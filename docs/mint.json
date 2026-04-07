@@ -1,0 +1,67 @@
+{
+  "$schema": "https://mintlify.com/schema.json",
+  "name": "Patter",
+  "logo": {
+    "light": "/logo/light.svg",
+    "dark": "/logo/dark.svg"
+  },
+  "favicon": "/favicon.svg",
+  "colors": {
+    "primary": "#18181B",
+    "light": "#71717A",
+    "dark": "#18181B"
+  },
+  "topbarLinks": [
+    {"name": "GitHub", "url": "https://github.com/PatterAI/Patter"}
+  ],
+  "topbarCtaButton": {
+    "name": "Get Started",
+    "url": "/quickstart"
+  },
+  "navigation": [
+    {
+      "group": "Getting Started",
+      "pages": ["introduction", "quickstart", "voice-modes"]
+    },
+    {
+      "group": "Python SDK",
+      "pages": [
+        "python/overview",
+        "python/agents",
+        "python/calls",
+        "python/providers",
+        "python/features",
+        "python/reference"
+      ]
+    },
+    {
+      "group": "TypeScript SDK",
+      "pages": [
+        "typescript/overview",
+        "typescript/agents",
+        "typescript/calls",
+        "typescript/providers",
+        "typescript/features",
+        "typescript/reference"
+      ]
+    },
+    {
+      "group": "Examples",
+      "pages": [
+        "examples/inbound-call",
+        "examples/outbound-call",
+        "examples/pipeline-mode",
+        "examples/tool-calling",
+        "examples/guardrails",
+        "examples/recording-amd"
+      ]
+    }
+  ],
+  "feedback": {
+    "thumbsRating": true,
+    "suggestEdit": true
+  },
+  "footerSocials": {
+    "github": "https://github.com/PatterAI/Patter"
+  }
+}

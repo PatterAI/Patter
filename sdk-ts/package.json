@@ -1,0 +1,68 @@
+{
+  "name": "patter",
+  "version": "0.3.0",
+  "description": "Connect AI agents to phone numbers with ~10 lines of code",
+  "license": "MIT",
+  "author": {
+    "name": "Patter Team",
+    "email": "hello@getpatter.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/PatterAI/Patter.git",
+    "directory": "sdk-ts"
+  },
+  "homepage": "https://getpatter.com",
+  "bugs": {
+    "url": "https://github.com/PatterAI/Patter/issues"
+  },
+  "keywords": [
+    "voice",
+    "ai",
+    "phone",
+    "telephony",
+    "speech",
+    "tts",
+    "stt",
+    "twilio",
+    "telnyx",
+    "openai",
+    "elevenlabs"
+  ],
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs,esm --dts",
+    "prepublishOnly": "npm run build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.0",
+    "@types/ws": "^8.5.0",
+    "tsup": "^8.0.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.4.0",
+    "vitest": "^2.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

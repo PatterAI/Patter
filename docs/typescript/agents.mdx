@@ -1,0 +1,110 @@
+---
+title: Agents (TypeScript)
+description: Configure voice AI agents with the TypeScript SDK
+---
+
+# Agents
+
+The `phone.agent()` method creates an `AgentOptions` object that defines how the AI behaves on calls.
+
+## Basic Agent
+
+```typescript
+const agent = phone.agent({
+  systemPrompt: "You are a friendly receptionist for Acme Corp.",
+  voice: "alloy",
+});
+```
+
+## Full Configuration
+
+```typescript
+const agent = phone.agent({
+  systemPrompt: "You are {name}'s assistant. Today is {date}.",
+  voice: "echo",
+  model: "gpt-4o-mini-realtime-preview",
+  language: "en",
+  firstMessage: "Hello! How can I help you today?",
+  provider: "openai_realtime",
+  tools: [
+    {
+      name: "check_order",
+      description: "Look up an order by ID",
+      parameters: {
+        type: "object",
+        properties: {
+          order_id: { type: "string", description: "The order ID" },
+        },
+        required: ["order_id"],
+      },
+      webhookUrl: "https://api.example.com/orders/lookup",
+    },
+  ],
+  variables: { name: "Alice", date: "2026-04-03" },
+  guardrails: [
+    Patter.guardrail({
+      name: "no_medical",
+      blockedTerms: ["diagnosis", "prescription"],
+      replacement: "I'm not qualified to give medical advice.",
+    }),
+  ],
+});
+```
+
+## Parameters
+
+<ParamField body="systemPrompt" type="string" required>
+  Instructions for the AI agent. Supports `{placeholder}` syntax for dynamic variable substitution.
+</ParamField>
+
+<ParamField body="voice" type="string" default="alloy">
+  TTS voice name. For OpenAI Realtime: `alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`.
+</ParamField>
+
+<ParamField body="model" type="string" default="gpt-4o-mini-realtime-preview">
+  OpenAI Realtime model ID.
+</ParamField>
+
+<ParamField body="language" type="string" default="en">
+  BCP-47 language code (e.g. `en`, `es`, `fr`).
+</ParamField>
+
+<ParamField body="firstMessage" type="string">
+  If set, the agent speaks this message immediately when a call connects.
+</ParamField>
+
+<ParamField body="provider" type="'openai_realtime' | 'elevenlabs_convai' | 'pipeline'">
+  Voice mode. Defaults to `openai_realtime`.
+</ParamField>
+
+<ParamField body="tools" type="Array<ToolDefinition>">
+  List of tool definitions. Each must have `name`, `description`, `parameters`, and `webhookUrl`.
+</ParamField>
+
+<ParamField body="stt" type="STTConfig">
+  STT provider for pipeline mode. Use `Patter.deepgram()` or `Patter.whisper()`.
+</ParamField>
+
+<ParamField body="tts" type="TTSConfig">
+  TTS provider for pipeline mode. Use `Patter.elevenlabs()` or `Patter.openaiTts()`.
+</ParamField>
+
+<ParamField body="elevenlabsKey" type="string">
+  ElevenLabs API key (for ConvAI mode).
+</ParamField>
+
+<ParamField body="elevenlabsAgentId" type="string">
+  ElevenLabs agent ID (for ConvAI mode).
+</ParamField>
+
+<ParamField body="deepgramKey" type="string">
+  Deepgram API key (for pipeline mode fallback).
+</ParamField>
+
+<ParamField body="variables" type="Record<string, string>">
+  Key-value pairs for `{placeholder}` substitution in `systemPrompt`.
+</ParamField>
+
+<ParamField body="guardrails" type="Guardrail[]">
+  Output guardrails created with `Patter.guardrail()`.
+</ParamField>

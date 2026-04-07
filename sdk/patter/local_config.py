@@ -1,0 +1,15 @@
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class LocalConfig:
+    telephony_provider: str = "twilio"
+    twilio_sid: str = ""
+    twilio_token: str = ""
+    telnyx_key: str = ""
+    telnyx_connection_id: str = ""
+    openai_key: str = ""
+    elevenlabs_key: str = ""
+    deepgram_key: str = ""
+    phone_number: str = ""
+    webhook_url: str = ""

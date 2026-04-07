@@ -1,0 +1,108 @@
+import asyncio
+import ipaddress
+import json
+import logging
+from urllib.parse import urlparse
+
+import httpx
+
+logger = logging.getLogger("patter")
+
+# Maximum size of a tool webhook response (1 MB).  Responses larger than this
+# are rejected to prevent OOM when the result is forwarded to OpenAI.
+_MAX_RESPONSE_BYTES = 1 * 1024 * 1024
+
+
+def _validate_webhook_url(url: str) -> None:
+    """Block SSRF — reject private IPs, loopback, non-HTTP(S) schemes.
+
+    NOTE: This check is a best-effort filter.  DNS rebinding attacks can
+    bypass it because the hostname is resolved at validation time, not at
+    request time.  The real protection is that tool webhook URLs are
+    supplied by the SDK user (not by callers), so they are trusted
+    configuration values.  Do not expose this function to untrusted input.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("https", "http"):
+        raise ValueError(f"Invalid URL scheme: {parsed.scheme!r}")
+    hostname = parsed.hostname or ""
+    if not hostname:
+        raise ValueError("Webhook URL is missing a hostname")
+    # Block literal private/loopback IP addresses in the URL itself.
+    # We intentionally avoid blocking based on DNS resolution here because
+    # synchronous socket.gethostbyname() would block the async event loop.
+    try:
+        addr = ipaddress.ip_address(hostname)
+        if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved:
+            raise ValueError(f"Webhook URL points to a private/reserved address: {hostname!r}")
+    except ValueError as exc:
+        # Re-raise only our own ValueError (private IP rejection), not the
+        # ip_address() parsing error which just means it's a hostname.
+        if "private" in str(exc) or "reserved" in str(exc):
+            raise
+
+
+class ToolExecutor:
+    """Executes agent tools by calling user webhooks with retry/fallback."""
+
+    MAX_RETRIES = 2
+    RETRY_DELAY = 0.5  # seconds
+
+    async def execute(
+        self,
+        tool_name: str,
+        arguments: dict,
+        webhook_url: str,
+        call_context: dict,
+    ) -> str:
+        """POST to user webhook and return result as string for OpenAI.
+
+        Retries up to MAX_RETRIES times on failure before returning an error
+        JSON with fallback=True.
+        """
+        _validate_webhook_url(webhook_url)
+        for attempt in range(self.MAX_RETRIES + 1):
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    response = await client.post(
+                        webhook_url,
+                        json={
+                            "tool": tool_name,
+                            "arguments": arguments,
+                            "call_id": call_context.get("call_id", ""),
+                            "caller": call_context.get("caller", ""),
+                            "callee": call_context.get("callee", ""),
+                            "attempt": attempt + 1,
+                        },
+                    )
+                    response.raise_for_status()
+                    content_length = len(response.content)
+                    if content_length > _MAX_RESPONSE_BYTES:
+                        raise ValueError(
+                            f"Webhook response too large: {content_length} bytes "
+                            f"(max {_MAX_RESPONSE_BYTES})"
+                        )
+                    return json.dumps(response.json())
+            except Exception as e:
+                if attempt < self.MAX_RETRIES:
+                    logger.warning(
+                        "Tool webhook failed (attempt %d), retrying in %ss: %s",
+                        attempt + 1,
+                        self.RETRY_DELAY,
+                        e,
+                    )
+                    await asyncio.sleep(self.RETRY_DELAY)
+                else:
+                    logger.error(
+                        "Tool webhook failed after %d attempts: %s",
+                        self.MAX_RETRIES + 1,
+                        e,
+                    )
+                    return json.dumps(
+                        {
+                            "error": f"Tool failed after {self.MAX_RETRIES + 1} attempts: {str(e)}",
+                            "fallback": True,
+                        }
+                    )
+        # Should never reach here, but satisfy type checker
+        return json.dumps({"error": "unexpected", "fallback": True})

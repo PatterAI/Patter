@@ -1,0 +1,105 @@
+---
+title: Outbound Call
+description: Full working example of making outbound calls
+---
+
+# Outbound Call Example
+
+A complete example that places an outbound call to a phone number and handles the conversation with an AI agent.
+
+<CodeGroup>
+```python Python
+import asyncio
+from patter import Patter
+
+phone = Patter(
+    twilio_sid="ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    twilio_token="your_auth_token",
+    openai_key="sk-xxx",
+    phone_number="+15550001234",
+    webhook_url="abc123.ngrok.io",
+)
+
+agent = phone.agent(
+    system_prompt="""You are calling to confirm an appointment.
+Be polite and professional. Ask the person to confirm or reschedule.
+If they want to reschedule, offer the next available slot: tomorrow at 2 PM.""",
+    voice="alloy",
+    first_message="Hi! I'm calling from Acme Corp to confirm your appointment tomorrow at 3 PM. Can you confirm?",
+)
+
+
+async def on_call_end(data):
+    print(f"Call ended — duration: {data.get('duration', 0)}s")
+    for entry in data.get("history", []):
+        print(f"  [{entry['role']}] {entry['text']}")
+
+
+async def main():
+    # Start the server (required for audio streaming)
+    serve_task = asyncio.create_task(
+        phone.serve(agent, on_call_end=on_call_end)
+    )
+
+    # Wait for server to start
+    await asyncio.sleep(2)
+
+    # Place the outbound call
+    await phone.call(to="+15550005678", agent=agent)
+
+    # Keep running until server stops
+    await serve_task
+
+
+asyncio.run(main())
+```
+
+```typescript TypeScript
+import { Patter } from "patter";
+
+const phone = new Patter({
+  mode: "local",
+  twilioSid: "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  twilioToken: "your_auth_token",
+  openaiKey: "sk-xxx",
+  phoneNumber: "+15550001234",
+  webhookUrl: "abc123.ngrok.io",
+});
+
+const agent = phone.agent({
+  systemPrompt: `You are calling to confirm an appointment.
+Be polite and professional. Ask the person to confirm or reschedule.
+If they want to reschedule, offer the next available slot: tomorrow at 2 PM.`,
+  voice: "alloy",
+  firstMessage:
+    "Hi! I'm calling from Acme Corp to confirm your appointment tomorrow at 3 PM. Can you confirm?",
+});
+
+// Start the server (required for audio streaming)
+const servePromise = phone.serve({
+  agent,
+  onCallEnd: async (data) => {
+    console.log(`Call ended — duration: ${data.duration ?? 0}s`);
+    const history = data.history as Array<{ role: string; text: string }>;
+    for (const entry of history ?? []) {
+      console.log(`  [${entry.role}] ${entry.text}`);
+    }
+  },
+});
+
+// Wait briefly, then place the call
+setTimeout(async () => {
+  await phone.call({ to: "+15550005678", agent });
+}, 2000);
+
+await servePromise;
+```
+</CodeGroup>
+
+<Warning>
+The embedded server must be running before placing an outbound call. The telephony provider connects back to your server via WebSocket to stream audio.
+</Warning>
+
+<Tip>
+For production use, consider using `first_message` to greet the callee immediately. Without it, there will be silence until the callee speaks first.
+</Tip>

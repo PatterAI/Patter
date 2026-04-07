@@ -1,0 +1,128 @@
+---
+title: Voice Modes
+description: Choose the right voice mode for your use case
+---
+
+# Voice Modes
+
+Patter supports three voice modes, each with different trade-offs between latency, cost, and flexibility.
+
+| Feature | Realtime | ConvAI | Pipeline |
+|---------|----------|--------|----------|
+| Provider | OpenAI Realtime API | ElevenLabs Conversational AI | Custom STT + LLM + TTS |
+| Latency | ~300ms | ~400ms | ~800ms |
+| Voice quality | Good | Excellent | Configurable |
+| Custom STT/TTS | No | No | Yes |
+| Cost | Higher | Medium | Varies |
+| Provider param | `openai_realtime` | `elevenlabs_convai` | `pipeline` |
+
+## OpenAI Realtime (Default)
+
+Uses the OpenAI Realtime API for end-to-end voice conversation. Lowest latency, simplest setup.
+
+<CodeGroup>
+```python Python
+agent = phone.agent(
+    system_prompt="You are a helpful assistant.",
+    voice="alloy",
+    model="gpt-4o-mini-realtime-preview",
+    provider="openai_realtime",  # default
+)
+```
+
+```typescript TypeScript
+const agent = phone.agent({
+  systemPrompt: "You are a helpful assistant.",
+  voice: "alloy",
+  model: "gpt-4o-mini-realtime-preview",
+  provider: "openai_realtime",  // default
+});
+```
+</CodeGroup>
+
+<Note>
+Requires `openai_key` in the `Patter()` constructor.
+</Note>
+
+## ElevenLabs ConvAI
+
+Uses ElevenLabs Conversational AI for high-quality voice synthesis. Requires an ElevenLabs agent configured in the ElevenLabs dashboard.
+
+<CodeGroup>
+```python Python
+agent = phone.agent(
+    system_prompt="You are a helpful assistant.",
+    provider="elevenlabs_convai",
+)
+```
+
+```typescript TypeScript
+const agent = phone.agent({
+  systemPrompt: "You are a helpful assistant.",
+  provider: "elevenlabs_convai",
+  elevenlabsKey: "your_elevenlabs_key",
+  elevenlabsAgentId: "your_agent_id",
+});
+```
+</CodeGroup>
+
+## Pipeline Mode
+
+Full control over each component: choose your STT provider (Deepgram or Whisper), your LLM (via the `on_message` callback), and your TTS provider (ElevenLabs or OpenAI TTS).
+
+<CodeGroup>
+```python Python
+phone = Patter(
+    twilio_sid="ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    twilio_token="your_auth_token",
+    deepgram_key="your_deepgram_key",
+    elevenlabs_key="your_elevenlabs_key",
+    phone_number="+15550001234",
+    webhook_url="abc123.ngrok.io",
+)
+
+agent = phone.agent(
+    system_prompt="You are a helpful assistant.",
+    provider="pipeline",
+    stt=Patter.deepgram(api_key="your_deepgram_key"),
+    tts=Patter.elevenlabs(api_key="your_elevenlabs_key", voice="rachel"),
+)
+
+async def handle_message(data):
+    user_text = data["text"]
+    # Call your own LLM here
+    return "This is the AI response."
+
+await phone.serve(agent, on_message=handle_message)
+```
+
+```typescript TypeScript
+const phone = new Patter({
+  mode: "local",
+  twilioSid: "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  twilioToken: "your_auth_token",
+  phoneNumber: "+15550001234",
+  webhookUrl: "abc123.ngrok.io",
+});
+
+const agent = phone.agent({
+  systemPrompt: "You are a helpful assistant.",
+  provider: "pipeline",
+  stt: Patter.deepgram({ apiKey: "your_deepgram_key" }),
+  tts: Patter.elevenlabs({ apiKey: "your_elevenlabs_key", voice: "rachel" }),
+});
+
+await phone.serve({
+  agent,
+  onMessage: async (data) => {
+    const userText = data.text;
+    // Call your own LLM here
+    return "This is the AI response.";
+  },
+});
+```
+</CodeGroup>
+
+<Tip>
+Pipeline mode is ideal when you need to use a non-OpenAI LLM, need fine-grained control over the conversation flow, or want to combine best-in-class STT and TTS providers.
+</Tip>

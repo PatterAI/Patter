@@ -1,0 +1,170 @@
+---
+title: Tool Calling
+description: Give your agent webhook-backed tools
+---
+
+# Tool Calling Example
+
+Tools let your AI agent call external APIs during a conversation. Each tool is backed by a webhook URL that receives JSON payloads and returns results.
+
+<CodeGroup>
+```python Python
+import asyncio
+from patter import Patter
+
+phone = Patter(
+    twilio_sid="ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    twilio_token="your_auth_token",
+    openai_key="sk-xxx",
+    phone_number="+15550001234",
+    webhook_url="abc123.ngrok.io",
+)
+
+agent = phone.agent(
+    system_prompt="""You are a customer service agent for an online store.
+You can look up orders and check product availability.
+Always confirm the order ID before looking it up.""",
+    voice="alloy",
+    first_message="Hi! I'm here to help with your order. Do you have an order ID?",
+    tools=[
+        {
+            "name": "lookup_order",
+            "description": "Look up an order by its ID and return status, items, and tracking info",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "order_id": {
+                        "type": "string",
+                        "description": "The order ID (e.g. ORD-12345)",
+                    }
+                },
+                "required": ["order_id"],
+            },
+            "webhook_url": "https://api.example.com/webhooks/lookup-order",
+        },
+        {
+            "name": "check_stock",
+            "description": "Check if a product is in stock",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "product_name": {
+                        "type": "string",
+                        "description": "Name of the product to check",
+                    }
+                },
+                "required": ["product_name"],
+            },
+            "webhook_url": "https://api.example.com/webhooks/check-stock",
+        },
+    ],
+)
+
+asyncio.run(phone.serve(agent))
+```
+
+```typescript TypeScript
+import { Patter } from "patter";
+
+const phone = new Patter({
+  mode: "local",
+  twilioSid: "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  twilioToken: "your_auth_token",
+  openaiKey: "sk-xxx",
+  phoneNumber: "+15550001234",
+  webhookUrl: "abc123.ngrok.io",
+});
+
+const agent = phone.agent({
+  systemPrompt: `You are a customer service agent for an online store.
+You can look up orders and check product availability.
+Always confirm the order ID before looking it up.`,
+  voice: "alloy",
+  firstMessage: "Hi! I'm here to help with your order. Do you have an order ID?",
+  tools: [
+    {
+      name: "lookup_order",
+      description:
+        "Look up an order by its ID and return status, items, and tracking info",
+      parameters: {
+        type: "object",
+        properties: {
+          order_id: {
+            type: "string",
+            description: "The order ID (e.g. ORD-12345)",
+          },
+        },
+        required: ["order_id"],
+      },
+      webhookUrl: "https://api.example.com/webhooks/lookup-order",
+    },
+    {
+      name: "check_stock",
+      description: "Check if a product is in stock",
+      parameters: {
+        type: "object",
+        properties: {
+          product_name: {
+            type: "string",
+            description: "Name of the product to check",
+          },
+        },
+        required: ["product_name"],
+      },
+      webhookUrl: "https://api.example.com/webhooks/check-stock",
+    },
+  ],
+});
+
+await phone.serve({ agent });
+```
+</CodeGroup>
+
+## Webhook Format
+
+When the agent calls a tool, Patter sends a `POST` request to the webhook URL with the tool arguments as JSON:
+
+```json
+{
+  "order_id": "ORD-12345"
+}
+```
+
+Your webhook should return a JSON response that the agent will use to formulate its reply:
+
+```json
+{
+  "status": "shipped",
+  "tracking_number": "1Z999AA10123456784",
+  "items": ["Blue Widget x2", "Red Gadget x1"],
+  "estimated_delivery": "2026-04-05"
+}
+```
+
+## Tool Definition Schema
+
+Each tool requires:
+
+<ParamField body="name" type="string" required>
+  Unique identifier for the tool.
+</ParamField>
+
+<ParamField body="description" type="string" required>
+  Human-readable description. The AI uses this to decide when to call the tool.
+</ParamField>
+
+<ParamField body="parameters" type="object" required>
+  JSON Schema object describing the tool's input parameters.
+</ParamField>
+
+<ParamField body="webhook_url" type="string" required>
+  HTTPS URL that receives the tool call as a POST request. Python SDK uses `webhook_url`, TypeScript SDK uses `webhookUrl`.
+</ParamField>
+
+<Note>
+Tool webhook calls automatically retry up to 3 times on failure before returning an error to the agent.
+</Note>
+
+<Warning>
+Webhook URLs must be HTTPS. The agent will not call HTTP endpoints.
+</Warning>

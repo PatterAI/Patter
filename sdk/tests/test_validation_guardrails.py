@@ -1,0 +1,593 @@
+"""Tests for parameter validation, output guardrails, and clear error messages."""
+
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+
+from patter import Patter
+from patter.models import Agent, Guardrail
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _local_phone(**kwargs):
+    """Create a minimal Patter instance in local mode."""
+    defaults = dict(
+        twilio_sid="AC_test",
+        twilio_token="tok_test",
+        openai_key="sk_test",
+        phone_number="+15550000000",
+        webhook_url="abc.ngrok.io",
+    )
+    defaults.update(kwargs)
+    return Patter(**defaults)
+
+
+# ---------------------------------------------------------------------------
+# Feature 1a: Patter() constructor validation — local mode
+# ---------------------------------------------------------------------------
+
+
+def test_local_mode_explicit_no_telephony_allowed():
+    """Explicit mode='local' without telephony keys is allowed (e.g. for testing)."""
+    phone = Patter(mode="local", openai_key="sk", phone_number="+1", webhook_url="x")
+    assert phone._mode == "local"
+
+
+def test_local_mode_requires_phone_number():
+    """Local mode without phone_number raises ValueError."""
+    with pytest.raises(ValueError, match="phone_number"):
+        Patter(twilio_sid="AC", twilio_token="tk", openai_key="sk", webhook_url="x")
+
+
+def test_local_mode_requires_webhook_url():
+    """Local mode without webhook_url raises ValueError."""
+    with pytest.raises(ValueError, match="webhook_url"):
+        Patter(twilio_sid="AC", twilio_token="tk", openai_key="sk", phone_number="+1")
+
+
+def test_local_mode_twilio_requires_token():
+    """twilio_sid without twilio_token raises ValueError."""
+    with pytest.raises(ValueError, match="twilio_token"):
+        Patter(twilio_sid="AC", openai_key="sk", phone_number="+1", webhook_url="x")
+
+
+def test_local_mode_valid_construction():
+    """Valid local mode construction does not raise."""
+    phone = _local_phone()
+    assert phone._mode == "local"
+
+
+# ---------------------------------------------------------------------------
+# Feature 1b: serve() validation
+# ---------------------------------------------------------------------------
+
+
+def test_serve_validates_agent_type():
+    """serve() with a non-Agent raises TypeError."""
+    phone = _local_phone()
+    with pytest.raises(TypeError, match="agent must be an Agent"):
+        asyncio.get_event_loop().run_until_complete(phone.serve("not an agent"))
+
+
+def test_serve_validates_port_type():
+    """serve() with a non-int port raises ValueError."""
+    phone = _local_phone()
+    agent = phone.agent(system_prompt="test")
+    with pytest.raises(ValueError, match="port must be an integer"):
+        asyncio.get_event_loop().run_until_complete(phone.serve(agent, port="8000"))
+
+
+def test_serve_validates_port_range_low():
+    """serve() with port < 1 raises ValueError."""
+    phone = _local_phone()
+    agent = phone.agent(system_prompt="test")
+    with pytest.raises(ValueError, match="port must be an integer"):
+        asyncio.get_event_loop().run_until_complete(phone.serve(agent, port=0))
+
+
+def test_serve_validates_port_range_high():
+    """serve() with port > 65535 raises ValueError."""
+    phone = _local_phone()
+    agent = phone.agent(system_prompt="test")
+    with pytest.raises(ValueError, match="port must be an integer"):
+        asyncio.get_event_loop().run_until_complete(phone.serve(agent, port=99999))
+
+
+def test_serve_validates_recording_type():
+    """serve() with non-bool recording raises TypeError."""
+    phone = _local_phone()
+    agent = phone.agent(system_prompt="test")
+    with pytest.raises(TypeError, match="recording must be a bool"):
+        asyncio.get_event_loop().run_until_complete(phone.serve(agent, recording="yes"))
+
+
+# ---------------------------------------------------------------------------
+# Feature 1c: agent() validation
+# ---------------------------------------------------------------------------
+
+
+def test_agent_validates_provider():
+    """agent() with an invalid provider raises ValueError."""
+    phone = _local_phone()
+    with pytest.raises(ValueError, match="provider must be one of"):
+        phone.agent(system_prompt="test", provider="invalid")
+
+
+def test_agent_valid_providers_accepted():
+    """All valid providers are accepted without error."""
+    phone = _local_phone(deepgram_key="dg", elevenlabs_key="el")
+    for p in ("openai_realtime", "pipeline"):
+        agent = phone.agent(system_prompt="test", provider=p)
+        assert agent.provider == p
+
+
+def test_agent_pipeline_requires_stt_config():
+    """Pipeline mode without stt or deepgram_key raises ValueError."""
+    phone = _local_phone(elevenlabs_key="el")
+    with pytest.raises(ValueError, match="Pipeline mode requires stt"):
+        phone.agent(system_prompt="test", provider="pipeline")
+
+
+def test_agent_pipeline_requires_tts_config():
+    """Pipeline mode without tts or elevenlabs_key raises ValueError."""
+    phone = _local_phone(deepgram_key="dg")
+    with pytest.raises(ValueError, match="Pipeline mode requires tts"):
+        phone.agent(system_prompt="test", provider="pipeline")
+
+
+def test_agent_openai_realtime_requires_openai_key():
+    """openai_realtime provider without openai_key raises ValueError."""
+    import dataclasses
+
+    # Build a Patter without openai_key by using telnyx
+    phone = Patter(
+        telnyx_key="KEY_test",
+        phone_number="+1",
+        webhook_url="x",
+    )
+    # Replace config with one that has no openai_key
+    phone._local_config = dataclasses.replace(phone._local_config, openai_key="")
+    with pytest.raises(ValueError, match="openai_key"):
+        phone.agent(system_prompt="test", provider="openai_realtime")
+
+
+def test_agent_tools_must_be_list():
+    """agent() with tools as a non-list raises TypeError."""
+    phone = _local_phone()
+    with pytest.raises(TypeError, match="tools must be a list"):
+        phone.agent(system_prompt="test", tools={"name": "bad"})
+
+
+def test_agent_tools_items_must_be_dict():
+    """agent() with a non-dict tool item raises TypeError."""
+    phone = _local_phone()
+    with pytest.raises(TypeError, match="tools\\[0\\] must be a dict"):
+        phone.agent(system_prompt="test", tools=["not-a-dict"])
+
+
+def test_agent_tools_must_have_name():
+    """agent() with a tool missing 'name' raises ValueError."""
+    phone = _local_phone()
+    with pytest.raises(ValueError, match="missing required 'name'"):
+        phone.agent(
+            system_prompt="test",
+            tools=[{"webhook_url": "https://x.com"}],
+        )
+
+
+def test_agent_tools_must_have_webhook_url():
+    """agent() with a tool missing 'webhook_url' raises ValueError."""
+    phone = _local_phone()
+    with pytest.raises(ValueError, match="missing required 'webhook_url'"):
+        phone.agent(
+            system_prompt="test",
+            tools=[{"name": "my_tool"}],
+        )
+
+
+def test_agent_variables_must_be_dict():
+    """agent() with non-dict variables raises TypeError."""
+    phone = _local_phone()
+    with pytest.raises(TypeError, match="variables must be a dict"):
+        phone.agent(system_prompt="test", variables=["a", "b"])
+
+
+def test_agent_guardrails_must_be_list():
+    """agent() with non-list guardrails raises TypeError."""
+    phone = _local_phone()
+    with pytest.raises(TypeError, match="guardrails must be a list"):
+        phone.agent(system_prompt="test", guardrails="not-a-list")
+
+
+# ---------------------------------------------------------------------------
+# Feature 1d: call() validation
+# ---------------------------------------------------------------------------
+
+
+def test_call_validates_e164_no_plus():
+    """call() with a number not starting with '+' raises ValueError."""
+    phone = _local_phone()
+    agent = phone.agent(system_prompt="test")
+    with pytest.raises(ValueError, match="E.164"):
+        asyncio.get_event_loop().run_until_complete(
+            phone.call(to="0039123456789", agent=agent)
+        )
+
+
+def test_call_validates_e164_empty():
+    """call() with an empty string raises ValueError."""
+    phone = _local_phone()
+    agent = phone.agent(system_prompt="test")
+    with pytest.raises(ValueError, match="E.164"):
+        asyncio.get_event_loop().run_until_complete(
+            phone.call(to="", agent=agent)
+        )
+
+
+def test_call_validates_e164_non_string():
+    """call() with a non-string 'to' raises ValueError."""
+    phone = _local_phone()
+    agent = phone.agent(system_prompt="test")
+    with pytest.raises(ValueError, match="E.164"):
+        asyncio.get_event_loop().run_until_complete(
+            phone.call(to=12345, agent=agent)
+        )
+
+
+def test_call_valid_e164_accepted():
+    """call() with a valid E.164 number passes the validation step."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    phone = _local_phone()
+    agent = phone.agent(system_prompt="test")
+
+    with patch("patter.providers.twilio_adapter.TwilioAdapter") as MockAdapter:
+        mock_instance = MagicMock()
+        mock_instance.initiate_call = AsyncMock(return_value="CA123")
+        MockAdapter.return_value = mock_instance
+
+        asyncio.get_event_loop().run_until_complete(
+            phone.call(to="+39123456789", agent=agent)
+        )
+
+        mock_instance.initiate_call.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Feature 2: Guardrail model
+# ---------------------------------------------------------------------------
+
+
+def test_guardrail_dataclass_creation():
+    """Guardrail dataclass can be constructed with all fields."""
+    g = Guardrail(
+        name="test",
+        blocked_terms=["bad"],
+        check=lambda t: False,
+        replacement="Nope.",
+    )
+    assert g.name == "test"
+    assert g.blocked_terms == ["bad"]
+    assert g.replacement == "Nope."
+
+
+def test_guardrail_defaults():
+    """Guardrail defaults: check=None, blocked_terms=None, replacement has default."""
+    g = Guardrail(name="default")
+    assert g.check is None
+    assert g.blocked_terms is None
+    assert "sorry" in g.replacement.lower()
+
+
+def test_guardrail_is_frozen():
+    """Guardrail is a frozen dataclass."""
+    g = Guardrail(name="x")
+    with pytest.raises(Exception):
+        g.name = "y"  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# Feature 2: Patter.guardrail() helper
+# ---------------------------------------------------------------------------
+
+
+def test_guardrail_helper_returns_dict():
+    """Patter.guardrail() returns a dict."""
+    g = Patter.guardrail(name="test", blocked_terms=["bad"])
+    assert isinstance(g, dict)
+
+
+def test_guardrail_helper_name():
+    """Patter.guardrail() preserves the name."""
+    g = Patter.guardrail(name="no-profanity")
+    assert g["name"] == "no-profanity"
+
+
+def test_guardrail_helper_blocked_terms():
+    """Patter.guardrail() stores blocked_terms."""
+    g = Patter.guardrail(name="test", blocked_terms=["bad", "worse"])
+    assert "bad" in g["blocked_terms"]
+    assert "worse" in g["blocked_terms"]
+
+
+def test_guardrail_helper_check_callable():
+    """Patter.guardrail() stores a callable check."""
+    fn = lambda t: "nope" in t
+    g = Patter.guardrail(name="test", check=fn)
+    assert g["check"] is fn
+
+
+def test_guardrail_helper_custom_replacement():
+    """Patter.guardrail() stores the replacement message."""
+    g = Patter.guardrail(name="test", replacement="Custom message.")
+    assert g["replacement"] == "Custom message."
+
+
+def test_guardrail_helper_default_replacement():
+    """Patter.guardrail() has a sensible default replacement."""
+    g = Patter.guardrail(name="test")
+    assert isinstance(g["replacement"], str)
+    assert len(g["replacement"]) > 0
+
+
+# ---------------------------------------------------------------------------
+# Feature 2: agent() accepts guardrails and stores them on Agent
+# ---------------------------------------------------------------------------
+
+
+def test_agent_with_guardrails():
+    """agent() with guardrails stores them on the Agent."""
+    phone = _local_phone()
+    agent = phone.agent(
+        system_prompt="test",
+        guardrails=[Patter.guardrail(name="test", blocked_terms=["bad"])],
+    )
+    assert agent.guardrails is not None
+    assert len(agent.guardrails) == 1
+    assert agent.guardrails[0]["name"] == "test"
+
+
+def test_agent_without_guardrails_defaults_to_none():
+    """agent() without guardrails sets Agent.guardrails to None."""
+    phone = _local_phone()
+    agent = phone.agent(system_prompt="test")
+    assert agent.guardrails is None
+
+
+def test_agent_multiple_guardrails():
+    """agent() accepts a list with multiple guardrails."""
+    phone = _local_phone()
+    agent = phone.agent(
+        system_prompt="test",
+        guardrails=[
+            Patter.guardrail(name="g1", blocked_terms=["a"]),
+            Patter.guardrail(name="g2", blocked_terms=["b"]),
+            Patter.guardrail(
+                name="g3",
+                check=lambda t: "c" in t,
+                replacement="Not allowed.",
+            ),
+        ],
+    )
+    assert len(agent.guardrails) == 3
+
+
+# ---------------------------------------------------------------------------
+# Feature 2: guardrail logic (unit-tested independently)
+# ---------------------------------------------------------------------------
+
+
+def test_guardrail_blocked_terms_match():
+    """A blocked_term match returns blocked=True."""
+    guard = Patter.guardrail(name="test", blocked_terms=["diagnosis"])
+    text = "You have a diagnosis of flu."
+    blocked_terms = guard.get("blocked_terms") or []
+    blocked = any(term.lower() in text.lower() for term in blocked_terms)
+    assert blocked is True
+
+
+def test_guardrail_blocked_terms_case_insensitive():
+    """blocked_terms matching is case-insensitive."""
+    guard = Patter.guardrail(name="test", blocked_terms=["DIAGNOSIS"])
+    text = "Your diagnosis is clear."
+    blocked_terms = guard.get("blocked_terms") or []
+    blocked = any(term.lower() in text.lower() for term in blocked_terms)
+    assert blocked is True
+
+
+def test_guardrail_blocked_terms_no_match():
+    """Non-matching text returns blocked=False."""
+    guard = Patter.guardrail(name="test", blocked_terms=["diagnosis"])
+    text = "Everything looks fine."
+    blocked_terms = guard.get("blocked_terms") or []
+    blocked = any(term.lower() in text.lower() for term in blocked_terms)
+    assert blocked is False
+
+
+def test_guardrail_check_fn_blocks():
+    """A check function returning True blocks the response."""
+    guard = Patter.guardrail(
+        name="profanity",
+        check=lambda t: "damn" in t.lower(),
+    )
+    text = "Damn, that's unfortunate."
+    check_fn = guard.get("check")
+    assert check_fn is not None
+    assert check_fn(text) is True
+
+
+def test_guardrail_check_fn_passes():
+    """A check function returning False allows the response."""
+    guard = Patter.guardrail(
+        name="profanity",
+        check=lambda t: "damn" in t.lower(),
+    )
+    text = "That's unfortunate."
+    check_fn = guard.get("check")
+    assert check_fn is not None
+    assert check_fn(text) is False
+
+
+# ---------------------------------------------------------------------------
+# Feature 2: guardrail application in twilio_handler (integration test)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_guardrail_triggers_cancel_and_replacement():
+    """transcript_output event triggers guardrail: cancel_response + send_text called."""
+    import asyncio
+    import json
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    agent = Agent(
+        system_prompt="test",
+        provider="openai_realtime",
+        guardrails=[
+            Patter.guardrail(
+                name="no-bad",
+                blocked_terms=["blocked_word"],
+                replacement="I can't say that.",
+            )
+        ],
+    )
+
+    start_payload = json.dumps({
+        "event": "start",
+        "streamSid": "SID_guard",
+        "start": {"callSid": "CA_guard", "customParameters": {}},
+    })
+    stop_payload = json.dumps({"event": "stop"})
+    messages = [start_payload, stop_payload]
+    idx = 0
+
+    class FakeWS:
+        query_params = {"caller": "+1", "callee": "+2"}
+        sent = []
+
+        async def accept(self):
+            pass
+
+        async def receive_text(self):
+            nonlocal idx
+            if idx < len(messages):
+                msg = messages[idx]
+                idx += 1
+                if idx == len(messages):
+                    # Yield control so forward_to_twilio task can process the event
+                    await asyncio.sleep(0.1)
+                return msg
+            await asyncio.sleep(10)
+
+        async def send_text(self, data):
+            self.sent.append(data)
+
+    fake_ws = FakeWS()
+
+    mock_adapter = AsyncMock()
+    mock_adapter.connect = AsyncMock()
+    mock_adapter.close = AsyncMock()
+    mock_adapter.cancel_response = AsyncMock()
+    mock_adapter.send_text = AsyncMock()
+
+    async def fake_events():
+        yield "transcript_output", "This contains the blocked_word in it."
+
+    mock_adapter.receive_events = MagicMock(return_value=fake_events())
+
+    with patch("patter.providers.openai_realtime.OpenAIRealtimeAdapter", return_value=mock_adapter):
+        from patter.handlers.twilio_handler import twilio_stream_bridge
+
+        try:
+            await asyncio.wait_for(
+                twilio_stream_bridge(
+                    websocket=fake_ws,
+                    agent=agent,
+                    openai_key="sk-test",
+                ),
+                timeout=2.0,
+            )
+        except asyncio.TimeoutError:
+            pass
+
+    mock_adapter.cancel_response.assert_called()
+    mock_adapter.send_text.assert_called_with("I can't say that.")
+
+
+@pytest.mark.asyncio
+async def test_guardrail_does_not_trigger_on_clean_response():
+    """transcript_output without blocked terms does NOT trigger guardrail."""
+    import asyncio
+    import json
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    agent = Agent(
+        system_prompt="test",
+        provider="openai_realtime",
+        guardrails=[
+            Patter.guardrail(name="no-bad", blocked_terms=["blocked_word"])
+        ],
+    )
+
+    start_payload = json.dumps({
+        "event": "start",
+        "streamSid": "SID_clean",
+        "start": {"callSid": "CA_clean", "customParameters": {}},
+    })
+    stop_payload = json.dumps({"event": "stop"})
+    messages = [start_payload, stop_payload]
+    idx = 0
+
+    class FakeWS:
+        query_params = {"caller": "+1", "callee": "+2"}
+        sent = []
+
+        async def accept(self):
+            pass
+
+        async def receive_text(self):
+            nonlocal idx
+            if idx < len(messages):
+                msg = messages[idx]
+                idx += 1
+                return msg
+            await asyncio.sleep(10)
+
+        async def send_text(self, data):
+            self.sent.append(data)
+
+    fake_ws = FakeWS()
+
+    mock_adapter = AsyncMock()
+    mock_adapter.connect = AsyncMock()
+    mock_adapter.close = AsyncMock()
+    mock_adapter.cancel_response = AsyncMock()
+    mock_adapter.send_text = AsyncMock()
+
+    async def fake_events():
+        yield "transcript_output", "This is a perfectly clean response."
+
+    mock_adapter.receive_events = MagicMock(return_value=fake_events())
+
+    with patch("patter.providers.openai_realtime.OpenAIRealtimeAdapter", return_value=mock_adapter):
+        from patter.handlers.twilio_handler import twilio_stream_bridge
+
+        try:
+            await asyncio.wait_for(
+                twilio_stream_bridge(
+                    websocket=fake_ws,
+                    agent=agent,
+                    openai_key="sk-test",
+                ),
+                timeout=2.0,
+            )
+        except asyncio.TimeoutError:
+            pass
+
+    mock_adapter.cancel_response.assert_not_called()

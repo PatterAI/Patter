@@ -1,0 +1,100 @@
+---
+title: Providers (TypeScript)
+description: Configure STT and TTS providers for pipeline mode
+---
+
+# Providers
+
+Provider helpers create `STTConfig` or `TTSConfig` objects for use in pipeline mode. They are static methods on the `Patter` class.
+
+## STT Providers
+
+### Deepgram
+
+```typescript
+const stt = Patter.deepgram({ apiKey: "your_deepgram_key", language: "en" });
+```
+
+<ParamField body="apiKey" type="string" required>
+  Deepgram API key.
+</ParamField>
+
+<ParamField body="language" type="string" default="en">
+  BCP-47 language code for transcription.
+</ParamField>
+
+### Whisper
+
+```typescript
+const stt = Patter.whisper({ apiKey: "your_openai_key", language: "en" });
+```
+
+<ParamField body="apiKey" type="string" required>
+  OpenAI API key (Whisper uses the OpenAI API).
+</ParamField>
+
+<ParamField body="language" type="string" default="en">
+  BCP-47 language code for transcription.
+</ParamField>
+
+## TTS Providers
+
+### ElevenLabs
+
+```typescript
+const tts = Patter.elevenlabs({ apiKey: "your_elevenlabs_key", voice: "rachel" });
+```
+
+<ParamField body="apiKey" type="string" required>
+  ElevenLabs API key.
+</ParamField>
+
+<ParamField body="voice" type="string" default="rachel">
+  ElevenLabs voice name or voice ID.
+</ParamField>
+
+### OpenAI TTS
+
+```typescript
+const tts = Patter.openaiTts({ apiKey: "your_openai_key", voice: "alloy" });
+```
+
+<ParamField body="apiKey" type="string" required>
+  OpenAI API key.
+</ParamField>
+
+<ParamField body="voice" type="string" default="alloy">
+  OpenAI TTS voice: `alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`.
+</ParamField>
+
+## Using Providers with Pipeline Mode
+
+```typescript
+const phone = new Patter({
+  mode: "local",
+  twilioSid: "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  twilioToken: "your_auth_token",
+  phoneNumber: "+15550001234",
+  webhookUrl: "abc123.ngrok.io",
+});
+
+const agent = phone.agent({
+  systemPrompt: "You are a helpful assistant.",
+  provider: "pipeline",
+  stt: Patter.deepgram({ apiKey: "your_deepgram_key" }),
+  tts: Patter.elevenlabs({ apiKey: "your_elevenlabs_key", voice: "rachel" }),
+});
+
+await phone.serve({
+  agent,
+  onMessage: async (data) => {
+    const userText = data.text as string;
+    // Process with your LLM of choice
+    return "Response from your LLM.";
+  },
+});
+```
+
+<Tip>
+Note the difference from the Python SDK: TypeScript provider helpers take an options object (`{ apiKey, voice }`) instead of positional arguments.
+</Tip>

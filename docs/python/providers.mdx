@@ -1,0 +1,97 @@
+---
+title: Providers (Python)
+description: Configure STT and TTS providers for pipeline mode
+---
+
+# Providers
+
+Provider helpers create `STTConfig` or `TTSConfig` objects for use in pipeline mode. They are static methods on the `Patter` class.
+
+## STT Providers
+
+### Deepgram
+
+```python
+stt = Patter.deepgram(api_key="your_deepgram_key", language="en")
+```
+
+<ParamField body="api_key" type="str" required>
+  Deepgram API key.
+</ParamField>
+
+<ParamField body="language" type="str" default="en">
+  BCP-47 language code for transcription.
+</ParamField>
+
+### Whisper
+
+```python
+stt = Patter.whisper(api_key="your_openai_key", language="en")
+```
+
+<ParamField body="api_key" type="str" required>
+  OpenAI API key (Whisper uses the OpenAI API).
+</ParamField>
+
+<ParamField body="language" type="str" default="en">
+  BCP-47 language code for transcription.
+</ParamField>
+
+## TTS Providers
+
+### ElevenLabs
+
+```python
+tts = Patter.elevenlabs(api_key="your_elevenlabs_key", voice="rachel")
+```
+
+<ParamField body="api_key" type="str" required>
+  ElevenLabs API key.
+</ParamField>
+
+<ParamField body="voice" type="str" default="rachel">
+  ElevenLabs voice name or voice ID.
+</ParamField>
+
+### OpenAI TTS
+
+```python
+tts = Patter.openai_tts(api_key="your_openai_key", voice="alloy")
+```
+
+<ParamField body="api_key" type="str" required>
+  OpenAI API key.
+</ParamField>
+
+<ParamField body="voice" type="str" default="alloy">
+  OpenAI TTS voice: `alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`.
+</ParamField>
+
+## Using Providers with Pipeline Mode
+
+```python
+phone = Patter(
+    twilio_sid="ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    twilio_token="your_auth_token",
+    phone_number="+15550001234",
+    webhook_url="abc123.ngrok.io",
+)
+
+agent = phone.agent(
+    system_prompt="You are a helpful assistant.",
+    provider="pipeline",
+    stt=Patter.deepgram(api_key="your_deepgram_key"),
+    tts=Patter.elevenlabs(api_key="your_elevenlabs_key", voice="rachel"),
+)
+
+async def handle_message(data):
+    user_text = data["text"]
+    # Process with your LLM of choice
+    return "Response from your LLM."
+
+await phone.serve(agent, on_message=handle_message)
+```
+
+<Tip>
+You can also pass `deepgram_key` and `elevenlabs_key` directly to the `Patter()` constructor. When you do, pipeline mode will use them as defaults if `stt` and `tts` are not specified on the agent.
+</Tip>

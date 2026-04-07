@@ -1,0 +1,61 @@
+---
+title: Introduction
+description: Connect AI agents to phone numbers with ~10 lines of code
+---
+
+# Patter
+
+Patter is an open-source Voice AI SDK that lets you connect AI agents to phone numbers with approximately 10 lines of code. Build inbound and outbound voice agents using Python or TypeScript, with support for multiple telephony providers, speech-to-text engines, and text-to-speech voices.
+
+<CardGroup cols={3}>
+  <Card title="3 Voice Modes" icon="microphone">
+    OpenAI Realtime, ElevenLabs ConvAI, or a fully custom Pipeline mode with mix-and-match STT/TTS providers.
+  </Card>
+  <Card title="2 Telephony Carriers" icon="phone">
+    Twilio and Telnyx support out of the box. Bring your own carrier credentials.
+  </Card>
+  <Card title="Call Recording" icon="circle-dot">
+    Record calls with a single boolean flag. Recordings are stored via your telephony provider.
+  </Card>
+  <Card title="Guardrails" icon="shield">
+    Block specific terms or run custom checks on AI responses before they reach the caller.
+  </Card>
+  <Card title="Tool Calling" icon="wrench">
+    Give your agent tools backed by webhook URLs. Automatic retry (3x) on failure.
+  </Card>
+  <Card title="AMD & Voicemail" icon="voicemail">
+    Answering machine detection on outbound calls with automatic voicemail drop.
+  </Card>
+  <Card title="Dynamic Variables" icon="brackets-curly">
+    Inject runtime values into system prompts using `{placeholder}` syntax.
+  </Card>
+  <Card title="DTMF Input" icon="grid-2">
+    Keypad presses are forwarded to your agent as `[DTMF: N]` in the transcript.
+  </Card>
+  <Card title="Call Transfer" icon="phone-arrow-right">
+    Transfer active calls to another number using an auto-injected system tool.
+  </Card>
+</CardGroup>
+
+## Installation
+
+<CodeGroup>
+```bash Python
+pip install patter[local]
+```
+
+```bash TypeScript
+npm install patter
+```
+</CodeGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Build your first voice agent in 5 minutes.
+  </Card>
+  <Card title="Voice Modes" icon="sliders" href="/voice-modes">
+    Choose the right voice mode for your use case.
+  </Card>
+</CardGroup>

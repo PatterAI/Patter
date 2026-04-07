@@ -1,0 +1,125 @@
+---
+title: Inbound Call
+description: Full working example of handling inbound calls
+---
+
+# Inbound Call Example
+
+A complete example that answers inbound calls with an AI agent, logs call events, and tracks conversation history.
+
+<CodeGroup>
+```python Python
+import asyncio
+from patter import Patter
+
+phone = Patter(
+    twilio_sid="ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    twilio_token="your_auth_token",
+    openai_key="sk-xxx",
+    phone_number="+15550001234",
+    webhook_url="abc123.ngrok.io",
+)
+
+agent = phone.agent(
+    system_prompt="""You are a helpful receptionist for Acme Corp.
+Be friendly and concise. Help callers with:
+- Business hours (Mon-Fri 9am-5pm)
+- General inquiries
+- Transferring to departments""",
+    voice="alloy",
+    first_message="Hello! Thanks for calling Acme Corp. How can I help you today?",
+)
+
+
+async def on_call_start(data):
+    print(f"Incoming call from {data.get('caller', 'unknown')}")
+
+
+async def on_call_end(data):
+    print(f"Call ended — duration: {data.get('duration', 0)}s")
+    for entry in data.get("history", []):
+        print(f"  [{entry['role']}] {entry['text']}")
+
+
+async def on_transcript(data):
+    print(f"[{data.get('role', '?')}]: {data.get('text', '')}")
+
+
+asyncio.run(
+    phone.serve(
+        agent,
+        port=8000,
+        on_call_start=on_call_start,
+        on_call_end=on_call_end,
+        on_transcript=on_transcript,
+    )
+)
+```
+
+```typescript TypeScript
+import { Patter } from "patter";
+
+const phone = new Patter({
+  mode: "local",
+  twilioSid: "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  twilioToken: "your_auth_token",
+  openaiKey: "sk-xxx",
+  phoneNumber: "+15550001234",
+  webhookUrl: "abc123.ngrok.io",
+});
+
+const agent = phone.agent({
+  systemPrompt: `You are a helpful receptionist for Acme Corp.
+Be friendly and concise. Help callers with:
+- Business hours (Mon-Fri 9am-5pm)
+- General inquiries
+- Transferring to departments`,
+  voice: "alloy",
+  firstMessage: "Hello! Thanks for calling Acme Corp. How can I help you today?",
+});
+
+await phone.serve({
+  agent,
+  port: 8000,
+  onCallStart: async (data) => {
+    console.log(`Incoming call from ${data.caller ?? "unknown"}`);
+  },
+  onCallEnd: async (data) => {
+    console.log(`Call ended — duration: ${data.duration ?? 0}s`);
+    const history = data.history as Array<{ role: string; text: string }>;
+    for (const entry of history ?? []) {
+      console.log(`  [${entry.role}] ${entry.text}`);
+    }
+  },
+  onTranscript: async (data) => {
+    console.log(`[${data.role ?? "?"}]: ${data.text ?? ""}`);
+  },
+});
+```
+</CodeGroup>
+
+<Steps>
+
+### Start ngrok
+
+```bash
+ngrok http 8000
+```
+
+### Run the script
+
+<CodeGroup>
+```bash Python
+python main.py
+```
+
+```bash TypeScript
+npx tsx main.ts
+```
+</CodeGroup>
+
+### Call your phone number
+
+Dial the Twilio/Telnyx phone number. The agent greets you and handles the conversation.
+
+</Steps>

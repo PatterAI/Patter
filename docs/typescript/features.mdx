@@ -1,0 +1,138 @@
+---
+title: Features (TypeScript)
+description: Guardrails, variables, DTMF, call transfer, and more
+---
+
+# Features
+
+## Guardrails
+
+Guardrails intercept AI responses before they reach TTS. When a response is blocked, a replacement message is spoken instead.
+
+```typescript
+const agent = phone.agent({
+  systemPrompt: "You are a customer service agent.",
+  guardrails: [
+    Patter.guardrail({
+      name: "no_medical",
+      blockedTerms: ["diagnosis", "prescription", "medication"],
+      replacement: "I'm not qualified to give medical advice. Please consult a doctor.",
+    }),
+    Patter.guardrail({
+      name: "no_competitor",
+      check: (text) => text.toLowerCase().includes("competitor"),
+      replacement: "I can only discuss our own products.",
+    }),
+  ],
+});
+```
+
+### `Patter.guardrail()` Options
+
+<ParamField body="name" type="string" required>
+  Identifier used in log warnings when the guardrail fires.
+</ParamField>
+
+<ParamField body="blockedTerms" type="string[]">
+  List of words or phrases. Any case-insensitive match blocks the response.
+</ParamField>
+
+<ParamField body="check" type="(text: string) => boolean">
+  Custom function that returns `true` to block the response. Evaluated after `blockedTerms`.
+</ParamField>
+
+<ParamField body="replacement" type="string" default="I'm sorry, I can't respond to that.">
+  Text spoken instead of the blocked response.
+</ParamField>
+
+## Dynamic Variables
+
+Use `{placeholder}` syntax in your system prompt and provide values at agent creation time.
+
+```typescript
+const agent = phone.agent({
+  systemPrompt: "You are {name}'s personal assistant. Today is {date}.",
+  variables: {
+    name: "Alice",
+    date: "April 3, 2026",
+  },
+});
+```
+
+Variables can also be overridden per call on outbound calls:
+
+```typescript
+await phone.call({
+  to: "+15550005678",
+  agent,
+  variables: { name: "Bob" },  // overrides agent-level value
+});
+```
+
+## DTMF Input
+
+Keypad presses from the caller are automatically forwarded to the agent as `[DTMF: N]` text in the transcript.
+
+No additional configuration is needed. Instruct the agent via the system prompt:
+
+```typescript
+const agent = phone.agent({
+  systemPrompt: `You are a phone menu system.
+When the user presses 1, transfer to sales.
+When the user presses 2, transfer to support.
+Listen for [DTMF: N] inputs.`,
+});
+```
+
+## Call Transfer
+
+A `transfer_call` system tool is automatically injected into all agents. When the agent decides to transfer, it invokes this tool which triggers a redirect via the telephony provider.
+
+```typescript
+const agent = phone.agent({
+  systemPrompt: `You are a receptionist.
+If the caller asks for sales, transfer them to +15550009999.
+If the caller asks for support, transfer them to +15550008888.`,
+});
+```
+
+## First Message
+
+The `firstMessage` parameter makes the agent speak immediately when the call connects.
+
+```typescript
+const agent = phone.agent({
+  systemPrompt: "You are a helpful assistant.",
+  firstMessage: "Hello! Thanks for calling Acme Corp. How can I help?",
+});
+```
+
+<Note>
+An AI disclosure message plays automatically at the start of every call. This is non-optional and precedes the `firstMessage`.
+</Note>
+
+## Conversation History
+
+All callbacks receive a data object that includes a `history` field with the full conversation transcript:
+
+```typescript
+await phone.serve({
+  agent,
+  onCallEnd: async (data) => {
+    const history = data.history as Array<{ role: string; text: string; timestamp: string }>;
+    for (const entry of history) {
+      console.log(`[${entry.role}] ${entry.text} (${entry.timestamp})`);
+    }
+  },
+});
+```
+
+## Call Recording
+
+Enable recording with a single flag:
+
+```typescript
+await phone.serve({ agent, recording: true });
+```
+
+Recordings are stored via your telephony provider (Twilio Recordings API or Telnyx equivalent).

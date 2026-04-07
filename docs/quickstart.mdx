@@ -1,0 +1,159 @@
+---
+title: Quickstart
+description: Build your first voice agent in 5 minutes
+---
+
+# Quickstart
+
+## Prerequisites
+
+- **Python 3.11+** or **Node.js 18+**
+- A **Twilio** or **Telnyx** account with a phone number
+- An **OpenAI** API key
+- **ngrok** (or any tunnel that gives you a public HTTPS URL)
+
+<Steps>
+
+### Install the SDK
+
+<CodeGroup>
+```bash Python
+pip install patter[local]
+```
+
+```bash TypeScript
+npm install patter
+```
+</CodeGroup>
+
+### Start ngrok
+
+Open a terminal and expose port 8000:
+
+```bash
+ngrok http 8000
+```
+
+Copy the hostname (e.g. `abc123.ngrok.io`) — you will need it in the next step.
+
+### Create your agent
+
+<CodeGroup>
+```python Python
+import asyncio
+from patter import Patter
+
+phone = Patter(
+    twilio_sid="ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    twilio_token="your_auth_token",
+    openai_key="sk-xxx",
+    phone_number="+15550001234",
+    webhook_url="abc123.ngrok.io",
+)
+
+agent = phone.agent(
+    system_prompt="You are a friendly assistant. Keep responses brief.",
+    voice="alloy",
+)
+
+asyncio.run(phone.serve(agent))
+```
+
+```typescript TypeScript
+import { Patter } from "patter";
+
+const phone = new Patter({
+  mode: "local",
+  twilioSid: "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  twilioToken: "your_auth_token",
+  openaiKey: "sk-xxx",
+  phoneNumber: "+15550001234",
+  webhookUrl: "abc123.ngrok.io",
+});
+
+const agent = phone.agent({
+  systemPrompt: "You are a friendly assistant. Keep responses brief.",
+  voice: "alloy",
+});
+
+await phone.serve({ agent });
+```
+</CodeGroup>
+
+### Call your number
+
+Dial your Twilio/Telnyx phone number from any phone. You should hear the AI agent respond.
+
+### Make an outbound call
+
+<CodeGroup>
+```python Python
+import asyncio
+from patter import Patter
+
+phone = Patter(
+    twilio_sid="ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    twilio_token="your_auth_token",
+    openai_key="sk-xxx",
+    phone_number="+15550001234",
+    webhook_url="abc123.ngrok.io",
+)
+
+agent = phone.agent(
+    system_prompt="You are a friendly assistant calling to confirm an appointment.",
+    voice="alloy",
+    first_message="Hi! I'm calling to confirm your appointment tomorrow at 3 PM.",
+)
+
+async def main():
+    # Start the server first (needed to handle the call media stream)
+    import asyncio
+    serve_task = asyncio.create_task(phone.serve(agent))
+
+    # Wait a moment for the server to start
+    await asyncio.sleep(2)
+
+    # Place the outbound call
+    await phone.call(to="+15550005678", agent=agent)
+
+    # Keep running
+    await serve_task
+
+asyncio.run(main())
+```
+
+```typescript TypeScript
+import { Patter } from "patter";
+
+const phone = new Patter({
+  mode: "local",
+  twilioSid: "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  twilioToken: "your_auth_token",
+  openaiKey: "sk-xxx",
+  phoneNumber: "+15550001234",
+  webhookUrl: "abc123.ngrok.io",
+});
+
+const agent = phone.agent({
+  systemPrompt: "You are a friendly assistant calling to confirm an appointment.",
+  voice: "alloy",
+  firstMessage: "Hi! I'm calling to confirm your appointment tomorrow at 3 PM.",
+});
+
+// Start the server (needed to handle call media stream)
+const servePromise = phone.serve({ agent });
+
+// Wait briefly, then place the call
+setTimeout(async () => {
+  await phone.call({ to: "+15550005678", agent });
+}, 2000);
+
+await servePromise;
+```
+</CodeGroup>
+
+</Steps>
+
+<Tip>
+The embedded server must be running before you place an outbound call, because the telephony provider connects back to your server to stream audio.
+</Tip>

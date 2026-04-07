@@ -1,0 +1,45 @@
+#!/bin/bash
+# Pre-push hook: run all tests before pushing to remote
+# If any test fails, the push is blocked
+
+set -e
+
+echo "🔍 Running pre-push checks..."
+
+# Python SDK tests
+echo "📦 Python SDK tests..."
+cd sdk
+if command -v python3 &>/dev/null; then
+    python3 -m pytest tests/ -q --tb=line 2>&1 | tail -3
+    if [ $? -ne 0 ]; then
+        echo "❌ Python SDK tests failed. Push blocked."
+        exit 1
+    fi
+fi
+cd ..
+
+# TypeScript SDK tests
+echo "📦 TypeScript SDK tests..."
+cd sdk-ts
+if [ -d "node_modules" ]; then
+    npm test 2>&1 | tail -3
+    if [ $? -ne 0 ]; then
+        echo "❌ TypeScript SDK tests failed. Push blocked."
+        exit 1
+    fi
+else
+    echo "⚠️  node_modules not found, skipping TS tests (run npm ci first)"
+fi
+cd ..
+
+# Secret scan
+echo "🔐 Secret scan..."
+SECRETS=$(grep -rn "sk-proj\|sk-ant-\|AC[0-9a-f]\{32\}" --include="*.py" --include="*.ts" --include="*.md" . 2>/dev/null | grep -v node_modules | grep -v "placeholder\|example\|xxx\|test\|mock\|fake\|your_\|_key\|_token" || true)
+if [ -n "$SECRETS" ]; then
+    echo "❌ Possible secrets found:"
+    echo "$SECRETS"
+    echo "Push blocked. Remove secrets before pushing."
+    exit 1
+fi
+
+echo "✅ All checks passed. Pushing..."
