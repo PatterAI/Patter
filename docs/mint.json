@@ -12,12 +12,30 @@
     "dark": "#18181B"
   },
   "topbarLinks": [
-    {"name": "GitHub", "url": "https://github.com/PatterAI/Patter"}
+    {"name": "GitHub", "url": "https://github.com/PatterAI/Patter"},
+    {"name": "Examples", "url": "/examples/inbound-call"}
   ],
   "topbarCtaButton": {
     "name": "Get Started",
     "url": "/quickstart"
   },
+  "tabs": [
+    {
+      "name": "Python SDK",
+      "url": "python",
+      "icon": "python"
+    },
+    {
+      "name": "TypeScript SDK",
+      "url": "typescript",
+      "icon": "js"
+    },
+    {
+      "name": "Examples",
+      "url": "examples",
+      "icon": "code"
+    }
+  ],
   "navigation": [
     {
       "group": "Getting Started",
