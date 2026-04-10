@@ -145,7 +145,7 @@ class OpenAIRealtimeAdapter:
                     })
 
                 elif event_type == "response.done":
-                    yield ("response_done", None)
+                    yield ("response_done", data.get("response", {}))
 
                 elif event_type == "error":
                     logger.error("OpenAI Realtime error: %s", data.get("error", {}))

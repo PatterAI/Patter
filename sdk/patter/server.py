@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import signal
+
+from fastapi import WebSocket
 
 from patter.local_config import LocalConfig
 from patter.models import Agent
@@ -26,18 +30,59 @@ class EmbeddedServer:
         agent: Agent,
         recording: bool = False,
         voicemail_message: str = "",
+        pricing: dict | None = None,
+        dashboard: bool = True,
+        dashboard_token: str = "",
     ) -> None:
         self.config = config
         self.agent = agent
         self.recording = recording
         self.voicemail_message = voicemail_message
+        self.pricing = pricing
+        self.dashboard = dashboard
+        self.dashboard_token = dashboard_token
         self._server = None
         self._app = None
+        self._active_connections: set[WebSocket] = set()
+        self._shutting_down = False
         self.on_call_start = None
         self.on_call_end = None
         self.on_transcript = None
         self.on_message = None
+        self.on_metrics = None
         self._telnyx_sig_warning_logged = False
+        self._metrics_store = None
+
+    def _wrap_callbacks(self):
+        """Return (on_call_start, on_call_end, on_metrics) wrappers.
+
+        Each wrapper feeds data into the dashboard store first, then calls
+        the user-provided callback (if any).
+        """
+        store = self._metrics_store
+        user_start = self.on_call_start
+        user_end = self.on_call_end
+        user_metrics = self.on_metrics
+
+        async def _on_call_start(data):
+            if store is not None:
+                store.record_call_start(data)
+            if user_start is not None:
+                await user_start(data)
+
+        async def _on_call_end(data):
+            if store is not None:
+                store.record_call_end(data, metrics=data.get("metrics"))
+            if user_end is not None:
+                await user_end(data)
+
+        async def _on_metrics(data):
+            if store is not None:
+                store.record_turn(data)
+            if user_metrics is not None:
+                await user_metrics(data)
+
+        return _on_call_start, _on_call_end, _on_metrics
 
     def _create_app(self):
         """Build the FastAPI application with webhook + stream routes."""
@@ -52,6 +97,26 @@ class EmbeddedServer:
         )
 
         app = FastAPI(title="Patter Local Server")
+
+        # --- Dashboard ---
+        if self.dashboard:
+            from patter.dashboard.routes import mount_dashboard
+
+            from patter.dashboard.store import MetricsStore
+            self._metrics_store = MetricsStore()
+
+            if not self.dashboard_token:
+                logger.warning(
+                    "Dashboard is enabled without authentication. "
+                    "Set dashboard_token to protect call data. "
+                    "This is safe for local development but should "
+                    "not be exposed on a public network."
+                )
+
+            mount_dashboard(app, self._metrics_store, token=self.dashboard_token)
+
+            from patter.api_routes import mount_api
+            mount_api(app, self._metrics_store, token=self.dashboard_token)
 
         @app.get("/health")
         async def health():
@@ -130,20 +195,27 @@ class EmbeddedServer:
 
         @app.websocket("/ws/stream/{call_id}")
         async def twilio_stream_handler(websocket: WebSocket, call_id: str):
-            await twilio_stream_bridge(
-                websocket=websocket,
-                agent=self.agent,
-                openai_key=self.config.openai_key,
-                on_call_start=self.on_call_start,
-                on_call_end=self.on_call_end,
-                on_transcript=self.on_transcript,
-                on_message=self.on_message,
-                deepgram_key=self.config.deepgram_key,
-                elevenlabs_key=self.config.elevenlabs_key,
-                twilio_sid=self.config.twilio_sid,
-                twilio_token=self.config.twilio_token,
-                recording=self.recording,
-            )
+            self._active_connections.add(websocket)
+            try:
+                _start, _end, _metrics = self._wrap_callbacks()
+                await twilio_stream_bridge(
+                    websocket=websocket,
+                    agent=self.agent,
+                    openai_key=self.config.openai_key,
+                    on_call_start=_start,
+                    on_call_end=_end,
+                    on_transcript=self.on_transcript,
+                    on_message=self.on_message,
+                    deepgram_key=self.config.deepgram_key,
+                    elevenlabs_key=self.config.elevenlabs_key,
+                    twilio_sid=self.config.twilio_sid,
+                    twilio_token=self.config.twilio_token,
+                    recording=self.recording,
+                    on_metrics=_metrics,
+                    pricing=self.pricing,
+                )
+            finally:
+                self._active_connections.discard(websocket)
 
         # --- Telnyx ---
 
@@ -184,17 +256,25 @@ class EmbeddedServer:
 
         @app.websocket("/ws/telnyx/stream/{call_id}")
         async def telnyx_stream_handler(websocket: WebSocket, call_id: str):
-            await telnyx_stream_bridge(
-                websocket=websocket,
-                agent=self.agent,
-                openai_key=self.config.openai_key,
-                on_call_start=self.on_call_start,
-                on_call_end=self.on_call_end,
-                on_transcript=self.on_transcript,
-                on_message=self.on_message,
-                deepgram_key=self.config.deepgram_key,
-                elevenlabs_key=self.config.elevenlabs_key,
-            )
+            self._active_connections.add(websocket)
+            try:
+                _start, _end, _metrics = self._wrap_callbacks()
+                await telnyx_stream_bridge(
+                    websocket=websocket,
+                    agent=self.agent,
+                    openai_key=self.config.openai_key,
+                    on_call_start=_start,
+                    on_call_end=_end,
+                    on_transcript=self.on_transcript,
+                    on_message=self.on_message,
+                    deepgram_key=self.config.deepgram_key,
+                    elevenlabs_key=self.config.elevenlabs_key,
+                    telnyx_key=self.config.telnyx_key,
+                    on_metrics=_metrics,
+                    pricing=self.pricing,
+                )
+            finally:
+                self._active_connections.discard(websocket)
 
         self._app = app
         return app
@@ -244,14 +324,52 @@ class EmbeddedServer:
         logger.info("Webhook URL: https://%s", self.config.webhook_url)
         logger.info("Phone: %s", self.config.phone_number)
         logger.info("Agent: %s / %s", self.agent.model, self.agent.voice)
+        if self.dashboard:
+            logger.info("Dashboard: http://127.0.0.1:%s/dashboard", port)
 
         config = uvicorn.Config(
             app, host="127.0.0.1", port=port, log_level="info"
         )
         self._server = uvicorn.Server(config)
+
+        # Register signal handlers for graceful shutdown
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, lambda: asyncio.create_task(self.stop()))
+
         await self._server.serve()
 
     async def stop(self) -> None:
-        """Gracefully stop the embedded server."""
+        """Gracefully stop the embedded server.
+
+        Closes all active WebSocket connections, waits up to 10 seconds
+        for in-progress calls to finish, then shuts down the uvicorn server.
+        """
+        if self._shutting_down:
+            return
+        self._shutting_down = True
+
+        logger.info("Graceful shutdown initiated — closing %d active connection(s)", len(self._active_connections))
+
+        # Signal all active WebSocket connections to close
+        for ws in list(self._active_connections):
+            try:
+                await ws.close(code=1001, reason="Server shutting down")
+            except Exception:
+                pass
+
+        # Wait up to 10 seconds for active connections to drain
+        for _ in range(100):
+            if not self._active_connections:
+                break
+            await asyncio.sleep(0.1)
+
+        if self._active_connections:
+            logger.warning(
+                "Shutdown timeout — %d connection(s) still active, forcing close",
+                len(self._active_connections),
+            )
+
+        # Shutdown the uvicorn server
         if self._server:
             self._server.should_exit = True

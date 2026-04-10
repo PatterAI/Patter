@@ -1,0 +1,126 @@
+---
+title: "Test Mode"
+description: "Interactive terminal testing for voice agents without telephony, STT, or TTS."
+---
+
+# Test Mode
+
+Test mode lets you interact with your voice agent in the terminal using pure text — no phone calls, no STT/TTS, no external services required. It simulates a phone conversation for rapid agent development.
+
+## Quick Start
+
+```python
+import asyncio
+from patter import Patter
+
+phone = Patter(openai_key="sk-...", mode="local")
+
+agent = phone.agent(
+    system_prompt="You are a helpful customer service agent for Acme Corp.",
+    first_message="Hello! Welcome to Acme Corp. How can I help you today?",
+)
+
+asyncio.run(phone.test(agent))
+```
+
+This opens an interactive REPL:
+
+```
+============================================================
+  PATTER TEST MODE
+============================================================
+  Agent: gpt-4o-realtime / alloy
+  Provider: openai_realtime
+  Call ID: test_a1b2c3d4e5f6
+  Caller: +15550000001  →  Callee: +15550000002
+------------------------------------------------------------
+  Commands: /quit  /transfer <number>  /hangup  /history
+============================================================
+
+  Agent: Hello! Welcome to Acme Corp. How can I help you today?
+
+  You: I need to return an item
+  Agent: I'd be happy to help with your return...
+```
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `/quit` | End the test session. |
+| `/hangup` | Simulate hanging up the call. |
+| `/transfer <number>` | Simulate a call transfer. |
+| `/history` | Print the full conversation history. |
+
+## Using with `on_message`
+
+Test mode works with custom message handlers, exactly as they would work in production:
+
+```python
+async def on_message(data, call_control):
+    user_text = data["text"]
+    history = data["history"]
+
+    if "cancel" in user_text.lower():
+        await call_control.transfer("+15550001111")
+        return "Let me transfer you to our cancellation team."
+
+    return f"You said: {user_text}"
+
+asyncio.run(phone.test(agent, on_message=on_message))
+```
+
+The `call_control` parameter is automatically injected if your handler accepts two arguments.
+
+## Using with Built-in LLM Loop
+
+When no `on_message` handler is provided and an `openai_key` is available, test mode uses the built-in LLM loop with streaming responses:
+
+```python
+agent = phone.agent(
+    system_prompt="You are a restaurant booking assistant.",
+    tools=[
+        {
+            "name": "check_availability",
+            "description": "Check table availability",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "date": {"type": "string"},
+                    "party_size": {"type": "integer"},
+                },
+            },
+            "webhook": "https://api.example.com/availability",
+        }
+    ],
+)
+
+asyncio.run(phone.test(agent))
+```
+
+The LLM loop supports tool calling — tools are executed via their configured webhooks just like in production.
+
+## Event Callbacks
+
+Test mode fires the same lifecycle callbacks as `serve()`:
+
+```python
+async def on_call_start(event):
+    print(f"Test call started: {event['call_id']}")
+    # Return overrides if needed
+    return {"variables": {"customer_name": "Test User"}}
+
+async def on_call_end(event):
+    print(f"Test call ended: {event['call_id']}")
+    print(f"Transcript: {len(event['transcript'])} messages")
+
+asyncio.run(phone.test(
+    agent,
+    on_call_start=on_call_start,
+    on_call_end=on_call_end,
+))
+```
+
+<Note>
+  Test mode is designed for development only. It does not use any external APIs (except OpenAI for the LLM loop when no `on_message` is provided).
+</Note>

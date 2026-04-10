@@ -1,0 +1,715 @@
+---
+title: "API Reference"
+description: "Complete reference for all classes, methods, parameters, and types in the Patter Python SDK."
+---
+
+# API Reference
+
+Complete reference for the `patter` Python SDK (v0.3.0).
+
+## Patter
+
+The main SDK client class.
+
+### Constructor
+
+```python
+Patter(
+    api_key: str = "",
+    backend_url: str = "wss://api.patter.dev",
+    rest_url: str = "https://api.patter.dev",
+    mode: str = "cloud",
+    twilio_sid: str = "",
+    twilio_token: str = "",
+    telnyx_key: str = "",
+    telnyx_connection_id: str = "",
+    openai_key: str = "",
+    elevenlabs_key: str = "",
+    deepgram_key: str = "",
+    phone_number: str = "",
+    webhook_url: str = "",
+    pricing: dict | None = None,
+)
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `api_key` | `str` | `""` | Patter API key (`pt_...`). Required for cloud mode. |
+| `backend_url` | `str` | `"wss://api.patter.dev"` | WebSocket URL for the backend. |
+| `rest_url` | `str` | `"https://api.patter.dev"` | REST API URL. |
+| `mode` | `str` | `"cloud"` | `"cloud"` or `"local"`. Auto-detected when provider keys given without `api_key`. |
+| `twilio_sid` | `str` | `""` | Twilio Account SID. |
+| `twilio_token` | `str` | `""` | Twilio Auth Token. |
+| `telnyx_key` | `str` | `""` | Telnyx API key. |
+| `telnyx_connection_id` | `str` | `""` | Telnyx Call Control App ID. |
+| `openai_key` | `str` | `""` | OpenAI API key. |
+| `elevenlabs_key` | `str` | `""` | ElevenLabs API key. |
+| `deepgram_key` | `str` | `""` | Deepgram API key. |
+| `phone_number` | `str` | `""` | Phone number in E.164 format. |
+| `webhook_url` | `str` | `""` | Public hostname (no scheme). |
+| `pricing` | `dict \| None` | `None` | Override default provider pricing. See [Metrics & Cost Tracking](/python-sdk/metrics). |
+
+### Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `api_key` | `str` | Read-only access to the API key. |
+
+---
+
+### Methods
+
+#### connect()
+
+```python
+async def connect(
+    on_message: Callable[[IncomingMessage], Awaitable[str]],
+    on_call_start: Callable[[dict], Awaitable[None]] | None = None,
+    on_call_end: Callable[[dict], Awaitable[None]] | None = None,
+    *,
+    provider: str | None = None,
+    provider_key: str | None = None,
+    provider_secret: str | None = None,
+    number: str | None = None,
+    country: str = "US",
+    stt: STTConfig | None = None,
+    tts: TTSConfig | None = None,
+) -> None
+```
+
+Connect to Patter and listen for calls. Cloud mode only.
+
+**Raises:** `PatterConnectionError` if called in local mode.
+
+---
+
+#### call()
+
+```python
+async def call(
+    to: str,
+    on_message: Callable[[IncomingMessage], Awaitable[str]] | None = None,
+    first_message: str = "",
+    from_number: str = "",
+    agent_id: str | None = None,
+    agent: Agent | None = None,
+    machine_detection: bool = False,
+    on_machine: Callable[[dict], Awaitable[None]] | None = None,
+    voicemail_message: str = "",
+) -> None
+```
+
+Make an outbound call. Works in both cloud and local mode.
+
+**Raises:**
+- `PatterConnectionError` if in local mode and `agent` is not provided.
+- `ValueError` if `to` is not in E.164 format.
+
+---
+
+#### agent()
+
+```python
+def agent(
+    system_prompt: str,
+    voice: str = "alloy",
+    model: str = "gpt-4o-mini-realtime-preview",
+    language: str = "en",
+    first_message: str = "",
+    tools: list[dict] | None = None,
+    provider: str = "openai_realtime",
+    stt: STTConfig | None = None,
+    tts: TTSConfig | None = None,
+    variables: dict | None = None,
+    guardrails: list | None = None,
+) -> Agent
+```
+
+Create an Agent configuration. Validates provider keys in local mode.
+
+**Raises:** `ValueError` if provider is invalid or required keys are missing.
+
+---
+
+#### serve()
+
+```python
+async def serve(
+    agent: Agent,
+    port: int = 8000,
+    recording: bool = False,
+    on_call_start: Callable[[dict], Awaitable[None]] | None = None,
+    on_call_end: Callable[[dict], Awaitable[None]] | None = None,
+    on_transcript: Callable[[dict], Awaitable[None]] | None = None,
+    on_message: Callable[[dict], Awaitable[str]] | str | None = None,
+    on_metrics: Callable[[dict], Awaitable[None]] | None = None,
+    voicemail_message: str = "",
+    dashboard: bool = True,
+    dashboard_token: str = "",
+) -> None
+```
+
+Start the embedded server. Local mode only. Blocks until stopped.
+
+**Raises:**
+- `PatterConnectionError` if called in cloud mode.
+- `TypeError` if `agent` is not an `Agent` instance.
+- `ValueError` if `port` is out of range.
+
+---
+
+#### test()
+
+```python
+async def test(
+    agent: Agent,
+    on_message: Callable[[dict], Awaitable[str]] | None = None,
+    on_call_start: Callable[[dict], Awaitable[None]] | None = None,
+    on_call_end: Callable[[dict], Awaitable[None]] | None = None,
+) -> None
+```
+
+Start an interactive terminal test session. Local mode only. Simulates a phone call without telephony, STT, or TTS — pure text input/output.
+
+When no `on_message` handler is provided and an `openai_key` is configured, the built-in LLM loop is used. See [Test Mode](/python-sdk/test-mode) for details.
+
+**Raises:**
+- `PatterConnectionError` if called in cloud mode.
+- `TypeError` if `agent` is not an `Agent` instance.
+
+---
+
+#### create_agent()
+
+```python
+async def create_agent(
+    name: str,
+    system_prompt: str,
+    model: str = "gpt-4o-mini-realtime-preview",
+    voice: str = "alloy",
+    voice_provider: str = "openai",
+    language: str = "en",
+    first_message: str | None = None,
+    tools: list[dict] | None = None,
+) -> dict
+```
+
+Create a cloud-managed agent. Returns the agent dict with `id`.
+
+**Raises:** `ProvisionError` on API failure.
+
+---
+
+#### list_agents()
+
+```python
+async def list_agents() -> list[dict]
+```
+
+List all cloud-managed agents.
+
+---
+
+#### update_agent()
+
+```python
+async def update_agent(agent_id: str, **kwargs) -> dict
+```
+
+Update a cloud-managed agent. Pass any agent fields as keyword arguments.
+
+**Raises:** `ProvisionError` on API failure.
+
+---
+
+#### delete_agent()
+
+```python
+async def delete_agent(agent_id: str) -> None
+```
+
+Delete a cloud-managed agent.
+
+**Raises:** `ProvisionError` on API failure.
+
+---
+
+#### buy_number()
+
+```python
+async def buy_number(country: str = "US", provider: str = "twilio") -> dict
+```
+
+Purchase a phone number. Returns the number dict.
+
+**Raises:** `ProvisionError` on API failure.
+
+---
+
+#### list_numbers()
+
+```python
+async def list_numbers() -> list[dict]
+```
+
+List all phone numbers.
+
+---
+
+#### assign_agent()
+
+```python
+async def assign_agent(number_id: str, agent_id: str) -> dict
+```
+
+Assign an agent to a phone number.
+
+**Raises:** `ProvisionError` on API failure.
+
+---
+
+#### list_calls()
+
+```python
+async def list_calls(limit: int = 50) -> list[dict]
+```
+
+List recent calls.
+
+---
+
+#### get_call()
+
+```python
+async def get_call(call_id: str) -> dict
+```
+
+Get call details with transcript.
+
+**Raises:** `ProvisionError` if call not found.
+
+---
+
+#### disconnect()
+
+```python
+async def disconnect() -> None
+```
+
+Disconnect from Patter. Stops the embedded server in local mode or closes the WebSocket and HTTP client in cloud mode.
+
+---
+
+### Static Methods
+
+#### Patter.deepgram()
+
+```python
+@staticmethod
+def deepgram(api_key: str, language: str = "en") -> STTConfig
+```
+
+Create a Deepgram STT configuration.
+
+---
+
+#### Patter.whisper()
+
+```python
+@staticmethod
+def whisper(api_key: str, language: str = "en") -> STTConfig
+```
+
+Create a Whisper (OpenAI) STT configuration.
+
+---
+
+#### Patter.elevenlabs()
+
+```python
+@staticmethod
+def elevenlabs(api_key: str, voice: str = "rachel") -> TTSConfig
+```
+
+Create an ElevenLabs TTS configuration.
+
+---
+
+#### Patter.openai_tts()
+
+```python
+@staticmethod
+def openai_tts(api_key: str, voice: str = "alloy") -> TTSConfig
+```
+
+Create an OpenAI TTS configuration. Audio is auto-resampled from 24kHz to 16kHz.
+
+---
+
+#### Patter.guardrail()
+
+```python
+@staticmethod
+def guardrail(
+    name: str,
+    blocked_terms: list[str] | None = None,
+    check: Callable[[str], bool] | None = None,
+    replacement: str = "I'm sorry, I can't respond to that.",
+) -> dict
+```
+
+Create an output guardrail dictionary.
+
+---
+
+#### Patter.tool()
+
+```python
+@staticmethod
+def tool(
+    name: str,
+    description: str = "",
+    parameters: dict | None = None,
+    handler: object = None,
+    webhook_url: str = "",
+) -> dict
+```
+
+Create a tool definition for use with `agent(tools=[...])`.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `name` | `str` | *required* | Tool name (visible to the LLM). |
+| `description` | `str` | `""` | What the tool does (visible to the LLM). |
+| `parameters` | `dict \| None` | `None` | JSON Schema for tool arguments. |
+| `handler` | `Callable \| None` | `None` | Async or sync callable `(arguments, context) -> str | dict`. Called in-process. |
+| `webhook_url` | `str` | `""` | URL to POST to when the LLM invokes the tool. |
+
+Either `handler` or `webhook_url` must be provided.
+
+**Raises:** `ValueError` if neither `handler` nor `webhook_url` is provided.
+
+---
+
+## Data Classes
+
+All data classes are frozen (immutable) dataclasses.
+
+### Agent
+
+```python
+@dataclass(frozen=True)
+class Agent:
+    system_prompt: str
+    voice: str = "alloy"
+    model: str = "gpt-4o-mini-realtime-preview"
+    language: str = "en"
+    first_message: str = ""
+    tools: list[dict] | None = None
+    provider: str = "openai_realtime"
+    stt: STTConfig | None = None
+    tts: TTSConfig | None = None
+    variables: dict | None = None
+    guardrails: list | None = None
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `system_prompt` | `str` | *required* | Agent instructions. |
+| `voice` | `str` | `"alloy"` | TTS voice name. |
+| `model` | `str` | `"gpt-4o-mini-realtime-preview"` | AI model ID. |
+| `language` | `str` | `"en"` | BCP-47 language code. |
+| `first_message` | `str` | `""` | Greeting spoken at call start. |
+| `tools` | `list[dict] \| None` | `None` | Tool definitions for function calling. |
+| `provider` | `str` | `"openai_realtime"` | `"openai_realtime"`, `"elevenlabs_convai"`, or `"pipeline"`. |
+| `stt` | `STTConfig \| None` | `None` | STT config for pipeline mode. |
+| `tts` | `TTSConfig \| None` | `None` | TTS config for pipeline mode. |
+| `variables` | `dict \| None` | `None` | Dynamic variable substitutions for `{placeholder}` in `system_prompt`. Values limited to 500 chars. |
+| `guardrails` | `list \| None` | `None` | Output guardrails. |
+
+---
+
+### CallEvent
+
+```python
+@dataclass(frozen=True)
+class CallEvent:
+    call_id: str
+    caller: str = ""
+    callee: str = ""
+    direction: str = ""
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `call_id` | `str` | *required* | Unique call identifier. |
+| `caller` | `str` | `""` | Caller phone number. |
+| `callee` | `str` | `""` | Callee phone number. |
+| `direction` | `str` | `""` | `"inbound"` or `"outbound"`. |
+
+---
+
+### IncomingMessage
+
+```python
+@dataclass(frozen=True)
+class IncomingMessage:
+    text: str
+    call_id: str
+    caller: str
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `text` | `str` | The user's transcribed message. |
+| `call_id` | `str` | Unique call identifier. |
+| `caller` | `str` | Caller phone number. |
+
+---
+
+### STTConfig
+
+```python
+@dataclass(frozen=True)
+class STTConfig:
+    provider: str
+    api_key: str
+    language: str = "en"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `provider` | `str` | *required* | STT provider name (`"deepgram"`, `"whisper"`). |
+| `api_key` | `str` | *required* | Provider API key. |
+| `language` | `str` | `"en"` | BCP-47 language code. |
+
+**Methods:** `to_dict() -> dict`
+
+---
+
+### TTSConfig
+
+```python
+@dataclass(frozen=True)
+class TTSConfig:
+    provider: str
+    api_key: str
+    voice: str = "alloy"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `provider` | `str` | *required* | TTS provider name (`"elevenlabs"`, `"openai"`). |
+| `api_key` | `str` | *required* | Provider API key. |
+| `voice` | `str` | `"alloy"` | Voice name or ID. |
+
+**Methods:** `to_dict() -> dict`
+
+---
+
+### Guardrail
+
+```python
+@dataclass(frozen=True)
+class Guardrail:
+    name: str
+    check: object = None
+    blocked_terms: list | None = None
+    replacement: str = "I'm sorry, I can't respond to that."
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | `str` | *required* | Guardrail identifier. |
+| `check` | `Callable[[str], bool] \| None` | `None` | Custom check function. |
+| `blocked_terms` | `list[str] \| None` | `None` | Case-insensitive blocked terms. |
+| `replacement` | `str` | `"I'm sorry, I can't respond to that."` | Replacement text when blocked. |
+
+---
+
+### CallControl
+
+```python
+@dataclass
+class CallControl:
+    call_id: str
+    caller: str
+    callee: str
+    telephony_provider: str
+```
+
+Passed as the second argument to `on_message` handlers. Allows dynamic call management during a conversation.
+
+| Method | Description |
+|--------|-------------|
+| `await transfer(number: str)` | Transfer the call to another phone number. |
+| `await hangup()` | End the call. |
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `is_transferred` | `bool` | Whether a transfer was requested. |
+| `is_hung_up` | `bool` | Whether a hangup was requested. |
+| `ended` | `bool` | `True` if transferred or hung up. |
+
+---
+
+### CallMetrics
+
+```python
+@dataclass(frozen=True)
+class CallMetrics:
+    call_id: str
+    duration_seconds: float
+    turns: tuple[TurnMetrics, ...]
+    cost: CostBreakdown
+    latency_avg: LatencyBreakdown
+    latency_p95: LatencyBreakdown
+    provider_mode: str
+    stt_provider: str = ""
+    tts_provider: str = ""
+    llm_provider: str = ""
+    telephony_provider: str = ""
+```
+
+Frozen metrics for a completed call. See [Metrics & Cost Tracking](/python-sdk/metrics) for usage.
+
+---
+
+### CostBreakdown
+
+```python
+@dataclass(frozen=True)
+class CostBreakdown:
+    stt: float = 0.0
+    tts: float = 0.0
+    llm: float = 0.0
+    telephony: float = 0.0
+    total: float = 0.0
+```
+
+Per-component cost in USD.
+
+---
+
+### LatencyBreakdown
+
+```python
+@dataclass(frozen=True)
+class LatencyBreakdown:
+    stt_ms: float = 0.0
+    llm_ms: float = 0.0
+    tts_ms: float = 0.0
+    total_ms: float = 0.0
+```
+
+Per-component latency in milliseconds.
+
+---
+
+### TurnMetrics
+
+```python
+@dataclass(frozen=True)
+class TurnMetrics:
+    turn_index: int
+    user_text: str
+    agent_text: str
+    latency: LatencyBreakdown
+    stt_audio_seconds: float = 0.0
+    tts_characters: int = 0
+    timestamp: float = 0.0
+```
+
+Per-turn metrics for a single conversation turn.
+
+---
+
+## Exceptions
+
+All exceptions inherit from `PatterError`.
+
+```
+PatterError
+├── PatterConnectionError
+├── AuthenticationError
+└── ProvisionError
+```
+
+### PatterError
+
+Base exception for all Patter SDK errors.
+
+```python
+from patter import PatterError
+
+try:
+    await phone.connect(on_message=handler)
+except PatterError as e:
+    print(f"Patter error: {e}")
+```
+
+### PatterConnectionError
+
+Raised for WebSocket connection failures, mode mismatches (e.g., calling `serve()` in cloud mode), or missing required parameters for local mode calls.
+
+```python
+from patter import PatterConnectionError
+
+try:
+    await phone.serve(agent)
+except PatterConnectionError as e:
+    print(f"Connection error: {e}")
+```
+
+### AuthenticationError
+
+Raised when the API key is invalid or expired.
+
+```python
+from patter import AuthenticationError
+
+try:
+    await phone.connect(on_message=handler)
+except AuthenticationError as e:
+    print(f"Auth error: {e}")
+```
+
+### ProvisionError
+
+Raised when a cloud API operation fails (creating agents, buying numbers, etc.).
+
+```python
+from patter import ProvisionError
+
+try:
+    agent = await phone.create_agent(name="Test", system_prompt="...")
+except ProvisionError as e:
+    print(f"Provision error: {e}")
+```
+
+---
+
+## Exports
+
+All public symbols exported from the `patter` package:
+
+```python
+from patter import (
+    Patter,
+    Agent,
+    CallControl,
+    CallEvent,
+    CallMetrics,
+    CostBreakdown,
+    Guardrail,
+    IncomingMessage,
+    LatencyBreakdown,
+    STTConfig,
+    TTSConfig,
+    TurnMetrics,
+    PatterError,
+    PatterConnectionError,
+    AuthenticationError,
+    ProvisionError,
+)
+```

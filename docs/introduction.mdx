@@ -1,61 +1,58 @@
 ---
 title: Introduction
-description: Connect AI agents to phone numbers with ~10 lines of code
+description: "Connect AI agents to phone calls with ~10 lines of code"
 ---
 
-# Patter
+# What is Patter?
 
-Patter is an open-source Voice AI SDK that lets you connect AI agents to phone numbers with approximately 10 lines of code. Build inbound and outbound voice agents using Python or TypeScript, with support for multiple telephony providers, speech-to-text engines, and text-to-speech voices.
+Patter is an open-source SDK that gives your AI agent a voice and a phone number. Write a message handler, and Patter takes care of telephony, speech-to-text, text-to-speech, and WebSocket streaming.
 
-<CardGroup cols={3}>
-  <Card title="3 Voice Modes" icon="microphone">
-    OpenAI Realtime, ElevenLabs ConvAI, or a fully custom Pipeline mode with mix-and-match STT/TTS providers.
+## How it works
+
+```
+Phone Call → Telephony (Twilio/Telnyx) → WebSocket → Patter → STT → Your Agent → TTS → Caller
+```
+
+Your agent receives transcribed speech as text and returns a text response. Patter handles everything else — audio streaming, transcoding, provider APIs, and real-time voice synthesis.
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card title="~10 lines of code" icon="code">
+    Write an async handler. Patter does the rest.
   </Card>
-  <Card title="2 Telephony Carriers" icon="phone">
-    Twilio and Telnyx support out of the box. Bring your own carrier credentials.
+  <Card title="Python & TypeScript" icon="language">
+    Same API surface in both languages. Pick your stack.
   </Card>
-  <Card title="Call Recording" icon="circle-dot">
-    Record calls with a single boolean flag. Recordings are stored via your telephony provider.
+  <Card title="Multiple voice modes" icon="microphone">
+    OpenAI Realtime, ElevenLabs ConvAI, or custom Pipeline (STT + TTS).
+  </Card>
+  <Card title="Twilio & Telnyx" icon="phone">
+    Both telephony providers supported. Bring your own credentials or use Patter Cloud.
+  </Card>
+  <Card title="Call transfer & recording" icon="phone-arrow-right">
+    Built-in system tools for transferring calls and enabling recording.
   </Card>
   <Card title="Guardrails" icon="shield">
-    Block specific terms or run custom checks on AI responses before they reach the caller.
-  </Card>
-  <Card title="Tool Calling" icon="wrench">
-    Give your agent tools backed by webhook URLs. Automatic retry (3x) on failure.
-  </Card>
-  <Card title="AMD & Voicemail" icon="voicemail">
-    Answering machine detection on outbound calls with automatic voicemail drop.
-  </Card>
-  <Card title="Dynamic Variables" icon="brackets-curly">
-    Inject runtime values into system prompts using `{placeholder}` syntax.
-  </Card>
-  <Card title="DTMF Input" icon="grid-2">
-    Keypad presses are forwarded to your agent as `[DTMF: N]` in the transcript.
-  </Card>
-  <Card title="Call Transfer" icon="phone-arrow-right">
-    Transfer active calls to another number using an auto-injected system tool.
+    Block terms, run custom checks, or replace responses before they reach the caller.
   </Card>
 </CardGroup>
 
-## Installation
+## Deployment modes
 
-<CodeGroup>
-```bash Python
-pip install patter[local]
-```
+| Mode | Description | Best for |
+|------|-------------|----------|
+| **Local** | Fully embedded server, no Patter backend needed | Development, self-hosted production |
+| **Cloud** | Managed infrastructure via Patter API | Production with minimal ops |
+| **Self-hosted** | Your own Patter backend deployment | Full control with cloud agent management |
 
-```bash TypeScript
-npm install patter
-```
-</CodeGroup>
-
-## Next Steps
+## Next steps
 
 <CardGroup cols={2}>
   <Card title="Quickstart" icon="rocket" href="/quickstart">
-    Build your first voice agent in 5 minutes.
+    Get your first phone call working in 5 minutes.
   </Card>
-  <Card title="Voice Modes" icon="sliders" href="/voice-modes">
-    Choose the right voice mode for your use case.
+  <Card title="Concepts" icon="book" href="/concepts">
+    Understand agents, providers, and modes.
   </Card>
 </CardGroup>

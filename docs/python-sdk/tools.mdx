@@ -1,0 +1,248 @@
+---
+title: "Tools & Function Calling"
+description: "Let your voice agent call APIs, query databases, and take actions during a conversation."
+---
+
+# Tools & Function Calling
+
+Tools let your voice agent perform actions during a conversation -- check a database, call an API, transfer a call, or anything else you can expose via a webhook.
+
+## Defining Tools
+
+Each tool is a dictionary with the following fields:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | `str` | Yes | Unique identifier for the tool. |
+| `description` | `str` | Yes | Natural language description of what the tool does. The AI uses this to decide when to call it. |
+| `parameters` | `dict` | Yes | JSON Schema defining the tool's input parameters. |
+| `webhook_url` | `str` | Yes | URL that Patter POSTs to when the AI invokes this tool. |
+
+```python
+agent = phone.agent(
+    system_prompt="You are a restaurant reservation assistant.",
+    tools=[
+        {
+            "name": "check_availability",
+            "description": "Check if a table is available for a given date, time, and party size.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "date": {
+                        "type": "string",
+                        "description": "Reservation date in YYYY-MM-DD format",
+                    },
+                    "time": {
+                        "type": "string",
+                        "description": "Reservation time in HH:MM format",
+                    },
+                    "party_size": {
+                        "type": "integer",
+                        "description": "Number of guests",
+                    },
+                },
+                "required": ["date", "time", "party_size"],
+            },
+            "webhook_url": "https://api.example.com/reservations/check",
+        },
+        {
+            "name": "make_reservation",
+            "description": "Book a table reservation.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "date": {"type": "string"},
+                    "time": {"type": "string"},
+                    "party_size": {"type": "integer"},
+                    "customer_name": {"type": "string"},
+                    "phone": {"type": "string"},
+                },
+                "required": ["date", "time", "party_size", "customer_name"],
+            },
+            "webhook_url": "https://api.example.com/reservations/create",
+        },
+    ],
+)
+```
+
+## Webhook Request Format
+
+When the AI decides to call a tool, Patter sends an HTTP POST to the `webhook_url` with the following JSON body:
+
+```json
+{
+  "tool": "check_availability",
+  "arguments": {
+    "date": "2025-03-15",
+    "time": "19:00",
+    "party_size": 4
+  },
+  "call_id": "call_abc123",
+  "caller": "+15550001234",
+  "callee": "+15550009876",
+  "attempt": 1
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `tool` | `str` | The name of the tool being invoked. |
+| `arguments` | `dict` | The arguments extracted by the AI, matching the JSON Schema. |
+| `call_id` | `str` | Unique identifier for the current call. |
+| `caller` | `str` | The caller's phone number. |
+| `callee` | `str` | The callee's phone number. |
+| `attempt` | `int` | Attempt number (1, 2, or 3). |
+
+## Webhook Response
+
+Your webhook must return valid JSON. The response is passed back to the AI as the tool result:
+
+```json
+{
+  "available": true,
+  "tables": [
+    {"id": "T5", "seats": 4, "location": "patio"},
+    {"id": "T12", "seats": 6, "location": "main"}
+  ]
+}
+```
+
+### Response Requirements
+
+| Constraint | Value |
+|------------|-------|
+| Content type | `application/json` |
+| Max response size | 1 MB |
+| Timeout | Standard HTTP timeout |
+
+### Retry Behavior
+
+If your webhook fails (non-2xx status code or network error), Patter retries automatically:
+
+- **Max retries:** 2 (3 total attempts)
+- **Retry delay:** 0.5 seconds between attempts
+- **Final failure:** If all 3 attempts fail, the AI receives an error message and continues the conversation gracefully.
+
+---
+
+## System Tools
+
+Patter automatically injects two system tools into every agent. You do not need to define these -- they are always available.
+
+### transfer_call
+
+Transfers the current call to another phone number. The AI decides when to trigger this based on the conversation context.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `number` | `str` | Phone number to transfer to (E.164 format). |
+
+The AI might say: *"Let me transfer you to our billing department."* and then invoke `transfer_call` with the appropriate number.
+
+### end_call
+
+Ends the current call programmatically.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `reason` | `str` | Reason for ending the call (logged in the transcript). |
+
+---
+
+## Tool Design Tips
+
+<Accordion title="Write clear descriptions">
+The AI uses the `description` field to decide when to call a tool. Be specific:
+
+```python
+# Good
+"description": "Look up the customer's order status by order ID. Returns tracking number and estimated delivery date."
+
+# Bad
+"description": "Check order."
+```
+</Accordion>
+
+<Accordion title="Use descriptive parameter names">
+Parameter names and descriptions help the AI extract the right values from the conversation:
+
+```python
+"properties": {
+    "order_id": {
+        "type": "string",
+        "description": "The order ID, usually starts with 'ORD-' followed by 6 digits",
+    },
+}
+```
+</Accordion>
+
+<Accordion title="Keep responses concise">
+The AI processes the full JSON response. Large responses add latency. Return only what the AI needs to continue the conversation.
+</Accordion>
+
+---
+
+## Complete Example
+
+```python
+import os
+import asyncio
+from dotenv import load_dotenv
+from patter import Patter
+
+load_dotenv()
+
+phone = Patter(
+    twilio_sid=os.environ["TWILIO_SID"],
+    twilio_token=os.environ["TWILIO_TOKEN"],
+    openai_key=os.environ["OPENAI_KEY"],
+    phone_number=os.environ["PHONE_NUMBER"],
+    webhook_url=os.environ["WEBHOOK_URL"],
+)
+
+agent = phone.agent(
+    system_prompt="""You are a customer service agent for an e-commerce store.
+Help customers check order status and process returns.
+Always ask for the order ID before looking anything up.""",
+    tools=[
+        {
+            "name": "get_order_status",
+            "description": "Look up an order by ID. Returns order status, items, and tracking info.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "order_id": {
+                        "type": "string",
+                        "description": "Order ID (e.g., ORD-123456)",
+                    },
+                },
+                "required": ["order_id"],
+            },
+            "webhook_url": "https://api.example.com/orders/status",
+        },
+        {
+            "name": "initiate_return",
+            "description": "Start a return process for a specific order item.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "order_id": {"type": "string"},
+                    "item_id": {"type": "string"},
+                    "reason": {
+                        "type": "string",
+                        "enum": ["defective", "wrong_item", "changed_mind", "other"],
+                    },
+                },
+                "required": ["order_id", "item_id", "reason"],
+            },
+            "webhook_url": "https://api.example.com/returns/initiate",
+        },
+    ],
+    first_message="Hi! I'm here to help with your order. Do you have an order ID I can look up?",
+)
+
+async def main():
+    await phone.serve(agent, port=8000)
+
+asyncio.run(main())
+```

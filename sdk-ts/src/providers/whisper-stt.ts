@@ -5,6 +5,8 @@
  * OpenAI Whisper transcription API as a WAV file.
  */
 
+import { getLogger } from '../logger';
+
 export interface Transcript {
   readonly text: string;
   readonly isFinal: boolean;
@@ -95,7 +97,7 @@ export class WhisperSTT {
 
   onTranscript(callback: TranscriptCallback): void {
     if (this.callbacks.length >= 10) {
-      console.warn('[PATTER] WhisperSTT: maximum of 10 onTranscript callbacks reached; replacing the last callback.');
+      getLogger().warn('WhisperSTT: maximum of 10 onTranscript callbacks reached; replacing the last callback.');
       this.callbacks[this.callbacks.length - 1] = callback;
       return;
     }
@@ -138,7 +140,7 @@ export class WhisperSTT {
 
       if (!resp.ok) {
         const body = await resp.text();
-        console.error(`[PATTER] WhisperSTT transcription error: ${resp.status} ${body}`);
+        getLogger().error(`WhisperSTT transcription error: ${resp.status} ${body}`);
         return;
       }
 
@@ -156,7 +158,7 @@ export class WhisperSTT {
         cb(transcript);
       }
     } catch (err) {
-      console.error('[PATTER] WhisperSTT transcription error:', err);
+      getLogger().error(`WhisperSTT transcription error: ${String(err)}`);
     }
   }
 }

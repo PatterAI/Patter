@@ -5,7 +5,7 @@ description = "Connect AI agents to phone numbers with ~10 lines of code"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [
-    { name = "Patter Team", email = "hello@getpatter.com" },
+    { name = "Nicolò Tognoni", email = "nicolo@patter.dev" },
 ]
 keywords = ["voice", "ai", "phone", "telephony", "speech", "tts", "stt", "twilio", "telnyx", "openai", "elevenlabs"]
 classifiers = [
@@ -27,10 +27,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://getpatter.com"
-Documentation = "https://docs.getpatter.com"
-Repository = "https://github.com/PatterAI/Patter"
-"Bug Tracker" = "https://github.com/PatterAI/Patter/issues"
+Homepage = "https://patter.dev"
+Documentation = "https://docs.patter.dev"
+Repository = "https://github.com/nicolotognoni/patter"
+"Bug Tracker" = "https://github.com/nicolotognoni/patter/issues"
 
 [project.optional-dependencies]
 local = [
@@ -38,6 +38,7 @@ local = [
     "uvicorn[standard]>=0.30.0",
     "twilio>=9.0.0",
     "audioop-lts>=0.2.1; python_version>='3.13'",
+    "openai>=1.0.0",
 ]
 dev = [
     "pytest>=8.0.0",

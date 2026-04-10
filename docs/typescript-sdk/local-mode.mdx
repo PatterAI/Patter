@@ -1,0 +1,147 @@
+---
+title: "Local Mode"
+description: "Self-hosted embedded server, webhook endpoints, and WebSocket streams."
+---
+
+# Local Mode
+
+Local mode runs an embedded Express server on your infrastructure. It handles telephony webhooks, manages WebSocket audio streams, and connects to AI providers directly — no Patter cloud required.
+
+## Starting the Server
+
+```typescript
+import { Patter } from "patter";
+
+const phone = new Patter({
+  mode: "local",
+  twilioSid: process.env.TWILIO_SID,
+  twilioToken: process.env.TWILIO_TOKEN,
+  openaiKey: process.env.OPENAI_KEY,
+  phoneNumber: "+15550001234",
+  webhookUrl: "abc.ngrok.io",
+});
+
+const agent = phone.agent({
+  systemPrompt: "You are a helpful assistant.",
+});
+
+await phone.serve({
+  agent,
+  port: 8000,
+});
+```
+
+## ServeOptions
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `agent` | `AgentOptions` | Yes | — | Agent configuration. |
+| `port` | `number` | No | `8000` | Port for the embedded server (1-65535). |
+| `onCallStart` | `(data) => Promise<void>` | No | — | Called when a call connects. |
+| `onCallEnd` | `(data) => Promise<void>` | No | — | Called when a call disconnects. |
+| `onTranscript` | `(data) => Promise<void>` | No | — | Called for each transcript segment. |
+| `onMessage` | `(data) => Promise<string>` | No | — | Pipeline mode only. Receives user transcript, returns response text. |
+| `recording` | `boolean` | No | `false` | Enable call recording (Twilio only). |
+| `voicemailMessage` | `string` | No | — | Default voicemail message for AMD. |
+
+## Webhook Endpoints
+
+The embedded server exposes these HTTP endpoints:
+
+### Health Check
+
+```
+GET /health
+```
+
+Returns `{ "status": "ok", "mode": "local" }`.
+
+### Twilio Endpoints
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/webhooks/twilio/voice` | POST | Handles incoming calls. Returns TwiML to connect a media stream. |
+| `/webhooks/twilio/recording` | POST | Receives recording status callbacks. |
+| `/webhooks/twilio/amd` | POST | Receives AMD (answering machine detection) results. |
+| `/webhooks/twilio/status` | POST | Receives call status callbacks for outbound calls. |
+
+### Telnyx Endpoints
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/webhooks/telnyx/voice` | POST | Handles incoming calls. Returns commands to answer and start streaming. |
+
+## WebSocket Streams
+
+Audio streams are handled over WebSocket:
+
+```
+wss://{webhookUrl}/ws/stream/{callId}?caller={caller}&callee={callee}
+```
+
+The server upgrades HTTP connections to WebSocket on the `/ws/stream/` path. Each call gets its own WebSocket connection.
+
+### Rate Limiting
+
+WebSocket connections are rate-limited to **10 concurrent connections per IP address**. Connections exceeding the limit receive a `429 Too Many Requests` response. This protects against DoS attacks while being generous enough for legitimate telephony provider traffic (which only opens 1 connection per call).
+
+## Security
+
+### Twilio Signature Validation
+
+When `twilioToken` is configured, all Twilio webhook requests are validated using HMAC-SHA1 signature verification:
+
+1. The SDK reconstructs the URL from the webhook hostname and request path
+2. Parameters are sorted and concatenated
+3. An HMAC-SHA1 digest is computed using the Twilio Auth Token
+4. The result is compared with the `X-Twilio-Signature` header using timing-safe comparison
+
+Requests with invalid signatures are rejected with HTTP 403.
+
+<Warning>
+  If `twilioToken` is not set, signature validation is disabled and a warning is logged. Always set `twilioToken` in production.
+</Warning>
+
+### Telnyx Signature Validation
+
+When `telnyxPublicKey` is configured, Telnyx webhook requests are verified using Ed25519 signatures:
+
+1. The raw request body is captured before JSON parsing
+2. The signed payload is: `{timestamp}|{rawBody}`
+3. The Ed25519 signature is verified against the Telnyx public key
+4. Requests older than 5 minutes are rejected (replay protection)
+
+Requests with invalid signatures are rejected with HTTP 403.
+
+## Architecture
+
+```
+Phone Call
+    │
+    ▼
+Telephony Provider (Twilio/Telnyx)
+    │
+    ├── POST /webhooks/{provider}/voice  →  Returns stream instructions
+    │
+    ▼
+WebSocket /ws/stream/{callId}
+    │
+    ├── Audio In  → [Transcoding] → AI Provider (OpenAI/ElevenLabs/Pipeline)
+    │
+    └── Audio Out ← [Transcoding] ← AI Provider
+    │
+    ▼
+Phone Speaker
+```
+
+### Audio Transcoding
+
+| Provider | Input Format | Transcoding |
+|----------|-------------|-------------|
+| Twilio | mulaw 8kHz | Decoded to PCM 16kHz |
+| Telnyx | PCM 16kHz | No transcoding needed |
+| OpenAI TTS | PCM 24kHz | Resampled to 16kHz |
+
+## Binding Address
+
+The server binds to `127.0.0.1` by default. Use a tunnel (ngrok, Cloudflare Tunnel) to expose it to the internet for telephony provider webhooks.

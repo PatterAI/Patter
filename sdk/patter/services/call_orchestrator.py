@@ -1,7 +1,4 @@
-"""Call orchestrator — routes audio between STT/TTS and telephony.
-
-Refactored from backend to use callbacks instead of WebSocket sends.
-"""
+"""Call orchestrator — routes audio between STT/TTS and telephony."""
 
 import base64
 import json

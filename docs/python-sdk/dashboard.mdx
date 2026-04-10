@@ -1,0 +1,118 @@
+---
+title: "Dashboard"
+description: "Embedded web dashboard for real-time call monitoring, analytics, and data export."
+---
+
+# Dashboard
+
+Patter includes a built-in web dashboard for monitoring calls in real time. It runs alongside your agent server and provides a visual interface for call analytics, live call tracking, and data export.
+
+## Enabling the Dashboard
+
+The dashboard is enabled automatically when you start a server in local mode:
+
+```python
+await phone.serve(
+    agent,
+    port=8000,
+    dashboard=True,           # Enable dashboard (default: True)
+    dashboard_token="secret", # Optional: protect with a token
+)
+```
+
+Once running, open your browser at `http://localhost:8000/dashboard`.
+
+## Authentication
+
+Protect the dashboard with a token:
+
+```python
+await phone.serve(
+    agent,
+    port=8000,
+    dashboard_token="my-secret-token",
+)
+```
+
+Access via:
+- **Browser**: `http://localhost:8000/dashboard?token=my-secret-token`
+- **API**: `Authorization: Bearer my-secret-token` header
+
+When no token is set, the dashboard is accessible without authentication.
+
+## Dashboard Features
+
+### Live Call Monitoring
+
+View active calls in real time:
+- Caller and callee numbers
+- Call duration
+- Current conversation transcript
+- Provider information
+
+### Call History
+
+Browse completed calls with:
+- Full conversation transcripts
+- Cost breakdown per call
+- Latency metrics (average and P95)
+- Provider and voice mode details
+
+### Analytics Overview
+
+Aggregate statistics across all calls:
+- Total calls and minutes
+- Average call duration
+- Cost trends over time
+- Cost breakdown by component (STT, TTS, LLM, telephony)
+
+### Data Export
+
+Export call data in CSV or JSON format:
+
+- **CSV**: Flat table with one row per call, suitable for spreadsheet analysis.
+- **JSON**: Full nested data including per-turn metrics.
+
+## API Endpoints
+
+The dashboard exposes a REST API for programmatic access:
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/v1/calls` | Paginated call history. |
+| `GET /api/v1/calls/active` | Currently active calls. |
+| `GET /api/v1/calls/{call_id}` | Single call detail with full transcript. |
+| `GET /api/v1/analytics/overview` | Aggregate statistics. |
+| `GET /api/v1/analytics/costs` | Cost breakdown over time. |
+| `GET /api/v1/export/csv` | Export calls as CSV. |
+| `GET /api/v1/export/json` | Export calls as JSON. |
+
+### Example: Fetch Call History
+
+```python
+import httpx
+
+resp = httpx.get(
+    "http://localhost:8000/api/v1/calls",
+    headers={"Authorization": "Bearer my-secret-token"},
+    params={"limit": 10, "offset": 0},
+)
+calls = resp.json()
+```
+
+## Real-Time Updates (SSE)
+
+The dashboard uses Server-Sent Events for live updates. You can subscribe programmatically:
+
+```python
+import httpx
+
+with httpx.stream("GET", "http://localhost:8000/api/v1/events") as response:
+    for line in response.iter_lines():
+        if line.startswith("data:"):
+            print(line)
+```
+
+<Note>
+  The dashboard stores metrics in memory. Data is lost when the server restarts. For persistent analytics, use the `on_call_end` callback to save metrics to your own database.
+</Note>

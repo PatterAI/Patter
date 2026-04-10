@@ -1,0 +1,244 @@
+---
+title: "Local Mode"
+description: "Run a fully self-hosted voice AI server with your own telephony and AI provider keys."
+---
+
+# Local Mode (Self-Hosted)
+
+Local mode runs an embedded server on your infrastructure. You bring your own telephony credentials (Twilio or Telnyx) and AI provider keys. No Patter backend required.
+
+## When to Use Local Mode
+
+- You need full control over your infrastructure
+- You want to keep all data on your own servers
+- You are testing and developing locally
+- You need to comply with data residency requirements
+
+## Setup
+
+### 1. Install with local extras
+
+```bash
+pip install patter[local]
+```
+
+### 2. Expose your server
+
+Telephony providers need to reach your server via a public URL. Use [ngrok](https://ngrok.com) for development:
+
+```bash
+ngrok http 8000
+```
+
+### 3. Initialize Patter
+
+```python
+import os
+from dotenv import load_dotenv
+from patter import Patter
+
+load_dotenv()
+
+phone = Patter(
+    twilio_sid=os.environ["TWILIO_SID"],
+    twilio_token=os.environ["TWILIO_TOKEN"],
+    openai_key=os.environ["OPENAI_KEY"],
+    phone_number=os.environ["PHONE_NUMBER"],
+    webhook_url=os.environ["WEBHOOK_URL"],
+)
+```
+
+---
+
+## serve()
+
+The `serve()` method starts the embedded server and blocks until it is stopped. It handles inbound calls automatically.
+
+```python
+await phone.serve(agent, port=8000)
+```
+
+### Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `agent` | `Agent` | *required* | The agent configuration to use for all calls. Create with `phone.agent()`. |
+| `port` | `int` | `8000` | TCP port to bind to (1-65535). |
+| `recording` | `bool` | `False` | Enable call recording via the Twilio Recordings API. |
+| `on_call_start` | `Callable \| None` | `None` | Async callback fired when a call connects. |
+| `on_call_end` | `Callable \| None` | `None` | Async callback fired when a call ends. |
+| `on_transcript` | `Callable \| None` | `None` | Async callback fired for each utterance. |
+| `on_message` | `Callable \| None` | `None` | Async callback for pipeline mode. Receives user text, returns agent response. |
+| `voicemail_message` | `str` | `""` | Message to speak when AMD detects a machine on outbound calls. |
+
+<Warning>
+  `serve()` is only available in local mode. Calling it in cloud mode raises `PatterConnectionError`.
+</Warning>
+
+---
+
+## Making Outbound Calls
+
+In local mode, use `call()` to make outbound calls while the server is running:
+
+```python
+import asyncio
+
+async def main():
+    # Start the server in background
+    server_task = asyncio.create_task(phone.serve(agent, port=8000))
+
+    # Wait a moment for the server to be ready
+    await asyncio.sleep(1)
+
+    # Make an outbound call
+    await phone.call(
+        to="+15550009876",
+        agent=agent,
+        machine_detection=True,
+        voicemail_message="Please call us back at 555-000-1234.",
+    )
+
+    # Keep the server running
+    await server_task
+
+asyncio.run(main())
+```
+
+### call() Parameters (Local Mode)
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `to` | `str` | *required* | Phone number to call (E.164 format). |
+| `agent` | `Agent` | *required* | Agent instance to use for this call. |
+| `from_number` | `str` | `""` | Override the configured phone number. |
+| `machine_detection` | `bool` | `False` | Enable answering machine detection. |
+| `voicemail_message` | `str` | `""` | Message to leave on voicemail (requires `machine_detection=True`). |
+
+---
+
+## EmbeddedServer
+
+The `EmbeddedServer` is the internal class that powers `serve()`. You typically do not interact with it directly, but it is useful to understand for advanced use cases.
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `config` | `LocalConfig` | Telephony and AI provider configuration. |
+| `agent` | `Agent` | The agent configuration. |
+| `recording` | `bool` | Whether call recording is enabled. |
+| `voicemail_message` | `str` | Voicemail message for AMD. |
+
+### Methods
+
+| Method | Description |
+|--------|-------------|
+| `start(port)` | Start the server (blocking). |
+| `stop()` | Gracefully stop the server. |
+
+---
+
+## LocalConfig
+
+The `LocalConfig` dataclass holds all provider credentials for local mode. It is created automatically from the `Patter` constructor parameters.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `telephony_provider` | `str` | `"twilio"` or `"telnyx"` (auto-detected). |
+| `twilio_sid` | `str` | Twilio Account SID. |
+| `twilio_token` | `str` | Twilio Auth Token. |
+| `telnyx_key` | `str` | Telnyx API key. |
+| `telnyx_connection_id` | `str` | Telnyx Call Control Application ID. |
+| `openai_key` | `str` | OpenAI API key. |
+| `elevenlabs_key` | `str` | ElevenLabs API key. |
+| `deepgram_key` | `str` | Deepgram API key. |
+| `phone_number` | `str` | Phone number in E.164 format. |
+| `webhook_url` | `str` | Public hostname (no scheme). |
+
+---
+
+## Disconnecting
+
+Call `disconnect()` to stop the embedded server gracefully:
+
+```python
+await phone.disconnect()
+```
+
+---
+
+## Complete Example
+
+```python
+import os
+import asyncio
+from dotenv import load_dotenv
+from patter import Patter
+
+load_dotenv()
+
+phone = Patter(
+    twilio_sid=os.environ["TWILIO_SID"],
+    twilio_token=os.environ["TWILIO_TOKEN"],
+    openai_key=os.environ["OPENAI_KEY"],
+    phone_number=os.environ["PHONE_NUMBER"],
+    webhook_url=os.environ["WEBHOOK_URL"],
+)
+
+agent = phone.agent(
+    system_prompt="""You are a friendly receptionist for Acme Corp.
+Help callers schedule appointments, answer general questions, and transfer to the right department.
+Transfer billing questions to +15550001111.
+Transfer technical support to +15550002222.""",
+    voice="nova",
+    first_message="Thank you for calling Acme Corp! How can I help you today?",
+    tools=[
+        {
+            "name": "schedule_appointment",
+            "description": "Schedule an appointment for the caller.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Caller's full name"},
+                    "date": {"type": "string", "description": "Preferred date (YYYY-MM-DD)"},
+                    "time": {"type": "string", "description": "Preferred time (HH:MM)"},
+                    "reason": {"type": "string", "description": "Reason for appointment"},
+                },
+                "required": ["name", "date", "time"],
+            },
+            "webhook_url": "https://api.example.com/appointments",
+        },
+    ],
+    guardrails=[
+        Patter.guardrail(
+            name="No legal advice",
+            blocked_terms=["lawsuit", "sue", "legal action"],
+            replacement="I'm not able to provide legal guidance. Let me transfer you to our legal department.",
+        ),
+    ],
+)
+
+async def on_call_start(event):
+    print(f"[CALL START] {event['direction']} call {event['call_id']}")
+    print(f"  From: {event['caller']} -> To: {event['callee']}")
+
+async def on_call_end(event):
+    print(f"[CALL END] {event['call_id']}")
+    for entry in event["transcript"]:
+        print(f"  [{entry['role']}]: {entry['text']}")
+
+async def on_transcript(event):
+    print(f"  [{event['role']}]: {event['text']}")
+
+async def main():
+    await phone.serve(
+        agent,
+        port=8000,
+        recording=True,
+        on_call_start=on_call_start,
+        on_call_end=on_call_end,
+        on_transcript=on_transcript,
+        voicemail_message="Hi, this is Acme Corp. Please call us back at your earliest convenience.",
+    )
+
+asyncio.run(main())
+```

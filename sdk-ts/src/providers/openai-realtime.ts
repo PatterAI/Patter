@@ -1,4 +1,5 @@
 import WebSocket from 'ws';
+import { getLogger } from '../logger';
 
 export class OpenAIRealtimeAdapter {
   private ws: WebSocket | null = null;
@@ -28,7 +29,7 @@ export class OpenAIRealtimeAdapter {
         try {
           msg = JSON.parse(raw.toString()) as { type: string };
         } catch (e) {
-          console.warn('[PATTER] OpenAI Realtime: failed to parse message:', e);
+          getLogger().warn(`OpenAI Realtime: failed to parse message: ${String(e)}`);
           return;
         }
         if (msg.type === 'session.created' && !sessionCreated) {
@@ -74,7 +75,7 @@ export class OpenAIRealtimeAdapter {
       try {
         data = JSON.parse(raw.toString()) as typeof data;
       } catch (e) {
-        console.warn('[PATTER] OpenAI Realtime: failed to parse event message:', e);
+        getLogger().warn(`OpenAI Realtime: failed to parse event message: ${String(e)}`);
         return;
       }
       const t = data.type;

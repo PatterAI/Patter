@@ -1,0 +1,148 @@
+---
+title: "Metrics & Cost Tracking"
+description: "Per-call cost breakdown, latency analytics, and real-time metrics."
+---
+
+# Metrics & Cost Tracking
+
+Patter automatically tracks cost and latency for every call, broken down by provider component (STT, TTS, LLM, telephony).
+
+## How It Works
+
+Metrics are collected automatically during calls. When a call ends, the `on_call_end` callback receives a `CallMetrics` object with the full breakdown:
+
+```python
+async def on_call_end(event):
+    metrics = event.get("metrics")
+    if metrics:
+        print(f"Duration: {metrics.duration_seconds}s")
+        print(f"Total cost: ${metrics.cost.total:.4f}")
+        print(f"  STT: ${metrics.cost.stt:.4f}")
+        print(f"  TTS: ${metrics.cost.tts:.4f}")
+        print(f"  LLM: ${metrics.cost.llm:.4f}")
+        print(f"  Telephony: ${metrics.cost.telephony:.4f}")
+        print(f"Avg latency: {metrics.latency_avg.total_ms}ms")
+        print(f"P95 latency: {metrics.latency_p95.total_ms}ms")
+```
+
+## Cost Breakdown
+
+The `CostBreakdown` object provides per-component costs in USD:
+
+| Field | Description |
+|-------|-------------|
+| `stt` | Speech-to-text cost (Deepgram, Whisper). |
+| `tts` | Text-to-speech cost (ElevenLabs, OpenAI TTS). |
+| `llm` | LLM cost (OpenAI Realtime tokens). |
+| `telephony` | Telephony cost (Twilio, Telnyx per-minute). |
+| `total` | Sum of all components. |
+
+## Latency Breakdown
+
+The `LatencyBreakdown` object provides per-component latency in milliseconds:
+
+| Field | Description |
+|-------|-------------|
+| `stt_ms` | Time from user speech to transcript. |
+| `llm_ms` | Time from transcript to LLM response. |
+| `tts_ms` | Time from LLM response to first audio byte. |
+| `total_ms` | End-to-end latency (user speech to first audio). |
+
+Both `latency_avg` and `latency_p95` are available on `CallMetrics`.
+
+## Per-Turn Metrics
+
+Each conversation turn is tracked individually:
+
+```python
+async def on_call_end(event):
+    metrics = event.get("metrics")
+    if metrics:
+        for turn in metrics.turns:
+            print(f"Turn {turn.turn_index}:")
+            print(f"  User: {turn.user_text}")
+            print(f"  Agent: {turn.agent_text}")
+            print(f"  Latency: {turn.latency.total_ms}ms")
+```
+
+## Custom Pricing
+
+Override default provider pricing estimates:
+
+```python
+phone = Patter(
+    openai_key="sk-...",
+    mode="local",
+    pricing={
+        "deepgram": {"price": 0.005},      # Override STT price per minute
+        "elevenlabs": {"price": 0.15},      # Override TTS price per 1k chars
+        "twilio": {"price": 0.015},         # Override telephony price per minute
+    },
+)
+```
+
+### Default Pricing
+
+| Provider | Unit | Default Price |
+|----------|------|---------------|
+| Deepgram | per minute | $0.0043 |
+| Whisper | per minute | $0.006 |
+| ElevenLabs | per 1k chars | $0.18 |
+| OpenAI TTS | per 1k chars | $0.015 |
+| OpenAI Realtime | per token | varies by type |
+| Twilio | per minute | $0.013 |
+| Telnyx | per minute | $0.007 |
+
+<Note>
+  Default pricing is based on publicly listed provider rates and may become stale. Pass your own overrides for accurate cost tracking, or check the provider's pricing page.
+</Note>
+
+## Real-Time Metrics
+
+Use the `on_metrics` callback for live cost updates during a call:
+
+```python
+async def on_metrics(data):
+    cost = data.get("cost_so_far")
+    if cost:
+        print(f"Running cost: ${cost['total']:.4f}")
+
+await phone.serve(
+    agent,
+    port=8000,
+    on_metrics=on_metrics,
+)
+```
+
+## Data Types
+
+```python
+from patter import CallMetrics, CostBreakdown, LatencyBreakdown, TurnMetrics
+```
+
+### CallMetrics
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `call_id` | `str` | Unique call identifier. |
+| `duration_seconds` | `float` | Total call duration. |
+| `turns` | `tuple[TurnMetrics, ...]` | Per-turn metrics. |
+| `cost` | `CostBreakdown` | Cost breakdown. |
+| `latency_avg` | `LatencyBreakdown` | Average latency. |
+| `latency_p95` | `LatencyBreakdown` | 95th percentile latency. |
+| `provider_mode` | `str` | Voice mode used. |
+| `stt_provider` | `str` | STT provider name. |
+| `tts_provider` | `str` | TTS provider name. |
+| `telephony_provider` | `str` | Telephony provider name. |
+
+### TurnMetrics
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `turn_index` | `int` | Zero-based turn index. |
+| `user_text` | `str` | What the user said. |
+| `agent_text` | `str` | What the agent replied. |
+| `latency` | `LatencyBreakdown` | Latency for this turn. |
+| `stt_audio_seconds` | `float` | Audio duration processed by STT. |
+| `tts_characters` | `int` | Characters synthesized by TTS. |
+| `timestamp` | `float` | Unix timestamp. |

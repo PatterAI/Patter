@@ -1,0 +1,146 @@
+---
+title: "Quickstart"
+description: "Build your first voice AI agent in 5 minutes."
+---
+
+# Python Quickstart
+
+This guide walks you through building a voice AI agent that answers phone calls. Choose between **local mode** (self-hosted) and **cloud mode** (managed platform).
+
+## Prerequisites
+
+- Python 3.11+
+- A telephony account (Twilio or Telnyx)
+- An AI provider key (OpenAI for local mode, or a Patter API key for cloud mode)
+
+## Local Mode
+
+Local mode runs an embedded server on your machine. You bring your own telephony and AI provider keys.
+
+### Step 1: Install the SDK
+
+```bash
+pip install patter[local]
+```
+
+### Step 2: Set Up Credentials
+
+Create a `.env` file in your project root:
+
+```env
+TWILIO_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TWILIO_TOKEN=your_auth_token
+OPENAI_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxx
+PHONE_NUMBER=+15550001234
+WEBHOOK_URL=abc.ngrok.io
+```
+
+### Step 3: Expose Your Server
+
+Patter needs a public URL so Twilio/Telnyx can reach your local server. Use [ngrok](https://ngrok.com):
+
+```bash
+ngrok http 8000
+```
+
+Copy the hostname (e.g., `abc.ngrok.io`) and use it as your `WEBHOOK_URL`.
+
+### Step 4: Write Your Agent
+
+```python
+import os
+import asyncio
+from dotenv import load_dotenv
+from patter import Patter
+
+load_dotenv()
+
+phone = Patter(
+    twilio_sid=os.environ["TWILIO_SID"],
+    twilio_token=os.environ["TWILIO_TOKEN"],
+    openai_key=os.environ["OPENAI_KEY"],
+    phone_number=os.environ["PHONE_NUMBER"],
+    webhook_url=os.environ["WEBHOOK_URL"],
+)
+
+agent = phone.agent(
+    system_prompt="You are a helpful assistant for a pizza restaurant. Help customers place orders and answer questions about the menu.",
+    voice="alloy",
+    first_message="Hi! Welcome to Pizza Palace. What can I get for you today?",
+)
+
+async def main():
+    await phone.serve(agent, port=8000)
+
+asyncio.run(main())
+```
+
+### Step 5: Make a Call
+
+Call your `PHONE_NUMBER` from any phone. The AI agent will answer and start the conversation.
+
+---
+
+## Cloud Mode
+
+Cloud mode connects to Patter's managed platform. No need to manage telephony infrastructure.
+
+### Step 1: Install the SDK
+
+```bash
+pip install patter
+```
+
+### Step 2: Get Your API Key
+
+Sign up at [patter.dev](https://patter.dev) and copy your API key from the dashboard. It starts with `pt_`.
+
+### Step 3: Write Your Agent
+
+```python
+import os
+import asyncio
+from patter import Patter, IncomingMessage
+
+phone = Patter(api_key=os.environ["PATTER_API_KEY"])
+
+async def handle_message(message: IncomingMessage) -> str:
+    """Called for each message in the conversation."""
+    return f"You said: {message.text}. How else can I help?"
+
+async def main():
+    # Connect and listen for inbound calls
+    await phone.connect(on_message=handle_message)
+
+    # Or make an outbound call
+    await phone.call(
+        to="+15550009876",
+        on_message=handle_message,
+        first_message="Hi! This is a call from our AI assistant.",
+    )
+
+asyncio.run(main())
+```
+
+### Step 4: Test It
+
+Make an outbound call or configure an inbound number in the Patter dashboard.
+
+---
+
+## What's Next
+
+<CardGroup cols={2}>
+  <Card title="Configuration" icon="gear" href="/python-sdk/configuration">
+    Explore all constructor options and modes.
+  </Card>
+  <Card title="Agents" icon="robot" href="/python-sdk/agents">
+    Customize voice, model, and behavior.
+  </Card>
+  <Card title="Tools" icon="wrench" href="/python-sdk/tools">
+    Add function calling to your agent.
+  </Card>
+  <Card title="Events" icon="bolt" href="/python-sdk/events">
+    Handle call start, end, and transcript events.
+  </Card>
+</CardGroup>

@@ -15,6 +15,7 @@ import type {
   AgentOptions,
   ServeOptions,
   Guardrail,
+  ToolDefinition,
 } from "./types";
 import { deepgram, whisper, elevenlabs, openaiTts } from "./providers";
 import { EmbeddedServer } from "./server";
@@ -83,7 +84,7 @@ export class Patter {
       }
       opts.tools.forEach((tool, i) => {
         if (!tool.name) throw new Error(`tools[${i}] missing required 'name' field`);
-        if (!tool.webhookUrl) throw new Error(`tools[${i}] missing required 'webhookUrl' field`);
+        if (!tool.webhookUrl && !tool.handler) throw new Error(`tools[${i}] requires either 'webhookUrl' or 'handler'`);
       });
     }
 
@@ -139,8 +140,27 @@ export class Patter {
       opts.onMessage,
       opts.recording ?? false,
       opts.voicemailMessage ?? '',
+      opts.onMetrics,
+      opts.pricing,
+      opts.dashboard ?? true,
+      opts.dashboardToken ?? '',
     );
     await this.embeddedServer.start(opts.port ?? 8000);
+  }
+
+  async test(opts: ServeOptions): Promise<void> {
+    if (this.mode !== 'local') {
+      throw new Error('test() is only available in local mode');
+    }
+    const { TestSession } = await import('./test-mode');
+    const session = new TestSession();
+    await session.run({
+      agent: opts.agent,
+      openaiKey: this.localConfig?.openaiKey,
+      onMessage: typeof opts.onMessage === 'function' ? opts.onMessage : undefined,
+      onCallStart: opts.onCallStart,
+      onCallEnd: opts.onCallEnd,
+    });
   }
 
   // === Cloud mode legacy ===
@@ -339,6 +359,55 @@ export class Patter {
       check: opts.check,
       replacement: opts.replacement ?? "I'm sorry, I can't respond to that.",
     };
+  }
+
+  /**
+   * Create a tool definition for use with `agent({ tools: [...] })`.
+   *
+   * Either `handler` (a function) or `webhookUrl` must be provided.
+   *
+   * @param opts.name - Tool name (visible to the LLM).
+   * @param opts.description - What the tool does (visible to the LLM).
+   * @param opts.parameters - JSON Schema for tool arguments.
+   * @param opts.handler - Async function called in-process when the LLM invokes the tool.
+   * @param opts.webhookUrl - URL to POST to when the LLM invokes the tool.
+   *
+   * @example
+   * ```ts
+   * phone.agent({
+   *   systemPrompt: 'You are a pizza bot.',
+   *   tools: [
+   *     Patter.tool({
+   *       name: 'check_menu',
+   *       description: 'Check available menu items',
+   *       handler: async (args) => JSON.stringify({ items: ['margherita'] }),
+   *     }),
+   *   ],
+   * });
+   * ```
+   */
+  static tool(opts: {
+    name: string;
+    description?: string;
+    parameters?: Record<string, unknown>;
+    handler?: (args: Record<string, unknown>, context: Record<string, unknown>) => Promise<string>;
+    webhookUrl?: string;
+  }): ToolDefinition {
+    if (!opts.handler && !opts.webhookUrl) {
+      throw new Error('tool() requires either handler or webhookUrl');
+    }
+    const t: ToolDefinition = {
+      name: opts.name,
+      description: opts.description ?? '',
+      parameters: opts.parameters ?? { type: 'object', properties: {} },
+    };
+    if (opts.handler) {
+      t.handler = opts.handler;
+    }
+    if (opts.webhookUrl) {
+      t.webhookUrl = opts.webhookUrl;
+    }
+    return t;
   }
 
   // Internal

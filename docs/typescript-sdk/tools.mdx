@@ -1,0 +1,161 @@
+---
+title: "Tools"
+description: "Function calling, webhook tools, and system tools for voice agents."
+---
+
+# Tools
+
+Tools let your agent perform actions during a call — look up customer data, book appointments, process payments, and more. Tools are defined as webhooks that the SDK calls when the AI model invokes them.
+
+## Defining Tools
+
+Each tool requires a `name`, `description`, `parameters` (JSON Schema), and `webhookUrl`:
+
+```typescript
+const agent = phone.agent({
+  systemPrompt: "You are a scheduling assistant.",
+  tools: [
+    {
+      name: "check_availability",
+      description: "Check available appointment slots for a given date.",
+      parameters: {
+        type: "object",
+        properties: {
+          date: {
+            type: "string",
+            description: "Date in YYYY-MM-DD format",
+          },
+        },
+        required: ["date"],
+      },
+      webhookUrl: "https://api.example.com/availability",
+    },
+    {
+      name: "book_appointment",
+      description: "Book an appointment at the specified date and time.",
+      parameters: {
+        type: "object",
+        properties: {
+          date: { type: "string", description: "Date in YYYY-MM-DD format" },
+          time: { type: "string", description: "Time in HH:MM format" },
+          name: { type: "string", description: "Customer name" },
+        },
+        required: ["date", "time", "name"],
+      },
+      webhookUrl: "https://api.example.com/book",
+    },
+  ],
+});
+```
+
+## ToolDefinition Interface
+
+```typescript
+interface ToolDefinition {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>; // JSON Schema
+  webhookUrl: string;
+}
+```
+
+## Webhook Payload
+
+When the AI model invokes a tool, the SDK sends a POST request to the `webhookUrl` with the following JSON body:
+
+```json
+{
+  "tool_name": "check_availability",
+  "arguments": {
+    "date": "2025-03-15"
+  },
+  "call_id": "call_abc123",
+  "caller": "+15551234567",
+  "callee": "+15550001234"
+}
+```
+
+Your webhook must return a JSON response. The response text is fed back to the AI model as the tool result.
+
+## Webhook Behavior
+
+| Setting | Value |
+|---------|-------|
+| HTTP method | POST |
+| Content type | `application/json` |
+| Timeout | 10 seconds |
+| Max response size | 64 KB |
+| Retries | 3 attempts with 500ms delay |
+
+If all retries fail, the SDK returns an error message to the AI model so it can inform the caller gracefully.
+
+## SSRF Protection
+
+All webhook URLs are validated before requests are sent. The following are blocked:
+
+- Private IP ranges: `127.x.x.x`, `10.x.x.x`, `172.16-31.x.x`, `192.168.x.x`
+- Link-local addresses: `169.254.x.x`
+- Loopback: `localhost`, `::1`
+- Cloud metadata endpoints: `metadata.google.internal`
+- Non-HTTP schemes (only `http:` and `https:` are allowed)
+
+```typescript
+// Blocked — private address
+webhookUrl: "http://127.0.0.1:3000/api"
+
+// Blocked — cloud metadata
+webhookUrl: "http://metadata.google.internal/computeMetadata/v1"
+
+// Allowed
+webhookUrl: "https://api.example.com/webhook"
+```
+
+## System Tools
+
+Two tools are automatically injected into every agent. You do not need to define them:
+
+### transfer_call
+
+Transfers the current call to another phone number. The AI model invokes this when the caller asks to speak to a human or be transferred.
+
+```json
+{
+  "name": "transfer_call",
+  "parameters": {
+    "number": "+15559876543"
+  }
+}
+```
+
+The SDK uses the Twilio REST API to redirect the call to the target number.
+
+### end_call
+
+Ends the current call. The AI model invokes this when the conversation is complete or the caller says goodbye.
+
+```json
+{
+  "name": "end_call",
+  "parameters": {
+    "reason": "conversation_complete"
+  }
+}
+```
+
+## Validation
+
+The `phone.agent()` method validates tools at creation time:
+
+- `tools` must be an array
+- Each tool must have a `name` field
+- Each tool must have a `webhookUrl` field
+
+Missing fields throw descriptive errors:
+
+```typescript
+// Throws: tools[0] missing required 'name' field
+phone.agent({
+  systemPrompt: "...",
+  tools: [{ description: "test", parameters: {}, webhookUrl: "https://..." }] as any,
+});
+```

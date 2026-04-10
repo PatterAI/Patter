@@ -1,0 +1,208 @@
+---
+title: "Events & Callbacks"
+description: "React to call lifecycle events with async callbacks."
+---
+
+# Events & Callbacks
+
+Patter fires async callbacks at key moments in the call lifecycle. Use them to log calls, update CRMs, trigger workflows, or control conversation flow.
+
+All callbacks are **async functions**. They are passed as parameters to `serve()` (local mode) or `connect()` (cloud mode).
+
+## Available Callbacks
+
+| Callback | Trigger | Mode |
+|----------|---------|------|
+| `on_call_start` | A call connects | Local, Cloud |
+| `on_call_end` | A call ends | Local, Cloud |
+| `on_transcript` | Each utterance is transcribed | Local |
+| `on_message` | User message received (pipeline mode) | Local, Cloud |
+
+---
+
+## on_call_start
+
+Fires when a call connects. Use it to log call starts, initialize state, or fetch customer data.
+
+```python
+async def on_call_start(event):
+    print(f"Call started: {event['call_id']}")
+    print(f"Caller: {event['caller']}")
+    print(f"Callee: {event['callee']}")
+    print(f"Direction: {event['direction']}")
+    print(f"Custom params: {event.get('custom_params', {})}")
+```
+
+### Event Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `call_id` | `str` | Unique identifier for this call. |
+| `caller` | `str` | The caller's phone number (E.164). |
+| `callee` | `str` | The callee's phone number (E.164). |
+| `direction` | `str` | `"inbound"` or `"outbound"`. |
+| `custom_params` | `dict` | Custom parameters passed with the call (if any). |
+
+---
+
+## on_call_end
+
+Fires when a call ends. Use it to save transcripts, calculate duration, or trigger post-call workflows.
+
+```python
+async def on_call_end(event):
+    print(f"Call ended: {event['call_id']}")
+    for entry in event["transcript"]:
+        print(f"  [{entry['role']}]: {entry['text']}")
+```
+
+### Event Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `call_id` | `str` | Unique identifier for this call. |
+| `transcript` | `list[dict]` | Full conversation transcript. Each entry has `role` (`"user"` or `"assistant"`) and `text`. |
+
+---
+
+## on_transcript
+
+Fires each time an utterance is transcribed during the call. Use it for real-time logging, sentiment analysis, or live dashboards.
+
+```python
+async def on_transcript(event):
+    print(f"[{event['role']}] {event['text']}")
+    # Access conversation history so far
+    for entry in event.get("history", []):
+        pass  # {role, text, timestamp}
+```
+
+### Event Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `role` | `str` | `"user"` or `"assistant"`. |
+| `text` | `str` | The transcribed text. |
+| `call_id` | `str` | Unique identifier for this call. |
+| `history` | `list[dict]` | Conversation history so far. Each entry has `role`, `text`, and `timestamp`. |
+
+---
+
+## on_message
+
+Fires when a user message is received in **pipeline mode**. Your callback processes the message and returns the agent's response as a string, which is then synthesized to speech.
+
+<Note>
+  `on_message` is only used in pipeline mode (`provider="pipeline"`). In OpenAI Realtime and ElevenLabs ConvAI modes, the AI provider handles responses directly.
+</Note>
+
+```python
+async def on_message(event) -> str:
+    user_text = event["text"]
+    call_id = event["call_id"]
+    caller = event["caller"]
+    history = event.get("history", [])
+
+    # Your custom logic here — call an LLM, query a database, etc.
+    response = await my_llm_handler(user_text, history)
+    return response
+```
+
+### Event Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `text` | `str` | The user's transcribed message. |
+| `call_id` | `str` | Unique identifier for this call. |
+| `caller` | `str` | The caller's phone number. |
+| `history` | `list[dict]` | Conversation history. Each entry has `role`, `text`, and `timestamp`. |
+
+### Return Value
+
+Return a `str` with the agent's response. This text is sent to the TTS provider and played back to the caller.
+
+---
+
+## Conversation History
+
+All callbacks that include `history` receive it as a list of dictionaries:
+
+```python
+[
+    {"role": "assistant", "text": "Hello! How can I help?", "timestamp": "2025-03-15T10:00:01Z"},
+    {"role": "user", "text": "I'd like to check my order status.", "timestamp": "2025-03-15T10:00:05Z"},
+    {"role": "assistant", "text": "Sure! What's your order ID?", "timestamp": "2025-03-15T10:00:06Z"},
+]
+```
+
+---
+
+## Complete Example
+
+```python
+import os
+import asyncio
+from dotenv import load_dotenv
+from patter import Patter
+
+load_dotenv()
+
+phone = Patter(
+    twilio_sid=os.environ["TWILIO_SID"],
+    twilio_token=os.environ["TWILIO_TOKEN"],
+    openai_key=os.environ["OPENAI_KEY"],
+    phone_number=os.environ["PHONE_NUMBER"],
+    webhook_url=os.environ["WEBHOOK_URL"],
+)
+
+agent = phone.agent(
+    system_prompt="You are a helpful assistant.",
+    first_message="Hi there! What can I do for you?",
+)
+
+async def on_call_start(event):
+    print(f"[START] Call {event['call_id']} from {event['caller']} ({event['direction']})")
+
+async def on_call_end(event):
+    print(f"[END] Call {event['call_id']}")
+    print(f"  Transcript ({len(event['transcript'])} messages):")
+    for entry in event["transcript"]:
+        print(f"    [{entry['role']}]: {entry['text']}")
+
+async def on_transcript(event):
+    print(f"  [{event['role']}]: {event['text']}")
+
+async def main():
+    await phone.serve(
+        agent,
+        port=8000,
+        on_call_start=on_call_start,
+        on_call_end=on_call_end,
+        on_transcript=on_transcript,
+    )
+
+asyncio.run(main())
+```
+
+## Cloud Mode Callbacks
+
+In cloud mode, pass callbacks to `connect()`:
+
+```python
+phone = Patter(api_key=os.environ["PATTER_API_KEY"])
+
+async def handle_message(message) -> str:
+    return f"You said: {message.text}"
+
+async def on_call_start(event):
+    print(f"Call started: {event['call_id']}")
+
+async def on_call_end(event):
+    print(f"Call ended: {event['call_id']}")
+
+await phone.connect(
+    on_message=handle_message,
+    on_call_start=on_call_start,
+    on_call_end=on_call_end,
+)
+```
