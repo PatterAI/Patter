@@ -325,7 +325,11 @@ class EmbeddedServer:
         logger.info("Phone: %s", self.config.phone_number)
         logger.info("Agent: %s / %s", self.agent.model, self.agent.voice)
         if self.dashboard:
-            logger.info("Dashboard: http://127.0.0.1:%s/dashboard", port)
+            logger.info("Dashboard: http://127.0.0.1:%s", port)
+
+        # Suppress Uvicorn's "Uvicorn running on..." startup message
+        # but keep request logs (INFO level) visible
+        logging.getLogger("uvicorn.error").setLevel(logging.WARNING)
 
         config = uvicorn.Config(
             app, host="127.0.0.1", port=port, log_level="info"

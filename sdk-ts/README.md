@@ -1,6 +1,6 @@
 <p align="center">
   <h1 align="center">Patter</h1>
-  <p align="center">Connect AI agents to phone numbers with ~10 lines of code</p>
+  <p align="center">Connect AI agents to phone numbers with 10 lines of code</p>
 </p>
 
 <p align="center">
