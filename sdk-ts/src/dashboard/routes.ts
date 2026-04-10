@@ -41,7 +41,7 @@ export function mountDashboard(app: Express, store: MetricsStore, token = ''): v
   });
 
   app.get('/dashboard/api/calls/:callId', auth, (req, res) => {
-    const call = store.getCall(req.params.callId);
+    const call = store.getCall(String(req.params.callId));
     if (!call) {
       res.status(404).json({ error: 'Not found' });
       return;
@@ -144,7 +144,7 @@ export function mountApi(app: Express, store: MetricsStore, token = ''): void {
   });
 
   app.get('/api/v1/calls/:callId', auth, (req, res) => {
-    const call = store.getCall(req.params.callId);
+    const call = store.getCall(String(req.params.callId));
     if (!call) {
       res.status(404).json({ error: 'Call not found' });
       return;
