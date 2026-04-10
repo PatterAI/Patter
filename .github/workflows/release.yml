@@ -13,7 +13,7 @@ jobs:
     name: Publish Python SDK to PyPI
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Set up Python 3.13
         uses: actions/setup-python@v6
         with:
@@ -38,7 +38,7 @@ jobs:
     name: Publish TypeScript SDK to npm
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Set up Node.js 20
         uses: actions/setup-node@v4
         with:
