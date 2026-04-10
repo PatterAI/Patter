@@ -72,7 +72,6 @@ class PatterConnection:
                             if response_text is not None:
                                 await self.send_response(message.call_id, response_text)
                         except Exception:
-                            import logging
                             logging.getLogger("patter").exception(
                                 "on_message handler error for call_id=%s", message.call_id
                             )

@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import express from 'express';
 import { createServer, Server as HTTPServer } from 'http';
 import { WebSocketServer, WebSocket as WSWebSocket } from 'ws';
@@ -5,9 +6,15 @@ import { OpenAIRealtimeAdapter } from './providers/openai-realtime';
 import { ElevenLabsConvAIAdapter } from './providers/elevenlabs-convai';
 import { DeepgramSTT } from './providers/deepgram-stt';
 import { WhisperSTT } from './providers/whisper-stt';
-import { ElevenLabsTTS } from './providers/elevenlabs-tts';
-import { OpenAITTS } from './providers/openai-tts';
-import type { AgentOptions, Guardrail, PipelineMessageHandler } from './types';
+import { CallMetricsAccumulator } from './metrics';
+import { mergePricing } from './pricing';
+import { MetricsStore } from './dashboard/store';
+import { mountDashboard, mountApi } from './dashboard/routes';
+import { RemoteMessageHandler } from './remote-message';
+import { StreamHandler } from './stream-handler';
+import { getLogger } from './logger';
+import type { TelephonyBridge } from './stream-handler';
+import type { AgentOptions, PipelineMessageHandler } from './types';
 
 export interface LocalConfig {
   twilioSid?: string;
@@ -119,8 +126,7 @@ function validateTelnyxSignature(
   publicKey: string,
   toleranceSec = 300,
 ): boolean {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const crypto = require('crypto') as typeof import('crypto');
+
   try {
     // Reject if timestamp is missing or too old (replay attack protection)
     const ts = parseInt(timestamp, 10);
@@ -154,8 +160,7 @@ function validateTwilioSignature(
   signature: string,
   authToken: string,
 ): boolean {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const crypto = require('crypto') as typeof import('crypto');
+
   const data = url + Object.keys(params).sort().reduce((acc, key) => acc + key + (params[key] ?? ''), '');
   const expected = crypto.createHmac('sha1', authToken).update(data).digest('base64');
   try {
@@ -185,7 +190,7 @@ export function sanitizeVariables(raw: Record<string, unknown>): Record<string, 
  * Replace ``{key}`` placeholders in a template string with values from the
  * provided variables map.
  */
-function resolveVariables(template: string, variables: Record<string, string>): string {
+export function resolveVariables(template: string, variables: Record<string, string>): string {
   let result = template;
   for (const [key, value] of Object.entries(variables)) {
     result = result.replaceAll(`{${key}}`, value);
@@ -194,42 +199,9 @@ function resolveVariables(template: string, variables: Record<string, string>): 
 }
 
 /**
- * Validate that a string is a valid E.164 phone number.
+ * Build an AI adapter (OpenAI Realtime or ElevenLabs ConvAI) for a call.
  */
-function isValidE164(number: string): boolean {
-  return /^\+[1-9]\d{6,14}$/.test(number);
-}
-
-/**
- * Strip control characters and truncate a user-controlled string before logging.
- * Prevents log injection and limits log line size.
- */
-function sanitizeLogValue(v: string, maxLen = 200): string {
-  // eslint-disable-next-line no-control-regex
-  const cleaned = v.replace(/[\x00-\x1f\x7f]/g, '');
-  return cleaned.length > maxLen ? cleaned.slice(0, maxLen) + '...' : cleaned;
-}
-
-/**
- * Check if a text string triggers any of the provided guardrails.
- * Returns the first triggered guardrail, or null if none matched.
- */
-function checkGuardrails(text: string, guardrails: Guardrail[] | undefined): Guardrail | null {
-  if (!guardrails) return null;
-  for (const guard of guardrails) {
-    let blocked = false;
-    if (guard.blockedTerms) {
-      blocked = guard.blockedTerms.some((term) => text.toLowerCase().includes(term.toLowerCase()));
-    }
-    if (!blocked && guard.check) {
-      blocked = guard.check(text);
-    }
-    if (blocked) return guard;
-  }
-  return null;
-}
-
-function buildAIAdapter(config: LocalConfig, agent: AgentOptions, resolvedPrompt?: string): AIAdapter {
+export function buildAIAdapter(config: LocalConfig, agent: AgentOptions, resolvedPrompt?: string): AIAdapter {
   if (agent.provider === 'elevenlabs_convai') {
     const key = agent.elevenlabsKey ?? '';
     return new ElevenLabsConvAIAdapter(
@@ -257,9 +229,187 @@ function buildAIAdapter(config: LocalConfig, agent: AgentOptions, resolvedPrompt
   );
 }
 
+// ---------------------------------------------------------------------------
+// Telephony bridge implementations
+// ---------------------------------------------------------------------------
+
+/** Twilio-specific telephony bridge. */
+class TwilioBridge implements TelephonyBridge {
+  readonly label = 'Twilio';
+  readonly telephonyProvider = 'twilio' as const;
+
+  constructor(private readonly config: LocalConfig) {}
+
+  sendAudio(ws: WSWebSocket, audioBase64: string, streamSid: string): void {
+    ws.send(JSON.stringify({ event: 'media', streamSid, media: { payload: audioBase64 } }));
+  }
+
+  sendMark(ws: WSWebSocket, markName: string, streamSid: string): void {
+    ws.send(JSON.stringify({ event: 'mark', streamSid, mark: { name: markName } }));
+  }
+
+  sendClear(ws: WSWebSocket, streamSid: string): void {
+    ws.send(JSON.stringify({ event: 'clear', streamSid }));
+  }
+
+  async transferCall(callId: string, toNumber: string): Promise<void> {
+    if (this.config.twilioSid && this.config.twilioToken && callId) {
+      const transferUrl = `https://api.twilio.com/2010-04-01/Accounts/${this.config.twilioSid}/Calls/${callId}.json`;
+      await fetch(transferUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Authorization': `Basic ${Buffer.from(`${this.config.twilioSid}:${this.config.twilioToken}`).toString('base64')}`,
+        },
+        body: new URLSearchParams({ Twiml: `<Response><Dial>${xmlEscape(toNumber)}</Dial></Response>` }).toString(),
+      });
+      getLogger().info(`Call transferred to ${toNumber}`);
+    }
+  }
+
+  async endCall(callId: string, _ws: WSWebSocket): Promise<void> {
+    if (this.config.twilioSid && this.config.twilioToken && callId) {
+      const endUrl = `https://api.twilio.com/2010-04-01/Accounts/${this.config.twilioSid}/Calls/${callId}.json`;
+      await fetch(endUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Authorization': `Basic ${Buffer.from(`${this.config.twilioSid}:${this.config.twilioToken}`).toString('base64')}`,
+        },
+        body: new URLSearchParams({ Status: 'completed' }).toString(),
+      });
+    }
+  }
+
+  createStt(agent: AgentOptions): DeepgramSTT | WhisperSTT | null {
+    if (agent.stt) {
+      if (agent.stt.provider === 'deepgram') {
+        return DeepgramSTT.forTwilio(agent.stt.apiKey, agent.stt.language ?? 'en');
+      } else if (agent.stt.provider === 'whisper') {
+        return WhisperSTT.forTwilio(agent.stt.apiKey, agent.stt.language ?? 'en');
+      }
+    } else if (agent.deepgramKey) {
+      return DeepgramSTT.forTwilio(agent.deepgramKey, agent.language ?? 'en');
+    }
+    return null;
+  }
+
+  async queryTelephonyCost(metricsAcc: CallMetricsAccumulator, callId: string): Promise<void> {
+    if (this.config.twilioSid && this.config.twilioToken && callId) {
+      try {
+        const resp = await fetch(
+          `https://api.twilio.com/2010-04-01/Accounts/${this.config.twilioSid}/Calls/${callId}.json`,
+          {
+            headers: {
+              'Authorization': `Basic ${Buffer.from(`${this.config.twilioSid}:${this.config.twilioToken}`).toString('base64')}`,
+            },
+            signal: AbortSignal.timeout(5000),
+          },
+        );
+        if (resp.ok) {
+          const data = await resp.json() as { price?: string };
+          if (data.price != null) {
+            metricsAcc.setActualTelephonyCost(Math.abs(parseFloat(data.price)));
+            getLogger().info(`Twilio actual cost: $${Math.abs(parseFloat(data.price))}`);
+          }
+        }
+      } catch {
+        // Fallback to estimated cost
+      }
+    }
+  }
+}
+
+/** Telnyx-specific telephony bridge. */
+class TelnyxBridge implements TelephonyBridge {
+  readonly label = 'Telnyx';
+  readonly telephonyProvider = 'telnyx' as const;
+
+  constructor(private readonly config: LocalConfig) {}
+
+  sendAudio(ws: WSWebSocket, audioBase64: string, _streamSid: string): void {
+    ws.send(JSON.stringify({ event_type: 'media', payload: { audio: { chunk: audioBase64 } } }));
+  }
+
+  sendMark(_ws: WSWebSocket, _markName: string, _streamSid: string): void {
+    // Telnyx does not support mark events — no-op
+  }
+
+  sendClear(ws: WSWebSocket, _streamSid: string): void {
+    ws.send(JSON.stringify({ event_type: 'media_stop' }));
+  }
+
+  async transferCall(callId: string, toNumber: string): Promise<void> {
+    const telnyxKey = this.config.telnyxKey ?? '';
+    await fetch(`https://api.telnyx.com/v2/calls/${callId}/actions/transfer`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${telnyxKey}` },
+      body: JSON.stringify({ to: toNumber }),
+    });
+    getLogger().info(`Telnyx call transferred to ${toNumber}`);
+  }
+
+  async endCall(_callId: string, ws: WSWebSocket): Promise<void> {
+    ws.close();
+  }
+
+  createStt(agent: AgentOptions): DeepgramSTT | WhisperSTT | null {
+    if (agent.stt) {
+      if (agent.stt.provider === 'deepgram') {
+        // Telnyx sends 16 kHz PCM — use linear16 encoding
+        return new DeepgramSTT(agent.stt.apiKey, agent.stt.language ?? 'en', 'nova-3', 'linear16', 16000);
+      } else if (agent.stt.provider === 'whisper') {
+        return new WhisperSTT(agent.stt.apiKey, 'whisper-1', agent.stt.language ?? 'en');
+      }
+    } else if (agent.deepgramKey) {
+      // Telnyx sends 16 kHz PCM — use linear16 encoding
+      return new DeepgramSTT(agent.deepgramKey, agent.language ?? 'en', 'nova-3', 'linear16', 16000);
+    }
+    return null;
+  }
+
+  async queryTelephonyCost(metricsAcc: CallMetricsAccumulator, callId: string): Promise<void> {
+    if (this.config.telnyxKey && callId) {
+      try {
+        const resp = await fetch(
+          `https://api.telnyx.com/v2/calls/${callId}`,
+          {
+            headers: { 'Authorization': `Bearer ${this.config.telnyxKey}` },
+            signal: AbortSignal.timeout(5000),
+          },
+        );
+        if (resp.ok) {
+          const body = await resp.json() as { data?: { cost?: { amount?: string } } };
+          const amount = body.data?.cost?.amount;
+          if (amount != null) {
+            metricsAcc.setActualTelephonyCost(Math.abs(parseFloat(amount)));
+            getLogger().info(`Telnyx actual cost: $${Math.abs(parseFloat(amount))}`);
+          }
+        }
+      } catch {
+        // Fallback to estimated cost
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// EmbeddedServer
+// ---------------------------------------------------------------------------
+
+/** Maximum seconds to wait for active calls to finish during graceful shutdown. */
+const GRACEFUL_SHUTDOWN_TIMEOUT_MS = 10_000;
+
 export class EmbeddedServer {
   private server: HTTPServer | null = null;
+  private wss: WebSocketServer | null = null;
   private twilioTokenWarningLogged = false;
+  private readonly metricsStore: MetricsStore;
+  private readonly pricing: ReturnType<typeof mergePricing>;
+  private readonly remoteHandler = new RemoteMessageHandler();
+
+  /** Active WebSocket connections tracked for graceful shutdown. */
+  private readonly activeConnections = new Set<WSWebSocket>();
 
   constructor(
     private readonly config: LocalConfig,
@@ -267,10 +417,17 @@ export class EmbeddedServer {
     public onCallStart?: (data: Record<string, unknown>) => Promise<void>,
     public onCallEnd?: (data: Record<string, unknown>) => Promise<void>,
     public onTranscript?: (data: Record<string, unknown>) => Promise<void>,
-    public onMessage?: PipelineMessageHandler,
+    public onMessage?: PipelineMessageHandler | string,
     private readonly recording: boolean = false,
     public voicemailMessage: string = '',
-  ) {}
+    public onMetrics?: (data: Record<string, unknown>) => Promise<void>,
+    pricingOverrides?: Record<string, Record<string, unknown>>,
+    private readonly dashboard: boolean = true,
+    private readonly dashboardToken: string = '',
+  ) {
+    this.metricsStore = new MetricsStore();
+    this.pricing = mergePricing(pricingOverrides as Record<string, { unit?: string; price?: number }> | undefined);
+  }
 
   async start(port: number = 8000): Promise<void> {
     const webhookUrlPattern = /^[a-zA-Z0-9][a-zA-Z0-9.\-]+[a-zA-Z0-9]$/;
@@ -306,6 +463,20 @@ export class EmbeddedServer {
       res.json({ status: 'ok', mode: 'local' });
     });
 
+    // Mount dashboard and B2B API routes
+    if (this.dashboard) {
+      if (!this.dashboardToken) {
+        getLogger().warn(
+          'Dashboard is enabled without authentication. ' +
+          'Set dashboardToken to protect call data. ' +
+          'This is safe for local development but should not be exposed on a public network.'
+        );
+      }
+      mountDashboard(app, this.metricsStore, this.dashboardToken);
+      mountApi(app, this.metricsStore, this.dashboardToken);
+      getLogger().info('Dashboard: http://127.0.0.1:' + port + '/dashboard');
+    }
+
     app.post('/webhooks/twilio/recording', (req, res) => {
       if (this.config.twilioToken) {
         const signature = (req.headers['x-twilio-signature'] as string) || '';
@@ -320,7 +491,7 @@ export class EmbeddedServer {
       const recordingSid = body['RecordingSid'] ?? '';
       const recordingUrl = body['RecordingUrl'] ?? '';
       const callSid = body['CallSid'] ?? '';
-      console.log(`[PATTER] Recording ${recordingSid} for call ${callSid}: ${recordingUrl}`);
+      getLogger().info(`Recording ${recordingSid} for call ${callSid}: ${recordingUrl}`);
       res.status(204).send();
     });
 
@@ -337,7 +508,7 @@ export class EmbeddedServer {
       const body = req.body as Record<string, string>;
       const answeredBy = body['AnsweredBy'] ?? '';
       const callSid = body['CallSid'] ?? '';
-      console.log(`[PATTER] AMD result for ${callSid}: ${answeredBy}`);
+      getLogger().info(`AMD result for ${callSid}: ${answeredBy}`);
 
       if (
         (answeredBy === 'machine_end_beep' || answeredBy === 'machine_end_silence') &&
@@ -357,12 +528,12 @@ export class EmbeddedServer {
             body: new URLSearchParams({ Twiml: twiml }).toString(),
           });
           if (vmResp.ok) {
-            console.log(`[PATTER] Voicemail dropped for ${callSid}`);
+            getLogger().info(`Voicemail dropped for ${callSid}`);
           } else {
-            console.warn(`[PATTER] Warning: could not drop voicemail: ${await vmResp.text()}`);
+            getLogger().warn(`Could not drop voicemail: ${await vmResp.text()}`);
           }
         } catch (e) {
-          console.warn(`[PATTER] Warning: could not drop voicemail: ${String(e)}`);
+          getLogger().warn(`Could not drop voicemail: ${String(e)}`);
         }
       }
 
@@ -380,7 +551,7 @@ export class EmbeddedServer {
         }
       } else if (!this.twilioTokenWarningLogged) {
         this.twilioTokenWarningLogged = true;
-        console.warn('[PATTER] WARNING: Twilio webhook signature validation disabled — set twilioToken for production');
+        getLogger().warn('Twilio webhook signature validation disabled — set twilioToken for production');
       }
       const callSid = (req.body.CallSid as string) || '';
       const caller = (req.body.From as string) || '';
@@ -398,11 +569,11 @@ export class EmbeddedServer {
         const signature = (req.headers['telnyx-signature-ed25519'] as string) ?? '';
         const timestamp = (req.headers['telnyx-timestamp'] as string) ?? '';
         if (!signature || !timestamp || !validateTelnyxSignature(rawBody, signature, timestamp, this.config.telnyxPublicKey)) {
-          console.warn('[PATTER] Telnyx webhook rejected: invalid or missing Ed25519 signature');
+          getLogger().warn('Telnyx webhook rejected: invalid or missing Ed25519 signature');
           return res.status(403).send('Invalid signature');
         }
       } else {
-        console.warn('[PATTER] Warning: Telnyx webhook signature verification is disabled. Set telnyxPublicKey in LocalOptions for production use.');
+        getLogger().warn('Telnyx webhook signature verification is disabled. Set telnyxPublicKey in LocalOptions for production use.');
       }
 
       const body = req.body as {
@@ -453,7 +624,7 @@ export class EmbeddedServer {
     });
 
     this.server = createServer(app);
-    const wss = new WebSocketServer({ noServer: true });
+    this.wss = new WebSocketServer({ noServer: true });
 
     // Per-IP WebSocket connection counter for DoS protection.
     // Telephony providers (Twilio/Telnyx) only open 1 connection per call;
@@ -465,13 +636,13 @@ export class EmbeddedServer {
       const remoteIp = (req.socket?.remoteAddress ?? 'unknown').replace(/^::ffff:/, '');
       const currentCount = wsConnectionsByIp.get(remoteIp) ?? 0;
       if (currentCount >= MAX_WS_PER_IP) {
-        console.warn(`[PATTER] WebSocket upgrade rejected: too many connections from ${remoteIp}`);
+        getLogger().warn(`WebSocket upgrade rejected: too many connections from ${remoteIp}`);
         socket.write('HTTP/1.1 429 Too Many Requests\r\n\r\n');
         socket.destroy();
         return;
       }
-      console.log(`[PATTER] Upgrade request: ${req.url}`);
-      wss.handleUpgrade(req, socket, head, (ws) => {
+      getLogger().info(`Upgrade request: ${req.url}`);
+      this.wss!.handleUpgrade(req, socket, head, (ws) => {
         wsConnectionsByIp.set(remoteIp, (wsConnectionsByIp.get(remoteIp) ?? 0) + 1);
         ws.once('close', () => {
           const count = (wsConnectionsByIp.get(remoteIp) ?? 1) - 1;
@@ -481,13 +652,19 @@ export class EmbeddedServer {
             wsConnectionsByIp.set(remoteIp, count);
           }
         });
-        wss.emit('connection', ws, req);
+        this.wss!.emit('connection', ws, req);
       });
     });
 
-    wss.on('connection', (ws, req) => {
+    this.wss.on('connection', (ws, req) => {
       const url = new URL((req as { url?: string }).url ?? '', `http://localhost`);
-      console.log(`[PATTER] WebSocket connected: ${(req as { url?: string }).url}`);
+      getLogger().info(`WebSocket connected: ${(req as { url?: string }).url}`);
+
+      // Track active connections for graceful shutdown
+      this.activeConnections.add(ws);
+      ws.once('close', () => {
+        this.activeConnections.delete(ws);
+      });
 
       const isTelnyx = this.config.telephonyProvider === 'telnyx';
       if (isTelnyx) {
@@ -498,8 +675,8 @@ export class EmbeddedServer {
     });
 
     await new Promise<void>((resolve) => {
-      this.server!.listen(port, '127.0.0.1', () => {
-        console.log(`
+      this.server!.listen(port, '0.0.0.0', () => {
+        getLogger().info(`
 ██████╗  █████╗ ████████╗████████╗███████╗██████╗
 ██╔══██╗██╔══██╗╚══██╔══╝╚══██╔══╝██╔════╝██╔══██╗
 ██████╔╝███████║   ██║      ██║   █████╗  ██████╔╝
@@ -509,790 +686,208 @@ export class EmbeddedServer {
 
 Connect AI agents to phone numbers with ~10 lines of code
 `);
-        console.log(`[PATTER] Server on port ${port}`);
-        console.log(`[PATTER] Webhook: https://${this.config.webhookUrl}`);
-        console.log(`[PATTER] Phone: ${this.config.phoneNumber}`);
+        getLogger().info(`Server on port ${port}`);
+        getLogger().info(`Webhook: https://${this.config.webhookUrl}`);
+        getLogger().info(`Phone: ${this.config.phoneNumber}`);
         resolve();
       });
     });
   }
 
+  // ---------------------------------------------------------------------------
+  // Stream handler helpers
+  // ---------------------------------------------------------------------------
+
+  /** Build the shared StreamHandlerDeps for the current server configuration. */
+  private buildStreamHandlerDeps(bridge: TelephonyBridge): import('./stream-handler').StreamHandlerDeps {
+    return {
+      config: this.config,
+      agent: this.agent,
+      bridge,
+      metricsStore: this.metricsStore,
+      pricing: this.pricing,
+      remoteHandler: this.remoteHandler,
+      onCallStart: this.onCallStart,
+      onCallEnd: this.onCallEnd,
+      onTranscript: this.onTranscript,
+      onMessage: this.onMessage,
+      onMetrics: this.onMetrics,
+      recording: this.recording,
+      buildAIAdapter: (resolvedPrompt: string) => buildAIAdapter(this.config, this.agent, resolvedPrompt),
+      sanitizeVariables,
+      resolveVariables,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Twilio WebSocket message parser (thin layer)
+  // ---------------------------------------------------------------------------
+
   private handleTwilioStream(ws: WSWebSocket, url: URL): void {
     const caller = url.searchParams.get('caller') ?? '';
     const callee = url.searchParams.get('callee') ?? '';
-    let streamSid = '';
-    let adapter: AIAdapter | null = null;
-    let callSid = '';
-
-    // Conversation history — accumulated per call, passed to callbacks (capped at 200 entries)
-    const conversationHistory: Array<{ role: string; text: string; timestamp: number }> = [];
-    const pushHistory = (entry: { role: string; text: string; timestamp: number }) => {
-      if (conversationHistory.length >= 200) conversationHistory.shift();
-      conversationHistory.push(entry);
-    };
-
-    // Pipeline mode state
-    let stt: DeepgramSTT | WhisperSTT | null = null;
-    let tts: ElevenLabsTTS | OpenAITTS | null = null;
-    let isSpeaking = false;
-
-    // Mark-based barge-in state
-    let chunkCount = 0;
-
-    // Guard to ensure onCallEnd is fired exactly once per call
-    let callEndFired = false;
-
-    console.log('[PATTER] WebSocket connection opened (Twilio)');
+    const bridge = new TwilioBridge(this.config);
+    const handler = new StreamHandler(this.buildStreamHandlerDeps(bridge), ws, caller, callee);
 
     ws.on('message', async (raw) => {
       try {
-      let data: {
-        event: string;
-        streamSid?: string;
-        start?: { callSid?: string; customParameters?: Record<string, string> };
-        media?: { payload?: string };
-        mark?: { name?: string };
-        dtmf?: { digit?: string };
-      };
-      try {
-        data = JSON.parse(raw.toString()) as typeof data;
-      } catch (e) {
-        console.error('[PATTER] Failed to parse WS message:', e);
-        return;
-      }
-      const event = data.event;
-      console.log(`[PATTER] WS event: ${event}`);
-
-      if (event === 'start') {
-        streamSid = data.streamSid ?? '';
-        callSid = data.start?.callSid ?? '';
-        const customParameters = data.start?.customParameters ?? {};
-        console.log(`[PATTER] Call started: ${callSid}`);
-        if (Object.keys(customParameters).length > 0) {
-          console.log(`[PATTER] Custom params: ${sanitizeLogValue(JSON.stringify(customParameters))}`);
+        let data: {
+          event: string;
+          streamSid?: string;
+          start?: { callSid?: string; customParameters?: Record<string, string> };
+          media?: { payload?: string };
+          mark?: { name?: string };
+          dtmf?: { digit?: string };
+        };
+        try {
+          data = JSON.parse(raw.toString()) as typeof data;
+        } catch (e) {
+          getLogger().error('Failed to parse WS message:', e);
+          return;
         }
+        const event = data.event;
+        getLogger().info(`WS event: ${event}`);
 
-        if (this.onCallStart) {
-          await this.onCallStart({ call_id: callSid, caller, callee, direction: 'inbound', custom_params: customParameters });
+        if (event === 'start') {
+          handler.setStreamSid(data.streamSid ?? '');
+          const callSid = data.start?.callSid ?? '';
+          const customParameters = data.start?.customParameters ?? {};
+          await handler.handleCallStart(callSid, customParameters);
+        } else if (event === 'media') {
+          const payload = data.media?.payload ?? '';
+          handler.handleAudio(Buffer.from(payload, 'base64'));
+        } else if (event === 'mark') {
+          // mark.name tracks last confirmed audio chunk (used for barge-in accuracy)
+        } else if (event === 'dtmf') {
+          const digit = data.dtmf?.digit ?? '';
+          await handler.handleDtmf(digit);
+        } else if (event === 'stop') {
+          await handler.handleStop();
         }
-
-        // Start recording if requested
-        if (this.recording && this.config.twilioSid && this.config.twilioToken && callSid) {
-          try {
-            const recUrl = `https://api.twilio.com/2010-04-01/Accounts/${this.config.twilioSid}/Calls/${callSid}/Recordings.json`;
-            const recResp = await fetch(recUrl, {
-              method: 'POST',
-              headers: {
-                'Authorization': `Basic ${Buffer.from(`${this.config.twilioSid}:${this.config.twilioToken}`).toString('base64')}`,
-              },
-            });
-            if (recResp.ok) {
-              console.log(`[PATTER] Recording started for ${callSid}`);
-            } else {
-              console.warn(`[PATTER] Warning: could not start recording: ${await recResp.text()}`);
-            }
-          } catch (e) {
-            console.warn(`[PATTER] Warning: could not start recording: ${String(e)}`);
-          }
-        }
-
-        // Resolve dynamic variables in system prompt.
-        // agent.variables are merged with customParameters from TwiML (customParams win on conflict).
-        const agentVars = sanitizeVariables(this.agent.variables ?? {});
-        const safeCustomParams = sanitizeVariables(customParameters);
-        const allVars = { ...agentVars, ...safeCustomParams };
-        const resolvedPrompt = Object.keys(allVars).length > 0
-          ? resolveVariables(this.agent.systemPrompt, allVars)
-          : this.agent.systemPrompt;
-
-        const provider = this.agent.provider ?? 'openai_realtime';
-
-        if (provider === 'pipeline') {
-          // ---- Pipeline mode: configurable STT + TTS ----
-
-          // Create STT: prefer agent.stt config, fall back to agent.deepgramKey
-          if (this.agent.stt) {
-            if (this.agent.stt.provider === 'deepgram') {
-              stt = DeepgramSTT.forTwilio(this.agent.stt.apiKey, this.agent.stt.language ?? 'en');
-            } else if (this.agent.stt.provider === 'whisper') {
-              stt = WhisperSTT.forTwilio(this.agent.stt.apiKey, this.agent.stt.language ?? 'en');
-            }
-          } else if (this.agent.deepgramKey) {
-            stt = DeepgramSTT.forTwilio(this.agent.deepgramKey, this.agent.language ?? 'en');
-          }
-
-          // Create TTS: prefer agent.tts config, fall back to agent.elevenlabsKey
-          if (this.agent.tts) {
-            if (this.agent.tts.provider === 'elevenlabs') {
-              tts = new ElevenLabsTTS(this.agent.tts.apiKey, this.agent.tts.voice ?? '21m00Tcm4TlvDq8ikWAM');
-            }
-            if (this.agent.tts.provider === 'openai') {
-              tts = new OpenAITTS(this.agent.tts.apiKey, this.agent.tts.voice ?? 'alloy');
-            }
-            // other tts providers can be added here
-          } else if (this.agent.elevenlabsKey) {
-            const voiceId = (this.agent.voice && this.agent.voice !== 'alloy')
-              ? this.agent.voice
-              : '21m00Tcm4TlvDq8ikWAM';
-            tts = new ElevenLabsTTS(this.agent.elevenlabsKey, voiceId);
-          }
-
-          if (!stt) {
-            console.log('[PATTER] Pipeline mode (Twilio): no STT configured');
-          }
-          if (!tts) {
-            console.log('[PATTER] Pipeline mode (Twilio): no TTS configured');
-          }
-
-          try {
-            if (stt) await stt.connect();
-            console.log('[PATTER] Pipeline mode (Twilio): STT + TTS connected');
-          } catch (e) {
-            console.error('[PATTER] Pipeline connect FAILED:', e);
-            return;
-          }
-
-          if (this.agent.firstMessage && !this.onMessage && tts) {
-            try {
-              for await (const chunk of tts.synthesizeStream(this.agent.firstMessage)) {
-                const encoded = chunk.toString('base64');
-                ws.send(JSON.stringify({ event: 'media', streamSid, media: { payload: encoded } }));
-              }
-            } catch (e) {
-              console.error('[PATTER] First message TTS error:', e);
-            }
-          }
-
-          if (stt) stt.onTranscript(async (transcript) => {
-            if (!transcript.isFinal || !transcript.text) return;
-
-            console.log(`[PATTER] User: ${sanitizeLogValue(transcript.text)}`);
-
-            pushHistory({ role: 'user', text: transcript.text, timestamp: Date.now() });
-
-            if (this.onTranscript) {
-              await this.onTranscript({
-                role: 'user',
-                text: transcript.text,
-                call_id: callSid,
-                history: [...conversationHistory],
-              });
-            }
-
-            if (!this.onMessage) return;
-
-            let responseText: string;
-            try {
-              responseText = await this.onMessage({
-                text: transcript.text,
-                call_id: callSid,
-                caller,
-                history: [...conversationHistory],
-              });
-            } catch (e) {
-              console.error('[PATTER] onMessage error:', e);
-              return;
-            }
-
-            if (!responseText) return;
-
-            pushHistory({ role: 'assistant', text: responseText, timestamp: Date.now() });
-
-            isSpeaking = true;
-            try {
-              for await (const chunk of tts!.synthesizeStream(responseText)) {
-                if (!isSpeaking) break;
-                const encoded = chunk.toString('base64');
-                ws.send(JSON.stringify({ event: 'media', streamSid, media: { payload: encoded } }));
-              }
-            } catch (e) {
-              console.error('[PATTER] TTS streaming error:', e);
-            } finally {
-              isSpeaking = false;
-            }
-          });
-
-        } else {
-          // ---- OpenAI Realtime / ElevenLabs ConvAI mode ----
-          adapter = buildAIAdapter(this.config, this.agent, resolvedPrompt);
-          try {
-            await adapter.connect();
-            console.log('[PATTER] AI adapter connected (Twilio)');
-          } catch (e) {
-            console.error('[PATTER] AI adapter connect FAILED:', e);
-            return;
-          }
-
-          if (this.agent.firstMessage && adapter instanceof OpenAIRealtimeAdapter) {
-            await adapter.sendText(this.agent.firstMessage);
-          }
-
-          adapter.onEvent(async (type, eventData) => {
-            try {
-            if (type === 'audio') {
-              const encoded = (eventData as Buffer).toString('base64');
-              ws.send(JSON.stringify({ event: 'media', streamSid, media: { payload: encoded } }));
-              // Send mark so we track which audio chunk was played (for barge-in accuracy)
-              chunkCount++;
-              ws.send(JSON.stringify({ event: 'mark', streamSid, mark: { name: `audio_${chunkCount}` } }));
-            } else if (type === 'transcript_input') {
-              const inputText = eventData as string;
-              console.log(`[PATTER] User: ${sanitizeLogValue(inputText)}`);
-              pushHistory({ role: 'user', text: inputText, timestamp: Date.now() });
-              if (this.onTranscript) {
-                await this.onTranscript({
-                  role: 'user',
-                  text: inputText,
-                  call_id: callSid,
-                  history: [...conversationHistory],
-                });
-              }
-            } else if (type === 'transcript_output') {
-              const outputText = eventData as string;
-              if (outputText) {
-                const triggered = checkGuardrails(outputText, this.agent.guardrails);
-                if (triggered) {
-                  console.log(`[PATTER] Guardrail '${triggered.name}' triggered`);
-                  if (adapter instanceof OpenAIRealtimeAdapter) {
-                    adapter.cancelResponse();
-                    await adapter.sendText(triggered.replacement ?? "I'm sorry, I can't respond to that.");
-                  }
-                }
-                pushHistory({ role: 'assistant', text: outputText, timestamp: Date.now() });
-              }
-            } else if (type === 'speech_started' || type === 'interruption') {
-              ws.send(JSON.stringify({ event: 'clear', streamSid }));
-              if (adapter instanceof OpenAIRealtimeAdapter) {
-                adapter.cancelResponse();
-              }
-            } else if (type === 'function_call' && adapter instanceof OpenAIRealtimeAdapter) {
-              const fc = eventData as { call_id: string; name: string; arguments: string };
-              if (fc.name === 'transfer_call') {
-                // System tool — transfer the call
-                let transferArgs: { number?: string };
-                try {
-                  transferArgs = JSON.parse(fc.arguments || '{}') as { number?: string };
-                } catch {
-                  transferArgs = {};
-                }
-                const transferTo = transferArgs.number ?? '';
-                if (!isValidE164(transferTo)) {
-                  console.warn(`[PATTER] transfer_call rejected: invalid number ${JSON.stringify(transferTo)}`);
-                  await adapter.sendFunctionResult(fc.call_id, JSON.stringify({ error: 'Invalid phone number format', status: 'rejected' }));
-                  return;
-                }
-                console.log(`[PATTER] Transferring call to ${transferTo}`);
-                await adapter.sendFunctionResult(fc.call_id, JSON.stringify({ status: 'transferring', to: transferTo }));
-                if (this.config.twilioSid && this.config.twilioToken && callSid) {
-                  const transferUrl = `https://api.twilio.com/2010-04-01/Accounts/${this.config.twilioSid}/Calls/${callSid}.json`;
-                  await fetch(transferUrl, {
-                    method: 'POST',
-                    headers: {
-                      'Content-Type': 'application/x-www-form-urlencoded',
-                      'Authorization': `Basic ${Buffer.from(`${this.config.twilioSid}:${this.config.twilioToken}`).toString('base64')}`,
-                    },
-                    body: new URLSearchParams({ Twiml: `<Response><Dial>${xmlEscape(transferTo)}</Dial></Response>` }).toString(),
-                  });
-                  console.log(`[PATTER] Call transferred to ${transferTo}`);
-                }
-                if (this.onTranscript) {
-                  await this.onTranscript({ role: 'system', text: `Call transferred to ${transferTo}`, call_id: callSid });
-                }
-                return; // Exit event handler
-              } else if (fc.name === 'end_call') {
-                // System tool — end the call
-                let endCallArgs: { reason?: string };
-                try {
-                  endCallArgs = JSON.parse(fc.arguments || '{}') as { reason?: string };
-                } catch {
-                  endCallArgs = {};
-                }
-                const reason = endCallArgs.reason ?? 'conversation_complete';
-                console.log(`[PATTER] Ending call: ${reason}`);
-                await adapter.sendFunctionResult(fc.call_id, JSON.stringify({ status: 'ending', reason }));
-                if (this.config.twilioSid && this.config.twilioToken && callSid) {
-                  const endUrl = `https://api.twilio.com/2010-04-01/Accounts/${this.config.twilioSid}/Calls/${callSid}.json`;
-                  await fetch(endUrl, {
-                    method: 'POST',
-                    headers: {
-                      'Content-Type': 'application/x-www-form-urlencoded',
-                      'Authorization': `Basic ${Buffer.from(`${this.config.twilioSid}:${this.config.twilioToken}`).toString('base64')}`,
-                    },
-                    body: new URLSearchParams({ Status: 'completed' }).toString(),
-                  });
-                }
-                if (this.onTranscript) {
-                  await this.onTranscript({ role: 'system', text: `Call ended: ${reason}`, call_id: callSid });
-                }
-                return; // Exit event handler
-              }
-              const toolDef = this.agent.tools?.find((t) => t.name === fc.name);
-              if (toolDef?.webhookUrl) {
-                let parsedArgs: unknown;
-                try {
-                  parsedArgs = JSON.parse(fc.arguments || '{}');
-                } catch {
-                  parsedArgs = {};
-                }
-                let result = '';
-                try {
-                  validateWebhookUrl(toolDef.webhookUrl);
-                } catch (e) {
-                  console.error(`[PATTER] Tool webhook URL rejected: ${String(e)}`);
-                  await adapter.sendFunctionResult(fc.call_id, JSON.stringify({ error: String(e), fallback: true }));
-                  return;
-                }
-                for (let attempt = 0; attempt < 3; attempt++) {
-                  try {
-                    const resp = await fetch(toolDef.webhookUrl, {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({
-                        tool: fc.name,
-                        arguments: parsedArgs,
-                        call_id: callSid,
-                        caller,
-                        attempt: attempt + 1,
-                      }),
-                      signal: AbortSignal.timeout(10_000),
-                    });
-                    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-                    result = JSON.stringify(await resp.json() as unknown);
-                    // Cap response body at 64 KB to prevent oversized payloads from malicious webhooks
-                    if (result.length > 65_536) {
-                      console.warn(`[PATTER] Tool webhook response truncated from ${result.length} bytes to 64KB`);
-                      result = result.slice(0, 65_536);
-                    }
-                    break;
-                  } catch (e) {
-                    if (attempt < 2) {
-                      console.log(`[PATTER] Tool webhook retry ${attempt + 1}: ${String(e)}`);
-                      await new Promise<void>((r) => setTimeout(r, 500));
-                    } else {
-                      result = JSON.stringify({ error: `Tool failed after 3 attempts: ${String(e)}`, fallback: true });
-                    }
-                  }
-                }
-                await adapter.sendFunctionResult(fc.call_id, result);
-              }
-            }
-            } catch (err) {
-              console.error('[PATTER] Adapter event handler error:', err);
-            }
-          });
-        }
-
-      } else if (event === 'media') {
-        const payload = data.media?.payload ?? '';
-        const provider = this.agent.provider ?? 'openai_realtime';
-        if (provider === 'pipeline' && stt && !isSpeaking) {
-          stt.sendAudio(Buffer.from(payload, 'base64'));
-        } else if (adapter) {
-          adapter.sendAudio(Buffer.from(payload, 'base64'));
-        }
-      } else if (event === 'mark') {
-        // mark.name tracks last confirmed audio chunk (used for barge-in accuracy)
-      } else if (event === 'dtmf') {
-        const digit = data.dtmf?.digit ?? '';
-        console.log(`[PATTER] DTMF: ${digit}`);
-        if (adapter instanceof OpenAIRealtimeAdapter) {
-          await adapter.sendText(`The user pressed key ${digit} on their phone keypad.`);
-        }
-        if (this.onTranscript) {
-          await this.onTranscript({ role: 'user', text: `[DTMF: ${digit}]`, call_id: callSid });
-        }
-      } else if (event === 'stop') {
-        stt?.close();
-        adapter?.close();
-        if (!callEndFired && this.onCallEnd) {
-          callEndFired = true;
-          await this.onCallEnd({ call_id: callSid, transcript: [...conversationHistory] });
-        }
-      }
       } catch (err) {
-        console.error('[PATTER] Stream handler error:', err);
+        getLogger().error('Stream handler error:', err);
       }
     });
 
-    ws.on('close', () => {
-      if (!callEndFired && this.onCallEnd) {
-        callEndFired = true;
-        this.onCallEnd({ call_id: callSid, transcript: [...conversationHistory] }).catch(() => {});
-      }
-      stt?.close();
-      adapter?.close();
+    ws.on('close', async () => {
+      await handler.handleWsClose();
     });
   }
+
+  // ---------------------------------------------------------------------------
+  // Telnyx WebSocket message parser (thin layer)
+  // ---------------------------------------------------------------------------
 
   private handleTelnyxStream(ws: WSWebSocket, url: URL): void {
     const caller = url.searchParams.get('caller') ?? '';
     const callee = url.searchParams.get('callee') ?? '';
-    let adapter: AIAdapter | null = null;
-    let callControlId = '';
+    const bridge = new TelnyxBridge(this.config);
+    const handler = new StreamHandler(this.buildStreamHandlerDeps(bridge), ws, caller, callee);
     let streamStarted = false;
-
-    // Conversation history — accumulated per call, passed to callbacks (capped at 200 entries)
-    const conversationHistory: Array<{ role: string; text: string; timestamp: number }> = [];
-    const pushHistory = (entry: { role: string; text: string; timestamp: number }) => {
-      if (conversationHistory.length >= 200) conversationHistory.shift();
-      conversationHistory.push(entry);
-    };
-
-    // Pipeline mode state
-    let stt: DeepgramSTT | WhisperSTT | null = null;
-    let tts: ElevenLabsTTS | OpenAITTS | null = null;
-    let isSpeaking = false;
-
-    // Guard to ensure onCallEnd is fired exactly once per call
-    let callEndFired = false;
-
-    console.log('[PATTER] WebSocket connection opened (Telnyx)');
 
     ws.on('message', async (raw) => {
       try {
-      let data: {
-        event_type?: string;
-        payload?: {
-          call_control_id?: string;
-          audio?: { chunk?: string };
+        let data: {
+          event_type?: string;
+          payload?: {
+            call_control_id?: string;
+            audio?: { chunk?: string };
+          };
         };
-      };
-      try {
-        data = JSON.parse(raw.toString()) as typeof data;
-      } catch (e) {
-        console.error('[PATTER] Failed to parse Telnyx WS message:', e);
-        return;
-      }
-
-      const eventType = data.event_type ?? '';
-      console.log(`[PATTER] Telnyx event: ${eventType}`);
-
-      if (eventType === 'stream_started' && !streamStarted) {
-        streamStarted = true;
-        callControlId = data.payload?.call_control_id ?? '';
-        console.log(`[PATTER] Telnyx stream started: ${callControlId}`);
-
-        if (this.onCallStart) {
-          await this.onCallStart({
-            call_id: callControlId,
-            caller,
-            callee,
-            direction: 'inbound',
-          });
+        try {
+          data = JSON.parse(raw.toString()) as typeof data;
+        } catch (e) {
+          getLogger().error('Failed to parse Telnyx WS message:', e);
+          return;
         }
 
-        // Resolve dynamic variables in system prompt (agent.variables only for Telnyx,
-        // since Telnyx does not pass customParameters in the same way as Twilio).
-        const agentVarsTelnyx = sanitizeVariables(this.agent.variables ?? {});
-        const resolvedPromptTelnyx = Object.keys(agentVarsTelnyx).length > 0
-          ? resolveVariables(this.agent.systemPrompt, agentVarsTelnyx)
-          : this.agent.systemPrompt;
+        const eventType = data.event_type ?? '';
+        getLogger().info(`Telnyx event: ${eventType}`);
 
-        const provider = this.agent.provider ?? 'openai_realtime';
-
-        if (provider === 'pipeline') {
-          // ---- Pipeline mode: configurable STT + TTS ----
-
-          // Create STT: prefer agent.stt config, fall back to agent.deepgramKey
-          if (this.agent.stt) {
-            if (this.agent.stt.provider === 'deepgram') {
-              // Telnyx sends 16 kHz PCM — use linear16 encoding
-              stt = new DeepgramSTT(this.agent.stt.apiKey, this.agent.stt.language ?? 'en', 'nova-3', 'linear16', 16000);
-            } else if (this.agent.stt.provider === 'whisper') {
-              stt = new WhisperSTT(this.agent.stt.apiKey, 'whisper-1', this.agent.stt.language ?? 'en');
-            }
-          } else if (this.agent.deepgramKey) {
-            // Telnyx sends 16 kHz PCM — use linear16 encoding
-            stt = new DeepgramSTT(this.agent.deepgramKey, this.agent.language ?? 'en', 'nova-3', 'linear16', 16000);
-          }
-
-          // Create TTS: prefer agent.tts config, fall back to agent.elevenlabsKey
-          if (this.agent.tts) {
-            if (this.agent.tts.provider === 'elevenlabs') {
-              tts = new ElevenLabsTTS(this.agent.tts.apiKey, this.agent.tts.voice ?? '21m00Tcm4TlvDq8ikWAM');
-            }
-            if (this.agent.tts.provider === 'openai') {
-              tts = new OpenAITTS(this.agent.tts.apiKey, this.agent.tts.voice ?? 'alloy');
-            }
-            // other tts providers can be added here
-          } else if (this.agent.elevenlabsKey) {
-            const voiceId = (this.agent.voice && this.agent.voice !== 'alloy')
-              ? this.agent.voice
-              : '21m00Tcm4TlvDq8ikWAM';
-            tts = new ElevenLabsTTS(this.agent.elevenlabsKey, voiceId);
-          }
-
-          if (!stt) {
-            console.log('[PATTER] Pipeline mode (Telnyx): no STT configured');
-          }
-          if (!tts) {
-            console.log('[PATTER] Pipeline mode (Telnyx): no TTS configured');
-          }
-
-          try {
-            if (stt) await stt.connect();
-            console.log('[PATTER] Pipeline mode (Telnyx): STT + TTS connected');
-          } catch (e) {
-            console.error('[PATTER] Pipeline connect FAILED (Telnyx):', e);
-            return;
-          }
-
-          if (this.agent.firstMessage && !this.onMessage && tts) {
-            try {
-              for await (const chunk of tts.synthesizeStream(this.agent.firstMessage)) {
-                const encoded = chunk.toString('base64');
-                ws.send(JSON.stringify({ event_type: 'media', payload: { audio: { chunk: encoded } } }));
-              }
-            } catch (e) {
-              console.error('[PATTER] First message TTS error (Telnyx):', e);
-            }
-          }
-
-          if (stt) stt.onTranscript(async (transcript) => {
-            if (!transcript.isFinal || !transcript.text) return;
-
-            console.log(`[PATTER] User (Telnyx pipeline): ${sanitizeLogValue(transcript.text)}`);
-
-            pushHistory({ role: 'user', text: transcript.text, timestamp: Date.now() });
-
-            if (this.onTranscript) {
-              await this.onTranscript({
-                role: 'user',
-                text: transcript.text,
-                call_id: callControlId,
-                history: [...conversationHistory],
-              });
-            }
-
-            if (!this.onMessage) return;
-
-            let responseText: string;
-            try {
-              responseText = await this.onMessage({
-                text: transcript.text,
-                call_id: callControlId,
-                caller,
-                history: [...conversationHistory],
-              });
-            } catch (e) {
-              console.error('[PATTER] onMessage error (Telnyx):', e);
-              return;
-            }
-
-            if (!responseText) return;
-
-            pushHistory({ role: 'assistant', text: responseText, timestamp: Date.now() });
-
-            isSpeaking = true;
-            try {
-              for await (const chunk of tts!.synthesizeStream(responseText)) {
-                if (!isSpeaking) break;
-                const encoded = chunk.toString('base64');
-                ws.send(JSON.stringify({ event_type: 'media', payload: { audio: { chunk: encoded } } }));
-              }
-            } catch (e) {
-              console.error('[PATTER] TTS streaming error (Telnyx):', e);
-            } finally {
-              isSpeaking = false;
-            }
-          });
-
-        } else {
-          // ---- OpenAI Realtime / ElevenLabs ConvAI mode ----
-          adapter = buildAIAdapter(this.config, this.agent, resolvedPromptTelnyx);
-          try {
-            await adapter.connect();
-            console.log('[PATTER] AI adapter connected (Telnyx)');
-          } catch (e) {
-            console.error('[PATTER] AI adapter connect FAILED (Telnyx):', e);
-            return;
-          }
-
-          if (this.agent.firstMessage && adapter instanceof OpenAIRealtimeAdapter) {
-            await adapter.sendText(this.agent.firstMessage);
-          }
-
-          adapter.onEvent(async (type, eventData) => {
-            try {
-            if (type === 'audio') {
-              const encoded = (eventData as Buffer).toString('base64');
-              ws.send(
-                JSON.stringify({
-                  event_type: 'media',
-                  payload: { audio: { chunk: encoded } },
-                }),
-              );
-            } else if (type === 'transcript_input') {
-              const inputTextTelnyx = eventData as string;
-              console.log(`[PATTER] User (Telnyx): ${sanitizeLogValue(inputTextTelnyx)}`);
-              pushHistory({ role: 'user', text: inputTextTelnyx, timestamp: Date.now() });
-              if (this.onTranscript) {
-                await this.onTranscript({
-                  role: 'user',
-                  text: inputTextTelnyx,
-                  call_id: callControlId,
-                  history: [...conversationHistory],
-                });
-              }
-            } else if (type === 'transcript_output') {
-              const outputTextTelnyx = eventData as string;
-              if (outputTextTelnyx) {
-                const triggeredTelnyx = checkGuardrails(outputTextTelnyx, this.agent.guardrails);
-                if (triggeredTelnyx) {
-                  console.log(`[PATTER] Guardrail '${triggeredTelnyx.name}' triggered`);
-                  if (adapter instanceof OpenAIRealtimeAdapter) {
-                    adapter.cancelResponse();
-                    await adapter.sendText(triggeredTelnyx.replacement ?? "I'm sorry, I can't respond to that.");
-                  }
-                }
-                pushHistory({ role: 'assistant', text: outputTextTelnyx, timestamp: Date.now() });
-              }
-            } else if (type === 'speech_started' || type === 'interruption') {
-              ws.send(JSON.stringify({ event_type: 'media_stop' }));
-              if (adapter instanceof OpenAIRealtimeAdapter) {
-                adapter.cancelResponse();
-              }
-            } else if (type === 'function_call' && adapter instanceof OpenAIRealtimeAdapter) {
-              const fc = eventData as { call_id: string; name: string; arguments: string };
-              if (fc.name === 'transfer_call') {
-                // System tool — transfer the call (Telnyx)
-                let transferArgs: { number?: string };
-                try {
-                  transferArgs = JSON.parse(fc.arguments || '{}') as { number?: string };
-                } catch {
-                  transferArgs = {};
-                }
-                const rawTransferTo = transferArgs.number ?? '';
-                if (!isValidE164(rawTransferTo)) {
-                  console.warn(`[PATTER] transfer_call rejected (Telnyx): invalid number ${JSON.stringify(rawTransferTo)}`);
-                  await adapter.sendFunctionResult(fc.call_id, JSON.stringify({ error: 'Invalid phone number format', status: 'rejected' }));
-                  return;
-                }
-                const transferTo = xmlEscape(rawTransferTo);
-                console.log(`[PATTER] Transferring Telnyx call to ${transferTo}`);
-                await adapter.sendFunctionResult(fc.call_id, JSON.stringify({ status: 'transferring' }));
-                const telnyxKey = this.config.telnyxKey ?? '';
-                await fetch(`https://api.telnyx.com/v2/calls/${callControlId}/actions/transfer`, {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${telnyxKey}` },
-                  body: JSON.stringify({ to: rawTransferTo }),
-                });
-                if (this.onTranscript) {
-                  await this.onTranscript({ role: 'system', text: `Call transferred to ${transferTo}`, call_id: callControlId });
-                }
-                return;
-              } else if (fc.name === 'end_call') {
-                // System tool — end the call (Telnyx)
-                let endArgs: { reason?: string };
-                try {
-                  endArgs = JSON.parse(fc.arguments || '{}') as { reason?: string };
-                } catch {
-                  endArgs = {};
-                }
-                const reason = endArgs.reason ?? 'conversation_complete';
-                console.log(`[PATTER] Ending call (Telnyx): ${reason}`);
-                await adapter.sendFunctionResult(fc.call_id, JSON.stringify({ status: 'ending', reason }));
-                if (this.onTranscript) {
-                  await this.onTranscript({ role: 'system', text: `Call ended: ${reason}`, call_id: callControlId });
-                }
-                ws.close();
-                return;
-              }
-              const toolDef = this.agent.tools?.find((t) => t.name === fc.name);
-              if (toolDef?.webhookUrl) {
-                let parsedArgsTelnyx: unknown;
-                try {
-                  parsedArgsTelnyx = JSON.parse(fc.arguments || '{}');
-                } catch {
-                  parsedArgsTelnyx = {};
-                }
-                let result = '';
-                try {
-                  validateWebhookUrl(toolDef.webhookUrl);
-                } catch (e) {
-                  console.error(`[PATTER] Tool webhook URL rejected (Telnyx): ${String(e)}`);
-                  await adapter.sendFunctionResult(fc.call_id, JSON.stringify({ error: String(e), fallback: true }));
-                  return;
-                }
-                for (let attempt = 0; attempt < 3; attempt++) {
-                  try {
-                    const resp = await fetch(toolDef.webhookUrl, {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({
-                        tool: fc.name,
-                        arguments: parsedArgsTelnyx,
-                        call_id: callControlId,
-                        caller,
-                        attempt: attempt + 1,
-                      }),
-                      signal: AbortSignal.timeout(10_000),
-                    });
-                    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-                    result = JSON.stringify(await resp.json() as unknown);
-                    // Cap response body at 64 KB to prevent oversized payloads from malicious webhooks
-                    if (result.length > 65_536) {
-                      console.warn(`[PATTER] Tool webhook response truncated from ${result.length} bytes to 64KB (Telnyx)`);
-                      result = result.slice(0, 65_536);
-                    }
-                    break;
-                  } catch (e) {
-                    if (attempt < 2) {
-                      console.log(`[PATTER] Tool webhook retry ${attempt + 1} (Telnyx): ${String(e)}`);
-                      await new Promise<void>((r) => setTimeout(r, 500));
-                    } else {
-                      result = JSON.stringify({ error: `Tool failed after 3 attempts: ${String(e)}`, fallback: true });
-                    }
-                  }
-                }
-                await adapter.sendFunctionResult(fc.call_id, result);
-              }
-            }
-            } catch (err) {
-              console.error('[PATTER] Adapter event handler error (Telnyx):', err);
-            }
-          });
+        if (eventType === 'stream_started' && !streamStarted) {
+          streamStarted = true;
+          const callControlId = data.payload?.call_control_id ?? '';
+          await handler.handleCallStart(callControlId);
+        } else if (eventType === 'media') {
+          const audioChunk = data.payload?.audio?.chunk ?? '';
+          if (!audioChunk) return;
+          // Telnyx sends 16 kHz PCM — send directly
+          handler.handleAudio(Buffer.from(audioChunk, 'base64'));
+        } else if (eventType === 'stream_stopped') {
+          await handler.handleStop();
         }
-
-      } else if (eventType === 'media') {
-        const audioChunk = data.payload?.audio?.chunk ?? '';
-        if (!audioChunk) return;
-
-        const provider = this.agent.provider ?? 'openai_realtime';
-        if (provider === 'pipeline' && stt && !isSpeaking) {
-          // Telnyx sends 16 kHz PCM — send directly to Deepgram
-          stt.sendAudio(Buffer.from(audioChunk, 'base64'));
-        } else if (adapter) {
-          adapter.sendAudio(Buffer.from(audioChunk, 'base64'));
-        }
-
-      } else if (eventType === 'stream_stopped') {
-        stt?.close();
-        adapter?.close();
-        if (!callEndFired && this.onCallEnd) {
-          callEndFired = true;
-          await this.onCallEnd({ call_id: callControlId, transcript: [...conversationHistory] });
-        }
-      }
       } catch (err) {
-        console.error('[PATTER] Stream handler error (Telnyx):', err);
+        getLogger().error('Stream handler error (Telnyx):', err);
       }
     });
 
-    ws.on('close', () => {
-      if (!callEndFired && this.onCallEnd) {
-        callEndFired = true;
-        this.onCallEnd({ call_id: callControlId, transcript: [...conversationHistory] }).catch(() => {});
-      }
-      stt?.close();
-      adapter?.close();
+    ws.on('close', async () => {
+      await handler.handleWsClose();
     });
   }
 
+  // ---------------------------------------------------------------------------
+  // Graceful shutdown
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Gracefully stop the server.
+   *
+   * 1. Stop accepting new connections (close the HTTP server).
+   * 2. Send close to all active WebSockets.
+   * 3. Wait up to 10 seconds for active calls to finish.
+   * 4. Force-close remaining connections.
+   * 5. Close the HTTP server.
+   */
   async stop(): Promise<void> {
     if (!this.server) return;
-    return new Promise((resolve) => {
+
+    // 1. Stop accepting new HTTP connections
+    const httpClosePromise = new Promise<void>((resolve) => {
       this.server!.close(() => resolve());
     });
+
+    // 2. Send close to all active WebSocket connections
+    for (const ws of this.activeConnections) {
+      try {
+        ws.close(1001, 'Server shutting down');
+      } catch {
+        // Connection may already be closing
+      }
+    }
+
+    // 3. Wait up to 10 seconds for active calls to drain
+    if (this.activeConnections.size > 0) {
+      getLogger().info(`Waiting for ${this.activeConnections.size} active connection(s) to close...`);
+      await Promise.race([
+        new Promise<void>((resolve) => {
+          const checkInterval = setInterval(() => {
+            if (this.activeConnections.size === 0) {
+              clearInterval(checkInterval);
+              resolve();
+            }
+          }, 100);
+        }),
+        new Promise<void>((resolve) => setTimeout(resolve, GRACEFUL_SHUTDOWN_TIMEOUT_MS)),
+      ]);
+    }
+
+    // 4. Force-close remaining connections
+    if (this.activeConnections.size > 0) {
+      getLogger().info(`Force-closing ${this.activeConnections.size} remaining connection(s)`);
+      for (const ws of this.activeConnections) {
+        try {
+          ws.terminate();
+        } catch {
+          // Already terminated
+        }
+      }
+      this.activeConnections.clear();
+    }
+
+    // 5. Wait for HTTP server to fully close
+    await httpClosePromise;
+    this.server = null;
+    this.wss = null;
   }
 }

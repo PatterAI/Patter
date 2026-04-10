@@ -184,7 +184,8 @@ async def test_serve_calls_embedded_server():
         await phone.serve(agent, port=9000)
 
         MockServer.assert_called_once_with(
-            config=phone._local_config, agent=agent, recording=False, voicemail_message=""
+            config=phone._local_config, agent=agent, recording=False, voicemail_message="", pricing=None, dashboard=True,
+            dashboard_token="",
         )
         mock_server.start.assert_called_once_with(port=9000)
 

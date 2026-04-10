@@ -181,10 +181,10 @@ def test_agent_tools_must_have_name():
         )
 
 
-def test_agent_tools_must_have_webhook_url():
-    """agent() with a tool missing 'webhook_url' raises ValueError."""
+def test_agent_tools_must_have_webhook_url_or_handler():
+    """agent() with a tool missing both 'webhook_url' and 'handler' raises ValueError."""
     phone = _local_phone()
-    with pytest.raises(ValueError, match="missing required 'webhook_url'"):
+    with pytest.raises(ValueError, match="'webhook_url' or 'handler'"):
         phone.agent(
             system_prompt="test",
             tools=[{"name": "my_tool"}],

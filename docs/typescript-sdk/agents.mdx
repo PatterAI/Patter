@@ -1,0 +1,85 @@
+---
+title: "Agents"
+description: "Configure AI voice agents with system prompts, voices, models, and tools."
+---
+
+# Agents
+
+An agent defines the personality, capabilities, and behavior of your AI voice assistant. Use `phone.agent()` to create and validate an agent configuration.
+
+## Basic Agent
+
+```typescript
+const agent = phone.agent({
+  systemPrompt: "You are a helpful customer support agent for Acme Corp.",
+  firstMessage: "Hello! How can I help you today?",
+  voice: "alloy",
+  model: "gpt-4o-mini-realtime-preview",
+});
+```
+
+## AgentOptions
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `systemPrompt` | `string` | Yes | — | Instructions that define the agent's persona and behavior. |
+| `voice` | `string` | No | Provider default | Voice ID. Depends on the provider (e.g., `"alloy"` for OpenAI, `"21m00Tcm4TlvDq8ikWAM"` for ElevenLabs). |
+| `model` | `string` | No | `"gpt-4o-mini-realtime-preview"` | AI model identifier. |
+| `language` | `string` | No | `"en"` | BCP-47 language code. |
+| `firstMessage` | `string` | No | — | Greeting spoken when the call connects. |
+| `tools` | `ToolDefinition[]` | No | — | Function calling tools. See [Tools](/typescript-sdk/tools). |
+| `provider` | `string` | No | `"openai_realtime"` | AI provider mode. See [Providers](/typescript-sdk/providers). |
+| `elevenlabsKey` | `string` | No | — | ElevenLabs API key (required for `elevenlabs_convai` provider). |
+| `elevenlabsAgentId` | `string` | No | — | ElevenLabs agent ID (required for `elevenlabs_convai` provider). |
+| `deepgramKey` | `string` | No | — | Deepgram API key (for pipeline mode STT). |
+| `stt` | `STTConfig` | No | — | STT config for pipeline mode. Use `Patter.deepgram()` or `Patter.whisper()`. |
+| `tts` | `TTSConfig` | No | — | TTS config for pipeline mode. Use `Patter.elevenlabs()` or `Patter.openaiTts()`. |
+| `variables` | `Record<string, string>` | No | — | Dynamic variables for `{placeholder}` substitution in `systemPrompt`. |
+| `guardrails` | `Guardrail[]` | No | — | Output guardrails. See [Guardrails](/typescript-sdk/guardrails). |
+
+## Validation Rules
+
+The `phone.agent()` method validates:
+
+- **Provider**: Must be one of `"openai_realtime"`, `"elevenlabs_convai"`, or `"pipeline"`. Throws if invalid.
+- **Tools**: Must be an array. Each tool requires `name` and `webhookUrl` fields.
+- **Variables**: Must be a plain object (not an array).
+
+```typescript
+// Throws: provider must be one of: openai_realtime, elevenlabs_convai, pipeline
+phone.agent({
+  systemPrompt: "...",
+  provider: "invalid" as any,
+});
+
+// Throws: tools[0] missing required 'webhookUrl' field
+phone.agent({
+  systemPrompt: "...",
+  tools: [{ name: "lookup", description: "Look up data", parameters: {} }] as any,
+});
+```
+
+## Dynamic Variables
+
+Use `{placeholder}` syntax in your system prompt. Variables are replaced at call time:
+
+```typescript
+const agent = phone.agent({
+  systemPrompt: "You are a support agent for {company}. The caller's name is {caller_name}.",
+  variables: {
+    company: "Acme Corp",
+    caller_name: "John",
+  },
+});
+```
+
+Variables can also be overridden per-call when making outbound calls. See [Features](/typescript-sdk/features).
+
+## System Tools
+
+Two system tools are automatically injected into every agent:
+
+- **`transfer_call`** — Transfers the call to a specified phone number (E.164 format).
+- **`end_call`** — Ends the current call with an optional reason.
+
+You do not need to define these in your `tools` array. The AI model can invoke them based on conversation context.

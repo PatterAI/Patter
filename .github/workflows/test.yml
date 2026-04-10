@@ -7,37 +7,72 @@ on:
     branches: [main]
 
 jobs:
-  python-sdk:
+  python:
+    name: Python SDK Tests
     runs-on: ubuntu-latest
     strategy:
       matrix:
         python-version: ['3.11', '3.12', '3.13']
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install dependencies
         run: |
           cd sdk
-          pip install -e ".[dev,local]"
+          pip install -e ".[local,dev]"
       - name: Run tests
         run: |
           cd sdk
           pytest tests/ -v --tb=short
 
-  typescript-sdk:
+  backend-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: |
+          cd backend
+          pip install -e ".[dev]"
+      - name: Run tests
+        run: |
+          cd backend
+          pytest tests/ -v --tb=short
+
+  typescript:
+    name: TypeScript SDK Tests
     runs-on: ubuntu-latest
     strategy:
       matrix:
         node-version: ['18', '20', '22']
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Set up Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
-      - name: Install and test
+      - name: Install dependencies
         run: |
           cd sdk-ts
-          npm ci
+          npm install
+      - name: Lint
+        run: |
+          cd sdk-ts
+          npm run lint
+      - name: Test
+        run: |
+          cd sdk-ts
           npm test
+      - name: Build
+        run: |
+          cd sdk-ts
+          npm run build

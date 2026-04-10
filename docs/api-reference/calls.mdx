@@ -1,0 +1,287 @@
+---
+title: "Calls"
+description: "List calls, get details, transcripts, recordings, and manage tags."
+---
+
+## List Calls
+
+Returns a paginated list of calls with optional filters.
+
+```bash
+curl "https://api.patter.ai/api/v1/calls?limit=20&offset=0&status=completed&direction=inbound" \
+  -H "X-API-Key: pt_your_api_key"
+```
+
+### Query Parameters
+
+<ParamField query="limit" type="integer" default="20">
+  Number of results to return (max 100).
+</ParamField>
+
+<ParamField query="offset" type="integer" default="0">
+  Number of results to skip.
+</ParamField>
+
+<ParamField query="status" type="string">
+  Filter by call status (e.g., `in_progress`, `completed`, `failed`).
+</ParamField>
+
+<ParamField query="direction" type="string">
+  Filter by direction: `inbound` or `outbound`.
+</ParamField>
+
+<ParamField query="from_date" type="string">
+  Filter calls after this ISO 8601 date (inclusive).
+</ParamField>
+
+<ParamField query="to_date" type="string">
+  Filter calls before this ISO 8601 date (inclusive).
+</ParamField>
+
+<ParamField query="number" type="string">
+  Filter by phone number (E.164 format).
+</ParamField>
+
+<ParamField query="tag" type="string[]">
+  Filter by one or more tags. Pass multiple `tag[]` params to filter by multiple tags.
+</ParamField>
+
+### Response `200`
+
+```json
+{
+  "data": [
+    {
+      "id": "call_abc123",
+      "agent_id": "agt_xyz789",
+      "phone_number_id": "phn_abc123",
+      "direction": "inbound",
+      "status": "completed",
+      "from": "+14155551234",
+      "to": "+14155559876",
+      "duration_seconds": 127,
+      "tags": ["support", "billing"],
+      "started_at": "2025-01-15T10:30:00Z",
+      "ended_at": "2025-01-15T10:32:07Z"
+    }
+  ],
+  "total": 42,
+  "limit": 20,
+  "offset": 0
+}
+```
+
+**Rate limit**: 60 requests per minute.
+
+---
+
+## Get Call Details
+
+Returns full details for a single call.
+
+```bash
+curl https://api.patter.ai/api/v1/calls/call_abc123 \
+  -H "X-API-Key: pt_your_api_key"
+```
+
+### Path Parameters
+
+<ParamField path="call_id" type="string" required>
+  The call ID.
+</ParamField>
+
+### Response `200`
+
+```json
+{
+  "data": {
+    "id": "call_abc123",
+    "agent_id": "agt_xyz789",
+    "phone_number_id": "phn_abc123",
+    "direction": "inbound",
+    "status": "completed",
+    "from": "+14155551234",
+    "to": "+14155559876",
+    "duration_seconds": 127,
+    "tags": ["support", "billing"],
+    "machine_detected": false,
+    "recording_enabled": true,
+    "started_at": "2025-01-15T10:30:00Z",
+    "ended_at": "2025-01-15T10:32:07Z"
+  }
+}
+```
+
+---
+
+## Get Transcript
+
+Returns the full conversation transcript for a call.
+
+```bash
+curl https://api.patter.ai/api/v1/calls/call_abc123/transcript \
+  -H "X-API-Key: pt_your_api_key"
+```
+
+### Path Parameters
+
+<ParamField path="call_id" type="string" required>
+  The call ID.
+</ParamField>
+
+### Response `200`
+
+```json
+{
+  "data": {
+    "call_id": "call_abc123",
+    "entries": [
+      {
+        "role": "agent",
+        "text": "Hello! Thanks for calling Acme Corp. How can I help you today?",
+        "timestamp": "2025-01-15T10:30:02Z"
+      },
+      {
+        "role": "user",
+        "text": "Hi, I need help with my billing.",
+        "timestamp": "2025-01-15T10:30:08Z"
+      }
+    ]
+  }
+}
+```
+
+<Note>
+  DTMF keypad presses appear in the transcript as `[DTMF: N]` entries.
+</Note>
+
+---
+
+## Get Recording
+
+Returns the recording audio for a call. Only available if recording was enabled.
+
+```bash
+curl https://api.patter.ai/api/v1/calls/call_abc123/recording \
+  -H "X-API-Key: pt_your_api_key"
+```
+
+### Path Parameters
+
+<ParamField path="call_id" type="string" required>
+  The call ID.
+</ParamField>
+
+### Response `200`
+
+Returns the audio file or a signed URL to download the recording.
+
+Returns `404` if recording was not enabled for this call.
+
+---
+
+## Replace Tags
+
+Replaces all tags on a call with the provided set.
+
+```bash
+curl -X PATCH https://api.patter.ai/api/v1/calls/call_abc123/tags \
+  -H "X-API-Key: pt_your_api_key" \
+  -H "Content-Type: application/json" \
+  -d '{"tags": ["vip", "escalated"]}'
+```
+
+### Path Parameters
+
+<ParamField path="call_id" type="string" required>
+  The call ID.
+</ParamField>
+
+### Request Body
+
+<ParamField body="tags" type="string[]" required>
+  The complete set of tags to apply. Replaces all existing tags.
+</ParamField>
+
+### Response `200`
+
+```json
+{
+  "data": {
+    "call_id": "call_abc123",
+    "tags": ["vip", "escalated"]
+  }
+}
+```
+
+---
+
+## Add Tags
+
+Appends tags to a call without removing existing ones.
+
+```bash
+curl -X POST https://api.patter.ai/api/v1/calls/call_abc123/tags \
+  -H "X-API-Key: pt_your_api_key" \
+  -H "Content-Type: application/json" \
+  -d '{"tags": ["follow-up"]}'
+```
+
+### Path Parameters
+
+<ParamField path="call_id" type="string" required>
+  The call ID.
+</ParamField>
+
+### Request Body
+
+<ParamField body="tags" type="string[]" required>
+  Tags to add.
+</ParamField>
+
+### Response `200`
+
+```json
+{
+  "data": {
+    "call_id": "call_abc123",
+    "tags": ["vip", "escalated", "follow-up"]
+  }
+}
+```
+
+---
+
+## Remove Tags
+
+Removes specific tags from a call.
+
+```bash
+curl -X DELETE https://api.patter.ai/api/v1/calls/call_abc123/tags \
+  -H "X-API-Key: pt_your_api_key" \
+  -H "Content-Type: application/json" \
+  -d '{"tags": ["escalated"]}'
+```
+
+### Path Parameters
+
+<ParamField path="call_id" type="string" required>
+  The call ID.
+</ParamField>
+
+### Request Body
+
+<ParamField body="tags" type="string[]" required>
+  Tags to remove.
+</ParamField>
+
+### Response `200`
+
+```json
+{
+  "data": {
+    "call_id": "call_abc123",
+    "tags": ["vip", "follow-up"]
+  }
+}
+```

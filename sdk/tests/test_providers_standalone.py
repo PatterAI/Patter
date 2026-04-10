@@ -272,7 +272,6 @@ async def test_tool_executor_http_error():
     import httpx
     from unittest.mock import AsyncMock, patch, MagicMock
 
-    executor = ToolExecutor()
     mock_response = MagicMock()
     mock_response.status_code = 500
     mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
@@ -280,17 +279,16 @@ async def test_tool_executor_http_error():
     )
 
     mock_client = AsyncMock()
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=False)
     mock_client.post = AsyncMock(return_value=mock_response)
 
-    with patch("httpx.AsyncClient", return_value=mock_client):
-        result = await executor.execute(
-            tool_name="test_tool",
-            arguments={"key": "val"},
-            webhook_url="https://example.com/hook",
-            call_context={"call_id": "c1", "caller": "+1", "callee": "+2"},
-        )
+    executor = ToolExecutor(client=mock_client)
+
+    result = await executor.execute(
+        tool_name="test_tool",
+        arguments={"key": "val"},
+        webhook_url="https://example.com/hook",
+        call_context={"call_id": "c1", "caller": "+1", "callee": "+2"},
+    )
     import json
     parsed = json.loads(result)
     assert "error" in parsed
@@ -301,19 +299,17 @@ async def test_tool_executor_network_error():
     """ToolExecutor returns error JSON on network failure."""
     from unittest.mock import AsyncMock, patch, MagicMock
 
-    executor = ToolExecutor()
     mock_client = AsyncMock()
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=False)
     mock_client.post = AsyncMock(side_effect=Exception("network error"))
 
-    with patch("httpx.AsyncClient", return_value=mock_client):
-        result = await executor.execute(
-            tool_name="test_tool",
-            arguments={},
-            webhook_url="https://example.com/hook",
-            call_context={},
-        )
+    executor = ToolExecutor(client=mock_client)
+
+    result = await executor.execute(
+        tool_name="test_tool",
+        arguments={},
+        webhook_url="https://example.com/hook",
+        call_context={},
+    )
     import json
     parsed = json.loads(result)
     assert "error" in parsed

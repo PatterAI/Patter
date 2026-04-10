@@ -1,0 +1,127 @@
+---
+title: "Guardrails"
+description: "Filter and control AI agent responses before they reach callers."
+---
+
+# Guardrails
+
+Guardrails let you intercept and filter AI responses before they are converted to speech. Use them to block inappropriate content, enforce compliance, or replace sensitive responses.
+
+## Basic Usage
+
+```typescript
+const agent = phone.agent({
+  systemPrompt: "You are a helpful assistant.",
+  guardrails: [
+    Patter.guardrail({
+      name: "profanity_filter",
+      blockedTerms: ["badword1", "badword2"],
+      replacement: "I apologize, but I cannot respond to that.",
+    }),
+  ],
+});
+```
+
+## Guardrail Interface
+
+```typescript
+interface Guardrail {
+  /** Name for logging when triggered */
+  name: string;
+  /** List of terms that trigger the guardrail (case-insensitive) */
+  blockedTerms?: string[];
+  /** Custom check function — return true to block the response */
+  check?: (text: string) => boolean;
+  /** Replacement text spoken when guardrail triggers */
+  replacement?: string;
+}
+```
+
+## Creating Guardrails
+
+Use the `Patter.guardrail()` static method for convenience:
+
+```typescript
+const guard = Patter.guardrail({
+  name: "compliance",
+  blockedTerms: ["guarantee", "promise"],
+  replacement: "I need to be careful with my wording. Let me rephrase that.",
+});
+```
+
+The default `replacement` is `"I'm sorry, I can't respond to that."` when not specified.
+
+## Blocked Terms
+
+Blocked terms are matched case-insensitively against the AI response text:
+
+```typescript
+Patter.guardrail({
+  name: "competitor_mentions",
+  blockedTerms: ["competitor_a", "competitor_b", "rival_corp"],
+  replacement: "I can only speak about our own products and services.",
+});
+```
+
+## Custom Check Function
+
+For more complex filtering, use a `check` function that receives the full response text and returns `true` to block it:
+
+```typescript
+Patter.guardrail({
+  name: "length_limit",
+  check: (text) => text.length > 500,
+  replacement: "Let me give you a shorter answer.",
+});
+```
+
+## Combining Blocked Terms and Check
+
+A guardrail triggers if either `blockedTerms` match or the `check` function returns `true`. Blocked terms are evaluated first:
+
+```typescript
+Patter.guardrail({
+  name: "content_policy",
+  blockedTerms: ["prohibited_term"],
+  check: (text) => {
+    // Block responses that contain phone numbers
+    return /\b\d{3}[-.]?\d{3}[-.]?\d{4}\b/.test(text);
+  },
+  replacement: "I cannot share that information over the phone.",
+});
+```
+
+## Multiple Guardrails
+
+You can stack multiple guardrails. They are evaluated in order, and the first match triggers:
+
+```typescript
+const agent = phone.agent({
+  systemPrompt: "You are a helpful assistant.",
+  guardrails: [
+    Patter.guardrail({
+      name: "profanity",
+      blockedTerms: ["badword"],
+    }),
+    Patter.guardrail({
+      name: "pii_protection",
+      check: (text) => /\b\d{3}-\d{2}-\d{4}\b/.test(text), // SSN pattern
+      replacement: "I cannot share personal identification numbers.",
+    }),
+    Patter.guardrail({
+      name: "compliance",
+      blockedTerms: ["guarantee", "warranty"],
+      replacement: "I need to be careful about making guarantees.",
+    }),
+  ],
+});
+```
+
+## How It Works
+
+1. The AI model generates a text response.
+2. Before TTS conversion, each guardrail is checked in order.
+3. If a guardrail triggers, the original response is discarded and the `replacement` text is spoken instead.
+4. If no guardrail triggers, the original response is spoken normally.
+
+The guardrail name is logged when triggered, so you can monitor which guardrails are firing in production.

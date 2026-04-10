@@ -1,19 +1,72 @@
-# Patter
+<p align="center">
+  <h1 align="center">Patter</h1>
+  <p align="center">Connect AI agents to phone numbers with ~10 lines of code</p>
+</p>
 
-The open-source SDK for voice AI. Connect any AI agent to phone calls with ~10 lines of code.
+<p align="center">
+  <a href="#quickstart">Quickstart</a> •
+  <a href="#features">Features</a> •
+  <a href="#installation">Installation</a> •
+  <a href="#documentation">Documentation</a> •
+  <a href="#self-hosting">Self-Hosting</a>
+</p>
 
-[![PyPI](https://img.shields.io/pypi/v/patter)](https://pypi.org/project/patter/)
-[![npm](https://img.shields.io/npm/v/patter)](https://www.npmjs.com/package/patter)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://github.com/PatterAI/Patter/actions/workflows/test.yml/badge.svg)](https://github.com/PatterAI/Patter/actions)
+<p align="center">
+  <img src="https://img.shields.io/badge/python-3.11%2B-blue?logo=python&logoColor=white" alt="Python 3.11+" />
+  <img src="https://img.shields.io/badge/typescript-5.0%2B-3178c6?logo=typescript&logoColor=white" alt="TypeScript 5+" />
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License" />
+</p>
 
-## Quick Start
+---
 
-### Python
+Patter is an open-source platform that gives your AI agent a voice and a phone number. Point it at any function that returns a string, and Patter handles the rest: telephony, speech-to-text, text-to-speech, and real-time audio streaming.
 
-```bash
-pip install patter
+## Quickstart
+
+<details open>
+<summary><strong>Python</strong></summary>
+
+```python
+import asyncio
+from patter import Patter, IncomingMessage
+
+async def on_message(msg: IncomingMessage) -> str:
+    # Your agent logic here — return what the AI should say
+    return f"You said: {msg.text}"
+
+async def main():
+    phone = Patter(api_key="pt_xxx")
+    await phone.connect(on_message=on_message)  # starts listening for inbound calls
+
+asyncio.run(main())
 ```
+
+</details>
+
+<details>
+<summary><strong>TypeScript</strong></summary>
+
+```typescript
+import { Patter } from "patter";
+
+const phone = new Patter({ apiKey: "pt_xxx" });
+
+await phone.connect({
+  onMessage: async (msg) => {
+    // Your agent logic here — return what the AI should say
+    return `You said: ${msg.text}`;
+  },
+});
+```
+
+</details>
+
+## Local Mode (No Cloud Required)
+
+Run Patter entirely in your process — no Patter account, no cloud backend.
+
+<details open>
+<summary><strong>Python</strong></summary>
 
 ```python
 import asyncio
@@ -21,26 +74,29 @@ from patter import Patter
 
 async def main():
     phone = Patter(
+        mode="local",
         twilio_sid="AC...", twilio_token="...",
         openai_key="sk-...",
-        phone_number="+15550001234",
-        webhook_url="abc.ngrok-free.app",
+        phone_number="+1...",
+        webhook_url="xxx.ngrok-free.dev",
     )
+
     agent = phone.agent(
-        system_prompt="You are a helpful assistant.",
+        system_prompt="You are a friendly customer service agent for Acme Corp.",
         voice="alloy",
-        first_message="Hello! How can I help you today?",
+        first_message="Hello! Thanks for calling. How can I help?",
     )
-    await phone.serve(agent, port=8000)
+
+    print("Listening for calls...")
+    await phone.serve(agent=agent, port=8000)
 
 asyncio.run(main())
 ```
 
-### TypeScript
+</details>
 
-```bash
-npm install patter
-```
+<details>
+<summary><strong>TypeScript</strong></summary>
 
 ```typescript
 import { Patter } from "patter";
@@ -49,274 +105,293 @@ const phone = new Patter({
   mode: "local",
   twilioSid: "AC...", twilioToken: "...",
   openaiKey: "sk-...",
-  phoneNumber: "+15550001234",
-  webhookUrl: "abc.ngrok-free.app",
+  phoneNumber: "+1...",
+  webhookUrl: "xxx.ngrok-free.dev",
 });
 
 const agent = phone.agent({
-  systemPrompt: "You are a helpful assistant.",
+  systemPrompt: "You are a friendly customer service agent for Acme Corp.",
   voice: "alloy",
-  firstMessage: "Hello! How can I help you today?",
+  firstMessage: "Hello! Thanks for calling. How can I help?",
 });
 
+console.log("Listening for calls...");
 await phone.serve({ agent, port: 8000 });
 ```
+
+</details>
+
+## Local vs Cloud
+
+| | Cloud Mode | Local Mode |
+|---|---|---|
+| **Setup** | Patter API key only | Twilio/Telnyx + OpenAI keys |
+| **Infrastructure** | Managed by Patter | Runs in your process |
+| **Backend** | `wss://api.patter.dev` | Built-in (FastAPI / Express) |
+| **Webhook** | Configured automatically | Requires public URL (e.g. ngrok) |
+| **Voice modes** | All three | All three |
+| **Best for** | Production, multi-tenant | Development, on-prem, full control |
 
 ## Features
 
-- **Three Voice Modes** -- OpenAI Realtime (lowest latency), Pipeline (Deepgram/Whisper STT + ElevenLabs/OpenAI TTS), ElevenLabs ConvAI
-- **Two Carriers** -- Twilio and Telnyx
-- **Call Recording** -- Enable with `recording=True`
-- **Call Transfer** -- Built-in `transfer_call` tool (auto-injected)
-- **DTMF** -- Keypad presses forwarded as `[DTMF: N]`
-- **Machine Detection** -- AMD with voicemail drop for outbound calls
-- **Dynamic Variables** -- `{name}` placeholders in system prompts and first messages
-- **Output Guardrails** -- Block terms or custom check functions
-- **Tool Calling** -- Webhook-based function calls during conversation with 3x auto-retry
-- **Conversation History** -- Full history available in every callback
-- **First Message** -- Agent speaks first when call connects
+### Voice
+- Three voice modes: OpenAI Realtime, ElevenLabs ConvAI, Pipeline (any STT + TTS)
+- Any STT: Deepgram, OpenAI Whisper
+- Any TTS: ElevenLabs, OpenAI TTS
+- Natural barge-in with mark-based audio tracking
+- DTMF keypad input forwarded to agent as `[DTMF: 1]`
 
-## Voice Modes
+### Agent
+- Bring your own agent (any LLM in pipeline mode)
+- System prompt with dynamic `{variable}` substitution
+- Conversation history tracked per call (`data.history` in all callbacks)
+- Tool calling via webhooks with automatic 3x retry
+- Built-in tools: `transfer_call`, `end_call` (auto-injected)
 
-| Mode | Provider | Latency | Best For |
-|---|---|---|---|
-| **OpenAI Realtime** | OpenAI | Lowest | Fluid, low-latency conversations (default) |
-| **Pipeline** | Deepgram/Whisper + ElevenLabs/OpenAI TTS | Low | Independent control over STT and TTS providers |
-| **ElevenLabs ConvAI** | ElevenLabs | Low | ElevenLabs-managed conversation flow |
+### Telephony
+- Twilio and Telnyx carriers
+- Inbound and outbound calls
+- Call transfer to humans (`transfer_call` system tool)
+- Call recording (`recording: true` in `serve()`)
+- Answering machine detection (`machineDetection: true` for outbound)
+- Voicemail drop (`voicemailMessage: "..."` plays on voicemail detection)
+- Custom parameters passthrough via TwiML
 
-Set via the `provider` parameter on `agent()`: `"openai_realtime"` (default), `"pipeline"`, or `"elevenlabs_convai"`.
+### Developer Experience
+- `pip install patter` / `npm install patter`
+- 10 lines of code to connect an agent to a phone
+- Local mode (embedded, no backend) + Cloud mode
+- Python + TypeScript SDKs with full parity
+- MCP server for Claude Desktop
+- Open-source (MIT)
 
-## Examples
-
-### Inbound Call (answer incoming)
-
-<table>
-<tr><td><strong>Python</strong></td><td><strong>TypeScript</strong></td></tr>
-<tr>
-<td>
-
-```python
-import asyncio
-from patter import Patter
-
-async def main():
-    phone = Patter(
-        twilio_sid="AC...",
-        twilio_token="...",
-        openai_key="sk-...",
-        phone_number="+15550001234",
-        webhook_url="abc.ngrok-free.app",
-    )
-    agent = phone.agent(
-        system_prompt="You are a customer service agent.",
-        first_message="Thanks for calling! How can I help?",
-    )
-    await phone.serve(
-        agent,
-        port=8000,
-        on_call_start=lambda d: print(f"Call from {d['caller']}"),
-        on_call_end=lambda d: print(f"Call ended, {len(d.get('history', []))} turns"),
-    )
-
-asyncio.run(main())
-```
-
-</td>
-<td>
+## Complete Example
 
 ```typescript
-import { Patter } from "patter";
-
 const phone = new Patter({
-  mode: "local",
-  twilioSid: "AC...",
-  twilioToken: "...",
-  openaiKey: "sk-...",
-  phoneNumber: "+15550001234",
-  webhookUrl: "abc.ngrok-free.app",
+  mode: 'local',
+  twilioSid: process.env.TWILIO_SID,
+  twilioToken: process.env.TWILIO_TOKEN,
+  openaiKey: process.env.OPENAI_KEY,
+  phoneNumber: '+16592214527',
+  webhookUrl: 'your-domain.ngrok-free.dev',
 });
 
 const agent = phone.agent({
-  systemPrompt: "You are a customer service agent.",
-  firstMessage: "Thanks for calling! How can I help?",
-});
-
-await phone.serve({
-  agent,
-  port: 8000,
-  onCallStart: async (d) => console.log(`Call from ${d.caller}`),
-  onCallEnd: async (d) => console.log("Call ended"),
-});
-```
-
-</td>
-</tr>
-</table>
-
-### Outbound Call (make a call)
-
-<table>
-<tr><td><strong>Python</strong></td><td><strong>TypeScript</strong></td></tr>
-<tr>
-<td>
-
-```python
-import asyncio
-from patter import Patter
-
-async def main():
-    phone = Patter(
-        twilio_sid="AC...",
-        twilio_token="...",
-        openai_key="sk-...",
-        phone_number="+15550001234",
-        webhook_url="abc.ngrok-free.app",
-    )
-    agent = phone.agent(
-        system_prompt="You are a reminder bot.",
-        first_message="Hi! This is a reminder about your appointment tomorrow.",
-    )
-    await phone.serve(agent, port=8000)
-    await phone.call(to="+14155559876", agent=agent)
-
-asyncio.run(main())
-```
-
-</td>
-<td>
-
-```typescript
-import { Patter } from "patter";
-
-const phone = new Patter({
-  mode: "local",
-  twilioSid: "AC...",
-  twilioToken: "...",
-  openaiKey: "sk-...",
-  phoneNumber: "+15550001234",
-  webhookUrl: "abc.ngrok-free.app",
-});
-
-const agent = phone.agent({
-  systemPrompt: "You are a reminder bot.",
-  firstMessage: "Hi! This is a reminder about your appointment tomorrow.",
-});
-
-await phone.serve({ agent, port: 8000 });
-await phone.call({ to: "+14155559876", agent });
-```
-
-</td>
-</tr>
-</table>
-
-### Pipeline Mode (custom STT + TTS)
-
-<table>
-<tr><td><strong>Python</strong></td><td><strong>TypeScript</strong></td></tr>
-<tr>
-<td>
-
-```python
-agent = phone.agent(
-    system_prompt="You are a helpful assistant.",
-    provider="pipeline",
-    stt=Patter.deepgram(api_key="dg_...", language="en"),
-    tts=Patter.elevenlabs(api_key="el_...", voice="rachel"),
-)
-
-await phone.serve(
-    agent,
-    port=8000,
-    on_message=my_llm_handler,  # your LLM logic
-)
-```
-
-</td>
-<td>
-
-```typescript
-const agent = phone.agent({
-  systemPrompt: "You are a helpful assistant.",
-  provider: "pipeline",
-  stt: Patter.deepgram({ apiKey: "dg_...", language: "en" }),
-  tts: Patter.elevenlabs({ apiKey: "el_...", voice: "rachel" }),
-});
-
-await phone.serve({
-  agent,
-  port: 8000,
-  onMessage: myLlmHandler, // your LLM logic
-});
-```
-
-</td>
-</tr>
-</table>
-
-### Tool Calling
-
-<table>
-<tr><td><strong>Python</strong></td><td><strong>TypeScript</strong></td></tr>
-<tr>
-<td>
-
-```python
-agent = phone.agent(
-    system_prompt="You are a booking assistant.",
-    tools=[{
-        "name": "check_availability",
-        "description": "Check if a date is available",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "date": {"type": "string"},
-            },
-            "required": ["date"],
-        },
-        "webhook_url": "https://api.example.com/check",
-    }],
-)
-```
-
-</td>
-<td>
-
-```typescript
-const agent = phone.agent({
-  systemPrompt: "You are a booking assistant.",
+  systemPrompt: `You are a customer service agent for Acme Corp.
+The customer is {customer_name} with order #{order_id}.
+Check inventory before answering stock questions.
+Transfer to a human if the customer is upset.`,
+  voice: 'alloy',
+  language: 'en',
+  firstMessage: 'Hi {customer_name}! How can I help with order #{order_id}?',
+  variables: {
+    customer_name: 'John',
+    order_id: '12345',
+  },
   tools: [{
-    name: "check_availability",
-    description: "Check if a date is available",
-    parameters: {
-      type: "object",
-      properties: {
-        date: { type: "string" },
-      },
-      required: ["date"],
-    },
-    webhookUrl: "https://api.example.com/check",
+    name: 'check_inventory',
+    description: 'Check product stock',
+    parameters: { type: 'object', properties: { product: { type: 'string' } } },
+    webhookUrl: 'https://api.acme.com/inventory',
   }],
+  // Built-in: transfer_call, end_call (auto-injected)
+});
+
+await phone.serve({
+  agent,
+  port: 8000,
+  recording: true,
+  onCallStart: async (data) => console.log(`Call from ${data.caller}`),
+  onCallEnd: async (data) => console.log(`Transcript: ${data.transcript?.length} turns`),
+  onTranscript: async (data) => console.log(`${data.role}: ${data.text}`),
+});
+
+// Outbound with machine detection
+await phone.call({
+  to: '+1234567890',
+  machineDetection: true,
+  voicemailMessage: 'Hi, please call us back at 555-0123.',
 });
 ```
 
-</td>
-</tr>
-</table>
+## How It Works
 
-Patter POSTs tool arguments as JSON to your `webhook_url` and uses the response as the tool result. Failed requests are retried up to 3 times. The built-in `transfer_call` and `end_call` tools are auto-injected into every agent.
+```
+Your Code (on_message handler)
+        │
+        ▼
+   Patter SDK  ──WebSocket──►  Patter Backend  ──────────────────────────────┐
+                                      │                                       │
+                              ┌───────┴────────┐                              │
+                              ▼                ▼                              ▼
+                          STT Engine       TTS Engine          Telephony Provider
+                       (Deepgram /      (ElevenLabs /          (Twilio / Telnyx)
+                        Whisper /        OpenAI TTS)                  │
+                       OpenAI RT)              │                       │
+                              │               └───────────────────────►│
+                              └────────────────────────────────────────►│
+                                                                        ▼
+                                                                  Phone Call
+```
 
-### Dynamic Variables
+The audio path: **Phone → Telephony → WebSocket → Backend → STT → your handler → TTS → Backend → WebSocket → Phone**
 
-<table>
-<tr><td><strong>Python</strong></td><td><strong>TypeScript</strong></td></tr>
-<tr>
-<td>
+## Installation
+
+```bash
+# Python
+pip install patter
+
+# TypeScript / Node.js
+npm install patter
+```
+
+## Documentation
+
+### Inbound Calls (AI answers the phone)
+
+<details open>
+<summary><strong>Python</strong></summary>
+
+```python
+import asyncio
+from patter import Patter, IncomingMessage
+
+async def agent(msg: IncomingMessage) -> str:
+    if "hours" in msg.text.lower():
+        return "We're open Monday through Friday, 9 to 5."
+    return "How can I help you today?"
+
+async def main():
+    phone = Patter(api_key="pt_xxx")
+    await phone.connect(
+        on_message=agent,
+        on_call_start=lambda data: print(f"Call from {data['caller']}"),
+        on_call_end=lambda data: print("Call ended"),
+    )
+    await asyncio.Event().wait()  # keep the process alive
+
+asyncio.run(main())
+```
+
+</details>
+
+<details>
+<summary><strong>TypeScript</strong></summary>
+
+```typescript
+import { Patter } from "patter";
+
+const phone = new Patter({ apiKey: "pt_xxx" });
+
+await phone.connect({
+  onMessage: async (msg) => {
+    if (msg.text.toLowerCase().includes("hours")) {
+      return "We're open Monday through Friday, 9 to 5.";
+    }
+    return "How can I help you today?";
+  },
+  onCallStart: (data) => console.log(`Call from ${data.caller}`),
+  onCallEnd: () => console.log("Call ended"),
+});
+```
+
+</details>
+
+---
+
+### Outbound Calls (AI calls someone)
+
+<details open>
+<summary><strong>Python</strong></summary>
+
+```python
+import asyncio
+from patter import Patter, IncomingMessage
+
+async def agent(msg: IncomingMessage) -> str:
+    return "Thanks for picking up. This is a reminder about your appointment tomorrow."
+
+async def main():
+    phone = Patter(api_key="pt_xxx")
+    await phone.connect(on_message=agent)
+    await phone.call(
+        to="+14155551234",
+        first_message="Hi, this is an automated reminder from Acme Corp.",
+    )
+
+asyncio.run(main())
+```
+
+</details>
+
+<details>
+<summary><strong>TypeScript</strong></summary>
+
+```typescript
+import { Patter } from "patter";
+
+const phone = new Patter({ apiKey: "pt_xxx" });
+
+await phone.connect({
+  onMessage: async () =>
+    "Thanks for picking up. This is a reminder about your appointment tomorrow.",
+});
+
+await phone.call({
+  to: "+14155551234",
+  firstMessage: "Hi, this is an automated reminder from Acme Corp.",
+});
+```
+
+</details>
+
+---
+
+### Outbound with Machine Detection + Voicemail Drop
+
+<details open>
+<summary><strong>Python</strong></summary>
+
+```python
+await phone.call(
+    to="+14155551234",
+    first_message="Hi, this is an automated reminder from Acme Corp.",
+    machine_detection=True,
+    voicemail_message="Hi, we tried to reach you. Please call us back at 555-0123.",
+)
+```
+
+</details>
+
+<details>
+<summary><strong>TypeScript</strong></summary>
+
+```typescript
+await phone.call({
+  to: "+14155551234",
+  firstMessage: "Hi, this is an automated reminder from Acme Corp.",
+  machineDetection: true,
+  voicemailMessage: "Hi, we tried to reach you. Please call us back at 555-0123.",
+});
+```
+
+</details>
+
+---
+
+### Dynamic Variables in Prompts
+
+Inject call-specific data into system prompts and first messages using `{variable}` placeholders.
+
+<details open>
+<summary><strong>Python</strong></summary>
 
 ```python
 agent = phone.agent(
     system_prompt="You are helping {customer_name}, account #{account_id}.",
-    first_message="Hi {customer_name}! How can I help?",
+    first_message="Hi {customer_name}! How can I help you today?",
     variables={
         "customer_name": "Jane",
         "account_id": "A-789",
@@ -324,13 +399,15 @@ agent = phone.agent(
 )
 ```
 
-</td>
-<td>
+</details>
+
+<details>
+<summary><strong>TypeScript</strong></summary>
 
 ```typescript
 const agent = phone.agent({
   systemPrompt: "You are helping {customer_name}, account #{account_id}.",
-  firstMessage: "Hi {customer_name}! How can I help?",
+  firstMessage: "Hi {customer_name}! How can I help you today?",
   variables: {
     customer_name: "Jane",
     account_id: "A-789",
@@ -338,247 +415,306 @@ const agent = phone.agent({
 });
 ```
 
-</td>
-</tr>
-</table>
+</details>
 
-### Guardrails
+---
 
-<table>
-<tr><td><strong>Python</strong></td><td><strong>TypeScript</strong></td></tr>
-<tr>
-<td>
+### Tool Calling via Webhooks
+
+Agents can call external APIs mid-conversation. Patter POSTs to your webhook URL and retries up to 3 times on failure.
+
+<details open>
+<summary><strong>Python</strong></summary>
 
 ```python
 agent = phone.agent(
-    system_prompt="You are a customer service agent.",
-    guardrails=[
-        Patter.guardrail(
-            name="no-competitors",
-            blocked_terms=["Competitor Inc", "OtherCo"],
-            replacement="I can only speak about our products.",
-        ),
-        Patter.guardrail(
-            name="no-profanity",
-            check=lambda text: has_profanity(text),
-        ),
-    ],
+    system_prompt="You are a booking assistant. Check availability before confirming.",
+    tools=[{
+        "name": "check_availability",
+        "description": "Check appointment availability for a given date",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "date": {"type": "string", "description": "ISO date, e.g. 2025-06-15"},
+            },
+            "required": ["date"],
+        },
+        "webhook_url": "https://api.example.com/availability",
+    }],
 )
 ```
 
-</td>
-<td>
+</details>
+
+<details>
+<summary><strong>TypeScript</strong></summary>
 
 ```typescript
 const agent = phone.agent({
-  systemPrompt: "You are a customer service agent.",
-  guardrails: [
-    Patter.guardrail({
-      name: "no-competitors",
-      blockedTerms: ["Competitor Inc", "OtherCo"],
-      replacement: "I can only speak about our products.",
-    }),
-    Patter.guardrail({
-      name: "no-profanity",
-      check: (text) => hasProfanity(text),
-    }),
-  ],
+  systemPrompt: "You are a booking assistant. Check availability before confirming.",
+  tools: [{
+    name: "check_availability",
+    description: "Check appointment availability for a given date",
+    parameters: {
+      type: "object",
+      properties: {
+        date: { type: "string", description: "ISO date, e.g. 2025-06-15" },
+      },
+      required: ["date"],
+    },
+    webhookUrl: "https://api.example.com/availability",
+  }],
 });
 ```
 
-</td>
-</tr>
-</table>
+</details>
 
-### Call Recording + Machine Detection
+---
 
-<table>
-<tr><td><strong>Python</strong></td><td><strong>TypeScript</strong></td></tr>
-<tr>
-<td>
+### Built-in Tools: Transfer & End Call
+
+`transfer_call` and `end_call` are automatically injected into every agent — no configuration needed.
+
+- The agent calls `transfer_call` when it decides to route to a human (e.g. "Let me transfer you now.")
+- The agent calls `end_call` when the conversation is complete (e.g. after a confirmed booking.)
+
+---
+
+### Call Recording
+
+<details open>
+<summary><strong>Python</strong></summary>
 
 ```python
-# Recording: enable on serve()
-await phone.serve(agent, port=8000, recording=True)
+await phone.serve(agent=agent, port=8000, recording=True)
+```
 
-# AMD + voicemail: enable on call()
-await phone.call(
-    to="+14155559876",
+</details>
+
+<details>
+<summary><strong>TypeScript</strong></summary>
+
+```typescript
+await phone.serve({ agent, port: 8000, recording: true });
+```
+
+</details>
+
+---
+
+### Conversation History
+
+Every callback receives `data.history` — the full conversation so far as a list of `{role, text}` turns.
+
+<details open>
+<summary><strong>Python</strong></summary>
+
+```python
+await phone.serve(
     agent=agent,
-    machine_detection=True,
-    voicemail_message="Hi, please call us back at 555-0123.",
+    port=8000,
+    on_transcript=lambda data: print(f"[{data['role']}] {data['text']}"),
+    on_call_end=lambda data: print(f"Full history: {data['history']}"),
 )
 ```
 
-</td>
-<td>
+</details>
+
+<details>
+<summary><strong>TypeScript</strong></summary>
 
 ```typescript
-// Recording: enable on serve()
-await phone.serve({ agent, port: 8000, recording: true });
-
-// AMD + voicemail: enable on call()
-await phone.call({
-  to: "+14155559876",
+await phone.serve({
   agent,
-  machineDetection: true,
-  voicemailMessage: "Hi, please call us back at 555-0123.",
+  port: 8000,
+  onTranscript: (data) => console.log(`[${data.role}] ${data.text}`),
+  onCallEnd: (data) => console.log(`Full history:`, data.history),
 });
 ```
 
-</td>
-</tr>
-</table>
+</details>
 
-## API Reference
+---
 
-### `Patter()`
+### Custom Voice (choose your providers)
 
-Creates a Patter client for local (embedded) mode.
+<details open>
+<summary><strong>Python</strong></summary>
 
-**Python:**
+```python
+phone = Patter(api_key="pt_xxx", backend_url="ws://localhost:8000")
+
+await phone.connect(
+    on_message=agent,
+    provider="twilio",
+    provider_key="ACxxxxxxxx",
+    provider_secret="your_auth_token",
+    number="+14155550000",
+    stt=Patter.deepgram(api_key="dg_xxx", language="en"),
+    tts=Patter.elevenlabs(api_key="el_xxx", voice="rachel"),
+)
+```
+
+</details>
+
+<details>
+<summary><strong>TypeScript</strong></summary>
+
+```typescript
+const phone = new Patter({ apiKey: "pt_xxx", backendUrl: "ws://localhost:8000" });
+
+await phone.connect({
+  onMessage: agent,
+  provider: "twilio",
+  providerKey: "ACxxxxxxxx",
+  providerSecret: "your_auth_token",
+  number: "+14155550000",
+  stt: Patter.deepgram({ apiKey: "dg_xxx", language: "en" }),
+  tts: Patter.elevenlabs({ apiKey: "el_xxx", voice: "rachel" }),
+});
+```
+
+</details>
+
+## Voice Modes
+
+| Mode | Latency | Quality | Best For |
+|---|---|---|---|
+| **OpenAI Realtime** | Lowest | High | Fluid, low-latency conversations |
+| **Deepgram + ElevenLabs** | Low | High | Independent control over STT and TTS |
+| **ElevenLabs ConvAI** | Low | High | ElevenLabs-managed conversation flow |
+
+The voice mode is configured on the backend. Your `on_message` handler works identically regardless of mode.
+
+## MCP Server (Claude Desktop)
+
+Patter ships an MCP server so you can control calls directly from Claude Desktop.
+
+```json
+{
+  "mcpServers": {
+    "patter": {
+      "command": "patter-mcp",
+      "env": { "PATTER_API_KEY": "pt_xxx" }
+    }
+  }
+}
+```
+
+## Self-Hosting
+
+Run the full stack yourself — no Patter Cloud account needed.
+
+```bash
+# 1. Clone the repo
+git clone https://github.com/your-org/patter
+cd patter
+
+# 2. Copy env and fill in your keys
+cp .env.example .env
+
+# 3. Start the backend
+cd backend
+pip install -e ".[dev]"
+alembic upgrade head
+uvicorn app.main:app --reload
+```
+
+Then point your SDK at your local backend:
 
 ```python
 phone = Patter(
-    twilio_sid="AC...",       # Twilio Account SID
-    twilio_token="...",       # Twilio Auth Token
-    openai_key="sk-...",      # OpenAI API key (for Realtime mode)
-    phone_number="+1...",     # Your phone number (E.164)
-    webhook_url="x.ngrok.app",  # Public hostname (no scheme)
-    # Optional — for Telnyx instead of Twilio:
-    # telnyx_key="KEY...",
-    # telnyx_connection_id="...",
-    # Optional — for Pipeline mode:
-    # deepgram_key="dg_...",
-    # elevenlabs_key="el_...",
+    api_key="pt_xxx",
+    backend_url="ws://localhost:8000",
+    rest_url="http://localhost:8000",
 )
 ```
 
-**TypeScript:**
+**Required environment variables:**
 
-```typescript
-const phone = new Patter({
-  mode: "local",
-  twilioSid: "AC...",
-  twilioToken: "...",
-  openaiKey: "sk-...",
-  phoneNumber: "+1...",
-  webhookUrl: "x.ngrok.app",
-  // Optional — for Telnyx instead of Twilio:
-  // telephonyProvider: "telnyx",
-  // telnyxKey: "KEY...",
-  // telnyxConnectionId: "...",
-});
-```
+| Variable | Description |
+|---|---|
+| `PATTER_DATABASE_URL` | PostgreSQL connection string |
+| `PATTER_ENCRYPTION_KEY` | Key for encrypting stored provider credentials |
+| `PATTER_SECRET_KEY` | JWT / HMAC signing secret |
 
-### `patter.agent()`
+See `backend/.env.example` for the full list.
 
-Creates an agent configuration.
+## API Reference
 
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `system_prompt` | `str` | (required) | Instructions for the AI agent. Supports `{variable}` placeholders. |
-| `voice` | `str` | `"alloy"` | TTS voice name (e.g., `"alloy"`, `"echo"`, `"rachel"`). |
-| `model` | `str` | `"gpt-4o-mini-realtime-preview"` | OpenAI Realtime model ID. |
-| `language` | `str` | `"en"` | BCP-47 language code. |
-| `first_message` | `str` | `""` | Agent speaks this immediately when a call connects. Supports `{variable}` placeholders. |
-| `tools` | `list[dict]` | `None` | Tool definitions with `name`, `description`, `parameters`, and `webhook_url`. |
-| `provider` | `str` | `"openai_realtime"` | Voice mode: `"openai_realtime"`, `"pipeline"`, or `"elevenlabs_convai"`. |
-| `stt` | `STTConfig` | `None` | STT config for pipeline mode. Use `Patter.deepgram()` or `Patter.whisper()`. |
-| `tts` | `TTSConfig` | `None` | TTS config for pipeline mode. Use `Patter.elevenlabs()` or `Patter.openai_tts()`. |
-| `variables` | `dict` | `None` | Values substituted into `system_prompt` and `first_message` at call time. |
-| `guardrails` | `list` | `None` | Output guardrails created with `Patter.guardrail()`. |
+### `Patter` (Python & TypeScript)
 
-### `patter.serve()`
+| Method | Description |
+|---|---|
+| `Patter(api_key, backend_url?, rest_url?)` | Create client. `backend_url` defaults to `wss://api.patter.dev`. |
+| `connect(on_message, ...)` | Connect and start receiving calls. Blocks until disconnected. |
+| `call(to, first_message?, machine_detection?, voicemail_message?, ...)` | Place an outbound call. |
+| `disconnect()` | Gracefully close the connection. |
 
-Starts the embedded server for inbound calls. Blocks until stopped.
+**`serve()` options:**
 
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `agent` | `Agent` | (required) | Agent configuration from `patter.agent()`. |
-| `port` | `int` | `8000` | TCP port to bind to. |
-| `recording` | `bool` | `False` | Enable call recording via the telephony provider. |
-| `on_call_start` | `callable` | `None` | `async (data) -> None` -- fires when a call connects. |
-| `on_call_end` | `callable` | `None` | `async (data) -> None` -- fires when a call ends. Receives `data.history`, `data.transcript`. |
-| `on_transcript` | `callable` | `None` | `async (data) -> None` -- fires on each utterance. Receives `data.role`, `data.text`, `data.history`. |
-| `on_message` | `callable` | `None` | `async (data) -> str` -- pipeline mode only. Called with user transcript; return value is spoken. |
-| `voicemail_message` | `str` | `""` | Spoken when AMD detects a machine (requires `machine_detection=True` on `call()`). |
-
-### `patter.call()`
-
-Makes an outbound call.
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `to` | `str` | (required) | Destination phone number in E.164 format. |
-| `agent` | `Agent` | (required) | Agent configuration from `patter.agent()`. |
-| `machine_detection` | `bool` | `False` | Enable answering machine detection. |
-| `voicemail_message` | `str` | `""` | Message played when voicemail is detected. Requires `machine_detection=True`. |
-
-### Provider Helpers
-
-Static methods for configuring STT/TTS providers in pipeline mode.
-
-| Helper | Returns | Parameters |
+| Option | Type | Description |
 |---|---|---|
-| `Patter.deepgram(api_key, language="en")` | `STTConfig` | Deepgram Nova STT |
-| `Patter.whisper(api_key, language="en")` | `STTConfig` | OpenAI Whisper STT |
-| `Patter.elevenlabs(api_key, voice="rachel")` | `TTSConfig` | ElevenLabs TTS |
-| `Patter.openai_tts(api_key, voice="alloy")` | `TTSConfig` | OpenAI TTS |
+| `agent` | `Agent` | Agent configuration to use for calls |
+| `port` | `int` | Port to listen on |
+| `recording` | `bool` | Enable call recording via the telephony provider |
+| `onCallStart` | `callable` | Called when a call connects; receives `data.caller`, `data.call_id` |
+| `onCallEnd` | `callable` | Called when a call ends; receives `data.history`, `data.transcript`, `data.duration` |
+| `onTranscript` | `callable` | Called on each transcript turn; receives `data.role`, `data.text`, `data.history` |
 
-### `Patter.guardrail()`
+**`agent()` options:**
 
-Creates an output guardrail that intercepts AI responses before TTS.
+| Option | Type | Description |
+|---|---|---|
+| `system_prompt` | `str` | Prompt with optional `{variable}` placeholders |
+| `variables` | `dict` | Values substituted into `system_prompt` and `first_message` |
+| `voice` | `str` | TTS voice name |
+| `language` | `str` | BCP-47 language code |
+| `first_message` | `str` | Opening message (supports `{variable}` placeholders) |
+| `tools` | `list` | Tool definitions with `name`, `description`, `parameters`, `webhook_url` |
 
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `name` | `str` | (required) | Identifier for logging when the guardrail fires. |
-| `blocked_terms` | `list[str]` | `None` | Words/phrases that trigger blocking (case-insensitive). |
-| `check` | `callable` | `None` | `(text: str) -> bool` -- return `True` to block. Evaluated after `blocked_terms`. |
-| `replacement` | `str` | `"I'm sorry, I can't respond to that."` | What the agent says instead. |
+**`call()` options:**
 
-### Callbacks
+| Option | Type | Description |
+|---|---|---|
+| `to` | `str` | Destination phone number |
+| `first_message` | `str` | Opening message for the outbound call |
+| `machine_detection` | `bool` | Enable answering machine detection |
+| `voicemail_message` | `str` | Message to play when voicemail is detected |
 
-All callbacks are async functions. The `data` dict includes:
+**Static provider helpers** (for self-hosted mode):
 
-**`on_call_start`**
-```python
-async def on_call_start(data):
-    data["caller"]   # caller phone number
-    data["call_id"]  # unique call ID
+| Helper | Type | Description |
+|---|---|---|
+| `Patter.deepgram(api_key, language?)` | STT | Deepgram Nova |
+| `Patter.whisper(api_key, language?)` | STT | OpenAI Whisper |
+| `Patter.elevenlabs(api_key, voice?)` | TTS | ElevenLabs |
+| `Patter.openai_tts(api_key, voice?)` | TTS | OpenAI TTS |
+
+### `IncomingMessage`
+
+| Field | Type | Description |
+|---|---|---|
+| `text` | `str` | Transcribed speech from the caller (includes `[DTMF: N]` for keypad presses) |
+| `call_id` | `str` | Unique identifier for the current call |
+| `history` | `list` | Conversation turns so far: `[{role, text}, ...]` |
+
+## Contributing
+
+Pull requests are welcome.
+
+```bash
+# Run tests
+cd backend && pytest tests/ -v
+cd sdk && pytest tests/ -v
+
+# Install dev dependencies
+cd backend && pip install -e ".[dev]"
+cd sdk && pip install -e ".[dev]"
 ```
 
-**`on_call_end`**
-```python
-async def on_call_end(data):
-    data["history"]     # [{role: "user"|"assistant", text: "..."}]
-    data["transcript"]  # full transcript
-    data["duration"]    # call duration in seconds
-```
-
-**`on_transcript`**
-```python
-async def on_transcript(data):
-    data["role"]     # "user" or "assistant"
-    data["text"]     # transcribed text (includes "[DTMF: N]" for keypad presses)
-    data["history"]  # conversation so far
-```
-
-**`on_message`** (pipeline mode only)
-```python
-async def on_message(data) -> str:
-    data["text"]     # user's transcribed speech
-    data["history"]  # conversation so far
-    return "Response to speak"  # return value is sent to TTS
-```
-
-## Requirements
-
-- Python 3.11+ or Node.js 18+
-- Twilio or Telnyx account
-- OpenAI API key (for Realtime mode) or Deepgram + ElevenLabs keys (for Pipeline mode)
-- ngrok or similar tunnel for local development (Twilio/Telnyx need a public webhook URL)
+Please open an issue before submitting large changes so we can discuss the approach first.
 
 ## License
 
-MIT -- see [LICENSE](./LICENSE).
+MIT — see [LICENSE](./LICENSE).

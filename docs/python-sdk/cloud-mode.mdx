@@ -1,0 +1,316 @@
+---
+title: "Cloud Mode"
+description: "Connect to Patter's managed platform for telephony, agent management, and call history."
+---
+
+# Cloud Mode
+
+Cloud mode connects to Patter's managed platform. You provide an API key and Patter handles telephony infrastructure, phone numbers, and call routing.
+
+## When to Use Cloud Mode
+
+- You want to get started quickly without managing infrastructure
+- You need managed phone numbers across multiple countries
+- You want built-in call history, analytics, and agent management
+- You prefer a serverless approach to voice AI
+
+## Setup
+
+```python
+import os
+from patter import Patter
+
+phone = Patter(api_key=os.environ["PATTER_API_KEY"])
+```
+
+---
+
+## connect()
+
+Connect to Patter and start listening for inbound calls. This method establishes a persistent WebSocket connection.
+
+```python
+async def handle_message(message) -> str:
+    return f"You said: {message.text}. How can I help?"
+
+await phone.connect(on_message=handle_message)
+```
+
+### Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `on_message` | `Callable[[IncomingMessage], Awaitable[str]]` | *required* | Async handler called for each user message. Returns the agent's response. |
+| `on_call_start` | `Callable[[dict], Awaitable[None]] \| None` | `None` | Async callback fired when a call connects. |
+| `on_call_end` | `Callable[[dict], Awaitable[None]] \| None` | `None` | Async callback fired when a call ends. |
+| `provider` | `str \| None` | `None` | Telephony provider (self-hosted mode). |
+| `provider_key` | `str \| None` | `None` | Provider API key (self-hosted mode). |
+| `provider_secret` | `str \| None` | `None` | Provider API secret (self-hosted mode). |
+| `number` | `str \| None` | `None` | Phone number to register (self-hosted mode). |
+| `country` | `str` | `"US"` | Country code for number registration. |
+| `stt` | `STTConfig \| None` | `None` | STT provider config (self-hosted mode). |
+| `tts` | `TTSConfig \| None` | `None` | TTS provider config (self-hosted mode). |
+
+### Self-Hosted Mode
+
+If you run your own Patter backend, pass provider credentials directly to `connect()`:
+
+```python
+phone = Patter(
+    api_key="pt_xxx",
+    backend_url="wss://your-backend.example.com",
+    rest_url="https://your-backend.example.com",
+)
+
+await phone.connect(
+    provider="twilio",
+    provider_key="ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    provider_secret="your_auth_token",
+    number="+15550001234",
+    stt=Patter.deepgram(api_key="dg_..."),
+    tts=Patter.elevenlabs(api_key="el_..."),
+    on_message=handle_message,
+)
+```
+
+---
+
+## call()
+
+Make an outbound call. If not already connected, `call()` auto-connects when `on_message` is provided.
+
+```python
+await phone.call(
+    to="+15550009876",
+    on_message=handle_message,
+    first_message="Hi! This is a call from Acme Corp.",
+)
+```
+
+### Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `to` | `str` | *required* | Phone number to call (E.164 format). |
+| `on_message` | `Callable \| None` | `None` | Message handler. Auto-connects if not already connected. |
+| `first_message` | `str` | `""` | What the AI says when the callee answers. |
+| `from_number` | `str` | `""` | Number to call from. Uses configured number if empty. |
+| `agent_id` | `str \| None` | `None` | Use a specific cloud-managed agent by ID. |
+| `agent` | `Agent \| None` | `None` | Agent instance (local mode only). |
+| `machine_detection` | `bool` | `False` | Enable answering machine detection. |
+| `on_machine` | `Callable \| None` | `None` | Callback when a machine is detected. |
+| `voicemail_message` | `str` | `""` | Message to leave on voicemail. |
+
+---
+
+## IncomingMessage
+
+The `on_message` callback receives an `IncomingMessage` object:
+
+```python
+from patter import IncomingMessage
+
+async def handle_message(message: IncomingMessage) -> str:
+    print(f"Call: {message.call_id}")
+    print(f"From: {message.caller}")
+    print(f"Text: {message.text}")
+    return "Thanks for your message!"
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `text` | `str` | The user's transcribed message. |
+| `call_id` | `str` | Unique identifier for the current call. |
+| `caller` | `str` | The caller's phone number. |
+
+---
+
+## Agent Management
+
+Manage voice AI agents on the Patter platform.
+
+### create_agent()
+
+```python
+agent = await phone.create_agent(
+    name="Customer Support",
+    system_prompt="You are a helpful customer support agent.",
+    model="gpt-4o-mini-realtime-preview",
+    voice="alloy",
+    voice_provider="openai",
+    language="en",
+    first_message="Hello! How can I help?",
+    tools=[
+        {
+            "name": "lookup_order",
+            "description": "Look up an order by ID",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "order_id": {"type": "string"},
+                },
+                "required": ["order_id"],
+            },
+            "webhook_url": "https://api.example.com/orders",
+        },
+    ],
+)
+print(f"Created agent: {agent['id']}")
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `name` | `str` | *required* | Display name for the agent. |
+| `system_prompt` | `str` | *required* | Instructions for the AI. |
+| `model` | `str` | `"gpt-4o-mini-realtime-preview"` | AI model ID. |
+| `voice` | `str` | `"alloy"` | TTS voice name. |
+| `voice_provider` | `str` | `"openai"` | Voice provider. |
+| `language` | `str` | `"en"` | BCP-47 language code. |
+| `first_message` | `str \| None` | `None` | Greeting message. |
+| `tools` | `list[dict] \| None` | `None` | Tool definitions. |
+
+### list_agents()
+
+```python
+agents = await phone.list_agents()
+for a in agents:
+    print(f"{a['id']}: {a['name']}")
+```
+
+### update_agent()
+
+```python
+updated = await phone.update_agent(
+    agent_id="agent_abc123",
+    system_prompt="Updated instructions.",
+    voice="nova",
+)
+```
+
+Pass any agent fields as keyword arguments. Only the provided fields are updated.
+
+### delete_agent()
+
+```python
+await phone.delete_agent(agent_id="agent_abc123")
+```
+
+---
+
+## Number Management
+
+### buy_number()
+
+Purchase a phone number through Patter.
+
+```python
+number = await phone.buy_number(country="US", provider="twilio")
+print(f"Bought: {number['number']}")
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `country` | `str` | `"US"` | ISO country code. |
+| `provider` | `str` | `"twilio"` | Telephony provider. |
+
+### list_numbers()
+
+```python
+numbers = await phone.list_numbers()
+for n in numbers:
+    print(f"{n['number']} ({n['provider']})")
+```
+
+### assign_agent()
+
+Assign an agent to a phone number so it handles inbound calls automatically.
+
+```python
+result = await phone.assign_agent(
+    number_id="num_abc123",
+    agent_id="agent_xyz789",
+)
+```
+
+---
+
+## Call History
+
+### list_calls()
+
+```python
+calls = await phone.list_calls(limit=20)
+for c in calls:
+    print(f"{c['id']}: {c['caller']} -> {c['callee']} ({c['status']})")
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `limit` | `int` | `50` | Maximum number of calls to return. |
+
+### get_call()
+
+```python
+call = await phone.get_call(call_id="call_abc123")
+print(f"Duration: {call['duration']}s")
+for entry in call["transcript"]:
+    print(f"  [{entry['role']}]: {entry['text']}")
+```
+
+---
+
+## disconnect()
+
+Close the WebSocket connection and HTTP client.
+
+```python
+await phone.disconnect()
+```
+
+---
+
+## Complete Example
+
+```python
+import os
+import asyncio
+from patter import Patter, IncomingMessage
+
+phone = Patter(api_key=os.environ["PATTER_API_KEY"])
+
+async def handle_message(message: IncomingMessage) -> str:
+    if "order" in message.text.lower():
+        return "Sure! What's your order number?"
+    if "human" in message.text.lower():
+        return "Let me transfer you to a human agent right away."
+    return "How else can I help you?"
+
+async def on_call_start(event):
+    print(f"Call started: {event['call_id']} from {event['caller']}")
+
+async def on_call_end(event):
+    print(f"Call ended: {event['call_id']}, {len(event['transcript'])} messages")
+
+async def main():
+    # Connect and listen for inbound calls
+    await phone.connect(
+        on_message=handle_message,
+        on_call_start=on_call_start,
+        on_call_end=on_call_end,
+    )
+
+    # Make an outbound call
+    await phone.call(
+        to="+15550009876",
+        first_message="Hi! This is Acme Corp. We're calling about your recent order.",
+    )
+
+    # List recent calls
+    calls = await phone.list_calls(limit=10)
+    print(f"Recent calls: {len(calls)}")
+
+    # Clean up
+    await phone.disconnect()
+
+asyncio.run(main())
+```

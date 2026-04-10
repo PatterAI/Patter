@@ -1,0 +1,113 @@
+---
+title: "Quickstart"
+description: "Get a voice AI agent answering phone calls in under 5 minutes."
+---
+
+# Quickstart
+
+This guide walks you through setting up a voice AI agent in local mode using Twilio and OpenAI.
+
+## Prerequisites
+
+- Node.js 18+
+- A Twilio account with a phone number
+- An OpenAI API key
+- [ngrok](https://ngrok.com) or another tunnel for local development
+
+## Step 1: Install the SDK
+
+```bash
+npm install patter
+```
+
+## Step 2: Set Up Your Tunnel
+
+Open a terminal and start ngrok:
+
+```bash
+ngrok http 8000
+```
+
+Copy the hostname from the output (e.g., `abc123.ngrok.io`). You will use this as your `webhookUrl`.
+
+## Step 3: Configure Environment Variables
+
+Create a `.env` file in your project root:
+
+```bash
+TWILIO_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TWILIO_TOKEN=your_auth_token
+OPENAI_KEY=sk-...
+PHONE_NUMBER=+15550001234
+WEBHOOK_URL=abc123.ngrok.io
+```
+
+## Step 4: Create Your Agent
+
+Create `index.ts`:
+
+```typescript
+import { Patter } from "patter";
+
+const phone = new Patter({
+  mode: "local",
+  twilioSid: process.env.TWILIO_SID,
+  twilioToken: process.env.TWILIO_TOKEN,
+  openaiKey: process.env.OPENAI_KEY,
+  phoneNumber: process.env.PHONE_NUMBER!,
+  webhookUrl: process.env.WEBHOOK_URL!,
+});
+
+const agent = phone.agent({
+  systemPrompt: "You are a friendly receptionist for Acme Corp. Help callers with scheduling, general inquiries, and directions to our office.",
+  voice: "alloy",
+  model: "gpt-4o-mini-realtime-preview",
+  firstMessage: "Hello! Thanks for calling Acme Corp. How can I help you today?",
+});
+
+await phone.serve({
+  agent,
+  port: 8000,
+  onCallStart: async (data) => {
+    console.log("Call started:", data);
+  },
+  onCallEnd: async (data) => {
+    console.log("Call ended:", data);
+  },
+});
+```
+
+## Step 5: Configure Twilio Webhooks
+
+In your [Twilio Console](https://console.twilio.com), navigate to your phone number and set the voice webhook to:
+
+```
+https://abc123.ngrok.io/webhooks/twilio/voice
+```
+
+Set the method to **POST**.
+
+## Step 6: Run Your Agent
+
+```bash
+npx tsx index.ts
+```
+
+You should see the Patter banner and server status in your terminal. Call your Twilio number and start talking to your AI agent.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Add Tools" icon="wrench" href="/typescript-sdk/tools">
+    Let your agent book appointments, look up data, and more.
+  </Card>
+  <Card title="Add Guardrails" icon="shield" href="/typescript-sdk/guardrails">
+    Filter AI responses before they reach callers.
+  </Card>
+  <Card title="Handle Events" icon="bolt" href="/typescript-sdk/events">
+    React to transcripts, call starts, and call ends.
+  </Card>
+  <Card title="Outbound Calls" icon="phone" href="/typescript-sdk/features">
+    Make outbound calls with machine detection.
+  </Card>
+</CardGroup>

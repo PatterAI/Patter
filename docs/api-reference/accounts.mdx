@@ -1,0 +1,110 @@
+---
+title: "Accounts"
+description: "Create, manage, and delete your Patter account."
+---
+
+## Create Account
+
+<Note>
+  This is the only public endpoint. No API key required.
+</Note>
+
+Creates a new account and returns your API key.
+
+```bash
+curl -X POST https://api.patter.ai/api/v1/accounts \
+  -H "Content-Type: application/json" \
+  -d '{"email": "you@example.com"}'
+```
+
+### Request Body
+
+<ParamField body="email" type="string" required>
+  Your email address. Must be unique across all accounts.
+</ParamField>
+
+### Response `201`
+
+```json
+{
+  "data": {
+    "id": "acc_abc123",
+    "email": "you@example.com",
+    "api_key": "pt_a1b2c3d4e5f6..."
+  }
+}
+```
+
+<Warning>
+  Save the `api_key` immediately. It will not be shown again.
+</Warning>
+
+**Rate limit**: 10 requests per minute.
+
+---
+
+## Get Profile
+
+Returns the authenticated account's profile.
+
+```bash
+curl https://api.patter.ai/api/v1/accounts/me \
+  -H "X-API-Key: pt_your_api_key"
+```
+
+### Response `200`
+
+```json
+{
+  "data": {
+    "id": "acc_abc123",
+    "email": "you@example.com"
+  }
+}
+```
+
+---
+
+## Rotate API Key
+
+Generates a new API key and immediately invalidates the current one.
+
+```bash
+curl -X POST https://api.patter.ai/api/v1/accounts/api-key/rotate \
+  -H "X-API-Key: pt_your_current_key"
+```
+
+### Response `200`
+
+```json
+{
+  "data": {
+    "id": "acc_abc123",
+    "email": "you@example.com",
+    "api_key": "pt_new_key_here..."
+  }
+}
+```
+
+**Rate limit**: 5 requests per minute.
+
+---
+
+## Delete Account
+
+Permanently deletes the account and all associated data (agents, phone numbers, call logs). This action cascades and cannot be undone.
+
+```bash
+curl -X DELETE https://api.patter.ai/api/v1/accounts/me \
+  -H "X-API-Key: pt_your_api_key"
+```
+
+### Response `204`
+
+No content.
+
+<Warning>
+  This permanently deletes all agents, phone numbers, call logs, and billing data associated with the account. This action is irreversible.
+</Warning>
+
+**Rate limit**: 5 requests per minute.

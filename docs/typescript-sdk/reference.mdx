@@ -1,0 +1,467 @@
+---
+title: "API Reference"
+description: "Complete type definitions, interfaces, error classes, and exports."
+---
+
+# API Reference
+
+Complete reference for all types, interfaces, and exports in the `patter` package.
+
+## Patter Class
+
+### Constructor
+
+```typescript
+new Patter(options: PatterOptions | LocalOptions)
+```
+
+### Instance Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `agent` | `(opts: AgentOptions) => AgentOptions` | Validates and returns an agent configuration. |
+| `serve` | `(opts: ServeOptions) => Promise<void>` | Starts the embedded server (local mode only). |
+| `connect` | `(opts: ConnectOptions) => Promise<void>` | Connects to the Patter cloud platform. |
+| `call` | `(opts: CallOptions \| LocalCallOptions) => Promise<void>` | Makes an outbound call. |
+| `disconnect` | `() => Promise<void>` | Disconnects from the cloud platform. |
+| `createAgent` | `(opts: CreateAgentOptions) => Promise<Agent>` | Creates a cloud-managed agent. |
+| `listAgents` | `() => Promise<Agent[]>` | Lists all cloud-managed agents. |
+| `buyNumber` | `(opts?: { country?: string; provider?: string }) => Promise<PhoneNumber>` | Provisions a new phone number. |
+| `assignAgent` | `(numberId: string, agentId: string) => Promise<void>` | Assigns an agent to a phone number. |
+| `listCalls` | `(limit?: number) => Promise<Call[]>` | Lists recent calls (1-1000, default 50). |
+| `test` | `(agent: AgentOptions, opts?: TestOptions) => Promise<void>` | Starts an interactive terminal test session (local mode only). See [Test Mode](/typescript-sdk/test-mode). |
+
+### Static Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `Patter.deepgram` | `(opts: { apiKey: string; language?: string }) => STTConfig` | Creates a Deepgram STT config. |
+| `Patter.whisper` | `(opts: { apiKey: string; language?: string }) => STTConfig` | Creates a Whisper STT config. |
+| `Patter.elevenlabs` | `(opts: { apiKey: string; voice?: string }) => TTSConfig` | Creates an ElevenLabs TTS config. |
+| `Patter.openaiTts` | `(opts: { apiKey: string; voice?: string }) => TTSConfig` | Creates an OpenAI TTS config. |
+| `Patter.guardrail` | `(opts: { name: string; blockedTerms?: string[]; check?: (text: string) => boolean; replacement?: string }) => Guardrail` | Creates a guardrail config. |
+| `Patter.tool` | `(opts: { name: string; description?: string; parameters?: object; handler?: Function; webhookUrl?: string }) => ToolDefinition` | Creates a tool definition. Requires either `handler` or `webhookUrl`. |
+
+## Interfaces
+
+### PatterOptions
+
+```typescript
+interface PatterOptions {
+  apiKey: string;
+  backendUrl?: string;
+  restUrl?: string;
+}
+```
+
+### LocalOptions
+
+```typescript
+interface LocalOptions {
+  mode: "local";
+  twilioSid?: string;
+  twilioToken?: string;
+  openaiKey?: string;
+  phoneNumber: string;
+  webhookUrl: string;
+  telephonyProvider?: "twilio" | "telnyx";
+  telnyxKey?: string;
+  telnyxConnectionId?: string;
+  telnyxPublicKey?: string;
+  pricing?: Record<string, Partial<ProviderPricing>>;
+}
+```
+
+### AgentOptions
+
+```typescript
+interface AgentOptions {
+  systemPrompt: string;
+  voice?: string;
+  model?: string;
+  language?: string;
+  firstMessage?: string;
+  tools?: ToolDefinition[];
+  provider?: "openai_realtime" | "elevenlabs_convai" | "pipeline";
+  elevenlabsKey?: string;
+  elevenlabsAgentId?: string;
+  deepgramKey?: string;
+  stt?: STTConfig;
+  tts?: TTSConfig;
+  variables?: Record<string, string>;
+  guardrails?: Guardrail[];
+}
+```
+
+### ServeOptions
+
+```typescript
+interface ServeOptions {
+  agent: AgentOptions;
+  port?: number;
+  onCallStart?: (data: Record<string, unknown>) => Promise<void>;
+  onCallEnd?: (data: Record<string, unknown>) => Promise<void>;
+  onTranscript?: (data: Record<string, unknown>) => Promise<void>;
+  onMessage?: PipelineMessageHandler | string;
+  onMetrics?: (data: Record<string, unknown>) => Promise<void>;
+  recording?: boolean;
+  voicemailMessage?: string;
+  dashboard?: boolean;
+  dashboardToken?: string;
+}
+```
+
+### ConnectOptions
+
+```typescript
+interface ConnectOptions {
+  onMessage: MessageHandler;
+  onCallStart?: CallEventHandler;
+  onCallEnd?: CallEventHandler;
+  provider?: string;
+  providerKey?: string;
+  providerSecret?: string;
+  number?: string;
+  country?: string;
+  stt?: STTConfig;
+  tts?: TTSConfig;
+}
+```
+
+### CallOptions
+
+```typescript
+interface CallOptions {
+  to: string;
+  onMessage?: MessageHandler;
+  firstMessage?: string;
+  fromNumber?: string;
+  agentId?: string;
+  machineDetection?: boolean;
+}
+```
+
+### LocalCallOptions
+
+```typescript
+interface LocalCallOptions {
+  to: string;
+  agent: AgentOptions;
+  machineDetection?: boolean;
+  voicemailMessage?: string;
+  variables?: Record<string, string>;
+}
+```
+
+### ToolDefinition
+
+```typescript
+interface ToolDefinition {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+  webhookUrl: string;
+}
+```
+
+### Guardrail
+
+```typescript
+interface Guardrail {
+  name: string;
+  blockedTerms?: string[];
+  check?: (text: string) => boolean;
+  replacement?: string;
+}
+```
+
+### STTConfig
+
+```typescript
+interface STTConfig {
+  readonly provider: string;
+  readonly apiKey: string;
+  readonly language: string;
+  toDict(): Record<string, string>;
+}
+```
+
+### TTSConfig
+
+```typescript
+interface TTSConfig {
+  readonly provider: string;
+  readonly apiKey: string;
+  readonly voice: string;
+  toDict(): Record<string, string>;
+}
+```
+
+### IncomingMessage
+
+```typescript
+interface IncomingMessage {
+  readonly text: string;
+  readonly callId: string;
+  readonly caller: string;
+}
+```
+
+### CreateAgentOptions
+
+```typescript
+interface CreateAgentOptions {
+  name: string;
+  systemPrompt: string;
+  model?: string;
+  voice?: string;
+  voiceProvider?: string;
+  language?: string;
+  firstMessage?: string;
+  tools?: ToolDefinition[];
+}
+```
+
+### Agent
+
+```typescript
+interface Agent {
+  id: string;
+  name: string;
+  systemPrompt: string;
+  model: string;
+  voice: string;
+  voiceProvider: string;
+  language: string;
+  firstMessage: string | null;
+  tools: ToolDefinition[] | null;
+}
+```
+
+### PhoneNumber
+
+```typescript
+interface PhoneNumber {
+  id: string;
+  number: string;
+  provider: string;
+  country: string;
+  status: string;
+  agentId: string | null;
+}
+```
+
+### Call
+
+```typescript
+interface Call {
+  id: string;
+  direction: string;
+  caller: string;
+  callee: string;
+  startedAt: string;
+  endedAt: string | null;
+  durationSeconds: number | null;
+  status: string;
+  transcript: Array<{ role: string; text: string; timestamp: string }> | null;
+}
+```
+
+### CallControl
+
+```typescript
+interface CallControl {
+  readonly callId: string;
+  readonly caller: string;
+  readonly callee: string;
+  readonly telephonyProvider: string;
+  transfer(number: string): Promise<void>;
+  hangup(): Promise<void>;
+  readonly isTransferred: boolean;
+  readonly isHungUp: boolean;
+  readonly ended: boolean;
+}
+```
+
+Passed as the second argument to `onMessage` handlers. Allows dynamic call management during a conversation.
+
+### CallMetrics
+
+```typescript
+interface CallMetrics {
+  callId: string;
+  durationSeconds: number;
+  turns: TurnMetrics[];
+  cost: CostBreakdown;
+  latencyAvg: LatencyBreakdown;
+  latencyP95: LatencyBreakdown;
+  providerMode: string;
+  sttProvider: string;
+  ttsProvider: string;
+  telephonyProvider: string;
+}
+```
+
+### CostBreakdown
+
+```typescript
+interface CostBreakdown {
+  stt: number;
+  tts: number;
+  llm: number;
+  telephony: number;
+  total: number;
+}
+```
+
+### LatencyBreakdown
+
+```typescript
+interface LatencyBreakdown {
+  sttMs: number;
+  llmMs: number;
+  ttsMs: number;
+  totalMs: number;
+}
+```
+
+### TurnMetrics
+
+```typescript
+interface TurnMetrics {
+  turnIndex: number;
+  userText: string;
+  agentText: string;
+  latency: LatencyBreakdown;
+  sttAudioSeconds: number;
+  ttsCharacters: number;
+  timestamp: number;
+}
+```
+
+### ProviderPricing
+
+```typescript
+interface ProviderPricing {
+  unit: string;
+  price?: number;
+  audio_input_per_token?: number;
+  audio_output_per_token?: number;
+  text_input_per_token?: number;
+  text_output_per_token?: number;
+}
+```
+
+## Type Aliases
+
+```typescript
+type MessageHandler = (msg: IncomingMessage) => Promise<string>;
+type CallEventHandler = (data: Record<string, unknown>) => Promise<void>;
+type PipelineMessageHandler = (data: Record<string, unknown>) => Promise<string>;
+```
+
+## Error Classes
+
+All errors extend `PatterError`, which extends the native `Error` class.
+
+| Class | Description |
+|-------|-------------|
+| `PatterError` | Base error class for all SDK errors. |
+| `PatterConnectionError` | WebSocket connection failures or disconnection errors. |
+| `AuthenticationError` | Invalid API key or authentication failure. |
+| `ProvisionError` | Failed to provision resources (create agents, buy numbers, make calls). |
+
+```typescript
+import {
+  PatterError,
+  PatterConnectionError,
+  AuthenticationError,
+  ProvisionError,
+} from "patter";
+
+try {
+  await phone.call({ to: "+15559876543", agent });
+} catch (error) {
+  if (error instanceof ProvisionError) {
+    console.error("Failed to make call:", error.message);
+  } else if (error instanceof PatterConnectionError) {
+    console.error("Connection issue:", error.message);
+  }
+}
+```
+
+## Exports
+
+### Classes
+
+```typescript
+export { Patter } from "patter";
+export { ElevenLabsConvAIAdapter } from "patter";
+export { OpenAIRealtimeAdapter } from "patter";
+export { DeepgramSTT } from "patter";
+export { WhisperSTT } from "patter";
+export { ElevenLabsTTS } from "patter";
+export { OpenAITTS } from "patter";
+```
+
+### Error Classes
+
+```typescript
+export {
+  PatterError,
+  PatterConnectionError,
+  AuthenticationError,
+  ProvisionError,
+} from "patter";
+```
+
+### Factory Functions
+
+```typescript
+export { deepgram, whisper, elevenlabs, openaiTts } from "patter";
+```
+
+### Transcoding Utilities
+
+```typescript
+export {
+  mulawToPcm16,
+  pcm16ToMulaw,
+  resample8kTo16k,
+  resample16kTo8k,
+  resample24kTo16k,
+} from "patter";
+```
+
+### All Type Exports
+
+```typescript
+export type {
+  IncomingMessage,
+  STTConfig,
+  TTSConfig,
+  PatterOptions,
+  LocalOptions,
+  AgentOptions,
+  ServeOptions,
+  LocalCallOptions,
+  ConnectOptions,
+  CallOptions,
+  MessageHandler,
+  CallEventHandler,
+  PipelineMessageHandler,
+  ToolDefinition,
+  CreateAgentOptions,
+  Agent,
+  PhoneNumber,
+  Call,
+  Guardrail,
+  LocalConfig,
+  CallControl,
+  CallMetrics,
+  CostBreakdown,
+  LatencyBreakdown,
+  TurnMetrics,
+  ProviderPricing,
+} from "patter";
+```
