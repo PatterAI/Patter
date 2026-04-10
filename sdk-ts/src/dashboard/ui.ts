@@ -250,7 +250,7 @@ async function fetchJSON(url) {
 }
 
 async function refreshAggregates() {
-  const d = await fetchJSON('/dashboard/api/aggregates');
+  const d = await fetchJSON('/api/dashboard/aggregates');
   $('#stat-total').textContent = d.total_calls;
   $('#stat-active').textContent = d.active_calls;
   $('#stat-cost').textContent = fmt\\$(d.total_cost);
@@ -262,7 +262,7 @@ async function refreshAggregates() {
 }
 
 async function refreshCalls() {
-  const calls = await fetchJSON('/dashboard/api/calls?limit=50');
+  const calls = await fetchJSON('/api/dashboard/calls?limit=50');
   const body = $('#calls-body');
   if (!calls.length) {
     body.innerHTML = '<tr><td colspan="8" class="empty">No calls yet. Waiting for incoming calls...</td></tr>';
@@ -288,7 +288,7 @@ async function refreshCalls() {
 }
 
 async function refreshActive() {
-  const active = await fetchJSON('/dashboard/api/active');
+  const active = await fetchJSON('/api/dashboard/active');
   const body = $('#active-body');
   if (!active.length) {
     body.innerHTML = '<tr><td colspan="6" class="empty">No active calls</td></tr>';
@@ -309,7 +309,7 @@ async function refreshActive() {
 }
 
 async function showCall(callId) {
-  const c = await fetchJSON('/dashboard/api/calls/'+encodeURIComponent(callId));
+  const c = await fetchJSON('/api/dashboard/calls/'+encodeURIComponent(callId));
   if (c.error) return;
   const m = c.metrics || {};
   const cost = m.cost || {};
@@ -415,7 +415,7 @@ refresh();
 
 if (typeof EventSource !== 'undefined') {
   var tokenParam = new URLSearchParams(window.location.search).get('token');
-  var sseUrl = '/dashboard/api/events' + (tokenParam ? '?' + new URLSearchParams({ token: tokenParam }).toString() : '');
+  var sseUrl = '/api/dashboard/events' + (tokenParam ? '?' + new URLSearchParams({ token: tokenParam }).toString() : '');
   var sseBackoff = 1000;
   var sseFailures = 0;
   var SSE_MAX_BACKOFF = 30000;

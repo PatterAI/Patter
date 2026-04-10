@@ -684,7 +684,7 @@ export class EmbeddedServer {
 ██║     ██║  ██║   ██║      ██║   ███████╗██║  ██║
 ╚═╝     ╚═╝  ╚═╝   ╚═╝      ╚═╝   ╚══════╝╚═╝  ╚═╝
 
-Connect AI agents to phone numbers with ~10 lines of code
+Connect AI agents to phone numbers with 10 lines of code
 `);
         getLogger().info(`Server on port ${port}`);
         getLogger().info(`Webhook: https://${this.config.webhookUrl}`);

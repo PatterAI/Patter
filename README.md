@@ -1,7 +1,11 @@
 <p align="center">
-  <img src="docs/patter-logo-banner.svg" alt="Patter" width="400" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/PatterAI/Patter/main/docs/patter-logo-banner.svg" />
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/PatterAI/Patter/main/docs/patter-logo-banner.svg" />
+    <img src="https://raw.githubusercontent.com/PatterAI/Patter/main/docs/patter-logo-banner.svg" alt="Patter" width="400" />
+  </picture>
   <br />
-  <em>Connect AI agents to phone numbers with ~10 lines of code</em>
+  <em>Connect AI agents to phone numbers with 10 lines of code</em>
 </p>
 
 <p align="center">

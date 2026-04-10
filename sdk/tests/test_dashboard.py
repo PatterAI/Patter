@@ -164,11 +164,11 @@ class TestDashboardRoutes:
         mount_dashboard(app, store)
 
         route_paths = [r.path for r in app.routes if hasattr(r, "path")]
-        assert "/dashboard" in route_paths
-        assert "/dashboard/api/calls" in route_paths
-        assert "/dashboard/api/calls/{call_id}" in route_paths
-        assert "/dashboard/api/active" in route_paths
-        assert "/dashboard/api/aggregates" in route_paths
+        assert "/" in route_paths
+        assert "/api/dashboard/calls" in route_paths
+        assert "/api/dashboard/calls/{call_id}" in route_paths
+        assert "/api/dashboard/active" in route_paths
+        assert "/api/dashboard/aggregates" in route_paths
 
 
 class TestDashboardHTML:
@@ -179,8 +179,8 @@ class TestDashboardHTML:
 
         assert "Patter" in DASHBOARD_HTML
         assert "Dashboard" in DASHBOARD_HTML
-        assert "/dashboard/api/calls" in DASHBOARD_HTML
-        assert "/dashboard/api/aggregates" in DASHBOARD_HTML
+        assert "/api/dashboard/calls" in DASHBOARD_HTML
+        assert "/api/dashboard/aggregates" in DASHBOARD_HTML
         assert "Total Calls" in DASHBOARD_HTML
         assert "Total Cost" in DASHBOARD_HTML
         assert "Avg Latency" in DASHBOARD_HTML

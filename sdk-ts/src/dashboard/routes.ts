@@ -2,13 +2,13 @@
  * Dashboard and B2B API routes for the EmbeddedServer (Express).
  *
  * Mounts:
- *   GET /dashboard                      - HTML UI
- *   GET /dashboard/api/calls            - call list JSON
- *   GET /dashboard/api/calls/:callId    - single call JSON
- *   GET /dashboard/api/active           - active calls JSON
- *   GET /dashboard/api/aggregates       - aggregate stats JSON
- *   GET /dashboard/api/events           - SSE event stream
- *   GET /dashboard/api/export/calls     - CSV/JSON export
+ *   GET /                               - HTML UI
+ *   GET /api/dashboard/calls            - call list JSON
+ *   GET /api/dashboard/calls/:callId    - single call JSON
+ *   GET /api/dashboard/active           - active calls JSON
+ *   GET /api/dashboard/aggregates       - aggregate stats JSON
+ *   GET /api/dashboard/events           - SSE event stream
+ *   GET /api/dashboard/export/calls     - CSV/JSON export
  *
  *   GET /api/v1/calls                   - B2B paginated call history
  *   GET /api/v1/calls/active            - B2B active calls
@@ -28,19 +28,19 @@ export function mountDashboard(app: Express, store: MetricsStore, token = ''): v
 
   // --- Dashboard UI ---
 
-  app.get('/dashboard', auth, (_req, res) => {
+  app.get('/', auth, (_req, res) => {
     res.type('text/html').send(DASHBOARD_HTML);
   });
 
   // --- Dashboard API ---
 
-  app.get('/dashboard/api/calls', auth, (req, res) => {
+  app.get('/api/dashboard/calls', auth, (req, res) => {
     const limit = Math.min(parseInt((req.query.limit as string) || '50', 10) || 50, 1000);
     const offset = parseInt((req.query.offset as string) || '0', 10) || 0;
     res.json(store.getCalls(limit, offset));
   });
 
-  app.get('/dashboard/api/calls/:callId', auth, (req, res) => {
+  app.get('/api/dashboard/calls/:callId', auth, (req, res) => {
     const call = store.getCall(String(req.params.callId));
     if (!call) {
       res.status(404).json({ error: 'Not found' });
@@ -49,17 +49,17 @@ export function mountDashboard(app: Express, store: MetricsStore, token = ''): v
     res.json(call);
   });
 
-  app.get('/dashboard/api/active', auth, (_req, res) => {
+  app.get('/api/dashboard/active', auth, (_req, res) => {
     res.json(store.getActiveCalls());
   });
 
-  app.get('/dashboard/api/aggregates', auth, (_req, res) => {
+  app.get('/api/dashboard/aggregates', auth, (_req, res) => {
     res.json(store.getAggregates());
   });
 
   // --- SSE endpoint ---
 
-  app.get('/dashboard/api/events', auth, (req, res) => {
+  app.get('/api/dashboard/events', auth, (req, res) => {
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
@@ -86,7 +86,7 @@ export function mountDashboard(app: Express, store: MetricsStore, token = ''): v
 
   // --- Export endpoint ---
 
-  app.get('/dashboard/api/export/calls', auth, (req, res) => {
+  app.get('/api/dashboard/export/calls', auth, (req, res) => {
     const fmt = (req.query.format as string) || 'json';
     const fromDate = (req.query.from as string) || '';
     const toDate = (req.query.to as string) || '';

@@ -40,7 +40,7 @@ async def test_auth_valid_header(app_with_auth):
         transport=ASGITransport(app=app_with_auth), base_url="http://test"
     ) as client:
         r = await client.get(
-            "/dashboard/api/aggregates",
+            "/api/dashboard/aggregates",
             headers={"Authorization": "Bearer secret123"},
         )
         assert r.status_code == 200
@@ -54,7 +54,7 @@ async def test_auth_valid_query_param(app_with_auth):
     async with AsyncClient(
         transport=ASGITransport(app=app_with_auth), base_url="http://test"
     ) as client:
-        r = await client.get("/dashboard/api/aggregates?token=secret123")
+        r = await client.get("/api/dashboard/aggregates?token=secret123")
         assert r.status_code == 200
 
 
@@ -67,7 +67,7 @@ async def test_auth_invalid_token(app_with_auth):
         transport=ASGITransport(app=app_with_auth), base_url="http://test"
     ) as client:
         r = await client.get(
-            "/dashboard/api/aggregates",
+            "/api/dashboard/aggregates",
             headers={"Authorization": "Bearer wrong"},
         )
         assert r.status_code == 401
@@ -81,7 +81,7 @@ async def test_auth_missing_token(app_with_auth):
     async with AsyncClient(
         transport=ASGITransport(app=app_with_auth), base_url="http://test"
     ) as client:
-        r = await client.get("/dashboard/api/aggregates")
+        r = await client.get("/api/dashboard/aggregates")
         assert r.status_code == 401
 
 
@@ -93,5 +93,5 @@ async def test_no_auth_allows_all(app_no_auth):
     async with AsyncClient(
         transport=ASGITransport(app=app_no_auth), base_url="http://test"
     ) as client:
-        r = await client.get("/dashboard/api/aggregates")
+        r = await client.get("/api/dashboard/aggregates")
         assert r.status_code == 200
