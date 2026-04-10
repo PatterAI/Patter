@@ -1,0 +1,113 @@
+---
+title: "Configuration"
+description: "Constructor options for cloud and local modes."
+---
+
+# Configuration
+
+The `Patter` constructor accepts either `PatterOptions` (cloud mode) or `LocalOptions` (local mode).
+
+## Cloud Mode
+
+```typescript
+import { Patter } from "patter";
+
+const phone = new Patter({
+  apiKey: "pt_...",
+});
+```
+
+### PatterOptions
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `apiKey` | `string` | Yes | — | Your Patter API key (`pt_...`). |
+| `backendUrl` | `string` | No | `wss://api.patter.dev` | WebSocket URL for the Patter backend. |
+| `restUrl` | `string` | No | `https://api.patter.dev` | REST API URL for agent management. |
+
+## Local Mode
+
+```typescript
+import { Patter } from "patter";
+
+const phone = new Patter({
+  mode: "local",
+  twilioSid: process.env.TWILIO_SID,
+  twilioToken: process.env.TWILIO_TOKEN,
+  openaiKey: process.env.OPENAI_KEY,
+  phoneNumber: "+15550001234",
+  webhookUrl: "abc.ngrok.io",
+});
+```
+
+### LocalOptions
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `mode` | `"local"` | Yes | — | Must be `"local"` to enable local mode. |
+| `phoneNumber` | `string` | Yes | — | Your phone number in E.164 format. |
+| `webhookUrl` | `string` | Yes | — | Public hostname for webhooks (no protocol prefix, no path). |
+| `twilioSid` | `string` | Conditional | — | Twilio Account SID. Required if not using Telnyx. |
+| `twilioToken` | `string` | Conditional | — | Twilio Auth Token. Required when `twilioSid` is set. |
+| `openaiKey` | `string` | No | — | OpenAI API key for the realtime adapter. |
+| `telephonyProvider` | `"twilio" \| "telnyx"` | No | `"twilio"` | Which telephony provider to use. |
+| `telnyxKey` | `string` | Conditional | — | Telnyx API key. Required if `telephonyProvider` is `"telnyx"`. |
+| `telnyxConnectionId` | `string` | No | — | Telnyx SIP Connection ID for outbound calls. |
+| `telnyxPublicKey` | `string` | No | — | Telnyx Ed25519 public key (base64 DER/SPKI) for webhook signature verification. |
+
+<Warning>
+  You must provide either `twilioSid` or `telnyxKey`. The constructor throws if neither is set.
+</Warning>
+
+## Webhook URL Format
+
+The `webhookUrl` must be a bare hostname with no protocol prefix or path:
+
+```typescript
+// Correct
+webhookUrl: "abc123.ngrok.io"
+
+// Wrong — will throw
+webhookUrl: "https://abc123.ngrok.io"
+webhookUrl: "abc123.ngrok.io/webhooks"
+```
+
+The SDK constructs full URLs internally (e.g., `https://{webhookUrl}/webhooks/twilio/voice`).
+
+## Using Telnyx
+
+```typescript
+const phone = new Patter({
+  mode: "local",
+  telephonyProvider: "telnyx",
+  telnyxKey: process.env.TELNYX_KEY,
+  telnyxConnectionId: process.env.TELNYX_CONNECTION_ID,
+  telnyxPublicKey: process.env.TELNYX_PUBLIC_KEY,
+  openaiKey: process.env.OPENAI_KEY,
+  phoneNumber: "+15550001234",
+  webhookUrl: "abc.ngrok.io",
+});
+```
+
+<Info>
+  Telnyx delivers 16kHz PCM audio natively, so no transcoding is needed. Twilio uses mulaw 8kHz, which the SDK transcodes automatically.
+</Info>
+
+## Environment Variables
+
+We recommend loading credentials from environment variables. Never hardcode secrets:
+
+```typescript
+// .env
+TWILIO_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TWILIO_TOKEN=your_auth_token
+OPENAI_KEY=sk-...
+PHONE_NUMBER=+15550001234
+WEBHOOK_URL=abc123.ngrok.io
+```
+
+Use a library like [dotenv](https://www.npmjs.com/package/dotenv) or Node's built-in `--env-file` flag (Node 20.6+):
+
+```bash
+node --env-file=.env index.js
+```

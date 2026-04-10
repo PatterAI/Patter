@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 from dataclasses import dataclass, field
+from typing import Callable
+
+logger = logging.getLogger("patter")
 
 
 @dataclass(frozen=True)
@@ -17,8 +22,8 @@ class Guardrail:
     """
 
     name: str
-    check: object = None  # Callable[[str], bool] | None
-    blocked_terms: list | None = None
+    check: Callable[[str], bool] | None = None
+    blocked_terms: list[str] | None = None
     replacement: str = "I'm sorry, I can't respond to that."
 
 
@@ -36,7 +41,7 @@ class Agent:
     stt: STTConfig | None = None  # which STT provider to use in pipeline mode
     tts: TTSConfig | None = None  # which TTS provider to use in pipeline mode
     variables: dict | None = None  # Dynamic variables for ``{placeholder}`` substitution in system_prompt
-    guardrails: list | None = None  # List of Guardrail objects or guardrail dicts
+    guardrails: list[Guardrail | dict] | None = None  # List of Guardrail objects or guardrail dicts
 
 
 @dataclass(frozen=True)
@@ -73,3 +78,122 @@ class TTSConfig:
 
     def to_dict(self) -> dict:
         return {"provider": self.provider, "api_key": self.api_key, "voice": self.voice}
+
+
+@dataclass(frozen=True)
+class CostBreakdown:
+    """Per-call cost breakdown by segment (USD)."""
+
+    stt: float = 0.0
+    tts: float = 0.0
+    llm: float = 0.0
+    telephony: float = 0.0
+    total: float = 0.0
+
+
+@dataclass(frozen=True)
+class LatencyBreakdown:
+    """Per-turn latency breakdown (milliseconds)."""
+
+    stt_ms: float = 0.0
+    llm_ms: float = 0.0
+    tts_ms: float = 0.0
+    total_ms: float = 0.0
+
+
+@dataclass(frozen=True)
+class TurnMetrics:
+    """Metrics for a single conversation turn."""
+
+    turn_index: int
+    user_text: str
+    agent_text: str
+    latency: LatencyBreakdown
+    stt_audio_seconds: float = 0.0
+    tts_characters: int = 0
+    timestamp: float = 0.0
+
+
+@dataclass(frozen=True)
+class CallMetrics:
+    """Accumulated metrics for an entire call."""
+
+    call_id: str
+    duration_seconds: float
+    turns: tuple[TurnMetrics, ...]
+    cost: CostBreakdown
+    latency_avg: LatencyBreakdown
+    latency_p95: LatencyBreakdown
+    provider_mode: str
+    stt_provider: str = ""
+    tts_provider: str = ""
+    llm_provider: str = ""
+    telephony_provider: str = ""
+
+
+class CallControl:
+    """In-call control interface passed to ``on_message`` handlers.
+
+    Allows the handler to transfer the call, hang up, or send DTMF tones
+    without needing direct access to the telephony provider.
+
+    Usage::
+
+        async def handle(data, call: CallControl):
+            if needs_transfer:
+                await call.transfer("+15551234567")
+            elif is_done:
+                await call.hangup()
+            else:
+                return "Hello!"
+    """
+
+    def __init__(
+        self,
+        call_id: str,
+        caller: str,
+        callee: str,
+        telephony_provider: str,
+        *,
+        _transfer_fn=None,
+        _hangup_fn=None,
+    ):
+        self.call_id = call_id
+        self.caller = caller
+        self.callee = callee
+        self.telephony_provider = telephony_provider
+        self._transfer_fn = _transfer_fn
+        self._hangup_fn = _hangup_fn
+        self._transferred = asyncio.Event()
+        self._hung_up = asyncio.Event()
+
+    @property
+    def is_transferred(self) -> bool:
+        """True if transfer() was called."""
+        return self._transferred.is_set()
+
+    @property
+    def is_hung_up(self) -> bool:
+        """True if hangup() was called."""
+        return self._hung_up.is_set()
+
+    @property
+    def ended(self) -> bool:
+        """True if transfer() or hangup() was called."""
+        return self._transferred.is_set() or self._hung_up.is_set()
+
+    async def transfer(self, number: str) -> None:
+        """Transfer the call to another phone number (E.164 format)."""
+        if self._transfer_fn is not None:
+            await self._transfer_fn(number)
+            self._transferred.set()
+        else:
+            logger.warning("transfer() not available for this provider mode")
+
+    async def hangup(self) -> None:
+        """End the call."""
+        if self._hangup_fn is not None:
+            await self._hangup_fn()
+            self._hung_up.set()
+        else:
+            logger.warning("hangup() not available for this provider mode")

@@ -140,9 +140,9 @@ describe('Parameter Validation', () => {
     expect(() => phone.agent({ systemPrompt: 'test', tools: [{ description: 'x', parameters: {}, webhookUrl: 'x' } as never] })).toThrow("tools[0] missing required 'name'");
   });
 
-  it('agent() rejects tools without webhookUrl', () => {
+  it('agent() rejects tools without webhookUrl or handler', () => {
     const phone = new Patter({ mode: 'local', twilioSid: 'AC', twilioToken: 'x', openaiKey: 'sk', phoneNumber: '+1', webhookUrl: 'x' } as never);
-    expect(() => phone.agent({ systemPrompt: 'test', tools: [{ name: 'myTool', description: 'x', parameters: {} } as never] })).toThrow("tools[0] missing required 'webhookUrl'");
+    expect(() => phone.agent({ systemPrompt: 'test', tools: [{ name: 'myTool', description: 'x', parameters: {} } as never] })).toThrow("tools[0] requires either 'webhookUrl' or 'handler'");
   });
 
   it('constructor rejects local mode without phoneNumber', () => {
@@ -174,6 +174,48 @@ describe('Parameter Validation', () => {
   it('serve() rejects invalid port', async () => {
     const phone = new Patter({ mode: 'local', twilioSid: 'AC', twilioToken: 'x', openaiKey: 'sk', phoneNumber: '+1', webhookUrl: 'x' } as never);
     await expect(phone.serve({ agent: { systemPrompt: 'test' }, port: 99999 })).rejects.toThrow('port must be between 1 and 65535');
+  });
+});
+
+describe('Patter.tool()', () => {
+  it('creates tool with handler', () => {
+    const handler = async () => 'result';
+    const t = Patter.tool({ name: 'myTool', description: 'Does stuff', handler });
+    expect(t.name).toBe('myTool');
+    expect(t.description).toBe('Does stuff');
+    expect(t.handler).toBe(handler);
+    expect(t.webhookUrl).toBeUndefined();
+    expect(t.parameters).toEqual({ type: 'object', properties: {} });
+  });
+
+  it('creates tool with webhookUrl', () => {
+    const t = Patter.tool({ name: 'myTool', webhookUrl: 'https://example.com/hook' });
+    expect(t.name).toBe('myTool');
+    expect(t.webhookUrl).toBe('https://example.com/hook');
+    expect(t.handler).toBeUndefined();
+    expect(t.description).toBe('');
+  });
+
+  it('creates tool with custom parameters', () => {
+    const params = { type: 'object', properties: { query: { type: 'string' } } };
+    const t = Patter.tool({ name: 'search', parameters: params, webhookUrl: 'https://x.com' });
+    expect(t.parameters).toEqual(params);
+  });
+
+  it('throws without handler or webhookUrl', () => {
+    expect(() => Patter.tool({ name: 'broken' })).toThrow('tool() requires either handler or webhookUrl');
+  });
+
+  it('agent() accepts tools created with Patter.tool()', () => {
+    const phone = new Patter({ mode: 'local', twilioSid: 'AC', twilioToken: 'x', openaiKey: 'sk', phoneNumber: '+1', webhookUrl: 'x' } as never);
+    const agent = phone.agent({
+      systemPrompt: 'test',
+      tools: [
+        Patter.tool({ name: 'lookup', description: 'Look up data', handler: async () => '{}' }),
+      ],
+    });
+    expect(agent.tools).toHaveLength(1);
+    expect(agent.tools?.[0].name).toBe('lookup');
   });
 });
 

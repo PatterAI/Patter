@@ -1,4 +1,5 @@
 import WebSocket from 'ws';
+import { getLogger } from '../logger';
 
 export interface Transcript {
   readonly text: string;
@@ -13,6 +14,8 @@ const DEEPGRAM_WS_URL = 'wss://api.deepgram.com/v1/listen';
 export class DeepgramSTT {
   private ws: WebSocket | null = null;
   private callbacks: TranscriptCallback[] = [];
+  /** Request ID from Deepgram — used to query actual cost post-call. */
+  requestId: string = '';
 
   constructor(
     private readonly apiKey: string,
@@ -72,6 +75,11 @@ export class DeepgramSTT {
         return;
       }
 
+      if (data.type === 'Metadata' && (data as Record<string, unknown>).request_id) {
+        this.requestId = (data as Record<string, unknown>).request_id as string;
+        return;
+      }
+
       if (data.type !== 'Results') return;
 
       const alternatives = data.channel?.alternatives ?? [];
@@ -100,7 +108,7 @@ export class DeepgramSTT {
 
   onTranscript(callback: TranscriptCallback): void {
     if (this.callbacks.length >= 10) {
-      console.warn('[PATTER] DeepgramSTT: maximum of 10 onTranscript callbacks reached; replacing the last callback.');
+      getLogger().warn('DeepgramSTT: maximum of 10 onTranscript callbacks reached; replacing the last callback.');
       this.callbacks[this.callbacks.length - 1] = callback;
       return;
     }

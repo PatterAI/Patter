@@ -23,6 +23,7 @@ class DeepgramSTT(STTProvider):
         self.encoding = encoding
         self.sample_rate = sample_rate
         self._ws = None
+        self.request_id: str | None = None
 
     def __repr__(self) -> str:
         return f"DeepgramSTT(model={self.model!r}, language={self.language!r}, encoding={self.encoding!r})"
@@ -65,6 +66,10 @@ class DeepgramSTT(STTProvider):
     def _parse_message(self, raw_message: str) -> Transcript | None:
         data = json.loads(raw_message)
         msg_type = data.get("type", "")
+
+        if msg_type == "Metadata":
+            self.request_id = data.get("request_id")
+            return None
 
         if msg_type != "Results":
             return None

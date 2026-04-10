@@ -1,6 +1,7 @@
 import WebSocket from "ws";
 import type { IncomingMessage, MessageHandler, CallEventHandler } from "./types";
 import { PatterConnectionError } from "./errors";
+import { getLogger } from "./logger";
 
 const DEFAULT_BACKEND_URL = "wss://api.patter.dev";
 
@@ -52,7 +53,7 @@ export class PatterConnection {
     if (!this.ws) return;
 
     this.ws.on("error", (err) => {
-      console.error("[PATTER] WebSocket error:", err.message);
+      getLogger().error(`WebSocket error: ${err.message}`);
     });
 
     this.ws.on("message", async (data: WebSocket.Data) => {

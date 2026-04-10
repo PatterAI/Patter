@@ -1,4 +1,6 @@
 export { Patter } from "./client";
+export type { Logger } from "./logger";
+export { getLogger, setLogger } from "./logger";
 export type {
   IncomingMessage,
   STTConfig,
@@ -27,7 +29,20 @@ export {
   ProvisionError,
 } from "./errors";
 export { deepgram, whisper, elevenlabs, openaiTts } from "./providers";
+export { DEFAULT_PRICING, mergePricing, calculateSttCost, calculateTtsCost, calculateRealtimeCost, calculateTelephonyCost } from "./pricing";
+export type { ProviderPricing } from "./pricing";
+export { CallMetricsAccumulator } from "./metrics";
+export type { LatencyBreakdown, CostBreakdown, TurnMetrics, CallMetrics, CallControl } from "./metrics";
 export type { LocalConfig } from "./server";
+export { MetricsStore } from "./dashboard/store";
+export type { CallRecord, SSEEvent } from "./dashboard/store";
+export { makeAuthMiddleware } from "./dashboard/auth";
+export { callsToCsv, callsToJson } from "./dashboard/export";
+export { mountDashboard, mountApi } from "./dashboard/routes";
+export { LLMLoop, OpenAILLMProvider } from "./llm-loop";
+export type { LLMProvider, LLMChunk } from "./llm-loop";
+export { RemoteMessageHandler, isRemoteUrl, isWebSocketUrl } from "./remote-message";
+export { TestSession } from "./test-mode";
 export { ElevenLabsConvAIAdapter } from "./providers/elevenlabs-convai";
 export { OpenAIRealtimeAdapter } from "./providers/openai-realtime";
 export { DeepgramSTT } from "./providers/deepgram-stt";

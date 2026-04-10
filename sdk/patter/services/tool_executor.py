@@ -43,17 +43,64 @@ def _validate_webhook_url(url: str) -> None:
 
 
 class ToolExecutor:
-    """Executes agent tools by calling user webhooks with retry/fallback."""
+    """Executes agent tools via local handler or webhook with retry/fallback."""
 
     MAX_RETRIES = 2
     RETRY_DELAY = 0.5  # seconds
+
+    def __init__(self, client: httpx.AsyncClient | None = None) -> None:
+        self._client = client or httpx.AsyncClient(timeout=10.0)
+        self._owns_client = client is None
+
+    async def close(self) -> None:
+        """Close the underlying HTTP client if we own it."""
+        if self._owns_client:
+            await self._client.aclose()
 
     async def execute(
         self,
         tool_name: str,
         arguments: dict,
-        webhook_url: str,
         call_context: dict,
+        webhook_url: str = "",
+        handler: object = None,
+    ) -> str:
+        """Execute a tool and return the result as a JSON string.
+
+        If *handler* is provided, it is called directly (sync or async).
+        Otherwise, falls back to POSTing to *webhook_url*.
+        """
+        if handler is not None:
+            return await self._execute_handler(tool_name, arguments, call_context, handler)
+        if webhook_url:
+            return await self._execute_webhook(tool_name, arguments, call_context, webhook_url)
+        return json.dumps({"error": f"Tool '{tool_name}' has no handler or webhook_url", "fallback": True})
+
+    async def _execute_handler(
+        self,
+        tool_name: str,
+        arguments: dict,
+        call_context: dict,
+        handler: object,
+    ) -> str:
+        """Call a local Python function as a tool handler."""
+        try:
+            result = handler(arguments, call_context)
+            if asyncio.iscoroutine(result) or asyncio.isfuture(result):
+                result = await result
+            if isinstance(result, str):
+                return result
+            return json.dumps(result)
+        except Exception as e:
+            logger.error("Tool handler '%s' raised: %s", tool_name, e)
+            return json.dumps({"error": f"Tool handler error: {str(e)}", "fallback": True})
+
+    async def _execute_webhook(
+        self,
+        tool_name: str,
+        arguments: dict,
+        call_context: dict,
+        webhook_url: str,
     ) -> str:
         """POST to user webhook and return result as string for OpenAI.
 
@@ -63,26 +110,25 @@ class ToolExecutor:
         _validate_webhook_url(webhook_url)
         for attempt in range(self.MAX_RETRIES + 1):
             try:
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    response = await client.post(
-                        webhook_url,
-                        json={
-                            "tool": tool_name,
-                            "arguments": arguments,
-                            "call_id": call_context.get("call_id", ""),
-                            "caller": call_context.get("caller", ""),
-                            "callee": call_context.get("callee", ""),
-                            "attempt": attempt + 1,
-                        },
+                response = await self._client.post(
+                    webhook_url,
+                    json={
+                        "tool": tool_name,
+                        "arguments": arguments,
+                        "call_id": call_context.get("call_id", ""),
+                        "caller": call_context.get("caller", ""),
+                        "callee": call_context.get("callee", ""),
+                        "attempt": attempt + 1,
+                    },
+                )
+                response.raise_for_status()
+                content_length = len(response.content)
+                if content_length > _MAX_RESPONSE_BYTES:
+                    raise ValueError(
+                        f"Webhook response too large: {content_length} bytes "
+                        f"(max {_MAX_RESPONSE_BYTES})"
                     )
-                    response.raise_for_status()
-                    content_length = len(response.content)
-                    if content_length > _MAX_RESPONSE_BYTES:
-                        raise ValueError(
-                            f"Webhook response too large: {content_length} bytes "
-                            f"(max {_MAX_RESPONSE_BYTES})"
-                        )
-                    return json.dumps(response.json())
+                return json.dumps(response.json())
             except Exception as e:
                 if attempt < self.MAX_RETRIES:
                     logger.warning(

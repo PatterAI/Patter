@@ -1,0 +1,208 @@
+---
+title: "Agents"
+description: "Configure voice AI agents with system prompts, tools, providers, and guardrails."
+---
+
+# Agent Configuration
+
+An `Agent` defines how your voice AI behaves: what it says, how it sounds, what tools it can use, and what guardrails it follows.
+
+## Creating an Agent
+
+Use the `phone.agent()` factory method to create an agent in local mode:
+
+```python
+agent = phone.agent(
+    system_prompt="You are a customer support agent for Acme Corp.",
+    voice="alloy",
+    model="gpt-4o-mini-realtime-preview",
+    first_message="Hello! How can I help you today?",
+)
+```
+
+## Agent Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `system_prompt` | `str` | *required* | Instructions that define the agent's behavior and personality. |
+| `voice` | `str` | `"alloy"` | TTS voice name (e.g., `"alloy"`, `"echo"`, `"shimmer"`). |
+| `model` | `str` | `"gpt-4o-mini-realtime-preview"` | OpenAI Realtime model ID. |
+| `language` | `str` | `"en"` | BCP-47 language code (e.g., `"en"`, `"es"`, `"it"`). |
+| `first_message` | `str` | `""` | If set, the agent speaks this immediately when a call connects. |
+| `tools` | `list[dict] \| None` | `None` | List of tool definitions for function calling. See [Tools](/python-sdk/tools). |
+| `provider` | `str` | `"openai_realtime"` | Voice AI provider mode. One of `"openai_realtime"`, `"elevenlabs_convai"`, or `"pipeline"`. |
+| `stt` | `STTConfig \| None` | `None` | STT provider config for pipeline mode. Use `Patter.deepgram()` or `Patter.whisper()`. |
+| `tts` | `TTSConfig \| None` | `None` | TTS provider config for pipeline mode. Use `Patter.elevenlabs()` or `Patter.openai_tts()`. |
+| `variables` | `dict \| None` | `None` | Dynamic variable substitutions for `{placeholder}` patterns in the system prompt. |
+| `guardrails` | `list \| None` | `None` | Output guardrails created with `Patter.guardrail()`. See [Guardrails](/python-sdk/guardrails). |
+
+## Agent Dataclass
+
+The `Agent` is a frozen (immutable) dataclass. You can also import and construct it directly:
+
+```python
+from patter import Agent
+
+agent = Agent(
+    system_prompt="You are a helpful assistant.",
+    voice="echo",
+    language="es",
+)
+```
+
+<Note>
+  When using local mode, prefer `phone.agent()` over constructing `Agent` directly. The factory method validates that the required provider keys are configured.
+</Note>
+
+## System Prompt
+
+The `system_prompt` defines the agent's personality, instructions, and constraints:
+
+```python
+agent = phone.agent(
+    system_prompt="""You are a scheduling assistant for Dr. Smith's dental office.
+
+Rules:
+- Only book appointments Monday through Friday, 9am to 5pm.
+- Each appointment is 30 minutes.
+- Always confirm the patient's name and phone number.
+- If the patient has an emergency, transfer them to the front desk.
+""",
+)
+```
+
+## Dynamic Variables
+
+Use `{placeholder}` syntax in the system prompt to inject dynamic values at call start. Variable values are limited to 500 characters each.
+
+```python
+agent = phone.agent(
+    system_prompt="""You are a support agent for {company_name}.
+The customer's name is {customer_name} and their account ID is {account_id}.
+Greet them by name and help resolve their issue.""",
+    variables={
+        "company_name": "Acme Corp",
+        "customer_name": "Jane Doe",
+        "account_id": "ACC-12345",
+    },
+)
+```
+
+Variables are substituted before the prompt is sent to the AI model. This lets you personalize each call without creating a new agent.
+
+## First Message
+
+When `first_message` is set, the agent speaks it immediately when a call connects, before waiting for the caller to speak:
+
+```python
+agent = phone.agent(
+    system_prompt="You are a restaurant reservation assistant.",
+    first_message="Good evening! Thank you for calling Luigi's. Would you like to make a reservation?",
+)
+```
+
+If left empty, the agent waits for the caller to speak first.
+
+## Voice Selection
+
+The `voice` parameter controls the TTS voice. Available voices depend on the provider:
+
+<Tabs>
+  <Tab title="OpenAI Realtime">
+    `"alloy"`, `"echo"`, `"fable"`, `"onyx"`, `"nova"`, `"shimmer"`
+  </Tab>
+  <Tab title="ElevenLabs">
+    Use any ElevenLabs voice ID or name (e.g., `"rachel"`, `"adam"`).
+  </Tab>
+  <Tab title="Pipeline">
+    Depends on the TTS provider configured via `tts` parameter.
+  </Tab>
+</Tabs>
+
+## Provider Modes
+
+The `provider` parameter selects the voice AI architecture:
+
+```python
+# OpenAI Realtime (default) — end-to-end voice
+agent = phone.agent(
+    system_prompt="...",
+    provider="openai_realtime",
+)
+
+# ElevenLabs Conversational AI — natural voices
+agent = phone.agent(
+    system_prompt="...",
+    provider="elevenlabs_convai",
+)
+
+# Pipeline — custom STT + LLM + TTS
+agent = phone.agent(
+    system_prompt="...",
+    provider="pipeline",
+    stt=Patter.deepgram(api_key="dg_..."),
+    tts=Patter.elevenlabs(api_key="el_..."),
+)
+```
+
+See [Providers](/python-sdk/providers) for full details on each mode.
+
+## Complete Example
+
+```python
+import os
+import asyncio
+from dotenv import load_dotenv
+from patter import Patter
+
+load_dotenv()
+
+phone = Patter(
+    twilio_sid=os.environ["TWILIO_SID"],
+    twilio_token=os.environ["TWILIO_TOKEN"],
+    openai_key=os.environ["OPENAI_KEY"],
+    phone_number=os.environ["PHONE_NUMBER"],
+    webhook_url=os.environ["WEBHOOK_URL"],
+)
+
+agent = phone.agent(
+    system_prompt="""You are a booking assistant for {hotel_name}.
+Help guests check availability and make reservations.
+Be warm, professional, and concise.""",
+    voice="nova",
+    model="gpt-4o-mini-realtime-preview",
+    language="en",
+    first_message="Welcome to {hotel_name}! How can I assist you with your stay?",
+    variables={
+        "hotel_name": "The Grand Hotel",
+    },
+    tools=[
+        {
+            "name": "check_availability",
+            "description": "Check room availability for given dates",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "check_in": {"type": "string", "description": "Check-in date (YYYY-MM-DD)"},
+                    "check_out": {"type": "string", "description": "Check-out date (YYYY-MM-DD)"},
+                    "guests": {"type": "integer", "description": "Number of guests"},
+                },
+                "required": ["check_in", "check_out"],
+            },
+            "webhook_url": "https://api.example.com/availability",
+        },
+    ],
+    guardrails=[
+        Patter.guardrail(
+            name="No pricing promises",
+            blocked_terms=["discount", "free upgrade", "complimentary"],
+            replacement="I'd be happy to check our current rates for you.",
+        ),
+    ],
+)
+
+async def main():
+    await phone.serve(agent, port=8000)
+
+asyncio.run(main())
+```

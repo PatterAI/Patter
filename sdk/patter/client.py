@@ -96,8 +96,11 @@ class Patter:
         deepgram_key: str = "",
         phone_number: str = "",
         webhook_url: str = "",
+        # Cost tracking
+        pricing: dict | None = None,
     ) -> None:
         self._mode = mode
+        self._pricing = pricing
 
         if mode == "local" or (twilio_sid and not api_key) or (telnyx_key and not api_key):
             self._mode = "local"
@@ -386,8 +389,10 @@ class Patter:
                     )
                 if "name" not in tool:
                     raise ValueError(f"tools[{i}] missing required 'name' field.")
-                if "webhook_url" not in tool:
-                    raise ValueError(f"tools[{i}] missing required 'webhook_url' field.")
+                if "webhook_url" not in tool and "handler" not in tool:
+                    raise ValueError(
+                        f"tools[{i}] requires either 'webhook_url' or 'handler'."
+                    )
 
         if variables is not None and not isinstance(variables, dict):
             raise TypeError(
@@ -421,8 +426,11 @@ class Patter:
         on_call_start: Callable[[dict], Awaitable[None]] | None = None,
         on_call_end: Callable[[dict], Awaitable[None]] | None = None,
         on_transcript: Callable[[dict], Awaitable[None]] | None = None,
-        on_message: Callable[[dict], Awaitable[str]] | None = None,
+        on_message: Callable[[dict], Awaitable[str]] | str | None = None,
         voicemail_message: str = "",
+        on_metrics: Callable[[dict], Awaitable[None]] | None = None,
+        dashboard: bool = True,
+        dashboard_token: str = "",
     ) -> None:
         """Start the embedded server for inbound calls (local mode only).
 
@@ -440,6 +448,10 @@ class Patter:
             recording: When ``True``, record each call via the Twilio Recordings API.
             voicemail_message: If set, spoken as a voicemail message when AMD
                 detects a machine (requires machine_detection=True on call()).
+            dashboard: When ``True`` (default), serves a local metrics dashboard
+                at ``http://localhost:{port}/dashboard``.
+            dashboard_token: Optional bearer token for dashboard authentication.
+                When set, all dashboard routes require this token.
         """
         if self._mode != "local":
             raise PatterConnectionError(
@@ -468,12 +480,55 @@ class Patter:
             agent=agent,
             recording=recording,
             voicemail_message=voicemail_message,
+            pricing=self._pricing,
+            dashboard=dashboard,
+            dashboard_token=dashboard_token,
         )
         self._server.on_call_start = on_call_start
         self._server.on_call_end = on_call_end
         self._server.on_transcript = on_transcript
         self._server.on_message = on_message
+        self._server.on_metrics = on_metrics
         await self._server.start(port=port)
+
+    async def test(
+        self,
+        agent: Agent,
+        on_message: Callable[[dict], Awaitable[str]] | None = None,
+        on_call_start: Callable[[dict], Awaitable[None]] | None = None,
+        on_call_end: Callable[[dict], Awaitable[None]] | None = None,
+    ) -> None:
+        """Start an interactive terminal test session (local mode only).
+
+        Simulates a phone call without telephony, STT, or TTS — pure
+        text input/output.  When no ``on_message`` handler is provided and
+        an ``openai_key`` is configured, the built-in LLM loop is used.
+
+        Args:
+            agent: The ``Agent`` to test.
+            on_message: Optional message handler (same as ``serve()``).
+            on_call_start: Optional call start callback.
+            on_call_end: Optional call end callback.
+        """
+        if self._mode != "local":
+            raise PatterConnectionError(
+                "test() is only available in local mode."
+            )
+        if not isinstance(agent, Agent):
+            raise TypeError(
+                f"agent must be an Agent instance, got {type(agent).__name__}."
+            )
+
+        from patter.test_mode import TestSession
+
+        session = TestSession()
+        await session.run(
+            agent=agent,
+            openai_key=self._local_config.openai_key,
+            on_message=on_message,
+            on_call_start=on_call_start,
+            on_call_end=on_call_end,
+        )
 
     # === Agent Management ===
 
@@ -641,6 +696,55 @@ class Patter:
             "check": check,
             "replacement": replacement,
         }
+
+    @staticmethod
+    def tool(
+        name: str,
+        description: str = "",
+        parameters: dict | None = None,
+        handler: object = None,
+        webhook_url: str = "",
+    ) -> dict:
+        """Create a tool dict for use with ``agent(tools=[...])``.
+
+        Either *handler* (a Python callable) or *webhook_url* must be provided.
+
+        Args:
+            name: Tool name (visible to the LLM).
+            description: What the tool does (visible to the LLM).
+            parameters: JSON Schema for tool arguments.
+            handler: Async or sync callable ``(arguments: dict, context: dict) -> str | dict``.
+                Called directly in-process when the LLM invokes the tool.
+            webhook_url: URL to POST to when the LLM invokes the tool.
+                Mutually exclusive with *handler*.
+
+        Example::
+
+            phone.agent(
+                system_prompt="You are a pizza bot.",
+                provider="openai_realtime",
+                tools=[
+                    Patter.tool(
+                        name="check_menu",
+                        description="Check available menu items",
+                        parameters={"type": "object", "properties": {}},
+                        handler=check_menu_fn,
+                    ),
+                ],
+            )
+        """
+        if not handler and not webhook_url:
+            raise ValueError("tool() requires either handler or webhook_url.")
+        t: dict = {"name": name, "description": description}
+        if parameters:
+            t["parameters"] = parameters
+        else:
+            t["parameters"] = {"type": "object", "properties": {}}
+        if handler:
+            t["handler"] = handler
+        if webhook_url:
+            t["webhook_url"] = webhook_url
+        return t
 
     # === Internal ===
 

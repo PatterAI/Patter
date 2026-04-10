@@ -53,7 +53,10 @@ export interface ToolDefinition {
   name: string;
   description: string;
   parameters: Record<string, unknown>;
-  webhookUrl: string;
+  /** Webhook URL — called when the LLM invokes this tool. Mutually exclusive with handler. */
+  webhookUrl?: string;
+  /** Local handler function — when provided, called instead of webhookUrl. */
+  handler?: (args: Record<string, unknown>, context: Record<string, unknown>) => Promise<string>;
 }
 
 export interface CreateAgentOptions {
@@ -136,7 +139,7 @@ export interface AgentOptions {
   model?: string;
   language?: string;
   firstMessage?: string;
-  tools?: Array<{ name: string; description: string; parameters: Record<string, unknown>; webhookUrl: string }>;
+  tools?: ToolDefinition[];
   provider?: 'openai_realtime' | 'elevenlabs_convai' | 'pipeline';
   elevenlabsKey?: string;
   elevenlabsAgentId?: string;
@@ -159,12 +162,25 @@ export interface ServeOptions {
   onCallStart?: (data: Record<string, unknown>) => Promise<void>;
   onCallEnd?: (data: Record<string, unknown>) => Promise<void>;
   onTranscript?: (data: Record<string, unknown>) => Promise<void>;
-  /** Pipeline mode only — called with the user's transcript; return value is spoken. */
-  onMessage?: PipelineMessageHandler;
+  /** Pipeline mode only — called with the user's transcript; return value is spoken.
+   *  Can also be a URL string for remote webhook/WebSocket integration. */
+  onMessage?: PipelineMessageHandler | string;
+  /** Called after each turn with per-turn metrics. */
+  onMetrics?: (data: Record<string, unknown>) => Promise<void>;
   /** When true, record calls via the Twilio Recordings API. */
   recording?: boolean;
   /** If set, spoken as a voicemail message when AMD detects a machine. */
   voicemailMessage?: string;
+  /** Custom pricing overrides for cost calculation. */
+  pricing?: Record<string, Record<string, unknown>>;
+  /** When true (default), serve a dashboard UI at /dashboard. */
+  dashboard?: boolean;
+  /** Bearer token for dashboard/API authentication. */
+  dashboardToken?: string;
+  /** Path to SQLite database for dashboard persistence (not used in TS yet). */
+  dashboardDb?: string;
+  /** When true (default), persist dashboard data. */
+  dashboardPersist?: boolean;
 }
 
 export interface LocalCallOptions {

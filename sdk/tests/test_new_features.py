@@ -415,12 +415,9 @@ async def test_tool_executor_retries_on_failure():
     """ToolExecutor retries on failure up to MAX_RETRIES times."""
     from patter.services.tool_executor import ToolExecutor
 
-    executor = ToolExecutor()
     call_count = 0
 
     mock_client = AsyncMock()
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=False)
 
     async def fail_twice_then_succeed(*args, **kwargs):
         nonlocal call_count
@@ -434,14 +431,15 @@ async def test_tool_executor_retries_on_failure():
 
     mock_client.post = fail_twice_then_succeed
 
-    with patch("httpx.AsyncClient", return_value=mock_client):
-        with patch("asyncio.sleep", new_callable=AsyncMock):
-            result = await executor.execute(
-                tool_name="test_tool",
-                arguments={},
-                webhook_url="https://example.com/hook",
-                call_context={"call_id": "c1"},
-            )
+    executor = ToolExecutor(client=mock_client)
+
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        result = await executor.execute(
+            tool_name="test_tool",
+            arguments={},
+            webhook_url="https://example.com/hook",
+            call_context={"call_id": "c1"},
+        )
 
     parsed = json.loads(result)
     assert parsed == {"ok": True}
@@ -453,21 +451,18 @@ async def test_tool_executor_returns_error_after_max_retries():
     """ToolExecutor returns error JSON with fallback=True after all retries fail."""
     from patter.services.tool_executor import ToolExecutor
 
-    executor = ToolExecutor()
-
     mock_client = AsyncMock()
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=False)
     mock_client.post = AsyncMock(side_effect=Exception("persistent error"))
 
-    with patch("httpx.AsyncClient", return_value=mock_client):
-        with patch("asyncio.sleep", new_callable=AsyncMock):
-            result = await executor.execute(
-                tool_name="test_tool",
-                arguments={},
-                webhook_url="https://example.com/hook",
-                call_context={},
-            )
+    executor = ToolExecutor(client=mock_client)
+
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        result = await executor.execute(
+            tool_name="test_tool",
+            arguments={},
+            webhook_url="https://example.com/hook",
+            call_context={},
+        )
 
     parsed = json.loads(result)
     assert "error" in parsed
@@ -480,12 +475,9 @@ async def test_tool_executor_includes_attempt_number():
     """ToolExecutor includes attempt number in webhook payload."""
     from patter.services.tool_executor import ToolExecutor
 
-    executor = ToolExecutor()
     payloads: list[dict] = []
 
     mock_client = AsyncMock()
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=False)
 
     async def capture_payload(*args, **kwargs):
         payloads.append(kwargs.get("json", {}))
@@ -496,13 +488,14 @@ async def test_tool_executor_includes_attempt_number():
 
     mock_client.post = capture_payload
 
-    with patch("httpx.AsyncClient", return_value=mock_client):
-        await executor.execute(
-            tool_name="my_tool",
-            arguments={"x": 1},
-            webhook_url="https://example.com/hook",
-            call_context={"call_id": "c1"},
-        )
+    executor = ToolExecutor(client=mock_client)
+
+    await executor.execute(
+        tool_name="my_tool",
+        arguments={"x": 1},
+        webhook_url="https://example.com/hook",
+        call_context={"call_id": "c1"},
+    )
 
     assert len(payloads) == 1
     assert payloads[0]["attempt"] == 1
@@ -608,9 +601,12 @@ async def test_conversation_history_pipeline_tracks_user_messages():
         except asyncio.TimeoutError:
             pass
 
-    # History tracking is verified indirectly — pipeline mode fires callbacks with history key
-    # The key assertion here is that the handler completes without error and the signature is correct
-    assert True  # handler accepted on_message with history param
+    # The handler should have called on_message at least once if STT produced a
+    # transcript, or completed without error if the mocked providers returned
+    # None (causing an early exit).  Either way the bridge must not raise.
+    # When providers are mocked to None the bridge exits before invoking
+    # on_message, so we assert the bridge completed (no exception escaped).
+    assert ws.accept.called, "WebSocket accept should have been called"
 
 
 @pytest.mark.asyncio

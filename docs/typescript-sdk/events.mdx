@@ -1,0 +1,184 @@
+---
+title: "Events"
+description: "React to call lifecycle events with typed callbacks."
+---
+
+# Events
+
+Patter emits events at key moments during a call. Register callbacks in `serve()` or `connect()` to react to call starts, ends, transcripts, and messages.
+
+## Callback Overview
+
+| Callback | Trigger | Available In |
+|----------|---------|--------------|
+| `onCallStart` | When a call connects | `serve()`, `connect()` |
+| `onCallEnd` | When a call disconnects | `serve()`, `connect()` |
+| `onTranscript` | Each time a transcript segment arrives | `serve()` |
+| `onMessage` | User transcript ready for response (pipeline mode) | `serve()` |
+
+## onCallStart
+
+Fires when a new call connects. Use it for logging, CRM lookups, or initializing per-call state.
+
+```typescript
+await phone.serve({
+  agent,
+  onCallStart: async (data) => {
+    const callId = data.call_id as string;
+    const caller = data.caller as string;
+    const callee = data.callee as string;
+    const direction = data.direction as string;
+
+    console.log(`Call ${callId} from ${caller} to ${callee} (${direction})`);
+  },
+});
+```
+
+### Payload
+
+```typescript
+{
+  call_id: string;    // Unique call identifier
+  caller: string;     // Caller phone number (E.164)
+  callee: string;     // Callee phone number (E.164)
+  direction: string;  // "inbound" or "outbound"
+}
+```
+
+## onCallEnd
+
+Fires when a call disconnects. Includes the full conversation transcript.
+
+```typescript
+await phone.serve({
+  agent,
+  onCallEnd: async (data) => {
+    const callId = data.call_id as string;
+    const transcript = data.transcript as Array<{
+      role: string;
+      text: string;
+      timestamp: number;
+    }>;
+
+    console.log(`Call ${callId} ended with ${transcript.length} messages`);
+
+    // Save transcript to database
+    await saveTranscript(callId, transcript);
+  },
+});
+```
+
+### Payload
+
+```typescript
+{
+  call_id: string;
+  transcript: Array<{
+    role: string;       // "user" or "assistant"
+    text: string;       // Transcript text
+    timestamp: number;  // Unix timestamp (ms)
+  }>;
+}
+```
+
+<Info>
+  `onCallEnd` is guaranteed to fire exactly once per call, even if the WebSocket disconnects unexpectedly.
+</Info>
+
+## onTranscript
+
+Fires each time a transcript segment is generated during the call. Useful for real-time dashboards, live monitoring, or logging.
+
+```typescript
+await phone.serve({
+  agent,
+  onTranscript: async (data) => {
+    const role = data.role as string;
+    const text = data.text as string;
+    const callId = data.call_id as string;
+
+    console.log(`[${callId}] ${role}: ${text}`);
+  },
+});
+```
+
+### Payload
+
+```typescript
+{
+  role: string;     // "user" or "assistant"
+  text: string;     // Transcript segment
+  call_id: string;  // Call identifier
+}
+```
+
+## onMessage (Pipeline Mode)
+
+In pipeline mode, `onMessage` is the core callback. It receives the user's transcript and conversation history, and must return the text to be spoken by the TTS engine.
+
+```typescript
+await phone.serve({
+  agent,
+  onMessage: async (data) => {
+    const text = data.text as string;
+    const callId = data.call_id as string;
+    const caller = data.caller as string;
+    const history = data.history as Array<{
+      role: string;
+      text: string;
+      timestamp: number;
+    }>;
+
+    // Call your own LLM or business logic
+    const response = await generateResponse(text, history);
+    return response; // This text will be spoken via TTS
+  },
+});
+```
+
+### Payload
+
+```typescript
+{
+  text: string;       // User's transcript
+  call_id: string;    // Call identifier
+  caller: string;     // Caller phone number
+  history: Array<{    // Conversation history (max 200 entries)
+    role: string;
+    text: string;
+    timestamp: number;
+  }>;
+}
+```
+
+### Return Value
+
+The function must return a `string` that will be converted to speech. If you return an empty string, nothing is spoken.
+
+## Type Signatures
+
+```typescript
+type CallEventHandler = (data: Record<string, unknown>) => Promise<void>;
+type PipelineMessageHandler = (data: Record<string, unknown>) => Promise<string>;
+```
+
+## Combining Callbacks
+
+You can use all callbacks together:
+
+```typescript
+await phone.serve({
+  agent,
+  port: 8000,
+  onCallStart: async (data) => {
+    console.log("Call started:", data.call_id);
+  },
+  onCallEnd: async (data) => {
+    console.log("Call ended:", data.call_id);
+    await saveTranscript(data);
+  },
+  onTranscript: async (data) => {
+    await broadcastToWebSocket(data);
+  },
+});
+```

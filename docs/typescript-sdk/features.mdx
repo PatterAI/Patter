@@ -1,0 +1,181 @@
+---
+title: "Features"
+description: "Recording, AMD, DTMF, call transfer, barge-in, variables, and conversation history."
+---
+
+# Features
+
+Advanced capabilities available in the Patter TypeScript SDK.
+
+## Call Recording
+
+Enable call recording via the Twilio Recordings API. Recordings are stored in your Twilio account.
+
+```typescript
+await phone.serve({
+  agent,
+  recording: true,
+  onCallEnd: async (data) => {
+    console.log("Recording available in your Twilio console");
+  },
+});
+```
+
+<Warning>
+  Recording is only available with Twilio. Telnyx recording is not yet supported.
+</Warning>
+
+The SDK sets up a `/webhooks/twilio/recording` endpoint to receive recording status callbacks. Recording URLs are logged to the console when they become available.
+
+## Answering Machine Detection (AMD)
+
+Detect voicemail systems on outbound calls and optionally leave a message. AMD is available with Twilio only.
+
+```typescript
+await phone.call({
+  to: "+15559876543",
+  agent,
+  machineDetection: true,
+  voicemailMessage: "Hi, this is Acme Corp calling about your appointment tomorrow. Please call us back at 555-000-1234.",
+});
+```
+
+When AMD detects a machine (after the beep or after silence), the SDK automatically:
+1. Plays the `voicemailMessage` as TwiML
+2. Hangs up the call
+
+If no `voicemailMessage` is set, the call proceeds normally even when a machine is detected.
+
+## DTMF Input
+
+Keypad presses (DTMF tones) during a call are automatically forwarded to the AI agent as text in the format `[DTMF: N]`, where `N` is the digit pressed (0-9, *, #).
+
+```
+User presses "1" → Agent receives: [DTMF: 1]
+User presses "#" → Agent receives: [DTMF: #]
+```
+
+No additional configuration is needed. The AI agent's system prompt can include instructions on how to handle DTMF input:
+
+```typescript
+const agent = phone.agent({
+  systemPrompt: `You are an IVR system. When the user presses:
+- 1: Transfer to sales
+- 2: Transfer to support  
+- 0: Transfer to operator
+Respond to [DTMF: N] inputs accordingly.`,
+});
+```
+
+## Call Transfer
+
+The `transfer_call` system tool is automatically available to every agent. The AI model invokes it when the caller asks to speak to a human.
+
+```typescript
+const agent = phone.agent({
+  systemPrompt: `You are a front desk assistant. If the caller wants to speak to a human, transfer them to +15559876543.`,
+});
+```
+
+When the transfer tool is invoked, the SDK uses the Twilio REST API to redirect the active call to the target number.
+
+## Barge-In
+
+Patter supports barge-in — the caller can interrupt the AI agent while it is speaking. The SDK uses mark-based audio tracking to detect when the caller starts speaking during AI playback.
+
+When barge-in occurs:
+1. The current TTS audio is immediately stopped
+2. The caller's speech is processed normally
+3. The AI generates a new response
+
+No configuration is needed. Barge-in is always active.
+
+## Dynamic Variables
+
+Use `{placeholder}` syntax in system prompts for per-call customization:
+
+```typescript
+const agent = phone.agent({
+  systemPrompt: "You are a support agent for {company}. The caller is {caller_name} with account {account_id}.",
+  variables: {
+    company: "Acme Corp",
+    caller_name: "Default",
+    account_id: "unknown",
+  },
+});
+```
+
+### Per-Call Variable Override
+
+Override agent-level variables for individual outbound calls:
+
+```typescript
+await phone.call({
+  to: "+15559876543",
+  agent,
+  variables: {
+    caller_name: "Jane Smith",
+    account_id: "ACC-12345",
+  },
+});
+```
+
+Call-level variables are merged with agent-level variables, with call-level taking precedence.
+
+<Info>
+  Variables are sanitized before substitution. Keys like `__proto__`, `constructor`, and `prototype` are stripped to prevent prototype pollution.
+</Info>
+
+## Conversation History
+
+Every call maintains a conversation history that accumulates throughout the call. The history is:
+
+- Passed to `onMessage` callbacks as `data.history`
+- Included in `onCallEnd` as `data.transcript`
+- Capped at **200 entries** per call (oldest entries are dropped when the limit is reached)
+
+Each entry contains:
+
+```typescript
+{
+  role: string;       // "user" or "assistant"
+  text: string;       // Transcript text
+  timestamp: number;  // Unix timestamp (ms)
+}
+```
+
+## AI Disclosure
+
+An AI disclosure message is automatically played at the start of every call. This is non-optional and ensures compliance with regulations requiring callers to be informed they are speaking with an AI.
+
+## Outbound Calls
+
+Make outbound calls in local mode:
+
+```typescript
+// Twilio
+await phone.call({
+  to: "+15559876543",
+  agent,
+});
+
+// With AMD and voicemail
+await phone.call({
+  to: "+15559876543",
+  agent,
+  machineDetection: true,
+  voicemailMessage: "Please call us back.",
+});
+```
+
+### LocalCallOptions
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `to` | `string` | Yes | — | Destination phone number (E.164 format). |
+| `agent` | `AgentOptions` | Yes | — | Agent configuration for the call. |
+| `machineDetection` | `boolean` | No | `false` | Enable AMD (Twilio only). |
+| `voicemailMessage` | `string` | No | — | Message to leave on voicemail. Requires `machineDetection: true`. |
+| `variables` | `Record<string, string>` | No | — | Per-call variable overrides merged into `agent.variables`. |
+
+The `to` parameter must be in E.164 format (e.g., `+15559876543`). The SDK validates this and throws if the format is invalid.

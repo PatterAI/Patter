@@ -1,0 +1,227 @@
+---
+title: "Advanced Features"
+description: "Recording, AMD, DTMF, call transfer, barge-in, and more."
+---
+
+# Advanced Features
+
+Patter includes production-ready features for handling real-world telephony scenarios.
+
+## Call Recording
+
+Enable recording on a per-call basis by passing `recording=True` to `serve()`. Recordings are created via the Twilio Recordings API.
+
+```python
+await phone.serve(agent, port=8000, recording=True)
+```
+
+<Note>
+  Call recording is available in local mode with Twilio. Recordings are managed through the Twilio Recordings API and stored in your Twilio account.
+</Note>
+
+### Accessing Recordings
+
+Use the Twilio API to list and download recordings:
+
+```python
+from twilio.rest import Client
+
+client = Client(account_sid, auth_token)
+recordings = client.recordings.list(limit=20)
+for record in recordings:
+    print(record.sid, record.duration)
+```
+
+---
+
+## Answering Machine Detection (AMD)
+
+Detect whether a human or machine answered an outbound call. When a machine is detected, optionally leave a voicemail message and hang up.
+
+```python
+# Enable AMD on outbound calls
+await phone.call(
+    to="+15550009876",
+    agent=agent,
+    machine_detection=True,
+    voicemail_message="Hi, this is Acme Corp calling about your appointment. Please call us back at 555-000-1234.",
+)
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `machine_detection` | `bool` | `False` | Enable answering machine detection. |
+| `voicemail_message` | `str` | `""` | Message to speak when a machine is detected. If empty, the call hangs up silently. |
+
+### How It Works
+
+1. Patter initiates the outbound call with AMD enabled.
+2. The telephony provider analyzes the audio to determine if a human or machine answered.
+3. **Human detected**: The call proceeds normally with the agent.
+4. **Machine detected**: If `voicemail_message` is set, it is spoken and the call ends. Otherwise, the call is disconnected.
+
+You can also set `voicemail_message` on `serve()` for use with any outbound call made during the server's lifetime:
+
+```python
+await phone.serve(
+    agent,
+    port=8000,
+    voicemail_message="Hi, please call us back at your earliest convenience.",
+)
+```
+
+---
+
+## DTMF Input
+
+Keypad presses (DTMF tones) during a call are captured and forwarded to the AI agent as natural language text in the format `[DTMF: N]`, where `N` is the key pressed (0-9, *, #).
+
+```
+User presses: 1
+Agent receives: "[DTMF: 1]"
+
+User presses: #
+Agent receives: "[DTMF: #]"
+```
+
+No configuration is required. DTMF input is automatically handled and sent to the AI as part of the conversation transcript. The AI can interpret keypresses based on its system prompt:
+
+```python
+agent = phone.agent(
+    system_prompt="""You are an automated phone menu.
+When the caller presses 1, transfer to sales.
+When the caller presses 2, transfer to support.
+When the caller presses 0, transfer to a human operator.""",
+)
+```
+
+---
+
+## Call Transfer
+
+Patter automatically injects a `transfer_call` system tool into every agent. The AI decides when to transfer based on the conversation context and system prompt instructions.
+
+```python
+agent = phone.agent(
+    system_prompt="""You are a front desk receptionist.
+If the caller asks about billing, transfer them to +15550001111.
+If the caller asks about technical support, transfer them to +15550002222.
+If the caller asks to speak to a manager, transfer them to +15550003333.""",
+)
+```
+
+The transfer is executed via the Twilio API as a redirect. The caller hears hold music briefly while the transfer completes.
+
+<Note>
+  You do not need to define `transfer_call` as a tool. It is injected automatically by Patter.
+</Note>
+
+---
+
+## Barge-In (Interruption Handling)
+
+Patter uses mark-based tracking for precise interruption handling. When a caller speaks while the agent is talking, the system:
+
+1. Detects the interruption via audio marks sent by the telephony provider.
+2. Stops the current TTS playback at the exact point of interruption.
+3. Processes the caller's new input immediately.
+
+This creates a natural conversational experience where the caller can interrupt the agent mid-sentence, just like a real phone call.
+
+No configuration is required. Barge-in is always enabled.
+
+---
+
+## AI Disclosure
+
+Patter automatically plays an AI disclosure message at the start of every call. This is a non-optional feature that ensures compliance with regulations requiring disclosure that the caller is speaking with an AI.
+
+The disclosure plays before the agent's `first_message` (if set) or before the agent begins listening.
+
+<Warning>
+  The AI disclosure message cannot be disabled. This is by design to ensure legal compliance across jurisdictions.
+</Warning>
+
+---
+
+## Conversation History
+
+All callbacks receive the full conversation history as `data.history`. Each entry includes the speaker role, text content, and timestamp:
+
+```python
+async def on_transcript(event):
+    history = event.get("history", [])
+    for entry in history:
+        print(f"[{entry['timestamp']}] {entry['role']}: {entry['text']}")
+```
+
+### History Entry Format
+
+```python
+{
+    "role": "user",       # or "assistant"
+    "text": "Hello!",
+    "timestamp": "2025-03-15T10:00:01Z"
+}
+```
+
+History is available in `on_transcript`, `on_message`, and `on_call_end` callbacks.
+
+---
+
+## Complete Example
+
+```python
+import os
+import asyncio
+from dotenv import load_dotenv
+from patter import Patter
+
+load_dotenv()
+
+phone = Patter(
+    twilio_sid=os.environ["TWILIO_SID"],
+    twilio_token=os.environ["TWILIO_TOKEN"],
+    openai_key=os.environ["OPENAI_KEY"],
+    phone_number=os.environ["PHONE_NUMBER"],
+    webhook_url=os.environ["WEBHOOK_URL"],
+)
+
+agent = phone.agent(
+    system_prompt="""You are an appointment reminder bot for Dr. Smith's office.
+
+Behavior:
+- Confirm the patient's identity by name and date of birth.
+- Remind them of their upcoming appointment.
+- If they want to reschedule, transfer to the front desk at +15550001111.
+- If they press 1, confirm the appointment.
+- If they press 2, cancel the appointment.
+
+Be concise and professional.""",
+    voice="nova",
+    first_message="Hello! This is Dr. Smith's office calling with an appointment reminder.",
+    variables={
+        "patient_name": "Jane Doe",
+        "appointment_date": "March 20th at 2:00 PM",
+    },
+)
+
+async def on_call_start(event):
+    print(f"Calling {event['callee']} for appointment reminder")
+
+async def on_call_end(event):
+    transcript = event["transcript"]
+    # Save transcript to your database
+    print(f"Call complete. {len(transcript)} messages exchanged.")
+
+async def main():
+    await phone.serve(
+        agent,
+        port=8000,
+        recording=True,
+        on_call_start=on_call_start,
+        on_call_end=on_call_end,
+    )
+
+asyncio.run(main())
+```
