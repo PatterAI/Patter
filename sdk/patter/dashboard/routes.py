@@ -12,13 +12,13 @@ def mount_dashboard(app, store: MetricsStore, token: str = "") -> None:
     """Add dashboard routes to an existing FastAPI app.
 
     Mounts:
-      - ``GET /dashboard`` — the web UI
-      - ``GET /dashboard/api/calls`` — call list JSON
-      - ``GET /dashboard/api/calls/{call_id}`` — single call JSON
-      - ``GET /dashboard/api/active`` — active calls JSON
-      - ``GET /dashboard/api/aggregates`` — aggregate stats JSON
-      - ``GET /dashboard/api/events`` — SSE event stream
-      - ``GET /dashboard/api/export/calls`` — CSV/JSON export
+      - ``GET /`` — the web UI
+      - ``GET /api/dashboard/calls`` — call list JSON
+      - ``GET /api/dashboard/calls/{call_id}`` — single call JSON
+      - ``GET /api/dashboard/active`` — active calls JSON
+      - ``GET /api/dashboard/aggregates`` — aggregate stats JSON
+      - ``GET /api/dashboard/events`` — SSE event stream
+      - ``GET /api/dashboard/export/calls`` — CSV/JSON export
 
     Args:
         app: The FastAPI application instance.
@@ -33,13 +33,13 @@ def mount_dashboard(app, store: MetricsStore, token: str = "") -> None:
 
     auth = make_auth_dependency(token=token)
 
-    @app.get("/dashboard", response_class=HTMLResponse)
+    @app.get("/", response_class=HTMLResponse)
     async def dashboard_ui(_=Depends(auth)):
         from patter.dashboard.ui import DASHBOARD_HTML
 
         return HTMLResponse(content=DASHBOARD_HTML)
 
-    @app.get("/dashboard/api/calls", dependencies=[Depends(auth)])
+    @app.get("/api/dashboard/calls", dependencies=[Depends(auth)])
     async def dashboard_calls(request: Request):
         try:
             limit = min(int(request.query_params.get("limit", "50")), 1000)
@@ -51,24 +51,24 @@ def mount_dashboard(app, store: MetricsStore, token: str = "") -> None:
             offset = 0
         return JSONResponse(content=store.get_calls(limit=limit, offset=offset))
 
-    @app.get("/dashboard/api/calls/{call_id}")
+    @app.get("/api/dashboard/calls/{call_id}")
     async def dashboard_call_detail(call_id: str, _=Depends(auth)):
         call = store.get_call(call_id)
         if call is None:
             return JSONResponse(content={"error": "Not found"}, status_code=404)
         return JSONResponse(content=call)
 
-    @app.get("/dashboard/api/active")
+    @app.get("/api/dashboard/active")
     async def dashboard_active(_=Depends(auth)):
         return JSONResponse(content=store.get_active_calls())
 
-    @app.get("/dashboard/api/aggregates")
+    @app.get("/api/dashboard/aggregates")
     async def dashboard_aggregates(_=Depends(auth)):
         return JSONResponse(content=store.get_aggregates())
 
     # --- SSE endpoint ---
 
-    @app.get("/dashboard/api/events")
+    @app.get("/api/dashboard/events")
     async def dashboard_sse(_=Depends(auth)):
         queue = store.subscribe()
 
@@ -94,7 +94,7 @@ def mount_dashboard(app, store: MetricsStore, token: str = "") -> None:
 
     # --- Export endpoint ---
 
-    @app.get("/dashboard/api/export/calls", dependencies=[Depends(auth)])
+    @app.get("/api/dashboard/export/calls", dependencies=[Depends(auth)])
     async def dashboard_export_calls(request: Request):
         fmt = request.query_params.get("format", "json")
         from_date = request.query_params.get("from", "")

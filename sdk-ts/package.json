@@ -1,7 +1,7 @@
 {
   "name": "patter",
   "version": "0.3.0",
-  "description": "Connect AI agents to phone numbers with ~10 lines of code",
+  "description": "Connect AI agents to phone numbers with 10 lines of code",
   "license": "MIT",
   "author": {
     "name": "Nicolò Tognoni",

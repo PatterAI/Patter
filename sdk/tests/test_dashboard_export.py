@@ -91,7 +91,7 @@ async def test_export_endpoint_csv():
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"
     ) as client:
-        r = await client.get("/dashboard/api/export/calls?format=csv")
+        r = await client.get("/api/dashboard/export/calls?format=csv")
         assert r.status_code == 200
         assert "text/csv" in r.headers["content-type"]
         assert "x1" in r.text
@@ -115,7 +115,7 @@ async def test_export_endpoint_json():
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"
     ) as client:
-        r = await client.get("/dashboard/api/export/calls?format=json")
+        r = await client.get("/api/dashboard/export/calls?format=json")
         assert r.status_code == 200
         data = json.loads(r.text)
         assert len(data) == 1
