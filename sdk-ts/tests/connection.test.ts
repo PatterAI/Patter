@@ -3,13 +3,13 @@ import { PatterConnection } from "../src/connection";
 
 describe("PatterConnection", () => {
   it("builds correct WebSocket URL", () => {
-    const conn = new PatterConnection("pt_test", "wss://api.patter.dev");
-    expect(conn["wsUrl"]).toBe("wss://api.patter.dev/ws/sdk");
+    const conn = new PatterConnection("pt_test", "wss://api.getpatter.com");
+    expect(conn["wsUrl"]).toBe("wss://api.getpatter.com/ws/sdk");
   });
 
   it("strips trailing slashes from backend URL", () => {
-    const conn = new PatterConnection("pt_test", "wss://api.patter.dev/");
-    expect(conn["wsUrl"]).toBe("wss://api.patter.dev/ws/sdk");
+    const conn = new PatterConnection("pt_test", "wss://api.getpatter.com/");
+    expect(conn["wsUrl"]).toBe("wss://api.getpatter.com/ws/sdk");
   });
 
   it("isConnected is false when not connected", () => {

@@ -52,7 +52,7 @@ asyncio.run(main())
 <summary><strong>TypeScript</strong></summary>
 
 ```typescript
-import { Patter } from "patter";
+import { Patter } from "getpatter";
 
 const phone = new Patter({ apiKey: "pt_xxx" });
 
@@ -104,7 +104,7 @@ asyncio.run(main())
 <summary><strong>TypeScript</strong></summary>
 
 ```typescript
-import { Patter } from "patter";
+import { Patter } from "getpatter";
 
 const phone = new Patter({
   mode: "local",
@@ -132,7 +132,7 @@ await phone.serve({ agent, port: 8000 });
 |---|---|---|
 | **Setup** | Patter API key only | Twilio/Telnyx + OpenAI keys |
 | **Infrastructure** | Managed by Patter | Runs in your process |
-| **Backend** | `wss://api.patter.dev` | Built-in (FastAPI / Express) |
+| **Backend** | `wss://api.getpatter.com` | Built-in (FastAPI / Express) |
 | **Webhook** | Configured automatically | Requires public URL (e.g. ngrok) |
 | **Voice modes** | All three | All three |
 | **Best for** | Production, multi-tenant | Development, on-prem, full control |
@@ -163,7 +163,7 @@ await phone.serve({ agent, port: 8000 });
 - Custom parameters passthrough via TwiML
 
 ### Developer Experience
-- `pip install patter` / `npm install patter`
+- `pip install patter` / `npm install getpatter`
 - 10 lines of code to connect an agent to a phone
 - Local mode (embedded, no backend) + Cloud mode
 - Python + TypeScript SDKs with full parity
@@ -249,7 +249,7 @@ The audio path: **Phone → Telephony → WebSocket → Backend → STT → your
 pip install patter
 
 # TypeScript / Node.js
-npm install patter
+npm install getpatter
 ```
 
 ## Documentation
@@ -286,7 +286,7 @@ asyncio.run(main())
 <summary><strong>TypeScript</strong></summary>
 
 ```typescript
-import { Patter } from "patter";
+import { Patter } from "getpatter";
 
 const phone = new Patter({ apiKey: "pt_xxx" });
 
@@ -335,7 +335,7 @@ asyncio.run(main())
 <summary><strong>TypeScript</strong></summary>
 
 ```typescript
-import { Patter } from "patter";
+import { Patter } from "getpatter";
 
 const phone = new Patter({ apiKey: "pt_xxx" });
 
@@ -651,7 +651,7 @@ See `backend/.env.example` for the full list.
 
 | Method | Description |
 |---|---|
-| `Patter(api_key, backend_url?, rest_url?)` | Create client. `backend_url` defaults to `wss://api.patter.dev`. |
+| `Patter(api_key, backend_url?, rest_url?)` | Create client. `backend_url` defaults to `wss://api.getpatter.com`. |
 | `connect(on_message, ...)` | Connect and start receiving calls. Blocks until disconnected. |
 | `call(to, first_message?, machine_detection?, voicemail_message?, ...)` | Place an outbound call. |
 | `disconnect()` | Gracefully close the connection. |

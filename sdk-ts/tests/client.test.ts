@@ -10,8 +10,8 @@ describe("Patter", () => {
 
   it("uses default URLs", () => {
     const phone = new Patter({ apiKey: "pt_test" });
-    expect(phone["backendUrl"]).toBe("wss://api.patter.dev");
-    expect(phone["restUrl"]).toBe("https://api.patter.dev");
+    expect(phone["backendUrl"]).toBe("wss://api.getpatter.com");
+    expect(phone["restUrl"]).toBe("https://api.getpatter.com");
   });
 
   it("accepts custom URLs", () => {

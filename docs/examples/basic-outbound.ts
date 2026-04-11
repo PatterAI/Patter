@@ -5,11 +5,11 @@
  * Replace the API key and destination number before running.
  *
  * Usage:
- *   npm install patter
+ *   npm install getpatter
  *   npx ts-node basic-outbound.ts
  */
 
-import { Patter, IncomingMessage } from "patter";
+import { Patter, IncomingMessage } from "getpatter";
 
 const DESTINATION = "+14155551234"; // Replace with a real number
 const API_KEY = "pt_your_api_key_here";

@@ -15,7 +15,7 @@
  *   npx ts-node call_transfer.ts
  */
 
-import { Patter } from "patter";
+import { Patter } from "getpatter";
 import dotenv from "dotenv";
 
 dotenv.config();

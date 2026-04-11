@@ -17,7 +17,7 @@ This guide walks you through setting up a voice AI agent in local mode using Twi
 ## Step 1: Install the SDK
 
 ```bash
-npm install patter
+npm install getpatter
 ```
 
 ## Step 2: Set Up Your Tunnel
@@ -47,7 +47,7 @@ WEBHOOK_URL=abc123.ngrok.io
 Create `index.ts`:
 
 ```typescript
-import { Patter } from "patter";
+import { Patter } from "getpatter";
 
 const phone = new Patter({
   mode: "local",

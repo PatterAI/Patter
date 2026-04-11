@@ -25,7 +25,7 @@
  *   npx ts-node dashboard_monitoring.ts
  */
 
-import { Patter } from "patter";
+import { Patter } from "getpatter";
 import dotenv from "dotenv";
 
 dotenv.config();

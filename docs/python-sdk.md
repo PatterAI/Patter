@@ -34,8 +34,8 @@ asyncio.run(main())
 ```python
 Patter(
     api_key: str,
-    backend_url: str = "wss://api.patter.dev",
-    rest_url: str = "https://api.patter.dev",
+    backend_url: str = "wss://api.getpatter.com",
+    rest_url: str = "https://api.getpatter.com",
 )
 ```
 

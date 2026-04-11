@@ -4,7 +4,7 @@
  * Placeholders in curly braces are replaced before the call starts.
  * Pass different variables per call to personalise at scale.
  */
-import { Patter } from "patter";
+import { Patter } from "getpatter";
 
 async function main() {
   const phone = new Patter({

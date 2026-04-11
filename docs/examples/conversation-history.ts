@@ -4,7 +4,7 @@
  * on_transcript fires after every turn with the latest text and full history.
  * on_call_end fires when the call finishes with the complete transcript.
  */
-import { Patter } from "patter";
+import { Patter } from "getpatter";
 
 interface TranscriptEntry {
   role: "user" | "assistant";

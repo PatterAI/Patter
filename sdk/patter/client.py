@@ -44,8 +44,8 @@ from patter.providers import (
     openai_tts as _openai_tts,
 )
 
-DEFAULT_BACKEND_URL = "wss://api.patter.dev"
-DEFAULT_REST_URL = "https://api.patter.dev"
+DEFAULT_BACKEND_URL = "wss://api.getpatter.com"
+DEFAULT_REST_URL = "https://api.getpatter.com"
 
 
 class Patter:
