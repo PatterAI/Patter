@@ -3,7 +3,7 @@ import type { IncomingMessage, MessageHandler, CallEventHandler } from "./types"
 import { PatterConnectionError } from "./errors";
 import { getLogger } from "./logger";
 
-const DEFAULT_BACKEND_URL = "wss://api.patter.dev";
+const DEFAULT_BACKEND_URL = "wss://api.getpatter.com";
 
 export class PatterConnection {
   readonly apiKey: string;

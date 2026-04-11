@@ -18,12 +18,12 @@
   "topbarLinks": [
     {
       "name": "Website",
-      "url": "https://patter.dev"
+      "url": "https://www.getpatter.com"
     }
   ],
   "topbarCtaButton": {
     "name": "GitHub",
-    "url": "https://github.com/patter-dev/patter"
+    "url": "https://github.com/PatterAI/Patter"
   },
   "tabs": [
     {
@@ -43,7 +43,7 @@
     {
       "name": "GitHub",
       "icon": "github",
-      "url": "https://github.com/patter-dev/patter"
+      "url": "https://github.com/PatterAI/Patter"
     },
     {
       "name": "Discord",

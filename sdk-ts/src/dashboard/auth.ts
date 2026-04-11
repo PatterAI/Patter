@@ -7,6 +7,12 @@
  */
 
 import type { Request, Response, NextFunction } from 'express';
+import crypto from 'node:crypto';
+
+function timingSafeCompare(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
+}
 
 export function makeAuthMiddleware(token: string = '') {
   return (req: Request, res: Response, next: NextFunction): void => {
@@ -15,15 +21,17 @@ export function makeAuthMiddleware(token: string = '') {
       return;
     }
 
-    // Check Authorization header
+    // Check Authorization header (timing-safe)
     const auth = req.headers.authorization || '';
-    if (auth === `Bearer ${token}`) {
+    const expected = `Bearer ${token}`;
+    if (auth.length === expected.length && timingSafeCompare(auth, expected)) {
       next();
       return;
     }
 
-    // Check query param (for browser access)
-    if (req.query.token === token) {
+    // Check query param (timing-safe)
+    const queryToken = String(req.query.token ?? '');
+    if (queryToken.length === token.length && timingSafeCompare(queryToken, token)) {
       next();
       return;
     }

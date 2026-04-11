@@ -6,7 +6,7 @@
  * the result back into the conversation.
  */
 import { createServer } from "http";
-import { Patter } from "patter";
+import { Patter } from "getpatter";
 
 // Mock inventory webhook — replace with your real endpoint
 const toolServer = createServer((req, res) => {

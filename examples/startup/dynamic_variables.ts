@@ -14,7 +14,7 @@
  *   npx tsx dynamic_variables.ts
  */
 
-import { Patter } from "patter";
+import { Patter } from "getpatter";
 import dotenv from "dotenv";
 
 dotenv.config();

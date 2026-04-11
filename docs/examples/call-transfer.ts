@@ -4,7 +4,7 @@
  * The transfer_call tool is automatically available on every agent.
  * The agent decides when to use it based on the system prompt.
  */
-import { Patter } from "patter";
+import { Patter } from "getpatter";
 
 async function main() {
   const phone = new Patter({

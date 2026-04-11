@@ -14,7 +14,7 @@
  *   npx ts-node basic_outbound.ts
  */
 
-import { Patter } from "patter";
+import { Patter } from "getpatter";
 import dotenv from "dotenv";
 
 dotenv.config();

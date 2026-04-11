@@ -16,7 +16,7 @@
  *   npx ts-node guardrails.ts
  */
 
-import { Patter } from "patter";
+import { Patter } from "getpatter";
 import dotenv from "dotenv";
 
 dotenv.config();

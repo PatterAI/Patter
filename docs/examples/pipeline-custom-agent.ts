@@ -4,7 +4,7 @@
  * Bring your own LLM (Claude, GPT, LangChain, or custom logic).
  * Patter handles STT, TTS, and telephony; your function handles the brain.
  */
-import { Patter } from "patter";
+import { Patter } from "getpatter";
 
 interface TurnData {
   text: string;

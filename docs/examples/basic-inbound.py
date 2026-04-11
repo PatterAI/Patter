@@ -2,7 +2,7 @@
 Basic inbound call handler.
 
 The AI answers incoming calls and responds to what the caller says.
-Replace the API key with your own from https://api.patter.dev.
+Replace the API key with your own from https://www.getpatter.com.
 
 Usage:
     pip install patter

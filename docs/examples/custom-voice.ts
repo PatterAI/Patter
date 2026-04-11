@@ -9,11 +9,11 @@
  * Requires a running Patter backend (see docs/self-hosting.md).
  *
  * Usage:
- *   npm install patter
+ *   npm install getpatter
  *   npx ts-node custom-voice.ts
  */
 
-import { Patter, IncomingMessage } from "patter";
+import { Patter, IncomingMessage } from "getpatter";
 
 // Configuration — use environment variables in production
 const PATTER_API_KEY = process.env.PATTER_API_KEY ?? "pt_your_api_key_here";

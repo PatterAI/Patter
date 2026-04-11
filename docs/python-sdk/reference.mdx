@@ -16,8 +16,8 @@ The main SDK client class.
 ```python
 Patter(
     api_key: str = "",
-    backend_url: str = "wss://api.patter.dev",
-    rest_url: str = "https://api.patter.dev",
+    backend_url: str = "wss://api.getpatter.com",
+    rest_url: str = "https://api.getpatter.com",
     mode: str = "cloud",
     twilio_sid: str = "",
     twilio_token: str = "",
@@ -35,8 +35,8 @@ Patter(
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `api_key` | `str` | `""` | Patter API key (`pt_...`). Required for cloud mode. |
-| `backend_url` | `str` | `"wss://api.patter.dev"` | WebSocket URL for the backend. |
-| `rest_url` | `str` | `"https://api.patter.dev"` | REST API URL. |
+| `backend_url` | `str` | `"wss://api.getpatter.com"` | WebSocket URL for the backend. |
+| `rest_url` | `str` | `"https://api.getpatter.com"` | REST API URL. |
 | `mode` | `str` | `"cloud"` | `"cloud"` or `"local"`. Auto-detected when provider keys given without `api_key`. |
 | `twilio_sid` | `str` | `""` | Twilio Account SID. |
 | `twilio_token` | `str` | `""` | Twilio Auth Token. |

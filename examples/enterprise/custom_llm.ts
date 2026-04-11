@@ -23,7 +23,7 @@
  *   npx ts-node custom_llm.ts
  */
 
-import { Patter, deepgram, elevenlabs } from "patter";
+import { Patter, deepgram, elevenlabs } from "getpatter";
 import dotenv from "dotenv";
 
 dotenv.config();

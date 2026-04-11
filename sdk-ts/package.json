@@ -1,20 +1,20 @@
 {
-  "name": "patter",
+  "name": "getpatter",
   "version": "0.3.0",
   "description": "Connect AI agents to phone numbers with 10 lines of code",
   "license": "MIT",
   "author": {
     "name": "Nicolò Tognoni",
-    "email": "nicolo@patter.dev"
+    "email": "nicolo@getpatter.com"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/nicolotognoni/patter.git",
+    "url": "https://github.com/PatterAI/Patter.git",
     "directory": "sdk-ts"
   },
-  "homepage": "https://patter.dev",
+  "homepage": "https://www.getpatter.com",
   "bugs": {
-    "url": "https://github.com/nicolotognoni/patter/issues"
+    "url": "https://github.com/PatterAI/Patter/issues"
   },
   "keywords": [
     "voice",

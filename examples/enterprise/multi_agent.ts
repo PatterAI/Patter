@@ -21,7 +21,7 @@
  *   npx ts-node multi_agent.ts
  */
 
-import { Patter } from "patter";
+import { Patter } from "getpatter";
 import dotenv from "dotenv";
 
 dotenv.config();

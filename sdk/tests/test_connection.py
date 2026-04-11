@@ -11,15 +11,15 @@ from patter.exceptions import PatterConnectionError
 
 
 def test_connection_init():
-    conn = PatterConnection(api_key="ap_test123", backend_url="wss://api.patter.dev")
+    conn = PatterConnection(api_key="ap_test123", backend_url="wss://api.getpatter.com")
     assert conn._api_key == "ap_test123"
     # api_key should not appear in repr (privacy)
     assert "ap_test123" not in repr(conn)
 
 
 def test_connection_builds_correct_url():
-    conn = PatterConnection(api_key="ap_test123", backend_url="wss://api.patter.dev")
-    assert conn._ws_url == "wss://api.patter.dev/ws/sdk"
+    conn = PatterConnection(api_key="ap_test123", backend_url="wss://api.getpatter.com")
+    assert conn._ws_url == "wss://api.getpatter.com/ws/sdk"
 
 
 def test_connection_parses_incoming_message():

@@ -474,7 +474,7 @@ export class EmbeddedServer {
       }
       mountDashboard(app, this.metricsStore, this.dashboardToken);
       mountApi(app, this.metricsStore, this.dashboardToken);
-      getLogger().info('Dashboard: http://127.0.0.1:' + port + '/dashboard');
+      getLogger().info('Dashboard: http://127.0.0.1:' + port + '/');
     }
 
     app.post('/webhooks/twilio/recording', (req, res) => {

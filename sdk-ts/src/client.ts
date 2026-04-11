@@ -20,8 +20,8 @@ import type {
 import { deepgram, whisper, elevenlabs, openaiTts } from "./providers";
 import { EmbeddedServer } from "./server";
 
-const DEFAULT_BACKEND_URL = "wss://api.patter.dev";
-const DEFAULT_REST_URL = "https://api.patter.dev";
+const DEFAULT_BACKEND_URL = "wss://api.getpatter.com";
+const DEFAULT_REST_URL = "https://api.getpatter.com";
 
 export class Patter {
   readonly apiKey: string;

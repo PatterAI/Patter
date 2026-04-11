@@ -5,7 +5,7 @@ description = "Connect AI agents to phone numbers with 10 lines of code"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [
-    { name = "Nicolò Tognoni", email = "nicolo@patter.dev" },
+    { name = "Nicolò Tognoni", email = "nicolo@getpatter.com" },
 ]
 keywords = ["voice", "ai", "phone", "telephony", "speech", "tts", "stt", "twilio", "telnyx", "openai", "elevenlabs"]
 classifiers = [
@@ -27,10 +27,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://patter.dev"
-Documentation = "https://docs.patter.dev"
-Repository = "https://github.com/nicolotognoni/patter"
-"Bug Tracker" = "https://github.com/nicolotognoni/patter/issues"
+Homepage = "https://www.getpatter.com"
+Documentation = "https://docs.getpatter.com"
+Repository = "https://github.com/PatterAI/Patter"
+"Bug Tracker" = "https://github.com/PatterAI/Patter/issues"
 
 [project.optional-dependencies]
 local = [

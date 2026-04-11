@@ -2,7 +2,7 @@
 
 The Patter backend exposes a REST API for account and phone number management, and a WebSocket endpoint used by the SDK.
 
-Base URL: `https://api.patter.dev` (Patter Cloud) or your self-hosted URL.
+Base URL: `https://api.getpatter.com` (Patter Cloud) or your self-hosted URL.
 
 ## Authentication
 
@@ -356,7 +356,7 @@ The SDK connects to this endpoint to receive call events and send responses. You
 **Connection:**
 
 ```
-WebSocket: wss://api.patter.dev/ws/sdk
+WebSocket: wss://api.getpatter.com/ws/sdk
 Header: X-API-Key: pt_xxx
 ```
 

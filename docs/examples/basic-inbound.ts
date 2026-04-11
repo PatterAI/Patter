@@ -2,14 +2,14 @@
  * Basic inbound call handler.
  *
  * The AI answers incoming calls and responds to what the caller says.
- * Replace the API key with your own from https://api.patter.dev.
+ * Replace the API key with your own from https://www.getpatter.com.
  *
  * Usage:
- *   npm install patter
+ *   npm install getpatter
  *   npx ts-node basic-inbound.ts
  */
 
-import { Patter, IncomingMessage } from "patter";
+import { Patter, IncomingMessage } from "getpatter";
 
 const phone = new Patter({ apiKey: "pt_your_api_key_here" });
 

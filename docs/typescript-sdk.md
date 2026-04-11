@@ -5,7 +5,7 @@ The `patter` npm package gives your TypeScript or JavaScript project a fully typ
 ## Installation
 
 ```bash
-npm install patter
+npm install getpatter
 # or
 yarn add patter
 # or
@@ -17,7 +17,7 @@ Requires Node.js 18 or higher.
 ## Quick example
 
 ```typescript
-import { Patter } from "patter";
+import { Patter } from "getpatter";
 
 const phone = new Patter({ apiKey: "pt_xxx" });
 
@@ -37,8 +37,8 @@ new Patter(options: PatterOptions)
 ```typescript
 interface PatterOptions {
   apiKey: string;       // Your API key — must start with pt_
-  backendUrl?: string;  // WebSocket URL — defaults to wss://api.patter.dev
-  restUrl?: string;     // HTTP base URL — defaults to https://api.patter.dev
+  backendUrl?: string;  // WebSocket URL — defaults to wss://api.getpatter.com
+  restUrl?: string;     // HTTP base URL — defaults to https://api.getpatter.com
 }
 ```
 
@@ -469,7 +469,7 @@ class PatterError extends Error {
 Base class. Catch this to handle any Patter error.
 
 ```typescript
-import { PatterError } from "patter";
+import { PatterError } from "getpatter";
 
 try {
   await phone.connect({ onMessage: handler });
@@ -555,7 +555,7 @@ If the number is already registered (HTTP 409), registration is skipped silently
 ### Inbound call handler
 
 ```typescript
-import { Patter, IncomingMessage } from "patter";
+import { Patter, IncomingMessage } from "getpatter";
 
 const phone = new Patter({ apiKey: "pt_xxx" });
 
@@ -586,7 +586,7 @@ await new Promise(() => {});
 ### Outbound appointment reminder
 
 ```typescript
-import { Patter, IncomingMessage } from "patter";
+import { Patter, IncomingMessage } from "getpatter";
 
 const phone = new Patter({ apiKey: "pt_xxx" });
 
@@ -621,7 +621,7 @@ for (const [number, appointment] of Object.entries(appointments)) {
 
 ```typescript
 import OpenAI from "openai";
-import { Patter, IncomingMessage } from "patter";
+import { Patter, IncomingMessage } from "getpatter";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -730,7 +730,7 @@ await phone.serve({ agent, port: 8000, recording: true });
 Use Deepgram + ElevenLabs instead of OpenAI for STT/TTS:
 
 ```typescript
-import { Patter } from "patter";
+import { Patter } from "getpatter";
 
 const phone = new Patter({
   mode: "local",

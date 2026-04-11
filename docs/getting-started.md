@@ -12,7 +12,7 @@ Patter connects AI agents to phone numbers with about 10 lines of code. You writ
 Create an account and get your API key:
 
 ```bash
-curl -X POST https://api.patter.dev/api/accounts \
+curl -X POST https://api.getpatter.com/api/accounts \
   -H "Content-Type: application/json" \
   -d '{"email": "you@example.com"}'
 ```
@@ -40,7 +40,7 @@ pip install patter
 **TypeScript / Node.js:**
 
 ```bash
-npm install patter
+npm install getpatter
 ```
 
 ## Step 3 — Write your handler
@@ -67,7 +67,7 @@ asyncio.run(main())
 **TypeScript:**
 
 ```typescript
-import { Patter } from "patter";
+import { Patter } from "getpatter";
 
 const phone = new Patter({ apiKey: "pt_your_api_key" });
 

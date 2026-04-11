@@ -8,7 +8,7 @@ from patter.models import IncomingMessage
 
 
 class PatterConnection:
-    def __init__(self, api_key: str, backend_url: str = "wss://api.patter.dev") -> None:
+    def __init__(self, api_key: str, backend_url: str = "wss://api.getpatter.com") -> None:
         self._api_key = api_key
         self.backend_url = backend_url.rstrip("/")
         self._ws_url = f"{self.backend_url}/ws/sdk"
