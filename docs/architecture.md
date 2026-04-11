@@ -11,7 +11,7 @@ This document describes how Patter's components fit together, how a call flows t
 │   phone = Patter(api_key="pt_xxx")                                  │
 │   await phone.connect(on_message=handler)                           │
 └──────────────────────────┬──────────────────────────────────────────┘
-                           │ WebSocket (wss://api.patter.dev/ws/sdk)
+                           │ WebSocket (wss://api.getpatter.com/ws/sdk)
                            ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        Patter Backend                               │
@@ -325,7 +325,7 @@ patter/
 │       ├── models.py         # IncomingMessage, STTConfig, TTSConfig
 │       ├── exceptions.py     # PatterError hierarchy
 │       └── providers.py      # Provider helper functions
-├── sdk-ts/                   # TypeScript SDK (npm install patter)
+├── sdk-ts/                   # TypeScript SDK (npm install getpatter)
 │   └── src/
 │       ├── client.ts         # Patter class
 │       ├── connection.ts     # WebSocket connection

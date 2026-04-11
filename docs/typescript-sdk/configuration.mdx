@@ -10,7 +10,7 @@ The `Patter` constructor accepts either `PatterOptions` (cloud mode) or `LocalOp
 ## Cloud Mode
 
 ```typescript
-import { Patter } from "patter";
+import { Patter } from "getpatter";
 
 const phone = new Patter({
   apiKey: "pt_...",
@@ -22,13 +22,13 @@ const phone = new Patter({
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `apiKey` | `string` | Yes | — | Your Patter API key (`pt_...`). |
-| `backendUrl` | `string` | No | `wss://api.patter.dev` | WebSocket URL for the Patter backend. |
-| `restUrl` | `string` | No | `https://api.patter.dev` | REST API URL for agent management. |
+| `backendUrl` | `string` | No | `wss://api.getpatter.com` | WebSocket URL for the Patter backend. |
+| `restUrl` | `string` | No | `https://api.getpatter.com` | REST API URL for agent management. |
 
 ## Local Mode
 
 ```typescript
-import { Patter } from "patter";
+import { Patter } from "getpatter";
 
 const phone = new Patter({
   mode: "local",

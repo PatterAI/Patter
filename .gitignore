@@ -16,8 +16,7 @@ venv/
 .coverage
 htmlcov/
 .claude/
-!.claude/CLAUDE.md
-!.claude/rules/
+CLAUDE.md
 node_modules/
 *.sqlite
 *.log

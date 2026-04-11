@@ -5,7 +5,7 @@
  * machineDetection=true lets the SDK detect voicemail and play a
  * pre-recorded message instead of connecting the live agent.
  */
-import { Patter } from "patter";
+import { Patter } from "getpatter";
 
 async function main() {
   const phone = new Patter({

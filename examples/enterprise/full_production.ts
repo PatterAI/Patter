@@ -20,7 +20,7 @@
  *   npx ts-node full_production.ts
  */
 
-import { Patter, deepgram, elevenlabs } from "patter";
+import { Patter, deepgram, elevenlabs } from "getpatter";
 import dotenv from "dotenv";
 
 dotenv.config();

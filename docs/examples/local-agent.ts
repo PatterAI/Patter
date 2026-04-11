@@ -1,7 +1,7 @@
 /**
  * Local mode — AI agent answers calls, no cloud needed.
  */
-import { Patter } from "patter";
+import { Patter } from "getpatter";
 
 async function main() {
   const phone = new Patter({

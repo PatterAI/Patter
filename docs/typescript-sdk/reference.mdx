@@ -377,7 +377,7 @@ import {
   PatterConnectionError,
   AuthenticationError,
   ProvisionError,
-} from "patter";
+} from "getpatter";
 
 try {
   await phone.call({ to: "+15559876543", agent });
@@ -395,13 +395,13 @@ try {
 ### Classes
 
 ```typescript
-export { Patter } from "patter";
-export { ElevenLabsConvAIAdapter } from "patter";
-export { OpenAIRealtimeAdapter } from "patter";
-export { DeepgramSTT } from "patter";
-export { WhisperSTT } from "patter";
-export { ElevenLabsTTS } from "patter";
-export { OpenAITTS } from "patter";
+export { Patter } from "getpatter";
+export { ElevenLabsConvAIAdapter } from "getpatter";
+export { OpenAIRealtimeAdapter } from "getpatter";
+export { DeepgramSTT } from "getpatter";
+export { WhisperSTT } from "getpatter";
+export { ElevenLabsTTS } from "getpatter";
+export { OpenAITTS } from "getpatter";
 ```
 
 ### Error Classes
@@ -412,13 +412,13 @@ export {
   PatterConnectionError,
   AuthenticationError,
   ProvisionError,
-} from "patter";
+} from "getpatter";
 ```
 
 ### Factory Functions
 
 ```typescript
-export { deepgram, whisper, elevenlabs, openaiTts } from "patter";
+export { deepgram, whisper, elevenlabs, openaiTts } from "getpatter";
 ```
 
 ### Transcoding Utilities
@@ -430,7 +430,7 @@ export {
   resample8kTo16k,
   resample16kTo8k,
   resample24kTo16k,
-} from "patter";
+} from "getpatter";
 ```
 
 ### All Type Exports
@@ -463,5 +463,5 @@ export type {
   LatencyBreakdown,
   TurnMetrics,
   ProviderPricing,
-} from "patter";
+} from "getpatter";
 ```
