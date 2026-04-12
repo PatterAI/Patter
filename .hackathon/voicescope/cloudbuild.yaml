@@ -1,0 +1,54 @@
+steps:
+  # Build the Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/voicescope:$COMMIT_SHA'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/voicescope:latest'
+      - '.'
+
+  # Push to Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'gcr.io/$PROJECT_ID/voicescope:$COMMIT_SHA'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'gcr.io/$PROJECT_ID/voicescope:latest'
+
+  # Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'voicescope'
+      - '--image'
+      - 'gcr.io/$PROJECT_ID/voicescope:$COMMIT_SHA'
+      - '--region'
+      - 'us-central1'
+      - '--platform'
+      - 'managed'
+      - '--allow-unauthenticated'
+      - '--port'
+      - '8080'
+      - '--memory'
+      - '512Mi'
+      - '--set-env-vars'
+      - 'GOOGLE_AI_STUDIO_KEY=${_GOOGLE_AI_STUDIO_KEY},OPENAI_API_KEY=${_OPENAI_API_KEY},TWILIO_ACCOUNT_SID=${_TWILIO_ACCOUNT_SID},TWILIO_AUTH_TOKEN=${_TWILIO_AUTH_TOKEN},TWILIO_PHONE_NUMBER=${_TWILIO_PHONE_NUMBER},WEBHOOK_URL=${_WEBHOOK_URL}'
+
+images:
+  - 'gcr.io/$PROJECT_ID/voicescope:$COMMIT_SHA'
+  - 'gcr.io/$PROJECT_ID/voicescope:latest'
+
+substitutions:
+  _GOOGLE_AI_STUDIO_KEY: ''
+  _OPENAI_API_KEY: ''
+  _TWILIO_ACCOUNT_SID: ''
+  _TWILIO_AUTH_TOKEN: ''
+  _TWILIO_PHONE_NUMBER: ''
+  _WEBHOOK_URL: ''

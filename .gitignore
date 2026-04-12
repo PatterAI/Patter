@@ -15,11 +15,10 @@ venv/
 .mypy_cache/
 .coverage
 htmlcov/
-.claude/
-CLAUDE.md
 node_modules/
 *.sqlite
 *.log
 .DS_Store
 settings.json
+.claude/settings.json
 .worktrees/

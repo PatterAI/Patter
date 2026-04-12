@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VoiceScope</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0a0a0a; color: #e0e0e0; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+        .container { max-width: 420px; width: 100%; padding: 2rem; text-align: center; }
+        h1 { font-size: 2rem; font-weight: 700; margin-bottom: 0.25rem; color: #fff; }
+        .subtitle { font-size: 1rem; color: #888; margin-bottom: 2rem; }
+        .upload-area { border: 2px dashed #333; border-radius: 12px; padding: 2rem; margin-bottom: 1.25rem; cursor: pointer; transition: border-color 0.2s; position: relative; }
+        .upload-area:hover, .upload-area.dragover { border-color: #4f9cf7; }
+        .upload-area.has-file { border-color: #34c759; border-style: solid; }
+        .upload-area input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+        .upload-label { font-size: 0.95rem; color: #aaa; }
+        .preview { max-width: 100%; max-height: 200px; border-radius: 8px; margin-top: 0.75rem; display: none; }
+        input[type="tel"] { width: 100%; padding: 0.85rem 1rem; border: 1px solid #333; border-radius: 8px; background: #1a1a1a; color: #fff; font-size: 1rem; margin-bottom: 1.25rem; outline: none; }
+        input[type="tel"]:focus { border-color: #4f9cf7; }
+        button { width: 100%; padding: 0.95rem; border: none; border-radius: 8px; background: #4f9cf7; color: #fff; font-size: 1.05rem; font-weight: 600; cursor: pointer; transition: background 0.2s; }
+        button:hover:not(:disabled) { background: #3a8ae5; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        .status { margin-top: 1rem; font-size: 0.9rem; min-height: 1.4rem; }
+        .status.error { color: #ff453a; }
+        .status.success { color: #34c759; }
+        .status.loading { color: #4f9cf7; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>VoiceScope</h1>
+        <p class="subtitle">Snap a photo. Get a call.</p>
+
+        <form id="form">
+            <div class="upload-area" id="dropzone">
+                <input type="file" id="image" accept="image/*" capture="environment" required>
+                <p class="upload-label" id="upload-label">Tap to take a photo or upload</p>
+                <img class="preview" id="preview" alt="Preview">
+            </div>
+
+            <input type="tel" id="phone" placeholder="+1 555 123 4567" required>
+
+            <button type="submit" id="btn">Analyze &amp; Call Me</button>
+        </form>
+
+        <p class="status" id="status"></p>
+    </div>
+
+    <script>
+        const form = document.getElementById("form");
+        const imageInput = document.getElementById("image");
+        const preview = document.getElementById("preview");
+        const uploadLabel = document.getElementById("upload-label");
+        const dropzone = document.getElementById("dropzone");
+        const status = document.getElementById("status");
+        const btn = document.getElementById("btn");
+
+        imageInput.addEventListener("change", () => {
+            const file = imageInput.files[0];
+            if (file) {
+                preview.src = URL.createObjectURL(file);
+                preview.style.display = "block";
+                uploadLabel.textContent = file.name;
+                dropzone.classList.add("has-file");
+            }
+        });
+
+        ["dragover", "dragenter"].forEach(e => dropzone.addEventListener(e, ev => { ev.preventDefault(); dropzone.classList.add("dragover"); }));
+        ["dragleave", "drop"].forEach(e => dropzone.addEventListener(e, () => dropzone.classList.remove("dragover")));
+
+        form.addEventListener("submit", async (e) => {
+            e.preventDefault();
+            const file = imageInput.files[0];
+            const phone = document.getElementById("phone").value.replace(/\s/g, "");
+
+            if (!file) { setStatus("Please select an image.", "error"); return; }
+            if (!phone.startsWith("+")) { setStatus("Phone number must start with + (E.164 format).", "error"); return; }
+
+            setStatus("Analyzing image with Gemini 3...", "loading");
+            btn.disabled = true;
+
+            const body = new FormData();
+            body.append("image", file);
+            body.append("phone_number", phone);
+
+            try {
+                const res = await fetch("/analyze", { method: "POST", body });
+                const data = await res.json();
+                if (res.ok) {
+                    setStatus("Calling you now... pick up your phone!", "success");
+                } else {
+                    setStatus(data.error || "Something went wrong.", "error");
+                }
+            } catch (err) {
+                setStatus("Network error. Is the server running?", "error");
+            } finally {
+                btn.disabled = false;
+            }
+        });
+
+        function setStatus(msg, type) {
+            status.textContent = msg;
+            status.className = "status " + (type || "");
+        }
+    </script>
+</body>
+</html>
