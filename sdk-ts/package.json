@@ -52,6 +52,7 @@
   },
   "dependencies": {
     "express": "^5.2.1",
+    "vite": "^6.4.2",
     "ws": "^8.18.0"
   },
   "devDependencies": {
