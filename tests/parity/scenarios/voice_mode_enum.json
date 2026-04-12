@@ -1,0 +1,27 @@
+{
+  "scenario_id": "voice_mode_enum",
+  "description": "Verify both SDKs support the same voice mode values: openai_realtime, elevenlabs_convai, pipeline",
+  "input": {
+    "method": "voice_modes",
+    "args": {},
+    "kwargs": {
+      "expected_modes": [
+        "openai_realtime",
+        "elevenlabs_convai",
+        "pipeline"
+      ],
+      "default_mode": "openai_realtime"
+    }
+  },
+  "expected_output": {
+    "type": "enum_values",
+    "value": {
+      "modes": ["openai_realtime", "elevenlabs_convai", "pipeline"],
+      "default": "openai_realtime"
+    }
+  },
+  "sdk_methods": {
+    "python": "patter.client.Patter.agent",
+    "typescript": "Patter.agent"
+  }
+}

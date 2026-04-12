@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   python:
@@ -56,3 +57,79 @@ jobs:
         run: |
           cd sdk-ts
           npm run build
+
+  e2e:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+      - name: Install dependencies
+        run: |
+          cd sdk-ts
+          npm install
+      - name: Install Playwright
+        run: |
+          cd sdk-ts
+          npx playwright install --with-deps
+      - name: Run E2E tests
+        run: |
+          cd sdk-ts
+          npx playwright test
+
+  security:
+    name: Security Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          cd sdk
+          pip install -e ".[local,dev]"
+      - name: Run security tests
+        run: |
+          cd sdk
+          pytest tests/security/ -v -m security
+
+  soak:
+    name: Soak Tests
+    runs-on: [self-hosted, soak-runner]
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+      - name: Install Python dependencies
+        run: |
+          cd sdk
+          pip install -e ".[local,dev]"
+          pip install psutil
+      - name: Run Python soak tests
+        run: |
+          cd sdk
+          pytest tests/soak/ -v -m soak 2>&1 | tee py-soak.txt
+      - name: Run TypeScript soak tests
+        run: |
+          cd sdk-ts
+          npm install
+          npx vitest run tests/soak --reporter=verbose 2>&1 | tee ts-soak.txt
+      - name: Upload soak results
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-results
+          path: |
+            sdk/py-soak.txt
+            sdk-ts/ts-soak.txt

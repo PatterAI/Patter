@@ -1,0 +1,30 @@
+{
+  "scenario_id": "model_e164",
+  "description": "Verify E.164 phone number validation accepts/rejects the same inputs in both SDKs",
+  "input": {
+    "method": "e164_validation",
+    "args": {},
+    "kwargs": {
+      "cases": [
+        {"number": "+15551234567", "expected_valid": true},
+        {"number": "+39123456789", "expected_valid": true},
+        {"number": "+442071234567", "expected_valid": true},
+        {"number": "15551234567", "expected_valid": false},
+        {"number": "5551234567", "expected_valid": false},
+        {"number": "not-a-number", "expected_valid": false},
+        {"number": "", "expected_valid": false},
+        {"number": "+", "expected_valid": false}
+      ]
+    }
+  },
+  "expected_output": {
+    "type": "validation_results",
+    "value": {
+      "rule": "Must start with '+' followed by digits (E.164 format)"
+    }
+  },
+  "sdk_methods": {
+    "python": "patter.client.Patter.call",
+    "typescript": "Patter.call"
+  }
+}

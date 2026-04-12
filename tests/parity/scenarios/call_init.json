@@ -1,0 +1,68 @@
+{
+  "scenario_id": "call_init",
+  "description": "Verify both SDKs detect cloud vs local mode based on constructor params",
+  "input": {
+    "method": "constructor",
+    "args": {},
+    "kwargs": {
+      "cases": [
+        {
+          "name": "cloud_mode",
+          "params": {
+            "api_key": "pt_test_key_123"
+          },
+          "expected_mode": "cloud"
+        },
+        {
+          "name": "local_mode_explicit",
+          "params": {
+            "mode": "local",
+            "twilio_sid": "ACtest000000000000000000000000000",
+            "twilio_token": "test_token",
+            "phone_number": "+15551234567",
+            "webhook_url": "test.ngrok.io"
+          },
+          "expected_mode": "local"
+        },
+        {
+          "name": "local_mode_auto_detect",
+          "params": {
+            "twilio_sid": "ACtest000000000000000000000000000",
+            "twilio_token": "test_token",
+            "phone_number": "+15551234567",
+            "webhook_url": "test.ngrok.io"
+          },
+          "expected_mode": "local"
+        },
+        {
+          "name": "default_backend_url",
+          "params": {
+            "api_key": "pt_test_key_123"
+          },
+          "expected_backend_url": "wss://api.getpatter.com"
+        },
+        {
+          "name": "default_rest_url",
+          "params": {
+            "api_key": "pt_test_key_123"
+          },
+          "expected_rest_url": "https://api.getpatter.com"
+        }
+      ]
+    }
+  },
+  "expected_output": {
+    "type": "mode_detection",
+    "value": {
+      "cloud_mode": "cloud",
+      "local_mode_explicit": "local",
+      "local_mode_auto_detect": "local",
+      "default_backend_url": "wss://api.getpatter.com",
+      "default_rest_url": "https://api.getpatter.com"
+    }
+  },
+  "sdk_methods": {
+    "python": "patter.client.Patter.__init__",
+    "typescript": "Patter.constructor"
+  }
+}

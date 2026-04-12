@@ -1,0 +1,41 @@
+{
+  "scenario_id": "call_status_enum",
+  "description": "Verify both SDKs use the same error class hierarchy and names",
+  "input": {
+    "method": "error_classes",
+    "args": {},
+    "kwargs": {
+      "expected_classes": [
+        {
+          "name": "PatterError",
+          "parent": "Error/Exception"
+        },
+        {
+          "name": "PatterConnectionError",
+          "parent": "PatterError"
+        },
+        {
+          "name": "AuthenticationError",
+          "parent": "PatterError"
+        },
+        {
+          "name": "ProvisionError",
+          "parent": "PatterError"
+        }
+      ]
+    }
+  },
+  "expected_output": {
+    "type": "class_hierarchy",
+    "value": {
+      "PatterError": "base",
+      "PatterConnectionError": "PatterError",
+      "AuthenticationError": "PatterError",
+      "ProvisionError": "PatterError"
+    }
+  },
+  "sdk_methods": {
+    "python": "patter.exceptions",
+    "typescript": "errors"
+  }
+}

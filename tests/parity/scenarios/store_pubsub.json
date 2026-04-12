@@ -1,0 +1,38 @@
+{
+  "scenario_id": "store_pubsub",
+  "description": "Verify MetricsStore circular buffer has the same default size (500) and eviction behavior",
+  "input": {
+    "method": "metrics_store",
+    "args": {},
+    "kwargs": {
+      "checks": [
+        {
+          "name": "default_max_calls",
+          "expected": 500
+        },
+        {
+          "name": "eviction_behavior",
+          "description": "When exceeding max_calls, oldest entries are evicted (keeps last N)",
+          "insert_count": 505,
+          "expected_remaining": 500
+        },
+        {
+          "name": "event_types",
+          "expected": ["call_start", "call_end", "turn_complete"]
+        }
+      ]
+    }
+  },
+  "expected_output": {
+    "type": "store_config",
+    "value": {
+      "default_max_calls": 500,
+      "eviction": "oldest_first",
+      "event_types": ["call_start", "call_end", "turn_complete"]
+    }
+  },
+  "sdk_methods": {
+    "python": "patter.dashboard.store.MetricsStore",
+    "typescript": "MetricsStore"
+  }
+}
