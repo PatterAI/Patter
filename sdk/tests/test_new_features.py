@@ -119,7 +119,7 @@ def test_serve_passes_recording_to_server():
         MockServer.return_value = mock_instance
 
         import asyncio
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             phone.serve(agent, recording=True)
         )
 
@@ -186,7 +186,7 @@ def test_machine_detection_adds_params_to_twilio_call():
         MockAdapter.return_value = mock_instance
 
         import asyncio
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             phone.call(to="+39123456789", agent=agent, machine_detection=True)
         )
 
@@ -215,7 +215,7 @@ def test_amd_callback_url_uses_webhook_host():
         MockAdapter.return_value = mock_instance
 
         import asyncio
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             phone.call(to="+39123456789", agent=agent, machine_detection=True)
         )
 
@@ -260,7 +260,7 @@ def test_machine_detection_false_no_extra_params():
         MockAdapter.return_value = mock_instance
 
         import asyncio
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             phone.call(to="+39123456789", agent=agent, machine_detection=False)
         )
 
@@ -396,7 +396,7 @@ def test_serve_passes_voicemail_message_to_server():
         MockServer.return_value = mock_instance
 
         import asyncio
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             phone.serve(agent, voicemail_message="Hi, please call back.")
         )
 
