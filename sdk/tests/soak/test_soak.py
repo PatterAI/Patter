@@ -45,9 +45,9 @@ async def test_s1_concurrent_calls_memory_growth(make_accumulator: Any) -> None:
     async def _simulate_call(call_index: int) -> None:
         acc = make_accumulator(call_id=f"soak-s1-{call_index}")
         sent = 0
-        deadline = asyncio.get_event_loop().time() + duration_seconds
+        deadline = asyncio.get_running_loop().time() + duration_seconds
         try:
-            while asyncio.get_event_loop().time() < deadline:
+            while asyncio.get_running_loop().time() < deadline:
                 acc.start_turn()
                 acc.add_stt_audio_bytes(len(frame))
                 acc.record_stt_complete("hello", audio_seconds=0.02)
@@ -173,9 +173,9 @@ async def test_s3_websocket_reconnection_flapping(mock_ws_pair: Any) -> None:
         await asyncio.sleep(reconnect_gap_ms / 1000.0)
 
         # Reconnect and measure time
-        t0 = asyncio.get_event_loop().time()
+        t0 = asyncio.get_running_loop().time()
         client_ws.reconnect()
-        t1 = asyncio.get_event_loop().time()
+        t1 = asyncio.get_running_loop().time()
         reconnect_times_ms.append((t1 - t0) * 1000)
 
         assert client_ws.state == "OPEN"
@@ -219,8 +219,8 @@ async def test_s4_sse_subscriber_churn(metrics_store: MetricsStore) -> None:
         queue = metrics_store.subscribe()
         try:
             # Stay subscribed for a short window, collecting events
-            deadline = asyncio.get_event_loop().time() + 0.1
-            while asyncio.get_event_loop().time() < deadline:
+            deadline = asyncio.get_running_loop().time() + 0.1
+            while asyncio.get_running_loop().time() < deadline:
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=0.05)
                     received_events[idx].append(event)
