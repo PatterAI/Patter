@@ -235,7 +235,7 @@ function esc(s) {
   if (!s) return '';
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
-function fmt\\$(v) { return v >= 0.01 ? '$'+v.toFixed(4) : v > 0 ? '$'+v.toFixed(6) : '$0.00'; }
+function fmt$(v) { return v >= 0.01 ? '$'+v.toFixed(4) : v > 0 ? '$'+v.toFixed(6) : '$0.00'; }
 function fmtMs(v) { return v > 0 ? Math.round(v)+'ms' : '-'; }
 function fmtDur(s) {
   if (!s) return '-';
@@ -253,10 +253,10 @@ async function refreshAggregates() {
   const d = await fetchJSON('/api/dashboard/aggregates');
   $('#stat-total').textContent = d.total_calls;
   $('#stat-active').textContent = d.active_calls;
-  $('#stat-cost').textContent = fmt\\$(d.total_cost);
+  $('#stat-cost').textContent = fmt$(d.total_cost);
   const cb = d.cost_breakdown;
   $('#stat-cost-breakdown').textContent =
-    'STT '+fmt\\$(cb.stt)+' | LLM '+fmt\\$(cb.llm)+' | TTS '+fmt\\$(cb.tts)+' | Tel '+fmt\\$(cb.telephony);
+    'STT '+fmt$(cb.stt)+' | LLM '+fmt$(cb.llm)+' | TTS '+fmt$(cb.tts)+' | Tel '+fmt$(cb.telephony);
   $('#stat-duration').textContent = fmtDur(d.avg_duration);
   $('#stat-latency').textContent = fmtMs(d.avg_latency_ms);
 }
@@ -281,7 +281,7 @@ async function refreshCalls() {
       '<td>'+(esc(c.caller) || '-')+' &rarr; '+(esc(c.callee) || '-')+'</td>'+
       '<td>'+fmtDur(m.duration_seconds)+'</td>'+
       '<td><span class="badge '+modeClass+'">'+esc(mode)+'</span></td>'+
-      '<td class="cost">'+fmt\\$(cost.total || 0)+'</td>'+
+      '<td class="cost">'+fmt$(cost.total || 0)+'</td>'+
       '<td class="latency">'+fmtMs(lat.total_ms || 0)+'</td>'+
       '<td>'+turns+'</td></tr>';
   }).join('');
@@ -335,12 +335,12 @@ async function showCall(callId) {
     '</div>'+
     '<div class="detail-card">'+
       '<h3>Cost Breakdown</h3>'+
-      '<div class="detail-row"><span class="k">STT</span><span class="cost">'+fmt\\$(cost.stt || 0)+'</span></div>'+
-      '<div class="detail-row"><span class="k">LLM</span><span class="cost">'+fmt\\$(cost.llm || 0)+'</span></div>'+
-      '<div class="detail-row"><span class="k">TTS</span><span class="cost">'+fmt\\$(cost.tts || 0)+'</span></div>'+
-      '<div class="detail-row"><span class="k">Telephony</span><span class="cost">'+fmt\\$(cost.telephony || 0)+'</span></div>'+
+      '<div class="detail-row"><span class="k">STT</span><span class="cost">'+fmt$(cost.stt || 0)+'</span></div>'+
+      '<div class="detail-row"><span class="k">LLM</span><span class="cost">'+fmt$(cost.llm || 0)+'</span></div>'+
+      '<div class="detail-row"><span class="k">TTS</span><span class="cost">'+fmt$(cost.tts || 0)+'</span></div>'+
+      '<div class="detail-row"><span class="k">Telephony</span><span class="cost">'+fmt$(cost.telephony || 0)+'</span></div>'+
       '<div class="detail-row" style="border-top:1px solid var(--border);padding-top:6px;margin-top:4px">'+
-        '<span class="k" style="font-weight:600">Total</span><span class="cost" style="font-weight:700">'+fmt\\$(cost.total || 0)+'</span>'+
+        '<span class="k" style="font-weight:600">Total</span><span class="cost" style="font-weight:700">'+fmt$(cost.total || 0)+'</span>'+
       '</div>'+
       '<h3 style="margin-top:14px">Latency (avg / p95)</h3>'+
       '<div class="detail-row"><span class="k">STT</span><span class="latency">'+fmtMs(latAvg.stt_ms)+' / '+fmtMs(latP95.stt_ms)+'</span></div>'+
