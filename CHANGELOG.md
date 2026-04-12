@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- 1,766 tests across 6 categories: unit, integration, E2E (Playwright), soak/stress, security, and cross-SDK parity
+- Python SDK test coverage raised to 82%
+- TypeScript SDK test coverage raised to 80.64%
+- `e2e`, `security`, and `soak` jobs added to the GitHub Actions CI workflow
+
+### Fixed
+- Dashboard JavaScript escaping bug (`fmt\$` → `fmt$`) that was breaking all client-side dashboard interactivity since v0.3.1
+- `asyncio.get_event_loop()` compatibility issues on Python 3.14 in existing test files
+
 ## 0.3.0 (2026-04-10)
 
 ### Added
