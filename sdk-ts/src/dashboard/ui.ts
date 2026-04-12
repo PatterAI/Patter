@@ -238,7 +238,7 @@ function esc(s) {
 function fmt$(v) { return v >= 0.01 ? '$'+v.toFixed(4) : v > 0 ? '$'+v.toFixed(6) : '$0.00'; }
 function fmtMs(v) { return v > 0 ? Math.round(v)+'ms' : '-'; }
 function fmtDur(s) {
-  if (!s) return '-';
+  if (s == null || s < 0) return '-';
   if (s < 60) return Math.round(s)+'s';
   return Math.floor(s/60)+'m '+Math.round(s%60)+'s';
 }
