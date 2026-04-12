@@ -1,0 +1,26 @@
+{
+  "scenario_id": "audio_frame",
+  "description": "Verify PCM silence frames of the same duration produce identical byte lengths in both SDKs",
+  "input": {
+    "method": "fake_pcm_frame",
+    "args": {},
+    "kwargs": {
+      "cases": [
+        {"duration_ms": 20, "sample_rate": 16000, "expected_bytes": 640},
+        {"duration_ms": 20, "sample_rate": 8000, "expected_bytes": 320},
+        {"duration_ms": 100, "sample_rate": 16000, "expected_bytes": 3200},
+        {"duration_ms": 40, "sample_rate": 24000, "expected_bytes": 1920}
+      ]
+    }
+  },
+  "expected_output": {
+    "type": "byte_lengths",
+    "value": {
+      "formula": "num_samples = sample_rate * duration_ms / 1000; bytes = num_samples * 2 (PCM16 = 2 bytes per sample)"
+    }
+  },
+  "sdk_methods": {
+    "python": "conftest.fake_pcm_frame",
+    "typescript": "fakeAudioBuffer"
+  }
+}

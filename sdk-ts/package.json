@@ -55,8 +55,11 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.59.1",
     "@types/express": "^5.0.6",
     "@types/ws": "^8.5.0",
+    "@vitest/coverage-v8": "^2.1.9",
+    "playwright": "^1.59.1",
     "tsup": "^8.0.0",
     "tsx": "^4.21.0",
     "typescript": "^5.4.0",

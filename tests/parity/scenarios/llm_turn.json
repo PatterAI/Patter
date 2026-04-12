@@ -1,0 +1,57 @@
+{
+  "scenario_id": "llm_turn",
+  "description": "Verify LLM turn completion detection uses the same tool call extraction format and max iteration cap",
+  "input": {
+    "method": "llm_loop_config",
+    "args": {},
+    "kwargs": {
+      "checks": [
+        {
+          "name": "max_iterations",
+          "expected": 10
+        },
+        {
+          "name": "tool_call_accumulation_format",
+          "description": "Both SDKs accumulate tool calls by index, concatenating id/name/arguments",
+          "expected_fields": ["id", "name", "arguments"]
+        },
+        {
+          "name": "tool_call_message_format",
+          "description": "Both SDKs produce OpenAI-compatible tool_calls in assistant messages",
+          "expected_structure": {
+            "id": "string",
+            "type": "function",
+            "function": {
+              "name": "string",
+              "arguments": "string"
+            }
+          }
+        },
+        {
+          "name": "openai_tools_format",
+          "description": "Both SDKs convert tool definitions to OpenAI format with type=function wrapper",
+          "expected_structure": {
+            "type": "function",
+            "function": {
+              "name": "string",
+              "description": "string",
+              "parameters": "object"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "expected_output": {
+    "type": "config_values",
+    "value": {
+      "max_iterations": 10,
+      "tool_call_fields": ["id", "name", "arguments"],
+      "message_format": "openai_compatible"
+    }
+  },
+  "sdk_methods": {
+    "python": "patter.services.llm_loop.LLMLoop.run",
+    "typescript": "LLMLoop.run"
+  }
+}
