@@ -72,7 +72,7 @@ def test_serve_validates_agent_type():
     """serve() with a non-Agent raises TypeError."""
     phone = _local_phone()
     with pytest.raises(TypeError, match="agent must be an Agent"):
-        asyncio.get_event_loop().run_until_complete(phone.serve("not an agent"))
+        asyncio.run(phone.serve("not an agent"))
 
 
 def test_serve_validates_port_type():
@@ -80,7 +80,7 @@ def test_serve_validates_port_type():
     phone = _local_phone()
     agent = phone.agent(system_prompt="test")
     with pytest.raises(ValueError, match="port must be an integer"):
-        asyncio.get_event_loop().run_until_complete(phone.serve(agent, port="8000"))
+        asyncio.run(phone.serve(agent, port="8000"))
 
 
 def test_serve_validates_port_range_low():
@@ -88,7 +88,7 @@ def test_serve_validates_port_range_low():
     phone = _local_phone()
     agent = phone.agent(system_prompt="test")
     with pytest.raises(ValueError, match="port must be an integer"):
-        asyncio.get_event_loop().run_until_complete(phone.serve(agent, port=0))
+        asyncio.run(phone.serve(agent, port=0))
 
 
 def test_serve_validates_port_range_high():
@@ -96,7 +96,7 @@ def test_serve_validates_port_range_high():
     phone = _local_phone()
     agent = phone.agent(system_prompt="test")
     with pytest.raises(ValueError, match="port must be an integer"):
-        asyncio.get_event_loop().run_until_complete(phone.serve(agent, port=99999))
+        asyncio.run(phone.serve(agent, port=99999))
 
 
 def test_serve_validates_recording_type():
@@ -104,7 +104,7 @@ def test_serve_validates_recording_type():
     phone = _local_phone()
     agent = phone.agent(system_prompt="test")
     with pytest.raises(TypeError, match="recording must be a bool"):
-        asyncio.get_event_loop().run_until_complete(phone.serve(agent, recording="yes"))
+        asyncio.run(phone.serve(agent, recording="yes"))
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +215,7 @@ def test_call_validates_e164_no_plus():
     phone = _local_phone()
     agent = phone.agent(system_prompt="test")
     with pytest.raises(ValueError, match="E.164"):
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             phone.call(to="0039123456789", agent=agent)
         )
 
@@ -225,7 +225,7 @@ def test_call_validates_e164_empty():
     phone = _local_phone()
     agent = phone.agent(system_prompt="test")
     with pytest.raises(ValueError, match="E.164"):
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             phone.call(to="", agent=agent)
         )
 
@@ -235,7 +235,7 @@ def test_call_validates_e164_non_string():
     phone = _local_phone()
     agent = phone.agent(system_prompt="test")
     with pytest.raises(ValueError, match="E.164"):
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             phone.call(to=12345, agent=agent)
         )
 
@@ -252,7 +252,7 @@ def test_call_valid_e164_accepted():
         mock_instance.initiate_call = AsyncMock(return_value="CA123")
         MockAdapter.return_value = mock_instance
 
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             phone.call(to="+39123456789", agent=agent)
         )
 

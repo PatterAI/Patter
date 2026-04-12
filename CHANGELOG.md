@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- Python 3.14 compatibility for test suite: replaced `asyncio.get_event_loop().run_until_complete(...)` with `asyncio.run(...)` at 14 call sites in `sdk/tests/test_new_features.py` and `sdk/tests/test_validation_guardrails.py`. Python 3.14 removed the implicit main-thread event-loop creation that the old idiom relied on; sync tests driving a coroutine now use `asyncio.run()` instead. Production code under `sdk/patter/` audited clean — no user-facing code change needed.
+
 ## 0.3.0 (2026-04-10)
 
 ### Added
