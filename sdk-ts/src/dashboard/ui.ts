@@ -236,7 +236,7 @@ function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 function fmt$(v) { return v >= 0.01 ? '$'+v.toFixed(4) : v > 0 ? '$'+v.toFixed(6) : '$0.00'; }
-function fmtMs(v) { return v > 0 ? Math.round(v)+'ms' : '-'; }
+function fmtMs(v) { return v != null && v >= 0 ? Math.round(v)+'ms' : '-'; }
 function fmtDur(s) {
   if (s == null || s < 0) return '-';
   if (s < 60) return Math.round(s)+'s';
