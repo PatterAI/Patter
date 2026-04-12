@@ -74,13 +74,13 @@ class TestPatterInit:
                 webhook_url="abc.ngrok.io",
             )
 
-    def test_local_mode_requires_webhook_url(self) -> None:
-        with pytest.raises(ValueError, match="webhook_url"):
-            Patter(
-                twilio_sid="ACtest000000000000000000000000000",
-                twilio_token="tok",
-                phone_number="+15550001234",
-            )
+    def test_local_mode_accepts_missing_webhook_url(self) -> None:
+        phone = Patter(
+            twilio_sid="ACtest000000000000000000000000000",
+            twilio_token="tok",
+            phone_number="+15550001234",
+        )
+        assert phone is not None
 
     def test_local_mode_requires_twilio_token(self) -> None:
         with pytest.raises(ValueError, match="twilio_token"):

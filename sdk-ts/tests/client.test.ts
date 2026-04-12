@@ -149,8 +149,9 @@ describe('Parameter Validation', () => {
     expect(() => new Patter({ mode: 'local', twilioSid: 'AC', twilioToken: 'x', openaiKey: 'sk', webhookUrl: 'x' } as never)).toThrow('phoneNumber');
   });
 
-  it('constructor rejects local mode without webhookUrl', () => {
-    expect(() => new Patter({ mode: 'local', twilioSid: 'AC', twilioToken: 'x', openaiKey: 'sk', phoneNumber: '+1' } as never)).toThrow('webhookUrl');
+  it('constructor accepts local mode without webhookUrl (deferred to serve)', () => {
+    const phone = new Patter({ mode: 'local', twilioSid: 'AC', twilioToken: 'x', openaiKey: 'sk', phoneNumber: '+1' } as never);
+    expect(phone).toBeDefined();
   });
 
   it('constructor rejects local mode without twilioSid or telnyxKey', () => {

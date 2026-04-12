@@ -111,7 +111,7 @@ export interface LocalOptions {
   twilioToken?: string;
   openaiKey?: string;
   phoneNumber: string;
-  webhookUrl: string;
+  webhookUrl?: string;
   telephonyProvider?: 'twilio' | 'telnyx';
   telnyxKey?: string;
   telnyxConnectionId?: string;
@@ -159,6 +159,8 @@ export type PipelineMessageHandler = (data: Record<string, unknown>) => Promise<
 export interface ServeOptions {
   agent: AgentOptions;
   port?: number;
+  /** When true, start a cloudflared tunnel automatically (requires `cloudflared` npm package). */
+  tunnel?: boolean;
   onCallStart?: (data: Record<string, unknown>) => Promise<void>;
   onCallEnd?: (data: Record<string, unknown>) => Promise<void>;
   onTranscript?: (data: Record<string, unknown>) => Promise<void>;

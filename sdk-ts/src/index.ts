@@ -56,3 +56,5 @@ export {
   resample16kTo8k,
   resample24kTo16k,
 } from "./transcoding";
+export { startTunnel } from "./tunnel";
+export type { TunnelHandle } from "./tunnel";

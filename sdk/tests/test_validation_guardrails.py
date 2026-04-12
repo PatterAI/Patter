@@ -45,10 +45,10 @@ def test_local_mode_requires_phone_number():
         Patter(twilio_sid="AC", twilio_token="tk", openai_key="sk", webhook_url="x")
 
 
-def test_local_mode_requires_webhook_url():
-    """Local mode without webhook_url raises ValueError."""
-    with pytest.raises(ValueError, match="webhook_url"):
-        Patter(twilio_sid="AC", twilio_token="tk", openai_key="sk", phone_number="+1")
+def test_local_mode_accepts_missing_webhook_url():
+    """Local mode without webhook_url is OK (deferred to serve)."""
+    phone = Patter(twilio_sid="AC", twilio_token="tk", openai_key="sk", phone_number="+1")
+    assert phone is not None
 
 
 def test_local_mode_twilio_requires_token():
