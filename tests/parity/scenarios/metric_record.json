@@ -1,0 +1,46 @@
+{
+  "scenario_id": "metric_record",
+  "description": "Verify CallMetricsAccumulator produces identical cost breakdowns for the same turn sequence",
+  "input": {
+    "method": "metrics_accumulator",
+    "args": {},
+    "kwargs": {
+      "init": {
+        "call_id": "test-call-001",
+        "provider_mode": "pipeline",
+        "telephony_provider": "twilio",
+        "stt_provider": "deepgram",
+        "tts_provider": "elevenlabs"
+      },
+      "turns": [
+        {
+          "user_text": "Hello there",
+          "agent_text": "Hi! How can I help you today?",
+          "stt_audio_seconds": 1.5
+        },
+        {
+          "user_text": "What is the weather?",
+          "agent_text": "I'd be happy to check the weather for you. Could you tell me your location?",
+          "stt_audio_seconds": 2.0
+        }
+      ],
+      "duration_seconds": 30.0
+    }
+  },
+  "expected_output": {
+    "type": "cost_breakdown",
+    "value": {
+      "cost_fields": ["stt", "tts", "llm", "telephony", "total"],
+      "latency_fields": ["stt_ms", "llm_ms", "tts_ms", "total_ms"],
+      "pricing_defaults": {
+        "deepgram_per_minute": 0.0043,
+        "elevenlabs_per_1k_chars": 0.18,
+        "twilio_per_minute": 0.013
+      }
+    }
+  },
+  "sdk_methods": {
+    "python": "patter.services.metrics.CallMetricsAccumulator",
+    "typescript": "CallMetricsAccumulator"
+  }
+}

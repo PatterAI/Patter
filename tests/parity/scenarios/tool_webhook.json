@@ -1,0 +1,51 @@
+{
+  "scenario_id": "tool_webhook",
+  "description": "Verify tool webhook dispatch uses the same retry count (3 attempts), timeout (10s), and iteration cap (10)",
+  "input": {
+    "method": "tool_executor_config",
+    "args": {},
+    "kwargs": {
+      "checks": [
+        {
+          "name": "total_attempts",
+          "description": "Python: MAX_RETRIES=2 means 3 total attempts (0,1,2). TS: loop < 3 means 3 attempts (0,1,2).",
+          "expected": 3
+        },
+        {
+          "name": "timeout_seconds",
+          "description": "HTTP timeout for webhook requests",
+          "expected": 10
+        },
+        {
+          "name": "llm_loop_max_iterations",
+          "description": "Max tool-call loop iterations before giving up",
+          "expected": 10
+        },
+        {
+          "name": "max_response_bytes",
+          "description": "Maximum webhook response size",
+          "expected": 1048576
+        },
+        {
+          "name": "retry_delay_seconds",
+          "description": "Delay between retry attempts",
+          "expected": 0.5
+        }
+      ]
+    }
+  },
+  "expected_output": {
+    "type": "config_values",
+    "value": {
+      "total_attempts": 3,
+      "timeout_seconds": 10,
+      "llm_loop_max_iterations": 10,
+      "max_response_bytes": 1048576,
+      "retry_delay_seconds": 0.5
+    }
+  },
+  "sdk_methods": {
+    "python": "patter.services.tool_executor.ToolExecutor",
+    "typescript": "LLMLoop.executeTool"
+  }
+}
