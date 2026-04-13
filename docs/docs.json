@@ -9,10 +9,10 @@
   },
   "favicon": "/favicon.svg",
   "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg",
+    "light": "/logo/patter-logo.png",
+    "dark": "/logo/patter-logo.png",
     "href": "https://www.getpatter.com",
-    "height": 60
+    "height": 35
   },
   "navbar": {
     "links": [
