@@ -11,7 +11,8 @@
   "logo": {
     "light": "/logo/light.svg",
     "dark": "/logo/dark.svg",
-    "href": "https://www.getpatter.com"
+    "href": "https://www.getpatter.com",
+    "height": 40
   },
   "navbar": {
     "links": [
@@ -38,7 +39,7 @@
     "products": [
       {
         "product": "Home",
-        "icon": "/patter-logo-banner.svg",
+        "icon": "house",
         "groups": [
           {
             "group": "Welcome",
