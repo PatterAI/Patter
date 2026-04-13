@@ -1,7 +1,7 @@
 {
   "$schema": "https://mintlify.com/docs.json",
   "theme": "almond",
-  "name": "Patter",
+  "name": "Patter | Documentation",
   "colors": {
     "primary": "#18181B",
     "light": "#10B981",
@@ -9,10 +9,10 @@
   },
   "favicon": "/favicon.svg",
   "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg",
+    "light": "/logo/patter-logo.png",
+    "dark": "/logo/patter-logo.png",
     "href": "https://www.getpatter.com",
-    "height": 30
+    "height": 45
   },
   "navbar": {
     "links": [
