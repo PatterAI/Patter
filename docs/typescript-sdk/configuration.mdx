@@ -1,29 +1,11 @@
 ---
 title: "Configuration"
-description: "Constructor options for cloud and local modes."
+description: "Constructor options for local mode."
 ---
 
 # Configuration
 
-The `Patter` constructor accepts either `PatterOptions` (cloud mode) or `LocalOptions` (local mode).
-
-## Cloud Mode
-
-```typescript
-import { Patter } from "getpatter";
-
-const phone = new Patter({
-  apiKey: "pt_...",
-});
-```
-
-### PatterOptions
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `apiKey` | `string` | Yes | — | Your Patter API key (`pt_...`). |
-| `backendUrl` | `string` | No | `wss://api.getpatter.com` | WebSocket URL for the Patter backend. |
-| `restUrl` | `string` | No | `https://api.getpatter.com` | REST API URL for agent management. |
+The `Patter` constructor accepts `LocalOptions`.
 
 ## Local Mode
 

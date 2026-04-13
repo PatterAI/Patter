@@ -1,6 +1,6 @@
 ---
 title: "Configuration"
-description: "All Patter constructor parameters for cloud, self-hosted, and local modes."
+description: "All Patter constructor parameters for local mode."
 ---
 
 # Configuration
@@ -9,54 +9,30 @@ The `Patter` class is the main entry point for the SDK. The constructor paramete
 
 ## Mode Detection
 
-Patter automatically detects the mode based on the parameters you provide:
+Patter runs in local mode. It is auto-detected when telephony provider keys are provided:
 
 | Condition | Detected Mode |
 |-----------|---------------|
-| `api_key` provided | Cloud |
-| `twilio_sid` or `telnyx_key` provided without `api_key` | Local (auto-detected) |
+| `twilio_sid` or `telnyx_key` provided | Local (auto-detected) |
 | `mode="local"` set explicitly | Local |
 
 ```python
-# Cloud mode (explicit)
-phone = Patter(api_key="pt_xxx")
-
-# Local mode (auto-detected — twilio_sid without api_key)
+# Local mode (auto-detected — twilio_sid)
 phone = Patter(twilio_sid="AC...", twilio_token="...", openai_key="sk-...",
                phone_number="+15550001234", webhook_url="abc.ngrok.io")
 
-# Local mode (auto-detected — telnyx_key without api_key)
+# Local mode (auto-detected — telnyx_key)
 phone = Patter(telnyx_key="KEY...", telnyx_connection_id="...", openai_key="sk-...",
                phone_number="+15550001234", webhook_url="abc.ngrok.io")
 ```
 
 ## Constructor Parameters
 
-### Cloud Mode
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `api_key` | `str` | `""` | Your Patter API key (starts with `pt_`). Required for cloud mode. |
-| `backend_url` | `str` | `"wss://api.getpatter.com"` | WebSocket URL for the Patter backend. Override for self-hosted deployments. |
-| `rest_url` | `str` | `"https://api.getpatter.com"` | REST API URL for the Patter backend. Override for self-hosted deployments. |
-
-```python
-# Cloud mode — managed platform
-phone = Patter(api_key="pt_xxx")
-
-# Self-hosted — your own Patter backend
-phone = Patter(
-    api_key="pt_xxx",
-    backend_url="wss://your-backend.example.com",
-    rest_url="https://your-backend.example.com",
-)
-```
-
 ### Local Mode
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `mode` | `str` | `"cloud"` | Set to `"local"` to force local mode. Auto-detected when provider keys are given without `api_key`. |
+| `mode` | `str` | `"local"` | Operating mode. Can be omitted — auto-detected when provider keys are given. |
 | `twilio_sid` | `str` | `""` | Twilio Account SID. |
 | `twilio_token` | `str` | `""` | Twilio Auth Token. Required when `twilio_sid` is provided. |
 | `telnyx_key` | `str` | `""` | Telnyx API key. |
@@ -110,19 +86,6 @@ Local mode enforces the following validation when telephony keys are provided:
 phone = Patter(twilio_sid="AC...", twilio_token="...")
 # ValueError: Local mode requires phone_number (e.g., phone_number='+15550001234').
 ```
-
-## Security Warning
-
-When using cloud mode with a non-localhost `backend_url`, the SDK warns if you use unencrypted `ws://` instead of `wss://`:
-
-```
-WARNING: Using unencrypted ws:// for non-localhost host 'example.com'.
-Use wss:// to protect your API key in transit.
-```
-
-<Warning>
-  Always use `wss://` for production deployments. The `ws://` protocol transmits your API key in plaintext.
-</Warning>
 
 ## Environment Variables
 

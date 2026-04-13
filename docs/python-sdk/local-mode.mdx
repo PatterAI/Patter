@@ -71,10 +71,6 @@ await phone.serve(agent, port=8000)
 | `on_message` | `Callable \| None` | `None` | Async callback for pipeline mode. Receives user text, returns agent response. |
 | `voicemail_message` | `str` | `""` | Message to speak when AMD detects a machine on outbound calls. |
 
-<Warning>
-  `serve()` is only available in local mode. Calling it in cloud mode raises `PatterConnectionError`.
-</Warning>
-
 ---
 
 ## Making Outbound Calls

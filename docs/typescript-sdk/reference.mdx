@@ -12,7 +12,7 @@ Complete reference for all types, interfaces, and exports in the `patter` packag
 ### Constructor
 
 ```typescript
-new Patter(options: PatterOptions | LocalOptions)
+new Patter(options: LocalOptions)
 ```
 
 ### Instance Methods
@@ -21,14 +21,7 @@ new Patter(options: PatterOptions | LocalOptions)
 |--------|-----------|-------------|
 | `agent` | `(opts: AgentOptions) => AgentOptions` | Validates and returns an agent configuration. |
 | `serve` | `(opts: ServeOptions) => Promise<void>` | Starts the embedded server (local mode only). |
-| `connect` | `(opts: ConnectOptions) => Promise<void>` | Connects to the Patter cloud platform. |
-| `call` | `(opts: CallOptions \| LocalCallOptions) => Promise<void>` | Makes an outbound call. |
-| `disconnect` | `() => Promise<void>` | Disconnects from the cloud platform. |
-| `createAgent` | `(opts: CreateAgentOptions) => Promise<Agent>` | Creates a cloud-managed agent. |
-| `listAgents` | `() => Promise<Agent[]>` | Lists all cloud-managed agents. |
-| `buyNumber` | `(opts?: { country?: string; provider?: string }) => Promise<PhoneNumber>` | Provisions a new phone number. |
-| `assignAgent` | `(numberId: string, agentId: string) => Promise<void>` | Assigns an agent to a phone number. |
-| `listCalls` | `(limit?: number) => Promise<Call[]>` | Lists recent calls (1-1000, default 50). |
+| `call` | `(opts: LocalCallOptions) => Promise<void>` | Makes an outbound call. |
 | `test` | `(agent: AgentOptions, opts?: TestOptions) => Promise<void>` | Starts an interactive terminal test session (local mode only). See [Test Mode](/typescript-sdk/test-mode). |
 
 ### Static Methods
@@ -43,16 +36,6 @@ new Patter(options: PatterOptions | LocalOptions)
 | `Patter.tool` | `(opts: { name: string; description?: string; parameters?: object; handler?: Function; webhookUrl?: string }) => ToolDefinition` | Creates a tool definition. Requires either `handler` or `webhookUrl`. |
 
 ## Interfaces
-
-### PatterOptions
-
-```typescript
-interface PatterOptions {
-  apiKey: string;
-  backendUrl?: string;
-  restUrl?: string;
-}
-```
 
 ### LocalOptions
 
@@ -108,36 +91,6 @@ interface ServeOptions {
   voicemailMessage?: string;
   dashboard?: boolean;
   dashboardToken?: string;
-}
-```
-
-### ConnectOptions
-
-```typescript
-interface ConnectOptions {
-  onMessage: MessageHandler;
-  onCallStart?: CallEventHandler;
-  onCallEnd?: CallEventHandler;
-  provider?: string;
-  providerKey?: string;
-  providerSecret?: string;
-  number?: string;
-  country?: string;
-  stt?: STTConfig;
-  tts?: TTSConfig;
-}
-```
-
-### CallOptions
-
-```typescript
-interface CallOptions {
-  to: string;
-  onMessage?: MessageHandler;
-  firstMessage?: string;
-  fromNumber?: string;
-  agentId?: string;
-  machineDetection?: boolean;
 }
 ```
 
@@ -204,66 +157,6 @@ interface IncomingMessage {
   readonly text: string;
   readonly callId: string;
   readonly caller: string;
-}
-```
-
-### CreateAgentOptions
-
-```typescript
-interface CreateAgentOptions {
-  name: string;
-  systemPrompt: string;
-  model?: string;
-  voice?: string;
-  voiceProvider?: string;
-  language?: string;
-  firstMessage?: string;
-  tools?: ToolDefinition[];
-}
-```
-
-### Agent
-
-```typescript
-interface Agent {
-  id: string;
-  name: string;
-  systemPrompt: string;
-  model: string;
-  voice: string;
-  voiceProvider: string;
-  language: string;
-  firstMessage: string | null;
-  tools: ToolDefinition[] | null;
-}
-```
-
-### PhoneNumber
-
-```typescript
-interface PhoneNumber {
-  id: string;
-  number: string;
-  provider: string;
-  country: string;
-  status: string;
-  agentId: string | null;
-}
-```
-
-### Call
-
-```typescript
-interface Call {
-  id: string;
-  direction: string;
-  caller: string;
-  callee: string;
-  startedAt: string;
-  endedAt: string | null;
-  durationSeconds: number | null;
-  status: string;
-  transcript: Array<{ role: string; text: string; timestamp: string }> | null;
 }
 ```
 
@@ -355,7 +248,6 @@ interface ProviderPricing {
 ## Type Aliases
 
 ```typescript
-type MessageHandler = (msg: IncomingMessage) => Promise<string>;
 type CallEventHandler = (data: Record<string, unknown>) => Promise<void>;
 type PipelineMessageHandler = (data: Record<string, unknown>) => Promise<string>;
 ```
@@ -368,23 +260,17 @@ All errors extend `PatterError`, which extends the native `Error` class.
 |-------|-------------|
 | `PatterError` | Base error class for all SDK errors. |
 | `PatterConnectionError` | WebSocket connection failures or disconnection errors. |
-| `AuthenticationError` | Invalid API key or authentication failure. |
-| `ProvisionError` | Failed to provision resources (create agents, buy numbers, make calls). |
 
 ```typescript
 import {
   PatterError,
   PatterConnectionError,
-  AuthenticationError,
-  ProvisionError,
 } from "getpatter";
 
 try {
   await phone.call({ to: "+15559876543", agent });
 } catch (error) {
-  if (error instanceof ProvisionError) {
-    console.error("Failed to make call:", error.message);
-  } else if (error instanceof PatterConnectionError) {
+  if (error instanceof PatterConnectionError) {
     console.error("Connection issue:", error.message);
   }
 }
@@ -410,8 +296,6 @@ export { OpenAITTS } from "getpatter";
 export {
   PatterError,
   PatterConnectionError,
-  AuthenticationError,
-  ProvisionError,
 } from "getpatter";
 ```
 
@@ -440,21 +324,13 @@ export type {
   IncomingMessage,
   STTConfig,
   TTSConfig,
-  PatterOptions,
   LocalOptions,
   AgentOptions,
   ServeOptions,
   LocalCallOptions,
-  ConnectOptions,
-  CallOptions,
-  MessageHandler,
   CallEventHandler,
   PipelineMessageHandler,
   ToolDefinition,
-  CreateAgentOptions,
-  Agent,
-  PhoneNumber,
-  Call,
   Guardrail,
   LocalConfig,
   CallControl,

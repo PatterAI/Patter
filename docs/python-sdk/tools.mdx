@@ -5,7 +5,7 @@ description: "Let your voice agent call APIs, query databases, and take actions 
 
 # Tools & Function Calling
 
-Tools let your voice agent perform actions during a conversation -- check a database, call an API, transfer a call, or anything else you can expose via a webhook.
+Tools let your voice agent perform actions during a conversation -- check a database, call an API, transfer a call, or anything else you can expose via a webhook or an in-process handler.
 
 ## Defining Tools
 
@@ -16,7 +16,12 @@ Each tool is a dictionary with the following fields:
 | `name` | `str` | Yes | Unique identifier for the tool. |
 | `description` | `str` | Yes | Natural language description of what the tool does. The AI uses this to decide when to call it. |
 | `parameters` | `dict` | Yes | JSON Schema defining the tool's input parameters. |
-| `webhook_url` | `str` | Yes | URL that Patter POSTs to when the AI invokes this tool. |
+| `webhook_url` | `str` | One of `webhook_url` or `handler` | URL that Patter POSTs to when the AI invokes this tool. |
+| `handler` | `Callable` | One of `webhook_url` or `handler` | Async or sync callable `(arguments, context) -> str | dict`. Runs in-process instead of making an HTTP call. |
+
+<Note>
+  Every tool must have either a `webhook_url` or a `handler`. Providing neither raises a `ValueError`.
+</Note>
 
 ```python
 agent = phone.agent(
@@ -146,6 +151,68 @@ Ends the current call programmatically.
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `reason` | `str` | Reason for ending the call (logged in the transcript). |
+
+---
+
+## Using Patter.tool()
+
+The `Patter.tool()` static method provides a convenient way to create tool definitions:
+
+```python
+agent = phone.agent(
+    system_prompt="You are a helpful assistant.",
+    tools=[
+        Patter.tool(
+            name="get_order_status",
+            description="Look up an order by ID.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "order_id": {"type": "string", "description": "Order ID"},
+                },
+                "required": ["order_id"],
+            },
+            webhook_url="https://api.example.com/orders/status",
+        ),
+    ],
+)
+```
+
+## In-Process Handlers
+
+Instead of webhook URLs, you can pass a Python callable that runs in-process. This is useful for tools that query local databases, call internal APIs, or perform any logic without an external HTTP endpoint.
+
+```python
+async def check_inventory(arguments, context):
+    product_id = arguments["product_id"]
+    # Your custom logic here
+    stock = await db.get_stock(product_id)
+    return {"product_id": product_id, "in_stock": stock > 0, "quantity": stock}
+
+agent = phone.agent(
+    system_prompt="You are a product specialist.",
+    tools=[
+        Patter.tool(
+            name="check_inventory",
+            description="Check if a product is in stock.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "product_id": {"type": "string", "description": "Product ID"},
+                },
+                "required": ["product_id"],
+            },
+            handler=check_inventory,
+        ),
+    ],
+)
+```
+
+The handler receives two arguments:
+- `arguments` — A dict of the arguments extracted by the AI
+- `context` — A dict with call metadata (`call_id`, `caller`, `callee`)
+
+The handler must return a `str` or `dict`. Dict values are serialized to JSON before being passed to the AI.
 
 ---
 
