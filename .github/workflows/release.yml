@@ -12,6 +12,11 @@ jobs:
   release-python-sdk:
     name: Publish Python SDK to PyPI
     runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/patter
+    permissions:
+      id-token: write
     steps:
       - uses: actions/checkout@v6
       - name: Set up Python 3.13
@@ -19,20 +24,15 @@ jobs:
         with:
           python-version: "3.13"
       - name: Install build tools
-        run: |
-          cd sdk
-          pip install build twine
+        run: pip install build
       - name: Build package
         run: |
           cd sdk
           python -m build
       - name: Publish to PyPI
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: |
-          cd sdk
-          twine upload dist/*
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: sdk/dist/
 
   release-ts-sdk:
     name: Publish TypeScript SDK to npm
