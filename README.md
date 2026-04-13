@@ -12,8 +12,7 @@
   <a href="#quickstart">Quickstart</a> •
   <a href="#features">Features</a> •
   <a href="#installation">Installation</a> •
-  <a href="#documentation">Documentation</a> •
-  <a href="#self-hosting">Self-Hosting</a>
+  <a href="#documentation">Documentation</a>
 </p>
 
 <p align="center">
@@ -33,57 +32,13 @@ Patter is an open-source platform that gives your AI agent a voice and a phone n
 
 ```python
 import asyncio
-from patter import Patter, IncomingMessage
-
-async def on_message(msg: IncomingMessage) -> str:
-    # Your agent logic here — return what the AI should say
-    return f"You said: {msg.text}"
-
-async def main():
-    phone = Patter(api_key="pt_xxx")
-    await phone.connect(on_message=on_message)  # starts listening for inbound calls
-
-asyncio.run(main())
-```
-
-</details>
-
-<details>
-<summary><strong>TypeScript</strong></summary>
-
-```typescript
-import { Patter } from "getpatter";
-
-const phone = new Patter({ apiKey: "pt_xxx" });
-
-await phone.connect({
-  onMessage: async (msg) => {
-    // Your agent logic here — return what the AI should say
-    return `You said: ${msg.text}`;
-  },
-});
-```
-
-</details>
-
-## Local Mode (No Cloud Required)
-
-Run Patter entirely in your process — no Patter account, no cloud backend.
-
-<details open>
-<summary><strong>Python</strong></summary>
-
-```python
-import asyncio
 from patter import Patter
 
 async def main():
     phone = Patter(
-        mode="local",
         twilio_sid="AC...", twilio_token="...",
         openai_key="sk-...",
         phone_number="+1...",
-        webhook_url="xxx.ngrok-free.dev",
     )
 
     agent = phone.agent(
@@ -107,11 +62,9 @@ asyncio.run(main())
 import { Patter } from "getpatter";
 
 const phone = new Patter({
-  mode: "local",
   twilioSid: "AC...", twilioToken: "...",
   openaiKey: "sk-...",
   phoneNumber: "+1...",
-  webhookUrl: "xxx.ngrok-free.dev",
 });
 
 const agent = phone.agent({
@@ -125,17 +78,6 @@ await phone.serve({ agent, port: 8000 });
 ```
 
 </details>
-
-## Local vs Cloud
-
-| | Cloud Mode | Local Mode |
-|---|---|---|
-| **Setup** | Patter API key only | Twilio/Telnyx + OpenAI keys |
-| **Infrastructure** | Managed by Patter | Runs in your process |
-| **Backend** | `wss://api.getpatter.com` | Built-in (FastAPI / Express) |
-| **Webhook** | Configured automatically | Requires public URL (e.g. ngrok) |
-| **Voice modes** | All three | All three |
-| **Best for** | Production, multi-tenant | Development, on-prem, full control |
 
 ## Features
 
@@ -165,7 +107,8 @@ await phone.serve({ agent, port: 8000 });
 ### Developer Experience
 - `pip install patter` / `npm install getpatter`
 - 10 lines of code to connect an agent to a phone
-- Local mode (embedded, no backend) + Cloud mode
+- Runs entirely in your process — no external backend needed
+- Built-in tunnel via Cloudflare (no ngrok required)
 - Python + TypeScript SDKs with full parity
 - MCP server for Claude Desktop
 - Open-source (MIT)
@@ -174,12 +117,10 @@ await phone.serve({ agent, port: 8000 });
 
 ```typescript
 const phone = new Patter({
-  mode: 'local',
   twilioSid: process.env.TWILIO_SID,
   twilioToken: process.env.TWILIO_TOKEN,
   openaiKey: process.env.OPENAI_KEY,
   phoneNumber: '+16592214527',
-  webhookUrl: 'your-domain.ngrok-free.dev',
 });
 
 const agent = phone.agent({
@@ -223,24 +164,25 @@ await phone.call({
 ## How It Works
 
 ```
-Your Code (on_message handler)
-        │
-        ▼
-   Patter SDK  ──WebSocket──►  Patter Backend  ──────────────────────────────┐
-                                      │                                       │
-                              ┌───────┴────────┐                              │
-                              ▼                ▼                              ▼
-                          STT Engine       TTS Engine          Telephony Provider
-                       (Deepgram /      (ElevenLabs /          (Twilio / Telnyx)
-                        Whisper /        OpenAI TTS)                  │
-                       OpenAI RT)              │                       │
-                              │               └───────────────────────►│
-                              └────────────────────────────────────────►│
-                                                                        ▼
-                                                                  Phone Call
+                          Phone Call
+                              │
+                              ▼
+                     Telephony Provider
+                     (Twilio / Telnyx)
+                              │
+                              ▼
+                   Patter Embedded Server
+                  (FastAPI / Express in your process)
+                              │
+                    ┌─────────┼─────────┐
+                    ▼         ▼         ▼
+               STT Engine  LLM Loop  TTS Engine
+              (Deepgram /  (OpenAI / (ElevenLabs /
+               Whisper /   Claude /   OpenAI TTS)
+              OpenAI RT)   any LLM)
 ```
 
-The audio path: **Phone → Telephony → WebSocket → Backend → STT → your handler → TTS → Backend → WebSocket → Phone**
+The audio path: **Phone → Twilio/Telnyx → Patter (in your process) → STT → LLM → TTS → Phone**
 
 ## Installation
 
@@ -254,107 +196,7 @@ npm install getpatter
 
 ## Documentation
 
-### Inbound Calls (AI answers the phone)
-
-<details open>
-<summary><strong>Python</strong></summary>
-
-```python
-import asyncio
-from patter import Patter, IncomingMessage
-
-async def agent(msg: IncomingMessage) -> str:
-    if "hours" in msg.text.lower():
-        return "We're open Monday through Friday, 9 to 5."
-    return "How can I help you today?"
-
-async def main():
-    phone = Patter(api_key="pt_xxx")
-    await phone.connect(
-        on_message=agent,
-        on_call_start=lambda data: print(f"Call from {data['caller']}"),
-        on_call_end=lambda data: print("Call ended"),
-    )
-    await asyncio.Event().wait()  # keep the process alive
-
-asyncio.run(main())
-```
-
-</details>
-
-<details>
-<summary><strong>TypeScript</strong></summary>
-
-```typescript
-import { Patter } from "getpatter";
-
-const phone = new Patter({ apiKey: "pt_xxx" });
-
-await phone.connect({
-  onMessage: async (msg) => {
-    if (msg.text.toLowerCase().includes("hours")) {
-      return "We're open Monday through Friday, 9 to 5.";
-    }
-    return "How can I help you today?";
-  },
-  onCallStart: (data) => console.log(`Call from ${data.caller}`),
-  onCallEnd: () => console.log("Call ended"),
-});
-```
-
-</details>
-
----
-
-### Outbound Calls (AI calls someone)
-
-<details open>
-<summary><strong>Python</strong></summary>
-
-```python
-import asyncio
-from patter import Patter, IncomingMessage
-
-async def agent(msg: IncomingMessage) -> str:
-    return "Thanks for picking up. This is a reminder about your appointment tomorrow."
-
-async def main():
-    phone = Patter(api_key="pt_xxx")
-    await phone.connect(on_message=agent)
-    await phone.call(
-        to="+14155551234",
-        first_message="Hi, this is an automated reminder from Acme Corp.",
-    )
-
-asyncio.run(main())
-```
-
-</details>
-
-<details>
-<summary><strong>TypeScript</strong></summary>
-
-```typescript
-import { Patter } from "getpatter";
-
-const phone = new Patter({ apiKey: "pt_xxx" });
-
-await phone.connect({
-  onMessage: async () =>
-    "Thanks for picking up. This is a reminder about your appointment tomorrow.",
-});
-
-await phone.call({
-  to: "+14155551234",
-  firstMessage: "Hi, this is an automated reminder from Acme Corp.",
-});
-```
-
-</details>
-
----
-
-### Outbound with Machine Detection + Voicemail Drop
+### Outbound Calls with Machine Detection + Voicemail Drop
 
 <details open>
 <summary><strong>Python</strong></summary>
@@ -539,48 +381,6 @@ await phone.serve({
 
 </details>
 
----
-
-### Custom Voice (choose your providers)
-
-<details open>
-<summary><strong>Python</strong></summary>
-
-```python
-phone = Patter(api_key="pt_xxx", backend_url="ws://localhost:8000")
-
-await phone.connect(
-    on_message=agent,
-    provider="twilio",
-    provider_key="ACxxxxxxxx",
-    provider_secret="your_auth_token",
-    number="+14155550000",
-    stt=Patter.deepgram(api_key="dg_xxx", language="en"),
-    tts=Patter.elevenlabs(api_key="el_xxx", voice="rachel"),
-)
-```
-
-</details>
-
-<details>
-<summary><strong>TypeScript</strong></summary>
-
-```typescript
-const phone = new Patter({ apiKey: "pt_xxx", backendUrl: "ws://localhost:8000" });
-
-await phone.connect({
-  onMessage: agent,
-  provider: "twilio",
-  providerKey: "ACxxxxxxxx",
-  providerSecret: "your_auth_token",
-  number: "+14155550000",
-  stt: Patter.deepgram({ apiKey: "dg_xxx", language: "en" }),
-  tts: Patter.elevenlabs({ apiKey: "el_xxx", voice: "rachel" }),
-});
-```
-
-</details>
-
 ## Voice Modes
 
 | Mode | Latency | Quality | Best For |
@@ -588,8 +388,6 @@ await phone.connect({
 | **OpenAI Realtime** | Lowest | High | Fluid, low-latency conversations |
 | **Deepgram + ElevenLabs** | Low | High | Independent control over STT and TTS |
 | **ElevenLabs ConvAI** | Low | High | ElevenLabs-managed conversation flow |
-
-The voice mode is configured on the backend. Your `on_message` handler works identically regardless of mode.
 
 ## MCP Server (Claude Desktop)
 
@@ -606,55 +404,16 @@ Patter ships an MCP server so you can control calls directly from Claude Desktop
 }
 ```
 
-## Self-Hosting
-
-Run the full stack yourself — no Patter Cloud account needed.
-
-```bash
-# 1. Clone the repo
-git clone https://github.com/your-org/patter
-cd patter
-
-# 2. Copy env and fill in your keys
-cp .env.example .env
-
-# 3. Start the backend
-cd backend
-pip install -e ".[dev]"
-alembic upgrade head
-uvicorn app.main:app --reload
-```
-
-Then point your SDK at your local backend:
-
-```python
-phone = Patter(
-    api_key="pt_xxx",
-    backend_url="ws://localhost:8000",
-    rest_url="http://localhost:8000",
-)
-```
-
-**Required environment variables:**
-
-| Variable | Description |
-|---|---|
-| `PATTER_DATABASE_URL` | PostgreSQL connection string |
-| `PATTER_ENCRYPTION_KEY` | Key for encrypting stored provider credentials |
-| `PATTER_SECRET_KEY` | JWT / HMAC signing secret |
-
-See `backend/.env.example` for the full list.
-
 ## API Reference
 
 ### `Patter` (Python & TypeScript)
 
 | Method | Description |
 |---|---|
-| `Patter(api_key, backend_url?, rest_url?)` | Create client. `backend_url` defaults to `wss://api.getpatter.com`. |
-| `connect(on_message, ...)` | Connect and start receiving calls. Blocks until disconnected. |
+| `Patter(twilio_sid, twilio_token, openai_key, phone_number, ...)` | Create client with provider credentials. |
+| `agent(system_prompt, voice?, first_message?, tools?, ...)` | Create an agent configuration. |
+| `serve(agent, port?, ...)` | Start the embedded server and listen for calls. |
 | `call(to, first_message?, machine_detection?, voicemail_message?, ...)` | Place an outbound call. |
-| `disconnect()` | Gracefully close the connection. |
 
 **`serve()` options:**
 
@@ -687,15 +446,6 @@ See `backend/.env.example` for the full list.
 | `machine_detection` | `bool` | Enable answering machine detection |
 | `voicemail_message` | `str` | Message to play when voicemail is detected |
 
-**Static provider helpers** (for self-hosted mode):
-
-| Helper | Type | Description |
-|---|---|---|
-| `Patter.deepgram(api_key, language?)` | STT | Deepgram Nova |
-| `Patter.whisper(api_key, language?)` | STT | OpenAI Whisper |
-| `Patter.elevenlabs(api_key, voice?)` | TTS | ElevenLabs |
-| `Patter.openai_tts(api_key, voice?)` | TTS | OpenAI TTS |
-
 ### `IncomingMessage`
 
 | Field | Type | Description |
@@ -709,13 +459,11 @@ See `backend/.env.example` for the full list.
 Pull requests are welcome.
 
 ```bash
-# Run tests
-cd backend && pytest tests/ -v
-cd sdk && pytest tests/ -v
+# Python SDK
+cd sdk && pip install -e ".[dev]" && pytest tests/ -v
 
-# Install dev dependencies
-cd backend && pip install -e ".[dev]"
-cd sdk && pip install -e ".[dev]"
+# TypeScript SDK
+cd sdk-ts && npm install && npm test
 ```
 
 Please open an issue before submitting large changes so we can discuss the approach first.
