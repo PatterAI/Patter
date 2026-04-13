@@ -1,5 +1,5 @@
 [project]
-name = "patter"
+name = "getpatter"
 version = "0.4.0"
 description = "Connect AI agents to phone numbers with 10 lines of code"
 readme = "README.md"
