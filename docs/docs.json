@@ -4,13 +4,13 @@
   "name": "Patter | Documentation",
   "colors": {
     "primary": "#18181B",
-    "light": "#10B981",
+    "light": "#FFFFFF",
     "dark": "#18181B"
   },
   "favicon": "/favicon.svg",
   "logo": {
     "light": "/logo/patter-logo.png",
-    "dark": "/logo/patter-logo.png",
+    "dark": "/logo/patter-logo-dark.png",
     "href": "https://www.getpatter.com",
     "height": 45
   },
