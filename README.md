@@ -163,26 +163,35 @@ await phone.call({
 
 ## How It Works
 
-```
-                          Phone Call
-                              │
-                              ▼
-                     Telephony Provider
-                     (Twilio / Telnyx)
-                              │
-                              ▼
-                   Patter Embedded Server
-                  (FastAPI / Express in your process)
-                              │
-                    ┌─────────┼─────────┐
-                    ▼         ▼         ▼
-               STT Engine  LLM Loop  TTS Engine
-              (Deepgram /  (OpenAI / (ElevenLabs /
-               Whisper /   Claude /   OpenAI TTS)
-              OpenAI RT)   any LLM)
-```
+> **From code to phone call** — Your AI agent connects to real phone calls through the Patter SDK in three steps.
 
-The audio path: **Phone → Twilio/Telnyx → Patter (in your process) → STT → LLM → TTS → Phone**
+<table>
+<tr>
+<th align="center">AI Agents</th>
+<th align="center"></th>
+<th align="center">Patter SDK</th>
+<th align="center"></th>
+<th align="center">Phone Calls</th>
+</tr>
+<tr>
+<td align="center">
+  <strong>ChatGPT</strong><br><sub>OpenAI</sub><br><br>
+  <strong>Claude</strong><br><sub>Anthropic</sub><br><br>
+  <strong>Your AI Agent</strong><br><sub><code>on_message</code></sub>
+</td>
+<td align="center">→</td>
+<td align="center">
+  <strong>Patter SDK</strong><br>
+  <em>Connect any AI to any phone</em><br><br>
+  <code>STT</code> · <code>TTS</code> · <code>WebSocket</code>
+</td>
+<td align="center">→</td>
+<td align="center">
+  <strong>Twilio</strong><br><sub>Telephony</sub><br><br>
+  <strong>Telnyx</strong><br><sub>Telephony</sub>
+</td>
+</tr>
+</table>
 
 ## Installation
 
