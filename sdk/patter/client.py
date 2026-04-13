@@ -115,10 +115,6 @@ class Patter:
                     raise ValueError(
                         "Local mode requires phone_number (e.g., phone_number='+15550001234')."
                     )
-                if not webhook_url:
-                    raise ValueError(
-                        "Local mode requires webhook_url (e.g., webhook_url='abc.ngrok.io')."
-                    )
                 if twilio_sid and not twilio_token:
                     raise ValueError(
                         "twilio_token is required when using twilio_sid."
@@ -136,6 +132,7 @@ class Patter:
                 webhook_url=webhook_url,
             )
             self._server = None
+            self._tunnel_handle = None
             self._connection = None
             self._http = None
         else:
@@ -431,6 +428,7 @@ class Patter:
         on_metrics: Callable[[dict], Awaitable[None]] | None = None,
         dashboard: bool = True,
         dashboard_token: str = "",
+        tunnel: bool = False,
     ) -> None:
         """Start the embedded server for inbound calls (local mode only).
 
@@ -452,6 +450,9 @@ class Patter:
                 at ``http://localhost:{port}/dashboard``.
             dashboard_token: Optional bearer token for dashboard authentication.
                 When set, all dashboard routes require this token.
+            tunnel: When ``True``, start a cloudflared tunnel automatically.
+                Requires ``cloudflared`` binary on PATH. Mutually exclusive
+                with ``webhook_url``.
         """
         if self._mode != "local":
             raise PatterConnectionError(
@@ -473,10 +474,36 @@ class Patter:
                 f"recording must be a bool, got {type(recording).__name__}."
             )
 
+        # Resolve webhook_url: tunnel or explicit
+        config = self._local_config
+
+        if tunnel and config.webhook_url:
+            raise ValueError(
+                "Cannot use both tunnel=True and webhook_url. Pick one."
+            )
+
+        if tunnel:
+            from patter.tunnel import start_tunnel
+
+            handle = await start_tunnel(port)
+            self._tunnel_handle = handle
+            # Replace config with the tunnel hostname (frozen dataclass)
+            from dataclasses import replace
+
+            config = replace(config, webhook_url=handle.hostname)
+            self._local_config = config
+
+        if not config.webhook_url:
+            raise ValueError(
+                "No webhook_url configured. Either:\n"
+                "  - Pass webhook_url in the Patter constructor\n"
+                "  - Use tunnel=True in serve() to auto-create a tunnel"
+            )
+
         from patter.server import EmbeddedServer
 
         self._server = EmbeddedServer(
-            config=self._local_config,
+            config=config,
             agent=agent,
             recording=recording,
             voicemail_message=voicemail_message,
@@ -629,6 +656,9 @@ class Patter:
         if self._mode == "local":
             if self._server:
                 await self._server.stop()
+            if self._tunnel_handle:
+                self._tunnel_handle.stop()
+                self._tunnel_handle = None
             return
         await self._connection.disconnect()
         await self._http.aclose()

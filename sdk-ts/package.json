@@ -54,6 +54,9 @@
     "express": "^5.2.1",
     "ws": "^8.18.0"
   },
+  "optionalDependencies": {
+    "cloudflared": "^1.0.0"
+  },
   "devDependencies": {
     "@playwright/test": "^1.59.1",
     "@types/express": "^5.0.6",

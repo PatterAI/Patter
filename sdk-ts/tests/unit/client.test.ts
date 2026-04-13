@@ -384,17 +384,15 @@ describe('Patter (local mode)', () => {
     ).toThrow('Local mode requires phoneNumber');
   });
 
-  it('throws if webhookUrl missing in local mode', () => {
-    expect(
-      () =>
-        new Patter({
-          mode: 'local',
-          phoneNumber: '+15551234567',
-          webhookUrl: '',
-          twilioSid: 'AC123',
-          twilioToken: 'tok',
-        }),
-    ).toThrow('Local mode requires webhookUrl');
+  it('accepts missing webhookUrl in constructor (deferred to serve)', () => {
+    const phone = new Patter({
+      mode: 'local',
+      phoneNumber: '+15551234567',
+      webhookUrl: '',
+      twilioSid: 'AC123',
+      twilioToken: 'tok',
+    });
+    expect(phone).toBeDefined();
   });
 
   it('throws if neither twilioSid nor telnyxKey provided', () => {

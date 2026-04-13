@@ -1,5 +1,6 @@
 import { PatterConnection } from "./connection";
 import { PatterConnectionError, ProvisionError } from "./errors";
+import type { TunnelHandle } from "./tunnel";
 import type {
   PatterOptions,
   LocalOptions,
@@ -31,6 +32,7 @@ export class Patter {
   private readonly mode: 'cloud' | 'local';
   private readonly localConfig: LocalOptions | null;
   private embeddedServer: EmbeddedServer | null = null;
+  private tunnelHandle: TunnelHandle | null = null;
 
   constructor(options: PatterOptions | LocalOptions) {
     if ('mode' in options && options.mode === 'local') {
@@ -38,9 +40,6 @@ export class Patter {
 
       if (!local.phoneNumber) {
         throw new Error('Local mode requires phoneNumber');
-      }
-      if (!local.webhookUrl) {
-        throw new Error('Local mode requires webhookUrl (e.g., your ngrok URL)');
       }
       if (!local.twilioSid && !local.telnyxKey) {
         throw new Error('Local mode requires twilioSid or telnyxKey');
@@ -121,13 +120,36 @@ export class Patter {
     if (opts.agent.provider && !validProviders.includes(opts.agent.provider)) {
       throw new Error(`agent.provider must be one of: ${validProviders.join(', ')}`);
     }
+
+    // Resolve webhookUrl: tunnel or explicit
+    let webhookUrl = this.localConfig.webhookUrl ?? '';
+    const port = opts.port ?? 8000;
+
+    if (opts.tunnel && webhookUrl) {
+      throw new Error('Cannot use both tunnel: true and webhookUrl. Pick one.');
+    }
+
+    if (opts.tunnel) {
+      const { startTunnel } = await import('./tunnel');
+      this.tunnelHandle = await startTunnel(port);
+      webhookUrl = this.tunnelHandle.hostname;
+    }
+
+    if (!webhookUrl) {
+      throw new Error(
+        'No webhookUrl configured. Either:\n' +
+        '  - Pass webhookUrl in the Patter constructor\n' +
+        '  - Use tunnel: true in serve() to auto-create a tunnel'
+      );
+    }
+
     this.embeddedServer = new EmbeddedServer(
       {
         twilioSid: this.localConfig.twilioSid,
         twilioToken: this.localConfig.twilioToken,
         openaiKey: this.localConfig.openaiKey,
         phoneNumber: this.localConfig.phoneNumber,
-        webhookUrl: this.localConfig.webhookUrl,
+        webhookUrl,
         telephonyProvider: this.localConfig.telephonyProvider,
         telnyxKey: this.localConfig.telnyxKey,
         telnyxConnectionId: this.localConfig.telnyxConnectionId,
@@ -145,7 +167,7 @@ export class Patter {
       opts.dashboard ?? true,
       opts.dashboardToken ?? '',
     );
-    await this.embeddedServer.start(opts.port ?? 8000);
+    await this.embeddedServer.start(port);
   }
 
   async test(opts: ServeOptions): Promise<void> {
@@ -282,6 +304,14 @@ export class Patter {
   }
 
   async disconnect(): Promise<void> {
+    if (this.tunnelHandle) {
+      this.tunnelHandle.stop();
+      this.tunnelHandle = null;
+    }
+    if (this.embeddedServer) {
+      await this.embeddedServer.stop();
+      this.embeddedServer = null;
+    }
     await this.connection.disconnect();
   }
 
