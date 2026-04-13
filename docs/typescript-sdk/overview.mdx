@@ -5,7 +5,7 @@ description: "Connect AI agents to phone numbers with 10 lines of TypeScript."
 
 # TypeScript SDK
 
-The Patter TypeScript SDK lets you connect AI voice agents to phone numbers in minutes. Build inbound call centers, outbound dialers, and conversational AI experiences with minimal code.
+The Patter TypeScript SDK lets you connect AI voice agents to phone numbers in minutes. Run everything locally with full control over your infrastructure — no external platform required.
 
 ## Installation
 
@@ -41,19 +41,16 @@ const agent = phone.agent({
 await phone.serve({ agent });
 ```
 
-## SDK Modes
+## SDK Mode
 
-Patter supports two operational modes:
+Patter runs in **local mode**, embedding an Express server and all provider adapters directly in your application:
 
 | Mode | Use Case | Requirements |
 |------|----------|--------------|
 | **Local** | Self-hosted, full control | Telephony + AI provider keys |
-| **Cloud** | Managed platform | Patter API key (`pt_...`) |
 
 <Info>
   **Local mode** includes an embedded Express server and all provider adapters. Use it when you want full control over your infrastructure.
-
-  **Cloud mode** connects to Patter's managed platform. No telephony credentials needed — just your API key.
 </Info>
 
 ## What's Next

@@ -7,16 +7,16 @@ description: "React to call lifecycle events with async callbacks."
 
 Patter fires async callbacks at key moments in the call lifecycle. Use them to log calls, update CRMs, trigger workflows, or control conversation flow.
 
-All callbacks are **async functions**. They are passed as parameters to `serve()` (local mode) or `connect()` (cloud mode).
+All callbacks are **async functions**. They are passed as parameters to `serve()`.
 
 ## Available Callbacks
 
-| Callback | Trigger | Mode |
-|----------|---------|------|
-| `on_call_start` | A call connects | Local, Cloud |
-| `on_call_end` | A call ends | Local, Cloud |
-| `on_transcript` | Each utterance is transcribed | Local |
-| `on_message` | User message received (pipeline mode) | Local, Cloud |
+| Callback | Trigger |
+|----------|---------|
+| `on_call_start` | A call connects |
+| `on_call_end` | A call ends |
+| `on_transcript` | Each utterance is transcribed |
+| `on_message` | User message received (pipeline mode) |
 
 ---
 
@@ -184,25 +184,3 @@ async def main():
 asyncio.run(main())
 ```
 
-## Cloud Mode Callbacks
-
-In cloud mode, pass callbacks to `connect()`:
-
-```python
-phone = Patter(api_key=os.environ["PATTER_API_KEY"])
-
-async def handle_message(message) -> str:
-    return f"You said: {message.text}"
-
-async def on_call_start(event):
-    print(f"Call started: {event['call_id']}")
-
-async def on_call_end(event):
-    print(f"Call ended: {event['call_id']}")
-
-await phone.connect(
-    on_message=handle_message,
-    on_call_start=on_call_start,
-    on_call_end=on_call_end,
-)
-```

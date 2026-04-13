@@ -9,23 +9,9 @@ The Patter Python SDK lets you connect AI voice agents to phone numbers in minut
 
 ## Installation
 
-<CodeGroup>
-
-```bash Local Mode (recommended for getting started)
+```bash
 pip install patter[local]
 ```
-
-```bash Cloud Mode
-pip install patter
-```
-
-</CodeGroup>
-
-<Info>
-  **Local mode** includes the embedded server and all provider adapters. Use it when you want full control over your infrastructure.
-
-  **Cloud mode** connects to Patter's managed platform. No telephony credentials needed — just your API key.
-</Info>
 
 ## Requirements
 
@@ -56,13 +42,11 @@ await phone.serve(agent)
 
 ## SDK Modes
 
-Patter supports three operational modes:
+Patter runs in local/self-hosted mode. You bring your own telephony and AI provider credentials — no external platform required.
 
 | Mode | Use Case | Requirements |
 |------|----------|--------------|
 | **Local** | Self-hosted, full control | Telephony + AI provider keys |
-| **Cloud** | Managed platform | Patter API key (`pt_...`) |
-| **Self-hosted** | Your infra, Patter backend | API key + provider credentials |
 
 ## What's Next
 

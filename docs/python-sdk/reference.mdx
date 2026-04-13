@@ -15,10 +15,7 @@ The main SDK client class.
 
 ```python
 Patter(
-    api_key: str = "",
-    backend_url: str = "wss://api.getpatter.com",
-    rest_url: str = "https://api.getpatter.com",
-    mode: str = "cloud",
+    mode: str = "local",
     twilio_sid: str = "",
     twilio_token: str = "",
     telnyx_key: str = "",
@@ -34,10 +31,7 @@ Patter(
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `api_key` | `str` | `""` | Patter API key (`pt_...`). Required for cloud mode. |
-| `backend_url` | `str` | `"wss://api.getpatter.com"` | WebSocket URL for the backend. |
-| `rest_url` | `str` | `"https://api.getpatter.com"` | REST API URL. |
-| `mode` | `str` | `"cloud"` | `"cloud"` or `"local"`. Auto-detected when provider keys given without `api_key`. |
+| `mode` | `str` | `"local"` | Operating mode. Can be omitted — auto-detected when provider keys are given. |
 | `twilio_sid` | `str` | `""` | Twilio Account SID. |
 | `twilio_token` | `str` | `""` | Twilio Auth Token. |
 | `telnyx_key` | `str` | `""` | Telnyx API key. |
@@ -49,39 +43,9 @@ Patter(
 | `webhook_url` | `str` | `""` | Public hostname (no scheme). |
 | `pricing` | `dict \| None` | `None` | Override default provider pricing. See [Metrics & Cost Tracking](/python-sdk/metrics). |
 
-### Properties
-
-| Property | Type | Description |
-|----------|------|-------------|
-| `api_key` | `str` | Read-only access to the API key. |
-
 ---
 
 ### Methods
-
-#### connect()
-
-```python
-async def connect(
-    on_message: Callable[[IncomingMessage], Awaitable[str]],
-    on_call_start: Callable[[dict], Awaitable[None]] | None = None,
-    on_call_end: Callable[[dict], Awaitable[None]] | None = None,
-    *,
-    provider: str | None = None,
-    provider_key: str | None = None,
-    provider_secret: str | None = None,
-    number: str | None = None,
-    country: str = "US",
-    stt: STTConfig | None = None,
-    tts: TTSConfig | None = None,
-) -> None
-```
-
-Connect to Patter and listen for calls. Cloud mode only.
-
-**Raises:** `PatterConnectionError` if called in local mode.
-
----
 
 #### call()
 
@@ -99,10 +63,10 @@ async def call(
 ) -> None
 ```
 
-Make an outbound call. Works in both cloud and local mode.
+Make an outbound call.
 
 **Raises:**
-- `PatterConnectionError` if in local mode and `agent` is not provided.
+- `PatterConnectionError` if `agent` is not provided.
 - `ValueError` if `to` is not in E.164 format.
 
 ---
@@ -146,13 +110,13 @@ async def serve(
     voicemail_message: str = "",
     dashboard: bool = True,
     dashboard_token: str = "",
+    tunnel: bool = False,
 ) -> None
 ```
 
-Start the embedded server. Local mode only. Blocks until stopped.
+Start the embedded server. Blocks until stopped.
 
 **Raises:**
-- `PatterConnectionError` if called in cloud mode.
 - `TypeError` if `agent` is not an `Agent` instance.
 - `ValueError` if `port` is out of range.
 
@@ -169,124 +133,12 @@ async def test(
 ) -> None
 ```
 
-Start an interactive terminal test session. Local mode only. Simulates a phone call without telephony, STT, or TTS — pure text input/output.
+Start an interactive terminal test session. Simulates a phone call without telephony, STT, or TTS — pure text input/output.
 
 When no `on_message` handler is provided and an `openai_key` is configured, the built-in LLM loop is used. See [Test Mode](/python-sdk/test-mode) for details.
 
 **Raises:**
-- `PatterConnectionError` if called in cloud mode.
 - `TypeError` if `agent` is not an `Agent` instance.
-
----
-
-#### create_agent()
-
-```python
-async def create_agent(
-    name: str,
-    system_prompt: str,
-    model: str = "gpt-4o-mini-realtime-preview",
-    voice: str = "alloy",
-    voice_provider: str = "openai",
-    language: str = "en",
-    first_message: str | None = None,
-    tools: list[dict] | None = None,
-) -> dict
-```
-
-Create a cloud-managed agent. Returns the agent dict with `id`.
-
-**Raises:** `ProvisionError` on API failure.
-
----
-
-#### list_agents()
-
-```python
-async def list_agents() -> list[dict]
-```
-
-List all cloud-managed agents.
-
----
-
-#### update_agent()
-
-```python
-async def update_agent(agent_id: str, **kwargs) -> dict
-```
-
-Update a cloud-managed agent. Pass any agent fields as keyword arguments.
-
-**Raises:** `ProvisionError` on API failure.
-
----
-
-#### delete_agent()
-
-```python
-async def delete_agent(agent_id: str) -> None
-```
-
-Delete a cloud-managed agent.
-
-**Raises:** `ProvisionError` on API failure.
-
----
-
-#### buy_number()
-
-```python
-async def buy_number(country: str = "US", provider: str = "twilio") -> dict
-```
-
-Purchase a phone number. Returns the number dict.
-
-**Raises:** `ProvisionError` on API failure.
-
----
-
-#### list_numbers()
-
-```python
-async def list_numbers() -> list[dict]
-```
-
-List all phone numbers.
-
----
-
-#### assign_agent()
-
-```python
-async def assign_agent(number_id: str, agent_id: str) -> dict
-```
-
-Assign an agent to a phone number.
-
-**Raises:** `ProvisionError` on API failure.
-
----
-
-#### list_calls()
-
-```python
-async def list_calls(limit: int = 50) -> list[dict]
-```
-
-List recent calls.
-
----
-
-#### get_call()
-
-```python
-async def get_call(call_id: str) -> dict
-```
-
-Get call details with transcript.
-
-**Raises:** `ProvisionError` if call not found.
 
 ---
 
@@ -296,7 +148,7 @@ Get call details with transcript.
 async def disconnect() -> None
 ```
 
-Disconnect from Patter. Stops the embedded server in local mode or closes the WebSocket and HTTP client in cloud mode.
+Disconnect from Patter. Stops the embedded server.
 
 ---
 
@@ -530,7 +382,6 @@ class Guardrail:
 ### CallControl
 
 ```python
-@dataclass
 class CallControl:
     call_id: str
     caller: str
@@ -630,9 +481,7 @@ All exceptions inherit from `PatterError`.
 
 ```
 PatterError
-├── PatterConnectionError
-├── AuthenticationError
-└── ProvisionError
+└── PatterConnectionError
 ```
 
 ### PatterError
@@ -643,14 +492,14 @@ Base exception for all Patter SDK errors.
 from patter import PatterError
 
 try:
-    await phone.connect(on_message=handler)
+    await phone.serve(agent)
 except PatterError as e:
     print(f"Patter error: {e}")
 ```
 
 ### PatterConnectionError
 
-Raised for WebSocket connection failures, mode mismatches (e.g., calling `serve()` in cloud mode), or missing required parameters for local mode calls.
+Raised for connection failures or missing required parameters.
 
 ```python
 from patter import PatterConnectionError
@@ -659,32 +508,6 @@ try:
     await phone.serve(agent)
 except PatterConnectionError as e:
     print(f"Connection error: {e}")
-```
-
-### AuthenticationError
-
-Raised when the API key is invalid or expired.
-
-```python
-from patter import AuthenticationError
-
-try:
-    await phone.connect(on_message=handler)
-except AuthenticationError as e:
-    print(f"Auth error: {e}")
-```
-
-### ProvisionError
-
-Raised when a cloud API operation fails (creating agents, buying numbers, etc.).
-
-```python
-from patter import ProvisionError
-
-try:
-    agent = await phone.create_agent(name="Test", system_prompt="...")
-except ProvisionError as e:
-    print(f"Provision error: {e}")
 ```
 
 ---
@@ -702,14 +525,11 @@ from patter import (
     CallMetrics,
     CostBreakdown,
     Guardrail,
-    IncomingMessage,
     LatencyBreakdown,
     STTConfig,
     TTSConfig,
     TurnMetrics,
     PatterError,
     PatterConnectionError,
-    AuthenticationError,
-    ProvisionError,
 )
 ```

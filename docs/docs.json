@@ -1,0 +1,190 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "almond",
+  "name": "Patter",
+  "colors": {
+    "primary": "#18181B",
+    "light": "#10B981",
+    "dark": "#18181B"
+  },
+  "favicon": "/favicon.svg",
+  "logo": {
+    "light": "/logo/light.svg",
+    "dark": "/logo/dark.svg",
+    "href": "https://www.getpatter.com"
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "Website",
+        "href": "https://www.getpatter.com"
+      }
+    ],
+    "primary": {
+      "type": "github",
+      "label": "GitHub",
+      "href": "https://github.com/PatterAI/Patter"
+    }
+  },
+  "footer": {
+    "socials": {
+      "x": "https://x.com/patter_dev",
+      "github": "https://github.com/PatterAI/Patter",
+      "discord": "https://discord.gg/patter",
+      "linkedin": "https://linkedin.com/company/patter-dev"
+    }
+  },
+  "navigation": {
+    "products": [
+      {
+        "product": "Home",
+        "icon": "/patter-logo-banner.svg",
+        "groups": [
+          {
+            "group": "Welcome",
+            "pages": [
+              "home/index"
+            ]
+          },
+          {
+            "group": "Libraries",
+            "icon": "library",
+            "pages": [
+              "home/redirects/python",
+              "home/redirects/typescript"
+            ]
+          },
+          {
+            "group": "Guides",
+            "icon": "book",
+            "pages": [
+              "concepts"
+            ]
+          }
+        ]
+      },
+      {
+        "product": "Python SDK",
+        "description": "Voice AI SDK for Python",
+        "icon": "python",
+        "tabs": [
+          {
+            "tab": "Docs",
+            "icon": "book",
+            "groups": [
+              {
+                "group": "Get Started",
+                "pages": [
+                  "python-sdk/overview",
+                  "python-sdk/quickstart",
+                  "python-sdk/configuration"
+                ]
+              },
+              {
+                "group": "Building Agents",
+                "icon": "robot",
+                "pages": [
+                  "python-sdk/agents",
+                  "python-sdk/providers",
+                  "python-sdk/tools",
+                  "python-sdk/guardrails",
+                  "python-sdk/events",
+                  "python-sdk/features"
+                ]
+              },
+              {
+                "group": "Observability",
+                "icon": "chart-line",
+                "pages": [
+                  "python-sdk/metrics",
+                  "python-sdk/dashboard"
+                ]
+              },
+              {
+                "group": "Development",
+                "icon": "code",
+                "pages": [
+                  "python-sdk/test-mode",
+                  "python-sdk/local-mode"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "SDK Reference",
+            "icon": "terminal",
+            "groups": [
+              {
+                "group": "Reference",
+                "pages": [
+                  "python-sdk/reference"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "product": "TypeScript SDK",
+        "description": "Voice AI SDK for TypeScript",
+        "icon": "js",
+        "tabs": [
+          {
+            "tab": "Docs",
+            "icon": "book",
+            "groups": [
+              {
+                "group": "Get Started",
+                "pages": [
+                  "typescript-sdk/overview",
+                  "typescript-sdk/quickstart",
+                  "typescript-sdk/configuration"
+                ]
+              },
+              {
+                "group": "Building Agents",
+                "icon": "robot",
+                "pages": [
+                  "typescript-sdk/agents",
+                  "typescript-sdk/providers",
+                  "typescript-sdk/tools",
+                  "typescript-sdk/guardrails",
+                  "typescript-sdk/events",
+                  "typescript-sdk/features"
+                ]
+              },
+              {
+                "group": "Observability",
+                "icon": "chart-line",
+                "pages": [
+                  "typescript-sdk/metrics",
+                  "typescript-sdk/dashboard"
+                ]
+              },
+              {
+                "group": "Development",
+                "icon": "code",
+                "pages": [
+                  "typescript-sdk/test-mode",
+                  "typescript-sdk/local-mode"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "SDK Reference",
+            "icon": "terminal",
+            "groups": [
+              {
+                "group": "Reference",
+                "pages": [
+                  "typescript-sdk/reference"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

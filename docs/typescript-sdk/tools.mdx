@@ -55,9 +55,14 @@ interface ToolDefinition {
   name: string;
   description: string;
   parameters: Record<string, unknown>; // JSON Schema
-  webhookUrl: string;
+  webhookUrl?: string;  // Required if handler is not provided
+  handler?: (args: Record<string, unknown>, context: Record<string, unknown>) => Promise<string | object>;
 }
 ```
+
+<Note>
+  Every tool must have either a `webhookUrl` or a `handler`. Providing neither raises an error.
+</Note>
 
 ## Webhook Payload
 
@@ -142,20 +147,53 @@ Ends the current call. The AI model invokes this when the conversation is comple
 }
 ```
 
+## In-Process Handlers
+
+Instead of webhook URLs, you can pass a function that runs in-process:
+
+```typescript
+const agent = phone.agent({
+  systemPrompt: "You are a product specialist.",
+  tools: [
+    Patter.tool({
+      name: "check_inventory",
+      description: "Check if a product is in stock.",
+      parameters: {
+        type: "object",
+        properties: {
+          productId: { type: "string", description: "Product ID" },
+        },
+        required: ["productId"],
+      },
+      handler: async (args, context) => {
+        const stock = await db.getStock(args.productId as string);
+        return { productId: args.productId, inStock: stock > 0, quantity: stock };
+      },
+    }),
+  ],
+});
+```
+
+The handler receives:
+- `args` — The arguments extracted by the AI
+- `context` — Call metadata (`callId`, `caller`, `callee`)
+
+---
+
 ## Validation
 
 The `phone.agent()` method validates tools at creation time:
 
 - `tools` must be an array
 - Each tool must have a `name` field
-- Each tool must have a `webhookUrl` field
+- Each tool must have either a `webhookUrl` or `handler` field
 
 Missing fields throw descriptive errors:
 
 ```typescript
-// Throws: tools[0] missing required 'name' field
+// Throws: tools[0] requires either 'webhookUrl' or 'handler'
 phone.agent({
   systemPrompt: "...",
-  tools: [{ description: "test", parameters: {}, webhookUrl: "https://..." }] as any,
+  tools: [{ name: "test", description: "test", parameters: {} }] as any,
 });
 ```

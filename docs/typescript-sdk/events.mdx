@@ -5,14 +5,14 @@ description: "React to call lifecycle events with typed callbacks."
 
 # Events
 
-Patter emits events at key moments during a call. Register callbacks in `serve()` or `connect()` to react to call starts, ends, transcripts, and messages.
+Patter emits events at key moments during a call. Register callbacks in `serve()` to react to call starts, ends, transcripts, and messages.
 
 ## Callback Overview
 
 | Callback | Trigger | Available In |
 |----------|---------|--------------|
-| `onCallStart` | When a call connects | `serve()`, `connect()` |
-| `onCallEnd` | When a call disconnects | `serve()`, `connect()` |
+| `onCallStart` | When a call connects | `serve()` |
+| `onCallEnd` | When a call disconnects | `serve()` |
 | `onTranscript` | Each time a transcript segment arrives | `serve()` |
 | `onMessage` | User transcript ready for response (pipeline mode) | `serve()` |
 

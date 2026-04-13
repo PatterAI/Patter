@@ -5,25 +5,21 @@ description: "Build your first voice AI agent in 5 minutes."
 
 # Python Quickstart
 
-This guide walks you through building a voice AI agent that answers phone calls. Choose between **local mode** (self-hosted) and **cloud mode** (managed platform).
+This guide walks you through building a voice AI agent that answers phone calls using local/self-hosted mode.
 
 ## Prerequisites
 
 - Python 3.11+
 - A telephony account (Twilio or Telnyx)
-- An AI provider key (OpenAI for local mode, or a Patter API key for cloud mode)
+- An AI provider key (OpenAI, ElevenLabs, or Deepgram)
 
-## Local Mode
-
-Local mode runs an embedded server on your machine. You bring your own telephony and AI provider keys.
-
-### Step 1: Install the SDK
+## Step 1: Install the SDK
 
 ```bash
 pip install patter[local]
 ```
 
-### Step 2: Set Up Credentials
+## Step 2: Set Up Credentials
 
 Create a `.env` file in your project root:
 
@@ -35,7 +31,7 @@ PHONE_NUMBER=+15550001234
 WEBHOOK_URL=abc.ngrok.io
 ```
 
-### Step 3: Expose Your Server
+## Step 3: Expose Your Server
 
 Patter needs a public URL so Twilio/Telnyx can reach your local server. Use [ngrok](https://ngrok.com):
 
@@ -45,7 +41,7 @@ ngrok http 8000
 
 Copy the hostname (e.g., `abc.ngrok.io`) and use it as your `WEBHOOK_URL`.
 
-### Step 4: Write Your Agent
+## Step 4: Write Your Agent
 
 ```python
 import os
@@ -75,56 +71,9 @@ async def main():
 asyncio.run(main())
 ```
 
-### Step 5: Make a Call
+## Step 5: Make a Call
 
 Call your `PHONE_NUMBER` from any phone. The AI agent will answer and start the conversation.
-
----
-
-## Cloud Mode
-
-Cloud mode connects to Patter's managed platform. No need to manage telephony infrastructure.
-
-### Step 1: Install the SDK
-
-```bash
-pip install patter
-```
-
-### Step 2: Get Your API Key
-
-Sign up at [getpatter.com](https://www.getpatter.com) and copy your API key from the dashboard. It starts with `pt_`.
-
-### Step 3: Write Your Agent
-
-```python
-import os
-import asyncio
-from patter import Patter, IncomingMessage
-
-phone = Patter(api_key=os.environ["PATTER_API_KEY"])
-
-async def handle_message(message: IncomingMessage) -> str:
-    """Called for each message in the conversation."""
-    return f"You said: {message.text}. How else can I help?"
-
-async def main():
-    # Connect and listen for inbound calls
-    await phone.connect(on_message=handle_message)
-
-    # Or make an outbound call
-    await phone.call(
-        to="+15550009876",
-        on_message=handle_message,
-        first_message="Hi! This is a call from our AI assistant.",
-    )
-
-asyncio.run(main())
-```
-
-### Step 4: Test It
-
-Make an outbound call or configure an inbound number in the Patter dashboard.
 
 ---
 
