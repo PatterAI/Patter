@@ -626,16 +626,22 @@ export class StreamHandler {
     }
 
     const finalMetrics = this.metricsAcc.endCall();
+    const callEndData = {
+      call_id: this.callId,
+      transcript: [...this.history.entries],
+      metrics: finalMetrics as unknown as Record<string, unknown>,
+    };
     this.deps.metricsStore.recordCallEnd(
-      { call_id: this.callId, transcript: [...this.history.entries] },
+      callEndData,
       finalMetrics as unknown as Record<string, unknown>,
     );
+    // Notify standalone dashboard (if running)
+    try {
+      const { notifyDashboard } = await import('./dashboard/persistence');
+      notifyDashboard(callEndData);
+    } catch { /* ignore */ }
     if (this.deps.onCallEnd) {
-      await this.deps.onCallEnd({
-        call_id: this.callId,
-        transcript: [...this.history.entries],
-        metrics: finalMetrics,
-      });
+      await this.deps.onCallEnd(callEndData);
     }
   }
 }

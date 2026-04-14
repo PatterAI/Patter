@@ -1,6 +1,6 @@
 <p align="center">
   <h1 align="center">Patter</h1>
-  <p align="center">Connect AI agents to phone numbers with 10 lines of code</p>
+  <p align="center">Connect AI agents to phone numbers with 4 lines of code</p>
 </p>
 
 <p align="center">
@@ -159,7 +159,7 @@ await phone.serve({ agent, port: 8000 });
 
 ### Developer Experience
 - `pip install patter` / `npm install getpatter`
-- 10 lines of code to connect an agent to a phone
+- 4 lines of code to connect an agent to a phone
 - Local mode (embedded, no backend) + Cloud mode
 - Python + TypeScript SDKs with full parity
 - MCP server for Claude Desktop

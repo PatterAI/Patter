@@ -39,6 +39,7 @@ export type { CallRecord, SSEEvent } from "./dashboard/store";
 export { makeAuthMiddleware } from "./dashboard/auth";
 export { callsToCsv, callsToJson } from "./dashboard/export";
 export { mountDashboard, mountApi } from "./dashboard/routes";
+export { notifyDashboard } from "./dashboard/persistence";
 export { LLMLoop, OpenAILLMProvider } from "./llm-loop";
 export type { LLMProvider, LLMChunk } from "./llm-loop";
 export { RemoteMessageHandler, isRemoteUrl, isWebSocketUrl } from "./remote-message";

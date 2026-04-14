@@ -1,11 +1,11 @@
 {
   "name": "getpatter",
   "version": "0.4.0",
-  "description": "Connect AI agents to phone numbers with 10 lines of code",
+  "description": "Connect AI agents to phone numbers in 4 lines of code",
   "license": "MIT",
   "author": {
-    "name": "Nicolò Tognoni",
-    "email": "nicolo@getpatter.com"
+    "name": "PatterAI",
+    "email": "hello@getpatter.com"
   },
   "repository": {
     "type": "git",
@@ -39,12 +39,15 @@
       "require": "./dist/index.js"
     }
   },
+  "bin": {
+    "getpatter": "dist/cli.js"
+  },
   "sideEffects": false,
   "files": [
     "dist"
   ],
   "scripts": {
-    "build": "tsup src/index.ts --format cjs,esm --dts",
+    "build": "tsup src/index.ts --format cjs,esm --dts && tsup src/cli.ts --format cjs --no-dts",
     "prepublishOnly": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest",

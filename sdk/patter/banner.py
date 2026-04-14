@@ -8,7 +8,7 @@ BANNER = r"""
 ██║     ██║  ██║   ██║      ██║   ███████╗██║  ██║
 ╚═╝     ╚═╝  ╚═╝   ╚═╝      ╚═╝   ╚══════╝╚═╝  ╚═╝
 
-Connect AI agents to phone numbers with 10 lines of code
+Connect AI agents to phone numbers in 4 lines of code
 """
 
 

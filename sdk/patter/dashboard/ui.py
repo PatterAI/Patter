@@ -63,6 +63,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .header-title {
     font-size: 14px; font-weight: 500; color: var(--muted);
   }
+  .badge-beta {
+    font-size: 10px; font-weight: 600; letter-spacing: 0.5px;
+    color: #e67e22; background: rgba(230,126,34,0.1);
+    border: 1px solid rgba(230,126,34,0.25);
+    padding: 2px 8px; border-radius: 100px; text-transform: uppercase;
+  }
   .status {
     margin-left: auto; font-size: 13px; color: var(--muted);
     display: flex; align-items: center; gap: 6px;
@@ -239,6 +245,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </a>
   <div class="header-sep"></div>
   <span class="header-title">Dashboard</span>
+  <span class="badge-beta">Beta</span>
   <div class="status"><span class="dot"></span> <span id="status-text">Listening</span></div>
 </header>
 
