@@ -1,4 +1,4 @@
-"""Patter SDK — Connect AI agents to phone numbers with 10 lines of code.
+"""Patter SDK — Connect AI agents to phone numbers in 4 lines of code.
 
 Three modes:
 

@@ -5,7 +5,7 @@
     <img src="https://raw.githubusercontent.com/PatterAI/Patter/main/docs/patter-logo-banner.svg" alt="Patter" width="400" />
   </picture>
   <br />
-  <em>Connect AI agents to phone numbers with 10 lines of code</em>
+  <em>Connect AI agents to phone numbers with 4 lines of code</em>
 </p>
 
 <p align="center">
@@ -106,7 +106,7 @@ await phone.serve({ agent, port: 8000 });
 
 ### Developer Experience
 - `pip install patter` / `npm install getpatter`
-- 10 lines of code to connect an agent to a phone
+- 4 lines of code to connect an agent to a phone
 - Runs entirely in your process — no external backend needed
 - Built-in tunnel via Cloudflare (no ngrok required)
 - Python + TypeScript SDKs with full parity

@@ -82,7 +82,7 @@ test.describe("Answering Machine Detection (AMD)", () => {
 
     // Navigate to dashboard — should load with key elements visible
     await page.goto(BASE);
-    await expect(page.locator("header h1")).toContainText("Patter");
+    await expect(page.locator("header .logo")).toContainText("Patter");
     await expect(page.locator("#stat-total")).toBeVisible();
 
     // Verify the dashboard still renders the stat cards correctly after webhooks

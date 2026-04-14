@@ -1,11 +1,11 @@
 [project]
 name = "getpatter"
 version = "0.4.0"
-description = "Connect AI agents to phone numbers with 10 lines of code"
+description = "Connect AI agents to phone numbers in 4 lines of code"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [
-    { name = "Nicolò Tognoni", email = "nicolo@getpatter.com" },
+    { name = "PatterAI", email = "hello@getpatter.com" },
 ]
 keywords = ["voice", "ai", "phone", "telephony", "speech", "tts", "stt", "twilio", "telnyx", "openai", "elevenlabs"]
 classifiers = [
@@ -25,6 +25,9 @@ dependencies = [
     "websockets>=13.0",
     "httpx>=0.27.0",
 ]
+
+[project.scripts]
+patter = "patter.cli:main"
 
 [project.urls]
 Homepage = "https://www.getpatter.com"

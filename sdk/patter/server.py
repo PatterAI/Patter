@@ -57,7 +57,9 @@ class EmbeddedServer:
         """Return (on_call_start, on_call_end, on_metrics) wrappers.
 
         Each wrapper feeds data into the dashboard store first, then calls
-        the user-provided callback (if any).
+        the user-provided callback (if any).  Completed calls are also
+        persisted to ``~/.patter/data/calls.jsonl`` and pushed to any
+        running standalone dashboard.
         """
         store = self._metrics_store
         user_start = self.on_call_start
@@ -73,6 +75,12 @@ class EmbeddedServer:
         async def _on_call_end(data):
             if store is not None:
                 store.record_call_end(data, metrics=data.get("metrics"))
+            # Notify standalone dashboard (if running)
+            try:
+                from patter.dashboard.persistence import notify_dashboard
+                notify_dashboard(data)
+            except Exception:
+                pass
             if user_end is not None:
                 await user_end(data)
 

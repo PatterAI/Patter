@@ -7,8 +7,8 @@ test.describe("Outbound call scenario", () => {
     await page.goto(BASE);
 
     // The dashboard title should be visible
-    await expect(page.locator("header h1")).toBeVisible();
-    await expect(page.locator("header h1")).toContainText("Patter");
+    await expect(page.locator("header .logo")).toBeVisible();
+    await expect(page.locator("header .logo")).toContainText("Patter");
 
     // All four stat cards should exist
     await expect(page.locator(".card")).toHaveCount(4);
