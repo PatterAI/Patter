@@ -7,8 +7,8 @@ test.describe("Inbound call scenario", () => {
     await page.goto(BASE);
 
     // Header
-    await expect(page.locator("header h1")).toContainText("Patter");
-    await expect(page.locator("header h1 span")).toHaveText("Patter");
+    await expect(page.locator("header .logo")).toContainText("Patter");
+    await expect(page.locator("header .header-title")).toHaveText("Dashboard");
 
     // Status indicator
     await expect(page.locator("#status-text")).toBeVisible();
