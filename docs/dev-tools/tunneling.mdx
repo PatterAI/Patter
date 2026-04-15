@@ -1,0 +1,77 @@
+---
+title: "Tunneling"
+description: "Expose your local Patter server to the internet for Twilio webhooks."
+---
+
+# Tunneling
+
+Patter needs a public URL for Twilio to send webhooks to your local server. There are two options:
+
+## Built-in Tunnel (Recommended)
+
+Patter includes a built-in Cloudflare tunnel that automatically creates a public URL. No account or setup required.
+
+<CodeGroup>
+```python Python
+await phone.serve(agent=agent, port=8000, tunnel=True)
+# Tunnel ready: https://random-name.trycloudflare.com
+```
+
+```typescript TypeScript
+await phone.serve({ agent, port: 8000, tunnel: true });
+// Tunnel ready: https://random-name.trycloudflare.com
+```
+</CodeGroup>
+
+Install the `cloudflared` package to use the built-in tunnel:
+
+<CodeGroup>
+```bash Python
+pip install cloudflared
+```
+
+```bash TypeScript
+npm install cloudflared
+```
+</CodeGroup>
+
+The tunnel URL is automatically configured as the Twilio webhook URL.
+
+## Manual Setup (ngrok)
+
+Alternatively, use ngrok or any other tunneling service:
+
+```bash
+ngrok http 8000
+```
+
+Then pass the hostname to the Patter constructor:
+
+<CodeGroup>
+```python Python
+phone = Patter(
+    webhook_url="abc123.ngrok.io",  # no https:// prefix
+    ...
+)
+```
+
+```typescript TypeScript
+const phone = new Patter({
+  webhookUrl: "abc123.ngrok.io",
+  ...
+});
+```
+</CodeGroup>
+
+## Production
+
+In production, use your own domain and point the webhook URL to your server:
+
+```python
+phone = Patter(
+    webhook_url="api.yourcompany.com",
+    ...
+)
+```
+
+No tunnel needed — Twilio connects directly to your server.

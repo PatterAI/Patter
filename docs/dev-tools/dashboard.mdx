@@ -1,0 +1,64 @@
+---
+title: "Dashboard"
+description: "Real-time call monitoring dashboard with cost and latency tracking."
+---
+
+# Dashboard
+
+Patter includes a built-in web dashboard for monitoring calls in real time.
+
+## Embedded Dashboard
+
+When running `serve()`, the dashboard is enabled by default at the root URL:
+
+<CodeGroup>
+```python Python
+await phone.serve(agent=agent, port=8000, dashboard=True)
+# Dashboard: http://localhost:8000/
+```
+
+```typescript TypeScript
+await phone.serve({ agent, port: 8000, dashboard: true });
+// Dashboard: http://localhost:8000/
+```
+</CodeGroup>
+
+## Standalone Dashboard
+
+Run the dashboard as a separate process — useful when using the SDK as a tool (e.g. from LangGraph or Claude Code).
+
+<CodeGroup>
+```bash Python
+pip install getpatter[local]
+patter dashboard --port 8000
+```
+
+```bash TypeScript
+npx getpatter dashboard --port 8000
+```
+</CodeGroup>
+
+The standalone dashboard receives call data automatically from the SDK via HTTP.
+
+## Features
+
+- **Total Calls** — count of all calls in the session
+- **Total Cost** — aggregate cost breakdown (STT, LLM, TTS, telephony)
+- **Avg Duration** — average call duration
+- **Avg Latency** — end-to-end response latency
+- **Call List** — all completed calls with cost, latency, turns
+- **Active Calls** — currently in-progress calls
+- **Call Detail** — click a call to see transcript, latency bars, cost breakdown
+- **Real-time Updates** — live via Server-Sent Events (SSE)
+
+## API Endpoints
+
+| Endpoint | Description |
+|---|---|
+| `GET /` | Dashboard web UI |
+| `GET /api/dashboard/calls` | List calls (paginated) |
+| `GET /api/dashboard/calls/:id` | Single call detail |
+| `GET /api/dashboard/active` | Active calls |
+| `GET /api/dashboard/aggregates` | Aggregate stats |
+| `GET /api/dashboard/events` | SSE event stream |
+| `GET /api/dashboard/export/calls` | Export as CSV or JSON |

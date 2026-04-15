@@ -1,0 +1,75 @@
+---
+title: "MCP Server"
+description: "Give Claude the ability to make and receive phone calls via the Model Context Protocol."
+---
+
+# Patter MCP Server
+
+An always-online MCP server that gives Claude Code and Claude Desktop the ability to make and receive real phone calls.
+
+<Card title="GitHub Repository" icon="github" href="https://github.com/PatterAI/patter-mcp">
+  View the source code and full documentation.
+</Card>
+
+## Installation
+
+```bash
+git clone https://github.com/PatterAI/patter-mcp
+cd patter-mcp
+npm install
+cp .env.example .env   # fill in your API keys
+```
+
+## Start the Server
+
+```bash
+npm run dev    # development
+# or
+npm run build && npm start   # production
+```
+
+## Connect Claude Code
+
+```bash
+claude mcp add --transport http patter-mcp http://localhost:3000/mcp
+```
+
+## MCP Tools
+
+| Tool | Description |
+|---|---|
+| `make_call` | Place an outbound call with an AI voice agent |
+| `call_third_party` | Call a third party with an autonomous task |
+| `get_calls` | List all calls with status, duration, and cost |
+| `get_transcript` | Get the full transcript of a call |
+
+## Claude Code Integration
+
+During a phone call, the voice agent has access to a full Claude Code session via the [Agent SDK](https://docs.claude.com/en/api/agent-sdk/overview). The agent can:
+
+- Read, write, and edit files
+- Run shell commands and tests
+- Search codebases
+- Create git commits
+- Anything Claude Code can do interactively
+
+## Environment Variables
+
+| Variable | Required | Description |
+|---|---|---|
+| `TWILIO_ACCOUNT_SID` | Yes | Twilio account SID |
+| `TWILIO_AUTH_TOKEN` | Yes | Twilio auth token |
+| `TWILIO_PHONE_NUMBER` | Yes | Your Twilio number (E.164) |
+| `OPENAI_API_KEY` | Yes | OpenAI API key |
+| `DEEPGRAM_API_KEY` | Yes | Deepgram STT key |
+| `ELEVENLABS_API_KEY` | Yes | ElevenLabs TTS key |
+
+## Example
+
+Ask Claude:
+
+> "Call +15551234567 and ask them about their order status"
+
+> "Call this restaurant and ask if there's a table for 2 tonight"
+
+> "Show me the transcript from the last call"

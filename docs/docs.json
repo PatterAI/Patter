@@ -61,6 +61,15 @@
             "pages": [
               "concepts"
             ]
+          },
+          {
+            "group": "Dev Tools",
+            "icon": "wrench",
+            "pages": [
+              "dev-tools/dashboard",
+              "dev-tools/mcp",
+              "dev-tools/tunneling"
+            ]
           }
         ]
       },

@@ -41,6 +41,8 @@ ngrok http 8000
 
 Copy the hostname (e.g., `abc.ngrok.io`) and use it as your `WEBHOOK_URL`.
 
+Alternatively, use the built-in Cloudflare tunnel (no setup required): set `tunnel=True` in `serve()`.
+
 ## Step 4: Write Your Agent
 
 ```python
