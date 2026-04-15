@@ -40,13 +40,46 @@ export async function startTunnel(port: number, timeoutMs = 30_000): Promise<Tun
 
   log.info('Starting tunnel to localhost:%d ...', port);
 
-  const result = tunnelMod.tunnel({
-    '--url': `http://localhost:${port}`,
-  }) as { url: Promise<string>; connections: Promise<unknown>; stop: () => void };
+  // cloudflared@0.7+ exposes Tunnel.quick() for quick tunnels.
+  // cloudflared@0.5 used tunnel({ '--url': ... }) returning { url: Promise }.
+  // We support both APIs for backward compatibility.
 
-  // Wait for the tunnel URL with a timeout
-  const tunnelUrl = await Promise.race([
-    result.url,
+  const TunnelClass = tunnelMod.Tunnel;
+  const hasQuick = TunnelClass && typeof TunnelClass.quick === 'function';
+
+  let instance: { on: (event: string, cb: (data: string) => void) => void; stop: () => void };
+
+  if (hasQuick) {
+    // New API (cloudflared 0.7+): Tunnel.quick(url) returns EventEmitter
+    instance = TunnelClass.quick(`http://localhost:${port}`);
+  } else {
+    // Old API (cloudflared 0.5): tunnel({ '--url': ... }) returns { url: Promise, stop }
+    const result = tunnelMod.tunnel({ '--url': `http://localhost:${port}` });
+    if (result.url && typeof result.url.then === 'function') {
+      // Old API with Promise-based URL
+      const tunnelUrl: string = await Promise.race([
+        result.url as Promise<string>,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(
+            `Tunnel failed to start within ${timeoutMs / 1000}s. ` +
+            'Check your internet connection or provide webhookUrl manually.'
+          )), timeoutMs)
+        ),
+      ]);
+
+      const hostname = tunnelUrl.replace(/^https?:\/\//, '').replace(/\/$/, '');
+      log.info('Tunnel ready: https://%s', hostname);
+      return { hostname, stop: () => { log.info('Stopping tunnel...'); result.stop(); } };
+    }
+    // If result has .on (EventEmitter pattern), fall through to event-based handling
+    instance = result;
+  }
+
+  // Event-based URL resolution (cloudflared 0.7+)
+  const tunnelUrl: string = await Promise.race([
+    new Promise<string>((resolve) => {
+      instance.on('url', (url: string) => resolve(url));
+    }),
     new Promise<never>((_, reject) =>
       setTimeout(() => reject(new Error(
         `Tunnel failed to start within ${timeoutMs / 1000}s. ` +
@@ -55,23 +88,14 @@ export async function startTunnel(port: number, timeoutMs = 30_000): Promise<Tun
     ),
   ]);
 
-  // Extract hostname from URL (strip https://)
   const hostname = tunnelUrl.replace(/^https?:\/\//, '').replace(/\/$/, '');
-
   log.info('Tunnel ready: https://%s', hostname);
-
-  // Wait for at least one connection to be established
-  result.connections.then(() => {
-    log.info('Tunnel connections established');
-  }).catch(() => {
-    // Connection info may not always resolve — non-critical
-  });
 
   return {
     hostname,
     stop: () => {
       log.info('Stopping tunnel...');
-      result.stop();
+      instance.stop();
     },
   };
 }
