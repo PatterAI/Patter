@@ -86,14 +86,24 @@ async function main(): Promise<void> {
   });
 
   const server = createServer(app);
+
+  // Track open connections so we can destroy them on shutdown
+  const connections = new Set<import('node:net').Socket>();
+  server.on('connection', (conn) => {
+    connections.add(conn);
+    conn.on('close', () => connections.delete(conn));
+  });
+
   server.listen(port, '127.0.0.1', () => {
     getLogger().info(`Dashboard server listening on port ${port}`);
   });
 
   const shutdown = () => {
     console.log('\nShutting down dashboard...');
+    // Destroy all open connections (including SSE keep-alive)
+    for (const conn of connections) conn.destroy();
     server.close(() => process.exit(0));
-    setTimeout(() => process.exit(0), 3000);
+    setTimeout(() => process.exit(0), 1000);
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
