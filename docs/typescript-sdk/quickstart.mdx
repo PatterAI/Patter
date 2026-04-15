@@ -30,6 +30,8 @@ ngrok http 8000
 
 Copy the hostname from the output (e.g., `abc123.ngrok.io`). You will use this as your `webhookUrl`.
 
+Alternatively, use the built-in Cloudflare tunnel (no setup required): set `tunnel: true` in `serve()`.
+
 ## Step 3: Configure Environment Variables
 
 Create a `.env` file in your project root:
