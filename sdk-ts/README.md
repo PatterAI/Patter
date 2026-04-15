@@ -19,7 +19,7 @@
 
 ---
 
-Patter is an open-source platform that gives your AI agent a voice and a phone number. Point it at any function that returns a string, and Patter handles the rest: telephony, speech-to-text, text-to-speech, and real-time audio streaming.
+Patter is the open-source SDK that gives your AI agent a phone number. Point it at any function that returns a string, and Patter handles the rest: telephony, speech-to-text, text-to-speech, and real-time audio streaming. You build the agent — we connect it to the phone.
 
 ## Quickstart
 

@@ -12,7 +12,7 @@ def main() -> None:
     """Entry point for the ``patter`` command."""
     parser = argparse.ArgumentParser(
         prog="patter",
-        description="Patter CLI — Voice AI platform utilities",
+        description="Patter CLI — Give your AI agent a phone number",
     )
     subparsers = parser.add_subparsers(dest="command")
 

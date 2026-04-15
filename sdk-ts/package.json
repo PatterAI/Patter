@@ -1,7 +1,7 @@
 {
   "name": "getpatter",
   "version": "0.4.0",
-  "description": "Connect AI agents to phone numbers in 4 lines of code",
+  "description": "Open-source voice AI SDK — connect any AI agent to real phone calls in 4 lines of code",
   "license": "MIT",
   "author": {
     "name": "PatterAI",
@@ -19,6 +19,7 @@
   "keywords": [
     "voice",
     "ai",
+    "voice-ai",
     "phone",
     "telephony",
     "speech",
@@ -27,7 +28,15 @@
     "twilio",
     "telnyx",
     "openai",
-    "elevenlabs"
+    "elevenlabs",
+    "llm",
+    "agent",
+    "ai-agent",
+    "conversational-ai",
+    "realtime",
+    "call",
+    "ivr",
+    "chatbot"
   ],
   "main": "dist/index.js",
   "module": "dist/index.mjs",
@@ -58,7 +67,7 @@
     "ws": "^8.18.0"
   },
   "optionalDependencies": {
-    "cloudflared": "^1.0.0"
+    "cloudflared": "^0.7.1"
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",
