@@ -56,6 +56,8 @@ export { TestSession } from "./test-mode";
 export { ElevenLabsConvAIAdapter } from "./providers/elevenlabs-convai";
 export { OpenAIRealtimeAdapter } from "./providers/openai-realtime";
 export { DeepgramSTT } from "./providers/deepgram-stt";
+export { SonioxSTT } from "./providers/soniox-stt";
+export type { SonioxSTTOptions } from "./providers/soniox-stt";
 export { WhisperSTT } from "./providers/whisper-stt";
 export { ElevenLabsTTS } from "./providers/elevenlabs-tts";
 export { OpenAITTS } from "./providers/openai-tts";

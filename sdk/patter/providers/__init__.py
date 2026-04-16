@@ -11,6 +11,16 @@ def whisper(api_key: str, language: str = "en") -> STTConfig:
     return STTConfig(provider="whisper", api_key=api_key, language=language)
 
 
+def soniox(api_key: str, language: str = "en") -> STTConfig:
+    """Soniox real-time STT config (requires the ``soniox`` optional extra)."""
+    return STTConfig(provider="soniox", api_key=api_key, language=language)
+
+
+def speechmatics(api_key: str, language: str = "en") -> STTConfig:
+    """Speechmatics real-time STT config (requires the ``speechmatics`` optional extra)."""
+    return STTConfig(provider="speechmatics", api_key=api_key, language=language)
+
+
 def elevenlabs(api_key: str, voice: str = "rachel") -> TTSConfig:
     return TTSConfig(provider="elevenlabs", api_key=api_key, voice=voice)
 
@@ -23,4 +33,4 @@ def openai_tts(api_key: str, voice: str = "alloy") -> TTSConfig:
 # Python's package import mechanism can bind submodule objects (e.g.
 # patter.providers.openai_tts) onto this package's namespace, which would
 # shadow the function of the same name. We re-bind them explicitly here.
-__all__ = ["deepgram", "whisper", "elevenlabs", "openai_tts"]
+__all__ = ["deepgram", "whisper", "soniox", "speechmatics", "elevenlabs", "openai_tts"]
