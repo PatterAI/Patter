@@ -9,6 +9,7 @@ passes through unchanged.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from typing import TYPE_CHECKING
 
@@ -26,8 +27,6 @@ async def _call_hook(hook, *args):
     ``functools.partial``, class instances with ``__call__``, and
     decorated async functions.
     """
-    import inspect
-
     result = hook(*args)
     if inspect.isawaitable(result):
         return await result

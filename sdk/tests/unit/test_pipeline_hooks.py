@@ -299,6 +299,50 @@ class TestAsyncHook:
 
 
 # ---------------------------------------------------------------------------
+# 10b. functools.partial and class callables — regression tests for isawaitable fix
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+class TestCallableEdgeCases:
+    """Verify hooks work with functools.partial and class-based callables.
+    These are the exact cases that broke with asyncio.iscoroutinefunction."""
+
+    async def test_functools_partial_wrapping_async(self):
+        import functools
+
+        async def async_hook(prefix: str, transcript: str, ctx: HookContext) -> str:
+            return f"{prefix}: {transcript}"
+
+        partial_hook = functools.partial(async_hook, "PREFIX")
+        hooks = PipelineHooks(after_transcribe=partial_hook)
+        executor = PipelineHookExecutor(hooks)
+        result = await executor.run_after_transcribe("hello", make_ctx())
+        assert result == "PREFIX: hello"
+
+    async def test_class_with_async_call(self):
+        class MyHook:
+            async def __call__(self, transcript: str, ctx: HookContext) -> str:
+                return transcript.upper()
+
+        hooks = PipelineHooks(after_transcribe=MyHook())
+        executor = PipelineHookExecutor(hooks)
+        result = await executor.run_after_transcribe("hello", make_ctx())
+        assert result == "HELLO"
+
+    async def test_functools_partial_wrapping_sync(self):
+        import functools
+
+        def sync_hook(suffix: str, transcript: str, ctx: HookContext) -> str:
+            return f"{transcript}{suffix}"
+
+        partial_hook = functools.partial(sync_hook, "!")
+        hooks = PipelineHooks(after_transcribe=partial_hook)
+        executor = PipelineHookExecutor(hooks)
+        result = await executor.run_after_transcribe("hi", make_ctx())
+        assert result == "hi!"
+
+
+# ---------------------------------------------------------------------------
 # 11. Sync hook — regular (non-async) callable works correctly
 # ---------------------------------------------------------------------------
 

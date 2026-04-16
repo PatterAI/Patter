@@ -967,22 +967,33 @@ class PipelineStreamHandler(StreamHandler):
         self.transcript_entries.append(
             {"role": "assistant", "text": response_text}
         )
+        # Use sentence chunking + hooks for consistent behavior with streaming path
+        hooks = getattr(self.agent, "hooks", None)
+        hook_executor = PipelineHookExecutor(hooks)
+        hook_ctx = self._build_hook_context()
+
+        chunker = SentenceChunker()
+        sentences = chunker.push(response_text) + chunker.flush()
+        if not sentences:
+            sentences = [response_text] if response_text else []
+
         self._is_speaking = True
-        first_tts_chunk = True
-        if self._tts is None:
-            self._is_speaking = False
-            return
-        async for audio_chunk in self._tts.synthesize(response_text):
-            if not self._is_speaking:
-                if self.metrics is not None:
-                    self.metrics.record_turn_interrupted()
-                break
-            if first_tts_chunk and self.metrics is not None:
-                self.metrics.record_tts_first_byte()
-                first_tts_chunk = False
-            await self.audio_sender.send_audio(audio_chunk)
-        else:
-            # TTS completed without interruption
+        first_tts_chunk = [True]
+        interrupted = False
+        try:
+            for sentence in sentences:
+                if not self._is_speaking:
+                    interrupted = True
+                    break
+                if not await self._synthesize_sentence(
+                    sentence, hook_executor, hook_ctx, first_tts_chunk
+                ):
+                    interrupted = True
+                    break
+        finally:
+            self._is_speaking = False  # guaranteed reset
+
+        if not interrupted:
             if self.metrics is not None:
                 self.metrics.record_tts_complete(response_text)
                 turn = self.metrics.record_turn_complete(response_text)
@@ -994,7 +1005,6 @@ class PipelineStreamHandler(StreamHandler):
                             "cost_so_far": self.metrics.get_cost_so_far(),
                         }
                     )
-        self._is_speaking = False
 
     async def _stt_loop(self) -> None:
         try:
@@ -1036,16 +1046,16 @@ class PipelineStreamHandler(StreamHandler):
                         self.metrics.record_turn_interrupted()
                     continue
 
-                # Use filtered text in conversation history (sent to LLM)
-                self.conversation_history.append(
-                    {"role": "user", "text": filtered_text, "timestamp": time.time()}
-                )
-
                 if self.on_message is None and self._llm_loop is None:
                     # No message handler or LLM loop — discard orphaned turn
                     if self.metrics is not None:
                         self.metrics.record_turn_interrupted()
                     continue
+
+                # Use filtered text in conversation history (sent to LLM)
+                self.conversation_history.append(
+                    {"role": "user", "text": filtered_text, "timestamp": time.time()}
+                )
 
                 # Built-in LLM loop path
                 if self.on_message is None and self._llm_loop is not None:
