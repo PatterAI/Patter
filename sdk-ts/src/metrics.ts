@@ -61,6 +61,13 @@ export interface CallControl {
   transfer(number: string): Promise<void>;
   /** Hang up the call. */
   hangup(): Promise<void>;
+  /**
+   * Send DTMF digits (for IVR navigation, e.g. "1234#").
+   *
+   * @param digits  String of DTMF digits (0-9, *, #, A-D).
+   * @param options Per-call tuning. `delayMs` defaults to `300`.
+   */
+  sendDtmf?(digits: string, options?: { delayMs?: number }): Promise<void>;
   /** Current call ID. */
   readonly callId: string;
   /** Caller number. */
