@@ -146,7 +146,26 @@ Each entry contains:
 
 ## AI Disclosure
 
-An AI disclosure message is automatically played at the start of every call. This is non-optional and ensures compliance with regulations requiring callers to be informed they are speaking with an AI.
+Patter does **not** automatically play an AI disclosure message. If your jurisdiction requires callers to be informed they are speaking with an AI, include a disclosure in your agent's `firstMessage`:
+
+```typescript
+const agent = phone.agent({
+  systemPrompt: "You are a helpful assistant.",
+  firstMessage: "Hi, this is an AI assistant from Acme Corp. How can I help you today?",
+});
+```
+
+The `firstMessage` is spoken as soon as the call connects, before the caller says anything. This is the recommended place for any legally required AI disclosure.
+
+## Max Call Duration
+
+As a safety measure, calls are automatically terminated after **1 hour** (60 minutes). This prevents runaway billing from calls that are accidentally left open.
+
+When the limit is reached:
+1. The SDK logs a warning: `Call {callId} hit max duration (60min), terminating`
+2. The call is hung up via the telephony provider API
+
+This limit is not configurable and applies to all calls.
 
 ## Outbound Calls
 

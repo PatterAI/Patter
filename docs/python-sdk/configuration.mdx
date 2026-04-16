@@ -32,7 +32,7 @@ phone = Patter(telnyx_key="KEY...", telnyx_connection_id="...", openai_key="sk-.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `mode` | `str` | `"local"` | Operating mode. Can be omitted — auto-detected when provider keys are given. |
+| `mode` | `str` | `"cloud"` | Operating mode. Auto-detected to `"local"` when telephony provider keys (e.g. `twilio_sid`, `telnyx_key`) are supplied without `api_key`. |
 | `twilio_sid` | `str` | `""` | Twilio Account SID. |
 | `twilio_token` | `str` | `""` | Twilio Auth Token. Required when `twilio_sid` is provided. |
 | `telnyx_key` | `str` | `""` | Telnyx API key. |
@@ -42,6 +42,7 @@ phone = Patter(telnyx_key="KEY...", telnyx_connection_id="...", openai_key="sk-.
 | `deepgram_key` | `str` | `""` | Deepgram API key (optional, for pipeline mode). |
 | `phone_number` | `str` | `""` | Your phone number in E.164 format (e.g., `"+15550001234"`). Required when telephony keys are provided. |
 | `webhook_url` | `str` | `""` | Public hostname of this server, without scheme (e.g., `"abc.ngrok.io"`). Required when telephony keys are provided. |
+| `pricing` | `dict \| None` | `None` | Override default provider pricing estimates. See [Metrics & Cost Tracking](/python-sdk/metrics). |
 
 ```python
 # Twilio + OpenAI Realtime

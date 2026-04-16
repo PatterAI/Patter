@@ -70,6 +70,10 @@ await phone.serve(agent, port=8000)
 | `on_transcript` | `Callable \| None` | `None` | Async callback fired for each utterance. |
 | `on_message` | `Callable \| None` | `None` | Async callback for pipeline mode. Receives user text, returns agent response. |
 | `voicemail_message` | `str` | `""` | Message to speak when AMD detects a machine on outbound calls. |
+| `on_metrics` | `Callable \| None` | `None` | Async callback fired after each conversation turn with real-time cost and latency data. See [Metrics & Cost Tracking](/python-sdk/metrics). |
+| `dashboard` | `bool` | `True` | Serve a local metrics dashboard at `http://localhost:{port}/dashboard`. |
+| `dashboard_token` | `str` | `""` | Bearer token for dashboard authentication. When set, all dashboard routes require this token. |
+| `tunnel` | `bool` | `False` | Start a cloudflared tunnel automatically. Requires `cloudflared` on PATH. Mutually exclusive with `webhook_url`. |
 
 ---
 

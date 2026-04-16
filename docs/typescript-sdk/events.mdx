@@ -15,6 +15,7 @@ Patter emits events at key moments during a call. Register callbacks in `serve()
 | `onCallEnd` | When a call disconnects | `serve()` |
 | `onTranscript` | Each time a transcript segment arrives | `serve()` |
 | `onMessage` | User transcript ready for response (pipeline mode) | `serve()` |
+| `onMetrics` | After each conversational turn completes | `serve()` |
 
 ## onCallStart
 
@@ -38,12 +39,17 @@ await phone.serve({
 
 ```typescript
 {
-  call_id: string;    // Unique call identifier
-  caller: string;     // Caller phone number (E.164)
-  callee: string;     // Callee phone number (E.164)
-  direction: string;  // "inbound" or "outbound"
+  call_id: string;                        // Unique call identifier
+  caller: string;                         // Caller phone number (E.164)
+  callee: string;                         // Callee phone number (E.164)
+  direction: string;                      // "inbound" or "outbound"
+  custom_params?: Record<string, string>; // TwiML custom parameters (Twilio only, omitted when empty)
 }
 ```
+
+<Info>
+  `custom_params` contains key-value pairs passed via TwiML `<Parameter>` elements. This is only present for Twilio calls that include custom parameters. For Telnyx calls, this field is omitted.
+</Info>
 
 ## onCallEnd
 
@@ -72,12 +78,36 @@ await phone.serve({
 
 ```typescript
 {
-  call_id: string;
+  call_id: string;       // Unique call identifier
+  caller: string;        // Caller phone number (E.164)
+  callee: string;        // Callee phone number (E.164)
+  ended_at: number;      // Unix timestamp in seconds (fractional)
   transcript: Array<{
-    role: string;       // "user" or "assistant"
-    text: string;       // Transcript text
-    timestamp: number;  // Unix timestamp (ms)
+    role: string;        // "user" or "assistant"
+    text: string;        // Transcript text
+    timestamp: number;   // Unix timestamp (ms)
   }>;
+  metrics: {             // Aggregated call metrics
+    call_id: string;
+    duration_seconds: number;
+    turns: Array<{
+      turn_index: number;
+      user_text: string;
+      agent_text: string;
+      latency: { stt_ms: number; llm_ms: number; tts_ms: number; total_ms: number };
+      stt_audio_seconds: number;
+      tts_characters: number;
+      timestamp: number;
+    }>;
+    cost: { stt: number; tts: number; llm: number; telephony: number; total: number };
+    latency_avg: { stt_ms: number; llm_ms: number; tts_ms: number; total_ms: number };
+    latency_p95: { stt_ms: number; llm_ms: number; tts_ms: number; total_ms: number };
+    provider_mode: string;
+    stt_provider: string;
+    tts_provider: string;
+    llm_provider: string;
+    telephony_provider: string;
+  };
 }
 ```
 
@@ -109,6 +139,11 @@ await phone.serve({
   role: string;     // "user" or "assistant"
   text: string;     // Transcript segment
   call_id: string;  // Call identifier
+  history: Array<{  // Full conversation history up to this point (max 200 entries)
+    role: string;
+    text: string;
+    timestamp: number;
+  }>;
 }
 ```
 
@@ -154,6 +189,52 @@ await phone.serve({
 ### Return Value
 
 The function must return a `string` that will be converted to speech. If you return an empty string, nothing is spoken.
+
+## onMetrics
+
+Fires after each conversational turn completes. Use it for real-time latency monitoring, cost tracking, or per-turn analytics.
+
+```typescript
+await phone.serve({
+  agent,
+  onMetrics: async (data) => {
+    const callId = data.call_id as string;
+    const turn = data.turn as {
+      turn_index: number;
+      user_text: string;
+      agent_text: string;
+      latency: { stt_ms: number; llm_ms: number; tts_ms: number; total_ms: number };
+      stt_audio_seconds: number;
+      tts_characters: number;
+      timestamp: number;
+    };
+
+    console.log(`[${callId}] Turn ${turn.turn_index}: ${turn.latency.total_ms}ms total latency`);
+  },
+});
+```
+
+### Payload
+
+```typescript
+{
+  call_id: string;  // Call identifier
+  turn: {
+    turn_index: number;          // Zero-based turn counter
+    user_text: string;           // What the user said (empty for first message turns)
+    agent_text: string;          // What the agent responded
+    latency: {
+      stt_ms: number;            // Speech-to-text latency
+      llm_ms: number;            // LLM inference latency
+      tts_ms: number;            // Text-to-speech time-to-first-byte
+      total_ms: number;          // End-to-end turn latency
+    };
+    stt_audio_seconds: number;   // Duration of user audio processed by STT
+    tts_characters: number;      // Number of characters sent to TTS
+    timestamp: number;           // Unix timestamp (seconds) when the turn completed
+  };
+}
+```
 
 ## Type Signatures
 

@@ -56,7 +56,7 @@ interface ToolDefinition {
   description: string;
   parameters: Record<string, unknown>; // JSON Schema
   webhookUrl?: string;  // Required if handler is not provided
-  handler?: (args: Record<string, unknown>, context: Record<string, unknown>) => Promise<string | object>;
+  handler?: (args: Record<string, unknown>, context: Record<string, unknown>) => Promise<string>;
 }
 ```
 
@@ -70,15 +70,18 @@ When the AI model invokes a tool, the SDK sends a POST request to the `webhookUr
 
 ```json
 {
-  "tool_name": "check_availability",
+  "tool": "check_availability",
   "arguments": {
     "date": "2025-03-15"
   },
   "call_id": "call_abc123",
   "caller": "+15551234567",
-  "callee": "+15550001234"
+  "callee": "+15550001234",
+  "attempt": 1
 }
 ```
+
+The `attempt` field is a 1-based retry counter (1 on the first try, up to 3).
 
 Your webhook must return a JSON response. The response text is fed back to the AI model as the tool result.
 
@@ -89,10 +92,19 @@ Your webhook must return a JSON response. The response text is fed back to the A
 | HTTP method | POST |
 | Content type | `application/json` |
 | Timeout | 10 seconds |
-| Max response size | 64 KB |
+| Max response size | 1 MB |
 | Retries | 3 attempts with 500ms delay |
 
 If all retries fail, the SDK returns an error message to the AI model so it can inform the caller gracefully.
+
+## LLM Loop Limits
+
+When using the built-in LLM loop (pipeline mode without an `onMessage` handler), the following safety limits apply:
+
+| Setting | Value |
+|---------|-------|
+| Max iterations | 10 (tool-call round-trips before the loop stops) |
+| LLM request timeout | 30 seconds (`AbortSignal.timeout`) |
 
 ## SSRF Protection
 
@@ -167,7 +179,7 @@ const agent = phone.agent({
       },
       handler: async (args, context) => {
         const stock = await db.getStock(args.productId as string);
-        return { productId: args.productId, inStock: stock > 0, quantity: stock };
+        return JSON.stringify({ productId: args.productId, inStock: stock > 0, quantity: stock });
       },
     }),
   ],

@@ -134,12 +134,17 @@ No configuration is required. Barge-in is always enabled.
 
 ## AI Disclosure
 
-Patter automatically plays an AI disclosure message at the start of every call. This is a non-optional feature that ensures compliance with regulations requiring disclosure that the caller is speaking with an AI.
+Many jurisdictions require disclosure that the caller is speaking with an AI. Patter does not automatically inject a disclosure message. Instead, use the `first_message` field on your agent configuration to include an appropriate disclosure at the start of every call:
 
-The disclosure plays before the agent's `first_message` (if set) or before the agent begins listening.
+```python
+agent = phone.agent(
+    system_prompt="You are a helpful assistant.",
+    first_message="Hi, this is an AI-powered assistant calling on behalf of Acme Corp. How can I help you?",
+)
+```
 
 <Warning>
-  The AI disclosure message cannot be disabled. This is by design to ensure legal compliance across jurisdictions.
+  You are responsible for ensuring your AI disclosure complies with the regulations in your jurisdiction. Always consult legal counsel for compliance requirements.
 </Warning>
 
 ---
@@ -161,7 +166,7 @@ async def on_transcript(event):
 {
     "role": "user",       # or "assistant"
     "text": "Hello!",
-    "timestamp": "2025-03-15T10:00:01Z"
+    "timestamp": 1710489601.234  # Unix float from time.time()
 }
 ```
 
