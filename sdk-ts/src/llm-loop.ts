@@ -8,6 +8,7 @@
 
 import type { ToolDefinition } from './types';
 import { getLogger } from './logger';
+import { validateWebhookUrl } from './server';
 
 // ---------------------------------------------------------------------------
 // Provider interface
@@ -305,6 +306,11 @@ export class LLMLoop {
 
     // Fall back to webhook
     if (toolDef.webhookUrl) {
+      try {
+        validateWebhookUrl(toolDef.webhookUrl);
+      } catch (e) {
+        return JSON.stringify({ error: `Tool webhook URL rejected: ${String(e)}` });
+      }
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
           const resp = await fetch(toolDef.webhookUrl, {

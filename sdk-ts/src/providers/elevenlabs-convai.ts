@@ -1,10 +1,11 @@
 import WebSocket from 'ws';
+import { getLogger } from '../logger';
 
 const ELEVENLABS_CONVAI_URL = 'wss://api.elevenlabs.io/v1/convai/conversation';
 
 export class ElevenLabsConvAIAdapter {
   private ws: WebSocket | null = null;
-  private eventCallback: ((type: string, data: unknown) => void) | null = null;
+  private eventCallback: ((type: string, data: unknown) => void | Promise<void>) | null = null;
 
   constructor(
     private readonly apiKey: string,
@@ -57,7 +58,13 @@ export class ElevenLabsConvAIAdapter {
     });
 
     this.ws.on('message', (raw) => {
-      if (!this.eventCallback) return;
+      const cb = this.eventCallback;
+      if (!cb) return;
+      const safeInvoke = (type: string, data: unknown): void => {
+        void Promise.resolve(cb(type, data)).catch((err) =>
+          getLogger().error('onEvent callback error:', err),
+        );
+      };
       let parsed: Record<string, unknown>;
       try {
         parsed = JSON.parse(raw.toString()) as Record<string, unknown>;
@@ -69,19 +76,19 @@ export class ElevenLabsConvAIAdapter {
       if (msgType === 'audio') {
         const audioB64 = parsed['audio'] as string | undefined;
         if (audioB64) {
-          this.eventCallback('audio', Buffer.from(audioB64, 'base64'));
+          safeInvoke('audio', Buffer.from(audioB64, 'base64'));
         }
       } else if (msgType === 'user_transcript') {
-        this.eventCallback('transcript_input', parsed['text'] ?? '');
+        safeInvoke('transcript_input', parsed['text'] ?? '');
       } else if (msgType === 'agent_response') {
-        this.eventCallback('transcript_output', parsed['text'] ?? '');
+        safeInvoke('transcript_output', parsed['text'] ?? '');
         // ElevenLabs agent_response contains the complete text (not a delta),
         // so signal turn completion immediately.
-        this.eventCallback('response_done', null);
+        safeInvoke('response_done', null);
       } else if (msgType === 'interruption') {
-        this.eventCallback('interruption', null);
+        safeInvoke('interruption', null);
       } else if (msgType === 'error') {
-        this.eventCallback('error', parsed);
+        safeInvoke('error', parsed);
       }
     });
   }
@@ -96,7 +103,7 @@ export class ElevenLabsConvAIAdapter {
     );
   }
 
-  onEvent(callback: (type: string, data: unknown) => void): void {
+  onEvent(callback: (type: string, data: unknown) => void | Promise<void>): void {
     this.eventCallback = callback;
   }
 

@@ -206,7 +206,9 @@ describe('StreamHandler', () => {
       const ws = makeMockWs();
       const handler = new StreamHandler(deps, ws, '+15551111111', '+15552222222');
 
-      await handler.handleCallStart('call-rec');
+      // Must be a valid Twilio CallSid (CA + 32 hex) — the recording start
+      // now validates the SID to prevent SSRF against the Twilio API.
+      await handler.handleCallStart('CA00000000000000000000000000000001');
       // Should have called fetch for recording + adapter connect
       const recordingCall = fetchSpy.mock.calls.find(
         (c) => typeof c[0] === 'string' && c[0].includes('Recordings.json'),

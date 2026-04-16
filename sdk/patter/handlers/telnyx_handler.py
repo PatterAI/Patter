@@ -9,6 +9,8 @@ import time
 from collections import deque
 from urllib.parse import quote
 
+from patter.handlers.common import _validate_e164
+from patter.utils.log_sanitize import mask_phone_number
 from patter.handlers.stream_handler import (
     AudioSender,
     ElevenLabsConvAIStreamHandler,
@@ -205,6 +207,12 @@ async def telnyx_stream_bridge(
 
                 # --- Telnyx-specific call control helpers ---
                 async def _telnyx_transfer(number):
+                    if not _validate_e164(number):
+                        logger.warning(
+                            "Telnyx transfer rejected: invalid E.164 number %s",
+                            mask_phone_number(number),
+                        )
+                        return
                     if telnyx_key and call_id_actual:
                         import httpx as _httpx
                         async with _httpx.AsyncClient() as _http:
@@ -214,7 +222,9 @@ async def telnyx_stream_bridge(
                                 json={"to": number},
                                 timeout=10.0,
                             )
-                        logger.info("Telnyx call transferred to %s", number)
+                        logger.info(
+                            "Telnyx call transferred to %s", mask_phone_number(number)
+                        )
 
                 async def _telnyx_hangup():
                     if telnyx_key and call_id_actual:

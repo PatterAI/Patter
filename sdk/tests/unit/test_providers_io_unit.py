@@ -14,6 +14,7 @@ Tests cover the I/O paths of:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import struct
@@ -542,6 +543,8 @@ class TestWhisperSTT:
 
         chunk = b"\x00\x00" * BUFFER_SIZE_BYTES
         await stt.send_audio(chunk)
+        if stt._pending:
+            await asyncio.gather(*stt._pending)
         stt._client.post.assert_called_once()
 
     @pytest.mark.asyncio

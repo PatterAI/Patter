@@ -37,6 +37,7 @@ export class ElevenLabsTTS {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ text, model_id: this.modelId }),
+      signal: AbortSignal.timeout(30_000),
     });
 
     if (!response.ok) {

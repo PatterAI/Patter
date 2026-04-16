@@ -38,14 +38,18 @@ export class PatterConnection {
         headers: { "X-API-Key": this.apiKey },
       });
 
-      this.ws.on("open", () => {
+      const onError = (err: Error): void => {
+        this.ws?.off("error", onError);
+        reject(new PatterConnectionError(`Failed to connect: ${err.message}`));
+      };
+
+      this.ws.once("open", () => {
+        this.ws?.off("error", onError);
         this.setupListeners();
         resolve();
       });
 
-      this.ws.on("error", (err) => {
-        reject(new PatterConnectionError(`Failed to connect: ${err.message}`));
-      });
+      this.ws.on("error", onError);
     });
   }
 

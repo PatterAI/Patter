@@ -1,5 +1,11 @@
 """Dashboard authentication middleware."""
 
+import hmac
+
+
+def _safe_compare(a: str, b: str) -> bool:
+    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+
 
 def make_auth_dependency(token: str = ""):
     """Create a FastAPI dependency for token-based authentication.
@@ -15,11 +21,11 @@ def make_auth_dependency(token: str = ""):
 
         # Check Authorization header
         auth = request.headers.get("Authorization", "")
-        if auth == f"Bearer {token}":
+        if _safe_compare(auth, f"Bearer {token}"):
             return
 
         # Check query param (for browser access)
-        if request.query_params.get("token") == token:
+        if _safe_compare(request.query_params.get("token", ""), token):
             return
 
         raise HTTPException(status_code=401, detail="Unauthorized")

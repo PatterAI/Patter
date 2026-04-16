@@ -17,6 +17,7 @@ from patter.handlers.common import (
     _sanitize_variable_value,
     _validate_e164,
 )
+from patter.utils.log_sanitize import mask_phone_number
 from patter.handlers.stream_handler import (
     END_CALL_TOOL,
     TRANSFER_CALL_TOOL,
@@ -284,7 +285,10 @@ async def twilio_stream_bridge(
                 # --- Twilio-specific call control helpers ---
                 async def _twilio_transfer(number):
                     if not _validate_e164(number):
-                        logger.warning("transfer rejected: invalid number %r", number)
+                        logger.warning(
+                            "transfer rejected: invalid number %s",
+                            mask_phone_number(number),
+                        )
                         return
                     if twilio_sid and twilio_token and call_sid_actual:
                         if not _validate_twilio_sid(call_sid_actual, "CA"):
@@ -298,7 +302,9 @@ async def twilio_stream_bridge(
                                 auth=(twilio_sid, twilio_token),
                                 data={"Twiml": twiml},
                             )
-                        logger.info("Call transferred to %s", number)
+                        logger.info(
+                            "Call transferred to %s", mask_phone_number(number)
+                        )
 
                 async def _twilio_hangup():
                     if twilio_sid and twilio_token and call_sid_actual:

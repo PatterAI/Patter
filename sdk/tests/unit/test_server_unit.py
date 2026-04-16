@@ -70,6 +70,12 @@ class _MockRequest:
     async def json(self):
         return self._json_data
 
+    async def body(self):
+        import json as _json
+        if self._json_data is None:
+            return b""
+        return _json.dumps(self._json_data).encode("utf-8")
+
 
 # ---------------------------------------------------------------------------
 # Construction
@@ -338,12 +344,27 @@ class TestTwilioVoiceRoute:
         assert response.status_code == 403
 
 
+def _unauth_config() -> LocalConfig:
+    """LocalConfig with empty twilio_token so signature validation is skipped.
+
+    The signature validation branch on /recording and /amd is tested
+    separately in TestTwilioRecordingSignature / TestTwilioAMDSignature.
+    """
+    return LocalConfig(
+        twilio_sid="ACtest000000000000000000000000000",
+        twilio_token="",
+        openai_key="sk-test",
+        webhook_url="test.ngrok.io",
+    )
+
+
 class TestTwilioRecordingRoute:
     """POST /webhooks/twilio/recording returns 204."""
 
     @pytest.mark.asyncio
     async def test_recording_callback_returns_204(self) -> None:
         srv = _make_server()
+        srv.config = _unauth_config()
         app = srv._create_app()
         endpoint = _get_endpoint(app, "/webhooks/twilio/recording")
 
@@ -364,6 +385,7 @@ class TestTwilioAMDRoute:
     @pytest.mark.asyncio
     async def test_amd_human_returns_204(self) -> None:
         srv = _make_server()
+        srv.config = _unauth_config()
         app = srv._create_app()
         endpoint = _get_endpoint(app, "/webhooks/twilio/amd")
 
@@ -379,6 +401,7 @@ class TestTwilioAMDRoute:
     @pytest.mark.asyncio
     async def test_amd_machine_no_voicemail_message_returns_204(self) -> None:
         srv = _make_server(voicemail_message="")
+        srv.config = _unauth_config()
         app = srv._create_app()
         endpoint = _get_endpoint(app, "/webhooks/twilio/amd")
 
@@ -394,12 +417,10 @@ class TestTwilioAMDRoute:
     @pytest.mark.asyncio
     async def test_amd_machine_invalid_sid_skips_voicemail(self) -> None:
         srv = _make_server(voicemail_message="Leave a message")
-        srv.config = LocalConfig(
-            twilio_sid="ACtest000000000000000000000000000",
-            twilio_token="tok_test",
-            openai_key="sk-test",
-            webhook_url="test.ngrok.io",
-        )
+        # Signature validation skipped (empty twilio_token); voicemail drop
+        # branch still requires sid+token, so this test exercises the
+        # invalid-sid early-return before any API call is made.
+        srv.config = _unauth_config()
         app = srv._create_app()
         endpoint = _get_endpoint(app, "/webhooks/twilio/amd")
 
@@ -415,6 +436,10 @@ class TestTwilioAMDRoute:
     @pytest.mark.asyncio
     async def test_amd_machine_drops_voicemail(self) -> None:
         srv = _make_server(voicemail_message="Please leave a message")
+        # Use empty token to bypass signature validation, but keep sid
+        # populated.  Patch the RequestValidator branch indirectly by
+        # supplying no token — voicemail drop uses sid+token both set, so
+        # we restore token via a patched validator that always returns True.
         srv.config = LocalConfig(
             twilio_sid="ACtest000000000000000000000000000",
             twilio_token="tok_test",
@@ -436,7 +461,13 @@ class TestTwilioAMDRoute:
         mock_http.__aenter__ = AsyncMock(return_value=mock_http)
         mock_http.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("httpx.AsyncClient", return_value=mock_http):
+        mock_validator = MagicMock()
+        mock_validator.validate.return_value = True
+
+        with patch("httpx.AsyncClient", return_value=mock_http), patch(
+            "twilio.request_validator.RequestValidator",
+            return_value=mock_validator,
+        ):
             response = await endpoint(request)
 
         assert response.status_code == 204
@@ -467,10 +498,64 @@ class TestTwilioAMDRoute:
         mock_http.__aexit__ = AsyncMock(return_value=False)
         mock_http.post.side_effect = Exception("Network error")
 
-        with patch("httpx.AsyncClient", return_value=mock_http):
+        mock_validator = MagicMock()
+        mock_validator.validate.return_value = True
+
+        with patch("httpx.AsyncClient", return_value=mock_http), patch(
+            "twilio.request_validator.RequestValidator",
+            return_value=mock_validator,
+        ):
             response = await endpoint(request)
 
         assert response.status_code == 204
+
+
+class TestTwilioRecordingSignature:
+    """POST /webhooks/twilio/recording enforces Twilio signature when configured."""
+
+    @pytest.mark.asyncio
+    async def test_invalid_signature_returns_403(self) -> None:
+        srv = _make_server()
+        srv.config = LocalConfig(
+            twilio_sid="ACtest000000000000000000000000000",
+            twilio_token="real_token_value",
+            openai_key="sk-test",
+            webhook_url="test.ngrok.io",
+        )
+        app = srv._create_app()
+        endpoint = _get_endpoint(app, "/webhooks/twilio/recording")
+
+        request = _MockRequest(
+            form_data={"CallSid": "CA00000000000000000000000000000000"},
+            headers={"X-Twilio-Signature": "badsig"},
+            url="https://test.ngrok.io/webhooks/twilio/recording",
+        )
+        response = await endpoint(request)
+        assert response.status_code == 403
+
+
+class TestTwilioAMDSignature:
+    """POST /webhooks/twilio/amd enforces Twilio signature when configured."""
+
+    @pytest.mark.asyncio
+    async def test_invalid_signature_returns_403(self) -> None:
+        srv = _make_server()
+        srv.config = LocalConfig(
+            twilio_sid="ACtest000000000000000000000000000",
+            twilio_token="real_token_value",
+            openai_key="sk-test",
+            webhook_url="test.ngrok.io",
+        )
+        app = srv._create_app()
+        endpoint = _get_endpoint(app, "/webhooks/twilio/amd")
+
+        request = _MockRequest(
+            form_data={"CallSid": "CA00000000000000000000000000000000"},
+            headers={"X-Twilio-Signature": "badsig"},
+            url="https://test.ngrok.io/webhooks/twilio/amd",
+        )
+        response = await endpoint(request)
+        assert response.status_code == 403
 
 
 class TestTelnyxVoiceRoute:

@@ -205,7 +205,7 @@ async def test_websocket_streaming():
 
     with patch("websockets.connect", return_value=mock_ws):
         chunks = []
-        async for chunk in handler.call_websocket("ws://localhost:9000", {"text": "hi"}):
+        async for chunk in handler.call_websocket("ws://example.com:9000", {"text": "hi"}):
             chunks.append(chunk)
 
     assert chunks == ["Hello ", "world!"]
@@ -222,7 +222,7 @@ async def test_websocket_plain_text_frames():
 
     with patch("websockets.connect", return_value=mock_ws):
         chunks = []
-        async for chunk in handler.call_websocket("ws://localhost:9000", {"text": "hi"}):
+        async for chunk in handler.call_websocket("ws://example.com:9000", {"text": "hi"}):
             chunks.append(chunk)
 
     assert chunks == ["Hello", "world"]

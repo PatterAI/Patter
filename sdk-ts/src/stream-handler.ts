@@ -22,6 +22,7 @@ import { createHistoryManager, executeToolWebhook } from './handler-utils';
 import type { AgentOptions, Guardrail, HookContext, PipelineMessageHandler, ToolDefinition } from './types';
 import type { MetricsStore } from './dashboard/store';
 import { getLogger } from './logger';
+import { validateTwilioSid } from './server';
 import type { ProviderPricing } from './pricing';
 import { SentenceChunker } from './sentence-chunker';
 import { PipelineHookExecutor } from './pipeline-hooks';
@@ -76,7 +77,7 @@ function checkGuardrails(text: string, guardrails: Guardrail[] | undefined): Gua
   return null;
 }
 
-function sanitizeLogValue(v: string, maxLen = 200): string {
+export function sanitizeLogValue(v: string, maxLen = 200): string {
   // eslint-disable-next-line no-control-regex
   const cleaned = v.replace(/[\x00-\x1f\x7f]/g, '');
   return cleaned.length > maxLen ? cleaned.slice(0, maxLen) + '...' : cleaned;
@@ -135,9 +136,12 @@ export class StreamHandler {
   private llmLoop: LLMLoop | null = null;
   private chunkCount = 0;
   private callEndFired = false;
+  private sttClosed = false;
   private currentAgentText = '';
   private responseAudioStarted = false;
   private maxDurationTimer: ReturnType<typeof setTimeout> | null = null;
+  private transcriptProcessing = false;
+  private transcriptQueue: Array<{ isFinal?: boolean; text?: string }> = [];
 
   private readonly history: ReturnType<typeof createHistoryManager>;
   private readonly metricsAcc: CallMetricsAccumulator;
@@ -231,21 +235,25 @@ export class StreamHandler {
 
     // Start recording (Twilio only)
     if (this.deps.recording && this.deps.config.twilioSid && this.deps.config.twilioToken && callId) {
-      try {
-        const recUrl = `https://api.twilio.com/2010-04-01/Accounts/${this.deps.config.twilioSid}/Calls/${callId}/Recordings.json`;
-        const recResp = await fetch(recUrl, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Basic ${Buffer.from(`${this.deps.config.twilioSid}:${this.deps.config.twilioToken}`).toString('base64')}`,
-          },
-        });
-        if (recResp.ok) {
-          getLogger().info(`Recording started for ${callId}`);
-        } else {
-          getLogger().warn(`could not start recording: ${await recResp.text()}`);
+      if (!validateTwilioSid(callId)) {
+        getLogger().warn(`Recording skipped: invalid Twilio CallSid format ${JSON.stringify(callId)}`);
+      } else {
+        try {
+          const recUrl = `https://api.twilio.com/2010-04-01/Accounts/${this.deps.config.twilioSid}/Calls/${callId}/Recordings.json`;
+          const recResp = await fetch(recUrl, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Basic ${Buffer.from(`${this.deps.config.twilioSid}:${this.deps.config.twilioToken}`).toString('base64')}`,
+            },
+          });
+          if (recResp.ok) {
+            getLogger().info(`Recording started for ${callId}`);
+          } else {
+            getLogger().warn(`could not start recording: ${await recResp.text()}`);
+          }
+        } catch (e) {
+          getLogger().warn(`could not start recording: ${String(e)}`);
         }
-      } catch (e) {
-        getLogger().warn(`could not start recording: ${String(e)}`);
       }
     }
 
@@ -310,18 +318,26 @@ export class StreamHandler {
 
   /** Handle call stop / stream end. */
   async handleStop(): Promise<void> {
-    try { this.stt?.close(); } catch { /* ignore */ }
+    await this.closeSttOnce();
     try { this.adapter?.close(); } catch { /* ignore */ }
     await this.fireCallEnd();
   }
 
   /** Handle WebSocket close event. */
   async handleWsClose(): Promise<void> {
-    await this.fireCallEnd();
-    try { this.stt?.close(); } catch { /* ignore */ }
+    // Drain STT first so in-flight transcripts fire before onCallEnd.
+    await this.closeSttOnce();
     try { this.adapter?.close(); } catch { /* ignore */ }
+    await this.fireCallEnd();
     // Ensure telephony call is terminated even if WebSocket closed abnormally
     try { await this.deps.bridge.endCall(this.callId, this.ws); } catch { /* best effort */ }
+  }
+
+  /** Close STT at most once; swallow errors. */
+  private async closeSttOnce(): Promise<void> {
+    if (this.sttClosed) return;
+    this.sttClosed = true;
+    try { await this.stt?.close(); } catch { /* ignore */ }
   }
 
   // ---------------------------------------------------------------------------
@@ -477,6 +493,20 @@ export class StreamHandler {
 
   /** Handle a final transcript from STT in pipeline mode. */
   private async handleTranscript(transcript: { isFinal?: boolean; text?: string }): Promise<void> {
+    this.transcriptQueue.push(transcript);
+    if (this.transcriptProcessing) return;
+    this.transcriptProcessing = true;
+    try {
+      while (this.transcriptQueue.length > 0) {
+        const next = this.transcriptQueue.shift()!;
+        await this.processTranscript(next);
+      }
+    } finally {
+      this.transcriptProcessing = false;
+    }
+  }
+
+  private async processTranscript(transcript: { isFinal?: boolean; text?: string }): Promise<void> {
     if (!transcript.isFinal || !transcript.text) return;
 
     const label = this.deps.bridge.label;

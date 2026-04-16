@@ -10,8 +10,14 @@ import type { Request, Response, NextFunction } from 'express';
 import crypto from 'node:crypto';
 
 function timingSafeCompare(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
+  const aBuf = Buffer.from(a);
+  const bBuf = Buffer.from(b);
+  if (aBuf.length !== bBuf.length) {
+    // Still run a timingSafeEqual to keep the code path timing uniform.
+    crypto.timingSafeEqual(aBuf, aBuf);
+    return false;
+  }
+  return crypto.timingSafeEqual(aBuf, bBuf);
 }
 
 export function makeAuthMiddleware(token: string = '') {
@@ -24,14 +30,14 @@ export function makeAuthMiddleware(token: string = '') {
     // Check Authorization header (timing-safe)
     const auth = req.headers.authorization || '';
     const expected = `Bearer ${token}`;
-    if (auth.length === expected.length && timingSafeCompare(auth, expected)) {
+    if (timingSafeCompare(auth, expected)) {
       next();
       return;
     }
 
     // Check query param (timing-safe)
     const queryToken = String(req.query.token ?? '');
-    if (queryToken.length === token.length && timingSafeCompare(queryToken, token)) {
+    if (timingSafeCompare(queryToken, token)) {
       next();
       return;
     }

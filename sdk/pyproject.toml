@@ -45,6 +45,7 @@ local = [
     "twilio>=9.0.0",
     "audioop-lts>=0.2.1; python_version>='3.13'",
     "openai>=1.0.0",
+    "cryptography>=42.0.0",
 ]
 dev = [
     "pytest>=8.0.0",

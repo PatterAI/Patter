@@ -11,7 +11,7 @@ import { mergePricing } from './pricing';
 import { MetricsStore } from './dashboard/store';
 import { mountDashboard, mountApi } from './dashboard/routes';
 import { RemoteMessageHandler } from './remote-message';
-import { StreamHandler } from './stream-handler';
+import { StreamHandler, sanitizeLogValue } from './stream-handler';
 import { getLogger } from './logger';
 import type { TelephonyBridge } from './stream-handler';
 import type { AgentOptions, PipelineMessageHandler } from './types';
@@ -151,6 +151,15 @@ function validateTelnyxSignature(
 }
 
 /**
+ * Validate a Twilio SID (CallSid etc.) to prevent path traversal / injection
+ * when interpolating into Twilio API URLs. Twilio SIDs are 34 characters:
+ * a two-letter prefix (e.g. 'CA' for calls) followed by 32 hex characters.
+ */
+export function validateTwilioSid(sid: string, prefix = 'CA'): boolean {
+  return sid.length === 34 && sid.startsWith(prefix) && /^[A-Z]{2}[0-9a-f]{32}$/.test(sid);
+}
+
+/**
  * Validate a Twilio webhook request signature using HMAC-SHA1.
  * Returns true if the signature is valid, false otherwise.
  */
@@ -254,6 +263,10 @@ class TwilioBridge implements TelephonyBridge {
 
   async transferCall(callId: string, toNumber: string): Promise<void> {
     if (this.config.twilioSid && this.config.twilioToken && callId) {
+      if (!validateTwilioSid(callId)) {
+        getLogger().warn(`TwilioBridge.transferCall rejected: invalid CallSid ${JSON.stringify(callId)}`);
+        return;
+      }
       const transferUrl = `https://api.twilio.com/2010-04-01/Accounts/${this.config.twilioSid}/Calls/${callId}.json`;
       await fetch(transferUrl, {
         method: 'POST',
@@ -269,6 +282,10 @@ class TwilioBridge implements TelephonyBridge {
 
   async endCall(callId: string, _ws: WSWebSocket): Promise<void> {
     if (this.config.twilioSid && this.config.twilioToken && callId) {
+      if (!validateTwilioSid(callId)) {
+        getLogger().warn(`TwilioBridge.endCall rejected: invalid CallSid ${JSON.stringify(callId)}`);
+        return;
+      }
       const endUrl = `https://api.twilio.com/2010-04-01/Accounts/${this.config.twilioSid}/Calls/${callId}.json`;
       await fetch(endUrl, {
         method: 'POST',
@@ -296,6 +313,10 @@ class TwilioBridge implements TelephonyBridge {
 
   async queryTelephonyCost(metricsAcc: CallMetricsAccumulator, callId: string): Promise<void> {
     if (this.config.twilioSid && this.config.twilioToken && callId) {
+      if (!validateTwilioSid(callId)) {
+        getLogger().warn(`TwilioBridge.queryTelephonyCost rejected: invalid CallSid ${JSON.stringify(callId)}`);
+        return;
+      }
       try {
         const resp = await fetch(
           `https://api.twilio.com/2010-04-01/Accounts/${this.config.twilioSid}/Calls/${callId}.json`,
@@ -340,6 +361,10 @@ class TelnyxBridge implements TelephonyBridge {
   }
 
   async transferCall(callId: string, toNumber: string): Promise<void> {
+    if (!/^\+[1-9]\d{6,14}$/.test(toNumber)) {
+      getLogger().warn(`TelnyxBridge.transferCall rejected: invalid E.164 number ${JSON.stringify(toNumber)}`);
+      return;
+    }
     const telnyxKey = this.config.telnyxKey ?? '';
     await fetch(`https://api.telnyx.com/v2/calls/${callId}/actions/transfer`, {
       method: 'POST',
@@ -500,9 +525,9 @@ export class EmbeddedServer {
         }
       }
       const body = req.body as Record<string, string>;
-      const recordingSid = body['RecordingSid'] ?? '';
-      const recordingUrl = body['RecordingUrl'] ?? '';
-      const callSid = body['CallSid'] ?? '';
+      const recordingSid = sanitizeLogValue(body['RecordingSid'] ?? '');
+      const recordingUrl = sanitizeLogValue(body['RecordingUrl'] ?? '');
+      const callSid = sanitizeLogValue(body['CallSid'] ?? '');
       getLogger().info(`Recording ${recordingSid} for call ${callSid}: ${recordingUrl}`);
       res.status(204).send();
     });
@@ -520,7 +545,7 @@ export class EmbeddedServer {
       const body = req.body as Record<string, string>;
       const answeredBy = body['AnsweredBy'] ?? '';
       const callSid = body['CallSid'] ?? '';
-      getLogger().info(`AMD result for ${callSid}: ${answeredBy}`);
+      getLogger().info(`AMD result for ${sanitizeLogValue(callSid)}: ${sanitizeLogValue(answeredBy)}`);
 
       if (
         (answeredBy === 'machine_end_beep' || answeredBy === 'machine_end_silence') &&
@@ -528,6 +553,11 @@ export class EmbeddedServer {
         this.config.twilioSid &&
         this.config.twilioToken
       ) {
+        if (!validateTwilioSid(callSid)) {
+          getLogger().warn(`AMD webhook rejected: invalid CallSid ${JSON.stringify(sanitizeLogValue(callSid))}`);
+          res.status(400).send('Invalid CallSid');
+          return;
+        }
         const twiml = `<Response><Say>${xmlEscape(this.voicemailMessage)}</Say><Hangup/></Response>`;
         try {
           const vmUrl = `https://api.twilio.com/2010-04-01/Accounts/${this.config.twilioSid}/Calls/${callSid}.json`;
@@ -540,12 +570,12 @@ export class EmbeddedServer {
             body: new URLSearchParams({ Twiml: twiml }).toString(),
           });
           if (vmResp.ok) {
-            getLogger().info(`Voicemail dropped for ${callSid}`);
+            getLogger().info(`Voicemail dropped for ${sanitizeLogValue(callSid)}`);
           } else {
-            getLogger().warn(`Could not drop voicemail: ${await vmResp.text()}`);
+            getLogger().warn(`Could not drop voicemail: ${sanitizeLogValue(await vmResp.text())}`);
           }
         } catch (e) {
-          getLogger().warn(`Could not drop voicemail: ${String(e)}`);
+          getLogger().warn(`Could not drop voicemail: ${sanitizeLogValue(String(e))}`);
         }
       }
 
@@ -566,6 +596,11 @@ export class EmbeddedServer {
         getLogger().warn('Twilio webhook signature validation disabled — set twilioToken for production');
       }
       const callSid = (req.body.CallSid as string) || '';
+      if (callSid && !validateTwilioSid(callSid)) {
+        getLogger().warn(`Twilio voice webhook rejected: invalid CallSid ${JSON.stringify(callSid)}`);
+        res.status(400).send('Invalid CallSid');
+        return;
+      }
       const caller = (req.body.From as string) || '';
       const callee = (req.body.To as string) || '';
       const rawStreamUrl = `wss://${this.config.webhookUrl}/ws/stream/${callSid}`;
@@ -687,7 +722,9 @@ export class EmbeddedServer {
     });
 
     await new Promise<void>((resolve) => {
-      this.server!.listen(port, '0.0.0.0', () => {
+      // Bind to loopback only. Public exposure should go through a reverse
+      // proxy or tunnel so the Node process is never directly reachable.
+      this.server!.listen(port, '127.0.0.1', () => {
         getLogger().info(`
 ██████╗  █████╗ ████████╗████████╗███████╗██████╗
 ██╔══██╗██╔══██╗╚══██╔══╝╚══██╔══╝██╔════╝██╔══██╗
