@@ -19,10 +19,19 @@ logger = logging.getLogger("patter")
 
 
 async def _call_hook(hook, *args):
-    """Call a hook that may be sync or async. Returns the result."""
-    if asyncio.iscoroutinefunction(hook):
-        return await hook(*args)
-    return hook(*args)
+    """Call a hook that may be sync or async. Returns the result.
+
+    Uses ``inspect.isawaitable`` on the return value instead of
+    ``asyncio.iscoroutinefunction`` to correctly handle
+    ``functools.partial``, class instances with ``__call__``, and
+    decorated async functions.
+    """
+    import inspect
+
+    result = hook(*args)
+    if inspect.isawaitable(result):
+        return await result
+    return result
 
 
 class PipelineHookExecutor:

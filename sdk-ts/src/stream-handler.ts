@@ -493,6 +493,7 @@ export class StreamHandler {
     const filteredTranscript = await hookExecutor.runAfterTranscribe(transcript.text, hookCtx);
     if (filteredTranscript === null) {
       getLogger().info(`afterTranscribe hook vetoed turn (${label})`);
+      this.metricsAcc.recordTurnInterrupted();
       return;
     }
 
@@ -504,6 +505,7 @@ export class StreamHandler {
           text: filteredTranscript,
           call_id: this.callId,
           caller: this.caller,
+          callee: this.callee,
           history: [...this.history.entries],
         });
       } catch (e) {
@@ -536,43 +538,50 @@ export class StreamHandler {
       const allParts: string[] = [];
       const ttsFirstByteSent = { value: false };
       this.isSpeaking = true;
+      let llmError = false;
 
       try {
-        for await (const token of this.llmLoop.run(filteredTranscript, this.history.entries, callCtx)) {
-          allParts.push(token);
+        try {
+          for await (const token of this.llmLoop.run(filteredTranscript, this.history.entries, callCtx)) {
+            allParts.push(token);
 
-          // Feed token to sentence chunker
-          const sentences = chunker.push(token);
-          for (const sentence of sentences) {
+            // Feed token to sentence chunker
+            const sentences = chunker.push(token);
+            for (const sentence of sentences) {
+              if (!this.isSpeaking) break;
+
+              // Guardrails check per-sentence
+              const guard = checkGuardrails(sentence, this.deps.agent.guardrails);
+              const sentenceText = guard
+                ? (guard.replacement ?? "I'm sorry, I can't respond to that.")
+                : sentence;
+
+              await this.synthesizeSentence(sentenceText, hookExecutor, hookCtx, ttsFirstByteSent);
+            }
             if (!this.isSpeaking) break;
+          }
+        } catch (e) {
+          llmError = true;
+          chunker.reset(); // discard partial content on LLM error
+          getLogger().error(`LLM loop error (${label}):`, e);
+        }
 
-            // Guardrails check per-sentence
+        this.metricsAcc.recordLlmComplete(); // record BEFORE TTS flush, not after
+
+        // Flush remaining text from chunker (skip if LLM errored)
+        if (!llmError && this.isSpeaking) {
+          for (const sentence of chunker.flush()) {
+            if (!this.isSpeaking) break;
             const guard = checkGuardrails(sentence, this.deps.agent.guardrails);
             const sentenceText = guard
               ? (guard.replacement ?? "I'm sorry, I can't respond to that.")
               : sentence;
-
             await this.synthesizeSentence(sentenceText, hookExecutor, hookCtx, ttsFirstByteSent);
           }
-          if (!this.isSpeaking) break;
         }
-      } catch (e) {
-        getLogger().error(`LLM loop error (${label}):`, e);
+      } finally {
+        this.isSpeaking = false; // guaranteed reset
       }
-
-      // Flush remaining text from chunker
-      if (this.isSpeaking) {
-        for (const sentence of chunker.flush()) {
-          if (!this.isSpeaking) break;
-          const guard = checkGuardrails(sentence, this.deps.agent.guardrails);
-          const sentenceText = guard
-            ? (guard.replacement ?? "I'm sorry, I can't respond to that.")
-            : sentence;
-          await this.synthesizeSentence(sentenceText, hookExecutor, hookCtx, ttsFirstByteSent);
-        }
-      }
-
-      this.isSpeaking = false;
       responseText = allParts.join('');
     } else {
       return;
@@ -595,20 +604,26 @@ export class StreamHandler {
       const chunker = new SentenceChunker();
       const sentences = [...chunker.push(responseText), ...chunker.flush()];
       const ttsFirstByteSent = { value: false };
+      let interrupted = false;
       this.isSpeaking = true;
 
-      for (const sentence of sentences) {
-        if (!this.isSpeaking) break;
-        await this.synthesizeSentence(sentence, hookExecutor, hookCtx, ttsFirstByteSent);
+      try {
+        for (const sentence of sentences) {
+          if (!this.isSpeaking) { interrupted = true; break; }
+          await this.synthesizeSentence(sentence, hookExecutor, hookCtx, ttsFirstByteSent);
+        }
+      } finally {
+        this.isSpeaking = false; // guaranteed reset
       }
 
-      this.isSpeaking = false;
+      if (!interrupted) {
+        this.metricsAcc.recordTtsComplete(responseText);
+      }
     } else {
-      this.metricsAcc.recordLlmComplete();
       this.history.push({ role: 'assistant', text: responseText, timestamp: Date.now() });
+      this.metricsAcc.recordTtsComplete(responseText);
     }
 
-    this.metricsAcc.recordTtsComplete(responseText);
     const turn = this.metricsAcc.recordTurnComplete(responseText);
     if (turn) {
       this.deps.metricsStore.recordTurn({ call_id: this.callId, turn });

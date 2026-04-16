@@ -182,7 +182,6 @@ def evaluate_guardrails(agent, response_text: str) -> tuple[bool, str]:
         blocked_terms = guard.get("blocked_terms") if isinstance(guard, dict) else getattr(guard, "blocked_terms", None)
         check_fn = guard.get("check") if isinstance(guard, dict) else getattr(guard, "check", None)
         guard_name = guard.get("name") if isinstance(guard, dict) else getattr(guard, "name", "unnamed")
-        replacement = (guard.get("replacement") if isinstance(guard, dict) else getattr(guard, "replacement", None)) or "I'm sorry, I can't respond to that."
         if blocked_terms:
             blocked = any(term.lower() in response_text.lower() for term in blocked_terms)
         if check_fn and not blocked:
@@ -194,6 +193,22 @@ def evaluate_guardrails(agent, response_text: str) -> tuple[bool, str]:
             logger.warning("Guardrail '%s' triggered on: %.50s", guard_name, response_text)
             return True, guard_name
     return False, ""
+
+
+def get_guardrail_replacement(agent, guard_name: str) -> str:
+    """Get the replacement text for a triggered guardrail by name.
+
+    Returns the replacement text from the specific guard that fired,
+    falling back to a default message.
+    """
+    guardrails = getattr(agent, "guardrails", None) or []
+    for guard in guardrails:
+        name = guard.get("name") if isinstance(guard, dict) else getattr(guard, "name", "unnamed")
+        if name == guard_name:
+            r = (guard.get("replacement") if isinstance(guard, dict) else getattr(guard, "replacement", None))
+            if r:
+                return r
+    return "I'm sorry, I can't respond to that."
 
 
 # ---------------------------------------------------------------------------
@@ -814,21 +829,6 @@ class PipelineStreamHandler(StreamHandler):
         if self._stt is not None:
             self._stt_task = asyncio.create_task(self._stt_loop())
 
-    async def _tts_sentence(self, sentence_text: str, first_tts_chunk_holder: list) -> bool:
-        """Synthesize a sentence and send audio. Returns False if interrupted."""
-        if self._tts is None:
-            return True
-        async for audio_chunk in self._tts.synthesize(sentence_text):
-            if not self._is_speaking:
-                if self.metrics is not None:
-                    self.metrics.record_turn_interrupted()
-                return False
-            if first_tts_chunk_holder[0] and self.metrics is not None:
-                self.metrics.record_tts_first_byte()
-                first_tts_chunk_holder[0] = False
-            await self.audio_sender.send_audio(audio_chunk)
-        return True
-
     def _build_hook_context(self) -> HookContext:
         """Build a HookContext for the current call state."""
         return HookContext(
@@ -885,62 +885,56 @@ class PipelineStreamHandler(StreamHandler):
         hook_ctx = self._build_hook_context()
 
         interrupted = False
-        async for token in result:
-            full_response_parts.append(token)
+        llm_error = False
+        try:
+            try:
+                async for token in result:
+                    full_response_parts.append(token)
 
-            sentences = chunker.push(token)
-            for sentence in sentences:
-                if not self._is_speaking:
-                    interrupted = True
-                    break
-
-                # Guardrails check per-sentence
-                blocked, guard_name = evaluate_guardrails(self.agent, sentence)
-                if blocked:
-                    guardrails = getattr(self.agent, "guardrails", None) or []
-                    replacement = "I'm sorry, I can't respond to that."
-                    for g in guardrails:
-                        r = (g.get("replacement") if isinstance(g, dict) else getattr(g, "replacement", None))
-                        if r:
-                            replacement = r
+                    sentences = chunker.push(token)
+                    for sentence in sentences:
+                        if not self._is_speaking:
+                            interrupted = True
                             break
-                    sentence = replacement
 
-                if not await self._synthesize_sentence(sentence, hook_executor, hook_ctx, first_tts_chunk):
-                    interrupted = True
-                    break
+                        blocked, guard_name = evaluate_guardrails(self.agent, sentence)
+                        if blocked:
+                            sentence = get_guardrail_replacement(self.agent, guard_name)
 
-            if interrupted:
-                break
-
-        # Flush remaining text from chunker
-        if not interrupted:
-            for sentence in chunker.flush():
-                if not self._is_speaking:
-                    interrupted = True
-                    break
-
-                blocked, _ = evaluate_guardrails(self.agent, sentence)
-                if blocked:
-                    guardrails = getattr(self.agent, "guardrails", None) or []
-                    replacement = "I'm sorry, I can't respond to that."
-                    for g in guardrails:
-                        r = (g.get("replacement") if isinstance(g, dict) else getattr(g, "replacement", None))
-                        if r:
-                            replacement = r
+                        if not await self._synthesize_sentence(sentence, hook_executor, hook_ctx, first_tts_chunk):
+                            interrupted = True
                             break
-                    sentence = replacement
 
-                if not await self._synthesize_sentence(sentence, hook_executor, hook_ctx, first_tts_chunk):
-                    interrupted = True
-                    break
+                    if interrupted:
+                        break
+            except Exception as exc:
+                llm_error = True
+                chunker.reset()  # discard partial content on LLM error
+                logger.exception("LLM streaming error: %s", exc)
+
+            if self.metrics is not None:
+                self.metrics.record_llm_complete()
+
+            # Flush remaining text from chunker (skip if LLM errored)
+            if not llm_error and not interrupted:
+                for sentence in chunker.flush():
+                    if not self._is_speaking:
+                        interrupted = True
+                        break
+
+                    blocked, guard_name = evaluate_guardrails(self.agent, sentence)
+                    if blocked:
+                        sentence = get_guardrail_replacement(self.agent, guard_name)
+
+                    if not await self._synthesize_sentence(sentence, hook_executor, hook_ctx, first_tts_chunk):
+                        interrupted = True
+                        break
+        finally:
+            self._is_speaking = False  # guaranteed reset
 
         response_text = "".join(full_response_parts)
 
-        if self.metrics is not None:
-            self.metrics.record_llm_complete()
-
-        if not interrupted and response_text:
+        if not interrupted and not llm_error and response_text:
             if self.metrics is not None:
                 self.metrics.record_tts_complete(response_text)
                 turn = self.metrics.record_turn_complete(response_text)
@@ -952,7 +946,6 @@ class PipelineStreamHandler(StreamHandler):
                             "cost_so_far": self.metrics.get_cost_so_far(),
                         }
                     )
-        self._is_speaking = False
         return response_text
 
     async def _process_regular_response(self, response_text: str, call_id: str) -> None:
@@ -966,14 +959,7 @@ class PipelineStreamHandler(StreamHandler):
         # Guardrails check (pipeline mode — was previously missing)
         blocked, guard_name = evaluate_guardrails(self.agent, response_text)
         if blocked:
-            guardrails = getattr(self.agent, "guardrails", None) or []
-            replacement = "I'm sorry, I can't respond to that."
-            for g in guardrails:
-                r = (g.get("replacement") if isinstance(g, dict) else getattr(g, "replacement", None))
-                if r:
-                    replacement = r
-                    break
-            response_text = replacement
+            response_text = get_guardrail_replacement(self.agent, guard_name)
 
         self.conversation_history.append(
             {"role": "assistant", "text": response_text, "timestamp": time.time()}
@@ -1022,9 +1008,7 @@ class PipelineStreamHandler(StreamHandler):
                     self.metrics.start_turn()
                     self.metrics.record_stt_complete(transcript.text)
 
-                self.conversation_history.append(
-                    {"role": "user", "text": transcript.text, "timestamp": time.time()}
-                )
+                # Raw transcript always goes to dashboard/transcript log
                 self.transcript_entries.append(
                     {"role": "user", "text": transcript.text}
                 )
@@ -1051,6 +1035,11 @@ class PipelineStreamHandler(StreamHandler):
                     if self.metrics is not None:
                         self.metrics.record_turn_interrupted()
                     continue
+
+                # Use filtered text in conversation history (sent to LLM)
+                self.conversation_history.append(
+                    {"role": "user", "text": filtered_text, "timestamp": time.time()}
+                )
 
                 if self.on_message is None and self._llm_loop is None:
                     # No message handler or LLM loop — discard orphaned turn
