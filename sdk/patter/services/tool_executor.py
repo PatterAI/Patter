@@ -6,6 +6,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from patter.observability.tracing import SPAN_TOOL, start_span
+
 logger = logging.getLogger("patter")
 
 # Maximum size of a tool webhook response (1 MB).  Responses larger than this
@@ -86,11 +88,19 @@ class ToolExecutor:
         If *handler* is provided, it is called directly (sync or async).
         Otherwise, falls back to POSTing to *webhook_url*.
         """
-        if handler is not None:
-            return await self._execute_handler(tool_name, arguments, call_context, handler)
-        if webhook_url:
-            return await self._execute_webhook(tool_name, arguments, call_context, webhook_url)
-        return json.dumps({"error": f"Tool '{tool_name}' has no handler or webhook_url", "fallback": True})
+        with start_span(
+            SPAN_TOOL,
+            {
+                "patter.tool.name": tool_name,
+                "patter.tool.transport": "handler" if handler is not None else ("webhook" if webhook_url else "none"),
+                "patter.call.id": call_context.get("call_id", ""),
+            },
+        ):
+            if handler is not None:
+                return await self._execute_handler(tool_name, arguments, call_context, handler)
+            if webhook_url:
+                return await self._execute_webhook(tool_name, arguments, call_context, webhook_url)
+            return json.dumps({"error": f"Tool '{tool_name}' has no handler or webhook_url", "fallback": True})
 
     async def _execute_handler(
         self,

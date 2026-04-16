@@ -55,6 +55,12 @@ export { RemoteMessageHandler, isRemoteUrl, isWebSocketUrl } from "./remote-mess
 export { TestSession } from "./test-mode";
 export { ElevenLabsConvAIAdapter } from "./providers/elevenlabs-convai";
 export { OpenAIRealtimeAdapter } from "./providers/openai-realtime";
+export { GeminiLiveAdapter, GEMINI_DEFAULT_INPUT_SR, GEMINI_DEFAULT_OUTPUT_SR } from "./providers/gemini-live";
+export type { GeminiLiveEventHandler } from "./providers/gemini-live";
+export { UltravoxRealtimeAdapter, ULTRAVOX_DEFAULT_API_BASE, ULTRAVOX_DEFAULT_SR } from "./providers/ultravox-realtime";
+export type { UltravoxEventHandler } from "./providers/ultravox-realtime";
+export { scheduleCron, scheduleOnce, scheduleInterval } from "./scheduler";
+export type { ScheduleHandle, JobCallback } from "./scheduler";
 export { DeepgramSTT } from "./providers/deepgram-stt";
 export { SonioxSTT } from "./providers/soniox-stt";
 export type { SonioxSTTOptions } from "./providers/soniox-stt";
