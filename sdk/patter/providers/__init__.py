@@ -44,6 +44,39 @@ def lmnt(api_key: str, voice: str = "leah") -> TTSConfig:
     return TTSConfig(provider="lmnt", api_key=api_key, voice=voice)
 
 
+def _load_anthropic_llm():
+    from patter.providers.anthropic_llm import AnthropicLLMProvider
+    return AnthropicLLMProvider
+
+
+def _load_groq_llm():
+    from patter.providers.groq_llm import GroqLLMProvider
+    return GroqLLMProvider
+
+
+def _load_cerebras_llm():
+    from patter.providers.cerebras_llm import CerebrasLLMProvider
+    return CerebrasLLMProvider
+
+
+def _load_google_llm():
+    from patter.providers.google_llm import GoogleLLMProvider
+    return GoogleLLMProvider
+
+
+def __getattr__(name: str):
+    """Lazy-load optional LLM providers to avoid importing heavy vendor SDKs."""
+    loaders = {
+        "AnthropicLLMProvider": _load_anthropic_llm,
+        "GroqLLMProvider": _load_groq_llm,
+        "CerebrasLLMProvider": _load_cerebras_llm,
+        "GoogleLLMProvider": _load_google_llm,
+    }
+    if name in loaders:
+        return loaders[name]()
+    raise AttributeError(f"module 'patter.providers' has no attribute {name!r}")
+
+
 # Prevent submodule names from shadowing the helper functions above.
 # Python's package import mechanism can bind submodule objects (e.g.
 # patter.providers.openai_tts) onto this package's namespace, which would
@@ -58,4 +91,8 @@ __all__ = [
     "cartesia",
     "rime",
     "lmnt",
+    "AnthropicLLMProvider",
+    "GroqLLMProvider",
+    "CerebrasLLMProvider",
+    "GoogleLLMProvider",
 ]
