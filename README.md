@@ -134,7 +134,7 @@ await phone.serve({ agent, port: 8000 });
 <td align="center">→</td>
 <td align="center">
   <strong>Twilio</strong><br><sub>Telephony</sub><br><br>
-  <strong>Telnyx</strong><br><sub>Telephony</sub>
+  <strong>Telnyx</strong> <sup>Beta</sup><br><sub>Telephony</sub>
 </td>
 </tr>
 </table>
@@ -181,6 +181,8 @@ cd python && pip install -r requirements.txt && python main.py
 cp .env.example .env
 # Edit .env with your API keys
 ```
+
+> **Telnyx (Beta):** Telnyx is supported as an alternative telephony provider but is currently in beta — tested locally, not yet validated in production.
 
 ### Docker
 

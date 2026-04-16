@@ -33,9 +33,9 @@ const phone = new Patter({
 | `twilioToken` | `string` | Conditional | — | Twilio Auth Token. Required when `twilioSid` is set. |
 | `openaiKey` | `string` | No | — | OpenAI API key for the realtime adapter. |
 | `telephonyProvider` | `"twilio" \| "telnyx"` | No | `"twilio"` | Which telephony provider to use. |
-| `telnyxKey` | `string` | Conditional | — | Telnyx API key. Required if `telephonyProvider` is `"telnyx"`. |
-| `telnyxConnectionId` | `string` | No | — | Telnyx SIP Connection ID for outbound calls. |
-| `telnyxPublicKey` | `string` | No | — | Telnyx Ed25519 public key (base64 DER/SPKI) for webhook signature verification. |
+| `telnyxKey` | `string` | Conditional | — | (Beta) Telnyx API key. Required if `telephonyProvider` is `"telnyx"`. |
+| `telnyxConnectionId` | `string` | No | — | (Beta) Telnyx SIP Connection ID for outbound calls. |
+| `telnyxPublicKey` | `string` | No | — | (Beta) Telnyx Ed25519 public key (base64 DER/SPKI) for webhook signature verification. |
 
 <Warning>
   You must provide either `twilioSid` or `telnyxKey`. The constructor throws if neither is set.
@@ -55,6 +55,10 @@ webhookUrl: "abc123.ngrok.io/webhooks"
 ```
 
 The SDK constructs full URLs internally (e.g., `https://{webhookUrl}/webhooks/twilio/voice`).
+
+<Warning>
+  **Telnyx (Beta):** Telnyx support is in beta — tested locally but not yet validated in production. We recommend Twilio for production deployments until Telnyx exits beta.
+</Warning>
 
 ## Using Telnyx
 
