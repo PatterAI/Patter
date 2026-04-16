@@ -89,6 +89,30 @@ ivr = [
     "scikit-learn>=1.3",
     "numpy>=1.26",
 ]
+# Telnyx STT and TTS WebSocket providers. Note: the `telnyx` telephony
+# package (Call Control REST API) is unrelated and does not require this
+# extra — only the in-call STT/TTS providers do.
+telnyx-ai = [
+    "aiohttp>=3.10",
+]
+# Anthropic Claude LLM provider (pipeline mode).
+anthropic = [
+    "anthropic>=0.41",
+    "httpx>=0.27",
+]
+# Groq LLM provider (OpenAI-compatible).
+groq = [
+    "openai>=1.0",
+]
+# Cerebras LLM provider (OpenAI-compatible with optional msgpack/gzip payload compression).
+cerebras = [
+    "openai>=1.0",
+    "msgpack>=1.0",
+]
+# Google Gemini LLM provider.
+google = [
+    "google-genai>=1.55",
+]
 # Background audio player (hold music + ambient cues). Ports LiveKit Agents'
 # BackgroundAudioPlayer and mixes bundled .ogg clips with the outbound PCM
 # stream. Requires numpy for PCM math and soundfile for .ogg decoding.
