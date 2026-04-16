@@ -47,10 +47,16 @@ export interface TelephonyBridge {
   /** Send a clear/interrupt event to stop audio playback. */
   sendClear(ws: WSWebSocket, streamSid: string): void;
 
-  /** Transfer the call to a different number via provider API. */
+  /** Transfer the call to a different number or SIP URI via provider API. */
   transferCall(callId: string, toNumber: string): Promise<void>;
   /** Hang up the call via provider API. */
   endCall(callId: string, ws: WSWebSocket): Promise<void>;
+  /** Send DTMF digits via provider API (optional; default no-op). */
+  sendDtmf?(callId: string, digits: string, delayMs: number): Promise<void>;
+  /** Start call recording via provider API (optional). */
+  startRecording?(callId: string): Promise<void>;
+  /** Stop call recording via provider API (optional). */
+  stopRecording?(callId: string): Promise<void>;
 
   /** Create an STT instance appropriate for this provider's audio format. */
   createStt(agent: AgentOptions): DeepgramSTT | WhisperSTT | null;

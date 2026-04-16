@@ -1,7 +1,3 @@
-# ⚠️  BETA: This example uses Telnyx for telephony. Telnyx support is in beta —
-# tested locally but not yet validated in production. For a production-ready
-# setup, use Twilio instead. See the quickstart guide for Twilio examples.
-
 """
 Self-hosted mode with custom STT and TTS providers.
 

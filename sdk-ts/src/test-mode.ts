@@ -97,6 +97,9 @@ export class TestSession {
         ended = true;
         log.info('  [Call ended by agent]');
       },
+      sendDtmf: async (digits: string, _opts?: { delayMs?: number }) => {
+        log.info(`  [DTMF -> ${digits}]`);
+      },
     };
     void _callControl;
 

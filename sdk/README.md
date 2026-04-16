@@ -125,7 +125,7 @@ await phone.serve({ agent, port: 8000 });
 
 | | Cloud Mode | Local Mode |
 |---|---|---|
-| **Setup** | Patter API key only | Twilio/Telnyx (Beta) + OpenAI keys |
+| **Setup** | Patter API key only | Twilio/Telnyx + OpenAI keys |
 | **Infrastructure** | Managed by Patter | Runs in your process |
 | **Backend** | `wss://api.getpatter.com` | Built-in (FastAPI / Express) |
 | **Webhook** | Configured automatically | Requires public URL (e.g. ngrok) |
@@ -149,7 +149,7 @@ await phone.serve({ agent, port: 8000 });
 - Built-in tools: `transfer_call`, `end_call` (auto-injected)
 
 ### Telephony
-- Twilio and Telnyx (Beta) carriers
+- Twilio and Telnyx carriers (both GA — DTMF, transfer, recording parity)
 - Inbound and outbound calls
 - Call transfer to humans (`transfer_call` system tool)
 - Call recording (`recording: true` in `serve()`)
@@ -226,7 +226,7 @@ Your Code (on_message handler)
                               ┌───────┴────────┐                              │
                               ▼                ▼                              ▼
                           STT Engine       TTS Engine          Telephony Provider
-                       (Deepgram /      (ElevenLabs /          (Twilio / Telnyx [Beta])
+                       (Deepgram /      (ElevenLabs /          (Twilio / Telnyx)
                         Whisper /        OpenAI TTS)                  │
                        OpenAI RT)              │                       │
                               │               └───────────────────────►│

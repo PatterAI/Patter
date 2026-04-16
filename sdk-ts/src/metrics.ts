@@ -57,7 +57,7 @@ export interface CallMetrics {
 // ---- CallControl interface ----
 
 export interface CallControl {
-  /** Transfer the call to a different number. */
+  /** Transfer the call to a different number or SIP URI. */
   transfer(number: string): Promise<void>;
   /** Hang up the call. */
   hangup(): Promise<void>;

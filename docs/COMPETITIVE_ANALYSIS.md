@@ -31,7 +31,7 @@ Legenda: ✅ supportato · ⚠️ parziale/beta · ❌ non supportato
 | **Licenza** | proprietaria | Apache 2.0 | MIT |
 | **Server required** | ❌ (embedded FastAPI) | ✅ LiveKit Server | ✅ Cloudflare Workers |
 | **Telephony Twilio** | ✅ | ✅ (plugin) | ✅ `@cloudflare/voice-twilio` |
-| **Telephony Telnyx** | ⚠️ beta | ✅ `livekit-plugins-telnyx` | ⚠️ roadmap |
+| **Telephony Telnyx** | ✅ (DTMF, transfer, recording parity) | ✅ `livekit-plugins-telnyx` | ⚠️ roadmap |
 | **SIP nativo** | ❌ | ✅ LiveKit SIP service | ❌ |
 | **STT providers** | Deepgram, Whisper | **~20** (deepgram, assemblyai, azure, google, speechmatics, gladia, fal, clova, aws, cartesia, soniox, speechify, spitch, rtzr, sarvam, fishaudio, minimax, asyncai, cambai, ecc.) | Deepgram Flux/Nova-3 (via Workers AI) + plugin deepgram |
 | **TTS providers** | ElevenLabs, OpenAI | **~25** (cartesia, elevenlabs, openai, azure, google, playai, rime, resemble, neuphonic, hume, lmnt, smallestai, speechify, murf, upliftai, hedra voice, fishaudio, minimax, phonic, inworld, ecc.) | Deepgram Aura (Workers AI) + ElevenLabs plugin |
