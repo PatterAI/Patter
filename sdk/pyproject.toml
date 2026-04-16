@@ -47,6 +47,12 @@ local = [
     "openai>=1.0.0",
     "cryptography>=42.0.0",
 ]
+soniox = [
+    "aiohttp>=3.10",
+]
+speechmatics = [
+    "speechmatics-voice[smart]>=0.2.8",
+]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",
