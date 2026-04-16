@@ -17,6 +17,7 @@ All callbacks are **async functions**. They are passed as parameters to `serve()
 | `on_call_end` | A call ends |
 | `on_transcript` | Each utterance is transcribed |
 | `on_message` | User message received (pipeline mode) |
+| `on_metrics` | After each conversation turn (real-time cost/latency) |
 
 ---
 
@@ -61,7 +62,11 @@ async def on_call_end(event):
 | Field | Type | Description |
 |-------|------|-------------|
 | `call_id` | `str` | Unique identifier for this call. |
+| `caller` | `str` | The caller's phone number (E.164). |
+| `callee` | `str` | The callee's phone number (E.164). |
+| `ended_at` | `float` | Unix timestamp when the call ended (e.g. `1710489601.234`). |
 | `transcript` | `list[dict]` | Full conversation transcript. Each entry has `role` (`"user"` or `"assistant"`) and `text`. |
+| `metrics` | `CallMetrics \| None` | Call metrics with cost and latency breakdowns. `None` if metrics collection failed. See [Metrics & Cost Tracking](/python-sdk/metrics). |
 
 ---
 
@@ -115,6 +120,7 @@ async def on_message(event) -> str:
 | `text` | `str` | The user's transcribed message. |
 | `call_id` | `str` | Unique identifier for this call. |
 | `caller` | `str` | The caller's phone number. |
+| `callee` | `str` | The callee's phone number. |
 | `history` | `list[dict]` | Conversation history. Each entry has `role`, `text`, and `timestamp`. |
 
 ### Return Value
@@ -129,11 +135,13 @@ All callbacks that include `history` receive it as a list of dictionaries:
 
 ```python
 [
-    {"role": "assistant", "text": "Hello! How can I help?", "timestamp": "2025-03-15T10:00:01Z"},
-    {"role": "user", "text": "I'd like to check my order status.", "timestamp": "2025-03-15T10:00:05Z"},
-    {"role": "assistant", "text": "Sure! What's your order ID?", "timestamp": "2025-03-15T10:00:06Z"},
+    {"role": "assistant", "text": "Hello! How can I help?", "timestamp": 1710489601.234},
+    {"role": "user", "text": "I'd like to check my order status.", "timestamp": 1710489605.891},
+    {"role": "assistant", "text": "Sure! What's your order ID?", "timestamp": 1710489606.712},
 ]
 ```
+
+Timestamps are Unix floats (from Python's `time.time()`), not ISO-8601 strings.
 
 ---
 

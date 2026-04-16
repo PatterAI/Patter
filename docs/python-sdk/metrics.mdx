@@ -105,7 +105,7 @@ Use the `on_metrics` callback for live cost updates during a call:
 async def on_metrics(data):
     cost = data.get("cost_so_far")
     if cost:
-        print(f"Running cost: ${cost['total']:.4f}")
+        print(f"Running cost: ${cost.total:.4f}")
 
 await phone.serve(
     agent,
@@ -113,6 +113,8 @@ await phone.serve(
     on_metrics=on_metrics,
 )
 ```
+
+The `cost_so_far` value is a `CostBreakdown` dataclass, so access its fields as attributes (e.g. `cost.total`, `cost.stt`) rather than dictionary keys.
 
 ## Data Types
 
@@ -133,6 +135,7 @@ from patter import CallMetrics, CostBreakdown, LatencyBreakdown, TurnMetrics
 | `provider_mode` | `str` | Voice mode used. |
 | `stt_provider` | `str` | STT provider name. |
 | `tts_provider` | `str` | TTS provider name. |
+| `llm_provider` | `str` | LLM provider name. |
 | `telephony_provider` | `str` | Telephony provider name. |
 
 ### TurnMetrics

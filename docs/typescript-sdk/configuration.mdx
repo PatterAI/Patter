@@ -28,7 +28,7 @@ const phone = new Patter({
 |-----------|------|----------|---------|-------------|
 | `mode` | `"local"` | Yes | — | Must be `"local"` to enable local mode. |
 | `phoneNumber` | `string` | Yes | — | Your phone number in E.164 format. |
-| `webhookUrl` | `string` | Yes | — | Public hostname for webhooks (no protocol prefix, no path). |
+| `webhookUrl` | `string` | Conditional | — | Public hostname for webhooks (no protocol prefix, no path). Required unless using `tunnel: true` in `serve()`. |
 | `twilioSid` | `string` | Conditional | — | Twilio Account SID. Required if not using Telnyx. |
 | `twilioToken` | `string` | Conditional | — | Twilio Auth Token. Required when `twilioSid` is set. |
 | `openaiKey` | `string` | No | — | OpenAI API key for the realtime adapter. |

@@ -22,7 +22,8 @@ new Patter(options: LocalOptions)
 | `agent` | `(opts: AgentOptions) => AgentOptions` | Validates and returns an agent configuration. |
 | `serve` | `(opts: ServeOptions) => Promise<void>` | Starts the embedded server (local mode only). |
 | `call` | `(opts: LocalCallOptions) => Promise<void>` | Makes an outbound call. |
-| `test` | `(agent: AgentOptions, opts?: TestOptions) => Promise<void>` | Starts an interactive terminal test session (local mode only). See [Test Mode](/typescript-sdk/test-mode). |
+| `test` | `(opts: ServeOptions) => Promise<void>` | Starts an interactive terminal test session (local mode only). See [Test Mode](/typescript-sdk/test-mode). |
+| `disconnect` | `() => Promise<void>` | Stops the tunnel, embedded server, and WebSocket connection. |
 
 ### Static Methods
 
@@ -46,12 +47,11 @@ interface LocalOptions {
   twilioToken?: string;
   openaiKey?: string;
   phoneNumber: string;
-  webhookUrl: string;
+  webhookUrl?: string;
   telephonyProvider?: "twilio" | "telnyx";
   telnyxKey?: string;
   telnyxConnectionId?: string;
   telnyxPublicKey?: string;
-  pricing?: Record<string, Partial<ProviderPricing>>;
 }
 ```
 
@@ -82,6 +82,7 @@ interface AgentOptions {
 interface ServeOptions {
   agent: AgentOptions;
   port?: number;
+  tunnel?: boolean;
   onCallStart?: (data: Record<string, unknown>) => Promise<void>;
   onCallEnd?: (data: Record<string, unknown>) => Promise<void>;
   onTranscript?: (data: Record<string, unknown>) => Promise<void>;
@@ -89,8 +90,11 @@ interface ServeOptions {
   onMetrics?: (data: Record<string, unknown>) => Promise<void>;
   recording?: boolean;
   voicemailMessage?: string;
+  pricing?: Record<string, Record<string, unknown>>;
   dashboard?: boolean;
   dashboardToken?: string;
+  dashboardDb?: string;
+  dashboardPersist?: boolean;
 }
 ```
 
@@ -113,7 +117,8 @@ interface ToolDefinition {
   name: string;
   description: string;
   parameters: Record<string, unknown>;
-  webhookUrl: string;
+  webhookUrl?: string;
+  handler?: (args: Record<string, unknown>, context: Record<string, unknown>) => Promise<string>;
 }
 ```
 
@@ -167,12 +172,8 @@ interface CallControl {
   readonly callId: string;
   readonly caller: string;
   readonly callee: string;
-  readonly telephonyProvider: string;
   transfer(number: string): Promise<void>;
   hangup(): Promise<void>;
-  readonly isTransferred: boolean;
-  readonly isHungUp: boolean;
-  readonly ended: boolean;
 }
 ```
 
@@ -182,16 +183,17 @@ Passed as the second argument to `onMessage` handlers. Allows dynamic call manag
 
 ```typescript
 interface CallMetrics {
-  callId: string;
-  durationSeconds: number;
+  call_id: string;
+  duration_seconds: number;
   turns: TurnMetrics[];
   cost: CostBreakdown;
-  latencyAvg: LatencyBreakdown;
-  latencyP95: LatencyBreakdown;
-  providerMode: string;
-  sttProvider: string;
-  ttsProvider: string;
-  telephonyProvider: string;
+  latency_avg: LatencyBreakdown;
+  latency_p95: LatencyBreakdown;
+  provider_mode: string;
+  stt_provider: string;
+  tts_provider: string;
+  llm_provider: string;
+  telephony_provider: string;
 }
 ```
 
@@ -211,10 +213,10 @@ interface CostBreakdown {
 
 ```typescript
 interface LatencyBreakdown {
-  sttMs: number;
-  llmMs: number;
-  ttsMs: number;
-  totalMs: number;
+  stt_ms: number;
+  llm_ms: number;
+  tts_ms: number;
+  total_ms: number;
 }
 ```
 
@@ -222,12 +224,12 @@ interface LatencyBreakdown {
 
 ```typescript
 interface TurnMetrics {
-  turnIndex: number;
-  userText: string;
-  agentText: string;
+  turn_index: number;
+  user_text: string;
+  agent_text: string;
   latency: LatencyBreakdown;
-  sttAudioSeconds: number;
-  ttsCharacters: number;
+  stt_audio_seconds: number;
+  tts_characters: number;
   timestamp: number;
 }
 ```
@@ -260,11 +262,15 @@ All errors extend `PatterError`, which extends the native `Error` class.
 |-------|-------------|
 | `PatterError` | Base error class for all SDK errors. |
 | `PatterConnectionError` | WebSocket connection failures or disconnection errors. |
+| `AuthenticationError` | Invalid or missing API key. |
+| `ProvisionError` | Failures when provisioning resources (numbers, agents, calls). |
 
 ```typescript
 import {
   PatterError,
   PatterConnectionError,
+  AuthenticationError,
+  ProvisionError,
 } from "getpatter";
 
 try {
@@ -296,6 +302,8 @@ export { OpenAITTS } from "getpatter";
 export {
   PatterError,
   PatterConnectionError,
+  AuthenticationError,
+  ProvisionError,
 } from "getpatter";
 ```
 

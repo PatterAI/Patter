@@ -12,19 +12,20 @@ Patter automatically tracks cost and latency for every call, broken down by prov
 Metrics are collected automatically during calls. When a call ends, the `onCallEnd` callback receives a `CallMetrics` object with the full breakdown:
 
 ```typescript
-await phone.serve(agent, {
+await phone.serve({
+  agent,
   port: 8000,
   onCallEnd: async (event) => {
     const metrics = event.metrics;
     if (metrics) {
-      console.log(`Duration: ${metrics.durationSeconds}s`);
+      console.log(`Duration: ${metrics.duration_seconds}s`);
       console.log(`Total cost: $${metrics.cost.total.toFixed(4)}`);
       console.log(`  STT: $${metrics.cost.stt.toFixed(4)}`);
       console.log(`  TTS: $${metrics.cost.tts.toFixed(4)}`);
       console.log(`  LLM: $${metrics.cost.llm.toFixed(4)}`);
       console.log(`  Telephony: $${metrics.cost.telephony.toFixed(4)}`);
-      console.log(`Avg latency: ${metrics.latencyAvg.totalMs}ms`);
-      console.log(`P95 latency: ${metrics.latencyP95.totalMs}ms`);
+      console.log(`Avg latency: ${metrics.latency_avg.total_ms}ms`);
+      console.log(`P95 latency: ${metrics.latency_p95.total_ms}ms`);
     }
   },
 });
@@ -48,28 +49,29 @@ The `LatencyBreakdown` object provides per-component latency in milliseconds:
 
 | Field | Description |
 |-------|-------------|
-| `sttMs` | Time from user speech to transcript. |
-| `llmMs` | Time from transcript to LLM response. |
-| `ttsMs` | Time from LLM response to first audio byte. |
-| `totalMs` | End-to-end latency (user speech to first audio). |
+| `stt_ms` | Time from user speech to transcript. |
+| `llm_ms` | Time from transcript to LLM response. |
+| `tts_ms` | Time from LLM response to first audio byte. |
+| `total_ms` | End-to-end latency (user speech to first audio). |
 
-Both `latencyAvg` and `latencyP95` are available on `CallMetrics`.
+Both `latency_avg` and `latency_p95` are available on `CallMetrics`.
 
 ## Per-Turn Metrics
 
 Each conversation turn is tracked individually:
 
 ```typescript
-await phone.serve(agent, {
+await phone.serve({
+  agent,
   port: 8000,
   onCallEnd: async (event) => {
     const metrics = event.metrics;
     if (metrics) {
       for (const turn of metrics.turns) {
-        console.log(`Turn ${turn.turnIndex}:`);
-        console.log(`  User: ${turn.userText}`);
-        console.log(`  Agent: ${turn.agentText}`);
-        console.log(`  Latency: ${turn.latency.totalMs}ms`);
+        console.log(`Turn ${turn.turn_index}:`);
+        console.log(`  User: ${turn.user_text}`);
+        console.log(`  Agent: ${turn.agent_text}`);
+        console.log(`  Latency: ${turn.latency.total_ms}ms`);
       }
     }
   },
@@ -81,9 +83,9 @@ await phone.serve(agent, {
 Override default provider pricing estimates:
 
 ```typescript
-const phone = new Patter({
-  openaiKey: "sk-...",
-  mode: "local",
+await phone.serve({
+  agent,
+  port: 8000,
   pricing: {
     deepgram: { price: 0.005 },      // Override STT price per minute
     elevenlabs: { price: 0.15 },      // Override TTS price per 1k chars
@@ -113,13 +115,14 @@ const phone = new Patter({
 Use the `onMetrics` callback for live cost updates during a call:
 
 ```typescript
-await phone.serve(agent, {
+await phone.serve({
+  agent,
   port: 8000,
   onMetrics: async (data) => {
-    const cost = data.costSoFar;
-    if (cost) {
-      console.log(`Running cost: $${cost.total.toFixed(4)}`);
-    }
+    const turn = data.turn as Record<string, unknown>;
+    const latency = turn.latency as Record<string, number>;
+    console.log(`Call ${data.call_id} — turn ${turn.turn_index}`);
+    console.log(`  Latency: ${latency.total_ms}ms`);
   },
 });
 ```
@@ -139,25 +142,26 @@ import type {
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `callId` | `string` | Unique call identifier. |
-| `durationSeconds` | `number` | Total call duration. |
+| `call_id` | `string` | Unique call identifier. |
+| `duration_seconds` | `number` | Total call duration. |
 | `turns` | `TurnMetrics[]` | Per-turn metrics. |
 | `cost` | `CostBreakdown` | Cost breakdown. |
-| `latencyAvg` | `LatencyBreakdown` | Average latency. |
-| `latencyP95` | `LatencyBreakdown` | 95th percentile latency. |
-| `providerMode` | `string` | Voice mode used. |
-| `sttProvider` | `string` | STT provider name. |
-| `ttsProvider` | `string` | TTS provider name. |
-| `telephonyProvider` | `string` | Telephony provider name. |
+| `latency_avg` | `LatencyBreakdown` | Average latency. |
+| `latency_p95` | `LatencyBreakdown` | 95th percentile latency. |
+| `provider_mode` | `string` | Voice mode used. |
+| `stt_provider` | `string` | STT provider name. |
+| `tts_provider` | `string` | TTS provider name. |
+| `llm_provider` | `string` | LLM provider name. |
+| `telephony_provider` | `string` | Telephony provider name. |
 
 ### TurnMetrics
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `turnIndex` | `number` | Zero-based turn index. |
-| `userText` | `string` | What the user said. |
-| `agentText` | `string` | What the agent replied. |
+| `turn_index` | `number` | Zero-based turn index. |
+| `user_text` | `string` | What the user said. |
+| `agent_text` | `string` | What the agent replied. |
 | `latency` | `LatencyBreakdown` | Latency for this turn. |
-| `sttAudioSeconds` | `number` | Audio duration processed by STT. |
-| `ttsCharacters` | `number` | Characters synthesized by TTS. |
+| `stt_audio_seconds` | `number` | Audio duration processed by STT. |
+| `tts_characters` | `number` | Characters synthesized by TTS. |
 | `timestamp` | `number` | Unix timestamp. |
