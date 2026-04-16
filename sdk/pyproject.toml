@@ -57,6 +57,19 @@ silero = [
     "onnxruntime>=1.18",
     "numpy>=1.26",
 ]
+# Krisp VIVA is a proprietary SDK (krisp-audio). Users must install it
+# separately and provide KRISP_VIVA_SDK_LICENSE_KEY + KRISP_VIVA_FILTER_MODEL_PATH.
+krisp = [
+    "krisp-audio>=2.0",
+    "numpy>=1.26",
+]
+# DeepFilterNet OSS fallback (MIT). Heavy deps (torch ~2 GB, model ~60 MB)
+# are opt-in.
+deepfilternet = [
+    "deep-filter>=0.5",
+    "torch>=2.0",
+    "numpy>=1.26",
+]
 
 [build-system]
 requires = ["setuptools>=68.0"]
