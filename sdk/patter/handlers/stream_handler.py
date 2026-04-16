@@ -716,6 +716,7 @@ class PipelineStreamHandler(StreamHandler):
         for_twilio: bool = False,
         transfer_fn=None,
         hangup_fn=None,
+        send_dtmf_fn=None,
         on_transcript=None,
         on_message=None,
         on_metrics=None,
@@ -742,6 +743,7 @@ class PipelineStreamHandler(StreamHandler):
         self._for_twilio = for_twilio
         self._transfer_fn = transfer_fn
         self._hangup_fn = hangup_fn
+        self._send_dtmf_fn = send_dtmf_fn
         self._stt = None
         self._tts = None
         self._stt_task: asyncio.Task | None = None
@@ -800,6 +802,7 @@ class PipelineStreamHandler(StreamHandler):
             telephony_provider="twilio" if self._for_twilio else "telnyx",
             _transfer_fn=self._transfer_fn,
             _hangup_fn=self._hangup_fn,
+            _send_dtmf_fn=self._send_dtmf_fn,
         )
 
         # Check if on_message accepts CallControl

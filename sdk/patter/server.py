@@ -373,6 +373,7 @@ class EmbeddedServer:
                     deepgram_key=self.config.deepgram_key,
                     elevenlabs_key=self.config.elevenlabs_key,
                     telnyx_key=self.config.telnyx_key,
+                    recording=self.recording,
                     on_metrics=_metrics,
                     pricing=self.pricing,
                 )

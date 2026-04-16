@@ -49,9 +49,9 @@ interface LocalOptions {
   phoneNumber: string;
   webhookUrl?: string;
   telephonyProvider?: "twilio" | "telnyx";
-  telnyxKey?: string; // Beta
-  telnyxConnectionId?: string; // Beta
-  telnyxPublicKey?: string; // Beta
+  telnyxKey?: string;
+  telnyxConnectionId?: string;
+  telnyxPublicKey?: string;
   pricing?: Record<string, Partial<ProviderPricing>>;
 }
 ```

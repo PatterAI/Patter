@@ -341,8 +341,24 @@ class TwilioBridge implements TelephonyBridge {
   }
 }
 
+/** Accept E.164 phone numbers and SIP(s) URIs as Telnyx transfer targets. */
+function isValidTelnyxTransferTarget(target: string): boolean {
+  if (typeof target !== 'string' || !target) return false;
+  if (/^\+[1-9]\d{6,14}$/.test(target)) return true;
+  return /^sips?:[^\s@]+(@[^\s]+)?$/i.test(target);
+}
+
+/** DTMF digits accepted by the Telnyx `send_dtmf` command. */
+const TELNYX_DTMF_ALLOWED = new Set('0123456789*#ABCDabcd');
+const TELNYX_DTMF_DURATION_MS = 250;
+
+async function sleep(ms: number): Promise<void> {
+  if (ms <= 0) return;
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /** Telnyx-specific telephony bridge. */
-class TelnyxBridge implements TelephonyBridge {
+export class TelnyxBridge implements TelephonyBridge {
   readonly label = 'Telnyx';
   readonly telephonyProvider = 'telnyx' as const;
 
@@ -361,8 +377,8 @@ class TelnyxBridge implements TelephonyBridge {
   }
 
   async transferCall(callId: string, toNumber: string): Promise<void> {
-    if (!/^\+[1-9]\d{6,14}$/.test(toNumber)) {
-      getLogger().warn(`TelnyxBridge.transferCall rejected: invalid E.164 number ${JSON.stringify(toNumber)}`);
+    if (!isValidTelnyxTransferTarget(toNumber)) {
+      getLogger().warn(`TelnyxBridge.transferCall rejected: invalid target ${JSON.stringify(toNumber)}`);
       return;
     }
     const telnyxKey = this.config.telnyxKey ?? '';
@@ -372,6 +388,73 @@ class TelnyxBridge implements TelephonyBridge {
       body: JSON.stringify({ to: toNumber }),
     });
     getLogger().info(`Telnyx call transferred to ${toNumber}`);
+  }
+
+  async sendDtmf(callId: string, digits: string, delayMs: number): Promise<void> {
+    if (!digits) {
+      getLogger().warn('TelnyxBridge.sendDtmf called with empty digits');
+      return;
+    }
+    const telnyxKey = this.config.telnyxKey ?? '';
+    if (!telnyxKey || !callId) {
+      getLogger().warn('TelnyxBridge.sendDtmf skipped: telnyxKey or callId missing');
+      return;
+    }
+    const filtered = Array.from(digits).filter((d) => TELNYX_DTMF_ALLOWED.has(d));
+    if (filtered.length === 0) {
+      getLogger().warn(`TelnyxBridge.sendDtmf: no valid digits in ${JSON.stringify(digits)}`);
+      return;
+    }
+    const duration = Math.max(100, Math.min(500, TELNYX_DTMF_DURATION_MS));
+    for (let i = 0; i < filtered.length; i += 1) {
+      await fetch(`https://api.telnyx.com/v2/calls/${callId}/actions/send_dtmf`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${telnyxKey}` },
+        body: JSON.stringify({ digits: filtered[i], duration_millis: duration }),
+      });
+      if (i < filtered.length - 1) {
+        await sleep(delayMs);
+      }
+    }
+    getLogger().info(`Telnyx DTMF sent (${filtered.length} digits, delay=${delayMs}ms)`);
+  }
+
+  async startRecording(callId: string): Promise<void> {
+    const telnyxKey = this.config.telnyxKey ?? '';
+    if (!telnyxKey || !callId) return;
+    try {
+      const resp = await fetch(`https://api.telnyx.com/v2/calls/${callId}/actions/record_start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${telnyxKey}` },
+        body: JSON.stringify({ format: 'mp3', channels: 'single' }),
+      });
+      if (!resp.ok) {
+        getLogger().warn(`Telnyx record_start failed (${resp.status}): ${(await resp.text()).slice(0, 200)}`);
+      } else {
+        getLogger().info('Telnyx recording started');
+      }
+    } catch (e) {
+      getLogger().warn(`Telnyx record_start error: ${String(e)}`);
+    }
+  }
+
+  async stopRecording(callId: string): Promise<void> {
+    const telnyxKey = this.config.telnyxKey ?? '';
+    if (!telnyxKey || !callId) return;
+    try {
+      const resp = await fetch(`https://api.telnyx.com/v2/calls/${callId}/actions/record_stop`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${telnyxKey}` },
+        body: JSON.stringify({}),
+      });
+      if (!resp.ok) {
+        getLogger().warn(`Telnyx record_stop failed (${resp.status}): ${(await resp.text()).slice(0, 200)}`);
+      } else {
+        getLogger().info('Telnyx recording stopped');
+      }
+    } catch (e) {
+      getLogger().warn(`Telnyx record_stop error: ${String(e)}`);
+    }
   }
 
   async endCall(callId: string, ws: WSWebSocket): Promise<void> {
@@ -630,6 +713,9 @@ export class EmbeddedServer {
             call_control_id?: string;
             from?: string;
             to?: string;
+            digit?: string;
+            recording_urls?: { mp3?: string; wav?: string };
+            public_recording_urls?: { mp3?: string; wav?: string };
           };
         };
       };
@@ -642,6 +728,26 @@ export class EmbeddedServer {
       }
 
       const eventType = body?.data?.event_type ?? '';
+
+      if (eventType === 'call.dtmf.received') {
+        const digit = String(body.data?.payload?.digit ?? '').trim();
+        if (digit) {
+          getLogger().info(`Telnyx DTMF received (webhook): ${sanitizeLogValue(digit)}`);
+        }
+        return res.json({ received: true });
+      }
+
+      if (eventType === 'call.recording.saved') {
+        const recordingUrl =
+          body.data?.payload?.recording_urls?.mp3 ??
+          body.data?.payload?.recording_urls?.wav ??
+          body.data?.payload?.public_recording_urls?.mp3 ??
+          '';
+        if (recordingUrl) {
+          getLogger().info(`Telnyx recording saved (webhook): ${sanitizeLogValue(recordingUrl)}`);
+        }
+        return res.json({ received: true });
+      }
 
       if (eventType === 'call.initiated') {
         const payload = body?.data?.payload ?? {};
@@ -843,6 +949,9 @@ Connect AI agents to phone numbers in 4 lines of code
           payload?: {
             call_control_id?: string;
             audio?: { chunk?: string };
+            digit?: string;
+            recording_urls?: { mp3?: string; wav?: string };
+            public_recording_urls?: { mp3?: string; wav?: string };
           };
         };
         try {
@@ -858,12 +967,35 @@ Connect AI agents to phone numbers in 4 lines of code
         if (eventType === 'stream_started' && !streamStarted) {
           streamStarted = true;
           const callControlId = data.payload?.call_control_id ?? '';
+          if (callControlId) this.activeCallIds.set(ws, callControlId);
           await handler.handleCallStart(callControlId);
+          if (this.recording) {
+            try {
+              await bridge.startRecording?.(callControlId);
+            } catch (e) {
+              getLogger().warn(`Could not start recording: ${String(e)}`);
+            }
+          }
         } else if (eventType === 'media') {
           const audioChunk = data.payload?.audio?.chunk ?? '';
           if (!audioChunk) return;
           // Telnyx sends 16 kHz PCM — send directly
           handler.handleAudio(Buffer.from(audioChunk, 'base64'));
+        } else if (eventType === 'call.dtmf.received') {
+          const digit = String(data.payload?.digit ?? '').trim();
+          if (digit) {
+            getLogger().info(`Telnyx DTMF received: ${digit}`);
+            await handler.handleDtmf(digit);
+          }
+        } else if (eventType === 'call.recording.saved') {
+          const recordingUrl =
+            data.payload?.recording_urls?.mp3 ??
+            data.payload?.recording_urls?.wav ??
+            data.payload?.public_recording_urls?.mp3 ??
+            '';
+          if (recordingUrl) {
+            getLogger().info(`Telnyx recording saved: ${recordingUrl}`);
+          }
         } else if (eventType === 'stream_stopped') {
           await handler.handleStop();
         }

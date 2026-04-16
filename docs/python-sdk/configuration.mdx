@@ -21,7 +21,7 @@ Patter runs in local mode. It is auto-detected when telephony provider keys are 
 phone = Patter(twilio_sid="AC...", twilio_token="...", openai_key="sk-...",
                phone_number="+15550001234", webhook_url="abc.ngrok.io")
 
-# Local mode (auto-detected — telnyx_key) [Beta]
+# Local mode (auto-detected — telnyx_key)
 phone = Patter(telnyx_key="KEY...", telnyx_connection_id="...", openai_key="sk-...",
                phone_number="+15550001234", webhook_url="abc.ngrok.io")
 ```
@@ -35,8 +35,8 @@ phone = Patter(telnyx_key="KEY...", telnyx_connection_id="...", openai_key="sk-.
 | `mode` | `str` | `"cloud"` | Operating mode. Auto-detected to `"local"` when telephony provider keys (e.g. `twilio_sid`, `telnyx_key`) are supplied without `api_key`. |
 | `twilio_sid` | `str` | `""` | Twilio Account SID. |
 | `twilio_token` | `str` | `""` | Twilio Auth Token. Required when `twilio_sid` is provided. |
-| `telnyx_key` | `str` | `""` | Telnyx API key (Beta). |
-| `telnyx_connection_id` | `str` | `""` | Telnyx Call Control Application ID (Beta). |
+| `telnyx_key` | `str` | `""` | Telnyx API key. |
+| `telnyx_connection_id` | `str` | `""` | Telnyx Call Control Application ID. |
 | `openai_key` | `str` | `""` | OpenAI API key for the Realtime API. |
 | `elevenlabs_key` | `str` | `""` | ElevenLabs API key (optional, for pipeline mode). |
 | `deepgram_key` | `str` | `""` | Deepgram API key (optional, for pipeline mode). |
@@ -44,9 +44,9 @@ phone = Patter(telnyx_key="KEY...", telnyx_connection_id="...", openai_key="sk-.
 | `webhook_url` | `str` | `""` | Public hostname of this server, without scheme (e.g., `"abc.ngrok.io"`). Required when telephony keys are provided. |
 | `pricing` | `dict \| None` | `None` | Override default provider pricing estimates. See [Metrics & Cost Tracking](/python-sdk/metrics). |
 
-<Warning>
-  **Telnyx (Beta):** Telnyx support is in beta — tested locally but not yet validated in production. We recommend Twilio for production deployments until Telnyx exits beta.
-</Warning>
+<Note>
+  **Telnyx:** Telnyx is fully supported as an alternative to Twilio, with feature parity for DTMF, call transfer, recording, and cost tracking.
+</Note>
 
 ```python
 # Twilio + OpenAI Realtime
@@ -58,7 +58,7 @@ phone = Patter(
     webhook_url="abc.ngrok.io",
 )
 
-# Telnyx + OpenAI Realtime (Beta)
+# Telnyx + OpenAI Realtime
 phone = Patter(
     telnyx_key="KEYxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
     telnyx_connection_id="your_connection_id",
