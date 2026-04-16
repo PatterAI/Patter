@@ -1,11 +1,11 @@
 ---
 title: "Agents"
-description: "Configure AI voice agents with system prompts, voices, models, and tools."
+description: "Define your agent's voice, model, tools, and behavior for phone calls."
 ---
 
 # Agents
 
-An agent defines the personality, capabilities, and behavior of your AI voice assistant. Use `phone.agent()` to create and validate an agent configuration.
+An agent configuration defines the personality, capabilities, and behavior of your AI voice assistant. Use `phone.agent()` to validate your agent config before connecting it to a phone number.
 
 ## Basic Agent
 
@@ -42,7 +42,7 @@ const agent = phone.agent({
 The `phone.agent()` method validates:
 
 - **Provider**: Must be one of `"openai_realtime"`, `"elevenlabs_convai"`, or `"pipeline"`. Throws if invalid.
-- **Tools**: Must be an array. Each tool requires `name` and `webhookUrl` fields.
+- **Tools**: Must be an array. Each tool requires a `name` field and either a `webhookUrl` or a `handler`.
 - **Variables**: Must be a plain object (not an array).
 
 ```typescript
@@ -52,7 +52,7 @@ phone.agent({
   provider: "invalid" as any,
 });
 
-// Throws: tools[0] missing required 'webhookUrl' field
+// Throws: tools[0] requires either 'webhookUrl' or 'handler'
 phone.agent({
   systemPrompt: "...",
   tools: [{ name: "lookup", description: "Look up data", parameters: {} }] as any,

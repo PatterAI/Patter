@@ -1,11 +1,11 @@
 ---
 title: "Test Mode"
-description: "Interactive terminal testing for voice agents without telephony, STT, or TTS."
+description: "Test your agent in the terminal without telephony, STT, or TTS."
 ---
 
 # Test Mode
 
-Test mode lets you interact with your voice agent in the terminal using pure text — no phone calls, no STT/TTS, no external services required. It simulates a phone conversation for rapid agent development.
+Test mode lets you interact with your agent in the terminal using pure text — no phone calls, no STT/TTS, no external services required. It simulates a phone conversation for rapid development.
 
 ## Quick Start
 
@@ -19,7 +19,7 @@ const agent = phone.agent({
   firstMessage: "Hello! Welcome to Acme Corp. How can I help you today?",
 });
 
-await phone.test(agent);
+await phone.test({ agent });
 ```
 
 This opens an interactive REPL:
@@ -56,21 +56,20 @@ This opens an interactive REPL:
 Test mode works with custom message handlers, exactly as they would work in production:
 
 ```typescript
-async function onMessage(data: Record<string, unknown>, callControl: CallControl) {
+async function onMessage(data: Record<string, unknown>) {
   const userText = data.text as string;
 
   if (userText.toLowerCase().includes("cancel")) {
-    await callControl.transfer("+15550001111");
     return "Let me transfer you to our cancellation team.";
   }
 
   return `You said: ${userText}`;
 }
 
-await phone.test(agent, { onMessage });
+await phone.test({ agent, onMessage });
 ```
 
-The `callControl` parameter is automatically provided as the second argument.
+The `onMessage` handler receives a single data object with `text`, `call_id`, `caller`, and `history` fields.
 
 ## Using with Built-in LLM Loop
 
@@ -90,12 +89,12 @@ const agent = phone.agent({
           partySize: { type: "number" },
         },
       },
-      webhook: "https://api.example.com/availability",
+      webhookUrl: "https://api.example.com/availability",
     },
   ],
 });
 
-await phone.test(agent);
+await phone.test({ agent });
 ```
 
 The LLM loop supports tool calling — tools are executed via their configured webhooks just like in production.
@@ -105,14 +104,15 @@ The LLM loop supports tool calling — tools are executed via their configured w
 Test mode fires the same lifecycle callbacks as `serve()`:
 
 ```typescript
-await phone.test(agent, {
+await phone.test({
+  agent,
   onCallStart: async (event) => {
-    console.log(`Test call started: ${event.callId}`);
-    return { variables: { customerName: "Test User" } };
+    console.log(`Test call started: ${event.call_id}`);
   },
   onCallEnd: async (event) => {
-    console.log(`Test call ended: ${event.callId}`);
-    console.log(`Transcript: ${event.transcript.length} messages`);
+    console.log(`Test call ended: ${event.call_id}`);
+    const transcript = event.transcript as Array<unknown>;
+    console.log(`Transcript: ${transcript.length} messages`);
   },
 });
 ```

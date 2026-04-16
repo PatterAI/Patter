@@ -37,12 +37,17 @@ await phone.serve({
 |-----------|------|----------|---------|-------------|
 | `agent` | `AgentOptions` | Yes | — | Agent configuration. |
 | `port` | `number` | No | `8000` | Port for the embedded server (1-65535). |
+| `tunnel` | `boolean` | No | `false` | When `true`, start a cloudflared tunnel automatically (requires `cloudflared` npm package). Cannot be used together with `webhookUrl`. |
 | `onCallStart` | `(data) => Promise<void>` | No | — | Called when a call connects. |
 | `onCallEnd` | `(data) => Promise<void>` | No | — | Called when a call disconnects. |
 | `onTranscript` | `(data) => Promise<void>` | No | — | Called for each transcript segment. |
-| `onMessage` | `(data) => Promise<string>` | No | — | Pipeline mode only. Receives user transcript, returns response text. |
+| `onMessage` | `(data) => Promise<string>` | No | — | Pipeline mode only. Receives user transcript, returns response text. Can also be a URL string for remote webhook/WebSocket integration. |
+| `onMetrics` | `(data) => Promise<void>` | No | — | Called after each conversational turn with per-turn latency and cost metrics. |
 | `recording` | `boolean` | No | `false` | Enable call recording (Twilio only). |
 | `voicemailMessage` | `string` | No | — | Default voicemail message for AMD. |
+| `pricing` | `Record<string, Record<string, unknown>>` | No | — | Custom pricing overrides for cost calculation. |
+| `dashboard` | `boolean` | No | `true` | When `true`, serve a dashboard UI at `/dashboard`. |
+| `dashboardToken` | `string` | No | — | Bearer token for dashboard/API authentication. |
 
 ## Webhook Endpoints
 
@@ -144,6 +149,36 @@ Phone Speaker
 | Telnyx (Beta) | PCM 16kHz | No transcoding needed |
 | OpenAI TTS | PCM 24kHz | Resampled to 16kHz |
 
+## Graceful Shutdown
+
+Call `phone.disconnect()` to gracefully stop the embedded server. The shutdown sequence:
+
+1. **Stop accepting new connections** — the HTTP server stops listening.
+2. **Hang up active calls** — each active call is terminated via the telephony provider API (Twilio or Telnyx).
+3. **Close WebSocket connections** — a close frame (`1001 Server shutting down`) is sent to all active WebSocket connections.
+4. **Wait for drain** — the server waits up to **10 seconds** for active connections to close cleanly.
+5. **Force-terminate** — any connections still open after the drain timeout are forcibly terminated.
+6. **Close HTTP server** — the underlying HTTP server is fully closed.
+
+```typescript
+// Handle SIGINT/SIGTERM for clean shutdown
+process.on("SIGINT", async () => {
+  console.log("Shutting down...");
+  await phone.disconnect();
+  process.exit(0);
+});
+```
+
+<Info>
+  If a cloudflared tunnel was started with `tunnel: true`, it is also stopped when `disconnect()` is called.
+</Info>
+
 ## Binding Address
 
-The server binds to `127.0.0.1` by default. Use a tunnel (ngrok, Cloudflare Tunnel) to expose it to the internet for telephony provider webhooks.
+The server binds to `0.0.0.0` by default, which means it listens on all network interfaces. This is necessary for the server to accept connections from telephony providers and tunnels, but it also means the server is accessible from other machines on your network.
+
+<Warning>
+  Because the server binds to `0.0.0.0`, it is reachable from any network interface. In production, use a firewall or reverse proxy to restrict access. Always configure `twilioToken` (or `telnyxPublicKey` for Telnyx) to enable webhook signature verification.
+</Warning>
+
+Use a tunnel (ngrok, Cloudflare Tunnel) to expose the server to the internet for telephony provider webhooks.

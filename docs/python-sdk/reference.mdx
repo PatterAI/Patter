@@ -15,7 +15,7 @@ The main SDK client class.
 
 ```python
 Patter(
-    mode: str = "local",
+    mode: str = "cloud",
     twilio_sid: str = "",
     twilio_token: str = "",
     telnyx_key: str = "",
@@ -31,7 +31,7 @@ Patter(
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `mode` | `str` | `"local"` | Operating mode. Can be omitted — auto-detected when provider keys are given. |
+| `mode` | `str` | `"cloud"` | Operating mode. Auto-detected to `"local"` when telephony provider keys (e.g. `twilio_sid`, `telnyx_key`) are supplied without `api_key`. |
 | `twilio_sid` | `str` | `""` | Twilio Account SID. |
 | `twilio_token` | `str` | `""` | Twilio Auth Token. |
 | `telnyx_key` | `str` | `""` | Telnyx API key (Beta). |
@@ -365,8 +365,8 @@ class TTSConfig:
 @dataclass(frozen=True)
 class Guardrail:
     name: str
-    check: object = None
-    blocked_terms: list | None = None
+    check: Callable[[str], bool] | None = None
+    blocked_terms: list[str] | None = None
     replacement: str = "I'm sorry, I can't respond to that."
 ```
 
@@ -481,7 +481,9 @@ All exceptions inherit from `PatterError`.
 
 ```
 PatterError
-└── PatterConnectionError
+├── PatterConnectionError
+├── AuthenticationError
+└── ProvisionError
 ```
 
 ### PatterError
@@ -510,6 +512,32 @@ except PatterConnectionError as e:
     print(f"Connection error: {e}")
 ```
 
+### AuthenticationError
+
+Raised when authentication fails (e.g., invalid API key).
+
+```python
+from patter import AuthenticationError
+
+try:
+    await phone.connect(on_message=handler)
+except AuthenticationError as e:
+    print(f"Authentication error: {e}")
+```
+
+### ProvisionError
+
+Raised when a provisioning operation fails (e.g., creating an agent, buying a number, registering a number).
+
+```python
+from patter import ProvisionError
+
+try:
+    await phone.create_agent(name="My Agent", system_prompt="Hello")
+except ProvisionError as e:
+    print(f"Provisioning error: {e}")
+```
+
 ---
 
 ## Exports
@@ -531,5 +559,7 @@ from patter import (
     TurnMetrics,
     PatterError,
     PatterConnectionError,
+    AuthenticationError,
+    ProvisionError,
 )
 ```

@@ -1,11 +1,11 @@
 ---
 title: "Quickstart"
-description: "Get a voice AI agent answering phone calls in under 5 minutes."
+description: "Give your AI agent a phone number in under 5 minutes."
 ---
 
 # Quickstart
 
-This guide walks you through setting up a voice AI agent in local mode using Twilio and OpenAI.
+This guide walks you through connecting your AI agent to a phone number in local mode using Twilio and OpenAI.
 
 ## Prerequisites
 
@@ -44,7 +44,7 @@ PHONE_NUMBER=+15550001234
 WEBHOOK_URL=abc123.ngrok.io
 ```
 
-## Step 4: Create Your Agent
+## Step 4: Define Your Agent
 
 Create `index.ts`:
 
@@ -89,13 +89,13 @@ https://abc123.ngrok.io/webhooks/twilio/voice
 
 Set the method to **POST**.
 
-## Step 6: Run Your Agent
+## Step 6: Start the Server
 
 ```bash
 npx tsx index.ts
 ```
 
-You should see the Patter banner and server status in your terminal. Call your Twilio number and start talking to your AI agent.
+You should see the Patter banner and server status in your terminal. Call your Twilio number — your agent is now live on the phone.
 
 ## Next Steps
 
