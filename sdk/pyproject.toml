@@ -96,6 +96,8 @@ background-audio = [
     "numpy>=1.26",
     "soundfile>=0.12",
 ]
+rime = ["aiohttp>=3.10"]
+lmnt = ["aiohttp>=3.10"]
 
 [build-system]
 requires = ["setuptools>=68.0"]

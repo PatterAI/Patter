@@ -65,6 +65,12 @@ export { CartesiaSTT } from "./providers/cartesia-stt";
 export type { CartesiaSTTOptions, CartesiaEncoding } from "./providers/cartesia-stt";
 export { ElevenLabsTTS } from "./providers/elevenlabs-tts";
 export { OpenAITTS } from "./providers/openai-tts";
+export { CartesiaTTS } from "./providers/cartesia-tts";
+export type { CartesiaTTSOptions } from "./providers/cartesia-tts";
+export { RimeTTS } from "./providers/rime-tts";
+export type { RimeTTSOptions } from "./providers/rime-tts";
+export { LMNTTTS } from "./providers/lmnt-tts";
+export type { LMNTTTSOptions, LMNTAudioFormat, LMNTModel, LMNTSampleRate } from "./providers/lmnt-tts";
 export {
   mulawToPcm16,
   pcm16ToMulaw,

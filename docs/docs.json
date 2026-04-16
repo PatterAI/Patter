@@ -96,6 +96,9 @@
                 "pages": [
                   "python-sdk/agents",
                   "python-sdk/providers",
+                  "python-sdk/providers/cartesia",
+                  "python-sdk/providers/rime",
+                  "python-sdk/providers/lmnt",
                   "python-sdk/tools",
                   "python-sdk/guardrails",
                   "python-sdk/events",

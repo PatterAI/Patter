@@ -29,8 +29,33 @@ def openai_tts(api_key: str, voice: str = "alloy") -> TTSConfig:
     return TTSConfig(provider="openai", api_key=api_key, voice=voice)
 
 
+def cartesia(api_key: str, voice: str = "f786b574-daa5-4673-aa0c-cbe3e8534c02") -> TTSConfig:
+    """Config helper for Cartesia TTS."""
+    return TTSConfig(provider="cartesia", api_key=api_key, voice=voice)
+
+
+def rime(api_key: str, voice: str = "astra") -> TTSConfig:
+    """Config helper for Rime TTS."""
+    return TTSConfig(provider="rime", api_key=api_key, voice=voice)
+
+
+def lmnt(api_key: str, voice: str = "leah") -> TTSConfig:
+    """Config helper for LMNT TTS."""
+    return TTSConfig(provider="lmnt", api_key=api_key, voice=voice)
+
+
 # Prevent submodule names from shadowing the helper functions above.
 # Python's package import mechanism can bind submodule objects (e.g.
 # patter.providers.openai_tts) onto this package's namespace, which would
 # shadow the function of the same name. We re-bind them explicitly here.
-__all__ = ["deepgram", "whisper", "soniox", "speechmatics", "elevenlabs", "openai_tts"]
+__all__ = [
+    "deepgram",
+    "whisper",
+    "soniox",
+    "speechmatics",
+    "elevenlabs",
+    "openai_tts",
+    "cartesia",
+    "rime",
+    "lmnt",
+]

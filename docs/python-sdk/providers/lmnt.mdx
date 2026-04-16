@@ -1,0 +1,52 @@
+---
+title: "LMNT TTS"
+description: "Blizzard and Aurora TTS models via the LMNT HTTP API."
+---
+
+# LMNT TTS
+
+`LMNTTTS` calls LMNT's [`/v1/ai/speech/bytes`](https://docs.lmnt.com/api-reference/speech/synthesize-speech-bytes) endpoint. The Patter port defaults to `format="raw"` (PCM_S16LE) at 16 kHz for direct telephony use; callers can switch to `mp3`, `mulaw`, `wav`, `aac` when needed.
+
+## Install
+
+```bash
+pip install "patter[lmnt]"
+```
+
+## Usage
+
+```python
+from patter.providers.lmnt_tts import LMNTTTS
+
+tts = LMNTTTS(
+    api_key="...",          # or LMNT_API_KEY env var
+    model="blizzard",
+    voice="leah",
+    # language=None -> defaults to "auto" for blizzard, "en" for aurora
+    format="raw",
+    sample_rate=16000,
+    temperature=1.0,
+    top_p=0.8,
+)
+
+async for chunk in tts.synthesize("Hello from Patter."):
+    ...
+
+await tts.close()
+```
+
+## Options
+
+| Option | Default | Notes |
+|---|---|---|
+| `model` | `"blizzard"` | `"blizzard"` or `"aurora"`. |
+| `voice` | `"leah"` | LMNT voice id. |
+| `language` | `None` | Auto-derived from model when omitted. |
+| `format` | `"raw"` | `"aac"`, `"mp3"`, `"mulaw"`, `"raw"`, `"wav"`. |
+| `sample_rate` | `16000` | `8000`, `16000`, or `24000`. |
+| `temperature` | `1.0` | Higher = more expressive. |
+| `top_p` | `0.8` | Controls stability. |
+
+## Attribution
+
+Ported from [LiveKit Agents](https://github.com/livekit/agents) (`livekit-plugins-lmnt`, Apache License 2.0).

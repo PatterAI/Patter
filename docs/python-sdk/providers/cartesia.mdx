@@ -1,6 +1,6 @@
 ---
-title: "Cartesia STT"
-description: "Streaming speech-to-text via Cartesia's ink-whisper model."
+title: "Cartesia"
+description: "Cartesia STT (ink-whisper) and TTS (sonic) providers. Ported from LiveKit Agents."
 ---
 
 # Cartesia STT
@@ -21,3 +21,50 @@ await stt.close()
 ```
 
 Install the extra: `pip install getpatter[cartesia]`. Supported sample rates: 8000, 16000, 24000, 44100, 48000 Hz.
+
+# Cartesia TTS
+
+`CartesiaTTS` is a Patter `TTSProvider` backed by Cartesia's [bytes endpoint](https://docs.cartesia.ai/api-reference/tts/bytes). It streams raw PCM_S16LE chunks that drop directly into Patter's pipeline with no transcoding.
+
+## Install
+
+```bash
+pip install "patter[cartesia]"
+```
+
+## Usage
+
+```python
+from patter.providers.cartesia_tts import CartesiaTTS
+
+tts = CartesiaTTS(
+    # Falls back to CARTESIA_API_KEY env var if api_key is None.
+    api_key="...",
+    model="sonic-2",
+    voice="f786b574-daa5-4673-aa0c-cbe3e8534c02",  # Katie
+    language="en",
+    sample_rate=16000,
+)
+
+async for chunk in tts.synthesize("Hello from Patter."):
+    # chunk is raw PCM_S16LE at sample_rate
+    ...
+
+await tts.close()
+```
+
+## Options
+
+| Option | Default | Notes |
+|---|---|---|
+| `model` | `"sonic-2"` | Any Cartesia TTS model id (e.g. `"sonic-3"`). |
+| `voice` | `"f786b574-..."` | Cartesia voice id. |
+| `language` | `"en"` | ISO 639-1 code. |
+| `sample_rate` | `16000` | Hz. |
+| `speed` | `None` | `"fastest" ... "slowest"` or float in `[0.6, 2.0]`. |
+| `emotion` | `None` | See Cartesia's emotion list. |
+| `volume` | `None` | Float in `[0.5, 2.0]` for sonic-3. |
+
+## Attribution
+
+Ported from [LiveKit Agents](https://github.com/livekit/agents) (`livekit-plugins-cartesia`, Apache License 2.0).
