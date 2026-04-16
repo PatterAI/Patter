@@ -21,7 +21,7 @@ Patter runs in local mode. It is auto-detected when telephony provider keys are 
 phone = Patter(twilio_sid="AC...", twilio_token="...", openai_key="sk-...",
                phone_number="+15550001234", webhook_url="abc.ngrok.io")
 
-# Local mode (auto-detected — telnyx_key)
+# Local mode (auto-detected — telnyx_key) [Beta]
 phone = Patter(telnyx_key="KEY...", telnyx_connection_id="...", openai_key="sk-...",
                phone_number="+15550001234", webhook_url="abc.ngrok.io")
 ```
@@ -35,13 +35,17 @@ phone = Patter(telnyx_key="KEY...", telnyx_connection_id="...", openai_key="sk-.
 | `mode` | `str` | `"local"` | Operating mode. Can be omitted — auto-detected when provider keys are given. |
 | `twilio_sid` | `str` | `""` | Twilio Account SID. |
 | `twilio_token` | `str` | `""` | Twilio Auth Token. Required when `twilio_sid` is provided. |
-| `telnyx_key` | `str` | `""` | Telnyx API key. |
-| `telnyx_connection_id` | `str` | `""` | Telnyx Call Control Application ID. |
+| `telnyx_key` | `str` | `""` | Telnyx API key (Beta). |
+| `telnyx_connection_id` | `str` | `""` | Telnyx Call Control Application ID (Beta). |
 | `openai_key` | `str` | `""` | OpenAI API key for the Realtime API. |
 | `elevenlabs_key` | `str` | `""` | ElevenLabs API key (optional, for pipeline mode). |
 | `deepgram_key` | `str` | `""` | Deepgram API key (optional, for pipeline mode). |
 | `phone_number` | `str` | `""` | Your phone number in E.164 format (e.g., `"+15550001234"`). Required when telephony keys are provided. |
 | `webhook_url` | `str` | `""` | Public hostname of this server, without scheme (e.g., `"abc.ngrok.io"`). Required when telephony keys are provided. |
+
+<Warning>
+  **Telnyx (Beta):** Telnyx support is in beta — tested locally but not yet validated in production. We recommend Twilio for production deployments until Telnyx exits beta.
+</Warning>
 
 ```python
 # Twilio + OpenAI Realtime
@@ -53,7 +57,7 @@ phone = Patter(
     webhook_url="abc.ngrok.io",
 )
 
-# Telnyx + OpenAI Realtime
+# Telnyx + OpenAI Realtime (Beta)
 phone = Patter(
     telnyx_key="KEYxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
     telnyx_connection_id="your_connection_id",

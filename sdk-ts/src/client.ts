@@ -50,6 +50,13 @@ export class Patter {
 
       this.mode = 'local';
       this.localConfig = options;
+      // TODO: Remove beta warning when Telnyx is validated in production
+      if (local.telnyxKey) {
+        console.warn(
+          '[patter] Telnyx support is in beta — tested locally but not yet validated in production. ' +
+          'If you encounter issues, please report them at https://github.com/PatterAI/Patter/issues'
+        );
+      }
       this.apiKey = '';
       this.backendUrl = DEFAULT_BACKEND_URL;
       this.restUrl = DEFAULT_REST_URL;

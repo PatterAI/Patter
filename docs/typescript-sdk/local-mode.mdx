@@ -65,6 +65,8 @@ Returns `{ "status": "ok", "mode": "local" }`.
 | `/webhooks/twilio/amd` | POST | Receives AMD (answering machine detection) results. |
 | `/webhooks/twilio/status` | POST | Receives call status callbacks for outbound calls. |
 
+<Info>Telnyx endpoints are in beta — tested locally, not yet validated in production.</Info>
+
 ### Telnyx Endpoints
 
 | Endpoint | Method | Purpose |
@@ -139,7 +141,7 @@ Phone Speaker
 | Provider | Input Format | Transcoding |
 |----------|-------------|-------------|
 | Twilio | mulaw 8kHz | Decoded to PCM 16kHz |
-| Telnyx | PCM 16kHz | No transcoding needed |
+| Telnyx (Beta) | PCM 16kHz | No transcoding needed |
 | OpenAI TTS | PCM 24kHz | Resampled to 16kHz |
 
 ## Binding Address
