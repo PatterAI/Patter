@@ -349,7 +349,18 @@ class TelnyxBridge implements TelephonyBridge {
     getLogger().info(`Telnyx call transferred to ${toNumber}`);
   }
 
-  async endCall(_callId: string, ws: WSWebSocket): Promise<void> {
+  async endCall(callId: string, ws: WSWebSocket): Promise<void> {
+    // Hang up via Telnyx Call Control API, then close the media WebSocket
+    const telnyxKey = this.config.telnyxKey ?? '';
+    if (callId && telnyxKey) {
+      try {
+        await fetch(`https://api.telnyx.com/v2/calls/${callId}/actions/hangup`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${telnyxKey}` },
+          body: JSON.stringify({}),
+        });
+      } catch { /* best effort — call may already be ended */ }
+    }
     ws.close();
   }
 
@@ -410,6 +421,7 @@ export class EmbeddedServer {
 
   /** Active WebSocket connections tracked for graceful shutdown. */
   private readonly activeConnections = new Set<WSWebSocket>();
+  private readonly activeCallIds = new Map<WSWebSocket, string>();
 
   constructor(
     private readonly config: LocalConfig,
@@ -556,9 +568,9 @@ export class EmbeddedServer {
       const callSid = (req.body.CallSid as string) || '';
       const caller = (req.body.From as string) || '';
       const callee = (req.body.To as string) || '';
-      const rawStreamUrl = `wss://${this.config.webhookUrl}/ws/stream/${callSid}?caller=${encodeURIComponent(caller)}&callee=${encodeURIComponent(callee)}`;
+      const rawStreamUrl = `wss://${this.config.webhookUrl}/ws/stream/${callSid}`;
       const xmlStreamUrl = xmlEscape(rawStreamUrl);
-      const twiml = `<?xml version="1.0" encoding="UTF-8"?><Response><Connect><Stream url="${xmlStreamUrl}"/></Connect></Response>`;
+      const twiml = `<?xml version="1.0" encoding="UTF-8"?><Response><Connect><Stream url="${xmlStreamUrl}"><Parameter name="caller" value="${xmlEscape(caller)}"/><Parameter name="callee" value="${xmlEscape(callee)}"/></Stream></Connect></Response>`;
       res.type('text/xml').send(twiml);
     });
 
@@ -752,6 +764,7 @@ Connect AI agents to phone numbers in 4 lines of code
           handler.setStreamSid(data.streamSid ?? '');
           const callSid = data.start?.callSid ?? '';
           const customParameters = data.start?.customParameters ?? {};
+          if (callSid) this.activeCallIds.set(ws, callSid);
           await handler.handleCallStart(callSid, customParameters);
         } else if (event === 'media') {
           const payload = data.media?.payload ?? '';
@@ -770,6 +783,7 @@ Connect AI agents to phone numbers in 4 lines of code
     });
 
     ws.on('close', async () => {
+      this.activeCallIds.delete(ws);
       await handler.handleWsClose();
     });
   }
@@ -847,7 +861,17 @@ Connect AI agents to phone numbers in 4 lines of code
       this.server!.close(() => resolve());
     });
 
-    // 2. Send close to all active WebSocket connections
+    // 2. Hang up all active telephony calls via provider API
+    const isTelnyx = this.config.telephonyProvider === 'telnyx';
+    for (const [ws, callId] of this.activeCallIds) {
+      try {
+        const bridge = isTelnyx ? new TelnyxBridge(this.config) : new TwilioBridge(this.config);
+        await bridge.endCall(callId, ws);
+      } catch { /* best effort */ }
+    }
+    this.activeCallIds.clear();
+
+    // 3. Send close to all active WebSocket connections
     for (const ws of this.activeConnections) {
       try {
         ws.close(1001, 'Server shutting down');

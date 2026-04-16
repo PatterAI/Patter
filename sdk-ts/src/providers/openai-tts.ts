@@ -60,6 +60,7 @@ export class OpenAITTS {
         }
       }
     } finally {
+      if (typeof reader.cancel === 'function') await reader.cancel().catch(() => {});
       reader.releaseLock();
     }
   }

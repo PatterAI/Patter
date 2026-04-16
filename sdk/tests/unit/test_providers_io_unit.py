@@ -438,7 +438,8 @@ class TestElevenLabsConvAIAdapterIO:
             events.append(event)
         assert events[0] == ("transcript_input", "Hi")
         assert events[1] == ("transcript_output", "Hello")
-        assert events[2] == ("interruption", None)
+        assert events[2] == ("response_done", {})
+        assert events[3] == ("interruption", None)
 
     @pytest.mark.asyncio
     async def test_receive_events_empty_audio_skipped(self) -> None:

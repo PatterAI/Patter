@@ -148,6 +148,11 @@ export class CallMetricsAccumulator {
 
   // ---- Turn lifecycle ----
 
+  /** Whether a turn is currently being measured (startTurn called, not yet completed). */
+  get turnActive(): boolean {
+    return this._turnStart !== null;
+  }
+
   startTurn(): void {
     this._turnStart = hrTimeMs();
     this._sttComplete = null;
@@ -294,6 +299,14 @@ export class CallMetricsAccumulator {
     }
     if (this._turnStart !== null && this._ttsFirstByte !== null) {
       total_ms = this._ttsFirstByte - this._turnStart;
+    }
+
+    // In Realtime mode (openai_realtime), STT/LLM/TTS happen inside a single
+    // OpenAI pipeline so individual checkpoints are never recorded.  Attribute
+    // the entire end-to-end latency to the LLM bucket so dashboards display a
+    // meaningful breakdown bar instead of all-zero.
+    if (total_ms > 0 && stt_ms === 0 && llm_ms === 0 && tts_ms === 0) {
+      llm_ms = total_ms;
     }
 
     return {

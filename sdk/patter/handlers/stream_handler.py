@@ -372,7 +372,6 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                 elif ev_type == "transcript_output":
                     if ev_data:
                         response_text: str = ev_data
-                        current_agent_text = response_text
                         blocked, _ = evaluate_guardrails(self.agent, response_text)
                         if blocked:
                             await self._adapter.cancel_response()
@@ -384,13 +383,10 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                                     replacement = r
                                     break
                             await self._adapter.send_text(replacement)
+                            current_agent_text = ""
                         else:
-                            self.conversation_history.append(
-                                {"role": "assistant", "text": response_text, "timestamp": time.time()}
-                            )
-                            self.transcript_entries.append(
-                                {"role": "assistant", "text": response_text}
-                            )
+                            # Accumulate deltas — push single entry on response_done
+                            current_agent_text += response_text
 
                 elif ev_type == "speech_started":
                     await self.audio_sender.send_clear()
@@ -405,7 +401,15 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                         usage = ev_data.get("usage", {})
                         if usage:
                             self.metrics.record_realtime_usage(usage)
-                        if current_agent_text:
+                    if current_agent_text:
+                        # Push complete response as single history entry
+                        self.conversation_history.append(
+                            {"role": "assistant", "text": current_agent_text, "timestamp": time.time()}
+                        )
+                        self.transcript_entries.append(
+                            {"role": "assistant", "text": current_agent_text}
+                        )
+                        if self.metrics is not None:
                             turn = self.metrics.record_turn_complete(current_agent_text)
                             if self.on_metrics:
                                 await self.on_metrics(
@@ -415,7 +419,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                                         "cost_so_far": self.metrics.get_cost_so_far(),
                                     }
                                 )
-                            current_agent_text = ""
+                        current_agent_text = ""
 
                 elif ev_type == "function_call":
                     func_data = ev_data
@@ -507,6 +511,10 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
     async def cleanup(self) -> None:
         if self._background_task:
             self._background_task.cancel()
+            try:
+                await self._background_task
+            except (asyncio.CancelledError, Exception):
+                pass
         if self._adapter:
             await self._adapter.close()
 
@@ -529,6 +537,7 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
         metrics,
         *,
         elevenlabs_key: str,
+        for_twilio: bool = False,
         on_transcript=None,
         on_metrics=None,
         conversation_history: deque | None = None,
@@ -548,6 +557,7 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
             transcript_entries=transcript_entries,
         )
         self._elevenlabs_key = elevenlabs_key
+        self._for_twilio = for_twilio
         self._adapter = None
 
     async def start(self) -> None:
@@ -608,26 +618,31 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
                 elif ev_type == "transcript_output":
                     if ev_data:
                         response_text: str = ev_data
-                        current_agent_text = response_text
                         blocked, _ = evaluate_guardrails(self.agent, response_text)
-                        if not blocked:
-                            self.conversation_history.append(
-                                {"role": "assistant", "text": response_text, "timestamp": time.time()}
-                            )
-                            self.transcript_entries.append(
-                                {"role": "assistant", "text": response_text}
-                            )
-                            if self.metrics is not None and current_agent_text:
-                                turn = self.metrics.record_turn_complete(current_agent_text)
-                                if self.on_metrics:
-                                    await self.on_metrics(
-                                        {
-                                            "call_id": self.call_id,
-                                            "turn": turn,
-                                            "cost_so_far": self.metrics.get_cost_so_far(),
-                                        }
-                                    )
-                                current_agent_text = ""
+                        if blocked:
+                            current_agent_text = ""
+                        else:
+                            current_agent_text += response_text
+
+                elif ev_type == "response_done":
+                    if current_agent_text:
+                        self.conversation_history.append(
+                            {"role": "assistant", "text": current_agent_text, "timestamp": time.time()}
+                        )
+                        self.transcript_entries.append(
+                            {"role": "assistant", "text": current_agent_text}
+                        )
+                        if self.metrics is not None:
+                            turn = self.metrics.record_turn_complete(current_agent_text)
+                            if self.on_metrics:
+                                await self.on_metrics(
+                                    {
+                                        "call_id": self.call_id,
+                                        "turn": turn,
+                                        "cost_so_far": self.metrics.get_cost_so_far(),
+                                    }
+                                )
+                        current_agent_text = ""
 
                 elif ev_type == "interruption":
                     await self.audio_sender.send_clear()
@@ -640,11 +655,21 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
 
     async def on_audio_received(self, audio_bytes: bytes) -> None:
         if self._adapter is not None:
-            await self._adapter.send_audio(audio_bytes)
+            # ElevenLabs ConvAI expects PCM 16kHz. Twilio sends mulaw 8kHz.
+            if self._for_twilio:
+                from patter.services.transcoding import mulaw_to_pcm16, resample_8k_to_16k
+                pcm16k = resample_8k_to_16k(mulaw_to_pcm16(audio_bytes))
+                await self._adapter.send_audio(pcm16k)
+            else:
+                await self._adapter.send_audio(audio_bytes)
 
     async def cleanup(self) -> None:
         if self._background_task:
             self._background_task.cancel()
+            try:
+                await self._background_task
+            except (asyncio.CancelledError, Exception):
+                pass
         if self._adapter:
             await self._adapter.close()
 
@@ -788,6 +813,8 @@ class PipelineStreamHandler(StreamHandler):
 
     async def _tts_sentence(self, sentence_text: str, first_tts_chunk_holder: list) -> bool:
         """Synthesize a sentence and send audio. Returns False if interrupted."""
+        if self._tts is None:
+            return True
         async for audio_chunk in self._tts.synthesize(sentence_text):
             if not self._is_speaking:
                 if self.metrics is not None:
@@ -859,6 +886,9 @@ class PipelineStreamHandler(StreamHandler):
         )
         self._is_speaking = True
         first_tts_chunk = True
+        if self._tts is None:
+            self._is_speaking = False
+            return
         async for audio_chunk in self._tts.synthesize(response_text):
             if not self._is_speaking:
                 if self.metrics is not None:
@@ -913,6 +943,9 @@ class PipelineStreamHandler(StreamHandler):
                     )
 
                 if self.on_message is None and self._llm_loop is None:
+                    # No message handler or LLM loop — discard orphaned turn
+                    if self.metrics is not None:
+                        self.metrics.record_turn_interrupted()
                     continue
 
                 # Built-in LLM loop path
@@ -994,13 +1027,24 @@ class PipelineStreamHandler(StreamHandler):
 
     async def on_audio_received(self, audio_bytes: bytes) -> None:
         if self._stt is not None and not self._is_speaking:
-            await self._stt.send_audio(audio_bytes)
+            # Twilio sends mulaw 8kHz — convert to PCM 16kHz for STT providers.
+            # Telnyx sends PCM 16kHz natively.
+            if self._for_twilio:
+                from patter.services.transcoding import mulaw_to_pcm16, resample_8k_to_16k
+                pcm16k = resample_8k_to_16k(mulaw_to_pcm16(audio_bytes))
+                await self._stt.send_audio(pcm16k)
+            else:
+                await self._stt.send_audio(audio_bytes)
             if self.metrics is not None:
                 self.metrics.add_stt_audio_bytes(len(audio_bytes))
 
     async def cleanup(self) -> None:
         if self._stt_task:
             self._stt_task.cancel()
+            try:
+                await self._stt_task
+            except (asyncio.CancelledError, Exception):
+                pass
         if self._stt is not None:
             await self._stt.close()
         if self._tts is not None:

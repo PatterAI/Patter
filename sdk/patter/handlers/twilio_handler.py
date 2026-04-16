@@ -6,6 +6,7 @@ import base64
 import json
 import logging
 import re
+import time
 from collections import deque
 from urllib.parse import quote
 
@@ -345,6 +346,7 @@ async def twilio_stream_bridge(
                         resolved_prompt=resolved_prompt,
                         metrics=metrics,
                         elevenlabs_key=elevenlabs_key,
+                        for_twilio=True,
                         on_transcript=on_transcript,
                         on_metrics=on_metrics,
                         conversation_history=conversation_history,
@@ -449,6 +451,9 @@ async def twilio_stream_bridge(
                 await on_call_end(
                     {
                         "call_id": call_sid_actual,
+                        "caller": caller,
+                        "callee": callee,
+                        "ended_at": time.time(),
                         "transcript": list(conversation_history),
                         "metrics": call_metrics,
                     }

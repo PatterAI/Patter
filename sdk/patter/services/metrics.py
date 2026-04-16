@@ -244,6 +244,13 @@ class CallMetricsAccumulator:
         if self._turn_start is not None and self._tts_first_byte is not None:
             total_ms = (self._tts_first_byte - self._turn_start) * 1000
 
+        # In Realtime mode, STT/LLM/TTS happen inside a single OpenAI
+        # pipeline so individual checkpoints are never recorded.  Attribute
+        # the entire end-to-end latency to the LLM bucket so dashboards
+        # display a meaningful breakdown bar instead of all-zero.
+        if total_ms > 0 and stt_ms == 0 and llm_ms == 0 and tts_ms == 0:
+            llm_ms = total_ms
+
         return LatencyBreakdown(
             stt_ms=round(stt_ms, 1),
             llm_ms=round(llm_ms, 1),

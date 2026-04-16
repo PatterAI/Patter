@@ -58,6 +58,9 @@ export class ElevenLabsTTS {
         }
       }
     } finally {
+      // Cancel the HTTP stream to stop ElevenLabs from synthesizing further
+      // characters (they bill per character, even if we stop consuming).
+      if (typeof reader.cancel === 'function') await reader.cancel().catch(() => {});
       reader.releaseLock();
     }
   }

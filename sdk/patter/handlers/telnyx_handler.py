@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import time
 from collections import deque
 from urllib.parse import quote
 
@@ -338,6 +339,9 @@ async def telnyx_stream_bridge(
                 await on_call_end(
                     {
                         "call_id": call_id_actual,
+                        "caller": caller,
+                        "callee": callee,
+                        "ended_at": time.time(),
                         "transcript": list(transcript_entries),
                         "metrics": call_metrics,
                     }

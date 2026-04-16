@@ -71,7 +71,7 @@ export class OpenAIRealtimeAdapter {
   onEvent(callback: (type: string, data: unknown) => void): void {
     if (!this.ws) return;
     this.ws.on('message', (raw) => {
-      let data: { type: string; delta?: string; transcript?: string; call_id?: string; name?: string; arguments?: string; error?: unknown };
+      let data: { type: string; delta?: string; transcript?: string; call_id?: string; name?: string; arguments?: string; error?: unknown; response?: Record<string, unknown> };
       try {
         data = JSON.parse(raw.toString()) as typeof data;
       } catch (e) {
@@ -90,7 +90,7 @@ export class OpenAIRealtimeAdapter {
       } else if (t === 'response.function_call_arguments.done') {
         callback('function_call', { call_id: data.call_id, name: data.name, arguments: data.arguments });
       } else if (t === 'response.done') {
-        callback('response_done', null);
+        callback('response_done', data.response ?? null);
       } else if (t === 'error') {
         callback('error', data.error);
       }

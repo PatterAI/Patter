@@ -69,6 +69,12 @@ class EmbeddedServer:
         async def _on_call_start(data):
             if store is not None:
                 store.record_call_start(data)
+            # Notify standalone dashboard so active calls appear immediately
+            try:
+                from patter.dashboard.persistence import notify_dashboard
+                notify_dashboard(data)
+            except Exception:
+                pass
             if user_start is not None:
                 await user_start(data)
 
