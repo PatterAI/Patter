@@ -28,6 +28,36 @@ class Guardrail:
 
 
 @dataclass(frozen=True)
+class HookContext:
+    """Context passed to pipeline hooks."""
+
+    call_id: str
+    caller: str
+    callee: str
+    history: tuple[dict, ...] = ()
+
+
+@dataclass(frozen=True)
+class PipelineHooks:
+    """Pipeline hooks for intercepting data at each stage (pipeline mode only).
+
+    Each hook receives the data and a :class:`HookContext`. Return ``None``
+    to skip the downstream step. Hooks may be sync or async.
+
+    Attributes:
+        after_transcribe: Called after STT, before LLM. Return ``None`` to skip turn.
+        before_synthesize: Called before TTS, per-sentence in streaming mode.
+            Return ``None`` to skip TTS for this sentence.
+        after_synthesize: Called after TTS produces an audio chunk.
+            Return ``None`` to discard the chunk.
+    """
+
+    after_transcribe: Callable | None = None
+    before_synthesize: Callable | None = None
+    after_synthesize: Callable | None = None
+
+
+@dataclass(frozen=True)
 class Agent:
     """Configuration for a local-mode voice AI agent."""
 
@@ -42,6 +72,7 @@ class Agent:
     tts: TTSConfig | None = None  # which TTS provider to use in pipeline mode
     variables: dict | None = None  # Dynamic variables for ``{placeholder}`` substitution in system_prompt
     guardrails: list[Guardrail | dict] | None = None  # List of Guardrail objects or guardrail dicts
+    hooks: PipelineHooks | None = None  # Pipeline hooks for pipeline mode
 
 
 @dataclass(frozen=True)

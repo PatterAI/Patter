@@ -21,7 +21,11 @@ export type {
   PhoneNumber,
   Call,
   Guardrail,
+  PipelineHooks,
+  HookContext,
 } from "./types";
+export { SentenceChunker, DEFAULT_MIN_SENTENCE_LEN } from "./sentence-chunker";
+export { PipelineHookExecutor } from "./pipeline-hooks";
 export {
   PatterError,
   PatterConnectionError,

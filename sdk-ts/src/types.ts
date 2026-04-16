@@ -133,6 +133,22 @@ export interface Guardrail {
   replacement?: string;
 }
 
+export interface HookContext {
+  readonly callId: string;
+  readonly caller: string;
+  readonly callee: string;
+  readonly history: ReadonlyArray<{ role: string; text: string }>;
+}
+
+export interface PipelineHooks {
+  /** Called after STT produces a transcript, before LLM. Return null to skip this turn. */
+  afterTranscribe?: (transcript: string, ctx: HookContext) => string | null | Promise<string | null>;
+  /** Called before TTS, per-sentence in streaming mode. Return null to skip TTS for this sentence. */
+  beforeSynthesize?: (text: string, ctx: HookContext) => string | null | Promise<string | null>;
+  /** Called after TTS produces an audio chunk. Return null to discard this chunk. */
+  afterSynthesize?: (audio: Buffer, text: string, ctx: HookContext) => Buffer | null | Promise<Buffer | null>;
+}
+
 export interface AgentOptions {
   systemPrompt: string;
   voice?: string;
@@ -152,6 +168,8 @@ export interface AgentOptions {
   variables?: Record<string, string>;
   /** Output guardrails — filter AI responses before TTS */
   guardrails?: Guardrail[];
+  /** Pipeline hooks — intercept and transform data at each pipeline stage (pipeline mode only). */
+  hooks?: PipelineHooks;
 }
 
 export type PipelineMessageHandler = (data: Record<string, unknown>) => Promise<string>;

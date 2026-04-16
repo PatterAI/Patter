@@ -8,13 +8,17 @@ from patter.models import (
     CallMetrics,
     CostBreakdown,
     Guardrail,
+    HookContext,
     IncomingMessage,
     LatencyBreakdown,
+    PipelineHooks,
     STTConfig,
     TTSConfig,
     TurnMetrics,
 )
 from patter.exceptions import PatterError, PatterConnectionError, AuthenticationError, ProvisionError
+from patter.services.sentence_chunker import SentenceChunker
+from patter.services.pipeline_hooks import PipelineHookExecutor
 
 __all__ = [
     "Patter",
@@ -24,8 +28,10 @@ __all__ = [
     "CallMetrics",
     "CostBreakdown",
     "Guardrail",
+    "HookContext",
     "IncomingMessage",
     "LatencyBreakdown",
+    "PipelineHooks",
     "STTConfig",
     "TTSConfig",
     "TurnMetrics",
@@ -33,4 +39,6 @@ __all__ = [
     "PatterConnectionError",
     "AuthenticationError",
     "ProvisionError",
+    "SentenceChunker",
+    "PipelineHookExecutor",
 ]
