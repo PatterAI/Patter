@@ -53,10 +53,12 @@
   },
   "sideEffects": false,
   "files": [
-    "dist"
+    "dist",
+    "src/resources/audio/NOTICE",
+    "src/resources/audio/*.ogg"
   ],
   "scripts": {
-    "build": "tsup src/index.ts --format cjs,esm --dts && tsup src/cli.ts --format cjs --no-dts",
+    "build": "tsup src/index.ts --format cjs,esm --dts && tsup src/cli.ts --format cjs --no-dts && node -e \"const fs=require('fs');fs.cpSync('src/resources','dist/resources',{recursive:true,filter:p=>!p.endsWith('.ts')})\"",
     "prepublishOnly": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest",

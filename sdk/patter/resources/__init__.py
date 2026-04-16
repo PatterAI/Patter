@@ -1,1 +1,1 @@
-"""Bundled binary resources used by Patter providers (ONNX models, etc.)."""
+"""Bundled static resources for Patter (audio clips, ONNX models, etc.)."""

@@ -84,3 +84,20 @@ export type {
   LoopCallback,
   SilenceCallback,
 } from "./services/ivr";
+export {
+  BackgroundAudioPlayer,
+  BuiltinAudioClip,
+  builtinClipPath,
+  mixPcm,
+  resamplePcm,
+  selectSoundFromList,
+} from "./services/background-audio";
+export type {
+  AudioConfig,
+  AudioSource,
+  BackgroundAudioOptions,
+  BuiltinAudioClipName,
+  BuiltinPcmSource,
+  FilePcmSource,
+  RawPcmSource,
+} from "./services/background-audio";
