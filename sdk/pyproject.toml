@@ -74,6 +74,13 @@ ivr = [
     "scikit-learn>=1.3",
     "numpy>=1.26",
 ]
+# Background audio player (hold music + ambient cues). Ports LiveKit Agents'
+# BackgroundAudioPlayer and mixes bundled .ogg clips with the outbound PCM
+# stream. Requires numpy for PCM math and soundfile for .ogg decoding.
+background-audio = [
+    "numpy>=1.26",
+    "soundfile>=0.12",
+]
 
 [build-system]
 requires = ["setuptools>=68.0"]
@@ -85,6 +92,7 @@ include = ["patter*"]
 
 [tool.setuptools.package-data]
 "patter.resources" = ["*.onnx"]
+"patter.resources.audio" = ["*.ogg", "NOTICE"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
