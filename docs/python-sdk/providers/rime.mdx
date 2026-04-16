@@ -1,0 +1,57 @@
+---
+title: "Rime TTS"
+description: "Arcana and Mist model families via Rime's HTTP endpoint."
+---
+
+# Rime TTS
+
+`RimeTTS` targets the [Rime HTTP endpoint](https://rime.ai/docs). Both Arcana (high fidelity) and Mist (low latency) model families are supported. The provider requests `audio/pcm` and yields raw PCM_S16LE chunks at the configured sample rate.
+
+## Install
+
+```bash
+pip install "patter[rime]"
+```
+
+## Usage
+
+```python
+from patter.providers.rime_tts import RimeTTS
+
+# Arcana — highest quality, up to 4-minute request timeout.
+tts = RimeTTS(
+    api_key="...",           # or RIME_API_KEY env var
+    model="arcana",
+    speaker="astra",
+    lang="eng",
+    sample_rate=16000,
+)
+
+# Mist v2 — low-latency, streaming-friendly.
+fast = RimeTTS(
+    model="mistv2",
+    speaker="cove",
+    speed_alpha=1.1,
+    reduce_latency=True,
+)
+
+async for chunk in tts.synthesize("Ciao dal Patter pipeline."):
+    ...
+
+await tts.close()
+```
+
+## Options (selection)
+
+| Option | Default | Notes |
+|---|---|---|
+| `model` | `"arcana"` | `"arcana"` or any `mist*` model. |
+| `speaker` | `"astra"` / `"cove"` | Default depends on model. |
+| `lang` | `"eng"` | Rime language code. |
+| `sample_rate` | `16000` | Hz. |
+| `temperature`, `top_p`, `max_tokens`, `repetition_penalty` | — | Arcana only. |
+| `speed_alpha`, `reduce_latency`, `pause_between_brackets`, `phonemize_between_brackets` | — | Mist only. |
+
+## Attribution
+
+Ported from [LiveKit Agents](https://github.com/livekit/agents) (`livekit-plugins-rime`, Apache License 2.0).
