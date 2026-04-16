@@ -1170,6 +1170,17 @@ class PipelineStreamHandler(StreamHandler):
                             {"role": "assistant", "text": response_text}
                         )
                 else:
+                    if not response_text:
+                        # Common misuse: on_message was provided as an observer
+                        # (returning None) but it actually replaces the built-in LLM
+                        # loop. Warn loudly — the caller hears no audio until the
+                        # handler returns a non-empty string.
+                        logger.warning(
+                            "on_message returned empty/None — no TTS will play. "
+                            "If you intended to observe transcripts, use on_transcript "
+                            "instead; if you meant to answer via the built-in LLM, "
+                            "remove on_message and pass openai_key."
+                        )
                     await self._process_regular_response(response_text, self.call_id)
 
         except Exception as exc:
