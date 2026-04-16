@@ -53,6 +53,10 @@ dev = [
     "pytest-cov>=5.0.0",
     "psutil>=5.9.0",
 ]
+silero = [
+    "onnxruntime>=1.18",
+    "numpy>=1.26",
+]
 
 [build-system]
 requires = ["setuptools>=68.0"]
@@ -61,6 +65,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["patter*"]
+
+[tool.setuptools.package-data]
+"patter.resources" = ["*.onnx"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
