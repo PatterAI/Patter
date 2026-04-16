@@ -73,7 +73,9 @@ export class GeminiLiveAdapter {
     let genaiModule: { GoogleGenAI: new (args: { apiKey: string; httpOptions?: Record<string, unknown> }) => unknown };
     try {
       // Lazy dynamic import — keeps @google/genai optional.
-      genaiModule = (await import('@google/genai')) as typeof genaiModule;
+      // Variable module name avoids TS2307 when the peer dep is not installed.
+      const modName = '@google/genai';
+      genaiModule = (await import(modName)) as typeof genaiModule;
     } catch (err) {
       throw new Error(
         "Gemini Live requires the '@google/genai' package. Install with: npm install @google/genai",
