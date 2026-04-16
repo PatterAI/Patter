@@ -19,10 +19,12 @@ import { mulawToPcm16, pcm16ToMulaw, resample8kTo16k, resample16kTo8k } from './
 import { LLMLoop } from './llm-loop';
 import { RemoteMessageHandler, isRemoteUrl, isWebSocketUrl } from './remote-message';
 import { createHistoryManager, executeToolWebhook } from './handler-utils';
-import type { AgentOptions, Guardrail, PipelineMessageHandler, ToolDefinition } from './types';
+import type { AgentOptions, Guardrail, HookContext, PipelineMessageHandler, ToolDefinition } from './types';
 import type { MetricsStore } from './dashboard/store';
 import { getLogger } from './logger';
 import type { ProviderPricing } from './pricing';
+import { SentenceChunker } from './sentence-chunker';
+import { PipelineHookExecutor } from './pipeline-hooks';
 
 type AIAdapter = OpenAIRealtimeAdapter | ElevenLabsConvAIAdapter;
 
@@ -421,6 +423,58 @@ export class StreamHandler {
     }
   }
 
+  /** Build a HookContext for the current call state. */
+  private buildHookContext(): HookContext {
+    return {
+      callId: this.callId,
+      caller: this.caller,
+      callee: this.callee,
+      history: [...this.history.entries],
+    };
+  }
+
+  /** Synthesize a single sentence through TTS with hooks, sending audio to telephony. */
+  private async synthesizeSentence(
+    sentence: string,
+    hookExecutor: PipelineHookExecutor,
+    hookCtx: HookContext,
+    ttsFirstByteSent: { value: boolean },
+  ): Promise<void> {
+    if (!this.tts || !this.isSpeaking) return;
+
+    // Apply text transforms before the beforeSynthesize hook
+    let transformed = sentence;
+    const transforms = this.deps.agent.textTransforms;
+    if (transforms) {
+      for (const fn of transforms) {
+        transformed = fn(transformed);
+      }
+    }
+
+    // beforeSynthesize hook (per-sentence)
+    const processedText = await hookExecutor.runBeforeSynthesize(transformed, hookCtx);
+    if (processedText === null) return;
+
+    try {
+      for await (const chunk of this.tts.synthesizeStream(processedText)) {
+        if (!this.isSpeaking) break;
+
+        // afterSynthesize hook (per-chunk)
+        const processedAudio = await hookExecutor.runAfterSynthesize(chunk, processedText, hookCtx);
+        if (processedAudio === null) continue;
+
+        if (!ttsFirstByteSent.value) {
+          ttsFirstByteSent.value = true;
+          this.metricsAcc.recordTtsFirstByte();
+        }
+        const encoded = this.encodePipelineAudio(processedAudio);
+        this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
+      }
+    } catch (e) {
+      getLogger().error(`TTS streaming error (${this.deps.bridge.label}):`, e);
+    }
+  }
+
   /** Handle a final transcript from STT in pipeline mode. */
   private async handleTranscript(transcript: { isFinal?: boolean; text?: string }): Promise<void> {
     if (!transcript.isFinal || !transcript.text) return;
@@ -431,8 +485,6 @@ export class StreamHandler {
     this.metricsAcc.startTurn();
     this.metricsAcc.recordSttComplete(transcript.text);
 
-    this.history.push({ role: 'user', text: transcript.text, timestamp: Date.now() });
-
     if (this.deps.onTranscript) {
       await this.deps.onTranscript({
         role: 'user',
@@ -442,14 +494,28 @@ export class StreamHandler {
       });
     }
 
+    // --- afterTranscribe hook ---
+    const hookExecutor = new PipelineHookExecutor(this.deps.agent.hooks);
+    const hookCtx = this.buildHookContext();
+    const filteredTranscript = await hookExecutor.runAfterTranscribe(transcript.text, hookCtx);
+    if (filteredTranscript === null) {
+      getLogger().info(`afterTranscribe hook vetoed turn (${label})`);
+      this.metricsAcc.recordTurnInterrupted();
+      return;
+    }
+
+    // Push filtered text to history (after hook, so LLM sees redacted/modified text)
+    this.history.push({ role: 'user', text: filteredTranscript, timestamp: Date.now() });
+
     let responseText = '';
 
     if (this.deps.onMessage && typeof this.deps.onMessage === 'function') {
       try {
         responseText = await this.deps.onMessage({
-          text: transcript.text,
+          text: filteredTranscript,
           call_id: this.callId,
           caller: this.caller,
+          callee: this.callee,
           history: [...this.history.entries],
         });
       } catch (e) {
@@ -458,7 +524,7 @@ export class StreamHandler {
       }
     } else if (this.deps.onMessage && isRemoteUrl(this.deps.onMessage)) {
       const msgData = {
-        text: transcript.text,
+        text: filteredTranscript,
         call_id: this.callId,
         caller: this.caller,
         callee: this.callee,
@@ -476,42 +542,98 @@ export class StreamHandler {
         }
       }
     } else if (this.llmLoop) {
+      // --- Streaming LLM with sentence chunking ---
       const callCtx = { call_id: this.callId, caller: this.caller, callee: this.callee };
-      const parts: string[] = [];
+      const chunker = new SentenceChunker();
+      const allParts: string[] = [];
+      const ttsFirstByteSent = { value: false };
       this.isSpeaking = true;
+      let llmError = false;
+
       try {
-        for await (const token of this.llmLoop.run(transcript.text, this.history.entries, callCtx)) {
-          parts.push(token);
+        try {
+          for await (const token of this.llmLoop.run(filteredTranscript, this.history.entries, callCtx)) {
+            allParts.push(token);
+
+            // Feed token to sentence chunker
+            const sentences = chunker.push(token);
+            for (const sentence of sentences) {
+              if (!this.isSpeaking) break;
+
+              // Guardrails check per-sentence
+              const guard = checkGuardrails(sentence, this.deps.agent.guardrails);
+              const sentenceText = guard
+                ? (guard.replacement ?? "I'm sorry, I can't respond to that.")
+                : sentence;
+
+              await this.synthesizeSentence(sentenceText, hookExecutor, hookCtx, ttsFirstByteSent);
+            }
+            if (!this.isSpeaking) break;
+          }
+        } catch (e) {
+          llmError = true;
+          chunker.reset(); // discard partial content on LLM error
+          getLogger().error(`LLM loop error (${label}):`, e);
         }
-      } catch (e) {
-        getLogger().error(`LLM loop error (${label}):`, e);
+
+        this.metricsAcc.recordLlmComplete(); // record BEFORE TTS flush, not after
+
+        // Flush remaining text from chunker (skip if LLM errored)
+        if (!llmError && this.isSpeaking) {
+          for (const sentence of chunker.flush()) {
+            if (!this.isSpeaking) break;
+            const guard = checkGuardrails(sentence, this.deps.agent.guardrails);
+            const sentenceText = guard
+              ? (guard.replacement ?? "I'm sorry, I can't respond to that.")
+              : sentence;
+            await this.synthesizeSentence(sentenceText, hookExecutor, hookCtx, ttsFirstByteSent);
+          }
+        }
+      } finally {
+        this.isSpeaking = false; // guaranteed reset
       }
-      this.isSpeaking = false;
-      responseText = parts.join('');
+      responseText = allParts.join('');
     } else {
       return;
     }
 
     if (!responseText) return;
 
-    this.metricsAcc.recordLlmComplete();
-    this.history.push({ role: 'assistant', text: responseText, timestamp: Date.now() });
-
-    this.isSpeaking = true;
-    let ttsFirstByteSent = false;
-    try {
-      for await (const chunk of this.tts!.synthesizeStream(responseText)) {
-        if (!this.isSpeaking) break;
-        if (!ttsFirstByteSent) { ttsFirstByteSent = true; this.metricsAcc.recordTtsFirstByte(); }
-        const encoded = this.encodePipelineAudio(chunk);
-        this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
+    // For non-streaming paths (onMessage function/webhook): apply guardrails + TTS with chunking
+    if (!this.llmLoop) {
+      const guard = checkGuardrails(responseText, this.deps.agent.guardrails);
+      if (guard) {
+        getLogger().info(`Guardrail '${guard.name}' triggered (pipeline)`);
+        responseText = guard.replacement ?? "I'm sorry, I can't respond to that.";
       }
-    } catch (e) {
-      getLogger().error(`TTS streaming error (${label}):`, e);
-    } finally {
-      this.isSpeaking = false;
+
+      this.metricsAcc.recordLlmComplete();
+      this.history.push({ role: 'assistant', text: responseText, timestamp: Date.now() });
+
+      // Sentence-chunk the complete response for TTS
+      const chunker = new SentenceChunker();
+      const sentences = [...chunker.push(responseText), ...chunker.flush()];
+      const ttsFirstByteSent = { value: false };
+      let interrupted = false;
+      this.isSpeaking = true;
+
+      try {
+        for (const sentence of sentences) {
+          if (!this.isSpeaking) { interrupted = true; break; }
+          await this.synthesizeSentence(sentence, hookExecutor, hookCtx, ttsFirstByteSent);
+        }
+      } finally {
+        this.isSpeaking = false; // guaranteed reset
+      }
+
+      if (!interrupted) {
+        this.metricsAcc.recordTtsComplete(responseText);
+      }
+    } else {
+      this.history.push({ role: 'assistant', text: responseText, timestamp: Date.now() });
+      this.metricsAcc.recordTtsComplete(responseText);
     }
-    this.metricsAcc.recordTtsComplete(responseText);
+
     const turn = this.metricsAcc.recordTurnComplete(responseText);
     if (turn) {
       this.deps.metricsStore.recordTurn({ call_id: this.callId, turn });

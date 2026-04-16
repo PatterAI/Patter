@@ -1,4 +1,6 @@
 export { Patter } from "./client";
+export { defineTool } from "./tool-decorator";
+export type { DefineToolInput, ParamSpec } from "./tool-decorator";
 export type { Logger } from "./logger";
 export { getLogger, setLogger } from "./logger";
 export type {
@@ -21,7 +23,12 @@ export type {
   PhoneNumber,
   Call,
   Guardrail,
+  PipelineHooks,
+  HookContext,
 } from "./types";
+export { SentenceChunker, DEFAULT_MIN_SENTENCE_LEN } from "./sentence-chunker";
+export { PipelineHookExecutor } from "./pipeline-hooks";
+export { filterMarkdown, filterEmoji, filterForTTS } from "./text-transforms";
 export {
   PatterError,
   PatterConnectionError,
@@ -42,6 +49,8 @@ export { mountDashboard, mountApi } from "./dashboard/routes";
 export { notifyDashboard } from "./dashboard/persistence";
 export { LLMLoop, OpenAILLMProvider } from "./llm-loop";
 export type { LLMProvider, LLMChunk } from "./llm-loop";
+export { FallbackLLMProvider, AllProvidersFailedError, PartialStreamError } from "./fallback-provider";
+export type { FallbackLLMProviderOptions } from "./fallback-provider";
 export { RemoteMessageHandler, isRemoteUrl, isWebSocketUrl } from "./remote-message";
 export { TestSession } from "./test-mode";
 export { ElevenLabsConvAIAdapter } from "./providers/elevenlabs-convai";
@@ -59,3 +68,5 @@ export {
 } from "./transcoding";
 export { startTunnel } from "./tunnel";
 export type { TunnelHandle } from "./tunnel";
+export { ChatContext } from "./chat-context";
+export type { ChatMessage, ChatRole, OpenAIMessage, AnthropicMessage, AnthropicConversion } from "./chat-context";

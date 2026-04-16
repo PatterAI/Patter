@@ -8,13 +8,25 @@ from patter.models import (
     CallMetrics,
     CostBreakdown,
     Guardrail,
+    HookContext,
     IncomingMessage,
     LatencyBreakdown,
+    PipelineHooks,
     STTConfig,
     TTSConfig,
     TurnMetrics,
 )
 from patter.exceptions import PatterError, PatterConnectionError, AuthenticationError, ProvisionError
+from patter.services.sentence_chunker import SentenceChunker
+from patter.services.pipeline_hooks import PipelineHookExecutor
+from patter.services.text_transforms import filter_markdown, filter_emoji, filter_for_tts
+from patter.services.tool_decorator import tool
+from patter.services.fallback_provider import (
+    FallbackLLMProvider,
+    AllProvidersFailedError,
+    PartialStreamError,
+)
+from patter.services.chat_context import ChatContext, ChatMessage
 
 __all__ = [
     "Patter",
@@ -24,8 +36,10 @@ __all__ = [
     "CallMetrics",
     "CostBreakdown",
     "Guardrail",
+    "HookContext",
     "IncomingMessage",
     "LatencyBreakdown",
+    "PipelineHooks",
     "STTConfig",
     "TTSConfig",
     "TurnMetrics",
@@ -33,4 +47,15 @@ __all__ = [
     "PatterConnectionError",
     "AuthenticationError",
     "ProvisionError",
+    "SentenceChunker",
+    "PipelineHookExecutor",
+    "filter_markdown",
+    "filter_emoji",
+    "filter_for_tts",
+    "tool",
+    "FallbackLLMProvider",
+    "AllProvidersFailedError",
+    "PartialStreamError",
+    "ChatContext",
+    "ChatMessage",
 ]
