@@ -456,3 +456,129 @@ class TestHookContextFields:
     def test_hook_context_default_history(self):
         ctx = HookContext(call_id="c", caller="a", callee="b")
         assert ctx.history == ()
+
+
+# ---------------------------------------------------------------------------
+# 13. before_send_to_stt hook (audio chunk interceptor)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+class TestBeforeSendToStt:
+    """The new ``before_send_to_stt`` hook intercepts raw PCM audio before it
+    is forwarded to the STT provider. Returning None drops the chunk."""
+
+    async def test_no_hooks_returns_audio(self):
+        executor = PipelineHookExecutor(None)
+        ctx = make_ctx()
+        audio = b"\x00\x01\x02"
+        assert await executor.run_before_send_to_stt(audio, ctx) == audio
+
+    async def test_hook_not_defined_returns_audio(self):
+        executor = PipelineHookExecutor(PipelineHooks())
+        ctx = make_ctx()
+        audio = b"\x00\x01\x02"
+        assert await executor.run_before_send_to_stt(audio, ctx) == audio
+
+    async def test_hook_modifies_audio(self):
+        def filter_hook(audio: bytes, ctx: HookContext) -> bytes:
+            return audio + b"\xff"
+
+        executor = PipelineHookExecutor(PipelineHooks(before_send_to_stt=filter_hook))
+        result = await executor.run_before_send_to_stt(b"\x00", make_ctx())
+        assert result == b"\x00\xff"
+
+    async def test_hook_returns_none_drops_chunk(self):
+        def drop_hook(audio: bytes, ctx: HookContext) -> bytes | None:
+            return None
+
+        executor = PipelineHookExecutor(PipelineHooks(before_send_to_stt=drop_hook))
+        result = await executor.run_before_send_to_stt(b"\x00", make_ctx())
+        assert result is None
+
+    async def test_async_hook(self):
+        async def async_hook(audio: bytes, ctx: HookContext) -> bytes:
+            return audio * 2
+
+        executor = PipelineHookExecutor(PipelineHooks(before_send_to_stt=async_hook))
+        result = await executor.run_before_send_to_stt(b"ab", make_ctx())
+        assert result == b"abab"
+
+    async def test_hook_exception_fails_open(self, caplog):
+        def bad_hook(audio: bytes, ctx: HookContext) -> bytes:
+            raise ValueError("boom")
+
+        executor = PipelineHookExecutor(PipelineHooks(before_send_to_stt=bad_hook))
+        with caplog.at_level(logging.ERROR):
+            result = await executor.run_before_send_to_stt(b"\x42", make_ctx())
+        assert result == b"\x42"
+        assert any("before_send_to_stt" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# 14. Agent new fields (vad, audio_filter, background_audio)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+class TestAgentNewFields:
+    """Verify that the new optional fields on Agent default to None and
+    accept values without breaking frozen semantics."""
+
+    def test_agent_defaults_none(self):
+        from patter.models import Agent
+        agent = Agent(system_prompt="hi")
+        assert agent.vad is None
+        assert agent.audio_filter is None
+        assert agent.background_audio is None
+
+    def test_agent_accepts_new_fields(self):
+        from patter.models import Agent
+        sentinel_vad = object()
+        sentinel_filter = object()
+        sentinel_bg = object()
+        agent = Agent(
+            system_prompt="hi",
+            vad=sentinel_vad,  # type: ignore[arg-type]
+            audio_filter=sentinel_filter,  # type: ignore[arg-type]
+            background_audio=sentinel_bg,  # type: ignore[arg-type]
+        )
+        assert agent.vad is sentinel_vad
+        assert agent.audio_filter is sentinel_filter
+        assert agent.background_audio is sentinel_bg
+
+
+# ---------------------------------------------------------------------------
+# 15. CallControl.send_dtmf
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+class TestCallControlSendDtmf:
+    """send_dtmf() dispatches to the injected _send_dtmf_fn; warns otherwise."""
+
+    async def test_send_dtmf_warns_when_not_wired(self, caplog):
+        from patter.models import CallControl
+        cc = CallControl("c", "a", "b", "twilio")
+        with caplog.at_level(logging.WARNING):
+            await cc.send_dtmf("123")
+        assert any("send_dtmf" in r.message for r in caplog.records)
+
+    async def test_send_dtmf_dispatches_with_delay(self):
+        from patter.models import CallControl
+        calls: list[tuple[str, int]] = []
+
+        async def fake_send(digits: str, delay_ms: int) -> None:
+            calls.append((digits, delay_ms))
+
+        cc = CallControl("c", "a", "b", "twilio", _send_dtmf_fn=fake_send)
+        await cc.send_dtmf("1234#", delay_ms=500)
+        assert calls == [("1234#", 500)]
+
+    async def test_send_dtmf_default_delay(self):
+        from patter.models import CallControl
+        calls: list[tuple[str, int]] = []
+
+        async def fake_send(digits: str, delay_ms: int) -> None:
+            calls.append((digits, delay_ms))
+
+        cc = CallControl("c", "a", "b", "twilio", _send_dtmf_fn=fake_send)
+        await cc.send_dtmf("9")
+        assert calls == [("9", 300)]

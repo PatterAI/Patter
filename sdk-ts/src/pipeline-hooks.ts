@@ -17,6 +17,21 @@ export class PipelineHookExecutor {
   }
 
   /**
+   * Run beforeSendToStt hook. Returns null to drop the audio chunk.
+   * If no hook is defined, returns the audio unchanged.
+   * Fail-open: on exception, the original audio passes through.
+   */
+  async runBeforeSendToStt(audio: Buffer, ctx: HookContext): Promise<Buffer | null> {
+    if (!this.hooks?.beforeSendToStt) return audio;
+    try {
+      return await this.hooks.beforeSendToStt(audio, ctx);
+    } catch (e) {
+      getLogger().error('Pipeline hook beforeSendToStt threw:', e);
+      return audio;
+    }
+  }
+
+  /**
    * Run afterTranscribe hook. Returns null if hook vetoes the turn.
    * If no hook is defined, returns the transcript unchanged.
    */

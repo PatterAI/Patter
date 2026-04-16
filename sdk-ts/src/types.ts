@@ -141,12 +141,41 @@ export interface HookContext {
 }
 
 export interface PipelineHooks {
+  /** Called with the raw PCM audio chunk before it is forwarded to the STT provider.
+   *  Return null to drop the chunk (e.g., for custom VAD gating). */
+  beforeSendToStt?: (audio: Buffer, ctx: HookContext) => Buffer | null | Promise<Buffer | null>;
   /** Called after STT produces a transcript, before LLM. Return null to skip this turn. */
   afterTranscribe?: (transcript: string, ctx: HookContext) => string | null | Promise<string | null>;
   /** Called before TTS, per-sentence in streaming mode. Return null to skip TTS for this sentence. */
   beforeSynthesize?: (text: string, ctx: HookContext) => string | null | Promise<string | null>;
   /** Called after TTS produces an audio chunk. Return null to discard this chunk. */
   afterSynthesize?: (audio: Buffer, text: string, ctx: HookContext) => Buffer | null | Promise<Buffer | null>;
+}
+
+/** Voice activity event emitted by a VADProvider. */
+export interface VADEvent {
+  readonly type: 'speech_start' | 'speech_end' | 'silence';
+  readonly confidence?: number;
+  readonly durationMs?: number;
+}
+
+/** Server-side voice activity detector. Integrated before STT in pipeline mode. */
+export interface VADProvider {
+  processFrame(pcmChunk: Buffer, sampleRate: number): Promise<VADEvent | null>;
+  close(): Promise<void>;
+}
+
+/** Pre-STT audio filter — noise cancellation, gain, EQ. */
+export interface AudioFilter {
+  process(pcmChunk: Buffer, sampleRate: number): Promise<Buffer>;
+  close(): Promise<void>;
+}
+
+/** Mixes background audio (hold music, thinking cues) with TTS output. */
+export interface BackgroundAudioPlayer {
+  start(): Promise<void>;
+  mix(agentPcm: Buffer, sampleRate: number): Promise<Buffer>;
+  stop(): Promise<void>;
 }
 
 export interface AgentOptions {
@@ -174,6 +203,12 @@ export interface AgentOptions {
    *  Each function receives a string and returns the transformed string.
    *  Applied in order before the ``beforeSynthesize`` hook. */
   textTransforms?: Array<(text: string) => string>;
+  /** Optional server-side VAD (e.g., Silero). Pipeline mode only. */
+  vad?: VADProvider;
+  /** Optional pre-STT audio filter (noise cancellation). Pipeline mode only. */
+  audioFilter?: AudioFilter;
+  /** Optional background audio mixer (hold music, thinking cues). Pipeline mode only. */
+  backgroundAudio?: BackgroundAudioPlayer;
 }
 
 export type PipelineMessageHandler = (data: Record<string, unknown>) => Promise<string>;

@@ -3,7 +3,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
+
+if TYPE_CHECKING:
+    from patter.providers.base import AudioFilter, BackgroundAudioPlayer, VADProvider
 
 logger = logging.getLogger("patter")
 
@@ -45,6 +48,9 @@ class PipelineHooks:
     to skip the downstream step. Hooks may be sync or async.
 
     Attributes:
+        before_send_to_stt: Called with the raw PCM audio chunk before it is
+            forwarded to the STT provider. Return ``None`` to drop the chunk
+            (e.g., to implement custom VAD gating).
         after_transcribe: Called after STT, before LLM. Return ``None`` to skip turn.
         before_synthesize: Called before TTS, per-sentence in streaming mode.
             Return ``None`` to skip TTS for this sentence.
@@ -52,6 +58,7 @@ class PipelineHooks:
             Return ``None`` to discard the chunk.
     """
 
+    before_send_to_stt: Callable | None = None
     after_transcribe: Callable | None = None
     before_synthesize: Callable | None = None
     after_synthesize: Callable | None = None
@@ -74,6 +81,9 @@ class Agent:
     guardrails: list[Guardrail | dict] | None = None  # List of Guardrail objects or guardrail dicts
     hooks: PipelineHooks | None = None  # Pipeline hooks for pipeline mode
     text_transforms: list[Callable] | None = None  # Text transforms applied to LLM output before TTS
+    vad: "VADProvider | None" = None  # Optional server-side VAD (e.g., Silero) — pipeline mode only
+    audio_filter: "AudioFilter | None" = None  # Optional pre-STT audio filter (noise cancel) — pipeline mode only
+    background_audio: "BackgroundAudioPlayer | None" = None  # Optional background audio mixer — pipeline mode only
 
 
 @dataclass(frozen=True)
@@ -189,6 +199,7 @@ class CallControl:
         *,
         _transfer_fn=None,
         _hangup_fn=None,
+        _send_dtmf_fn=None,
     ):
         self.call_id = call_id
         self.caller = caller
@@ -196,6 +207,7 @@ class CallControl:
         self.telephony_provider = telephony_provider
         self._transfer_fn = _transfer_fn
         self._hangup_fn = _hangup_fn
+        self._send_dtmf_fn = _send_dtmf_fn
         self._transferred = asyncio.Event()
         self._hung_up = asyncio.Event()
 
@@ -229,3 +241,15 @@ class CallControl:
             self._hung_up.set()
         else:
             logger.warning("hangup() not available for this provider mode")
+
+    async def send_dtmf(self, digits: str, *, delay_ms: int = 300) -> None:
+        """Send DTMF digits (for IVR navigation, e.g. "1234#").
+
+        Args:
+            digits: String of DTMF digits (0-9, *, #).
+            delay_ms: Delay in milliseconds between consecutive digits.
+        """
+        if self._send_dtmf_fn is not None:
+            await self._send_dtmf_fn(digits, delay_ms)
+        else:
+            logger.warning("send_dtmf() not available for this provider mode")
