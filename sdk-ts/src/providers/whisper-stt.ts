@@ -136,6 +136,7 @@ export class WhisperSTT {
         method: 'POST',
         headers: { Authorization: `Bearer ${this.apiKey}` },
         body: formData,
+        signal: AbortSignal.timeout(15_000),
       });
 
       if (!resp.ok) {

@@ -107,6 +107,8 @@ class ElevenLabsConvAIAdapter:
 
                 elif msg_type == "agent_response":
                     yield ("transcript_output", data.get("text", ""))
+                    # ElevenLabs agent_response is complete text, signal turn done
+                    yield ("response_done", {})
 
                 elif msg_type == "interruption":
                     yield ("interruption", None)

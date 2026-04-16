@@ -17,9 +17,11 @@ test.describe("Call transfer", () => {
     expect(response.status()).toBe(200);
     const body = await response.text();
 
-    // The stream URL should contain the caller and callee as query params
-    expect(body).toContain("caller=%2B14155550001");
-    expect(body).toContain("callee=%2B15551234567");
+    // Caller/callee are passed via TwiML <Parameter> elements (not query params)
+    expect(body).toContain('name="caller"');
+    expect(body).toContain("+14155550001");
+    expect(body).toContain('name="callee"');
+    expect(body).toContain("+15551234567");
   });
 
   test("multiple webhook calls produce unique stream URLs", async ({

@@ -6,13 +6,15 @@
  * nothing is written to disk.
  */
 
+import http from 'node:http';
+
 export function notifyDashboard(
   callData: Record<string, unknown>,
   port = 8000,
 ): void {
   try {
     const body = JSON.stringify(callData);
-    const req = (require('node:http') as typeof import('node:http')).request(
+    const req = http.request(
       {
         hostname: '127.0.0.1',
         port,

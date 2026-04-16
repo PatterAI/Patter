@@ -75,6 +75,9 @@ export class ElevenLabsConvAIAdapter {
         this.eventCallback('transcript_input', parsed['text'] ?? '');
       } else if (msgType === 'agent_response') {
         this.eventCallback('transcript_output', parsed['text'] ?? '');
+        // ElevenLabs agent_response contains the complete text (not a delta),
+        // so signal turn completion immediately.
+        this.eventCallback('response_done', null);
       } else if (msgType === 'interruption') {
         this.eventCallback('interruption', null);
       } else if (msgType === 'error') {

@@ -84,9 +84,9 @@ export class MetricsStore extends EventEmitter {
 
     const entry: CallRecord = {
       call_id: callId,
-      caller: active?.caller || '',
-      callee: active?.callee || '',
-      direction: active?.direction || 'inbound',
+      caller: (data.caller as string) || active?.caller || '',
+      callee: (data.callee as string) || active?.callee || '',
+      direction: active?.direction || (data.direction as string) || 'inbound',
       started_at: active?.started_at || 0,
       ended_at: Date.now() / 1000,
       transcript: (data.transcript as CallRecord['transcript']) || [],

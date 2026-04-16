@@ -401,7 +401,8 @@ async def test_twilio_stream_bridge_pipeline_sends_audio_to_stt():
             pass
 
     # The media event should have caused audio to be sent to Deepgram
-    mock_stt.send_audio.assert_called_once_with(mulaw_bytes)
+    # (transcoded from mulaw 8kHz → PCM 16kHz for Twilio pipeline mode)
+    mock_stt.send_audio.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

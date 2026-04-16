@@ -6,7 +6,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Patter | Dashboard</title>
-<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1188 1773' fill='none'%3E%3Cpath d='M25 561L245 694M25 561V818M245 694V951M25 961V1218M25 1357V1614M245 1489V1747M245 1093V1351M942 823V1080M1161 955V1213M1162 555V812M942 422V679M669 585V843L787 913M942 25V282M1162 158V415M25 818L245 951M244 1094L464 962M25 961L143 890M244 1352L464 1219M942 823L1162 956M942 679L1162 812M721 811L942 679M669 842L724 809M669 586L724 553M1041 883L1162 812M245 1747L1161 1213M244 1490L942 1080M25 1357L142 1289M518 1071L942 823M721 555L942 422M942 422L1162 556M942 282L1162 415M942 25L1162 158M942 1080L1161 1213M25 1218L245 1351M25 961L245 1094M464 962L519 929M464 1219L519 1186V928L403 859M25 1357L245 1490M25 1614L245 1747M25 561L942 25M244 694L941 282M1043 484L1162 415M245 951L668 704' stroke='%2309090b' stroke-width='50' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1188 1773' fill='none'%3E%3Cstyle%3Epath%7Bstroke:%2309090b%7D@media(prefers-color-scheme:dark)%7Bpath%7Bstroke:%23e4e4e7%7D%7D%3C/style%3E%3Cpath d='M25 561L245 694M25 561V818M245 694V951M25 961V1218M25 1357V1614M245 1489V1747M245 1093V1351M942 823V1080M1161 955V1213M1162 555V812M942 422V679M669 585V843L787 913M942 25V282M1162 158V415M25 818L245 951M244 1094L464 962M25 961L143 890M244 1352L464 1219M942 823L1162 956M942 679L1162 812M721 811L942 679M669 842L724 809M669 586L724 553M1041 883L1162 812M245 1747L1161 1213M244 1490L942 1080M25 1357L142 1289M518 1071L942 823M721 555L942 422M942 422L1162 556M942 282L1162 415M942 25L1162 158M942 1080L1161 1213M25 1218L245 1351M25 961L245 1094M464 962L519 929M464 1219L519 1186V928L403 859M25 1357L245 1490M25 1614L245 1747M25 561L942 25M244 694L941 282M1043 484L1162 415M245 951L668 704' stroke-width='50' stroke-linecap='round'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -30,6 +30,29 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     --radius: 12px;
     --font: 'Instrument Sans', ui-sans-serif, system-ui, sans-serif;
     --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    --header-bg: #fff;
+    --assistant-bubble: #f0eeff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #151518;
+      --fg: #e4e4e7;
+      --card: #1c1c21;
+      --primary: #e4e4e7;
+      --primary-fg: #18181b;
+      --secondary: #232329;
+      --muted: #8b8b95;
+      --border: #2c2c33;
+      --border-d: #3a3a44;
+      --green: #34d399;
+      --red: #f87171;
+      --blue: #60a5fa;
+      --purple: #c4b5fd;
+      --orange: #fdba74;
+      --yellow: #fbbf24;
+      --header-bg: #1a1a1f;
+      --assistant-bubble: #252230;
+    }
   }
   * { margin:0; padding:0; box-sizing:border-box; }
   html { -webkit-font-smoothing: antialiased; }
@@ -45,7 +68,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   /* Header */
   header {
     position: sticky; top: 0; z-index: 100;
-    background: #fff;
+    background: var(--header-bg);
     border-bottom: 1px solid var(--border);
     padding: 0 24px;
     height: 56px;
@@ -162,6 +185,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
   .cost { color: #16a34a; font-family: var(--mono); font-size: 13px; }
   .latency { color: #ca8a04; font-family: var(--mono); font-size: 13px; }
+  @media (prefers-color-scheme: dark) {
+    .cost { color: var(--green); }
+    .latency { color: var(--yellow); }
+    code { background: var(--secondary); color: var(--fg); }
+  }
   .empty {
     text-align: center; padding: 48px; color: var(--muted);
     font-size: 14px;
@@ -170,41 +198,46 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   /* Modal */
   .modal-overlay {
     display: none; position: fixed; inset: 0;
-    background: rgba(0,0,0,0.3); backdrop-filter: blur(4px);
+    background: rgba(0,0,0,0.25); backdrop-filter: blur(6px);
     z-index: 200;
     justify-content: center; align-items: flex-start;
-    padding: 60px 20px; overflow-y: auto;
+    padding: 48px 20px; overflow-y: auto;
   }
   .modal-overlay.open { display: flex; }
   .modal {
     background: var(--card);
     border: 1px solid var(--border);
     border-radius: 16px;
-    max-width: 800px; width: 100%;
-    padding: 28px;
-    box-shadow: 0 24px 48px rgba(0,0,0,0.1);
+    max-width: 820px; width: 100%;
+    padding: 0;
+    box-shadow: 0 24px 64px rgba(0,0,0,0.12), 0 0 0 1px rgba(0,0,0,0.03);
+    overflow: hidden;
   }
   .modal-header {
     display: flex; justify-content: space-between; align-items: center;
-    margin-bottom: 24px;
+    padding: 20px 28px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
   }
-  .modal-header h2 { font-size: 16px; font-weight: 600; }
+  .modal-header h2 { font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 10px; }
   .modal-close {
     background: none; border: 1px solid var(--border);
-    color: var(--muted); width: 32px; height: 32px;
-    border-radius: 8px; font-size: 18px; cursor: pointer;
+    color: var(--muted); width: 30px; height: 30px;
+    border-radius: 8px; font-size: 16px; cursor: pointer;
     display: flex; align-items: center; justify-content: center;
     transition: all .15s;
   }
   .modal-close:hover { background: var(--secondary); color: var(--fg); }
+  .modal-body { padding: 24px 28px; }
 
   .detail-grid {
     display: grid; grid-template-columns: 1fr 1fr;
-    gap: 16px; margin-bottom: 20px;
+    gap: 14px; margin-bottom: 20px;
   }
   .detail-card {
-    background: var(--secondary);
-    border-radius: var(--radius); padding: 16px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 16px 18px;
   }
   .detail-card h3 {
     font-size: 11px; color: var(--muted);
@@ -212,23 +245,44 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     margin-bottom: 10px; font-weight: 600;
   }
   .detail-row {
-    display: flex; justify-content: space-between;
-    font-size: 13px; padding: 4px 0;
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 13px; padding: 5px 0;
   }
-  .detail-row .k { color: var(--muted); }
+  .detail-row .k { color: var(--muted); font-weight: 500; }
+  .detail-row span:last-child { font-weight: 500; text-align: right; }
+  .detail-row .mono { font-family: var(--mono); font-size: 12px; }
+  .detail-sep {
+    border-top: 1px solid var(--border); padding-top: 8px; margin-top: 6px;
+  }
 
   .transcript-box {
-    background: var(--secondary);
+    border: 1px solid var(--border);
     border-radius: var(--radius);
-    padding: 16px; max-height: 300px; overflow-y: auto;
+    padding: 16px; max-height: 340px; overflow-y: auto;
+    background: var(--bg);
   }
-  .transcript-box .msg { padding: 4px 0; font-size: 13px; }
+  .transcript-box .msg {
+    padding: 8px 12px; border-radius: 10px; font-size: 13px;
+    max-width: 85%; margin-bottom: 6px; line-height: 1.5;
+  }
+  .transcript-box .msg.user {
+    background: var(--secondary); margin-left: auto;
+    border-bottom-right-radius: 4px;
+  }
+  .transcript-box .msg.assistant {
+    background: var(--assistant-bubble); margin-right: auto;
+    border-bottom-left-radius: 4px;
+  }
+  .transcript-box .role {
+    font-weight: 600; font-size: 11px; text-transform: uppercase;
+    letter-spacing: 0.3px; display: block; margin-bottom: 2px;
+  }
   .transcript-box .msg.user .role { color: var(--blue); }
   .transcript-box .msg.assistant .role { color: #7c3aed; }
-  .transcript-box .role { font-weight: 600; margin-right: 8px; }
 
   /* Turn bars */
   .turns-table { margin-top: 16px; }
+  .turns-table table { border: 1px solid var(--border); }
   .bar-container { display: flex; height: 14px; border-radius: 4px; overflow: hidden; min-width: 120px; }
   .bar-stt { background: var(--blue); }
   .bar-llm { background: var(--purple); }
@@ -313,7 +367,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <h2 id="modal-title">Call Detail</h2>
       <button class="modal-close" onclick="closeModal()">&times;</button>
     </div>
-    <div id="modal-body"></div>
+    <div class="modal-body" id="modal-body"></div>
   </div>
 </div>
 
@@ -403,7 +457,7 @@ async function refreshActive() {
       <td>${esc(c.caller) || '-'}</td>
       <td>${esc(c.callee) || '-'}</td>
       <td>${esc(c.direction) || '-'}</td>
-      <td>${fmtDur(dur)}</td>
+      <td data-started="${c.started_at || 0}">${fmtDur(dur)}</td>
       <td>${turns}</td>
     </tr>`;
   }).join('');
@@ -418,36 +472,42 @@ async function showCall(callId) {
   const latP95 = m.latency_p95 || {};
   const turns = m.turns || [];
 
-  $('#modal-title').textContent = `Call ${shortId(c.call_id)}`;
+  const modeLabel = (m.provider_mode || '').replace(/_/g, ' ');
+  const modeBadgeClass = (m.provider_mode || '').indexOf('pipeline') !== -1 ? 'badge-pipeline' : 'badge-realtime';
+  $('#modal-title').innerHTML = `Call <code>${shortId(c.call_id)}</code> <span class="badge ${modeBadgeClass}" style="font-size:10px">${esc(modeLabel)}</span>`;
+
+  const isRealtime = (m.provider_mode || '').indexOf('realtime') !== -1;
 
   let html = `<div class="detail-grid">
     <div class="detail-card">
       <h3>Overview</h3>
-      <div class="detail-row"><span class="k">Call ID</span><span>${esc(c.call_id)}</span></div>
       <div class="detail-row"><span class="k">Direction</span><span>${esc(c.direction) || '-'}</span></div>
-      <div class="detail-row"><span class="k">From</span><span>${esc(c.caller) || '-'}</span></div>
-      <div class="detail-row"><span class="k">To</span><span>${esc(c.callee) || '-'}</span></div>
-      <div class="detail-row"><span class="k">Duration</span><span>${fmtDur(m.duration_seconds)}</span></div>
-      <div class="detail-row"><span class="k">Mode</span><span>${esc(m.provider_mode) || '-'}</span></div>
+      <div class="detail-row"><span class="k">From</span><span class="mono">${esc(c.caller) || '-'}</span></div>
+      <div class="detail-row"><span class="k">To</span><span class="mono">${esc(c.callee) || '-'}</span></div>
+      <div class="detail-row"><span class="k">Duration</span><span style="font-weight:600">${fmtDur(m.duration_seconds)}</span></div>
+      ${isRealtime ? '' : `
       <div class="detail-row"><span class="k">STT</span><span>${esc(m.stt_provider) || '-'}</span></div>
       <div class="detail-row"><span class="k">TTS</span><span>${esc(m.tts_provider) || '-'}</span></div>
-      <div class="detail-row"><span class="k">LLM</span><span>${esc(m.llm_provider) || '-'}</span></div>
+      <div class="detail-row"><span class="k">LLM</span><span>${esc(m.llm_provider) || '-'}</span></div>`}
       <div class="detail-row"><span class="k">Telephony</span><span>${esc(m.telephony_provider) || '-'}</span></div>
     </div>
     <div class="detail-card">
-      <h3>Cost Breakdown</h3>
-      <div class="detail-row"><span class="k">STT</span><span class="cost">${fmt$(cost.stt || 0)}</span></div>
+      <h3>Cost</h3>
+      ${isRealtime ?
+        `<div class="detail-row"><span class="k">OpenAI</span><span class="cost">${fmt$(cost.llm || 0)}</span></div>` :
+        `<div class="detail-row"><span class="k">STT</span><span class="cost">${fmt$(cost.stt || 0)}</span></div>
       <div class="detail-row"><span class="k">LLM</span><span class="cost">${fmt$(cost.llm || 0)}</span></div>
-      <div class="detail-row"><span class="k">TTS</span><span class="cost">${fmt$(cost.tts || 0)}</span></div>
+      <div class="detail-row"><span class="k">TTS</span><span class="cost">${fmt$(cost.tts || 0)}</span></div>`}
       <div class="detail-row"><span class="k">Telephony</span><span class="cost">${fmt$(cost.telephony || 0)}</span></div>
-      <div class="detail-row" style="border-top:1px solid var(--border);padding-top:8px;margin-top:6px">
-        <span class="k" style="font-weight:600">Total</span><span class="cost" style="font-weight:700">${fmt$(cost.total || 0)}</span>
+      <div class="detail-row detail-sep">
+        <span class="k" style="font-weight:600">Total</span><span class="cost" style="font-weight:700;font-size:14px">${fmt$(cost.total || 0)}</span>
       </div>
-      <h3 style="margin-top:16px">Latency (avg / p95)</h3>
+      <h3 style="margin-top:16px">Latency <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--muted)">(avg / p95)</span></h3>
+      ${isRealtime ? '' : `
       <div class="detail-row"><span class="k">STT</span><span class="latency">${fmtMs(latAvg.stt_ms)} / ${fmtMs(latP95.stt_ms)}</span></div>
       <div class="detail-row"><span class="k">LLM</span><span class="latency">${fmtMs(latAvg.llm_ms)} / ${fmtMs(latP95.llm_ms)}</span></div>
-      <div class="detail-row"><span class="k">TTS</span><span class="latency">${fmtMs(latAvg.tts_ms)} / ${fmtMs(latP95.tts_ms)}</span></div>
-      <div class="detail-row"><span class="k">Total</span><span class="latency" style="font-weight:700">${fmtMs(latAvg.total_ms)} / ${fmtMs(latP95.total_ms)}</span></div>
+      <div class="detail-row"><span class="k">TTS</span><span class="latency">${fmtMs(latAvg.tts_ms)} / ${fmtMs(latP95.tts_ms)}</span></div>`}
+      <div class="detail-row"><span class="k">${isRealtime ? 'End-to-end' : 'Total'}</span><span class="latency" style="font-weight:700;font-size:14px">${fmtMs(latAvg.total_ms)} / ${fmtMs(latP95.total_ms)}</span></div>
     </div>
   </div>`;
 
@@ -481,9 +541,11 @@ async function showCall(callId) {
     });
     html += `</tbody></table>
       <div style="margin-top:10px;font-size:11px;color:var(--muted)">
-        <span style="color:var(--blue)">&#9632;</span> STT &nbsp;
-        <span style="color:var(--purple)">&#9632;</span> LLM &nbsp;
-        <span style="color:var(--orange)">&#9632;</span> TTS
+        ${isRealtime ?
+          '<span style="color:var(--purple)">&#9632;</span> End-to-end' :
+          `<span style="color:var(--blue)">&#9632;</span> STT &nbsp;
+          <span style="color:var(--purple)">&#9632;</span> LLM &nbsp;
+          <span style="color:var(--orange)">&#9632;</span> TTS`}
       </div>
     </div>`;
   }
@@ -517,6 +579,17 @@ async function refresh() {
 }
 
 refresh();
+
+// Update active call durations every second
+setInterval(() => {
+  const cells = document.querySelectorAll('#active-body td[data-started]');
+  if (!cells.length) return;
+  const now = Date.now() / 1000;
+  cells.forEach(td => {
+    const started = parseFloat(td.getAttribute('data-started'));
+    if (started) td.textContent = fmtDur(Math.round(now - started));
+  });
+}, 1000);
 
 if (typeof EventSource !== 'undefined') {
   const tokenParam = new URLSearchParams(window.location.search).get('token');
