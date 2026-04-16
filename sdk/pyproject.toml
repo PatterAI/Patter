@@ -122,6 +122,24 @@ background-audio = [
 ]
 rime = ["aiohttp>=3.10"]
 lmnt = ["aiohttp>=3.10"]
+gemini-live = [
+    "google-genai>=1.55",
+]
+ultravox = [
+    "aiohttp>=3.10",
+]
+evals = [
+    "pyyaml>=6.0",
+    "openai>=1.0",
+]
+tracing = [
+    "opentelemetry-api>=1.27",
+    "opentelemetry-sdk>=1.27",
+    "opentelemetry-exporter-otlp>=1.27",
+]
+scheduling = [
+    "apscheduler>=3.10",
+]
 
 [build-system]
 requires = ["setuptools>=68.0"]

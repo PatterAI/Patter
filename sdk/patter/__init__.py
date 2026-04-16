@@ -28,6 +28,12 @@ from patter.services.fallback_provider import (
 )
 from patter.services.chat_context import ChatContext, ChatMessage
 from patter.services.ivr import DtmfEvent, IVRActivity, TfidfLoopDetector, format_dtmf
+from patter.scheduler import (
+    ScheduleHandle,
+    schedule_cron,
+    schedule_once,
+    schedule_interval,
+)
 
 __all__ = [
     "Patter",
@@ -63,4 +69,8 @@ __all__ = [
     "TfidfLoopDetector",
     "DtmfEvent",
     "format_dtmf",
+    "ScheduleHandle",
+    "schedule_cron",
+    "schedule_once",
+    "schedule_interval",
 ]

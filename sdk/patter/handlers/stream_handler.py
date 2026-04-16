@@ -30,6 +30,7 @@ from patter.handlers.common import (
     _validate_e164,
 )
 from patter.models import HookContext
+from patter.observability.tracing import SPAN_STT, SPAN_TTS, start_span
 from patter.services.pipeline_hooks import PipelineHookExecutor
 from patter.services.sentence_chunker import SentenceChunker
 from patter.utils.log_sanitize import mask_phone_number, sanitize_log_value
@@ -867,6 +868,14 @@ class PipelineStreamHandler(StreamHandler):
         if processed is None:
             return True  # hook skipped this sentence, not an interruption
 
+        _tts_span = start_span(
+            SPAN_TTS,
+            {
+                "patter.tts.text_len": len(processed),
+                "patter.call.id": self.call_id,
+            },
+        )
+        _tts_span.__enter__()
         gen = self._tts.synthesize(processed)
         try:
             async for audio_chunk in gen:
@@ -886,6 +895,7 @@ class PipelineStreamHandler(StreamHandler):
                 await self.audio_sender.send_audio(processed_audio)
         finally:
             await gen.aclose()
+            _tts_span.__exit__(None, None, None)
         return True
 
     async def _process_streaming_response(self, result, call_id: str) -> str:
@@ -1026,6 +1036,19 @@ class PipelineStreamHandler(StreamHandler):
             async for transcript in self._stt.receive_transcripts():
                 if not (transcript.is_final and transcript.text):
                     continue
+
+                # Record one STT span per final transcript turn. The span is
+                # short-lived (just the attribute set) because STT is
+                # streaming — we do not re-wrap the long-lived iterator.
+                with start_span(
+                    SPAN_STT,
+                    {
+                        "patter.stt.text_len": len(transcript.text),
+                        "patter.stt.confidence": float(transcript.confidence or 0.0),
+                        "patter.call.id": self.call_id,
+                    },
+                ):
+                    pass
 
                 logger.info("User: %s", sanitize_log_value(transcript.text))
 

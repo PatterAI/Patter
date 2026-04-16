@@ -24,10 +24,17 @@ def main() -> None:
         "--port", type=int, default=8000, help="Port to serve dashboard on (default: 8000)"
     )
 
+    # patter eval run <suite>
+    from patter.evals.cli import build_eval_parser, dispatch_eval
+
+    build_eval_parser(subparsers)
+
     args = parser.parse_args()
 
     if args.command == "dashboard":
         asyncio.run(_run_dashboard(args.port))
+    elif args.command == "eval":
+        sys.exit(dispatch_eval(args))
     else:
         parser.print_help()
         sys.exit(1)
