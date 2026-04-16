@@ -1,0 +1,23 @@
+---
+title: "Cartesia STT"
+description: "Streaming speech-to-text via Cartesia's ink-whisper model."
+---
+
+# Cartesia STT
+
+Streaming speech-to-text using Cartesia's `ink-whisper` model. Ported from LiveKit Agents (Apache 2.0) — pure-`aiohttp` transport, no vendor SDK required.
+
+## Quickstart
+
+```python
+from patter.providers.cartesia_stt import CartesiaSTT
+
+stt = CartesiaSTT(api_key="csk_...", language="en")
+await stt.connect()
+await stt.send_audio(pcm_chunk)  # 16 kHz PCM s16le
+async for t in stt.receive_transcripts():
+    print(t.text, t.is_final, t.confidence)
+await stt.close()
+```
+
+Install the extra: `pip install getpatter[cartesia]`. Supported sample rates: 8000, 16000, 24000, 44100, 48000 Hz.

@@ -1,0 +1,23 @@
+---
+title: "Cartesia STT"
+description: "Streaming speech-to-text via Cartesia's ink-whisper model."
+---
+
+# Cartesia STT
+
+Streaming speech-to-text using Cartesia's `ink-whisper` model. Ported from LiveKit Agents (Apache 2.0) — uses `ws`, no vendor SDK required.
+
+## Quickstart
+
+```typescript
+import { CartesiaSTT } from "getpatter";
+
+const stt = new CartesiaSTT("csk_...", { language: "en" });
+stt.onTranscript((t) => console.log(t.text, t.isFinal, t.confidence));
+await stt.connect();
+stt.sendAudio(pcmBuffer); // 16 kHz PCM s16le
+// ...
+stt.close();
+```
+
+Supported sample rates: 8000, 16000, 24000, 44100, 48000 Hz.

@@ -59,6 +59,10 @@ export { DeepgramSTT } from "./providers/deepgram-stt";
 export { SonioxSTT } from "./providers/soniox-stt";
 export type { SonioxSTTOptions } from "./providers/soniox-stt";
 export { WhisperSTT } from "./providers/whisper-stt";
+export { AssemblyAISTT } from "./providers/assemblyai-stt";
+export type { AssemblyAISTTOptions, AssemblyAIModel, AssemblyAIEncoding } from "./providers/assemblyai-stt";
+export { CartesiaSTT } from "./providers/cartesia-stt";
+export type { CartesiaSTTOptions, CartesiaEncoding } from "./providers/cartesia-stt";
 export { ElevenLabsTTS } from "./providers/elevenlabs-tts";
 export { OpenAITTS } from "./providers/openai-tts";
 export {
