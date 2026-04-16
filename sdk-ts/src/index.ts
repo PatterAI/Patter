@@ -70,3 +70,17 @@ export { startTunnel } from "./tunnel";
 export type { TunnelHandle } from "./tunnel";
 export { ChatContext } from "./chat-context";
 export type { ChatMessage, ChatRole, OpenAIMessage, AnthropicMessage, AnthropicConversion } from "./chat-context";
+export {
+  IVRActivity,
+  TfidfLoopDetector,
+  DTMF_EVENTS,
+  formatDtmf,
+} from "./services/ivr";
+export type {
+  DtmfEvent,
+  IVRActivityOptions,
+  IVRToolDefinition,
+  TfidfLoopDetectorOptions,
+  LoopCallback,
+  SilenceCallback,
+} from "./services/ivr";
