@@ -442,8 +442,17 @@ export class StreamHandler {
   ): Promise<void> {
     if (!this.tts || !this.isSpeaking) return;
 
+    // Apply text transforms before the beforeSynthesize hook
+    let transformed = sentence;
+    const transforms = this.deps.agent.textTransforms;
+    if (transforms) {
+      for (const fn of transforms) {
+        transformed = fn(transformed);
+      }
+    }
+
     // beforeSynthesize hook (per-sentence)
-    const processedText = await hookExecutor.runBeforeSynthesize(sentence, hookCtx);
+    const processedText = await hookExecutor.runBeforeSynthesize(transformed, hookCtx);
     if (processedText === null) return;
 
     try {

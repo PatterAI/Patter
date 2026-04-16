@@ -73,6 +73,7 @@ class Agent:
     variables: dict | None = None  # Dynamic variables for ``{placeholder}`` substitution in system_prompt
     guardrails: list[Guardrail | dict] | None = None  # List of Guardrail objects or guardrail dicts
     hooks: PipelineHooks | None = None  # Pipeline hooks for pipeline mode
+    text_transforms: list[Callable] | None = None  # Text transforms applied to LLM output before TTS
 
 
 @dataclass(frozen=True)

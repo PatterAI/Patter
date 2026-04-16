@@ -843,8 +843,15 @@ class PipelineStreamHandler(StreamHandler):
         if self._tts is None:
             return True
 
+        # Apply text transforms before the beforeSynthesize hook
+        transformed = sentence
+        text_transforms = getattr(self.agent, "text_transforms", None)
+        if text_transforms:
+            for fn in text_transforms:
+                transformed = fn(transformed)
+
         # beforeSynthesize hook (per-sentence)
-        processed = await hook_executor.run_before_synthesize(sentence, hook_ctx)
+        processed = await hook_executor.run_before_synthesize(transformed, hook_ctx)
         if processed is None:
             return True  # hook skipped this sentence, not an interruption
 

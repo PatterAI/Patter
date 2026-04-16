@@ -170,6 +170,10 @@ export interface AgentOptions {
   guardrails?: Guardrail[];
   /** Pipeline hooks — intercept and transform data at each pipeline stage (pipeline mode only). */
   hooks?: PipelineHooks;
+  /** Text transforms applied to LLM output before TTS (pipeline mode only).
+   *  Each function receives a string and returns the transformed string.
+   *  Applied in order before the ``beforeSynthesize`` hook. */
+  textTransforms?: Array<(text: string) => string>;
 }
 
 export type PipelineMessageHandler = (data: Record<string, unknown>) => Promise<string>;
