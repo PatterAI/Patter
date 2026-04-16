@@ -476,8 +476,6 @@ export class StreamHandler {
     this.metricsAcc.startTurn();
     this.metricsAcc.recordSttComplete(transcript.text);
 
-    this.history.push({ role: 'user', text: transcript.text, timestamp: Date.now() });
-
     if (this.deps.onTranscript) {
       await this.deps.onTranscript({
         role: 'user',
@@ -496,6 +494,9 @@ export class StreamHandler {
       this.metricsAcc.recordTurnInterrupted();
       return;
     }
+
+    // Push filtered text to history (after hook, so LLM sees redacted/modified text)
+    this.history.push({ role: 'user', text: filteredTranscript, timestamp: Date.now() });
 
     let responseText = '';
 

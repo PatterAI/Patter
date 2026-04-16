@@ -390,16 +390,10 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                 elif ev_type == "transcript_output":
                     if ev_data:
                         response_text: str = ev_data
-                        blocked, _ = evaluate_guardrails(self.agent, response_text)
+                        blocked, guard_name = evaluate_guardrails(self.agent, response_text)
                         if blocked:
                             await self._adapter.cancel_response()
-                            replacement = "I'm sorry, I can't respond to that."
-                            guardrails = getattr(self.agent, "guardrails", None) or []
-                            for g in guardrails:
-                                r = (g.get("replacement") if isinstance(g, dict) else getattr(g, "replacement", None))
-                                if r:
-                                    replacement = r
-                                    break
+                            replacement = get_guardrail_replacement(self.agent, guard_name)
                             await self._adapter.send_text(replacement)
                             current_agent_text = ""
                         else:
@@ -856,9 +850,7 @@ class PipelineStreamHandler(StreamHandler):
 
         async for audio_chunk in self._tts.synthesize(processed):
             if not self._is_speaking:
-                if self.metrics is not None:
-                    self.metrics.record_turn_interrupted()
-                return False
+                return False  # caller handles interrupted metrics
 
             # afterSynthesize hook (per-chunk)
             processed_audio = await hook_executor.run_after_synthesize(
