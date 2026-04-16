@@ -558,6 +558,16 @@ export class StreamHandler {
         getLogger().error(`onMessage error (${label}):`, e);
         return;
       }
+      if (!responseText) {
+        // Common misuse: onMessage was provided as an observer (returning void)
+        // but it actually replaces the built-in LLM loop. Warn loudly — the caller
+        // will hear no audio until the handler returns a non-empty string.
+        getLogger().warn(
+          `onMessage returned empty/void (${label}) — no TTS will play. ` +
+          `If you intended to observe transcripts, use onTranscript instead; ` +
+          `if you meant to answer via the built-in LLM, remove onMessage and pass openaiKey.`,
+        );
+      }
     } else if (this.deps.onMessage && isRemoteUrl(this.deps.onMessage)) {
       const msgData = {
         text: filteredTranscript,
