@@ -8,7 +8,7 @@ test.describe("Answering Machine Detection (AMD)", () => {
   }) => {
     const response = await request.post(`${BASE}/webhooks/twilio/amd`, {
       form: {
-        CallSid: "CA_e2e_amd_001",
+        CallSid: "CA0000000000000000000000000000e001",
         AnsweredBy: "human",
         AccountSid: "ACtest123456789",
       },
@@ -21,7 +21,7 @@ test.describe("Answering Machine Detection (AMD)", () => {
   test("AMD webhook accepts machine_start detection", async ({ request }) => {
     const response = await request.post(`${BASE}/webhooks/twilio/amd`, {
       form: {
-        CallSid: "CA_e2e_amd_002",
+        CallSid: "CA0000000000000000000000000000e002",
         AnsweredBy: "machine_start",
         AccountSid: "ACtest123456789",
       },
@@ -36,7 +36,7 @@ test.describe("Answering Machine Detection (AMD)", () => {
     // With no voicemailMessage configured, no TwiML update is attempted.
     const response = await request.post(`${BASE}/webhooks/twilio/amd`, {
       form: {
-        CallSid: "CA_e2e_amd_003",
+        CallSid: "CA0000000000000000000000000000e003",
         AnsweredBy: "machine_end_beep",
         AccountSid: "ACtest123456789",
       },
@@ -50,7 +50,7 @@ test.describe("Answering Machine Detection (AMD)", () => {
   }) => {
     const response = await request.post(`${BASE}/webhooks/twilio/amd`, {
       form: {
-        CallSid: "CA_e2e_amd_004",
+        CallSid: "CA0000000000000000000000000000e004",
         AnsweredBy: "machine_end_silence",
         AccountSid: "ACtest123456789",
       },
@@ -62,7 +62,7 @@ test.describe("Answering Machine Detection (AMD)", () => {
   test("AMD webhook accepts fax detection", async ({ request }) => {
     const response = await request.post(`${BASE}/webhooks/twilio/amd`, {
       form: {
-        CallSid: "CA_e2e_amd_005",
+        CallSid: "CA0000000000000000000000000000e005",
         AnsweredBy: "fax",
         AccountSid: "ACtest123456789",
       },
@@ -77,7 +77,7 @@ test.describe("Answering Machine Detection (AMD)", () => {
   }) => {
     // Fire AMD events
     await request.post(`${BASE}/webhooks/twilio/amd`, {
-      form: { CallSid: "CA_e2e_amd_stable", AnsweredBy: "human" },
+      form: { CallSid: "CA0000000000000000000000000000ef00", AnsweredBy: "human" },
     });
 
     // Navigate to dashboard — should load with key elements visible

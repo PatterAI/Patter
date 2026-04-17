@@ -11,12 +11,16 @@ from __future__ import annotations
 import math
 from typing import Iterable
 
-import numpy as np
 import pytest
 
-from patter.providers.base import VADEvent
-from patter.providers.silero_onnx import OnnxModel
-from patter.providers.silero_vad import SileroVAD, _VADOptions
+# Silero VAD is an optional extra (`pip install getpatter[silero]`); skip the
+# whole module gracefully when numpy is not installed on CI runners that only
+# install base deps.
+np = pytest.importorskip("numpy")
+
+from patter.providers.base import VADEvent  # noqa: E402
+from patter.providers.silero_onnx import OnnxModel  # noqa: E402
+from patter.providers.silero_vad import SileroVAD, _VADOptions  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

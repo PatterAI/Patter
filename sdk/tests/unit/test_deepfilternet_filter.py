@@ -15,8 +15,11 @@ import sys
 import types
 from unittest.mock import MagicMock
 
-import numpy as np
 import pytest
+
+# DeepFilterNet is an optional extra (`pip install getpatter[deepfilternet]`);
+# skip the whole module when numpy is absent on CI runners with base deps only.
+np = pytest.importorskip("numpy")
 
 
 # ---------------------------------------------------------------------------
