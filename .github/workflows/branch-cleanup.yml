@@ -1,0 +1,146 @@
+name: Branch Cleanup
+
+# Daily sweep of remote branches that were merged into `main` (or `develop`)
+# but left undeleted. Skips protected branches, open-PR branches, and anything
+# matching a release/hotfix prefix.
+#
+# Default run is DRY-RUN (log what would be deleted but don't delete). Flip the
+# `dry_run` input to `false` to actually prune. The scheduled run is *not*
+# dry-run — once verified, we trust it to clean.
+
+on:
+  schedule:
+    # 04:00 UTC every day (one hour after docs-feature-drift)
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry-run mode (log only, do not delete)'
+        required: false
+        default: 'true'
+        type: choice
+        options: ['true', 'false']
+
+permissions:
+  contents: write   # required to delete refs
+  pull-requests: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prune merged branches
+        uses: actions/github-script@v8
+        with:
+          script: |
+            // On schedule we always prune for real. Manual dispatch honours the input.
+            const isDryRun =
+              context.eventName === 'workflow_dispatch'
+                ? context.payload.inputs?.dry_run !== 'false'
+                : false;
+
+            const PROTECTED = new Set(['main', 'develop', 'master', 'staging']);
+            const PROTECTED_PREFIXES = [/^release\//, /^hotfix\//, /^dependabot\//];
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            // 1. List all remote branches (paginated).
+            const branches = await github.paginate(
+              github.rest.repos.listBranches,
+              { owner, repo, per_page: 100 },
+            );
+
+            const deleted = [];
+            const skipped = [];
+            const kept = [];
+
+            for (const branch of branches) {
+              const name = branch.name;
+
+              if (PROTECTED.has(name) || PROTECTED_PREFIXES.some((re) => re.test(name))) {
+                skipped.push({ name, reason: 'protected' });
+                continue;
+              }
+
+              // 2. Skip if there is any open PR from this branch.
+              const { data: openPrs } = await github.rest.pulls.list({
+                owner,
+                repo,
+                state: 'open',
+                head: `${owner}:${name}`,
+                per_page: 1,
+              });
+              if (openPrs.length > 0) {
+                skipped.push({ name, reason: `open PR #${openPrs[0].number}` });
+                continue;
+              }
+
+              // 3. Check whether this branch had a merged PR into main or develop.
+              const { data: closedPrs } = await github.rest.pulls.list({
+                owner,
+                repo,
+                state: 'closed',
+                head: `${owner}:${name}`,
+                per_page: 20,
+              });
+              const mergedInto = closedPrs
+                .filter((pr) => pr.merged_at)
+                .map((pr) => pr.base.ref);
+
+              if (mergedInto.length === 0) {
+                kept.push({ name, reason: 'no merged PR' });
+                continue;
+              }
+
+              // 4. Delete (or log in dry-run).
+              if (isDryRun) {
+                deleted.push({ name, mergedInto: mergedInto.join(', '), dryRun: true });
+                continue;
+              }
+
+              try {
+                await github.rest.git.deleteRef({
+                  owner,
+                  repo,
+                  ref: `heads/${name}`,
+                });
+                deleted.push({ name, mergedInto: mergedInto.join(', ') });
+              } catch (err) {
+                kept.push({ name, reason: `delete failed: ${err.message}` });
+              }
+            }
+
+            // 5. Summary (Markdown, shown in Actions UI).
+            const summary = core.summary
+              .addHeading('Branch cleanup summary', 2)
+              .addRaw(`Mode: **${isDryRun ? 'DRY-RUN' : 'ACTIVE'}**`)
+              .addBreak()
+              .addBreak();
+
+            if (deleted.length > 0) {
+              summary
+                .addHeading(`${isDryRun ? 'Would delete' : 'Deleted'} (${deleted.length})`, 3)
+                .addTable([
+                  [{ data: 'branch', header: true }, { data: 'merged into', header: true }],
+                  ...deleted.map((d) => [d.name, d.mergedInto]),
+                ]);
+            } else {
+              summary.addRaw('No branches to delete.').addBreak();
+            }
+
+            if (skipped.length > 0) {
+              summary
+                .addHeading(`Skipped (${skipped.length})`, 3)
+                .addList(skipped.map((s) => `${s.name} — ${s.reason}`));
+            }
+
+            if (kept.length > 0) {
+              summary
+                .addHeading(`Kept (${kept.length})`, 3)
+                .addList(kept.map((k) => `${k.name} — ${k.reason}`));
+            }
+
+            await summary.write();
+
+            core.info(`Done. deleted=${deleted.length} skipped=${skipped.length} kept=${kept.length}`);
