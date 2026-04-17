@@ -134,7 +134,7 @@ await phone.serve({ agent, port: 8000 });
 <td align="center">→</td>
 <td align="center">
   <strong>Twilio</strong><br><sub>Telephony</sub><br><br>
-  <strong>Telnyx</strong> <sup>Beta</sup><br><sub>Telephony</sub>
+  <strong>Telnyx</strong><br><sub>Telephony</sub>
 </td>
 </tr>
 </table>
@@ -182,7 +182,7 @@ cp .env.example .env
 # Edit .env with your API keys
 ```
 
-> **Telnyx (Beta):** Telnyx is supported as an alternative telephony provider but is currently in beta — tested locally, not yet validated in production.
+> **Telnyx:** Telnyx is a fully supported telephony provider alternative to Twilio. Both carriers receive equal support for DTMF, transfer, recording, and metrics.
 
 ### Docker
 

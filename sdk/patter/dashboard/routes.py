@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 import time
 from datetime import datetime
 
@@ -78,6 +79,7 @@ def mount_dashboard(app, store: MetricsStore, token: str = "") -> None:
                     try:
                         event = await asyncio.wait_for(queue.get(), timeout=30.0)
                         event_type = event.get("type", "message")
+                        event_type = re.sub(r'[\r\n]', '', event_type)
                         data = json.dumps(event.get("data", {}), default=str)
                         yield f"event: {event_type}\ndata: {data}\n\n"
                     except asyncio.TimeoutError:

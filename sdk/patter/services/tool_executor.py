@@ -6,11 +6,24 @@ from urllib.parse import urlparse
 
 import httpx
 
+from patter.observability.tracing import SPAN_TOOL, start_span
+
 logger = logging.getLogger("patter")
 
 # Maximum size of a tool webhook response (1 MB).  Responses larger than this
 # are rejected to prevent OOM when the result is forwarded to OpenAI.
 _MAX_RESPONSE_BYTES = 1 * 1024 * 1024
+
+# Hostnames that must never be targeted by a webhook, even when they are not
+# literal IPs (DNS-based SSRF to cloud metadata endpoints or localhost aliases).
+_BLOCKED_HOSTNAMES = frozenset({
+    "localhost",
+    "localhost.localdomain",
+    "ip6-localhost",
+    "ip6-loopback",
+    "metadata.google.internal",
+    "metadata",
+})
 
 
 def _validate_webhook_url(url: str) -> None:
@@ -28,6 +41,11 @@ def _validate_webhook_url(url: str) -> None:
     hostname = parsed.hostname or ""
     if not hostname:
         raise ValueError("Webhook URL is missing a hostname")
+    # Reject known-dangerous hostnames up front, before any IP parsing, so
+    # that aliases like `localhost` or cloud metadata endpoints are blocked
+    # even when they do not resolve to a literal IP in the URL string.
+    if hostname.lower() in _BLOCKED_HOSTNAMES:
+        raise ValueError(f"Webhook URL points to a blocked hostname: {hostname!r}")
     # Block literal private/loopback IP addresses in the URL itself.
     # We intentionally avoid blocking based on DNS resolution here because
     # synchronous socket.gethostbyname() would block the async event loop.
@@ -70,11 +88,19 @@ class ToolExecutor:
         If *handler* is provided, it is called directly (sync or async).
         Otherwise, falls back to POSTing to *webhook_url*.
         """
-        if handler is not None:
-            return await self._execute_handler(tool_name, arguments, call_context, handler)
-        if webhook_url:
-            return await self._execute_webhook(tool_name, arguments, call_context, webhook_url)
-        return json.dumps({"error": f"Tool '{tool_name}' has no handler or webhook_url", "fallback": True})
+        with start_span(
+            SPAN_TOOL,
+            {
+                "patter.tool.name": tool_name,
+                "patter.tool.transport": "handler" if handler is not None else ("webhook" if webhook_url else "none"),
+                "patter.call.id": call_context.get("call_id", ""),
+            },
+        ):
+            if handler is not None:
+                return await self._execute_handler(tool_name, arguments, call_context, handler)
+            if webhook_url:
+                return await self._execute_webhook(tool_name, arguments, call_context, webhook_url)
+            return json.dumps({"error": f"Tool '{tool_name}' has no handler or webhook_url", "fallback": True})
 
     async def _execute_handler(
         self,

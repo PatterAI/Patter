@@ -204,9 +204,15 @@ class FallbackLLMProvider:
                     gen = self._providers[index].stream(
                         [{"role": "user", "content": "ping"}], None
                     )
-                    # Drain one chunk to verify the provider responds
-                    async for _ in gen:
-                        break
+                    # Drain one chunk to verify the provider responds.
+                    # Explicit aclose() ensures the underlying HTTP stream
+                    # (e.g. OpenAI SDK) is released even when the async
+                    # generator early-exits before normal completion.
+                    try:
+                        async for _ in gen:
+                            break
+                    finally:
+                        await gen.aclose()
 
                     self._availability[index] = True
                     self._stop_recovery(index)

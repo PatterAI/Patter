@@ -23,8 +23,10 @@ export class OpenAIRealtimeAdapter {
 
     await new Promise<void>((resolve, reject) => {
       let sessionCreated = false;
-      const timer = setTimeout(() => reject(new Error('OpenAI Realtime connect timeout')), 15000);
-      this.ws!.on('message', (raw) => {
+      let settled = false;
+      const ws = this.ws!;
+
+      const onSetupMessage = (raw: Buffer | string): void => {
         let msg: { type: string };
         try {
           msg = JSON.parse(raw.toString()) as { type: string };
@@ -50,16 +52,35 @@ export class OpenAIRealtimeAdapter {
               parameters: t.parameters,
             }));
           }
-          this.ws!.send(JSON.stringify({ type: 'session.update', session: config }));
+          ws.send(JSON.stringify({ type: 'session.update', session: config }));
         } else if (msg.type === 'session.updated') {
-          clearTimeout(timer);
+          cleanup();
           resolve();
         }
-      });
-      this.ws!.on('error', (err) => {
-        clearTimeout(timer);
+      };
+
+      const onSetupError = (err: Error): void => {
+        cleanup();
+        try { ws.close(); } catch { /* ignore */ }
         reject(err);
-      });
+      };
+
+      const cleanup = (): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        ws.off('message', onSetupMessage);
+        ws.off('error', onSetupError);
+      };
+
+      const timer = setTimeout(() => {
+        cleanup();
+        try { ws.close(); } catch { /* ignore */ }
+        reject(new Error('OpenAI Realtime connect timeout'));
+      }, 15000);
+
+      ws.on('message', onSetupMessage);
+      ws.on('error', onSetupError);
     });
   }
 
@@ -68,8 +89,13 @@ export class OpenAIRealtimeAdapter {
     this.ws.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: mulawAudio.toString('base64') }));
   }
 
-  onEvent(callback: (type: string, data: unknown) => void): void {
+  onEvent(callback: (type: string, data: unknown) => void | Promise<void>): void {
     if (!this.ws) return;
+    const safeInvoke = (type: string, data: unknown): void => {
+      void Promise.resolve(callback(type, data)).catch((err) =>
+        getLogger().error('onEvent callback error:', err),
+      );
+    };
     this.ws.on('message', (raw) => {
       let data: { type: string; delta?: string; transcript?: string; call_id?: string; name?: string; arguments?: string; error?: unknown; response?: Record<string, unknown> };
       try {
@@ -80,19 +106,19 @@ export class OpenAIRealtimeAdapter {
       }
       const t = data.type;
       if (t === 'response.audio.delta') {
-        callback('audio', Buffer.from(data.delta ?? '', 'base64'));
+        safeInvoke('audio', Buffer.from(data.delta ?? '', 'base64'));
       } else if (t === 'response.audio_transcript.delta') {
-        callback('transcript_output', data.delta);
+        safeInvoke('transcript_output', data.delta);
       } else if (t === 'input_audio_buffer.speech_started') {
-        callback('speech_started', null);
+        safeInvoke('speech_started', null);
       } else if (t === 'conversation.item.input_audio_transcription.completed') {
-        callback('transcript_input', data.transcript);
+        safeInvoke('transcript_input', data.transcript);
       } else if (t === 'response.function_call_arguments.done') {
-        callback('function_call', { call_id: data.call_id, name: data.name, arguments: data.arguments });
+        safeInvoke('function_call', { call_id: data.call_id, name: data.name, arguments: data.arguments });
       } else if (t === 'response.done') {
-        callback('response_done', data.response ?? null);
+        safeInvoke('response_done', data.response ?? null);
       } else if (t === 'error') {
-        callback('error', data.error);
+        safeInvoke('error', data.error);
       }
     });
   }

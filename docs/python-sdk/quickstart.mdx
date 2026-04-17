@@ -10,7 +10,7 @@ This guide walks you through connecting your AI agent to phone calls using local
 ## Prerequisites
 
 - Python 3.11+
-- A Twilio account (Telnyx is available as a beta alternative)
+- A Twilio or Telnyx account (both fully supported)
 - An AI provider key (OpenAI, ElevenLabs, or Deepgram)
 
 ## Step 1: Install the SDK
@@ -35,9 +35,9 @@ WEBHOOK_URL=abc.ngrok.io
 
 Patter needs a public URL so your telephony provider can reach your local server. Use [ngrok](https://ngrok.com):
 
-<Warning>
-  **Telnyx (Beta):** Telnyx support is in beta — tested locally but not yet validated in production. We recommend Twilio for production deployments until Telnyx exits beta.
-</Warning>
+<Note>
+  **Telnyx:** Telnyx is a fully supported alternative to Twilio, with feature parity for DTMF, call transfer, recording, and cost tracking.
+</Note>
 
 ```bash
 ngrok http 8000

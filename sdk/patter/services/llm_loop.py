@@ -13,6 +13,8 @@ import json
 import logging
 from typing import AsyncGenerator, AsyncIterator, Protocol, runtime_checkable
 
+from patter.observability.tracing import SPAN_LLM, SPAN_TOOL, start_span
+
 logger = logging.getLogger("patter")
 
 
@@ -185,35 +187,51 @@ class LLMLoop:
 
         # Loop to handle tool calls — the LLM may call tools multiple times
         max_iterations = 10
-        for _ in range(max_iterations):
+        for iteration in range(max_iterations):
             tool_calls_accumulated: dict[int, dict] = {}
             text_parts: list[str] = []
             has_tool_calls = False
 
-            async for chunk in self._provider.stream(messages, self._openai_tools):
-                chunk_type = chunk.get("type")
+            # Open a span around the provider streaming call. Kept as an
+            # explicit __enter__/__exit__ (rather than ``with``) because we
+            # need to ``yield`` from inside the span which ``with`` + async
+            # generators makes awkward.
+            _span_cm = start_span(
+                SPAN_LLM,
+                {
+                    "patter.llm.iteration": iteration,
+                    "patter.llm.history_size": len(history),
+                    "patter.call.id": call_context.get("call_id", ""),
+                },
+            )
+            _span_cm.__enter__()
+            try:
+                async for chunk in self._provider.stream(messages, self._openai_tools):
+                    chunk_type = chunk.get("type")
 
-                if chunk_type == "text":
-                    content = chunk.get("content", "")
-                    if content:
-                        text_parts.append(content)
-                        yield content
+                    if chunk_type == "text":
+                        content = chunk.get("content", "")
+                        if content:
+                            text_parts.append(content)
+                            yield content
 
-                elif chunk_type == "tool_call":
-                    has_tool_calls = True
-                    idx = chunk["index"]
-                    if idx not in tool_calls_accumulated:
-                        tool_calls_accumulated[idx] = {
-                            "id": "",
-                            "name": "",
-                            "arguments": "",
-                        }
-                    if chunk.get("id"):
-                        tool_calls_accumulated[idx]["id"] = chunk["id"]
-                    if chunk.get("name"):
-                        tool_calls_accumulated[idx]["name"] = chunk["name"]
-                    if chunk.get("arguments"):
-                        tool_calls_accumulated[idx]["arguments"] += chunk["arguments"]
+                    elif chunk_type == "tool_call":
+                        has_tool_calls = True
+                        idx = chunk["index"]
+                        if idx not in tool_calls_accumulated:
+                            tool_calls_accumulated[idx] = {
+                                "id": "",
+                                "name": "",
+                                "arguments": "",
+                            }
+                        if chunk.get("id"):
+                            tool_calls_accumulated[idx]["id"] = chunk["id"]
+                        if chunk.get("name"):
+                            tool_calls_accumulated[idx]["name"] = chunk["name"]
+                        if chunk.get("arguments"):
+                            tool_calls_accumulated[idx]["arguments"] += chunk["arguments"]
+            finally:
+                _span_cm.__exit__(None, None, None)
 
             # If no tool calls, we're done
             if not has_tool_calls:

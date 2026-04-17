@@ -39,6 +39,13 @@ vi.mock('ws', () => {
       this.handlers.get(event)!.push(cb);
     }
 
+    off(event: string, cb: (...args: unknown[]) => void) {
+      const cbs = this.handlers.get(event);
+      if (!cbs) return;
+      const idx = cbs.indexOf(cb);
+      if (idx >= 0) cbs.splice(idx, 1);
+    }
+
     emit(event: string, ...args: unknown[]) {
       const cbs = this.handlers.get(event) ?? [];
       for (const cb of cbs) {

@@ -3,15 +3,75 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import signal
+import time
 
 from fastapi import WebSocket
 
 from patter.local_config import LocalConfig
 from patter.models import Agent
+from patter.utils.log_sanitize import sanitize_log_value
 
 logger = logging.getLogger("patter")
+
+
+def _validate_telnyx_signature(
+    raw_body: bytes,
+    signature: str,
+    timestamp: str,
+    public_key: str,
+    tolerance_sec: int = 300,
+) -> bool:
+    """Verify a Telnyx webhook Ed25519 signature.
+
+    Signed payload is ``timestamp + "|" + raw_body``. Returns False when any
+    step fails (missing deps, bad base64, stale timestamp, bad signature).
+    """
+    if not signature or not timestamp or not public_key:
+        return False
+    try:
+        ts = int(timestamp)
+    except (TypeError, ValueError):
+        return False
+    now_ms = int(time.time() * 1000)
+    age_ms = now_ms - ts
+    if age_ms < 0 or age_ms > tolerance_sec * 1000:
+        return False
+    try:
+        from cryptography.hazmat.primitives.serialization import load_der_public_key
+        from cryptography.exceptions import InvalidSignature
+    except ImportError:
+        logger.warning(
+            "cryptography package not installed — cannot verify Telnyx signature. "
+            "Install with: pip install cryptography"
+        )
+        return False
+    try:
+        key_bytes = base64.b64decode(public_key)
+        key = load_der_public_key(key_bytes)
+        payload = timestamp.encode("utf-8") + b"|" + raw_body
+    except (ValueError, TypeError):
+        return False
+    except Exception:
+        return False
+    # The telnyx-signature-ed25519 header may contain multiple
+    # comma-separated signatures during key rotation.  Accept the webhook
+    # if any one of them verifies.  Fail-closed when none match.
+    for raw_sig in signature.split(","):
+        raw_sig = raw_sig.strip()
+        if not raw_sig:
+            continue
+        try:
+            sig_bytes = base64.b64decode(raw_sig)
+            key.verify(sig_bytes, payload)
+            return True
+        except (InvalidSignature, ValueError, TypeError):
+            continue
+        except Exception:
+            continue
+    return False
 
 
 class EmbeddedServer:
@@ -138,9 +198,14 @@ class EmbeddedServer:
 
         # --- Twilio ---
 
-        @app.post("/webhooks/twilio/voice")
-        async def twilio_voice(request: Request):
-            # Validate Twilio signature
+        async def _read_and_validate_twilio_form(request: Request):
+            """Read the form body and verify the X-Twilio-Signature header.
+
+            Returns the parsed form on success, or a 403 Response when the
+            signature is present but invalid.  When no auth token is
+            configured, or the `twilio` package is missing, the body is
+            returned without validation (logged once).
+            """
             if self.config.twilio_token:
                 try:
                     from twilio.request_validator import RequestValidator
@@ -150,11 +215,18 @@ class EmbeddedServer:
                     signature = request.headers.get("X-Twilio-Signature", "")
                     if not validator.validate(url, dict(form_data), signature):
                         return Response(status_code=403, content="Invalid signature")
+                    return form_data
                 except ImportError:
                     logger.warning("twilio package not installed; skipping signature validation")
-                    form_data = await request.form()
-            else:
-                form_data = await request.form()
+                    return await request.form()
+            return await request.form()
+
+        @app.post("/webhooks/twilio/voice")
+        async def twilio_voice(request: Request):
+            form_or_response = await _read_and_validate_twilio_form(request)
+            if isinstance(form_or_response, Response):
+                return form_or_response
+            form_data = form_or_response
             call_sid = form_data.get("CallSid", "")
             caller = form_data.get("From", "")
             callee = form_data.get("To", "")
@@ -165,16 +237,27 @@ class EmbeddedServer:
 
         @app.post("/webhooks/twilio/recording")
         async def twilio_recording_callback(request: Request):
-            form = await request.form()
+            form_or_response = await _read_and_validate_twilio_form(request)
+            if isinstance(form_or_response, Response):
+                return form_or_response
+            form = form_or_response
             recording_sid = form.get("RecordingSid", "")
             recording_url = form.get("RecordingUrl", "")
             call_sid = form.get("CallSid", "")
-            logger.info("Recording %s for call %s: %s", recording_sid, call_sid, recording_url)
+            logger.info(
+                "Recording %s for call %s: %s",
+                sanitize_log_value(recording_sid),
+                sanitize_log_value(call_sid),
+                sanitize_log_value(recording_url),
+            )
             return Response(content="", status_code=204)
 
         @app.post("/webhooks/twilio/amd")
         async def twilio_amd_callback(request: Request):
-            form = await request.form()
+            form_or_response = await _read_and_validate_twilio_form(request)
+            if isinstance(form_or_response, Response):
+                return form_or_response
+            form = form_or_response
             answered_by = form.get("AnsweredBy", "")
             call_sid = form.get("CallSid", "")
             logger.info("AMD result for %s: %s", call_sid, answered_by)
@@ -235,26 +318,32 @@ class EmbeddedServer:
 
         @app.post("/webhooks/telnyx/voice")
         async def telnyx_voice(request: Request):
-            body = await request.json()
-            if not isinstance(body.get("data"), dict) or not isinstance(body.get("data", {}).get("payload"), dict):
+            raw_body = await request.body()
+            telnyx_public_key = getattr(self.config, "telnyx_public_key", "")
+            if telnyx_public_key:
+                signature = request.headers.get("telnyx-signature-ed25519", "")
+                timestamp = request.headers.get("telnyx-timestamp", "")
+                if not _validate_telnyx_signature(raw_body, signature, timestamp, telnyx_public_key):
+                    logger.warning("Telnyx webhook rejected: invalid or missing Ed25519 signature")
+                    return Response(status_code=403, content="Invalid signature")
+            elif not self._telnyx_sig_warning_logged:
+                self._telnyx_sig_warning_logged = True
                 logger.warning(
-                    "Telnyx webhook rejected: missing data.payload structure. "
-                    "Enable Ed25519 signature verification for production use."
+                    "Telnyx webhook signature verification is disabled. "
+                    "Set telnyx_public_key in LocalConfig for production use."
                 )
+            import json as _json
+            try:
+                body = _json.loads(raw_body)
+            except (ValueError, TypeError):
+                return Response(status_code=400, content="Invalid JSON body")
+            if not isinstance(body.get("data"), dict) or not isinstance(body.get("data", {}).get("payload"), dict):
+                logger.warning("Telnyx webhook rejected: missing data.payload structure.")
                 return Response(status_code=400, content="Invalid webhook structure")
             payload = body["data"]["payload"]
             if not payload.get("call_control_id") or not payload.get("from") or not payload.get("to"):
-                logger.warning(
-                    "Telnyx webhook rejected: missing required payload fields. "
-                    "Enable Ed25519 signature verification for production use."
-                )
+                logger.warning("Telnyx webhook rejected: missing required payload fields.")
                 return Response(status_code=400, content="Invalid webhook payload")
-            if not self._telnyx_sig_warning_logged:
-                self._telnyx_sig_warning_logged = True
-                logger.warning(
-                    "Telnyx webhook Ed25519 signature verification not implemented "
-                    "— validate signatures in production"
-                )
             call_id = payload.get("call_control_id", "")
             caller = payload.get("from", "")
             callee = payload.get("to", "")
@@ -284,6 +373,7 @@ class EmbeddedServer:
                     deepgram_key=self.config.deepgram_key,
                     elevenlabs_key=self.config.elevenlabs_key,
                     telnyx_key=self.config.telnyx_key,
+                    recording=self.recording,
                     on_metrics=_metrics,
                     pricing=self.pricing,
                 )

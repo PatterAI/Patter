@@ -131,13 +131,6 @@ class Patter:
                 phone_number=phone_number,
                 webhook_url=webhook_url,
             )
-            # TODO: Remove beta warning when Telnyx is validated in production
-            if telnyx_key:
-                logger.warning(
-                    "Telnyx support is in beta — tested locally but not yet "
-                    "validated in production. If you encounter issues, please "
-                    "report them at https://github.com/PatterAI/Patter/issues"
-                )
             self._server = None
             self._tunnel_handle = None
             self._connection = None

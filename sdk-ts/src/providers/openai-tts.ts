@@ -39,6 +39,7 @@ export class OpenAITTS {
         voice: this.voice,
         response_format: 'pcm',
       }),
+      signal: AbortSignal.timeout(30_000),
     });
 
     if (!response.ok) {

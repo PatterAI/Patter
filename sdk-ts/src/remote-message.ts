@@ -8,8 +8,24 @@
 
 import crypto from 'node:crypto';
 import { getLogger } from './logger';
+import { validateWebhookUrl } from './server';
 
 const MAX_RESPONSE_BYTES = 64 * 1024;
+
+/**
+ * Validate a WebSocket URL against the same SSRF blocklist used for HTTP
+ * webhooks. Translates ws(s):// to http(s):// before delegating to
+ * validateWebhookUrl so the scheme/hostname/IP checks apply uniformly.
+ */
+function validateWebSocketUrl(url: string): void {
+  let translated = url;
+  if (url.startsWith('ws://')) {
+    translated = 'http://' + url.slice('ws://'.length);
+  } else if (url.startsWith('wss://')) {
+    translated = 'https://' + url.slice('wss://'.length);
+  }
+  validateWebhookUrl(translated);
+}
 
 export class RemoteMessageHandler {
   private readonly webhookSecret: string | undefined;
@@ -54,6 +70,12 @@ export class RemoteMessageHandler {
    * digest of the JSON body.
    */
   async callWebhook(url: string, data: Record<string, unknown>): Promise<string> {
+    try {
+      validateWebhookUrl(url);
+    } catch (e) {
+      getLogger().warn(`Webhook URL rejected by SSRF guard: ${String(e)}`);
+      return '';
+    }
     if (url.startsWith('http://')) {
       getLogger().warn(
         'Webhook URL uses unencrypted http:// — call transcripts ' +
@@ -104,6 +126,12 @@ export class RemoteMessageHandler {
    * A frame with { done: true } signals end of response.
    */
   async *callWebSocket(url: string, data: Record<string, unknown>): AsyncGenerator<string, void, unknown> {
+    try {
+      validateWebSocketUrl(url);
+    } catch (e) {
+      getLogger().warn(`WebSocket URL rejected by SSRF guard: ${String(e)}`);
+      return;
+    }
     if (url.startsWith('ws://')) {
       getLogger().warn(
         'WebSocket URL uses unencrypted ws:// — call transcripts ' +
@@ -117,20 +145,10 @@ export class RemoteMessageHandler {
     const chunks: string[] = [];
     let done = false;
     let error: Error | null = null;
-
-    await new Promise<void>((resolve, reject) => {
-      ws.on('open', () => {
-        ws.send(JSON.stringify(data));
-        resolve();
-      });
-      ws.on('error', (err: Error) => {
-        error = err;
-        reject(err);
-      });
-    });
-
     let resolveNext: ((value: string | null) => void) | null = null;
 
+    // Register message / close / error handlers BEFORE awaiting 'open' so
+    // frames delivered immediately after open are not lost in the gap.
     ws.on('message', (raw: Buffer | string) => {
       const rawStr = raw.toString();
       let text: string | null = null;
@@ -141,7 +159,11 @@ export class RemoteMessageHandler {
           if (frame.done) {
             done = true;
             ws.close();
-            if (resolveNext) resolveNext(null);
+            if (resolveNext) {
+              const r = resolveNext;
+              resolveNext = null;
+              r(null);
+            }
             return;
           }
           text = frame.text || null;
@@ -153,8 +175,9 @@ export class RemoteMessageHandler {
       }
 
       if (text && resolveNext) {
-        resolveNext(text);
+        const r = resolveNext;
         resolveNext = null;
+        r(text);
       } else if (text) {
         chunks.push(text);
       }
@@ -162,34 +185,58 @@ export class RemoteMessageHandler {
 
     ws.on('close', () => {
       done = true;
-      if (resolveNext) resolveNext(null);
+      if (resolveNext) {
+        const r = resolveNext;
+        resolveNext = null;
+        r(null);
+      }
     });
 
     ws.on('error', (err: Error) => {
       error = err;
       done = true;
-      if (resolveNext) resolveNext(null);
+      if (resolveNext) {
+        const r = resolveNext;
+        resolveNext = null;
+        r(null);
+      }
     });
 
-    // Yield buffered chunks first
-    while (chunks.length > 0) {
-      yield chunks.shift()!;
-    }
-
-    // Then wait for new messages
-    while (!done && !error) {
-      const text = await new Promise<string | null>((resolve) => {
-        if (chunks.length > 0) {
-          resolve(chunks.shift()!);
-        } else {
-          resolveNext = resolve;
-        }
+    try {
+      await new Promise<void>((resolve, reject) => {
+        ws.on('open', () => {
+          ws.send(JSON.stringify(data));
+          resolve();
+        });
+        ws.on('error', (err: Error) => {
+          reject(err);
+        });
       });
-      if (text === null) break;
-      yield text;
-    }
 
-    if (error) throw error;
+      // Yield buffered chunks first
+      while (chunks.length > 0) {
+        yield chunks.shift()!;
+      }
+
+      // Then wait for new messages
+      while (!done && !error) {
+        const text = await new Promise<string | null>((resolve) => {
+          if (chunks.length > 0) {
+            resolve(chunks.shift()!);
+          } else {
+            resolveNext = resolve;
+          }
+        });
+        if (text === null) break;
+        yield text;
+      }
+
+      if (error) throw error;
+    } finally {
+      if (ws.readyState !== ws.CLOSED && ws.readyState !== ws.CLOSING) {
+        ws.close();
+      }
+    }
   }
 }
 

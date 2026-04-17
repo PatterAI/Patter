@@ -34,12 +34,13 @@ class OpenAITTS(TTSProvider):
         response = await self._client.send(request, stream=True)
         response.raise_for_status()
 
-        async for chunk in response.aiter_bytes(chunk_size=4096):
-            # OpenAI returns 24kHz PCM16, resample to 16kHz
-            resampled = self._resample_24k_to_16k(chunk)
-            yield resampled
-
-        await response.aclose()
+        try:
+            async for chunk in response.aiter_bytes(chunk_size=4096):
+                # OpenAI returns 24kHz PCM16, resample to 16kHz
+                resampled = self._resample_24k_to_16k(chunk)
+                yield resampled
+        finally:
+            await response.aclose()
 
     @staticmethod
     def _resample_24k_to_16k(audio_data: bytes) -> bytes:

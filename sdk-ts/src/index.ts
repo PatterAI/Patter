@@ -55,10 +55,28 @@ export { RemoteMessageHandler, isRemoteUrl, isWebSocketUrl } from "./remote-mess
 export { TestSession } from "./test-mode";
 export { ElevenLabsConvAIAdapter } from "./providers/elevenlabs-convai";
 export { OpenAIRealtimeAdapter } from "./providers/openai-realtime";
+export { GeminiLiveAdapter, GEMINI_DEFAULT_INPUT_SR, GEMINI_DEFAULT_OUTPUT_SR } from "./providers/gemini-live";
+export type { GeminiLiveEventHandler } from "./providers/gemini-live";
+export { UltravoxRealtimeAdapter, ULTRAVOX_DEFAULT_API_BASE, ULTRAVOX_DEFAULT_SR } from "./providers/ultravox-realtime";
+export type { UltravoxEventHandler } from "./providers/ultravox-realtime";
+export { scheduleCron, scheduleOnce, scheduleInterval } from "./scheduler";
+export type { ScheduleHandle, JobCallback } from "./scheduler";
 export { DeepgramSTT } from "./providers/deepgram-stt";
+export { SonioxSTT } from "./providers/soniox-stt";
+export type { SonioxSTTOptions } from "./providers/soniox-stt";
 export { WhisperSTT } from "./providers/whisper-stt";
+export { AssemblyAISTT } from "./providers/assemblyai-stt";
+export type { AssemblyAISTTOptions, AssemblyAIModel, AssemblyAIEncoding } from "./providers/assemblyai-stt";
+export { CartesiaSTT } from "./providers/cartesia-stt";
+export type { CartesiaSTTOptions, CartesiaEncoding } from "./providers/cartesia-stt";
 export { ElevenLabsTTS } from "./providers/elevenlabs-tts";
 export { OpenAITTS } from "./providers/openai-tts";
+export { CartesiaTTS } from "./providers/cartesia-tts";
+export type { CartesiaTTSOptions } from "./providers/cartesia-tts";
+export { RimeTTS } from "./providers/rime-tts";
+export type { RimeTTSOptions } from "./providers/rime-tts";
+export { LMNTTTS } from "./providers/lmnt-tts";
+export type { LMNTTTSOptions, LMNTAudioFormat, LMNTModel, LMNTSampleRate } from "./providers/lmnt-tts";
 export {
   mulawToPcm16,
   pcm16ToMulaw,
@@ -70,3 +88,34 @@ export { startTunnel } from "./tunnel";
 export type { TunnelHandle } from "./tunnel";
 export { ChatContext } from "./chat-context";
 export type { ChatMessage, ChatRole, OpenAIMessage, AnthropicMessage, AnthropicConversion } from "./chat-context";
+export {
+  IVRActivity,
+  TfidfLoopDetector,
+  DTMF_EVENTS,
+  formatDtmf,
+} from "./services/ivr";
+export type {
+  DtmfEvent,
+  IVRActivityOptions,
+  IVRToolDefinition,
+  TfidfLoopDetectorOptions,
+  LoopCallback,
+  SilenceCallback,
+} from "./services/ivr";
+export {
+  BackgroundAudioPlayer,
+  BuiltinAudioClip,
+  builtinClipPath,
+  mixPcm,
+  resamplePcm,
+  selectSoundFromList,
+} from "./services/background-audio";
+export type {
+  AudioConfig,
+  AudioSource,
+  BackgroundAudioOptions,
+  BuiltinAudioClipName,
+  BuiltinPcmSource,
+  FilePcmSource,
+  RawPcmSource,
+} from "./services/background-audio";

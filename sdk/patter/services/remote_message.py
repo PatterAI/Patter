@@ -78,6 +78,12 @@ class RemoteMessageHandler:
                 "and phone numbers will be sent in plaintext. "
                 "Use https:// in production."
             )
+        from patter.services.tool_executor import _validate_webhook_url
+        try:
+            _validate_webhook_url(url)
+        except ValueError as exc:
+            logger.warning("on_message webhook URL rejected: %s", exc)
+            return ""
         body = json.dumps(data).encode("utf-8")
         headers: dict[str, str] = {"Content-Type": "application/json"}
         if self._webhook_secret is not None:
@@ -122,6 +128,30 @@ class RemoteMessageHandler:
                 "and phone numbers will be sent in plaintext. "
                 "Use wss:// in production."
             )
+        import ipaddress
+        from urllib.parse import urlparse
+        from patter.services.tool_executor import _BLOCKED_HOSTNAMES
+        parsed = urlparse(url)
+        if parsed.scheme not in ("ws", "wss"):
+            logger.warning("on_message WebSocket URL rejected: invalid scheme %r", parsed.scheme)
+            return
+        hostname = parsed.hostname or ""
+        if not hostname:
+            logger.warning("on_message WebSocket URL rejected: missing hostname")
+            return
+        if hostname.lower() in _BLOCKED_HOSTNAMES:
+            logger.warning("on_message WebSocket URL rejected: blocked hostname %r", hostname)
+            return
+        try:
+            addr = ipaddress.ip_address(hostname)
+            if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved:
+                logger.warning(
+                    "on_message WebSocket URL rejected: points to private/reserved address %r",
+                    hostname,
+                )
+                return
+        except ValueError:
+            pass
         try:
             import websockets
         except ImportError:

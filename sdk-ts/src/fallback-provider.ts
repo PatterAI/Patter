@@ -217,8 +217,12 @@ export class FallbackLLMProvider implements LLMProvider {
           [{ role: 'user', content: 'ping' }],
           null,
         );
-        // Drain one chunk to verify the provider responds
-        await gen.next();
+        // Drain one chunk to verify the provider responds, then close the generator
+        try {
+          await gen.next();
+        } finally {
+          await gen.return(undefined);
+        }
 
         this.availability[index] = true;
         this.stopRecovery(index);

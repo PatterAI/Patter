@@ -59,6 +59,7 @@ export class WhisperSTT {
   private buffer: Buffer = Buffer.alloc(0);
   private callbacks: TranscriptCallback[] = [];
   private running = false;
+  private pendingTranscriptions: Promise<void>[] = [];
 
   constructor(
     apiKey: string,
@@ -90,9 +91,16 @@ export class WhisperSTT {
     if (this.buffer.length >= this.bufferSize) {
       const pcm = this.buffer;
       this.buffer = Buffer.alloc(0);
-      // Fire-and-forget — transcription runs in the background.
-      void this.transcribeBuffer(pcm);
+      this.trackTranscription(this.transcribeBuffer(pcm));
     }
+  }
+
+  private trackTranscription(promise: Promise<void>): void {
+    const wrapped = promise.finally(() => {
+      const idx = this.pendingTranscriptions.indexOf(wrapped);
+      if (idx !== -1) this.pendingTranscriptions.splice(idx, 1);
+    });
+    this.pendingTranscriptions.push(wrapped);
   }
 
   onTranscript(callback: TranscriptCallback): void {
@@ -104,17 +112,20 @@ export class WhisperSTT {
     this.callbacks.push(callback);
   }
 
-  close(): void {
+  async close(): Promise<void> {
     this.running = false;
 
     // Flush remaining buffer if it has enough audio (~25% of threshold).
     if (this.buffer.length >= this.bufferSize / 4) {
       const pcm = this.buffer;
       this.buffer = Buffer.alloc(0);
-      void this.transcribeBuffer(pcm);
+      this.trackTranscription(this.transcribeBuffer(pcm));
     } else {
       this.buffer = Buffer.alloc(0);
     }
+
+    await Promise.allSettled(this.pendingTranscriptions);
+    this.callbacks = [];
   }
 
   // ------------------------------------------------------------------

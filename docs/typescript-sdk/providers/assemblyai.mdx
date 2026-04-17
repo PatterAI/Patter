@@ -1,0 +1,23 @@
+---
+title: "AssemblyAI STT"
+description: "Universal Streaming speech-to-text via AssemblyAI's v3 WebSocket API."
+---
+
+# AssemblyAI STT
+
+Streaming speech-to-text via AssemblyAI's Universal Streaming v3 API. Ported from LiveKit Agents (Apache 2.0) — uses `ws`, no vendor SDK required.
+
+## Quickstart
+
+```typescript
+import { AssemblyAISTT } from "getpatter";
+
+const stt = new AssemblyAISTT("aa_...", { model: "universal-streaming-english" });
+stt.onTranscript((t) => console.log(t.text, t.isFinal, t.confidence));
+await stt.connect();
+stt.sendAudio(pcmBuffer); // 16 kHz PCM s16le
+// ...
+stt.close();
+```
+
+For Twilio (mulaw 8 kHz) use `AssemblyAISTT.forTwilio("aa_...")`.

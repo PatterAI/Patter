@@ -44,6 +44,22 @@ class PipelineHookExecutor:
     def __init__(self, hooks: PipelineHooks | None) -> None:
         self._hooks = hooks
 
+    async def run_before_send_to_stt(
+        self, audio: bytes, ctx: HookContext
+    ) -> bytes | None:
+        """Run beforeSendToStt hook. Returns None to drop the audio chunk.
+
+        Fail-open: if the hook raises, the original audio passes through.
+        """
+        hook = self._hooks.before_send_to_stt if self._hooks else None
+        if hook is None:
+            return audio
+        try:
+            return await _call_hook(hook, audio, ctx)
+        except Exception:
+            logger.exception("Pipeline hook before_send_to_stt threw")
+            return audio
+
     async def run_after_transcribe(
         self, transcript: str, ctx: HookContext
     ) -> str | None:

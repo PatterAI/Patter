@@ -423,3 +423,68 @@ describe('HookContext fields', () => {
     await executor.runAfterTranscribe('test', passedCtx);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 13. beforeSendToStt hook (audio chunk interceptor)
+// ---------------------------------------------------------------------------
+
+describe('PipelineHookExecutor — beforeSendToStt', () => {
+  it('returns audio unchanged when hooks is undefined', async () => {
+    const executor = new PipelineHookExecutor(undefined);
+    const audio = fakeAudio();
+    const result = await executor.runBeforeSendToStt(audio, makeCtx());
+    expect(result).toEqual(audio);
+  });
+
+  it('returns audio unchanged when hook is not defined', async () => {
+    const executor = new PipelineHookExecutor({});
+    const audio = fakeAudio();
+    const result = await executor.runBeforeSendToStt(audio, makeCtx());
+    expect(result).toEqual(audio);
+  });
+
+  it('modifies the audio chunk', async () => {
+    const hooks: PipelineHooks = {
+      beforeSendToStt: (audio) => Buffer.concat([audio, Buffer.from([0xff])]),
+    };
+    const executor = new PipelineHookExecutor(hooks);
+    const result = await executor.runBeforeSendToStt(Buffer.from([0x00]), makeCtx());
+    expect(result).toEqual(Buffer.from([0x00, 0xff]));
+  });
+
+  it('returns null to drop the chunk', async () => {
+    const hooks: PipelineHooks = { beforeSendToStt: () => null };
+    const executor = new PipelineHookExecutor(hooks);
+    const result = await executor.runBeforeSendToStt(fakeAudio(), makeCtx());
+    expect(result).toBeNull();
+  });
+
+  it('supports async hooks', async () => {
+    const hooks: PipelineHooks = {
+      beforeSendToStt: async (audio) => Buffer.concat([audio, audio]),
+    };
+    const executor = new PipelineHookExecutor(hooks);
+    const result = await executor.runBeforeSendToStt(Buffer.from([0xaa]), makeCtx());
+    expect(result).toEqual(Buffer.from([0xaa, 0xaa]));
+  });
+
+  it('fails open and logs on exception', async () => {
+    const errorSpy = vi.fn();
+    vi.spyOn(loggerModule, 'getLogger').mockReturnValue({
+      error: errorSpy,
+      warn: vi.fn(),
+      info: vi.fn(),
+      debug: vi.fn(),
+    } as unknown as ReturnType<typeof loggerModule.getLogger>);
+
+    const hooks: PipelineHooks = {
+      beforeSendToStt: () => {
+        throw new Error('boom');
+      },
+    };
+    const executor = new PipelineHookExecutor(hooks);
+    const result = await executor.runBeforeSendToStt(Buffer.from([0x42]), makeCtx());
+    expect(result).toEqual(Buffer.from([0x42]));
+    expect(errorSpy).toHaveBeenCalled();
+  });
+});

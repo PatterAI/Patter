@@ -50,6 +50,7 @@ class WhisperSTT:
         self._buffer = bytearray()
         self._transcript_queue: asyncio.Queue[_Transcript] = asyncio.Queue()
         self._running = False
+        self._pending: set[asyncio.Task] = set()
         self._client = httpx.AsyncClient(
             headers={"Authorization": f"Bearer {api_key}"},
             timeout=10.0,
@@ -66,9 +67,14 @@ class WhisperSTT:
         if len(self._buffer) >= BUFFER_SIZE_BYTES:
             buf = bytes(self._buffer)
             self._buffer.clear()
-            transcript = await self._transcribe_buffer(buf)
-            if transcript:
-                await self._transcript_queue.put(transcript)
+            task = asyncio.create_task(self._transcribe_and_enqueue(buf))
+            self._pending.add(task)
+            task.add_done_callback(self._pending.discard)
+
+    async def _transcribe_and_enqueue(self, pcm_data: bytes) -> None:
+        transcript = await self._transcribe_buffer(pcm_data)
+        if transcript:
+            await self._transcript_queue.put(transcript)
 
     async def _transcribe_buffer(self, pcm_data: bytes) -> _Transcript | None:
         """Send a PCM buffer to the Whisper API and return the transcript."""
@@ -108,4 +114,6 @@ class WhisperSTT:
             if transcript:
                 await self._transcript_queue.put(transcript)
         self._buffer.clear()
+        if self._pending:
+            await asyncio.gather(*self._pending, return_exceptions=True)
         await self._client.aclose()

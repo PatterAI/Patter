@@ -10,7 +10,7 @@ test.describe("Recording", () => {
       form: {
         RecordingSid: "RE_e2e_rec_001",
         RecordingUrl: "https://api.twilio.com/recordings/RE_e2e_rec_001",
-        CallSid: "CA_e2e_rec_call_001",
+        CallSid: "CA0000000000000000000000000000d001",
         RecordingDuration: "30",
       },
     });

@@ -52,42 +52,48 @@ class OpenAIRealtimeAdapter:
         )
         self._running = True
 
-        # Wait for session.created
-        response = await self._ws.recv()
-        data = json.loads(response)
-        if data.get("type") != "session.created":
-            raise RuntimeError(f"Expected session.created, got {data.get('type')}")
+        try:
+            # Wait for session.created
+            response = await self._ws.recv()
+            data = json.loads(response)
+            if data.get("type") != "session.created":
+                raise RuntimeError(f"Expected session.created, got {data.get('type')}")
 
-        # Configure session audio format (g711_ulaw for Twilio, pcm16 for Telnyx)
-        session_config: dict = {
-            "input_audio_format": self.audio_format,
-            "output_audio_format": self.audio_format,
-            "voice": self.voice,
-            "instructions": self.instructions or f"You are a helpful voice assistant. Respond in {self.language}. Be concise and natural.",
-            "turn_detection": {
-                "type": "server_vad",
-                "threshold": 0.5,
-                "prefix_padding_ms": 300,
-                "silence_duration_ms": 500,
-            },
-            "input_audio_transcription": {
-                "model": "whisper-1",
-            },
-        }
-        if self.tools:
-            session_config["tools"] = [
-                {
-                    "type": "function",
-                    "name": t["name"],
-                    "description": t["description"],
-                    "parameters": t["parameters"],
-                }
-                for t in self.tools
-            ]
-        await self._ws.send(json.dumps({
-            "type": "session.update",
-            "session": session_config,
-        }))
+            # Configure session audio format (g711_ulaw for Twilio, pcm16 for Telnyx)
+            session_config: dict = {
+                "input_audio_format": self.audio_format,
+                "output_audio_format": self.audio_format,
+                "voice": self.voice,
+                "instructions": self.instructions or f"You are a helpful voice assistant. Respond in {self.language}. Be concise and natural.",
+                "turn_detection": {
+                    "type": "server_vad",
+                    "threshold": 0.5,
+                    "prefix_padding_ms": 300,
+                    "silence_duration_ms": 500,
+                },
+                "input_audio_transcription": {
+                    "model": "whisper-1",
+                },
+            }
+            if self.tools:
+                session_config["tools"] = [
+                    {
+                        "type": "function",
+                        "name": t["name"],
+                        "description": t["description"],
+                        "parameters": t["parameters"],
+                    }
+                    for t in self.tools
+                ]
+            await self._ws.send(json.dumps({
+                "type": "session.update",
+                "session": session_config,
+            }))
+        except Exception:
+            await self._ws.close()
+            self._ws = None
+            self._running = False
+            raise
 
     async def send_audio(self, audio: bytes) -> None:
         """Send audio to OpenAI Realtime API (format must match configured audio_format)."""

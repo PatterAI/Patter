@@ -260,11 +260,12 @@ describe('EmbeddedServer route behavior', () => {
     await server.start(port);
 
     try {
+      const validSid = 'CA' + 'abcdef0123456789abcdef0123456789';
       const resp = await fetch(`http://127.0.0.1:${port}/webhooks/twilio/voice`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({
-          CallSid: 'CA_test_123',
+          CallSid: validSid,
           From: '+15551111111',
           To: '+15552222222',
         }).toString(),
@@ -276,7 +277,7 @@ describe('EmbeddedServer route behavior', () => {
       expect(text).toContain('<Response>');
       expect(text).toContain('<Connect>');
       expect(text).toContain('<Stream');
-      expect(text).toContain('wss://abc.ngrok.io/ws/stream/CA_test_123');
+      expect(text).toContain(`wss://abc.ngrok.io/ws/stream/${validSid}`);
     } finally {
       await server.stop();
     }
@@ -524,9 +525,10 @@ describe('EmbeddedServer route behavior', () => {
 
       try {
         // Compute a valid Twilio signature for this request
+        const validSid = 'CA' + 'fedcba9876543210fedcba9876543210';
         const params: Record<string, string> = {
           AnsweredBy: 'machine_end_beep',
-          CallSid: 'CA_vm_test',
+          CallSid: validSid,
         };
         const sigUrl = `https://abc.ngrok.io/webhooks/twilio/amd`;
         const sigData = sigUrl + Object.keys(params).sort().reduce(
@@ -550,7 +552,7 @@ describe('EmbeddedServer route behavior', () => {
 
         // Should have called Twilio API to update the call with voicemail TwiML
         const vmCall = twilioFetchCalls.find(
-          ([url]) => typeof url === 'string' && url.includes('Calls/CA_vm_test.json'),
+          ([url]) => typeof url === 'string' && url.includes(`Calls/${validSid}.json`),
         );
         expect(vmCall).toBeDefined();
       } finally {

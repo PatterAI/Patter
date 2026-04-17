@@ -16,6 +16,10 @@ const mockWsInstances: Array<{
   send: ReturnType<typeof vi.fn>;
   close: ReturnType<typeof vi.fn>;
   readyState: number;
+  emit: (event: string, ...args: unknown[]) => void;
+  on: (event: string, cb: (...args: unknown[]) => void) => void;
+  once: (event: string, cb: (...args: unknown[]) => void) => void;
+  off: (event: string, cb: (...args: unknown[]) => void) => void;
 }> = [];
 
 vi.mock('ws', () => {
@@ -41,8 +45,23 @@ vi.mock('ws', () => {
       this.handlers.get(event)!.push(cb);
     }
 
+    once(event: string, cb: (...args: unknown[]) => void) {
+      const wrapper = (...args: unknown[]) => {
+        this.off(event, wrapper);
+        cb(...args);
+      };
+      this.on(event, wrapper);
+    }
+
+    off(event: string, cb: (...args: unknown[]) => void) {
+      const cbs = this.handlers.get(event);
+      if (!cbs) return;
+      const idx = cbs.indexOf(cb);
+      if (idx !== -1) cbs.splice(idx, 1);
+    }
+
     emit(event: string, ...args: unknown[]) {
-      const cbs = this.handlers.get(event) ?? [];
+      const cbs = [...(this.handlers.get(event) ?? [])];
       for (const cb of cbs) {
         cb(...args);
       }

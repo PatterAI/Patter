@@ -13,7 +13,9 @@ class ElevenLabsTTS(TTSProvider):
     async def synthesize(self, text: str) -> AsyncIterator[bytes]:
         req = self._client.build_request("POST", f"/text-to-speech/{self.voice_id}/stream", json={"text": text, "model_id": self.model_id}, params={"output_format": self.output_format})
         resp = await self._client.send(req, stream=True); resp.raise_for_status()
-        async for chunk in resp.aiter_bytes(chunk_size=4096): yield chunk
-        await resp.aclose()
+        try:
+            async for chunk in resp.aiter_bytes(chunk_size=4096): yield chunk
+        finally:
+            await resp.aclose()
 
     async def close(self) -> None: await self._client.aclose()

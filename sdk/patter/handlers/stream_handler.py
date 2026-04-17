@@ -30,8 +30,10 @@ from patter.handlers.common import (
     _validate_e164,
 )
 from patter.models import HookContext
+from patter.observability.tracing import SPAN_STT, SPAN_TTS, start_span
 from patter.services.pipeline_hooks import PipelineHookExecutor
 from patter.services.sentence_chunker import SentenceChunker
+from patter.utils.log_sanitize import mask_phone_number, sanitize_log_value
 
 logger = logging.getLogger("patter")
 
@@ -364,7 +366,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                     await self.audio_sender.send_mark(f"audio_{id(ev_data)}")
 
                 elif ev_type == "transcript_input":
-                    logger.info("User: %s", ev_data)
+                    logger.info("User: %s", sanitize_log_value(ev_data))
                     if self.metrics is not None:
                         self.metrics.start_turn()
                         self.metrics.record_stt_complete(ev_data)
@@ -440,13 +442,18 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                         args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
                         transfer_number = args.get("number", "")
                         if not _validate_e164(transfer_number):
-                            logger.warning("transfer_call rejected: invalid number %r", transfer_number)
+                            logger.warning(
+                                "transfer_call rejected: invalid number %s",
+                                mask_phone_number(transfer_number),
+                            )
                             await self._adapter.send_function_result(
                                 func_data["call_id"],
                                 json.dumps({"error": "Invalid phone number format", "status": "rejected"}),
                             )
                             continue
-                        logger.info("Transferring call to %s", transfer_number)
+                        logger.info(
+                            "Transferring call to %s", mask_phone_number(transfer_number)
+                        )
                         await self._adapter.send_function_result(
                             func_data["call_id"],
                             json.dumps({"status": "transferring", "to": transfer_number}),
@@ -605,7 +612,7 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
                     await self.audio_sender.send_audio(ev_data)
 
                 elif ev_type == "transcript_input":
-                    logger.info("User: %s", ev_data)
+                    logger.info("User: %s", sanitize_log_value(ev_data))
                     if self.metrics is not None:
                         self.metrics.start_turn()
                         self.metrics.record_stt_complete(ev_data)
@@ -709,6 +716,7 @@ class PipelineStreamHandler(StreamHandler):
         for_twilio: bool = False,
         transfer_fn=None,
         hangup_fn=None,
+        send_dtmf_fn=None,
         on_transcript=None,
         on_message=None,
         on_metrics=None,
@@ -735,6 +743,7 @@ class PipelineStreamHandler(StreamHandler):
         self._for_twilio = for_twilio
         self._transfer_fn = transfer_fn
         self._hangup_fn = hangup_fn
+        self._send_dtmf_fn = send_dtmf_fn
         self._stt = None
         self._tts = None
         self._stt_task: asyncio.Task | None = None
@@ -742,6 +751,7 @@ class PipelineStreamHandler(StreamHandler):
         self._call_control = None
         self._llm_loop = None
         self._msg_accepts_call = False
+        self._remote_handler = None
 
     async def start(self) -> None:
         from patter.models import CallControl
@@ -792,6 +802,7 @@ class PipelineStreamHandler(StreamHandler):
             telephony_provider="twilio" if self._for_twilio else "telnyx",
             _transfer_fn=self._transfer_fn,
             _hangup_fn=self._hangup_fn,
+            _send_dtmf_fn=self._send_dtmf_fn,
         )
 
         # Check if on_message accepts CallControl
@@ -818,6 +829,11 @@ class PipelineStreamHandler(StreamHandler):
                 tools=self.agent.tools,
                 tool_executor=tool_executor,
             )
+
+        # Create remote message handler once if on_message is a remote URL
+        from patter.services.remote_message import is_remote_url, RemoteMessageHandler
+        if is_remote_url(self.on_message):
+            self._remote_handler = RemoteMessageHandler()
 
         # Start STT receive loop
         if self._stt is not None:
@@ -855,21 +871,34 @@ class PipelineStreamHandler(StreamHandler):
         if processed is None:
             return True  # hook skipped this sentence, not an interruption
 
-        async for audio_chunk in self._tts.synthesize(processed):
-            if not self._is_speaking:
-                return False  # caller handles interrupted metrics
+        _tts_span = start_span(
+            SPAN_TTS,
+            {
+                "patter.tts.text_len": len(processed),
+                "patter.call.id": self.call_id,
+            },
+        )
+        _tts_span.__enter__()
+        gen = self._tts.synthesize(processed)
+        try:
+            async for audio_chunk in gen:
+                if not self._is_speaking:
+                    return False  # caller handles interrupted metrics
 
-            # afterSynthesize hook (per-chunk)
-            processed_audio = await hook_executor.run_after_synthesize(
-                audio_chunk, processed, hook_ctx
-            )
-            if processed_audio is None:
-                continue  # hook discarded this chunk
+                # afterSynthesize hook (per-chunk)
+                processed_audio = await hook_executor.run_after_synthesize(
+                    audio_chunk, processed, hook_ctx
+                )
+                if processed_audio is None:
+                    continue  # hook discarded this chunk
 
-            if first_tts_chunk[0] and self.metrics is not None:
-                self.metrics.record_tts_first_byte()
-                first_tts_chunk[0] = False
-            await self.audio_sender.send_audio(processed_audio)
+                if first_tts_chunk[0] and self.metrics is not None:
+                    self.metrics.record_tts_first_byte()
+                    first_tts_chunk[0] = False
+                await self.audio_sender.send_audio(processed_audio)
+        finally:
+            await gen.aclose()
+            _tts_span.__exit__(None, None, None)
         return True
 
     async def _process_streaming_response(self, result, call_id: str) -> str:
@@ -1011,7 +1040,20 @@ class PipelineStreamHandler(StreamHandler):
                 if not (transcript.is_final and transcript.text):
                     continue
 
-                logger.info("User: %s", transcript.text)
+                # Record one STT span per final transcript turn. The span is
+                # short-lived (just the attribute set) because STT is
+                # streaming — we do not re-wrap the long-lived iterator.
+                with start_span(
+                    SPAN_STT,
+                    {
+                        "patter.stt.text_len": len(transcript.text),
+                        "patter.stt.confidence": float(transcript.confidence or 0.0),
+                        "patter.call.id": self.call_id,
+                    },
+                ):
+                    pass
+
+                logger.info("User: %s", sanitize_log_value(transcript.text))
 
                 if self.metrics is not None:
                     self.metrics.start_turn()
@@ -1090,9 +1132,9 @@ class PipelineStreamHandler(StreamHandler):
                 response_text = ""
                 streaming = False
 
-                from patter.services.remote_message import is_remote_url, is_websocket_url, RemoteMessageHandler
+                from patter.services.remote_message import is_remote_url, is_websocket_url
                 if is_remote_url(self.on_message):
-                    remote = RemoteMessageHandler()
+                    remote = self._remote_handler
                     if is_websocket_url(self.on_message):
                         result = remote.call_websocket(self.on_message, msg_data)
                         streaming = True
@@ -1115,7 +1157,7 @@ class PipelineStreamHandler(StreamHandler):
                         streaming = False
 
                 # Check if handler ended the call
-                if self._call_control.ended:
+                if self._call_control is not None and self._call_control.ended:
                     return
 
                 if streaming:
@@ -1128,6 +1170,17 @@ class PipelineStreamHandler(StreamHandler):
                             {"role": "assistant", "text": response_text}
                         )
                 else:
+                    if not response_text:
+                        # Common misuse: on_message was provided as an observer
+                        # (returning None) but it actually replaces the built-in LLM
+                        # loop. Warn loudly — the caller hears no audio until the
+                        # handler returns a non-empty string.
+                        logger.warning(
+                            "on_message returned empty/None — no TTS will play. "
+                            "If you intended to observe transcripts, use on_transcript "
+                            "instead; if you meant to answer via the built-in LLM, "
+                            "remove on_message and pass openai_key."
+                        )
                     await self._process_regular_response(response_text, self.call_id)
 
         except Exception as exc:
@@ -1157,6 +1210,8 @@ class PipelineStreamHandler(StreamHandler):
             await self._stt.close()
         if self._tts is not None:
             await self._tts.close()
+        if self._remote_handler is not None:
+            await self._remote_handler.close()
 
     @property
     def stt(self):

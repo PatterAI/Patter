@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
+import re
 import time
 from collections import deque
 from urllib.parse import quote
 
+from patter.handlers.common import _validate_e164
+from patter.utils.log_sanitize import mask_phone_number
 from patter.handlers.stream_handler import (
     AudioSender,
     ElevenLabsConvAIStreamHandler,
@@ -19,6 +23,25 @@ from patter.handlers.stream_handler import (
     fetch_deepgram_cost,
     resolve_agent_prompt,
 )
+
+# DTMF digits accepted by the Telnyx ``send_dtmf`` command. Duration bounds
+# mirror Telnyx API constraints (100–500 ms per digit).
+_DTMF_ALLOWED = frozenset("0123456789*#ABCDabcd")
+_DTMF_DEFAULT_DURATION_MS = 250
+
+# SIP URI validator — very permissive: ``sip:`` or ``sips:`` scheme plus a
+# non-empty host component, per Telnyx transfer semantics. E.164 numbers
+# are checked separately via ``_validate_e164``.
+_SIP_URI_RE = re.compile(r"^sips?:[^\s@]+(@[^\s]+)?$", re.IGNORECASE)
+
+
+def _is_valid_transfer_target(target: str) -> bool:
+    """Accept either a validated E.164 phone number or a SIP(s) URI."""
+    if not isinstance(target, str) or not target:
+        return False
+    if _validate_e164(target):
+        return True
+    return bool(_SIP_URI_RE.match(target))
 
 logger = logging.getLogger("patter")
 
@@ -109,6 +132,7 @@ async def telnyx_stream_bridge(
     deepgram_key: str = "",
     elevenlabs_key: str = "",
     telnyx_key: str = "",
+    recording: bool = False,
     on_metrics=None,
     pricing: dict | None = None,
 ) -> None:
@@ -205,6 +229,17 @@ async def telnyx_stream_bridge(
 
                 # --- Telnyx-specific call control helpers ---
                 async def _telnyx_transfer(number):
+                    """Blind-transfer the call via the Telnyx Call Control API.
+
+                    Accepts either an E.164 phone number or a SIP URI
+                    (``sip:user@host`` / ``sips:user@host``).
+                    """
+                    if not _is_valid_transfer_target(number):
+                        logger.warning(
+                            "Telnyx transfer rejected: invalid target %s",
+                            mask_phone_number(number),
+                        )
+                        return
                     if telnyx_key and call_id_actual:
                         import httpx as _httpx
                         async with _httpx.AsyncClient() as _http:
@@ -214,7 +249,9 @@ async def telnyx_stream_bridge(
                                 json={"to": number},
                                 timeout=10.0,
                             )
-                        logger.info("Telnyx call transferred to %s", number)
+                        logger.info(
+                            "Telnyx call transferred to %s", mask_phone_number(number)
+                        )
 
                 async def _telnyx_hangup():
                     if telnyx_key and call_id_actual:
@@ -227,6 +264,102 @@ async def telnyx_stream_bridge(
                                 timeout=10.0,
                             )
                         logger.info("Telnyx call hung up")
+
+                async def _telnyx_send_dtmf(digits: str, delay_ms: int = 300) -> None:
+                    """Send DTMF digits via the Telnyx Call Control API.
+
+                    Emits one ``send_dtmf`` command per digit, sleeping
+                    ``delay_ms`` milliseconds between digits. Telnyx's
+                    ``duration_millis`` is clamped to 100–500 ms per digit.
+                    """
+                    if not digits:
+                        logger.warning("Telnyx send_dtmf called with empty digits")
+                        return
+                    if not (telnyx_key and call_id_actual):
+                        logger.warning(
+                            "Telnyx send_dtmf skipped: telnyx_key or call_id missing"
+                        )
+                        return
+
+                    filtered = [d for d in digits if d in _DTMF_ALLOWED]
+                    if not filtered:
+                        logger.warning(
+                            "Telnyx send_dtmf: no valid digits in %r", digits
+                        )
+                        return
+
+                    duration = max(100, min(500, _DTMF_DEFAULT_DURATION_MS))
+                    import httpx as _httpx
+
+                    async with _httpx.AsyncClient() as _http:
+                        for idx, digit in enumerate(filtered):
+                            await _http.post(
+                                f"https://api.telnyx.com/v2/calls/{call_id_actual}/actions/send_dtmf",
+                                headers={"Authorization": f"Bearer {telnyx_key}"},
+                                json={
+                                    "digits": digit,
+                                    "duration_millis": duration,
+                                },
+                                timeout=10.0,
+                            )
+                            if idx < len(filtered) - 1 and delay_ms > 0:
+                                await asyncio.sleep(delay_ms / 1000)
+                    logger.info(
+                        "Telnyx DTMF sent (%d digits, delay=%dms)",
+                        len(filtered),
+                        delay_ms,
+                    )
+
+                async def _telnyx_start_recording() -> None:
+                    """Start recording the call via Telnyx Call Control API."""
+                    if not (telnyx_key and call_id_actual):
+                        return
+                    import httpx as _httpx
+
+                    async with _httpx.AsyncClient() as _http:
+                        resp = await _http.post(
+                            f"https://api.telnyx.com/v2/calls/{call_id_actual}/actions/record_start",
+                            headers={"Authorization": f"Bearer {telnyx_key}"},
+                            json={"format": "mp3", "channels": "single"},
+                            timeout=10.0,
+                        )
+                        if resp.status_code >= 400:
+                            logger.warning(
+                                "Telnyx record_start failed (%d): %s",
+                                resp.status_code,
+                                resp.text[:200],
+                            )
+                        else:
+                            logger.info("Telnyx recording started")
+
+                async def _telnyx_stop_recording() -> None:
+                    """Stop recording the call via Telnyx Call Control API."""
+                    if not (telnyx_key and call_id_actual):
+                        return
+                    import httpx as _httpx
+
+                    async with _httpx.AsyncClient() as _http:
+                        resp = await _http.post(
+                            f"https://api.telnyx.com/v2/calls/{call_id_actual}/actions/record_stop",
+                            headers={"Authorization": f"Bearer {telnyx_key}"},
+                            json={},
+                            timeout=10.0,
+                        )
+                        if resp.status_code >= 400:
+                            logger.warning(
+                                "Telnyx record_stop failed (%d): %s",
+                                resp.status_code,
+                                resp.text[:200],
+                            )
+                        else:
+                            logger.info("Telnyx recording stopped")
+
+                # Kick off recording if requested
+                if recording:
+                    try:
+                        await _telnyx_start_recording()
+                    except Exception as _exc:
+                        logger.warning("Could not start recording: %s", _exc)
 
                 # Create the appropriate stream handler
                 if provider == "pipeline":
@@ -244,6 +377,7 @@ async def telnyx_stream_bridge(
                         for_twilio=False,
                         transfer_fn=_telnyx_transfer,
                         hangup_fn=_telnyx_hangup,
+                        send_dtmf_fn=_telnyx_send_dtmf,
                         on_transcript=on_transcript,
                         on_message=on_message,
                         on_metrics=on_metrics,
@@ -293,12 +427,69 @@ async def telnyx_stream_bridge(
                 if handler is not None:
                     await handler.on_audio_received(pcm_audio)
 
+            elif event_type_telnyx == "call.dtmf.received":
+                payload_data = data.get("payload", {})
+                digit = str(payload_data.get("digit", "")).strip()
+                if digit:
+                    logger.info("Telnyx DTMF received: %s", digit)
+                    if handler is not None:
+                        try:
+                            on_dtmf = getattr(handler, "on_dtmf", None)
+                            if callable(on_dtmf):
+                                await on_dtmf(digit)
+                        except Exception as _exc:
+                            logger.debug("on_dtmf handler error: %s", _exc)
+                    if on_transcript:
+                        try:
+                            await on_transcript(
+                                {
+                                    "role": "user",
+                                    "text": f"[DTMF: {digit}]",
+                                    "call_id": call_id_actual,
+                                }
+                            )
+                        except Exception as _exc:
+                            logger.debug("on_transcript DTMF dispatch error: %s", _exc)
+
+            elif event_type_telnyx == "call.recording.saved":
+                payload_data = data.get("payload", {})
+                recording_urls = payload_data.get("recording_urls", {})
+                recording_url = (
+                    recording_urls.get("mp3")
+                    or recording_urls.get("wav")
+                    or payload_data.get("public_recording_urls", {}).get("mp3")
+                    or ""
+                )
+                if recording_url:
+                    logger.info(
+                        "Telnyx recording saved for call %s: %s",
+                        call_id_actual,
+                        recording_url,
+                    )
+
             elif event_type_telnyx == "stream_stopped":
                 break
 
     except Exception as exc:
         logger.exception("Stream error: %s", exc)
     finally:
+        # Best-effort recording stop — only if recording was requested and
+        # the call is still active. Telnyx auto-stops on hangup so errors
+        # are non-fatal.
+        if recording and telnyx_key and call_id_actual:
+            try:
+                import httpx as _httpx
+
+                async with _httpx.AsyncClient() as _http:
+                    await _http.post(
+                        f"https://api.telnyx.com/v2/calls/{call_id_actual}/actions/record_stop",
+                        headers={"Authorization": f"Bearer {telnyx_key}"},
+                        json={},
+                        timeout=5.0,
+                    )
+            except Exception as _exc:
+                logger.debug("Telnyx record_stop best-effort failed: %s", _exc)
+
         if handler is not None:
             await handler.cleanup()
 

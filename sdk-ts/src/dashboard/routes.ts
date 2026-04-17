@@ -68,7 +68,8 @@ export function mountDashboard(app: Express, store: MetricsStore, token = ''): v
 
     const listener = (event: SSEEvent) => {
       const data = JSON.stringify(event.data);
-      res.write(`event: ${event.type}\ndata: ${data}\n\n`);
+      const safeType = String(event.type ?? 'message').replace(/[\r\n]/g, '');
+      res.write(`event: ${safeType}\ndata: ${data}\n\n`);
     };
 
     store.on('sse', listener);

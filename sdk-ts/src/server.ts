@@ -11,7 +11,7 @@ import { mergePricing } from './pricing';
 import { MetricsStore } from './dashboard/store';
 import { mountDashboard, mountApi } from './dashboard/routes';
 import { RemoteMessageHandler } from './remote-message';
-import { StreamHandler } from './stream-handler';
+import { StreamHandler, sanitizeLogValue } from './stream-handler';
 import { getLogger } from './logger';
 import type { TelephonyBridge } from './stream-handler';
 import type { AgentOptions, PipelineMessageHandler } from './types';
@@ -151,6 +151,15 @@ function validateTelnyxSignature(
 }
 
 /**
+ * Validate a Twilio SID (CallSid etc.) to prevent path traversal / injection
+ * when interpolating into Twilio API URLs. Twilio SIDs are 34 characters:
+ * a two-letter prefix (e.g. 'CA' for calls) followed by 32 hex characters.
+ */
+export function validateTwilioSid(sid: string, prefix = 'CA'): boolean {
+  return sid.length === 34 && sid.startsWith(prefix) && /^[A-Z]{2}[0-9a-f]{32}$/.test(sid);
+}
+
+/**
  * Validate a Twilio webhook request signature using HMAC-SHA1.
  * Returns true if the signature is valid, false otherwise.
  */
@@ -254,6 +263,10 @@ class TwilioBridge implements TelephonyBridge {
 
   async transferCall(callId: string, toNumber: string): Promise<void> {
     if (this.config.twilioSid && this.config.twilioToken && callId) {
+      if (!validateTwilioSid(callId)) {
+        getLogger().warn(`TwilioBridge.transferCall rejected: invalid CallSid ${JSON.stringify(callId)}`);
+        return;
+      }
       const transferUrl = `https://api.twilio.com/2010-04-01/Accounts/${this.config.twilioSid}/Calls/${callId}.json`;
       await fetch(transferUrl, {
         method: 'POST',
@@ -269,6 +282,10 @@ class TwilioBridge implements TelephonyBridge {
 
   async endCall(callId: string, _ws: WSWebSocket): Promise<void> {
     if (this.config.twilioSid && this.config.twilioToken && callId) {
+      if (!validateTwilioSid(callId)) {
+        getLogger().warn(`TwilioBridge.endCall rejected: invalid CallSid ${JSON.stringify(callId)}`);
+        return;
+      }
       const endUrl = `https://api.twilio.com/2010-04-01/Accounts/${this.config.twilioSid}/Calls/${callId}.json`;
       await fetch(endUrl, {
         method: 'POST',
@@ -296,6 +313,10 @@ class TwilioBridge implements TelephonyBridge {
 
   async queryTelephonyCost(metricsAcc: CallMetricsAccumulator, callId: string): Promise<void> {
     if (this.config.twilioSid && this.config.twilioToken && callId) {
+      if (!validateTwilioSid(callId)) {
+        getLogger().warn(`TwilioBridge.queryTelephonyCost rejected: invalid CallSid ${JSON.stringify(callId)}`);
+        return;
+      }
       try {
         const resp = await fetch(
           `https://api.twilio.com/2010-04-01/Accounts/${this.config.twilioSid}/Calls/${callId}.json`,
@@ -320,8 +341,24 @@ class TwilioBridge implements TelephonyBridge {
   }
 }
 
+/** Accept E.164 phone numbers and SIP(s) URIs as Telnyx transfer targets. */
+function isValidTelnyxTransferTarget(target: string): boolean {
+  if (typeof target !== 'string' || !target) return false;
+  if (/^\+[1-9]\d{6,14}$/.test(target)) return true;
+  return /^sips?:[^\s@]+(@[^\s]+)?$/i.test(target);
+}
+
+/** DTMF digits accepted by the Telnyx `send_dtmf` command. */
+const TELNYX_DTMF_ALLOWED = new Set('0123456789*#ABCDabcd');
+const TELNYX_DTMF_DURATION_MS = 250;
+
+async function sleep(ms: number): Promise<void> {
+  if (ms <= 0) return;
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /** Telnyx-specific telephony bridge. */
-class TelnyxBridge implements TelephonyBridge {
+export class TelnyxBridge implements TelephonyBridge {
   readonly label = 'Telnyx';
   readonly telephonyProvider = 'telnyx' as const;
 
@@ -340,6 +377,10 @@ class TelnyxBridge implements TelephonyBridge {
   }
 
   async transferCall(callId: string, toNumber: string): Promise<void> {
+    if (!isValidTelnyxTransferTarget(toNumber)) {
+      getLogger().warn(`TelnyxBridge.transferCall rejected: invalid target ${JSON.stringify(toNumber)}`);
+      return;
+    }
     const telnyxKey = this.config.telnyxKey ?? '';
     await fetch(`https://api.telnyx.com/v2/calls/${callId}/actions/transfer`, {
       method: 'POST',
@@ -347,6 +388,73 @@ class TelnyxBridge implements TelephonyBridge {
       body: JSON.stringify({ to: toNumber }),
     });
     getLogger().info(`Telnyx call transferred to ${toNumber}`);
+  }
+
+  async sendDtmf(callId: string, digits: string, delayMs: number): Promise<void> {
+    if (!digits) {
+      getLogger().warn('TelnyxBridge.sendDtmf called with empty digits');
+      return;
+    }
+    const telnyxKey = this.config.telnyxKey ?? '';
+    if (!telnyxKey || !callId) {
+      getLogger().warn('TelnyxBridge.sendDtmf skipped: telnyxKey or callId missing');
+      return;
+    }
+    const filtered = Array.from(digits).filter((d) => TELNYX_DTMF_ALLOWED.has(d));
+    if (filtered.length === 0) {
+      getLogger().warn(`TelnyxBridge.sendDtmf: no valid digits in ${JSON.stringify(digits)}`);
+      return;
+    }
+    const duration = Math.max(100, Math.min(500, TELNYX_DTMF_DURATION_MS));
+    for (let i = 0; i < filtered.length; i += 1) {
+      await fetch(`https://api.telnyx.com/v2/calls/${callId}/actions/send_dtmf`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${telnyxKey}` },
+        body: JSON.stringify({ digits: filtered[i], duration_millis: duration }),
+      });
+      if (i < filtered.length - 1) {
+        await sleep(delayMs);
+      }
+    }
+    getLogger().info(`Telnyx DTMF sent (${filtered.length} digits, delay=${delayMs}ms)`);
+  }
+
+  async startRecording(callId: string): Promise<void> {
+    const telnyxKey = this.config.telnyxKey ?? '';
+    if (!telnyxKey || !callId) return;
+    try {
+      const resp = await fetch(`https://api.telnyx.com/v2/calls/${callId}/actions/record_start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${telnyxKey}` },
+        body: JSON.stringify({ format: 'mp3', channels: 'single' }),
+      });
+      if (!resp.ok) {
+        getLogger().warn(`Telnyx record_start failed (${resp.status}): ${(await resp.text()).slice(0, 200)}`);
+      } else {
+        getLogger().info('Telnyx recording started');
+      }
+    } catch (e) {
+      getLogger().warn(`Telnyx record_start error: ${String(e)}`);
+    }
+  }
+
+  async stopRecording(callId: string): Promise<void> {
+    const telnyxKey = this.config.telnyxKey ?? '';
+    if (!telnyxKey || !callId) return;
+    try {
+      const resp = await fetch(`https://api.telnyx.com/v2/calls/${callId}/actions/record_stop`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${telnyxKey}` },
+        body: JSON.stringify({}),
+      });
+      if (!resp.ok) {
+        getLogger().warn(`Telnyx record_stop failed (${resp.status}): ${(await resp.text()).slice(0, 200)}`);
+      } else {
+        getLogger().info('Telnyx recording stopped');
+      }
+    } catch (e) {
+      getLogger().warn(`Telnyx record_stop error: ${String(e)}`);
+    }
   }
 
   async endCall(callId: string, ws: WSWebSocket): Promise<void> {
@@ -500,9 +608,9 @@ export class EmbeddedServer {
         }
       }
       const body = req.body as Record<string, string>;
-      const recordingSid = body['RecordingSid'] ?? '';
-      const recordingUrl = body['RecordingUrl'] ?? '';
-      const callSid = body['CallSid'] ?? '';
+      const recordingSid = sanitizeLogValue(body['RecordingSid'] ?? '');
+      const recordingUrl = sanitizeLogValue(body['RecordingUrl'] ?? '');
+      const callSid = sanitizeLogValue(body['CallSid'] ?? '');
       getLogger().info(`Recording ${recordingSid} for call ${callSid}: ${recordingUrl}`);
       res.status(204).send();
     });
@@ -520,7 +628,7 @@ export class EmbeddedServer {
       const body = req.body as Record<string, string>;
       const answeredBy = body['AnsweredBy'] ?? '';
       const callSid = body['CallSid'] ?? '';
-      getLogger().info(`AMD result for ${callSid}: ${answeredBy}`);
+      getLogger().info(`AMD result for ${sanitizeLogValue(callSid)}: ${sanitizeLogValue(answeredBy)}`);
 
       if (
         (answeredBy === 'machine_end_beep' || answeredBy === 'machine_end_silence') &&
@@ -528,6 +636,11 @@ export class EmbeddedServer {
         this.config.twilioSid &&
         this.config.twilioToken
       ) {
+        if (!validateTwilioSid(callSid)) {
+          getLogger().warn(`AMD webhook rejected: invalid CallSid ${JSON.stringify(sanitizeLogValue(callSid))}`);
+          res.status(400).send('Invalid CallSid');
+          return;
+        }
         const twiml = `<Response><Say>${xmlEscape(this.voicemailMessage)}</Say><Hangup/></Response>`;
         try {
           const vmUrl = `https://api.twilio.com/2010-04-01/Accounts/${this.config.twilioSid}/Calls/${callSid}.json`;
@@ -540,12 +653,12 @@ export class EmbeddedServer {
             body: new URLSearchParams({ Twiml: twiml }).toString(),
           });
           if (vmResp.ok) {
-            getLogger().info(`Voicemail dropped for ${callSid}`);
+            getLogger().info(`Voicemail dropped for ${sanitizeLogValue(callSid)}`);
           } else {
-            getLogger().warn(`Could not drop voicemail: ${await vmResp.text()}`);
+            getLogger().warn(`Could not drop voicemail: ${sanitizeLogValue(await vmResp.text())}`);
           }
         } catch (e) {
-          getLogger().warn(`Could not drop voicemail: ${String(e)}`);
+          getLogger().warn(`Could not drop voicemail: ${sanitizeLogValue(String(e))}`);
         }
       }
 
@@ -566,6 +679,11 @@ export class EmbeddedServer {
         getLogger().warn('Twilio webhook signature validation disabled — set twilioToken for production');
       }
       const callSid = (req.body.CallSid as string) || '';
+      if (callSid && !validateTwilioSid(callSid)) {
+        getLogger().warn(`Twilio voice webhook rejected: invalid CallSid ${JSON.stringify(callSid)}`);
+        res.status(400).send('Invalid CallSid');
+        return;
+      }
       const caller = (req.body.From as string) || '';
       const callee = (req.body.To as string) || '';
       const rawStreamUrl = `wss://${this.config.webhookUrl}/ws/stream/${callSid}`;
@@ -595,6 +713,9 @@ export class EmbeddedServer {
             call_control_id?: string;
             from?: string;
             to?: string;
+            digit?: string;
+            recording_urls?: { mp3?: string; wav?: string };
+            public_recording_urls?: { mp3?: string; wav?: string };
           };
         };
       };
@@ -607,6 +728,26 @@ export class EmbeddedServer {
       }
 
       const eventType = body?.data?.event_type ?? '';
+
+      if (eventType === 'call.dtmf.received') {
+        const digit = String(body.data?.payload?.digit ?? '').trim();
+        if (digit) {
+          getLogger().info(`Telnyx DTMF received (webhook): ${sanitizeLogValue(digit)}`);
+        }
+        return res.json({ received: true });
+      }
+
+      if (eventType === 'call.recording.saved') {
+        const recordingUrl =
+          body.data?.payload?.recording_urls?.mp3 ??
+          body.data?.payload?.recording_urls?.wav ??
+          body.data?.payload?.public_recording_urls?.mp3 ??
+          '';
+        if (recordingUrl) {
+          getLogger().info(`Telnyx recording saved (webhook): ${sanitizeLogValue(recordingUrl)}`);
+        }
+        return res.json({ received: true });
+      }
 
       if (eventType === 'call.initiated') {
         const payload = body?.data?.payload ?? {};
@@ -687,7 +828,9 @@ export class EmbeddedServer {
     });
 
     await new Promise<void>((resolve) => {
-      this.server!.listen(port, '0.0.0.0', () => {
+      // Bind to loopback only. Public exposure should go through a reverse
+      // proxy or tunnel so the Node process is never directly reachable.
+      this.server!.listen(port, '127.0.0.1', () => {
         getLogger().info(`
 ██████╗  █████╗ ████████╗████████╗███████╗██████╗
 ██╔══██╗██╔══██╗╚══██╔══╝╚══██╔══╝██╔════╝██╔══██╗
@@ -806,6 +949,9 @@ Connect AI agents to phone numbers in 4 lines of code
           payload?: {
             call_control_id?: string;
             audio?: { chunk?: string };
+            digit?: string;
+            recording_urls?: { mp3?: string; wav?: string };
+            public_recording_urls?: { mp3?: string; wav?: string };
           };
         };
         try {
@@ -821,12 +967,35 @@ Connect AI agents to phone numbers in 4 lines of code
         if (eventType === 'stream_started' && !streamStarted) {
           streamStarted = true;
           const callControlId = data.payload?.call_control_id ?? '';
+          if (callControlId) this.activeCallIds.set(ws, callControlId);
           await handler.handleCallStart(callControlId);
+          if (this.recording) {
+            try {
+              await bridge.startRecording?.(callControlId);
+            } catch (e) {
+              getLogger().warn(`Could not start recording: ${String(e)}`);
+            }
+          }
         } else if (eventType === 'media') {
           const audioChunk = data.payload?.audio?.chunk ?? '';
           if (!audioChunk) return;
           // Telnyx sends 16 kHz PCM — send directly
           handler.handleAudio(Buffer.from(audioChunk, 'base64'));
+        } else if (eventType === 'call.dtmf.received') {
+          const digit = String(data.payload?.digit ?? '').trim();
+          if (digit) {
+            getLogger().info(`Telnyx DTMF received: ${digit}`);
+            await handler.handleDtmf(digit);
+          }
+        } else if (eventType === 'call.recording.saved') {
+          const recordingUrl =
+            data.payload?.recording_urls?.mp3 ??
+            data.payload?.recording_urls?.wav ??
+            data.payload?.public_recording_urls?.mp3 ??
+            '';
+          if (recordingUrl) {
+            getLogger().info(`Telnyx recording saved: ${recordingUrl}`);
+          }
         } else if (eventType === 'stream_stopped') {
           await handler.handleStop();
         }

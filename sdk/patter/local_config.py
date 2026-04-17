@@ -8,6 +8,7 @@ class LocalConfig:
     twilio_token: str = ""
     telnyx_key: str = ""
     telnyx_connection_id: str = ""
+    telnyx_public_key: str = ""
     openai_key: str = ""
     elevenlabs_key: str = ""
     deepgram_key: str = ""
