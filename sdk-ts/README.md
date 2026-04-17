@@ -173,7 +173,7 @@ const phone = new Patter({
   twilioSid: process.env.TWILIO_SID,
   twilioToken: process.env.TWILIO_TOKEN,
   openaiKey: process.env.OPENAI_KEY,
-  phoneNumber: '+16592214527',
+  phoneNumber: '+15551234567',
   webhookUrl: 'your-domain.ngrok-free.dev',
 });
 

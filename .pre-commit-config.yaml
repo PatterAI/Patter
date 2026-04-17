@@ -1,0 +1,63 @@
+# Patter pre-commit hooks.
+# Adapted from https://github.com/mcp-use/mcp-use/blob/main/.pre-commit-config.yaml
+# (MIT-licensed reference project) for Patter's sdk/ (Python) + sdk-ts/ (TS) layout.
+#
+# Install locally:
+#   pip install pre-commit && pre-commit install
+# Run manually on the whole repo:
+#   pre-commit run --all-files
+
+repos:
+  # ── Python: ruff (lint + format) ─────────────────────────────────────────
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+        files: ^sdk/.*\.py$
+        types: [python]
+      - id: ruff-format
+        files: ^sdk/.*\.py$
+        types: [python]
+
+  # ── Hygiene (all files) ──────────────────────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: \.(ogg|onnx|png|jpg|jpeg|pdf|ico|lock)$
+      - id: end-of-file-fixer
+        exclude: \.(ogg|onnx|png|jpg|jpeg|pdf|ico|lock)$
+      - id: check-yaml
+        exclude: (package-lock\.json|pnpm-lock\.yaml)$
+      - id: check-json
+        exclude: (tsconfig.*\.json)$ # allow comments
+      - id: check-added-large-files
+        args: [--maxkb=3000] # 3MB cap (silero_vad.onnx is ~2.2MB)
+        exclude: \.(onnx|ogg)$ # vendored bundled assets
+      - id: debug-statements
+        files: ^sdk/.*\.py$
+      - id: detect-private-key
+      - id: mixed-line-ending
+        args: [--fix=lf]
+
+  # ── Secret scan on every commit ──────────────────────────────────────────
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.4
+    hooks:
+      - id: gitleaks
+
+  # ── TypeScript: prettier + eslint via local npm scripts ──────────────────
+  - repo: local
+    hooks:
+      - id: ts-lint
+        name: TypeScript lint (tsc --noEmit)
+        entry: bash -c 'cd sdk-ts && npm run lint'
+        language: system
+        files: ^sdk-ts/.*\.(ts|tsx)$
+        pass_filenames: false
+
+default_language_version:
+  python: python3.11
+
+# The pre-push hook in .githooks/pre-push complements this with a full test run.
