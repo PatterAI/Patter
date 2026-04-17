@@ -61,7 +61,7 @@ test.describe("Inbound call scenario", () => {
   }) => {
     const response = await request.post(`${BASE}/webhooks/twilio/voice`, {
       form: {
-        CallSid: "CA_e2e_inbound_001",
+        CallSid: "CA0000000000000000000000000000c001",
         From: "+14155551234",
         To: "+15551234567",
         Direction: "inbound",
@@ -76,7 +76,7 @@ test.describe("Inbound call scenario", () => {
     expect(body).toContain("<Response>");
     expect(body).toContain("<Connect>");
     expect(body).toContain("<Stream");
-    expect(body).toContain("wss://example.com/ws/stream/CA_e2e_inbound_001");
+    expect(body).toContain("wss://example.com/ws/stream/CA0000000000000000000000000000c001");
   });
 
   test("dashboard updates after simulated inbound call lifecycle", async ({
@@ -96,7 +96,7 @@ test.describe("Inbound call scenario", () => {
     // We verify the webhook endpoint is reachable and returns valid TwiML.
     const voiceResp = await request.post(`${BASE}/webhooks/twilio/voice`, {
       form: {
-        CallSid: "CA_e2e_inbound_002",
+        CallSid: "CA0000000000000000000000000000c002",
         From: "+14155559999",
         To: "+15551234567",
       },

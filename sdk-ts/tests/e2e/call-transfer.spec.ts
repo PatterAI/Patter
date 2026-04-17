@@ -8,7 +8,7 @@ test.describe("Call transfer", () => {
   }) => {
     const response = await request.post(`${BASE}/webhooks/twilio/voice`, {
       form: {
-        CallSid: "CA_transfer_001",
+        CallSid: "CA0000000000000000000000000000a001",
         From: "+14155550001",
         To: "+15551234567",
       },
@@ -29,14 +29,14 @@ test.describe("Call transfer", () => {
   }) => {
     const resp1 = await request.post(`${BASE}/webhooks/twilio/voice`, {
       form: {
-        CallSid: "CA_transfer_unique_001",
+        CallSid: "CA0000000000000000000000000000b001",
         From: "+14155550001",
         To: "+15551234567",
       },
     });
     const resp2 = await request.post(`${BASE}/webhooks/twilio/voice`, {
       form: {
-        CallSid: "CA_transfer_unique_002",
+        CallSid: "CA0000000000000000000000000000b002",
         From: "+14155550002",
         To: "+15551234567",
       },
@@ -45,8 +45,8 @@ test.describe("Call transfer", () => {
     const body1 = await resp1.text();
     const body2 = await resp2.text();
 
-    expect(body1).toContain("CA_transfer_unique_001");
-    expect(body2).toContain("CA_transfer_unique_002");
+    expect(body1).toContain("CA0000000000000000000000000000b001");
+    expect(body2).toContain("CA0000000000000000000000000000b002");
     expect(body1).not.toEqual(body2);
   });
 
