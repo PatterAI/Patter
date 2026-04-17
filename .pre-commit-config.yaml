@@ -53,15 +53,11 @@ repos:
     hooks:
       - id: gitleaks
 
-  # ── TypeScript: prettier + eslint via local npm scripts ──────────────────
-  - repo: local
-    hooks:
-      - id: ts-lint
-        name: TypeScript lint (tsc --noEmit)
-        entry: bash -c 'cd sdk-ts && npm run lint'
-        language: system
-        files: ^sdk-ts/.*\.(ts|tsx)$
-        pass_filenames: false
+  # ── TypeScript lint is covered by the dedicated 'typescript' job in
+  # .github/workflows/test.yml (which does npm ci + npm run lint with the
+  # full node_modules tree available). Running it from pre-commit required
+  # provisioning a separate node install inside the pre-commit job only to
+  # duplicate work — skipped here on purpose.
 
 # No default_language_version pin: CI runners aren't guaranteed to have
 # python3.11 specifically, and pre-commit hooks (ruff, gitleaks, the generic
