@@ -18,7 +18,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from patter.services.ivr import (
+# IVR loop detection requires sklearn (extras [ivr]). Several tests below
+# exercise TfidfLoopDetector (directly or via loop_detector=True). Skip the
+# whole module on CI runners without sklearn installed.
+pytest.importorskip("sklearn", reason="IVR tests require the 'ivr' extras (scikit-learn)")
+
+from patter.services.ivr import (  # noqa: E402
     DtmfEvent,
     IVRActivity,
     TfidfLoopDetector,

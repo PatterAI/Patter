@@ -16,6 +16,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
+# A few tests below import numpy locally to synthesise PCM frames; those tests
+# are skipped gracefully on CI runners without the optional extras installed.
+# Module-level importorskip makes the entire file skip cleanly when numpy
+# is absent, matching the pattern already used in test_pcm_mixer.py and
+# test_silero_vad.py.
+pytest.importorskip("numpy", reason="Krisp filter tests that synthesise PCM require numpy")
+
 
 # ---------------------------------------------------------------------------
 # Fake krisp_audio module fixture
