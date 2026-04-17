@@ -137,39 +137,60 @@ jobs:
           pytest tests/security/ -v -m security
 
   pre-commit:
-    name: Pre-commit (lint + secret scan)
+    name: Pre-commit (lint + hygiene)
     runs-on: ubuntu-latest
+    # Runs only when the config file is present on the target branch; during
+    # the rollout window some branches may not have .pre-commit-config.yaml
+    # yet and we don't want the gate to block unrelated PRs.
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+      - name: Check config presence
+        id: config
+        run: |
+          if [ -f .pre-commit-config.yaml ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Skipping pre-commit: .pre-commit-config.yaml not present on this branch yet"
+          fi
       - name: Set up Python 3.12
+        if: steps.config.outputs.present == 'true'
         uses: actions/setup-python@v6
         with:
           python-version: '3.12'
           cache: 'pip'
       - name: Install pre-commit
+        if: steps.config.outputs.present == 'true'
         run: pip install pre-commit==3.8.0
       - name: Cache pre-commit envs
+        if: steps.config.outputs.present == 'true'
         uses: actions/cache@v4
         with:
           path: ~/.cache/pre-commit
           key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
       - name: Run pre-commit (all files)
+        if: steps.config.outputs.present == 'true'
         run: pre-commit run --all-files --show-diff-on-failure
 
-  gitleaks:
-    name: Gitleaks (secret scan)
+  secret-scan:
+    name: Secret scan (trufflehog)
     runs-on: ubuntu-latest
-    # Standalone gitleaks job so the check runs even for contributors who
-    # haven't installed pre-commit locally. Fails fast on any leak.
+    # gitleaks-action v2 now requires a commercial license for org repos; we
+    # use TruffleHog OSS instead (no license, broader ruleset, scans verified
+    # secrets on every push / PR diff).
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: TruffleHog OSS scan
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: ${{ github.event.pull_request.base.sha || github.event.before }}
+          head: HEAD
+          extra_args: --results=verified,unknown
 
   soak:
     name: Soak Tests
