@@ -1,0 +1,60 @@
+---
+title: "Rime TTS"
+description: "Arcana and Mist model families via Rime's HTTP endpoint."
+---
+
+# Rime TTS
+
+`RimeTTS` targets the [Rime HTTP endpoint](https://rime.ai/docs). Both Arcana (high fidelity) and Mist (low latency) model families are supported. The provider requests `audio/pcm` and yields raw PCM_S16LE chunks at the configured sample rate.
+
+## Install
+
+```bash
+npm install getpatter
+```
+
+No vendor SDK is required — `RimeTTS` uses the platform `fetch`, so it works on Node 18+.
+
+## Usage
+
+```typescript
+import { RimeTTS } from "getpatter";
+
+// Arcana — highest quality, up to 4-minute request timeout.
+const tts = new RimeTTS(process.env.RIME_API_KEY!, {
+  model: "arcana",
+  speaker: "astra",
+  lang: "eng",
+  sampleRate: 16000,
+});
+
+// Mist v2 — low-latency, streaming-friendly.
+const fast = new RimeTTS(process.env.RIME_API_KEY!, {
+  model: "mistv2",
+  speaker: "cove",
+  speedAlpha: 1.1,
+  reduceLatency: true,
+});
+
+for await (const chunk of tts.synthesizeStream("Ciao dal Patter pipeline.")) {
+  // chunk is a Buffer of PCM_S16LE audio
+}
+```
+
+Prefer one-shot synthesis? Use `await tts.synthesize(text)` to collect the stream into a single `Buffer`.
+
+## Options (selection)
+
+| Option | Default | Notes |
+|---|---|---|
+| `model` | `"arcana"` | `"arcana"` or any `mist*` model. |
+| `speaker` | `"astra"` / `"cove"` | Default depends on model. |
+| `lang` | `"eng"` | Rime language code. |
+| `sampleRate` | `16000` | Hz. |
+| `temperature`, `topP`, `maxTokens`, `repetitionPenalty` | — | Arcana only. |
+| `speedAlpha`, `reduceLatency`, `pauseBetweenBrackets`, `phonemizeBetweenBrackets` | — | Mist only. |
+| `baseUrl` | Rime `/v1/rime-tts` | Override for proxying or self-hosted gateways. |
+
+## Attribution
+
+Ported from [LiveKit Agents](https://github.com/livekit/agents) (`livekit-plugins-rime`, Apache License 2.0).

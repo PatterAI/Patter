@@ -160,6 +160,9 @@
                 "pages": [
                   "typescript-sdk/agents",
                   "typescript-sdk/providers",
+                  "typescript-sdk/providers/cartesia",
+                  "typescript-sdk/providers/rime",
+                  "typescript-sdk/providers/lmnt",
                   "typescript-sdk/tools",
                   "typescript-sdk/guardrails",
                   "typescript-sdk/events",

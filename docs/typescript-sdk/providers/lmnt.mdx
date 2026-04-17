@@ -1,0 +1,55 @@
+---
+title: "LMNT TTS"
+description: "Blizzard and Aurora TTS models via the LMNT HTTP API."
+---
+
+# LMNT TTS
+
+`LMNTTTS` calls LMNT's [`/v1/ai/speech/bytes`](https://docs.lmnt.com/api-reference/speech/synthesize-speech-bytes) endpoint. The Patter port defaults to `format: "raw"` (PCM_S16LE) at 16 kHz for direct telephony use; callers can switch to `mp3`, `mulaw`, `wav`, `aac` when needed.
+
+## Install
+
+```bash
+npm install getpatter
+```
+
+No vendor SDK is required — `LMNTTTS` uses the platform `fetch`, so it works on Node 18+.
+
+## Usage
+
+```typescript
+import { LMNTTTS } from "getpatter";
+
+const tts = new LMNTTTS(process.env.LMNT_API_KEY!, {
+  model: "blizzard",
+  voice: "leah",
+  // language omitted -> defaults to "auto" for blizzard, "en" for aurora
+  format: "raw",
+  sampleRate: 16000,
+  temperature: 1.0,
+  topP: 0.8,
+});
+
+for await (const chunk of tts.synthesizeStream("Hello from Patter.")) {
+  // chunk is a Buffer of PCM_S16LE audio
+}
+```
+
+Prefer one-shot synthesis? Use `await tts.synthesize(text)` to collect the stream into a single `Buffer`.
+
+## Options
+
+| Option | Default | Notes |
+|---|---|---|
+| `model` | `"blizzard"` | `"blizzard"` or `"aurora"`. |
+| `voice` | `"leah"` | LMNT voice id. |
+| `language` | `undefined` | Auto-derived from model when omitted. |
+| `format` | `"raw"` | `"aac"`, `"mp3"`, `"mulaw"`, `"raw"`, `"wav"`. |
+| `sampleRate` | `16000` | `8000`, `16000`, or `24000`. |
+| `temperature` | `1.0` | Higher = more expressive. |
+| `topP` | `0.8` | Controls stability. |
+| `baseUrl` | LMNT `/v1/ai/speech/bytes` | Override for proxying or self-hosted gateways. |
+
+## Attribution
+
+Ported from [LiveKit Agents](https://github.com/livekit/agents) (`livekit-plugins-lmnt`, Apache License 2.0).

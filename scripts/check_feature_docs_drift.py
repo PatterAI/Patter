@@ -5,7 +5,7 @@ Cross-references:
   1. The feature inventory (patter_sdk_features.xlsx) — source of truth for
      what the SDK publicly ships.
   2. The Mintlify documentation (docs/) — what the users can read about.
-  3. The SDK public surface (sdk/patter/__init__.py, sdk-ts/src/index.ts) —
+  3. The SDK public surface (sdk-py/patter/__init__.py, sdk-ts/src/index.ts) —
      what is actually exported from the code today.
 
 Exits with code 1 when drift exists (so the GitHub Action can open an issue);
@@ -15,7 +15,7 @@ Usage:
     python scripts/check_feature_docs_drift.py \\
         --xlsx /path/to/patter_sdk_features.xlsx \\
         --docs docs/ \\
-        --py-init sdk/patter/__init__.py \\
+        --py-init sdk-py/patter/__init__.py \\
         --ts-index sdk-ts/src/index.ts \\
         --output drift-report.md
 """

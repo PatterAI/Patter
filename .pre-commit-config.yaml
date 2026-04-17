@@ -1,6 +1,6 @@
 # Patter pre-commit hooks.
 # Adapted from https://github.com/mcp-use/mcp-use/blob/main/.pre-commit-config.yaml
-# (MIT-licensed reference project) for Patter's sdk/ (Python) + sdk-ts/ (TS) layout.
+# (MIT-licensed reference project) for Patter's sdk-py/ (Python) + sdk-ts/ (TS) layout.
 #
 # Install locally:
 #   pip install pre-commit && pre-commit install
@@ -20,10 +20,10 @@ repos:
   #   hooks:
   #     - id: ruff
   #       args: [--fix, --exit-non-zero-on-fix]
-  #       files: ^sdk/.*\.py$
+  #       files: ^sdk-py/.*\.py$
   #       types: [python]
   #     - id: ruff-format
-  #       files: ^sdk/.*\.py$
+  #       files: ^sdk-py/.*\.py$
   #       types: [python]
 
   # ── Hygiene (all files) ──────────────────────────────────────────────────
@@ -42,7 +42,7 @@ repos:
         args: [--maxkb=3000] # 3MB cap (silero_vad.onnx is ~2.2MB)
         exclude: \.(onnx|ogg)$ # vendored bundled assets
       - id: debug-statements
-        files: ^sdk/.*\.py$
+        files: ^sdk-py/.*\.py$
       - id: detect-private-key
       - id: mixed-line-ending
         args: [--fix=lf]

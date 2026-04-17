@@ -1,16 +1,46 @@
 # Changelog
 
-## [Unreleased]
+## 0.4.2 (2026-04-17)
+
+### Changed
+- Renamed `sdk/` directory to `sdk-py/` for clearer Python/TypeScript split; CI, pre-commit, pre-push hook, and docs updated accordingly
+- Removed remaining Patter Cloud references from `sdk-py/README.md`, `sdk-ts/README.md`, and `docs/examples/custom-voice.*` — only local mode is documented (code still supports both modes)
+- TypeScript provider docs parity: added `docs/typescript-sdk/providers/{lmnt,rime}.mdx` and registered them in `docs.json`
+- High-signal test cleanup: dropped tautological and redundant tests (#59)
+- CI workflow slimmed: removed unused soak job, shrunk test matrices (#60)
+- Daily docs/feature-inventory drift check (#55) and daily merged-branch cleanup (#56)
+- Extras coverage matrix (#58)
+
+### Fixed
+- Pre-commit `default_language_version` Python pin removed (#61)
+
+### Security
+- Pre-commit hardening and gitleaks integration (#57, #58)
+- Real phone number redacted from tests and documentation (#57)
+
+## 0.4.1 (2026-04-13)
+
+### Changed
+- Removed Patter Cloud references from SDK READMEs and custom-voice examples (#17)
+- Updated PyPI publishing to use trusted publishers with OIDC authentication (#18)
+
+## 0.4.0 (2026-04-13)
 
 ### Added
-- 1,766 tests across 6 categories: unit, integration, E2E (Playwright), soak/stress, security, and cross-SDK parity
+- Comprehensive test suite: 1,766 tests across unit, integration, E2E (Playwright), soak/stress, and security categories (#14)
+- Built-in cloudflared tunnel for local mode — automatically expose local development server to internet (#16)
 - Python SDK test coverage raised to 82%
 - TypeScript SDK test coverage raised to 80.64%
-- `e2e`, `security`, and `soak` jobs added to the GitHub Actions CI workflow
 
 ### Fixed
 - Dashboard JavaScript escaping bug (`fmt\$` → `fmt$`) that was breaking all client-side dashboard interactivity since v0.3.1
-- `asyncio.get_event_loop()` compatibility issues on Python 3.14 in existing test files
+- `asyncio.get_event_loop()` compatibility issues on Python 3.14 in test files (#13)
+- Express v5 type compatibility for `req.params` (#10)
+
+### Changed
+- SDK rebrand to getpatter.com with 30 comprehensive examples and dashboard redesign (#12, #11)
+- Added Patter SDK title below banner in README (#32)
+- Improved documentation and developer tooling section (#33)
 
 ## 0.3.0 (2026-04-10)
 

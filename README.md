@@ -240,7 +240,7 @@ Pull requests are welcome.
 
 ```bash
 # Python SDK
-cd sdk && pip install -e ".[dev]" && pytest tests/ -v
+cd sdk-py && pip install -e ".[dev]" && pytest tests/ -v
 
 # TypeScript SDK
 cd sdk-ts && npm install && npm test

@@ -6,7 +6,7 @@ Thank you for your interest in contributing to Patter!
 
 ### Python SDK
 ```bash
-cd sdk
+cd sdk-py
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[local,dev]"
