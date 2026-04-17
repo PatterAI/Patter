@@ -9,9 +9,9 @@ labels: bug
 A clear description of the bug.
 
 ## Steps to Reproduce
-1. 
-2. 
-3. 
+1.
+2.
+3.
 
 ## Expected Behavior
 
@@ -21,8 +21,8 @@ A clear description of the bug.
 
 ## Environment
 - SDK: Python / TypeScript (version: )
-- Node.js / Python version: 
-- OS: 
+- Node.js / Python version:
+- OS:
 - Carrier: Twilio / Telnyx
 - Voice mode: OpenAI Realtime / Pipeline / ElevenLabs
 
