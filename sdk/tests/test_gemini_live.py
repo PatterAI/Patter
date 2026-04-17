@@ -124,28 +124,26 @@ async def test_send_audio_uses_correct_mime(monkeypatch: pytest.MonkeyPatch) -> 
 
 @pytest.mark.asyncio
 async def test_missing_google_genai_raises_helpful_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Remove any genai import that may have leaked in.
+    """When google-genai is not installed, connect() must raise a clear error.
+
+    Works in both CI modes: the base Python job where google-genai is absent
+    AND the all-extras job where it is installed. We set ``sys.modules`` entries
+    to ``None`` which causes any subsequent ``import google.genai`` to raise
+    ``ImportError`` immediately (PEP 328 standard behaviour, survives PEP 451
+    loader overhauls that broke the old ``find_module`` blocker pattern).
+    """
     for k in list(sys.modules):
         if k == "google" or k.startswith("google.genai"):
             monkeypatch.delitem(sys.modules, k, raising=False)
 
-    # Force import to fail by injecting a blocker.
-    class _Blocker:
-        def find_module(self, name, path=None):
-            if name == "google.genai" or name == "google":
-                return self
-            return None
+    # Poison the import cache so any future `import google.genai` raises.
+    monkeypatch.setitem(sys.modules, "google", None)
+    monkeypatch.setitem(sys.modules, "google.genai", None)
+    monkeypatch.setitem(sys.modules, "google.genai.types", None)
 
-        def load_module(self, name):  # pragma: no cover - exercised via import
-            raise ImportError(f"blocked: {name}")
-
-    sys.meta_path.insert(0, _Blocker())
-    try:
-        adapter = GeminiLiveAdapter(api_key="fake")
-        with pytest.raises(RuntimeError, match="google-genai"):
-            await adapter.connect()
-    finally:
-        sys.meta_path.pop(0)
+    adapter = GeminiLiveAdapter(api_key="fake")
+    with pytest.raises(RuntimeError, match="google-genai"):
+        await adapter.connect()
 
 
 @pytest.mark.asyncio
