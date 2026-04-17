@@ -1,12 +1,12 @@
 /**
- * Self-hosted mode with custom STT and TTS providers.
+ * Local mode with custom STT and TTS providers.
  *
- * Connects to your own Patter backend with:
- * - Telnyx for telephony
+ * Connects using local mode with:
+ * - Twilio for telephony
  * - Deepgram Nova for speech-to-text
  * - ElevenLabs for text-to-speech
  *
- * Requires a running Patter backend (see docs/self-hosting.md).
+ * No cloud backend required — runs entirely in your process.
  *
  * Usage:
  *   npm install getpatter
@@ -16,20 +16,12 @@
 import { Patter, IncomingMessage } from "getpatter";
 
 // Configuration — use environment variables in production
-const PATTER_API_KEY = process.env.PATTER_API_KEY ?? "pt_your_api_key_here";
-const TELNYX_API_KEY = process.env.TELNYX_API_KEY ?? "KEY4...";
+const TWILIO_SID = process.env.TWILIO_ACCOUNT_SID ?? "AC...";
+const TWILIO_TOKEN = process.env.TWILIO_AUTH_TOKEN ?? "your_auth_token";
+const OPENAI_KEY = process.env.OPENAI_API_KEY ?? "sk-...";
 const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY ?? "dg_...";
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY ?? "el_...";
-const PHONE_NUMBER = process.env.PHONE_NUMBER ?? "+14155550000"; // E.164 format
-
-const BACKEND_WS = process.env.PATTER_BACKEND_WS ?? "ws://localhost:8000";
-const BACKEND_REST = process.env.PATTER_BACKEND_REST ?? "http://localhost:8000";
-
-const phone = new Patter({
-  apiKey: PATTER_API_KEY,
-  backendUrl: BACKEND_WS,
-  restUrl: BACKEND_REST,
-});
+const PHONE_NUMBER = process.env.TWILIO_PHONE_NUMBER ?? "+14155550000"; // E.164 format
 
 async function onMessage(msg: IncomingMessage): Promise<string> {
   console.log(`[${msg.callId}] ${msg.caller}: "${msg.text}"`);
@@ -52,33 +44,46 @@ async function onMessage(msg: IncomingMessage): Promise<string> {
 }
 
 async function main(): Promise<void> {
-  console.log(`Connecting to ${BACKEND_WS}...`);
+  const phone = new Patter({
+    twilioSid: TWILIO_SID,
+    twilioToken: TWILIO_TOKEN,
+    openaiKey: OPENAI_KEY,
+    phoneNumber: PHONE_NUMBER,
+  });
 
-  await phone.connect({
-    onMessage,
-    onCallStart: async (data) => {
-      console.log(`Call started from ${data.caller} (mode: ${data.mode})`);
-    },
-    onCallEnd: async (data) => {
-      console.log(`Call ended after ${data.duration_seconds ?? 0}s`);
-    },
-    // Self-hosted: pass provider and voice config
-    provider: "telnyx",
-    providerKey: TELNYX_API_KEY,
-    number: PHONE_NUMBER,
-    country: "US",
-    stt: Patter.deepgram({ apiKey: DEEPGRAM_API_KEY, language: "en" }),
-    tts: Patter.elevenlabs({ apiKey: ELEVENLABS_API_KEY, voice: "aria" }),
+  const agent = phone.agent({
+    systemPrompt: "You are a helpful customer service agent.",
+    voice: "alloy",
+    firstMessage: "Hi! Thanks for calling. How can I help?",
   });
 
   console.log(`Ready on ${PHONE_NUMBER}. Waiting for calls... (Ctrl+C to stop)`);
 
-  await new Promise<never>(() => {});
+  try {
+    await phone.serve({
+      agent,
+      port: 8000,
+      onCallStart: async (data) => {
+        console.log(`Call started from ${data.caller}`);
+      },
+      onCallEnd: async (data) => {
+        console.log(`Call ended after ${data.duration_seconds ?? 0}s`);
+      },
+      // Use custom STT and TTS providers
+      stt: Patter.deepgram({ apiKey: DEEPGRAM_API_KEY, language: "en" }),
+      tts: Patter.elevenlabs({ apiKey: ELEVENLABS_API_KEY, voice: "aria" }),
+    });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ERR_ASSERTION") {
+      console.log("\nShutting down...");
+    } else {
+      throw error;
+    }
+  }
 }
 
 process.on("SIGINT", async () => {
   console.log("\nShutting down...");
-  await phone.disconnect();
   process.exit(0);
 });
 
