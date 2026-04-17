@@ -1,0 +1,112 @@
+name: Docs Feature Drift Check
+
+# Daily consistency check between:
+#   - the canonical feature inventory (patter_sdk_features.xlsx, stored in the
+#     patter-assets sibling repo)
+#   - the Mintlify documentation under docs/
+#   - the public SDK surface (sdk/patter/__init__.py + sdk-ts/src/index.ts)
+#
+# Opens or updates a single issue labelled `docs-drift` listing every mismatch.
+# If there is nothing to report, closes the issue (if open).
+
+on:
+  schedule:
+    # 03:00 UTC every day
+    - cron: '0 3 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  drift-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Patter repo
+        uses: actions/checkout@v5
+
+      - name: Checkout patter-assets (private, xlsx lives here)
+        uses: actions/checkout@v5
+        with:
+          repository: PatterAI/patter-assets
+          token: ${{ secrets.PATTER_ASSETS_TOKEN }}
+          path: patter-assets
+          # Soft-fail if the repo/secret isn't configured yet: the job falls
+          # back to a file path check and emits a warning.
+          continue-on-error: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: pip install openpyxl==3.1.5
+
+      - name: Run drift check
+        id: drift
+        run: |
+          python scripts/check_feature_docs_drift.py \
+            --xlsx patter-assets/patter_sdk_features.xlsx \
+            --docs docs/ \
+            --py-init sdk/patter/__init__.py \
+            --ts-index sdk-ts/src/index.ts \
+            --output drift-report.md
+        continue-on-error: true
+
+      - name: Open or update docs-drift issue
+        if: steps.drift.outcome == 'failure'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('drift-report.md', 'utf8');
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: 'docs-drift',
+              state: 'open',
+            });
+            if (issues.length > 0) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issues[0].number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: 'docs-drift: feature inventory ↔ docs mismatch',
+                body,
+                labels: ['docs-drift', 'documentation'],
+              });
+            }
+
+      - name: Close docs-drift issue if clean
+        if: steps.drift.outcome == 'success'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: 'docs-drift',
+              state: 'open',
+            });
+            for (const issue of issues) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: 'Drift resolved — closing automatically.',
+              });
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                state: 'closed',
+              });
+            }
