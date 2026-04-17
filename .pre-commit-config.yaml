@@ -57,7 +57,11 @@ repos:
         files: ^sdk-ts/.*\.(ts|tsx)$
         pass_filenames: false
 
-default_language_version:
-  python: python3.11
+# No default_language_version pin: CI runners aren't guaranteed to have
+# python3.11 specifically, and pre-commit hooks (ruff, gitleaks, the generic
+# hygiene checks) work on any Python >= 3.8. Pinning 3.11 here caused the
+# CI job to fail with 'failed to find interpreter for Builtin discover of
+# python_spec=python3.11' whenever the workflow picked a different version
+# via actions/setup-python.
 
 # The pre-push hook in .githooks/pre-push complements this with a full test run.
