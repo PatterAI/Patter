@@ -1,6 +1,6 @@
 [project]
 name = "getpatter"
-version = "0.4.2"
+version = "0.4.3"
 description = "Open-source voice AI SDK — connect any AI agent to real phone calls in 4 lines of code"
 readme = "README.md"
 license = { text = "MIT" }
@@ -27,6 +27,12 @@ requires-python = ">=3.11"
 dependencies = [
     "websockets>=13.0",
     "httpx>=0.27.0",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "twilio>=9.0.0",
+    "audioop-lts>=0.2.1; python_version>='3.13'",
+    "openai>=1.0.0",
+    "cryptography>=42.0.0",
 ]
 
 [project.scripts]
@@ -39,14 +45,11 @@ Repository = "https://github.com/PatterAI/Patter"
 "Bug Tracker" = "https://github.com/PatterAI/Patter/issues"
 
 [project.optional-dependencies]
-local = [
-    "fastapi>=0.115.0",
-    "uvicorn[standard]>=0.30.0",
-    "twilio>=9.0.0",
-    "audioop-lts>=0.2.1; python_version>='3.13'",
-    "openai>=1.0.0",
-    "cryptography>=42.0.0",
-]
+# Kept as an empty alias for backwards compatibility: older guides and
+# templates documented `pip install getpatter[local]`. Those dependencies
+# are now part of the base install, so `getpatter[local]` is equivalent
+# to `getpatter`.
+local = []
 soniox = [
     "aiohttp>=3.10",
 ]
