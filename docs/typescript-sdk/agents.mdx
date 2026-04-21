@@ -36,6 +36,12 @@ const agent = phone.agent({
 | `tts` | `TTSConfig` | No | — | TTS config for pipeline mode. Use `Patter.elevenlabs()` or `Patter.openaiTts()`. |
 | `variables` | `Record<string, string>` | No | — | Dynamic variables for `{placeholder}` substitution in `systemPrompt`. |
 | `guardrails` | `Guardrail[]` | No | — | Output guardrails. See [Guardrails](/typescript-sdk/guardrails). |
+| `hooks` | `PipelineHooks` | No | — | Pipeline hooks for intercepting STT/TTS processing. |
+| `textTransforms` | `((text: string) => string)[]` | No | — | Text transformation functions for LLM responses. |
+| `vad` | `VADProvider` | No | — | Voice activity detection provider. |
+| `audioFilter` | `AudioFilter` | No | — | Audio preprocessing filter. |
+| `backgroundAudio` | `BackgroundAudioPlayer` | No | — | Background audio player. |
+| `bargeInThresholdMs` | `number` | No | `300` | Barge-in hang-over window (ms). Set to `0` to disable. |
 
 ## Validation Rules
 
