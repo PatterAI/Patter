@@ -194,13 +194,13 @@ See [`Dockerfile`](./Dockerfile) and [`docker-compose.yml`](./docker-compose.yml
 
 ## Voice Modes
 
-| Mode | Turn latency | Quality | Best For |
-|---|---|---|---|
-| **OpenAI Realtime** (`provider="openai_realtime"`) | ~400–700 ms | High | Fluid, low-latency conversations |
-| **ElevenLabs ConvAI** (`provider="elevenlabs_convai"`) | ~600–900 ms | High | ElevenLabs-managed conversation flow |
-| **Pipeline** (`provider="pipeline"`) | ~2.0–2.8 s | High | Independent control over STT / LLM / TTS |
+| Mode | Quality | Best For |
+|---|---|---|
+| **OpenAI Realtime** (`provider="openai_realtime"`) | High | Fluid, low-latency conversations |
+| **ElevenLabs ConvAI** (`provider="elevenlabs_convai"`) | High | ElevenLabs-managed conversation flow |
+| **Pipeline** (`provider="pipeline"`) | High | Independent control over STT / LLM / TTS |
 
-Pipeline-mode latency is dominated by three fixed costs you can't remove without changing the provider: Deepgram endpointing (~150 ms + `utterance_end_ms`, default 1000 ms), LLM first-token (700–1500 ms for GPT-4o-mini via Twilio egress; ~300 ms with Cerebras/Groq), and TTS first-byte (~400 ms for ElevenLabs Turbo v2.5, ~780 ms for OpenAI tts-1). For sub-second turn UX switch to `provider="openai_realtime"`.
+Pipeline mode composes STT + LLM + TTS sequentially and inherits the latency of each provider plus the endpointing window. For the fastest turn UX pick `provider="openai_realtime"`, or pair the pipeline with low-latency providers such as Cerebras/Groq for the LLM and ElevenLabs Turbo v2.5 for TTS.
 
 ### Provider Notes
 
