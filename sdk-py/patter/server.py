@@ -8,7 +8,7 @@ import logging
 import signal
 import time
 
-from fastapi import WebSocket
+from fastapi import FastAPI, Request, Response, WebSocket
 
 from patter.local_config import LocalConfig
 from patter.models import Agent
@@ -160,15 +160,11 @@ class EmbeddedServer:
 
     def _create_app(self):
         """Build the FastAPI application with webhook + stream routes."""
-        from fastapi import FastAPI, Request, Response, WebSocket
         from patter.handlers.twilio_handler import (
             twilio_webhook_handler,
             twilio_stream_bridge,
         )
-        from patter.handlers.telnyx_handler import (
-            telnyx_webhook_handler,
-            telnyx_stream_bridge,
-        )
+        from patter.handlers.telnyx_handler import telnyx_stream_bridge
 
         app = FastAPI(title="Patter Local Server")
 
@@ -228,12 +224,45 @@ class EmbeddedServer:
                 return form_or_response
             form_data = form_or_response
             call_sid = form_data.get("CallSid", "")
-            caller = form_data.get("From", "")
-            callee = form_data.get("To", "")
+            # Twilio sends both `From` and `Caller` — `From` is set for direct
+            # inbound dials, `Caller` is what Twilio sees on the SIP trunk and
+            # is the reliable fallback when the number is anonymised or
+            # masked. Same for `To` / `Called`.
+            caller = form_data.get("From", "") or form_data.get("Caller", "")
+            callee = form_data.get("To", "") or form_data.get("Called", "")
             twiml = twilio_webhook_handler(
                 call_sid, caller, callee, self.config.webhook_url
             )
             return Response(content=twiml, media_type="text/xml")
+
+        # Twilio posts here for every status transition of a call
+        # (initiated → ringing → in-progress → completed | no-answer |
+        # busy | failed | canceled). Keeps the dashboard honest even when
+        # the call never reaches the media channel. See BUG #06.
+        @app.post("/webhooks/twilio/status")
+        async def twilio_status_callback(request: Request):
+            form_or_response = await _read_and_validate_twilio_form(request)
+            if isinstance(form_or_response, Response):
+                return form_or_response
+            form = form_or_response
+            call_sid = form.get("CallSid", "")
+            call_status = form.get("CallStatus", "")
+            duration = form.get("CallDuration", "") or form.get("Duration", "")
+            logger.info(
+                "Twilio status %s for call %s (duration=%s)",
+                sanitize_log_value(call_status),
+                sanitize_log_value(call_sid),
+                sanitize_log_value(duration),
+            )
+            if self._metrics_store is not None and call_sid and call_status:
+                extra: dict = {}
+                if duration:
+                    try:
+                        extra["duration_seconds"] = float(duration)
+                    except ValueError:
+                        pass
+                self._metrics_store.update_call_status(call_sid, call_status, **extra)
+            return Response(content="", status_code=204)
 
         @app.post("/webhooks/twilio/recording")
         async def twilio_recording_callback(request: Request):
@@ -340,22 +369,68 @@ class EmbeddedServer:
             if not isinstance(body.get("data"), dict) or not isinstance(body.get("data", {}).get("payload"), dict):
                 logger.warning("Telnyx webhook rejected: missing data.payload structure.")
                 return Response(status_code=400, content="Invalid webhook structure")
-            payload = body["data"]["payload"]
-            if not payload.get("call_control_id") or not payload.get("from") or not payload.get("to"):
-                logger.warning("Telnyx webhook rejected: missing required payload fields.")
-                return Response(status_code=400, content="Invalid webhook payload")
-            call_id = payload.get("call_control_id", "")
+            data = body["data"]
+            event_type = data.get("event_type", "")
+            payload = data["payload"]
+            call_control_id = payload.get("call_control_id", "")
             caller = payload.get("from", "")
             callee = payload.get("to", "")
-            response_data = telnyx_webhook_handler(
-                call_id,
-                caller,
-                callee,
-                self.config.webhook_url,
-                connection_id=self.config.telnyx_connection_id,
-            )
-            from fastapi.responses import JSONResponse
-            return JSONResponse(content=response_data)
+            if not call_control_id:
+                logger.warning("Telnyx webhook rejected: missing call_control_id.")
+                return Response(status_code=400, content="Invalid webhook payload")
+
+            # Telnyx Call Control is a REST API — the webhook body is a
+            # notification, not a command transport. We react by POSTing
+            # actions/answer and actions/streaming_start to the Call Control
+            # REST endpoint. See BUG #16.
+            api_key = self.config.telnyx_key
+            if not api_key:
+                logger.warning("Telnyx webhook: missing telnyx_key in LocalConfig")
+                return Response(status_code=500, content="Missing Telnyx API key")
+
+            import httpx as _httpx
+            api_base = "https://api.telnyx.com/v2"
+            auth_headers = {"Authorization": f"Bearer {api_key}"}
+
+            try:
+                if event_type == "call.initiated":
+                    logger.info("Telnyx call.initiated %s — answering", call_control_id)
+                    async with _httpx.AsyncClient(timeout=10.0) as client:
+                        resp = await client.post(
+                            f"{api_base}/calls/{call_control_id}/actions/answer",
+                            headers=auth_headers,
+                            json={},
+                        )
+                        if resp.status_code >= 400:
+                            logger.warning("Telnyx answer failed: %s %s", resp.status_code, resp.text)
+                elif event_type == "call.answered":
+                    from urllib.parse import quote as _quote
+                    stream_url = (
+                        f"wss://{self.config.webhook_url}/ws/telnyx/stream/{call_control_id}"
+                        f"?caller={_quote(caller)}&callee={_quote(callee)}"
+                    )
+                    logger.info("Telnyx call.answered %s — starting stream", call_control_id)
+                    async with _httpx.AsyncClient(timeout=10.0) as client:
+                        resp = await client.post(
+                            f"{api_base}/calls/{call_control_id}/actions/streaming_start",
+                            headers=auth_headers,
+                            json={
+                                "stream_url": stream_url,
+                                "stream_track": "both_tracks",
+                                "stream_bidirectional_mode": "rtp",
+                                "stream_bidirectional_codec": "PCMU",
+                                "stream_bidirectional_sampling_rate": 8000,
+                                "stream_bidirectional_target_legs": "self",
+                            },
+                        )
+                        if resp.status_code >= 400:
+                            logger.warning("Telnyx streaming_start failed: %s %s", resp.status_code, resp.text)
+                else:
+                    logger.debug("Telnyx event ignored: %s", event_type)
+            except Exception as exc:
+                logger.exception("Telnyx webhook handler error: %s", exc)
+
+            return Response(status_code=200)
 
         @app.websocket("/ws/telnyx/stream/{call_id}")
         async def telnyx_stream_handler(websocket: WebSocket, call_id: str):
