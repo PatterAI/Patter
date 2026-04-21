@@ -82,6 +82,9 @@ Create STT configurations using static factory methods:
 const stt = Patter.deepgram({
   apiKey: process.env.DEEPGRAM_KEY!,
   language: "en", // optional, defaults to "en"
+  endpointingMs: 150, // optional, defaults to 150
+  utteranceEndMs: 1000, // optional, defaults to 1000
+  vadEvents: true, // optional, defaults to true
 });
 ```
 
@@ -119,6 +122,37 @@ const tts = Patter.openaiTts({
 <Note>
   OpenAI TTS returns 24kHz PCM audio, which the SDK automatically resamples to 16kHz for telephony.
 </Note>
+
+### Patter.cartesia()
+
+```typescript
+const tts = Patter.cartesia({
+  apiKey: process.env.CARTESIA_KEY!,
+  voice: "f786b574-daa5-4673-aa0c-cbe3e8534c02", // optional, defaults to standard voice
+});
+```
+
+### Patter.rime()
+
+```typescript
+const tts = Patter.rime({
+  apiKey: process.env.RIME_KEY!,
+  voice: "astra", // optional, defaults to "astra"
+});
+```
+
+Supports Arcana (high fidelity) and Mist (low latency) model families.
+
+### Patter.lmnt()
+
+```typescript
+const tts = Patter.lmnt({
+  apiKey: process.env.LMNT_KEY!,
+  voice: "leah", // optional, defaults to "leah"
+});
+```
+
+Streams PCM_S16LE at 16 kHz by default.
 
 ## Provider Comparison
 

@@ -101,13 +101,22 @@ Use these factory methods to configure speech-to-text:
 ### Patter.deepgram()
 
 ```python
-stt = Patter.deepgram(api_key="dg_...", language="en")
+stt = Patter.deepgram(
+    api_key="dg_...",
+    language="en",
+    endpointing_ms=150,
+    utterance_end_ms=1000,
+    vad_events=True,
+)
 ```
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `api_key` | `str` | *required* | Your Deepgram API key. |
 | `language` | `str` | `"en"` | BCP-47 language code. |
+| `endpointing_ms` | `int` | `150` | Milliseconds of silence after final transcription. |
+| `utterance_end_ms` | `int` | `1000` | Milliseconds before ending an utterance. |
+| `vad_events` | `bool` | `True` | Enable voice activity detection events. |
 
 ### Patter.whisper()
 

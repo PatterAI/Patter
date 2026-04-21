@@ -5,7 +5,7 @@ description: "Complete reference for all classes, methods, parameters, and types
 
 # API Reference
 
-Complete reference for the `patter` Python SDK (v0.3.0).
+Complete reference for the `patter` Python SDK (v0.4.4).
 
 ## Patter
 
@@ -60,10 +60,20 @@ async def call(
     machine_detection: bool = False,
     on_machine: Callable[[dict], Awaitable[None]] | None = None,
     voicemail_message: str = "",
+    ring_timeout: int = 60,
 ) -> None
 ```
 
 Make an outbound call.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `to` | `str` | *required* | Destination phone number in E.164 format. |
+| `agent` | `Agent \| None` | `None` | Agent configuration to use for the call. |
+| `ring_timeout` | `int` | `60` | Ring timeout in seconds before no-answer. Maps to Twilio `Timeout` and Telnyx `timeout_secs`. |
+| `machine_detection` | `bool` | `False` | Enable answering machine detection. |
+| `on_machine` | `Callable \| None` | `None` | Callback when an answering machine is detected. |
+| `voicemail_message` | `str` | `""` | Message to drop if an answering machine answers. |
 
 **Raises:**
 - `PatterConnectionError` if `agent` is not provided.
@@ -86,10 +96,36 @@ def agent(
     tts: TTSConfig | None = None,
     variables: dict | None = None,
     guardrails: list | None = None,
+    hooks: PipelineHooks | None = None,
+    text_transforms: list[Callable] | None = None,
+    vad: VADProvider | None = None,
+    audio_filter: AudioFilter | None = None,
+    background_audio: BackgroundAudioPlayer | None = None,
+    barge_in_threshold_ms: int = 300,
 ) -> Agent
 ```
 
 Create an Agent configuration. Validates provider keys in local mode.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `system_prompt` | `str` | *required* | Agent instructions. |
+| `voice` | `str` | `"alloy"` | TTS voice name. |
+| `model` | `str` | `"gpt-4o-mini-realtime-preview"` | AI model ID. |
+| `language` | `str` | `"en"` | BCP-47 language code. |
+| `first_message` | `str` | `""` | Greeting spoken at call start. |
+| `tools` | `list[dict] \| None` | `None` | Tool definitions for function calling. |
+| `provider` | `str` | `"openai_realtime"` | Voice mode: `"openai_realtime"`, `"elevenlabs_convai"`, or `"pipeline"`. |
+| `stt` | `STTConfig \| None` | `None` | STT config for pipeline mode. |
+| `tts` | `TTSConfig \| None` | `None` | TTS config for pipeline mode. |
+| `variables` | `dict \| None` | `None` | Dynamic variable substitutions. |
+| `guardrails` | `list \| None` | `None` | Output guardrails. |
+| `hooks` | `PipelineHooks \| None` | `None` | Pipeline hooks for STT/TTS interception. |
+| `text_transforms` | `list[Callable] \| None` | `None` | Text transformation functions. |
+| `vad` | `VADProvider \| None` | `None` | Voice activity detection provider. |
+| `audio_filter` | `AudioFilter \| None` | `None` | Audio preprocessing filter. |
+| `background_audio` | `BackgroundAudioPlayer \| None` | `None` | Background audio player. |
+| `barge_in_threshold_ms` | `int` | `300` | Barge-in hang-over window (ms). Set to `0` to disable. |
 
 **Raises:** `ValueError` if provider is invalid or required keys are missing.
 
@@ -198,6 +234,39 @@ Create an OpenAI TTS configuration. Audio is auto-resampled from 24kHz to 16kHz.
 
 ---
 
+#### Patter.cartesia()
+
+```python
+@staticmethod
+def cartesia(api_key: str, voice: str = "f786b574-daa5-4673-aa0c-cbe3e8534c02") -> TTSConfig
+```
+
+Create a Cartesia TTS configuration. Streams raw PCM_S16LE audio.
+
+---
+
+#### Patter.rime()
+
+```python
+@staticmethod
+def rime(api_key: str, voice: str = "astra") -> TTSConfig
+```
+
+Create a Rime TTS configuration. Supports Arcana (high fidelity) and Mist (low latency) models.
+
+---
+
+#### Patter.lmnt()
+
+```python
+@staticmethod
+def lmnt(api_key: str, voice: str = "leah") -> TTSConfig
+```
+
+Create an LMNT TTS configuration. Streams PCM_S16LE at 16 kHz by default.
+
+---
+
 #### Patter.guardrail()
 
 ```python
@@ -263,6 +332,12 @@ class Agent:
     tts: TTSConfig | None = None
     variables: dict | None = None
     guardrails: list | None = None
+    hooks: PipelineHooks | None = None
+    text_transforms: list[Callable] | None = None
+    vad: VADProvider | None = None
+    audio_filter: AudioFilter | None = None
+    background_audio: BackgroundAudioPlayer | None = None
+    barge_in_threshold_ms: int = 300
 ```
 
 | Field | Type | Default | Description |
@@ -278,6 +353,12 @@ class Agent:
 | `tts` | `TTSConfig \| None` | `None` | TTS config for pipeline mode. |
 | `variables` | `dict \| None` | `None` | Dynamic variable substitutions for `{placeholder}` in `system_prompt`. Values limited to 500 chars. |
 | `guardrails` | `list \| None` | `None` | Output guardrails. |
+| `hooks` | `PipelineHooks \| None` | `None` | Pipeline hooks for STT/TTS interception. |
+| `text_transforms` | `list[Callable] \| None` | `None` | Text transformation functions. |
+| `vad` | `VADProvider \| None` | `None` | Voice activity detection provider. |
+| `audio_filter` | `AudioFilter \| None` | `None` | Audio preprocessing filter. |
+| `background_audio` | `BackgroundAudioPlayer \| None` | `None` | Background audio player. |
+| `barge_in_threshold_ms` | `int` | `300` | Barge-in hang-over window (ms). Set to `0` to disable. |
 
 ---
 

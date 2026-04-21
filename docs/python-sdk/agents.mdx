@@ -35,6 +35,12 @@ agent = phone.agent(
 | `tts` | `TTSConfig \| None` | `None` | TTS provider config for pipeline mode. Use `Patter.elevenlabs()` or `Patter.openai_tts()`. |
 | `variables` | `dict \| None` | `None` | Dynamic variable substitutions for `{placeholder}` patterns in the system prompt. |
 | `guardrails` | `list \| None` | `None` | Output guardrails created with `Patter.guardrail()`. See [Guardrails](/python-sdk/guardrails). |
+| `hooks` | `PipelineHooks \| None` | `None` | Pipeline hooks for intercepting STT/TTS processing. See [Pipeline Hooks](/python-sdk/events). |
+| `text_transforms` | `list[Callable] \| None` | `None` | List of text transformation functions to apply to LLM responses. |
+| `vad` | `VADProvider \| None` | `None` | Voice activity detection provider for custom STT behavior. |
+| `audio_filter` | `AudioFilter \| None` | `None` | Audio filter for preprocessing raw audio frames. |
+| `background_audio` | `BackgroundAudioPlayer \| None` | `None` | Background audio player for ambient sounds during calls. |
+| `barge_in_threshold_ms` | `int` | `300` | Barge-in hang-over window in milliseconds. Set to `0` to disable barge-in. |
 
 ## Agent Dataclass
 
