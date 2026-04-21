@@ -31,6 +31,10 @@ class MetricsStoreProtocol(Protocol):
 
     def record_turn(self, data: dict[str, Any]) -> None: ...
 
+    def record_call_initiated(self, data: dict[str, Any]) -> None: ...
+
+    def update_call_status(self, call_id: str, status: str, **extra: Any) -> None: ...
+
     def get_calls(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]: ...
 
     def get_call(self, call_id: str) -> dict[str, Any] | None: ...
@@ -107,13 +111,92 @@ class MetricsStore:
             "direction": data.get("direction", "inbound"),
         }
         with self._lock:
-            self._active_calls[call_id] = {
-                **event_data,
-                "started_at": time.time(),
-                "turns": [],
-            }
+            existing = self._active_calls.get(call_id)
+            # If the call was pre-registered with ``record_call_initiated``
+            # (e.g., outbound dial before media arrives), upgrade its status
+            # to "in-progress" instead of overwriting the from/to metadata.
+            if existing is not None:
+                existing.update(event_data)
+                existing["status"] = "in-progress"
+                existing.setdefault("turns", [])
+            else:
+                self._active_calls[call_id] = {
+                    **event_data,
+                    "started_at": time.time(),
+                    "status": "in-progress",
+                    "turns": [],
+                }
         # Publish outside lock to avoid deadlock with subscribe/unsubscribe
         self._publish("call_start", event_data)
+
+    def record_call_initiated(self, data: dict[str, Any]) -> None:
+        """Pre-register an outbound call before any webhook fires.
+
+        Called from ``Patter.call()`` so that even calls that never reach the
+        media channel (busy, no-answer, carrier-rejected) show up in the
+        dashboard. See BUG #06.
+        """
+        call_id = data.get("call_id", "")
+        if not call_id:
+            return
+        entry = {
+            "call_id": call_id,
+            "caller": data.get("caller", ""),
+            "callee": data.get("callee", ""),
+            "direction": data.get("direction", "outbound"),
+            "started_at": time.time(),
+            "status": "initiated",
+            "turns": [],
+        }
+        with self._lock:
+            # Don't clobber a pre-existing record (e.g. inbound already moved
+            # to "in-progress"). First writer wins.
+            self._active_calls.setdefault(call_id, entry)
+        self._publish("call_initiated", {k: entry[k] for k in ("call_id", "caller", "callee", "direction", "status")})
+
+    def update_call_status(self, call_id: str, status: str, **extra: Any) -> None:
+        """Update the status of an active or completed call.
+
+        Used by the Twilio ``statusCallback`` handler and by operators
+        wiring custom provider webhooks. Known statuses:
+        ``initiated``, ``ringing``, ``in-progress``, ``completed``,
+        ``no-answer``, ``busy``, ``failed``, ``canceled``, ``webhook_error``.
+        """
+        if not call_id or not status:
+            return
+        terminal = status in {"completed", "no-answer", "busy", "failed", "canceled", "webhook_error"}
+        with self._lock:
+            active = self._active_calls.get(call_id)
+            if active is not None:
+                active["status"] = status
+                if extra:
+                    active.update(extra)
+                if terminal:
+                    # Move to completed list so the UI stops the live timer.
+                    entry = {
+                        "call_id": call_id,
+                        "caller": active.get("caller", ""),
+                        "callee": active.get("callee", ""),
+                        "direction": active.get("direction", "outbound"),
+                        "started_at": active.get("started_at", 0),
+                        "ended_at": time.time(),
+                        "status": status,
+                        "metrics": None,
+                        **{k: v for k, v in extra.items() if k not in {"status"}},
+                    }
+                    self._active_calls.pop(call_id, None)
+                    self._calls.append(entry)
+                    if len(self._calls) > self._max_calls:
+                        self._calls = self._calls[-self._max_calls:]
+            else:
+                # Call already completed — patch the existing row if found.
+                for call in reversed(self._calls):
+                    if call.get("call_id") == call_id:
+                        call["status"] = status
+                        if extra:
+                            call.update(extra)
+                        break
+        self._publish("call_status", {"call_id": call_id, "status": status, **extra})
 
     def record_turn(self, data: dict[str, Any]) -> None:
         call_id = data.get("call_id", "")
@@ -146,10 +229,27 @@ class MetricsStore:
                 entry["callee"] = active.get("callee", "")
                 entry["direction"] = active.get("direction", "inbound")
                 entry["started_at"] = active.get("started_at", 0)
+                # Preserve any explicit status (no-answer, busy, ...) set by
+                # a statusCallback during the call. Fall back to "completed".
+                entry["status"] = active.get("status", "completed") if active.get("status") != "in-progress" else "completed"
+            else:
+                entry.setdefault("status", "completed")
             if metrics is not None:
                 entry["metrics"] = asdict(metrics)
             else:
-                entry["metrics"] = None
+                # No metrics payload (e.g. webhook-rejected inbound, or
+                # outbound call that never hit media): synthesise a minimal
+                # metrics shim so the UI can still display a frozen duration.
+                started = entry.get("started_at") or 0
+                ended = entry.get("ended_at") or time.time()
+                entry["metrics"] = {
+                    "duration_seconds": max(0.0, float(ended - started)),
+                    "turns": [],
+                    "cost": {"total": 0.0, "stt": 0.0, "tts": 0.0, "llm": 0.0, "telephony": 0.0},
+                    "latency_avg": {"total_ms": 0.0},
+                    "latency_p95": {"total_ms": 0.0},
+                    "provider_mode": "",
+                }
             self._calls.append(entry)
             if len(self._calls) > self._max_calls:
                 self._calls = self._calls[-self._max_calls :]
