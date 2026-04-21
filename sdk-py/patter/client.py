@@ -42,6 +42,9 @@ from patter.providers import (
     whisper as _whisper,
     elevenlabs as _elevenlabs,
     openai_tts as _openai_tts,
+    cartesia as _cartesia,
+    rime as _rime,
+    lmnt as _lmnt,
 )
 
 DEFAULT_BACKEND_URL = "wss://api.getpatter.com"
@@ -724,6 +727,7 @@ class Patter:
         utterance_end_ms: int | None = 1000,
         smart_format: bool = True,
         interim_results: bool = True,
+        vad_events: bool | None = None,
     ) -> STTConfig:
         return _deepgram(
             api_key=api_key,
@@ -733,6 +737,7 @@ class Patter:
             utterance_end_ms=utterance_end_ms,
             smart_format=smart_format,
             interim_results=interim_results,
+            vad_events=vad_events,
         )
 
     @staticmethod
@@ -746,6 +751,24 @@ class Patter:
     @staticmethod
     def openai_tts(api_key: str, voice: str = "alloy") -> TTSConfig:
         return _openai_tts(api_key=api_key, voice=voice)
+
+    @staticmethod
+    def cartesia(
+        api_key: str,
+        voice: str = "f786b574-daa5-4673-aa0c-cbe3e8534c02",
+    ) -> TTSConfig:
+        """Cartesia TTS config (parity with ``Patter.cartesia()`` in sdk-ts)."""
+        return _cartesia(api_key=api_key, voice=voice)
+
+    @staticmethod
+    def rime(api_key: str, voice: str = "astra") -> TTSConfig:
+        """Rime TTS config (parity with ``Patter.rime()`` in sdk-ts)."""
+        return _rime(api_key=api_key, voice=voice)
+
+    @staticmethod
+    def lmnt(api_key: str, voice: str = "leah") -> TTSConfig:
+        """LMNT TTS config (parity with ``Patter.lmnt()`` in sdk-ts)."""
+        return _lmnt(api_key=api_key, voice=voice)
 
     @staticmethod
     def guardrail(

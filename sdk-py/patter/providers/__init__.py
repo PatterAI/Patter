@@ -12,15 +12,18 @@ def deepgram(
     utterance_end_ms: int | None = 1000,
     smart_format: bool = True,
     interim_results: bool = True,
+    vad_events: bool | None = None,
 ) -> STTConfig:
     """Deepgram STT config. Tune latency via ``endpointing_ms`` / ``utterance_end_ms``."""
-    options = {
+    options: dict = {
         "model": model,
         "endpointing_ms": endpointing_ms,
         "utterance_end_ms": utterance_end_ms,
         "smart_format": smart_format,
         "interim_results": interim_results,
     }
+    if vad_events is not None:
+        options["vad_events"] = vad_events
     return STTConfig(provider="deepgram", api_key=api_key, language=language, options=options)
 
 
