@@ -242,6 +242,36 @@ export function buildAIAdapter(config: LocalConfig, agent: AgentOptions, resolve
 // Telephony bridge implementations
 // ---------------------------------------------------------------------------
 
+/**
+ * Normalize the ``options`` bag carried on an ``STTConfig`` into the strongly
+ * typed ``DeepgramSTTOptions`` shape. Accepts both snake_case (as produced by
+ * the ``deepgram()`` factory to match Python serialisation) and camelCase keys.
+ */
+type DeepgramOptionsMutable = {
+  -readonly [K in keyof import('./providers/deepgram-stt').DeepgramSTTOptions]:
+    import('./providers/deepgram-stt').DeepgramSTTOptions[K];
+};
+
+function extractDeepgramOptions(options?: Record<string, unknown>): DeepgramOptionsMutable {
+  if (!options) return {};
+  const get = (snake: string, camel: string): unknown => options[snake] ?? options[camel];
+  const out: DeepgramOptionsMutable = {};
+  const model = get('model', 'model');
+  if (typeof model === 'string') out.model = model;
+  const endpointing = get('endpointing_ms', 'endpointingMs');
+  if (typeof endpointing === 'number') out.endpointingMs = endpointing;
+  const utteranceEnd = get('utterance_end_ms', 'utteranceEndMs');
+  if (utteranceEnd === null) out.utteranceEndMs = null;
+  else if (typeof utteranceEnd === 'number') out.utteranceEndMs = utteranceEnd;
+  const smart = get('smart_format', 'smartFormat');
+  if (typeof smart === 'boolean') out.smartFormat = smart;
+  const interim = get('interim_results', 'interimResults');
+  if (typeof interim === 'boolean') out.interimResults = interim;
+  const vad = get('vad_events', 'vadEvents');
+  if (typeof vad === 'boolean') out.vadEvents = vad;
+  return out;
+}
+
 /** Twilio-specific telephony bridge. */
 class TwilioBridge implements TelephonyBridge {
   readonly label = 'Twilio';
@@ -299,13 +329,28 @@ class TwilioBridge implements TelephonyBridge {
   }
 
   createStt(agent: AgentOptions): DeepgramSTT | WhisperSTT | null {
+    // BUG #12 — Pipeline mode transcodes Twilio's mulaw 8 kHz to PCM16 16 kHz
+    // in ``StreamHandler.handleAudio`` before forwarding to STT. Configuring
+    // Deepgram for mulaw 8 kHz here would cause it to misinterpret the
+    // already-decoded PCM as garbage. The pipeline always uses linear16
+    // 16 kHz; ``forTwilio`` is kept for non-pipeline Twilio integrations.
+    const isPipeline = agent.provider === 'pipeline';
     if (agent.stt) {
       if (agent.stt.provider === 'deepgram') {
-        return DeepgramSTT.forTwilio(agent.stt.apiKey, agent.stt.language ?? 'en');
+        const dgOptions = extractDeepgramOptions(agent.stt.options);
+        if (isPipeline) {
+          return new DeepgramSTT(agent.stt.apiKey, agent.stt.language ?? 'en', dgOptions.model, 'linear16', 16000, dgOptions);
+        }
+        return DeepgramSTT.forTwilio(agent.stt.apiKey, agent.stt.language ?? 'en', dgOptions.model, dgOptions);
       } else if (agent.stt.provider === 'whisper') {
-        return WhisperSTT.forTwilio(agent.stt.apiKey, agent.stt.language ?? 'en');
+        return isPipeline
+          ? new WhisperSTT(agent.stt.apiKey, 'whisper-1', agent.stt.language ?? 'en')
+          : WhisperSTT.forTwilio(agent.stt.apiKey, agent.stt.language ?? 'en');
       }
     } else if (agent.deepgramKey) {
+      if (isPipeline) {
+        return new DeepgramSTT(agent.deepgramKey, agent.language ?? 'en', 'nova-3', 'linear16', 16000);
+      }
       return DeepgramSTT.forTwilio(agent.deepgramKey, agent.language ?? 'en');
     }
     return null;
@@ -365,7 +410,10 @@ export class TelnyxBridge implements TelephonyBridge {
   constructor(private readonly config: LocalConfig) {}
 
   sendAudio(ws: WSWebSocket, audioBase64: string, _streamSid: string): void {
-    ws.send(JSON.stringify({ event_type: 'media', payload: { audio: { chunk: audioBase64 } } }));
+    // BUG #18 — Telnyx media-stream outbound wire format is
+    // ``{"event":"media","media":{"payload":b64}}``, not the legacy
+    // ``event_type``/``payload.audio.chunk`` shape.
+    ws.send(JSON.stringify({ event: 'media', media: { payload: audioBase64 } }));
   }
 
   sendMark(_ws: WSWebSocket, _markName: string, _streamSid: string): void {
@@ -373,7 +421,8 @@ export class TelnyxBridge implements TelephonyBridge {
   }
 
   sendClear(ws: WSWebSocket, _streamSid: string): void {
-    ws.send(JSON.stringify({ event_type: 'media_stop' }));
+    // BUG #18 — matching clear signal.
+    ws.send(JSON.stringify({ event: 'clear' }));
   }
 
   async transferCall(callId: string, toNumber: string): Promise<void> {
@@ -475,13 +524,20 @@ export class TelnyxBridge implements TelephonyBridge {
   createStt(agent: AgentOptions): DeepgramSTT | WhisperSTT | null {
     if (agent.stt) {
       if (agent.stt.provider === 'deepgram') {
-        // Telnyx sends 16 kHz PCM — use linear16 encoding
-        return new DeepgramSTT(agent.stt.apiKey, agent.stt.language ?? 'en', 'nova-3', 'linear16', 16000);
+        // Telnyx pipeline also transcodes mulaw 8 kHz → PCM16 16 kHz before STT.
+        const dgOptions = extractDeepgramOptions(agent.stt.options);
+        return new DeepgramSTT(
+          agent.stt.apiKey,
+          agent.stt.language ?? 'en',
+          dgOptions.model ?? 'nova-3',
+          'linear16',
+          16000,
+          dgOptions,
+        );
       } else if (agent.stt.provider === 'whisper') {
         return new WhisperSTT(agent.stt.apiKey, 'whisper-1', agent.stt.language ?? 'en');
       }
     } else if (agent.deepgramKey) {
-      // Telnyx sends 16 kHz PCM — use linear16 encoding
       return new DeepgramSTT(agent.deepgramKey, agent.language ?? 'en', 'nova-3', 'linear16', 16000);
     }
     return null;
@@ -523,7 +579,8 @@ export class EmbeddedServer {
   private server: HTTPServer | null = null;
   private wss: WebSocketServer | null = null;
   private twilioTokenWarningLogged = false;
-  private readonly metricsStore: MetricsStore;
+  private telnyxSigWarningLogged = false;
+  readonly metricsStore: MetricsStore;
   private readonly pricing: ReturnType<typeof mergePricing>;
   private readonly remoteHandler = new RemoteMessageHandler();
 
@@ -596,6 +653,35 @@ export class EmbeddedServer {
       mountApi(app, this.metricsStore, this.dashboardToken);
       getLogger().info('Dashboard: http://127.0.0.1:' + port + '/');
     }
+
+    // Twilio statusCallback — captures ringing/no-answer/busy/failed
+    // transitions so the dashboard surfaces calls that never reach media.
+    // See BUG #06.
+    app.post('/webhooks/twilio/status', (req, res) => {
+      if (this.config.twilioToken) {
+        const signature = (req.headers['x-twilio-signature'] as string) || '';
+        const url = `https://${this.config.webhookUrl}${req.originalUrl}`;
+        const params = (req.body ?? {}) as Record<string, string>;
+        if (!validateTwilioSignature(url, params, signature, this.config.twilioToken)) {
+          res.status(403).send('Invalid signature');
+          return;
+        }
+      }
+      const body = req.body as Record<string, string>;
+      const callSid = sanitizeLogValue(body['CallSid'] ?? '');
+      const callStatus = sanitizeLogValue(body['CallStatus'] ?? '');
+      const duration = body['CallDuration'] ?? body['Duration'] ?? '';
+      getLogger().info(
+        `Twilio status ${callStatus} for call ${callSid} (duration=${duration})`,
+      );
+      if (callSid && callStatus) {
+        const extra: Record<string, unknown> = {};
+        const parsed = parseFloat(duration);
+        if (!Number.isNaN(parsed)) extra.duration_seconds = parsed;
+        this.metricsStore.updateCallStatus(callSid, callStatus, extra);
+      }
+      res.status(204).send();
+    });
 
     app.post('/webhooks/twilio/recording', (req, res) => {
       if (this.config.twilioToken) {
@@ -692,7 +778,7 @@ export class EmbeddedServer {
       res.type('text/xml').send(twiml);
     });
 
-    app.post('/webhooks/telnyx/voice', (req, res) => {
+    app.post('/webhooks/telnyx/voice', async (req, res) => {
       // Enforce Ed25519 signature verification when a public key is configured.
       if (this.config.telnyxPublicKey) {
         const rawBody = (req as express.Request & { rawBody?: string }).rawBody ?? '';
@@ -702,7 +788,8 @@ export class EmbeddedServer {
           getLogger().warn('Telnyx webhook rejected: invalid or missing Ed25519 signature');
           return res.status(403).send('Invalid signature');
         }
-      } else {
+      } else if (!this.telnyxSigWarningLogged) {
+        this.telnyxSigWarningLogged = true;
         getLogger().warn('Telnyx webhook signature verification is disabled. Set telnyxPublicKey in LocalOptions for production use.');
       }
 
@@ -727,53 +814,95 @@ export class EmbeddedServer {
         return res.status(400).send('Invalid body');
       }
 
-      const eventType = body?.data?.event_type ?? '';
+      const eventType = body.data.event_type ?? '';
+      const payload = body.data.payload ?? {};
 
       if (eventType === 'call.dtmf.received') {
-        const digit = String(body.data?.payload?.digit ?? '').trim();
+        const digit = String(payload.digit ?? '').trim();
         if (digit) {
           getLogger().info(`Telnyx DTMF received (webhook): ${sanitizeLogValue(digit)}`);
         }
-        return res.json({ received: true });
+        return res.status(200).send();
       }
 
       if (eventType === 'call.recording.saved') {
         const recordingUrl =
-          body.data?.payload?.recording_urls?.mp3 ??
-          body.data?.payload?.recording_urls?.wav ??
-          body.data?.payload?.public_recording_urls?.mp3 ??
+          payload.recording_urls?.mp3 ??
+          payload.recording_urls?.wav ??
+          payload.public_recording_urls?.mp3 ??
           '';
         if (recordingUrl) {
           getLogger().info(`Telnyx recording saved (webhook): ${sanitizeLogValue(recordingUrl)}`);
         }
-        return res.json({ received: true });
+        return res.status(200).send();
       }
 
-      if (eventType === 'call.initiated') {
-        const payload = body?.data?.payload ?? {};
-        const callControlId = payload.call_control_id ?? '';
-        const caller = payload.from ?? '';
-        const callee = payload.to ?? '';
-        const streamUrl =
-          `wss://${this.config.webhookUrl}/ws/stream/${encodeURIComponent(callControlId)}` +
-          `?caller=${encodeURIComponent(caller)}&callee=${encodeURIComponent(callee)}`;
+      const callControlId = payload.call_control_id ?? '';
+      if (!callControlId) {
+        getLogger().warn('Telnyx webhook rejected: missing call_control_id');
+        return res.status(400).send('Invalid webhook payload');
+      }
 
-        const commands = [
-          { command: 'answer' },
-          {
-            command: 'stream_start',
-            params: {
+      // BUG #16 — Telnyx Call Control is a REST API. The webhook body is an
+      // informational notification; the response body is ignored. To answer
+      // a call we POST ``actions/answer``, and to start audio streaming we
+      // POST ``actions/streaming_start`` (once the call is answered).
+      const apiKey = this.config.telnyxKey;
+      if (!apiKey) {
+        getLogger().warn('Telnyx webhook: missing telnyxKey in LocalOptions');
+        return res.status(500).send('Missing Telnyx API key');
+      }
+
+      const apiBase = 'https://api.telnyx.com/v2';
+      const authHeaders = {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      } as const;
+
+      try {
+        if (eventType === 'call.initiated') {
+          getLogger().info(`Telnyx call.initiated ${callControlId} — answering`);
+          const resp = await fetch(`${apiBase}/calls/${encodeURIComponent(callControlId)}/actions/answer`, {
+            method: 'POST',
+            headers: authHeaders,
+            body: JSON.stringify({}),
+            signal: AbortSignal.timeout(10_000),
+          });
+          if (!resp.ok) {
+            getLogger().warn(`Telnyx answer failed: ${resp.status} ${(await resp.text()).slice(0, 200)}`);
+          }
+        } else if (eventType === 'call.answered') {
+          const caller = payload.from ?? '';
+          const callee = payload.to ?? '';
+          const streamUrl =
+            `wss://${this.config.webhookUrl}/ws/stream/${encodeURIComponent(callControlId)}` +
+            `?caller=${encodeURIComponent(caller)}&callee=${encodeURIComponent(callee)}`;
+          getLogger().info(`Telnyx call.answered ${callControlId} — starting stream`);
+          const resp = await fetch(`${apiBase}/calls/${encodeURIComponent(callControlId)}/actions/streaming_start`, {
+            method: 'POST',
+            headers: authHeaders,
+            body: JSON.stringify({
               stream_url: streamUrl,
               stream_track: 'both_tracks',
-            },
-          },
-        ];
-
-        res.json({ commands });
-      } else {
-        // Acknowledge other Telnyx webhook events
-        res.json({ received: true });
+              stream_bidirectional_mode: 'rtp',
+              stream_bidirectional_codec: 'PCMU',
+              stream_bidirectional_sampling_rate: 8000,
+              stream_bidirectional_target_legs: 'self',
+            }),
+            signal: AbortSignal.timeout(10_000),
+          });
+          if (!resp.ok) {
+            getLogger().warn(`Telnyx streaming_start failed: ${resp.status} ${(await resp.text()).slice(0, 200)}`);
+          }
+        } else {
+          getLogger().debug(`Telnyx event ignored: ${eventType}`);
+        }
+      } catch (e) {
+        getLogger().error(`Telnyx webhook handler error: ${String(e)}`);
       }
+
+      // Telnyx ignores the response body. Acknowledge with 200 OK.
+      return res.status(200).send();
     });
 
     this.server = createServer(app);
@@ -944,15 +1073,16 @@ Connect AI agents to phone numbers in 4 lines of code
 
     ws.on('message', async (raw) => {
       try {
+        // BUG #17 — Telnyx media-stream WebSocket uses ``event`` (not
+        // ``event_type``, which is a Call Control REST notification field),
+        // and the frame layout is ``{event, start|media|stop|dtmf}`` —
+        // mirror of the Python bridge.
         let data: {
-          event_type?: string;
-          payload?: {
-            call_control_id?: string;
-            audio?: { chunk?: string };
-            digit?: string;
-            recording_urls?: { mp3?: string; wav?: string };
-            public_recording_urls?: { mp3?: string; wav?: string };
-          };
+          event?: string;
+          start?: { call_control_id?: string; from?: string; to?: string };
+          media?: { payload?: string; track?: string };
+          dtmf?: { digit?: string };
+          stop?: Record<string, unknown>;
         };
         try {
           data = JSON.parse(raw.toString()) as typeof data;
@@ -961,12 +1091,14 @@ Connect AI agents to phone numbers in 4 lines of code
           return;
         }
 
-        const eventType = data.event_type ?? '';
-        getLogger().info(`Telnyx event: ${eventType}`);
+        const event = data.event ?? '';
+        if (event === 'connected') return;  // first ping, nothing to do
 
-        if (eventType === 'stream_started' && !streamStarted) {
+        getLogger().info(`Telnyx event: ${event}`);
+
+        if (event === 'start' && !streamStarted) {
           streamStarted = true;
-          const callControlId = data.payload?.call_control_id ?? '';
+          const callControlId = data.start?.call_control_id ?? '';
           if (callControlId) this.activeCallIds.set(ws, callControlId);
           await handler.handleCallStart(callControlId);
           if (this.recording) {
@@ -976,27 +1108,25 @@ Connect AI agents to phone numbers in 4 lines of code
               getLogger().warn(`Could not start recording: ${String(e)}`);
             }
           }
-        } else if (eventType === 'media') {
-          const audioChunk = data.payload?.audio?.chunk ?? '';
+        } else if (event === 'media') {
+          // BUG #19 — with ``stream_track=both_tracks`` Telnyx sends media
+          // for the caller leg (``track=inbound``) AND for our injected
+          // outbound leg (``track=outbound``). Forwarding the outbound
+          // echo feeds the agent its own voice and breaks turn detection.
+          const track = data.media?.track ?? 'inbound';
+          if (track !== 'inbound') return;
+          const audioChunk = data.media?.payload ?? '';
           if (!audioChunk) return;
-          // Telnyx sends 16 kHz PCM — send directly
           handler.handleAudio(Buffer.from(audioChunk, 'base64'));
-        } else if (eventType === 'call.dtmf.received') {
-          const digit = String(data.payload?.digit ?? '').trim();
+        } else if (event === 'dtmf') {
+          const digit = String(data.dtmf?.digit ?? '').trim();
           if (digit) {
             getLogger().info(`Telnyx DTMF received: ${digit}`);
             await handler.handleDtmf(digit);
           }
-        } else if (eventType === 'call.recording.saved') {
-          const recordingUrl =
-            data.payload?.recording_urls?.mp3 ??
-            data.payload?.recording_urls?.wav ??
-            data.payload?.public_recording_urls?.mp3 ??
-            '';
-          if (recordingUrl) {
-            getLogger().info(`Telnyx recording saved: ${recordingUrl}`);
-          }
-        } else if (eventType === 'stream_stopped') {
+        } else if (event === 'error') {
+          getLogger().warn(`Telnyx stream error: ${JSON.stringify(data)}`);
+        } else if (event === 'stop') {
           await handler.handleStop();
         }
       } catch (err) {

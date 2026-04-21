@@ -14,6 +14,12 @@ export interface CallRecord {
   direction: string;
   started_at: number;
   ended_at?: number;
+  /**
+   * Current lifecycle state: ``initiated`` (pre-registered), ``ringing``,
+   * ``in-progress``, ``completed``, ``no-answer``, ``busy``, ``failed``,
+   * ``canceled``, or ``webhook_error``.
+   */
+  status?: string;
   transcript?: Array<{ role: string; text: string; timestamp: number }>;
   turns?: unknown[];
   metrics?: Record<string, unknown> | null;
@@ -30,9 +36,18 @@ export class MetricsStore extends EventEmitter {
   private calls: CallRecord[] = [];
   private activeCalls: Map<string, CallRecord> = new Map();
 
-  constructor(maxCalls = 500) {
+  /**
+   * Accepts either a numeric ``maxCalls`` (legacy positional — matches the
+   * original TS API) or an options object ``{ maxCalls }`` to align with the
+   * Python SDK's keyword-argument style. Plain literals also work:
+   * ``new MetricsStore()`` / ``new MetricsStore(100)`` / ``new MetricsStore({ maxCalls: 100 })``.
+   */
+  constructor(maxCallsOrOpts: number | { maxCalls?: number } = 500) {
     super();
-    this.maxCalls = maxCalls;
+    this.maxCalls =
+      typeof maxCallsOrOpts === 'number'
+        ? maxCallsOrOpts
+        : maxCallsOrOpts.maxCalls ?? 500;
   }
 
   private publish(eventType: string, data: Record<string, unknown>): void {
@@ -43,22 +58,105 @@ export class MetricsStore extends EventEmitter {
     const callId = (data.call_id as string) || '';
     if (!callId) return;
 
-    const record: CallRecord = {
+    const existing = this.activeCalls.get(callId);
+    if (existing) {
+      // Upgrade a pre-registered (``initiated``) outbound call to in-progress
+      // without losing its from/to metadata. See BUG #06.
+      existing.caller = (data.caller as string) || existing.caller;
+      existing.callee = (data.callee as string) || existing.callee;
+      existing.direction = (data.direction as string) || existing.direction;
+      existing.status = 'in-progress';
+      existing.turns = existing.turns || [];
+    } else {
+      const record: CallRecord = {
+        call_id: callId,
+        caller: (data.caller as string) || '',
+        callee: (data.callee as string) || '',
+        direction: (data.direction as string) || 'inbound',
+        started_at: Date.now() / 1000,
+        status: 'in-progress',
+        turns: [],
+      };
+      this.activeCalls.set(callId, record);
+    }
+
+    this.publish('call_start', {
       call_id: callId,
       caller: (data.caller as string) || '',
       callee: (data.callee as string) || '',
       direction: (data.direction as string) || 'inbound',
+    });
+  }
+
+  /**
+   * Pre-register an outbound call before any webhook fires. Lets the
+   * dashboard surface attempts that never reach media (no-answer, busy,
+   * carrier-rejected). Mirrors the Python ``record_call_initiated``.
+   */
+  recordCallInitiated(data: Record<string, unknown>): void {
+    const callId = (data.call_id as string) || '';
+    if (!callId) return;
+    if (this.activeCalls.has(callId)) return; // first writer wins
+
+    const record: CallRecord = {
+      call_id: callId,
+      caller: (data.caller as string) || '',
+      callee: (data.callee as string) || '',
+      direction: (data.direction as string) || 'outbound',
       started_at: Date.now() / 1000,
+      status: 'initiated',
       turns: [],
     };
     this.activeCalls.set(callId, record);
-
-    this.publish('call_start', {
+    this.publish('call_initiated', {
       call_id: callId,
       caller: record.caller,
       callee: record.callee,
       direction: record.direction,
+      status: record.status,
     });
+  }
+
+  /**
+   * Update the status of an active or completed call. Terminal states
+   * (completed, no-answer, busy, failed, canceled, webhook_error) move the
+   * row from active to completed so the UI freezes the live duration timer.
+   */
+  updateCallStatus(callId: string, status: string, extra: Record<string, unknown> = {}): void {
+    if (!callId || !status) return;
+    const TERMINAL = new Set(['completed', 'no-answer', 'busy', 'failed', 'canceled', 'webhook_error']);
+    const active = this.activeCalls.get(callId);
+    if (active) {
+      active.status = status;
+      Object.assign(active, extra);
+      if (TERMINAL.has(status)) {
+        const entry: CallRecord = {
+          call_id: callId,
+          caller: active.caller || '',
+          callee: active.callee || '',
+          direction: active.direction || 'outbound',
+          started_at: active.started_at || 0,
+          ended_at: Date.now() / 1000,
+          status,
+          metrics: null,
+          ...extra,
+        };
+        this.activeCalls.delete(callId);
+        this.calls.push(entry);
+        if (this.calls.length > this.maxCalls) {
+          this.calls = this.calls.slice(-this.maxCalls);
+        }
+      }
+    } else {
+      for (let i = this.calls.length - 1; i >= 0; i--) {
+        if (this.calls[i].call_id === callId) {
+          this.calls[i].status = status;
+          Object.assign(this.calls[i], extra);
+          break;
+        }
+      }
+    }
+    this.publish('call_status', { call_id: callId, status, ...extra });
   }
 
   recordTurn(data: Record<string, unknown>): void {
@@ -82,6 +180,12 @@ export class MetricsStore extends EventEmitter {
     const active = this.activeCalls.get(callId);
     this.activeCalls.delete(callId);
 
+    // Preserve explicit status set by a statusCallback during the call
+    // (e.g. "no-answer" from Twilio) — fall back to "completed" when the
+    // row was still showing the normal "in-progress" state at hang-up.
+    const activeStatus = active?.status;
+    const resolvedStatus =
+      activeStatus && activeStatus !== 'in-progress' ? activeStatus : 'completed';
     const entry: CallRecord = {
       call_id: callId,
       caller: (data.caller as string) || active?.caller || '',
@@ -90,6 +194,7 @@ export class MetricsStore extends EventEmitter {
       started_at: active?.started_at || 0,
       ended_at: Date.now() / 1000,
       transcript: (data.transcript as CallRecord['transcript']) || [],
+      status: resolvedStatus,
       metrics: metrics ?? null,
     };
 

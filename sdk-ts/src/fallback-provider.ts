@@ -86,6 +86,43 @@ export class FallbackLLMProvider implements LLMProvider {
     }
   }
 
+  /**
+   * Async-friendly disposer. Parity with Python's ``FallbackLLMProvider.aclose()``
+   * — safe to call multiple times, returns a resolved Promise once all probe
+   * timers are cleared. Prefer this in async contexts so awaiting the
+   * shutdown integrates naturally with the owning lifecycle.
+   */
+  async aclose(): Promise<void> {
+    this.destroy();
+  }
+
+  /**
+   * Explicit-resource-management hook so callers can write
+   * ``await using fallback = new FallbackLLMProvider([...])`` and have
+   * background probe timers cleared automatically when the block exits.
+   * Mirrors Python's ``async with FallbackLLMProvider(...)``.
+   */
+  async [Symbol.asyncDispose](): Promise<void> {
+    await this.aclose();
+  }
+
+  /**
+   * Stream only the text deltas, flattening the chunk envelope. Parity with
+   * Python's ``FallbackLLMProvider.complete_stream``. Tool-call and done
+   * markers are filtered out so callers can concatenate the yielded strings
+   * directly.
+   */
+  async *completeStream(
+    messages: Array<Record<string, unknown>>,
+    tools?: Array<Record<string, unknown>> | null,
+  ): AsyncGenerator<string, void, unknown> {
+    for await (const chunk of this.stream(messages, tools)) {
+      if ((chunk as { type?: string }).type === 'text') {
+        yield ((chunk as { content?: string }).content ?? '') as string;
+      }
+    }
+  }
+
   // -----------------------------------------------------------------------
   // LLMProvider implementation
   // -----------------------------------------------------------------------

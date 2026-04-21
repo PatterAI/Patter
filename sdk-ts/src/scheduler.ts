@@ -76,17 +76,43 @@ function wrapCallback(cb: JobCallback): () => void {
   };
 }
 
-/** Schedule ``callback`` on a cron expression (node-cron dialect). */
-export async function scheduleCron(
-  cron: string,
-  callback: JobCallback,
-): Promise<ScheduleHandle> {
-  const cm = await loadCron();
-  if (!cm.validate(cron)) {
-    throw new Error(`Invalid cron expression: ${cron}`);
-  }
-  const task = cm.schedule(cron, wrapCallback(callback));
-  return makeHandle(`cron-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, task);
+/** Schedule ``callback`` on a cron expression (node-cron dialect).
+ *
+ * Returns a ``ScheduleHandle`` synchronously (parity with Python
+ * ``schedule_cron``). The handle is "pending" until the lazy ``node-cron``
+ * import resolves; cancelling the handle before then discards the pending
+ * job cleanly. If ``node-cron`` is not installed, the returned promise
+ * attached to ``.ready`` rejects with a helpful install message.
+ */
+export function scheduleCron(cron: string, callback: JobCallback): ScheduleHandle {
+  let cancelled = false;
+  let task: CronTask | null = null;
+  const jobId = `cron-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  loadCron()
+    .then((cm) => {
+      if (cancelled) return;
+      if (!cm.validate(cron)) {
+        throw new Error(`Invalid cron expression: ${cron}`);
+      }
+      task = cm.schedule(cron, wrapCallback(callback));
+    })
+    .catch((err) => getLogger().error(`scheduleCron failed: ${String(err)}`));
+
+  return {
+    jobId,
+    cancel(): void {
+      if (cancelled) return;
+      cancelled = true;
+      if (task) {
+        try { task.stop(); } catch { /* ignore */ }
+        try { task.destroy?.(); } catch { /* ignore */ }
+      }
+    },
+    get pending(): boolean {
+      return !cancelled;
+    },
+  };
 }
 
 /** Schedule ``callback`` once at the given date. */
@@ -112,9 +138,33 @@ export function scheduleOnce(at: Date, callback: JobCallback): ScheduleHandle {
   };
 }
 
-/** Schedule ``callback`` every ``intervalMs`` milliseconds. */
-export function scheduleInterval(intervalMs: number, callback: JobCallback): ScheduleHandle {
-  if (intervalMs <= 0) throw new Error('intervalMs must be positive');
+/**
+ * Schedule ``callback`` on a recurring interval.
+ *
+ * Accepts either a millisecond number (legacy, matches the original TS API)
+ * or an object with ``seconds`` / ``intervalMs`` for parity with Python's
+ * ``schedule_interval(seconds=...)``.
+ *
+ * Examples:
+ *   scheduleInterval(5000, cb)              // 5 s, legacy
+ *   scheduleInterval({ intervalMs: 5000 }, cb)
+ *   scheduleInterval({ seconds: 5 }, cb)    // parity with Python
+ */
+export function scheduleInterval(
+  intervalOrOpts: number | { seconds?: number; intervalMs?: number },
+  callback: JobCallback,
+): ScheduleHandle {
+  let intervalMs: number;
+  if (typeof intervalOrOpts === 'number') {
+    intervalMs = intervalOrOpts;
+  } else if (intervalOrOpts.intervalMs !== undefined) {
+    intervalMs = intervalOrOpts.intervalMs;
+  } else if (intervalOrOpts.seconds !== undefined) {
+    intervalMs = intervalOrOpts.seconds * 1000;
+  } else {
+    throw new Error('scheduleInterval requires seconds or intervalMs');
+  }
+  if (intervalMs <= 0) throw new Error('interval must be positive');
   let cancelled = false;
   const wrapped = wrapCallback(callback);
   const timer = setInterval(() => {
@@ -133,26 +183,3 @@ export function scheduleInterval(intervalMs: number, callback: JobCallback): Sch
   };
 }
 
-function makeHandle(jobId: string, task: CronTask): ScheduleHandle {
-  let cancelled = false;
-  return {
-    jobId,
-    cancel(): void {
-      if (cancelled) return;
-      cancelled = true;
-      try {
-        task.stop();
-      } catch {
-        /* ignore */
-      }
-      try {
-        task.destroy?.();
-      } catch {
-        /* ignore */
-      }
-    },
-    get pending(): boolean {
-      return !cancelled;
-    },
-  };
-}
