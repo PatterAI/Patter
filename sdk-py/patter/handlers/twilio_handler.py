@@ -101,21 +101,35 @@ def twilio_webhook_handler(
 # ---------------------------------------------------------------------------
 
 class TwilioAudioSender(AudioSender):
-    """Sends audio to a Twilio WebSocket, transcoding PCM to mulaw."""
+    """Sends audio to a Twilio WebSocket, transcoding PCM to mulaw.
 
-    def __init__(self, websocket, stream_sid: str) -> None:
+    When ``input_is_mulaw_8k`` is True, incoming bytes are already in Twilio's
+    native codec (g711 mulaw @ 8 kHz) and are forwarded as-is. This is the
+    correct path for OpenAI Realtime on Twilio — feeding OpenAI's 24 kHz PCM16
+    into a 16 → 8 kHz resampler produces audibly broken audio (see BUG #10).
+    """
+
+    def __init__(self, websocket, stream_sid: str, input_is_mulaw_8k: bool = False) -> None:
         self._ws = websocket
         self._stream_sid = stream_sid
         self._chunk_count = 0
         self.last_confirmed_mark = ""
-        # Lazy import transcoding functions
-        from patter.services.transcoding import pcm16_to_mulaw, resample_16k_to_8k  # type: ignore[import]
-        self._pcm16_to_mulaw = pcm16_to_mulaw
-        self._resample_16k_to_8k = resample_16k_to_8k
+        self._input_is_mulaw_8k = input_is_mulaw_8k
+        # Lazy import transcoding functions (only needed when transcoding)
+        if not input_is_mulaw_8k:
+            from patter.services.transcoding import pcm16_to_mulaw, resample_16k_to_8k  # type: ignore[import]
+            self._pcm16_to_mulaw = pcm16_to_mulaw
+            self._resample_16k_to_8k = resample_16k_to_8k
+        else:
+            self._pcm16_to_mulaw = None
+            self._resample_16k_to_8k = None
 
     async def send_audio(self, pcm_audio: bytes) -> None:
-        resampled = self._resample_16k_to_8k(pcm_audio)
-        mulaw = self._pcm16_to_mulaw(resampled)
+        if self._input_is_mulaw_8k:
+            mulaw = pcm_audio
+        else:
+            resampled = self._resample_16k_to_8k(pcm_audio)
+            mulaw = self._pcm16_to_mulaw(resampled)
         encoded = base64.b64encode(mulaw).decode("ascii")
         await self._ws.send_text(
             json.dumps(
@@ -279,8 +293,14 @@ async def twilio_stream_bridge(
                 # Twilio uses mulaw 8kHz (1 byte/sample)
                 metrics.configure_stt_format(sample_rate=8000, bytes_per_sample=1)
 
-                # Create audio sender
-                audio_sender = TwilioAudioSender(websocket, stream_sid)
+                # Create audio sender. OpenAI Realtime on Twilio is configured
+                # to emit g711_ulaw @ 8 kHz directly (see below), so for that
+                # provider we skip the built-in PCM→mulaw transcoding path.
+                # Pipeline / ConvAI still produce PCM16 @ 16 kHz.
+                _input_is_mulaw = provider == "openai_realtime"
+                audio_sender = TwilioAudioSender(
+                    websocket, stream_sid, input_is_mulaw_8k=_input_is_mulaw
+                )
 
                 # --- Twilio-specific call control helpers ---
                 async def _twilio_transfer(number):
@@ -374,6 +394,11 @@ async def twilio_stream_bridge(
                         on_metrics=on_metrics,
                         conversation_history=conversation_history,
                         transcript_entries=transcript_entries,
+                        # Twilio media streams are g711 mulaw @ 8 kHz. Asking
+                        # OpenAI to emit the same codec avoids a 24 kHz →
+                        # 16 kHz → 8 kHz resample chain that otherwise
+                        # produces a deep, slurred voice.
+                        audio_format="g711_ulaw",
                     )
 
                 await handler.start()
