@@ -3,8 +3,25 @@
 from patter.models import STTConfig, TTSConfig
 
 
-def deepgram(api_key: str, language: str = "en") -> STTConfig:
-    return STTConfig(provider="deepgram", api_key=api_key, language=language)
+def deepgram(
+    api_key: str,
+    language: str = "en",
+    *,
+    model: str = "nova-3",
+    endpointing_ms: int = 150,
+    utterance_end_ms: int | None = 1000,
+    smart_format: bool = True,
+    interim_results: bool = True,
+) -> STTConfig:
+    """Deepgram STT config. Tune latency via ``endpointing_ms`` / ``utterance_end_ms``."""
+    options = {
+        "model": model,
+        "endpointing_ms": endpointing_ms,
+        "utterance_end_ms": utterance_end_ms,
+        "smart_format": smart_format,
+        "interim_results": interim_results,
+    }
+    return STTConfig(provider="deepgram", api_key=api_key, language=language, options=options)
 
 
 def whisper(api_key: str, language: str = "en") -> STTConfig:
