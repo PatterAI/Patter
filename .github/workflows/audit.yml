@@ -94,8 +94,11 @@ jobs:
         with:
           python-version: '3.12'
           cache: 'pip'
-      - name: Install bandit
-        run: pip install 'bandit[toml]'
+      - name: Install bandit (+ SARIF formatter)
+        # ``bandit-sarif-formatter`` registers a ``sarif`` output mode so the
+        # result lands in the GitHub Security tab. Stock ``bandit`` only
+        # supports csv/custom/html/json/screen/txt/xml/yaml.
+        run: pip install 'bandit[toml]' bandit-sarif-formatter
       - name: Run bandit on sdk-py
         run: |
           # Skip the tests dir (they intentionally exercise suspicious
@@ -110,7 +113,10 @@ jobs:
             --exclude sdk-py/patter/dashboard/ui.py \
             -f sarif -o bandit.sarif || true
       - uses: github/codeql-action/upload-sarif@v3
-        if: always()
+        # Only upload when the SARIF file was actually produced — if the
+        # formatter install fails on a future bandit version the step
+        # shouldn't fail the job, it just skips the Security-tab upload.
+        if: always() && hashFiles('bandit.sarif') != ''
         with:
           sarif_file: bandit.sarif
           category: bandit

@@ -44,21 +44,28 @@ def _make_ws_mock(events: list[dict]) -> AsyncMock:
 
 
 def _telnyx_stream_started(call_control_id: str = "v3:convai-id") -> dict:
+    # Telnyx media-stream wire format (BUG #17/#18): ``event: "start"`` with a
+    # ``start`` dict carrying call_control_id + caller/callee.
     return {
-        "event_type": "stream_started",
-        "payload": {"call_control_id": call_control_id},
+        "event": "start",
+        "start": {
+            "call_control_id": call_control_id,
+            "from": "+15551111111",
+            "to": "+15552222222",
+        },
     }
 
 
 def _telnyx_media_event() -> dict:
+    # Wire format: ``{"event":"media","media":{"payload":b64}}`` — BUG #18.
     return {
-        "event_type": "media",
-        "payload": {"audio": {"chunk": base64.b64encode(fake_pcm_frame()).decode()}},
+        "event": "media",
+        "media": {"payload": base64.b64encode(fake_pcm_frame()).decode()},
     }
 
 
 def _telnyx_stream_stopped() -> dict:
-    return {"event_type": "stream_stopped"}
+    return {"event": "stop"}
 
 
 # ---------------------------------------------------------------------------
