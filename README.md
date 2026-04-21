@@ -194,11 +194,21 @@ See [`Dockerfile`](./Dockerfile) and [`docker-compose.yml`](./docker-compose.yml
 
 ## Voice Modes
 
-| Mode | Latency | Quality | Best For |
+| Mode | Turn latency | Quality | Best For |
 |---|---|---|---|
-| **OpenAI Realtime** | Lowest | High | Fluid, low-latency conversations |
-| **Deepgram + ElevenLabs** | Low | High | Independent control over STT and TTS |
-| **ElevenLabs ConvAI** | Low | High | ElevenLabs-managed conversation flow |
+| **OpenAI Realtime** (`provider="openai_realtime"`) | ~400–700 ms | High | Fluid, low-latency conversations |
+| **ElevenLabs ConvAI** (`provider="elevenlabs_convai"`) | ~600–900 ms | High | ElevenLabs-managed conversation flow |
+| **Pipeline** (`provider="pipeline"`) | ~2.0–2.8 s | High | Independent control over STT / LLM / TTS |
+
+Pipeline-mode latency is dominated by three fixed costs you can't remove without changing the provider: Deepgram endpointing (~150 ms + `utterance_end_ms`, default 1000 ms), LLM first-token (700–1500 ms for GPT-4o-mini via Twilio egress; ~300 ms with Cerebras/Groq), and TTS first-byte (~400 ms for ElevenLabs Turbo v2.5, ~780 ms for OpenAI tts-1). For sub-second turn UX switch to `provider="openai_realtime"`.
+
+### Provider Notes
+
+- **ElevenLabs free tier** — the library voice catalog is not reachable via API (`402 Payment Required`). Set `ELEVENLABS_VOICE_ID` to a voice you own (cloned or generated) before `phone.serve()`. The SDK resolves ~45 well-known names (`"rachel"`, `"adam"`, …) to their UUIDs automatically; custom voices must be referenced by ID.
+- **Telnyx outbound** — calls will return `403 D38` until your connection has an "Outbound Profile" attached in the Telnyx portal. Inbound and Call Control answer flows work without it.
+- **Google Gemini free tier** — `gemini-2.0-flash` has a hard `quota=0` on the free tier. Enable billing on the project before using Gemini as the LLM.
+- **Whisper STT** — on mulaw 8 kHz inputs Whisper routinely hallucinates short fillers (`"you"`, `"."`, `"thank you"`). The pipeline drops these by default plus any duplicate / sub-500 ms back-to-back final, so you won't hear overlapping turns.
+- **Model IDs** — keep these updated per vendor release notes. Examples currently in use: `gpt-4o-mini-realtime-preview`, `claude-haiku-4-5`, `llama-3.3-70b-versatile` (Groq), `llama3.1-8b` (Cerebras).
 
 ## API Reference
 
@@ -209,7 +219,9 @@ See [`Dockerfile`](./Dockerfile) and [`docker-compose.yml`](./docker-compose.yml
 | `Patter(twilio_sid, twilio_token, openai_key, phone_number, ...)` | Create client with provider credentials |
 | `agent(system_prompt, voice?, first_message?, tools?, ...)` | Create an agent configuration |
 | `serve(agent, port?, dashboard?, ...)` | Start the embedded server and listen for calls |
-| `call(to, agent?, machine_detection?, voicemail_message?, ...)` | Place an outbound call |
+| `call(to, agent?, machine_detection?, voicemail_message?, ring_timeout?, ...)` | Place an outbound call |
+
+`call()` accepts a `ring_timeout` (seconds) that maps to Twilio's `Timeout` dial parameter and Telnyx's `timeout_secs`. When the carrier reports `no-answer`, `busy`, or `canceled`, the outcome is forwarded to the dashboard's `/webhooks/twilio/status` callback so it appears in the call log even if no media frames were ever exchanged.
 
 **`serve()` options:**
 
