@@ -8,14 +8,22 @@ export interface STTConfig {
   readonly provider: string;
   readonly apiKey: string;
   readonly language: string;
-  toDict(): Record<string, string>;
+  /**
+   * Optional — when present, called by internal serialisation. Not required for
+   * callers that pass a plain object literal (``{ provider, apiKey, language }``)
+   * to maintain parity with the Python SDK, which accepts dataclass-like inputs.
+   */
+  toDict?(): Record<string, string | Record<string, unknown>>;
+  /** Provider-specific knobs (e.g. Deepgram endpointing). */
+  options?: Record<string, unknown>;
 }
 
 export interface TTSConfig {
   readonly provider: string;
   readonly apiKey: string;
   readonly voice: string;
-  toDict(): Record<string, string>;
+  toDict?(): Record<string, string | Record<string, unknown>>;
+  options?: Record<string, unknown>;
 }
 
 export type MessageHandler = (msg: IncomingMessage) => Promise<string>;
@@ -106,7 +114,12 @@ export interface Call {
 // === Local mode ===
 
 export interface LocalOptions {
-  mode: 'local';
+  /**
+   * Optional — when omitted, local mode is auto-detected from the presence of
+   * ``twilioSid`` or ``telnyxKey`` (matches the Python SDK which treats
+   * ``Patter(twilio_sid=...)`` as local mode by default).
+   */
+  mode?: 'local';
   twilioSid?: string;
   twilioToken?: string;
   openaiKey?: string;
@@ -120,6 +133,14 @@ export interface LocalOptions {
    * signature verification. When provided, unauthenticated requests are rejected.
    */
   telnyxPublicKey?: string;
+  /**
+   * Provider-level Deepgram API key. When set, agents that don't override
+   * ``agent.deepgramKey`` / ``agent.stt`` use this as the default STT key.
+   * Mirrors Python's ``Patter(deepgram_key=...)``.
+   */
+  deepgramKey?: string;
+  /** Provider-level ElevenLabs API key (same semantics as ``deepgramKey``). */
+  elevenlabsKey?: string;
 }
 
 export interface Guardrail {
@@ -209,6 +230,13 @@ export interface AgentOptions {
   audioFilter?: AudioFilter;
   /** Optional background audio mixer (hold music, thinking cues). Pipeline mode only. */
   backgroundAudio?: BackgroundAudioPlayer;
+  /**
+   * Minimum sustained voice (ms) before treating caller audio as a barge-in
+   * and interrupting TTS. `0` disables barge-in entirely — useful on noisy
+   * links (ngrok tunnels, speakerphone) where the agent can hear itself.
+   * Default: 300.
+   */
+  bargeInThresholdMs?: number;
 }
 
 export type PipelineMessageHandler = (data: Record<string, unknown>) => Promise<string>;
@@ -250,4 +278,11 @@ export interface LocalCallOptions {
   voicemailMessage?: string;
   /** Dynamic variables merged into agent.variables before call. Override agent-level variables. */
   variables?: Record<string, string>;
+  /**
+   * Ring timeout in seconds. Forwarded to Twilio as `Timeout` and to Telnyx
+   * as `timeout_secs`. Defaults to the carrier default (~28 s on Twilio) when
+   * omitted. Increase for international routes where the remote carrier
+   * silences short US→IT rings.
+   */
+  ringTimeout?: number;
 }

@@ -18,11 +18,31 @@ import type {
   Guardrail,
   ToolDefinition,
 } from "./types";
-import { deepgram, whisper, elevenlabs, openaiTts } from "./providers";
+import { deepgram, whisper, elevenlabs, openaiTts, cartesia, rime, lmnt } from "./providers";
 import { EmbeddedServer } from "./server";
 
 const DEFAULT_BACKEND_URL = "wss://api.getpatter.com";
 const DEFAULT_REST_URL = "https://api.getpatter.com";
+
+function sttConfigToDict(cfg: STTConfig): Record<string, unknown> {
+  const out: Record<string, unknown> = {
+    provider: cfg.provider,
+    api_key: cfg.apiKey,
+    language: cfg.language,
+  };
+  if (cfg.options) out.options = { ...cfg.options };
+  return out;
+}
+
+function ttsConfigToDict(cfg: TTSConfig): Record<string, unknown> {
+  const out: Record<string, unknown> = {
+    provider: cfg.provider,
+    api_key: cfg.apiKey,
+    voice: cfg.voice,
+  };
+  if (cfg.options) out.options = { ...cfg.options };
+  return out;
+}
 
 export class Patter {
   readonly apiKey: string;
@@ -35,7 +55,17 @@ export class Patter {
   private tunnelHandle: TunnelHandle | null = null;
 
   constructor(options: PatterOptions | LocalOptions) {
-    if ('mode' in options && options.mode === 'local') {
+    // Auto-detect local mode when a telephony credential is supplied and no
+    // cloud ``apiKey`` is present. Matches Python: ``Patter(twilio_sid=...)``
+    // implicitly selects local mode. Passing ``mode: 'local'`` explicitly
+    // still works and forces local mode.
+    const isLocal =
+      ('mode' in options && options.mode === 'local') ||
+      (!('apiKey' in options) &&
+        (('twilioSid' in options && (options as LocalOptions).twilioSid) ||
+          ('telnyxKey' in options && (options as LocalOptions).telnyxKey)));
+
+    if (isLocal) {
       const local = options as LocalOptions;
 
       if (!local.phoneNumber) {
@@ -235,22 +265,42 @@ export class Patter {
           `wss://${webhookUrl}/ws/stream/${encodeURIComponent(localOpts.to)}` +
           `?caller=${encodeURIComponent(phoneNumber)}&callee=${encodeURIComponent(localOpts.to)}`;
 
+        const telnyxPayload: Record<string, unknown> = {
+          connection_id: connectionId,
+          from: phoneNumber,
+          to: localOpts.to,
+          stream_url: streamUrl,
+          stream_track: 'both_tracks',
+        };
+        if (localOpts.ringTimeout !== undefined) {
+          telnyxPayload.timeout_secs = Math.max(1, Math.floor(localOpts.ringTimeout));
+        }
         const response = await fetch('https://api.telnyx.com/v2/calls', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${telnyxKey}`,
           },
-          body: JSON.stringify({
-            connection_id: connectionId,
-            from: phoneNumber,
-            to: localOpts.to,
-            stream_url: streamUrl,
-            stream_track: 'both_tracks',
-          }),
+          body: JSON.stringify(telnyxPayload),
         });
         if (!response.ok) {
           throw new ProvisionError(`Failed to initiate Telnyx call: ${await response.text()}`);
+        }
+        if (this.embeddedServer) {
+          try {
+            const body = (await response.clone().json()) as { data?: { call_control_id?: string } };
+            const callId = body.data?.call_control_id;
+            if (callId) {
+              this.embeddedServer.metricsStore.recordCallInitiated({
+                call_id: callId,
+                caller: phoneNumber,
+                callee: localOpts.to,
+                direction: 'outbound',
+              });
+            }
+          } catch {
+            /* non-fatal */
+          }
         }
         return;
       }
@@ -266,11 +316,17 @@ export class Patter {
         Url: `https://${webhookUrl}/webhooks/twilio/voice`,
         StatusCallback: statusCallbackUrl,
         StatusCallbackMethod: 'POST',
+        // Full lifecycle so the dashboard sees ringing/no-answer/busy/failed
+        // transitions even when media never arrives.
+        StatusCallbackEvent: 'initiated ringing answered completed',
       });
       if (localOpts.machineDetection) {
         params.append('MachineDetection', 'DetectMessageEnd');
         params.append('AsyncAmd', 'true');
         params.append('AsyncAmdStatusCallback', `https://${webhookUrl}/webhooks/twilio/amd`);
+      }
+      if (localOpts.ringTimeout !== undefined) {
+        params.append('Timeout', String(Math.max(1, Math.floor(localOpts.ringTimeout))));
       }
       // Store voicemail message on the running server so AMD webhook can use it
       if (localOpts.voicemailMessage && this.embeddedServer) {
@@ -286,6 +342,24 @@ export class Patter {
       });
       if (!response.ok) {
         throw new ProvisionError(`Failed to initiate call: ${await response.text()}`);
+      }
+      // Pre-register the call so the dashboard shows attempts even when the
+      // callee never answers (no-answer, busy, carrier-rejected). BUG #06.
+      if (this.embeddedServer) {
+        try {
+          const body = (await response.clone().json()) as { sid?: string };
+          const callSid = body.sid;
+          if (callSid) {
+            this.embeddedServer.metricsStore.recordCallInitiated({
+              call_id: callSid,
+              caller: phoneNumber,
+              callee: localOpts.to,
+              direction: 'outbound',
+            });
+          }
+        } catch {
+          /* non-fatal — the statusCallback will register anyway */
+        }
       }
       return;
     }
@@ -376,11 +450,15 @@ export class Patter {
     return data.map(c => ({ id: c.id, direction: c.direction, caller: c.caller, callee: c.callee, startedAt: c.started_at, endedAt: c.ended_at, durationSeconds: c.duration_seconds, status: c.status, transcript: c.transcript }));
   }
 
-  // Provider helpers
+  // Provider helpers — mirror the Python classmethod factories so callers can
+  // write ``Patter.deepgram({ apiKey })`` without importing the top-level.
   static deepgram = deepgram;
   static whisper = whisper;
   static elevenlabs = elevenlabs;
   static openaiTts = openaiTts;
+  static cartesia = cartesia;
+  static rime = rime;
+  static lmnt = lmnt;
 
   static guardrail(opts: {
     name: string;
@@ -469,8 +547,8 @@ export class Patter {
         provider,
         provider_credentials: credentials,
         country,
-        stt_config: stt?.toDict() ?? null,
-        tts_config: tts?.toDict() ?? null,
+        stt_config: stt ? (stt.toDict?.() ?? sttConfigToDict(stt)) : null,
+        tts_config: tts ? (tts.toDict?.() ?? ttsConfigToDict(tts)) : null,
       }),
     });
 
