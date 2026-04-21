@@ -20,9 +20,10 @@ from tests.conftest import make_agent
 # ---------------------------------------------------------------------------
 
 
-def _ws_message(event_type: str, **kwargs) -> str:
-    """Build a JSON WebSocket message string for Telnyx."""
-    msg: dict = {"event_type": event_type, **kwargs}
+def _ws_message(event: str, **kwargs) -> str:
+    """Build a JSON WebSocket message string for Telnyx (media-stream wire
+    format — BUG #17)."""
+    msg: dict = {"event": event, **kwargs}
     return json.dumps(msg)
 
 
@@ -30,8 +31,8 @@ def _stream_started_message(
     call_control_id: str = "v3:test-id",
 ) -> str:
     return _ws_message(
-        "stream_started",
-        payload={"call_control_id": call_control_id},
+        "start",
+        start={"call_control_id": call_control_id, "from": "+15551111111", "to": "+15552222222"},
     )
 
 
@@ -39,12 +40,12 @@ def _media_message(audio: bytes = b"\x00\x00" * 320) -> str:
     encoded = base64.b64encode(audio).decode("ascii")
     return _ws_message(
         "media",
-        payload={"audio": {"chunk": encoded}},
+        media={"payload": encoded},
     )
 
 
 def _stream_stopped_message() -> str:
-    return _ws_message("stream_stopped")
+    return _ws_message("stop")
 
 
 def _make_mock_ws(messages: list[str]) -> AsyncMock:
@@ -342,7 +343,7 @@ class TestTelnyxStreamBridgeLifecycle:
     @patch("patter.handlers.telnyx_handler.create_metrics_accumulator")
     @patch("patter.handlers.telnyx_handler.resolve_agent_prompt", return_value="prompt")
     @patch("patter.handlers.telnyx_handler.fetch_deepgram_cost", new_callable=AsyncMock)
-    async def test_openai_realtime_uses_pcm16_format(
+    async def test_openai_realtime_uses_g711_ulaw_format(
         self,
         mock_fetch_dg,
         mock_resolve,
@@ -365,6 +366,8 @@ class TestTelnyxStreamBridgeLifecycle:
             openai_key="sk-test",
         )
 
-        # Verify pcm16 audio_format was passed to OpenAIRealtimeStreamHandler
+        # Telnyx streaming_start negotiates PCMU 8 kHz bidirectional, so
+        # OpenAI Realtime must emit g711_ulaw to avoid transcoding mismatch
+        # (BUG #18).
         call_kwargs = mock_handler_cls.call_args[1]
-        assert call_kwargs.get("audio_format") == "pcm16"
+        assert call_kwargs.get("audio_format") == "g711_ulaw"

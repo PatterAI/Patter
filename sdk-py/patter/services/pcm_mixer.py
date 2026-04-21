@@ -128,4 +128,14 @@ class PcmMixer:
         return mixed.astype(np.int16).tobytes()
 
 
-__all__ = ["PcmMixer"]
+def mix_pcm(agent: bytes, bg: bytes, ratio: float) -> bytes:
+    """Standalone PCM mixer — mirrors the TypeScript ``mixPcm(agent, bg, ratio)``.
+
+    Thin wrapper over :class:`PcmMixer`. The ``ratio`` argument is mandatory
+    (matching the TS signature); pass ``0.0`` to get the agent buffer back
+    unchanged.
+    """
+    return PcmMixer().mix(agent, bg, ratio=ratio)
+
+
+__all__ = ["PcmMixer", "mix_pcm"]

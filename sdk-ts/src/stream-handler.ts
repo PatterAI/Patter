@@ -148,6 +148,9 @@ export class StreamHandler {
   private maxDurationTimer: ReturnType<typeof setTimeout> | null = null;
   private transcriptProcessing = false;
   private transcriptQueue: Array<{ isFinal?: boolean; text?: string }> = [];
+  // BUG #22 throttle state — mirror Python impl.
+  private lastCommitText = '';
+  private lastCommitAt = 0;
 
   private readonly history: ReturnType<typeof createHistoryManager>;
   private readonly metricsAcc: CallMetricsAccumulator;
@@ -286,17 +289,31 @@ export class StreamHandler {
   }
 
   /** Handle an incoming audio chunk (already decoded from base64). */
-  handleAudio(audioBuffer: Buffer): void {
+  async handleAudio(audioBuffer: Buffer): Promise<void> {
     const provider = this.deps.agent.provider ?? 'openai_realtime';
-    if (provider === 'pipeline' && this.stt && !this.isSpeaking) {
-      // Twilio sends mulaw 8kHz — convert to PCM 16kHz for STT providers
-      if (this.deps.bridge.telephonyProvider === 'twilio') {
-        const pcm8k = mulawToPcm16(audioBuffer);
-        const pcm16k = resample8kTo16k(pcm8k);
-        this.stt.sendAudio(pcm16k);
+    if (provider === 'pipeline' && this.stt) {
+      // BUG #20: keep forwarding caller audio to STT during TTS so barge-in
+      // detection can trigger. Caller sets ``agent.bargeInThresholdMs=0`` to
+      // disable barge-in on noisy links.
+      if (this.isSpeaking && (this.deps.agent.bargeInThresholdMs ?? 300) === 0) {
+        return;
+      }
+      // BUG #12 / #19 audio path: both Twilio and Telnyx with the default
+      // streaming_start (PCMU bidirectional) deliver mulaw 8 kHz inbound
+      // — we always transcode to PCM16 16 kHz before STT.
+      const pcm8k = mulawToPcm16(audioBuffer);
+      const pcm16k = resample8kTo16k(pcm8k);
+
+      // BUG #15: run the before_send_to_stt hook before forwarding.
+      const hooks = this.deps.agent.hooks;
+      if (hooks) {
+        const hookExecutor = new PipelineHookExecutor(hooks);
+        const hookCtx = this.buildHookContext();
+        const processed = await hookExecutor.runBeforeSendToStt(pcm16k, hookCtx);
+        if (processed === null) return;
+        this.stt.sendAudio(processed);
       } else {
-        // Telnyx sends PCM 16kHz natively
-        this.stt.sendAudio(audioBuffer);
+        this.stt.sendAudio(pcm16k);
       }
     } else if (this.adapter) {
       // OpenAI Realtime is configured for g711_ulaw so Twilio mulaw is fine.
@@ -381,10 +398,8 @@ export class StreamHandler {
         this.tts = new OpenAITTS(this.deps.agent.tts.apiKey, this.deps.agent.tts.voice ?? 'alloy');
       }
     } else if (this.deps.agent.elevenlabsKey) {
-      const voiceId = (this.deps.agent.voice && this.deps.agent.voice !== 'alloy')
-        ? this.deps.agent.voice
-        : '21m00Tcm4TlvDq8ikWAM';
-      this.tts = new ElevenLabsTTS(this.deps.agent.elevenlabsKey, voiceId);
+      // ElevenLabsTTS resolves display names ("rachel") to voice IDs.
+      this.tts = new ElevenLabsTTS(this.deps.agent.elevenlabsKey, this.deps.agent.voice || 'rachel');
     }
 
     if (!this.stt) {
@@ -513,7 +528,53 @@ export class StreamHandler {
   }
 
   private async processTranscript(transcript: { isFinal?: boolean; text?: string }): Promise<void> {
+    // BUG #20 — barge-in: if TTS is mid-stream and the caller speaks,
+    // any transcript with text flips ``isSpeaking`` to false so the TTS
+    // sentence loop exits on its next check.
+    if (transcript.text && this.isSpeaking) {
+      getLogger().info(
+        `Barge-in: caller spoke over agent (${sanitizeLogValue(transcript.text.slice(0, 40))})`,
+      );
+      this.isSpeaking = false;
+      try {
+        this.deps.bridge.sendClear(this.ws, this.streamSid);
+      } catch (err) {
+        getLogger().debug(`sendClear during barge-in failed: ${String(err)}`);
+      }
+      this.metricsAcc.recordTurnInterrupted();
+    }
+
     if (!transcript.isFinal || !transcript.text) return;
+
+    // BUG #22 — dedup + throttle + hallucination filter, mirror of the
+    // Python implementation in ``PipelineStreamHandler._stt_loop``.
+    const now = Date.now();
+    const normalised = transcript.text.trim().toLowerCase();
+    const stripped = normalised.replace(/[.,!?;: ]+$/, '').trim();
+    const sinceLastMs = now - this.lastCommitAt;
+    const HALLUCINATIONS = new Set([
+      'you', 'thank you', 'thanks', 'yeah', 'yes', 'no',
+      'okay', 'ok', 'uh', 'um', 'mmm', 'hmm', '.', 'bye',
+      'right', 'cool',
+    ]);
+    if (HALLUCINATIONS.has(stripped) || stripped === '') {
+      getLogger().info(`Dropped likely STT hallucination: ${sanitizeLogValue(normalised.slice(0, 40))}`);
+      return;
+    }
+    if (sinceLastMs < 2000 && normalised === this.lastCommitText) {
+      getLogger().info(
+        `Dropped duplicate final transcript (${(sinceLastMs / 1000).toFixed(1)}s since last): ${sanitizeLogValue(normalised.slice(0, 40))}`,
+      );
+      return;
+    }
+    if (sinceLastMs < 500) {
+      getLogger().info(
+        `Dropped back-to-back final transcript (${(sinceLastMs / 1000).toFixed(2)}s since last): ${sanitizeLogValue(normalised.slice(0, 40))}`,
+      );
+      return;
+    }
+    this.lastCommitText = normalised;
+    this.lastCommitAt = now;
 
     const label = this.deps.bridge.label;
     getLogger().info(`User (${label} pipeline): ${sanitizeLogValue(transcript.text)}`);

@@ -34,14 +34,24 @@ class TelnyxAdapter(TelephonyProvider):
             json={"connection_id": self.connection_id},
         )
 
-    async def initiate_call(self, from_number: str, to_number: str, stream_url: str) -> str:
-        resp = await self._client.post("/calls", json={
+    async def initiate_call(
+        self,
+        from_number: str,
+        to_number: str,
+        stream_url: str,
+        *,
+        ring_timeout: int | None = None,
+    ) -> str:
+        payload: dict = {
             "connection_id": self.connection_id,
             "from": from_number,
             "to": to_number,
             "stream_url": stream_url,
             "stream_track": "both_tracks",
-        })
+        }
+        if ring_timeout is not None:
+            payload["timeout_secs"] = int(ring_timeout)
+        resp = await self._client.post("/calls", json=payload)
         resp.raise_for_status()
         return resp.json()["data"]["call_control_id"]
 

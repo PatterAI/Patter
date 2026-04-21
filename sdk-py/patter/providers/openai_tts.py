@@ -1,7 +1,13 @@
-import struct
 from typing import AsyncIterator
 
 import httpx
+
+try:
+    # Python ≤ 3.12 ships ``audioop``; on 3.13+ the ``audioop-lts`` PyPI
+    # package exposes the same C API (pinned in our pyproject).
+    import audioop  # type: ignore[import]
+except ImportError:  # pragma: no cover
+    audioop = None  # type: ignore[assignment]
 
 from patter.providers.base import TTSProvider
 
@@ -34,32 +40,58 @@ class OpenAITTS(TTSProvider):
         response = await self._client.send(request, stream=True)
         response.raise_for_status()
 
+        # ``audioop.ratecv`` resamples chunk-by-chunk while preserving
+        # cross-chunk filter state — critical because OpenAI streams the
+        # PCM body in arbitrary-sized slices and a stateless per-chunk
+        # downsample produced audible pops / dropped audio (the caller
+        # heard garbled or silent TTS in acceptance test 09).
+        state = None
+        carry = b""  # odd trailing byte between chunks (PCM16 = 2 B/sample)
         try:
             async for chunk in response.aiter_bytes(chunk_size=4096):
-                # OpenAI returns 24kHz PCM16, resample to 16kHz
-                resampled = self._resample_24k_to_16k(chunk)
-                yield resampled
+                if not chunk:
+                    continue
+                buf = carry + chunk
+                # Keep only a whole number of 16-bit samples for the
+                # current ratecv call; stash the extra byte for next time.
+                usable_len = (len(buf) // 2) * 2
+                carry = buf[usable_len:]
+                buf = buf[:usable_len]
+                if not buf:
+                    continue
+                if audioop is None:
+                    # Fallback: no resample, downstream will try to
+                    # transcode 24 kHz as 16 kHz and sound wrong. Log once.
+                    yield buf
+                    continue
+                resampled, state = audioop.ratecv(
+                    buf,
+                    2,  # sample width (bytes)
+                    1,  # channels
+                    24000,  # in rate
+                    16000,  # out rate
+                    state,
+                )
+                if resampled:
+                    yield resampled
         finally:
             await response.aclose()
 
-    @staticmethod
-    def _resample_24k_to_16k(audio_data: bytes) -> bytes:
-        """Resample 24kHz PCM16 to 16kHz by taking every 2 out of 3 samples."""
-        if len(audio_data) < 2:
-            return audio_data
-        num_samples = len(audio_data) // 2
-        samples = struct.unpack(f"<{num_samples}h", audio_data[: num_samples * 2])
-        # Take 2 out of every 3 samples (24000/16000 = 3/2)
-        resampled = []
-        for i in range(0, len(samples), 3):
-            resampled.append(samples[i])
-            if i + 1 < len(samples):
-                # Interpolate between sample i+1 and i+2
-                if i + 2 < len(samples):
-                    resampled.append((samples[i + 1] + samples[i + 2]) // 2)
-                else:
-                    resampled.append(samples[i + 1])
-        return struct.pack(f"<{len(resampled)}h", *resampled)
-
     async def close(self) -> None:
         await self._client.aclose()
+
+    @staticmethod
+    def _resample_24k_to_16k(audio: bytes) -> bytes:
+        """Stateless 24 kHz → 16 kHz resample used by unit tests.
+
+        The streaming ``synthesize`` path uses ``audioop.ratecv`` with
+        per-stream state carried across chunks (see the class docstring).
+        This helper performs a single-shot resample on a complete buffer
+        and is kept for backwards compatibility with the unit tests.
+        """
+        if len(audio) < 2 or audioop is None:
+            return audio
+        out, _ = audioop.ratecv(
+            audio[: (len(audio) // 2) * 2], 2, 1, 24000, 16000, None
+        )
+        return out

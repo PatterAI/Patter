@@ -73,15 +73,52 @@ class FallbackLLMProvider:
         return list(self._availability)
 
     def destroy(self) -> None:
-        """Cancel all background recovery tasks. Call on shutdown."""
+        """Cancel all background recovery tasks. Call on shutdown.
+
+        Prefer :meth:`aclose` in async contexts — it awaits task cancellation
+        and guarantees no pending tasks survive the owning event loop.
+        """
         for i, task in enumerate(self._recovery_tasks):
             if task is not None:
                 task.cancel()
                 self._recovery_tasks[i] = None
 
+    async def aclose(self) -> None:
+        """Cancel probe tasks and await them. Safe to call multiple times."""
+        tasks = [t for t in self._recovery_tasks if t is not None]
+        for t in tasks:
+            t.cancel()
+        for t in tasks:
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._recovery_tasks = [None] * len(self._providers)
+
+    async def __aenter__(self) -> "FallbackLLMProvider":
+        return self
+
+    async def __aexit__(self, *_exc) -> None:
+        await self.aclose()
+
     # ------------------------------------------------------------------
     # LLMProvider implementation
     # ------------------------------------------------------------------
+
+    async def complete_stream(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+    ) -> AsyncIterator[str]:
+        """Stream only the text deltas, flattening the chunk envelope.
+
+        Convenience wrapper over :meth:`stream` for callers that only want the
+        assistant's text output and don't need tool-call or done markers.
+        Mirrors the TypeScript SDK's ``fallback.completeStream`` shape.
+        """
+        async for chunk in self.stream(messages, tools):
+            if chunk.get("type") == "text":
+                yield chunk.get("content", "")
 
     async def stream(
         self,

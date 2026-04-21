@@ -4,15 +4,28 @@ class STTConfigImpl implements STTConfig {
   readonly provider: string;
   readonly apiKey: string;
   readonly language: string;
+  readonly options?: Record<string, unknown>;
 
-  constructor(provider: string, apiKey: string, language: string = "en") {
+  constructor(
+    provider: string,
+    apiKey: string,
+    language: string = "en",
+    options?: Record<string, unknown>,
+  ) {
     this.provider = provider;
     this.apiKey = apiKey;
     this.language = language;
+    if (options) this.options = options;
   }
 
-  toDict(): Record<string, string> {
-    return { provider: this.provider, api_key: this.apiKey, language: this.language };
+  toDict(): Record<string, string | Record<string, unknown>> {
+    const out: Record<string, string | Record<string, unknown>> = {
+      provider: this.provider,
+      api_key: this.apiKey,
+      language: this.language,
+    };
+    if (this.options) out.options = { ...this.options };
+    return out;
   }
 }
 
@@ -32,8 +45,29 @@ class TTSConfigImpl implements TTSConfig {
   }
 }
 
-export function deepgram(opts: { apiKey: string; language?: string }): STTConfig {
-  return new STTConfigImpl("deepgram", opts.apiKey, opts.language ?? "en");
+/**
+ * Deepgram STT config. Tune latency via ``endpointingMs`` / ``utteranceEndMs``
+ * — mirrors Python's ``Patter.deepgram(endpointing_ms=..., utterance_end_ms=...)``.
+ */
+export function deepgram(opts: {
+  apiKey: string;
+  language?: string;
+  model?: string;
+  endpointingMs?: number;
+  utteranceEndMs?: number | null;
+  smartFormat?: boolean;
+  interimResults?: boolean;
+  vadEvents?: boolean;
+}): STTConfig {
+  const options: Record<string, unknown> = {
+    model: opts.model ?? "nova-3",
+    endpointing_ms: opts.endpointingMs ?? 150,
+    utterance_end_ms: opts.utteranceEndMs === null ? null : (opts.utteranceEndMs ?? 1000),
+    smart_format: opts.smartFormat ?? true,
+    interim_results: opts.interimResults ?? true,
+  };
+  if (opts.vadEvents !== undefined) options.vad_events = opts.vadEvents;
+  return new STTConfigImpl("deepgram", opts.apiKey, opts.language ?? "en", options);
 }
 
 export function whisper(opts: { apiKey: string; language?: string }): STTConfig {

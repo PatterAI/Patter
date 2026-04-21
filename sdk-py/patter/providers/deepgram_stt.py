@@ -1,5 +1,6 @@
 import json
 from typing import AsyncIterator
+from urllib.parse import urlencode
 
 import websockets
 
@@ -16,12 +17,23 @@ class DeepgramSTT(STTProvider):
         model: str = "nova-3",
         encoding: str = "linear16",
         sample_rate: int = 16000,
+        *,
+        endpointing_ms: int = 150,
+        utterance_end_ms: int | None = 1000,
+        smart_format: bool = True,
+        interim_results: bool = True,
+        vad_events: bool = True,
     ):
         self.api_key = api_key
         self.language = language
         self.model = model
         self.encoding = encoding
         self.sample_rate = sample_rate
+        self.endpointing_ms = endpointing_ms
+        self.utterance_end_ms = utterance_end_ms
+        self.smart_format = smart_format
+        self.interim_results = interim_results
+        self.vad_events = vad_events
         self._ws = None
         self.request_id: str | None = None
 
@@ -29,7 +41,13 @@ class DeepgramSTT(STTProvider):
         return f"DeepgramSTT(model={self.model!r}, language={self.language!r}, encoding={self.encoding!r})"
 
     @classmethod
-    def for_twilio(cls, api_key: str, language: str = "en", model: str = "nova-3"):
+    def for_twilio(
+        cls,
+        api_key: str,
+        language: str = "en",
+        model: str = "nova-3",
+        **kwargs,
+    ):
         """Create a Deepgram adapter configured for Twilio mulaw 8kHz."""
         return cls(
             api_key=api_key,
@@ -37,22 +55,26 @@ class DeepgramSTT(STTProvider):
             model=model,
             encoding="mulaw",
             sample_rate=8000,
+            **kwargs,
         )
 
     async def connect(self) -> None:
-        url = (
-            f"{DEEPGRAM_WS_URL}"
-            f"?model={self.model}"
-            f"&language={self.language}"
-            f"&encoding={self.encoding}"
-            f"&sample_rate={self.sample_rate}"
-            f"&channels=1"
-            f"&interim_results=true"
-            f"&endpointing=300"
-            f"&smart_format=true"
-            f"&vad_events=true"
-            f"&no_delay=true"
-        )
+        params = {
+            "model": self.model,
+            "language": self.language,
+            "encoding": self.encoding,
+            "sample_rate": str(self.sample_rate),
+            "channels": "1",
+            "interim_results": "true" if self.interim_results else "false",
+            "endpointing": str(self.endpointing_ms),
+            "smart_format": "true" if self.smart_format else "false",
+            "vad_events": "true" if self.vad_events else "false",
+            "no_delay": "true",
+        }
+        if self.utterance_end_ms is not None:
+            # utterance_end_ms has a hard minimum of 1000 on Deepgram's API.
+            params["utterance_end_ms"] = str(max(int(self.utterance_end_ms), 1000))
+        url = f"{DEEPGRAM_WS_URL}?{urlencode(params)}"
         self._ws = await websockets.connect(
             url,
             additional_headers={"Authorization": f"Token {self.api_key}"},
@@ -83,9 +105,13 @@ class DeepgramSTT(STTProvider):
         if not text:
             return None
 
+        # is_final alone marks a stable utterance; speech_final is a faster
+        # end-of-utterance hint from Deepgram's VAD. Accept either so the
+        # pipeline doesn't wait up to utterance_end_ms on every turn.
+        is_final = bool(data.get("is_final", False) or data.get("speech_final", False))
         return Transcript(
             text=text,
-            is_final=data.get("is_final", False) and data.get("speech_final", False),
+            is_final=is_final,
             confidence=best.get("confidence", 0.0),
         )
 

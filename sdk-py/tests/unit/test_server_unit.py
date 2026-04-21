@@ -559,27 +559,60 @@ class TestTwilioAMDSignature:
 
 
 class TestTelnyxVoiceRoute:
-    """POST /webhooks/telnyx/voice returns JSON commands."""
+    """POST /webhooks/telnyx/voice dispatches Call Control REST actions (BUG #16)."""
 
     @pytest.mark.asyncio
-    async def test_valid_telnyx_webhook_returns_commands(self) -> None:
-        srv = _make_server()
+    async def test_valid_telnyx_webhook_initiates_answer(self, monkeypatch) -> None:
+        # Build a server with a telnyx_key so the handler can reach the REST API.
+        cfg = LocalConfig(
+            telephony_provider="telnyx",
+            telnyx_key="tk_test",
+            telnyx_connection_id="conn-1",
+            openai_key="sk-test",
+            webhook_url="test.ngrok.io",
+            phone_number="+15551234567",
+        )
+        srv = EmbeddedServer(config=cfg, agent=make_agent(), dashboard=False)
         app = srv._create_app()
         endpoint = _get_endpoint(app, "/webhooks/telnyx/voice")
+
+        # Intercept the POST to the Telnyx Call Control API so the test is
+        # hermetic.
+        calls: list[str] = []
+
+        class _FakeResp:
+            status_code = 200
+            text = ""
+
+        class _FakeClient:
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *_exc):
+                pass
+            async def post(self, url, **kwargs):
+                calls.append(url)
+                return _FakeResp()
+
+        import httpx as _httpx
+        monkeypatch.setattr(_httpx, "AsyncClient", _FakeClient)
 
         request = _MockRequest(
             json_data={
                 "data": {
+                    "event_type": "call.initiated",
                     "payload": {
                         "call_control_id": "v3:abc123",
                         "from": "+15551234567",
                         "to": "+15559876543",
-                    }
+                    },
                 }
             },
         )
         response = await endpoint(request)
         assert response.status_code == 200
+        assert any("/actions/answer" in url for url in calls)
 
     @pytest.mark.asyncio
     async def test_invalid_telnyx_structure_returns_400(self) -> None:

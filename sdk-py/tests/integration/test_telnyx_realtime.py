@@ -47,23 +47,29 @@ def _make_ws_mock(events: list[dict]) -> AsyncMock:
 
 
 def _telnyx_stream_started(call_control_id: str = "v3:test-id") -> dict:
+    # Telnyx media-stream wire format (BUG #17/#18).
     return {
-        "event_type": "stream_started",
-        "payload": {"call_control_id": call_control_id},
+        "event": "start",
+        "start": {
+            "call_control_id": call_control_id,
+            "from": "+15551111111",
+            "to": "+15552222222",
+        },
     }
 
 
 def _telnyx_media_event(audio: bytes = b"") -> dict:
     if not audio:
         audio = fake_pcm_frame()
+    # Wire format: ``{"event":"media","media":{"payload":b64}}`` — BUG #18.
     return {
-        "event_type": "media",
-        "payload": {"audio": {"chunk": base64.b64encode(audio).decode()}},
+        "event": "media",
+        "media": {"payload": base64.b64encode(audio).decode()},
     }
 
 
 def _telnyx_stream_stopped() -> dict:
-    return {"event_type": "stream_stopped"}
+    return {"event": "stop"}
 
 
 # ---------------------------------------------------------------------------
@@ -114,8 +120,13 @@ class TestTelnyxRealtime:
         on_call_end.assert_awaited_once()
 
     @patch(_PATCH_RT)
-    async def test_audio_format_pcm16(self, MockHandler) -> None:
-        """Telnyx uses pcm16 audio format for OpenAI Realtime."""
+    async def test_audio_format_g711_ulaw(self, MockHandler) -> None:
+        """Telnyx Call Control streams are PCMU 8 kHz bidirectional (BUG #19).
+
+        The Realtime handler therefore runs on ``g711_ulaw`` so both legs are
+        pass-through — transcoding PCM16 would misinterpret the bytes and
+        break turn detection.
+        """
         handler_instance = AsyncMock()
         handler_instance.start = AsyncMock()
         handler_instance.cleanup = AsyncMock()
@@ -134,7 +145,7 @@ class TestTelnyxRealtime:
         )
 
         call_kwargs = MockHandler.call_args.kwargs
-        assert call_kwargs.get("audio_format") == "pcm16"
+        assert call_kwargs.get("audio_format") == "g711_ulaw"
 
     @patch(_PATCH_RT)
     async def test_empty_audio_chunk_skipped(self, MockHandler) -> None:
@@ -149,8 +160,8 @@ class TestTelnyxRealtime:
         agent = make_agent(provider="openai_realtime")
 
         empty_media = {
-            "event_type": "media",
-            "payload": {"audio": {"chunk": ""}},
+            "event": "media",
+            "media": {"payload": ""},
         }
 
         ws = _make_ws_mock([

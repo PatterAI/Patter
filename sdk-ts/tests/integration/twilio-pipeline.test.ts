@@ -117,7 +117,7 @@ describe('Integration: Twilio + Pipeline', () => {
     await handler.handleCallStart('CA-pipe-audio');
 
     const audio = fakeMulawBuffer(20);
-    handler.handleAudio(audio);
+    await handler.handleAudio(audio);
     // Audio is transcoded from mulaw 8kHz → PCM 16kHz before reaching STT
     expect(stt.sendAudio).toHaveBeenCalledTimes(1);
     // buildAIAdapter should NOT be called for pipeline mode

@@ -25,6 +25,11 @@ export class OpenAITTS {
    *
    * OpenAI returns 24 kHz PCM16; each chunk is resampled to 16 kHz before
    * yielding so the output is ready for telephony pipelines.
+   *
+   * The resampler carries state (buffered samples + odd trailing byte)
+   * between chunks — without that state cross-chunk sample alignment drifts
+   * and the caller hears pops / dropped audio (BUG #23, mirror of the
+   * Python `audioop.ratecv` fix).
    */
   async *synthesizeStream(text: string): AsyncGenerator<Buffer> {
     const response = await fetch(OPENAI_TTS_URL, {
@@ -51,14 +56,27 @@ export class OpenAITTS {
       throw new Error('OpenAI TTS: no response body');
     }
 
+    // Stateful resampler: keeps leftover samples + an odd trailing byte so
+    // chunk N+1 continues the 3:2 cadence where chunk N stopped.
+    const ctx = { carryByte: null as number | null, leftover: [] as number[] };
+
     const reader = response.body.getReader();
     try {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         if (value && value.length > 0) {
-          yield OpenAITTS.resample24kTo16k(Buffer.from(value));
+          const out = OpenAITTS.resampleStreaming(Buffer.from(value), ctx);
+          if (out.length > 0) yield out;
         }
+      }
+      // Flush trailing leftover (≤2 samples) at stream end.
+      if (ctx.leftover.length > 0) {
+        const tail = Buffer.alloc(ctx.leftover.length * 2);
+        for (let i = 0; i < ctx.leftover.length; i++) {
+          tail.writeInt16LE(ctx.leftover[i], i * 2);
+        }
+        yield tail;
       }
     } finally {
       if (typeof reader.cancel === 'function') await reader.cancel().catch(() => {});
@@ -67,38 +85,63 @@ export class OpenAITTS {
   }
 
   /**
-   * Resample 24 kHz PCM16-LE to 16 kHz by taking 2 out of every 3 samples.
-   *
-   * For each group of 3 input samples the first is kept as-is and the second
-   * output sample is the average of input samples 2 and 3.  This matches the
-   * Python SDK implementation.
+   * Streaming 24 kHz → 16 kHz resampler (PCM16-LE). Maintains cross-chunk
+   * state so the 3:2 pattern doesn't reset at every network read.
    */
-  static resample24kTo16k(audio: Buffer): Buffer {
-    if (audio.length < 2) return audio;
+  static resampleStreaming(
+    audio: Buffer,
+    ctx: { carryByte: number | null; leftover: number[] },
+  ): Buffer {
+    // Prepend an odd trailing byte from the previous chunk (PCM16 = 2 B/sample).
+    let buf: Buffer;
+    if (ctx.carryByte !== null) {
+      buf = Buffer.concat([Buffer.from([ctx.carryByte]), audio]);
+      ctx.carryByte = null;
+    } else {
+      buf = audio;
+    }
+    if (buf.length % 2 === 1) {
+      ctx.carryByte = buf[buf.length - 1];
+      buf = buf.subarray(0, buf.length - 1);
+    }
+    if (buf.length === 0 && ctx.leftover.length === 0) {
+      return Buffer.alloc(0);
+    }
 
-    const sampleCount = Math.floor(audio.length / 2);
-    const samples = new Int16Array(sampleCount);
+    const sampleCount = buf.length / 2;
+    // Combine leftover samples from the previous chunk with the new ones.
+    const samples: number[] = ctx.leftover.slice();
     for (let i = 0; i < sampleCount; i++) {
-      samples[i] = audio.readInt16LE(i * 2);
+      samples.push(buf.readInt16LE(i * 2));
     }
 
-    const resampled: number[] = [];
-    for (let i = 0; i < samples.length; i += 3) {
-      resampled.push(samples[i]);
-      if (i + 1 < samples.length) {
-        if (i + 2 < samples.length) {
-          // Interpolate between sample i+1 and i+2
-          resampled.push(Math.trunc((samples[i + 1] + samples[i + 2]) / 2));
-        } else {
-          resampled.push(samples[i + 1]);
-        }
-      }
+    const out: number[] = [];
+    let i = 0;
+    // Process complete groups of 3 input samples → 2 output samples.
+    while (i + 2 < samples.length) {
+      out.push(samples[i]);
+      out.push(Math.trunc((samples[i + 1] + samples[i + 2]) / 2));
+      i += 3;
     }
+    // Keep any unprocessed trailing samples (0, 1, or 2) for the next call.
+    ctx.leftover = samples.slice(i);
 
-    const out = Buffer.alloc(resampled.length * 2);
-    for (let i = 0; i < resampled.length; i++) {
-      out.writeInt16LE(resampled[i], i * 2);
+    const buffer = Buffer.alloc(out.length * 2);
+    for (let j = 0; j < out.length; j++) {
+      buffer.writeInt16LE(out[j], j * 2);
     }
-    return out;
+    return buffer;
+  }
+
+  /** @deprecated use {@link resampleStreaming} with persistent state. */
+  static resample24kTo16k(audio: Buffer): Buffer {
+    const ctx = { carryByte: null as number | null, leftover: [] as number[] };
+    const out = OpenAITTS.resampleStreaming(audio, ctx);
+    if (ctx.leftover.length === 0) return out;
+    const tail = Buffer.alloc(ctx.leftover.length * 2);
+    for (let i = 0; i < ctx.leftover.length; i++) {
+      tail.writeInt16LE(ctx.leftover[i], i * 2);
+    }
+    return Buffer.concat([out, tail]);
   }
 }

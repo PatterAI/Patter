@@ -128,18 +128,26 @@ class TestToolDecoratorBasic:
 class TestToolDecoratorHandler:
     """Handler invocation."""
 
+    # Post-BUG-#21 the ``handler`` stored in the ToolDefinition is an
+    # adapter with the signature ``(arguments_dict, call_context_dict)``;
+    # the original user function is on ``handler.__wrapped__``.
+
     @pytest.mark.asyncio
     async def test_async_handler_works(self) -> None:
-        result = await _weather["handler"]("New York")
+        result = await _weather["handler"]({"location": "New York"}, {})
         assert "Sunny" in result
 
     @pytest.mark.asyncio
     async def test_async_handler_with_default(self) -> None:
-        result = await _weather["handler"]("London", "fahrenheit")
+        result = await _weather["handler"](
+            {"location": "London", "unit": "fahrenheit"}, {}
+        )
         assert "F" in result
 
-    def test_sync_handler_works(self) -> None:
-        result = _sync_handler["handler"]("World")
+    @pytest.mark.asyncio
+    async def test_sync_handler_works(self) -> None:
+        # Sync user functions are awaited via the adapter in an event loop.
+        result = await _sync_handler["handler"]({"name": "World"}, {})
         assert result == "Hello, World!"
 
 

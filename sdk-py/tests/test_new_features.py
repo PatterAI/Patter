@@ -266,7 +266,11 @@ def test_machine_detection_false_no_extra_params():
 
         _, kwargs = mock_instance.initiate_call.call_args
         extra = kwargs.get("extra_params", {})
-        assert not extra  # empty dict when AMD disabled
+        # AMD-specific params must be absent when machine_detection=False.
+        assert "MachineDetection" not in extra
+        assert "AsyncAmd" not in extra
+        # StatusCallback is always wired (BUG #06 — dashboard sees failures).
+        assert extra.get("StatusCallback", "").endswith("/webhooks/twilio/status")
 
 
 # ---------------------------------------------------------------------------

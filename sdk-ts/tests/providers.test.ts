@@ -22,6 +22,31 @@ describe("deepgram", () => {
       provider: "deepgram",
       api_key: "dg_test",
       language: "en",
+      options: {
+        model: "nova-3",
+        endpointing_ms: 150,
+        utterance_end_ms: 1000,
+        smart_format: true,
+        interim_results: true,
+      },
+    });
+  });
+
+  it("forwards tuning knobs into options (BUG #13 parity)", () => {
+    const config = deepgram({
+      apiKey: "dg_test",
+      endpointingMs: 80,
+      utteranceEndMs: 1500,
+      smartFormat: false,
+      interimResults: false,
+      model: "nova-2",
+    });
+    expect(config.options).toEqual({
+      model: "nova-2",
+      endpointing_ms: 80,
+      utterance_end_ms: 1500,
+      smart_format: false,
+      interim_results: false,
     });
   });
 });

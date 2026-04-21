@@ -182,6 +182,30 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .badge-ended { background: var(--secondary); color: var(--muted); }
   .badge-pipeline { background: rgba(167,139,250,0.1); color: #7c3aed; }
   .badge-realtime { background: rgba(59,130,246,0.1); color: #2563eb; }
+  .badge-status-completed { background: rgba(34,197,94,0.1); color: #16a34a; }
+  .badge-status-inprogress { background: rgba(59,130,246,0.1); color: #2563eb; }
+  .badge-status-initiated { background: rgba(234,179,8,0.12); color: #ca8a04; }
+  .badge-status-ringing { background: rgba(234,179,8,0.12); color: #ca8a04; }
+  .badge-status-failed { background: rgba(239,68,68,0.12); color: #dc2626; }
+  .badge-status-noanswer { background: rgba(239,68,68,0.12); color: #dc2626; }
+  .badge-status-busy { background: rgba(251,146,60,0.15); color: #ea580c; }
+  .badge-status-canceled { background: var(--secondary); color: var(--muted); }
+  .badge-status-webhookerror { background: rgba(239,68,68,0.12); color: #dc2626; }
+  tr.row-failed { background: rgba(239,68,68,0.04); }
+
+  /* Filter buttons */
+  .filter-btn {
+    font-family: var(--font); font-size: 13px; font-weight: 500;
+    padding: 6px 14px; border-radius: 8px;
+    background: var(--secondary); color: var(--muted);
+    border: 1px solid var(--border);
+    cursor: pointer; transition: all .15s ease;
+  }
+  .filter-btn:hover { color: var(--fg); border-color: var(--border-d); }
+  .filter-btn.active {
+    background: var(--primary); color: var(--primary-fg);
+    border-color: var(--primary);
+  }
 
   .cost { color: #16a34a; font-family: var(--mono); font-size: 13px; }
   .latency { color: #ca8a04; font-family: var(--mono); font-size: 13px; }
@@ -333,15 +357,20 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
   <div class="tab-content active" id="tab-calls">
     <div class="section">
+      <div style="display:flex; gap:8px; margin-bottom:12px; flex-wrap:wrap;">
+        <button class="filter-btn active" data-filter="all">All</button>
+        <button class="filter-btn" data-filter="completed">Completed</button>
+        <button class="filter-btn" data-filter="failed">Failed</button>
+      </div>
       <table id="calls-table">
         <thead>
           <tr>
             <th>Call ID</th><th>Direction</th><th>From / To</th>
-            <th>Duration</th><th>Mode</th><th>Cost</th><th>Avg Latency</th><th>Turns</th>
+            <th>Duration</th><th>Status</th><th>Mode</th><th>Cost</th><th>Avg Latency</th><th>Turns</th>
           </tr>
         </thead>
         <tbody id="calls-body">
-          <tr><td colspan="8" class="empty">No calls yet. Waiting for incoming calls...</td></tr>
+          <tr><td colspan="9" class="empty">No calls yet. Waiting for incoming calls...</td></tr>
         </tbody>
       </table>
     </div>
@@ -414,25 +443,59 @@ async function refreshAggregates() {
   $('#stat-latency').textContent = fmtMs(d.avg_latency_ms);
 }
 
+let _currentFilter = 'all';
+const _FAILED_STATUSES = new Set(['failed', 'no-answer', 'busy', 'canceled', 'webhook_error']);
+
+function statusBadgeClass(status) {
+  const key = (status || '').replace(/[^a-z]/gi, '').toLowerCase();
+  const map = {
+    completed: 'badge-status-completed',
+    inprogress: 'badge-status-inprogress',
+    initiated: 'badge-status-initiated',
+    ringing: 'badge-status-ringing',
+    failed: 'badge-status-failed',
+    noanswer: 'badge-status-noanswer',
+    busy: 'badge-status-busy',
+    canceled: 'badge-status-canceled',
+    webhookerror: 'badge-status-webhookerror',
+  };
+  return map[key] || 'badge-ended';
+}
+
+function passesFilter(status) {
+  if (_currentFilter === 'all') return true;
+  if (_currentFilter === 'completed') return status === 'completed';
+  if (_currentFilter === 'failed') return _FAILED_STATUSES.has(status);
+  return true;
+}
+
 async function refreshCalls() {
   const calls = await fetchJSON('/api/dashboard/calls?limit=50');
   const body = $('#calls-body');
   if (!calls.length) {
-    body.innerHTML = '<tr><td colspan="8" class="empty">No calls yet. Waiting for incoming calls...</td></tr>';
+    body.innerHTML = '<tr><td colspan="9" class="empty">No calls yet. Waiting for incoming calls...</td></tr>';
     return;
   }
-  body.innerHTML = calls.map(c => {
+  const filtered = calls.filter(c => passesFilter(c.status || 'completed'));
+  if (!filtered.length) {
+    body.innerHTML = `<tr><td colspan="9" class="empty">No calls match the current filter.</td></tr>`;
+    return;
+  }
+  body.innerHTML = filtered.map(c => {
     const m = c.metrics || {};
     const cost = m.cost || {};
     const lat = m.latency_avg || {};
     const mode = m.provider_mode || '-';
     const turns = m.turns ? m.turns.length : 0;
     const modeClass = mode === 'pipeline' ? 'badge-pipeline' : 'badge-realtime';
-    return `<tr class="clickable" onclick="showCall('${esc(c.call_id)}')">
+    const status = c.status || 'completed';
+    const rowClass = _FAILED_STATUSES.has(status) ? 'clickable row-failed' : 'clickable';
+    return `<tr class="${rowClass}" onclick="showCall('${esc(c.call_id)}')">
       <td><code>${shortId(c.call_id)}</code></td>
       <td>${esc(c.direction) || '-'}</td>
       <td>${esc(c.caller) || '-'} &rarr; ${esc(c.callee) || '-'}</td>
       <td>${fmtDur(m.duration_seconds)}</td>
+      <td><span class="badge ${statusBadgeClass(status)}">${esc(status)}</span></td>
       <td><span class="badge ${modeClass}">${esc(mode)}</span></td>
       <td class="cost">${fmt$(cost.total || 0)}</td>
       <td class="latency">${fmtMs(lat.total_ms || 0)}</td>
@@ -580,12 +643,24 @@ async function refresh() {
 
 refresh();
 
-// Update active call durations every second
+// Wire the status-filter pills.
+document.querySelectorAll('.filter-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    _currentFilter = btn.getAttribute('data-filter') || 'all';
+    refreshCalls();
+  });
+});
+
+// Update active call durations every second. Rows carrying a `data-ended`
+// attribute have already received call_end — freeze them instead of ticking.
 setInterval(() => {
   const cells = document.querySelectorAll('#active-body td[data-started]');
   if (!cells.length) return;
   const now = Date.now() / 1000;
   cells.forEach(td => {
+    if (td.getAttribute('data-ended')) return;
     const started = parseFloat(td.getAttribute('data-started'));
     if (started) td.textContent = fmtDur(Math.round(now - started));
   });
@@ -603,6 +678,8 @@ if (typeof EventSource !== 'undefined') {
     const es = new EventSource(sseUrl);
     function onEvent() { sseBackoff = 1000; sseFailures = 0; }
     es.addEventListener('call_start', () => { onEvent(); refresh(); });
+    es.addEventListener('call_initiated', () => { onEvent(); refresh(); });
+    es.addEventListener('call_status', () => { onEvent(); refresh(); });
     es.addEventListener('turn_complete', () => { onEvent(); refreshAggregates(); });
     es.addEventListener('call_end', () => { onEvent(); refresh(); });
     es.onerror = () => {

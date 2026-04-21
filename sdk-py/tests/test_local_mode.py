@@ -381,8 +381,10 @@ async def test_twilio_stream_bridge_pipeline_sends_audio_to_stt():
     mock_tts = AsyncMock()
     mock_tts.close = AsyncMock()
 
+    # Pipeline mode now transcodes mulaw→PCM16 before STT (BUG #12), so the
+    # bridge instantiates the plain DeepgramSTT constructor — not for_twilio.
     with (
-        patch("patter.providers.deepgram_stt.DeepgramSTT.for_twilio", return_value=mock_stt),
+        patch("patter.providers.deepgram_stt.DeepgramSTT", return_value=mock_stt),
         patch("patter.providers.elevenlabs_tts.ElevenLabsTTS", return_value=mock_tts),
     ):
         # Run with a short timeout — we only care that it starts up correctly
@@ -605,7 +607,7 @@ async def test_dtmf_event_fires_transcript_callback():
     mock_tts.close = AsyncMock()
 
     with (
-        patch("patter.providers.deepgram_stt.DeepgramSTT.for_twilio", return_value=mock_stt),
+        patch("patter.providers.deepgram_stt.DeepgramSTT", return_value=mock_stt),
         patch("patter.providers.elevenlabs_tts.ElevenLabsTTS", return_value=mock_tts),
     ):
         try:

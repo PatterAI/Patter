@@ -84,6 +84,10 @@ class Agent:
     vad: "VADProvider | None" = None  # Optional server-side VAD (e.g., Silero) — pipeline mode only
     audio_filter: "AudioFilter | None" = None  # Optional pre-STT audio filter (noise cancel) — pipeline mode only
     background_audio: "BackgroundAudioPlayer | None" = None  # Optional background audio mixer — pipeline mode only
+    # Minimum sustained voice (ms) before treating caller audio as a barge-in
+    # and interrupting TTS. ``0`` disables barge-in entirely — useful on noisy
+    # links (ngrok tunnels, speakerphone) where the agent can hear itself.
+    barge_in_threshold_ms: int = 300
 
 
 @dataclass(frozen=True)
@@ -107,9 +111,15 @@ class STTConfig:
     provider: str
     api_key: str
     language: str = "en"
+    # Provider-specific tuning knobs (e.g. Deepgram endpointing). Unknown keys
+    # are silently ignored so older SDK versions stay forward-compatible.
+    options: dict | None = None
 
     def to_dict(self) -> dict:
-        return {"provider": self.provider, "api_key": self.api_key, "language": self.language}
+        out = {"provider": self.provider, "api_key": self.api_key, "language": self.language}
+        if self.options:
+            out["options"] = dict(self.options)
+        return out
 
 
 @dataclass(frozen=True)
@@ -117,9 +127,13 @@ class TTSConfig:
     provider: str
     api_key: str
     voice: str = "alloy"
+    options: dict | None = None
 
     def to_dict(self) -> dict:
-        return {"provider": self.provider, "api_key": self.api_key, "voice": self.voice}
+        out = {"provider": self.provider, "api_key": self.api_key, "voice": self.voice}
+        if self.options:
+            out["options"] = dict(self.options)
+        return out
 
 
 @dataclass(frozen=True)
