@@ -115,10 +115,16 @@ describe('Integration: Telnyx + Pipeline', () => {
 
     await handler.handleCallStart('ctrl-tp-audio');
 
-    // Telnyx sends 16kHz PCM
-    const audio = fakeAudioBuffer(20, 16000);
-    handler.handleAudio(audio);
-    expect(stt.sendAudio).toHaveBeenCalledWith(audio);
+    // Telnyx with the default streaming_start (PCMU bidirectional) sends
+    // mulaw 8 kHz inbound. The pipeline transcodes to PCM16 16 kHz before
+    // STT, so the mock sees the transcoded buffer (different from input).
+    const { fakeMulawBuffer } = await import('../setup');
+    const mulaw = fakeMulawBuffer(20, 8000);
+    await handler.handleAudio(mulaw);
+    expect(stt.sendAudio).toHaveBeenCalledTimes(1);
+    const forwarded = (stt.sendAudio as any).mock.calls[0][0] as Buffer;
+    // Transcoded output is PCM16 @ 16 kHz = 4× the mulaw byte count.
+    expect(forwarded.length).toBe(mulaw.length * 4);
   });
 
   it('pipeline mode processes transcript with onMessage handler', async () => {

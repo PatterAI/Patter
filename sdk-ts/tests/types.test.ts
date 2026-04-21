@@ -4,10 +4,19 @@ import { deepgram, elevenlabs } from "../src/providers";
 describe("STTConfig", () => {
   it("toDict includes all fields", () => {
     const config = deepgram({ apiKey: "dg_test", language: "it" });
+    // BUG #13 parity — the Deepgram factory now carries tuning defaults in
+    // ``options`` so callers can pass them through without monkey-patching.
     expect(config.toDict()).toEqual({
       provider: "deepgram",
       api_key: "dg_test",
       language: "it",
+      options: {
+        model: "nova-3",
+        endpointing_ms: 150,
+        utterance_end_ms: 1000,
+        smart_format: true,
+        interim_results: true,
+      },
     });
   });
 

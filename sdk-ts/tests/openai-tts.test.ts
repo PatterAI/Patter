@@ -13,10 +13,14 @@ describe('OpenAITTS', () => {
   });
 
   describe('resample24kTo16k', () => {
-    it('returns input unchanged when less than 2 bytes', () => {
+    it('returns empty buffer when input is a single odd byte (flushed later)', () => {
+      // Legacy wrapper: in the new streaming resampler a single trailing
+      // byte is a ``carry`` that would be consumed by the next chunk; the
+      // non-streaming helper flushes only complete samples and therefore
+      // returns an empty buffer for a 1-byte input.
       const input = Buffer.from([0x01]);
       const result = OpenAITTS.resample24kTo16k(input);
-      expect(result).toEqual(input);
+      expect(result.length).toBe(0);
     });
 
     it('returns empty buffer for empty input', () => {

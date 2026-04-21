@@ -363,78 +363,137 @@ describe('EmbeddedServer route behavior', () => {
   });
 
   it('serves /webhooks/telnyx/voice for call.initiated event', async () => {
-    const server = new EmbeddedServer(
-      makeConfig({
-        telephonyProvider: 'telnyx',
-        telnyxKey: 'KEY_test',
-        telnyxConnectionId: 'conn_test',
-        // No telnyxPublicKey = skip sig validation
-      }),
-      makeAgent(),
-      undefined, undefined, undefined, undefined, false, '', undefined, undefined, false,
+    // BUG #16 — Telnyx Call Control is REST-first: the webhook body is an
+    // informational notification, so the SDK must POST ``actions/answer`` to
+    // Telnyx and respond with 200 + empty body.
+    const originalFetch = globalThis.fetch;
+    const telnyxFetchCalls: Array<[string | URL | Request, RequestInit | undefined]> = [];
+    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        if (url.includes('api.telnyx.com')) {
+          telnyxFetchCalls.push([input, init]);
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ data: {} }),
+            text: async () => '',
+          } as Response;
+        }
+        return originalFetch(input, init);
+      },
     );
 
-    const port = 19000 + Math.floor(Math.random() * 1000);
-    await server.start(port);
-
     try {
-      const resp = await fetch(`http://127.0.0.1:${port}/webhooks/telnyx/voice`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          data: {
-            event_type: 'call.initiated',
-            payload: {
-              call_control_id: 'ctrl-123',
-              from: '+15551111111',
-              to: '+15552222222',
-            },
-          },
+      const server = new EmbeddedServer(
+        makeConfig({
+          telephonyProvider: 'telnyx',
+          telnyxKey: 'KEY_test',
+          telnyxConnectionId: 'conn_test',
+          // No telnyxPublicKey = skip sig validation
         }),
-      });
+        makeAgent(),
+        undefined, undefined, undefined, undefined, false, '', undefined, undefined, false,
+      );
 
-      expect(resp.ok).toBe(true);
-      const body = await resp.json() as Record<string, unknown>;
-      expect(body.commands).toBeDefined();
-      const commands = body.commands as Array<Record<string, unknown>>;
-      expect(commands[0].command).toBe('answer');
-      expect(commands[1].command).toBe('stream_start');
+      const port = 19000 + Math.floor(Math.random() * 1000);
+      await server.start(port);
+
+      try {
+        const resp = await fetch(`http://127.0.0.1:${port}/webhooks/telnyx/voice`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            data: {
+              event_type: 'call.initiated',
+              payload: {
+                call_control_id: 'ctrl-123',
+                from: '+15551111111',
+                to: '+15552222222',
+              },
+            },
+          }),
+        });
+
+        expect(resp.status).toBe(200);
+
+        const answerCall = telnyxFetchCalls.find(([url]) =>
+          typeof url === 'string' && url.includes('/calls/ctrl-123/actions/answer'),
+        );
+        expect(answerCall).toBeDefined();
+      } finally {
+        await server.stop();
+      }
     } finally {
-      await server.stop();
+      spy.mockRestore();
     }
   });
 
-  it('acknowledges non-call.initiated telnyx events', async () => {
-    const server = new EmbeddedServer(
-      makeConfig({
-        telephonyProvider: 'telnyx',
-        telnyxKey: 'KEY_test',
-        telnyxConnectionId: 'conn_test',
-      }),
-      makeAgent(),
-      undefined, undefined, undefined, undefined, false, '', undefined, undefined, false,
+  it('POSTs actions/streaming_start when telnyx call.answered arrives', async () => {
+    const originalFetch = globalThis.fetch;
+    const telnyxFetchCalls: Array<[string | URL | Request, RequestInit | undefined]> = [];
+    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        if (url.includes('api.telnyx.com')) {
+          telnyxFetchCalls.push([input, init]);
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ data: {} }),
+            text: async () => '',
+          } as Response;
+        }
+        return originalFetch(input, init);
+      },
     );
 
-    const port = 19000 + Math.floor(Math.random() * 1000);
-    await server.start(port);
-
     try {
-      const resp = await fetch(`http://127.0.0.1:${port}/webhooks/telnyx/voice`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          data: {
-            event_type: 'call.answered',
-            payload: { call_control_id: 'ctrl-456' },
-          },
+      const server = new EmbeddedServer(
+        makeConfig({
+          telephonyProvider: 'telnyx',
+          telnyxKey: 'KEY_test',
+          telnyxConnectionId: 'conn_test',
         }),
-      });
+        makeAgent(),
+        undefined, undefined, undefined, undefined, false, '', undefined, undefined, false,
+      );
 
-      expect(resp.ok).toBe(true);
-      const body = await resp.json() as Record<string, unknown>;
-      expect(body.received).toBe(true);
+      const port = 19000 + Math.floor(Math.random() * 1000);
+      await server.start(port);
+
+      try {
+        const resp = await fetch(`http://127.0.0.1:${port}/webhooks/telnyx/voice`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            data: {
+              event_type: 'call.answered',
+              payload: {
+                call_control_id: 'ctrl-456',
+                from: '+15551111111',
+                to: '+15552222222',
+              },
+            },
+          }),
+        });
+
+        expect(resp.status).toBe(200);
+
+        const startCall = telnyxFetchCalls.find(([url]) =>
+          typeof url === 'string' && url.includes('/calls/ctrl-456/actions/streaming_start'),
+        );
+        expect(startCall).toBeDefined();
+        // Validate the streaming_start payload includes PCMU bidirectional.
+        const body = JSON.parse((startCall?.[1]?.body as string) ?? '{}') as Record<string, unknown>;
+        expect(body.stream_url).toContain('ctrl-456');
+        expect(body.stream_track).toBe('both_tracks');
+        expect(body.stream_bidirectional_codec).toBe('PCMU');
+      } finally {
+        await server.stop();
+      }
     } finally {
-      await server.stop();
+      spy.mockRestore();
     }
   });
 
