@@ -95,29 +95,48 @@ def telnyx_webhook_handler(
 # ---------------------------------------------------------------------------
 
 class TelnyxAudioSender(AudioSender):
-    """Sends audio to a Telnyx WebSocket (16 kHz PCM, no transcoding)."""
+    """Sends audio to a Telnyx media-stream WebSocket.
 
-    def __init__(self, websocket) -> None:
+    Telnyx expects outbound frames in the same codec negotiated at
+    ``streaming_start`` time (see BUG #16). The server currently negotiates
+    PCMU 8 kHz bidirectional, so OpenAI Realtime is configured to emit
+    ``g711_ulaw`` directly — the sender forwards the bytes as-is. For
+    pipeline mode, ``input_is_mulaw_8k=False`` keeps the PCM16 16 kHz path
+    (Telnyx transcodes on the RTP leg when negotiated as L16/16000).
+
+    Wire format (BUG #18): ``{"event": "media", "media": {"payload": b64}}``.
+    """
+
+    def __init__(self, websocket, input_is_mulaw_8k: bool = False) -> None:
         self._ws = websocket
+        self._input_is_mulaw_8k = input_is_mulaw_8k
+        # Lazy import transcoding when the caller sends PCM16 16 kHz and
+        # we need to match the negotiated PCMU 8 kHz bidirectional stream.
+        if not input_is_mulaw_8k:
+            from patter.services.transcoding import pcm16_to_mulaw, resample_16k_to_8k  # type: ignore[import]
+            self._pcm16_to_mulaw = pcm16_to_mulaw
+            self._resample_16k_to_8k = resample_16k_to_8k
+        else:
+            self._pcm16_to_mulaw = None
+            self._resample_16k_to_8k = None
 
-    async def send_audio(self, pcm_audio: bytes) -> None:
-        encoded = base64.b64encode(pcm_audio).decode("ascii")
+    async def send_audio(self, audio: bytes) -> None:
+        if self._input_is_mulaw_8k:
+            mulaw = audio
+        else:
+            resampled = self._resample_16k_to_8k(audio)
+            mulaw = self._pcm16_to_mulaw(resampled)
+        encoded = base64.b64encode(mulaw).decode("ascii")
         await self._ws.send_text(
-            json.dumps(
-                {
-                    "event_type": "media",
-                    "payload": {"audio": {"chunk": encoded}},
-                }
-            )
+            json.dumps({"event": "media", "media": {"payload": encoded}})
         )
 
     async def send_clear(self) -> None:
-        await self._ws.send_text(
-            json.dumps({"event_type": "media_stop"})
-        )
+        # Telnyx media stream clear signal. See BUG #18.
+        await self._ws.send_text(json.dumps({"event": "clear"}))
 
     async def send_mark(self, mark_name: str) -> None:
-        # Telnyx does not support playback marks — no-op
+        # Telnyx media streams do not support playback marks — no-op.
         pass
 
 
@@ -179,13 +198,21 @@ async def telnyx_stream_bridge(
                 )
                 continue
             data = json.loads(raw)
-            event_type_telnyx = data.get("event_type", "")
+            # Telnyx media-stream WebSocket uses ``event`` (not
+            # ``event_type``, which is a Call Control REST notification
+            # field). See BUG #17.
+            event_type_telnyx = data.get("event", "")
 
-            # Telnyx uses event_type instead of event, and wraps payload in "payload"
-            if event_type_telnyx == "stream_started" and not stream_started:
+            if event_type_telnyx == "connected":
+                # First frame after WS open — Telnyx ping. Nothing to do.
+                continue
+
+            if event_type_telnyx == "start" and not stream_started:
                 stream_started = True
-                payload_data = data.get("payload", {})
-                call_id_actual = payload_data.get("call_control_id", "")
+                start_info = data.get("start", {}) or {}
+                call_id_actual = start_info.get("call_control_id", "")
+                caller = start_info.get("from", "") or caller
+                callee = start_info.get("to", "") or callee
 
                 logger.info("Telnyx stream started: %s", call_id_actual)
 
@@ -224,8 +251,12 @@ async def telnyx_stream_bridge(
                 # Telnyx uses PCM 16kHz (2 bytes/sample)
                 metrics.configure_stt_format(sample_rate=16000, bytes_per_sample=2)
 
-                # Create audio sender
-                audio_sender = TelnyxAudioSender(websocket)
+                # Create audio sender. OpenAI Realtime negotiates g711_ulaw
+                # 8 kHz to match the `streaming_start` PCMU bidirectional
+                # stream — forward bytes as-is. Pipeline and ConvAI still
+                # produce PCM16 that Telnyx accepts when L16 is negotiated.
+                _input_is_mulaw = getattr(agent, "provider", "openai_realtime") == "openai_realtime"
+                audio_sender = TelnyxAudioSender(websocket, input_is_mulaw_8k=_input_is_mulaw)
 
                 # --- Telnyx-specific call control helpers ---
                 async def _telnyx_transfer(number):
@@ -375,6 +406,13 @@ async def telnyx_stream_bridge(
                         deepgram_key=deepgram_key,
                         elevenlabs_key=elevenlabs_key,
                         for_twilio=False,
+                        # Telnyx bidirectional PCMU 8 kHz: inbound caller
+                        # audio arrives as mulaw 8 kHz and must be
+                        # transcoded to PCM16 16 kHz before STT. Outbound
+                        # PCM16 16 kHz from the TTS must be transcoded
+                        # back to mulaw 8 kHz in the audio_sender.
+                        input_is_mulaw_8k=True,
+                        output_is_mulaw_8k=False,  # TTS produces PCM16; sender transcodes
                         transfer_fn=_telnyx_transfer,
                         hangup_fn=_telnyx_hangup,
                         send_dtmf_fn=_telnyx_send_dtmf,
@@ -412,14 +450,29 @@ async def telnyx_stream_bridge(
                         on_transcript=on_transcript,
                         on_metrics=on_metrics,
                         transcript_entries=transcript_entries,
-                        audio_format="pcm16",
+                        # Telnyx Call Control media streams deliver PCMU
+                        # 8 kHz (g711 mulaw) in both directions when
+                        # streaming_start negotiates PCMU bidirectional.
+                        # Verified 2026-04-21: inbound chunks are 160 B /
+                        # 20 ms → PCMU 8 kHz. OpenAI Realtime with this
+                        # codec forwards bytes pass-through on both legs.
+                        audio_format="g711_ulaw",
                     )
 
                 await handler.start()
 
             elif event_type_telnyx == "media":
-                payload_data = data.get("payload", {})
-                audio_chunk_b64 = payload_data.get("audio", {}).get("chunk", "")
+                media = data.get("media", {}) or {}
+                # Telnyx with ``stream_track=both_tracks`` emits media for
+                # both the caller leg (``track=inbound``) and the leg we
+                # are injecting audio into (``track=outbound``). Forwarding
+                # the ``outbound`` echo to OpenAI Realtime would feed the
+                # agent its own voice and break turn detection — only the
+                # inbound track is actual caller audio.
+                track = media.get("track", "inbound")
+                if track != "inbound":
+                    continue
+                audio_chunk_b64 = media.get("payload", "")
                 if not audio_chunk_b64:
                     continue
 
@@ -427,9 +480,9 @@ async def telnyx_stream_bridge(
                 if handler is not None:
                     await handler.on_audio_received(pcm_audio)
 
-            elif event_type_telnyx == "call.dtmf.received":
-                payload_data = data.get("payload", {})
-                digit = str(payload_data.get("digit", "")).strip()
+            elif event_type_telnyx == "dtmf":
+                dtmf_info = data.get("dtmf", {}) or {}
+                digit = str(dtmf_info.get("digit", "")).strip()
                 if digit:
                     logger.info("Telnyx DTMF received: %s", digit)
                     if handler is not None:
@@ -451,23 +504,10 @@ async def telnyx_stream_bridge(
                         except Exception as _exc:
                             logger.debug("on_transcript DTMF dispatch error: %s", _exc)
 
-            elif event_type_telnyx == "call.recording.saved":
-                payload_data = data.get("payload", {})
-                recording_urls = payload_data.get("recording_urls", {})
-                recording_url = (
-                    recording_urls.get("mp3")
-                    or recording_urls.get("wav")
-                    or payload_data.get("public_recording_urls", {}).get("mp3")
-                    or ""
-                )
-                if recording_url:
-                    logger.info(
-                        "Telnyx recording saved for call %s: %s",
-                        call_id_actual,
-                        recording_url,
-                    )
+            elif event_type_telnyx == "error":
+                logger.warning("Telnyx stream error: %s", data.get("payload") or data)
 
-            elif event_type_telnyx == "stream_stopped":
+            elif event_type_telnyx == "stop":
                 break
 
     except Exception as exc:
