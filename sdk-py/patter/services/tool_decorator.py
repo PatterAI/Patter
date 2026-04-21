@@ -181,9 +181,37 @@ def tool(fn: Callable[..., Any]) -> ToolDefinition:
     if required:
         parameters["required"] = required
 
+    # Adapter between the decorated user function (signature
+    # ``check_order(order_id: str)``) and the runtime tool executor which
+    # always invokes handlers as ``handler(arguments_dict, call_context_dict)``.
+    # The adapter inspects the original signature: if the function already
+    # takes ``(arguments, call_context)`` positionally we pass through,
+    # otherwise we unpack ``arguments`` as keyword-args into the real call.
+    # Without this adapter every ``@tool`` function fails at runtime with
+    # ``takes 1 positional argument but 2 were given`` (BUG #21).
+    _param_names = tuple(sig.parameters.keys())
+    _is_legacy_twoarg = (
+        len(_param_names) == 2 and _param_names == ("arguments", "call_context")
+    )
+    import asyncio as _asyncio
+
+    async def _adapter(arguments: dict, call_context: dict):
+        if _is_legacy_twoarg:
+            result = fn(arguments, call_context)
+        else:
+            filtered = {
+                k: v for k, v in (arguments or {}).items() if k in _param_names
+            }
+            result = fn(**filtered)
+        if _asyncio.iscoroutine(result) or _asyncio.isfuture(result):
+            result = await result
+        return result
+
+    _adapter.__wrapped__ = fn  # type: ignore[attr-defined]
+
     return {
         "name": fn.__name__,
         "description": summary,
         "parameters": parameters,
-        "handler": fn,
+        "handler": _adapter,
     }
