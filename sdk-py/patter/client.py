@@ -220,6 +220,7 @@ class Patter:
         machine_detection: bool = False,
         on_machine: Callable[[dict], Awaitable[None]] | None = None,
         voicemail_message: str = "",
+        ring_timeout: int | None = None,
     ) -> None:
         """Make an outbound call.
 
@@ -270,6 +271,19 @@ class Patter:
                     extra_params["AsyncAmdStatusCallback"] = (
                         f"https://{config.webhook_url}/webhooks/twilio/amd"
                     )
+                if ring_timeout is not None:
+                    extra_params["Timeout"] = int(ring_timeout)
+                # Status callback so the dashboard sees ringing/failed/
+                # no-answer transitions before any media webhook fires.
+                extra_params.setdefault(
+                    "StatusCallback",
+                    f"https://{config.webhook_url}/webhooks/twilio/status",
+                )
+                extra_params.setdefault("StatusCallbackMethod", "POST")
+                extra_params.setdefault(
+                    "StatusCallbackEvent",
+                    "initiated ringing answered completed",
+                )
                 call_id = await adapter.initiate_call(
                     config.phone_number or from_number,
                     to,
@@ -277,6 +291,18 @@ class Patter:
                     extra_params=extra_params,
                 )
                 logger.info("Outbound call initiated: %s", call_id)
+                # Pre-register the call so the dashboard surfaces attempts
+                # that never reach media (no-answer, busy, carrier-reject).
+                if self._server is not None and getattr(self._server, "_metrics_store", None) is not None:
+                    try:
+                        self._server._metrics_store.record_call_initiated({
+                            "call_id": call_id,
+                            "caller": config.phone_number or from_number,
+                            "callee": to,
+                            "direction": "outbound",
+                        })
+                    except Exception as exc:
+                        logger.debug("record_call_initiated: %s", exc)
             elif config.telephony_provider == "telnyx":
                 from patter.providers.telnyx_adapter import TelnyxAdapter  # type: ignore[import]
 
@@ -291,8 +317,19 @@ class Patter:
                     config.phone_number or from_number,
                     to,
                     stream_url,
+                    ring_timeout=ring_timeout,
                 )
                 logger.info("Outbound call initiated: %s", call_id)
+                if self._server is not None and getattr(self._server, "_metrics_store", None) is not None:
+                    try:
+                        self._server._metrics_store.record_call_initiated({
+                            "call_id": call_id,
+                            "caller": config.phone_number or from_number,
+                            "callee": to,
+                            "direction": "outbound",
+                        })
+                    except Exception as exc:
+                        logger.debug("record_call_initiated: %s", exc)
             return
 
         # Cloud mode
@@ -325,6 +362,12 @@ class Patter:
         tts: TTSConfig | None = None,
         variables: dict | None = None,
         guardrails: list | None = None,
+        hooks: "PipelineHooks | None" = None,
+        text_transforms: "list[Callable] | None" = None,
+        vad: "VADProvider | None" = None,
+        audio_filter: "AudioFilter | None" = None,
+        background_audio: "BackgroundAudioPlayer | None" = None,
+        barge_in_threshold_ms: int = 300,
     ) -> Agent:
         """Create an ``Agent`` configuration for local mode.
 
@@ -413,6 +456,12 @@ class Patter:
             tts=tts,
             variables=variables,
             guardrails=guardrails,
+            hooks=hooks,
+            text_transforms=text_transforms,
+            vad=vad,
+            audio_filter=audio_filter,
+            background_audio=background_audio,
+            barge_in_threshold_ms=barge_in_threshold_ms,
         )
 
     async def serve(
@@ -666,8 +715,25 @@ class Patter:
     # === Provider helpers (for self-hosted setup) ===
 
     @staticmethod
-    def deepgram(api_key: str, language: str = "en") -> STTConfig:
-        return _deepgram(api_key=api_key, language=language)
+    def deepgram(
+        api_key: str,
+        language: str = "en",
+        *,
+        model: str = "nova-3",
+        endpointing_ms: int = 150,
+        utterance_end_ms: int | None = 1000,
+        smart_format: bool = True,
+        interim_results: bool = True,
+    ) -> STTConfig:
+        return _deepgram(
+            api_key=api_key,
+            language=language,
+            model=model,
+            endpointing_ms=endpointing_ms,
+            utterance_end_ms=utterance_end_ms,
+            smart_format=smart_format,
+            interim_results=interim_results,
+        )
 
     @staticmethod
     def whisper(api_key: str, language: str = "en") -> STTConfig:
