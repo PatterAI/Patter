@@ -58,14 +58,30 @@ class ScheduleHandle:
             return False
 
 
-_scheduler_singleton: Any = None
+# Schedulers are scoped per event loop. A single module-level singleton would
+# bind to the first loop it sees and then crash with "Event loop is closed"
+# on any subsequent loop (e.g. a new pytest-asyncio test, or an app that
+# recreates the loop on reload). Keying on id(loop) avoids that footgun while
+# keeping the "shared scheduler per loop" ergonomics.
+_schedulers_by_loop: dict[int, Any] = {}
 
 
 def _get_scheduler() -> Any:
-    """Lazily construct the APScheduler ``AsyncIOScheduler`` and start it."""
-    global _scheduler_singleton
-    if _scheduler_singleton is not None:
-        return _scheduler_singleton
+    """Lazily construct the APScheduler ``AsyncIOScheduler`` bound to the current loop."""
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    existing = _schedulers_by_loop.get(id(loop))
+    if existing is not None:
+        # If the loop was torn down under us (e.g. pytest-asyncio finished a
+        # test), drop the stale entry and build a fresh scheduler.
+        if getattr(loop, "is_closed", lambda: False)():
+            _schedulers_by_loop.pop(id(loop), None)
+        else:
+            return existing
 
     try:
         from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import-not-found]
@@ -75,10 +91,20 @@ def _get_scheduler() -> Any:
             "Install with: pip install getpatter[scheduling]"
         ) from exc
 
-    scheduler = AsyncIOScheduler()
+    scheduler = AsyncIOScheduler(event_loop=loop)
     scheduler.start()
-    _scheduler_singleton = scheduler
+    _schedulers_by_loop[id(loop)] = scheduler
     return scheduler
+
+
+def reset_for_tests() -> None:
+    """Tear down every cached scheduler. Call from test teardown to avoid state bleed."""
+    for sched in list(_schedulers_by_loop.values()):
+        try:
+            sched.shutdown(wait=False)
+        except Exception:  # pragma: no cover
+            pass
+    _schedulers_by_loop.clear()
 
 
 def _wrap_callback(cb: JobCallback) -> Callable[[], Any]:
@@ -166,12 +192,5 @@ def schedule_interval(seconds: float, callback: JobCallback) -> ScheduleHandle:
 
 
 def shutdown() -> None:
-    """Tear down the scheduler. Safe to call even if never initialised."""
-    global _scheduler_singleton
-    if _scheduler_singleton is None:
-        return
-    try:
-        _scheduler_singleton.shutdown(wait=False)
-    except Exception:  # pragma: no cover
-        pass
-    _scheduler_singleton = None
+    """Tear down every active scheduler. Safe to call even if never initialised."""
+    reset_for_tests()
