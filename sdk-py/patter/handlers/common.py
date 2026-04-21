@@ -44,9 +44,22 @@ def _create_stt_from_config(config, for_twilio: bool = False):
     if provider == "deepgram":
         from patter.providers.deepgram_stt import DeepgramSTT  # type: ignore[import]
 
+        opts = dict(config.options or {})
+        # Only forward keys the DeepgramSTT ctor understands.
+        allowed = {
+            "model",
+            "endpointing_ms",
+            "utterance_end_ms",
+            "smart_format",
+            "interim_results",
+            "vad_events",
+        }
+        kwargs = {k: v for k, v in opts.items() if k in allowed}
         if for_twilio:
-            return DeepgramSTT.for_twilio(api_key=config.api_key, language=config.language)
-        return DeepgramSTT(api_key=config.api_key, language=config.language)
+            return DeepgramSTT.for_twilio(
+                api_key=config.api_key, language=config.language, **kwargs
+            )
+        return DeepgramSTT(api_key=config.api_key, language=config.language, **kwargs)
     elif provider == "whisper":
         from patter.providers.whisper_stt import WhisperSTT  # type: ignore[import]
 

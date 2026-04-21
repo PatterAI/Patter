@@ -299,6 +299,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         conversation_history: deque | None = None,
         transcript_entries: deque | None = None,
         audio_format: str = "pcm16",
+        input_transcode: str | None = None,
     ) -> None:
         super().__init__(
             agent=agent,
@@ -317,6 +318,18 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         self._transfer_fn = transfer_fn
         self._hangup_fn = hangup_fn
         self._audio_format = audio_format
+        # OpenAI Realtime API uses a single codec for both input and output
+        # (``audio_format`` becomes both ``input_audio_format`` and
+        # ``output_audio_format`` in the session). When the telephony leg
+        # delivers a different codec than what we want to send back (e.g.
+        # Telnyx inbound = PCM16 16 kHz, outbound = PCMU 8 kHz), set
+        # ``input_transcode`` to convert inbound bytes to match ``audio_format``
+        # before forwarding to OpenAI.
+        #
+        # Supported values:
+        #   ``"pcm16_16k_to_g711_ulaw"`` — Telnyx inbound PCM16 16 kHz →
+        #       mulaw 8 kHz (matches ``audio_format="g711_ulaw"``).
+        self._input_transcode = input_transcode
         self._adapter = None
 
     async def start(self) -> None:
@@ -518,8 +531,15 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
             logger.exception("OpenAI Realtime forward error: %s", exc)
 
     async def on_audio_received(self, audio_bytes: bytes) -> None:
-        if self._adapter is not None:
-            await self._adapter.send_audio(audio_bytes)
+        if self._adapter is None:
+            return
+        if self._input_transcode == "pcm16_16k_to_g711_ulaw":
+            from patter.services.transcoding import (
+                resample_16k_to_8k,
+                pcm16_to_mulaw,
+            )
+            audio_bytes = pcm16_to_mulaw(resample_16k_to_8k(audio_bytes))
+        await self._adapter.send_audio(audio_bytes)
 
     async def on_dtmf(self, digit: str) -> None:
         if self._adapter is not None:
@@ -714,6 +734,8 @@ class PipelineStreamHandler(StreamHandler):
         deepgram_key: str = "",
         elevenlabs_key: str = "",
         for_twilio: bool = False,
+        input_is_mulaw_8k: bool | None = None,
+        output_is_mulaw_8k: bool | None = None,
         transfer_fn=None,
         hangup_fn=None,
         send_dtmf_fn=None,
@@ -741,6 +763,18 @@ class PipelineStreamHandler(StreamHandler):
         self._deepgram_key = deepgram_key
         self._elevenlabs_key = elevenlabs_key
         self._for_twilio = for_twilio
+        # Explicit codec flags decouple "we run on Twilio" (for metrics /
+        # telephony-specific knobs) from "the stream is PCMU 8 kHz and must
+        # be transcoded before STT / from PCM16 for TTS". Twilio is always
+        # mulaw 8 kHz; Telnyx is mulaw 8 kHz when ``streaming_start``
+        # negotiates PCMU bidirectional (our default). Callers pass the
+        # flags explicitly when they differ from `for_twilio`.
+        self._input_is_mulaw_8k = (
+            for_twilio if input_is_mulaw_8k is None else input_is_mulaw_8k
+        )
+        self._output_is_mulaw_8k = (
+            for_twilio if output_is_mulaw_8k is None else output_is_mulaw_8k
+        )
         self._transfer_fn = transfer_fn
         self._hangup_fn = hangup_fn
         self._send_dtmf_fn = send_dtmf_fn
@@ -756,28 +790,28 @@ class PipelineStreamHandler(StreamHandler):
     async def start(self) -> None:
         from patter.models import CallControl
 
-        # Create STT
+        # Create STT. Pipeline mode always transcodes Twilio mulaw 8 kHz →
+        # PCM16 16 kHz in on_audio_received before forwarding to STT, so the
+        # STT adapter must be configured for linear16 @ 16 kHz — even on
+        # Twilio. Passing `for_twilio=True` would build a mulaw-expecting
+        # adapter that misinterprets the already-decoded PCM as garbage.
         if self.agent.stt:
-            self._stt = _create_stt_from_config(self.agent.stt, for_twilio=self._for_twilio)
+            self._stt = _create_stt_from_config(self.agent.stt, for_twilio=False)
         elif self._deepgram_key:
             from patter.providers.deepgram_stt import DeepgramSTT  # type: ignore[import]
-            if self._for_twilio:
-                self._stt = DeepgramSTT.for_twilio(api_key=self._deepgram_key, language=self.agent.language)
-            else:
-                self._stt = DeepgramSTT(
-                    api_key=self._deepgram_key,
-                    language=self.agent.language,
-                    encoding="linear16",
-                    sample_rate=16000,
-                )
+            self._stt = DeepgramSTT(
+                api_key=self._deepgram_key,
+                language=self.agent.language,
+                encoding="linear16",
+                sample_rate=16000,
+            )
 
         # Create TTS
         if self.agent.tts:
             self._tts = _create_tts_from_config(self.agent.tts)
         elif self._elevenlabs_key:
             from patter.providers.elevenlabs_tts import ElevenLabsTTS  # type: ignore[import]
-            voice_id = self.agent.voice if self.agent.voice != "alloy" else "21m00Tcm4TlvDq8ikWAM"
-            self._tts = ElevenLabsTTS(api_key=self._elevenlabs_key, voice_id=voice_id)
+            self._tts = ElevenLabsTTS(api_key=self._elevenlabs_key, voice_id=self.agent.voice)
 
         if self._stt is None:
             logger.warning("Pipeline mode: no STT configured")
@@ -1035,10 +1069,79 @@ class PipelineStreamHandler(StreamHandler):
                     )
 
     async def _stt_loop(self) -> None:
+        # Per-loop state used to throttle back-to-back turns (BUG #22). When
+        # the STT provider emits several nearly-identical final transcripts
+        # in quick succession (e.g. Whisper on mulaw 8 kHz repeatedly
+        # returning "you" / ".") we would otherwise kick off a new LLM+TTS
+        # turn for each, and the audio of consecutive turns overlaps on the
+        # caller's line. Dedup rules:
+        #   1. Drop a final transcript whose normalised text matches the
+        #      previous committed text within 2.0 s.
+        #   2. Drop a final transcript that lands within 500 ms of the last
+        #      committed turn — too tight to be a legitimate new utterance.
+        last_commit_text: str = ""
+        last_commit_at: float = 0.0
         try:
             async for transcript in self._stt.receive_transcripts():
+                # Barge-in: if the agent is currently speaking and the STT
+                # produces any transcript with text (even an interim one),
+                # flip `_is_speaking=False` + clear the downstream audio
+                # buffer so the in-flight TTS loop interrupts (BUG #20).
+                if transcript.text and self._is_speaking:
+                    logger.info(
+                        "Barge-in: caller spoke over agent (%s)",
+                        sanitize_log_value(transcript.text[:40]),
+                    )
+                    self._is_speaking = False
+                    try:
+                        await self.audio_sender.send_clear()
+                    except Exception as exc:
+                        logger.debug("send_clear during barge-in failed: %s", exc)
+                    if self.metrics is not None:
+                        self.metrics.record_turn_interrupted()
                 if not (transcript.is_final and transcript.text):
                     continue
+
+                # --- Dedup / throttle / hallucination filter (BUG #22) -------
+                _now = time.time()
+                _normalised = transcript.text.strip().lower()
+                _stripped = _normalised.rstrip(".,!?;: ").strip()
+                _since_last = _now - last_commit_at
+
+                # Whisper (and, to a lesser extent, Deepgram) routinely
+                # hallucinate a handful of short "filler" words when fed
+                # silence or TTS echo on mulaw 8 kHz. Dropping them as
+                # turns stops the caller from entering a feedback loop
+                # where every silent frame triggers a new LLM+TTS turn.
+                _HALLUCINATIONS = frozenset({
+                    "you", "thank you", "thanks", "yeah", "yes", "no",
+                    "okay", "ok", "uh", "um", "mmm", "hmm", ".", "bye",
+                    "right", "cool",
+                })
+                if _stripped in _HALLUCINATIONS or _stripped == "":
+                    logger.info(
+                        "Dropped likely STT hallucination: %r",
+                        _normalised[:40],
+                    )
+                    continue
+
+                if _since_last < 2.0 and _normalised == last_commit_text:
+                    logger.info(
+                        "Dropped duplicate final transcript (%.1fs since last): %r",
+                        _since_last,
+                        _normalised[:40],
+                    )
+                    continue
+                if _since_last < 0.5:
+                    logger.info(
+                        "Dropped back-to-back final transcript (%.2fs since last): %r",
+                        _since_last,
+                        _normalised[:40],
+                    )
+                    continue
+                last_commit_text = _normalised
+                last_commit_at = _now
+                # -------------------------------------------------------------
 
                 # Record one STT span per final transcript turn. The span is
                 # short-lived (just the attribute set) because STT is
@@ -1187,17 +1290,39 @@ class PipelineStreamHandler(StreamHandler):
             logger.exception("Pipeline STT loop error: %s", exc)
 
     async def on_audio_received(self, audio_bytes: bytes) -> None:
-        if self._stt is not None and not self._is_speaking:
-            # Twilio sends mulaw 8kHz — convert to PCM 16kHz for STT providers.
-            # Telnyx sends PCM 16kHz natively.
-            if self._for_twilio:
-                from patter.services.transcoding import mulaw_to_pcm16, resample_8k_to_16k
-                pcm16k = resample_8k_to_16k(mulaw_to_pcm16(audio_bytes))
-                await self._stt.send_audio(pcm16k)
-            else:
-                await self._stt.send_audio(audio_bytes)
-            if self.metrics is not None:
-                self.metrics.add_stt_audio_bytes(len(audio_bytes))
+        if self._stt is None:
+            return
+        # Always forward caller audio to STT — even while the agent is
+        # speaking — so barge-in detection can trigger (BUG #20). When
+        # `barge_in_threshold_ms == 0` on the agent, skip the STT during
+        # TTS to avoid echo-loop costs (legacy behaviour).
+        if self._is_speaking and getattr(self.agent, "barge_in_threshold_ms", 300) == 0:
+            return
+        # Inbound PCMU 8 kHz (Twilio always, Telnyx when streaming_start
+        # negotiated PCMU bidirectional) must be decoded to PCM16 and
+        # up-sampled to 16 kHz before hitting STT adapters configured for
+        # linear16 @ 16 kHz.
+        if self._input_is_mulaw_8k:
+            from patter.services.transcoding import mulaw_to_pcm16, resample_8k_to_16k
+            pcm = resample_8k_to_16k(mulaw_to_pcm16(audio_bytes))
+        else:
+            pcm = audio_bytes
+
+        # before_send_to_stt hook — gate/transform the audio chunk before it
+        # reaches the STT provider. Returning None drops the chunk (useful
+        # for custom VAD / echo-cancellation). See BUG #15.
+        hooks = getattr(self.agent, "hooks", None)
+        if hooks is not None:
+            hook_executor = PipelineHookExecutor(hooks)
+            hook_ctx = self._build_hook_context()
+            processed = await hook_executor.run_before_send_to_stt(pcm, hook_ctx)
+            if processed is None:
+                return
+            pcm = processed
+
+        await self._stt.send_audio(pcm)
+        if self.metrics is not None:
+            self.metrics.add_stt_audio_bytes(len(audio_bytes))
 
     async def cleanup(self) -> None:
         if self._stt_task:
