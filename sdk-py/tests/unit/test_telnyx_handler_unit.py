@@ -86,15 +86,19 @@ class TestTelnyxAudioSender:
     async def test_send_audio(self) -> None:
         ws = AsyncMock()
         ws.send_text = AsyncMock()
-        sender = TelnyxAudioSender(ws)
+        # ``input_is_mulaw_8k=True`` forces pass-through — the default
+        # behaviour transcodes PCM16 → mulaw (BUG #18), which would alter
+        # the byte stream and break this round-trip assertion.
+        sender = TelnyxAudioSender(ws, input_is_mulaw_8k=True)
 
         audio = b"\x00\x01\x02\x03"
         await sender.send_audio(audio)
 
         ws.send_text.assert_awaited_once()
         payload = json.loads(ws.send_text.call_args[0][0])
-        assert payload["event_type"] == "media"
-        decoded = base64.b64decode(payload["payload"]["audio"]["chunk"])
+        # Telnyx media-stream wire format (BUG #18).
+        assert payload["event"] == "media"
+        decoded = base64.b64decode(payload["media"]["payload"])
         assert decoded == audio
 
     async def test_send_clear(self) -> None:
@@ -105,7 +109,7 @@ class TestTelnyxAudioSender:
         await sender.send_clear()
         ws.send_text.assert_awaited_once()
         payload = json.loads(ws.send_text.call_args[0][0])
-        assert payload["event_type"] == "media_stop"
+        assert payload["event"] == "clear"
 
     async def test_send_mark_is_noop(self) -> None:
         """Telnyx does not support playback marks — send_mark is a no-op."""
@@ -120,13 +124,14 @@ class TestTelnyxAudioSender:
         """Verify base64 encoding round-trips correctly."""
         ws = AsyncMock()
         ws.send_text = AsyncMock()
-        sender = TelnyxAudioSender(ws)
+        # Pass-through mode so the output bytes match the input exactly.
+        sender = TelnyxAudioSender(ws, input_is_mulaw_8k=True)
 
         original_audio = bytes(range(256))
         await sender.send_audio(original_audio)
 
         payload = json.loads(ws.send_text.call_args[0][0])
-        decoded = base64.b64decode(payload["payload"]["audio"]["chunk"])
+        decoded = base64.b64decode(payload["media"]["payload"])
         assert decoded == original_audio
 
 
