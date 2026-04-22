@@ -144,6 +144,11 @@ tracing = [
 scheduling = [
     "apscheduler>=3.10",
 ]
+# Built-in Cloudflare Quick Tunnel for local dev (``Patter(tunnel=True)``).
+# Cloudflare ships a thin Python wrapper around their ``cloudflared`` binary.
+tunnel = [
+    "cloudflared>=0.7",
+]
 
 [build-system]
 requires = ["setuptools>=68.0"]

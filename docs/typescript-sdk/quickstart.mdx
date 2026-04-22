@@ -1,6 +1,7 @@
 ---
 title: "Quickstart"
 description: "Give your AI agent a phone number in four lines of TypeScript."
+icon: "rocket"
 ---
 
 # TypeScript Quickstart
@@ -64,8 +65,18 @@ Create `main.ts`:
 import { Patter, Twilio, OpenAIRealtime } from "getpatter";
 
 const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
-const agent = phone.agent({ engine: new OpenAIRealtime(), systemPrompt: "You are a friendly receptionist for Acme Corp.", firstMessage: "Hello! How can I help?" });
+const agent = phone.agent({ engine: new OpenAIRealtime(), systemPrompt: "You are a receptionist." });
 await phone.serve({ agent, tunnel: true });
+```
+
+Want a custom greeting? Add `firstMessage`:
+
+```typescript
+const agent = phone.agent({
+  engine: new OpenAIRealtime(),
+  systemPrompt: "You are a friendly receptionist for Acme Corp.",
+  firstMessage: "Hello! How can I help?",
+});
 ```
 
 What each line does:

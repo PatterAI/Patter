@@ -1,6 +1,7 @@
 ---
 title: "Quickstart"
 description: "Give your AI agent a phone number in four lines of Python."
+icon: "rocket"
 ---
 
 # Python Quickstart
@@ -64,8 +65,18 @@ Create `main.py`:
 from getpatter import Patter, Twilio, OpenAIRealtime
 
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")
-agent = phone.agent(engine=OpenAIRealtime(), system_prompt="You are a friendly receptionist for Acme Corp.", first_message="Hello! How can I help?")
+agent = phone.agent(engine=OpenAIRealtime(), system_prompt="You are a receptionist.")
 await phone.serve(agent, tunnel=True)
+```
+
+Want a custom greeting? Add `first_message="..."`:
+
+```python
+agent = phone.agent(
+    engine=OpenAIRealtime(),
+    system_prompt="You are a friendly receptionist for Acme Corp.",
+    first_message="Hello! How can I help?",
+)
 ```
 
 What each line does:

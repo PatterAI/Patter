@@ -2,33 +2,21 @@
 Basic inbound call handler.
 
 The AI answers incoming calls and responds to what the caller says.
-Replace the API key with your own from https://www.getpatter.com.
+Uses OpenAI Realtime as the default engine — swap for ElevenLabs ConvAI or
+pipeline mode (stt=/tts=) if you want full control.
 
 Usage:
     pip install getpatter
+    # Set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, OPENAI_API_KEY in the env
     python basic-inbound.py
 """
 
 import asyncio
-from getpatter import Patter, IncomingMessage
+import os
 
+from getpatter import Patter, Twilio, OpenAIRealtime
 
-async def on_message(msg: IncomingMessage) -> str:
-    """Called for every utterance the caller makes. Return what the AI should say."""
-    print(f"Caller said: {msg.text!r}")
-
-    text = msg.text.lower()
-
-    if "hours" in text or "open" in text:
-        return "We are open Monday through Friday, 9 AM to 6 PM Eastern time."
-
-    if "help" in text or "support" in text:
-        return "I can help you with billing, technical questions, or account changes. What do you need?"
-
-    if "bye" in text or "goodbye" in text:
-        return "Thanks for calling. Have a great day! Goodbye."
-
-    return f"You said: {msg.text}. How can I help you today?"
+PHONE_NUMBER = os.environ.get("PHONE_NUMBER", "+15550001234")
 
 
 async def on_call_start(data: dict) -> None:
@@ -36,25 +24,41 @@ async def on_call_start(data: dict) -> None:
 
 
 async def on_call_end(data: dict) -> None:
-    print("Call ended")
+    duration = data.get("duration_seconds", 0)
+    print(f"Call ended after {duration}s")
+
+
+async def on_transcript(event: dict) -> None:
+    print(f"[{event['role']}]: {event['text']}")
 
 
 async def main() -> None:
-    phone = Patter(api_key="pt_your_api_key_here")
-
-    print("Connecting to Patter...")
-    await phone.connect(
-        on_message=on_message,
-        on_call_start=on_call_start,
-        on_call_end=on_call_end,
+    phone = Patter(
+        carrier=Twilio(),             # reads TWILIO_ACCOUNT_SID + TWILIO_AUTH_TOKEN
+        phone_number=PHONE_NUMBER,
     )
-    print("Ready. Waiting for incoming calls... (Ctrl+C to stop)")
+
+    agent = phone.agent(
+        engine=OpenAIRealtime(),      # reads OPENAI_API_KEY
+        system_prompt=(
+            "You are the receptionist for Acme Corp. Help callers with hours, "
+            "support questions, and simple account changes. Keep replies short."
+        ),
+        first_message="Hi! Thanks for calling Acme Corp. How can I help?",
+    )
+
+    print(f"Ready on {PHONE_NUMBER}. Waiting for calls... (Ctrl+C to stop)")
 
     try:
-        await asyncio.Event().wait()
+        await phone.serve(
+            agent,
+            tunnel=True,              # start a Cloudflare Quick Tunnel for dev
+            on_call_start=on_call_start,
+            on_call_end=on_call_end,
+            on_transcript=on_transcript,
+        )
     except KeyboardInterrupt:
         print("\nShutting down...")
-        await phone.disconnect()
 
 
 if __name__ == "__main__":

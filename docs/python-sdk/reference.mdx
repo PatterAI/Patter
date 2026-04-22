@@ -1,6 +1,7 @@
 ---
 title: "API Reference"
 description: "Complete reference for all classes, methods, parameters, and types in the Patter Python SDK."
+icon: "terminal"
 ---
 
 # API Reference
@@ -218,7 +219,7 @@ from getpatter.tunnels import CloudflareTunnel, Static, Ngrok
 |-------|----------|
 | `CloudflareTunnel()` | Auto-start a Cloudflare Quick Tunnel via the local `cloudflared` binary. |
 | `Static(hostname=...)` | Use an existing public hostname (user-managed tunnel, e.g. ngrok). |
-| `Ngrok(hostname=...)` | Use an existing ngrok hostname. Auto-spawn is not yet implemented. |
+| `Ngrok(hostname=...)` | Use an existing ngrok hostname (you run `ngrok http 8000` yourself). Same behavior as `Static(hostname=...)` with an ngrok-friendly name. |
 
 `tunnel=True` on `Patter(...)` is shorthand for `tunnel=CloudflareTunnel()`.
 

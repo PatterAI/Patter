@@ -1,6 +1,7 @@
 ---
 title: "Tunneling"
 description: "Expose your local Patter server to the internet for Twilio webhooks."
+icon: "cloud"
 ---
 
 # Tunneling
@@ -62,10 +63,18 @@ await phone.serve({ agent, tunnel: true });
 ```
 </CodeGroup>
 
-Install the `cloudflared` package once:
+### Installing cloudflared
+
+`cloudflared` is a small companion package (a Python/npm wrapper around Cloudflare's binary) that Patter spawns on demand. It is **not bundled by default** — the core `getpatter` package stays lean so builds that don't need a tunnel don't pay for it.
+
+Install it once:
 
 <CodeGroup>
-```bash Python
+```bash Python (with Patter)
+pip install "getpatter[tunnel]"
+```
+
+```bash Python (standalone)
 pip install cloudflared
 ```
 
@@ -73,6 +82,10 @@ pip install cloudflared
 npm install cloudflared
 ```
 </CodeGroup>
+
+Patter cannot install it for you at runtime — Python/npm forbid silent installs from inside a running process. If you pass `tunnel=True` / `tunnel: true` without `cloudflared` available, the SDK raises a clear error with the `pip install` / `npm install` command you need.
+
+### Twilio webhook auto-configuration
 
 Both SDKs automatically set the tunnel URL as the Twilio number's voice webhook (`IncomingPhoneNumber.update(voice_url=...)`) on `serve()`, so inbound calls work out of the box — no Twilio Console configuration needed. For Telnyx, the number is associated with the configured Call Control Application (`connection_id`) the same way.
 

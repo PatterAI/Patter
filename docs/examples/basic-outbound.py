@@ -1,72 +1,74 @@
 """
 Basic outbound call example.
 
-The AI places a call to a phone number and holds a conversation.
-Replace the API key and destination number before running.
+The AI places a call to a destination and holds a conversation.
 
 Usage:
     pip install getpatter
+    # Set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, OPENAI_API_KEY in the env
     python basic-outbound.py
 """
 
 import asyncio
-from getpatter import Patter, IncomingMessage
+import os
 
-DESTINATION = "+14155551234"   # Replace with a real number
-API_KEY = "pt_your_api_key_here"
+from getpatter import Patter, Twilio, OpenAIRealtime
 
-
-async def on_message(msg: IncomingMessage) -> str:
-    """Handle the callee's responses."""
-    print(f"Callee said: {msg.text!r}")
-
-    text = msg.text.lower()
-
-    if "yes" in text or "confirm" in text or "sure" in text:
-        return "Perfect. Your appointment is confirmed. We will see you then. Goodbye!"
-
-    if "no" in text or "cancel" in text:
-        return "No problem. I have cancelled your appointment. Have a good day. Goodbye!"
-
-    if "when" in text or "time" in text:
-        return "Your appointment is scheduled for tomorrow at 3 PM. Can you confirm you will make it?"
-
-    return "I did not catch that. Could you say yes to confirm or no to cancel your appointment?"
+PHONE_NUMBER = os.environ.get("PHONE_NUMBER", "+15550001234")
+DESTINATION = os.environ.get("DESTINATION", "+14155551234")
 
 
 async def on_call_start(data: dict) -> None:
-    print(f"Call connected (call ID: {data.get('call_id')})")
+    print(f"Call connected (call_id={data.get('call_id')})")
 
 
 async def on_call_end(data: dict) -> None:
-    duration = data.get("duration_seconds", 0)
-    print(f"Call ended after {duration} seconds")
+    print(f"Call ended after {data.get('duration_seconds', 0)}s")
 
 
 async def main() -> None:
-    phone = Patter(api_key=API_KEY)
-
-    print("Connecting to Patter...")
-    await phone.connect(
-        on_message=on_message,
-        on_call_start=on_call_start,
-        on_call_end=on_call_end,
+    phone = Patter(
+        carrier=Twilio(),             # TWILIO_* from env
+        phone_number=PHONE_NUMBER,
     )
+
+    agent = phone.agent(
+        engine=OpenAIRealtime(),      # OPENAI_API_KEY from env
+        system_prompt=(
+            "You are calling to confirm an appointment scheduled for tomorrow at 3 PM. "
+            "Ask the callee to confirm. If they say yes, thank them and hang up. "
+            "If they say no, apologise and offer to reschedule."
+        ),
+        first_message=(
+            "Hi! This is an automated reminder about your appointment tomorrow at 3 PM. "
+            "Can you confirm you'll make it?"
+        ),
+    )
+
+    # Start the server in the background, then place the call
+    server_task = asyncio.create_task(
+        phone.serve(
+            agent,
+            tunnel=True,
+            on_call_start=on_call_start,
+            on_call_end=on_call_end,
+        )
+    )
+    await asyncio.sleep(1)            # wait for the tunnel to come up
 
     print(f"Calling {DESTINATION}...")
     await phone.call(
         to=DESTINATION,
-        first_message="Hi! This is an automated reminder about your appointment tomorrow at 3 PM. "
-                      "Can you confirm you will make it?",
+        agent=agent,
+        machine_detection=True,
+        voicemail_message="Hi, this is a reminder that your appointment is tomorrow at 3 PM. "
+                          "Please call back if you need to reschedule.",
     )
 
-    print("Call placed. Waiting for it to complete... (Ctrl+C to stop)")
-
     try:
-        await asyncio.Event().wait()
+        await server_task
     except KeyboardInterrupt:
         print("\nShutting down...")
-        await phone.disconnect()
 
 
 if __name__ == "__main__":

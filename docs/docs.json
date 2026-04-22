@@ -67,7 +67,6 @@
             "icon": "wrench",
             "pages": [
               "dev-tools/dashboard",
-              "dev-tools/mcp",
               "dev-tools/tunneling"
             ]
           }
@@ -95,20 +94,8 @@
                 "icon": "sliders",
                 "pages": [
                   "python-sdk/agents",
-                  {
-                    "group": "Carrier",
-                    "icon": "phone",
-                    "pages": [
-                      "python-sdk/carrier"
-                    ]
-                  },
-                  {
-                    "group": "Engines",
-                    "icon": "bolt",
-                    "pages": [
-                      "python-sdk/engines"
-                    ]
-                  },
+                  "python-sdk/carrier",
+                  "python-sdk/engines",
                   {
                     "group": "STT",
                     "icon": "microphone",
@@ -118,13 +105,7 @@
                       "python-sdk/providers/cartesia"
                     ]
                   },
-                  {
-                    "group": "LLM",
-                    "icon": "brain",
-                    "pages": [
-                      "python-sdk/llm"
-                    ]
-                  },
+                  "python-sdk/llm",
                   {
                     "group": "TTS",
                     "icon": "volume",
@@ -145,7 +126,8 @@
                 "icon": "chart-line",
                 "pages": [
                   "python-sdk/metrics",
-                  "python-sdk/dashboard"
+                  "python-sdk/dashboard",
+                  "python-sdk/tracing"
                 ]
               },
               {
@@ -194,20 +176,8 @@
                 "icon": "sliders",
                 "pages": [
                   "typescript-sdk/agents",
-                  {
-                    "group": "Carrier",
-                    "icon": "phone",
-                    "pages": [
-                      "typescript-sdk/carrier"
-                    ]
-                  },
-                  {
-                    "group": "Engines",
-                    "icon": "bolt",
-                    "pages": [
-                      "typescript-sdk/engines"
-                    ]
-                  },
+                  "typescript-sdk/carrier",
+                  "typescript-sdk/engines",
                   {
                     "group": "STT",
                     "icon": "microphone",
@@ -217,13 +187,7 @@
                       "typescript-sdk/providers/cartesia"
                     ]
                   },
-                  {
-                    "group": "LLM",
-                    "icon": "brain",
-                    "pages": [
-                      "typescript-sdk/llm"
-                    ]
-                  },
+                  "typescript-sdk/llm",
                   {
                     "group": "TTS",
                     "icon": "volume",
