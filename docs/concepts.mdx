@@ -84,20 +84,23 @@ agent = phone.agent(
 **Pipeline mode (full control)** — you pick each stage:
 
 ```python
-from getpatter import DeepgramSTT, ElevenLabsTTS
+from getpatter import DeepgramSTT, AnthropicLLM, ElevenLabsTTS
 
 agent = phone.agent(
-    stt=DeepgramSTT(),          # speech → text
-    tts=ElevenLabsTTS(),        # text → speech
+    stt=DeepgramSTT(),           # speech → text
+    llm=AnthropicLLM(),          # text → text (ANTHROPIC_API_KEY from env)
+    tts=ElevenLabsTTS(),         # text → speech
     system_prompt="...",
 )
-await phone.serve(agent, on_message=my_llm_handler)  # your LLM in on_message
+await phone.serve(agent)
 ```
+
+Want fully custom LLM logic (multi-model routing, local models, an internal gateway)? Drop `llm=` and pass an async `on_message` callback to `serve()` instead. `llm=` and `on_message` are mutually exclusive.
 
 Three independent stages — swap any of them for a different vendor or local model:
 
 - **STT (Speech-to-Text)** — transcribes caller audio in real time. Providers: `DeepgramSTT`, `WhisperSTT`, `CartesiaSTT`, `SonioxSTT`, `SpeechmaticsSTT` (Python-only), `AssemblyAISTT`. See [STT](/python-sdk/stt).
-- **LLM (Large Language Model)** — generates the reply. Today you plug this via `on_message`; any Python/TS client works (OpenAI, Anthropic, Groq, a local `llama.cpp`, etc.). A first-class `llm=` selector is planned for 0.6. See [LLM](/python-sdk/llm).
+- **LLM (Large Language Model)** — generates the reply. Pass a class instance via `llm=`: `OpenAILLM`, `AnthropicLLM`, `GroqLLM`, `CerebrasLLM`, `GoogleLLM`. Tool calling works across all five. For anything else, use `on_message`. See [LLM](/python-sdk/llm).
 - **TTS (Text-to-Speech)** — synthesizes the reply audio. Providers: `ElevenLabsTTS`, `OpenAITTS`, `CartesiaTTS`, `RimeTTS`, `LMNTTTS`. See [TTS](/python-sdk/tts).
 
 Pick engine mode when you want minimum code. Pick pipeline mode when you need a specific LLM, a custom voice, or fine-grained control over latency / costs.

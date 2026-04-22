@@ -131,6 +131,21 @@ Each class accepts an options object with `apiKey?: string` and falls back to th
 
 ---
 
+## LLM classes
+
+```typescript
+import { OpenAILLM, AnthropicLLM, GroqLLM, CerebrasLLM, GoogleLLM } from "getpatter";
+import * as openai from "getpatter/llm/openai";
+import * as anthropic from "getpatter/llm/anthropic";
+import * as groq from "getpatter/llm/groq";
+import * as cerebras from "getpatter/llm/cerebras";
+import * as google from "getpatter/llm/google";
+```
+
+Each class accepts an options object with `apiKey?: string` and falls back to the provider's standard env var (`GoogleLLM` prefers `GEMINI_API_KEY`, falls back to `GOOGLE_API_KEY`). Pass an instance via `phone.agent({ llm })` for pipeline mode. `llm` is mutually exclusive with `onMessage` on `serve()` and is ignored when `engine` is set. See the [LLM page](/typescript-sdk/llm) for full constructor signatures.
+
+---
+
 ## Tunnels
 
 ```typescript
@@ -190,6 +205,7 @@ interface AgentOptions {
   systemPrompt: string;
   engine?: OpenAIRealtime | ElevenLabsConvAI;
   stt?: STTProvider;
+  llm?: LLMProvider;
   tts?: TTSProvider;
   voice?: string;
   model?: string;
@@ -327,6 +343,9 @@ export {
   // TTS classes
   ElevenLabsTTS, OpenAITTS, CartesiaTTS, RimeTTS, LMNTTTS,
 
+  // LLM classes
+  OpenAILLM, AnthropicLLM, GroqLLM, CerebrasLLM, GoogleLLM,
+
   // Tunnels
   CloudflareTunnel, StaticTunnel,
 
@@ -348,5 +367,10 @@ import * as elevenlabs from "getpatter/engines/elevenlabs";
 import * as deepgram from "getpatter/stt/deepgram";
 import * as whisper from "getpatter/stt/whisper";
 import * as cartesia from "getpatter/stt/cartesia";
+import * as openaiLlm from "getpatter/llm/openai";
+import * as anthropicLlm from "getpatter/llm/anthropic";
+import * as groqLlm from "getpatter/llm/groq";
+import * as cerebrasLlm from "getpatter/llm/cerebras";
+import * as googleLlm from "getpatter/llm/google";
 // etc.
 ```

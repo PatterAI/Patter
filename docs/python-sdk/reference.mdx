@@ -6,7 +6,7 @@ icon: "terminal"
 
 # API Reference
 
-Complete reference for the `getpatter` Python SDK (v0.5.0).
+Complete reference for the `getpatter` Python SDK (v0.5.1).
 
 ## Patter
 
@@ -43,6 +43,7 @@ def agent(
     system_prompt: str,
     engine: OpenAIRealtime | ElevenLabsConvAI | None = None,
     stt: STTProvider | None = None,
+    llm: LLMProvider | None = None,
     tts: TTSProvider | None = None,
     voice: str = "alloy",
     model: str = "gpt-4o-mini-realtime-preview",
@@ -67,6 +68,7 @@ Pass `engine=OpenAIRealtime(...)` or `engine=ElevenLabsConvAI(...)` for end-to-e
 | `system_prompt` | `str` | *required* | Agent instructions. |
 | `engine` | `OpenAIRealtime \| ElevenLabsConvAI \| None` | `None` | End-to-end voice runtime. Omit for pipeline mode. |
 | `stt` | `STTProvider \| None` | `None` | STT instance for pipeline mode (e.g. `DeepgramSTT()`). |
+| `llm` | `LLMProvider \| None` | `None` | LLM provider instance for pipeline mode (e.g. `AnthropicLLM()`). Mutually exclusive with `on_message` on `serve()`. Ignored when `engine` is set. |
 | `tts` | `TTSProvider \| None` | `None` | TTS instance for pipeline mode (e.g. `ElevenLabsTTS()`). |
 | `voice` | `str` | `"alloy"` | TTS voice name (when engine doesn't carry it). |
 | `model` | `str` | `"gpt-4o-mini-realtime-preview"` | AI model ID (when engine doesn't carry it). |
@@ -232,6 +234,19 @@ All classes accept `api_key: str | None = None` and fall back to the provider's 
 
 ---
 
+## LLM providers
+
+```python
+from getpatter import OpenAILLM, AnthropicLLM, GroqLLM, CerebrasLLM, GoogleLLM   # flat
+from getpatter.llm import openai, anthropic, groq, cerebras, google              # namespaced
+```
+
+All classes accept `api_key: str | None = None` and fall back to the provider's standard env var (`GoogleLLM` prefers `GEMINI_API_KEY`, falls back to `GOOGLE_API_KEY`). See the [LLM page](/python-sdk/llm) for full constructor signatures and tool-calling semantics.
+
+Pass an instance via `phone.agent(llm=...)` for pipeline mode. `llm=` is mutually exclusive with `on_message` on `serve()` and is ignored when `engine=` is set.
+
+---
+
 ## Tunnels
 
 ```python
@@ -393,6 +408,9 @@ from getpatter import (
     # TTS classes
     ElevenLabsTTS, OpenAITTS, CartesiaTTS, RimeTTS, LMNTTTS,
 
+    # LLM classes
+    OpenAILLM, AnthropicLLM, GroqLLM, CerebrasLLM, GoogleLLM,
+
     # Public primitives
     Tool, Guardrail, tool, guardrail,
 
@@ -418,5 +436,6 @@ from getpatter.carriers import twilio, telnyx
 from getpatter.engines import openai, elevenlabs
 from getpatter.stt import deepgram, whisper, cartesia, assemblyai, soniox, speechmatics
 from getpatter.tts import elevenlabs, openai, cartesia, rime, lmnt
+from getpatter.llm import openai, anthropic, groq, cerebras, google
 from getpatter.tunnels import CloudflareTunnel, Static, Ngrok
 ```

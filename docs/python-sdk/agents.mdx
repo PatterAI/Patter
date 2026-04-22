@@ -34,27 +34,32 @@ agent = phone.agent(
 )
 ```
 
-To use pipeline mode (STT + your own LLM via `on_message` + TTS):
+To use pipeline mode (pick STT, LLM, TTS independently):
 
 ```python
-from getpatter import DeepgramSTT, ElevenLabsTTS
+from getpatter import DeepgramSTT, AnthropicLLM, ElevenLabsTTS
 
 agent = phone.agent(
     stt=DeepgramSTT(endpointing_ms=80),        # DEEPGRAM_API_KEY from env
+    llm=AnthropicLLM(),                        # ANTHROPIC_API_KEY from env
     tts=ElevenLabsTTS(voice_id="rachel"),      # ELEVENLABS_API_KEY from env
     system_prompt="You are a helpful assistant.",
     first_message="Hi!",
 )
 ```
 
+Available LLM providers: `OpenAILLM`, `AnthropicLLM`, `GroqLLM`, `CerebrasLLM`, `GoogleLLM`. Tool calling works across all five. See [LLM](/python-sdk/llm) for the full reference. For fully custom logic (multi-model routing, local models), drop `llm=` and pass an `on_message` callback to `serve()` instead — `llm=` and `on_message` are mutually exclusive.
+
 The same pipeline using namespaced imports:
 
 ```python
 from getpatter.stt import deepgram
+from getpatter.llm import anthropic
 from getpatter.tts import elevenlabs
 
 agent = phone.agent(
     stt=deepgram.STT(endpointing_ms=80),
+    llm=anthropic.LLM(),
     tts=elevenlabs.TTS(voice_id="rachel"),
     system_prompt="You are a helpful assistant.",
 )
@@ -67,6 +72,7 @@ agent = phone.agent(
 | `system_prompt` | `str` | *required* | Instructions that define the agent's behavior. |
 | `engine` | `OpenAIRealtime \| ElevenLabsConvAI \| None` | `None` → OpenAI Realtime | End-to-end engine. See [Engines](/python-sdk/engines). Omit for pipeline mode. |
 | `stt` | `STTProvider \| None` | `None` | STT instance for pipeline mode (`DeepgramSTT()`, `CartesiaSTT()`, ...). See [STT](/python-sdk/stt). |
+| `llm` | `LLMProvider \| None` | `None` | LLM instance for pipeline mode (`AnthropicLLM()`, `GroqLLM()`, ...). Mutually exclusive with `on_message` on `serve()`. Ignored when `engine` is set. See [LLM](/python-sdk/llm). |
 | `tts` | `TTSProvider \| None` | `None` | TTS instance for pipeline mode (`ElevenLabsTTS()`, `RimeTTS()`, ...). See [TTS](/python-sdk/tts). |
 | `voice` | `str` | `"alloy"` | Voice name. Usually inferred from the engine or TTS instance. |
 | `model` | `str` | `"gpt-4o-mini-realtime-preview"` | Model ID for OpenAI Realtime. Usually inferred from the engine. |
@@ -164,7 +170,7 @@ Voice is usually inferred from the engine or TTS instance — e.g. `OpenAIRealti
 ## Engine vs Pipeline Mode
 
 ```python
-from getpatter import OpenAIRealtime, ElevenLabsConvAI, DeepgramSTT, ElevenLabsTTS
+from getpatter import OpenAIRealtime, ElevenLabsConvAI, DeepgramSTT, AnthropicLLM, ElevenLabsTTS
 
 # OpenAI Realtime (default engine) — end-to-end
 agent = phone.agent(
@@ -178,9 +184,10 @@ agent = phone.agent(
     system_prompt="...",
 )
 
-# Pipeline — custom STT + TTS + on_message LLM
+# Pipeline — pick STT, LLM, TTS independently
 agent = phone.agent(
     stt=DeepgramSTT(),
+    llm=AnthropicLLM(),
     tts=ElevenLabsTTS(voice_id="rachel"),
     system_prompt="...",
 )

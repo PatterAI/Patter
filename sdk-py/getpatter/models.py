@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
     from getpatter.providers.base import AudioFilter, BackgroundAudioPlayer, VADProvider
+    from getpatter.services.llm_loop import LLMProvider
 
 logger = logging.getLogger("patter")
 
@@ -84,6 +85,7 @@ class Agent:
     vad: "VADProvider | None" = None  # Optional server-side VAD (e.g., Silero) — pipeline mode only
     audio_filter: "AudioFilter | None" = None  # Optional pre-STT audio filter (noise cancel) — pipeline mode only
     background_audio: "BackgroundAudioPlayer | None" = None  # Optional background audio mixer — pipeline mode only
+    llm: "LLMProvider | None" = None  # Optional built-in LLM provider for pipeline mode (e.g., AnthropicLLM())
     # Minimum sustained voice (ms) before treating caller audio as a barge-in
     # and interrupting TTS. ``0`` disables barge-in entirely — useful on noisy
     # links (ngrok tunnels, speakerphone) where the agent can hear itself.

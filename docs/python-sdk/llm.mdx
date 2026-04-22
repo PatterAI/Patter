@@ -1,36 +1,36 @@
 ---
 title: "LLM"
-description: "Voice AI modes and language model providers."
+description: "Pick an LLM provider the same way you pick STT and TTS."
 icon: "brain"
 ---
 
 # LLM (Voice Mode)
 
-Patter supports two high-level voice AI architectures:
+Patter supports two voice architectures:
 
 | Mode | How to enable | When to use |
 |------|---------------|-------------|
-| **Engine (end-to-end)** | `phone.agent(engine=OpenAIRealtime(...))` or `engine=ElevenLabsConvAI(...)` | Lowest-latency speech-to-speech. The engine handles STT + LLM + TTS in a single provider. |
-| **Pipeline** | `phone.agent(stt=..., tts=...)` (omit `engine=`) | Full control. Plug a streaming STT, your own LLM, and a streaming TTS. |
+| **Engine (speech-to-speech)** | `phone.agent(engine=OpenAIRealtime(...))` or `engine=ElevenLabsConvAI(...)` | Lowest-latency speech-to-speech. A single provider handles STT + LLM + TTS. |
+| **Pipeline (STT + LLM + TTS)** | `phone.agent(stt=..., llm=..., tts=...)` (omit `engine=`) | Full control. Mix and match providers per stage. |
 
-See [Engines](/python-sdk/engines) for the reference on engine classes. This page focuses on the LLM step.
+See [Engines](/python-sdk/engines) for engine-mode reference. This page focuses on the `llm=` selector in pipeline mode.
 
-## Engine mode
+## Pipeline mode
 
-Engine mode collapses STT, LLM, and TTS into a single streaming connection with the provider.
-
-### OpenAI Realtime (default)
+Compose the three stages independently. Each provider reads its credentials from the environment by default.
 
 ```python
 import asyncio
-from getpatter import Patter, Twilio, OpenAIRealtime
+from getpatter import Patter, Twilio, DeepgramSTT, AnthropicLLM, ElevenLabsTTS
 
-phone = Patter(carrier=Twilio(), phone_number="+15550001234")   # TWILIO_* from env
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
 
 agent = phone.agent(
-    engine=OpenAIRealtime(voice="nova"),                        # OPENAI_API_KEY from env
+    stt=DeepgramSTT(),                    # DEEPGRAM_API_KEY
+    llm=AnthropicLLM(),                   # ANTHROPIC_API_KEY
+    tts=ElevenLabsTTS(voice_id="rachel"), # ELEVENLABS_API_KEY
     system_prompt="You are a helpful assistant.",
-    first_message="Hello!",
+    first_message="Hi!",
 )
 
 async def main():
@@ -39,29 +39,107 @@ async def main():
 asyncio.run(main())
 ```
 
-**Voices:** `alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`
-**Env var:** `OPENAI_API_KEY`
+Tool calling works across every provider — each adapter normalizes its vendor-specific streaming format to Patter's unified `{type: "text" | "tool_call" | "done"}` chunk protocol, so your tools are defined once and run everywhere.
 
-### ElevenLabs ConvAI
+<Note>
+`llm=` and `on_message` are **mutually exclusive**. Pass one or the other on `serve()` — passing both raises a clear error at `serve()` time. When `engine=` is set, `llm=` is ignored (with a one-time warning in the logs). If neither `llm=` nor `on_message` is passed and `OPENAI_API_KEY` is set, Patter auto-constructs the default OpenAI LLM loop — existing 0.5.0 code still works.
+</Note>
 
-Uses a Conversational AI agent configured in the ElevenLabs dashboard.
+## Supported LLM providers
+
+| Flat import | Namespaced import | Env var | Install extra |
+|---|---|---|---|
+| `OpenAILLM` | `getpatter.llm.openai.LLM` | `OPENAI_API_KEY` | included |
+| `AnthropicLLM` | `getpatter.llm.anthropic.LLM` | `ANTHROPIC_API_KEY` | `getpatter[anthropic]` |
+| `GroqLLM` | `getpatter.llm.groq.LLM` | `GROQ_API_KEY` | `getpatter[groq]` |
+| `CerebrasLLM` | `getpatter.llm.cerebras.LLM` | `CEREBRAS_API_KEY` | `getpatter[cerebras]` |
+| `GoogleLLM` | `getpatter.llm.google.LLM` | `GEMINI_API_KEY` (falls back to `GOOGLE_API_KEY`) | `getpatter[google]` |
+
+All classes accept `api_key: str | None = None` and fall back to the listed env var when it is omitted.
+
+### OpenAILLM
+
+OpenAI Chat Completions with streaming + tool calling. Default model `"gpt-4o-mini"`. For other OpenAI-compatible endpoints use the dedicated wrappers (`GroqLLM`, `CerebrasLLM`) — they subclass `OpenAILLMProvider` with the right `base_url`.
 
 ```python
-from getpatter import Patter, Twilio, ElevenLabsConvAI
+from getpatter import OpenAILLM                    # flat
+from getpatter.llm import openai                   # namespaced
 
-phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+llm = OpenAILLM()                                   # reads OPENAI_API_KEY
+llm = openai.LLM(api_key="sk-...", model="gpt-4o-mini")
+```
 
-agent = phone.agent(
-    engine=ElevenLabsConvAI(agent_id="agent_abc123"),           # ELEVENLABS_API_KEY + ELEVENLABS_AGENT_ID from env
-    system_prompt="You are a warm and friendly concierge.",
+### AnthropicLLM
+
+Anthropic Messages API with native streaming and `tool_use` blocks, normalised to Patter's chunk protocol. Default model `"claude-3-5-sonnet-20241022"`, default `max_tokens=1024` (Anthropic requires an explicit cap on every request).
+
+```python
+from getpatter import AnthropicLLM                 # flat
+from getpatter.llm import anthropic                # namespaced
+
+llm = AnthropicLLM()                                # reads ANTHROPIC_API_KEY
+llm = anthropic.LLM(
+    api_key="sk-ant-...",
+    model="claude-3-5-sonnet-20241022",
+    max_tokens=2048,
 )
 ```
 
-**Env vars:** `ELEVENLABS_API_KEY`, `ELEVENLABS_AGENT_ID`
+Install: `pip install 'getpatter[anthropic]'`.
 
-## Pipeline mode
+### GroqLLM
 
-Omit `engine=` and pass `stt=` + `tts=` instead. Patter wires them together automatically. For the LLM step, provide an `on_message` callback — you can run any model you like inside.
+Hardware-accelerated Llama inference via Groq's OpenAI-compatible Chat Completions API at `https://api.groq.com/openai/v1`. Default model `"llama-3.3-70b-versatile"`.
+
+```python
+from getpatter import GroqLLM                      # flat
+from getpatter.llm import groq                     # namespaced
+
+llm = GroqLLM()                                     # reads GROQ_API_KEY
+llm = groq.LLM(api_key="gsk_...", model="llama-3.3-70b-versatile")
+```
+
+Install: `pip install 'getpatter[groq]'`.
+
+### CerebrasLLM
+
+Cerebras Inference API (OpenAI-compatible) at `https://api.cerebras.ai/v1`. Default model `"llama3.1-8b"`. Supports optional msgpack + gzip payload compression (enabled by default) to reduce time-to-first-token on large prompts — see [Cerebras payload optimization](https://inference-docs.cerebras.ai/payload-optimization).
+
+```python
+from getpatter import CerebrasLLM                  # flat
+from getpatter.llm import cerebras                 # namespaced
+
+llm = CerebrasLLM()                                 # reads CEREBRAS_API_KEY
+llm = cerebras.LLM(
+    api_key="csk-...",
+    model="llama3.1-8b",
+    gzip_compression=True,                          # defaults to True
+    msgpack_encoding=True,                          # defaults to True
+)
+```
+
+Install: `pip install 'getpatter[cerebras]'`.
+
+### GoogleLLM
+
+Google Gemini via the `google-genai` SDK. Supports the Gemini Developer API (API key) and Vertex AI (GCP project + location). Default model `"gemini-2.5-flash"`.
+
+```python
+from getpatter import GoogleLLM                    # flat
+from getpatter.llm import google                   # namespaced
+
+llm = GoogleLLM()                                   # reads GEMINI_API_KEY, falls back to GOOGLE_API_KEY
+llm = google.LLM(api_key="AIza...", model="gemini-2.5-flash")
+
+# Vertex AI
+llm = google.LLM(vertexai=True, project="my-gcp-project", location="us-central1")
+```
+
+Install: `pip install 'getpatter[google]'`.
+
+## Custom LLM via `on_message`
+
+For cases the five built-in providers don't cover — multi-model routing, local `llama.cpp`, an internal gateway, caching layers — drop `llm=` and plug an async `on_message` callback instead:
 
 ```python
 import asyncio
@@ -70,14 +148,13 @@ from getpatter import Patter, Twilio, DeepgramSTT, ElevenLabsTTS
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")
 
 agent = phone.agent(
-    stt=DeepgramSTT(endpointing_ms=80),          # DEEPGRAM_API_KEY from env
-    tts=ElevenLabsTTS(voice_id="rachel"),        # ELEVENLABS_API_KEY from env
+    stt=DeepgramSTT(),
+    tts=ElevenLabsTTS(voice_id="rachel"),
     system_prompt="You are a helpful assistant.",
-    first_message="Hi!",
 )
 
 async def handle_message(event) -> str:
-    # Drop in OpenAI, Anthropic, Groq, a local llama.cpp, whatever.
+    # Route to any model you like — local llama.cpp, a private gateway, etc.
     return f"You said: {event['text']}. How can I help?"
 
 async def main():
@@ -86,36 +163,15 @@ async def main():
 asyncio.run(main())
 ```
 
-### Built-in LLM adapters
+<Warning>
+`on_message` and `llm=` cannot be used together. Combining them raises a clear error at `serve()` time — pick one.
+</Warning>
 
-The following adapters live in `getpatter.providers` and are safe to call directly from `on_message`:
-
-| Provider | Module | Install extra |
-|----------|--------|---------------|
-| Anthropic | `getpatter.providers.anthropic_llm` | `getpatter[anthropic]` |
-| Google Gemini | `getpatter.providers.google_llm` | `getpatter[google]` |
-| Groq | `getpatter.providers.groq_llm` | `getpatter[groq]` |
-| Cerebras | `getpatter.providers.cerebras_llm` | `getpatter[cerebras]` |
-| Ultravox (realtime) | `getpatter.providers.ultravox_realtime` | `getpatter[ultravox]` |
-
-<Note>
-A first-class `llm=AnthropicLLM(...)` parameter is planned for Patter 0.6 — once it lands you will be able to plug LLMs the same way you plug STT and TTS today. Until then, the LLM step of pipeline mode flows through `on_message`.
-</Note>
-
-## Comparison
-
-| Feature | `engine=OpenAIRealtime()` | `engine=ElevenLabsConvAI()` | Pipeline (`stt=`/`tts=`) |
-|---------|---------------------------|------------------------------|---------------------------|
-| Latency | Lowest | Low | Medium |
-| Voice quality | Good | Best | Configurable |
-| Custom LLM | No | No | Yes (via `on_message`) |
-| Required env vars | `OPENAI_API_KEY` | `ELEVENLABS_API_KEY`, `ELEVENLABS_AGENT_ID` | STT + TTS provider keys |
-
-## What's Next
+## What's next
 
 <CardGroup cols={2}>
-  <Card title="Engines" icon="bolt" href="/python-sdk/engines">Engine class reference.</Card>
   <Card title="STT" icon="microphone" href="/python-sdk/stt">STT providers for pipeline mode.</Card>
   <Card title="TTS" icon="volume" href="/python-sdk/tts">TTS providers for pipeline mode.</Card>
-  <Card title="Tools" icon="wrench" href="/python-sdk/tools">Function calling.</Card>
+  <Card title="Tools" icon="wrench" href="/python-sdk/tools">Function calling (works across every LLM).</Card>
+  <Card title="Engines" icon="bolt" href="/python-sdk/engines">Speech-to-speech engines (OpenAI Realtime, ElevenLabs ConvAI).</Card>
 </CardGroup>

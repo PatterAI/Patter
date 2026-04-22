@@ -436,8 +436,25 @@ export class StreamHandler {
       }
     }
 
-    // Create LLM loop for pipeline mode when no onMessage handler provided
-    if (!this.deps.onMessage && this.deps.config.openaiKey) {
+    // Create LLM loop for pipeline mode when no onMessage handler provided.
+    // Precedence: user-supplied ``agent.llm`` > OpenAI default (from openaiKey).
+    if (this.deps.agent.llm) {
+      if (this.deps.onMessage) {
+        throw new Error(
+          "Cannot pass both agent({ llm }) and serve({ onMessage }). Pick one — " +
+            "`llm` for built-in LLMs, `onMessage` for custom logic.",
+        );
+      }
+      this.llmLoop = new LLMLoop(
+        '', // apiKey unused when llmProvider is supplied
+        '', // model unused when llmProvider is supplied
+        resolvedPrompt,
+        this.deps.agent.tools as ToolDefinition[] | undefined,
+        this.deps.agent.llm,
+      );
+      const llmLabel = this.deps.agent.llm.constructor?.name ?? 'custom';
+      getLogger().info(`Built-in LLM loop active (pipeline, ${label}, llm=${llmLabel})`);
+    } else if (!this.deps.onMessage && this.deps.config.openaiKey) {
       let llmModel = this.deps.agent.model || 'gpt-4o-mini';
       if (llmModel.includes('realtime')) llmModel = 'gpt-4o-mini';
       this.llmLoop = new LLMLoop(

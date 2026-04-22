@@ -5,6 +5,7 @@ import type { ConvAI } from "./engines/elevenlabs";
 import type { CloudflareTunnel, Static as StaticTunnel } from "./tunnels";
 import type { Tool as ToolInstance } from "./public-api";
 import type { STTAdapter, TTSAdapter } from "./provider-factory";
+import type { LLMProvider } from "./llm-loop";
 
 export interface IncomingMessage {
   readonly text: string;
@@ -241,6 +242,13 @@ export interface AgentOptions {
   stt?: STTAdapter;
   /** Pre-instantiated TTS adapter (e.g. ``new ElevenLabsTTS({ apiKey })``). */
   tts?: TTSAdapter;
+  /**
+   * Pipeline-mode LLM provider (e.g. ``new AnthropicLLM()``). When set, the
+   * built-in LLM loop uses this provider instead of the OpenAI default.
+   * Mutually exclusive with ``onMessage`` passed to ``serve()``. Ignored
+   * when ``engine`` is set (realtime mode bypasses the pipeline LLM).
+   */
+  llm?: LLMProvider;
   /** Dynamic variables for ``{placeholder}`` substitution in systemPrompt at call time. */
   variables?: Record<string, string>;
   /** Output guardrails — ``Guardrail`` class instances from ``getpatter``. */

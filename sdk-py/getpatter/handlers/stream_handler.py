@@ -847,8 +847,21 @@ class PipelineStreamHandler(StreamHandler):
             except (ValueError, TypeError):
                 pass
 
-        # Built-in LLM loop
-        if self.on_message is None and self._openai_key:
+        # Built-in LLM loop. Three paths:
+        #   1. `agent.llm` set + `on_message` set → ValueError (caught early
+        #      in serve(), but we re-assert here for belt-and-braces).
+        #   2. `agent.llm` set → use the user-supplied LLMProvider; openai_key
+        #      is not required.
+        #   3. Otherwise fall back to the legacy OpenAI default (requires
+        #      `openai_key`).
+        agent_llm = getattr(self.agent, "llm", None)
+        if agent_llm is not None and self.on_message is not None:
+            raise ValueError(
+                "Cannot pass both `llm=` on the agent and `on_message=` on serve(). "
+                "Pick one — `llm=` for built-in LLMs, `on_message=` for custom logic."
+            )
+
+        if self.on_message is None and (agent_llm is not None or self._openai_key):
             from getpatter.services.llm_loop import LLMLoop
             from getpatter.services.tool_executor import ToolExecutor
 
@@ -862,6 +875,7 @@ class PipelineStreamHandler(StreamHandler):
                 system_prompt=self.resolved_prompt,
                 tools=self.agent.tools,
                 tool_executor=tool_executor,
+                llm_provider=agent_llm,
             )
 
         # Create remote message handler once if on_message is a remote URL

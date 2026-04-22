@@ -22,6 +22,7 @@ import { Carrier as TelnyxCarrier } from "./carriers/telnyx";
 import { Realtime as OpenAIRealtime } from "./engines/openai";
 import { ConvAI as ElevenLabsConvAI } from "./engines/elevenlabs";
 import { CloudflareTunnel, Static as StaticTunnel } from "./tunnels";
+import { getLogger } from "./logger";
 
 const DEFAULT_BACKEND_URL = "wss://api.getpatter.com";
 const DEFAULT_REST_URL = "https://api.getpatter.com";
@@ -174,6 +175,28 @@ export class Patter {
       const valid = ['openai_realtime', 'elevenlabs_convai', 'pipeline'];
       if (!valid.includes(working.provider)) {
         throw new Error(`provider must be one of: ${valid.join(', ')}. Got: '${working.provider}'`);
+      }
+    }
+
+    // Validate llm — must implement the LLMProvider interface (duck-typed on
+    // ``.stream`` being a function).  Surface a clear error if the caller
+    // passed a plain object literal by mistake.
+    if (working.llm !== undefined) {
+      const llm = working.llm as { stream?: unknown };
+      if (!llm || typeof llm.stream !== 'function') {
+        throw new Error(
+          "`llm` must be an LLMProvider instance (e.g. new AnthropicLLM()). " +
+            "Got a value without a `.stream` method.",
+        );
+      }
+      // engine + llm: engine path owns LLM selection (realtime model is the
+      // LLM). Warn once and keep the agent working — don't throw.
+      if (working.engine) {
+        getLogger().warn(
+          "agent({ engine, llm }): `llm` is ignored when `engine` is set — " +
+            "realtime/ConvAI engines run their own model. Remove `llm` or " +
+            "switch to pipeline mode (stt + tts + llm) to silence this warning.",
+        );
       }
     }
 
