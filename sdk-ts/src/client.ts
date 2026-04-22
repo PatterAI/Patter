@@ -168,6 +168,15 @@ export class Patter {
           "Unknown engine. Expected OpenAIRealtime or ElevenLabsConvAI instance.",
         );
       }
+    } else if (
+      !working.provider &&
+      (working.stt !== undefined || working.tts !== undefined || working.llm !== undefined)
+    ) {
+      // Parity with sdk-py: when the caller supplies any pipeline-mode piece
+      // (stt / tts / llm) without an explicit engine or provider, derive
+      // ``provider = "pipeline"`` so metrics, logs, and the ``Call started``
+      // mode-label are accurate.
+      working = { ...working, provider: 'pipeline' };
     }
 
     // Validate provider
