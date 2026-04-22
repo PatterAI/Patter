@@ -12,6 +12,7 @@ Covers:
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 from unittest.mock import AsyncMock
 
@@ -30,6 +31,24 @@ from getpatter import (
 )
 from getpatter.client import Patter
 from getpatter.services.llm_loop import LLMLoop, LLMProvider
+
+
+# Optional-extras availability — these tests construct adapter instances whose
+# underlying providers import the vendor SDK lazily at class construction time.
+# On the base CI matrix (no optional extras) those imports fail; skip
+# parametrized entries that need a missing package. The all-extras CI job
+# installs everything and exercises every branch.
+_ANTHROPIC_AVAILABLE = importlib.util.find_spec("anthropic") is not None
+_GOOGLE_GENAI_AVAILABLE = importlib.util.find_spec("google.genai") is not None
+
+_skip_if_no_anthropic = pytest.mark.skipif(
+    not _ANTHROPIC_AVAILABLE,
+    reason="anthropic package not installed — run with getpatter[anthropic]",
+)
+_skip_if_no_google = pytest.mark.skipif(
+    not _GOOGLE_GENAI_AVAILABLE,
+    reason="google-genai package not installed — run with getpatter[google]",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -55,7 +74,10 @@ def _local_phone() -> Patter:
 
 PROVIDER_CASES = [
     pytest.param(OpenAILLM, "OPENAI_API_KEY", {}, id="openai"),
-    pytest.param(AnthropicLLM, "ANTHROPIC_API_KEY", {}, id="anthropic"),
+    pytest.param(
+        AnthropicLLM, "ANTHROPIC_API_KEY", {}, id="anthropic",
+        marks=_skip_if_no_anthropic,
+    ),
     pytest.param(GroqLLM, "GROQ_API_KEY", {}, id="groq"),
     pytest.param(
         CerebrasLLM,
@@ -90,20 +112,23 @@ class TestProviderWrappers:
             cls(**extra)
 
     # Google reads either GEMINI_API_KEY or GOOGLE_API_KEY; cover both plus
-    # the missing-both case.
+    # the missing-both case. Requires the optional ``google`` extra.
 
+    @_skip_if_no_google
     def test_google_explicit_api_key(self, monkeypatch) -> None:
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
         llm = GoogleLLM(api_key="AIza-explicit")
         assert isinstance(llm, LLMProvider)
 
+    @_skip_if_no_google
     def test_google_env_fallback_gemini(self, monkeypatch) -> None:
         monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
         monkeypatch.setenv("GEMINI_API_KEY", "AIza-gemini")
         llm = GoogleLLM()
         assert isinstance(llm, LLMProvider)
 
+    @_skip_if_no_google
     def test_google_env_fallback_google(self, monkeypatch) -> None:
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         monkeypatch.setenv("GOOGLE_API_KEY", "AIza-google")
