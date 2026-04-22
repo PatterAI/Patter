@@ -19,7 +19,7 @@ Installation extras:
 See ``pyproject.toml`` and the top-level README for the full matrix.
 """
 
-__version__ = "0.4.4"
+__version__ = "0.5.1"
 
 from getpatter.client import Patter
 from getpatter.models import (
@@ -69,6 +69,13 @@ from getpatter.tts.openai import TTS as OpenAITTS
 from getpatter.tts.cartesia import TTS as CartesiaTTS
 from getpatter.tts.rime import TTS as RimeTTS
 from getpatter.tts.lmnt import TTS as LMNTTTS
+
+# LLM flat aliases — parity with sdk-ts/src/index.ts and mirror of STT/TTS layout.
+from getpatter.llm.openai import LLM as OpenAILLM
+from getpatter.llm.anthropic import LLM as AnthropicLLM
+from getpatter.llm.groq import LLM as GroqLLM
+from getpatter.llm.cerebras import LLM as CerebrasLLM
+from getpatter.llm.google import LLM as GoogleLLM
 
 # Tunnel flat aliases.
 from getpatter.tunnels import CloudflareTunnel, Ngrok, Static as StaticTunnel
@@ -136,6 +143,11 @@ __all__ = [
     "CartesiaTTS",
     "RimeTTS",
     "LMNTTTS",
+    "OpenAILLM",
+    "AnthropicLLM",
+    "GroqLLM",
+    "CerebrasLLM",
+    "GoogleLLM",
     "CloudflareTunnel",
     "Ngrok",
     "StaticTunnel",

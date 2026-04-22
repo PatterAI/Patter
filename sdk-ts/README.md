@@ -57,7 +57,8 @@ await phone.serve({ agent, tunnel: true });
 | Tool calling | `agent({ tools: [tool(...)] })` | Agent calls external APIs mid-conversation |
 | Custom STT + TTS | `agent({ stt: new DeepgramSTT(), tts: new ElevenLabsTTS() })` | Bring your own voice providers |
 | Dynamic variables | `agent({ variables: {...} })` | Personalize prompts per caller |
-| Custom LLM (any model) | `serve({ onMessage })` | Claude, Mistral, LLaMA, etc. |
+| Pluggable LLM | `agent({ llm: new AnthropicLLM() })` | 5 built-in providers: OpenAI, Anthropic, Groq, Cerebras, Google |
+| Custom LLM (any model) | `serve({ onMessage })` | Route to anything — local inference, internal gateways, etc. |
 | Call recording | `serve({ recording: true })` | Record all calls |
 | Call transfer | `transfer_call` (auto-injected) | Transfer to a human |
 | Voicemail drop | `call({ voicemailMessage: "..." })` | Play message on voicemail |
@@ -80,6 +81,10 @@ Every provider reads its credentials from the environment by default. Pass `apiK
 | `LMNT_API_KEY` | `LMNTTTS` |
 | `SONIOX_API_KEY` | `SonioxSTT` |
 | `ASSEMBLYAI_API_KEY` | `AssemblyAISTT` |
+| `ANTHROPIC_API_KEY` | `AnthropicLLM` |
+| `GROQ_API_KEY` | `GroqLLM` |
+| `CEREBRAS_API_KEY` | `CerebrasLLM` |
+| `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) | `GoogleLLM` |
 
 ```bash
 cp .env.example .env
@@ -180,6 +185,8 @@ import {
   DeepgramSTT, WhisperSTT, CartesiaSTT, SonioxSTT, AssemblyAISTT,
   // TTS
   ElevenLabsTTS, OpenAITTS, CartesiaTTS, RimeTTS, LMNTTTS,
+  // LLM
+  OpenAILLM, AnthropicLLM, GroqLLM, CerebrasLLM, GoogleLLM,
   // Tunnels
   CloudflareTunnel, StaticTunnel,
   // Primitives
@@ -224,6 +231,23 @@ const agent = phone.agent({
 });
 await phone.serve({ agent, tunnel: true });
 ```
+
+### Pipeline mode — pick STT, LLM, TTS independently
+
+```typescript
+import { Patter, Twilio, DeepgramSTT, AnthropicLLM, ElevenLabsTTS } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+const agent = phone.agent({
+  stt: new DeepgramSTT(),                         // reads DEEPGRAM_API_KEY
+  llm: new AnthropicLLM(),                        // reads ANTHROPIC_API_KEY
+  tts: new ElevenLabsTTS({ voiceId: "rachel" }),  // reads ELEVENLABS_API_KEY
+  systemPrompt: "You are a helpful voice assistant.",
+});
+await phone.serve({ agent, tunnel: true });
+```
+
+Available LLM providers: `OpenAILLM`, `AnthropicLLM`, `GroqLLM`, `CerebrasLLM`, `GoogleLLM`. Tool calling works across all five. For fully custom logic, drop `llm` and pass an `onMessage` callback to `serve()` instead.
 
 ### Tool calling
 

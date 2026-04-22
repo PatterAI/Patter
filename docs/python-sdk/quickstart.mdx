@@ -126,22 +126,23 @@ await phone.serve(agent, tunnel=True)
 
 `ElevenLabsConvAI()` reads `ELEVENLABS_API_KEY` and `ELEVENLABS_AGENT_ID` from the environment.
 
-For the STT + LLM + TTS pipeline mode, pass `stt=` and `tts=` to `agent()`:
+For the STT + LLM + TTS pipeline mode, pick each stage independently:
 
 ```python
-from getpatter import Patter, Twilio
-from getpatter.stt import deepgram
-from getpatter.tts import elevenlabs
+from getpatter import Patter, Twilio, DeepgramSTT, AnthropicLLM, ElevenLabsTTS
 
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")
 agent = phone.agent(
-    stt=deepgram.STT(),        # reads DEEPGRAM_API_KEY
-    tts=elevenlabs.TTS(),      # reads ELEVENLABS_API_KEY
+    stt=DeepgramSTT(),                    # reads DEEPGRAM_API_KEY
+    llm=AnthropicLLM(),                   # reads ANTHROPIC_API_KEY
+    tts=ElevenLabsTTS(voice_id="rachel"), # reads ELEVENLABS_API_KEY
     system_prompt="You are a helpful assistant.",
     first_message="Hello!",
 )
 await phone.serve(agent, tunnel=True)
 ```
+
+Swap `AnthropicLLM()` for `OpenAILLM()`, `GroqLLM()`, `CerebrasLLM()`, or `GoogleLLM()` — tool calling works across all five. Need fully custom LLM logic? Drop `llm=` and pass `on_message=handler` to `serve()` instead.
 
 ---
 

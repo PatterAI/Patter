@@ -57,7 +57,8 @@ await phone.serve(agent, tunnel=True)
 | Tool calling | `agent(tools=[Tool(...)])` | Agent calls external APIs mid-conversation |
 | Custom STT + TTS | `agent(stt=DeepgramSTT(), tts=ElevenLabsTTS())` | Bring your own voice providers |
 | Dynamic variables | `agent(variables={...})` | Personalize prompts per caller |
-| Custom LLM (any model) | `serve(on_message=handler)` | Claude, Mistral, LLaMA, etc. |
+| Pluggable LLM | `agent(llm=AnthropicLLM())` | 5 built-in providers: OpenAI, Anthropic, Groq, Cerebras, Google |
+| Custom LLM (any model) | `serve(on_message=handler)` | Route to anything — local llama.cpp, internal gateways, etc. |
 | Call recording | `serve(recording=True)` | Record all calls |
 | Call transfer | `transfer_call` (auto-injected) | Transfer to a human |
 | Voicemail drop | `call(voicemail_message="...")` | Play message on voicemail |
@@ -81,6 +82,10 @@ Every provider reads its credentials from the environment by default. Pass `api_
 | `SONIOX_API_KEY` | `getpatter.stt.soniox.STT` |
 | `SPEECHMATICS_API_KEY` | `getpatter.stt.speechmatics.STT` |
 | `ASSEMBLYAI_API_KEY` | `getpatter.stt.assemblyai.STT` |
+| `ANTHROPIC_API_KEY` | `AnthropicLLM` / `getpatter.llm.anthropic.LLM` |
+| `GROQ_API_KEY` | `GroqLLM` / `getpatter.llm.groq.LLM` |
+| `CEREBRAS_API_KEY` | `CerebrasLLM` / `getpatter.llm.cerebras.LLM` |
+| `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) | `GoogleLLM` / `getpatter.llm.google.LLM` |
 
 ```bash
 cp .env.example .env
@@ -233,6 +238,23 @@ agent = phone.agent(
 )
 await phone.serve(agent, tunnel=True)
 ```
+
+### Pipeline mode — pick STT, LLM, TTS independently
+
+```python
+from getpatter import Patter, Twilio, DeepgramSTT, AnthropicLLM, ElevenLabsTTS
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+agent = phone.agent(
+    stt=DeepgramSTT(),                     # reads DEEPGRAM_API_KEY
+    llm=AnthropicLLM(),                    # reads ANTHROPIC_API_KEY
+    tts=ElevenLabsTTS(voice_id="rachel"),  # reads ELEVENLABS_API_KEY
+    system_prompt="You are a helpful voice assistant.",
+)
+await phone.serve(agent, tunnel=True)
+```
+
+Available LLM providers: `OpenAILLM`, `AnthropicLLM`, `GroqLLM`, `CerebrasLLM`, `GoogleLLM`. Tool calling works across all five. For fully custom logic, drop `llm=` and pass an `on_message` callback to `serve()` instead.
 
 ### Tool calling
 

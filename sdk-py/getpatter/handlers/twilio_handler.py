@@ -234,9 +234,20 @@ async def twilio_stream_bridge(
                 call_sid_actual = start_data.get("callSid", "")
                 custom_params: dict = start_data.get("customParameters", {})
 
-                logger.info("Call started: %s", call_sid_actual)
+                # Single INFO line per call-start — full context in one place.
+                _mode = (
+                    f"engine={getattr(agent, 'provider', 'unknown')}"
+                    if getattr(agent, 'engine', None) is None
+                    else f"engine={getattr(agent.engine, 'kind', 'unknown')}"
+                )
+                if getattr(agent, 'stt', None) is not None and getattr(agent, 'tts', None) is not None and getattr(agent, 'engine', None) is None:
+                    _mode = "pipeline"
+                logger.info(
+                    "Call started: %s (Twilio, %s, %s → %s)",
+                    call_sid_actual, _mode, caller or '?', callee or '?',
+                )
                 if custom_params:
-                    logger.info("Custom params: %s", custom_params)
+                    logger.debug("Custom params: %s", custom_params)
 
                 # Fire on_call_start callback — may return per-call config overrides
                 _call_overrides = None
@@ -273,7 +284,7 @@ async def twilio_stream_bridge(
                                     f"https://api.twilio.com/2010-04-01/Accounts/{twilio_sid}/Calls/{call_sid_actual}/Recordings.json",
                                     auth=(twilio_sid, twilio_token),
                                 )
-                            logger.info("Recording started for %s", call_sid_actual)
+                            logger.debug("Recording started for %s", call_sid_actual)
                         except Exception as _exc:
                             logger.warning("Could not start recording: %s", _exc)
 
@@ -322,7 +333,7 @@ async def twilio_stream_bridge(
                                 auth=(twilio_sid, twilio_token),
                                 data={"Twiml": twiml},
                             )
-                        logger.info(
+                        logger.debug(
                             "Call transferred to %s", mask_phone_number(number)
                         )
 
@@ -338,7 +349,7 @@ async def twilio_stream_bridge(
                                 auth=(twilio_sid, twilio_token),
                                 data={"Status": "completed"},
                             )
-                        logger.info("Call hung up")
+                        logger.debug("Call hung up")
 
                 # Create the appropriate stream handler
                 if provider == "pipeline":
@@ -418,7 +429,7 @@ async def twilio_stream_bridge(
 
             elif event == "dtmf":
                 digit = data.get("dtmf", {}).get("digit", "")
-                logger.info("DTMF: %s", digit)
+                logger.debug("DTMF: %s", digit)
                 if handler is not None:
                     await handler.on_dtmf(digit)
                 if on_transcript:
@@ -462,7 +473,7 @@ async def twilio_stream_bridge(
                         if price is not None:
                             # Twilio returns price as negative string (e.g. "-0.0085")
                             metrics.set_actual_telephony_cost(abs(float(price)))
-                            logger.info("Twilio actual cost: $%s", abs(float(price)))
+                            logger.debug("Twilio actual cost: $%s", abs(float(price)))
             except Exception as exc:
                 logger.debug("Could not fetch Twilio call cost: %s", exc)
 
@@ -491,4 +502,16 @@ async def twilio_stream_bridge(
                 )
             except Exception as exc:
                 logger.exception("on_call_end error: %s", exc)
-        logger.info("Call ended")
+
+        # Single INFO line per call-end — duration, turns, cost, latency.
+        if call_metrics is not None:
+            _dur = getattr(call_metrics, 'duration_seconds', 0) or 0
+            _turns = len(getattr(call_metrics, 'turns', []) or [])
+            _cost = getattr(getattr(call_metrics, 'cost', None), 'total', 0) or 0
+            _p95 = getattr(getattr(call_metrics, 'latency_p95', None), 'total_ms', 0) or 0
+            logger.info(
+                "Call ended: %s (%.1fs, %d turns, cost=$%.4f, p95=%dms)",
+                call_sid_actual, _dur, _turns, _cost, round(_p95),
+            )
+        else:
+            logger.info("Call ended: %s", call_sid_actual)

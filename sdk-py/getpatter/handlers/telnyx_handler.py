@@ -214,7 +214,18 @@ async def telnyx_stream_bridge(
                 caller = start_info.get("from", "") or caller
                 callee = start_info.get("to", "") or callee
 
-                logger.info("Telnyx stream started: %s", call_id_actual)
+                # Single INFO line per call-start — full context in one place.
+                _mode = (
+                    f"engine={getattr(agent.engine, 'kind', 'unknown')}"
+                    if getattr(agent, 'engine', None) is not None
+                    else "pipeline"
+                    if (getattr(agent, 'stt', None) is not None and getattr(agent, 'tts', None) is not None)
+                    else f"engine={getattr(agent, 'provider', 'unknown')}"
+                )
+                logger.info(
+                    "Call started: %s (Telnyx, %s, %s → %s)",
+                    call_id_actual, _mode, caller or '?', callee or '?',
+                )
 
                 # Fire on_call_start callback — may return per-call config overrides
                 _call_overrides = None
@@ -280,7 +291,7 @@ async def telnyx_stream_bridge(
                                 json={"to": number},
                                 timeout=10.0,
                             )
-                        logger.info(
+                        logger.debug(
                             "Telnyx call transferred to %s", mask_phone_number(number)
                         )
 
@@ -294,7 +305,7 @@ async def telnyx_stream_bridge(
                                 json={},
                                 timeout=10.0,
                             )
-                        logger.info("Telnyx call hung up")
+                        logger.debug("Telnyx call hung up")
 
                 async def _telnyx_send_dtmf(digits: str, delay_ms: int = 300) -> None:
                     """Send DTMF digits via the Telnyx Call Control API.
@@ -335,7 +346,7 @@ async def telnyx_stream_bridge(
                             )
                             if idx < len(filtered) - 1 and delay_ms > 0:
                                 await asyncio.sleep(delay_ms / 1000)
-                    logger.info(
+                    logger.debug(
                         "Telnyx DTMF sent (%d digits, delay=%dms)",
                         len(filtered),
                         delay_ms,
@@ -361,7 +372,7 @@ async def telnyx_stream_bridge(
                                 resp.text[:200],
                             )
                         else:
-                            logger.info("Telnyx recording started")
+                            logger.debug("Telnyx recording started")
 
                 async def _telnyx_stop_recording() -> None:
                     """Stop recording the call via Telnyx Call Control API."""
@@ -383,7 +394,7 @@ async def telnyx_stream_bridge(
                                 resp.text[:200],
                             )
                         else:
-                            logger.info("Telnyx recording stopped")
+                            logger.debug("Telnyx recording stopped")
 
                 # Kick off recording if requested
                 if recording:
@@ -484,7 +495,7 @@ async def telnyx_stream_bridge(
                 dtmf_info = data.get("dtmf", {}) or {}
                 digit = str(dtmf_info.get("digit", "")).strip()
                 if digit:
-                    logger.info("Telnyx DTMF received: %s", digit)
+                    logger.debug("Telnyx DTMF received: %s", digit)
                     if handler is not None:
                         try:
                             on_dtmf = getattr(handler, "on_dtmf", None)
@@ -550,7 +561,7 @@ async def telnyx_stream_bridge(
                         total_cost = cost.get("amount")
                         if total_cost is not None:
                             metrics.set_actual_telephony_cost(abs(float(total_cost)))
-                            logger.info("Telnyx actual cost: $%s", abs(float(total_cost)))
+                            logger.debug("Telnyx actual cost: $%s", abs(float(total_cost)))
             except Exception as exc:
                 logger.debug("Could not fetch Telnyx call cost: %s", exc)
 
@@ -579,4 +590,16 @@ async def telnyx_stream_bridge(
                 )
             except Exception as exc:
                 logger.exception("on_call_end error: %s", exc)
-        logger.info("Telnyx call ended")
+
+        # Single INFO line per call-end — duration, turns, cost, latency.
+        if call_metrics is not None:
+            _dur = getattr(call_metrics, 'duration_seconds', 0) or 0
+            _turns = len(getattr(call_metrics, 'turns', []) or [])
+            _cost = getattr(getattr(call_metrics, 'cost', None), 'total', 0) or 0
+            _p95 = getattr(getattr(call_metrics, 'latency_p95', None), 'total_ms', 0) or 0
+            logger.info(
+                "Call ended: %s (%.1fs, %d turns, cost=$%.4f, p95=%dms)",
+                call_id_actual, _dur, _turns, _cost, round(_p95),
+            )
+        else:
+            logger.info("Call ended: %s", call_id_actual)

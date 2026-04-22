@@ -41,6 +41,7 @@ from getpatter.exceptions import PatterConnectionError, ProvisionError
 from getpatter.models import Agent, Guardrail, IncomingMessage, STTConfig, TTSConfig
 from getpatter.local_config import LocalConfig
 from getpatter.providers.base import STTProvider, TTSProvider
+from getpatter.services.llm_loop import LLMProvider
 
 if TYPE_CHECKING:  # pragma: no cover — typing only
     from getpatter.carriers.twilio import Carrier as TwilioCarrier
@@ -485,6 +486,7 @@ class Patter:
         background_audio: "BackgroundAudioPlayer | None" = None,
         barge_in_threshold_ms: int = 300,
         engine: Any = None,
+        llm: "LLMProvider | None" = None,
     ) -> Agent:
         """Create an ``Agent`` configuration for local mode.
 
@@ -514,10 +516,24 @@ class Patter:
                 replaced before TTS.
             engine: ``OpenAIRealtime(...)`` or ``ElevenLabsConvAI(...)``.
         """
+        # --- Validate llm= (runtime-checkable Protocol) ---
+        if llm is not None and not isinstance(llm, LLMProvider):
+            raise TypeError(
+                "llm must be an LLMProvider instance (e.g. AnthropicLLM(api_key=...)) "
+                f"or None; got {type(llm).__name__}"
+            )
+
         # --- Engine dispatch ---
         openai_engine_key: str = ""
         elevenlabs_engine_key: str = ""
         if engine is not None:
+            # Engine mode handles the LLM internally — `llm=` is ignored.
+            # Emit a one-time warning so the user knows.
+            if llm is not None:
+                logger.warning(
+                    "llm= ignored when engine= is set (the engine handles the "
+                    "LLM internally)."
+                )
             engine_kind, engine_fields = self._unpack_engine(engine)
             provider = engine_kind
             # Engine-supplied voice/model win over the method defaults, but we
@@ -531,7 +547,7 @@ class Patter:
                 openai_engine_key = engine_fields.get("api_key", "")
             elif engine_kind == "elevenlabs_convai":
                 elevenlabs_engine_key = engine_fields.get("api_key", "")
-        elif stt is not None or tts is not None:
+        elif stt is not None or tts is not None or llm is not None:
             provider = "pipeline"
         else:
             provider = "openai_realtime"
@@ -617,6 +633,7 @@ class Patter:
             audio_filter=audio_filter,
             background_audio=background_audio,
             barge_in_threshold_ms=barge_in_threshold_ms,
+            llm=llm,
         )
 
     @staticmethod
@@ -737,6 +754,11 @@ class Patter:
             raise TypeError(
                 f"agent must be an Agent instance, got {type(agent).__name__}. "
                 "Use phone.agent() to create one."
+            )
+        if agent.llm is not None and on_message is not None:
+            raise ValueError(
+                "Cannot pass both `llm=` on the agent and `on_message=` on serve(). "
+                "Pick one — `llm=` for built-in LLMs, `on_message=` for custom logic."
             )
         if not isinstance(port, int) or isinstance(port, bool) or port < 1 or port > 65535:
             raise ValueError(

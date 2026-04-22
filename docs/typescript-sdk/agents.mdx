@@ -36,29 +36,34 @@ const agent = phone.agent({
 });
 ```
 
-Pipeline mode (STT + your own LLM via `onMessage` + TTS):
+Pipeline mode (pick STT, LLM, TTS independently):
 
 ```typescript
-import { Patter, Twilio, DeepgramSTT, ElevenLabsTTS } from "getpatter";
+import { Patter, Twilio, DeepgramSTT, AnthropicLLM, ElevenLabsTTS } from "getpatter";
 
 const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
 
 const agent = phone.agent({
   stt: new DeepgramSTT({ endpointingMs: 80 }),           // DEEPGRAM_API_KEY from env
+  llm: new AnthropicLLM(),                               // ANTHROPIC_API_KEY from env
   tts: new ElevenLabsTTS({ voiceId: "rachel" }),         // ELEVENLABS_API_KEY from env
   systemPrompt: "You are a helpful assistant.",
   firstMessage: "Hi!",
 });
 ```
 
+Available LLM providers: `OpenAILLM`, `AnthropicLLM`, `GroqLLM`, `CerebrasLLM`, `GoogleLLM`. Tool calling works across all five. See [LLM](/typescript-sdk/llm) for the full reference. For fully custom logic (multi-model routing, local models), drop `llm` and pass an `onMessage` callback to `serve()` instead — `llm` and `onMessage` are mutually exclusive.
+
 The same pipeline using namespaced imports:
 
 ```typescript
 import * as deepgram from "getpatter/stt/deepgram";
+import * as anthropic from "getpatter/llm/anthropic";
 import * as elevenlabs from "getpatter/tts/elevenlabs";
 
 const agent = phone.agent({
   stt: new deepgram.STT({ endpointingMs: 80 }),
+  llm: new anthropic.LLM(),
   tts: new elevenlabs.TTS({ voiceId: "rachel" }),
   systemPrompt: "You are a helpful assistant.",
 });
@@ -71,6 +76,7 @@ const agent = phone.agent({
 | `systemPrompt` | `string` | Yes | — | Instructions that define the agent's persona and behavior. |
 | `engine` | `OpenAIRealtime \| ElevenLabsConvAI` | No | defaults to `OpenAIRealtime` | End-to-end engine. See [Engines](/typescript-sdk/engines). Omit for pipeline mode. |
 | `stt` | `STTProvider` | No | — | STT instance for pipeline mode (`new DeepgramSTT()`, `new CartesiaSTT()`, ...). |
+| `llm` | `LLMProvider` | No | — | LLM instance for pipeline mode (`new AnthropicLLM()`, `new GroqLLM()`, ...). Mutually exclusive with `onMessage` on `serve()`. Ignored when `engine` is set. See [LLM](/typescript-sdk/llm). |
 | `tts` | `TTSProvider` | No | — | TTS instance for pipeline mode (`new ElevenLabsTTS()`, `new RimeTTS()`, ...). |
 | `voice` | `string` | No | Provider default | Voice ID. Usually inferred from the engine or TTS instance. |
 | `model` | `string` | No | `"gpt-4o-mini-realtime-preview"` | Model ID for OpenAI Realtime. Usually inferred from the engine. |
@@ -122,7 +128,7 @@ You do not need to define these in your `tools` array. The AI model can invoke t
 ## Engine vs Pipeline Mode
 
 ```typescript
-import { OpenAIRealtime, ElevenLabsConvAI, DeepgramSTT, ElevenLabsTTS } from "getpatter";
+import { OpenAIRealtime, ElevenLabsConvAI, DeepgramSTT, AnthropicLLM, ElevenLabsTTS } from "getpatter";
 
 // OpenAI Realtime — end-to-end
 const agent = phone.agent({
@@ -136,9 +142,10 @@ const agent = phone.agent({
   systemPrompt: "...",
 });
 
-// Pipeline — custom STT + TTS + onMessage LLM
+// Pipeline — pick STT, LLM, TTS independently
 const agent = phone.agent({
   stt: new DeepgramSTT(),
+  llm: new AnthropicLLM(),
   tts: new ElevenLabsTTS({ voiceId: "rachel" }),
   systemPrompt: "...",
 });

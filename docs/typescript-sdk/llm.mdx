@@ -1,64 +1,130 @@
 ---
 title: "LLM"
-description: "Voice AI modes and language model providers."
+description: "Pick an LLM provider the same way you pick STT and TTS."
 icon: "brain"
 ---
 
 # LLM (Voice Mode)
 
-Patter supports two high-level voice AI architectures:
+Patter supports two voice architectures:
 
 | Mode | How to enable | When to use |
 |------|---------------|-------------|
-| **Engine (end-to-end)** | `phone.agent({ engine: new OpenAIRealtime(...) })` or `engine: new ElevenLabsConvAI(...)` | Lowest-latency speech-to-speech. The engine handles STT + LLM + TTS in a single provider. |
-| **Pipeline** | `phone.agent({ stt: ..., tts: ... })` (omit `engine`) | Full control. Plug a streaming STT, your own LLM, and a streaming TTS. |
+| **Engine (speech-to-speech)** | `phone.agent({ engine: new OpenAIRealtime(...) })` or `engine: new ElevenLabsConvAI(...)` | Lowest-latency speech-to-speech. A single provider handles STT + LLM + TTS. |
+| **Pipeline (STT + LLM + TTS)** | `phone.agent({ stt, llm, tts })` (omit `engine`) | Full control. Mix and match providers per stage. |
 
-See [Engines](/typescript-sdk/engines) for the reference on engine classes. This page focuses on the LLM step.
+See [Engines](/typescript-sdk/engines) for engine-mode reference. This page focuses on the `llm` selector in pipeline mode.
 
-## Engine mode
+## Pipeline mode
 
-Engine mode collapses STT, LLM, and TTS into a single streaming connection with the provider.
-
-### OpenAI Realtime (default)
+Compose the three stages independently. Each provider reads its credentials from the environment by default.
 
 ```typescript
 // npx tsx example.ts
-import { Patter, Twilio, OpenAIRealtime } from "getpatter";
+import { Patter, Twilio, DeepgramSTT, AnthropicLLM, ElevenLabsTTS } from "getpatter";
 
 const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
 
 const agent = phone.agent({
-  engine: new OpenAIRealtime({ voice: "alloy" }),           // OPENAI_API_KEY from env
+  stt: new DeepgramSTT(),                       // DEEPGRAM_API_KEY
+  llm: new AnthropicLLM(),                      // ANTHROPIC_API_KEY
+  tts: new ElevenLabsTTS({ voiceId: "rachel" }), // ELEVENLABS_API_KEY
   systemPrompt: "You are a helpful assistant.",
-  firstMessage: "Hello!",
+  firstMessage: "Hi!",
 });
 
 await phone.serve({ agent });
 ```
 
-**Voices:** `alloy`, `ash`, `ballad`, `coral`, `echo`, `sage`, `shimmer`, `verse`
-**Env var:** `OPENAI_API_KEY`
+Tool calling works across every provider — each adapter normalizes its vendor-specific streaming format to Patter's unified `{ type: "text" | "tool_call" | "done" }` chunk protocol, so your tools are defined once and run everywhere.
 
-### ElevenLabs ConvAI
+<Note>
+`llm` and `onMessage` are **mutually exclusive**. Pass one or the other on `serve()` — passing both raises a clear error at `serve()` time. When `engine` is set, `llm` is ignored (with a one-time warning in the logs). If neither `llm` nor `onMessage` is passed and `OPENAI_API_KEY` is set, Patter auto-constructs the default OpenAI LLM loop — existing 0.5.0 code still works.
+</Note>
 
-Uses a Conversational AI agent configured in the ElevenLabs dashboard.
+## Supported LLM providers
+
+| Flat import | Namespaced import | Env var | Install |
+|---|---|---|---|
+| `OpenAILLM` | `getpatter/llm/openai` → `LLM` | `OPENAI_API_KEY` | included |
+| `AnthropicLLM` | `getpatter/llm/anthropic` → `LLM` | `ANTHROPIC_API_KEY` | included |
+| `GroqLLM` | `getpatter/llm/groq` → `LLM` | `GROQ_API_KEY` | included |
+| `CerebrasLLM` | `getpatter/llm/cerebras` → `LLM` | `CEREBRAS_API_KEY` | included |
+| `GoogleLLM` | `getpatter/llm/google` → `LLM` | `GEMINI_API_KEY` (falls back to `GOOGLE_API_KEY`) | included |
+
+All classes accept an options object with `apiKey?: string` and fall back to the listed env var when it is omitted.
+
+### OpenAILLM
+
+OpenAI Chat Completions with streaming + tool calling. Default model `"gpt-4o-mini"`.
 
 ```typescript
-import { Patter, Twilio, ElevenLabsConvAI } from "getpatter";
+import { OpenAILLM } from "getpatter";                    // flat
+import * as openai from "getpatter/llm/openai";           // namespaced
 
-const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+const llm = new OpenAILLM();                              // reads OPENAI_API_KEY
+const llm2 = new openai.LLM({ apiKey: "sk-...", model: "gpt-4o-mini" });
+```
 
-const agent = phone.agent({
-  engine: new ElevenLabsConvAI({ agentId: "agent_abc123" }),   // ELEVENLABS_API_KEY + ELEVENLABS_AGENT_ID from env
-  systemPrompt: "You are a warm and friendly concierge.",
+### AnthropicLLM
+
+Anthropic Messages API with native streaming and `tool_use` blocks, normalised to Patter's chunk protocol. Default model `"claude-3-5-sonnet-20241022"`. Pass `maxTokens` to override the default token cap.
+
+```typescript
+import { AnthropicLLM } from "getpatter";                 // flat
+import * as anthropic from "getpatter/llm/anthropic";     // namespaced
+
+const llm = new AnthropicLLM();                           // reads ANTHROPIC_API_KEY
+const llm2 = new anthropic.LLM({
+  apiKey: "sk-ant-...",
+  model: "claude-3-5-sonnet-20241022",
+  maxTokens: 2048,
 });
 ```
 
-**Env vars:** `ELEVENLABS_API_KEY`, `ELEVENLABS_AGENT_ID`
+### GroqLLM
 
-## Pipeline mode
+Hardware-accelerated Llama inference via Groq's OpenAI-compatible Chat Completions API at `https://api.groq.com/openai/v1`. Default model `"llama-3.3-70b-versatile"`.
 
-Omit `engine` and pass `stt` + `tts` instead. Patter wires them together automatically. For the LLM step, provide an `onMessage` callback — you can run any model you like inside.
+```typescript
+import { GroqLLM } from "getpatter";                      // flat
+import * as groq from "getpatter/llm/groq";               // namespaced
+
+const llm = new GroqLLM();                                // reads GROQ_API_KEY
+const llm2 = new groq.LLM({ apiKey: "gsk_...", model: "llama-3.3-70b-versatile" });
+```
+
+### CerebrasLLM
+
+Cerebras Inference API (OpenAI-compatible) at `https://api.cerebras.ai/v1`. Default model `"llama3.1-8b"`. Supports optional gzip request-body compression via `gzipCompression: true` to reduce time-to-first-token on large prompts — see [Cerebras payload optimization](https://inference-docs.cerebras.ai/payload-optimization).
+
+```typescript
+import { CerebrasLLM } from "getpatter";                  // flat
+import * as cerebras from "getpatter/llm/cerebras";       // namespaced
+
+const llm = new CerebrasLLM();                            // reads CEREBRAS_API_KEY
+const llm2 = new cerebras.LLM({
+  apiKey: "csk-...",
+  model: "llama3.1-8b",
+  gzipCompression: true,
+});
+```
+
+### GoogleLLM
+
+Google Gemini via the Developer API (streaming SSE). Default model `"gemini-2.5-flash"`.
+
+```typescript
+import { GoogleLLM } from "getpatter";                    // flat
+import * as google from "getpatter/llm/google";           // namespaced
+
+const llm = new GoogleLLM();                              // reads GEMINI_API_KEY, falls back to GOOGLE_API_KEY
+const llm2 = new google.LLM({ apiKey: "AIza...", model: "gemini-2.5-flash" });
+```
+
+## Custom LLM via `onMessage`
+
+For cases the five built-in providers don't cover — multi-model routing, local inference, an internal gateway, caching layers — drop `llm` and plug an async `onMessage` callback instead:
 
 ```typescript
 // npx tsx example.ts
@@ -67,51 +133,29 @@ import { Patter, Twilio, DeepgramSTT, ElevenLabsTTS } from "getpatter";
 const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
 
 const agent = phone.agent({
-  stt: new DeepgramSTT({ endpointingMs: 80 }),          // DEEPGRAM_API_KEY from env
-  tts: new ElevenLabsTTS({ voiceId: "rachel" }),        // ELEVENLABS_API_KEY from env
+  stt: new DeepgramSTT(),
+  tts: new ElevenLabsTTS({ voiceId: "rachel" }),
   systemPrompt: "You are a helpful assistant.",
-  firstMessage: "Hi!",
 });
 
 await phone.serve({
   agent,
   onMessage: async ({ text }) => {
-    // Drop in OpenAI, Anthropic, Groq, a local llama.cpp, whatever.
+    // Route to any model you like — local inference, a private gateway, etc.
     return `You said: ${text}. How can I help?`;
   },
 });
 ```
 
-### Built-in LLM adapters
+<Warning>
+`onMessage` and `llm` cannot be used together. Combining them raises a clear error at `serve()` time — pick one.
+</Warning>
 
-Built-in LLM adapters live inside `getpatter` and can be called from `onMessage`:
-
-| Provider | Notes |
-|----------|-------|
-| Anthropic | `anthropic-llm.ts` |
-| Google Gemini | `google-llm.ts` (Gemini Live also available via `gemini-live.ts`) |
-| Groq | `groq-llm.ts` |
-| Cerebras | `cerebras-llm.ts` |
-| Ultravox (realtime) | `ultravox-realtime.ts` |
-
-<Note>
-A first-class `llm: new AnthropicLLM(...)` parameter is planned for Patter 0.6 — once it lands you will be able to plug LLMs the same way you plug STT and TTS today. Until then, the LLM step of pipeline mode flows through `onMessage`.
-</Note>
-
-## Comparison
-
-| Feature | `engine: OpenAIRealtime` | `engine: ElevenLabsConvAI` | Pipeline (`stt` / `tts`) |
-|---------|--------------------------|-----------------------------|---------------------------|
-| Latency | Lowest | Low | Medium |
-| Voice quality | High | Very high | Depends on TTS |
-| Custom LLM | No | No | Yes (via `onMessage`) |
-| Function calling | Yes | Limited | Yes |
-
-## What's Next
+## What's next
 
 <CardGroup cols={2}>
-  <Card title="Engines" icon="bolt" href="/typescript-sdk/engines">Engine class reference.</Card>
   <Card title="STT" icon="microphone" href="/typescript-sdk/stt">STT providers for pipeline mode.</Card>
   <Card title="TTS" icon="volume" href="/typescript-sdk/tts">TTS providers for pipeline mode.</Card>
-  <Card title="Tools" icon="wrench" href="/typescript-sdk/tools">Function calling.</Card>
+  <Card title="Tools" icon="wrench" href="/typescript-sdk/tools">Function calling (works across every LLM).</Card>
+  <Card title="Engines" icon="bolt" href="/typescript-sdk/engines">Speech-to-speech engines (OpenAI Realtime, ElevenLabs ConvAI).</Card>
 </CardGroup>

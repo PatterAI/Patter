@@ -126,20 +126,23 @@ await phone.serve({ agent, tunnel: true });
 
 `new ElevenLabsConvAI()` reads `ELEVENLABS_API_KEY` and `ELEVENLABS_AGENT_ID` from the environment.
 
-For the STT + LLM + TTS pipeline mode, pass `stt` and `tts` to `agent()`:
+For the STT + LLM + TTS pipeline mode, pick each stage independently:
 
 ```typescript
-import { Patter, Twilio, DeepgramSTT, ElevenLabsTTS } from "getpatter";
+import { Patter, Twilio, DeepgramSTT, AnthropicLLM, ElevenLabsTTS } from "getpatter";
 
 const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
 const agent = phone.agent({
-  stt: new DeepgramSTT(),        // reads DEEPGRAM_API_KEY
-  tts: new ElevenLabsTTS(),      // reads ELEVENLABS_API_KEY
+  stt: new DeepgramSTT(),                         // reads DEEPGRAM_API_KEY
+  llm: new AnthropicLLM(),                        // reads ANTHROPIC_API_KEY
+  tts: new ElevenLabsTTS({ voiceId: "rachel" }),  // reads ELEVENLABS_API_KEY
   systemPrompt: "You are a helpful assistant.",
   firstMessage: "Hello!",
 });
 await phone.serve({ agent, tunnel: true });
 ```
+
+Swap `new AnthropicLLM()` for `new OpenAILLM()`, `new GroqLLM()`, `new CerebrasLLM()`, or `new GoogleLLM()` — tool calling works across all five. Need fully custom LLM logic? Drop `llm` and pass `onMessage` to `serve()` instead.
 
 ---
 

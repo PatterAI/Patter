@@ -94,6 +94,18 @@ export type { RimeTTSOptions } from "./tts/rime";
 export { TTS as LMNTTTS } from "./tts/lmnt";
 export type { LMNTTTSOptions } from "./tts/lmnt";
 
+// New namespaced LLM classes (Phase 2 of the v0.5.x API refactor).
+export { LLM as OpenAILLM } from "./llm/openai";
+export type { OpenAILLMOptions } from "./llm/openai";
+export { LLM as AnthropicLLM } from "./llm/anthropic";
+export type { AnthropicLLMOptions } from "./llm/anthropic";
+export { LLM as GroqLLM } from "./llm/groq";
+export type { GroqLLMOptions } from "./llm/groq";
+export { LLM as CerebrasLLM } from "./llm/cerebras";
+export type { CerebrasLLMOptions } from "./llm/cerebras";
+export { LLM as GoogleLLM } from "./llm/google";
+export type { GoogleLLMOptions } from "./llm/google";
+
 // Telephony carriers.
 export { Carrier as Twilio } from "./carriers/twilio";
 export type { TwilioCarrierOptions } from "./carriers/twilio";

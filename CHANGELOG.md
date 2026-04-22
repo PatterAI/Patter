@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.1 (2026-04-22)
+
+### Added
+- **First-class `llm=` selector on `phone.agent()`** — pick any of 5 LLM providers the same way you pick STT/TTS.
+  - `OpenAILLM`, `AnthropicLLM`, `GroqLLM`, `CerebrasLLM`, `GoogleLLM` — all instance-based with env-var fallback.
+  - Namespaced imports: `from getpatter.llm import openai, anthropic, groq, cerebras, google` (Python) / `import * as anthropic from "getpatter/llm/anthropic"` (TypeScript).
+  - Flat imports: `from getpatter import AnthropicLLM, GroqLLM, ...` / `import { AnthropicLLM, GroqLLM, ... } from "getpatter"`.
+- Tool calling works across all 5 providers — each adapter normalizes to Patter's unified `{type: "text" | "tool_call" | "done"}` chunk protocol.
+- `GoogleLLM` reads `GEMINI_API_KEY` preferred, falls back to `GOOGLE_API_KEY`.
+
+### Unchanged (no break from 0.5.0)
+- `on_message` / `onMessage` callback still works for custom LLM logic. Mutually exclusive with `llm=` (conflict raises at `serve()` time).
+- When no `llm=` and no `on_message` but `OPENAI_API_KEY` is set, the default OpenAI LLM loop keeps running.
+
 ## 0.5.0 (2026-04-22)
 
 Patter 0.5.0 ships an instance-based API. Every provider — carriers, engines, STT, TTS, tunnels — is a typed class that reads its credentials from environment variables by default. The result is a four-line quickstart:

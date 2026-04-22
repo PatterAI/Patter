@@ -184,7 +184,7 @@ export class StreamHandler {
       pricing: deps.pricing,
     });
 
-    getLogger().info(`WebSocket connection opened (${deps.bridge.label})`);
+    getLogger().debug(`WebSocket connection opened (${deps.bridge.label})`);
   }
 
   // ---------------------------------------------------------------------------
@@ -207,10 +207,17 @@ export class StreamHandler {
     if (customParams.caller && !this.caller) this.caller = customParams.caller;
     if (customParams.callee && !this.callee) this.callee = customParams.callee;
 
-    getLogger().info(`Call started: ${callId}`);
+    // Single INFO line per call-start — full context in one place.
+    const mode =
+      this.deps.agent.engine
+        ? `engine=${(this.deps.agent.engine as { kind?: string }).kind ?? 'unknown'}`
+        : 'pipeline';
+    getLogger().info(
+      `Call started: ${callId} (${this.deps.bridge.label}, ${mode}, ${sanitizeLogValue(this.caller || '?')} → ${sanitizeLogValue(this.callee || '?')})`,
+    );
 
     if (Object.keys(customParams).length > 0) {
-      getLogger().info(`Custom params: ${sanitizeLogValue(JSON.stringify(customParams))}`);
+      getLogger().debug(`Custom params: ${sanitizeLogValue(JSON.stringify(customParams))}`);
     }
 
     this.deps.metricsStore.recordCallStart({
@@ -262,7 +269,7 @@ export class StreamHandler {
             },
           });
           if (recResp.ok) {
-            getLogger().info(`Recording started for ${callId}`);
+            getLogger().debug(`Recording started for ${callId}`);
           } else {
             getLogger().warn(`could not start recording: ${await recResp.text()}`);
           }
@@ -336,7 +343,7 @@ export class StreamHandler {
 
   /** Handle a DTMF keypress event (Twilio only). */
   async handleDtmf(digit: string): Promise<void> {
-    getLogger().info(`DTMF: ${digit}`);
+    getLogger().debug(`DTMF: ${digit}`);
     if (this.adapter instanceof OpenAIRealtimeAdapter) {
       await this.adapter.sendText(`The user pressed key ${digit} on their phone keypad.`);
     }
@@ -399,15 +406,15 @@ export class StreamHandler {
     this.tts = await createTTS(this.deps.agent);
 
     if (!this.stt) {
-      getLogger().info(`Pipeline mode (${label}): no STT configured`);
+      getLogger().debug(`Pipeline mode (${label}): no STT configured`);
     }
     if (!this.tts) {
-      getLogger().info(`Pipeline mode (${label}): no TTS configured`);
+      getLogger().debug(`Pipeline mode (${label}): no TTS configured`);
     }
 
     try {
       if (this.stt) await this.stt.connect();
-      getLogger().info(`Pipeline mode (${label}): STT + TTS connected`);
+      getLogger().debug(`Pipeline mode (${label}): STT + TTS connected`);
     } catch (e) {
       getLogger().error(`Pipeline connect FAILED (${label}):`, e);
       try { await this.deps.bridge.endCall(this.callId, this.ws); } catch { /* best effort */ }
@@ -436,8 +443,25 @@ export class StreamHandler {
       }
     }
 
-    // Create LLM loop for pipeline mode when no onMessage handler provided
-    if (!this.deps.onMessage && this.deps.config.openaiKey) {
+    // Create LLM loop for pipeline mode when no onMessage handler provided.
+    // Precedence: user-supplied ``agent.llm`` > OpenAI default (from openaiKey).
+    if (this.deps.agent.llm) {
+      if (this.deps.onMessage) {
+        throw new Error(
+          "Cannot pass both agent({ llm }) and serve({ onMessage }). Pick one — " +
+            "`llm` for built-in LLMs, `onMessage` for custom logic.",
+        );
+      }
+      this.llmLoop = new LLMLoop(
+        '', // apiKey unused when llmProvider is supplied
+        '', // model unused when llmProvider is supplied
+        resolvedPrompt,
+        this.deps.agent.tools as ToolDefinition[] | undefined,
+        this.deps.agent.llm,
+      );
+      const llmLabel = this.deps.agent.llm.constructor?.name ?? 'custom';
+      getLogger().debug(`Built-in LLM loop active (pipeline, ${label}, llm=${llmLabel})`);
+    } else if (!this.deps.onMessage && this.deps.config.openaiKey) {
       let llmModel = this.deps.agent.model || 'gpt-4o-mini';
       if (llmModel.includes('realtime')) llmModel = 'gpt-4o-mini';
       this.llmLoop = new LLMLoop(
@@ -446,7 +470,7 @@ export class StreamHandler {
         resolvedPrompt,
         this.deps.agent.tools as ToolDefinition[] | undefined,
       );
-      getLogger().info(`Built-in LLM loop active (pipeline, ${label})`);
+      getLogger().debug(`Built-in LLM loop active (pipeline, ${label})`);
     }
 
     if (this.stt) {
@@ -528,7 +552,7 @@ export class StreamHandler {
     // any transcript with text flips ``isSpeaking`` to false so the TTS
     // sentence loop exits on its next check.
     if (transcript.text && this.isSpeaking) {
-      getLogger().info(
+      getLogger().debug(
         `Barge-in: caller spoke over agent (${sanitizeLogValue(transcript.text.slice(0, 40))})`,
       );
       this.isSpeaking = false;
@@ -554,17 +578,17 @@ export class StreamHandler {
       'right', 'cool',
     ]);
     if (HALLUCINATIONS.has(stripped) || stripped === '') {
-      getLogger().info(`Dropped likely STT hallucination: ${sanitizeLogValue(normalised.slice(0, 40))}`);
+      getLogger().debug(`Dropped likely STT hallucination: ${sanitizeLogValue(normalised.slice(0, 40))}`);
       return;
     }
     if (sinceLastMs < 2000 && normalised === this.lastCommitText) {
-      getLogger().info(
+      getLogger().debug(
         `Dropped duplicate final transcript (${(sinceLastMs / 1000).toFixed(1)}s since last): ${sanitizeLogValue(normalised.slice(0, 40))}`,
       );
       return;
     }
     if (sinceLastMs < 500) {
-      getLogger().info(
+      getLogger().debug(
         `Dropped back-to-back final transcript (${(sinceLastMs / 1000).toFixed(2)}s since last): ${sanitizeLogValue(normalised.slice(0, 40))}`,
       );
       return;
@@ -573,7 +597,7 @@ export class StreamHandler {
     this.lastCommitAt = now;
 
     const label = this.deps.bridge.label;
-    getLogger().info(`User (${label} pipeline): ${sanitizeLogValue(transcript.text)}`);
+    getLogger().debug(`User (${label} pipeline): ${sanitizeLogValue(transcript.text)}`);
 
     this.metricsAcc.startTurn();
     this.metricsAcc.recordSttComplete(transcript.text);
@@ -592,7 +616,7 @@ export class StreamHandler {
     const hookCtx = this.buildHookContext();
     const filteredTranscript = await hookExecutor.runAfterTranscribe(transcript.text, hookCtx);
     if (filteredTranscript === null) {
-      getLogger().info(`afterTranscribe hook vetoed turn (${label})`);
+      getLogger().debug(`afterTranscribe hook vetoed turn (${label})`);
       this.metricsAcc.recordTurnInterrupted();
       return;
     }
@@ -706,7 +730,7 @@ export class StreamHandler {
     if (!this.llmLoop) {
       const guard = checkGuardrails(responseText, this.deps.agent.guardrails);
       if (guard) {
-        getLogger().info(`Guardrail '${guard.name}' triggered (pipeline)`);
+        getLogger().debug(`Guardrail '${guard.name}' triggered (pipeline)`);
         responseText = guard.replacement ?? "I'm sorry, I can't respond to that.";
       }
 
@@ -788,7 +812,7 @@ export class StreamHandler {
 
     try {
       await this.adapter.connect();
-      getLogger().info(`AI adapter connected (${label})`);
+      getLogger().debug(`AI adapter connected (${label})`);
     } catch (e) {
       getLogger().error(`AI adapter connect FAILED (${label}):`, e);
       // Hang up the telephony call so it doesn't stay connected billing
@@ -839,7 +863,7 @@ export class StreamHandler {
       this.deps.bridge.sendMark(this.ws, `audio_${this.chunkCount}`, this.streamSid);
     } else if (type === 'transcript_input') {
       const inputText = eventData as string;
-      getLogger().info(`User (${this.deps.bridge.label}): ${sanitizeLogValue(inputText)}`);
+      getLogger().debug(`User (${this.deps.bridge.label}): ${sanitizeLogValue(inputText)}`);
       this.history.push({ role: 'user', text: inputText, timestamp: Date.now() });
       // Start a new turn when user finishes speaking (Realtime mode)
       this.metricsAcc.startTurn();
@@ -858,7 +882,7 @@ export class StreamHandler {
       if (outputText) {
         const triggered = checkGuardrails(outputText, this.deps.agent.guardrails);
         if (triggered) {
-          getLogger().info(`Guardrail '${triggered.name}' triggered`);
+          getLogger().debug(`Guardrail '${triggered.name}' triggered`);
           if (this.adapter instanceof OpenAIRealtimeAdapter) {
             this.adapter.cancelResponse();
             await this.adapter.sendText(triggered.replacement ?? "I'm sorry, I can't respond to that.");
@@ -926,7 +950,7 @@ export class StreamHandler {
         await adapter.sendFunctionResult(fc.call_id, JSON.stringify({ error: 'Invalid phone number format', status: 'rejected' }));
         return;
       }
-      getLogger().info(`Transferring call to ${transferTo}`);
+      getLogger().debug(`Transferring call to ${transferTo}`);
       await adapter.sendFunctionResult(fc.call_id, JSON.stringify({ status: 'transferring', to: transferTo }));
       await this.deps.bridge.transferCall(this.callId, transferTo);
       if (this.deps.onTranscript) {
@@ -943,7 +967,7 @@ export class StreamHandler {
         endArgs = {};
       }
       const reason = endArgs.reason ?? 'conversation_complete';
-      getLogger().info(`Ending call (${this.deps.bridge.label}): ${reason}`);
+      getLogger().debug(`Ending call (${this.deps.bridge.label}): ${reason}`);
       await adapter.sendFunctionResult(fc.call_id, JSON.stringify({ status: 'ending', reason }));
       await this.deps.bridge.endCall(this.callId, this.ws);
       if (this.deps.onTranscript) {
@@ -1001,6 +1025,14 @@ export class StreamHandler {
       transcript: [...this.history.entries],
       metrics: finalMetrics as unknown as Record<string, unknown>,
     };
+
+    // Single INFO line per call-end — duration, turns, cost, latency.
+    const cost = (finalMetrics.cost as { total?: number } | undefined)?.total ?? 0;
+    const latencyP95 = (finalMetrics.latency_p95 as { total_ms?: number } | undefined)?.total_ms ?? 0;
+    getLogger().info(
+      `Call ended: ${this.callId} (${finalMetrics.duration_seconds.toFixed(1)}s, ` +
+        `${finalMetrics.turns.length} turns, cost=$${cost.toFixed(4)}, p95=${Math.round(latencyP95)}ms)`,
+    );
     this.deps.metricsStore.recordCallEnd(
       callEndData,
       finalMetrics as unknown as Record<string, unknown>,
@@ -1046,7 +1078,7 @@ async function queryDeepgramCost(
           const usd = reqData.response?.details?.usd;
           if (usd != null) {
             metricsAcc.setActualSttCost(usd);
-            getLogger().info(`Deepgram actual cost: $${usd}`);
+            getLogger().debug(`Deepgram actual cost: $${usd}`);
           }
         }
       }
