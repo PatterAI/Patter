@@ -133,7 +133,7 @@ def apply_call_overrides(agent, overrides: dict):
         base = {k: v for k, v in asdict(agent).items() if k not in fields}
         base.update(fields)
         agent = _Agent(**base)
-        logger.info("Per-call config overrides applied: %s", list(fields.keys()))
+        logger.debug("Per-call config overrides applied: %s", list(fields.keys()))
     return agent
 
 
@@ -356,7 +356,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
             audio_format=self._audio_format,
         )
         await self._adapter.connect()
-        logger.info("OpenAI Realtime connected")
+        logger.debug("OpenAI Realtime connected")
 
         if self.agent.first_message:
             await self._adapter.send_text(self.agent.first_message)
@@ -379,7 +379,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                     await self.audio_sender.send_mark(f"audio_{id(ev_data)}")
 
                 elif ev_type == "transcript_input":
-                    logger.info("User: %s", sanitize_log_value(ev_data))
+                    logger.debug("User: %s", sanitize_log_value(ev_data))
                     if self.metrics is not None:
                         self.metrics.start_turn()
                         self.metrics.record_stt_complete(ev_data)
@@ -464,7 +464,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                                 json.dumps({"error": "Invalid phone number format", "status": "rejected"}),
                             )
                             continue
-                        logger.info(
+                        logger.debug(
                             "Transferring call to %s", mask_phone_number(transfer_number)
                         )
                         await self._adapter.send_function_result(
@@ -487,7 +487,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                         raw_args = func_data.get("arguments", "{}")
                         args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
                         reason = args.get("reason", "conversation_complete")
-                        logger.info("Ending call: %s", reason)
+                        logger.debug("Ending call: %s", reason)
                         await self._adapter.send_function_result(
                             func_data["call_id"],
                             json.dumps({"status": "ending", "reason": reason}),
@@ -616,7 +616,7 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
             first_message=self.agent.first_message,
         )
         await self._adapter.connect()
-        logger.info("ElevenLabs ConvAI connected")
+        logger.debug("ElevenLabs ConvAI connected")
 
         self._background_task = asyncio.create_task(self._forward_events())
 
@@ -632,7 +632,7 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
                     await self.audio_sender.send_audio(ev_data)
 
                 elif ev_type == "transcript_input":
-                    logger.info("User: %s", sanitize_log_value(ev_data))
+                    logger.debug("User: %s", sanitize_log_value(ev_data))
                     if self.metrics is not None:
                         self.metrics.start_turn()
                         self.metrics.record_stt_complete(ev_data)
@@ -821,7 +821,7 @@ class PipelineStreamHandler(StreamHandler):
         if self._stt is not None:
             await self._stt.connect()
 
-        logger.info("Pipeline mode: STT + TTS connected")
+        logger.debug("Pipeline mode: STT + TTS connected")
 
         # Play first_message if configured and no on_message handler
         if self.agent.first_message and self.on_message is None and self._tts is not None:
@@ -1102,7 +1102,7 @@ class PipelineStreamHandler(StreamHandler):
                 # flip `_is_speaking=False` + clear the downstream audio
                 # buffer so the in-flight TTS loop interrupts (BUG #20).
                 if transcript.text and self._is_speaking:
-                    logger.info(
+                    logger.debug(
                         "Barge-in: caller spoke over agent (%s)",
                         sanitize_log_value(transcript.text[:40]),
                     )
@@ -1133,21 +1133,21 @@ class PipelineStreamHandler(StreamHandler):
                     "right", "cool",
                 })
                 if _stripped in _HALLUCINATIONS or _stripped == "":
-                    logger.info(
+                    logger.debug(
                         "Dropped likely STT hallucination: %r",
                         _normalised[:40],
                     )
                     continue
 
                 if _since_last < 2.0 and _normalised == last_commit_text:
-                    logger.info(
+                    logger.debug(
                         "Dropped duplicate final transcript (%.1fs since last): %r",
                         _since_last,
                         _normalised[:40],
                     )
                     continue
                 if _since_last < 0.5:
-                    logger.info(
+                    logger.debug(
                         "Dropped back-to-back final transcript (%.2fs since last): %r",
                         _since_last,
                         _normalised[:40],
@@ -1170,7 +1170,7 @@ class PipelineStreamHandler(StreamHandler):
                 ):
                     pass
 
-                logger.info("User: %s", sanitize_log_value(transcript.text))
+                logger.debug("User: %s", sanitize_log_value(transcript.text))
 
                 if self.metrics is not None:
                     self.metrics.start_turn()
@@ -1199,7 +1199,7 @@ class PipelineStreamHandler(StreamHandler):
                     transcript.text, hook_ctx
                 )
                 if filtered_text is None:
-                    logger.info("afterTranscribe hook vetoed turn")
+                    logger.debug("afterTranscribe hook vetoed turn")
                     if self.metrics is not None:
                         self.metrics.record_turn_interrupted()
                     continue
@@ -1395,6 +1395,6 @@ async def fetch_deepgram_cost(metrics, stt, deepgram_key: str) -> None:
                             usd = req_resp.json().get("response", {}).get("details", {}).get("usd", None)
                             if usd is not None:
                                 metrics.set_actual_stt_cost(float(usd))
-                                logger.info("Deepgram actual cost: $%s", usd)
+                                logger.debug("Deepgram actual cost: $%s", usd)
     except Exception as exc:
         logger.debug("Could not fetch Deepgram request cost: %s", exc)
