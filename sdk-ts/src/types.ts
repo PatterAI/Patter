@@ -1,3 +1,11 @@
+import type { Carrier as TwilioCarrier } from "./carriers/twilio";
+import type { Carrier as TelnyxCarrier } from "./carriers/telnyx";
+import type { Realtime } from "./engines/openai";
+import type { ConvAI } from "./engines/elevenlabs";
+import type { CloudflareTunnel, Static as StaticTunnel } from "./tunnels";
+import type { Tool as ToolInstance } from "./public-api";
+import type { STTAdapter, TTSAdapter } from "./provider-factory";
+
 export interface IncomingMessage {
   readonly text: string;
   readonly callId: string;
@@ -115,32 +123,34 @@ export interface Call {
 
 export interface LocalOptions {
   /**
-   * Optional — when omitted, local mode is auto-detected from the presence of
-   * ``twilioSid`` or ``telnyxKey`` (matches the Python SDK which treats
-   * ``Patter(twilio_sid=...)`` as local mode by default).
+   * Local mode is auto-detected when a ``carrier`` is passed. Pass
+   * ``mode: 'local'`` to force local mode explicitly.
    */
   mode?: 'local';
-  twilioSid?: string;
-  twilioToken?: string;
-  openaiKey?: string;
+  /**
+   * Telephony carrier instance. Required for local mode.
+   *
+   * @example
+   * ```ts
+   * import { Patter, Twilio } from "getpatter";
+   * const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+1..." });
+   * ```
+   */
+  carrier: TwilioCarrier | TelnyxCarrier;
+  /**
+   * Tunnel configuration. Accepts a tunnel instance, ``true`` (alias for
+   * ``new CloudflareTunnel()``), or ``false`` / omitted (no tunnel).
+   */
+  tunnel?: CloudflareTunnel | StaticTunnel | boolean;
   phoneNumber: string;
   webhookUrl?: string;
-  telephonyProvider?: 'twilio' | 'telnyx';
-  telnyxKey?: string;
-  telnyxConnectionId?: string;
   /**
-   * Telnyx Ed25519 public key (base64-encoded, DER/SPKI format) for webhook
-   * signature verification. When provided, unauthenticated requests are rejected.
+   * @internal — allows ``StreamHandler`` to build the default OpenAI
+   * ``LLMLoop`` when no ``onMessage`` handler is supplied. The
+   * ``OpenAIRealtime`` engine instance carries its own key when one is
+   * used via ``phone.agent({ engine: new OpenAIRealtime({ apiKey }) })``.
    */
-  telnyxPublicKey?: string;
-  /**
-   * Provider-level Deepgram API key. When set, agents that don't override
-   * ``agent.deepgramKey`` / ``agent.stt`` use this as the default STT key.
-   * Mirrors Python's ``Patter(deepgram_key=...)``.
-   */
-  deepgramKey?: string;
-  /** Provider-level ElevenLabs API key (same semantics as ``deepgramKey``). */
-  elevenlabsKey?: string;
+  openaiKey?: string;
 }
 
 export interface Guardrail {
@@ -201,23 +211,40 @@ export interface BackgroundAudioPlayer {
 
 export interface AgentOptions {
   systemPrompt: string;
+  /**
+   * Voice preset. When ``engine`` is provided, its ``voice`` is used unless
+   * explicitly overridden here.
+   */
   voice?: string;
+  /**
+   * LLM / Realtime model. When ``engine`` is provided, its ``model`` is used
+   * unless explicitly overridden here.
+   */
   model?: string;
   language?: string;
   firstMessage?: string;
-  tools?: ToolDefinition[];
+  /** Tool definitions — ``Tool`` class instances from ``getpatter``. */
+  tools?: Array<ToolInstance>;
+  /**
+   * Realtime / ConvAI engine instance. When present, the agent runs in the
+   * matching mode (``openai_realtime`` or ``elevenlabs_convai``). When absent,
+   * pipeline mode is selected if ``stt`` and ``tts`` are provided.
+   */
+  engine?: Realtime | ConvAI;
+  /**
+   * Provider mode. Normally derived from ``engine`` / ``stt`` + ``tts``. Pass
+   * ``'pipeline'`` explicitly when building a pipeline-mode agent without
+   * an engine instance.
+   */
   provider?: 'openai_realtime' | 'elevenlabs_convai' | 'pipeline';
-  elevenlabsKey?: string;
-  elevenlabsAgentId?: string;
-  deepgramKey?: string;
-  /** STT provider config for pipeline mode. Use ``Patter.deepgram()`` or ``Patter.whisper()``. */
-  stt?: STTConfig;
-  /** TTS provider config for pipeline mode. Use ``Patter.elevenlabs()`` or ``Patter.openaiTts()``. */
-  tts?: TTSConfig;
+  /** Pre-instantiated STT adapter (e.g. ``new DeepgramSTT({ apiKey })``). */
+  stt?: STTAdapter;
+  /** Pre-instantiated TTS adapter (e.g. ``new ElevenLabsTTS({ apiKey })``). */
+  tts?: TTSAdapter;
   /** Dynamic variables for ``{placeholder}`` substitution in systemPrompt at call time. */
   variables?: Record<string, string>;
-  /** Output guardrails — filter AI responses before TTS */
-  guardrails?: Guardrail[];
+  /** Output guardrails — ``Guardrail`` class instances from ``getpatter``. */
+  guardrails?: Array<Guardrail>;
   /** Pipeline hooks — intercept and transform data at each pipeline stage (pipeline mode only). */
   hooks?: PipelineHooks;
   /** Text transforms applied to LLM output before TTS (pipeline mode only).

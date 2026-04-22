@@ -6,10 +6,27 @@ import json
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from patter import Patter
+from patter import (
+    DeepgramSTT,
+    ElevenLabsTTS,
+    OpenAIRealtime,
+    Patter,
+    Telnyx,
+    Twilio,
+)
 from patter.models import Agent
 from patter.local_config import LocalConfig
 from patter.exceptions import PatterConnectionError
+
+
+def _twilio_phone(**kwargs) -> Patter:
+    defaults = dict(
+        carrier=Twilio(account_sid="AC_test", auth_token="tok"),
+        phone_number="+15550001234",
+        webhook_url="abc.ngrok.io",
+    )
+    defaults.update(kwargs)
+    return Patter(**defaults)
 
 
 # ---------------------------------------------------------------------------
@@ -80,20 +97,13 @@ def test_agent_pipeline_provider():
 
 
 def test_agent_factory_pipeline_provider():
-    """Patter.agent() passes provider through correctly."""
-    phone = Patter(
-        twilio_sid="AC",
-        twilio_token="tok",
-        openai_key="sk",
-        deepgram_key="dg_test",
-        elevenlabs_key="el_test",
-        phone_number="+1",
-        webhook_url="x.ngrok.io",
-    )
+    """Patter.agent() derives pipeline provider when stt+tts are supplied."""
+    phone = _twilio_phone()
     a = phone.agent(
         system_prompt="Pipeline bot",
         voice="21m00Tcm4TlvDq8ikWAM",
-        provider="pipeline",
+        stt=DeepgramSTT(api_key="dg_test"),
+        tts=ElevenLabsTTS(api_key="el_test"),
     )
     assert isinstance(a, Agent)
     assert a.provider == "pipeline"
@@ -111,24 +121,25 @@ def test_agent_pipeline_is_immutable():
 # ---------------------------------------------------------------------------
 
 
-def test_local_mode_auto_detected_from_twilio_sid():
-    phone = Patter(twilio_sid="AC_test", twilio_token="tok", openai_key="sk-test",
-                   phone_number="+1555", webhook_url="x.ngrok.io")
+def test_local_mode_auto_detected_from_twilio_carrier():
+    phone = _twilio_phone()
     assert phone._mode == "local"
     assert isinstance(phone._local_config, LocalConfig)
     assert phone._local_config.telephony_provider == "twilio"
 
 
-def test_local_mode_auto_detected_from_telnyx_key():
-    phone = Patter(telnyx_key="KEY_test", openai_key="sk-test",
-                   phone_number="+1555", webhook_url="x.ngrok.io")
+def test_local_mode_auto_detected_from_telnyx_carrier():
+    phone = Patter(
+        carrier=Telnyx(api_key="KEY_test", connection_id="200"),
+        phone_number="+1555",
+        webhook_url="x.ngrok.io",
+    )
     assert phone._mode == "local"
     assert phone._local_config.telephony_provider == "telnyx"
 
 
 def test_local_mode_explicit():
-    phone = Patter(mode="local", openai_key="sk-test",
-                   phone_number="+1555", webhook_url="x.ngrok.io")
+    phone = Patter(mode="local", phone_number="+1555", webhook_url="x.ngrok.io")
     assert phone._mode == "local"
 
 
@@ -145,9 +156,9 @@ def test_cloud_mode_when_api_key_given():
 
 
 def test_agent_factory():
-    phone = Patter(twilio_sid="AC", twilio_token="tok", openai_key="sk",
-                   phone_number="+1", webhook_url="x.ngrok.io")
+    phone = _twilio_phone()
     a = phone.agent(
+        engine=OpenAIRealtime(api_key="sk-test"),
         system_prompt="You are a bot.",
         voice="shimmer",
         first_message="Hello!",
@@ -173,9 +184,11 @@ async def test_serve_raises_in_cloud_mode():
 
 @pytest.mark.asyncio
 async def test_serve_calls_embedded_server():
-    phone = Patter(twilio_sid="AC", twilio_token="tok", openai_key="sk",
-                   phone_number="+1555", webhook_url="x.ngrok.io")
-    agent = phone.agent(system_prompt="test")
+    phone = _twilio_phone()
+    agent = phone.agent(
+        engine=OpenAIRealtime(api_key="sk-test"),
+        system_prompt="test",
+    )
 
     mock_server = MagicMock()
     mock_server.start = AsyncMock()
@@ -197,8 +210,7 @@ async def test_serve_calls_embedded_server():
 
 @pytest.mark.asyncio
 async def test_connect_raises_in_local_mode():
-    phone = Patter(twilio_sid="AC", twilio_token="tok", openai_key="sk",
-                   phone_number="+1", webhook_url="x.ngrok.io")
+    phone = _twilio_phone()
     with pytest.raises(PatterConnectionError, match="local mode"):
         await phone.connect(on_message=AsyncMock())
 
@@ -210,17 +222,15 @@ async def test_connect_raises_in_local_mode():
 
 @pytest.mark.asyncio
 async def test_call_local_mode_requires_agent():
-    phone = Patter(twilio_sid="AC", twilio_token="tok", openai_key="sk",
-                   phone_number="+1", webhook_url="x.ngrok.io")
+    phone = _twilio_phone()
     with pytest.raises(PatterConnectionError, match="agent parameter"):
         await phone.call(to="+39123")
 
 
 @pytest.mark.asyncio
 async def test_call_local_mode_twilio():
-    phone = Patter(twilio_sid="AC_test", twilio_token="tok", openai_key="sk",
-                   phone_number="+1555", webhook_url="x.ngrok.io")
-    agent = phone.agent(system_prompt="test")
+    phone = _twilio_phone()
+    agent = phone.agent(engine=OpenAIRealtime(api_key="sk-test"), system_prompt="test")
 
     mock_adapter = MagicMock()
     mock_adapter.initiate_call = AsyncMock(return_value="CA_sid")
@@ -446,28 +456,19 @@ def test_agent_with_whisper_openai_tts():
 
 
 def test_agent_factory_passes_stt_tts():
-    """Patter.agent() passes stt/tts configs through to Agent."""
-    from patter.models import STTConfig, TTSConfig
-
-    phone = Patter(
-        twilio_sid="AC",
-        twilio_token="tok",
-        openai_key="sk",
-        phone_number="+1",
-        webhook_url="x.ngrok.io",
-    )
-    stt_cfg = STTConfig(provider="deepgram", api_key="dg_test")
-    tts_cfg = TTSConfig(provider="elevenlabs", api_key="el_test", voice="aria")
+    """Patter.agent() passes stt/tts instances through to Agent."""
+    phone = _twilio_phone()
+    stt = DeepgramSTT(api_key="dg_test")
+    tts = ElevenLabsTTS(api_key="el_test", voice_id="aria")
 
     agent = phone.agent(
         system_prompt="Pipeline bot",
-        provider="pipeline",
-        stt=stt_cfg,
-        tts=tts_cfg,
+        stt=stt,
+        tts=tts,
     )
     assert isinstance(agent, Agent)
-    assert agent.stt is stt_cfg
-    assert agent.tts is tts_cfg
+    assert agent.stt is stt
+    assert agent.tts is tts
 
 
 def test_agent_stt_tts_none_by_default():
@@ -522,24 +523,25 @@ def test_create_stt_whisper():
     assert result is not None
 
 
-def test_create_stt_returns_none_for_unknown():
-    """_create_stt_from_config returns None for unknown providers."""
+def test_create_stt_raises_for_unknown():
+    """_create_stt_from_config fails fast on unknown providers so users see a
+    clear error instead of a silently voiceless agent."""
     from patter.models import STTConfig
     from patter.handlers.twilio_handler import _create_stt_from_config
 
     cfg = STTConfig(provider="unknown_provider", api_key="x")
-    result = _create_stt_from_config(cfg)
-    assert result is None
+    with pytest.raises(ValueError, match="Unknown STT provider"):
+        _create_stt_from_config(cfg)
 
 
-def test_create_tts_returns_none_for_unknown():
-    """_create_tts_from_config returns None for unknown providers."""
+def test_create_tts_raises_for_unknown():
+    """_create_tts_from_config fails fast on unknown providers."""
     from patter.models import TTSConfig
     from patter.handlers.twilio_handler import _create_tts_from_config
 
     cfg = TTSConfig(provider="unknown_provider", api_key="x")
-    result = _create_tts_from_config(cfg)
-    assert result is None
+    with pytest.raises(ValueError, match="Unknown TTS provider"):
+        _create_tts_from_config(cfg)
 
 
 # ---------------------------------------------------------------------------

@@ -11,9 +11,8 @@ import { WebSocket as WSWebSocket } from 'ws';
 import { OpenAIRealtimeAdapter } from './providers/openai-realtime';
 import { ElevenLabsConvAIAdapter } from './providers/elevenlabs-convai';
 import { DeepgramSTT } from './providers/deepgram-stt';
-import { WhisperSTT } from './providers/whisper-stt';
-import { ElevenLabsTTS } from './providers/elevenlabs-tts';
-import { OpenAITTS } from './providers/openai-tts';
+import { createTTS } from './provider-factory';
+import type { STTAdapter, TTSAdapter } from './provider-factory';
 import { CallMetricsAccumulator } from './metrics';
 import { mulawToPcm16, pcm16ToMulaw, resample8kTo16k, resample16kTo8k } from './transcoding';
 import { LLMLoop } from './llm-loop';
@@ -58,8 +57,10 @@ export interface TelephonyBridge {
   /** Stop call recording via provider API (optional). */
   stopRecording?(callId: string): Promise<void>;
 
-  /** Create an STT instance appropriate for this provider's audio format. */
-  createStt(agent: AgentOptions): DeepgramSTT | WhisperSTT | null;
+  /** Create an STT instance appropriate for this provider's audio format.
+   *  Returns any of the supported STT adapters (DeepgramSTT, WhisperSTT,
+   *  CartesiaSTT, SonioxSTT, AssemblyAISTT) or null when no STT is configured. */
+  createStt(agent: AgentOptions): Promise<STTAdapter | null>;
   /** Query actual telephony costs after call ends. */
   queryTelephonyCost(metricsAcc: CallMetricsAccumulator, callId: string): Promise<void>;
 }
@@ -136,8 +137,8 @@ export class StreamHandler {
   private streamSid = '';
   private callId = '';
   private adapter: AIAdapter | null = null;
-  private stt: DeepgramSTT | WhisperSTT | null = null;
-  private tts: ElevenLabsTTS | OpenAITTS | null = null;
+  private stt: STTAdapter | null = null;
+  private tts: TTSAdapter | null = null;
   private isSpeaking = false;
   private llmLoop: LLMLoop | null = null;
   private chunkCount = 0;
@@ -163,10 +164,15 @@ export class StreamHandler {
 
     this.history = createHistoryManager(200);
 
-    const sttProviderName = deps.agent.stt?.provider || (deps.agent.deepgramKey ? 'deepgram' : undefined);
-    const ttsProviderName = deps.agent.tts?.provider === 'elevenlabs' ? 'elevenlabs'
-      : deps.agent.tts?.provider === 'openai' ? 'openai_tts'
-        : (deps.agent.elevenlabsKey ? 'elevenlabs' : undefined);
+    // v0.5.0+: ``agent.stt`` / ``agent.tts`` are always STTAdapter / TTSAdapter
+    // instances (or undefined). Derive a provider name from the class for
+    // metrics; callers can identify providers by constructor name.
+    const sttProviderName = deps.agent.stt
+      ? (deps.agent.stt.constructor?.name ?? 'custom')
+      : undefined;
+    const ttsProviderName = deps.agent.tts
+      ? (deps.agent.tts.constructor?.name ?? 'custom')
+      : undefined;
     const providerMode = deps.agent.provider ?? 'openai_realtime';
 
     this.metricsAcc = new CallMetricsAccumulator({
@@ -387,20 +393,10 @@ export class StreamHandler {
   private async initPipeline(resolvedPrompt: string): Promise<void> {
     const label = this.deps.bridge.label;
 
-    this.stt = this.deps.bridge.createStt(this.deps.agent);
+    this.stt = await this.deps.bridge.createStt(this.deps.agent);
 
-    // Create TTS: prefer agent.tts config, fall back to agent.elevenlabsKey
-    if (this.deps.agent.tts) {
-      if (this.deps.agent.tts.provider === 'elevenlabs') {
-        this.tts = new ElevenLabsTTS(this.deps.agent.tts.apiKey, this.deps.agent.tts.voice ?? '21m00Tcm4TlvDq8ikWAM');
-      }
-      if (this.deps.agent.tts.provider === 'openai') {
-        this.tts = new OpenAITTS(this.deps.agent.tts.apiKey, this.deps.agent.tts.voice ?? 'alloy');
-      }
-    } else if (this.deps.agent.elevenlabsKey) {
-      // ElevenLabsTTS resolves display names ("rachel") to voice IDs.
-      this.tts = new ElevenLabsTTS(this.deps.agent.elevenlabsKey, this.deps.agent.voice || 'rachel');
-    }
+    // v0.5.0+: TTS is a pre-instantiated adapter on ``agent.tts`` or null.
+    this.tts = await createTTS(this.deps.agent);
 
     if (!this.stt) {
       getLogger().info(`Pipeline mode (${label}): no STT configured`);
@@ -987,11 +983,13 @@ export class StreamHandler {
 
     await this.deps.bridge.queryTelephonyCost(this.metricsAcc, this.callId);
 
-    // Deepgram cost query
-    const deepgramKey = this.deps.agent.deepgramKey;
-    const deepgramRequestId = (this.stt as DeepgramSTT | null)?.requestId;
-    if (deepgramKey && deepgramRequestId) {
-      await queryDeepgramCost(this.metricsAcc, deepgramKey, deepgramRequestId);
+    // Deepgram cost query — pull the key off the adapter when STT is a
+    // DeepgramSTT instance.
+    if (this.stt instanceof DeepgramSTT && this.stt.requestId) {
+      const dgKey = (this.stt as unknown as { apiKey?: string }).apiKey;
+      if (dgKey) {
+        await queryDeepgramCost(this.metricsAcc, dgKey, this.stt.requestId);
+      }
     }
 
     const finalMetrics = this.metricsAcc.endCall();

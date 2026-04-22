@@ -1,6 +1,6 @@
 ---
 title: "Agents"
-description: "Configure voice AI agents with system prompts, tools, providers, and guardrails."
+description: "Configure voice AI agents with system prompts, tools, engines, and guardrails."
 ---
 
 # Agent Configuration
@@ -9,14 +9,53 @@ An `Agent` defines how your voice AI behaves: what it says, how it sounds, what 
 
 ## Creating an Agent
 
-Use the `phone.agent()` factory method to create an agent in local mode:
+Use the `phone.agent()` factory method. The simplest form leans on env-var fallback and a default engine (`OpenAIRealtime`):
 
 ```python
+from patter import Patter, Twilio
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")   # TWILIO_* from env
+
 agent = phone.agent(
     system_prompt="You are a customer support agent for Acme Corp.",
-    voice="alloy",
-    model="gpt-4o-mini-realtime-preview",
     first_message="Hello! How can I help you today?",
+)   # defaults to engine=OpenAIRealtime(), reads OPENAI_API_KEY
+```
+
+To pick the engine explicitly (flat imports):
+
+```python
+from patter import OpenAIRealtime
+
+agent = phone.agent(
+    engine=OpenAIRealtime(voice="nova"),
+    system_prompt="You are a customer support agent for Acme Corp.",
+)
+```
+
+To use pipeline mode (STT + your own LLM via `on_message` + TTS):
+
+```python
+from patter import DeepgramSTT, ElevenLabsTTS
+
+agent = phone.agent(
+    stt=DeepgramSTT(endpointing_ms=80),        # DEEPGRAM_API_KEY from env
+    tts=ElevenLabsTTS(voice_id="rachel"),      # ELEVENLABS_API_KEY from env
+    system_prompt="You are a helpful assistant.",
+    first_message="Hi!",
+)
+```
+
+The same pipeline using namespaced imports:
+
+```python
+from patter.stt import deepgram
+from patter.tts import elevenlabs
+
+agent = phone.agent(
+    stt=deepgram.STT(endpointing_ms=80),
+    tts=elevenlabs.TTS(voice_id="rachel"),
+    system_prompt="You are a helpful assistant.",
 )
 ```
 
@@ -24,21 +63,22 @@ agent = phone.agent(
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `system_prompt` | `str` | *required* | Instructions that define the agent's behavior and personality. |
-| `voice` | `str` | `"alloy"` | TTS voice name (e.g., `"alloy"`, `"echo"`, `"shimmer"`). |
-| `model` | `str` | `"gpt-4o-mini-realtime-preview"` | OpenAI Realtime model ID. |
-| `language` | `str` | `"en"` | BCP-47 language code (e.g., `"en"`, `"es"`, `"it"`). |
+| `system_prompt` | `str` | *required* | Instructions that define the agent's behavior. |
+| `engine` | `OpenAIRealtime \| ElevenLabsConvAI \| None` | `None` → OpenAI Realtime | End-to-end engine. See [Engines](/python-sdk/engines). Omit for pipeline mode. |
+| `stt` | `STTProvider \| None` | `None` | STT instance for pipeline mode (`DeepgramSTT()`, `CartesiaSTT()`, ...). See [STT](/python-sdk/stt). |
+| `tts` | `TTSProvider \| None` | `None` | TTS instance for pipeline mode (`ElevenLabsTTS()`, `RimeTTS()`, ...). See [TTS](/python-sdk/tts). |
+| `voice` | `str` | `"alloy"` | Voice name. Usually inferred from the engine or TTS instance. |
+| `model` | `str` | `"gpt-4o-mini-realtime-preview"` | Model ID for OpenAI Realtime. Usually inferred from the engine. |
+| `language` | `str` | `"en"` | BCP-47 language code. |
 | `first_message` | `str` | `""` | If set, the agent speaks this immediately when a call connects. |
-| `tools` | `list[dict] \| None` | `None` | List of tool definitions for function calling. See [Tools](/python-sdk/tools). |
-| `provider` | `str` | `"openai_realtime"` | Voice AI provider mode. One of `"openai_realtime"`, `"elevenlabs_convai"`, or `"pipeline"`. |
-| `stt` | `STTConfig \| None` | `None` | STT provider config for pipeline mode. Use `Patter.deepgram()` or `Patter.whisper()`. |
-| `tts` | `TTSConfig \| None` | `None` | TTS provider config for pipeline mode. Use `Patter.elevenlabs()` or `Patter.openai_tts()`. |
+| `tools` | `list[Tool \| dict] \| None` | `None` | Tool definitions. See [Tools](/python-sdk/tools). |
 | `variables` | `dict \| None` | `None` | Dynamic variable substitutions for `{placeholder}` patterns in the system prompt. |
-| `guardrails` | `list \| None` | `None` | Output guardrails created with `Patter.guardrail()`. See [Guardrails](/python-sdk/guardrails). |
+| `guardrails` | `list[Guardrail \| dict] \| None` | `None` | Output guardrails. See [Guardrails](/python-sdk/guardrails). |
+| `hooks` | `PipelineHooks \| None` | `None` | Optional pipeline hooks for interception/instrumentation. |
 
 ## Agent Dataclass
 
-The `Agent` is a frozen (immutable) dataclass. You can also import and construct it directly:
+`Agent` is a frozen (immutable) dataclass. You can construct it directly when you need a dataclass outside of `phone.agent()`:
 
 ```python
 from patter import Agent
@@ -51,7 +91,7 @@ agent = Agent(
 ```
 
 <Note>
-  When using local mode, prefer `phone.agent()` over constructing `Agent` directly. The factory method validates that the required provider keys are configured.
+Prefer `phone.agent()` over constructing `Agent` directly — the factory method validates credentials, unpacks the engine/STT/TTS instances, and surfaces clear errors up front.
 </Note>
 
 ## System Prompt
@@ -73,7 +113,7 @@ Rules:
 
 ## Dynamic Variables
 
-Use `{placeholder}` syntax in the system prompt to inject dynamic values at call start. Variable values are limited to 500 characters each.
+Use `{placeholder}` syntax in the system prompt to inject dynamic values at call start. Values are limited to 500 characters each.
 
 ```python
 agent = phone.agent(
@@ -88,11 +128,9 @@ Greet them by name and help resolve their issue.""",
 )
 ```
 
-Variables are substituted before the prompt is sent to the AI model. This lets you personalize each call without creating a new agent.
-
 ## First Message
 
-When `first_message` is set, the agent speaks it immediately when a call connects, before waiting for the caller to speak:
+When `first_message` is set, the agent speaks it immediately when a call connects:
 
 ```python
 agent = phone.agent(
@@ -101,51 +139,48 @@ agent = phone.agent(
 )
 ```
 
-If left empty, the agent waits for the caller to speak first.
-
 ## Voice Selection
 
-The `voice` parameter controls the TTS voice. Available voices depend on the provider:
+Voice is usually inferred from the engine or TTS instance — e.g. `OpenAIRealtime(voice="nova")` or `ElevenLabsTTS(voice_id="rachel")`. Available voices depend on the provider.
 
 <Tabs>
   <Tab title="OpenAI Realtime">
     `"alloy"`, `"echo"`, `"fable"`, `"onyx"`, `"nova"`, `"shimmer"`
   </Tab>
   <Tab title="ElevenLabs">
-    Use any ElevenLabs voice ID or name (e.g., `"rachel"`, `"adam"`).
+    Any ElevenLabs voice ID or name (e.g., `"rachel"`, `"adam"`).
   </Tab>
   <Tab title="Pipeline">
-    Depends on the TTS provider configured via `tts` parameter.
+    Depends on the TTS provider instance (`ElevenLabsTTS`, `RimeTTS`, `LMNTTTS`, ...).
   </Tab>
 </Tabs>
 
-## Provider Modes
-
-The `provider` parameter selects the voice AI architecture:
+## Engine vs Pipeline Mode
 
 ```python
-# OpenAI Realtime (default) — end-to-end voice
+from patter import OpenAIRealtime, ElevenLabsConvAI, DeepgramSTT, ElevenLabsTTS
+
+# OpenAI Realtime (default engine) — end-to-end
 agent = phone.agent(
+    engine=OpenAIRealtime(),
     system_prompt="...",
-    provider="openai_realtime",
 )
 
 # ElevenLabs Conversational AI — natural voices
 agent = phone.agent(
+    engine=ElevenLabsConvAI(agent_id="agent_abc123"),
     system_prompt="...",
-    provider="elevenlabs_convai",
 )
 
-# Pipeline — custom STT + LLM + TTS
+# Pipeline — custom STT + TTS + on_message LLM
 agent = phone.agent(
+    stt=DeepgramSTT(),
+    tts=ElevenLabsTTS(voice_id="rachel"),
     system_prompt="...",
-    provider="pipeline",
-    stt=Patter.deepgram(api_key="dg_..."),
-    tts=Patter.elevenlabs(api_key="el_..."),
 )
 ```
 
-See [Providers](/python-sdk/providers) for full details on each mode.
+See [LLM](/python-sdk/llm) for a deeper comparison.
 
 ## Complete Example
 
@@ -153,34 +188,33 @@ See [Providers](/python-sdk/providers) for full details on each mode.
 import os
 import asyncio
 from dotenv import load_dotenv
-from patter import Patter
+from patter import Patter, Twilio, OpenAIRealtime, Tool, Guardrail
 
 load_dotenv()
 
 phone = Patter(
-    twilio_sid=os.environ["TWILIO_SID"],
-    twilio_token=os.environ["TWILIO_TOKEN"],
-    openai_key=os.environ["OPENAI_KEY"],
+    carrier=Twilio(),                               # TWILIO_* from env
     phone_number=os.environ["PHONE_NUMBER"],
     webhook_url=os.environ["WEBHOOK_URL"],
 )
 
+async def check_availability(args: dict, ctx: dict) -> dict:
+    # Hit your reservation system here.
+    return {"available": True, "rooms": 3}
+
 agent = phone.agent(
+    engine=OpenAIRealtime(voice="nova"),            # OPENAI_API_KEY from env
     system_prompt="""You are a booking assistant for {hotel_name}.
 Help guests check availability and make reservations.
 Be warm, professional, and concise.""",
-    voice="nova",
-    model="gpt-4o-mini-realtime-preview",
     language="en",
     first_message="Welcome to {hotel_name}! How can I assist you with your stay?",
-    variables={
-        "hotel_name": "The Grand Hotel",
-    },
+    variables={"hotel_name": "The Grand Hotel"},
     tools=[
-        {
-            "name": "check_availability",
-            "description": "Check room availability for given dates",
-            "parameters": {
+        Tool(
+            name="check_availability",
+            description="Check room availability for given dates",
+            parameters={
                 "type": "object",
                 "properties": {
                     "check_in": {"type": "string", "description": "Check-in date (YYYY-MM-DD)"},
@@ -189,11 +223,11 @@ Be warm, professional, and concise.""",
                 },
                 "required": ["check_in", "check_out"],
             },
-            "webhook_url": "https://api.example.com/availability",
-        },
+            handler=check_availability,
+        ),
     ],
     guardrails=[
-        Patter.guardrail(
+        Guardrail(
             name="No pricing promises",
             blocked_terms=["discount", "free upgrade", "complimentary"],
             replacement="I'd be happy to check our current rates for you.",

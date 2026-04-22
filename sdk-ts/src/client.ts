@@ -15,11 +15,13 @@ import type {
   Call,
   AgentOptions,
   ServeOptions,
-  Guardrail,
-  ToolDefinition,
 } from "./types";
-import { deepgram, whisper, elevenlabs, openaiTts, cartesia, rime, lmnt } from "./providers";
 import { EmbeddedServer } from "./server";
+import { Carrier as TwilioCarrier } from "./carriers/twilio";
+import { Carrier as TelnyxCarrier } from "./carriers/telnyx";
+import { Realtime as OpenAIRealtime } from "./engines/openai";
+import { ConvAI as ElevenLabsConvAI } from "./engines/elevenlabs";
+import { CloudflareTunnel, Static as StaticTunnel } from "./tunnels";
 
 const DEFAULT_BACKEND_URL = "wss://api.getpatter.com";
 const DEFAULT_REST_URL = "https://api.getpatter.com";
@@ -44,26 +46,33 @@ function ttsConfigToDict(cfg: TTSConfig): Record<string, unknown> {
   return out;
 }
 
+/** Internal local-mode state — holds carrier + resolved runtime settings. */
+export interface ResolvedLocalConfig {
+  carrier: TwilioCarrier | TelnyxCarrier;
+  phoneNumber: string;
+  webhookUrl?: string;
+  tunnel?: CloudflareTunnel | StaticTunnel | boolean;
+  openaiKey?: string;
+}
+
 export class Patter {
   readonly apiKey: string;
   private readonly backendUrl: string;
   private readonly restUrl: string;
   private readonly connection: PatterConnection;
   private readonly mode: 'cloud' | 'local';
-  private readonly localConfig: LocalOptions | null;
+  private localConfig: ResolvedLocalConfig | null;
   private embeddedServer: EmbeddedServer | null = null;
   private tunnelHandle: TunnelHandle | null = null;
 
   constructor(options: PatterOptions | LocalOptions) {
-    // Auto-detect local mode when a telephony credential is supplied and no
-    // cloud ``apiKey`` is present. Matches Python: ``Patter(twilio_sid=...)``
-    // implicitly selects local mode. Passing ``mode: 'local'`` explicitly
-    // still works and forces local mode.
+    // Local mode is selected when a ``carrier`` instance is present or the
+    // caller passes ``mode: 'local'`` explicitly.
+    const hasCarrier =
+      'carrier' in options &&
+      (options as LocalOptions).carrier !== undefined;
     const isLocal =
-      ('mode' in options && options.mode === 'local') ||
-      (!('apiKey' in options) &&
-        (('twilioSid' in options && (options as LocalOptions).twilioSid) ||
-          ('telnyxKey' in options && (options as LocalOptions).telnyxKey)));
+      ('mode' in options && options.mode === 'local') || hasCarrier;
 
     if (isLocal) {
       const local = options as LocalOptions;
@@ -71,20 +80,43 @@ export class Patter {
       if (!local.phoneNumber) {
         throw new Error('Local mode requires phoneNumber');
       }
-      if (!local.twilioSid && !local.telnyxKey) {
-        throw new Error('Local mode requires twilioSid or telnyxKey');
+      if (!local.carrier) {
+        throw new Error(
+          'Local mode requires a `carrier` instance. ' +
+            'Pass `carrier: new Twilio({...})` or `carrier: new Telnyx({...})`.',
+        );
       }
-      if (local.twilioSid && !local.twilioToken) {
-        throw new Error('twilioToken is required when using twilioSid');
+
+      const carrier = local.carrier;
+
+      // Tunnel normalization — StaticTunnel's hostname becomes webhookUrl.
+      const tunnel = local.tunnel;
+      let tunnelWebhookUrl: string | undefined;
+      if (tunnel instanceof StaticTunnel) {
+        if (local.webhookUrl) {
+          throw new Error(
+            'Cannot use both `tunnel: new StaticTunnel(...)` and `webhookUrl`. ' +
+              'Pick one.',
+          );
+        }
+        tunnelWebhookUrl = tunnel.hostname;
       }
 
       this.mode = 'local';
       // Normalize webhookUrl: strip any http(s):// prefix and trailing slash
       // so downstream callers that prefix 'wss://' or 'https://' don't double-scheme.
-      const normalizedLocal: LocalOptions = local.webhookUrl
-        ? { ...local, webhookUrl: local.webhookUrl.replace(/^https?:\/\//, '').replace(/\/$/, '') }
-        : local;
-      this.localConfig = normalizedLocal;
+      const rawWebhook = tunnelWebhookUrl ?? local.webhookUrl;
+      const normalizedWebhook = rawWebhook
+        ? rawWebhook.replace(/^https?:\/\//, '').replace(/\/$/, '')
+        : undefined;
+
+      this.localConfig = {
+        carrier,
+        phoneNumber: local.phoneNumber,
+        webhookUrl: normalizedWebhook,
+        tunnel: local.tunnel,
+        openaiKey: local.openaiKey,
+      };
       this.apiKey = '';
       this.backendUrl = DEFAULT_BACKEND_URL;
       this.restUrl = DEFAULT_REST_URL;
@@ -103,31 +135,66 @@ export class Patter {
   // === Local mode ===
 
   agent(opts: AgentOptions): AgentOptions {
-    // Validate provider
-    if (opts.provider) {
-      const valid = ['openai_realtime', 'elevenlabs_convai', 'pipeline'];
-      if (!valid.includes(opts.provider)) {
-        throw new Error(`provider must be one of: ${valid.join(', ')}. Got: '${opts.provider}'`);
+    let working: AgentOptions = { ...opts };
+
+    if (opts.engine) {
+      if (opts.provider) {
+        throw new Error(
+          "Cannot pass both `engine:` and `provider:`. Use one (engine is preferred).",
+        );
+      }
+      const engine = opts.engine;
+      if (engine instanceof OpenAIRealtime) {
+        working = {
+          ...working,
+          provider: 'openai_realtime',
+          model: working.model ?? engine.model,
+          voice: working.voice ?? engine.voice,
+        };
+        // Surface the engine's apiKey to local config so pipeline-mode
+        // ``LLMLoop`` and Realtime adapter have a key when no onMessage is set.
+        if (this.localConfig && !this.localConfig.openaiKey) {
+          this.localConfig = { ...this.localConfig, openaiKey: engine.apiKey };
+        }
+      } else if (engine instanceof ElevenLabsConvAI) {
+        working = {
+          ...working,
+          provider: 'elevenlabs_convai',
+          voice: working.voice ?? engine.voice,
+        };
+      } else {
+        throw new Error(
+          "Unknown engine. Expected OpenAIRealtime or ElevenLabsConvAI instance.",
+        );
       }
     }
 
-    // Validate tools
-    if (opts.tools) {
-      if (!Array.isArray(opts.tools)) {
+    // Validate provider
+    if (working.provider) {
+      const valid = ['openai_realtime', 'elevenlabs_convai', 'pipeline'];
+      if (!valid.includes(working.provider)) {
+        throw new Error(`provider must be one of: ${valid.join(', ')}. Got: '${working.provider}'`);
+      }
+    }
+
+    // Validate tools — must be Tool class instances (structurally compatible with
+    // ToolDefinition). Validation happens at the shape level.
+    if (working.tools) {
+      if (!Array.isArray(working.tools)) {
         throw new TypeError('tools must be an array');
       }
-      opts.tools.forEach((tool, i) => {
+      working.tools.forEach((tool, i) => {
         if (!tool.name) throw new Error(`tools[${i}] missing required 'name' field`);
         if (!tool.webhookUrl && !tool.handler) throw new Error(`tools[${i}] requires either 'webhookUrl' or 'handler'`);
       });
     }
 
     // Validate variables
-    if (opts.variables !== undefined && (typeof opts.variables !== 'object' || Array.isArray(opts.variables))) {
+    if (working.variables !== undefined && (typeof working.variables !== 'object' || Array.isArray(working.variables))) {
       throw new TypeError('variables must be an object');
     }
 
-    return { ...opts };
+    return working;
   }
 
   async serve(opts: ServeOptions): Promise<void> {
@@ -156,15 +223,22 @@ export class Patter {
       throw new Error(`agent.provider must be one of: ${validProviders.join(', ')}`);
     }
 
-    // Resolve webhookUrl: tunnel or explicit
+    // Resolve webhookUrl: tunnel or explicit. Static tunnels have already
+    // been normalized into webhookUrl by the constructor.
     let webhookUrl = this.localConfig.webhookUrl ?? '';
     const port = opts.port ?? 8000;
 
-    if (opts.tunnel && webhookUrl) {
+    const ctorTunnel = this.localConfig.tunnel;
+    const wantsCloudflaredFromServe = opts.tunnel === true;
+    const wantsCloudflaredFromCtor =
+      ctorTunnel === true || ctorTunnel instanceof CloudflareTunnel;
+    const wantsCloudflared = wantsCloudflaredFromServe || wantsCloudflaredFromCtor;
+
+    if (wantsCloudflared && webhookUrl) {
       throw new Error('Cannot use both tunnel: true and webhookUrl. Pick one.');
     }
 
-    if (opts.tunnel) {
+    if (wantsCloudflared) {
       const { startTunnel } = await import('./tunnel');
       this.tunnelHandle = await startTunnel(port);
       webhookUrl = this.tunnelHandle.hostname;
@@ -178,17 +252,33 @@ export class Patter {
       );
     }
 
+    const carrier = this.localConfig.carrier;
+    const telephonyProvider = carrier.kind === 'twilio' ? 'twilio' : 'telnyx';
+
+    // Auto-configure the carrier so inbound calls hit this server without
+    // manual Console setup. Mirrors Python's server.py start() flow.
+    const { autoConfigureCarrier } = await import('./carrier-config');
+    await autoConfigureCarrier({
+      telephonyProvider,
+      twilioSid: carrier.kind === 'twilio' ? carrier.accountSid : undefined,
+      twilioToken: carrier.kind === 'twilio' ? carrier.authToken : undefined,
+      telnyxKey: carrier.kind === 'telnyx' ? carrier.apiKey : undefined,
+      telnyxConnectionId: carrier.kind === 'telnyx' ? carrier.connectionId : undefined,
+      phoneNumber: this.localConfig.phoneNumber,
+      webhookHost: webhookUrl,
+    });
+
     this.embeddedServer = new EmbeddedServer(
       {
-        twilioSid: this.localConfig.twilioSid,
-        twilioToken: this.localConfig.twilioToken,
+        twilioSid: carrier.kind === 'twilio' ? carrier.accountSid : undefined,
+        twilioToken: carrier.kind === 'twilio' ? carrier.authToken : undefined,
         openaiKey: this.localConfig.openaiKey,
         phoneNumber: this.localConfig.phoneNumber,
         webhookUrl,
-        telephonyProvider: this.localConfig.telephonyProvider,
-        telnyxKey: this.localConfig.telnyxKey,
-        telnyxConnectionId: this.localConfig.telnyxConnectionId,
-        telnyxPublicKey: this.localConfig.telnyxPublicKey,
+        telephonyProvider,
+        telnyxKey: carrier.kind === 'telnyx' ? carrier.apiKey : undefined,
+        telnyxConnectionId: carrier.kind === 'telnyx' ? carrier.connectionId : undefined,
+        telnyxPublicKey: carrier.kind === 'telnyx' ? carrier.publicKey : undefined,
       },
       opts.agent,
       opts.onCallStart,
@@ -255,12 +345,12 @@ export class Patter {
       if (!this.localConfig) {
         throw new Error('local config missing');
       }
-      const { phoneNumber, webhookUrl, telephonyProvider } = this.localConfig;
+      const { phoneNumber, webhookUrl, carrier } = this.localConfig;
 
-      if (telephonyProvider === 'telnyx') {
+      if (carrier.kind === 'telnyx') {
         // Telnyx outbound call via Call Control API
-        const telnyxKey = this.localConfig.telnyxKey ?? '';
-        const connectionId = this.localConfig.telnyxConnectionId ?? '';
+        const telnyxKey = carrier.apiKey;
+        const connectionId = carrier.connectionId;
         const streamUrl =
           `wss://${webhookUrl}/ws/stream/${encodeURIComponent(localOpts.to)}` +
           `?caller=${encodeURIComponent(phoneNumber)}&callee=${encodeURIComponent(localOpts.to)}`;
@@ -305,9 +395,9 @@ export class Patter {
         return;
       }
 
-      // Default: Twilio
-      const twilioSid = this.localConfig.twilioSid ?? '';
-      const twilioToken = this.localConfig.twilioToken ?? '';
+      // Twilio
+      const twilioSid = carrier.accountSid;
+      const twilioToken = carrier.authToken;
       const statusCallbackUrl = `https://${webhookUrl}/webhooks/twilio/status`;
       const url = `https://api.twilio.com/2010-04-01/Accounts/${twilioSid}/Calls.json`;
       const params = new URLSearchParams({
@@ -448,79 +538,6 @@ export class Patter {
     if (!response.ok) throw new ProvisionError(`Failed to list calls: ${response.status}`);
     const data = await response.json() as Array<{ id: string; direction: string; caller: string; callee: string; started_at: string; ended_at: string | null; duration_seconds: number | null; status: string; transcript: Call['transcript'] }>;
     return data.map(c => ({ id: c.id, direction: c.direction, caller: c.caller, callee: c.callee, startedAt: c.started_at, endedAt: c.ended_at, durationSeconds: c.duration_seconds, status: c.status, transcript: c.transcript }));
-  }
-
-  // Provider helpers — mirror the Python classmethod factories so callers can
-  // write ``Patter.deepgram({ apiKey })`` without importing the top-level.
-  static deepgram = deepgram;
-  static whisper = whisper;
-  static elevenlabs = elevenlabs;
-  static openaiTts = openaiTts;
-  static cartesia = cartesia;
-  static rime = rime;
-  static lmnt = lmnt;
-
-  static guardrail(opts: {
-    name: string;
-    blockedTerms?: string[];
-    check?: (text: string) => boolean;
-    replacement?: string;
-  }): Guardrail {
-    return {
-      name: opts.name,
-      blockedTerms: opts.blockedTerms,
-      check: opts.check,
-      replacement: opts.replacement ?? "I'm sorry, I can't respond to that.",
-    };
-  }
-
-  /**
-   * Create a tool definition for use with `agent({ tools: [...] })`.
-   *
-   * Either `handler` (a function) or `webhookUrl` must be provided.
-   *
-   * @param opts.name - Tool name (visible to the LLM).
-   * @param opts.description - What the tool does (visible to the LLM).
-   * @param opts.parameters - JSON Schema for tool arguments.
-   * @param opts.handler - Async function called in-process when the LLM invokes the tool.
-   * @param opts.webhookUrl - URL to POST to when the LLM invokes the tool.
-   *
-   * @example
-   * ```ts
-   * phone.agent({
-   *   systemPrompt: 'You are a pizza bot.',
-   *   tools: [
-   *     Patter.tool({
-   *       name: 'check_menu',
-   *       description: 'Check available menu items',
-   *       handler: async (args) => JSON.stringify({ items: ['margherita'] }),
-   *     }),
-   *   ],
-   * });
-   * ```
-   */
-  static tool(opts: {
-    name: string;
-    description?: string;
-    parameters?: Record<string, unknown>;
-    handler?: (args: Record<string, unknown>, context: Record<string, unknown>) => Promise<string>;
-    webhookUrl?: string;
-  }): ToolDefinition {
-    if (!opts.handler && !opts.webhookUrl) {
-      throw new Error('tool() requires either handler or webhookUrl');
-    }
-    const t: ToolDefinition = {
-      name: opts.name,
-      description: opts.description ?? '',
-      parameters: opts.parameters ?? { type: 'object', properties: {} },
-    };
-    if (opts.handler) {
-      t.handler = opts.handler;
-    }
-    if (opts.webhookUrl) {
-      t.webhookUrl = opts.webhookUrl;
-    }
-    return t;
   }
 
   // Internal

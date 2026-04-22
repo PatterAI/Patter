@@ -13,7 +13,7 @@ Guardrails let you intercept and filter AI responses before they are converted t
 const agent = phone.agent({
   systemPrompt: "You are a helpful assistant.",
   guardrails: [
-    Patter.guardrail({
+    guardrail({
       name: "profanity_filter",
       blockedTerms: ["badword1", "badword2"],
       replacement: "I apologize, but I cannot respond to that.",
@@ -39,10 +39,10 @@ interface Guardrail {
 
 ## Creating Guardrails
 
-Use the `Patter.guardrail()` static method for convenience:
+Use the `guardrail()` static method for convenience:
 
 ```typescript
-const guard = Patter.guardrail({
+const guard = guardrail({
   name: "compliance",
   blockedTerms: ["guarantee", "promise"],
   replacement: "I need to be careful with my wording. Let me rephrase that.",
@@ -56,7 +56,7 @@ The default `replacement` is `"I'm sorry, I can't respond to that."` when not sp
 Blocked terms are matched case-insensitively against the AI response text:
 
 ```typescript
-Patter.guardrail({
+guardrail({
   name: "competitor_mentions",
   blockedTerms: ["competitor_a", "competitor_b", "rival_corp"],
   replacement: "I can only speak about our own products and services.",
@@ -68,7 +68,7 @@ Patter.guardrail({
 For more complex filtering, use a `check` function that receives the full response text and returns `true` to block it:
 
 ```typescript
-Patter.guardrail({
+guardrail({
   name: "length_limit",
   check: (text) => text.length > 500,
   replacement: "Let me give you a shorter answer.",
@@ -80,7 +80,7 @@ Patter.guardrail({
 A guardrail triggers if either `blockedTerms` match or the `check` function returns `true`. Blocked terms are evaluated first:
 
 ```typescript
-Patter.guardrail({
+guardrail({
   name: "content_policy",
   blockedTerms: ["prohibited_term"],
   check: (text) => {
@@ -99,16 +99,16 @@ You can stack multiple guardrails. They are evaluated in order, and the first ma
 const agent = phone.agent({
   systemPrompt: "You are a helpful assistant.",
   guardrails: [
-    Patter.guardrail({
+    guardrail({
       name: "profanity",
       blockedTerms: ["badword"],
     }),
-    Patter.guardrail({
+    guardrail({
       name: "pii_protection",
       check: (text) => /\b\d{3}-\d{2}-\d{4}\b/.test(text), // SSN pattern
       replacement: "I cannot share personal identification numbers.",
     }),
-    Patter.guardrail({
+    guardrail({
       name: "compliance",
       blockedTerms: ["guarantee", "warranty"],
       replacement: "I need to be careful about making guarantees.",

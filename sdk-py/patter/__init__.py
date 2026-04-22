@@ -41,7 +41,38 @@ from patter.exceptions import PatterError, PatterConnectionError, Authentication
 from patter.services.sentence_chunker import SentenceChunker
 from patter.services.pipeline_hooks import PipelineHookExecutor
 from patter.services.text_transforms import filter_markdown, filter_emoji, filter_for_tts
-from patter.services.tool_decorator import tool
+
+# New v0.5.0 public API (Phase 1a). ``tool`` here is the unified factory that
+# supports both decorator use (``@tool`` on a typed function) and keyword
+# construction (``tool(name=..., handler=...)``). It supersedes the historical
+# :func:`patter.services.tool_decorator.tool` at the top level, but that module
+# remains importable for users that already depend on the legacy dict shape.
+from patter._public_api import Tool, tool, guardrail
+
+# Flat aliases for the 4-line quickstart.
+from patter.carriers.twilio import Carrier as Twilio
+from patter.carriers.telnyx import Carrier as Telnyx
+from patter.engines.openai import Realtime as OpenAIRealtime
+from patter.engines.elevenlabs import ConvAI as ElevenLabsConvAI
+
+# STT flat aliases — parity with sdk-ts/src/index.ts.
+from patter.stt.deepgram import STT as DeepgramSTT
+from patter.stt.whisper import STT as WhisperSTT
+from patter.stt.cartesia import STT as CartesiaSTT
+from patter.stt.soniox import STT as SonioxSTT
+from patter.stt.speechmatics import STT as SpeechmaticsSTT
+from patter.stt.assemblyai import STT as AssemblyAISTT
+
+# TTS flat aliases.
+from patter.tts.elevenlabs import TTS as ElevenLabsTTS
+from patter.tts.openai import TTS as OpenAITTS
+from patter.tts.cartesia import TTS as CartesiaTTS
+from patter.tts.rime import TTS as RimeTTS
+from patter.tts.lmnt import TTS as LMNTTTS
+
+# Tunnel flat aliases.
+from patter.tunnels import CloudflareTunnel, Ngrok, Static as StaticTunnel
+
 from patter.services.fallback_provider import (
     FallbackLLMProvider,
     AllProvidersFailedError,
@@ -88,6 +119,26 @@ __all__ = [
     "filter_emoji",
     "filter_for_tts",
     "tool",
+    "Tool",
+    "guardrail",
+    "Twilio",
+    "Telnyx",
+    "OpenAIRealtime",
+    "ElevenLabsConvAI",
+    "DeepgramSTT",
+    "WhisperSTT",
+    "CartesiaSTT",
+    "SonioxSTT",
+    "SpeechmaticsSTT",
+    "AssemblyAISTT",
+    "ElevenLabsTTS",
+    "OpenAITTS",
+    "CartesiaTTS",
+    "RimeTTS",
+    "LMNTTTS",
+    "CloudflareTunnel",
+    "Ngrok",
+    "StaticTunnel",
     "FallbackLLMProvider",
     "AllProvidersFailedError",
     "PartialStreamError",

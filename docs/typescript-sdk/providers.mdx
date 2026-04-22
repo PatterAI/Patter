@@ -1,129 +1,122 @@
 ---
-title: "Providers"
-description: "Voice providers: OpenAI Realtime, ElevenLabs ConvAI, and custom pipelines."
+title: "Voice Providers"
+description: "Choose between end-to-end engines and pipeline mode with pluggable STT/TTS."
 ---
 
-# Providers
+# Voice Providers
 
-Patter supports three provider modes that control how audio is processed and AI responses are generated.
+Patter supports two voice AI architectures. Each offers different tradeoffs between latency, voice quality, and customization.
 
-## OpenAI Realtime (Default)
+## Engine Mode (default)
 
-The default provider uses OpenAI's Realtime API for speech-to-speech processing. Audio streams directly between the phone and OpenAI with minimal latency.
+Pass an `engine` instance to `phone.agent()`. The engine collapses STT, LLM, and TTS into a single streaming provider — lowest latency, fewest moving parts.
+
+### OpenAI Realtime
 
 ```typescript
+import { Patter, Twilio, OpenAIRealtime } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
 const agent = phone.agent({
+  engine: new OpenAIRealtime({ voice: "alloy" }),           // OPENAI_API_KEY from env
   systemPrompt: "You are a helpful assistant.",
-  provider: "openai_realtime",
-  model: "gpt-4o-mini-realtime-preview",
-  voice: "alloy",
 });
 ```
 
-**Supported voices**: `alloy`, `ash`, `ballad`, `coral`, `echo`, `sage`, `shimmer`, `verse`
+**Supported voices:** `alloy`, `ash`, `ballad`, `coral`, `echo`, `sage`, `shimmer`, `verse`
 
-<Info>
-  OpenAI Realtime is a speech-to-speech model. It handles STT, reasoning, and TTS in a single API call for the lowest latency.
-</Info>
+### ElevenLabs Conversational AI
 
-## ElevenLabs Conversational AI
-
-Uses ElevenLabs' Conversational AI platform. Requires an ElevenLabs agent created in their dashboard.
+Uses an agent configured in the ElevenLabs dashboard.
 
 ```typescript
+import { Patter, Twilio, ElevenLabsConvAI } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
 const agent = phone.agent({
-  systemPrompt: "You are a helpful assistant.",
-  provider: "elevenlabs_convai",
-  elevenlabsKey: process.env.ELEVENLABS_KEY,
-  elevenlabsAgentId: process.env.ELEVENLABS_AGENT_ID,
-  voice: "21m00Tcm4TlvDq8ikWAM",
-  language: "en",
+  engine: new ElevenLabsConvAI({ agentId: "agent_abc123" }),   // ELEVENLABS_API_KEY + ELEVENLABS_AGENT_ID from env
+  systemPrompt: "You are a warm and friendly concierge.",
 });
 ```
 
-| Parameter | Description |
-|-----------|-------------|
-| `elevenlabsKey` | Your ElevenLabs API key. |
-| `elevenlabsAgentId` | The agent ID from the ElevenLabs dashboard. |
-| `voice` | ElevenLabs voice ID. |
+See [Engines](/typescript-sdk/engines) for the full reference.
+
+---
 
 ## Pipeline Mode
 
-Pipeline mode gives you full control over the STT, LLM, and TTS stages independently. Use it when you want to mix providers or add custom processing between stages.
+Build a custom voice pipeline by combining a separate STT, LLM, and TTS. Omit `engine` and pass `stt` and `tts` instead. Patter also exposes an `onMessage` hook so you can swap in any LLM you like.
 
 ```typescript
+import { Patter, Twilio, DeepgramSTT, ElevenLabsTTS } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
 const agent = phone.agent({
+  stt: new DeepgramSTT({ endpointingMs: 80 }),              // DEEPGRAM_API_KEY from env
+  tts: new ElevenLabsTTS({ voiceId: "rachel" }),            // ELEVENLABS_API_KEY from env
   systemPrompt: "You are a helpful assistant.",
-  provider: "pipeline",
-  stt: Patter.deepgram({ apiKey: process.env.DEEPGRAM_KEY! }),
-  tts: Patter.elevenlabs({ apiKey: process.env.ELEVENLABS_KEY!, voice: "rachel" }),
 });
 
 await phone.serve({
   agent,
-  onMessage: async (data) => {
+  onMessage: async ({ text }) => {
     // Custom LLM logic — return the text to be spoken
-    const transcript = data.text as string;
-    const response = await myCustomLLM(transcript);
-    return response;
+    return await myCustomLLM(text);
   },
 });
 ```
 
-In pipeline mode, the `onMessage` callback receives the user's transcript and must return the text for TTS.
+### Requirements
 
-## STT Factory Functions
+Pipeline mode needs both an STT and a TTS instance. If you rely on env vars only, `phone.agent()` raises a clear error at construction time.
 
-Create STT configurations using static factory methods:
+---
 
-### Patter.deepgram()
+## STT Providers
 
-```typescript
-const stt = Patter.deepgram({
-  apiKey: process.env.DEEPGRAM_KEY!,
-  language: "en", // optional, defaults to "en"
-});
-```
-
-### Patter.whisper()
+All STT classes are instantiated directly and read their API key from a matching env var when omitted.
 
 ```typescript
-const stt = Patter.whisper({
-  apiKey: process.env.OPENAI_KEY!,
-  language: "en", // optional, defaults to "en"
-});
+import { DeepgramSTT, WhisperSTT, CartesiaSTT, AssemblyAISTT, SonioxSTT } from "getpatter";
+
+new DeepgramSTT({ endpointingMs: 80 });               // DEEPGRAM_API_KEY
+new WhisperSTT({ language: "es" });                   // OPENAI_API_KEY
+new CartesiaSTT({ language: "en", sampleRate: 16000 }); // CARTESIA_API_KEY
+new AssemblyAISTT();                                  // ASSEMBLYAI_API_KEY
+new SonioxSTT();                                      // SONIOX_API_KEY
 ```
 
-## TTS Factory Functions
+The namespaced equivalents live under `getpatter/stt/*` (e.g. `import * as deepgram from "getpatter/stt/deepgram"; new deepgram.STT(...)`). See the dedicated [STT page](/typescript-sdk/stt) for the full parameter tables.
 
-Create TTS configurations using static factory methods:
+---
 
-### Patter.elevenlabs()
+## TTS Providers
 
 ```typescript
-const tts = Patter.elevenlabs({
-  apiKey: process.env.ELEVENLABS_KEY!,
-  voice: "rachel", // optional, defaults to "rachel"
-});
+import { ElevenLabsTTS, OpenAITTS, CartesiaTTS, RimeTTS, LMNTTTS } from "getpatter";
+
+new ElevenLabsTTS({ voiceId: "rachel" });             // ELEVENLABS_API_KEY
+new OpenAITTS({ voice: "nova" });                     // OPENAI_API_KEY
+new CartesiaTTS({ voice: "f786b574-..." });           // CARTESIA_API_KEY
+new RimeTTS({ model: "arcana", speaker: "astra" });   // RIME_API_KEY
+new LMNTTTS({ model: "blizzard", voice: "leah" });    // LMNT_API_KEY
 ```
 
-### Patter.openaiTts()
-
-```typescript
-const tts = Patter.openaiTts({
-  apiKey: process.env.OPENAI_KEY!,
-  voice: "alloy", // optional, defaults to "alloy"
-});
-```
+The namespaced equivalents live under `getpatter/tts/*` (e.g. `import * as elevenlabs from "getpatter/tts/elevenlabs"; new elevenlabs.TTS(...)`). See the dedicated [TTS page](/typescript-sdk/tts) for the full parameter tables.
 
 <Note>
-  OpenAI TTS returns 24kHz PCM audio, which the SDK automatically resamples to 16kHz for telephony.
+OpenAI TTS returns 24 kHz PCM audio, which the SDK automatically resamples to 16 kHz for telephony.
 </Note>
+
+---
 
 ## Provider Comparison
 
-| Feature | OpenAI Realtime | ElevenLabs ConvAI | Pipeline |
-|---------|----------------|-------------------|----------|
+| Feature | `engine: OpenAIRealtime` | `engine: ElevenLabsConvAI` | Pipeline |
+|---------|--------------------------|-----------------------------|----------|
 | Latency | Lowest | Low | Variable |
 | Voice quality | High | Very high | Depends on TTS |
 | Custom LLM | No | No | Yes |

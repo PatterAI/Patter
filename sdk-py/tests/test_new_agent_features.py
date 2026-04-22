@@ -6,9 +6,24 @@ import json
 
 import pytest
 
-from patter import Patter, CallControl
+from patter import (
+    CallControl,
+    OpenAIRealtime,
+    Patter,
+    Tool,
+    Twilio,
+    tool,
+)
 from patter.models import Agent, CallControl, STTConfig, TTSConfig
 from patter.services.tool_executor import ToolExecutor
+
+
+def _local_phone():
+    return Patter(
+        carrier=Twilio(account_sid="AC" + "a" * 32, auth_token="test"),
+        phone_number="+15550001234",
+        webhook_url="test.ngrok.io",
+    )
 
 
 # ── Local Function Tools ──
@@ -17,62 +32,53 @@ from patter.services.tool_executor import ToolExecutor
 class TestLocalFunctionTools:
     """Test that tools accept handler (Python callable) instead of webhook_url."""
 
-    def test_tool_helper_with_handler(self):
+    def test_tool_factory_with_handler(self):
         def my_handler(args, ctx):
             return {"result": "ok"}
 
-        tool = Patter.tool(
+        t = tool(
             name="lookup",
             description="Look something up",
             parameters={"type": "object", "properties": {"q": {"type": "string"}}},
             handler=my_handler,
         )
-        assert tool["name"] == "lookup"
-        assert tool["handler"] is my_handler
-        assert "webhook_url" not in tool
+        assert isinstance(t, Tool)
+        assert t.name == "lookup"
+        assert t.handler is my_handler
+        assert t.webhook_url == ""
 
-    def test_tool_helper_with_webhook(self):
-        tool = Patter.tool(
+    def test_tool_factory_with_webhook(self):
+        t = tool(
             name="lookup",
             description="Look something up",
             webhook_url="https://example.com/hook",
         )
-        assert tool["webhook_url"] == "https://example.com/hook"
-        assert "handler" not in tool
+        assert t.webhook_url == "https://example.com/hook"
+        assert t.handler is None
 
-    def test_tool_helper_requires_handler_or_webhook(self):
-        with pytest.raises(ValueError, match="handler or webhook_url"):
-            Patter.tool(name="noop", description="nothing")
+    def test_tool_factory_requires_handler_or_webhook(self):
+        with pytest.raises(ValueError, match="handler.*webhook_url|webhook_url.*handler"):
+            tool(name="noop", description="nothing")
 
     def test_agent_accepts_handler_tool(self):
-        phone = Patter(
-            twilio_sid="AC" + "a" * 32,
-            twilio_token="test",
-            openai_key="sk-test",
-            phone_number="+15550001234",
-            webhook_url="test.ngrok.io",
-        )
+        phone = _local_phone()
         agent = phone.agent(
+            engine=OpenAIRealtime(api_key="sk-test"),
             system_prompt="Test",
             tools=[
-                Patter.tool(name="fn", description="d", handler=lambda a, c: "ok"),
+                tool(name="fn", description="d", handler=lambda a, c: "ok"),
             ],
         )
         assert len(agent.tools) == 1
         assert "handler" in agent.tools[0]
 
-    def test_agent_rejects_tool_without_handler_or_webhook(self):
-        phone = Patter(
-            twilio_sid="AC" + "a" * 32,
-            twilio_token="test",
-            openai_key="sk-test",
-            phone_number="+15550001234",
-            webhook_url="test.ngrok.io",
-        )
-        with pytest.raises(ValueError, match="'webhook_url' or 'handler'"):
+    def test_agent_rejects_raw_dict_tool(self):
+        phone = _local_phone()
+        with pytest.raises(TypeError, match="Tool instance"):
             phone.agent(
+                engine=OpenAIRealtime(api_key="sk-test"),
                 system_prompt="Test",
-                tools=[{"name": "broken", "description": "no handler or webhook"}],
+                tools=[{"name": "legacy", "handler": lambda a, c: "ok"}],
             )
 
 

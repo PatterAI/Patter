@@ -3,6 +3,7 @@ import { EmbeddedServer } from '../src/server';
 import type { LocalConfig } from '../src/server';
 import type { AgentOptions, ServeOptions, LocalCallOptions } from '../src/types';
 import { Patter } from '../src/client';
+import { Twilio } from '../src/index';
 
 function makeConfig(overrides: Partial<LocalConfig> = {}): LocalConfig {
   return {
@@ -128,9 +129,7 @@ describe('Answering Machine Detection', () => {
 
   it('Patter.call in local mode accepts machineDetection option', async () => {
     const phone = new Patter({
-      mode: 'local',
-      twilioSid: 'AC_test',
-      twilioToken: 'tok_test',
+      carrier: new Twilio({ accountSid: 'AC_test', authToken: 'tok_test' }),
       openaiKey: 'sk_test',
       phoneNumber: '+15550000000',
       webhookUrl: 'abc.ngrok.io',
@@ -162,9 +161,7 @@ describe('Answering Machine Detection', () => {
 
   it('Patter.call without machineDetection does not add AMD params', async () => {
     const phone = new Patter({
-      mode: 'local',
-      twilioSid: 'AC_test',
-      twilioToken: 'tok_test',
+      carrier: new Twilio({ accountSid: 'AC_test', authToken: 'tok_test' }),
       openaiKey: 'sk_test',
       phoneNumber: '+15550000000',
       webhookUrl: 'abc.ngrok.io',
@@ -188,9 +185,7 @@ describe('Answering Machine Detection', () => {
 
   it('AMD callback URL contains the configured webhook host', async () => {
     const phone = new Patter({
-      mode: 'local',
-      twilioSid: 'AC_test',
-      twilioToken: 'tok_test',
+      carrier: new Twilio({ accountSid: 'AC_test', authToken: 'tok_test' }),
       openaiKey: 'sk_test',
       phoneNumber: '+15550000000',
       webhookUrl: 'my.ngrok.io',
@@ -299,9 +294,7 @@ describe('Voicemail Drop', () => {
 
   it('Patter.serve passes voicemailMessage to EmbeddedServer', async () => {
     const phone = new Patter({
-      mode: 'local',
-      twilioSid: 'AC_test',
-      twilioToken: 'tok_test',
+      carrier: new Twilio({ accountSid: 'AC_test', authToken: 'tok_test' }),
       openaiKey: 'sk_test',
       phoneNumber: '+15550000000',
       webhookUrl: 'abc.ngrok.io',

@@ -1,0 +1,130 @@
+---
+title: "TTS"
+description: "Text-to-speech providers supported by Patter."
+---
+
+# TTS (Text-to-Speech)
+
+TTS is used in **pipeline mode** to synthesize the agent's response audio. If you use an [engine](/typescript-sdk/engines) such as `OpenAIRealtime` or `ElevenLabsConvAI`, speech synthesis is handled internally by the engine.
+
+Each TTS ships as both a **namespaced** class (`import * as elevenlabs from "getpatter/tts/elevenlabs"` → `new elevenlabs.TTS()`) and a **flat alias** (`import { ElevenLabsTTS } from "getpatter"`). They are equivalent — the flat aliases are convenient for short examples, the namespaced form avoids name collisions when mixing providers.
+
+## Quickstart
+
+```typescript
+// npx tsx example.ts
+import { Patter, Twilio, DeepgramSTT, ElevenLabsTTS } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  stt: new DeepgramSTT(),                            // DEEPGRAM_API_KEY from env
+  tts: new ElevenLabsTTS({ voiceId: "rachel" }),     // ELEVENLABS_API_KEY from env
+  systemPrompt: "You are a helpful assistant.",
+});
+
+await phone.serve({ agent });
+```
+
+The same agent using namespaced imports:
+
+```typescript
+import * as deepgram from "getpatter/stt/deepgram";
+import * as elevenlabs from "getpatter/tts/elevenlabs";
+
+const agent = phone.agent({
+  stt: new deepgram.STT(),
+  tts: new elevenlabs.TTS({ voiceId: "rachel" }),
+  systemPrompt: "You are a helpful assistant.",
+});
+```
+
+## Supported providers
+
+| Flat import | Namespaced import | Env var |
+|-------------|-------------------|---------|
+| `ElevenLabsTTS` | `getpatter/tts/elevenlabs` → `TTS` | `ELEVENLABS_API_KEY` |
+| `OpenAITTS` | `getpatter/tts/openai` → `TTS` | `OPENAI_API_KEY` |
+| `CartesiaTTS` | `getpatter/tts/cartesia` → `TTS` | `CARTESIA_API_KEY` |
+| `RimeTTS` | `getpatter/tts/rime` → `TTS` | `RIME_API_KEY` |
+| `LMNTTTS` | `getpatter/tts/lmnt` → `TTS` | `LMNT_API_KEY` |
+
+## ElevenLabs
+
+Streaming HTTP TTS via ElevenLabs `eleven_turbo_v2_5`.
+
+```typescript
+import { ElevenLabsTTS } from "getpatter";
+
+const tts = new ElevenLabsTTS();                                  // reads ELEVENLABS_API_KEY
+const tts = new ElevenLabsTTS({ voiceId: "rachel" });
+const tts = new ElevenLabsTTS({ apiKey: "...", voiceId: "21m00Tcm4TlvDq8ikWAM", modelId: "eleven_turbo_v2_5" });
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `apiKey` | `string` | — | API key — reads from `ELEVENLABS_API_KEY` if omitted. |
+| `voiceId` | `string` | `"21m00Tcm4TlvDq8ikWAM"` | ElevenLabs voice ID (or name). |
+| `modelId` | `string` | `"eleven_turbo_v2_5"` | Model preset. |
+| `outputFormat` | `string` | `"pcm_16000"` | ElevenLabs output format. |
+
+## OpenAI
+
+```typescript
+import { OpenAITTS } from "getpatter";
+
+const tts = new OpenAITTS();                                      // reads OPENAI_API_KEY
+const tts = new OpenAITTS({ voice: "nova" });
+```
+
+<Note>OpenAI TTS returns audio at 24 kHz — Patter automatically resamples to 16 kHz for telephony.</Note>
+
+## Cartesia
+
+Raw PCM streaming via Cartesia's sonic-2 bytes endpoint. See [Cartesia setup](/typescript-sdk/providers/cartesia).
+
+```typescript
+import { CartesiaTTS } from "getpatter";
+
+const tts = new CartesiaTTS();                                    // reads CARTESIA_API_KEY
+const tts = new CartesiaTTS({ voice: "f786b574-daa5-4673-aa0c-cbe3e8534c02" });  // Katie
+```
+
+## Rime
+
+Arcana (high fidelity) and Mist (low latency) via Rime's HTTP endpoint. See [Rime setup](/typescript-sdk/providers/rime).
+
+```typescript
+import { RimeTTS } from "getpatter";
+
+const tts = new RimeTTS();                                        // reads RIME_API_KEY
+const tts = new RimeTTS({ model: "arcana", speaker: "astra" });
+const tts = new RimeTTS({ model: "mistv2", speaker: "cove", speedAlpha: 1.1, reduceLatency: true });
+```
+
+## LMNT
+
+Blizzard and Aurora via the LMNT HTTP API. See [LMNT setup](/typescript-sdk/providers/lmnt).
+
+```typescript
+import { LMNTTTS } from "getpatter";
+
+const tts = new LMNTTTS();                                        // reads LMNT_API_KEY
+const tts = new LMNTTTS({ model: "blizzard", voice: "leah" });
+```
+
+## Missing credentials
+
+Each class throws at construction time if no API key is resolved:
+
+```
+Error: ElevenLabs TTS requires an apiKey. Pass { apiKey: '...' } or
+set ELEVENLABS_API_KEY in the environment.
+```
+
+## What's Next
+
+<CardGroup cols={2}>
+  <Card title="STT" icon="microphone" href="/typescript-sdk/stt">Speech-to-text providers.</Card>
+  <Card title="LLM" icon="brain" href="/typescript-sdk/llm">Language model providers.</Card>
+</CardGroup>

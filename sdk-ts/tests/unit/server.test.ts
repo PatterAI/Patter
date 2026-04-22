@@ -174,7 +174,8 @@ describe('buildAIAdapter()', () => {
     expect(typeof (adapter as Record<string, unknown>).sendAudio).toBe('function');
   });
 
-  it('returns ElevenLabs adapter when provider is elevenlabs_convai', () => {
+  it('returns ElevenLabs adapter when engine is ElevenLabsConvAI', async () => {
+    const { ElevenLabsConvAI } = await import('../../src/index');
     const config: LocalConfig = {
       phoneNumber: '+15551234567',
       webhookUrl: 'example.com',
@@ -182,11 +183,22 @@ describe('buildAIAdapter()', () => {
     const agent: AgentOptions = {
       systemPrompt: 'Test',
       provider: 'elevenlabs_convai',
-      elevenlabsKey: 'el-key',
-      elevenlabsAgentId: 'agent-id',
+      engine: new ElevenLabsConvAI({ apiKey: 'el-key', agentId: 'agent-id' }),
     };
     const adapter = buildAIAdapter(config, agent);
     expect(adapter).toBeDefined();
+  });
+
+  it('buildAIAdapter throws without engine for elevenlabs_convai', () => {
+    const config: LocalConfig = {
+      phoneNumber: '+15551234567',
+      webhookUrl: 'example.com',
+    };
+    const agent: AgentOptions = {
+      systemPrompt: 'Test',
+      provider: 'elevenlabs_convai',
+    };
+    expect(() => buildAIAdapter(config, agent)).toThrow(/engine/);
   });
 
   it('injects transfer_call and end_call tools alongside agent tools', () => {

@@ -10,15 +10,47 @@ description: "Blizzard and Aurora TTS models via the LMNT HTTP API."
 ## Install
 
 ```bash
-pip install "patter[lmnt]"
+pip install "getpatter[lmnt]"
 ```
 
 ## Usage
 
 ```python
-from patter.providers.lmnt_tts import LMNTTTS
+# Namespaced import
+from patter.tts import lmnt
 
-tts = LMNTTTS(
+tts = lmnt.TTS()                                          # reads LMNT_API_KEY
+tts = lmnt.TTS(model="blizzard", voice="leah")
+
+# Flat alias (equivalent)
+from patter import LMNTTTS
+
+tts = LMNTTTS(model="blizzard", voice="leah")
+```
+
+In an agent:
+
+```python
+import asyncio
+from patter import Patter, Twilio, DeepgramSTT, LMNTTTS
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
+agent = phone.agent(
+    stt=DeepgramSTT(),                                    # DEEPGRAM_API_KEY from env
+    tts=LMNTTTS(model="blizzard", voice="leah"),          # LMNT_API_KEY from env
+    system_prompt="You are a helpful assistant.",
+)
+
+asyncio.run(phone.serve(agent))
+```
+
+## Low-level usage
+
+```python
+from patter.providers.lmnt_tts import LMNTTTS as _LowLevelTTS
+
+tts = _LowLevelTTS(
     api_key="...",          # or LMNT_API_KEY env var
     model="blizzard",
     voice="leah",
@@ -39,6 +71,7 @@ await tts.close()
 
 | Option | Default | Notes |
 |---|---|---|
+| `api_key` | `None` | Reads from `LMNT_API_KEY` when omitted. |
 | `model` | `"blizzard"` | `"blizzard"` or `"aurora"`. |
 | `voice` | `"leah"` | LMNT voice id. |
 | `language` | `None` | Auto-derived from model when omitted. |

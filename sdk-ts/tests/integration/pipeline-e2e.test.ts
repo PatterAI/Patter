@@ -117,13 +117,18 @@ function makeDeps(
   agentOverrides: Partial<AgentOptions> = {},
   depsOverrides: Partial<StreamHandlerDeps> = {},
 ): StreamHandlerDeps {
+  // Instantiate a TTS adapter via the mocked ElevenLabsTTS factory so the
+  // pipeline's synthesizeStream path is exercised.
+  const mockTts = new (ElevenLabsTTS as unknown as new (
+    key: string,
+    voice?: string,
+  ) => { synthesizeStream: (t: string) => AsyncIterable<Buffer> })('el-key', 'rachel');
   return {
     config: { openaiKey: 'test-openai-key' },
     agent: {
       systemPrompt: 'You are a test pipeline agent.',
       provider: 'pipeline',
-      deepgramKey: 'dg-key',
-      elevenlabsKey: 'el-key',
+      tts: mockTts,
       ...agentOverrides,
     },
     bridge,

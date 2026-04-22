@@ -8,8 +8,22 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from patter import Patter
+from patter import OpenAIRealtime, Patter, Twilio, tool
 from patter.models import Agent
+
+
+def _local_phone(webhook_url="abc.ngrok.io"):
+    """Build a local-mode Patter instance for the tests below."""
+    return Patter(
+        carrier=Twilio(account_sid="AC_test", auth_token="tok_test"),
+        phone_number="+15550000000",
+        webhook_url=webhook_url,
+    )
+
+
+def _local_agent(phone: Patter) -> Agent:
+    """Build an OpenAI Realtime agent for the tests below."""
+    return phone.agent(engine=OpenAIRealtime(api_key="sk_test"), system_prompt="Test")
 from patter.handlers.twilio_handler import _TRANSFER_CALL_TOOL, _END_CALL_TOOL
 
 
@@ -104,14 +118,8 @@ def test_embedded_server_recording_defaults_to_false():
 
 def test_serve_passes_recording_to_server():
     """Patter.serve() passes recording=True to EmbeddedServer."""
-    phone = Patter(
-        twilio_sid="AC_test",
-        twilio_token="tok_test",
-        openai_key="sk_test",
-        phone_number="+15550000000",
-        webhook_url="abc.ngrok.io",
-    )
-    agent = phone.agent(system_prompt="Test")
+    phone = _local_phone()
+    agent = _local_agent(phone)
 
     with patch("patter.server.EmbeddedServer") as MockServer:
         mock_instance = MagicMock()
@@ -155,14 +163,8 @@ def test_recording_webhook_endpoint_exists():
 
 def test_call_accepts_machine_detection_param():
     """Patter.call() accepts machine_detection=True without error in local mode."""
-    phone = Patter(
-        twilio_sid="AC_test",
-        twilio_token="tok_test",
-        openai_key="sk_test",
-        phone_number="+15550000000",
-        webhook_url="abc.ngrok.io",
-    )
-    agent = phone.agent(system_prompt="Test")
+    phone = _local_phone()
+    agent = _local_agent(phone)
     # Verify the parameter is accepted by the function signature
     import inspect
     sig = inspect.signature(phone.call)
@@ -171,14 +173,8 @@ def test_call_accepts_machine_detection_param():
 
 def test_machine_detection_adds_params_to_twilio_call():
     """machine_detection=True passes AMD params to TwilioAdapter.initiate_call."""
-    phone = Patter(
-        twilio_sid="AC_test",
-        twilio_token="tok_test",
-        openai_key="sk_test",
-        phone_number="+15550000000",
-        webhook_url="abc.ngrok.io",
-    )
-    agent = phone.agent(system_prompt="Test")
+    phone = _local_phone()
+    agent = _local_agent(phone)
 
     with patch("patter.providers.twilio_adapter.TwilioAdapter") as MockAdapter:
         mock_instance = MagicMock()
@@ -200,14 +196,8 @@ def test_machine_detection_adds_params_to_twilio_call():
 
 def test_amd_callback_url_uses_webhook_host():
     """AMD callback URL contains the configured webhook host."""
-    phone = Patter(
-        twilio_sid="AC_test",
-        twilio_token="tok_test",
-        openai_key="sk_test",
-        phone_number="+15550000000",
-        webhook_url="my.ngrok.io",
-    )
-    agent = phone.agent(system_prompt="Test")
+    phone = _local_phone(webhook_url="my.ngrok.io")
+    agent = _local_agent(phone)
 
     with patch("patter.providers.twilio_adapter.TwilioAdapter") as MockAdapter:
         mock_instance = MagicMock()
@@ -245,14 +235,8 @@ def test_amd_webhook_endpoint_exists():
 
 def test_machine_detection_false_no_extra_params():
     """machine_detection=False does not add AMD params to the call."""
-    phone = Patter(
-        twilio_sid="AC_test",
-        twilio_token="tok_test",
-        openai_key="sk_test",
-        phone_number="+15550000000",
-        webhook_url="abc.ngrok.io",
-    )
-    agent = phone.agent(system_prompt="Test")
+    phone = _local_phone()
+    agent = _local_agent(phone)
 
     with patch("patter.providers.twilio_adapter.TwilioAdapter") as MockAdapter:
         mock_instance = MagicMock()
@@ -324,13 +308,7 @@ def test_end_call_tool_injected_with_no_agent_tools():
 def test_voicemail_message_param_on_call():
     """Patter.call() accepts voicemail_message parameter."""
     import inspect
-    phone = Patter(
-        twilio_sid="AC_test",
-        twilio_token="tok_test",
-        openai_key="sk_test",
-        phone_number="+15550000000",
-        webhook_url="abc.ngrok.io",
-    )
+    phone = _local_phone()
     sig = inspect.signature(phone.call)
     assert "voicemail_message" in sig.parameters
 
@@ -338,13 +316,7 @@ def test_voicemail_message_param_on_call():
 def test_voicemail_message_param_on_serve():
     """Patter.serve() accepts voicemail_message parameter."""
     import inspect
-    phone = Patter(
-        twilio_sid="AC_test",
-        twilio_token="tok_test",
-        openai_key="sk_test",
-        phone_number="+15550000000",
-        webhook_url="abc.ngrok.io",
-    )
+    phone = _local_phone()
     sig = inspect.signature(phone.serve)
     assert "voicemail_message" in sig.parameters
 
@@ -385,14 +357,8 @@ def test_embedded_server_voicemail_message_defaults_empty():
 
 def test_serve_passes_voicemail_message_to_server():
     """Patter.serve() passes voicemail_message to EmbeddedServer."""
-    phone = Patter(
-        twilio_sid="AC_test",
-        twilio_token="tok_test",
-        openai_key="sk_test",
-        phone_number="+15550000000",
-        webhook_url="abc.ngrok.io",
-    )
-    agent = phone.agent(system_prompt="Test")
+    phone = _local_phone()
+    agent = _local_agent(phone)
 
     with patch("patter.server.EmbeddedServer") as MockServer:
         mock_instance = MagicMock()

@@ -22,10 +22,12 @@ export type {
   Agent,
   PhoneNumber,
   Call,
-  Guardrail,
   PipelineHooks,
   HookContext,
 } from "./types";
+// `Guardrail` is intentionally not re-exported from `./types` — the public
+// `Guardrail` identifier is the class from `./public-api` (exported below),
+// which is structurally compatible with the internal interface.
 export { SentenceChunker, DEFAULT_MIN_SENTENCE_LEN } from "./sentence-chunker";
 export { PipelineHookExecutor } from "./pipeline-hooks";
 export { filterMarkdown, filterEmoji, filterForTTS } from "./text-transforms";
@@ -61,22 +63,55 @@ export { UltravoxRealtimeAdapter, ULTRAVOX_DEFAULT_API_BASE, ULTRAVOX_DEFAULT_SR
 export type { UltravoxEventHandler } from "./providers/ultravox-realtime";
 export { scheduleCron, scheduleOnce, scheduleInterval } from "./scheduler";
 export type { ScheduleHandle, JobCallback } from "./scheduler";
-export { DeepgramSTT } from "./providers/deepgram-stt";
-export { SonioxSTT } from "./providers/soniox-stt";
+// Provider adapter types (re-exported for advanced users who build custom
+// pipelines). The concrete wrapper classes are exported below under the
+// namespaced STT/TTS names (Phase 1a of the v0.5.0 API refactor).
 export type { SonioxSTTOptions } from "./providers/soniox-stt";
-export { WhisperSTT } from "./providers/whisper-stt";
-export { AssemblyAISTT } from "./providers/assemblyai-stt";
-export type { AssemblyAISTTOptions, AssemblyAIModel, AssemblyAIEncoding } from "./providers/assemblyai-stt";
-export { CartesiaSTT } from "./providers/cartesia-stt";
-export type { CartesiaSTTOptions, CartesiaEncoding } from "./providers/cartesia-stt";
-export { ElevenLabsTTS } from "./providers/elevenlabs-tts";
-export { OpenAITTS } from "./providers/openai-tts";
-export { CartesiaTTS } from "./providers/cartesia-tts";
-export type { CartesiaTTSOptions } from "./providers/cartesia-tts";
-export { RimeTTS } from "./providers/rime-tts";
-export type { RimeTTSOptions } from "./providers/rime-tts";
-export { LMNTTTS } from "./providers/lmnt-tts";
-export type { LMNTTTSOptions, LMNTAudioFormat, LMNTModel, LMNTSampleRate } from "./providers/lmnt-tts";
+export type { AssemblyAIModel, AssemblyAIEncoding } from "./providers/assemblyai-stt";
+export type { CartesiaEncoding } from "./providers/cartesia-stt";
+export type { LMNTAudioFormat, LMNTModel, LMNTSampleRate } from "./providers/lmnt-tts";
+
+// New namespaced STT classes — options-object constructor with env fallback.
+export { STT as DeepgramSTT } from "./stt/deepgram";
+export type { DeepgramSTTOptions } from "./stt/deepgram";
+export { STT as WhisperSTT } from "./stt/whisper";
+export type { WhisperSTTOptions } from "./stt/whisper";
+export { STT as CartesiaSTT } from "./stt/cartesia";
+export type { CartesiaSTTOptions } from "./stt/cartesia";
+export { STT as SonioxSTT } from "./stt/soniox";
+export { STT as AssemblyAISTT } from "./stt/assemblyai";
+export type { AssemblyAISTTOptions } from "./stt/assemblyai";
+
+// New namespaced TTS classes.
+export { TTS as ElevenLabsTTS } from "./tts/elevenlabs";
+export type { ElevenLabsTTSOptions } from "./tts/elevenlabs";
+export { TTS as OpenAITTS } from "./tts/openai";
+export type { OpenAITTSOptions } from "./tts/openai";
+export { TTS as CartesiaTTS } from "./tts/cartesia";
+export type { CartesiaTTSOptions } from "./tts/cartesia";
+export { TTS as RimeTTS } from "./tts/rime";
+export type { RimeTTSOptions } from "./tts/rime";
+export { TTS as LMNTTTS } from "./tts/lmnt";
+export type { LMNTTTSOptions } from "./tts/lmnt";
+
+// Telephony carriers.
+export { Carrier as Twilio } from "./carriers/twilio";
+export type { TwilioCarrierOptions } from "./carriers/twilio";
+export { Carrier as Telnyx } from "./carriers/telnyx";
+export type { TelnyxCarrierOptions } from "./carriers/telnyx";
+
+// Realtime / ConvAI engines.
+export { Realtime as OpenAIRealtime } from "./engines/openai";
+export type { RealtimeOptions as OpenAIRealtimeOptions } from "./engines/openai";
+export { ConvAI as ElevenLabsConvAI } from "./engines/elevenlabs";
+export type { ConvAIOptions as ElevenLabsConvAIOptions } from "./engines/elevenlabs";
+
+// Tunnel markers.
+export { CloudflareTunnel, Static as StaticTunnel } from "./tunnels";
+
+// Public API primitives.
+export { Tool, Guardrail, tool, guardrail } from "./public-api";
+export type { ToolOptions, GuardrailOptions, ToolHandler } from "./public-api";
 export {
   mulawToPcm16,
   pcm16ToMulaw,

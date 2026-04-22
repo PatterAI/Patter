@@ -91,14 +91,49 @@
                 ]
               },
               {
-                "group": "Building Agents",
-                "icon": "robot",
+                "group": "Setting up Patter",
+                "icon": "sliders",
                 "pages": [
                   "python-sdk/agents",
-                  "python-sdk/providers",
-                  "python-sdk/providers/cartesia",
-                  "python-sdk/providers/rime",
-                  "python-sdk/providers/lmnt",
+                  {
+                    "group": "Carrier",
+                    "icon": "phone",
+                    "pages": [
+                      "python-sdk/carrier"
+                    ]
+                  },
+                  {
+                    "group": "Engines",
+                    "icon": "bolt",
+                    "pages": [
+                      "python-sdk/engines"
+                    ]
+                  },
+                  {
+                    "group": "STT",
+                    "icon": "microphone",
+                    "pages": [
+                      "python-sdk/stt",
+                      "python-sdk/providers/assemblyai",
+                      "python-sdk/providers/cartesia"
+                    ]
+                  },
+                  {
+                    "group": "LLM",
+                    "icon": "brain",
+                    "pages": [
+                      "python-sdk/llm"
+                    ]
+                  },
+                  {
+                    "group": "TTS",
+                    "icon": "volume",
+                    "pages": [
+                      "python-sdk/tts",
+                      "python-sdk/providers/rime",
+                      "python-sdk/providers/lmnt"
+                    ]
+                  },
                   "python-sdk/tools",
                   "python-sdk/guardrails",
                   "python-sdk/events",
@@ -155,14 +190,49 @@
                 ]
               },
               {
-                "group": "Building Agents",
-                "icon": "robot",
+                "group": "Setting up Patter",
+                "icon": "sliders",
                 "pages": [
                   "typescript-sdk/agents",
-                  "typescript-sdk/providers",
-                  "typescript-sdk/providers/cartesia",
-                  "typescript-sdk/providers/rime",
-                  "typescript-sdk/providers/lmnt",
+                  {
+                    "group": "Carrier",
+                    "icon": "phone",
+                    "pages": [
+                      "typescript-sdk/carrier"
+                    ]
+                  },
+                  {
+                    "group": "Engines",
+                    "icon": "bolt",
+                    "pages": [
+                      "typescript-sdk/engines"
+                    ]
+                  },
+                  {
+                    "group": "STT",
+                    "icon": "microphone",
+                    "pages": [
+                      "typescript-sdk/stt",
+                      "typescript-sdk/providers/assemblyai",
+                      "typescript-sdk/providers/cartesia"
+                    ]
+                  },
+                  {
+                    "group": "LLM",
+                    "icon": "brain",
+                    "pages": [
+                      "typescript-sdk/llm"
+                    ]
+                  },
+                  {
+                    "group": "TTS",
+                    "icon": "volume",
+                    "pages": [
+                      "typescript-sdk/tts",
+                      "typescript-sdk/providers/rime",
+                      "typescript-sdk/providers/lmnt"
+                    ]
+                  },
                   "typescript-sdk/tools",
                   "typescript-sdk/guardrails",
                   "typescript-sdk/events",

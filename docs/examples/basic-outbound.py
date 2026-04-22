@@ -5,7 +5,7 @@ The AI places a call to a phone number and holds a conversation.
 Replace the API key and destination number before running.
 
 Usage:
-    pip install patter
+    pip install getpatter
     python basic-outbound.py
 """
 

@@ -70,9 +70,11 @@ async def on_call_end(event):
 Override default provider pricing estimates:
 
 ```python
+from patter import Patter, Twilio
+
 phone = Patter(
-    openai_key="sk-...",
-    mode="local",
+    carrier=Twilio(),
+    phone_number="+15550001234",
     pricing={
         "deepgram": {"price": 0.005},      # Override STT price per minute
         "elevenlabs": {"price": 0.15},      # Override TTS price per 1k chars

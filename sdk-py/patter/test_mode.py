@@ -5,8 +5,12 @@ input/output in the terminal.  Useful for rapid agent development.
 
 Usage::
 
-    phone = Patter(openai_key="sk-...", mode="local")
-    agent = phone.agent(system_prompt="You are helpful.", provider="pipeline")
+    phone = Patter(mode="local", phone_number="+15550001234")
+    agent = phone.agent(
+        system_prompt="You are helpful.",
+        stt=DeepgramSTT(api_key="..."),
+        tts=ElevenLabsTTS(api_key="..."),
+    )
     await phone.test(agent)
 """
 

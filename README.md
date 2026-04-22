@@ -30,6 +30,14 @@ Patter is the open-source SDK that gives your AI agent a phone number. Point it 
 
 ## Quickstart
 
+Set the env vars your carrier and engine need:
+
+```bash
+export TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+export TWILIO_AUTH_TOKEN=your_auth_token
+export OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxx
+```
+
 <details open>
 <summary><strong>Python</strong></summary>
 
@@ -38,25 +46,11 @@ pip install getpatter
 ```
 
 ```python
-import asyncio
-from patter import Patter
+from patter import Patter, Twilio, OpenAIRealtime
 
-async def main():
-    phone = Patter(
-        twilio_sid="AC...", twilio_token="...",
-        openai_key="sk-...",
-        phone_number="+1...",
-    )
-
-    agent = phone.agent(
-        system_prompt="You are a friendly customer service agent for Acme Corp.",
-        voice="alloy",
-        first_message="Hello! Thanks for calling. How can I help?",
-    )
-
-    await phone.serve(agent=agent, port=8000)
-
-asyncio.run(main())
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+agent = phone.agent(engine=OpenAIRealtime(), system_prompt="You are a friendly receptionist for Acme Corp.", first_message="Hello! How can I help?")
+await phone.serve(agent, tunnel=True)
 ```
 
 </details>
@@ -69,24 +63,16 @@ npm install getpatter
 ```
 
 ```typescript
-import { Patter } from "getpatter";
+import { Patter, Twilio, OpenAIRealtime } from "getpatter";
 
-const phone = new Patter({
-  twilioSid: "AC...", twilioToken: "...",
-  openaiKey: "sk-...",
-  phoneNumber: "+1...",
-});
-
-const agent = phone.agent({
-  systemPrompt: "You are a friendly customer service agent for Acme Corp.",
-  voice: "alloy",
-  firstMessage: "Hello! Thanks for calling. How can I help?",
-});
-
-await phone.serve({ agent, port: 8000 });
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+const agent = phone.agent({ engine: new OpenAIRealtime(), systemPrompt: "You are a friendly receptionist for Acme Corp.", firstMessage: "Hello! How can I help?" });
+await phone.serve({ agent, tunnel: true });
 ```
 
 </details>
+
+`tunnel: true` spawns a Cloudflare tunnel and points your Twilio number at it. In production, pass `webhook_url` / `webhookUrl` to the constructor instead. Every carrier and provider reads its credentials from environment variables by default; see each SDK's README for the full catalog.
 
 ## Features
 
@@ -196,11 +182,11 @@ See [`Dockerfile`](./Dockerfile) and [`docker-compose.yml`](./docker-compose.yml
 
 | Mode | Quality | Best For |
 |---|---|---|
-| **OpenAI Realtime** (`provider="openai_realtime"`) | High | Fluid, low-latency conversations |
-| **ElevenLabs ConvAI** (`provider="elevenlabs_convai"`) | High | ElevenLabs-managed conversation flow |
-| **Pipeline** (`provider="pipeline"`) | High | Independent control over STT / LLM / TTS |
+| **OpenAI Realtime** (`engine=OpenAIRealtime()`) | High | Fluid, low-latency conversations |
+| **ElevenLabs ConvAI** (`engine=ElevenLabsConvAI()`) | High | ElevenLabs-managed conversation flow |
+| **Pipeline** (`stt=DeepgramSTT(), tts=ElevenLabsTTS()`) | High | Independent control over STT / LLM / TTS |
 
-Pipeline mode composes STT + LLM + TTS sequentially and inherits the latency of each provider plus the endpointing window. For the fastest turn UX pick `provider="openai_realtime"`, or pair the pipeline with low-latency providers such as Cerebras/Groq for the LLM and ElevenLabs Turbo v2.5 for TTS.
+Pipeline mode composes STT + LLM + TTS sequentially and inherits the latency of each provider plus the endpointing window. For the fastest turn UX pick `engine=OpenAIRealtime()`, or pair the pipeline with low-latency providers such as Cerebras/Groq for the LLM and ElevenLabs Turbo v2.5 for TTS.
 
 ### Provider Notes
 
@@ -216,9 +202,9 @@ Pipeline mode composes STT + LLM + TTS sequentially and inherits the latency of 
 
 | Method | Description |
 |---|---|
-| `Patter(twilio_sid, twilio_token, openai_key, phone_number, ...)` | Create client with provider credentials |
-| `agent(system_prompt, voice?, first_message?, tools?, ...)` | Create an agent configuration |
-| `serve(agent, port?, dashboard?, ...)` | Start the embedded server and listen for calls |
+| `Patter(carrier=Twilio(), phone_number, ...)` | Create client bound to a carrier and phone number |
+| `agent(engine=..., system_prompt, first_message?, tools?, ...)` | Create an agent configuration |
+| `serve(agent, port?, tunnel?, dashboard?, ...)` | Start the embedded server and listen for calls |
 | `call(to, agent?, machine_detection?, voicemail_message?, ring_timeout?, ...)` | Place an outbound call |
 
 `call()` accepts a `ring_timeout` (seconds) that maps to Twilio's `Timeout` dial parameter and Telnyx's `timeout_secs`. When the carrier reports `no-answer`, `busy`, or `canceled`, the outcome is forwarded to the dashboard's `/webhooks/twilio/status` callback so it appears in the call log even if no media frames were ever exchanged.

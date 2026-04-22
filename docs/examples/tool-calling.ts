@@ -6,7 +6,7 @@
  * the result back into the conversation.
  */
 import { createServer } from "http";
-import { Patter } from "getpatter";
+import { Patter, Twilio, OpenAIRealtime } from "getpatter";
 
 // Mock inventory webhook — replace with your real endpoint
 const toolServer = createServer((req, res) => {
@@ -23,19 +23,16 @@ const toolServer = createServer((req, res) => {
 toolServer.listen(8001, () => console.log("Tool webhook listening on :8001"));
 
 const phone = new Patter({
-  mode: "local",
-  twilioSid: "AC...",
-  twilioToken: "...",
-  openaiKey: "sk-...",
-  phoneNumber: "+1...",
+  carrier: new Twilio(),                                // TWILIO_* from env
+  phoneNumber: "+15550001234",
   webhookUrl: "xxx.ngrok-free.dev",
 });
 
 const agent = phone.agent({
+  engine: new OpenAIRealtime({ voice: "alloy" }),       // OPENAI_API_KEY from env
   systemPrompt:
     "You help customers check product availability. " +
     "Always use the check_stock tool before answering stock questions.",
-  voice: "alloy",
   firstMessage: "Hello! I can help you check if a product is in stock. What are you looking for?",
   tools: [
     {

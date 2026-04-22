@@ -18,29 +18,40 @@ No vendor SDK is required — `LMNTTTS` uses the platform `fetch`, so it works o
 ## Usage
 
 ```typescript
+// Namespaced import
+import * as lmnt from "getpatter/tts/lmnt";
+
+const tts = new lmnt.TTS();                           // reads LMNT_API_KEY
+const tts = new lmnt.TTS({ model: "blizzard", voice: "leah" });
+
+// Flat alias (equivalent)
 import { LMNTTTS } from "getpatter";
 
-const tts = new LMNTTTS(process.env.LMNT_API_KEY!, {
-  model: "blizzard",
-  voice: "leah",
-  // language omitted -> defaults to "auto" for blizzard, "en" for aurora
-  format: "raw",
-  sampleRate: 16000,
-  temperature: 1.0,
-  topP: 0.8,
-});
-
-for await (const chunk of tts.synthesizeStream("Hello from Patter.")) {
-  // chunk is a Buffer of PCM_S16LE audio
-}
+const tts = new LMNTTTS({ model: "blizzard", voice: "leah" });
 ```
 
-Prefer one-shot synthesis? Use `await tts.synthesize(text)` to collect the stream into a single `Buffer`.
+In an agent:
+
+```typescript
+// npx tsx example.ts
+import { Patter, Twilio, DeepgramSTT, LMNTTTS } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  stt: new DeepgramSTT(),                             // DEEPGRAM_API_KEY from env
+  tts: new LMNTTTS({ model: "blizzard", voice: "leah" }),  // LMNT_API_KEY from env
+  systemPrompt: "You are a helpful assistant.",
+});
+
+await phone.serve({ agent });
+```
 
 ## Options
 
 | Option | Default | Notes |
 |---|---|---|
+| `apiKey` | — | Reads from `LMNT_API_KEY` when omitted. |
 | `model` | `"blizzard"` | `"blizzard"` or `"aurora"`. |
 | `voice` | `"leah"` | LMNT voice id. |
 | `language` | `undefined` | Auto-derived from model when omitted. |

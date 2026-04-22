@@ -5,73 +5,196 @@ description: "Complete type definitions, interfaces, error classes, and exports.
 
 # API Reference
 
-Complete reference for all types, interfaces, and exports in the `patter` package.
+Complete reference for all types, interfaces, and exports in the `getpatter` package.
 
 ## Patter Class
 
 ### Constructor
 
 ```typescript
-new Patter(options: LocalOptions)
+new Patter(options: PatterOptions)
 ```
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `carrier` | `Twilio \| Telnyx` | Yes | Carrier instance. Reads credentials from env vars when arguments are omitted. |
+| `phoneNumber` | `string` | Yes | Phone number in E.164 format. |
+| `webhookUrl` | `string` | Conditional | Public hostname, no scheme. Required unless using `tunnel: true` in `serve()`. |
+| `tunnel` | `CloudflareTunnel \| StaticTunnel \| boolean` | No | Tunnel directive. `true` is shorthand for `new CloudflareTunnel()`. |
+| `pricing` | `Record<string, Partial<ProviderPricing>>` | No | Custom pricing overrides. |
 
 ### Instance Methods
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `agent` | `(opts: AgentOptions) => AgentOptions` | Validates and returns an agent configuration. |
-| `serve` | `(opts: ServeOptions) => Promise<void>` | Starts the embedded server (local mode only). |
+| `agent` | `(opts: AgentOptions) => Agent` | Validates and returns an agent configuration. |
+| `serve` | `(opts: ServeOptions) => Promise<void>` | Starts the embedded server. |
 | `call` | `(opts: LocalCallOptions) => Promise<void>` | Makes an outbound call. |
-| `test` | `(opts: ServeOptions) => Promise<void>` | Starts an interactive terminal test session (local mode only). See [Test Mode](/typescript-sdk/test-mode). |
+| `test` | `(opts: ServeOptions) => Promise<void>` | Starts an interactive terminal test session. See [Test Mode](/typescript-sdk/test-mode). |
 | `disconnect` | `() => Promise<void>` | Stops the tunnel, embedded server, and WebSocket connection. |
 
-### Static Methods
-
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| `Patter.deepgram` | `(opts: { apiKey: string; language?: string }) => STTConfig` | Creates a Deepgram STT config. |
-| `Patter.whisper` | `(opts: { apiKey: string; language?: string }) => STTConfig` | Creates a Whisper STT config. |
-| `Patter.elevenlabs` | `(opts: { apiKey: string; voice?: string }) => TTSConfig` | Creates an ElevenLabs TTS config. |
-| `Patter.openaiTts` | `(opts: { apiKey: string; voice?: string }) => TTSConfig` | Creates an OpenAI TTS config. |
-| `Patter.guardrail` | `(opts: { name: string; blockedTerms?: string[]; check?: (text: string) => boolean; replacement?: string }) => Guardrail` | Creates a guardrail config. |
-| `Patter.tool` | `(opts: { name: string; description?: string; parameters?: object; handler?: Function; webhookUrl?: string }) => ToolDefinition` | Creates a tool definition. Requires either `handler` or `webhookUrl`. |
-
-## Interfaces
-
-### LocalOptions
+## Carriers
 
 ```typescript
-interface LocalOptions {
-  mode: "local";
-  twilioSid?: string;
-  twilioToken?: string;
-  openaiKey?: string;
-  phoneNumber: string;
-  webhookUrl?: string;
-  telephonyProvider?: "twilio" | "telnyx";
-  telnyxKey?: string;
-  telnyxConnectionId?: string;
-  telnyxPublicKey?: string;
-  pricing?: Record<string, Partial<ProviderPricing>>;
+import { Twilio, Telnyx } from "getpatter";                         // flat aliases
+import * as twilio from "getpatter/carriers/twilio";                 // namespaced
+import * as telnyx from "getpatter/carriers/telnyx";
+```
+
+### Twilio
+
+```typescript
+class Twilio {
+  readonly kind: "twilio";
+  readonly accountSid: string;   // reads TWILIO_ACCOUNT_SID when omitted
+  readonly authToken: string;    // reads TWILIO_AUTH_TOKEN when omitted
+  constructor(opts?: { accountSid?: string; authToken?: string });
 }
 ```
+
+### Telnyx
+
+```typescript
+class Telnyx {
+  readonly kind: "telnyx";
+  readonly apiKey: string;         // reads TELNYX_API_KEY when omitted
+  readonly connectionId: string;   // reads TELNYX_CONNECTION_ID when omitted
+  readonly publicKey: string;      // optional, reads TELNYX_PUBLIC_KEY when omitted
+  constructor(opts?: { apiKey?: string; connectionId?: string; publicKey?: string });
+}
+```
+
+---
+
+## Engines
+
+```typescript
+import { OpenAIRealtime, ElevenLabsConvAI } from "getpatter";        // flat aliases
+import * as openai from "getpatter/engines/openai";                   // namespaced
+import * as elevenlabs from "getpatter/engines/elevenlabs";
+```
+
+### OpenAIRealtime
+
+```typescript
+class OpenAIRealtime {
+  readonly kind: "openai_realtime";
+  readonly apiKey: string;     // reads OPENAI_API_KEY when omitted
+  readonly voice: string;      // default "alloy"
+  readonly model: string;      // default "gpt-4o-mini-realtime-preview"
+  constructor(opts?: { apiKey?: string; voice?: string; model?: string });
+}
+```
+
+### ElevenLabsConvAI
+
+```typescript
+class ElevenLabsConvAI {
+  readonly kind: "elevenlabs_convai";
+  readonly apiKey: string;     // reads ELEVENLABS_API_KEY when omitted
+  readonly agentId: string;    // reads ELEVENLABS_AGENT_ID when omitted
+  readonly voice?: string;     // override agent default
+  constructor(opts?: { apiKey?: string; agentId?: string; voice?: string });
+}
+```
+
+---
+
+## STT classes
+
+```typescript
+import { DeepgramSTT, WhisperSTT, CartesiaSTT, AssemblyAISTT, SonioxSTT } from "getpatter";
+import * as deepgram from "getpatter/stt/deepgram";
+import * as whisper from "getpatter/stt/whisper";
+import * as cartesia from "getpatter/stt/cartesia";
+import * as assemblyai from "getpatter/stt/assemblyai";
+import * as soniox from "getpatter/stt/soniox";
+```
+
+Each class accepts an options object with `apiKey?: string` and falls back to the provider's standard env var. See the [STT page](/typescript-sdk/stt) for full constructor signatures.
+
+---
+
+## TTS classes
+
+```typescript
+import { ElevenLabsTTS, OpenAITTS, CartesiaTTS, RimeTTS, LMNTTTS } from "getpatter";
+import * as elevenlabs from "getpatter/tts/elevenlabs";
+import * as openai from "getpatter/tts/openai";
+import * as cartesia from "getpatter/tts/cartesia";
+import * as rime from "getpatter/tts/rime";
+import * as lmnt from "getpatter/tts/lmnt";
+```
+
+Each class accepts an options object with `apiKey?: string` and falls back to the provider's standard env var. See the [TTS page](/typescript-sdk/tts) for full constructor signatures.
+
+---
+
+## Tunnels
+
+```typescript
+import { CloudflareTunnel, StaticTunnel } from "getpatter";
+```
+
+| Class | Behavior |
+|-------|----------|
+| `new CloudflareTunnel()` | Auto-start a Cloudflare Quick Tunnel via the local `cloudflared` binary. |
+| `new StaticTunnel({ hostname })` | Use an existing public hostname (user-managed tunnel). |
+
+`tunnel: true` on `new Patter(...)` or `phone.serve(...)` is shorthand for `new CloudflareTunnel()`.
+
+---
+
+## Tools & Guardrails
+
+```typescript
+import { Tool, Guardrail, tool, guardrail } from "getpatter";
+```
+
+### Tool
+
+```typescript
+class Tool {
+  readonly name: string;
+  readonly description: string;
+  readonly parameters?: Record<string, unknown>;
+  readonly handler?: ToolHandler;
+  readonly webhookUrl?: string;
+  constructor(opts: ToolOptions);
+}
+```
+
+Either `handler` or `webhookUrl` must be provided.
+
+### Guardrail
+
+```typescript
+class Guardrail {
+  readonly name: string;
+  readonly blockedTerms?: string[];
+  readonly check?: (text: string) => boolean;
+  readonly replacement: string;
+  constructor(opts: GuardrailOptions);
+}
+```
+
+---
+
+## Interfaces
 
 ### AgentOptions
 
 ```typescript
 interface AgentOptions {
   systemPrompt: string;
+  engine?: OpenAIRealtime | ElevenLabsConvAI;
+  stt?: STTProvider;
+  tts?: TTSProvider;
   voice?: string;
   model?: string;
   language?: string;
   firstMessage?: string;
   tools?: ToolDefinition[];
-  provider?: "openai_realtime" | "elevenlabs_convai" | "pipeline";
-  elevenlabsKey?: string;
-  elevenlabsAgentId?: string;
-  deepgramKey?: string;
-  stt?: STTConfig;
-  tts?: TTSConfig;
   variables?: Record<string, string>;
   guardrails?: Guardrail[];
 }
@@ -81,7 +204,7 @@ interface AgentOptions {
 
 ```typescript
 interface ServeOptions {
-  agent: AgentOptions;
+  agent: Agent;
   port?: number;
   tunnel?: boolean;
   onCallStart?: (data: Record<string, unknown>) => Promise<void>;
@@ -104,7 +227,7 @@ interface ServeOptions {
 ```typescript
 interface LocalCallOptions {
   to: string;
-  agent: AgentOptions;
+  agent: Agent;
   machineDetection?: boolean;
   voicemailMessage?: string;
   variables?: Record<string, string>;
@@ -120,39 +243,6 @@ interface ToolDefinition {
   parameters: Record<string, unknown>;
   webhookUrl?: string;
   handler?: (args: Record<string, unknown>, context: Record<string, unknown>) => Promise<string>;
-}
-```
-
-### Guardrail
-
-```typescript
-interface Guardrail {
-  name: string;
-  blockedTerms?: string[];
-  check?: (text: string) => boolean;
-  replacement?: string;
-}
-```
-
-### STTConfig
-
-```typescript
-interface STTConfig {
-  readonly provider: string;
-  readonly apiKey: string;
-  readonly language: string;
-  toDict(): Record<string, string>;
-}
-```
-
-### TTSConfig
-
-```typescript
-interface TTSConfig {
-  readonly provider: string;
-  readonly apiKey: string;
-  readonly voice: string;
-  toDict(): Record<string, string>;
 }
 ```
 
@@ -178,82 +268,9 @@ interface CallControl {
 }
 ```
 
-Passed as the second argument to `onMessage` handlers. Allows dynamic call management during a conversation.
+### CallMetrics / CostBreakdown / LatencyBreakdown / TurnMetrics / ProviderPricing
 
-### CallMetrics
-
-```typescript
-interface CallMetrics {
-  call_id: string;
-  duration_seconds: number;
-  turns: TurnMetrics[];
-  cost: CostBreakdown;
-  latency_avg: LatencyBreakdown;
-  latency_p95: LatencyBreakdown;
-  provider_mode: string;
-  stt_provider: string;
-  tts_provider: string;
-  llm_provider: string;
-  telephony_provider: string;
-}
-```
-
-### CostBreakdown
-
-```typescript
-interface CostBreakdown {
-  stt: number;
-  tts: number;
-  llm: number;
-  telephony: number;
-  total: number;
-}
-```
-
-### LatencyBreakdown
-
-```typescript
-interface LatencyBreakdown {
-  stt_ms: number;
-  llm_ms: number;
-  tts_ms: number;
-  total_ms: number;
-}
-```
-
-### TurnMetrics
-
-```typescript
-interface TurnMetrics {
-  turn_index: number;
-  user_text: string;
-  agent_text: string;
-  latency: LatencyBreakdown;
-  stt_audio_seconds: number;
-  tts_characters: number;
-  timestamp: number;
-}
-```
-
-### ProviderPricing
-
-```typescript
-interface ProviderPricing {
-  unit: string;
-  price?: number;
-  audio_input_per_token?: number;
-  audio_output_per_token?: number;
-  text_input_per_token?: number;
-  text_output_per_token?: number;
-}
-```
-
-## Type Aliases
-
-```typescript
-type CallEventHandler = (data: Record<string, unknown>) => Promise<void>;
-type PipelineMessageHandler = (data: Record<string, unknown>) => Promise<string>;
-```
+See [Metrics](/typescript-sdk/metrics) for the full shapes.
 
 ## Error Classes
 
@@ -283,70 +300,45 @@ try {
 }
 ```
 
-## Exports
-
-### Classes
-
-```typescript
-export { Patter } from "getpatter";
-export { ElevenLabsConvAIAdapter } from "getpatter";
-export { OpenAIRealtimeAdapter } from "getpatter";
-export { DeepgramSTT } from "getpatter";
-export { WhisperSTT } from "getpatter";
-export { ElevenLabsTTS } from "getpatter";
-export { OpenAITTS } from "getpatter";
-```
-
-### Error Classes
+## Top-level exports
 
 ```typescript
 export {
-  PatterError,
-  PatterConnectionError,
-  AuthenticationError,
-  ProvisionError,
+  // Client
+  Patter,
+
+  // Carriers
+  Twilio, Telnyx,
+
+  // Engines
+  OpenAIRealtime, ElevenLabsConvAI,
+
+  // STT classes
+  DeepgramSTT, WhisperSTT, CartesiaSTT, AssemblyAISTT, SonioxSTT,
+
+  // TTS classes
+  ElevenLabsTTS, OpenAITTS, CartesiaTTS, RimeTTS, LMNTTTS,
+
+  // Tunnels
+  CloudflareTunnel, StaticTunnel,
+
+  // Public primitives
+  Tool, Guardrail, tool, guardrail,
+
+  // Errors
+  PatterError, PatterConnectionError, AuthenticationError, ProvisionError,
 } from "getpatter";
 ```
 
-### Factory Functions
+Namespaced modules:
 
 ```typescript
-export { deepgram, whisper, elevenlabs, openaiTts } from "getpatter";
-```
-
-### Transcoding Utilities
-
-```typescript
-export {
-  mulawToPcm16,
-  pcm16ToMulaw,
-  resample8kTo16k,
-  resample16kTo8k,
-  resample24kTo16k,
-} from "getpatter";
-```
-
-### All Type Exports
-
-```typescript
-export type {
-  IncomingMessage,
-  STTConfig,
-  TTSConfig,
-  LocalOptions,
-  AgentOptions,
-  ServeOptions,
-  LocalCallOptions,
-  CallEventHandler,
-  PipelineMessageHandler,
-  ToolDefinition,
-  Guardrail,
-  LocalConfig,
-  CallControl,
-  CallMetrics,
-  CostBreakdown,
-  LatencyBreakdown,
-  TurnMetrics,
-  ProviderPricing,
-} from "getpatter";
+import * as twilio from "getpatter/carriers/twilio";
+import * as telnyx from "getpatter/carriers/telnyx";
+import * as openai from "getpatter/engines/openai";
+import * as elevenlabs from "getpatter/engines/elevenlabs";
+import * as deepgram from "getpatter/stt/deepgram";
+import * as whisper from "getpatter/stt/whisper";
+import * as cartesia from "getpatter/stt/cartesia";
+// etc.
 ```

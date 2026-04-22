@@ -1,6 +1,6 @@
 <p align="center">
   <h1 align="center">Patter Python SDK</h1>
-  <p align="center">Connect AI agents to phone numbers with 4 lines of code</p>
+  <p align="center">Connect AI agents to phone numbers in four lines of code</p>
 </p>
 
 <p align="center">
@@ -28,56 +28,59 @@ Patter is the open-source SDK that gives your AI agent a phone number. Point it 
 pip install getpatter
 ```
 
-```python
-import asyncio
-from patter import Patter
+Set the env vars your carrier and engine need:
 
-async def main():
-    phone = Patter(
-        twilio_sid="AC...", twilio_token="...",
-        openai_key="sk-...",
-        phone_number="+1...",
-    )
-
-    agent = phone.agent(
-        system_prompt="You are a friendly customer service agent for Acme Corp.",
-        voice="alloy",
-        first_message="Hello! Thanks for calling. How can I help?",
-    )
-
-    await phone.serve(agent=agent, port=8000)
-
-asyncio.run(main())
+```bash
+export TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+export TWILIO_AUTH_TOKEN=your_auth_token
+export OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxx
 ```
+
+Four lines of Python:
+
+```python
+from patter import Patter, Twilio, OpenAIRealtime
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+agent = phone.agent(engine=OpenAIRealtime(), system_prompt="You are a friendly receptionist for Acme Corp.", first_message="Hello! How can I help?")
+await phone.serve(agent, tunnel=True)
+```
+
+`tunnel=True` spawns a Cloudflare tunnel and points your Twilio number at it. In production, pass `webhook_url="api.prod.example.com"` to the constructor instead.
 
 ## Features
 
 | Feature | Method | Example |
 |---|---|---|
 | Inbound calls | `phone.serve(agent)` | Answer calls as an AI |
-| Outbound calls + AMD | `phone.call(to, machineDetection)` | Place calls with voicemail detection |
-| Tool calling (webhooks) | `agent(tools=[...])` | Agent calls external APIs mid-conversation |
-| Custom STT + TTS | `agent(provider="pipeline")` | Bring your own voice providers |
+| Outbound calls + AMD | `phone.call(to, machine_detection=True)` | Place calls with voicemail detection |
+| Tool calling | `agent(tools=[Tool(...)])` | Agent calls external APIs mid-conversation |
+| Custom STT + TTS | `agent(stt=DeepgramSTT(), tts=ElevenLabsTTS())` | Bring your own voice providers |
 | Dynamic variables | `agent(variables={...})` | Personalize prompts per caller |
-| Custom LLM (any model) | `serve(onMessage=handler)` | Claude, Mistral, LLaMA, etc. |
+| Custom LLM (any model) | `serve(on_message=handler)` | Claude, Mistral, LLaMA, etc. |
 | Call recording | `serve(recording=True)` | Record all calls |
 | Call transfer | `transfer_call` (auto-injected) | Transfer to a human |
-| Voicemail drop | `call(voicemailMessage="...")` | Play message on voicemail |
+| Voicemail drop | `call(voicemail_message="...")` | Play message on voicemail |
 
 ## Configuration
 
-### Environment Variables
+### Environment variables
 
-| Variable | Required | Description |
-|---|---|---|
-| `OPENAI_API_KEY` | Yes (Realtime mode) | OpenAI API key with Realtime access |
-| `TWILIO_ACCOUNT_SID` | Yes | Twilio account SID |
-| `TWILIO_AUTH_TOKEN` | Yes | Twilio auth token |
-| `TWILIO_PHONE_NUMBER` | Yes | Your Twilio phone number (E.164) |
-| `DEEPGRAM_API_KEY` | Pipeline mode | Deepgram STT key |
-| `ELEVENLABS_API_KEY` | Pipeline mode | ElevenLabs TTS key |
-| `ANTHROPIC_API_KEY` | Custom LLM | For bringing your own model |
-| `WEBHOOK_URL` | No | Public URL (auto-tunneled via Cloudflare if omitted) |
+Every provider reads its credentials from the environment by default. Pass `api_key="..."` to any constructor to override.
+
+| Variable | Used by |
+|---|---|
+| `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` | `Twilio()` carrier |
+| `TELNYX_API_KEY`, `TELNYX_CONNECTION_ID`, `TELNYX_PUBLIC_KEY` (optional) | `Telnyx()` carrier |
+| `OPENAI_API_KEY` | `OpenAIRealtime`, `patter.stt.whisper.STT`, `patter.tts.openai.TTS` |
+| `ELEVENLABS_API_KEY`, `ELEVENLABS_AGENT_ID` | `ElevenLabsConvAI`, `patter.tts.elevenlabs.TTS` |
+| `DEEPGRAM_API_KEY` | `patter.stt.deepgram.STT` |
+| `CARTESIA_API_KEY` | `patter.stt.cartesia.STT`, `patter.tts.cartesia.TTS` |
+| `RIME_API_KEY` | `patter.tts.rime.TTS` |
+| `LMNT_API_KEY` | `patter.tts.lmnt.TTS` |
+| `SONIOX_API_KEY` | `patter.stt.soniox.STT` |
+| `SPEECHMATICS_API_KEY` | `patter.stt.speechmatics.STT` |
+| `ASSEMBLYAI_API_KEY` | `patter.stt.assemblyai.STT` |
 
 ```bash
 cp .env.example .env
@@ -91,225 +94,189 @@ cp .env.example .env
 | Mode | Latency | Quality | Best For |
 |---|---|---|---|
 | **OpenAI Realtime** | Lowest | High | Fluid, low-latency conversations |
-| **Deepgram + ElevenLabs** | Low | High | Independent control over STT and TTS |
+| **Pipeline** (STT + LLM + TTS) | Low | High | Independent control over STT and TTS |
 | **ElevenLabs ConvAI** | Low | High | ElevenLabs-managed conversation flow |
 
 ## API Reference
 
-### `Patter` Constructor
+### `Patter` constructor
 
 ```python
 Patter(
-    twilio_sid: str,
-    twilio_token: str,
-    openai_key: str,
+    carrier: Twilio | Telnyx,
     phone_number: str,
-    webhook_url: str = None,  # Optional; auto-tunneled via Cloudflare if omitted
+    webhook_url: str = "",         # Public hostname (no scheme). Mutually exclusive with tunnel=...
+    tunnel: CloudflareTunnel | Static | Ngrok | None = None,
+    pricing: dict | None = None,
 )
 ```
 
 | Parameter | Type | Description |
 |---|---|---|
-| `twilio_sid` | `str` | Twilio account SID |
-| `twilio_token` | `str` | Twilio auth token |
-| `openai_key` | `str` | OpenAI API key |
-| `phone_number` | `str` | Your Twilio phone number (E.164 format) |
-| `webhook_url` | `str` | Public URL for Twilio webhooks (optional) |
+| `carrier` | `Twilio` / `Telnyx` | Carrier instance. Reads env vars by default. |
+| `phone_number` | `str` | Your phone number in E.164 format. |
+| `webhook_url` | `str` | Public hostname your local server is reachable on. Use instead of `tunnel=`. |
+| `tunnel` | instance | `CloudflareTunnel()`, `Static(hostname=...)`, or `Ngrok()`. |
 
-### `phone.agent()` Method
+### `phone.agent()`
 
 ```python
-agent = phone.agent(
+phone.agent(
     system_prompt: str,
+    engine: OpenAIRealtime | ElevenLabsConvAI | None = None,   # default OpenAIRealtime()
+    stt: STTProvider | None = None,                            # e.g. DeepgramSTT()
+    tts: TTSProvider | None = None,                            # e.g. ElevenLabsTTS()
     voice: str = "alloy",
-    first_message: str = None,
-    variables: dict = None,
-    tools: list = None,
+    model: str = "gpt-4o-mini-realtime-preview",
+    language: str = "en",
+    first_message: str = "",
+    tools: list[Tool] | None = None,
+    guardrails: list[Guardrail] | None = None,
+    variables: dict | None = None,
+    ...,
 )
 ```
 
-| Parameter | Type | Description |
-|---|---|---|
-| `system_prompt` | `str` | Prompt with optional `{variable}` placeholders |
-| `voice` | `str` | TTS voice name (e.g., "alloy", "echo", "fable") |
-| `first_message` | `str` | Opening message (supports `{variable}` placeholders) |
-| `variables` | `dict` | Values substituted into prompts |
-| `tools` | `list` | Tool definitions: `{name, description, parameters, webhook_url}` |
+Pass `engine=` for end-to-end mode, `stt=` + `tts=` for pipeline mode. Both arguments may take plain adapter instances (e.g. `DeepgramSTT()`) that read their API key from the environment.
 
-### `phone.serve()` Method
+### `phone.serve()`
 
 ```python
 await phone.serve(
     agent: Agent,
     port: int = 8000,
-    dashboard: bool = False,
+    tunnel: bool = False,          # shortcut for Patter(tunnel=CloudflareTunnel())
+    dashboard: bool = True,
     recording: bool = False,
-    onCallStart: callable = None,
-    onCallEnd: callable = None,
-    onTranscript: callable = None,
+    on_call_start: Callable | None = None,
+    on_call_end: Callable | None = None,
+    on_transcript: Callable | None = None,
+    on_message: Callable | str | None = None,
+    voicemail_message: str = "",
+    dashboard_token: str = "",
 )
 ```
 
-| Parameter | Type | Description |
-|---|---|---|
-| `agent` | `Agent` | Agent configuration to use for calls |
-| `port` | `int` | Port to listen on (default: 8000) |
-| `dashboard` | `bool` | Enable the built-in monitoring dashboard |
-| `recording` | `bool` | Enable call recording via the telephony provider |
-| `onCallStart` | `callable` | Called when a call connects; receives `data.caller`, `data.call_id` |
-| `onCallEnd` | `callable` | Called when a call ends; receives `data.history`, `data.transcript`, `data.duration` |
-| `onTranscript` | `callable` | Called on each transcript turn; receives `data.role`, `data.text`, `data.history` |
-
-### `phone.call()` Method
+### `phone.call()`
 
 ```python
 await phone.call(
     to: str,
-    first_message: str = None,
+    agent: Agent | None = None,            # required in local mode
+    from_number: str = "",
+    first_message: str = "",
     machine_detection: bool = False,
-    voicemail_message: str = None,
+    voicemail_message: str = "",
+    ring_timeout: int | None = None,
 )
 ```
 
-| Parameter | Type | Description |
-|---|---|---|
-| `to` | `str` | Destination phone number (E.164 format) |
-| `first_message` | `str` | Opening message for the outbound call |
-| `machine_detection` | `bool` | Enable answering machine detection |
-| `voicemail_message` | `str` | Message to play when voicemail is detected |
+### STT / TTS catalog
 
-### Static Provider Helpers
+Flat re-exports (short form):
 
 ```python
-Patter.deepgram(api_key: str, language: str = "en") -> STT
-Patter.elevenlabs(api_key: str, voice: str = "aria") -> TTS
-Patter.openai_tts(api_key: str, voice: str = "alloy") -> TTS
-Patter.whisper(api_key: str, language: str = "en") -> STT
+from patter import (
+    Twilio, Telnyx,
+    OpenAIRealtime, ElevenLabsConvAI,
+    # STT / TTS classes live in namespaced modules — see below.
+)
+```
+
+Namespaced imports (one module per provider):
+
+```python
+from patter.stt import deepgram, whisper, cartesia, soniox, speechmatics, assemblyai
+from patter.tts import elevenlabs, openai as openai_tts, cartesia as cartesia_tts, rime, lmnt
+
+stt = deepgram.STT()                    # reads DEEPGRAM_API_KEY
+tts = elevenlabs.TTS(voice="rachel")    # reads ELEVENLABS_API_KEY
 ```
 
 ## Examples
 
-### Inbound Calls (AI answers the phone)
+### Inbound calls — default engine
 
 ```python
 import asyncio
-from patter import Patter, IncomingMessage
+from patter import Patter, Twilio, OpenAIRealtime
 
-async def agent(msg: IncomingMessage) -> str:
-    if "hours" in msg.text.lower():
-        return "We're open Monday through Friday, 9 to 5."
-    return "How can I help you today?"
-
-async def main():
-    phone = Patter(
-        twilio_sid="AC...", twilio_token="...",
-        openai_key="sk-...",
-        phone_number="+1...",
+async def main() -> None:
+    phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+    agent = phone.agent(
+        engine=OpenAIRealtime(),
+        system_prompt="You are a helpful customer service agent.",
+        first_message="Hello! How can I help?",
     )
-
     await phone.serve(
-        agent=phone.agent(
-            system_prompt="You are a helpful customer service agent.",
-            first_message="Hello! How can I help?",
-        ),
-        port=8000,
-        onCallStart=lambda data: print(f"Call from {data['caller']}"),
-        onCallEnd=lambda data: print("Call ended"),
+        agent,
+        tunnel=True,
+        on_call_start=lambda data: print(f"Call from {data['caller']}"),
+        on_call_end=lambda data: print("Call ended"),
     )
 
 asyncio.run(main())
 ```
 
-### Outbound Calls (AI calls someone)
+### Custom voice — Deepgram STT + ElevenLabs TTS
 
 ```python
-import asyncio
-from patter import Patter, IncomingMessage
+from patter import Patter, Twilio
+from patter.stt import deepgram
+from patter.tts import elevenlabs
 
-async def agent(msg: IncomingMessage) -> str:
-    return "Thanks for picking up. This is a reminder about your appointment tomorrow."
-
-async def main():
-    phone = Patter(
-        twilio_sid="AC...", twilio_token="...",
-        openai_key="sk-...",
-        phone_number="+1...",
-    )
-
-    agent_config = phone.agent(
-        system_prompt="You are making reminder calls.",
-        first_message="Hi, this is an automated reminder from Acme Corp.",
-    )
-
-    await phone.serve(agent=agent_config, port=8000)
-    await phone.call(to="+14155551234", first_message="Hi, just checking in.")
-
-asyncio.run(main())
-```
-
-### Tool Calling (Agent calls external APIs)
-
-```python
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
 agent = phone.agent(
-    system_prompt="You are a booking assistant. Check availability before confirming.",
-    tools=[{
-        "name": "check_availability",
-        "description": "Check appointment availability for a given date",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "date": {"type": "string", "description": "ISO date, e.g. 2025-06-15"},
-            },
-            "required": ["date"],
-        },
-        "webhook_url": "https://api.example.com/availability",
-    }],
-)
-```
-
-### Custom Voice (Deepgram STT + ElevenLabs TTS)
-
-```python
-phone = Patter(
-    twilio_sid="AC...", twilio_token="...",
-    openai_key="sk-...",
-    phone_number="+1...",
-)
-
-agent = phone.agent(
+    stt=deepgram.STT(),              # reads DEEPGRAM_API_KEY
+    tts=elevenlabs.TTS(voice="rachel"),   # reads ELEVENLABS_API_KEY
     system_prompt="You are a helpful voice assistant.",
-    voice="aria",
 )
-
-# Use custom STT and TTS in pipeline mode
-await phone.serve(
-    agent=agent,
-    port=8000,
-    stt=Patter.deepgram(api_key="dg_...", language="en"),
-    tts=Patter.elevenlabs(api_key="el_...", voice="aria"),
-)
+await phone.serve(agent, tunnel=True)
 ```
 
-### Call Recording
+### Tool calling
 
 ```python
-await phone.serve(
-    agent=agent,
-    port=8000,
-    recording=True,  # Records all inbound and outbound calls
+from patter import Patter, Twilio, OpenAIRealtime, Tool, tool
+
+@tool
+async def check_availability(date: str) -> dict:
+    """Check appointment availability for a given ISO date."""
+    return {"available": True}
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+agent = phone.agent(
+    engine=OpenAIRealtime(),
+    system_prompt="You are a booking assistant.",
+    tools=[check_availability],
 )
+await phone.serve(agent, tunnel=True)
 ```
 
-### Dynamic Variables in Prompts
+### Outbound calls
+
+```python
+from patter import Patter, Twilio, OpenAIRealtime
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+agent = phone.agent(
+    engine=OpenAIRealtime(),
+    system_prompt="You are making reminder calls.",
+    first_message="Hi, this is a reminder from Acme Corp.",
+)
+
+await phone.serve(agent, tunnel=True)
+await phone.call(to="+14155551234", agent=agent)
+```
+
+### Dynamic variables
 
 ```python
 agent = phone.agent(
+    engine=OpenAIRealtime(),
     system_prompt="You are helping {customer_name}, account #{account_id}.",
     first_message="Hi {customer_name}! How can I help you today?",
-    variables={
-        "customer_name": "Jane",
-        "account_id": "A-789",
-    },
+    variables={"customer_name": "Jane", "account_id": "A-789"},
 )
 ```
 

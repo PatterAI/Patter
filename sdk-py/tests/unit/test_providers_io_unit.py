@@ -1055,7 +1055,8 @@ class TestCreateSTTFromConfig:
         from patter.models import STTConfig
 
         config = STTConfig(provider="unknown", api_key="x")
-        assert _create_stt_from_config(config) is None
+        with pytest.raises(ValueError, match="Unknown STT provider"):
+            _create_stt_from_config(config)
 
 
 @pytest.mark.unit
@@ -1085,7 +1086,8 @@ class TestCreateTTSFromConfig:
         from patter.models import TTSConfig
 
         config = TTSConfig(provider="unknown", api_key="x")
-        assert _create_tts_from_config(config) is None
+        with pytest.raises(ValueError, match="Unknown TTS provider"):
+            _create_tts_from_config(config)
 
 
 # ---------------------------------------------------------------------------

@@ -4,7 +4,7 @@ Bring your own LLM (Claude, GPT, LangChain, or custom logic).
 Patter handles STT, TTS, and telephony; your function handles the brain.
 """
 import asyncio
-from patter import Patter
+from patter import Patter, Twilio, DeepgramSTT, ElevenLabsTTS
 
 
 # Your agent — can be Claude, GPT, LangChain, custom logic, anything.
@@ -40,19 +40,16 @@ async def my_agent(data: dict) -> str:
 
 
 async def main():
-    # openai_key is not required in pipeline mode — you provide the LLM yourself
     phone = Patter(
-        mode="local",
-        twilio_sid="AC...",
-        twilio_token="...",
-        phone_number="+1...",
+        carrier=Twilio(),                               # TWILIO_* from env
+        phone_number="+15550001234",
         webhook_url="xxx.ngrok-free.dev",
     )
 
+    # Pipeline mode: plug an STT and a TTS; the LLM flows through on_message.
     agent = phone.agent(
-        provider="pipeline",
-        stt=Patter.deepgram(api_key="dg_..."),
-        tts=Patter.elevenlabs(api_key="el_...", voice="aria"),
+        stt=DeepgramSTT(),                              # DEEPGRAM_API_KEY from env
+        tts=ElevenLabsTTS(voice_id="aria"),             # ELEVENLABS_API_KEY from env
         language="en",
     )
 

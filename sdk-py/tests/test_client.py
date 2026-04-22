@@ -1,7 +1,12 @@
 import pytest
 from unittest.mock import AsyncMock, patch
-from patter import Patter
-from patter.models import STTConfig, TTSConfig
+from patter import (
+    DeepgramSTT,
+    ElevenLabsTTS,
+    OpenAIRealtime,
+    Patter,
+    Twilio,
+)
 from patter.providers import deepgram, elevenlabs
 from patter.exceptions import PatterConnectionError
 
@@ -16,19 +21,46 @@ def test_client_init_custom_backend():
     assert phone._backend_url == "wss://custom.server.com"
 
 
-def test_client_deepgram_helper():
-    config = Patter.deepgram(api_key="dg_test")
-    assert isinstance(config, STTConfig)
+def test_agent_stt_instance_stored():
+    phone = Patter(
+        carrier=Twilio(account_sid="AC_test", auth_token="tok"),
+        phone_number="+15550001234",
+    )
+    stt = DeepgramSTT(api_key="dg_test")
+    tts = ElevenLabsTTS(api_key="el_test")
+    ag = phone.agent(system_prompt="hi", stt=stt, tts=tts)
+    assert ag.provider == "pipeline"
+    assert ag.stt is stt
+    assert ag.tts is tts
 
 
-def test_client_elevenlabs_helper():
-    config = Patter.elevenlabs(api_key="el_test", voice="aria")
-    assert isinstance(config, TTSConfig)
+def test_agent_tts_instance_stored():
+    phone = Patter(
+        carrier=Twilio(account_sid="AC_test", auth_token="tok"),
+        phone_number="+15550001234",
+    )
+    stt = DeepgramSTT(api_key="dg_test")
+    tts = ElevenLabsTTS(api_key="el_test", voice_id="aria")
+    ag = phone.agent(system_prompt="hi", stt=stt, tts=tts, voice="aria")
+    assert ag.tts is tts
 
 
-def test_client_openai_tts_helper():
-    config = Patter.openai_tts(api_key="sk_test")
-    assert isinstance(config, TTSConfig)
+def test_agent_rejects_non_stt_provider_type():
+    phone = Patter(
+        carrier=Twilio(account_sid="AC_test", auth_token="tok"),
+        phone_number="+15550001234",
+    )
+    with pytest.raises(TypeError, match="STTProvider"):
+        phone.agent(system_prompt="hi", stt="deepgram")
+
+
+def test_agent_rejects_non_tts_provider_type():
+    phone = Patter(
+        carrier=Twilio(account_sid="AC_test", auth_token="tok"),
+        phone_number="+15550001234",
+    )
+    with pytest.raises(TypeError, match="TTSProvider"):
+        phone.agent(system_prompt="hi", stt=DeepgramSTT(api_key="dg"), tts="elevenlabs")
 
 
 # === Managed mode (simple) ===

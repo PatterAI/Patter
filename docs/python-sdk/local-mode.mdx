@@ -16,15 +16,17 @@ Local mode runs an embedded server on your infrastructure. You bring your own te
 
 ## Setup
 
-### 1. Install with local extras
+### 1. Install the SDK
 
 ```bash
-pip install patter[local]
+pip install getpatter
 ```
 
 ### 2. Expose your server
 
-Telephony providers need to reach your server via a public URL. Use [ngrok](https://ngrok.com) for development:
+Telephony providers need a public URL to reach your local server. The easiest option is the **built-in Cloudflare tunnel** — pass `tunnel=True` (or `tunnel=CloudflareTunnel()`) to `serve()` and Patter creates the tunnel and auto-configures the Twilio webhook for you (requires the `cloudflared` package, see [Tunneling](/dev-tools/tunneling)).
+
+Alternatively, run [ngrok](https://ngrok.com) and pass the hostname as `webhook_url`:
 
 ```bash
 ngrok http 8000
@@ -35,14 +37,12 @@ ngrok http 8000
 ```python
 import os
 from dotenv import load_dotenv
-from patter import Patter
+from patter import Patter, Twilio
 
 load_dotenv()
 
 phone = Patter(
-    twilio_sid=os.environ["TWILIO_SID"],
-    twilio_token=os.environ["TWILIO_TOKEN"],
-    openai_key=os.environ["OPENAI_KEY"],
+    carrier=Twilio(),                                    # TWILIO_* from env
     phone_number=os.environ["PHONE_NUMBER"],
     webhook_url=os.environ["WEBHOOK_URL"],
 )
@@ -139,16 +139,16 @@ The `EmbeddedServer` is the internal class that powers `serve()`. You typically 
 
 ## LocalConfig
 
-The `LocalConfig` dataclass holds all provider credentials for local mode. It is created automatically from the `Patter` constructor parameters.
+The `LocalConfig` dataclass holds all provider credentials for local mode. It is created automatically from the `Patter` constructor — you don't normally need to touch it directly.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `telephony_provider` | `str` | `"twilio"` or `"telnyx"` (auto-detected). |
-| `twilio_sid` | `str` | Twilio Account SID. |
-| `twilio_token` | `str` | Twilio Auth Token. |
-| `telnyx_key` | `str` | Telnyx API key. |
-| `telnyx_connection_id` | `str` | Telnyx Call Control Application ID. |
-| `openai_key` | `str` | OpenAI API key. |
+| `telephony_provider` | `str` | `"twilio"` or `"telnyx"` (auto-detected from the `carrier=` instance). |
+| `twilio_sid` | `str` | Twilio Account SID (unpacked from `Twilio(...)`). |
+| `twilio_token` | `str` | Twilio Auth Token (unpacked from `Twilio(...)`). |
+| `telnyx_key` | `str` | Telnyx API key (unpacked from `Telnyx(...)`). |
+| `telnyx_connection_id` | `str` | Telnyx Call Control Application ID (unpacked from `Telnyx(...)`). |
+| `openai_key` | `str` | OpenAI API key (resolved from `OpenAIRealtime(...)` or `OPENAI_API_KEY`). |
 | `elevenlabs_key` | `str` | ElevenLabs API key. |
 | `deepgram_key` | `str` | Deepgram API key. |
 | `phone_number` | `str` | Phone number in E.164 format. |
@@ -172,30 +172,32 @@ await phone.disconnect()
 import os
 import asyncio
 from dotenv import load_dotenv
-from patter import Patter
+from patter import Patter, Twilio, OpenAIRealtime, Tool, Guardrail
 
 load_dotenv()
 
 phone = Patter(
-    twilio_sid=os.environ["TWILIO_SID"],
-    twilio_token=os.environ["TWILIO_TOKEN"],
-    openai_key=os.environ["OPENAI_KEY"],
+    carrier=Twilio(),                                   # TWILIO_* from env
     phone_number=os.environ["PHONE_NUMBER"],
     webhook_url=os.environ["WEBHOOK_URL"],
 )
 
+async def schedule_appointment(args: dict, ctx: dict) -> dict:
+    # Your reservation system here.
+    return {"confirmation": "ACME-123", "date": args["date"], "time": args["time"]}
+
 agent = phone.agent(
+    engine=OpenAIRealtime(voice="nova"),                # OPENAI_API_KEY from env
     system_prompt="""You are a friendly receptionist for Acme Corp.
 Help callers schedule appointments, answer general questions, and transfer to the right department.
 Transfer billing questions to +15550001111.
 Transfer technical support to +15550002222.""",
-    voice="nova",
     first_message="Thank you for calling Acme Corp! How can I help you today?",
     tools=[
-        {
-            "name": "schedule_appointment",
-            "description": "Schedule an appointment for the caller.",
-            "parameters": {
+        Tool(
+            name="schedule_appointment",
+            description="Schedule an appointment for the caller.",
+            parameters={
                 "type": "object",
                 "properties": {
                     "name": {"type": "string", "description": "Caller's full name"},
@@ -205,11 +207,11 @@ Transfer technical support to +15550002222.""",
                 },
                 "required": ["name", "date", "time"],
             },
-            "webhook_url": "https://api.example.com/appointments",
-        },
+            handler=schedule_appointment,
+        ),
     ],
     guardrails=[
-        Patter.guardrail(
+        Guardrail(
             name="No legal advice",
             blocked_terms=["lawsuit", "sue", "legal action"],
             replacement="I'm not able to provide legal guidance. Let me transfer you to our legal department.",

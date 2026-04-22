@@ -5,41 +5,27 @@ description: "Constructor options for local mode."
 
 # Configuration
 
-The `Patter` constructor accepts `LocalOptions`.
+The `Patter` constructor accepts `PatterOptions`. Pass a carrier instance and a phone number — everything else flows through environment variables unless you override it.
 
-## Local Mode
+## Minimal config
 
 ```typescript
-import { Patter } from "getpatter";
+import { Patter, Twilio } from "getpatter";
 
-const phone = new Patter({
-  mode: "local",
-  twilioSid: process.env.TWILIO_SID,
-  twilioToken: process.env.TWILIO_TOKEN,
-  openaiKey: process.env.OPENAI_KEY,
-  phoneNumber: "+15550001234",
-  webhookUrl: "abc.ngrok.io",
-});
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });  // TWILIO_* from env
 ```
 
-### LocalOptions
+The carrier instance reads credentials from environment variables when you don't pass them explicitly. See [Carrier](/typescript-sdk/carrier) for the full list.
+
+## Constructor parameters
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `mode` | `"local"` | Yes | — | Must be `"local"` to enable local mode. |
+| `carrier` | `Twilio \| Telnyx` | Yes | — | Telephony carrier instance. Reads credentials from env vars when arguments are omitted. See [Carrier](/typescript-sdk/carrier). |
 | `phoneNumber` | `string` | Yes | — | Your phone number in E.164 format. |
 | `webhookUrl` | `string` | Conditional | — | Public hostname for webhooks (no protocol prefix, no path). Required unless using `tunnel: true` in `serve()`. |
-| `twilioSid` | `string` | Conditional | — | Twilio Account SID. Required if not using Telnyx. |
-| `twilioToken` | `string` | Conditional | — | Twilio Auth Token. Required when `twilioSid` is set. |
-| `openaiKey` | `string` | No | — | OpenAI API key for the realtime adapter. |
-| `telephonyProvider` | `"twilio" \| "telnyx"` | No | `"twilio"` | Which telephony provider to use. |
-| `telnyxKey` | `string` | Conditional | — | Telnyx API key. Required if `telephonyProvider` is `"telnyx"`. |
-| `telnyxConnectionId` | `string` | No | — | Telnyx SIP Connection ID for outbound calls. |
-| `telnyxPublicKey` | `string` | No | — | Telnyx Ed25519 public key (base64 DER/SPKI) for webhook signature verification. |
-
-<Warning>
-  You must provide either `twilioSid` or `telnyxKey`. The constructor throws if neither is set.
-</Warning>
+| `tunnel` | `CloudflareTunnel \| StaticTunnel \| boolean` | No | — | Tunnel directive. `true` is shorthand for `new CloudflareTunnel()`. See [Tunneling](/dev-tools/tunneling). |
+| `pricing` | `Record<string, Partial<ProviderPricing>>` | No | — | Override default provider pricing estimates. See [Metrics](/typescript-sdk/metrics). |
 
 ## Webhook URL Format
 
@@ -57,47 +43,93 @@ webhookUrl: "abc123.ngrok.io/webhooks"
 The SDK constructs full URLs internally (e.g., `https://{webhookUrl}/webhooks/twilio/voice`).
 
 <Note>
-  **Telnyx:** Telnyx is a fully supported alternative to Twilio, with feature parity for DTMF, call transfer, recording, and cost tracking.
+**Telnyx:** Telnyx is a fully supported alternative to Twilio, with feature parity for DTMF, call transfer, recording, and cost tracking.
 </Note>
 
-## Using Telnyx
+## Environment variables
+
+Every credential resolves from an env var when the matching argument is omitted. See `.env.example` in the repo for a complete list.
+
+| Env var | Used by |
+|---------|---------|
+| `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` | `new Twilio()` |
+| `TELNYX_API_KEY`, `TELNYX_CONNECTION_ID`, `TELNYX_PUBLIC_KEY` (optional) | `new Telnyx()` |
+| `OPENAI_API_KEY` | `new OpenAIRealtime()`, `new OpenAITTS()`, `new WhisperSTT()` |
+| `ELEVENLABS_API_KEY`, `ELEVENLABS_AGENT_ID` | `new ElevenLabsTTS()`, `new ElevenLabsConvAI()` |
+| `DEEPGRAM_API_KEY` | `new DeepgramSTT()` |
+| `CARTESIA_API_KEY` | `new CartesiaSTT()`, `new CartesiaTTS()` |
+| `RIME_API_KEY` | `new RimeTTS()` |
+| `LMNT_API_KEY` | `new LMNTTTS()` |
+| `SONIOX_API_KEY` | `new SonioxSTT()` |
+| `ASSEMBLYAI_API_KEY` | `new AssemblyAISTT()` |
+
+## Examples
+
+### OpenAI Realtime on Twilio
 
 ```typescript
+import { Patter, Twilio, OpenAIRealtime } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  engine: new OpenAIRealtime({ voice: "alloy" }),
+  systemPrompt: "You are a friendly receptionist.",
+  firstMessage: "Thanks for calling!",
+});
+```
+
+### OpenAI Realtime on Telnyx
+
+```typescript
+import { Patter, Telnyx, OpenAIRealtime } from "getpatter";
+
+const phone = new Patter({ carrier: new Telnyx(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  engine: new OpenAIRealtime(),
+  systemPrompt: "You are a friendly receptionist.",
+});
+```
+
+### Pipeline mode
+
+```typescript
+import { Patter, Twilio, DeepgramSTT, ElevenLabsTTS } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  stt: new DeepgramSTT({ endpointingMs: 80 }),
+  tts: new ElevenLabsTTS({ voiceId: "rachel" }),
+  systemPrompt: "You are a helpful assistant.",
+});
+```
+
+## Loading from .env
+
+```typescript
+// Node 20.6+: --env-file flag
+// node --env-file=.env --loader tsx index.ts
+
+import { Patter, Twilio, OpenAIRealtime } from "getpatter";
+
 const phone = new Patter({
-  mode: "local",
-  telephonyProvider: "telnyx",
-  telnyxKey: process.env.TELNYX_KEY,
-  telnyxConnectionId: process.env.TELNYX_CONNECTION_ID,
-  telnyxPublicKey: process.env.TELNYX_PUBLIC_KEY,
-  openaiKey: process.env.OPENAI_KEY,
-  phoneNumber: "+15550001234",
-  webhookUrl: "abc.ngrok.io",
+  carrier: new Twilio(),                              // reads TWILIO_* from env
+  phoneNumber: process.env.PHONE_NUMBER!,
+  webhookUrl: process.env.WEBHOOK_URL!,
+});
+
+const agent = phone.agent({
+  engine: new OpenAIRealtime(),                       // reads OPENAI_API_KEY
+  systemPrompt: "You are a helpful assistant.",
 });
 ```
 
 <Info>
-  Telnyx delivers 16kHz PCM audio natively, so no transcoding is needed. Twilio uses mulaw 8kHz, which the SDK transcodes automatically.
+Telnyx delivers 16 kHz PCM audio natively, so no transcoding is needed. Twilio uses mulaw 8 kHz, which the SDK transcodes automatically.
 </Info>
 
-## Environment Variables
-
-We recommend loading credentials from environment variables. Never hardcode secrets:
-
-```typescript
-// .env
-TWILIO_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-TWILIO_TOKEN=your_auth_token
-OPENAI_KEY=sk-...
-PHONE_NUMBER=+15550001234
-WEBHOOK_URL=abc123.ngrok.io
-```
-
-Use a library like [dotenv](https://www.npmjs.com/package/dotenv) or Node's built-in `--env-file` flag (Node 20.6+):
-
-```bash
-node --env-file=.env index.js
-```
-
-<Note>
-  Copy `.env.example` from the repo root for a complete list of environment variables.
-</Note>
+<Warning>
+Never hardcode API keys, tokens, or secrets in your source code. Always use environment variables or a secret manager.
+</Warning>

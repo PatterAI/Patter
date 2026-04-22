@@ -12,22 +12,25 @@ Three modes:
     await phone.connect(
         provider="twilio", provider_key="AC...",
         number="+1...",
-        stt=phone.deepgram(api_key="dg_..."),
-        tts=phone.elevenlabs(api_key="el_..."),
+        stt=DeepgramSTT(api_key="dg_..."),
+        tts=ElevenLabsTTS(api_key="el_..."),
         on_message=handler,
     )
 
   Local (fully embedded, no Patter backend):
-    phone = Patter(twilio_sid="AC...", twilio_token="...", openai_key="sk-...",
-                   phone_number="+1...", webhook_url="abc.ngrok.io")
-    agent = phone.agent(system_prompt="You are a helpful assistant.")
+    phone = Patter(
+        carrier=Twilio(account_sid="AC...", auth_token="..."),
+        phone_number="+1...",
+        tunnel=Static(hostname="abc.ngrok.io"),
+    )
+    agent = phone.agent(engine=OpenAIRealtime(), system_prompt="hi")
     await phone.serve(agent, port=8000)
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Callable, Awaitable
+from typing import TYPE_CHECKING, Any, Callable, Awaitable
 
 import httpx
 
@@ -37,15 +40,15 @@ from patter.connection import PatterConnection
 from patter.exceptions import PatterConnectionError, ProvisionError
 from patter.models import Agent, Guardrail, IncomingMessage, STTConfig, TTSConfig
 from patter.local_config import LocalConfig
-from patter.providers import (
-    deepgram as _deepgram,
-    whisper as _whisper,
-    elevenlabs as _elevenlabs,
-    openai_tts as _openai_tts,
-    cartesia as _cartesia,
-    rime as _rime,
-    lmnt as _lmnt,
-)
+from patter.providers.base import STTProvider, TTSProvider
+
+if TYPE_CHECKING:  # pragma: no cover — typing only
+    from patter.carriers.twilio import Carrier as TwilioCarrier
+    from patter.carriers.telnyx import Carrier as TelnyxCarrier
+    from patter.engines.openai import Realtime as OpenAIRealtimeEngine
+    from patter.engines.elevenlabs import ConvAI as ElevenLabsConvAIEngine
+    from patter.tunnels import CloudflareTunnel, Ngrok, Static
+    from patter._public_api import Tool
 
 DEFAULT_BACKEND_URL = "wss://api.getpatter.com"
 DEFAULT_REST_URL = "https://api.getpatter.com"
@@ -60,26 +63,26 @@ class Patter:
 
     Local (embedded) mode::
 
-        phone = Patter(twilio_sid="AC...", twilio_token="...",
-                       openai_key="sk-...", phone_number="+1...",
-                       webhook_url="abc.ngrok.io")
+        phone = Patter(
+            carrier=Twilio(account_sid="AC...", auth_token="..."),
+            phone_number="+1...",
+            tunnel=Static(hostname="abc.ngrok.io"),
+        )
 
     Args:
         api_key: Your Patter API key (starts with ``pt_``). Required for cloud mode.
         backend_url: WebSocket URL for the Patter backend (cloud/self-hosted).
         rest_url: REST API URL for the Patter backend (cloud/self-hosted).
         mode: ``"cloud"`` (default) or ``"local"``.  Auto-detected when
-            ``twilio_sid`` is supplied without ``api_key``.
-        twilio_sid: Twilio Account SID (local mode).
-        twilio_token: Twilio Auth Token (local mode).
-        telnyx_key: Telnyx API key (local mode, Telnyx).
-        telnyx_connection_id: Telnyx Call Control App ID (local mode, Telnyx).
-        openai_key: OpenAI API key for the Realtime API (local mode).
-        elevenlabs_key: ElevenLabs API key (local mode, optional pipeline).
-        deepgram_key: Deepgram API key (local mode, optional pipeline).
+            ``carrier`` is supplied without ``api_key``.
+        carrier: ``Twilio(...)`` or ``Telnyx(...)`` instance (local mode).
         phone_number: Your phone number in E.164 format (local mode).
         webhook_url: Public hostname (no scheme) of this server, e.g.
-            ``"abc.ngrok.io"`` (local mode).
+            ``"abc.ngrok.io"`` (local mode). Mutually exclusive with ``tunnel``.
+        tunnel: ``CloudflareTunnel()``, ``Ngrok(hostname=...)``, ``Static(hostname=...)``,
+            or ``True`` (alias for ``CloudflareTunnel()``). Used to expose the
+            embedded server publicly (local mode).
+        pricing: Optional pricing overrides for cost tracking (local mode).
     """
 
     def __init__(
@@ -88,49 +91,67 @@ class Patter:
         api_key: str = "",
         backend_url: str = DEFAULT_BACKEND_URL,
         rest_url: str = DEFAULT_REST_URL,
-        # Local mode
+        # Mode override
         mode: str = "cloud",
-        twilio_sid: str = "",
-        twilio_token: str = "",
-        telnyx_key: str = "",
-        telnyx_connection_id: str = "",
-        openai_key: str = "",
-        elevenlabs_key: str = "",
-        deepgram_key: str = "",
+        # Local mode — instance-based API
+        carrier: Any = None,
         phone_number: str = "",
         webhook_url: str = "",
+        tunnel: Any = None,
         # Cost tracking
         pricing: dict | None = None,
     ) -> None:
         self._mode = mode
         self._pricing = pricing
 
-        if mode == "local" or (twilio_sid and not api_key) or (telnyx_key and not api_key):
+        # --- Carrier normalisation ---
+        carrier_kind, carrier_creds = self._unpack_carrier(carrier)
+
+        # --- Tunnel directive → webhook_url override ---
+        tunnel_directive, tunnel_webhook = self._unpack_tunnel(tunnel)
+        if tunnel_directive is not None and tunnel_webhook:
+            if webhook_url and webhook_url != tunnel_webhook:
+                raise ValueError(
+                    "Patter() received a tunnel=Static(...)/Ngrok(hostname=...) "
+                    "and a conflicting webhook_url. Provide only one."
+                )
+            webhook_url = tunnel_webhook
+        self._tunnel_directive = tunnel_directive
+
+        # --- Mode detection ---
+        # Local mode is selected when either mode="local" is explicit OR a
+        # carrier instance is provided without an api_key.
+        if mode == "local" or (carrier_kind is not None and not api_key):
             self._mode = "local"
-            # --- Local mode validation (only when telephony keys are provided) ---
-            # Auto-detected local mode (twilio_sid/telnyx_key supplied without api_key)
-            # requires a complete configuration; explicit mode="local" with no keys is allowed
-            # for testing or future providers.
-            _has_telephony = bool(twilio_sid or telnyx_key)
-            _auto_detected = (twilio_sid and not api_key) or (telnyx_key and not api_key)
-            if _auto_detected or _has_telephony:
+
+            twilio_sid = ""
+            twilio_token = ""
+            telnyx_key = ""
+            telnyx_connection_id = ""
+            telnyx_public_key = ""
+
+            if carrier_kind == "twilio":
+                twilio_sid = carrier_creds["account_sid"]
+                twilio_token = carrier_creds["auth_token"]
+            elif carrier_kind == "telnyx":
+                telnyx_key = carrier_creds["api_key"]
+                telnyx_connection_id = carrier_creds["connection_id"]
+                telnyx_public_key = carrier_creds.get("public_key", "")
+
+            # --- Local mode validation (only when a carrier is provided) ---
+            if carrier_kind is not None:
                 if not phone_number:
                     raise ValueError(
                         "Local mode requires phone_number (e.g., phone_number='+15550001234')."
                     )
-                if twilio_sid and not twilio_token:
-                    raise ValueError(
-                        "twilio_token is required when using twilio_sid."
-                    )
+
             self._local_config = LocalConfig(
-                telephony_provider="twilio" if twilio_sid else "telnyx",
+                telephony_provider=carrier_kind or "twilio",
                 twilio_sid=twilio_sid,
                 twilio_token=twilio_token,
                 telnyx_key=telnyx_key,
                 telnyx_connection_id=telnyx_connection_id,
-                openai_key=openai_key,
-                elevenlabs_key=elevenlabs_key,
-                deepgram_key=deepgram_key,
+                telnyx_public_key=telnyx_public_key,
                 phone_number=phone_number,
                 webhook_url=webhook_url,
             )
@@ -157,6 +178,75 @@ class Patter:
                 headers={"X-API-Key": api_key},
                 timeout=30.0,
             )
+
+    @staticmethod
+    def _unpack_carrier(carrier: Any) -> tuple[str | None, dict]:
+        """Convert a ``Twilio(...)``/``Telnyx(...)`` instance to kind + creds.
+
+        Returns ``(None, {})`` when *carrier* is ``None``. Raises
+        :class:`TypeError` if the argument does not expose a ``.kind`` attribute
+        matching one of the supported carriers.
+        """
+        if carrier is None:
+            return None, {}
+        # Import lazily to keep the module import graph flat.
+        from patter.carriers.telnyx import Carrier as _Telnyx
+        from patter.carriers.twilio import Carrier as _Twilio
+
+        if isinstance(carrier, _Twilio):
+            return "twilio", {
+                "account_sid": carrier.account_sid,
+                "auth_token": carrier.auth_token,
+            }
+        if isinstance(carrier, _Telnyx):
+            return "telnyx", {
+                "api_key": carrier.api_key,
+                "connection_id": carrier.connection_id,
+                "public_key": carrier.public_key,
+            }
+        raise TypeError(
+            "carrier= must be a Twilio(...) or Telnyx(...) instance, got "
+            f"{type(carrier).__name__}"
+        )
+
+    @staticmethod
+    def _unpack_tunnel(tunnel: Any) -> tuple[Any, str]:
+        """Resolve the tunnel directive.
+
+        Returns ``(directive, webhook_url)`` where *directive* is the raw object
+        to keep around (used later by :meth:`serve`) and *webhook_url* is the
+        host to feed into :class:`LocalConfig` right now — empty when the
+        tunnel must be auto-started at ``serve()`` time.
+        """
+        if tunnel is None:
+            return None, ""
+        # Legacy shorthand: ``tunnel=True`` == ``tunnel=CloudflareTunnel()``.
+        if isinstance(tunnel, bool):
+            if not tunnel:
+                return None, ""
+            from patter.tunnels import CloudflareTunnel
+
+            return CloudflareTunnel(), ""
+
+        from patter.tunnels import CloudflareTunnel, Ngrok, Static
+
+        if isinstance(tunnel, CloudflareTunnel):
+            return tunnel, ""
+        if isinstance(tunnel, Static):
+            return tunnel, tunnel.hostname
+        if isinstance(tunnel, Ngrok):
+            if not tunnel.hostname:
+                raise NotImplementedError(
+                    "Ngrok() with no hostname is not yet supported — programmatic "
+                    "ngrok launch is planned for a future release. For now, run "
+                    "ngrok yourself and pass tunnel=Static(hostname='abc.ngrok.io') "
+                    "or tunnel=Ngrok(hostname='abc.ngrok.io')."
+                )
+            return tunnel, tunnel.hostname
+        raise TypeError(
+            "tunnel= must be a CloudflareTunnel(), Ngrok(...), Static(...) "
+            f"instance, or bool, got {type(tunnel).__name__}"
+        )
 
     @property
     def api_key(self) -> str:
@@ -352,6 +442,30 @@ class Patter:
 
     # === Local mode helpers ===
 
+    @staticmethod
+    def _resolve_stt(stt: Any) -> STTProvider | None:
+        """Validate that *stt* is an ``STTProvider`` instance or ``None``."""
+        if stt is None:
+            return None
+        if isinstance(stt, STTProvider):
+            return stt
+        raise TypeError(
+            "stt must be an STTProvider instance (e.g. DeepgramSTT(api_key=...)) "
+            f"or None; got {type(stt).__name__}"
+        )
+
+    @staticmethod
+    def _resolve_tts(tts: Any) -> TTSProvider | None:
+        """Validate that *tts* is a ``TTSProvider`` instance or ``None``."""
+        if tts is None:
+            return None
+        if isinstance(tts, TTSProvider):
+            return tts
+        raise TypeError(
+            "tts must be a TTSProvider instance (e.g. ElevenLabsTTS(api_key=...)) "
+            f"or None; got {type(tts).__name__}"
+        )
+
     def agent(
         self,
         system_prompt: str,
@@ -359,20 +473,28 @@ class Patter:
         model: str = "gpt-4o-mini-realtime-preview",
         language: str = "en",
         first_message: str = "",
-        tools: list[dict] | None = None,
-        provider: str = "openai_realtime",
-        stt: STTConfig | None = None,
-        tts: TTSConfig | None = None,
+        tools: "list[Tool] | None" = None,
+        stt: STTProvider | None = None,
+        tts: TTSProvider | None = None,
         variables: dict | None = None,
-        guardrails: list | None = None,
+        guardrails: "list[Guardrail] | None" = None,
         hooks: "PipelineHooks | None" = None,
         text_transforms: "list[Callable] | None" = None,
         vad: "VADProvider | None" = None,
         audio_filter: "AudioFilter | None" = None,
         background_audio: "BackgroundAudioPlayer | None" = None,
         barge_in_threshold_ms: int = 300,
+        engine: Any = None,
     ) -> Agent:
         """Create an ``Agent`` configuration for local mode.
+
+        The AI provider mode is derived from the arguments:
+
+        * ``engine=OpenAIRealtime(...)`` → OpenAI Realtime API.
+        * ``engine=ElevenLabsConvAI(...)`` → ElevenLabs Conversational AI.
+        * No ``engine`` + ``stt``/``tts`` set → pipeline mode (STT + LLM + TTS).
+        * No ``engine`` and no ``stt``/``tts`` → defaults to OpenAI Realtime (the
+          server will look up the OpenAI credentials from the engine or env).
 
         Args:
             system_prompt: Instructions for the AI agent.
@@ -380,72 +502,102 @@ class Patter:
             model: OpenAI Realtime model ID.
             language: BCP-47 language code, e.g. ``"en"``.
             first_message: If set, the agent speaks this immediately on connect.
-            tools: List of tool dicts with ``name``, ``description``,
-                ``parameters``, and optional ``webhook_url``.
-            provider: AI provider mode — ``"openai_realtime"``,
-                ``"elevenlabs_convai"``, or ``"pipeline"``.
-            stt: STT provider config (pipeline mode). Use ``Patter.deepgram()``
-                or ``Patter.whisper()``. Falls back to ``deepgram_key`` when
-                omitted.
-            tts: TTS provider config (pipeline mode). Use
-                ``Patter.elevenlabs()`` or ``Patter.openai_tts()``. Falls back
-                to ``elevenlabs_key`` when omitted.
+            tools: List of ``Tool`` instances (build with the ``tool()`` factory).
+            stt: ``STTProvider`` instance for pipeline mode (e.g.
+                ``DeepgramSTT(api_key=...)``).
+            tts: ``TTSProvider`` instance for pipeline mode (e.g.
+                ``ElevenLabsTTS(api_key=...)``).
             variables: Dict of ``{placeholder: value}`` pairs substituted into
                 ``system_prompt`` at call start.
-            guardrails: List of guardrail dicts created with
-                ``Patter.guardrail()``.  Responses matching a guardrail are
+            guardrails: List of ``Guardrail`` instances (build with the
+                ``guardrail()`` factory). Responses matching a guardrail are
                 replaced before TTS.
+            engine: ``OpenAIRealtime(...)`` or ``ElevenLabsConvAI(...)``.
         """
-        _VALID_PROVIDERS = ("openai_realtime", "elevenlabs_convai", "pipeline")
-        if provider not in _VALID_PROVIDERS:
-            raise ValueError(
-                f"provider must be one of {_VALID_PROVIDERS}, got '{provider}'."
-            )
+        # --- Engine dispatch ---
+        openai_engine_key: str = ""
+        elevenlabs_engine_key: str = ""
+        if engine is not None:
+            engine_kind, engine_fields = self._unpack_engine(engine)
+            provider = engine_kind
+            # Engine-supplied voice/model win over the method defaults, but we
+            # let any *explicit* voice=/model= kwarg pass through unchanged —
+            # users sometimes pass the engine AND a specific voice.
+            if voice == "alloy" and engine_fields.get("voice"):
+                voice = engine_fields["voice"]
+            if model == "gpt-4o-mini-realtime-preview" and engine_fields.get("model"):
+                model = engine_fields["model"]
+            if engine_kind == "openai_realtime":
+                openai_engine_key = engine_fields.get("api_key", "")
+            elif engine_kind == "elevenlabs_convai":
+                elevenlabs_engine_key = engine_fields.get("api_key", "")
+        elif stt is not None or tts is not None:
+            provider = "pipeline"
+        else:
+            provider = "openai_realtime"
 
-        if provider == "openai_realtime" and self._mode == "local":
-            if not self._local_config.openai_key:
-                raise ValueError(
-                    "OpenAI Realtime mode requires openai_key in the Patter() constructor."
+        # Validate instance types for stt/tts and drop legacy forms.
+        stt_resolved = self._resolve_stt(stt)
+        tts_resolved = self._resolve_tts(tts)
+
+        # In local mode we backfill any credentials the engine carries into
+        # LocalConfig so downstream validation / dispatch sees them even when
+        # the user didn't also set them on the Patter() constructor.
+        if self._mode == "local":
+            from dataclasses import replace
+
+            if openai_engine_key and not self._local_config.openai_key:
+                self._local_config = replace(
+                    self._local_config, openai_key=openai_engine_key
+                )
+            if elevenlabs_engine_key and not self._local_config.elevenlabs_key:
+                self._local_config = replace(
+                    self._local_config, elevenlabs_key=elevenlabs_engine_key
                 )
 
-        if provider == "pipeline" and self._mode == "local":
-            if not stt and not self._local_config.deepgram_key:
+            if provider == "openai_realtime" and not self._local_config.openai_key:
                 raise ValueError(
-                    "Pipeline mode requires stt config (e.g., Patter.deepgram(api_key='...')) "
-                    "or deepgram_key in the Patter() constructor."
-                )
-            if not tts and not self._local_config.elevenlabs_key:
-                raise ValueError(
-                    "Pipeline mode requires tts config (e.g., Patter.elevenlabs(api_key='...')) "
-                    "or elevenlabs_key in the Patter() constructor."
+                    "OpenAI Realtime mode requires an OpenAI API key. Pass "
+                    "engine=OpenAIRealtime(api_key='sk-...') or set OPENAI_API_KEY "
+                    "in the environment."
                 )
 
+            if provider == "pipeline":
+                if stt_resolved is None:
+                    raise ValueError(
+                        "Pipeline mode requires an STT provider instance. "
+                        "Pass stt=DeepgramSTT(api_key='...') (or another supported "
+                        "STTProvider) to agent()."
+                    )
+                # TTS may be omitted when the user supplies an on_message handler
+                # that returns pre-synthesised audio, but most users will need it.
+                # We no longer hard-require a TTS key on the Patter() constructor
+                # because the TTS instance carries its own credentials.
+
+        # --- Normalise tools ---
+        tools_out: list[dict] | None = None
         if tools is not None:
             if not isinstance(tools, list):
                 raise TypeError(
                     f"tools must be a list, got {type(tools).__name__}."
                 )
-            for i, tool in enumerate(tools):
-                if not isinstance(tool, dict):
-                    raise TypeError(
-                        f"tools[{i}] must be a dict, got {type(tool).__name__}."
-                    )
-                if "name" not in tool:
-                    raise ValueError(f"tools[{i}] missing required 'name' field.")
-                if "webhook_url" not in tool and "handler" not in tool:
-                    raise ValueError(
-                        f"tools[{i}] requires either 'webhook_url' or 'handler'."
-                    )
+            tools_out = [self._tool_to_dict(t, index=i) for i, t in enumerate(tools)]
 
         if variables is not None and not isinstance(variables, dict):
             raise TypeError(
                 f"variables must be a dict, got {type(variables).__name__}."
             )
 
-        if guardrails is not None and not isinstance(guardrails, list):
-            raise TypeError(
-                f"guardrails must be a list, got {type(guardrails).__name__}."
-            )
+        # --- Normalise guardrails ---
+        guardrails_out: list[dict] | None = None
+        if guardrails is not None:
+            if not isinstance(guardrails, list):
+                raise TypeError(
+                    f"guardrails must be a list, got {type(guardrails).__name__}."
+                )
+            guardrails_out = [
+                self._guardrail_to_dict(g, index=i) for i, g in enumerate(guardrails)
+            ]
 
         return Agent(
             system_prompt=system_prompt,
@@ -453,12 +605,12 @@ class Patter:
             model=model,
             language=language,
             first_message=first_message,
-            tools=tools,
+            tools=tools_out,
             provider=provider,
-            stt=stt,
-            tts=tts,
+            stt=stt_resolved,
+            tts=tts_resolved,
             variables=variables,
-            guardrails=guardrails,
+            guardrails=guardrails_out,
             hooks=hooks,
             text_transforms=text_transforms,
             vad=vad,
@@ -466,6 +618,75 @@ class Patter:
             background_audio=background_audio,
             barge_in_threshold_ms=barge_in_threshold_ms,
         )
+
+    @staticmethod
+    def _unpack_engine(engine: Any) -> tuple[str, dict]:
+        """Convert an engine instance to ``(kind, {voice, model, api_key, agent_id})``."""
+        from patter.engines.elevenlabs import ConvAI as _ConvAI
+        from patter.engines.openai import Realtime as _Realtime
+
+        if isinstance(engine, _Realtime):
+            return "openai_realtime", {
+                "api_key": engine.api_key,
+                "voice": engine.voice,
+                "model": engine.model,
+            }
+        if isinstance(engine, _ConvAI):
+            return "elevenlabs_convai", {
+                "api_key": engine.api_key,
+                "agent_id": engine.agent_id,
+                "voice": engine.voice,
+            }
+        raise TypeError(
+            "engine= must be an OpenAIRealtime(...) or ElevenLabsConvAI(...) "
+            f"instance, got {type(engine).__name__}"
+        )
+
+    @staticmethod
+    def _tool_to_dict(tool: Any, *, index: int) -> dict:
+        """Normalise a ``Tool`` instance into the internal dict shape.
+
+        Raises ``TypeError`` if *tool* is not a ``Tool`` instance — the legacy
+        raw-dict form was removed in v0.5.0.
+        """
+        from patter._public_api import Tool as _Tool
+
+        if not isinstance(tool, _Tool):
+            raise TypeError(
+                f"tools[{index}] must be a Tool instance (build with "
+                f"patter.tool(...)), got {type(tool).__name__}."
+            )
+        out: dict = {
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": tool.parameters
+            if tool.parameters is not None
+            else {"type": "object", "properties": {}},
+        }
+        if tool.handler is not None:
+            out["handler"] = tool.handler
+        if tool.webhook_url:
+            out["webhook_url"] = tool.webhook_url
+        return out
+
+    @staticmethod
+    def _guardrail_to_dict(guardrail: Any, *, index: int) -> dict:
+        """Normalise a ``Guardrail`` instance into the internal dict shape.
+
+        Raises ``TypeError`` if *guardrail* is not a ``Guardrail`` instance —
+        the legacy raw-dict form was removed in v0.5.0.
+        """
+        if not isinstance(guardrail, Guardrail):
+            raise TypeError(
+                f"guardrails[{index}] must be a Guardrail instance (build with "
+                f"patter.guardrail(...)), got {type(guardrail).__name__}."
+            )
+        return {
+            "name": guardrail.name,
+            "blocked_terms": guardrail.blocked_terms,
+            "check": guardrail.check,
+            "replacement": guardrail.replacement,
+        }
 
     async def serve(
         self,
@@ -509,7 +730,7 @@ class Patter:
         if self._mode != "local":
             raise PatterConnectionError(
                 "serve() is only available in local mode. "
-                "Initialise Patter with twilio_sid/telnyx_key instead of api_key."
+                "Initialise Patter with carrier=Twilio(...) / carrier=Telnyx(...) instead of api_key."
             )
 
         if not isinstance(agent, Agent):
@@ -528,6 +749,13 @@ class Patter:
 
         # Resolve webhook_url: tunnel or explicit
         config = self._local_config
+
+        # If Patter(tunnel=CloudflareTunnel()) was passed, route through the
+        # same cloudflared auto-start path as ``serve(tunnel=True)``.
+        from patter.tunnels import CloudflareTunnel as _CFT
+
+        if isinstance(self._tunnel_directive, _CFT) and not tunnel:
+            tunnel = True
 
         if tunnel and config.webhook_url:
             raise ValueError(
@@ -714,156 +942,6 @@ class Patter:
             return
         await self._connection.disconnect()
         await self._http.aclose()
-
-    # === Provider helpers (for self-hosted setup) ===
-
-    @staticmethod
-    def deepgram(
-        api_key: str,
-        language: str = "en",
-        *,
-        model: str = "nova-3",
-        endpointing_ms: int = 150,
-        utterance_end_ms: int | None = 1000,
-        smart_format: bool = True,
-        interim_results: bool = True,
-        vad_events: bool | None = None,
-    ) -> STTConfig:
-        return _deepgram(
-            api_key=api_key,
-            language=language,
-            model=model,
-            endpointing_ms=endpointing_ms,
-            utterance_end_ms=utterance_end_ms,
-            smart_format=smart_format,
-            interim_results=interim_results,
-            vad_events=vad_events,
-        )
-
-    @staticmethod
-    def whisper(api_key: str, language: str = "en") -> STTConfig:
-        return _whisper(api_key=api_key, language=language)
-
-    @staticmethod
-    def elevenlabs(api_key: str, voice: str = "rachel") -> TTSConfig:
-        return _elevenlabs(api_key=api_key, voice=voice)
-
-    @staticmethod
-    def openai_tts(api_key: str, voice: str = "alloy") -> TTSConfig:
-        return _openai_tts(api_key=api_key, voice=voice)
-
-    @staticmethod
-    def cartesia(
-        api_key: str,
-        voice: str = "f786b574-daa5-4673-aa0c-cbe3e8534c02",
-    ) -> TTSConfig:
-        """Cartesia TTS config (parity with ``Patter.cartesia()`` in sdk-ts)."""
-        return _cartesia(api_key=api_key, voice=voice)
-
-    @staticmethod
-    def rime(api_key: str, voice: str = "astra") -> TTSConfig:
-        """Rime TTS config (parity with ``Patter.rime()`` in sdk-ts)."""
-        return _rime(api_key=api_key, voice=voice)
-
-    @staticmethod
-    def lmnt(api_key: str, voice: str = "leah") -> TTSConfig:
-        """LMNT TTS config (parity with ``Patter.lmnt()`` in sdk-ts)."""
-        return _lmnt(api_key=api_key, voice=voice)
-
-    @staticmethod
-    def guardrail(
-        name: str,
-        blocked_terms: list[str] | None = None,
-        check: Callable[[str], bool] | None = None,
-        replacement: str = "I'm sorry, I can't respond to that.",
-    ) -> dict:
-        """Create an output guardrail dict for use with ``agent(guardrails=[...])``.
-
-        Output guardrails intercept AI responses before they are sent to TTS.
-        When a response is blocked, ``replacement`` is spoken instead.
-
-        Args:
-            name: Identifier used in log warnings when the guardrail fires.
-            blocked_terms: List of words/phrases — any case-insensitive match
-                blocks the response.
-            check: Custom callable ``(text: str) -> bool`` that returns
-                ``True`` when the response should be blocked.  Evaluated after
-                ``blocked_terms``.
-            replacement: What the agent says instead when a response is blocked.
-                Defaults to ``"I'm sorry, I can't respond to that."``.
-
-        Example::
-
-            phone.agent(
-                system_prompt="You are a customer service agent.",
-                guardrails=[
-                    Patter.guardrail(
-                        name="No medical advice",
-                        blocked_terms=["diagnosis", "prescription"],
-                        replacement="Please consult a doctor.",
-                    ),
-                    Patter.guardrail(
-                        name="Custom check",
-                        check=lambda text: "competitor" in text.lower(),
-                    ),
-                ],
-            )
-        """
-        return {
-            "name": name,
-            "blocked_terms": blocked_terms,
-            "check": check,
-            "replacement": replacement,
-        }
-
-    @staticmethod
-    def tool(
-        name: str,
-        description: str = "",
-        parameters: dict | None = None,
-        handler: object = None,
-        webhook_url: str = "",
-    ) -> dict:
-        """Create a tool dict for use with ``agent(tools=[...])``.
-
-        Either *handler* (a Python callable) or *webhook_url* must be provided.
-
-        Args:
-            name: Tool name (visible to the LLM).
-            description: What the tool does (visible to the LLM).
-            parameters: JSON Schema for tool arguments.
-            handler: Async or sync callable ``(arguments: dict, context: dict) -> str | dict``.
-                Called directly in-process when the LLM invokes the tool.
-            webhook_url: URL to POST to when the LLM invokes the tool.
-                Mutually exclusive with *handler*.
-
-        Example::
-
-            phone.agent(
-                system_prompt="You are a pizza bot.",
-                provider="openai_realtime",
-                tools=[
-                    Patter.tool(
-                        name="check_menu",
-                        description="Check available menu items",
-                        parameters={"type": "object", "properties": {}},
-                        handler=check_menu_fn,
-                    ),
-                ],
-            )
-        """
-        if not handler and not webhook_url:
-            raise ValueError("tool() requires either handler or webhook_url.")
-        t: dict = {"name": name, "description": description}
-        if parameters:
-            t["parameters"] = parameters
-        else:
-            t["parameters"] = {"type": "object", "properties": {}}
-        if handler:
-            t["handler"] = handler
-        if webhook_url:
-            t["webhook_url"] = webhook_url
-        return t
 
     # === Internal ===
 

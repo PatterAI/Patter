@@ -1,21 +1,18 @@
 """Local mode — AI agent answers calls, no cloud needed."""
 import asyncio
-from patter import Patter
+from patter import Patter, Twilio, OpenAIRealtime
 
 
 async def main():
     phone = Patter(
-        mode="local",
-        twilio_sid="AC...",
-        twilio_token="...",
-        openai_key="sk-...",
-        phone_number="+1...",
+        carrier=Twilio(),                               # TWILIO_* from env
+        phone_number="+15550001234",
         webhook_url="xxx.ngrok-free.dev",
     )
 
     agent = phone.agent(
+        engine=OpenAIRealtime(voice="alloy"),           # OPENAI_API_KEY from env
         system_prompt="You are a friendly customer service agent for Acme Corp.",
-        voice="alloy",
         first_message="Hello! Thanks for calling Acme. How can I help?",
     )
 

@@ -22,24 +22,15 @@ npm install getpatter
 ## Minimal Example
 
 ```typescript
-import { Patter } from "getpatter";
+// npx tsx example.ts
+import { Patter, Twilio, OpenAIRealtime } from "getpatter";
 
-const phone = new Patter({
-  mode: "local",
-  twilioSid: process.env.TWILIO_SID,
-  twilioToken: process.env.TWILIO_TOKEN,
-  openaiKey: process.env.OPENAI_KEY,
-  phoneNumber: "+15550001234",
-  webhookUrl: "abc.ngrok.io",
-});
-
-const agent = phone.agent({
-  systemPrompt: "You are a friendly receptionist for Acme Corp.",
-  firstMessage: "Hello! Thanks for calling Acme Corp. How can I help you?",
-});
-
-await phone.serve({ agent });
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });   // TWILIO_* from env
+const agent = phone.agent({ engine: new OpenAIRealtime(), systemPrompt: "You are a friendly receptionist." });
+await phone.serve({ agent });                                                       // OPENAI_API_KEY from env
 ```
+
+That's the full file. Every provider class reads its API key from an env var when you omit `apiKey`, so as long as you have `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and `OPENAI_API_KEY` set, the example above is paste-runnable.
 
 ## SDK Mode
 
@@ -65,13 +56,13 @@ Patter runs in **local mode**, embedding an Express server and all provider adap
   <Card title="Agents" icon="robot" href="/typescript-sdk/agents">
     Configure voice, model, tools, and guardrails.
   </Card>
-  <Card title="Providers" icon="microphone" href="/typescript-sdk/providers">
-    OpenAI Realtime, ElevenLabs, and custom pipelines.
+  <Card title="Engines" icon="bolt" href="/typescript-sdk/engines">
+    OpenAI Realtime, ElevenLabs ConvAI.
+  </Card>
+  <Card title="LLM" icon="brain" href="/typescript-sdk/llm">
+    Pipeline mode and custom LLMs.
   </Card>
   <Card title="Tools" icon="wrench" href="/typescript-sdk/tools">
     Function calling and webhook integrations.
-  </Card>
-  <Card title="Events" icon="bolt" href="/typescript-sdk/events">
-    React to call lifecycle events in real time.
   </Card>
 </CardGroup>

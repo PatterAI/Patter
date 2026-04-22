@@ -167,7 +167,7 @@ Instead of webhook URLs, you can pass a function that runs in-process:
 const agent = phone.agent({
   systemPrompt: "You are a product specialist.",
   tools: [
-    Patter.tool({
+    tool({
       name: "check_inventory",
       description: "Check if a product is in stock.",
       parameters: {

@@ -1,24 +1,32 @@
 ---
 title: "Voice Providers"
-description: "Choose between OpenAI Realtime, ElevenLabs ConvAI, and custom pipeline mode."
+description: "Choose between end-to-end engines and pipeline mode with pluggable STT/TTS."
 ---
 
 # Voice Providers
 
-Patter supports three voice AI architectures. Each offers different tradeoffs between latency, voice quality, and customization.
+Patter supports two voice AI architectures. Each offers different tradeoffs between latency, voice quality, and customization.
 
-## OpenAI Realtime (Default)
+## Engine Mode (default)
 
-End-to-end voice processing powered by OpenAI's Realtime API. Audio goes directly to OpenAI, which handles speech recognition, language understanding, and speech synthesis in a single round trip.
+Pass an `engine=` instance to `phone.agent()`. The engine collapses STT, LLM, and TTS into a single streaming provider — lowest latency, fewest moving parts.
+
+### OpenAI Realtime
 
 ```python
+from patter import Patter, Twilio, OpenAIRealtime
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")   # TWILIO_* from env
+
 agent = phone.agent(
+    engine=OpenAIRealtime(voice="alloy"),                       # OPENAI_API_KEY from env
     system_prompt="You are a helpful assistant.",
-    provider="openai_realtime",  # default
-    model="gpt-4o-mini-realtime-preview",
-    voice="alloy",
 )
 ```
+
+### Available voices
+
+`"alloy"`, `"echo"`, `"fable"`, `"onyx"`, `"nova"`, `"shimmer"`
 
 ### Audio Encoding
 
@@ -29,124 +37,88 @@ OpenAI Realtime handles audio encoding automatically based on your telephony pro
 | Twilio | G.711 mu-law | 8 kHz |
 | Telnyx | PCM 16-bit | 16 kHz |
 
-### Available Voices
+### ElevenLabs Conversational AI
 
-`"alloy"`, `"echo"`, `"fable"`, `"onyx"`, `"nova"`, `"shimmer"`
-
-### Requirements
-
-- `openai_key` in the Patter constructor (local mode)
-
----
-
-## ElevenLabs Conversational AI
-
-Uses ElevenLabs' Conversational AI platform for natural, expressive voices. Ideal when voice quality is the top priority.
+Uses an agent configured in the ElevenLabs dashboard. Ideal when voice quality is the top priority.
 
 ```python
+from patter import Patter, Twilio, ElevenLabsConvAI
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
 agent = phone.agent(
+    engine=ElevenLabsConvAI(agent_id="agent_abc123"),           # ELEVENLABS_API_KEY from env
     system_prompt="You are a warm and friendly concierge.",
-    provider="elevenlabs_convai",
-    voice="rachel",
 )
 ```
 
-### Configuration
-
-When using ElevenLabs ConvAI, you can configure additional provider-specific parameters through the agent:
-
-| Parameter | Description |
-|-----------|-------------|
-| `voice` | ElevenLabs voice ID or name (e.g., `"rachel"`, `"adam"`) |
-| `model` | Model identifier for ElevenLabs |
-
-### Requirements
-
-- `elevenlabs_key` in the Patter constructor (local mode)
+See [Engines](/python-sdk/engines) for the full reference.
 
 ---
 
 ## Pipeline Mode
 
-Build a custom voice pipeline by combining separate STT (speech-to-text) and TTS (text-to-speech) providers. This gives you full control over each stage of the audio processing chain.
+Build a custom voice pipeline by combining a separate STT, LLM, and TTS. Omit `engine=` and pass `stt=` and `tts=` instead. Patter also exposes an `on_message` hook so you can swap in any LLM you like.
 
 ```python
+import asyncio
+from patter import Patter, Twilio, DeepgramSTT, ElevenLabsTTS
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
 agent = phone.agent(
+    stt=DeepgramSTT(endpointing_ms=80),                         # DEEPGRAM_API_KEY from env
+    tts=ElevenLabsTTS(voice_id="rachel"),                       # ELEVENLABS_API_KEY from env
     system_prompt="You are a helpful assistant.",
-    provider="pipeline",
-    stt=Patter.deepgram(api_key="dg_..."),
-    tts=Patter.elevenlabs(api_key="el_...", voice="rachel"),
 )
-```
 
-In pipeline mode, the `on_message` callback receives the transcribed text and returns the response to synthesize:
-
-```python
 async def handle_message(event) -> str:
+    # Drop in OpenAI, Anthropic, Groq, Cerebras, Ollama, whatever.
     return f"You said: {event['text']}. How can I help?"
 
-await phone.serve(agent, on_message=handle_message)
+async def main():
+    await phone.serve(agent, on_message=handle_message)
+
+asyncio.run(main())
 ```
 
 ### Requirements
 
-Pipeline mode requires both an STT and a TTS provider. If you don't pass `stt`/`tts` explicitly, Patter falls back to `deepgram_key` and `elevenlabs_key` from the constructor.
+Pipeline mode needs both an STT and a TTS instance. If you rely on env vars only, `phone.agent()` raises a clear error at construction time.
 
 ---
 
 ## STT Providers
 
-Use these factory methods to configure speech-to-text:
-
-### Patter.deepgram()
+All STT classes are instantiated directly and read their API key from a matching env var when omitted.
 
 ```python
-stt = Patter.deepgram(api_key="dg_...", language="en")
+from patter import DeepgramSTT, WhisperSTT, CartesiaSTT, AssemblyAISTT, SonioxSTT
+
+DeepgramSTT(endpointing_ms=80)                # DEEPGRAM_API_KEY
+WhisperSTT(language="es")                     # OPENAI_API_KEY
+CartesiaSTT(language="en", sample_rate=16000) # CARTESIA_API_KEY
+AssemblyAISTT()                               # ASSEMBLYAI_API_KEY
+SonioxSTT()                                   # SONIOX_API_KEY
 ```
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `api_key` | `str` | *required* | Your Deepgram API key. |
-| `language` | `str` | `"en"` | BCP-47 language code. |
-
-### Patter.whisper()
-
-```python
-stt = Patter.whisper(api_key="sk-...", language="en")
-```
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `api_key` | `str` | *required* | Your OpenAI API key. |
-| `language` | `str` | `"en"` | BCP-47 language code. |
+The namespaced equivalents live under `patter.stt` (e.g. `from patter.stt import deepgram; deepgram.STT(...)`). See the dedicated [STT page](/python-sdk/stt) for the full parameter tables.
 
 ---
 
 ## TTS Providers
 
-Use these factory methods to configure text-to-speech:
-
-### Patter.elevenlabs()
-
 ```python
-tts = Patter.elevenlabs(api_key="el_...", voice="rachel")
+from patter import ElevenLabsTTS, OpenAITTS, CartesiaTTS, RimeTTS, LMNTTTS
+
+ElevenLabsTTS(voice_id="rachel")              # ELEVENLABS_API_KEY
+OpenAITTS(voice="nova")                       # OPENAI_API_KEY
+CartesiaTTS(voice="f786b574-...")             # CARTESIA_API_KEY
+RimeTTS(model="arcana", speaker="astra")      # RIME_API_KEY
+LMNTTTS(model="blizzard", voice="leah")       # LMNT_API_KEY
 ```
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `api_key` | `str` | *required* | Your ElevenLabs API key. |
-| `voice` | `str` | `"rachel"` | Voice name or ID. |
-
-### Patter.openai_tts()
-
-```python
-tts = Patter.openai_tts(api_key="sk-...", voice="alloy")
-```
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `api_key` | `str` | *required* | Your OpenAI API key. |
-| `voice` | `str` | `"alloy"` | Voice name (`"alloy"`, `"echo"`, `"fable"`, `"onyx"`, `"nova"`, `"shimmer"`). |
+The namespaced equivalents live under `patter.tts` (e.g. `from patter.tts import elevenlabs; elevenlabs.TTS(...)`). See the dedicated [TTS page](/python-sdk/tts) for the full parameter tables.
 
 <Note>
   OpenAI TTS returns audio at 24 kHz. Patter automatically resamples it to 16 kHz for telephony compatibility.
@@ -156,13 +128,13 @@ tts = Patter.openai_tts(api_key="sk-...", voice="alloy")
 
 ## Provider Comparison
 
-| Feature | OpenAI Realtime | ElevenLabs ConvAI | Pipeline |
-|---------|----------------|-------------------|----------|
+| Feature | `engine=OpenAIRealtime()` | `engine=ElevenLabsConvAI()` | Pipeline |
+|---------|---------------------------|------------------------------|----------|
 | Latency | Lowest | Low | Medium |
 | Voice quality | Good | Best | Configurable |
 | Customization | Limited | Medium | Full |
 | `on_message` callback | No | No | Yes |
-| Requires AI key | OpenAI | ElevenLabs | STT + TTS keys |
+| Required env vars | `OPENAI_API_KEY` | `ELEVENLABS_API_KEY`, `ELEVENLABS_AGENT_ID` | STT + TTS keys |
 
 ---
 
@@ -172,22 +144,20 @@ tts = Patter.openai_tts(api_key="sk-...", voice="alloy")
 import os
 import asyncio
 from dotenv import load_dotenv
-from patter import Patter
+from patter import Patter, Twilio, DeepgramSTT, ElevenLabsTTS
 
 load_dotenv()
 
 phone = Patter(
-    twilio_sid=os.environ["TWILIO_SID"],
-    twilio_token=os.environ["TWILIO_TOKEN"],
+    carrier=Twilio(),                                           # TWILIO_* from env
     phone_number=os.environ["PHONE_NUMBER"],
     webhook_url=os.environ["WEBHOOK_URL"],
 )
 
 agent = phone.agent(
+    stt=DeepgramSTT(),                                          # DEEPGRAM_API_KEY from env
+    tts=ElevenLabsTTS(voice_id="rachel"),                       # ELEVENLABS_API_KEY from env
     system_prompt="You are a helpful assistant.",
-    provider="pipeline",
-    stt=Patter.deepgram(api_key=os.environ["DEEPGRAM_KEY"]),
-    tts=Patter.elevenlabs(api_key=os.environ["ELEVENLABS_KEY"], voice="rachel"),
 )
 
 async def handle_message(event) -> str:

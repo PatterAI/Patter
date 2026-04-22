@@ -8,54 +8,53 @@ description: "Understand agents, providers, modes, and the audio pipeline"
 An **agent** defines the AI behavior for a phone call. It includes:
 
 - **System prompt** — Instructions for the AI (e.g., "You are a customer service agent for Acme Corp")
+- **Engine** — An end-to-end speech runtime (OpenAI Realtime, ElevenLabs ConvAI) — or STT + TTS for pipeline mode
 - **Voice** — The TTS voice to use (e.g., `alloy`, `rachel`)
-- **Model** — The AI model (e.g., `gpt-4o-mini-realtime-preview`)
 - **Tools** — Functions the AI can call (e.g., look up orders, transfer calls)
 - **Guardrails** — Rules that filter or block AI responses before they reach the caller
 
-## Voice Modes
+## Voice Architectures
 
-Patter supports three voice processing modes:
+Patter supports two voice AI architectures:
 
-### OpenAI Realtime (default)
+### Engine mode (end-to-end)
 
-End-to-end voice via OpenAI's Realtime API. Handles STT + LLM + TTS in a single WebSocket connection. Lowest latency (~500ms).
+Pass an `engine=` instance to `phone.agent()`. The engine handles STT + LLM + TTS in a single streaming connection with the provider — lowest latency, fewest moving parts.
 
 ```python
+from patter import Patter, Twilio, OpenAIRealtime
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
 agent = phone.agent(
-    system_prompt="...",
-    provider="openai_realtime",  # default
-    model="gpt-4o-mini-realtime-preview",
-    voice="alloy",
+    engine=OpenAIRealtime(voice="alloy"),       # OPENAI_API_KEY from env
+    system_prompt="You are a helpful assistant.",
 )
 ```
 
-### ElevenLabs ConvAI
+ElevenLabs Conversational AI is available the same way via `engine=ElevenLabsConvAI(agent_id=...)`.
 
-Conversational AI via ElevenLabs. Natural-sounding voices with built-in STT.
+### Pipeline mode
 
-```python
-agent = phone.agent(
-    system_prompt="...",
-    provider="elevenlabs_convai",
-    voice="rachel",
-)
-```
-
-### Pipeline
-
-Custom STT + your logic + custom TTS. You control each piece.
+Omit `engine=` and pass `stt=` and `tts=` instead. You get full control over each stage — mix Deepgram STT with ElevenLabs TTS and any LLM you like via the `on_message` callback.
 
 ```python
-agent = phone.agent(
-    system_prompt="...",
-    provider="pipeline",
-    stt=Patter.deepgram(api_key="..."),
-    tts=Patter.elevenlabs(api_key="...", voice="rachel"),
-)
-```
+from patter import Patter, Twilio, DeepgramSTT, ElevenLabsTTS
 
-In pipeline mode, your `on_message` callback receives transcribed text and returns a response string. You can use any LLM or logic to generate responses.
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
+agent = phone.agent(
+    stt=DeepgramSTT(endpointing_ms=80),         # DEEPGRAM_API_KEY from env
+    tts=ElevenLabsTTS(voice_id="rachel"),       # ELEVENLABS_API_KEY from env
+    system_prompt="You are a helpful assistant.",
+)
+
+async def handle_message(event) -> str:
+    # Drop in any LLM here — OpenAI, Anthropic, Groq, llama.cpp, ...
+    return f"You said: {event['text']}"
+
+await phone.serve(agent, on_message=handle_message)
+```
 
 ## Telephony Providers
 
@@ -63,6 +62,15 @@ In pipeline mode, your `on_message` callback receives transcribed text and retur
 |----------|-------------|----------|
 | **Twilio** | mulaw 8kHz (auto-transcoded) | Recording, AMD, DTMF, call transfer |
 | **Telnyx** | PCM 16kHz native | Recording, DTMF, call transfer, Ed25519 webhook validation |
+
+Both are selected via a carrier instance:
+
+```python
+from patter import Patter, Twilio, Telnyx
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")   # TWILIO_* from env
+phone = Patter(carrier=Telnyx(), phone_number="+15550001234")   # TELNYX_* from env
+```
 
 ## Audio Pipeline
 
@@ -72,9 +80,9 @@ Caller speaks
     → Twilio/Telnyx (telephony)
     → WebSocket media stream
     → Patter SDK (transcoding if needed)
-    → STT (speech → text)
-    → Your agent logic
-    → TTS (text → speech)
+    → STT (speech → text)              ← pipeline mode only
+    → Your agent logic                  ← engine handles end-to-end
+    → TTS (text → speech)               ← pipeline mode only
     → Patter SDK (resampling if needed)
     → WebSocket media stream
     → Twilio/Telnyx
@@ -90,7 +98,7 @@ Caller speaks
 
 ## Tools
 
-Tools let your agent interact with external systems during a call. When the AI decides to use a tool, Patter POSTs the tool arguments to a webhook URL and returns the result to the AI.
+Tools let your agent interact with external systems during a call. When the AI decides to use a tool, Patter either calls your `handler` in-process or POSTs the tool arguments to a webhook URL and returns the result to the AI.
 
 Two system tools are always available:
 

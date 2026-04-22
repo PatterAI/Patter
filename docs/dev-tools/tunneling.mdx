@@ -5,25 +5,64 @@ description: "Expose your local Patter server to the internet for Twilio webhook
 
 # Tunneling
 
-Patter needs a public URL for Twilio to send webhooks to your local server. There are two options:
+Patter needs a public URL so your telephony provider can send webhooks to the local server. There are three options, all configured via the `tunnel=` argument on `Patter()` (or `new Patter({ tunnel })`).
 
-## Built-in Tunnel (Recommended)
+## CloudflareTunnel (recommended)
 
-Patter includes a built-in Cloudflare tunnel that automatically creates a public URL. No account or setup required.
+The built-in Cloudflare Quick Tunnel creates a public `*.trycloudflare.com` URL. No account or setup required — just the `cloudflared` binary on `PATH` (or the `cloudflared` npm package).
 
 <CodeGroup>
 ```python Python
-await phone.serve(agent=agent, port=8000, tunnel=True)
-# Tunnel ready: https://random-name.trycloudflare.com
+from patter import Patter, Twilio
+from patter.tunnels import CloudflareTunnel
+
+phone = Patter(
+    carrier=Twilio(),
+    phone_number="+15550001234",
+    tunnel=CloudflareTunnel(),                 # auto-starts cloudflared
+)
+# When phone.serve() runs: "Tunnel ready: https://random-name.trycloudflare.com"
 ```
 
 ```typescript TypeScript
-await phone.serve({ agent, port: 8000, tunnel: true });
-// Tunnel ready: https://random-name.trycloudflare.com
+import { Patter, Twilio, CloudflareTunnel } from "getpatter";
+
+const phone = new Patter({
+  carrier: new Twilio(),
+  phoneNumber: "+15550001234",
+  tunnel: new CloudflareTunnel(),              // auto-starts cloudflared
+});
+// When phone.serve() runs: "Tunnel ready: https://random-name.trycloudflare.com"
 ```
 </CodeGroup>
 
-Install the `cloudflared` package to use the built-in tunnel:
+`tunnel=True` (Python) / `tunnel: true` (TypeScript) is shorthand for `CloudflareTunnel()`:
+
+<CodeGroup>
+```python Python
+phone = Patter(carrier=Twilio(), phone_number="+15550001234", tunnel=True)
+# equivalent to tunnel=CloudflareTunnel()
+```
+
+```typescript TypeScript
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234", tunnel: true });
+// equivalent to tunnel: new CloudflareTunnel()
+```
+</CodeGroup>
+
+You can also pass `tunnel=True` directly to `serve()`:
+
+<CodeGroup>
+```python Python
+await phone.serve(agent, tunnel=True)
+```
+
+```typescript TypeScript
+await phone.serve({ agent, tunnel: true });
+```
+</CodeGroup>
+
+Install the `cloudflared` package once:
 
 <CodeGroup>
 ```bash Python
@@ -35,43 +74,81 @@ npm install cloudflared
 ```
 </CodeGroup>
 
-The tunnel URL is automatically configured as the Twilio webhook URL.
+Both SDKs automatically set the tunnel URL as the Twilio number's voice webhook (`IncomingPhoneNumber.update(voice_url=...)`) on `serve()`, so inbound calls work out of the box — no Twilio Console configuration needed. For Telnyx, the number is associated with the configured Call Control Application (`connection_id`) the same way.
 
-## Manual Setup (ngrok)
+If auto-configuration fails (for example the Twilio auth token doesn't have permission to update the number), Patter logs a warning and prints the URL you can set manually.
 
-Alternatively, use ngrok or any other tunneling service:
+## Static (user-managed tunnel)
+
+Running ngrok or some other public hostname yourself? Use `Static(hostname=...)` — Patter will skip process management and just trust the hostname you provide.
 
 ```bash
 ngrok http 8000
 ```
 
-Then pass the hostname to the Patter constructor:
+<CodeGroup>
+```python Python
+from patter import Patter, Twilio
+from patter.tunnels import Static
+
+phone = Patter(
+    carrier=Twilio(),
+    phone_number="+15550001234",
+    tunnel=Static(hostname="abc123.ngrok.io"),
+)
+```
+
+```typescript TypeScript
+import { Patter, Twilio, StaticTunnel } from "getpatter";
+
+const phone = new Patter({
+  carrier: new Twilio(),
+  phoneNumber: "+15550001234",
+  tunnel: new StaticTunnel({ hostname: "abc123.ngrok.io" }),
+});
+```
+</CodeGroup>
+
+Alternatively, pass the hostname directly as `webhook_url` / `webhookUrl`:
 
 <CodeGroup>
 ```python Python
 phone = Patter(
-    webhook_url="abc123.ngrok.io",  # no https:// prefix
-    ...
+    carrier=Twilio(),
+    phone_number="+15550001234",
+    webhook_url="abc123.ngrok.io",             # no https:// prefix
 )
 ```
 
 ```typescript TypeScript
 const phone = new Patter({
+  carrier: new Twilio(),
+  phoneNumber: "+15550001234",
   webhookUrl: "abc123.ngrok.io",
-  ...
 });
 ```
 </CodeGroup>
 
 ## Production
 
-In production, use your own domain and point the webhook URL to your server:
+In production, point your own domain at the server:
 
-```python
+<CodeGroup>
+```python Python
 phone = Patter(
+    carrier=Twilio(),
+    phone_number="+15550001234",
     webhook_url="api.yourcompany.com",
-    ...
 )
 ```
 
-No tunnel needed — Twilio connects directly to your server.
+```typescript TypeScript
+const phone = new Patter({
+  carrier: new Twilio(),
+  phoneNumber: "+15550001234",
+  webhookUrl: "api.yourcompany.com",
+});
+```
+</CodeGroup>
+
+No tunnel needed — the telephony provider connects directly to your server.

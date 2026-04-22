@@ -18,35 +18,51 @@ No vendor SDK is required — `RimeTTS` uses the platform `fetch`, so it works o
 ## Usage
 
 ```typescript
+// Namespaced import
+import * as rime from "getpatter/tts/rime";
+
+const tts = new rime.TTS();                           // reads RIME_API_KEY
+const tts = new rime.TTS({ model: "arcana", speaker: "astra" });
+
+// Flat alias (equivalent)
 import { RimeTTS } from "getpatter";
 
-// Arcana — highest quality, up to 4-minute request timeout.
-const tts = new RimeTTS(process.env.RIME_API_KEY!, {
-  model: "arcana",
-  speaker: "astra",
-  lang: "eng",
-  sampleRate: 16000,
+const tts = new RimeTTS({ model: "arcana", speaker: "astra" });
+```
+
+In an agent:
+
+```typescript
+// npx tsx example.ts
+import { Patter, Twilio, DeepgramSTT, RimeTTS } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  stt: new DeepgramSTT(),                             // DEEPGRAM_API_KEY from env
+  tts: new RimeTTS({ model: "arcana", speaker: "astra" }),  // RIME_API_KEY from env
+  systemPrompt: "You are a helpful assistant.",
 });
 
-// Mist v2 — low-latency, streaming-friendly.
-const fast = new RimeTTS(process.env.RIME_API_KEY!, {
+await phone.serve({ agent });
+```
+
+Mist v2 — low-latency, streaming-friendly:
+
+```typescript
+const fast = new RimeTTS({
   model: "mistv2",
   speaker: "cove",
   speedAlpha: 1.1,
   reduceLatency: true,
 });
-
-for await (const chunk of tts.synthesizeStream("Ciao dal Patter pipeline.")) {
-  // chunk is a Buffer of PCM_S16LE audio
-}
 ```
-
-Prefer one-shot synthesis? Use `await tts.synthesize(text)` to collect the stream into a single `Buffer`.
 
 ## Options (selection)
 
 | Option | Default | Notes |
 |---|---|---|
+| `apiKey` | — | Reads from `RIME_API_KEY` when omitted. |
 | `model` | `"arcana"` | `"arcana"` or any `mist*` model. |
 | `speaker` | `"astra"` / `"cove"` | Default depends on model. |
 | `lang` | `"eng"` | Rime language code. |

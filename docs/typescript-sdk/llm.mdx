@@ -1,0 +1,116 @@
+---
+title: "LLM"
+description: "Voice AI modes and language model providers."
+---
+
+# LLM (Voice Mode)
+
+Patter supports two high-level voice AI architectures:
+
+| Mode | How to enable | When to use |
+|------|---------------|-------------|
+| **Engine (end-to-end)** | `phone.agent({ engine: new OpenAIRealtime(...) })` or `engine: new ElevenLabsConvAI(...)` | Lowest-latency speech-to-speech. The engine handles STT + LLM + TTS in a single provider. |
+| **Pipeline** | `phone.agent({ stt: ..., tts: ... })` (omit `engine`) | Full control. Plug a streaming STT, your own LLM, and a streaming TTS. |
+
+See [Engines](/typescript-sdk/engines) for the reference on engine classes. This page focuses on the LLM step.
+
+## Engine mode
+
+Engine mode collapses STT, LLM, and TTS into a single streaming connection with the provider.
+
+### OpenAI Realtime (default)
+
+```typescript
+// npx tsx example.ts
+import { Patter, Twilio, OpenAIRealtime } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  engine: new OpenAIRealtime({ voice: "alloy" }),           // OPENAI_API_KEY from env
+  systemPrompt: "You are a helpful assistant.",
+  firstMessage: "Hello!",
+});
+
+await phone.serve({ agent });
+```
+
+**Voices:** `alloy`, `ash`, `ballad`, `coral`, `echo`, `sage`, `shimmer`, `verse`
+**Env var:** `OPENAI_API_KEY`
+
+### ElevenLabs ConvAI
+
+Uses a Conversational AI agent configured in the ElevenLabs dashboard.
+
+```typescript
+import { Patter, Twilio, ElevenLabsConvAI } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  engine: new ElevenLabsConvAI({ agentId: "agent_abc123" }),   // ELEVENLABS_API_KEY + ELEVENLABS_AGENT_ID from env
+  systemPrompt: "You are a warm and friendly concierge.",
+});
+```
+
+**Env vars:** `ELEVENLABS_API_KEY`, `ELEVENLABS_AGENT_ID`
+
+## Pipeline mode
+
+Omit `engine` and pass `stt` + `tts` instead. Patter wires them together automatically. For the LLM step, provide an `onMessage` callback — you can run any model you like inside.
+
+```typescript
+// npx tsx example.ts
+import { Patter, Twilio, DeepgramSTT, ElevenLabsTTS } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  stt: new DeepgramSTT({ endpointingMs: 80 }),          // DEEPGRAM_API_KEY from env
+  tts: new ElevenLabsTTS({ voiceId: "rachel" }),        // ELEVENLABS_API_KEY from env
+  systemPrompt: "You are a helpful assistant.",
+  firstMessage: "Hi!",
+});
+
+await phone.serve({
+  agent,
+  onMessage: async ({ text }) => {
+    // Drop in OpenAI, Anthropic, Groq, a local llama.cpp, whatever.
+    return `You said: ${text}. How can I help?`;
+  },
+});
+```
+
+### Built-in LLM adapters
+
+Built-in LLM adapters live inside `getpatter` and can be called from `onMessage`:
+
+| Provider | Notes |
+|----------|-------|
+| Anthropic | `anthropic-llm.ts` |
+| Google Gemini | `google-llm.ts` (Gemini Live also available via `gemini-live.ts`) |
+| Groq | `groq-llm.ts` |
+| Cerebras | `cerebras-llm.ts` |
+| Ultravox (realtime) | `ultravox-realtime.ts` |
+
+<Note>
+A first-class `llm: new AnthropicLLM(...)` parameter is planned for Patter 0.6 — once it lands you will be able to plug LLMs the same way you plug STT and TTS today. Until then, the LLM step of pipeline mode flows through `onMessage`.
+</Note>
+
+## Comparison
+
+| Feature | `engine: OpenAIRealtime` | `engine: ElevenLabsConvAI` | Pipeline (`stt` / `tts`) |
+|---------|--------------------------|-----------------------------|---------------------------|
+| Latency | Lowest | Low | Medium |
+| Voice quality | High | Very high | Depends on TTS |
+| Custom LLM | No | No | Yes (via `onMessage`) |
+| Function calling | Yes | Limited | Yes |
+
+## What's Next
+
+<CardGroup cols={2}>
+  <Card title="Engines" icon="bolt" href="/typescript-sdk/engines">Engine class reference.</Card>
+  <Card title="STT" icon="microphone" href="/typescript-sdk/stt">STT providers for pipeline mode.</Card>
+  <Card title="TTS" icon="volume" href="/typescript-sdk/tts">TTS providers for pipeline mode.</Card>
+  <Card title="Tools" icon="wrench" href="/typescript-sdk/tools">Function calling.</Card>
+</CardGroup>

@@ -1,6 +1,6 @@
 """Conversation history — agent remembers the entire call."""
 import asyncio
-from patter import Patter
+from patter import Patter, Twilio, OpenAIRealtime
 
 
 async def on_transcript(data: dict) -> None:
@@ -23,18 +23,15 @@ async def on_call_end(data: dict) -> None:
 
 async def main():
     phone = Patter(
-        mode="local",
-        twilio_sid="AC...",
-        twilio_token="...",
-        openai_key="sk-...",
-        phone_number="+1...",
+        carrier=Twilio(),                               # TWILIO_* from env
+        phone_number="+15550001234",
         webhook_url="xxx.ngrok-free.dev",
     )
 
     agent = phone.agent(
+        engine=OpenAIRealtime(voice="alloy"),           # OPENAI_API_KEY from env
         system_prompt="You are a helpful assistant. "
                       "Reference earlier parts of the conversation when relevant.",
-        voice="alloy",
         first_message="Hello! Let's have a conversation. I'll remember everything we discuss.",
     )
 

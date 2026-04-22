@@ -1,7 +1,7 @@
 """
 Local mode with custom STT and TTS providers.
 
-Connects using local mode with:
+Connects using:
 - Twilio for telephony
 - Deepgram Nova for speech-to-text
 - ElevenLabs for text-to-speech
@@ -10,19 +10,14 @@ No cloud backend required — runs entirely in your process.
 
 Usage:
     pip install getpatter
+    # Set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, DEEPGRAM_API_KEY, ELEVENLABS_API_KEY
     python custom-voice.py
 """
 
 import asyncio
 import os
-from patter import Patter, IncomingMessage
+from patter import Patter, Twilio, DeepgramSTT, ElevenLabsTTS, IncomingMessage
 
-# Configuration — use environment variables in production
-TWILIO_SID = os.environ.get("TWILIO_ACCOUNT_SID", "AC...")
-TWILIO_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "your_auth_token")
-OPENAI_KEY = os.environ.get("OPENAI_API_KEY", "sk-...")
-DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_API_KEY", "dg_...")
-ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "el_...")
 PHONE_NUMBER = os.environ.get("TWILIO_PHONE_NUMBER", "+14155550000")  # E.164 format
 
 
@@ -54,15 +49,14 @@ async def on_call_end(data: dict) -> None:
 
 async def main() -> None:
     phone = Patter(
-        twilio_sid=TWILIO_SID,
-        twilio_token=TWILIO_TOKEN,
-        openai_key=OPENAI_KEY,
+        carrier=Twilio(),                               # TWILIO_* from env
         phone_number=PHONE_NUMBER,
     )
 
     agent = phone.agent(
+        stt=DeepgramSTT(),                              # DEEPGRAM_API_KEY from env
+        tts=ElevenLabsTTS(voice_id="aria"),             # ELEVENLABS_API_KEY from env
         system_prompt="You are a helpful customer service agent.",
-        voice="alloy",
         first_message="Hi! Thanks for calling. How can I help?",
     )
 
@@ -72,11 +66,9 @@ async def main() -> None:
         await phone.serve(
             agent=agent,
             port=8000,
+            on_message=on_message,
             on_call_start=on_call_start,
             on_call_end=on_call_end,
-            # Use custom STT and TTS providers
-            stt=Patter.deepgram(api_key=DEEPGRAM_API_KEY, language="en"),
-            tts=Patter.elevenlabs(api_key=ELEVENLABS_API_KEY, voice="aria"),
         )
     except KeyboardInterrupt:
         print("\nShutting down...")

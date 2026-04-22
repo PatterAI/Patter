@@ -10,11 +10,12 @@ Test mode lets you interact with your agent in the terminal using pure text — 
 ## Quick Start
 
 ```typescript
-import { Patter } from "getpatter";
+import { Patter, Twilio, OpenAIRealtime } from "getpatter";
 
-const phone = new Patter({ openaiKey: "sk-...", mode: "local" });
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
 
 const agent = phone.agent({
+  engine: new OpenAIRealtime(),                         // OPENAI_API_KEY from env
   systemPrompt: "You are a helpful customer service agent for Acme Corp.",
   firstMessage: "Hello! Welcome to Acme Corp. How can I help you today?",
 });
@@ -73,7 +74,7 @@ The `onMessage` handler receives a single data object with `text`, `call_id`, `c
 
 ## Using with Built-in LLM Loop
 
-When no `onMessage` handler is provided and an `openaiKey` is available, test mode uses the built-in LLM loop with streaming responses:
+When no `onMessage` handler is provided and `OPENAI_API_KEY` is available (either from `new OpenAIRealtime({ apiKey })` or the env var), test mode uses the built-in LLM loop with streaming responses:
 
 ```typescript
 const agent = phone.agent({

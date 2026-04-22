@@ -5,23 +5,20 @@
  * machineDetection=true lets the SDK detect voicemail and play a
  * pre-recorded message instead of connecting the live agent.
  */
-import { Patter } from "getpatter";
+import { Patter, Twilio, OpenAIRealtime } from "getpatter";
 
 async function main() {
   const phone = new Patter({
-    mode: "local",
-    twilioSid: "AC...",
-    twilioToken: "...",
-    openaiKey: "sk-...",
-    phoneNumber: "+1...",
+    carrier: new Twilio(),                              // TWILIO_* from env
+    phoneNumber: "+15550001234",
     webhookUrl: "xxx.ngrok-free.dev",
   });
 
   const agent = phone.agent({
+    engine: new OpenAIRealtime({ voice: "alloy" }),     // OPENAI_API_KEY from env
     systemPrompt:
       "You are calling to confirm an appointment for tomorrow at 3 PM. " +
       "Be brief and polite. If confirmed, thank them and say goodbye.",
-    voice: "alloy",
     firstMessage:
       "Hi! I'm calling from Dr. Smith's office to confirm your appointment tomorrow at 3 PM.",
   });

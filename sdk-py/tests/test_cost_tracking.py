@@ -50,10 +50,10 @@ class TestPatterPricingParam:
     """Test that the Patter constructor accepts pricing parameter."""
 
     def test_pricing_param_accepted(self):
+        from patter import Twilio
+
         phone = Patter(
-            twilio_sid="AC" + "a" * 32,
-            twilio_token="test_token",
-            openai_key="sk-test",
+            carrier=Twilio(account_sid="AC" + "a" * 32, auth_token="test_token"),
             phone_number="+15550001234",
             webhook_url="test.ngrok.io",
             pricing={"deepgram": {"price": 0.005}},
@@ -61,10 +61,10 @@ class TestPatterPricingParam:
         assert phone._pricing == {"deepgram": {"price": 0.005}}
 
     def test_pricing_param_none_by_default(self):
+        from patter import Twilio
+
         phone = Patter(
-            twilio_sid="AC" + "a" * 32,
-            twilio_token="test_token",
-            openai_key="sk-test",
+            carrier=Twilio(account_sid="AC" + "a" * 32, auth_token="test_token"),
             phone_number="+15550001234",
             webhook_url="test.ngrok.io",
         )
