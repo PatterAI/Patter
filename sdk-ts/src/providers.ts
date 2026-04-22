@@ -46,8 +46,9 @@ class TTSConfigImpl implements TTSConfig {
 }
 
 /**
- * Deepgram STT config. Tune latency via ``endpointingMs`` / ``utteranceEndMs``
- * — mirrors Python's ``Patter.deepgram(endpointing_ms=..., utterance_end_ms=...)``.
+ * Deepgram STT config builder. Tune latency via ``endpointingMs`` /
+ * ``utteranceEndMs``. Internal only — public code should use ``DeepgramSTT``
+ * from ``getpatter/stt/deepgram``.
  */
 export function deepgram(opts: {
   apiKey: string;

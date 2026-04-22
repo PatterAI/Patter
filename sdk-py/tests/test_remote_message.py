@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from patter.services.remote_message import (
+from getpatter.services.remote_message import (
     RemoteMessageHandler,
     is_remote_url,
     is_websocket_url,

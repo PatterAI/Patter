@@ -4,8 +4,8 @@ import { createServer, Server as HTTPServer } from 'http';
 import { WebSocketServer, WebSocket as WSWebSocket } from 'ws';
 import { OpenAIRealtimeAdapter } from './providers/openai-realtime';
 import { ElevenLabsConvAIAdapter } from './providers/elevenlabs-convai';
-import { DeepgramSTT } from './providers/deepgram-stt';
-import { WhisperSTT } from './providers/whisper-stt';
+import { createSTT } from './provider-factory';
+import type { STTAdapter } from './provider-factory';
 import { CallMetricsAccumulator } from './metrics';
 import { mergePricing } from './pricing';
 import { MetricsStore } from './dashboard/store';
@@ -209,13 +209,20 @@ export function resolveVariables(template: string, variables: Record<string, str
 
 /**
  * Build an AI adapter (OpenAI Realtime or ElevenLabs ConvAI) for a call.
+ * Credentials come from the engine instance attached to ``agent.engine``
+ * (v0.5.0+). OpenAI falls back to ``config.openaiKey`` when no engine is set.
  */
 export function buildAIAdapter(config: LocalConfig, agent: AgentOptions, resolvedPrompt?: string): AIAdapter {
+  const engine = agent.engine;
   if (agent.provider === 'elevenlabs_convai') {
-    const key = agent.elevenlabsKey ?? '';
+    if (!engine || engine.kind !== 'elevenlabs_convai') {
+      throw new Error(
+        "ElevenLabs ConvAI mode requires `agent.engine = new ElevenLabsConvAI({...})`.",
+      );
+    }
     return new ElevenLabsConvAIAdapter(
-      key,
-      agent.elevenlabsAgentId ?? '',
+      engine.apiKey,
+      engine.agentId,
       agent.voice ?? '21m00Tcm4TlvDq8ikWAM',
       'eleven_turbo_v2_5',
       agent.language ?? 'en',
@@ -229,8 +236,9 @@ export function buildAIAdapter(config: LocalConfig, agent: AgentOptions, resolve
     parameters: t.parameters,
   })) ?? [];
   const tools = [...agentTools, TRANSFER_CALL_TOOL, END_CALL_TOOL];
+  const openaiKey = engine && engine.kind === 'openai_realtime' ? engine.apiKey : (config.openaiKey ?? '');
   return new OpenAIRealtimeAdapter(
-    config.openaiKey ?? '',
+    openaiKey,
     agent.model,
     agent.voice,
     resolvedPrompt ?? agent.systemPrompt,
@@ -241,36 +249,6 @@ export function buildAIAdapter(config: LocalConfig, agent: AgentOptions, resolve
 // ---------------------------------------------------------------------------
 // Telephony bridge implementations
 // ---------------------------------------------------------------------------
-
-/**
- * Normalize the ``options`` bag carried on an ``STTConfig`` into the strongly
- * typed ``DeepgramSTTOptions`` shape. Accepts both snake_case (as produced by
- * the ``deepgram()`` factory to match Python serialisation) and camelCase keys.
- */
-type DeepgramOptionsMutable = {
-  -readonly [K in keyof import('./providers/deepgram-stt').DeepgramSTTOptions]:
-    import('./providers/deepgram-stt').DeepgramSTTOptions[K];
-};
-
-function extractDeepgramOptions(options?: Record<string, unknown>): DeepgramOptionsMutable {
-  if (!options) return {};
-  const get = (snake: string, camel: string): unknown => options[snake] ?? options[camel];
-  const out: DeepgramOptionsMutable = {};
-  const model = get('model', 'model');
-  if (typeof model === 'string') out.model = model;
-  const endpointing = get('endpointing_ms', 'endpointingMs');
-  if (typeof endpointing === 'number') out.endpointingMs = endpointing;
-  const utteranceEnd = get('utterance_end_ms', 'utteranceEndMs');
-  if (utteranceEnd === null) out.utteranceEndMs = null;
-  else if (typeof utteranceEnd === 'number') out.utteranceEndMs = utteranceEnd;
-  const smart = get('smart_format', 'smartFormat');
-  if (typeof smart === 'boolean') out.smartFormat = smart;
-  const interim = get('interim_results', 'interimResults');
-  if (typeof interim === 'boolean') out.interimResults = interim;
-  const vad = get('vad_events', 'vadEvents');
-  if (typeof vad === 'boolean') out.vadEvents = vad;
-  return out;
-}
 
 /** Twilio-specific telephony bridge. */
 class TwilioBridge implements TelephonyBridge {
@@ -328,32 +306,11 @@ class TwilioBridge implements TelephonyBridge {
     }
   }
 
-  createStt(agent: AgentOptions): DeepgramSTT | WhisperSTT | null {
-    // BUG #12 — Pipeline mode transcodes Twilio's mulaw 8 kHz to PCM16 16 kHz
-    // in ``StreamHandler.handleAudio`` before forwarding to STT. Configuring
-    // Deepgram for mulaw 8 kHz here would cause it to misinterpret the
-    // already-decoded PCM as garbage. The pipeline always uses linear16
-    // 16 kHz; ``forTwilio`` is kept for non-pipeline Twilio integrations.
-    const isPipeline = agent.provider === 'pipeline';
-    if (agent.stt) {
-      if (agent.stt.provider === 'deepgram') {
-        const dgOptions = extractDeepgramOptions(agent.stt.options);
-        if (isPipeline) {
-          return new DeepgramSTT(agent.stt.apiKey, agent.stt.language ?? 'en', dgOptions.model, 'linear16', 16000, dgOptions);
-        }
-        return DeepgramSTT.forTwilio(agent.stt.apiKey, agent.stt.language ?? 'en', dgOptions.model, dgOptions);
-      } else if (agent.stt.provider === 'whisper') {
-        return isPipeline
-          ? new WhisperSTT(agent.stt.apiKey, 'whisper-1', agent.stt.language ?? 'en')
-          : WhisperSTT.forTwilio(agent.stt.apiKey, agent.stt.language ?? 'en');
-      }
-    } else if (agent.deepgramKey) {
-      if (isPipeline) {
-        return new DeepgramSTT(agent.deepgramKey, agent.language ?? 'en', 'nova-3', 'linear16', 16000);
-      }
-      return DeepgramSTT.forTwilio(agent.deepgramKey, agent.language ?? 'en');
-    }
-    return null;
+  createStt(agent: AgentOptions): Promise<STTAdapter | null> {
+    // In v0.5.0+ the adapter is pre-instantiated and already configured for
+    // the transcoded pipeline stream (PCM16 16 kHz). Transcoding happens in
+    // ``StreamHandler.handleAudio``.
+    return createSTT(agent);
   }
 
   async queryTelephonyCost(metricsAcc: CallMetricsAccumulator, callId: string): Promise<void> {
@@ -521,26 +478,8 @@ export class TelnyxBridge implements TelephonyBridge {
     ws.close();
   }
 
-  createStt(agent: AgentOptions): DeepgramSTT | WhisperSTT | null {
-    if (agent.stt) {
-      if (agent.stt.provider === 'deepgram') {
-        // Telnyx pipeline also transcodes mulaw 8 kHz → PCM16 16 kHz before STT.
-        const dgOptions = extractDeepgramOptions(agent.stt.options);
-        return new DeepgramSTT(
-          agent.stt.apiKey,
-          agent.stt.language ?? 'en',
-          dgOptions.model ?? 'nova-3',
-          'linear16',
-          16000,
-          dgOptions,
-        );
-      } else if (agent.stt.provider === 'whisper') {
-        return new WhisperSTT(agent.stt.apiKey, 'whisper-1', agent.stt.language ?? 'en');
-      }
-    } else if (agent.deepgramKey) {
-      return new DeepgramSTT(agent.deepgramKey, agent.language ?? 'en', 'nova-3', 'linear16', 16000);
-    }
-    return null;
+  createStt(agent: AgentOptions): Promise<STTAdapter | null> {
+    return createSTT(agent);
   }
 
   async queryTelephonyCost(metricsAcc: CallMetricsAccumulator, callId: string): Promise<void> {

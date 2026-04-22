@@ -1,6 +1,7 @@
 ---
 title: "Tools & Function Calling"
 description: "Let your voice agent call APIs, query databases, and take actions during a conversation."
+icon: "wrench"
 ---
 
 # Tools & Function Calling
@@ -154,15 +155,15 @@ Ends the current call programmatically.
 
 ---
 
-## Using Patter.tool()
+## Using tool()
 
-The `Patter.tool()` static method provides a convenient way to create tool definitions:
+The `tool()` static method provides a convenient way to create tool definitions:
 
 ```python
 agent = phone.agent(
     system_prompt="You are a helpful assistant.",
     tools=[
-        Patter.tool(
+        tool(
             name="get_order_status",
             description="Look up an order by ID.",
             parameters={
@@ -192,7 +193,7 @@ async def check_inventory(arguments, context):
 agent = phone.agent(
     system_prompt="You are a product specialist.",
     tools=[
-        Patter.tool(
+        tool(
             name="check_inventory",
             description="Check if a product is in stock.",
             parameters={
@@ -255,19 +256,18 @@ The AI processes the full JSON response. Large responses add latency. Return onl
 import os
 import asyncio
 from dotenv import load_dotenv
-from patter import Patter
+from getpatter import Patter, Twilio, OpenAIRealtime
 
 load_dotenv()
 
 phone = Patter(
-    twilio_sid=os.environ["TWILIO_SID"],
-    twilio_token=os.environ["TWILIO_TOKEN"],
-    openai_key=os.environ["OPENAI_KEY"],
+    carrier=Twilio(),                               # TWILIO_* from env
     phone_number=os.environ["PHONE_NUMBER"],
     webhook_url=os.environ["WEBHOOK_URL"],
 )
 
 agent = phone.agent(
+    engine=OpenAIRealtime(),                        # OPENAI_API_KEY from env
     system_prompt="""You are a customer service agent for an e-commerce store.
 Help customers check order status and process returns.
 Always ask for the order ID before looking anything up.""",

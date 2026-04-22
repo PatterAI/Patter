@@ -1,4 +1,4 @@
-"""Unit tests for :mod:`patter.providers.deepfilternet_filter`.
+"""Unit tests for :mod:`getpatter.providers.deepfilternet_filter`.
 
 These tests inject fake ``deep-filter`` / ``torch`` / ``numpy`` modules via
 ``sys.modules`` so the wrapper can be exercised without downloading the real
@@ -80,7 +80,7 @@ def _install_fake_modules(monkeypatch: pytest.MonkeyPatch) -> dict[str, MagicMoc
     monkeypatch.setitem(sys.modules, "df.enhance", df_enhance_mod)
 
     # Reload patter module.
-    sys.modules.pop("patter.providers.deepfilternet_filter", None)
+    sys.modules.pop("getpatter.providers.deepfilternet_filter", None)
 
     return {"init_df": init_df, "enhance": enhance_mock}
 
@@ -105,9 +105,9 @@ def test_init_raises_when_deps_missing(monkeypatch):
     monkeypatch.setattr(builtins, "__import__", fake_import)
     sys.modules.pop("df.enhance", None)
     sys.modules.pop("torch", None)
-    sys.modules.pop("patter.providers.deepfilternet_filter", None)
+    sys.modules.pop("getpatter.providers.deepfilternet_filter", None)
 
-    from patter.providers.deepfilternet_filter import DeepFilterNetFilter
+    from getpatter.providers.deepfilternet_filter import DeepFilterNetFilter
 
     with pytest.raises(RuntimeError, match="DeepFilterNet not installed"):
         DeepFilterNetFilter()
@@ -118,7 +118,7 @@ async def test_process_calls_enhance_and_returns_bytes(monkeypatch):
     """MOCK: no real inference.  Verifies bytes<->float round-trip + call chain."""
     mocks = _install_fake_modules(monkeypatch)
 
-    from patter.providers.deepfilternet_filter import DeepFilterNetFilter
+    from getpatter.providers.deepfilternet_filter import DeepFilterNetFilter
 
     flt = DeepFilterNetFilter()
     assert mocks["init_df"].call_count == 1
@@ -137,7 +137,7 @@ async def test_process_calls_enhance_and_returns_bytes(monkeypatch):
 @pytest.mark.unit
 async def test_process_empty_chunk(monkeypatch):
     _install_fake_modules(monkeypatch)
-    from patter.providers.deepfilternet_filter import DeepFilterNetFilter
+    from getpatter.providers.deepfilternet_filter import DeepFilterNetFilter
 
     flt = DeepFilterNetFilter()
     assert await flt.process(b"", 16000) == b""
@@ -147,7 +147,7 @@ async def test_process_empty_chunk(monkeypatch):
 @pytest.mark.unit
 async def test_process_after_close_raises(monkeypatch):
     _install_fake_modules(monkeypatch)
-    from patter.providers.deepfilternet_filter import DeepFilterNetFilter
+    from getpatter.providers.deepfilternet_filter import DeepFilterNetFilter
 
     flt = DeepFilterNetFilter()
     await flt.close()
@@ -159,7 +159,7 @@ async def test_process_after_close_raises(monkeypatch):
 async def test_native_sample_rate_skips_resampling(monkeypatch):
     """At 48 kHz input, up/down-sampling is a no-op."""
     _install_fake_modules(monkeypatch)
-    from patter.providers.deepfilternet_filter import DeepFilterNetFilter
+    from getpatter.providers.deepfilternet_filter import DeepFilterNetFilter
 
     flt = DeepFilterNetFilter()
     # 10 ms @ 48 kHz = 480 samples.
@@ -185,7 +185,7 @@ async def test_real_rms_before_after():
     Enable with ``PATTER_DEEPFILTERNET_REAL=1`` once torch + deep-filter are
     installed.
     """
-    from patter.providers.deepfilternet_filter import DeepFilterNetFilter
+    from getpatter.providers.deepfilternet_filter import DeepFilterNetFilter
 
     flt = DeepFilterNetFilter()
     rng = np.random.default_rng(0)

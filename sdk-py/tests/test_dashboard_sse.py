@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from patter.dashboard.store import MetricsStore
+from getpatter.dashboard.store import MetricsStore
 
 
 @pytest.mark.asyncio
@@ -32,7 +32,7 @@ async def test_turn_complete_event():
     # Consume call_start event
     queue.get_nowait()
 
-    from patter.models import TurnMetrics, LatencyBreakdown
+    from getpatter.models import TurnMetrics, LatencyBreakdown
 
     turn = TurnMetrics(
         turn_index=0,

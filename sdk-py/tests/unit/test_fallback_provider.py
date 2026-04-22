@@ -1,4 +1,4 @@
-"""Unit tests for patter.services.fallback_provider — FallbackLLMProvider."""
+"""Unit tests for getpatter.services.fallback_provider — FallbackLLMProvider."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from patter.services.fallback_provider import (
+from getpatter.services.fallback_provider import (
     AllProvidersFailedError,
     FallbackLLMProvider,
     PartialStreamError,

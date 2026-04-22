@@ -1,6 +1,6 @@
 [project]
 name = "getpatter"
-version = "0.4.4"
+version = "0.5.0"
 description = "Open-source voice AI SDK — connect any AI agent to real phone calls in 4 lines of code"
 readme = "README.md"
 license = { text = "MIT" }
@@ -37,7 +37,7 @@ dependencies = [
 ]
 
 [project.scripts]
-patter = "patter.cli:main"
+getpatter = "getpatter.cli:main"
 
 [project.urls]
 Homepage = "https://www.getpatter.com"
@@ -144,6 +144,11 @@ tracing = [
 scheduling = [
     "apscheduler>=3.10",
 ]
+# Built-in Cloudflare Quick Tunnel for local dev (``Patter(tunnel=True)``).
+# Cloudflare ships a thin Python wrapper around their ``cloudflared`` binary.
+tunnel = [
+    "cloudflared>=0.7",
+]
 
 [build-system]
 requires = ["setuptools>=68.0"]
@@ -151,11 +156,11 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["patter*"]
+include = ["getpatter*"]
 
 [tool.setuptools.package-data]
-"patter.resources" = ["*.onnx"]
-"patter.resources.audio" = ["*.ogg", "NOTICE"]
+"getpatter.resources" = ["*.onnx"]
+"getpatter.resources.audio" = ["*.ogg", "NOTICE"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

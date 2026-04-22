@@ -6,13 +6,13 @@ import json
 
 import pytest
 
-from patter.dashboard.store import MetricsStore
-from patter.models import CallMetrics, CostBreakdown, LatencyBreakdown
+from getpatter.dashboard.store import MetricsStore
+from getpatter.models import CallMetrics, CostBreakdown, LatencyBreakdown
 
 
 def _make_app(token: str = ""):
     from fastapi import FastAPI
-    from patter.api_routes import mount_api
+    from getpatter.api_routes import mount_api
 
     app = FastAPI()
     store = MetricsStore()

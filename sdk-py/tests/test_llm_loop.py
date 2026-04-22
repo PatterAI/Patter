@@ -33,13 +33,13 @@ class FakeLLMProvider:
 
 @pytest.fixture
 def mock_openai():
-    with patch("patter.services.llm_loop.LLMLoop.__init__", return_value=None) as mock_init:
+    with patch("getpatter.services.llm_loop.LLMLoop.__init__", return_value=None) as mock_init:
         yield mock_init
 
 
 def _make_llm_loop(tools=None, tool_executor=None, provider=None):
     """Create an LLMLoop with a fake provider."""
-    from patter.services.llm_loop import LLMLoop
+    from getpatter.services.llm_loop import LLMLoop
 
     loop = LLMLoop.__new__(LLMLoop)
     loop._provider = provider or FakeLLMProvider([[]])
@@ -183,7 +183,7 @@ async def test_max_iterations_guard():
 @pytest.mark.asyncio
 async def test_custom_llm_provider_via_constructor():
     """LLMLoop accepts a custom llm_provider, skipping OpenAI init."""
-    from patter.services.llm_loop import LLMLoop
+    from getpatter.services.llm_loop import LLMLoop
 
     provider = FakeLLMProvider([
         [{"type": "text", "content": "custom!"}],

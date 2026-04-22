@@ -2,26 +2,26 @@
 
 import pytest
 
-from patter import CallMetrics, CostBreakdown, LatencyBreakdown, TurnMetrics, Patter
+from getpatter import CallMetrics, CostBreakdown, LatencyBreakdown, TurnMetrics, Patter
 
 
 class TestModelsExported:
     """Verify that new metric types are importable from the patter package."""
 
     def test_cost_breakdown_importable(self):
-        from patter import CostBreakdown
+        from getpatter import CostBreakdown
 
         cb = CostBreakdown(stt=0.01, tts=0.02, llm=0.03, telephony=0.04, total=0.10)
         assert cb.total == 0.10
 
     def test_latency_breakdown_importable(self):
-        from patter import LatencyBreakdown
+        from getpatter import LatencyBreakdown
 
         lb = LatencyBreakdown(stt_ms=50, llm_ms=100, tts_ms=30, total_ms=180)
         assert lb.total_ms == 180
 
     def test_turn_metrics_importable(self):
-        from patter import TurnMetrics
+        from getpatter import TurnMetrics
 
         tm = TurnMetrics(
             turn_index=0,
@@ -32,7 +32,7 @@ class TestModelsExported:
         assert tm.turn_index == 0
 
     def test_call_metrics_importable(self):
-        from patter import CallMetrics
+        from getpatter import CallMetrics
 
         cm = CallMetrics(
             call_id="test",
@@ -50,10 +50,10 @@ class TestPatterPricingParam:
     """Test that the Patter constructor accepts pricing parameter."""
 
     def test_pricing_param_accepted(self):
+        from getpatter import Twilio
+
         phone = Patter(
-            twilio_sid="AC" + "a" * 32,
-            twilio_token="test_token",
-            openai_key="sk-test",
+            carrier=Twilio(account_sid="AC" + "a" * 32, auth_token="test_token"),
             phone_number="+15550001234",
             webhook_url="test.ngrok.io",
             pricing={"deepgram": {"price": 0.005}},
@@ -61,10 +61,10 @@ class TestPatterPricingParam:
         assert phone._pricing == {"deepgram": {"price": 0.005}}
 
     def test_pricing_param_none_by_default(self):
+        from getpatter import Twilio
+
         phone = Patter(
-            twilio_sid="AC" + "a" * 32,
-            twilio_token="test_token",
-            openai_key="sk-test",
+            carrier=Twilio(account_sid="AC" + "a" * 32, auth_token="test_token"),
             phone_number="+15550001234",
             webhook_url="test.ngrok.io",
         )
@@ -113,7 +113,7 @@ class TestDeepgramRequestIdCapture:
     """Test that DeepgramSTT captures request_id from Metadata messages."""
 
     def test_request_id_captured_from_metadata(self):
-        from patter.providers.deepgram_stt import DeepgramSTT
+        from getpatter.providers.deepgram_stt import DeepgramSTT
 
         stt = DeepgramSTT(api_key="test-key")
         assert stt.request_id is None
@@ -129,7 +129,7 @@ class TestDeepgramRequestIdCapture:
         assert stt.request_id == "abc-123-def"
 
     def test_request_id_not_overwritten_by_results(self):
-        from patter.providers.deepgram_stt import DeepgramSTT
+        from getpatter.providers.deepgram_stt import DeepgramSTT
 
         stt = DeepgramSTT(api_key="test-key")
         import json

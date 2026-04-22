@@ -28,8 +28,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from patter.handlers.stream_handler import PipelineStreamHandler
-from patter.providers.base import Transcript
+from getpatter.handlers.stream_handler import PipelineStreamHandler
+from getpatter.providers.base import Transcript
 
 from tests.conftest import make_agent
 
@@ -187,7 +187,7 @@ class TestDuplicateFilter:
         # Two identical legitimate finals separated by 1.0 s (inside the window).
         times = iter([100.0, 101.0])
         monkeypatch.setattr(
-            "patter.handlers.stream_handler.time.time",
+            "getpatter.handlers.stream_handler.time.time",
             lambda: next(times),
         )
         stt = _StubSTT([
@@ -208,7 +208,7 @@ class TestDuplicateFilter:
         # Same text, but 2.5 s apart — caller legitimately repeating themselves.
         times = iter([100.0, 102.5])
         monkeypatch.setattr(
-            "patter.handlers.stream_handler.time.time",
+            "getpatter.handlers.stream_handler.time.time",
             lambda: next(times),
         )
         stt = _StubSTT([
@@ -227,7 +227,7 @@ class TestDuplicateFilter:
     ) -> None:
         times = iter([100.0, 100.8])
         monkeypatch.setattr(
-            "patter.handlers.stream_handler.time.time",
+            "getpatter.handlers.stream_handler.time.time",
             lambda: next(times),
         )
         stt = _StubSTT([
@@ -259,7 +259,7 @@ class TestThrottleFilter:
         # Different text but only 0.2 s apart — treated as STT over-firing.
         times = iter([100.0, 100.2])
         monkeypatch.setattr(
-            "patter.handlers.stream_handler.time.time",
+            "getpatter.handlers.stream_handler.time.time",
             lambda: next(times),
         )
         stt = _StubSTT([
@@ -280,7 +280,7 @@ class TestThrottleFilter:
         # Different text, 700 ms apart — legitimate second turn.
         times = iter([100.0, 100.7])
         monkeypatch.setattr(
-            "patter.handlers.stream_handler.time.time",
+            "getpatter.handlers.stream_handler.time.time",
             lambda: next(times),
         )
         stt = _StubSTT([

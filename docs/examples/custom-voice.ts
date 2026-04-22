@@ -1,7 +1,7 @@
 /**
  * Local mode with custom STT and TTS providers.
  *
- * Connects using local mode with:
+ * Connects using:
  * - Twilio for telephony
  * - Deepgram Nova for speech-to-text
  * - ElevenLabs for text-to-speech
@@ -10,17 +10,12 @@
  *
  * Usage:
  *   npm install getpatter
- *   npx ts-node custom-voice.ts
+ *   # Set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, DEEPGRAM_API_KEY, ELEVENLABS_API_KEY
+ *   npx tsx custom-voice.ts
  */
 
-import { Patter, IncomingMessage } from "getpatter";
+import { Patter, Twilio, DeepgramSTT, ElevenLabsTTS, IncomingMessage } from "getpatter";
 
-// Configuration — use environment variables in production
-const TWILIO_SID = process.env.TWILIO_ACCOUNT_SID ?? "AC...";
-const TWILIO_TOKEN = process.env.TWILIO_AUTH_TOKEN ?? "your_auth_token";
-const OPENAI_KEY = process.env.OPENAI_API_KEY ?? "sk-...";
-const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY ?? "dg_...";
-const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY ?? "el_...";
 const PHONE_NUMBER = process.env.TWILIO_PHONE_NUMBER ?? "+14155550000"; // E.164 format
 
 async function onMessage(msg: IncomingMessage): Promise<string> {
@@ -45,15 +40,14 @@ async function onMessage(msg: IncomingMessage): Promise<string> {
 
 async function main(): Promise<void> {
   const phone = new Patter({
-    twilioSid: TWILIO_SID,
-    twilioToken: TWILIO_TOKEN,
-    openaiKey: OPENAI_KEY,
+    carrier: new Twilio(),                              // TWILIO_* from env
     phoneNumber: PHONE_NUMBER,
   });
 
   const agent = phone.agent({
+    stt: new DeepgramSTT(),                             // DEEPGRAM_API_KEY from env
+    tts: new ElevenLabsTTS({ voiceId: "aria" }),        // ELEVENLABS_API_KEY from env
     systemPrompt: "You are a helpful customer service agent.",
-    voice: "alloy",
     firstMessage: "Hi! Thanks for calling. How can I help?",
   });
 
@@ -63,15 +57,13 @@ async function main(): Promise<void> {
     await phone.serve({
       agent,
       port: 8000,
+      onMessage,
       onCallStart: async (data) => {
         console.log(`Call started from ${data.caller}`);
       },
       onCallEnd: async (data) => {
         console.log(`Call ended after ${data.duration_seconds ?? 0}s`);
       },
-      // Use custom STT and TTS providers
-      stt: Patter.deepgram({ apiKey: DEEPGRAM_API_KEY, language: "en" }),
-      tts: Patter.elevenlabs({ apiKey: ELEVENLABS_API_KEY, voice: "aria" }),
     });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ERR_ASSERTION") {

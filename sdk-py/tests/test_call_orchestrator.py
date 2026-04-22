@@ -3,9 +3,9 @@
 import json
 from unittest.mock import AsyncMock, MagicMock
 
-from patter.providers.base import Transcript
-from patter.services.call_orchestrator import CallOrchestrator
-from patter.services.session_manager import CallSession
+from getpatter.providers.base import Transcript
+from getpatter.services.call_orchestrator import CallOrchestrator
+from getpatter.services.session_manager import CallSession
 
 
 def _make_session(**overrides) -> CallSession:

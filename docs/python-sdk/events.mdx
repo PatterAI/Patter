@@ -1,6 +1,7 @@
 ---
-title: "Events & Callbacks"
+title: "Events"
 description: "React to call lifecycle events with async callbacks."
+icon: "rss"
 ---
 
 # Events & Callbacks
@@ -98,7 +99,7 @@ async def on_transcript(event):
 Fires when a user message is received in **pipeline mode**. Your callback processes the message and returns the agent's response as a string, which is then synthesized to speech.
 
 <Note>
-  `on_message` is only used in pipeline mode (`provider="pipeline"`). In OpenAI Realtime and ElevenLabs ConvAI modes, the AI provider handles responses directly.
+  `on_message` is only used in pipeline mode (when you pass `stt=` / `tts=` instead of `engine=`). In engine mode (OpenAI Realtime, ElevenLabs ConvAI) the engine handles responses directly.
 </Note>
 
 ```python
@@ -151,19 +152,18 @@ Timestamps are Unix floats (from Python's `time.time()`), not ISO-8601 strings.
 import os
 import asyncio
 from dotenv import load_dotenv
-from patter import Patter
+from getpatter import Patter, Twilio, OpenAIRealtime
 
 load_dotenv()
 
 phone = Patter(
-    twilio_sid=os.environ["TWILIO_SID"],
-    twilio_token=os.environ["TWILIO_TOKEN"],
-    openai_key=os.environ["OPENAI_KEY"],
+    carrier=Twilio(),                               # TWILIO_* from env
     phone_number=os.environ["PHONE_NUMBER"],
     webhook_url=os.environ["WEBHOOK_URL"],
 )
 
 agent = phone.agent(
+    engine=OpenAIRealtime(),                        # OPENAI_API_KEY from env
     system_prompt="You are a helpful assistant.",
     first_message="Hi there! What can I do for you?",
 )

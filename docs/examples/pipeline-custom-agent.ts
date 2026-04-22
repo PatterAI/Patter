@@ -4,7 +4,7 @@
  * Bring your own LLM (Claude, GPT, LangChain, or custom logic).
  * Patter handles STT, TTS, and telephony; your function handles the brain.
  */
-import { Patter } from "getpatter";
+import { Patter, Twilio, DeepgramSTT, ElevenLabsTTS } from "getpatter";
 
 interface TurnData {
   text: string;
@@ -47,19 +47,16 @@ async function myAgent(data: TurnData): Promise<string> {
 }
 
 async function main() {
-  // openaiKey is not required in pipeline mode — you provide the LLM yourself
   const phone = new Patter({
-    mode: "local",
-    twilioSid: "AC...",
-    twilioToken: "...",
-    phoneNumber: "+1...",
+    carrier: new Twilio(),                              // TWILIO_* from env
+    phoneNumber: "+15550001234",
     webhookUrl: "xxx.ngrok-free.dev",
   });
 
+  // Pipeline mode: plug an STT and a TTS; the LLM flows through onMessage.
   const agent = phone.agent({
-    provider: "pipeline",
-    stt: Patter.deepgram({ apiKey: "dg_..." }),
-    tts: Patter.elevenlabs({ apiKey: "el_...", voice: "aria" }),
+    stt: new DeepgramSTT(),                             // DEEPGRAM_API_KEY from env
+    tts: new ElevenLabsTTS({ voiceId: "aria" }),        // ELEVENLABS_API_KEY from env
     language: "en",
   });
 

@@ -1,4 +1,4 @@
-"""Unit tests for patter.services.metrics — CallMetricsAccumulator."""
+"""Unit tests for getpatter.services.metrics — CallMetricsAccumulator."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from unittest.mock import patch
 
 import pytest
 
-from patter.models import CostBreakdown, LatencyBreakdown, TurnMetrics
-from patter.services.metrics import CallMetricsAccumulator
+from getpatter.models import CostBreakdown, LatencyBreakdown, TurnMetrics
+from getpatter.services.metrics import CallMetricsAccumulator
 
 
 # ---------------------------------------------------------------------------

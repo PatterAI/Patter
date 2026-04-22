@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from patter.dashboard.export import calls_to_csv, calls_to_json
+from getpatter.dashboard.export import calls_to_csv, calls_to_json
 
 
 @pytest.fixture
@@ -78,8 +78,8 @@ async def test_export_endpoint_csv():
     """Export endpoint returns CSV with correct content type."""
     from fastapi import FastAPI
     from httpx import AsyncClient, ASGITransport
-    from patter.dashboard.store import MetricsStore
-    from patter.dashboard.routes import mount_dashboard
+    from getpatter.dashboard.store import MetricsStore
+    from getpatter.dashboard.routes import mount_dashboard
 
     app = FastAPI()
     store = MetricsStore()
@@ -102,8 +102,8 @@ async def test_export_endpoint_json():
     """Export endpoint returns JSON with correct content type."""
     from fastapi import FastAPI
     from httpx import AsyncClient, ASGITransport
-    from patter.dashboard.store import MetricsStore
-    from patter.dashboard.routes import mount_dashboard
+    from getpatter.dashboard.store import MetricsStore
+    from getpatter.dashboard.routes import mount_dashboard
 
     app = FastAPI()
     store = MetricsStore()

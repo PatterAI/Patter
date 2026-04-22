@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import pytest
 
-from patter.services.text_transforms import filter_emoji, filter_for_tts, filter_markdown
+from getpatter.services.text_transforms import filter_emoji, filter_for_tts, filter_markdown
 
 
 # ---------------------------------------------------------------------------

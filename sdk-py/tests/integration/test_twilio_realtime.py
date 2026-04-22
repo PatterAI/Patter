@@ -14,16 +14,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from patter.handlers.twilio_handler import twilio_stream_bridge, TwilioAudioSender
-from patter.models import Agent
+from getpatter.handlers.twilio_handler import twilio_stream_bridge, TwilioAudioSender
+from getpatter.models import Agent
 
 from tests.conftest import fake_mulaw_frame, make_agent
 
-# The bridge function references these via `from patter.handlers.stream_handler import ...`
+# The bridge function references these via `from getpatter.handlers.stream_handler import ...`
 # so we must patch them in twilio_handler's namespace.
-_PATCH_RT = "patter.handlers.twilio_handler.OpenAIRealtimeStreamHandler"
-_PATCH_CONVAI = "patter.handlers.twilio_handler.ElevenLabsConvAIStreamHandler"
-_PATCH_PIPELINE = "patter.handlers.twilio_handler.PipelineStreamHandler"
+_PATCH_RT = "getpatter.handlers.twilio_handler.OpenAIRealtimeStreamHandler"
+_PATCH_CONVAI = "getpatter.handlers.twilio_handler.ElevenLabsConvAIStreamHandler"
+_PATCH_PIPELINE = "getpatter.handlers.twilio_handler.PipelineStreamHandler"
 
 
 # ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-"""Unit tests for patter.services.chat_context — ChatMessage and ChatContext."""
+"""Unit tests for getpatter.services.chat_context — ChatMessage and ChatContext."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from patter.services.chat_context import ChatContext, ChatMessage
+from getpatter.services.chat_context import ChatContext, ChatMessage
 
 
 # ---------------------------------------------------------------------------

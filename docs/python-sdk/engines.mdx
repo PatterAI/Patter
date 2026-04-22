@@ -1,0 +1,99 @@
+---
+title: "Engines"
+description: "End-to-end speech-to-speech runtimes (OpenAI Realtime, ElevenLabs ConvAI)."
+icon: "bolt"
+---
+
+# Engines
+
+An **engine** is an end-to-end speech-to-speech runtime. Pass an engine instance to `phone.agent(engine=...)` and Patter wires the audio stream straight through to the provider — no separate STT or TTS is needed.
+
+Patter ships with two engine classes today:
+
+- [`OpenAIRealtime`](#openairealtime) — OpenAI's Realtime API
+- [`ElevenLabsConvAI`](#elevenlabsconvai) — ElevenLabs Conversational AI
+
+Each class ships as both a **flat alias** (`from getpatter import OpenAIRealtime`) and a **namespaced** class (`from getpatter.engines import openai` → `openai.Realtime()`). They are equivalent.
+
+If you need full control over STT, LLM, and TTS independently, use [pipeline mode](/python-sdk/llm#pipeline-mode) instead and omit `engine=`.
+
+## OpenAIRealtime
+
+OpenAI's Realtime API — the lowest-latency option.
+
+```python
+import asyncio
+from getpatter import Patter, Twilio, OpenAIRealtime
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")   # TWILIO_* from env
+
+agent = phone.agent(
+    engine=OpenAIRealtime(voice="nova"),                        # OPENAI_API_KEY from env
+    system_prompt="You are a helpful assistant.",
+    first_message="Hello!",
+)
+
+async def main():
+    await phone.serve(agent)
+
+asyncio.run(main())
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `api_key` | `str` | `""` | OpenAI API key. Reads from `OPENAI_API_KEY` when empty. |
+| `voice` | `str` | `"alloy"` | One of `"alloy"`, `"echo"`, `"fable"`, `"onyx"`, `"nova"`, `"shimmer"`. |
+| `model` | `str` | `"gpt-4o-mini-realtime-preview"` | OpenAI Realtime model ID. |
+
+Namespaced form:
+
+```python
+from getpatter.engines import openai as openai_engine
+
+engine = openai_engine.Realtime()                     # reads OPENAI_API_KEY
+engine = openai_engine.Realtime(voice="nova", model="gpt-4o-mini-realtime-preview")
+```
+
+## ElevenLabsConvAI
+
+ElevenLabs Conversational AI — premium voice quality using a managed agent configured in the ElevenLabs dashboard.
+
+```python
+import asyncio
+from getpatter import Patter, Twilio, ElevenLabsConvAI
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")   # TWILIO_* from env
+
+agent = phone.agent(
+    engine=ElevenLabsConvAI(agent_id="agent_abc123"),           # ELEVENLABS_API_KEY from env
+    system_prompt="You are a warm and friendly concierge.",
+)
+
+async def main():
+    await phone.serve(agent)
+
+asyncio.run(main())
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `api_key` | `str` | `""` | ElevenLabs API key. Reads from `ELEVENLABS_API_KEY` when empty. |
+| `agent_id` | `str` | `""` | ElevenLabs agent ID (from the ConvAI dashboard). Reads from `ELEVENLABS_AGENT_ID` when empty. |
+| `voice` | `str` | `""` | Optional override for the agent's default voice ID. |
+
+Namespaced form:
+
+```python
+from getpatter.engines import elevenlabs as elevenlabs_engine
+
+engine = elevenlabs_engine.ConvAI()                   # reads env
+engine = elevenlabs_engine.ConvAI(agent_id="agent_abc123", voice="rachel")
+```
+
+## What's Next
+
+<CardGroup cols={2}>
+  <Card title="LLM" icon="brain" href="/python-sdk/llm">Compare engine mode with pipeline mode.</Card>
+  <Card title="STT" icon="microphone" href="/python-sdk/stt">STT for pipeline mode.</Card>
+  <Card title="TTS" icon="volume" href="/python-sdk/tts">TTS for pipeline mode.</Card>
+</CardGroup>

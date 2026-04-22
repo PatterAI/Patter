@@ -6,8 +6,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from patter.models import Agent
-from patter.test_mode import TestSession
+from getpatter.models import Agent
+from getpatter.test_mode import TestSession
 
 
 @pytest.mark.asyncio

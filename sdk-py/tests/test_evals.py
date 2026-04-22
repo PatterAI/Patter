@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from patter.evals import (
+from getpatter.evals import (
     EvalCase,
     EvalResult,
     EvalRunner,
@@ -22,7 +22,7 @@ from patter.evals import (
     JudgeResult,
     LLMJudge,
 )
-from patter.evals.runner import load_suite
+from getpatter.evals.runner import load_suite
 
 
 class FakeBackend:

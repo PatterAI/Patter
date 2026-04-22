@@ -1,6 +1,7 @@
 ---
 title: "Agents"
 description: "Define your agent's voice, model, tools, and behavior for phone calls."
+icon: "robot"
 ---
 
 # Agents
@@ -9,12 +10,57 @@ An agent configuration defines the personality, capabilities, and behavior of yo
 
 ## Basic Agent
 
+The simplest form leans on env-var fallback and a default engine (`OpenAIRealtime`):
+
 ```typescript
+import { Patter, Twilio } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
 const agent = phone.agent({
   systemPrompt: "You are a helpful customer support agent for Acme Corp.",
   firstMessage: "Hello! How can I help you today?",
-  voice: "alloy",
-  model: "gpt-4o-mini-realtime-preview",
+});   // defaults to engine: OpenAIRealtime, reads OPENAI_API_KEY
+```
+
+To pick the engine explicitly (flat imports):
+
+```typescript
+import { Patter, Twilio, OpenAIRealtime } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  engine: new OpenAIRealtime({ voice: "nova" }),
+  systemPrompt: "You are a helpful customer support agent for Acme Corp.",
+});
+```
+
+Pipeline mode (STT + your own LLM via `onMessage` + TTS):
+
+```typescript
+import { Patter, Twilio, DeepgramSTT, ElevenLabsTTS } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  stt: new DeepgramSTT({ endpointingMs: 80 }),           // DEEPGRAM_API_KEY from env
+  tts: new ElevenLabsTTS({ voiceId: "rachel" }),         // ELEVENLABS_API_KEY from env
+  systemPrompt: "You are a helpful assistant.",
+  firstMessage: "Hi!",
+});
+```
+
+The same pipeline using namespaced imports:
+
+```typescript
+import * as deepgram from "getpatter/stt/deepgram";
+import * as elevenlabs from "getpatter/tts/elevenlabs";
+
+const agent = phone.agent({
+  stt: new deepgram.STT({ endpointingMs: 80 }),
+  tts: new elevenlabs.TTS({ voiceId: "rachel" }),
+  systemPrompt: "You are a helpful assistant.",
 });
 ```
 
@@ -23,17 +69,14 @@ const agent = phone.agent({
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `systemPrompt` | `string` | Yes | — | Instructions that define the agent's persona and behavior. |
-| `voice` | `string` | No | Provider default | Voice ID. Depends on the provider (e.g., `"alloy"` for OpenAI, `"21m00Tcm4TlvDq8ikWAM"` for ElevenLabs). |
-| `model` | `string` | No | `"gpt-4o-mini-realtime-preview"` | AI model identifier. |
+| `engine` | `OpenAIRealtime \| ElevenLabsConvAI` | No | defaults to `OpenAIRealtime` | End-to-end engine. See [Engines](/typescript-sdk/engines). Omit for pipeline mode. |
+| `stt` | `STTProvider` | No | — | STT instance for pipeline mode (`new DeepgramSTT()`, `new CartesiaSTT()`, ...). |
+| `tts` | `TTSProvider` | No | — | TTS instance for pipeline mode (`new ElevenLabsTTS()`, `new RimeTTS()`, ...). |
+| `voice` | `string` | No | Provider default | Voice ID. Usually inferred from the engine or TTS instance. |
+| `model` | `string` | No | `"gpt-4o-mini-realtime-preview"` | Model ID for OpenAI Realtime. Usually inferred from the engine. |
 | `language` | `string` | No | `"en"` | BCP-47 language code. |
 | `firstMessage` | `string` | No | — | Greeting spoken when the call connects. |
 | `tools` | `ToolDefinition[]` | No | — | Function calling tools. See [Tools](/typescript-sdk/tools). |
-| `provider` | `string` | No | `"openai_realtime"` | AI provider mode. See [Providers](/typescript-sdk/providers). |
-| `elevenlabsKey` | `string` | No | — | ElevenLabs API key (required for `elevenlabs_convai` provider). |
-| `elevenlabsAgentId` | `string` | No | — | ElevenLabs agent ID (required for `elevenlabs_convai` provider). |
-| `deepgramKey` | `string` | No | — | Deepgram API key (for pipeline mode STT). |
-| `stt` | `STTConfig` | No | — | STT config for pipeline mode. Use `Patter.deepgram()` or `Patter.whisper()`. |
-| `tts` | `TTSConfig` | No | — | TTS config for pipeline mode. Use `Patter.elevenlabs()` or `Patter.openaiTts()`. |
 | `variables` | `Record<string, string>` | No | — | Dynamic variables for `{placeholder}` substitution in `systemPrompt`. |
 | `guardrails` | `Guardrail[]` | No | — | Output guardrails. See [Guardrails](/typescript-sdk/guardrails). |
 | `hooks` | `PipelineHooks` | No | — | Pipeline hooks for intercepting STT/TTS processing. |
@@ -47,23 +90,9 @@ const agent = phone.agent({
 
 The `phone.agent()` method validates:
 
-- **Provider**: Must be one of `"openai_realtime"`, `"elevenlabs_convai"`, or `"pipeline"`. Throws if invalid.
-- **Tools**: Must be an array. Each tool requires a `name` field and either a `webhookUrl` or a `handler`.
-- **Variables**: Must be a plain object (not an array).
-
-```typescript
-// Throws: provider must be one of: openai_realtime, elevenlabs_convai, pipeline
-phone.agent({
-  systemPrompt: "...",
-  provider: "invalid" as any,
-});
-
-// Throws: tools[0] requires either 'webhookUrl' or 'handler'
-phone.agent({
-  systemPrompt: "...",
-  tools: [{ name: "lookup", description: "Look up data", parameters: {} }] as any,
-});
-```
+- **Engine / pipeline**: exactly one of `engine`, `(stt` + `tts)` must resolve correctly.
+- **Tools**: must be an array. Each tool requires a `name` field and either a `webhookUrl` or a `handler`.
+- **Variables**: must be a plain object (not an array).
 
 ## Dynamic Variables
 
@@ -89,3 +118,30 @@ Two system tools are automatically injected into every agent:
 - **`end_call`** — Ends the current call with an optional reason.
 
 You do not need to define these in your `tools` array. The AI model can invoke them based on conversation context.
+
+## Engine vs Pipeline Mode
+
+```typescript
+import { OpenAIRealtime, ElevenLabsConvAI, DeepgramSTT, ElevenLabsTTS } from "getpatter";
+
+// OpenAI Realtime — end-to-end
+const agent = phone.agent({
+  engine: new OpenAIRealtime(),
+  systemPrompt: "...",
+});
+
+// ElevenLabs Conversational AI — natural voices
+const agent = phone.agent({
+  engine: new ElevenLabsConvAI({ agentId: "agent_abc123" }),
+  systemPrompt: "...",
+});
+
+// Pipeline — custom STT + TTS + onMessage LLM
+const agent = phone.agent({
+  stt: new DeepgramSTT(),
+  tts: new ElevenLabsTTS({ voiceId: "rachel" }),
+  systemPrompt: "...",
+});
+```
+
+See [LLM](/typescript-sdk/llm) for a deeper comparison.

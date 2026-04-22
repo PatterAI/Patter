@@ -10,7 +10,7 @@ import os
 
 import pytest
 
-from patter.evals import EvalCase, EvalRunner, EvalSuite, EvalTurn, LLMJudge
+from getpatter.evals import EvalCase, EvalRunner, EvalSuite, EvalTurn, LLMJudge
 
 pytestmark = pytest.mark.integration
 

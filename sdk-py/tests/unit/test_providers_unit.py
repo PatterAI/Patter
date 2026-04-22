@@ -20,7 +20,7 @@ class TestOpenAIRealtimeAdapter:
     """OpenAIRealtimeAdapter construction and basic behavior."""
 
     def test_init_stores_config(self) -> None:
-        from patter.providers.openai_realtime import OpenAIRealtimeAdapter
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
         adapter = OpenAIRealtimeAdapter(
             api_key="sk-test",
@@ -40,7 +40,7 @@ class TestOpenAIRealtimeAdapter:
         assert adapter._running is False
 
     def test_init_defaults(self) -> None:
-        from patter.providers.openai_realtime import OpenAIRealtimeAdapter
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
         adapter = OpenAIRealtimeAdapter(api_key="sk-test")
         assert adapter.model == "gpt-4o-mini-realtime-preview"
@@ -49,7 +49,7 @@ class TestOpenAIRealtimeAdapter:
         assert adapter.tools is None
 
     def test_repr(self) -> None:
-        from patter.providers.openai_realtime import OpenAIRealtimeAdapter
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
         adapter = OpenAIRealtimeAdapter(
             api_key="sk-test",
@@ -62,35 +62,35 @@ class TestOpenAIRealtimeAdapter:
         assert "alloy" in r
 
     def test_pcm16_format(self) -> None:
-        from patter.providers.openai_realtime import OpenAIRealtimeAdapter
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
         adapter = OpenAIRealtimeAdapter(api_key="sk-test", audio_format="pcm16")
         assert adapter.audio_format == "pcm16"
 
     @pytest.mark.asyncio
     async def test_send_audio_noop_when_no_ws(self) -> None:
-        from patter.providers.openai_realtime import OpenAIRealtimeAdapter
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
         adapter = OpenAIRealtimeAdapter(api_key="sk-test")
         await adapter.send_audio(b"\x00\x01\x02\x03")
 
     @pytest.mark.asyncio
     async def test_send_text_noop_when_no_ws(self) -> None:
-        from patter.providers.openai_realtime import OpenAIRealtimeAdapter
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
         adapter = OpenAIRealtimeAdapter(api_key="sk-test")
         await adapter.send_text("hello")
 
     @pytest.mark.asyncio
     async def test_send_function_result_noop_when_no_ws(self) -> None:
-        from patter.providers.openai_realtime import OpenAIRealtimeAdapter
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
         adapter = OpenAIRealtimeAdapter(api_key="sk-test")
         await adapter.send_function_result("call-1", '{"result": "ok"}')
 
     @pytest.mark.asyncio
     async def test_close_when_no_ws(self) -> None:
-        from patter.providers.openai_realtime import OpenAIRealtimeAdapter
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
         adapter = OpenAIRealtimeAdapter(api_key="sk-test")
         await adapter.close()
@@ -99,7 +99,7 @@ class TestOpenAIRealtimeAdapter:
 
     @pytest.mark.asyncio
     async def test_close_when_ws_exists(self) -> None:
-        from patter.providers.openai_realtime import OpenAIRealtimeAdapter
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
         adapter = OpenAIRealtimeAdapter(api_key="sk-test")
         adapter._ws = AsyncMock()
@@ -109,18 +109,18 @@ class TestOpenAIRealtimeAdapter:
 
     @pytest.mark.asyncio
     async def test_cancel_response_noop_when_no_ws(self) -> None:
-        from patter.providers.openai_realtime import OpenAIRealtimeAdapter
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
         adapter = OpenAIRealtimeAdapter(api_key="sk-test")
         await adapter.cancel_response()
 
     def test_url_constant(self) -> None:
-        from patter.providers.openai_realtime import OpenAIRealtimeAdapter
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
         assert "openai.com" in OpenAIRealtimeAdapter.OPENAI_REALTIME_URL
 
     def test_tools_stored(self) -> None:
-        from patter.providers.openai_realtime import OpenAIRealtimeAdapter
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
         tools = [{"name": "get_weather", "description": "Get weather", "parameters": {}}]
         adapter = OpenAIRealtimeAdapter(api_key="sk-test", tools=tools)
@@ -132,7 +132,7 @@ class TestElevenLabsConvAIAdapter:
     """ElevenLabsConvAIAdapter construction and basic behavior."""
 
     def test_init_stores_config(self) -> None:
-        from patter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
+        from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
         adapter = ElevenLabsConvAIAdapter(
             api_key="el-test",
@@ -152,7 +152,7 @@ class TestElevenLabsConvAIAdapter:
         assert adapter._running is False
 
     def test_init_defaults(self) -> None:
-        from patter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
+        from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
         adapter = ElevenLabsConvAIAdapter(api_key="el-test")
         assert adapter.agent_id == ""
@@ -162,7 +162,7 @@ class TestElevenLabsConvAIAdapter:
         assert adapter.first_message == ""
 
     def test_repr(self) -> None:
-        from patter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
+        from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
         adapter = ElevenLabsConvAIAdapter(api_key="el-test", agent_id="agent-1")
         r = repr(adapter)
@@ -171,14 +171,14 @@ class TestElevenLabsConvAIAdapter:
 
     @pytest.mark.asyncio
     async def test_send_audio_noop_when_no_ws(self) -> None:
-        from patter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
+        from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
         adapter = ElevenLabsConvAIAdapter(api_key="el-test")
         await adapter.send_audio(b"\x00\x01\x02\x03")
 
     @pytest.mark.asyncio
     async def test_close_when_no_ws(self) -> None:
-        from patter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
+        from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
         adapter = ElevenLabsConvAIAdapter(api_key="el-test")
         await adapter.close()
@@ -187,7 +187,7 @@ class TestElevenLabsConvAIAdapter:
 
     @pytest.mark.asyncio
     async def test_close_when_ws_exists(self) -> None:
-        from patter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
+        from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
         adapter = ElevenLabsConvAIAdapter(api_key="el-test")
         adapter._ws = AsyncMock()
@@ -196,7 +196,7 @@ class TestElevenLabsConvAIAdapter:
         assert adapter._running is False
 
     def test_url_constant(self) -> None:
-        from patter.providers.elevenlabs_convai import ELEVENLABS_CONVAI_URL
+        from getpatter.providers.elevenlabs_convai import ELEVENLABS_CONVAI_URL
 
         assert "elevenlabs.io" in ELEVENLABS_CONVAI_URL
 
@@ -206,20 +206,20 @@ class TestTelnyxAdapter:
     """TelnyxAdapter construction and repr."""
 
     def test_init_stores_config(self) -> None:
-        from patter.providers.telnyx_adapter import TelnyxAdapter
+        from getpatter.providers.telnyx_adapter import TelnyxAdapter
 
         adapter = TelnyxAdapter(api_key="key-test", connection_id="conn-1")
         assert adapter.api_key == "key-test"
         assert adapter.connection_id == "conn-1"
 
     def test_init_defaults(self) -> None:
-        from patter.providers.telnyx_adapter import TelnyxAdapter
+        from getpatter.providers.telnyx_adapter import TelnyxAdapter
 
         adapter = TelnyxAdapter(api_key="key-test")
         assert adapter.connection_id == ""
 
     def test_repr(self) -> None:
-        from patter.providers.telnyx_adapter import TelnyxAdapter
+        from getpatter.providers.telnyx_adapter import TelnyxAdapter
 
         adapter = TelnyxAdapter(api_key="key-test", connection_id="conn-1")
         r = repr(adapter)
@@ -228,7 +228,7 @@ class TestTelnyxAdapter:
 
     @pytest.mark.asyncio
     async def test_close(self) -> None:
-        from patter.providers.telnyx_adapter import TelnyxAdapter
+        from getpatter.providers.telnyx_adapter import TelnyxAdapter
 
         adapter = TelnyxAdapter(api_key="key-test")
         await adapter.close()
@@ -239,7 +239,7 @@ class TestBaseClasses:
     """Base provider classes and dataclasses."""
 
     def test_transcript_dataclass(self) -> None:
-        from patter.providers.base import Transcript
+        from getpatter.providers.base import Transcript
 
         t = Transcript(text="hello", is_final=True, confidence=0.95)
         assert t.text == "hello"
@@ -247,13 +247,13 @@ class TestBaseClasses:
         assert t.confidence == 0.95
 
     def test_transcript_default_confidence(self) -> None:
-        from patter.providers.base import Transcript
+        from getpatter.providers.base import Transcript
 
         t = Transcript(text="hi", is_final=False)
         assert t.confidence == 0.0
 
     def test_call_info_dataclass(self) -> None:
-        from patter.providers.base import CallInfo
+        from getpatter.providers.base import CallInfo
 
         ci = CallInfo(call_id="c1", caller="+1555", callee="+1666", direction="inbound")
         assert ci.call_id == "c1"
@@ -265,55 +265,55 @@ class TestPricing:
     """Pricing module functions."""
 
     def test_merge_pricing_no_overrides(self) -> None:
-        from patter.pricing import DEFAULT_PRICING, merge_pricing
+        from getpatter.pricing import DEFAULT_PRICING, merge_pricing
 
         result = merge_pricing(None)
         assert "deepgram" in result
         assert result is not DEFAULT_PRICING
 
     def test_merge_pricing_with_overrides(self) -> None:
-        from patter.pricing import merge_pricing
+        from getpatter.pricing import merge_pricing
 
         result = merge_pricing({"deepgram": {"price": 0.005}})
         assert result["deepgram"]["price"] == 0.005
         assert result["deepgram"]["unit"] == "minute"
 
     def test_merge_pricing_new_provider(self) -> None:
-        from patter.pricing import merge_pricing
+        from getpatter.pricing import merge_pricing
 
         result = merge_pricing({"custom_stt": {"unit": "minute", "price": 0.01}})
         assert result["custom_stt"]["price"] == 0.01
 
     def test_calculate_stt_cost(self) -> None:
-        from patter.pricing import DEFAULT_PRICING, calculate_stt_cost, merge_pricing
+        from getpatter.pricing import DEFAULT_PRICING, calculate_stt_cost, merge_pricing
 
         pricing = merge_pricing(None)
         cost = calculate_stt_cost("deepgram", 60.0, pricing)
         assert cost == pytest.approx(DEFAULT_PRICING["deepgram"]["price"])
 
     def test_calculate_stt_cost_unknown_provider(self) -> None:
-        from patter.pricing import calculate_stt_cost, merge_pricing
+        from getpatter.pricing import calculate_stt_cost, merge_pricing
 
         pricing = merge_pricing(None)
         cost = calculate_stt_cost("unknown", 60.0, pricing)
         assert cost == 0.0
 
     def test_calculate_tts_cost(self) -> None:
-        from patter.pricing import DEFAULT_PRICING, calculate_tts_cost, merge_pricing
+        from getpatter.pricing import DEFAULT_PRICING, calculate_tts_cost, merge_pricing
 
         pricing = merge_pricing(None)
         cost = calculate_tts_cost("elevenlabs", 1000, pricing)
         assert cost == pytest.approx(DEFAULT_PRICING["elevenlabs"]["price"])
 
     def test_calculate_tts_cost_unknown_provider(self) -> None:
-        from patter.pricing import calculate_tts_cost, merge_pricing
+        from getpatter.pricing import calculate_tts_cost, merge_pricing
 
         pricing = merge_pricing(None)
         cost = calculate_tts_cost("unknown", 1000, pricing)
         assert cost == 0.0
 
     def test_calculate_realtime_cost(self) -> None:
-        from patter.pricing import calculate_realtime_cost, merge_pricing
+        from getpatter.pricing import calculate_realtime_cost, merge_pricing
 
         pricing = merge_pricing(None)
         usage = {
@@ -324,27 +324,27 @@ class TestPricing:
         assert cost > 0.0
 
     def test_calculate_realtime_cost_empty_usage(self) -> None:
-        from patter.pricing import calculate_realtime_cost, merge_pricing
+        from getpatter.pricing import calculate_realtime_cost, merge_pricing
 
         pricing = merge_pricing(None)
         cost = calculate_realtime_cost({}, pricing)
         assert cost == 0.0
 
     def test_calculate_telephony_cost(self) -> None:
-        from patter.pricing import calculate_telephony_cost, merge_pricing
+        from getpatter.pricing import calculate_telephony_cost, merge_pricing
 
         pricing = merge_pricing(None)
         cost = calculate_telephony_cost("twilio", 60.0, pricing)
         assert cost > 0.0
 
     def test_calculate_telephony_cost_unknown(self) -> None:
-        from patter.pricing import calculate_telephony_cost, merge_pricing
+        from getpatter.pricing import calculate_telephony_cost, merge_pricing
 
         pricing = merge_pricing(None)
         cost = calculate_telephony_cost("unknown", 60.0, pricing)
         assert cost == 0.0
 
     def test_pricing_version_exists(self) -> None:
-        from patter.pricing import PRICING_VERSION
+        from getpatter.pricing import PRICING_VERSION
 
         assert PRICING_VERSION

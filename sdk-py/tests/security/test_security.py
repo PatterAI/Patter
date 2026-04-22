@@ -10,10 +10,10 @@ import re
 
 import pytest
 
-from patter.handlers.common import _sanitize_variable_value, _validate_e164
-from patter.handlers.twilio_handler import _xml_escape, _validate_twilio_sid
-from patter.local_config import LocalConfig
-from patter.models import Agent
+from getpatter.handlers.common import _sanitize_variable_value, _validate_e164
+from getpatter.handlers.twilio_handler import _xml_escape, _validate_twilio_sid
+from getpatter.local_config import LocalConfig
+from getpatter.models import Agent
 
 
 # ── SEC-1: SSRF on user-supplied webhook URLs ─────────────────────────────
@@ -182,7 +182,7 @@ class TestSecretLeakage:
         assert isinstance(output, str)
 
     def test_patter_connection_repr_hides_api_key(self) -> None:
-        from patter.connection import PatterConnection
+        from getpatter.connection import PatterConnection
 
         conn = PatterConnection(api_key=self.FAKE_API_KEY)
         output = repr(conn)
@@ -199,14 +199,14 @@ class TestSecretLeakage:
 
     def test_error_message_is_useful(self) -> None:
         """Error messages must provide diagnostic info (not be empty/generic)."""
-        from patter.exceptions import PatterConnectionError
+        from getpatter.exceptions import PatterConnectionError
 
         err = PatterConnectionError("Connection to backend failed: timeout after 30s")
         assert len(str(err)) > 10
         assert "timeout" in str(err).lower() or "connection" in str(err).lower()
 
     def test_agent_repr_does_not_leak_stt_key(self) -> None:
-        from patter.models import STTConfig
+        from getpatter.models import STTConfig
 
         stt = STTConfig(provider="deepgram", api_key=self.FAKE_API_KEY)
         agent = Agent(

@@ -4,24 +4,21 @@
  * The transfer_call tool is automatically available on every agent.
  * The agent decides when to use it based on the system prompt.
  */
-import { Patter } from "getpatter";
+import { Patter, Twilio, OpenAIRealtime } from "getpatter";
 
 async function main() {
   const phone = new Patter({
-    mode: "local",
-    twilioSid: "AC...",
-    twilioToken: "...",
-    openaiKey: "sk-...",
-    phoneNumber: "+1...",
+    carrier: new Twilio(),                              // TWILIO_* from env
+    phoneNumber: "+15550001234",
     webhookUrl: "xxx.ngrok-free.dev",
   });
 
   const agent = phone.agent({
+    engine: new OpenAIRealtime({ voice: "alloy" }),     // OPENAI_API_KEY from env
     systemPrompt: `You are a customer service agent for Acme Corp.
 If the customer is angry, frustrated, or explicitly asks for a manager or human,
 use the transfer_call tool to transfer them to +12345670000 (the manager's line).
 Otherwise, help them with their question as best you can.`,
-    voice: "alloy",
     firstMessage: "Hello! Thanks for calling Acme. How can I help you today?",
     // transfer_call tool is automatically available — no extra config needed
   });

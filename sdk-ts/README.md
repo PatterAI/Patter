@@ -1,6 +1,6 @@
 <p align="center">
   <h1 align="center">Patter TypeScript SDK</h1>
-  <p align="center">Connect AI agents to phone numbers with 4 lines of code</p>
+  <p align="center">Connect AI agents to phone numbers in four lines of code</p>
 </p>
 
 <p align="center">
@@ -28,52 +28,58 @@ Patter is the open-source SDK that gives your AI agent a phone number. Point it 
 npm install getpatter
 ```
 
-```typescript
-import { Patter } from "getpatter";
+Set the env vars your carrier and engine need:
 
-const phone = new Patter({
-  twilioSid: "AC...", twilioToken: "...",
-  openaiKey: "sk-...",
-  phoneNumber: "+1...",
-});
-
-const agent = phone.agent({
-  systemPrompt: "You are a friendly customer service agent for Acme Corp.",
-  voice: "alloy",
-  firstMessage: "Hello! Thanks for calling. How can I help?",
-});
-
-await phone.serve({ agent, port: 8000 });
+```bash
+export TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+export TWILIO_AUTH_TOKEN=your_auth_token
+export OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxx
 ```
+
+Four lines of TypeScript:
+
+```typescript
+import { Patter, Twilio, OpenAIRealtime } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+const agent = phone.agent({ engine: new OpenAIRealtime(), systemPrompt: "You are a friendly receptionist for Acme Corp.", firstMessage: "Hello! How can I help?" });
+await phone.serve({ agent, tunnel: true });
+```
+
+`tunnel: true` spawns a Cloudflare tunnel and points your Twilio number at it. In production, pass `webhookUrl: "api.prod.example.com"` to the constructor instead.
 
 ## Features
 
 | Feature | Method | Example |
 |---|---|---|
-| Inbound calls | `phone.serve(agent)` | Answer calls as an AI |
-| Outbound calls + AMD | `phone.call(to, machineDetection)` | Place calls with voicemail detection |
-| Tool calling (webhooks) | `agent(tools=[...])` | Agent calls external APIs mid-conversation |
-| Custom STT + TTS | `agent(provider="pipeline")` | Bring your own voice providers |
-| Dynamic variables | `agent(variables={...})` | Personalize prompts per caller |
-| Custom LLM (any model) | `serve(onMessage=handler)` | Claude, Mistral, LLaMA, etc. |
-| Call recording | `serve(recording=true)` | Record all calls |
+| Inbound calls | `phone.serve({ agent })` | Answer calls as an AI |
+| Outbound calls + AMD | `phone.call({ to, machineDetection: true })` | Place calls with voicemail detection |
+| Tool calling | `agent({ tools: [tool(...)] })` | Agent calls external APIs mid-conversation |
+| Custom STT + TTS | `agent({ stt: new DeepgramSTT(), tts: new ElevenLabsTTS() })` | Bring your own voice providers |
+| Dynamic variables | `agent({ variables: {...} })` | Personalize prompts per caller |
+| Custom LLM (any model) | `serve({ onMessage })` | Claude, Mistral, LLaMA, etc. |
+| Call recording | `serve({ recording: true })` | Record all calls |
 | Call transfer | `transfer_call` (auto-injected) | Transfer to a human |
-| Voicemail drop | `call(voicemailMessage="...")` | Play message on voicemail |
+| Voicemail drop | `call({ voicemailMessage: "..." })` | Play message on voicemail |
 
 ## Configuration
 
-### Environment Variables
+### Environment variables
 
-| Variable | Required | Description |
-|---|---|---|
-| `OPENAI_API_KEY` | Yes (Realtime mode) | OpenAI API key with Realtime access |
-| `TWILIO_ACCOUNT_SID` | Yes | Twilio account SID |
-| `TWILIO_AUTH_TOKEN` | Yes | Twilio auth token |
-| `TWILIO_PHONE_NUMBER` | Yes | Your Twilio phone number (E.164) |
-| `DEEPGRAM_API_KEY` | Pipeline mode | Deepgram STT key |
-| `ELEVENLABS_API_KEY` | Pipeline mode | ElevenLabs TTS key |
-| `ANTHROPIC_API_KEY` | Custom LLM | For bringing your own model |
-| `WEBHOOK_URL` | No | Public URL (auto-tunneled via Cloudflare if omitted) |
+Every provider reads its credentials from the environment by default. Pass `apiKey: "..."` to any constructor to override.
+
+| Variable | Used by |
+|---|---|
+| `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` | `new Twilio()` carrier |
+| `TELNYX_API_KEY`, `TELNYX_CONNECTION_ID`, `TELNYX_PUBLIC_KEY` (optional) | `new Telnyx()` carrier |
+| `OPENAI_API_KEY` | `OpenAIRealtime`, `WhisperSTT`, `OpenAITTS` |
+| `ELEVENLABS_API_KEY`, `ELEVENLABS_AGENT_ID` | `ElevenLabsConvAI`, `ElevenLabsTTS` |
+| `DEEPGRAM_API_KEY` | `DeepgramSTT` |
+| `CARTESIA_API_KEY` | `CartesiaSTT`, `CartesiaTTS` |
+| `RIME_API_KEY` | `RimeTTS` |
+| `LMNT_API_KEY` | `LMNTTTS` |
+| `SONIOX_API_KEY` | `SonioxSTT` |
+| `ASSEMBLYAI_API_KEY` | `AssemblyAISTT` |
 
 ```bash
 cp .env.example .env
@@ -87,219 +93,187 @@ cp .env.example .env
 | Mode | Latency | Quality | Best For |
 |---|---|---|---|
 | **OpenAI Realtime** | Lowest | High | Fluid, low-latency conversations |
-| **Deepgram + ElevenLabs** | Low | High | Independent control over STT and TTS |
+| **Pipeline** (STT + LLM + TTS) | Low | High | Independent control over STT and TTS |
 | **ElevenLabs ConvAI** | Low | High | ElevenLabs-managed conversation flow |
 
 ## API Reference
 
-### `Patter` Constructor
+### `Patter` constructor
 
 ```typescript
 new Patter({
-  twilioSid: string;
-  twilioToken: string;
-  openaiKey: string;
+  carrier: Twilio | Telnyx;
   phoneNumber: string;
-  webhookUrl?: string;  // Optional; auto-tunneled via Cloudflare if omitted
+  webhookUrl?: string;                              // Public hostname. Mutually exclusive with tunnel.
+  tunnel?: CloudflareTunnel | StaticTunnel;         // Or pass tunnel: true on serve() for dev.
 })
 ```
 
 | Parameter | Type | Description |
 |---|---|---|
-| `twilioSid` | `string` | Twilio account SID |
-| `twilioToken` | `string` | Twilio auth token |
-| `openaiKey` | `string` | OpenAI API key |
-| `phoneNumber` | `string` | Your Twilio phone number (E.164 format) |
-| `webhookUrl` | `string` | Public URL for Twilio webhooks (optional) |
+| `carrier` | `Twilio` / `Telnyx` | Carrier instance. Reads env vars by default. |
+| `phoneNumber` | `string` | Your phone number in E.164 format. |
+| `webhookUrl` | `string` | Public hostname your local server is reachable on. |
+| `tunnel` | instance | `new CloudflareTunnel()` or `new StaticTunnel({ hostname: ... })`. |
 
-### `phone.agent()` Method
+### `phone.agent()`
 
 ```typescript
 phone.agent({
   systemPrompt: string;
+  engine?: OpenAIRealtime | ElevenLabsConvAI;        // default: new OpenAIRealtime()
+  stt?: STTProvider;                                 // e.g. new DeepgramSTT()
+  tts?: TTSProvider;                                 // e.g. new ElevenLabsTTS()
   voice?: string;
+  model?: string;
+  language?: string;
   firstMessage?: string;
+  tools?: Tool[];
+  guardrails?: Guardrail[];
   variables?: Record<string, string>;
-  tools?: Array<{name, description, parameters, webhookUrl}>;
 })
 ```
 
-| Parameter | Type | Description |
-|---|---|---|
-| `systemPrompt` | `string` | Prompt with optional `{variable}` placeholders |
-| `voice` | `string` | TTS voice name (e.g., "alloy", "echo", "fable") |
-| `firstMessage` | `string` | Opening message (supports `{variable}` placeholders) |
-| `variables` | `Record<string, string>` | Values substituted into prompts |
-| `tools` | `Array` | Tool definitions: `{name, description, parameters, webhookUrl}` |
+Pass `engine` for end-to-end mode, `stt` + `tts` for pipeline mode. Both arguments may take plain adapter instances (e.g. `new DeepgramSTT()`) that read their API key from the environment.
 
-### `phone.serve()` Method
+### `phone.serve()`
 
 ```typescript
 await phone.serve({
   agent: Agent;
   port?: number;
+  tunnel?: boolean;                 // shortcut for Patter({ tunnel: new CloudflareTunnel() })
   dashboard?: boolean;
   recording?: boolean;
-  onCallStart?: (data: CallData) => Promise<void>;
-  onCallEnd?: (data: CallData) => Promise<void>;
-  onTranscript?: (data: TranscriptData) => Promise<void>;
-})
+  onCallStart?: (data) => Promise<void>;
+  onCallEnd?: (data) => Promise<void>;
+  onTranscript?: (data) => Promise<void>;
+  onMessage?: (data) => Promise<string> | string;
+  voicemailMessage?: string;
+  dashboardToken?: string;
+});
 ```
 
-| Parameter | Type | Description |
-|---|---|---|
-| `agent` | `Agent` | Agent configuration to use for calls |
-| `port` | `number` | Port to listen on (default: 8000) |
-| `dashboard` | `boolean` | Enable the built-in monitoring dashboard |
-| `recording` | `boolean` | Enable call recording via the telephony provider |
-| `onCallStart` | `(data) => Promise<void>` | Called when a call connects; receives `data.caller`, `data.callId` |
-| `onCallEnd` | `(data) => Promise<void>` | Called when a call ends; receives `data.history`, `data.transcript`, `data.duration` |
-| `onTranscript` | `(data) => Promise<void>` | Called on each transcript turn; receives `data.role`, `data.text`, `data.history` |
-
-### `phone.call()` Method
+### `phone.call()`
 
 ```typescript
 await phone.call({
   to: string;
+  agent?: Agent;
+  from?: string;
   firstMessage?: string;
   machineDetection?: boolean;
   voicemailMessage?: string;
-})
+  ringTimeout?: number;
+});
 ```
 
-| Parameter | Type | Description |
-|---|---|---|
-| `to` | `string` | Destination phone number (E.164 format) |
-| `firstMessage` | `string` | Opening message for the outbound call |
-| `machineDetection` | `boolean` | Enable answering machine detection |
-| `voicemailMessage` | `string` | Message to play when voicemail is detected |
-
-### Static Provider Helpers
+### STT / TTS catalog
 
 ```typescript
-Patter.deepgram(options: { apiKey: string; language?: string }) -> STT
-Patter.elevenlabs(options: { apiKey: string; voice?: string }) -> TTS
-Patter.openaiTts(options: { apiKey: string; voice?: string }) -> TTS
-Patter.whisper(options: { apiKey: string; language?: string }) -> STT
+import {
+  // Carriers
+  Twilio, Telnyx,
+  // Engines
+  OpenAIRealtime, ElevenLabsConvAI,
+  // STT
+  DeepgramSTT, WhisperSTT, CartesiaSTT, SonioxSTT, AssemblyAISTT,
+  // TTS
+  ElevenLabsTTS, OpenAITTS, CartesiaTTS, RimeTTS, LMNTTTS,
+  // Tunnels
+  CloudflareTunnel, StaticTunnel,
+  // Primitives
+  Tool, Guardrail, tool, guardrail,
+} from "getpatter";
 ```
+
+Every class reads its API key from the environment by default, so `new DeepgramSTT()` / `new ElevenLabsTTS()` work out of the box when the corresponding env var is set.
 
 ## Examples
 
-### Inbound Calls (AI answers the phone)
+### Inbound calls — default engine
 
 ```typescript
-import { Patter, IncomingMessage } from "getpatter";
+import { Patter, Twilio, OpenAIRealtime } from "getpatter";
 
-const phone = new Patter({
-  twilioSid: "AC...", twilioToken: "...",
-  openaiKey: "sk-...",
-  phoneNumber: "+1...",
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+const agent = phone.agent({
+  engine: new OpenAIRealtime(),
+  systemPrompt: "You are a helpful customer service agent.",
+  firstMessage: "Hello! How can I help?",
 });
 
-async function agent(msg: IncomingMessage): Promise<string> {
-  if (msg.text.toLowerCase().includes("hours")) {
-    return "We're open Monday through Friday, 9 to 5.";
-  }
-  return "How can I help you today?";
-}
-
 await phone.serve({
-  agent: phone.agent({
-    systemPrompt: "You are a helpful customer service agent.",
-    firstMessage: "Hello! How can I help?",
-  }),
-  port: 8000,
+  agent,
+  tunnel: true,
   onCallStart: (data) => console.log(`Call from ${data.caller}`),
-  onCallEnd: (data) => console.log("Call ended"),
+  onCallEnd: () => console.log("Call ended"),
 });
 ```
 
-### Outbound Calls (AI calls someone)
+### Custom voice — Deepgram STT + ElevenLabs TTS
 
 ```typescript
-import { Patter } from "getpatter";
+import { Patter, Twilio, DeepgramSTT, ElevenLabsTTS } from "getpatter";
 
-const phone = new Patter({
-  twilioSid: "AC...", twilioToken: "...",
-  openaiKey: "sk-...",
-  phoneNumber: "+1...",
-});
-
-const agentConfig = phone.agent({
-  systemPrompt: "You are making reminder calls.",
-  firstMessage: "Hi, this is an automated reminder from Acme Corp.",
-});
-
-await phone.serve({ agent: agentConfig, port: 8000 });
-await phone.call({
-  to: "+14155551234",
-  firstMessage: "Hi, just checking in.",
-});
-```
-
-### Tool Calling (Agent calls external APIs)
-
-```typescript
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
 const agent = phone.agent({
-  systemPrompt: "You are a booking assistant. Check availability before confirming.",
-  tools: [{
-    name: "check_availability",
-    description: "Check appointment availability for a given date",
-    parameters: {
-      type: "object",
-      properties: {
-        date: { type: "string", description: "ISO date, e.g. 2025-06-15" },
-      },
-      required: ["date"],
-    },
-    webhookUrl: "https://api.example.com/availability",
-  }],
-});
-```
-
-### Custom Voice (Deepgram STT + ElevenLabs TTS)
-
-```typescript
-const phone = new Patter({
-  twilioSid: "AC...", twilioToken: "...",
-  openaiKey: "sk-...",
-  phoneNumber: "+1...",
-});
-
-const agent = phone.agent({
+  stt: new DeepgramSTT(),                         // reads DEEPGRAM_API_KEY
+  tts: new ElevenLabsTTS({ voice: "rachel" }),    // reads ELEVENLABS_API_KEY
   systemPrompt: "You are a helpful voice assistant.",
-  voice: "aria",
 });
-
-// Use custom STT and TTS in pipeline mode
-await phone.serve({
-  agent,
-  port: 8000,
-  stt: Patter.deepgram({ apiKey: "dg_...", language: "en" }),
-  tts: Patter.elevenlabs({ apiKey: "el_...", voice: "aria" }),
-});
+await phone.serve({ agent, tunnel: true });
 ```
 
-### Call Recording
+### Tool calling
 
 ```typescript
-await phone.serve({
-  agent,
-  port: 8000,
-  recording: true,  // Records all inbound and outbound calls
+import { Patter, Twilio, OpenAIRealtime, tool } from "getpatter";
+
+const checkAvailability = tool({
+  name: "check_availability",
+  description: "Check appointment availability for a given ISO date.",
+  parameters: {
+    type: "object",
+    properties: { date: { type: "string" } },
+    required: ["date"],
+  },
+  handler: async ({ date }) => ({ available: true }),
 });
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+const agent = phone.agent({
+  engine: new OpenAIRealtime(),
+  systemPrompt: "You are a booking assistant.",
+  tools: [checkAvailability],
+});
+await phone.serve({ agent, tunnel: true });
 ```
 
-### Dynamic Variables in Prompts
+### Outbound calls
+
+```typescript
+import { Patter, Twilio, OpenAIRealtime } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+const agent = phone.agent({
+  engine: new OpenAIRealtime(),
+  systemPrompt: "You are making reminder calls.",
+  firstMessage: "Hi, this is a reminder from Acme Corp.",
+});
+
+await phone.serve({ agent, tunnel: true });
+await phone.call({ to: "+14155551234", agent });
+```
+
+### Dynamic variables
 
 ```typescript
 const agent = phone.agent({
+  engine: new OpenAIRealtime(),
   systemPrompt: "You are helping {customer_name}, account #{account_id}.",
   firstMessage: "Hi {customer_name}! How can I help you today?",
-  variables: {
-    customer_name: "Jane",
-    account_id: "A-789",
-  },
+  variables: { customer_name: "Jane", account_id: "A-789" },
 });
 ```
 

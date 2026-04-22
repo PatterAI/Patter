@@ -1,6 +1,7 @@
 ---
-title: "Output Guardrails"
+title: "Guardrails"
 description: "Filter and control AI responses before they reach the caller."
+icon: "shield"
 ---
 
 # Output Guardrails
@@ -9,10 +10,10 @@ Guardrails intercept AI responses before they are sent to text-to-speech. When a
 
 ## Creating a Guardrail
 
-Use the `Patter.guardrail()` static method:
+Use the `guardrail()` static method:
 
 ```python
-guardrail = Patter.guardrail(
+guardrail = guardrail(
     name="No medical advice",
     blocked_terms=["diagnosis", "prescription", "medication"],
     replacement="I'm not qualified to give medical advice. Please consult a doctor.",
@@ -42,7 +43,7 @@ guardrail = Patter.guardrail(
 The simplest way to filter responses. Terms are matched as case-insensitive substrings:
 
 ```python
-Patter.guardrail(
+guardrail(
     name="No competitor mentions",
     blocked_terms=["CompetitorCo", "RivalCorp", "OtherBrand"],
     replacement="I can only speak about our own products and services.",
@@ -56,7 +57,7 @@ A response containing *"CompetitorCo has a similar feature"* would be blocked an
 For more complex logic, provide a `check` callable:
 
 ```python
-Patter.guardrail(
+guardrail(
     name="No phone numbers in responses",
     check=lambda text: bool(__import__("re").search(r"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b", text)),
     replacement="I can't share phone numbers directly. Let me transfer you instead.",
@@ -70,7 +71,7 @@ The `check` function receives the full response text and should return `True` to
 You can use both `blocked_terms` and `check` on the same guardrail. The blocked terms are evaluated first; if they don't match, the `check` function is called:
 
 ```python
-Patter.guardrail(
+guardrail(
     name="Content filter",
     blocked_terms=["profanity1", "profanity2"],
     check=lambda text: len(text) > 500,  # Block overly long responses
@@ -86,17 +87,17 @@ Pass a list of guardrails to the agent. They are evaluated in order -- the first
 agent = phone.agent(
     system_prompt="You are a financial advisor assistant.",
     guardrails=[
-        Patter.guardrail(
+        guardrail(
             name="No specific investment advice",
             blocked_terms=["buy", "sell", "invest in", "stock tip"],
             replacement="I can provide general information, but please consult a licensed financial advisor for specific investment decisions.",
         ),
-        Patter.guardrail(
+        guardrail(
             name="No personal data disclosure",
             check=lambda text: "SSN" in text.upper() or "social security" in text.lower(),
             replacement="I cannot share personal identification information.",
         ),
-        Patter.guardrail(
+        guardrail(
             name="No competitor comparisons",
             blocked_terms=["better than", "worse than", "compared to"],
             replacement="I'd prefer to focus on what we can offer you directly.",
@@ -111,31 +112,29 @@ agent = phone.agent(
 import os
 import asyncio
 from dotenv import load_dotenv
-from patter import Patter
+from getpatter import Patter, Twilio, OpenAIRealtime, Guardrail
 
 load_dotenv()
 
 phone = Patter(
-    twilio_sid=os.environ["TWILIO_SID"],
-    twilio_token=os.environ["TWILIO_TOKEN"],
-    openai_key=os.environ["OPENAI_KEY"],
+    carrier=Twilio(),                               # TWILIO_* from env
     phone_number=os.environ["PHONE_NUMBER"],
     webhook_url=os.environ["WEBHOOK_URL"],
 )
 
 agent = phone.agent(
+    engine=OpenAIRealtime(voice="nova"),            # OPENAI_API_KEY from env
     system_prompt="""You are a customer service agent for a healthcare company.
 Answer questions about services and scheduling.
 Never provide medical diagnoses or treatment recommendations.""",
-    voice="nova",
     first_message="Hello! How can I help you today?",
     guardrails=[
-        Patter.guardrail(
+        Guardrail(
             name="No medical advice",
             blocked_terms=["diagnosis", "prescription", "dosage", "treatment plan"],
             replacement="That's a medical question I'm not qualified to answer. Would you like me to connect you with a nurse?",
         ),
-        Patter.guardrail(
+        Guardrail(
             name="No pricing promises",
             check=lambda text: any(
                 word in text.lower() for word in ["guaranteed price", "price match", "free"]

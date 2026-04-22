@@ -1,6 +1,7 @@
 ---
 title: "Test Mode"
 description: "Interactive terminal testing for voice agents without telephony, STT, or TTS."
+icon: "flask"
 ---
 
 # Test Mode
@@ -11,11 +12,12 @@ Test mode lets you interact with your voice agent in the terminal using pure tex
 
 ```python
 import asyncio
-from patter import Patter
+from getpatter import Patter, Twilio, OpenAIRealtime
 
-phone = Patter(openai_key="sk-...", mode="local")
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
 
 agent = phone.agent(
+    engine=OpenAIRealtime(),                            # OPENAI_API_KEY from env
     system_prompt="You are a helpful customer service agent for Acme Corp.",
     first_message="Hello! Welcome to Acme Corp. How can I help you today?",
 )
@@ -74,7 +76,7 @@ The `call_control` parameter is automatically injected if your handler accepts t
 
 ## Using with Built-in LLM Loop
 
-When no `on_message` handler is provided and an `openai_key` is available, test mode uses the built-in LLM loop with streaming responses:
+When no `on_message` handler is provided and `OPENAI_API_KEY` is available (either from `OpenAIRealtime(api_key=...)` or the env var), test mode uses the built-in LLM loop with streaming responses:
 
 ```python
 agent = phone.agent(

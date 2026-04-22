@@ -1,6 +1,7 @@
 ---
 title: "Python SDK"
 description: "Connect AI agents to phone numbers with 4 lines of Python."
+icon: "compass"
 ---
 
 # Python SDK
@@ -10,7 +11,7 @@ The Patter Python SDK lets you connect AI voice agents to phone numbers in minut
 ## Installation
 
 ```bash
-pip install patter[local]
+pip install getpatter
 ```
 
 ## Requirements
@@ -22,23 +23,15 @@ pip install patter[local]
 ## Minimal Example
 
 ```python
-from patter import Patter
+import asyncio
+from getpatter import Patter, Twilio, OpenAIRealtime
 
-phone = Patter(
-    twilio_sid="AC...",
-    twilio_token="your_token",
-    openai_key="sk-...",
-    phone_number="+15550001234",
-    webhook_url="abc.ngrok.io",
-)
-
-agent = phone.agent(
-    system_prompt="You are a friendly receptionist for Acme Corp.",
-    first_message="Hello! Thanks for calling Acme Corp. How can I help you?",
-)
-
-await phone.serve(agent)
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")    # TWILIO_* from env
+agent = phone.agent(engine=OpenAIRealtime(), system_prompt="You are a friendly receptionist.")
+asyncio.run(phone.serve(agent))                                  # OPENAI_API_KEY from env
 ```
+
+That's the full file. Every provider class reads its API key from an env var when you omit `api_key=` — so as long as you have `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and `OPENAI_API_KEY` set, the example above is paste-runnable.
 
 ## SDK Modes
 
@@ -60,13 +53,13 @@ Patter runs in local/self-hosted mode. You bring your own telephony and AI provi
   <Card title="Agents" icon="robot" href="/python-sdk/agents">
     Configure voice, model, tools, and guardrails.
   </Card>
-  <Card title="Providers" icon="microphone" href="/python-sdk/providers">
-    OpenAI Realtime, ElevenLabs, and custom pipelines.
+  <Card title="Engines" icon="bolt" href="/python-sdk/engines">
+    OpenAI Realtime, ElevenLabs ConvAI.
+  </Card>
+  <Card title="LLM" icon="brain" href="/python-sdk/llm">
+    Pipeline mode and custom LLMs.
   </Card>
   <Card title="Tools" icon="wrench" href="/python-sdk/tools">
     Function calling and webhook integrations.
-  </Card>
-  <Card title="Events" icon="bolt" href="/python-sdk/events">
-    React to call lifecycle events in real time.
   </Card>
 </CardGroup>

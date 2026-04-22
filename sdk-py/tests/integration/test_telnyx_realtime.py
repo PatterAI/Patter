@@ -12,14 +12,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from patter.handlers.telnyx_handler import telnyx_stream_bridge, TelnyxAudioSender
+from getpatter.handlers.telnyx_handler import telnyx_stream_bridge, TelnyxAudioSender
 
 from tests.conftest import fake_pcm_frame, make_agent
 
 # telnyx_handler imports these from stream_handler at module level
-_PATCH_RT = "patter.handlers.telnyx_handler.OpenAIRealtimeStreamHandler"
-_PATCH_CONVAI = "patter.handlers.telnyx_handler.ElevenLabsConvAIStreamHandler"
-_PATCH_PIPELINE = "patter.handlers.telnyx_handler.PipelineStreamHandler"
+_PATCH_RT = "getpatter.handlers.telnyx_handler.OpenAIRealtimeStreamHandler"
+_PATCH_CONVAI = "getpatter.handlers.telnyx_handler.ElevenLabsConvAIStreamHandler"
+_PATCH_PIPELINE = "getpatter.handlers.telnyx_handler.PipelineStreamHandler"
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 ---
 title: "Rime TTS"
 description: "Arcana and Mist model families via Rime's HTTP endpoint."
+icon: "waveform"
 ---
 
 # Rime TTS
@@ -10,29 +11,60 @@ description: "Arcana and Mist model families via Rime's HTTP endpoint."
 ## Install
 
 ```bash
-pip install "patter[rime]"
+pip install "getpatter[rime]"
 ```
 
 ## Usage
 
 ```python
-from patter.providers.rime_tts import RimeTTS
+# Namespaced import
+from getpatter.tts import rime
 
-# Arcana — highest quality, up to 4-minute request timeout.
-tts = RimeTTS(
+tts = rime.TTS()                                          # reads RIME_API_KEY
+tts = rime.TTS(model="arcana", speaker="astra")
+
+# Flat alias (equivalent)
+from getpatter import RimeTTS
+
+tts = RimeTTS(model="arcana", speaker="astra")
+```
+
+In an agent:
+
+```python
+import asyncio
+from getpatter import Patter, Twilio, DeepgramSTT, RimeTTS
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
+agent = phone.agent(
+    stt=DeepgramSTT(),                                    # DEEPGRAM_API_KEY from env
+    tts=RimeTTS(model="arcana", speaker="astra"),         # RIME_API_KEY from env
+    system_prompt="You are a helpful assistant.",
+)
+
+asyncio.run(phone.serve(agent))
+```
+
+Mist v2 — low-latency, streaming-friendly:
+
+```python
+from getpatter import RimeTTS
+
+fast = RimeTTS(model="mistv2", speaker="cove", speed_alpha=1.1, reduce_latency=True)
+```
+
+## Low-level usage
+
+```python
+from getpatter.providers.rime_tts import RimeTTS as _LowLevelTTS
+
+tts = _LowLevelTTS(
     api_key="...",           # or RIME_API_KEY env var
     model="arcana",
     speaker="astra",
     lang="eng",
     sample_rate=16000,
-)
-
-# Mist v2 — low-latency, streaming-friendly.
-fast = RimeTTS(
-    model="mistv2",
-    speaker="cove",
-    speed_alpha=1.1,
-    reduce_latency=True,
 )
 
 async for chunk in tts.synthesize("Ciao dal Patter pipeline."):
@@ -45,6 +77,7 @@ await tts.close()
 
 | Option | Default | Notes |
 |---|---|---|
+| `api_key` | `None` | Reads from `RIME_API_KEY` when omitted. |
 | `model` | `"arcana"` | `"arcana"` or any `mist*` model. |
 | `speaker` | `"astra"` / `"cove"` | Default depends on model. |
 | `lang` | `"eng"` | Rime language code. |

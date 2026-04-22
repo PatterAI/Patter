@@ -1,16 +1,59 @@
 ---
 title: "AssemblyAI STT"
 description: "Universal Streaming speech-to-text via AssemblyAI's v3 WebSocket API."
+icon: "waveform"
 ---
 
 # AssemblyAI STT
 
 Streaming speech-to-text via AssemblyAI's Universal Streaming v3 API. Ported from LiveKit Agents (Apache 2.0) — pure-`aiohttp` transport, no vendor SDK required.
 
-## Quickstart
+## Install
+
+```bash
+pip install "getpatter[assemblyai]"
+```
+
+## Usage
+
+Use the public STT class either namespaced or flat — both read from `ASSEMBLYAI_API_KEY` when `api_key=` is omitted.
 
 ```python
-from patter.providers.assemblyai_stt import AssemblyAISTT
+# Namespaced import
+from getpatter.stt import assemblyai
+
+stt = assemblyai.STT()                                    # reads ASSEMBLYAI_API_KEY
+stt = assemblyai.STT(api_key="aa_...")
+
+# Flat alias (equivalent)
+from getpatter import AssemblyAISTT
+
+stt = AssemblyAISTT()
+```
+
+Plug it into an agent:
+
+```python
+import asyncio
+from getpatter import Patter, Twilio, AssemblyAISTT, ElevenLabsTTS
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
+agent = phone.agent(
+    stt=AssemblyAISTT(),                                  # ASSEMBLYAI_API_KEY from env
+    tts=ElevenLabsTTS(voice_id="rachel"),                 # ELEVENLABS_API_KEY from env
+    system_prompt="You are a helpful assistant.",
+)
+
+asyncio.run(phone.serve(agent))
+```
+
+## Low-level usage
+
+If you are building a custom pipeline outside `phone.agent()`, the low-level adapter stays importable:
+
+```python
+from getpatter.providers.assemblyai_stt import AssemblyAISTT
 
 stt = AssemblyAISTT(api_key="aa_...", model="universal-streaming-english")
 await stt.connect()
@@ -20,4 +63,4 @@ async for t in stt.receive_transcripts():
 await stt.close()
 ```
 
-Install the extra: `pip install getpatter[assemblyai]`. For Twilio (mulaw 8 kHz) use `AssemblyAISTT.for_twilio(api_key=...)`.
+For Twilio (mulaw 8 kHz) use `AssemblyAISTT.for_twilio(api_key=...)`.

@@ -1,6 +1,7 @@
 ---
 title: "Local Mode"
 description: "Self-hosted embedded server, webhook endpoints, and WebSocket streams."
+icon: "server"
 ---
 
 # Local Mode
@@ -10,32 +11,28 @@ Local mode runs an embedded Express server on your infrastructure. It handles te
 ## Starting the Server
 
 ```typescript
-import { Patter } from "getpatter";
+// npx tsx example.ts
+import { Patter, Twilio, OpenAIRealtime } from "getpatter";
 
 const phone = new Patter({
-  mode: "local",
-  twilioSid: process.env.TWILIO_SID,
-  twilioToken: process.env.TWILIO_TOKEN,
-  openaiKey: process.env.OPENAI_KEY,
+  carrier: new Twilio(),                              // TWILIO_* from env
   phoneNumber: "+15550001234",
   webhookUrl: "abc.ngrok.io",
 });
 
 const agent = phone.agent({
+  engine: new OpenAIRealtime(),                       // OPENAI_API_KEY from env
   systemPrompt: "You are a helpful assistant.",
 });
 
-await phone.serve({
-  agent,
-  port: 8000,
-});
+await phone.serve({ agent, port: 8000 });
 ```
 
 ## ServeOptions
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `agent` | `AgentOptions` | Yes | — | Agent configuration. |
+| `agent` | `Agent` | Yes | — | Agent configuration from `phone.agent(...)`. |
 | `port` | `number` | No | `8000` | Port for the embedded server (1-65535). |
 | `tunnel` | `boolean` | No | `false` | When `true`, start a cloudflared tunnel automatically (requires `cloudflared` npm package). Cannot be used together with `webhookUrl`. |
 | `onCallStart` | `(data) => Promise<void>` | No | — | Called when a call connects. |
@@ -96,7 +93,7 @@ WebSocket connections are rate-limited to **10 concurrent connections per IP add
 
 ### Twilio Signature Validation
 
-When `twilioToken` is configured, all Twilio webhook requests are validated using HMAC-SHA1 signature verification:
+When a Twilio Auth Token is configured (either passed to `new Twilio({ authToken })` or via `TWILIO_AUTH_TOKEN`), all Twilio webhook requests are validated using HMAC-SHA1 signature verification:
 
 1. The SDK reconstructs the URL from the webhook hostname and request path
 2. Parameters are sorted and concatenated
@@ -105,13 +102,9 @@ When `twilioToken` is configured, all Twilio webhook requests are validated usin
 
 Requests with invalid signatures are rejected with HTTP 403.
 
-<Warning>
-  If `twilioToken` is not set, signature validation is disabled and a warning is logged. Always set `twilioToken` in production.
-</Warning>
-
 ### Telnyx Signature Validation
 
-When `telnyxPublicKey` is configured, Telnyx webhook requests are verified using Ed25519 signatures:
+When a Telnyx public key is configured (either passed to `new Telnyx({ publicKey })` or via `TELNYX_PUBLIC_KEY`), Telnyx webhook requests are verified using Ed25519 signatures:
 
 1. The raw request body is captured before JSON parsing
 2. The signed payload is: `{timestamp}|{rawBody}`
@@ -178,7 +171,7 @@ process.on("SIGINT", async () => {
 The server binds to `0.0.0.0` by default, which means it listens on all network interfaces. This is necessary for the server to accept connections from telephony providers and tunnels, but it also means the server is accessible from other machines on your network.
 
 <Warning>
-  Because the server binds to `0.0.0.0`, it is reachable from any network interface. In production, use a firewall or reverse proxy to restrict access. Always configure `twilioToken` (or `telnyxPublicKey` for Telnyx) to enable webhook signature verification.
+Because the server binds to `0.0.0.0`, it is reachable from any network interface. In production, use a firewall or reverse proxy to restrict access. Always configure the Auth Token / public key so webhook signature verification is enforced.
 </Warning>
 
-Use a tunnel (ngrok, Cloudflare Tunnel) to expose the server to the internet for telephony provider webhooks.
+Use a tunnel (Cloudflare Tunnel, ngrok) to expose the server to the internet for telephony provider webhooks.

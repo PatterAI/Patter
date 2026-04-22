@@ -1,121 +1,128 @@
 ---
 title: "Configuration"
 description: "All Patter constructor parameters for local mode."
+icon: "gear"
 ---
 
 # Configuration
 
-The `Patter` class is the main entry point for the SDK. The constructor parameters you provide determine the operational mode.
+The `Patter` class is the main entry point for the SDK. Pass a carrier instance and a phone number — everything else flows through environment variables unless you override it.
 
-## Mode Detection
-
-Patter runs in local mode. It is auto-detected when telephony provider keys are provided:
-
-| Condition | Detected Mode |
-|-----------|---------------|
-| `twilio_sid` or `telnyx_key` provided | Local (auto-detected) |
-| `mode="local"` set explicitly | Local |
+## Minimal config
 
 ```python
-# Local mode (auto-detected — twilio_sid)
-phone = Patter(twilio_sid="AC...", twilio_token="...", openai_key="sk-...",
-               phone_number="+15550001234", webhook_url="abc.ngrok.io")
+from getpatter import Patter, Twilio
 
-# Local mode (auto-detected — telnyx_key)
-phone = Patter(telnyx_key="KEY...", telnyx_connection_id="...", openai_key="sk-...",
-               phone_number="+15550001234", webhook_url="abc.ngrok.io")
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")   # TWILIO_* from env
 ```
 
-## Constructor Parameters
+The carrier instance reads credentials from environment variables when you don't pass them explicitly. See [Carrier](/python-sdk/carrier) for the full list.
 
-### Local Mode
+## Constructor parameters
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `mode` | `str` | `"cloud"` | Operating mode. Auto-detected to `"local"` when telephony provider keys (e.g. `twilio_sid`, `telnyx_key`) are supplied without `api_key`. |
-| `twilio_sid` | `str` | `""` | Twilio Account SID. |
-| `twilio_token` | `str` | `""` | Twilio Auth Token. Required when `twilio_sid` is provided. |
-| `telnyx_key` | `str` | `""` | Telnyx API key. |
-| `telnyx_connection_id` | `str` | `""` | Telnyx Call Control Application ID. |
-| `openai_key` | `str` | `""` | OpenAI API key for the Realtime API. |
-| `elevenlabs_key` | `str` | `""` | ElevenLabs API key (optional, for pipeline mode). |
-| `deepgram_key` | `str` | `""` | Deepgram API key (optional, for pipeline mode). |
-| `phone_number` | `str` | `""` | Your phone number in E.164 format (e.g., `"+15550001234"`). Required when telephony keys are provided. |
-| `webhook_url` | `str` | `""` | Public hostname of this server, without scheme (e.g., `"abc.ngrok.io"`). Required when telephony keys are provided. |
+| `carrier` | `Twilio \| Telnyx \| None` | `None` | Telephony carrier instance. See [Carrier](/python-sdk/carrier). Reads credentials from env vars when arguments are omitted. |
+| `phone_number` | `str` | `""` | Your phone number in E.164 format (e.g., `"+15550001234"`). Required when a carrier is set. |
+| `webhook_url` | `str` | `""` | Public hostname of this server, without scheme (e.g., `"abc.ngrok.io"`). See [Tunneling](/dev-tools/tunneling) for ways to get one. |
+| `tunnel` | `CloudflareTunnel \| Static \| bool \| None` | `None` | Tunnel directive. `True` is shorthand for `CloudflareTunnel()`. See [Tunneling](/dev-tools/tunneling). |
 | `pricing` | `dict \| None` | `None` | Override default provider pricing estimates. See [Metrics & Cost Tracking](/python-sdk/metrics). |
 
-<Note>
-  **Telnyx:** Telnyx is fully supported as an alternative to Twilio, with feature parity for DTMF, call transfer, recording, and cost tracking.
-</Note>
+## Environment variables
+
+Every credential resolves from an env var when the matching argument is omitted. See `.env.example` in the repo for a complete list.
+
+| Env var | Used by |
+|---------|---------|
+| `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` | `Twilio()` |
+| `TELNYX_API_KEY`, `TELNYX_CONNECTION_ID`, `TELNYX_PUBLIC_KEY` (optional) | `Telnyx()` |
+| `OPENAI_API_KEY` | `OpenAIRealtime()`, `OpenAITTS()`, `WhisperSTT()` |
+| `ELEVENLABS_API_KEY`, `ELEVENLABS_AGENT_ID` | `ElevenLabsTTS()`, `ElevenLabsConvAI()` |
+| `DEEPGRAM_API_KEY` | `DeepgramSTT()` |
+| `CARTESIA_API_KEY` | `CartesiaSTT()`, `CartesiaTTS()` |
+| `RIME_API_KEY` | `RimeTTS()` |
+| `LMNT_API_KEY` | `LMNTTTS()` |
+| `SONIOX_API_KEY` | `SonioxSTT()` |
+| `SPEECHMATICS_API_KEY` | `SpeechmaticsSTT()` (Python only) |
+| `ASSEMBLYAI_API_KEY` | `AssemblyAISTT()` |
+
+## Examples
+
+### OpenAI Realtime on Twilio
 
 ```python
-# Twilio + OpenAI Realtime
-phone = Patter(
-    twilio_sid="ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-    twilio_token="your_auth_token",
-    openai_key="sk-xxxxxxxxxxxxxxxxxxxxxxxx",
-    phone_number="+15550001234",
-    webhook_url="abc.ngrok.io",
-)
+from getpatter import Patter, Twilio, OpenAIRealtime
 
-# Telnyx + OpenAI Realtime
-phone = Patter(
-    telnyx_key="KEYxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-    telnyx_connection_id="your_connection_id",
-    openai_key="sk-xxxxxxxxxxxxxxxxxxxxxxxx",
-    phone_number="+15550001234",
-    webhook_url="abc.ngrok.io",
-)
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
 
-# Pipeline mode with Deepgram STT + ElevenLabs TTS
-phone = Patter(
-    twilio_sid="ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-    twilio_token="your_auth_token",
-    deepgram_key="dg_xxxxxxxxxxxxxxxxxxxxxxxx",
-    elevenlabs_key="el_xxxxxxxxxxxxxxxxxxxxxxxx",
-    phone_number="+15550001234",
-    webhook_url="abc.ngrok.io",
+agent = phone.agent(
+    engine=OpenAIRealtime(voice="nova"),
+    system_prompt="You are a friendly receptionist.",
+    first_message="Thanks for calling!",
 )
 ```
 
-## Validation Rules
+### OpenAI Realtime on Telnyx
 
-Local mode enforces the following validation when telephony keys are provided:
+```python
+from getpatter import Patter, Telnyx, OpenAIRealtime
+
+phone = Patter(carrier=Telnyx(), phone_number="+15550001234")
+
+agent = phone.agent(
+    engine=OpenAIRealtime(),
+    system_prompt="You are a friendly receptionist.",
+)
+```
+
+### Pipeline mode
+
+```python
+from getpatter import Patter, Twilio, DeepgramSTT, ElevenLabsTTS
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
+agent = phone.agent(
+    stt=DeepgramSTT(endpointing_ms=80),
+    tts=ElevenLabsTTS(voice_id="rachel"),
+    system_prompt="You are a helpful assistant.",
+)
+```
+
+## Validation
+
+Local mode enforces the following when telephony credentials are present:
 
 - `phone_number` is required
-- `webhook_url` is required
-- `twilio_token` is required when `twilio_sid` is provided
+- Both `account_sid` and `auth_token` are required when using Twilio (either via `Twilio(...)` kwargs or `TWILIO_*` env vars)
 
 ```python
-# This raises ValueError — missing phone_number
-phone = Patter(twilio_sid="AC...", twilio_token="...")
-# ValueError: Local mode requires phone_number (e.g., phone_number='+15550001234').
+# Raises ValueError — Twilio credentials missing from env and arguments.
+phone = Patter(carrier=Twilio())
+# ValueError: Twilio carrier requires account_sid and auth_token.
 ```
 
-## Environment Variables
-
-We recommend loading credentials from environment variables using `python-dotenv`:
+## Loading from .env
 
 ```python
 import os
 from dotenv import load_dotenv
-from patter import Patter
+from getpatter import Patter, Twilio, OpenAIRealtime
 
 load_dotenv()
 
 phone = Patter(
-    twilio_sid=os.environ["TWILIO_SID"],
-    twilio_token=os.environ["TWILIO_TOKEN"],
-    openai_key=os.environ["OPENAI_KEY"],
+    carrier=Twilio(),                                 # reads TWILIO_* from env
     phone_number=os.environ["PHONE_NUMBER"],
     webhook_url=os.environ["WEBHOOK_URL"],
+)
+
+agent = phone.agent(
+    engine=OpenAIRealtime(),                          # reads OPENAI_API_KEY
+    system_prompt="You are a helpful assistant.",
 )
 ```
 
 <Warning>
-  Never hardcode API keys, tokens, or secrets in your source code. Always use environment variables or a secret manager.
+Never hardcode API keys, tokens, or secrets in your source code. Always use environment variables or a secret manager.
 </Warning>
-
-<Note>
-  Copy `.env.example` from the repo root for a complete list of environment variables.
-</Note>

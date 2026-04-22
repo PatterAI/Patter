@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Patter } from '../../src/client';
+import { Twilio, Telnyx } from '../../src/index';
 import { PatterConnectionError, ProvisionError } from '../../src/errors';
 
 // ---------------------------------------------------------------------------
@@ -33,10 +34,18 @@ vi.mock('../../src/server', async (importOriginal) => {
 
 // We need to mock the dynamic import of test-mode
 vi.mock('../../src/test-mode', () => ({
-  TestSession: vi.fn().mockImplementation(() => ({
-    run: vi.fn().mockResolvedValue(undefined),
-  })),
+  TestSession: class MockTestSession {
+    async run() { return undefined; }
+  },
 }));
+
+function makeTwilioCarrier() {
+  return new Twilio({ accountSid: 'AC123', authToken: 'tok' });
+}
+
+function makeTelnyxCarrier() {
+  return new Telnyx({ apiKey: 'KEY_123', connectionId: 'conn-1' });
+}
 
 describe('Patter (cloud mode)', () => {
   let fetchSpy: ReturnType<typeof vi.spyOn>;
@@ -279,74 +288,6 @@ describe('Patter (cloud mode)', () => {
       await expect(client.disconnect()).resolves.toBeUndefined();
     });
   });
-
-  // --- static tool() ---
-
-  describe('Patter.tool()', () => {
-    it('creates a tool definition with handler', () => {
-      const tool = Patter.tool({
-        name: 'lookup',
-        description: 'Look up data',
-        handler: async () => 'result',
-      });
-      expect(tool.name).toBe('lookup');
-      expect(tool.handler).toBeDefined();
-    });
-
-    it('creates a tool definition with webhookUrl', () => {
-      const tool = Patter.tool({
-        name: 'lookup',
-        webhookUrl: 'https://example.com/hook',
-      });
-      expect(tool.webhookUrl).toBe('https://example.com/hook');
-    });
-
-    it('throws if neither handler nor webhookUrl provided', () => {
-      expect(() => Patter.tool({ name: 'bad' })).toThrow(
-        'tool() requires either handler or webhookUrl',
-      );
-    });
-  });
-
-  // --- static guardrail() ---
-
-  describe('Patter.guardrail()', () => {
-    it('creates a guardrail with default replacement', () => {
-      const g = Patter.guardrail({ name: 'profanity', blockedTerms: ['bad'] });
-      expect(g.name).toBe('profanity');
-      expect(g.replacement).toBe("I'm sorry, I can't respond to that.");
-    });
-
-    it('uses custom replacement', () => {
-      const g = Patter.guardrail({ name: 'test', replacement: 'Nope.' });
-      expect(g.replacement).toBe('Nope.');
-    });
-  });
-
-  // --- static provider helpers ---
-
-  describe('static provider helpers', () => {
-    it('Patter.deepgram returns STTConfig', () => {
-      const cfg = Patter.deepgram({ apiKey: 'dg-key' });
-      expect(cfg.provider).toBe('deepgram');
-      expect(cfg.apiKey).toBe('dg-key');
-    });
-
-    it('Patter.whisper returns STTConfig', () => {
-      const cfg = Patter.whisper({ apiKey: 'w-key' });
-      expect(cfg.provider).toBe('whisper');
-    });
-
-    it('Patter.elevenlabs returns TTSConfig', () => {
-      const cfg = Patter.elevenlabs({ apiKey: 'el-key' });
-      expect(cfg.provider).toBe('elevenlabs');
-    });
-
-    it('Patter.openaiTts returns TTSConfig', () => {
-      const cfg = Patter.openaiTts({ apiKey: 'oai-key' });
-      expect(cfg.provider).toBe('openai');
-    });
-  });
 });
 
 describe('Patter (local mode)', () => {
@@ -360,13 +301,11 @@ describe('Patter (local mode)', () => {
     vi.restoreAllMocks();
   });
 
-  it('constructs in local mode with required fields', () => {
+  it('constructs in local mode with a Twilio carrier', () => {
     const client = new Patter({
-      mode: 'local',
+      carrier: makeTwilioCarrier(),
       phoneNumber: '+15551234567',
-      webhookUrl: 'https://example.com/wh',
-      twilioSid: 'AC123',
-      twilioToken: 'tok',
+      webhookUrl: 'example.com/wh',
     });
     expect(client.apiKey).toBe('');
   });
@@ -375,58 +314,39 @@ describe('Patter (local mode)', () => {
     expect(
       () =>
         new Patter({
-          mode: 'local',
+          carrier: makeTwilioCarrier(),
           phoneNumber: '',
-          webhookUrl: 'https://example.com/wh',
-          twilioSid: 'AC123',
-          twilioToken: 'tok',
+          webhookUrl: 'example.com/wh',
         }),
     ).toThrow('Local mode requires phoneNumber');
   });
 
   it('accepts missing webhookUrl in constructor (deferred to serve)', () => {
     const phone = new Patter({
-      mode: 'local',
+      carrier: makeTwilioCarrier(),
       phoneNumber: '+15551234567',
-      webhookUrl: '',
-      twilioSid: 'AC123',
-      twilioToken: 'tok',
     });
     expect(phone).toBeDefined();
   });
 
-  it('throws if neither twilioSid nor telnyxKey provided', () => {
+  it('throws if mode=local but carrier missing', () => {
     expect(
       () =>
         new Patter({
           mode: 'local',
           phoneNumber: '+15551234567',
-          webhookUrl: 'https://example.com/wh',
-        }),
-    ).toThrow('Local mode requires twilioSid or telnyxKey');
-  });
-
-  it('throws if twilioSid without twilioToken', () => {
-    expect(
-      () =>
-        new Patter({
-          mode: 'local',
-          phoneNumber: '+15551234567',
-          webhookUrl: 'https://example.com/wh',
-          twilioSid: 'AC123',
-        }),
-    ).toThrow('twilioToken is required when using twilioSid');
+          webhookUrl: 'example.com/wh',
+        } as never),
+    ).toThrow(/carrier/);
   });
 
   // --- agent() ---
 
   describe('agent()', () => {
     const client = new Patter({
-      mode: 'local',
+      carrier: makeTwilioCarrier(),
       phoneNumber: '+15551234567',
-      webhookUrl: 'https://example.com/wh',
-      twilioSid: 'AC123',
-      twilioToken: 'tok',
+      webhookUrl: 'example.com/wh',
     });
 
     it('returns a copy of agent options', () => {
@@ -452,7 +372,7 @@ describe('Patter (local mode)', () => {
       expect(() =>
         client.agent({
           systemPrompt: 'Hi',
-          tools: [{ name: '', description: 'x', parameters: {} }],
+          tools: [{ name: '', description: 'x', parameters: {} } as never],
         }),
       ).toThrow("tools[0] missing required 'name' field");
     });
@@ -461,7 +381,7 @@ describe('Patter (local mode)', () => {
       expect(() =>
         client.agent({
           systemPrompt: 'Hi',
-          tools: [{ name: 'test', description: 'x', parameters: {} }],
+          tools: [{ name: 'test', description: 'x', parameters: {} } as never],
         }),
       ).toThrow("tools[0] requires either 'webhookUrl' or 'handler'");
     });
@@ -499,11 +419,9 @@ describe('Patter (local mode)', () => {
 
     it('throws if agent is missing', async () => {
       const client = new Patter({
-        mode: 'local',
+        carrier: makeTwilioCarrier(),
         phoneNumber: '+15551234567',
-        webhookUrl: 'https://example.com/wh',
-        twilioSid: 'AC123',
-        twilioToken: 'tok',
+        webhookUrl: 'example.com/wh',
       });
       await expect(
         client.serve({ agent: null as never }),
@@ -512,11 +430,9 @@ describe('Patter (local mode)', () => {
 
     it('throws if systemPrompt missing (non-pipeline)', async () => {
       const client = new Patter({
-        mode: 'local',
+        carrier: makeTwilioCarrier(),
         phoneNumber: '+15551234567',
-        webhookUrl: 'https://example.com/wh',
-        twilioSid: 'AC123',
-        twilioToken: 'tok',
+        webhookUrl: 'example.com/wh',
       });
       await expect(
         client.serve({
@@ -527,11 +443,9 @@ describe('Patter (local mode)', () => {
 
     it('throws for invalid port', async () => {
       const client = new Patter({
-        mode: 'local',
+        carrier: makeTwilioCarrier(),
         phoneNumber: '+15551234567',
-        webhookUrl: 'https://example.com/wh',
-        twilioSid: 'AC123',
-        twilioToken: 'tok',
+        webhookUrl: 'example.com/wh',
       });
       await expect(
         client.serve({
@@ -549,11 +463,9 @@ describe('Patter (local mode)', () => {
 
     it('starts the embedded server', async () => {
       const client = new Patter({
-        mode: 'local',
+        carrier: makeTwilioCarrier(),
         phoneNumber: '+15551234567',
-        webhookUrl: 'https://example.com/wh',
-        twilioSid: 'AC123',
-        twilioToken: 'tok',
+        webhookUrl: 'example.com/wh',
       });
       await client.serve({ agent: { systemPrompt: 'Hello' } });
       // No throw means success — EmbeddedServer is mocked
@@ -572,11 +484,9 @@ describe('Patter (local mode)', () => {
 
     it('runs a test session in local mode', async () => {
       const client = new Patter({
-        mode: 'local',
+        carrier: makeTwilioCarrier(),
         phoneNumber: '+15551234567',
-        webhookUrl: 'https://example.com/wh',
-        twilioSid: 'AC123',
-        twilioToken: 'tok',
+        webhookUrl: 'example.com/wh',
       });
       await expect(
         client.test({ agent: { systemPrompt: 'Hi' } }),
@@ -589,11 +499,9 @@ describe('Patter (local mode)', () => {
   describe('call() in local mode', () => {
     it('throws if "to" is missing', async () => {
       const client = new Patter({
-        mode: 'local',
+        carrier: makeTwilioCarrier(),
         phoneNumber: '+15551234567',
-        webhookUrl: 'https://example.com/wh',
-        twilioSid: 'AC123',
-        twilioToken: 'tok',
+        webhookUrl: 'example.com/wh',
       });
       await expect(
         client.call({ to: '', agent: { systemPrompt: 'Hi' } }),
@@ -602,11 +510,9 @@ describe('Patter (local mode)', () => {
 
     it('throws if "to" is not E.164', async () => {
       const client = new Patter({
-        mode: 'local',
+        carrier: makeTwilioCarrier(),
         phoneNumber: '+15551234567',
-        webhookUrl: 'https://example.com/wh',
-        twilioSid: 'AC123',
-        twilioToken: 'tok',
+        webhookUrl: 'example.com/wh',
       });
       await expect(
         client.call({ to: '5551234567', agent: { systemPrompt: 'Hi' } }),
@@ -615,11 +521,9 @@ describe('Patter (local mode)', () => {
 
     it('makes a Twilio outbound call via fetch', async () => {
       const client = new Patter({
-        mode: 'local',
+        carrier: makeTwilioCarrier(),
         phoneNumber: '+15551234567',
-        webhookUrl: 'https://example.com/wh',
-        twilioSid: 'AC123',
-        twilioToken: 'tok',
+        webhookUrl: 'example.com/wh',
       });
       fetchSpy.mockResolvedValueOnce({
         ok: true,
@@ -635,11 +539,9 @@ describe('Patter (local mode)', () => {
 
     it('throws ProvisionError on Twilio call failure', async () => {
       const client = new Patter({
-        mode: 'local',
+        carrier: makeTwilioCarrier(),
         phoneNumber: '+15551234567',
-        webhookUrl: 'https://example.com/wh',
-        twilioSid: 'AC123',
-        twilioToken: 'tok',
+        webhookUrl: 'example.com/wh',
       });
       fetchSpy.mockResolvedValueOnce({
         ok: false,
@@ -655,12 +557,9 @@ describe('Patter (local mode)', () => {
 
     it('makes a Telnyx outbound call via fetch', async () => {
       const client = new Patter({
-        mode: 'local',
+        carrier: makeTelnyxCarrier(),
         phoneNumber: '+15551234567',
-        webhookUrl: 'https://example.com/wh',
-        telephonyProvider: 'telnyx',
-        telnyxKey: 'KEY_123',
-        telnyxConnectionId: 'conn-1',
+        webhookUrl: 'example.com/wh',
       });
       fetchSpy.mockResolvedValueOnce({
         ok: true,
@@ -676,12 +575,9 @@ describe('Patter (local mode)', () => {
 
     it('throws ProvisionError on Telnyx call failure', async () => {
       const client = new Patter({
-        mode: 'local',
+        carrier: makeTelnyxCarrier(),
         phoneNumber: '+15551234567',
-        webhookUrl: 'https://example.com/wh',
-        telephonyProvider: 'telnyx',
-        telnyxKey: 'KEY_123',
-        telnyxConnectionId: 'conn-1',
+        webhookUrl: 'example.com/wh',
       });
       fetchSpy.mockResolvedValueOnce({
         ok: false,

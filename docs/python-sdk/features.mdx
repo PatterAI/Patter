@@ -1,6 +1,7 @@
 ---
 title: "Advanced Features"
 description: "Recording, AMD, DTMF, call transfer, barge-in, and more."
+icon: "sparkles"
 ---
 
 # Advanced Features
@@ -195,19 +196,18 @@ History is available in `on_transcript`, `on_message`, and `on_call_end` callbac
 import os
 import asyncio
 from dotenv import load_dotenv
-from patter import Patter
+from getpatter import Patter, Twilio, OpenAIRealtime
 
 load_dotenv()
 
 phone = Patter(
-    twilio_sid=os.environ["TWILIO_SID"],
-    twilio_token=os.environ["TWILIO_TOKEN"],
-    openai_key=os.environ["OPENAI_KEY"],
+    carrier=Twilio(),                               # TWILIO_* from env
     phone_number=os.environ["PHONE_NUMBER"],
     webhook_url=os.environ["WEBHOOK_URL"],
 )
 
 agent = phone.agent(
+    engine=OpenAIRealtime(voice="nova"),            # OPENAI_API_KEY from env
     system_prompt="""You are an appointment reminder bot for Dr. Smith's office.
 
 Behavior:
@@ -218,7 +218,6 @@ Behavior:
 - If they press 2, cancel the appointment.
 
 Be concise and professional.""",
-    voice="nova",
     first_message="Hello! This is Dr. Smith's office calling with an appointment reminder.",
     variables={
         "patient_name": "Jane Doe",

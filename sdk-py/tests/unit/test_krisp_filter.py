@@ -2,7 +2,7 @@
 
 These tests exercise the Patter wrapper in isolation from the proprietary
 ``krisp-audio`` SDK by injecting a fake ``krisp_audio`` module before
-importing :mod:`patter.providers.krisp_filter` / :mod:`patter.providers.krisp_instance`.
+importing :mod:`getpatter.providers.krisp_filter` / :mod:`getpatter.providers.krisp_instance`.
 
 MOCK: no real inference.  Tests that require the real SDK + license key are
 documented in the module docstring and must be run manually.
@@ -101,8 +101,8 @@ def fake_krisp(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setitem(sys.modules, "krisp_audio", fake)
     # Drop any cached imports so the providers pick up the fake module.
     for mod in (
-        "patter.providers.krisp_instance",
-        "patter.providers.krisp_filter",
+        "getpatter.providers.krisp_instance",
+        "getpatter.providers.krisp_filter",
     ):
         sys.modules.pop(mod, None)
     return fake
@@ -115,7 +115,7 @@ def fake_krisp(monkeypatch: pytest.MonkeyPatch):
 
 @pytest.mark.unit
 def test_sdk_manager_acquire_initialises_once(fake_krisp):
-    from patter.providers.krisp_instance import KrispSDKManager
+    from getpatter.providers.krisp_instance import KrispSDKManager
 
     # Reset counters between tests because the manager is a classmethod-based
     # singleton.
@@ -140,7 +140,7 @@ def test_sdk_manager_acquire_raises_when_sdk_missing(monkeypatch: pytest.MonkeyP
     import importlib
 
     monkeypatch.setitem(sys.modules, "krisp_audio", None)
-    sys.modules.pop("patter.providers.krisp_instance", None)
+    sys.modules.pop("getpatter.providers.krisp_instance", None)
 
     # Force ImportError during the lazy import.
     import builtins
@@ -154,7 +154,7 @@ def test_sdk_manager_acquire_raises_when_sdk_missing(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
 
-    module = importlib.import_module("patter.providers.krisp_instance")
+    module = importlib.import_module("getpatter.providers.krisp_instance")
     assert module.KRISP_AUDIO_AVAILABLE is False
     with pytest.raises(RuntimeError, match="Krisp SDK not installed"):
         module.KrispSDKManager.acquire()
@@ -167,8 +167,8 @@ def test_sdk_manager_acquire_raises_when_sdk_missing(monkeypatch: pytest.MonkeyP
 
 @pytest.mark.unit
 def test_filter_requires_model_path(fake_krisp, monkeypatch: pytest.MonkeyPatch):
-    from patter.providers.krisp_filter import KrispVivaFilter
-    from patter.providers.krisp_instance import KrispSDKManager
+    from getpatter.providers.krisp_filter import KrispVivaFilter
+    from getpatter.providers.krisp_instance import KrispSDKManager
 
     KrispSDKManager._reference_count = 0
     KrispSDKManager._initialized = False
@@ -180,8 +180,8 @@ def test_filter_requires_model_path(fake_krisp, monkeypatch: pytest.MonkeyPatch)
 
 @pytest.mark.unit
 def test_filter_rejects_non_kef_extension(fake_krisp, tmp_path, monkeypatch):
-    from patter.providers.krisp_filter import KrispVivaFilter
-    from patter.providers.krisp_instance import KrispSDKManager
+    from getpatter.providers.krisp_filter import KrispVivaFilter
+    from getpatter.providers.krisp_instance import KrispSDKManager
 
     KrispSDKManager._reference_count = 0
     KrispSDKManager._initialized = False
@@ -197,8 +197,8 @@ async def test_filter_process_delegates_to_krisp(fake_krisp, tmp_path, monkeypat
     """MOCK: no real inference.  Verifies bytes<->numpy round-trip and call chain."""
     import numpy as np
 
-    from patter.providers.krisp_filter import KrispVivaFilter
-    from patter.providers.krisp_instance import KrispSDKManager
+    from getpatter.providers.krisp_filter import KrispVivaFilter
+    from getpatter.providers.krisp_instance import KrispSDKManager
 
     KrispSDKManager._reference_count = 0
     KrispSDKManager._initialized = False
@@ -229,8 +229,8 @@ async def test_filter_process_delegates_to_krisp(fake_krisp, tmp_path, monkeypat
 async def test_filter_disable_passthrough(fake_krisp, tmp_path):
     import numpy as np
 
-    from patter.providers.krisp_filter import KrispVivaFilter
-    from patter.providers.krisp_instance import KrispSDKManager
+    from getpatter.providers.krisp_filter import KrispVivaFilter
+    from getpatter.providers.krisp_instance import KrispSDKManager
 
     KrispSDKManager._reference_count = 0
     KrispSDKManager._initialized = False
@@ -258,10 +258,10 @@ def test_filter_raises_when_sdk_unavailable(monkeypatch):
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
-    sys.modules.pop("patter.providers.krisp_instance", None)
-    sys.modules.pop("patter.providers.krisp_filter", None)
+    sys.modules.pop("getpatter.providers.krisp_instance", None)
+    sys.modules.pop("getpatter.providers.krisp_filter", None)
 
-    module = importlib.import_module("patter.providers.krisp_filter")
+    module = importlib.import_module("getpatter.providers.krisp_filter")
     with pytest.raises(RuntimeError, match="Krisp SDK not installed"):
         module.KrispVivaFilter(model_path="whatever.kef")
 
@@ -282,7 +282,7 @@ import os  # noqa: E402
 )
 async def test_filter_real_sdk_smoke():
     """Smoke test against the real Krisp SDK (requires license + model file)."""
-    from patter.providers.krisp_filter import KrispVivaFilter
+    from getpatter.providers.krisp_filter import KrispVivaFilter
 
     flt = KrispVivaFilter(frame_duration_ms=10, sample_rate=16000)
     import numpy as np

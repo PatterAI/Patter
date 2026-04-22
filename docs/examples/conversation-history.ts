@@ -4,7 +4,7 @@
  * on_transcript fires after every turn with the latest text and full history.
  * on_call_end fires when the call finishes with the complete transcript.
  */
-import { Patter } from "getpatter";
+import { Patter, Twilio, OpenAIRealtime } from "getpatter";
 
 interface TranscriptEntry {
   role: "user" | "assistant";
@@ -24,19 +24,16 @@ interface CallEndEvent {
 
 async function main() {
   const phone = new Patter({
-    mode: "local",
-    twilioSid: "AC...",
-    twilioToken: "...",
-    openaiKey: "sk-...",
-    phoneNumber: "+1...",
+    carrier: new Twilio(),                              // TWILIO_* from env
+    phoneNumber: "+15550001234",
     webhookUrl: "xxx.ngrok-free.dev",
   });
 
   const agent = phone.agent({
+    engine: new OpenAIRealtime({ voice: "alloy" }),     // OPENAI_API_KEY from env
     systemPrompt:
       "You are a helpful assistant. " +
       "Reference earlier parts of the conversation when relevant.",
-    voice: "alloy",
     firstMessage:
       "Hello! Let's have a conversation. I'll remember everything we discuss.",
   });

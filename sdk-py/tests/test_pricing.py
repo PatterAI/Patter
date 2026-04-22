@@ -2,7 +2,7 @@
 
 import pytest
 
-from patter.pricing import (
+from getpatter.pricing import (
     DEFAULT_PRICING,
     calculate_realtime_cost,
     calculate_stt_cost,

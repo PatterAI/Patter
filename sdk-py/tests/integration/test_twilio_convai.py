@@ -12,11 +12,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from patter.handlers.twilio_handler import twilio_stream_bridge, TwilioAudioSender
+from getpatter.handlers.twilio_handler import twilio_stream_bridge, TwilioAudioSender
 
 from tests.conftest import fake_mulaw_frame, make_agent
 
-_PATCH_CONVAI = "patter.handlers.twilio_handler.ElevenLabsConvAIStreamHandler"
+_PATCH_CONVAI = "getpatter.handlers.twilio_handler.ElevenLabsConvAIStreamHandler"
 
 
 # ---------------------------------------------------------------------------

@@ -29,9 +29,9 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
-from patter.handlers.stream_handler import PipelineStreamHandler
-from patter.models import Agent, Guardrail, HookContext, PipelineHooks
-from patter.services.sentence_chunker import SentenceChunker
+from getpatter.handlers.stream_handler import PipelineStreamHandler
+from getpatter.models import Agent, Guardrail, HookContext, PipelineHooks
+from getpatter.services.sentence_chunker import SentenceChunker
 
 
 # ---------------------------------------------------------------------------
@@ -229,7 +229,7 @@ class TestAfterTranscribeModifiesTranscript:
             agent, audio_sender=audio_sender, metrics=metrics, on_message=on_message
         )
         # Simulate CallControl (needed by _stt_loop)
-        from patter.models import CallControl
+        from getpatter.models import CallControl
 
         handler._call_control = CallControl(
             call_id="call-test-001",
@@ -244,7 +244,7 @@ class TestAfterTranscribeModifiesTranscript:
         transcript.text = "hello world"
 
         # Feed the transcript through the hook pipeline directly
-        from patter.services.pipeline_hooks import PipelineHookExecutor
+        from getpatter.services.pipeline_hooks import PipelineHookExecutor
 
         hook_executor = PipelineHookExecutor(agent.hooks)
         hook_ctx = handler._build_hook_context()
@@ -279,7 +279,7 @@ class TestAfterTranscribeModifiesTranscript:
 
         handler._tts.synthesize = _tts_noop
 
-        from patter.models import CallControl
+        from getpatter.models import CallControl
 
         handler._call_control = CallControl(
             call_id="call-test-001",
@@ -338,7 +338,7 @@ class TestAfterTranscribeVeto:
 
         handler._tts.synthesize = _tts
 
-        from patter.models import CallControl
+        from getpatter.models import CallControl
 
         handler._call_control = CallControl(
             call_id="call-test-001",
@@ -375,7 +375,7 @@ class TestAfterTranscribeVeto:
             agent, metrics=metrics, on_message=on_message
         )
 
-        from patter.models import CallControl
+        from getpatter.models import CallControl
 
         handler._call_control = CallControl(
             call_id="call-test-001",
@@ -933,7 +933,7 @@ class TestNonStreamingOnMessageWithHooks:
 
         handler._tts.synthesize = _tts
 
-        from patter.models import CallControl
+        from getpatter.models import CallControl
 
         handler._call_control = CallControl(
             call_id="call-test-001",
@@ -996,7 +996,7 @@ class TestLLMErrorMidStream:
                 super().reset()
 
         with patch(
-            "patter.handlers.stream_handler.SentenceChunker",
+            "getpatter.handlers.stream_handler.SentenceChunker",
             TrackingChunker,
         ):
             await handler._process_streaming_response(
@@ -1035,7 +1035,7 @@ class TestLLMErrorMidStream:
             raise RuntimeError("died mid-third-sentence")
 
         with patch(
-            "patter.handlers.stream_handler.SentenceChunker",
+            "getpatter.handlers.stream_handler.SentenceChunker",
             SentenceChunker,
         ):
             await handler._process_streaming_response(

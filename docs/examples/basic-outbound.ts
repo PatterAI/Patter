@@ -1,73 +1,59 @@
 /**
  * Basic outbound call example.
  *
- * The AI places a call to a phone number and holds a conversation.
- * Replace the API key and destination number before running.
+ * The AI places a call to a destination and confirms an appointment.
  *
  * Usage:
  *   npm install getpatter
- *   npx ts-node basic-outbound.ts
+ *   # Set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, OPENAI_API_KEY in the env
+ *   npx tsx basic-outbound.ts
  */
 
-import { Patter, IncomingMessage } from "getpatter";
+import { Patter, Twilio, OpenAIRealtime } from "getpatter";
 
-const DESTINATION = "+14155551234"; // Replace with a real number
-const API_KEY = "pt_your_api_key_here";
-
-const phone = new Patter({ apiKey: API_KEY });
-
-async function onMessage(msg: IncomingMessage): Promise<string> {
-  console.log(`Callee said: "${msg.text}"`);
-
-  const text = msg.text.toLowerCase();
-
-  if (text.includes("yes") || text.includes("confirm") || text.includes("sure")) {
-    return "Perfect. Your appointment is confirmed. We will see you then. Goodbye!";
-  }
-
-  if (text.includes("no") || text.includes("cancel")) {
-    return "No problem. I have cancelled your appointment. Have a good day. Goodbye!";
-  }
-
-  if (text.includes("when") || text.includes("time")) {
-    return "Your appointment is scheduled for tomorrow at 3 PM. Can you confirm you will make it?";
-  }
-
-  return "I did not catch that. Could you say yes to confirm or no to cancel your appointment?";
-}
+const PHONE_NUMBER = process.env.PHONE_NUMBER ?? "+15550001234";
+const DESTINATION = process.env.DESTINATION ?? "+14155551234";
 
 async function main(): Promise<void> {
-  console.log("Connecting to Patter...");
-
-  await phone.connect({
-    onMessage,
-    onCallStart: async (data) => {
-      console.log(`Call connected (call ID: ${data.call_id ?? "unknown"})`);
-    },
-    onCallEnd: async (data) => {
-      const duration = data.duration_seconds ?? 0;
-      console.log(`Call ended after ${duration} seconds`);
-    },
+  const phone = new Patter({
+    carrier: new Twilio(),              // TWILIO_* from env
+    phoneNumber: PHONE_NUMBER,
   });
 
-  console.log(`Calling ${DESTINATION}...`);
-
-  await phone.call({
-    to: DESTINATION,
+  const agent = phone.agent({
+    engine: new OpenAIRealtime(),       // OPENAI_API_KEY from env
+    systemPrompt:
+      "You are calling to confirm an appointment scheduled for tomorrow at 3 PM. " +
+      "Ask the callee to confirm. If they say yes, thank them and hang up. " +
+      "If they say no, apologise and offer to reschedule.",
     firstMessage:
       "Hi! This is an automated reminder about your appointment tomorrow at 3 PM. " +
-      "Can you confirm you will make it?",
+      "Can you confirm you'll make it?",
   });
 
-  console.log("Call placed. Waiting for it to complete... (Ctrl+C to stop)");
+  // Start the server in the background, then place the call
+  const serveTask = phone.serve({
+    agent,
+    tunnel: true,
+    onCallStart: async (data) => console.log(`Call connected (call_id=${data.call_id})`),
+    onCallEnd: async (data) => console.log(`Call ended after ${data.duration_seconds ?? 0}s`),
+  });
+  await new Promise((r) => setTimeout(r, 1000));      // wait for the tunnel to come up
 
-  await new Promise<never>(() => {});
+  console.log(`Calling ${DESTINATION}...`);
+  await phone.call({
+    to: DESTINATION,
+    agent,
+    machineDetection: true,
+    voicemailMessage:
+      "Hi, this is a reminder that your appointment is tomorrow at 3 PM. " +
+      "Please call back if you need to reschedule.",
+  });
+
+  await serveTask;
 }
 
-process.on("SIGINT", async () => {
-  console.log("\nShutting down...");
-  await phone.disconnect();
-  process.exit(0);
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
 });
-
-main().catch(console.error);

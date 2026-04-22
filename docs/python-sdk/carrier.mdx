@@ -1,0 +1,102 @@
+---
+title: "Carrier"
+description: "Telephony providers: Twilio and Telnyx."
+icon: "phone"
+---
+
+# Carrier
+
+The carrier delivers the phone call to Patter. Patter supports **Twilio** and **Telnyx** with full feature parity (DTMF, call transfer, recording, AMD, status callbacks, cost tracking).
+
+You configure one carrier per `Patter` instance by passing an instance to the `carrier=` keyword argument. Each carrier class falls back to environment variables when constructor arguments are omitted.
+
+Each carrier ships as both a **flat alias** (`from getpatter import Twilio`) and a **namespaced** class (`from getpatter.carriers import twilio` → `twilio.Carrier()`). They are equivalent.
+
+## Twilio
+
+```python
+from getpatter import Patter, Twilio
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")   # reads env
+# Or explicitly:
+phone = Patter(
+    carrier=Twilio(account_sid="AC...", auth_token="..."),
+    phone_number="+15550001234",
+)
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `account_sid` | `str` | `""` | Twilio Account SID (starts with `AC`). Reads from `TWILIO_ACCOUNT_SID` when empty. |
+| `auth_token` | `str` | `""` | Twilio Auth Token. Reads from `TWILIO_AUTH_TOKEN` when empty. |
+
+Namespaced form:
+
+```python
+from getpatter.carriers import twilio
+
+carrier = twilio.Carrier()                            # reads env
+carrier = twilio.Carrier(account_sid="AC...", auth_token="...")
+```
+
+On `serve()`, Patter automatically sets the `voice_url` on the Twilio number to `https://<webhook_url>/webhooks/twilio/voice` via the Twilio REST API — no manual Console configuration needed.
+
+### Signature verification
+
+The Auth Token is also used to verify every Twilio webhook with HMAC-SHA1 against the `X-Twilio-Signature` header. Requests with invalid signatures are rejected with HTTP 403.
+
+## Telnyx
+
+```python
+from getpatter import Patter, Telnyx
+
+phone = Patter(carrier=Telnyx(), phone_number="+15550001234")    # reads env
+# Or explicitly:
+phone = Patter(
+    carrier=Telnyx(
+        api_key="KEY...",
+        connection_id="2000000000000000000",
+        public_key="...",  # optional — enables Ed25519 signature verification
+    ),
+    phone_number="+15550001234",
+)
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `api_key` | `str` | `""` | Telnyx API v2 key. Reads from `TELNYX_API_KEY` when empty. |
+| `connection_id` | `str` | `""` | Call Control Application ID. Reads from `TELNYX_CONNECTION_ID` when empty. |
+| `public_key` | `str` | `""` | Optional. Ed25519 public key for webhook signature verification. Reads from `TELNYX_PUBLIC_KEY` when empty. |
+
+Namespaced form:
+
+```python
+from getpatter.carriers import telnyx
+
+carrier = telnyx.Carrier()                            # reads env
+```
+
+### Signature verification
+
+When `public_key` is set (or `TELNYX_PUBLIC_KEY` is present), every Telnyx webhook is verified with Ed25519. Requests older than 5 minutes are rejected (replay protection).
+
+## Webhook Endpoints
+
+The embedded server exposes these endpoints regardless of carrier choice:
+
+| Endpoint | Purpose |
+|----------|---------|
+| `POST /webhooks/twilio/voice` | Incoming Twilio call → returns TwiML to start streaming. |
+| `POST /webhooks/twilio/status` | Call lifecycle status callbacks (initiated, ringing, answered, completed). |
+| `POST /webhooks/twilio/recording` | Recording completion callbacks. |
+| `POST /webhooks/twilio/amd` | Async AMD (answering machine detection) results. |
+| `POST /webhooks/telnyx/voice` | Incoming Telnyx call → returns Call Control commands. |
+
+## What's Next
+
+<CardGroup cols={2}>
+  <Card title="STT" icon="microphone" href="/python-sdk/stt">Speech-to-text providers.</Card>
+  <Card title="LLM" icon="brain" href="/python-sdk/llm">Language model providers.</Card>
+  <Card title="TTS" icon="volume" href="/python-sdk/tts">Text-to-speech providers.</Card>
+  <Card title="Tunneling" icon="cloud" href="/dev-tools/tunneling">Expose your local server publicly.</Card>
+</CardGroup>

@@ -1,21 +1,18 @@
 /**
  * Local mode — AI agent answers calls, no cloud needed.
  */
-import { Patter } from "getpatter";
+import { Patter, Twilio, OpenAIRealtime } from "getpatter";
 
 async function main() {
   const phone = new Patter({
-    mode: "local",
-    twilioSid: "AC...",
-    twilioToken: "...",
-    openaiKey: "sk-...",
-    phoneNumber: "+1...",
+    carrier: new Twilio(),                              // TWILIO_* from env
+    phoneNumber: "+15550001234",
     webhookUrl: "xxx.ngrok-free.dev",
   });
 
   const agent = phone.agent({
+    engine: new OpenAIRealtime({ voice: "alloy" }),     // OPENAI_API_KEY from env
     systemPrompt: "You are a friendly customer service agent for Acme Corp.",
-    voice: "alloy",
     firstMessage: "Hello! Thanks for calling Acme. How can I help?",
   });
 

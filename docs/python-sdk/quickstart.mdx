@@ -1,101 +1,166 @@
 ---
 title: "Quickstart"
-description: "Give your AI agent a phone number in 5 minutes."
+description: "Give your AI agent a phone number in four lines of Python."
+icon: "rocket"
 ---
 
 # Python Quickstart
 
-This guide walks you through connecting your AI agent to phone calls using local/self-hosted mode.
+Patter connects an AI agent to a real phone number in four lines of Python. This page walks you end-to-end: install, credentials, the four lines, and your first call.
 
 ## Prerequisites
 
 - Python 3.11+
-- A Twilio or Telnyx account (both fully supported)
-- An AI provider key (OpenAI, ElevenLabs, or Deepgram)
+- A Twilio **or** Telnyx account with a phone number you own
+- An AI provider key — OpenAI for the default Realtime engine, or any supported STT/TTS pair for pipeline mode
 
-## Step 1: Install the SDK
-
-```bash
-pip install patter[local]
-```
-
-## Step 2: Set Up Credentials
-
-Create a `.env` file in your project root:
-
-```env
-TWILIO_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-TWILIO_TOKEN=your_auth_token
-OPENAI_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxx
-PHONE_NUMBER=+15550001234
-WEBHOOK_URL=abc.ngrok.io
-```
-
-## Step 3: Expose Your Server
-
-Patter needs a public URL so your telephony provider can reach your local server. Use [ngrok](https://ngrok.com):
-
-<Note>
-  **Telnyx:** Telnyx is a fully supported alternative to Twilio, with feature parity for DTMF, call transfer, recording, and cost tracking.
-</Note>
+## Step 1 — Install
 
 ```bash
-ngrok http 8000
+pip install getpatter
 ```
 
-Copy the hostname (e.g., `abc.ngrok.io`) and use it as your `WEBHOOK_URL`.
+## Step 2 — Set environment variables
 
-Alternatively, use the built-in Cloudflare tunnel (no setup required): set `tunnel=True` in `serve()`.
+Each carrier and engine reads its credentials from the environment by default. The four-line quickstart below works as-is once these are set.
 
-## Step 4: Write Your Agent
+<CodeGroup>
+
+```bash .env
+# Telephony — pick one carrier
+TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TWILIO_AUTH_TOKEN=your_auth_token
+
+# Realtime engine (default)
+OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+```bash bash/zsh
+export TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+export TWILIO_AUTH_TOKEN=your_auth_token
+export OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+```powershell PowerShell
+$env:TWILIO_ACCOUNT_SID = "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+$env:TWILIO_AUTH_TOKEN = "your_auth_token"
+$env:OPENAI_API_KEY = "sk-xxxxxxxxxxxxxxxxxxxxxxxx"
+```
+
+</CodeGroup>
+
+| Variable | Purpose |
+|---|---|
+| `TWILIO_ACCOUNT_SID` | Account SID from the Twilio console. Starts with `AC`. |
+| `TWILIO_AUTH_TOKEN` | Auth token paired with the SID. Keep it secret. |
+| `OPENAI_API_KEY` | Used by `OpenAIRealtime`, `WhisperSTT`, and `OpenAITTS`. |
+
+Using Telnyx instead? Swap the Twilio vars for `TELNYX_API_KEY` and `TELNYX_CONNECTION_ID` (plus optional `TELNYX_PUBLIC_KEY` for webhook signature verification) and use `Telnyx()` in place of `Twilio()`. See the [Carrier](/python-sdk/carrier) page for all supported env vars.
+
+## Step 3 — The four-line quickstart
+
+Create `main.py`:
+
+```python main.py
+from getpatter import Patter, Twilio, OpenAIRealtime
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+agent = phone.agent(engine=OpenAIRealtime(), system_prompt="You are a receptionist.")
+await phone.serve(agent, tunnel=True)
+```
+
+Want a custom greeting? Add `first_message="..."`:
 
 ```python
-import os
-import asyncio
-from dotenv import load_dotenv
-from patter import Patter
-
-load_dotenv()
-
-phone = Patter(
-    twilio_sid=os.environ["TWILIO_SID"],
-    twilio_token=os.environ["TWILIO_TOKEN"],
-    openai_key=os.environ["OPENAI_KEY"],
-    phone_number=os.environ["PHONE_NUMBER"],
-    webhook_url=os.environ["WEBHOOK_URL"],
-)
-
 agent = phone.agent(
-    system_prompt="You are a helpful assistant for a pizza restaurant. Help customers place orders and answer questions about the menu.",
-    voice="alloy",
-    first_message="Hi! Welcome to Pizza Palace. What can I get for you today?",
+    engine=OpenAIRealtime(),
+    system_prompt="You are a friendly receptionist for Acme Corp.",
+    first_message="Hello! How can I help?",
 )
-
-async def main():
-    await phone.serve(agent, port=8000)
-
-asyncio.run(main())
 ```
 
-## Step 5: Make a Call
+What each line does:
 
-Call your `PHONE_NUMBER` from any phone. The AI agent will answer and start the conversation.
+1. **Import** — the three primitives you need: the client, a carrier, and an engine. All three read credentials from environment variables by default, so no keys appear in source.
+2. **`Patter(...)`** — build the client and bind it to your phone number. `Twilio()` (or `Telnyx()`) carries the carrier credentials; swap it to change providers.
+3. **`phone.agent(...)`** — describe the agent: the engine (OpenAI Realtime by default), the system prompt, and the first message it speaks on answer.
+4. **`await phone.serve(agent, tunnel=True)`** — start the embedded server. `tunnel=True` spawns a Cloudflare tunnel and points your Twilio number at it automatically, so the agent is reachable from the PSTN without any additional DNS or firewall work.
+
+<Note>
+  `tunnel=True` is the dev shorthand. In production replace it with a stable webhook URL via the constructor:
+
+  ```python
+  phone = Patter(carrier=Twilio(), phone_number="+15550001234", webhook_url="api.prod.example.com")
+  ...
+  await phone.serve(agent)
+  ```
+
+  Or use a pre-provisioned tunnel object: `Patter(..., tunnel=Static(hostname="agent.example.com"))`. See [Tunneling](/dev-tools/tunneling).
+</Note>
+
+## Step 4 — Run it
+
+```bash
+python main.py
+```
+
+You'll see the Patter banner, a Cloudflare tunnel URL, and a log line confirming the Twilio voice webhook was set to that URL.
+
+## Step 5 — Call the number
+
+Pick up your phone, dial your Twilio number, and the agent will answer with `"Hello! How can I help?"`. Start talking.
 
 ---
 
-## What's Next
+## Using a different engine
+
+OpenAI Realtime is the default. To switch engines, pass a different instance:
+
+```python
+from getpatter import Patter, Twilio, ElevenLabsConvAI
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+agent = phone.agent(engine=ElevenLabsConvAI(), system_prompt="You are a helpful assistant.")
+await phone.serve(agent, tunnel=True)
+```
+
+`ElevenLabsConvAI()` reads `ELEVENLABS_API_KEY` and `ELEVENLABS_AGENT_ID` from the environment.
+
+For the STT + LLM + TTS pipeline mode, pass `stt=` and `tts=` to `agent()`:
+
+```python
+from getpatter import Patter, Twilio
+from getpatter.stt import deepgram
+from getpatter.tts import elevenlabs
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+agent = phone.agent(
+    stt=deepgram.STT(),        # reads DEEPGRAM_API_KEY
+    tts=elevenlabs.TTS(),      # reads ELEVENLABS_API_KEY
+    system_prompt="You are a helpful assistant.",
+    first_message="Hello!",
+)
+await phone.serve(agent, tunnel=True)
+```
+
+---
+
+## What's next
 
 <CardGroup cols={2}>
   <Card title="Configuration" icon="gear" href="/python-sdk/configuration">
-    Explore all constructor options and modes.
+    Every constructor option in one place.
   </Card>
   <Card title="Agents" icon="robot" href="/python-sdk/agents">
-    Customize voice, model, and behavior.
+    Customize voice, model, tools, and guardrails.
+  </Card>
+  <Card title="STT providers" icon="microphone" href="/python-sdk/stt">
+    Deepgram, Whisper, Cartesia, Soniox, Speechmatics, AssemblyAI.
+  </Card>
+  <Card title="TTS providers" icon="volume" href="/python-sdk/tts">
+    ElevenLabs, OpenAI, Cartesia, Rime, LMNT.
   </Card>
   <Card title="Tools" icon="wrench" href="/python-sdk/tools">
-    Add function calling to your agent.
-  </Card>
-  <Card title="Events" icon="bolt" href="/python-sdk/events">
-    Handle call start, end, and transcript events.
+    Give your agent function-calling superpowers.
   </Card>
 </CardGroup>

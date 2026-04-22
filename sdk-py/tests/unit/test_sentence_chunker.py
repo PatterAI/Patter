@@ -1,10 +1,10 @@
-"""Unit tests for patter.services.sentence_chunker — SentenceChunker and _split_sentences."""
+"""Unit tests for getpatter.services.sentence_chunker — SentenceChunker and _split_sentences."""
 
 from __future__ import annotations
 
 import pytest
 
-from patter.services.sentence_chunker import (
+from getpatter.services.sentence_chunker import (
     DEFAULT_MIN_SENTENCE_LEN,
     SentenceChunker,
     _split_sentences,

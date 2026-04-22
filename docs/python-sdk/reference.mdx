@@ -1,11 +1,12 @@
 ---
 title: "API Reference"
 description: "Complete reference for all classes, methods, parameters, and types in the Patter Python SDK."
+icon: "terminal"
 ---
 
 # API Reference
 
-Complete reference for the `patter` Python SDK (v0.4.4).
+Complete reference for the `getpatter` Python SDK (v0.5.0).
 
 ## Patter
 
@@ -15,87 +16,41 @@ The main SDK client class.
 
 ```python
 Patter(
-    mode: str = "cloud",
-    twilio_sid: str = "",
-    twilio_token: str = "",
-    telnyx_key: str = "",
-    telnyx_connection_id: str = "",
-    openai_key: str = "",
-    elevenlabs_key: str = "",
-    deepgram_key: str = "",
+    carrier: Twilio | Telnyx | None = None,
     phone_number: str = "",
     webhook_url: str = "",
+    tunnel: CloudflareTunnel | Static | bool | None = None,
     pricing: dict | None = None,
 )
 ```
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `mode` | `str` | `"cloud"` | Operating mode. Auto-detected to `"local"` when telephony provider keys (e.g. `twilio_sid`, `telnyx_key`) are supplied without `api_key`. |
-| `twilio_sid` | `str` | `""` | Twilio Account SID. |
-| `twilio_token` | `str` | `""` | Twilio Auth Token. |
-| `telnyx_key` | `str` | `""` | Telnyx API key. |
-| `telnyx_connection_id` | `str` | `""` | Telnyx Call Control App ID. |
-| `openai_key` | `str` | `""` | OpenAI API key. |
-| `elevenlabs_key` | `str` | `""` | ElevenLabs API key. |
-| `deepgram_key` | `str` | `""` | Deepgram API key. |
+| `carrier` | `Twilio \| Telnyx \| None` | `None` | Telephony carrier instance. Reads credentials from env vars when arguments are omitted. |
 | `phone_number` | `str` | `""` | Phone number in E.164 format. |
-| `webhook_url` | `str` | `""` | Public hostname (no scheme). |
+| `webhook_url` | `str` | `""` | Public hostname, no scheme. |
+| `tunnel` | `CloudflareTunnel \| Static \| bool \| None` | `None` | Tunnel directive. `True` is shorthand for `CloudflareTunnel()`. |
 | `pricing` | `dict \| None` | `None` | Override default provider pricing. See [Metrics & Cost Tracking](/python-sdk/metrics). |
 
 ---
 
 ### Methods
 
-#### call()
-
-```python
-async def call(
-    to: str,
-    on_message: Callable[[IncomingMessage], Awaitable[str]] | None = None,
-    first_message: str = "",
-    from_number: str = "",
-    agent_id: str | None = None,
-    agent: Agent | None = None,
-    machine_detection: bool = False,
-    on_machine: Callable[[dict], Awaitable[None]] | None = None,
-    voicemail_message: str = "",
-    ring_timeout: int = 60,
-) -> None
-```
-
-Make an outbound call.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `to` | `str` | *required* | Destination phone number in E.164 format. |
-| `agent` | `Agent \| None` | `None` | Agent configuration to use for the call. |
-| `ring_timeout` | `int` | `60` | Ring timeout in seconds before no-answer. Maps to Twilio `Timeout` and Telnyx `timeout_secs`. |
-| `machine_detection` | `bool` | `False` | Enable answering machine detection. |
-| `on_machine` | `Callable \| None` | `None` | Callback when an answering machine is detected. |
-| `voicemail_message` | `str` | `""` | Message to drop if an answering machine answers. |
-
-**Raises:**
-- `PatterConnectionError` if `agent` is not provided.
-- `ValueError` if `to` is not in E.164 format.
-
----
-
 #### agent()
 
 ```python
 def agent(
     system_prompt: str,
+    engine: OpenAIRealtime | ElevenLabsConvAI | None = None,
+    stt: STTProvider | None = None,
+    tts: TTSProvider | None = None,
     voice: str = "alloy",
     model: str = "gpt-4o-mini-realtime-preview",
     language: str = "en",
     first_message: str = "",
-    tools: list[dict] | None = None,
-    provider: str = "openai_realtime",
-    stt: STTConfig | None = None,
-    tts: TTSConfig | None = None,
+    tools: list[Tool] | None = None,
     variables: dict | None = None,
-    guardrails: list | None = None,
+    guardrails: list[Guardrail] | None = None,
     hooks: PipelineHooks | None = None,
     text_transforms: list[Callable] | None = None,
     vad: VADProvider | None = None,
@@ -105,29 +60,29 @@ def agent(
 ) -> Agent
 ```
 
-Create an Agent configuration. Validates provider keys in local mode.
+Pass `engine=OpenAIRealtime(...)` or `engine=ElevenLabsConvAI(...)` for end-to-end engines; omit `engine=` and pass `stt=`/`tts=` for pipeline mode.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `system_prompt` | `str` | *required* | Agent instructions. |
-| `voice` | `str` | `"alloy"` | TTS voice name. |
-| `model` | `str` | `"gpt-4o-mini-realtime-preview"` | AI model ID. |
+| `engine` | `OpenAIRealtime \| ElevenLabsConvAI \| None` | `None` | End-to-end voice runtime. Omit for pipeline mode. |
+| `stt` | `STTProvider \| None` | `None` | STT instance for pipeline mode (e.g. `DeepgramSTT()`). |
+| `tts` | `TTSProvider \| None` | `None` | TTS instance for pipeline mode (e.g. `ElevenLabsTTS()`). |
+| `voice` | `str` | `"alloy"` | TTS voice name (when engine doesn't carry it). |
+| `model` | `str` | `"gpt-4o-mini-realtime-preview"` | AI model ID (when engine doesn't carry it). |
 | `language` | `str` | `"en"` | BCP-47 language code. |
 | `first_message` | `str` | `""` | Greeting spoken at call start. |
-| `tools` | `list[dict] \| None` | `None` | Tool definitions for function calling. |
-| `provider` | `str` | `"openai_realtime"` | Voice mode: `"openai_realtime"`, `"elevenlabs_convai"`, or `"pipeline"`. |
-| `stt` | `STTConfig \| None` | `None` | STT config for pipeline mode. |
-| `tts` | `TTSConfig \| None` | `None` | TTS config for pipeline mode. |
-| `variables` | `dict \| None` | `None` | Dynamic variable substitutions. |
-| `guardrails` | `list \| None` | `None` | Output guardrails. |
+| `tools` | `list[Tool] \| None` | `None` | `Tool(...)` instances for function calling. |
+| `variables` | `dict \| None` | `None` | Dynamic `{placeholder}` variable substitutions. |
+| `guardrails` | `list[Guardrail] \| None` | `None` | `Guardrail(...)` instances applied to LLM output. |
 | `hooks` | `PipelineHooks \| None` | `None` | Pipeline hooks for STT/TTS interception. |
-| `text_transforms` | `list[Callable] \| None` | `None` | Text transformation functions. |
-| `vad` | `VADProvider \| None` | `None` | Voice activity detection provider. |
-| `audio_filter` | `AudioFilter \| None` | `None` | Audio preprocessing filter. |
-| `background_audio` | `BackgroundAudioPlayer \| None` | `None` | Background audio player. |
+| `text_transforms` | `list[Callable] \| None` | `None` | Text transformation functions (pipeline mode). |
+| `vad` | `VADProvider \| None` | `None` | Voice activity detection provider (pipeline mode). |
+| `audio_filter` | `AudioFilter \| None` | `None` | Audio preprocessing filter (pipeline mode). |
+| `background_audio` | `BackgroundAudioPlayer \| None` | `None` | Background audio player (pipeline mode). |
 | `barge_in_threshold_ms` | `int` | `300` | Barge-in hang-over window (ms). Set to `0` to disable. |
 
-**Raises:** `ValueError` if provider is invalid or required keys are missing.
+**Raises:** `ValueError` if required credentials are missing or conflicting options are passed (e.g. both `engine` and `stt`/`tts`).
 
 ---
 
@@ -152,9 +107,24 @@ async def serve(
 
 Start the embedded server. Blocks until stopped.
 
-**Raises:**
-- `TypeError` if `agent` is not an `Agent` instance.
-- `ValueError` if `port` is out of range.
+---
+
+#### call()
+
+```python
+async def call(
+    to: str,
+    first_message: str = "",
+    from_number: str = "",
+    agent: Agent | None = None,
+    machine_detection: bool = False,
+    on_machine: Callable[[dict], Awaitable[None]] | None = None,
+    voicemail_message: str = "",
+    ring_timeout: int | None = None,
+) -> None
+```
+
+Make an outbound call.
 
 ---
 
@@ -169,12 +139,7 @@ async def test(
 ) -> None
 ```
 
-Start an interactive terminal test session. Simulates a phone call without telephony, STT, or TTS — pure text input/output.
-
-When no `on_message` handler is provided and an `openai_key` is configured, the built-in LLM loop is used. See [Test Mode](/python-sdk/test-mode) for details.
-
-**Raises:**
-- `TypeError` if `agent` is not an `Agent` instance.
+Start an interactive terminal test session. Simulates a phone call without telephony, STT, or TTS — pure text input/output. See [Test Mode](/python-sdk/test-mode).
 
 ---
 
@@ -188,127 +153,135 @@ Disconnect from Patter. Stops the embedded server.
 
 ---
 
-### Static Methods
-
-#### Patter.deepgram()
+## Carriers
 
 ```python
-@staticmethod
-def deepgram(api_key: str, language: str = "en") -> STTConfig
+from getpatter import Twilio, Telnyx                 # flat aliases
+from getpatter.carriers import twilio, telnyx        # namespaced (twilio.Carrier, telnyx.Carrier)
 ```
 
-Create a Deepgram STT configuration.
+### Twilio
+
+```python
+@dataclass(frozen=True)
+class Twilio:
+    account_sid: str = ""   # reads TWILIO_ACCOUNT_SID when empty
+    auth_token: str = ""    # reads TWILIO_AUTH_TOKEN when empty
+```
+
+### Telnyx
+
+```python
+@dataclass(frozen=True)
+class Telnyx:
+    api_key: str = ""       # reads TELNYX_API_KEY when empty
+    connection_id: str = "" # reads TELNYX_CONNECTION_ID when empty
+    public_key: str = ""    # optional — reads TELNYX_PUBLIC_KEY when empty
+```
 
 ---
 
-#### Patter.whisper()
+## Engines
 
 ```python
-@staticmethod
-def whisper(api_key: str, language: str = "en") -> STTConfig
+from getpatter import OpenAIRealtime, ElevenLabsConvAI              # flat aliases
+from getpatter.engines import openai, elevenlabs                     # namespaced
 ```
 
-Create a Whisper (OpenAI) STT configuration.
+### OpenAIRealtime
+
+```python
+@dataclass(frozen=True)
+class OpenAIRealtime:
+    api_key: str = ""                                # reads OPENAI_API_KEY when empty
+    voice: str = "alloy"
+    model: str = "gpt-4o-mini-realtime-preview"
+```
+
+### ElevenLabsConvAI
+
+```python
+@dataclass(frozen=True)
+class ElevenLabsConvAI:
+    api_key: str = ""                                # reads ELEVENLABS_API_KEY when empty
+    agent_id: str = ""                               # reads ELEVENLABS_AGENT_ID when empty
+    voice: str = ""                                  # override agent's default voice
+```
 
 ---
 
-#### Patter.elevenlabs()
+## STT classes
 
 ```python
-@staticmethod
-def elevenlabs(api_key: str, voice: str = "rachel") -> TTSConfig
+from getpatter import DeepgramSTT, WhisperSTT, CartesiaSTT, AssemblyAISTT, SonioxSTT
+from getpatter.stt import deepgram, whisper, cartesia, assemblyai, soniox, speechmatics
 ```
 
-Create an ElevenLabs TTS configuration.
+All classes accept `api_key: str | None = None` and fall back to the provider's standard env var. See the [STT page](/python-sdk/stt) for full constructor signatures.
 
 ---
 
-#### Patter.openai_tts()
+## TTS classes
 
 ```python
-@staticmethod
-def openai_tts(api_key: str, voice: str = "alloy") -> TTSConfig
+from getpatter import ElevenLabsTTS, OpenAITTS, CartesiaTTS, RimeTTS, LMNTTTS
+from getpatter.tts import elevenlabs, openai, cartesia, rime, lmnt
 ```
 
-Create an OpenAI TTS configuration. Audio is auto-resampled from 24kHz to 16kHz.
+All classes accept `api_key: str | None = None` and fall back to the provider's standard env var. See the [TTS page](/python-sdk/tts) for full constructor signatures.
 
 ---
 
-#### Patter.cartesia()
+## Tunnels
 
 ```python
-@staticmethod
-def cartesia(api_key: str, voice: str = "f786b574-daa5-4673-aa0c-cbe3e8534c02") -> TTSConfig
+from getpatter.tunnels import CloudflareTunnel, Static, Ngrok
 ```
 
-Create a Cartesia TTS configuration. Streams raw PCM_S16LE audio.
+| Class | Behavior |
+|-------|----------|
+| `CloudflareTunnel()` | Auto-start a Cloudflare Quick Tunnel via the local `cloudflared` binary. |
+| `Static(hostname=...)` | Use an existing public hostname (user-managed tunnel, e.g. ngrok). |
+| `Ngrok(hostname=...)` | Use an existing ngrok hostname (you run `ngrok http 8000` yourself). Same behavior as `Static(hostname=...)` with an ngrok-friendly name. |
+
+`tunnel=True` on `Patter(...)` is shorthand for `tunnel=CloudflareTunnel()`.
 
 ---
 
-#### Patter.rime()
+## Tools & Guardrails
 
 ```python
-@staticmethod
-def rime(api_key: str, voice: str = "astra") -> TTSConfig
+from getpatter import Tool, Guardrail, tool, guardrail
 ```
 
-Create a Rime TTS configuration. Supports Arcana (high fidelity) and Mist (low latency) models.
-
----
-
-#### Patter.lmnt()
+### Tool
 
 ```python
-@staticmethod
-def lmnt(api_key: str, voice: str = "leah") -> TTSConfig
+@dataclass(frozen=True)
+class Tool:
+    name: str
+    description: str = ""
+    parameters: dict | None = None
+    handler: Callable | None = None
+    webhook_url: str = ""
 ```
-
-Create an LMNT TTS configuration. Streams PCM_S16LE at 16 kHz by default.
-
----
-
-#### Patter.guardrail()
-
-```python
-@staticmethod
-def guardrail(
-    name: str,
-    blocked_terms: list[str] | None = None,
-    check: Callable[[str], bool] | None = None,
-    replacement: str = "I'm sorry, I can't respond to that.",
-) -> dict
-```
-
-Create an output guardrail dictionary.
-
----
-
-#### Patter.tool()
-
-```python
-@staticmethod
-def tool(
-    name: str,
-    description: str = "",
-    parameters: dict | None = None,
-    handler: object = None,
-    webhook_url: str = "",
-) -> dict
-```
-
-Create a tool definition for use with `agent(tools=[...])`.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `name` | `str` | *required* | Tool name (visible to the LLM). |
-| `description` | `str` | `""` | What the tool does (visible to the LLM). |
-| `parameters` | `dict \| None` | `None` | JSON Schema for tool arguments. |
-| `handler` | `Callable \| None` | `None` | Async or sync callable `(arguments, context) -> str | dict`. Called in-process. |
-| `webhook_url` | `str` | `""` | URL to POST to when the LLM invokes the tool. |
 
 Either `handler` or `webhook_url` must be provided.
 
-**Raises:** `ValueError` if neither `handler` nor `webhook_url` is provided.
+`tool(...)` is a factory that doubles as a decorator — see [Tools](/python-sdk/tools).
+
+### Guardrail
+
+```python
+@dataclass(frozen=True)
+class Guardrail:
+    name: str
+    blocked_terms: list[str] | None = None
+    check: Callable[[str], bool] | None = None
+    replacement: str = "I'm sorry, I can't respond to that."
+```
+
+See [Guardrails](/python-sdk/guardrails).
 
 ---
 
@@ -328,8 +301,8 @@ class Agent:
     first_message: str = ""
     tools: list[dict] | None = None
     provider: str = "openai_realtime"
-    stt: STTConfig | None = None
-    tts: TTSConfig | None = None
+    stt: STTConfig | STTProvider | None = None
+    tts: TTSConfig | TTSProvider | None = None
     variables: dict | None = None
     guardrails: list | None = None
     hooks: PipelineHooks | None = None
@@ -339,28 +312,6 @@ class Agent:
     background_audio: BackgroundAudioPlayer | None = None
     barge_in_threshold_ms: int = 300
 ```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `system_prompt` | `str` | *required* | Agent instructions. |
-| `voice` | `str` | `"alloy"` | TTS voice name. |
-| `model` | `str` | `"gpt-4o-mini-realtime-preview"` | AI model ID. |
-| `language` | `str` | `"en"` | BCP-47 language code. |
-| `first_message` | `str` | `""` | Greeting spoken at call start. |
-| `tools` | `list[dict] \| None` | `None` | Tool definitions for function calling. |
-| `provider` | `str` | `"openai_realtime"` | `"openai_realtime"`, `"elevenlabs_convai"`, or `"pipeline"`. |
-| `stt` | `STTConfig \| None` | `None` | STT config for pipeline mode. |
-| `tts` | `TTSConfig \| None` | `None` | TTS config for pipeline mode. |
-| `variables` | `dict \| None` | `None` | Dynamic variable substitutions for `{placeholder}` in `system_prompt`. Values limited to 500 chars. |
-| `guardrails` | `list \| None` | `None` | Output guardrails. |
-| `hooks` | `PipelineHooks \| None` | `None` | Pipeline hooks for STT/TTS interception. |
-| `text_transforms` | `list[Callable] \| None` | `None` | Text transformation functions. |
-| `vad` | `VADProvider \| None` | `None` | Voice activity detection provider. |
-| `audio_filter` | `AudioFilter \| None` | `None` | Audio preprocessing filter. |
-| `background_audio` | `BackgroundAudioPlayer \| None` | `None` | Background audio player. |
-| `barge_in_threshold_ms` | `int` | `300` | Barge-in hang-over window (ms). Set to `0` to disable. |
-
----
 
 ### CallEvent
 
@@ -373,15 +324,6 @@ class CallEvent:
     direction: str = ""
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `call_id` | `str` | *required* | Unique call identifier. |
-| `caller` | `str` | `""` | Caller phone number. |
-| `callee` | `str` | `""` | Callee phone number. |
-| `direction` | `str` | `""` | `"inbound"` or `"outbound"`. |
-
----
-
 ### IncomingMessage
 
 ```python
@@ -392,75 +334,13 @@ class IncomingMessage:
     caller: str
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `text` | `str` | The user's transcribed message. |
-| `call_id` | `str` | Unique call identifier. |
-| `caller` | `str` | Caller phone number. |
+### STTConfig / TTSConfig
 
----
-
-### STTConfig
-
-```python
-@dataclass(frozen=True)
-class STTConfig:
-    provider: str
-    api_key: str
-    language: str = "en"
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `provider` | `str` | *required* | STT provider name (`"deepgram"`, `"whisper"`). |
-| `api_key` | `str` | *required* | Provider API key. |
-| `language` | `str` | `"en"` | BCP-47 language code. |
-
-**Methods:** `to_dict() -> dict`
-
----
-
-### TTSConfig
-
-```python
-@dataclass(frozen=True)
-class TTSConfig:
-    provider: str
-    api_key: str
-    voice: str = "alloy"
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `provider` | `str` | *required* | TTS provider name (`"elevenlabs"`, `"openai"`). |
-| `api_key` | `str` | *required* | Provider API key. |
-| `voice` | `str` | `"alloy"` | Voice name or ID. |
-
-**Methods:** `to_dict() -> dict`
-
----
-
-### Guardrail
-
-```python
-@dataclass(frozen=True)
-class Guardrail:
-    name: str
-    check: Callable[[str], bool] | None = None
-    blocked_terms: list[str] | None = None
-    replacement: str = "I'm sorry, I can't respond to that."
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `name` | `str` | *required* | Guardrail identifier. |
-| `check` | `Callable[[str], bool] \| None` | `None` | Custom check function. |
-| `blocked_terms` | `list[str] \| None` | `None` | Case-insensitive blocked terms. |
-| `replacement` | `str` | `"I'm sorry, I can't respond to that."` | Replacement text when blocked. |
-
----
+Internal config dataclasses produced when you pass an STT/TTS *instance* to `phone.agent()`. You rarely need to construct these directly.
 
 ### CallControl
+
+Passed as the second argument to `on_message` handlers. Allows dynamic call management:
 
 ```python
 class CallControl:
@@ -468,97 +348,18 @@ class CallControl:
     caller: str
     callee: str
     telephony_provider: str
+
+    async def transfer(number: str) -> None: ...
+    async def hangup() -> None: ...
 ```
 
-Passed as the second argument to `on_message` handlers. Allows dynamic call management during a conversation.
+### CallMetrics / CostBreakdown / LatencyBreakdown / TurnMetrics
 
-| Method | Description |
-|--------|-------------|
-| `await transfer(number: str)` | Transfer the call to another phone number. |
-| `await hangup()` | End the call. |
-
-| Property | Type | Description |
-|----------|------|-------------|
-| `is_transferred` | `bool` | Whether a transfer was requested. |
-| `is_hung_up` | `bool` | Whether a hangup was requested. |
-| `ended` | `bool` | `True` if transferred or hung up. |
-
----
-
-### CallMetrics
-
-```python
-@dataclass(frozen=True)
-class CallMetrics:
-    call_id: str
-    duration_seconds: float
-    turns: tuple[TurnMetrics, ...]
-    cost: CostBreakdown
-    latency_avg: LatencyBreakdown
-    latency_p95: LatencyBreakdown
-    provider_mode: str
-    stt_provider: str = ""
-    tts_provider: str = ""
-    llm_provider: str = ""
-    telephony_provider: str = ""
-```
-
-Frozen metrics for a completed call. See [Metrics & Cost Tracking](/python-sdk/metrics) for usage.
-
----
-
-### CostBreakdown
-
-```python
-@dataclass(frozen=True)
-class CostBreakdown:
-    stt: float = 0.0
-    tts: float = 0.0
-    llm: float = 0.0
-    telephony: float = 0.0
-    total: float = 0.0
-```
-
-Per-component cost in USD.
-
----
-
-### LatencyBreakdown
-
-```python
-@dataclass(frozen=True)
-class LatencyBreakdown:
-    stt_ms: float = 0.0
-    llm_ms: float = 0.0
-    tts_ms: float = 0.0
-    total_ms: float = 0.0
-```
-
-Per-component latency in milliseconds.
-
----
-
-### TurnMetrics
-
-```python
-@dataclass(frozen=True)
-class TurnMetrics:
-    turn_index: int
-    user_text: str
-    agent_text: str
-    latency: LatencyBreakdown
-    stt_audio_seconds: float = 0.0
-    tts_characters: int = 0
-    timestamp: float = 0.0
-```
-
-Per-turn metrics for a single conversation turn.
+See [Metrics & Cost Tracking](/python-sdk/metrics).
 
 ---
 
 ## Exceptions
-
-All exceptions inherit from `PatterError`.
 
 ```
 PatterError
@@ -567,80 +368,55 @@ PatterError
 └── ProvisionError
 ```
 
-### PatterError
-
-Base exception for all Patter SDK errors.
-
 ```python
-from patter import PatterError
-
-try:
-    await phone.serve(agent)
-except PatterError as e:
-    print(f"Patter error: {e}")
-```
-
-### PatterConnectionError
-
-Raised for connection failures or missing required parameters.
-
-```python
-from patter import PatterConnectionError
-
-try:
-    await phone.serve(agent)
-except PatterConnectionError as e:
-    print(f"Connection error: {e}")
-```
-
-### AuthenticationError
-
-Raised when authentication fails (e.g., invalid API key).
-
-```python
-from patter import AuthenticationError
-
-try:
-    await phone.connect(on_message=handler)
-except AuthenticationError as e:
-    print(f"Authentication error: {e}")
-```
-
-### ProvisionError
-
-Raised when a provisioning operation fails (e.g., creating an agent, buying a number, registering a number).
-
-```python
-from patter import ProvisionError
-
-try:
-    await phone.create_agent(name="My Agent", system_prompt="Hello")
-except ProvisionError as e:
-    print(f"Provisioning error: {e}")
+from getpatter import PatterError, PatterConnectionError, AuthenticationError, ProvisionError
 ```
 
 ---
 
-## Exports
-
-All public symbols exported from the `patter` package:
+## Top-level exports
 
 ```python
-from patter import (
+from getpatter import (
+    # Client
     Patter,
-    Agent,
-    CallControl,
-    CallEvent,
-    CallMetrics,
-    CostBreakdown,
-    Guardrail,
-    LatencyBreakdown,
-    STTConfig,
-    TTSConfig,
-    TurnMetrics,
-    PatterError,
-    PatterConnectionError,
-    AuthenticationError,
-    ProvisionError,
+
+    # Carriers
+    Twilio, Telnyx,
+
+    # Engines
+    OpenAIRealtime, ElevenLabsConvAI,
+
+    # STT classes
+    DeepgramSTT, WhisperSTT, CartesiaSTT, AssemblyAISTT, SonioxSTT,
+
+    # TTS classes
+    ElevenLabsTTS, OpenAITTS, CartesiaTTS, RimeTTS, LMNTTTS,
+
+    # Public primitives
+    Tool, Guardrail, tool, guardrail,
+
+    # Data classes
+    Agent, CallControl, CallEvent, CallMetrics, CostBreakdown,
+    LatencyBreakdown, IncomingMessage, TurnMetrics, PipelineHooks,
+    HookContext, STTConfig, TTSConfig,
+
+    # Services / utilities
+    SentenceChunker, PipelineHookExecutor,
+    filter_markdown, filter_emoji, filter_for_tts,
+    FallbackLLMProvider, AllProvidersFailedError, PartialStreamError,
+    ChatContext, ChatMessage,
+    IVRActivity, TfidfLoopDetector, DtmfEvent, format_dtmf,
+    ScheduleHandle, schedule_cron, schedule_once, schedule_interval,
+    mix_pcm,
+
+    # Errors
+    PatterError, PatterConnectionError, AuthenticationError, ProvisionError,
 )
+
+from getpatter.carriers import twilio, telnyx
+from getpatter.engines import openai, elevenlabs
+from getpatter.stt import deepgram, whisper, cartesia, assemblyai, soniox, speechmatics
+from getpatter.tts import elevenlabs, openai, cartesia, rime, lmnt
+from getpatter.tunnels import CloudflareTunnel, Static, Ngrok
 ```

@@ -1,4 +1,4 @@
-from patter.models import IncomingMessage, STTConfig, TTSConfig
+from getpatter.models import IncomingMessage, STTConfig, TTSConfig
 
 
 def test_incoming_message():

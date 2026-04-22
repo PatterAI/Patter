@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from patter.dashboard.store import MetricsStore
+from getpatter.dashboard.store import MetricsStore
 
 
 @pytest.fixture
 def app_with_auth():
     """Create a FastAPI app with authenticated dashboard."""
     from fastapi import FastAPI
-    from patter.dashboard.routes import mount_dashboard
+    from getpatter.dashboard.routes import mount_dashboard
 
     app = FastAPI()
     store = MetricsStore()
@@ -23,7 +23,7 @@ def app_with_auth():
 def app_no_auth():
     """Create a FastAPI app without dashboard auth."""
     from fastapi import FastAPI
-    from patter.dashboard.routes import mount_dashboard
+    from getpatter.dashboard.routes import mount_dashboard
 
     app = FastAPI()
     store = MetricsStore()

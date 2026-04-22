@@ -24,8 +24,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from patter.local_config import LocalConfig
-from patter.server import EmbeddedServer
+from getpatter.local_config import LocalConfig
+from getpatter.server import EmbeddedServer
 
 from tests.conftest import make_agent
 
@@ -235,7 +235,7 @@ class TestRingTimeoutPropagation:
 
     @pytest.mark.asyncio
     async def test_twilio_ring_timeout_becomes_timeout_param(self) -> None:
-        from patter.client import Patter
+        from getpatter.client import Patter
 
         cfg = LocalConfig(
             telephony_provider="twilio",
@@ -251,7 +251,7 @@ class TestRingTimeoutPropagation:
         phone._server = None
 
         with patch(
-            "patter.providers.twilio_adapter.TwilioAdapter"
+            "getpatter.providers.twilio_adapter.TwilioAdapter"
         ) as mock_adapter_cls:
             mock_adapter = mock_adapter_cls.return_value
             mock_adapter.initiate_call = AsyncMock(
@@ -273,7 +273,7 @@ class TestRingTimeoutPropagation:
     @pytest.mark.asyncio
     async def test_twilio_ring_timeout_omitted_when_none(self) -> None:
         """Passing no ring_timeout must not inject Timeout into the payload."""
-        from patter.client import Patter
+        from getpatter.client import Patter
 
         cfg = LocalConfig(
             telephony_provider="twilio",
@@ -289,7 +289,7 @@ class TestRingTimeoutPropagation:
         phone._server = None
 
         with patch(
-            "patter.providers.twilio_adapter.TwilioAdapter"
+            "getpatter.providers.twilio_adapter.TwilioAdapter"
         ) as mock_adapter_cls:
             mock_adapter = mock_adapter_cls.return_value
             mock_adapter.initiate_call = AsyncMock(
@@ -307,7 +307,7 @@ class TestRingTimeoutPropagation:
     async def test_twilio_statuscallback_always_registered(self) -> None:
         """BUG #06 — every outbound Twilio call must set StatusCallback so
         the dashboard receives ringing / no-answer / busy transitions."""
-        from patter.client import Patter
+        from getpatter.client import Patter
 
         cfg = LocalConfig(
             telephony_provider="twilio",
@@ -323,7 +323,7 @@ class TestRingTimeoutPropagation:
         phone._server = None
 
         with patch(
-            "patter.providers.twilio_adapter.TwilioAdapter"
+            "getpatter.providers.twilio_adapter.TwilioAdapter"
         ) as mock_adapter_cls:
             mock_adapter = mock_adapter_cls.return_value
             mock_adapter.initiate_call = AsyncMock(
@@ -348,7 +348,7 @@ class TestRingTimeoutPropagation:
     async def test_telnyx_ring_timeout_becomes_timeout_secs(self) -> None:
         """Telnyx uses ``timeout_secs``, not ``Timeout`` — confirm the adapter
         receives the kwarg verbatim."""
-        from patter.providers.telnyx_adapter import TelnyxAdapter
+        from getpatter.providers.telnyx_adapter import TelnyxAdapter
 
         adapter = TelnyxAdapter(
             api_key="tk_test",
@@ -386,7 +386,7 @@ class TestRingTimeoutPropagation:
 
     @pytest.mark.asyncio
     async def test_telnyx_ring_timeout_omitted_when_none(self) -> None:
-        from patter.providers.telnyx_adapter import TelnyxAdapter
+        from getpatter.providers.telnyx_adapter import TelnyxAdapter
 
         adapter = TelnyxAdapter(api_key="tk_test", connection_id="conn-1")
         captured: dict = {}

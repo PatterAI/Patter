@@ -1,0 +1,93 @@
+---
+title: "Engines"
+description: "End-to-end speech-to-speech runtimes (OpenAI Realtime, ElevenLabs ConvAI)."
+icon: "bolt"
+---
+
+# Engines
+
+An **engine** is an end-to-end speech-to-speech runtime. Pass an engine instance to `phone.agent({ engine })` and Patter wires the audio stream straight through to the provider — no separate STT or TTS is needed.
+
+Patter ships with two engine classes today:
+
+- [`OpenAIRealtime`](#openairealtime) — OpenAI's Realtime API
+- [`ElevenLabsConvAI`](#elevenlabsconvai) — ElevenLabs Conversational AI
+
+Each class ships as both a **flat alias** (`import { OpenAIRealtime } from "getpatter"`) and a **namespaced** class (`import * as openai from "getpatter/engines/openai"` → `new openai.Realtime()`). They are equivalent.
+
+If you need full control over STT, LLM, and TTS independently, use [pipeline mode](/typescript-sdk/llm#pipeline-mode) instead and omit `engine`.
+
+## OpenAIRealtime
+
+OpenAI's Realtime API — the lowest-latency option.
+
+```typescript
+// npx tsx example.ts
+import { Patter, Twilio, OpenAIRealtime } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  engine: new OpenAIRealtime({ voice: "alloy" }),           // OPENAI_API_KEY from env
+  systemPrompt: "You are a helpful assistant.",
+  firstMessage: "Hello!",
+});
+
+await phone.serve({ agent });
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `apiKey` | `string` | — | OpenAI API key. Reads from `OPENAI_API_KEY` when omitted. |
+| `voice` | `string` | `"alloy"` | One of `"alloy"`, `"ash"`, `"ballad"`, `"coral"`, `"echo"`, `"sage"`, `"shimmer"`, `"verse"`. |
+| `model` | `string` | `"gpt-4o-mini-realtime-preview"` | OpenAI Realtime model ID. |
+
+Namespaced form:
+
+```typescript
+import * as openai from "getpatter/engines/openai";
+
+const engine = new openai.Realtime();                 // reads OPENAI_API_KEY
+const engine = new openai.Realtime({ voice: "alloy" });
+```
+
+## ElevenLabsConvAI
+
+ElevenLabs Conversational AI — premium voice quality using a managed agent configured in the ElevenLabs dashboard.
+
+```typescript
+// npx tsx example.ts
+import { Patter, Twilio, ElevenLabsConvAI } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  engine: new ElevenLabsConvAI({ agentId: "agent_abc123" }),   // ELEVENLABS_API_KEY from env
+  systemPrompt: "You are a warm and friendly concierge.",
+});
+
+await phone.serve({ agent });
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `apiKey` | `string` | — | ElevenLabs API key. Reads from `ELEVENLABS_API_KEY` when omitted. |
+| `agentId` | `string` | — | ElevenLabs agent ID (from the ConvAI dashboard). Reads from `ELEVENLABS_AGENT_ID` when omitted. |
+| `voice` | `string` | — | Optional override for the agent's default voice ID. |
+
+Namespaced form:
+
+```typescript
+import * as elevenlabs from "getpatter/engines/elevenlabs";
+
+const engine = new elevenlabs.ConvAI();               // reads env
+const engine = new elevenlabs.ConvAI({ agentId: "agent_abc123", voice: "rachel" });
+```
+
+## What's Next
+
+<CardGroup cols={2}>
+  <Card title="LLM" icon="brain" href="/typescript-sdk/llm">Compare engine mode with pipeline mode.</Card>
+  <Card title="STT" icon="microphone" href="/typescript-sdk/stt">STT for pipeline mode.</Card>
+  <Card title="TTS" icon="volume" href="/typescript-sdk/tts">TTS for pipeline mode.</Card>
+</CardGroup>

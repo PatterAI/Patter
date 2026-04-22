@@ -1,115 +1,164 @@
 ---
 title: "Quickstart"
-description: "Give your AI agent a phone number in under 5 minutes."
+description: "Give your AI agent a phone number in four lines of TypeScript."
+icon: "rocket"
 ---
 
-# Quickstart
+# TypeScript Quickstart
 
-This guide walks you through connecting your AI agent to a phone number in local mode using Twilio and OpenAI.
+Patter connects an AI agent to a real phone number in four lines of TypeScript. This page walks you end-to-end: install, credentials, the four lines, and your first call.
 
 ## Prerequisites
 
 - Node.js 18+
-- A Twilio account with a phone number
-- An OpenAI API key
-- [ngrok](https://ngrok.com) or another tunnel for local development
+- A Twilio **or** Telnyx account with a phone number you own
+- An AI provider key — OpenAI for the default Realtime engine, or any supported STT/TTS pair for pipeline mode
 
-## Step 1: Install the SDK
+## Step 1 — Install
 
 ```bash
 npm install getpatter
 ```
 
-## Step 2: Set Up Your Tunnel
+## Step 2 — Set environment variables
 
-Open a terminal and start ngrok:
+Each carrier and engine reads its credentials from the environment by default. The four-line quickstart below works as-is once these are set.
 
-```bash
-ngrok http 8000
+<CodeGroup>
+
+```bash .env
+# Telephony — pick one carrier
+TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TWILIO_AUTH_TOKEN=your_auth_token
+
+# Realtime engine (default)
+OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
-Copy the hostname from the output (e.g., `abc123.ngrok.io`). You will use this as your `webhookUrl`.
-
-Alternatively, use the built-in Cloudflare tunnel (no setup required): set `tunnel: true` in `serve()`.
-
-## Step 3: Configure Environment Variables
-
-Create a `.env` file in your project root:
-
-```bash
-TWILIO_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-TWILIO_TOKEN=your_auth_token
-OPENAI_KEY=sk-...
-PHONE_NUMBER=+15550001234
-WEBHOOK_URL=abc123.ngrok.io
+```bash bash/zsh
+export TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+export TWILIO_AUTH_TOKEN=your_auth_token
+export OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
-## Step 4: Define Your Agent
+```powershell PowerShell
+$env:TWILIO_ACCOUNT_SID = "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+$env:TWILIO_AUTH_TOKEN = "your_auth_token"
+$env:OPENAI_API_KEY = "sk-xxxxxxxxxxxxxxxxxxxxxxxx"
+```
 
-Create `index.ts`:
+</CodeGroup>
+
+| Variable | Purpose |
+|---|---|
+| `TWILIO_ACCOUNT_SID` | Account SID from the Twilio console. Starts with `AC`. |
+| `TWILIO_AUTH_TOKEN` | Auth token paired with the SID. Keep it secret. |
+| `OPENAI_API_KEY` | Used by `OpenAIRealtime`, `WhisperSTT`, and `OpenAITTS`. |
+
+Using Telnyx instead? Swap the Twilio vars for `TELNYX_API_KEY` and `TELNYX_CONNECTION_ID` (plus optional `TELNYX_PUBLIC_KEY` for webhook signature verification) and use `new Telnyx()` in place of `new Twilio()`. See the [Carrier](/typescript-sdk/carrier) page for all supported env vars.
+
+## Step 3 — The four-line quickstart
+
+Create `main.ts`:
+
+```typescript main.ts
+import { Patter, Twilio, OpenAIRealtime } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+const agent = phone.agent({ engine: new OpenAIRealtime(), systemPrompt: "You are a receptionist." });
+await phone.serve({ agent, tunnel: true });
+```
+
+Want a custom greeting? Add `firstMessage`:
 
 ```typescript
-import { Patter } from "getpatter";
-
-const phone = new Patter({
-  mode: "local",
-  twilioSid: process.env.TWILIO_SID,
-  twilioToken: process.env.TWILIO_TOKEN,
-  openaiKey: process.env.OPENAI_KEY,
-  phoneNumber: process.env.PHONE_NUMBER!,
-  webhookUrl: process.env.WEBHOOK_URL!,
-});
-
 const agent = phone.agent({
-  systemPrompt: "You are a friendly receptionist for Acme Corp. Help callers with scheduling, general inquiries, and directions to our office.",
-  voice: "alloy",
-  model: "gpt-4o-mini-realtime-preview",
-  firstMessage: "Hello! Thanks for calling Acme Corp. How can I help you today?",
-});
-
-await phone.serve({
-  agent,
-  port: 8000,
-  onCallStart: async (data) => {
-    console.log("Call started:", data);
-  },
-  onCallEnd: async (data) => {
-    console.log("Call ended:", data);
-  },
+  engine: new OpenAIRealtime(),
+  systemPrompt: "You are a friendly receptionist for Acme Corp.",
+  firstMessage: "Hello! How can I help?",
 });
 ```
 
-## Step 5: Configure Twilio Webhooks
+What each line does:
 
-In your [Twilio Console](https://console.twilio.com), navigate to your phone number and set the voice webhook to:
+1. **Import** — the three primitives you need: the client, a carrier, and an engine. All three read credentials from environment variables by default, so no keys appear in source.
+2. **`new Patter({...})`** — build the client and bind it to your phone number. `new Twilio()` (or `new Telnyx()`) carries the carrier credentials; swap it to change providers.
+3. **`phone.agent({...})`** — describe the agent: the engine (OpenAI Realtime by default), the system prompt, and the first message it speaks on answer.
+4. **`await phone.serve({ agent, tunnel: true })`** — start the embedded server. `tunnel: true` spawns a Cloudflare tunnel and points your Twilio number at it automatically, so the agent is reachable from the PSTN without any additional DNS or firewall work.
 
-```
-https://abc123.ngrok.io/webhooks/twilio/voice
-```
+<Note>
+  `tunnel: true` is the dev shorthand. In production replace it with a stable webhook URL via the constructor:
 
-Set the method to **POST**.
+  ```typescript
+  const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234", webhookUrl: "api.prod.example.com" });
+  ...
+  await phone.serve({ agent });
+  ```
 
-## Step 6: Start the Server
+  Or use a pre-provisioned tunnel object: `new Patter({ ..., tunnel: new StaticTunnel({ hostname: "agent.example.com" }) })`. See [Tunneling](/dev-tools/tunneling).
+</Note>
+
+## Step 4 — Run it
 
 ```bash
-npx tsx index.ts
+npx tsx main.ts
 ```
 
-You should see the Patter banner and server status in your terminal. Call your Twilio number — your agent is now live on the phone.
+You'll see the Patter banner, a Cloudflare tunnel URL, and a log line confirming the Twilio voice webhook was set to that URL.
 
-## Next Steps
+## Step 5 — Call the number
+
+Pick up your phone, dial your Twilio number, and the agent will answer with `"Hello! How can I help?"`. Start talking.
+
+---
+
+## Using a different engine
+
+OpenAI Realtime is the default. To switch engines, pass a different instance:
+
+```typescript
+import { Patter, Twilio, ElevenLabsConvAI } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+const agent = phone.agent({ engine: new ElevenLabsConvAI(), systemPrompt: "You are a helpful assistant." });
+await phone.serve({ agent, tunnel: true });
+```
+
+`new ElevenLabsConvAI()` reads `ELEVENLABS_API_KEY` and `ELEVENLABS_AGENT_ID` from the environment.
+
+For the STT + LLM + TTS pipeline mode, pass `stt` and `tts` to `agent()`:
+
+```typescript
+import { Patter, Twilio, DeepgramSTT, ElevenLabsTTS } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+const agent = phone.agent({
+  stt: new DeepgramSTT(),        // reads DEEPGRAM_API_KEY
+  tts: new ElevenLabsTTS(),      // reads ELEVENLABS_API_KEY
+  systemPrompt: "You are a helpful assistant.",
+  firstMessage: "Hello!",
+});
+await phone.serve({ agent, tunnel: true });
+```
+
+---
+
+## What's next
 
 <CardGroup cols={2}>
-  <Card title="Add Tools" icon="wrench" href="/typescript-sdk/tools">
-    Let your agent book appointments, look up data, and more.
+  <Card title="Configuration" icon="gear" href="/typescript-sdk/configuration">
+    Every constructor option in one place.
   </Card>
-  <Card title="Add Guardrails" icon="shield" href="/typescript-sdk/guardrails">
-    Filter AI responses before they reach callers.
+  <Card title="Agents" icon="robot" href="/typescript-sdk/agents">
+    Customize voice, model, tools, and guardrails.
   </Card>
-  <Card title="Handle Events" icon="bolt" href="/typescript-sdk/events">
-    React to transcripts, call starts, and call ends.
+  <Card title="STT providers" icon="microphone" href="/typescript-sdk/stt">
+    Deepgram, Whisper, Cartesia, Soniox, AssemblyAI.
   </Card>
-  <Card title="Outbound Calls" icon="phone" href="/typescript-sdk/features">
-    Make outbound calls with machine detection.
+  <Card title="TTS providers" icon="volume" href="/typescript-sdk/tts">
+    ElevenLabs, OpenAI, Cartesia, Rime, LMNT.
+  </Card>
+  <Card title="Tools" icon="wrench" href="/typescript-sdk/tools">
+    Give your agent function-calling superpowers.
   </Card>
 </CardGroup>
