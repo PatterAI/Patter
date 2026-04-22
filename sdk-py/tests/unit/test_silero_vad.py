@@ -1,4 +1,4 @@
-"""Unit tests for patter.providers.silero_vad — SileroVAD streaming state machine.
+"""Unit tests for getpatter.providers.silero_vad — SileroVAD streaming state machine.
 
 All tests mock ``onnxruntime.InferenceSession`` so they run without the
 bundled ONNX model and without pulling onnxruntime as a hard dependency.
@@ -18,9 +18,9 @@ import pytest
 # install base deps.
 np = pytest.importorskip("numpy")
 
-from patter.providers.base import VADEvent  # noqa: E402
-from patter.providers.silero_onnx import OnnxModel  # noqa: E402
-from patter.providers.silero_vad import SileroVAD, _VADOptions  # noqa: E402
+from getpatter.providers.base import VADEvent  # noqa: E402
+from getpatter.providers.silero_onnx import OnnxModel  # noqa: E402
+from getpatter.providers.silero_vad import SileroVAD, _VADOptions  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

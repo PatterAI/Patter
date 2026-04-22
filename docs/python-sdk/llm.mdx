@@ -22,7 +22,7 @@ Engine mode collapses STT, LLM, and TTS into a single streaming connection with 
 
 ```python
 import asyncio
-from patter import Patter, Twilio, OpenAIRealtime
+from getpatter import Patter, Twilio, OpenAIRealtime
 
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")   # TWILIO_* from env
 
@@ -46,7 +46,7 @@ asyncio.run(main())
 Uses a Conversational AI agent configured in the ElevenLabs dashboard.
 
 ```python
-from patter import Patter, Twilio, ElevenLabsConvAI
+from getpatter import Patter, Twilio, ElevenLabsConvAI
 
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")
 
@@ -64,7 +64,7 @@ Omit `engine=` and pass `stt=` + `tts=` instead. Patter wires them together auto
 
 ```python
 import asyncio
-from patter import Patter, Twilio, DeepgramSTT, ElevenLabsTTS
+from getpatter import Patter, Twilio, DeepgramSTT, ElevenLabsTTS
 
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")
 
@@ -87,15 +87,15 @@ asyncio.run(main())
 
 ### Built-in LLM adapters
 
-The following adapters live in `patter.providers` and are safe to call directly from `on_message`:
+The following adapters live in `getpatter.providers` and are safe to call directly from `on_message`:
 
 | Provider | Module | Install extra |
 |----------|--------|---------------|
-| Anthropic | `patter.providers.anthropic_llm` | `getpatter[anthropic]` |
-| Google Gemini | `patter.providers.google_llm` | `getpatter[google]` |
-| Groq | `patter.providers.groq_llm` | `getpatter[groq]` |
-| Cerebras | `patter.providers.cerebras_llm` | `getpatter[cerebras]` |
-| Ultravox (realtime) | `patter.providers.ultravox_realtime` | `getpatter[ultravox]` |
+| Anthropic | `getpatter.providers.anthropic_llm` | `getpatter[anthropic]` |
+| Google Gemini | `getpatter.providers.google_llm` | `getpatter[google]` |
+| Groq | `getpatter.providers.groq_llm` | `getpatter[groq]` |
+| Cerebras | `getpatter.providers.cerebras_llm` | `getpatter[cerebras]` |
+| Ultravox (realtime) | `getpatter.providers.ultravox_realtime` | `getpatter[ultravox]` |
 
 <Note>
 A first-class `llm=AnthropicLLM(...)` parameter is planned for Patter 0.6 — once it lands you will be able to plug LLMs the same way you plug STT and TTS today. Until then, the LLM step of pipeline mode flows through `on_message`.

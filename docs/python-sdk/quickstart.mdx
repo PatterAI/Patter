@@ -61,7 +61,7 @@ Using Telnyx instead? Swap the Twilio vars for `TELNYX_API_KEY` and `TELNYX_CONN
 Create `main.py`:
 
 ```python main.py
-from patter import Patter, Twilio, OpenAIRealtime
+from getpatter import Patter, Twilio, OpenAIRealtime
 
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")
 agent = phone.agent(engine=OpenAIRealtime(), system_prompt="You are a friendly receptionist for Acme Corp.", first_message="Hello! How can I help?")
@@ -106,7 +106,7 @@ Pick up your phone, dial your Twilio number, and the agent will answer with `"He
 OpenAI Realtime is the default. To switch engines, pass a different instance:
 
 ```python
-from patter import Patter, Twilio, ElevenLabsConvAI
+from getpatter import Patter, Twilio, ElevenLabsConvAI
 
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")
 agent = phone.agent(engine=ElevenLabsConvAI(), system_prompt="You are a helpful assistant.")
@@ -118,9 +118,9 @@ await phone.serve(agent, tunnel=True)
 For the STT + LLM + TTS pipeline mode, pass `stt=` and `tts=` to `agent()`:
 
 ```python
-from patter import Patter, Twilio
-from patter.stt import deepgram
-from patter.tts import elevenlabs
+from getpatter import Patter, Twilio
+from getpatter.stt import deepgram
+from getpatter.tts import elevenlabs
 
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")
 agent = phone.agent(

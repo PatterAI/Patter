@@ -10,7 +10,7 @@ Usage:
 """
 
 import asyncio
-from patter import Patter, IncomingMessage
+from getpatter import Patter, IncomingMessage
 
 
 async def on_message(msg: IncomingMessage) -> str:

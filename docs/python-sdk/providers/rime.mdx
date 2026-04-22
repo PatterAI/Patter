@@ -17,13 +17,13 @@ pip install "getpatter[rime]"
 
 ```python
 # Namespaced import
-from patter.tts import rime
+from getpatter.tts import rime
 
 tts = rime.TTS()                                          # reads RIME_API_KEY
 tts = rime.TTS(model="arcana", speaker="astra")
 
 # Flat alias (equivalent)
-from patter import RimeTTS
+from getpatter import RimeTTS
 
 tts = RimeTTS(model="arcana", speaker="astra")
 ```
@@ -32,7 +32,7 @@ In an agent:
 
 ```python
 import asyncio
-from patter import Patter, Twilio, DeepgramSTT, RimeTTS
+from getpatter import Patter, Twilio, DeepgramSTT, RimeTTS
 
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")
 
@@ -48,7 +48,7 @@ asyncio.run(phone.serve(agent))
 Mist v2 — low-latency, streaming-friendly:
 
 ```python
-from patter import RimeTTS
+from getpatter import RimeTTS
 
 fast = RimeTTS(model="mistv2", speaker="cove", speed_alpha=1.1, reduce_latency=True)
 ```
@@ -56,7 +56,7 @@ fast = RimeTTS(model="mistv2", speaker="cove", speed_alpha=1.1, reduce_latency=T
 ## Low-level usage
 
 ```python
-from patter.providers.rime_tts import RimeTTS as _LowLevelTTS
+from getpatter.providers.rime_tts import RimeTTS as _LowLevelTTS
 
 tts = _LowLevelTTS(
     api_key="...",           # or RIME_API_KEY env var

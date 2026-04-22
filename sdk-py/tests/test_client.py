@@ -1,14 +1,14 @@
 import pytest
 from unittest.mock import AsyncMock, patch
-from patter import (
+from getpatter import (
     DeepgramSTT,
     ElevenLabsTTS,
     OpenAIRealtime,
     Patter,
     Twilio,
 )
-from patter.providers import deepgram, elevenlabs
-from patter.exceptions import PatterConnectionError
+from getpatter.providers import deepgram, elevenlabs
+from getpatter.exceptions import PatterConnectionError
 
 
 def test_client_init():

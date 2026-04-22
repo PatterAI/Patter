@@ -1,4 +1,4 @@
-"""Unit tests for patter.handlers.telnyx_handler — webhook response, audio sender."""
+"""Unit tests for getpatter.handlers.telnyx_handler — webhook response, audio sender."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from patter.handlers.telnyx_handler import (
+from getpatter.handlers.telnyx_handler import (
     TelnyxAudioSender,
     _MAX_WS_MESSAGE_BYTES,
     telnyx_webhook_handler,

@@ -25,8 +25,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from patter.handlers.stream_handler import PipelineStreamHandler
-from patter.providers.base import Transcript
+from getpatter.handlers.stream_handler import PipelineStreamHandler
+from getpatter.providers.base import Transcript
 
 from tests.conftest import make_agent
 

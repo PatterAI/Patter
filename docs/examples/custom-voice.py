@@ -16,7 +16,7 @@ Usage:
 
 import asyncio
 import os
-from patter import Patter, Twilio, DeepgramSTT, ElevenLabsTTS, IncomingMessage
+from getpatter import Patter, Twilio, DeepgramSTT, ElevenLabsTTS, IncomingMessage
 
 PHONE_NUMBER = os.environ.get("TWILIO_PHONE_NUMBER", "+14155550000")  # E.164 format
 

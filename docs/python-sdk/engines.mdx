@@ -12,7 +12,7 @@ Patter ships with two engine classes today:
 - [`OpenAIRealtime`](#openairealtime) — OpenAI's Realtime API
 - [`ElevenLabsConvAI`](#elevenlabsconvai) — ElevenLabs Conversational AI
 
-Each class ships as both a **flat alias** (`from patter import OpenAIRealtime`) and a **namespaced** class (`from patter.engines import openai` → `openai.Realtime()`). They are equivalent.
+Each class ships as both a **flat alias** (`from getpatter import OpenAIRealtime`) and a **namespaced** class (`from getpatter.engines import openai` → `openai.Realtime()`). They are equivalent.
 
 If you need full control over STT, LLM, and TTS independently, use [pipeline mode](/python-sdk/llm#pipeline-mode) instead and omit `engine=`.
 
@@ -22,7 +22,7 @@ OpenAI's Realtime API — the lowest-latency option.
 
 ```python
 import asyncio
-from patter import Patter, Twilio, OpenAIRealtime
+from getpatter import Patter, Twilio, OpenAIRealtime
 
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")   # TWILIO_* from env
 
@@ -47,7 +47,7 @@ asyncio.run(main())
 Namespaced form:
 
 ```python
-from patter.engines import openai as openai_engine
+from getpatter.engines import openai as openai_engine
 
 engine = openai_engine.Realtime()                     # reads OPENAI_API_KEY
 engine = openai_engine.Realtime(voice="nova", model="gpt-4o-mini-realtime-preview")
@@ -59,7 +59,7 @@ ElevenLabs Conversational AI — premium voice quality using a managed agent con
 
 ```python
 import asyncio
-from patter import Patter, Twilio, ElevenLabsConvAI
+from getpatter import Patter, Twilio, ElevenLabsConvAI
 
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")   # TWILIO_* from env
 
@@ -83,7 +83,7 @@ asyncio.run(main())
 Namespaced form:
 
 ```python
-from patter.engines import elevenlabs as elevenlabs_engine
+from getpatter.engines import elevenlabs as elevenlabs_engine
 
 engine = elevenlabs_engine.ConvAI()                   # reads env
 engine = elevenlabs_engine.ConvAI(agent_id="agent_abc123", voice="rachel")

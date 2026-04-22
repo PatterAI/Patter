@@ -1,4 +1,4 @@
-"""Unit tests for patter.dashboard.store — MetricsStore."""
+"""Unit tests for getpatter.dashboard.store — MetricsStore."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from patter.dashboard.store import MetricsStore, MetricsStoreProtocol
-from patter.models import CallMetrics, CostBreakdown, LatencyBreakdown
+from getpatter.dashboard.store import MetricsStore, MetricsStoreProtocol
+from getpatter.models import CallMetrics, CostBreakdown, LatencyBreakdown
 
 
 # ---------------------------------------------------------------------------

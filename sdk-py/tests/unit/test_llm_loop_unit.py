@@ -1,4 +1,4 @@
-"""Unit tests for patter.services.llm_loop — LLMLoop and LLMProvider."""
+"""Unit tests for getpatter.services.llm_loop — LLMLoop and LLMProvider."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from patter.services.llm_loop import LLMLoop, LLMProvider, OpenAILLMProvider
+from getpatter.services.llm_loop import LLMLoop, LLMProvider, OpenAILLMProvider
 
 
 # ---------------------------------------------------------------------------

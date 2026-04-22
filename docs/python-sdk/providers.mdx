@@ -14,7 +14,7 @@ Pass an `engine=` instance to `phone.agent()`. The engine collapses STT, LLM, an
 ### OpenAI Realtime
 
 ```python
-from patter import Patter, Twilio, OpenAIRealtime
+from getpatter import Patter, Twilio, OpenAIRealtime
 
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")   # TWILIO_* from env
 
@@ -42,7 +42,7 @@ OpenAI Realtime handles audio encoding automatically based on your telephony pro
 Uses an agent configured in the ElevenLabs dashboard. Ideal when voice quality is the top priority.
 
 ```python
-from patter import Patter, Twilio, ElevenLabsConvAI
+from getpatter import Patter, Twilio, ElevenLabsConvAI
 
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")
 
@@ -62,7 +62,7 @@ Build a custom voice pipeline by combining a separate STT, LLM, and TTS. Omit `e
 
 ```python
 import asyncio
-from patter import Patter, Twilio, DeepgramSTT, ElevenLabsTTS
+from getpatter import Patter, Twilio, DeepgramSTT, ElevenLabsTTS
 
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")
 
@@ -93,7 +93,7 @@ Pipeline mode needs both an STT and a TTS instance. If you rely on env vars only
 All STT classes are instantiated directly and read their API key from a matching env var when omitted.
 
 ```python
-from patter import DeepgramSTT, WhisperSTT, CartesiaSTT, AssemblyAISTT, SonioxSTT
+from getpatter import DeepgramSTT, WhisperSTT, CartesiaSTT, AssemblyAISTT, SonioxSTT
 
 DeepgramSTT(endpointing_ms=80)                # DEEPGRAM_API_KEY
 WhisperSTT(language="es")                     # OPENAI_API_KEY
@@ -102,14 +102,14 @@ AssemblyAISTT()                               # ASSEMBLYAI_API_KEY
 SonioxSTT()                                   # SONIOX_API_KEY
 ```
 
-The namespaced equivalents live under `patter.stt` (e.g. `from patter.stt import deepgram; deepgram.STT(...)`). See the dedicated [STT page](/python-sdk/stt) for the full parameter tables.
+The namespaced equivalents live under `getpatter.stt` (e.g. `from getpatter.stt import deepgram; deepgram.STT(...)`). See the dedicated [STT page](/python-sdk/stt) for the full parameter tables.
 
 ---
 
 ## TTS Providers
 
 ```python
-from patter import ElevenLabsTTS, OpenAITTS, CartesiaTTS, RimeTTS, LMNTTTS
+from getpatter import ElevenLabsTTS, OpenAITTS, CartesiaTTS, RimeTTS, LMNTTTS
 
 ElevenLabsTTS(voice_id="rachel")              # ELEVENLABS_API_KEY
 OpenAITTS(voice="nova")                       # OPENAI_API_KEY
@@ -118,7 +118,7 @@ RimeTTS(model="arcana", speaker="astra")      # RIME_API_KEY
 LMNTTTS(model="blizzard", voice="leah")       # LMNT_API_KEY
 ```
 
-The namespaced equivalents live under `patter.tts` (e.g. `from patter.tts import elevenlabs; elevenlabs.TTS(...)`). See the dedicated [TTS page](/python-sdk/tts) for the full parameter tables.
+The namespaced equivalents live under `getpatter.tts` (e.g. `from getpatter.tts import elevenlabs; elevenlabs.TTS(...)`). See the dedicated [TTS page](/python-sdk/tts) for the full parameter tables.
 
 <Note>
   OpenAI TTS returns audio at 24 kHz. Patter automatically resamples it to 16 kHz for telephony compatibility.
@@ -144,7 +144,7 @@ The namespaced equivalents live under `patter.tts` (e.g. `from patter.tts import
 import os
 import asyncio
 from dotenv import load_dotenv
-from patter import Patter, Twilio, DeepgramSTT, ElevenLabsTTS
+from getpatter import Patter, Twilio, DeepgramSTT, ElevenLabsTTS
 
 load_dotenv()
 

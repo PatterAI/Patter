@@ -7,13 +7,13 @@ description: "Text-to-speech providers supported by Patter."
 
 TTS is used in **pipeline mode** to synthesize the agent's response audio. If you use an [engine](/python-sdk/engines) such as `OpenAIRealtime` or `ElevenLabsConvAI`, speech synthesis is handled internally by the engine.
 
-Each TTS ships as both a **namespaced** class (`from patter.tts import elevenlabs` → `elevenlabs.TTS()`) and a **flat alias** (`from patter import ElevenLabsTTS`). They are equivalent — the flat aliases are convenient for short examples, the namespaced form avoids name collisions when mixing providers.
+Each TTS ships as both a **namespaced** class (`from getpatter.tts import elevenlabs` → `elevenlabs.TTS()`) and a **flat alias** (`from getpatter import ElevenLabsTTS`). They are equivalent — the flat aliases are convenient for short examples, the namespaced form avoids name collisions when mixing providers.
 
 ## Quickstart
 
 ```python
 import asyncio
-from patter import Patter, Twilio, DeepgramSTT, ElevenLabsTTS
+from getpatter import Patter, Twilio, DeepgramSTT, ElevenLabsTTS
 
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")  # TWILIO_* from env
 
@@ -32,8 +32,8 @@ asyncio.run(main())
 The same agent using namespaced imports:
 
 ```python
-from patter.stt import deepgram
-from patter.tts import elevenlabs
+from getpatter.stt import deepgram
+from getpatter.tts import elevenlabs
 
 agent = phone.agent(
     stt=deepgram.STT(),
@@ -46,18 +46,18 @@ agent = phone.agent(
 
 | Flat import | Namespaced import | Env var | Install extra |
 |-------------|-------------------|---------|---------------|
-| `ElevenLabsTTS` | `patter.tts.elevenlabs.TTS` | `ELEVENLABS_API_KEY` | included |
-| `OpenAITTS` | `patter.tts.openai.TTS` | `OPENAI_API_KEY` | included |
-| `CartesiaTTS` | `patter.tts.cartesia.TTS` | `CARTESIA_API_KEY` | `getpatter[cartesia]` |
-| `RimeTTS` | `patter.tts.rime.TTS` | `RIME_API_KEY` | `getpatter[rime]` |
-| `LMNTTTS` | `patter.tts.lmnt.TTS` | `LMNT_API_KEY` | `getpatter[lmnt]` |
+| `ElevenLabsTTS` | `getpatter.tts.elevenlabs.TTS` | `ELEVENLABS_API_KEY` | included |
+| `OpenAITTS` | `getpatter.tts.openai.TTS` | `OPENAI_API_KEY` | included |
+| `CartesiaTTS` | `getpatter.tts.cartesia.TTS` | `CARTESIA_API_KEY` | `getpatter[cartesia]` |
+| `RimeTTS` | `getpatter.tts.rime.TTS` | `RIME_API_KEY` | `getpatter[rime]` |
+| `LMNTTTS` | `getpatter.tts.lmnt.TTS` | `LMNT_API_KEY` | `getpatter[lmnt]` |
 
 ## ElevenLabs
 
 Streaming HTTP TTS via ElevenLabs `eleven_turbo_v2_5`.
 
 ```python
-from patter import ElevenLabsTTS
+from getpatter import ElevenLabsTTS
 
 tts = ElevenLabsTTS()                        # reads ELEVENLABS_API_KEY
 tts = ElevenLabsTTS(voice_id="rachel")
@@ -74,7 +74,7 @@ tts = ElevenLabsTTS(api_key="...", voice_id="21m00Tcm4TlvDq8ikWAM", model_id="el
 ## OpenAI
 
 ```python
-from patter import OpenAITTS
+from getpatter import OpenAITTS
 
 tts = OpenAITTS()                            # reads OPENAI_API_KEY
 tts = OpenAITTS(voice="nova")
@@ -93,7 +93,7 @@ tts = OpenAITTS(voice="nova")
 Raw PCM streaming via Cartesia's sonic-2 bytes endpoint. See [Cartesia setup](/python-sdk/providers/cartesia).
 
 ```python
-from patter import CartesiaTTS
+from getpatter import CartesiaTTS
 
 tts = CartesiaTTS()                          # reads CARTESIA_API_KEY
 tts = CartesiaTTS(voice="f786b574-daa5-4673-aa0c-cbe3e8534c02")  # Katie
@@ -104,7 +104,7 @@ tts = CartesiaTTS(voice="f786b574-daa5-4673-aa0c-cbe3e8534c02")  # Katie
 Arcana (high fidelity) and Mist (low latency) via Rime's HTTP endpoint. See [Rime setup](/python-sdk/providers/rime).
 
 ```python
-from patter import RimeTTS
+from getpatter import RimeTTS
 
 tts = RimeTTS()                              # reads RIME_API_KEY
 tts = RimeTTS(model="arcana", speaker="astra")
@@ -116,7 +116,7 @@ tts = RimeTTS(model="mistv2", speaker="cove", speed_alpha=1.1, reduce_latency=Tr
 Blizzard and Aurora via the LMNT HTTP API. See [LMNT setup](/python-sdk/providers/lmnt).
 
 ```python
-from patter import LMNTTTS
+from getpatter import LMNTTTS
 
 tts = LMNTTTS()                              # reads LMNT_API_KEY
 tts = LMNTTTS(model="blizzard", voice="leah")

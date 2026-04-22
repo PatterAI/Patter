@@ -22,7 +22,7 @@ Patter supports two voice AI architectures:
 Pass an `engine=` instance to `phone.agent()`. The engine handles STT + LLM + TTS in a single streaming connection with the provider — lowest latency, fewest moving parts.
 
 ```python
-from patter import Patter, Twilio, OpenAIRealtime
+from getpatter import Patter, Twilio, OpenAIRealtime
 
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")
 
@@ -39,7 +39,7 @@ ElevenLabs Conversational AI is available the same way via `engine=ElevenLabsCon
 Omit `engine=` and pass `stt=` and `tts=` instead. You get full control over each stage — mix Deepgram STT with ElevenLabs TTS and any LLM you like via the `on_message` callback.
 
 ```python
-from patter import Patter, Twilio, DeepgramSTT, ElevenLabsTTS
+from getpatter import Patter, Twilio, DeepgramSTT, ElevenLabsTTS
 
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")
 
@@ -66,7 +66,7 @@ await phone.serve(agent, on_message=handle_message)
 Both are selected via a carrier instance:
 
 ```python
-from patter import Patter, Twilio, Telnyx
+from getpatter import Patter, Twilio, Telnyx
 
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")   # TWILIO_* from env
 phone = Patter(carrier=Telnyx(), phone_number="+15550001234")   # TELNYX_* from env

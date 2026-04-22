@@ -70,7 +70,7 @@ async def on_call_end(event):
 Override default provider pricing estimates:
 
 ```python
-from patter import Patter, Twilio
+from getpatter import Patter, Twilio
 
 phone = Patter(
     carrier=Twilio(),
@@ -121,7 +121,7 @@ The `cost_so_far` value is a `CostBreakdown` dataclass, so access its fields as 
 ## Data Types
 
 ```python
-from patter import CallMetrics, CostBreakdown, LatencyBreakdown, TurnMetrics
+from getpatter import CallMetrics, CostBreakdown, LatencyBreakdown, TurnMetrics
 ```
 
 ### CallMetrics

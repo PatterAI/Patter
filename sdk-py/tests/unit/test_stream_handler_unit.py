@@ -1,4 +1,4 @@
-"""Unit tests for patter.handlers.stream_handler — shared helpers, base class, guardrails."""
+"""Unit tests for getpatter.handlers.stream_handler — shared helpers, base class, guardrails."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from patter.handlers.stream_handler import (
+from getpatter.handlers.stream_handler import (
     AudioSender,
     END_CALL_TOOL,
     StreamHandler,
@@ -19,7 +19,7 @@ from patter.handlers.stream_handler import (
     evaluate_guardrails,
     resolve_agent_prompt,
 )
-from patter.models import Agent, STTConfig, TTSConfig
+from getpatter.models import Agent, STTConfig, TTSConfig
 
 from tests.conftest import make_agent
 

@@ -4,8 +4,8 @@ import time
 
 import pytest
 
-from patter.dashboard.store import MetricsStore
-from patter.models import CallMetrics, CostBreakdown, LatencyBreakdown, TurnMetrics
+from getpatter.dashboard.store import MetricsStore
+from getpatter.models import CallMetrics, CostBreakdown, LatencyBreakdown, TurnMetrics
 
 _has_fastapi = False
 try:
@@ -157,7 +157,7 @@ class TestDashboardRoutes:
     @pytest.mark.skipif(not _has_fastapi, reason="fastapi not installed")
     def test_mount_dashboard_adds_routes(self):
         from fastapi import FastAPI
-        from patter.dashboard.routes import mount_dashboard
+        from getpatter.dashboard.routes import mount_dashboard
 
         app = FastAPI()
         store = MetricsStore()
@@ -175,7 +175,7 @@ class TestDashboardHTML:
     """Test that the dashboard HTML template is valid."""
 
     def test_html_contains_key_elements(self):
-        from patter.dashboard.ui import DASHBOARD_HTML
+        from getpatter.dashboard.ui import DASHBOARD_HTML
 
         assert "Patter" in DASHBOARD_HTML
         assert "Dashboard" in DASHBOARD_HTML
@@ -191,7 +191,7 @@ class TestServerDashboardIntegration:
 
     def test_server_has_dashboard_param(self):
         import inspect
-        from patter.server import EmbeddedServer
+        from getpatter.server import EmbeddedServer
 
         sig = inspect.signature(EmbeddedServer.__init__)
         assert "dashboard" in sig.parameters
@@ -199,16 +199,16 @@ class TestServerDashboardIntegration:
 
     def test_serve_has_dashboard_param(self):
         import inspect
-        from patter.client import Patter
+        from getpatter.client import Patter
 
         sig = inspect.signature(Patter.serve)
         assert "dashboard" in sig.parameters
         assert sig.parameters["dashboard"].default is True
 
     def test_wrap_callbacks_returns_callables(self):
-        from patter.server import EmbeddedServer
-        from patter.local_config import LocalConfig
-        from patter.models import Agent
+        from getpatter.server import EmbeddedServer
+        from getpatter.local_config import LocalConfig
+        from getpatter.models import Agent
 
         config = LocalConfig(
             telephony_provider="twilio",
@@ -221,7 +221,7 @@ class TestServerDashboardIntegration:
         agent = Agent(system_prompt="Test", voice="alloy", model="gpt-4o-mini-realtime-preview")
         server = EmbeddedServer(config=config, agent=agent, dashboard=True)
         # Force store creation
-        from patter.dashboard.store import MetricsStore
+        from getpatter.dashboard.store import MetricsStore
         server._metrics_store = MetricsStore()
 
         start_cb, end_cb, metrics_cb = server._wrap_callbacks()

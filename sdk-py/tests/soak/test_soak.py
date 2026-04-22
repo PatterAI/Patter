@@ -16,8 +16,8 @@ from unittest.mock import AsyncMock
 import psutil
 import pytest
 
-from patter.dashboard.store import MetricsStore
-from patter.services.metrics import CallMetricsAccumulator
+from getpatter.dashboard.store import MetricsStore
+from getpatter.services.metrics import CallMetricsAccumulator
 
 
 # ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-"""Unit tests for patter.server — EmbeddedServer construction & HTTP routes.
+"""Unit tests for getpatter.server — EmbeddedServer construction & HTTP routes.
 
 Tests the FastAPI app created by ``_create_app()``. Route handler tests
 call the endpoint functions directly with mock Request objects (avoiding
@@ -12,8 +12,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from patter.local_config import LocalConfig
-from patter.server import EmbeddedServer
+from getpatter.local_config import LocalConfig
+from getpatter.server import EmbeddedServer
 
 from tests.conftest import make_agent
 
@@ -299,7 +299,7 @@ class TestTwilioVoiceRoute:
     """POST /webhooks/twilio/voice returns TwiML."""
 
     @pytest.mark.asyncio
-    @patch("patter.providers.twilio_adapter.TwilioAdapter")
+    @patch("getpatter.providers.twilio_adapter.TwilioAdapter")
     async def test_twilio_voice_returns_xml_no_sig_validation(self, mock_adapter_cls) -> None:
         mock_adapter_cls.generate_stream_twiml.return_value = "<Response><Connect/></Response>"
         srv = _make_server()
@@ -953,7 +953,7 @@ class TestBanner:
     """show_banner() prints the ASCII art banner."""
 
     def test_show_banner_runs(self, capsys) -> None:
-        from patter.banner import show_banner
+        from getpatter.banner import show_banner
 
         show_banner()
         captured = capsys.readouterr()
@@ -966,53 +966,53 @@ class TestBanner:
 
 
 class TestCommonHandlers:
-    """Tests for patter.handlers.common functions."""
+    """Tests for getpatter.handlers.common functions."""
 
     def test_validate_e164_valid(self) -> None:
-        from patter.handlers.common import _validate_e164
+        from getpatter.handlers.common import _validate_e164
 
         assert _validate_e164("+15551234567") is True
 
     def test_validate_e164_invalid_no_plus(self) -> None:
-        from patter.handlers.common import _validate_e164
+        from getpatter.handlers.common import _validate_e164
 
         assert _validate_e164("15551234567") is False
 
     def test_validate_e164_invalid_too_short(self) -> None:
-        from patter.handlers.common import _validate_e164
+        from getpatter.handlers.common import _validate_e164
 
         assert _validate_e164("+123") is False
 
     def test_sanitize_variable_value_strips_control_chars(self) -> None:
-        from patter.handlers.common import _sanitize_variable_value
+        from getpatter.handlers.common import _sanitize_variable_value
 
         result = _sanitize_variable_value("hello\x00world\x0a")
         assert "\x00" not in result
 
     def test_sanitize_variable_value_truncates_at_500(self) -> None:
-        from patter.handlers.common import _sanitize_variable_value
+        from getpatter.handlers.common import _sanitize_variable_value
 
         result = _sanitize_variable_value("x" * 1000)
         assert len(result) == 500
 
     def test_resolve_variables_replaces_placeholders(self) -> None:
-        from patter.handlers.common import _resolve_variables
+        from getpatter.handlers.common import _resolve_variables
 
         result = _resolve_variables("Hello {name}, age {age}", {"name": "Alice", "age": "30"})
         assert result == "Hello Alice, age 30"
 
     def test_resolve_variables_no_match_unchanged(self) -> None:
-        from patter.handlers.common import _resolve_variables
+        from getpatter.handlers.common import _resolve_variables
 
         result = _resolve_variables("Hello {name}", {"other": "value"})
         assert result == "Hello {name}"
 
     def test_create_stt_from_config_none(self) -> None:
-        from patter.handlers.common import _create_stt_from_config
+        from getpatter.handlers.common import _create_stt_from_config
 
         assert _create_stt_from_config(None) is None
 
     def test_create_tts_from_config_none(self) -> None:
-        from patter.handlers.common import _create_tts_from_config
+        from getpatter.handlers.common import _create_tts_from_config
 
         assert _create_tts_from_config(None) is None

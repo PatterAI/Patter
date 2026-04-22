@@ -2,7 +2,7 @@
 
 from unittest.mock import AsyncMock
 
-from patter.services.session_manager import CallSession, SessionManager
+from getpatter.services.session_manager import CallSession, SessionManager
 
 
 # --- SessionManager ---

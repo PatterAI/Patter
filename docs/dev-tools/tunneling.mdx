@@ -13,8 +13,8 @@ The built-in Cloudflare Quick Tunnel creates a public `*.trycloudflare.com` URL.
 
 <CodeGroup>
 ```python Python
-from patter import Patter, Twilio
-from patter.tunnels import CloudflareTunnel
+from getpatter import Patter, Twilio
+from getpatter.tunnels import CloudflareTunnel
 
 phone = Patter(
     carrier=Twilio(),
@@ -88,8 +88,8 @@ ngrok http 8000
 
 <CodeGroup>
 ```python Python
-from patter import Patter, Twilio
-from patter.tunnels import Static
+from getpatter import Patter, Twilio
+from getpatter.tunnels import Static
 
 phone = Patter(
     carrier=Twilio(),

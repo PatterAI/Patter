@@ -69,14 +69,14 @@ def _make_mock_ws(messages: list[str]) -> AsyncMock:
 def _patched_bridge_deps():
     """Patch the heavy dependencies the bridge pulls in."""
     with patch(
-        "patter.handlers.telnyx_handler.OpenAIRealtimeStreamHandler"
+        "getpatter.handlers.telnyx_handler.OpenAIRealtimeStreamHandler"
     ) as mock_handler_cls, patch(
-        "patter.handlers.telnyx_handler.create_metrics_accumulator"
+        "getpatter.handlers.telnyx_handler.create_metrics_accumulator"
     ) as mock_metrics_fn, patch(
-        "patter.handlers.telnyx_handler.resolve_agent_prompt",
+        "getpatter.handlers.telnyx_handler.resolve_agent_prompt",
         return_value="prompt",
     ), patch(
-        "patter.handlers.telnyx_handler.fetch_deepgram_cost",
+        "getpatter.handlers.telnyx_handler.fetch_deepgram_cost",
         new_callable=AsyncMock,
     ):
         mock_handler = AsyncMock()
@@ -103,7 +103,7 @@ class TestTelnyxTrackFilter:
     async def test_inbound_track_forwards_audio(
         self, _patched_bridge_deps
     ) -> None:
-        from patter.handlers.telnyx_handler import telnyx_stream_bridge
+        from getpatter.handlers.telnyx_handler import telnyx_stream_bridge
 
         handler = _patched_bridge_deps
         audio = b"\x00\x01" * 160  # 20 ms of PCMU 8 kHz
@@ -127,7 +127,7 @@ class TestTelnyxTrackFilter:
         self, _patched_bridge_deps
     ) -> None:
         """The outbound echo must never reach the handler."""
-        from patter.handlers.telnyx_handler import telnyx_stream_bridge
+        from getpatter.handlers.telnyx_handler import telnyx_stream_bridge
 
         handler = _patched_bridge_deps
         echo = b"\xff\xfe" * 160
@@ -151,7 +151,7 @@ class TestTelnyxTrackFilter:
         self, _patched_bridge_deps
     ) -> None:
         """Older Telnyx payloads omit the field; default to inbound."""
-        from patter.handlers.telnyx_handler import telnyx_stream_bridge
+        from getpatter.handlers.telnyx_handler import telnyx_stream_bridge
 
         handler = _patched_bridge_deps
         audio = b"\x11\x22" * 160
@@ -175,7 +175,7 @@ class TestTelnyxTrackFilter:
         self, _patched_bridge_deps
     ) -> None:
         """With both tracks in the same stream, only inbound must pass."""
-        from patter.handlers.telnyx_handler import telnyx_stream_bridge
+        from getpatter.handlers.telnyx_handler import telnyx_stream_bridge
 
         handler = _patched_bridge_deps
         inbound_a = b"\xaa\xaa" * 160
@@ -207,7 +207,7 @@ class TestTelnyxTrackFilter:
         self, _patched_bridge_deps
     ) -> None:
         """Defensive — anything that isn't literally 'inbound' is skipped."""
-        from patter.handlers.telnyx_handler import telnyx_stream_bridge
+        from getpatter.handlers.telnyx_handler import telnyx_stream_bridge
 
         handler = _patched_bridge_deps
         ws = _make_mock_ws(

@@ -26,8 +26,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from patter.handlers.stream_handler import PipelineStreamHandler
-from patter.models import PipelineHooks
+from getpatter.handlers.stream_handler import PipelineStreamHandler
+from getpatter.models import PipelineHooks
 
 from tests.conftest import fake_pcm_frame, make_agent
 

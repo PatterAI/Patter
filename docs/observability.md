@@ -18,7 +18,7 @@ Then call `init_tracing` once at process start — typically from the same
 module that creates your `Patter` client:
 
 ```python
-from patter.observability import init_tracing
+from getpatter.observability import init_tracing
 
 init_tracing(
     service_name="my-voice-bot",
@@ -34,9 +34,9 @@ every span becomes a no-op — **zero cost** when disabled.
 
 | Span name      | Fires                                     | Attributes                                      |
 |----------------|-------------------------------------------|-------------------------------------------------|
-| `patter.stt`   | One per final transcript                  | `patter.stt.text_len`, `patter.stt.confidence`  |
+| `getpatter.stt`   | One per final transcript                  | `getpatter.stt.text_len`, `getpatter.stt.confidence`  |
 | `patter.llm`   | One per LLM iteration (incl. tool rounds) | `patter.llm.iteration`, `patter.llm.history_size` |
-| `patter.tts`   | One per synthesized sentence              | `patter.tts.text_len`                           |
+| `getpatter.tts`   | One per synthesized sentence              | `getpatter.tts.text_len`                           |
 | `patter.tool`  | One per tool invocation                   | `patter.tool.name`, `patter.tool.transport`     |
 
 Every span also carries the current `patter.call.id` so you can group by
@@ -53,7 +53,7 @@ traces safe to ship to a shared Jaeger / Honeycomb / Grafana Cloud instance.
 Call `shutdown_tracing()` during graceful shutdown to flush any pending spans:
 
 ```python
-from patter.observability import shutdown_tracing
+from getpatter.observability import shutdown_tracing
 
 shutdown_tracing()
 ```
@@ -64,7 +64,7 @@ shutdown_tracing()
   that calls `init_tracing`*. A quick check:
 
   ```python
-  from patter.observability import is_enabled
+  from getpatter.observability import is_enabled
   print(is_enabled())
   ```
 

@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from patter import (
+from getpatter import (
     DeepgramSTT,
     ElevenLabsTTS,
     OpenAIRealtime,
@@ -17,7 +17,7 @@ from patter import (
     guardrail,
     tool,
 )
-from patter.models import Agent, Guardrail
+from getpatter.models import Agent, Guardrail
 
 
 # ---------------------------------------------------------------------------
@@ -247,7 +247,7 @@ def test_call_valid_e164_accepted():
     phone = _local_phone()
     agent = phone.agent(engine=OpenAIRealtime(api_key="sk"), system_prompt="test")
 
-    with patch("patter.providers.twilio_adapter.TwilioAdapter") as MockAdapter:
+    with patch("getpatter.providers.twilio_adapter.TwilioAdapter") as MockAdapter:
         mock_instance = MagicMock()
         mock_instance.initiate_call = AsyncMock(return_value="CA123")
         MockAdapter.return_value = mock_instance
@@ -498,8 +498,8 @@ async def test_guardrail_triggers_cancel_and_replacement():
 
     mock_adapter.receive_events = MagicMock(return_value=fake_events())
 
-    with patch("patter.providers.openai_realtime.OpenAIRealtimeAdapter", return_value=mock_adapter):
-        from patter.handlers.twilio_handler import twilio_stream_bridge
+    with patch("getpatter.providers.openai_realtime.OpenAIRealtimeAdapter", return_value=mock_adapter):
+        from getpatter.handlers.twilio_handler import twilio_stream_bridge
 
         try:
             await asyncio.wait_for(
@@ -572,8 +572,8 @@ async def test_guardrail_does_not_trigger_on_clean_response():
 
     mock_adapter.receive_events = MagicMock(return_value=fake_events())
 
-    with patch("patter.providers.openai_realtime.OpenAIRealtimeAdapter", return_value=mock_adapter):
-        from patter.handlers.twilio_handler import twilio_stream_bridge
+    with patch("getpatter.providers.openai_realtime.OpenAIRealtimeAdapter", return_value=mock_adapter):
+        from getpatter.handlers.twilio_handler import twilio_stream_bridge
 
         try:
             await asyncio.wait_for(

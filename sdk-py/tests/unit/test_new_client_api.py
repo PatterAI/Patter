@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from patter import (
+from getpatter import (
     ElevenLabsConvAI,
     Guardrail,
     OpenAIRealtime,
@@ -26,9 +26,9 @@ from patter import (
     guardrail,
     tool,
 )
-from patter.stt import deepgram as deepgram_stt
-from patter.tts import elevenlabs as elevenlabs_tts
-from patter.tunnels import CloudflareTunnel, Ngrok, Static
+from getpatter.stt import deepgram as deepgram_stt
+from getpatter.tts import elevenlabs as elevenlabs_tts
+from getpatter.tunnels import CloudflareTunnel, Ngrok, Static
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +160,7 @@ class TestSTTTTSDispatch:
 
     def test_stt_provider_bypasses_config_resolution(self) -> None:
         """An STTProvider instance must flow through untouched to downstream dispatch."""
-        from patter.handlers.common import _create_stt_from_config, _create_tts_from_config
+        from getpatter.handlers.common import _create_stt_from_config, _create_tts_from_config
 
         stt = deepgram_stt.STT(api_key="dg_bypass")
         tts = elevenlabs_tts.TTS(api_key="el_bypass")

@@ -13,7 +13,7 @@ import pytest
 
 pytest.importorskip("apscheduler")
 
-from patter.scheduler import (  # noqa: E402
+from getpatter.scheduler import (  # noqa: E402
     ScheduleHandle,
     schedule_interval,
     schedule_once,

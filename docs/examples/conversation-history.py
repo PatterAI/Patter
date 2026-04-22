@@ -1,6 +1,6 @@
 """Conversation history — agent remembers the entire call."""
 import asyncio
-from patter import Patter, Twilio, OpenAIRealtime
+from getpatter import Patter, Twilio, OpenAIRealtime
 
 
 async def on_transcript(data: dict) -> None:

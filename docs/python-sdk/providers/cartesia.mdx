@@ -17,13 +17,13 @@ pip install "getpatter[cartesia]"
 
 ```python
 # Namespaced import
-from patter.stt import cartesia
+from getpatter.stt import cartesia
 
 stt = cartesia.STT()                                      # reads CARTESIA_API_KEY
 stt = cartesia.STT(api_key="csk_...", language="en")
 
 # Flat alias (equivalent)
-from patter import CartesiaSTT
+from getpatter import CartesiaSTT
 
 stt = CartesiaSTT()
 ```
@@ -32,7 +32,7 @@ Plug it into an agent:
 
 ```python
 import asyncio
-from patter import Patter, Twilio, CartesiaSTT, ElevenLabsTTS
+from getpatter import Patter, Twilio, CartesiaSTT, ElevenLabsTTS
 
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")
 
@@ -50,7 +50,7 @@ Supported sample rates: 8000, 16000, 24000, 44100, 48000 Hz.
 ## Low-level usage
 
 ```python
-from patter.providers.cartesia_stt import CartesiaSTT as _LowLevelSTT
+from getpatter.providers.cartesia_stt import CartesiaSTT as _LowLevelSTT
 
 stt = _LowLevelSTT(api_key="csk_...", language="en")
 await stt.connect()
@@ -68,13 +68,13 @@ await stt.close()
 
 ```python
 # Namespaced import
-from patter.tts import cartesia
+from getpatter.tts import cartesia
 
 tts = cartesia.TTS()                                      # reads CARTESIA_API_KEY
 tts = cartesia.TTS(voice="f786b574-daa5-4673-aa0c-cbe3e8534c02")  # Katie
 
 # Flat alias (equivalent)
-from patter import CartesiaTTS
+from getpatter import CartesiaTTS
 
 tts = CartesiaTTS(voice="f786b574-daa5-4673-aa0c-cbe3e8534c02")
 ```
@@ -82,7 +82,7 @@ tts = CartesiaTTS(voice="f786b574-daa5-4673-aa0c-cbe3e8534c02")
 In an agent:
 
 ```python
-from patter import Patter, Twilio, DeepgramSTT, CartesiaTTS
+from getpatter import Patter, Twilio, DeepgramSTT, CartesiaTTS
 
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")
 

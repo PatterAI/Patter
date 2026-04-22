@@ -37,7 +37,7 @@ dependencies = [
 ]
 
 [project.scripts]
-patter = "patter.cli:main"
+getpatter = "getpatter.cli:main"
 
 [project.urls]
 Homepage = "https://www.getpatter.com"
@@ -151,11 +151,11 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["patter*"]
+include = ["getpatter*"]
 
 [tool.setuptools.package-data]
-"patter.resources" = ["*.onnx"]
-"patter.resources.audio" = ["*.ogg", "NOTICE"]
+"getpatter.resources" = ["*.onnx"]
+"getpatter.resources.audio" = ["*.ogg", "NOTICE"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

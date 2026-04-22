@@ -1,4 +1,4 @@
-"""Unit tests for patter.handlers.twilio_handler — TwiML, validation, audio sender."""
+"""Unit tests for getpatter.handlers.twilio_handler — TwiML, validation, audio sender."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from patter.handlers.twilio_handler import (
+from getpatter.handlers.twilio_handler import (
     TwilioAudioSender,
     _validate_twilio_sid,
     _xml_escape,
@@ -97,7 +97,7 @@ class TestXmlEscape:
 class TestTwilioWebhookHandler:
     """twilio_webhook_handler generates valid TwiML."""
 
-    @patch("patter.providers.twilio_adapter.TwilioAdapter")
+    @patch("getpatter.providers.twilio_adapter.TwilioAdapter")
     def test_generates_twiml(self, mock_adapter_cls) -> None:
         mock_adapter_cls.generate_stream_twiml.return_value = (
             '<?xml version="1.0"?><Response><Connect><Stream url="wss://host/ws/stream/CA123" /></Connect></Response>'
@@ -112,7 +112,7 @@ class TestTwilioWebhookHandler:
         assert "<Stream" in result or "<Connect" in result
         mock_adapter_cls.generate_stream_twiml.assert_called_once()
 
-    @patch("patter.providers.twilio_adapter.TwilioAdapter")
+    @patch("getpatter.providers.twilio_adapter.TwilioAdapter")
     def test_stream_url_includes_call_sid(self, mock_adapter_cls) -> None:
         mock_adapter_cls.generate_stream_twiml.return_value = "<Response/>"
         twilio_webhook_handler(
@@ -138,15 +138,15 @@ class TestTwilioAudioSender:
     def _make_sender(self) -> tuple[TwilioAudioSender, AsyncMock]:
         ws = AsyncMock()
         ws.send_text = AsyncMock()
-        with patch("patter.handlers.twilio_handler.pcm16_to_mulaw", create=True), \
-             patch("patter.handlers.twilio_handler.resample_16k_to_8k", create=True):
+        with patch("getpatter.handlers.twilio_handler.pcm16_to_mulaw", create=True), \
+             patch("getpatter.handlers.twilio_handler.resample_16k_to_8k", create=True):
             # Patch the imports within the constructor
             with patch(
-                "patter.services.transcoding.pcm16_to_mulaw",
+                "getpatter.services.transcoding.pcm16_to_mulaw",
                 side_effect=lambda x: x,
                 create=True,
             ), patch(
-                "patter.services.transcoding.resample_16k_to_8k",
+                "getpatter.services.transcoding.resample_16k_to_8k",
                 side_effect=lambda x: x,
                 create=True,
             ):
@@ -160,11 +160,11 @@ class TestTwilioAudioSender:
         mock_mulaw = MagicMock(side_effect=lambda x: x)
 
         with patch(
-            "patter.services.transcoding.pcm16_to_mulaw",
+            "getpatter.services.transcoding.pcm16_to_mulaw",
             mock_mulaw,
             create=True,
         ), patch(
-            "patter.services.transcoding.resample_16k_to_8k",
+            "getpatter.services.transcoding.resample_16k_to_8k",
             mock_resample,
             create=True,
         ):
@@ -184,11 +184,11 @@ class TestTwilioAudioSender:
         ws = AsyncMock()
         ws.send_text = AsyncMock()
         with patch(
-            "patter.services.transcoding.pcm16_to_mulaw",
+            "getpatter.services.transcoding.pcm16_to_mulaw",
             lambda x: x,
             create=True,
         ), patch(
-            "patter.services.transcoding.resample_16k_to_8k",
+            "getpatter.services.transcoding.resample_16k_to_8k",
             lambda x: x,
             create=True,
         ):
@@ -204,11 +204,11 @@ class TestTwilioAudioSender:
         ws = AsyncMock()
         ws.send_text = AsyncMock()
         with patch(
-            "patter.services.transcoding.pcm16_to_mulaw",
+            "getpatter.services.transcoding.pcm16_to_mulaw",
             lambda x: x,
             create=True,
         ), patch(
-            "patter.services.transcoding.resample_16k_to_8k",
+            "getpatter.services.transcoding.resample_16k_to_8k",
             lambda x: x,
             create=True,
         ):
@@ -225,11 +225,11 @@ class TestTwilioAudioSender:
     def test_on_mark_confirmed(self) -> None:
         ws = AsyncMock()
         with patch(
-            "patter.services.transcoding.pcm16_to_mulaw",
+            "getpatter.services.transcoding.pcm16_to_mulaw",
             lambda x: x,
             create=True,
         ), patch(
-            "patter.services.transcoding.resample_16k_to_8k",
+            "getpatter.services.transcoding.resample_16k_to_8k",
             lambda x: x,
             create=True,
         ):

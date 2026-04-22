@@ -37,7 +37,7 @@ ngrok http 8000
 ```python
 import os
 from dotenv import load_dotenv
-from patter import Patter, Twilio
+from getpatter import Patter, Twilio
 
 load_dotenv()
 
@@ -172,7 +172,7 @@ await phone.disconnect()
 import os
 import asyncio
 from dotenv import load_dotenv
-from patter import Patter, Twilio, OpenAIRealtime, Tool, Guardrail
+from getpatter import Patter, Twilio, OpenAIRealtime, Tool, Guardrail
 
 load_dotenv()
 

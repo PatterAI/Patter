@@ -1,6 +1,6 @@
 """Agent with tool calling — checks inventory during the call."""
 import asyncio
-from patter import Patter, Twilio, OpenAIRealtime, Tool
+from getpatter import Patter, Twilio, OpenAIRealtime, Tool
 
 
 async def main():

@@ -19,13 +19,13 @@ Use the public STT class either namespaced or flat — both read from `ASSEMBLYA
 
 ```python
 # Namespaced import
-from patter.stt import assemblyai
+from getpatter.stt import assemblyai
 
 stt = assemblyai.STT()                                    # reads ASSEMBLYAI_API_KEY
 stt = assemblyai.STT(api_key="aa_...")
 
 # Flat alias (equivalent)
-from patter import AssemblyAISTT
+from getpatter import AssemblyAISTT
 
 stt = AssemblyAISTT()
 ```
@@ -34,7 +34,7 @@ Plug it into an agent:
 
 ```python
 import asyncio
-from patter import Patter, Twilio, AssemblyAISTT, ElevenLabsTTS
+from getpatter import Patter, Twilio, AssemblyAISTT, ElevenLabsTTS
 
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")
 
@@ -52,7 +52,7 @@ asyncio.run(phone.serve(agent))
 If you are building a custom pipeline outside `phone.agent()`, the low-level adapter stays importable:
 
 ```python
-from patter.providers.assemblyai_stt import AssemblyAISTT
+from getpatter.providers.assemblyai_stt import AssemblyAISTT
 
 stt = AssemblyAISTT(api_key="aa_...", model="universal-streaming-english")
 await stt.connect()

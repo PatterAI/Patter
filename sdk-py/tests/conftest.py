@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from patter.models import Agent
+from getpatter.models import Agent
 
 
 # ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-"""Unit tests for patter.services.tool_decorator — @tool decorator."""
+"""Unit tests for getpatter.services.tool_decorator — @tool decorator."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from typing import Optional
 
 import pytest
 
-from patter.services.tool_decorator import tool
+from getpatter.services.tool_decorator import tool
 
 
 # ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-"""Unit tests for patter.models — dataclasses and CallControl."""
+"""Unit tests for getpatter.models — dataclasses and CallControl."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from patter.models import (
+from getpatter.models import (
     Agent,
     CallControl,
     CallEvent,

@@ -5,8 +5,8 @@ from unittest.mock import patch
 
 import pytest
 
-from patter.models import CallMetrics, CostBreakdown, LatencyBreakdown, TurnMetrics
-from patter.services.metrics import CallMetricsAccumulator
+from getpatter.models import CallMetrics, CostBreakdown, LatencyBreakdown, TurnMetrics
+from getpatter.services.metrics import CallMetricsAccumulator
 
 
 class TestCallMetricsAccumulatorPipeline:

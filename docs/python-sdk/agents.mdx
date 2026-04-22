@@ -12,7 +12,7 @@ An `Agent` defines how your voice AI behaves: what it says, how it sounds, what 
 Use the `phone.agent()` factory method. The simplest form leans on env-var fallback and a default engine (`OpenAIRealtime`):
 
 ```python
-from patter import Patter, Twilio
+from getpatter import Patter, Twilio
 
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")   # TWILIO_* from env
 
@@ -25,7 +25,7 @@ agent = phone.agent(
 To pick the engine explicitly (flat imports):
 
 ```python
-from patter import OpenAIRealtime
+from getpatter import OpenAIRealtime
 
 agent = phone.agent(
     engine=OpenAIRealtime(voice="nova"),
@@ -36,7 +36,7 @@ agent = phone.agent(
 To use pipeline mode (STT + your own LLM via `on_message` + TTS):
 
 ```python
-from patter import DeepgramSTT, ElevenLabsTTS
+from getpatter import DeepgramSTT, ElevenLabsTTS
 
 agent = phone.agent(
     stt=DeepgramSTT(endpointing_ms=80),        # DEEPGRAM_API_KEY from env
@@ -49,8 +49,8 @@ agent = phone.agent(
 The same pipeline using namespaced imports:
 
 ```python
-from patter.stt import deepgram
-from patter.tts import elevenlabs
+from getpatter.stt import deepgram
+from getpatter.tts import elevenlabs
 
 agent = phone.agent(
     stt=deepgram.STT(endpointing_ms=80),
@@ -81,7 +81,7 @@ agent = phone.agent(
 `Agent` is a frozen (immutable) dataclass. You can construct it directly when you need a dataclass outside of `phone.agent()`:
 
 ```python
-from patter import Agent
+from getpatter import Agent
 
 agent = Agent(
     system_prompt="You are a helpful assistant.",
@@ -158,7 +158,7 @@ Voice is usually inferred from the engine or TTS instance — e.g. `OpenAIRealti
 ## Engine vs Pipeline Mode
 
 ```python
-from patter import OpenAIRealtime, ElevenLabsConvAI, DeepgramSTT, ElevenLabsTTS
+from getpatter import OpenAIRealtime, ElevenLabsConvAI, DeepgramSTT, ElevenLabsTTS
 
 # OpenAI Realtime (default engine) — end-to-end
 agent = phone.agent(
@@ -188,7 +188,7 @@ See [LLM](/python-sdk/llm) for a deeper comparison.
 import os
 import asyncio
 from dotenv import load_dotenv
-from patter import Patter, Twilio, OpenAIRealtime, Tool, Guardrail
+from getpatter import Patter, Twilio, OpenAIRealtime, Tool, Guardrail
 
 load_dotenv()
 

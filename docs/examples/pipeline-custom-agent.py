@@ -4,7 +4,7 @@ Bring your own LLM (Claude, GPT, LangChain, or custom logic).
 Patter handles STT, TTS, and telephony; your function handles the brain.
 """
 import asyncio
-from patter import Patter, Twilio, DeepgramSTT, ElevenLabsTTS
+from getpatter import Patter, Twilio, DeepgramSTT, ElevenLabsTTS
 
 
 # Your agent — can be Claude, GPT, LangChain, custom logic, anything.

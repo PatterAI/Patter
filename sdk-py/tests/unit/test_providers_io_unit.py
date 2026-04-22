@@ -94,13 +94,13 @@ class TestOpenAIRealtimeAdapterIO:
 
     @pytest.mark.asyncio
     async def test_connect_sends_session_update(self) -> None:
-        from patter.providers.openai_realtime import OpenAIRealtimeAdapter
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
         adapter = OpenAIRealtimeAdapter(api_key="sk-test", instructions="Be helpful.")
         mock_ws = AsyncMock()
         mock_ws.recv.return_value = json.dumps({"type": "session.created"})
 
-        with patch("patter.providers.openai_realtime.websockets.connect", side_effect=_ws_connect_side_effect(mock_ws)):
+        with patch("getpatter.providers.openai_realtime.websockets.connect", side_effect=_ws_connect_side_effect(mock_ws)):
             await adapter.connect()
 
         assert adapter._running is True
@@ -113,14 +113,14 @@ class TestOpenAIRealtimeAdapterIO:
 
     @pytest.mark.asyncio
     async def test_connect_with_tools(self) -> None:
-        from patter.providers.openai_realtime import OpenAIRealtimeAdapter
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
         tools = [{"name": "search", "description": "Search", "parameters": {"type": "object"}}]
         adapter = OpenAIRealtimeAdapter(api_key="sk-test", tools=tools)
         mock_ws = AsyncMock()
         mock_ws.recv.return_value = json.dumps({"type": "session.created"})
 
-        with patch("patter.providers.openai_realtime.websockets.connect", side_effect=_ws_connect_side_effect(mock_ws)):
+        with patch("getpatter.providers.openai_realtime.websockets.connect", side_effect=_ws_connect_side_effect(mock_ws)):
             await adapter.connect()
 
         sent = json.loads(mock_ws.send.call_args[0][0])
@@ -129,13 +129,13 @@ class TestOpenAIRealtimeAdapterIO:
 
     @pytest.mark.asyncio
     async def test_connect_default_instructions(self) -> None:
-        from patter.providers.openai_realtime import OpenAIRealtimeAdapter
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
         adapter = OpenAIRealtimeAdapter(api_key="sk-test", instructions="", language="fr")
         mock_ws = AsyncMock()
         mock_ws.recv.return_value = json.dumps({"type": "session.created"})
 
-        with patch("patter.providers.openai_realtime.websockets.connect", side_effect=_ws_connect_side_effect(mock_ws)):
+        with patch("getpatter.providers.openai_realtime.websockets.connect", side_effect=_ws_connect_side_effect(mock_ws)):
             await adapter.connect()
 
         sent = json.loads(mock_ws.send.call_args[0][0])
@@ -143,19 +143,19 @@ class TestOpenAIRealtimeAdapterIO:
 
     @pytest.mark.asyncio
     async def test_connect_raises_on_unexpected_first_message(self) -> None:
-        from patter.providers.openai_realtime import OpenAIRealtimeAdapter
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
         adapter = OpenAIRealtimeAdapter(api_key="sk-test")
         mock_ws = AsyncMock()
         mock_ws.recv.return_value = json.dumps({"type": "error"})
 
-        with patch("patter.providers.openai_realtime.websockets.connect", side_effect=_ws_connect_side_effect(mock_ws)):
+        with patch("getpatter.providers.openai_realtime.websockets.connect", side_effect=_ws_connect_side_effect(mock_ws)):
             with pytest.raises(RuntimeError, match="Expected session.created"):
                 await adapter.connect()
 
     @pytest.mark.asyncio
     async def test_send_audio_encodes_base64(self) -> None:
-        from patter.providers.openai_realtime import OpenAIRealtimeAdapter
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
         adapter = OpenAIRealtimeAdapter(api_key="sk-test")
         adapter._ws = AsyncMock()
@@ -170,7 +170,7 @@ class TestOpenAIRealtimeAdapterIO:
 
     @pytest.mark.asyncio
     async def test_cancel_response_sends_cancel(self) -> None:
-        from patter.providers.openai_realtime import OpenAIRealtimeAdapter
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
         adapter = OpenAIRealtimeAdapter(api_key="sk-test")
         adapter._ws = AsyncMock()
@@ -180,7 +180,7 @@ class TestOpenAIRealtimeAdapterIO:
 
     @pytest.mark.asyncio
     async def test_send_text_creates_item_and_triggers_response(self) -> None:
-        from patter.providers.openai_realtime import OpenAIRealtimeAdapter
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
         adapter = OpenAIRealtimeAdapter(api_key="sk-test")
         adapter._ws = AsyncMock()
@@ -195,7 +195,7 @@ class TestOpenAIRealtimeAdapterIO:
 
     @pytest.mark.asyncio
     async def test_send_function_result(self) -> None:
-        from patter.providers.openai_realtime import OpenAIRealtimeAdapter
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
         adapter = OpenAIRealtimeAdapter(api_key="sk-test")
         adapter._ws = AsyncMock()
@@ -209,7 +209,7 @@ class TestOpenAIRealtimeAdapterIO:
 
     @pytest.mark.asyncio
     async def test_receive_events_yields_audio(self) -> None:
-        from patter.providers.openai_realtime import OpenAIRealtimeAdapter
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
         adapter = OpenAIRealtimeAdapter(api_key="sk-test")
         audio_bytes = b"\xaa\xbb\xcc"
@@ -224,7 +224,7 @@ class TestOpenAIRealtimeAdapterIO:
 
     @pytest.mark.asyncio
     async def test_receive_events_yields_transcript_output(self) -> None:
-        from patter.providers.openai_realtime import OpenAIRealtimeAdapter
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
         adapter = OpenAIRealtimeAdapter(api_key="sk-test")
         messages = [json.dumps({"type": "response.audio_transcript.delta", "delta": "Hello"})]
@@ -237,7 +237,7 @@ class TestOpenAIRealtimeAdapterIO:
 
     @pytest.mark.asyncio
     async def test_receive_events_yields_transcript_input(self) -> None:
-        from patter.providers.openai_realtime import OpenAIRealtimeAdapter
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
         adapter = OpenAIRealtimeAdapter(api_key="sk-test")
         messages = [json.dumps({"type": "conversation.item.input_audio_transcription.completed", "transcript": "Hi"})]
@@ -250,7 +250,7 @@ class TestOpenAIRealtimeAdapterIO:
 
     @pytest.mark.asyncio
     async def test_receive_events_yields_speech_events(self) -> None:
-        from patter.providers.openai_realtime import OpenAIRealtimeAdapter
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
         adapter = OpenAIRealtimeAdapter(api_key="sk-test")
         messages = [
@@ -267,7 +267,7 @@ class TestOpenAIRealtimeAdapterIO:
 
     @pytest.mark.asyncio
     async def test_receive_events_yields_function_call(self) -> None:
-        from patter.providers.openai_realtime import OpenAIRealtimeAdapter
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
         adapter = OpenAIRealtimeAdapter(api_key="sk-test")
         messages = [json.dumps({
@@ -284,7 +284,7 @@ class TestOpenAIRealtimeAdapterIO:
 
     @pytest.mark.asyncio
     async def test_receive_events_yields_response_done(self) -> None:
-        from patter.providers.openai_realtime import OpenAIRealtimeAdapter
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
         adapter = OpenAIRealtimeAdapter(api_key="sk-test")
         messages = [json.dumps({"type": "response.done", "response": {"id": "r1"}})]
@@ -297,7 +297,7 @@ class TestOpenAIRealtimeAdapterIO:
 
     @pytest.mark.asyncio
     async def test_receive_events_handles_error_event(self) -> None:
-        from patter.providers.openai_realtime import OpenAIRealtimeAdapter
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
         adapter = OpenAIRealtimeAdapter(api_key="sk-test")
         messages = [json.dumps({"type": "error", "error": {"message": "bad"}})]
@@ -310,7 +310,7 @@ class TestOpenAIRealtimeAdapterIO:
 
     @pytest.mark.asyncio
     async def test_receive_events_handles_connection_closed(self) -> None:
-        from patter.providers.openai_realtime import OpenAIRealtimeAdapter
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
         adapter = OpenAIRealtimeAdapter(api_key="sk-test")
         adapter._running = True
@@ -323,7 +323,7 @@ class TestOpenAIRealtimeAdapterIO:
 
     @pytest.mark.asyncio
     async def test_receive_events_noop_when_no_ws(self) -> None:
-        from patter.providers.openai_realtime import OpenAIRealtimeAdapter
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
         adapter = OpenAIRealtimeAdapter(api_key="sk-test")
         adapter._ws = None
@@ -344,12 +344,12 @@ class TestElevenLabsConvAIAdapterIO:
 
     @pytest.mark.asyncio
     async def test_connect_without_agent_id(self) -> None:
-        from patter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
+        from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
         adapter = ElevenLabsConvAIAdapter(api_key="el-test")
         mock_ws = AsyncMock()
 
-        with patch("patter.providers.elevenlabs_convai.websockets.connect", side_effect=_ws_connect_side_effect(mock_ws)) as mc:
+        with patch("getpatter.providers.elevenlabs_convai.websockets.connect", side_effect=_ws_connect_side_effect(mock_ws)) as mc:
             await adapter.connect()
 
         assert adapter._running is True
@@ -359,12 +359,12 @@ class TestElevenLabsConvAIAdapterIO:
 
     @pytest.mark.asyncio
     async def test_connect_with_agent_id(self) -> None:
-        from patter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
+        from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
         adapter = ElevenLabsConvAIAdapter(api_key="el-test", agent_id="agent_xyz")
         mock_ws = AsyncMock()
 
-        with patch("patter.providers.elevenlabs_convai.websockets.connect", side_effect=_ws_connect_side_effect(mock_ws)) as mc:
+        with patch("getpatter.providers.elevenlabs_convai.websockets.connect", side_effect=_ws_connect_side_effect(mock_ws)) as mc:
             await adapter.connect()
 
         call_url = mc.call_args[0][0]
@@ -372,12 +372,12 @@ class TestElevenLabsConvAIAdapterIO:
 
     @pytest.mark.asyncio
     async def test_connect_with_first_message(self) -> None:
-        from patter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
+        from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
         adapter = ElevenLabsConvAIAdapter(api_key="el-test", first_message="Hi there!")
         mock_ws = AsyncMock()
 
-        with patch("patter.providers.elevenlabs_convai.websockets.connect", side_effect=_ws_connect_side_effect(mock_ws)):
+        with patch("getpatter.providers.elevenlabs_convai.websockets.connect", side_effect=_ws_connect_side_effect(mock_ws)):
             await adapter.connect()
 
         sent = json.loads(mock_ws.send.call_args[0][0])
@@ -385,12 +385,12 @@ class TestElevenLabsConvAIAdapterIO:
 
     @pytest.mark.asyncio
     async def test_connect_without_first_message(self) -> None:
-        from patter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
+        from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
         adapter = ElevenLabsConvAIAdapter(api_key="el-test", first_message="")
         mock_ws = AsyncMock()
 
-        with patch("patter.providers.elevenlabs_convai.websockets.connect", side_effect=_ws_connect_side_effect(mock_ws)):
+        with patch("getpatter.providers.elevenlabs_convai.websockets.connect", side_effect=_ws_connect_side_effect(mock_ws)):
             await adapter.connect()
 
         sent = json.loads(mock_ws.send.call_args[0][0])
@@ -398,7 +398,7 @@ class TestElevenLabsConvAIAdapterIO:
 
     @pytest.mark.asyncio
     async def test_send_audio_encodes_base64(self) -> None:
-        from patter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
+        from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
         adapter = ElevenLabsConvAIAdapter(api_key="el-test")
         adapter._ws = AsyncMock()
@@ -411,7 +411,7 @@ class TestElevenLabsConvAIAdapterIO:
 
     @pytest.mark.asyncio
     async def test_receive_events_yields_audio(self) -> None:
-        from patter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
+        from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
         adapter = ElevenLabsConvAIAdapter(api_key="el-test")
         audio_bytes = b"\xdd\xee"
@@ -425,7 +425,7 @@ class TestElevenLabsConvAIAdapterIO:
 
     @pytest.mark.asyncio
     async def test_receive_events_yields_transcripts(self) -> None:
-        from patter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
+        from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
         adapter = ElevenLabsConvAIAdapter(api_key="el-test")
         adapter._ws = _AsyncIterableWS([
@@ -444,7 +444,7 @@ class TestElevenLabsConvAIAdapterIO:
 
     @pytest.mark.asyncio
     async def test_receive_events_empty_audio_skipped(self) -> None:
-        from patter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
+        from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
         adapter = ElevenLabsConvAIAdapter(api_key="el-test")
         adapter._ws = _AsyncIterableWS([json.dumps({"type": "audio", "audio": ""})])
@@ -456,7 +456,7 @@ class TestElevenLabsConvAIAdapterIO:
 
     @pytest.mark.asyncio
     async def test_receive_events_error_event_logged(self) -> None:
-        from patter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
+        from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
         adapter = ElevenLabsConvAIAdapter(api_key="el-test")
         adapter._ws = _AsyncIterableWS([json.dumps({"type": "error", "message": "bad"})])
@@ -468,7 +468,7 @@ class TestElevenLabsConvAIAdapterIO:
 
     @pytest.mark.asyncio
     async def test_receive_events_handles_connection_closed(self) -> None:
-        from patter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
+        from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
         adapter = ElevenLabsConvAIAdapter(api_key="el-test")
         adapter._running = True
@@ -481,7 +481,7 @@ class TestElevenLabsConvAIAdapterIO:
 
     @pytest.mark.asyncio
     async def test_receive_events_noop_when_no_ws(self) -> None:
-        from patter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
+        from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
         adapter = ElevenLabsConvAIAdapter(api_key="el-test")
         adapter._ws = None
@@ -501,7 +501,7 @@ class TestWhisperSTT:
     """WhisperSTT construction, buffering, transcription, and lifecycle."""
 
     def test_construction(self) -> None:
-        from patter.providers.whisper_stt import WhisperSTT
+        from getpatter.providers.whisper_stt import WhisperSTT
 
         stt = WhisperSTT(api_key="sk-test", language="en", model="whisper-1")
         assert stt.api_key == "sk-test"
@@ -511,7 +511,7 @@ class TestWhisperSTT:
 
     @pytest.mark.asyncio
     async def test_connect_resets_state(self) -> None:
-        from patter.providers.whisper_stt import WhisperSTT
+        from getpatter.providers.whisper_stt import WhisperSTT
 
         stt = WhisperSTT(api_key="sk-test")
         stt._buffer = bytearray(b"\x01\x02\x03")
@@ -521,7 +521,7 @@ class TestWhisperSTT:
 
     @pytest.mark.asyncio
     async def test_send_audio_buffers_small_chunks(self) -> None:
-        from patter.providers.whisper_stt import WhisperSTT
+        from getpatter.providers.whisper_stt import WhisperSTT
 
         stt = WhisperSTT(api_key="sk-test")
         stt._running = True
@@ -530,7 +530,7 @@ class TestWhisperSTT:
 
     @pytest.mark.asyncio
     async def test_send_audio_transcribes_when_buffer_full(self) -> None:
-        from patter.providers.whisper_stt import BUFFER_SIZE_BYTES, WhisperSTT
+        from getpatter.providers.whisper_stt import BUFFER_SIZE_BYTES, WhisperSTT
 
         stt = WhisperSTT(api_key="sk-test")
         stt._running = True
@@ -549,7 +549,7 @@ class TestWhisperSTT:
 
     @pytest.mark.asyncio
     async def test_transcribe_buffer_returns_transcript(self) -> None:
-        from patter.providers.whisper_stt import WhisperSTT
+        from getpatter.providers.whisper_stt import WhisperSTT
 
         stt = WhisperSTT(api_key="sk-test")
         mock_response = MagicMock()
@@ -566,7 +566,7 @@ class TestWhisperSTT:
 
     @pytest.mark.asyncio
     async def test_transcribe_buffer_returns_none_for_empty_text(self) -> None:
-        from patter.providers.whisper_stt import WhisperSTT
+        from getpatter.providers.whisper_stt import WhisperSTT
 
         stt = WhisperSTT(api_key="sk-test")
         mock_response = MagicMock()
@@ -580,7 +580,7 @@ class TestWhisperSTT:
 
     @pytest.mark.asyncio
     async def test_transcribe_buffer_returns_none_on_error(self) -> None:
-        from patter.providers.whisper_stt import WhisperSTT
+        from getpatter.providers.whisper_stt import WhisperSTT
 
         stt = WhisperSTT(api_key="sk-test")
         stt._client = AsyncMock()
@@ -591,7 +591,7 @@ class TestWhisperSTT:
 
     @pytest.mark.asyncio
     async def test_close_flushes_large_buffer(self) -> None:
-        from patter.providers.whisper_stt import BUFFER_SIZE_BYTES, WhisperSTT
+        from getpatter.providers.whisper_stt import BUFFER_SIZE_BYTES, WhisperSTT
 
         stt = WhisperSTT(api_key="sk-test")
         stt._running = True
@@ -611,7 +611,7 @@ class TestWhisperSTT:
 
     @pytest.mark.asyncio
     async def test_close_skips_small_buffer(self) -> None:
-        from patter.providers.whisper_stt import WhisperSTT
+        from getpatter.providers.whisper_stt import WhisperSTT
 
         stt = WhisperSTT(api_key="sk-test")
         stt._running = True
@@ -625,7 +625,7 @@ class TestWhisperSTT:
 
     @pytest.mark.asyncio
     async def test_receive_transcripts_yields_from_queue(self) -> None:
-        from patter.providers.whisper_stt import WhisperSTT, _Transcript
+        from getpatter.providers.whisper_stt import WhisperSTT, _Transcript
 
         stt = WhisperSTT(api_key="sk-test")
         stt._running = True
@@ -642,7 +642,7 @@ class TestWhisperSTT:
         assert results[0].text == "Hello"
 
     def test_transcript_dataclass(self) -> None:
-        from patter.providers.whisper_stt import _Transcript
+        from getpatter.providers.whisper_stt import _Transcript
 
         t = _Transcript(text="hello")
         assert t.text == "hello"
@@ -661,12 +661,12 @@ class TestDeepgramSTTIO:
 
     @pytest.mark.asyncio
     async def test_connect(self) -> None:
-        from patter.providers.deepgram_stt import DeepgramSTT
+        from getpatter.providers.deepgram_stt import DeepgramSTT
 
         stt = DeepgramSTT(api_key="dg-test")
         mock_ws = AsyncMock()
 
-        with patch("patter.providers.deepgram_stt.websockets.connect", side_effect=_ws_connect_side_effect(mock_ws)) as mc:
+        with patch("getpatter.providers.deepgram_stt.websockets.connect", side_effect=_ws_connect_side_effect(mock_ws)) as mc:
             await stt.connect()
 
         assert stt._ws is mock_ws
@@ -675,7 +675,7 @@ class TestDeepgramSTTIO:
 
     @pytest.mark.asyncio
     async def test_send_audio(self) -> None:
-        from patter.providers.deepgram_stt import DeepgramSTT
+        from getpatter.providers.deepgram_stt import DeepgramSTT
 
         stt = DeepgramSTT(api_key="dg-test")
         mock_ws = AsyncMock()
@@ -687,7 +687,7 @@ class TestDeepgramSTTIO:
 
     @pytest.mark.asyncio
     async def test_send_audio_raises_when_not_connected(self) -> None:
-        from patter.providers.deepgram_stt import DeepgramSTT
+        from getpatter.providers.deepgram_stt import DeepgramSTT
 
         stt = DeepgramSTT(api_key="dg-test")
         with pytest.raises(RuntimeError, match="Not connected"):
@@ -695,7 +695,7 @@ class TestDeepgramSTTIO:
 
     @pytest.mark.asyncio
     async def test_receive_transcripts_yields_results(self) -> None:
-        from patter.providers.deepgram_stt import DeepgramSTT
+        from getpatter.providers.deepgram_stt import DeepgramSTT
 
         stt = DeepgramSTT(api_key="dg-test")
         messages = [json.dumps({
@@ -714,7 +714,7 @@ class TestDeepgramSTTIO:
 
     @pytest.mark.asyncio
     async def test_receive_transcripts_skips_binary_frames(self) -> None:
-        from patter.providers.deepgram_stt import DeepgramSTT
+        from getpatter.providers.deepgram_stt import DeepgramSTT
 
         stt = DeepgramSTT(api_key="dg-test")
         stt._ws = _AsyncIterableWS([b"\x00\x01"])
@@ -726,7 +726,7 @@ class TestDeepgramSTTIO:
 
     @pytest.mark.asyncio
     async def test_receive_transcripts_raises_when_not_connected(self) -> None:
-        from patter.providers.deepgram_stt import DeepgramSTT
+        from getpatter.providers.deepgram_stt import DeepgramSTT
 
         stt = DeepgramSTT(api_key="dg-test")
         with pytest.raises(RuntimeError, match="Not connected"):
@@ -734,7 +734,7 @@ class TestDeepgramSTTIO:
                 pass
 
     def test_parse_message_metadata(self) -> None:
-        from patter.providers.deepgram_stt import DeepgramSTT
+        from getpatter.providers.deepgram_stt import DeepgramSTT
 
         stt = DeepgramSTT(api_key="dg-test")
         raw = json.dumps({"type": "Metadata", "request_id": "req-123"})
@@ -744,7 +744,7 @@ class TestDeepgramSTTIO:
 
     @pytest.mark.asyncio
     async def test_close_sends_close_stream(self) -> None:
-        from patter.providers.deepgram_stt import DeepgramSTT
+        from getpatter.providers.deepgram_stt import DeepgramSTT
 
         stt = DeepgramSTT(api_key="dg-test")
         mock_ws = AsyncMock()
@@ -760,7 +760,7 @@ class TestDeepgramSTTIO:
 
     @pytest.mark.asyncio
     async def test_close_handles_send_error(self) -> None:
-        from patter.providers.deepgram_stt import DeepgramSTT
+        from getpatter.providers.deepgram_stt import DeepgramSTT
 
         stt = DeepgramSTT(api_key="dg-test")
         mock_ws = AsyncMock()
@@ -773,21 +773,21 @@ class TestDeepgramSTTIO:
 
     @pytest.mark.asyncio
     async def test_close_noop_when_no_ws(self) -> None:
-        from patter.providers.deepgram_stt import DeepgramSTT
+        from getpatter.providers.deepgram_stt import DeepgramSTT
 
         stt = DeepgramSTT(api_key="dg-test")
         stt._ws = None
         await stt.close()
 
     def test_for_twilio(self) -> None:
-        from patter.providers.deepgram_stt import DeepgramSTT
+        from getpatter.providers.deepgram_stt import DeepgramSTT
 
         stt = DeepgramSTT.for_twilio(api_key="dg-test", language="es")
         assert stt.encoding == "mulaw"
         assert stt.sample_rate == 8000
 
     def test_repr(self) -> None:
-        from patter.providers.deepgram_stt import DeepgramSTT
+        from getpatter.providers.deepgram_stt import DeepgramSTT
 
         stt = DeepgramSTT(api_key="dg-test", model="nova-2", language="fr")
         r = repr(stt)
@@ -805,7 +805,7 @@ class TestOpenAITTSResample:
     """OpenAITTS resample logic."""
 
     def test_resample_24k_to_16k_basic(self) -> None:
-        from patter.providers.openai_tts import OpenAITTS
+        from getpatter.providers.openai_tts import OpenAITTS
 
         samples = [100, 200, 300, 400, 500, 600]
         audio = struct.pack(f"<{len(samples)}h", *samples)
@@ -814,17 +814,17 @@ class TestOpenAITTSResample:
         assert len(out_samples) == 4
 
     def test_resample_24k_to_16k_empty(self) -> None:
-        from patter.providers.openai_tts import OpenAITTS
+        from getpatter.providers.openai_tts import OpenAITTS
 
         assert OpenAITTS._resample_24k_to_16k(b"") == b""
 
     def test_resample_24k_to_16k_single_byte(self) -> None:
-        from patter.providers.openai_tts import OpenAITTS
+        from getpatter.providers.openai_tts import OpenAITTS
 
         assert OpenAITTS._resample_24k_to_16k(b"\x00") == b"\x00"
 
     def test_resample_24k_to_16k_partial_group(self) -> None:
-        from patter.providers.openai_tts import OpenAITTS
+        from getpatter.providers.openai_tts import OpenAITTS
 
         samples = [100, 200, 300, 400, 500]
         audio = struct.pack(f"<{len(samples)}h", *samples)
@@ -832,7 +832,7 @@ class TestOpenAITTSResample:
         assert len(result) > 0
 
     def test_repr(self) -> None:
-        from patter.providers.openai_tts import OpenAITTS
+        from getpatter.providers.openai_tts import OpenAITTS
 
         tts = OpenAITTS(api_key="x", voice="shimmer", model="tts-1-hd")
         r = repr(tts)
@@ -841,7 +841,7 @@ class TestOpenAITTSResample:
 
     @pytest.mark.asyncio
     async def test_close(self) -> None:
-        from patter.providers.openai_tts import OpenAITTS
+        from getpatter.providers.openai_tts import OpenAITTS
 
         tts = OpenAITTS(api_key="sk-test")
         tts._client = AsyncMock()
@@ -859,7 +859,7 @@ class TestElevenLabsTTSIO:
     """ElevenLabsTTS construction and repr."""
 
     def test_repr(self) -> None:
-        from patter.providers.elevenlabs_tts import ElevenLabsTTS
+        from getpatter.providers.elevenlabs_tts import ElevenLabsTTS
 
         tts = ElevenLabsTTS(api_key="x", voice_id="v1", model_id="m1")
         r = repr(tts)
@@ -868,7 +868,7 @@ class TestElevenLabsTTSIO:
 
     @pytest.mark.asyncio
     async def test_close(self) -> None:
-        from patter.providers.elevenlabs_tts import ElevenLabsTTS
+        from getpatter.providers.elevenlabs_tts import ElevenLabsTTS
 
         tts = ElevenLabsTTS(api_key="el-test")
         tts._client = AsyncMock()
@@ -887,7 +887,7 @@ class TestTelnyxAdapterIO:
 
     @pytest.mark.asyncio
     async def test_configure_number(self) -> None:
-        from patter.providers.telnyx_adapter import TelnyxAdapter
+        from getpatter.providers.telnyx_adapter import TelnyxAdapter
 
         adapter = TelnyxAdapter(api_key="key_test", connection_id="conn_123")
         adapter._client = AsyncMock()
@@ -896,7 +896,7 @@ class TestTelnyxAdapterIO:
 
     @pytest.mark.asyncio
     async def test_end_call(self) -> None:
-        from patter.providers.telnyx_adapter import TelnyxAdapter
+        from getpatter.providers.telnyx_adapter import TelnyxAdapter
 
         adapter = TelnyxAdapter(api_key="key_test")
         adapter._client = AsyncMock()
@@ -905,7 +905,7 @@ class TestTelnyxAdapterIO:
 
     @pytest.mark.asyncio
     async def test_initiate_call(self) -> None:
-        from patter.providers.telnyx_adapter import TelnyxAdapter
+        from getpatter.providers.telnyx_adapter import TelnyxAdapter
 
         adapter = TelnyxAdapter(api_key="key_test", connection_id="conn_123")
         mock_resp = MagicMock()
@@ -919,7 +919,7 @@ class TestTelnyxAdapterIO:
 
     @pytest.mark.asyncio
     async def test_provision_number(self) -> None:
-        from patter.providers.telnyx_adapter import TelnyxAdapter
+        from getpatter.providers.telnyx_adapter import TelnyxAdapter
 
         adapter = TelnyxAdapter(api_key="key_test")
         list_resp = MagicMock()
@@ -936,7 +936,7 @@ class TestTelnyxAdapterIO:
 
     @pytest.mark.asyncio
     async def test_provision_number_no_numbers(self) -> None:
-        from patter.providers.telnyx_adapter import TelnyxAdapter
+        from getpatter.providers.telnyx_adapter import TelnyxAdapter
 
         adapter = TelnyxAdapter(api_key="key_test")
         list_resp = MagicMock()
@@ -950,7 +950,7 @@ class TestTelnyxAdapterIO:
 
     @pytest.mark.asyncio
     async def test_close(self) -> None:
-        from patter.providers.telnyx_adapter import TelnyxAdapter
+        from getpatter.providers.telnyx_adapter import TelnyxAdapter
 
         adapter = TelnyxAdapter(api_key="key_test")
         adapter._client = AsyncMock()
@@ -968,46 +968,46 @@ class TestTranscoding:
     """Test transcoding functions."""
 
     def test_mulaw_to_pcm16(self) -> None:
-        from patter.services.transcoding import mulaw_to_pcm16
+        from getpatter.services.transcoding import mulaw_to_pcm16
 
         pcm = mulaw_to_pcm16(b"\xff" * 160)
         assert len(pcm) > 0
 
     def test_pcm16_to_mulaw(self) -> None:
-        from patter.services.transcoding import pcm16_to_mulaw
+        from getpatter.services.transcoding import pcm16_to_mulaw
 
         pcm = struct.pack("<4h", 0, 1000, -1000, 500)
         mulaw = pcm16_to_mulaw(pcm)
         assert len(mulaw) > 0
 
     def test_mulaw_pcm_roundtrip(self) -> None:
-        from patter.services.transcoding import mulaw_to_pcm16, pcm16_to_mulaw
+        from getpatter.services.transcoding import mulaw_to_pcm16, pcm16_to_mulaw
 
         pcm = struct.pack("<4h", 0, 1000, -1000, 500)
         pcm_back = mulaw_to_pcm16(pcm16_to_mulaw(pcm))
         assert len(pcm_back) > 0
 
     def test_resample_8k_to_16k(self) -> None:
-        from patter.services.transcoding import resample_8k_to_16k
+        from getpatter.services.transcoding import resample_8k_to_16k
 
         pcm = struct.pack("<4h", 100, 200, 300, 400)
         result = resample_8k_to_16k(pcm)
         assert len(result) >= len(pcm)
 
     def test_resample_8k_to_16k_empty(self) -> None:
-        from patter.services.transcoding import resample_8k_to_16k
+        from getpatter.services.transcoding import resample_8k_to_16k
 
         assert resample_8k_to_16k(b"") == b""
 
     def test_resample_16k_to_8k(self) -> None:
-        from patter.services.transcoding import resample_16k_to_8k
+        from getpatter.services.transcoding import resample_16k_to_8k
 
         pcm = struct.pack("<8h", 100, 200, 300, 400, 500, 600, 700, 800)
         result = resample_16k_to_8k(pcm)
         assert len(result) <= len(pcm)
 
     def test_resample_16k_to_8k_empty(self) -> None:
-        from patter.services.transcoding import resample_16k_to_8k
+        from getpatter.services.transcoding import resample_16k_to_8k
 
         assert resample_16k_to_8k(b"") == b""
 
@@ -1022,8 +1022,8 @@ class TestCreateSTTFromConfig:
     """_create_stt_from_config creates the right adapter."""
 
     def test_deepgram_default(self) -> None:
-        from patter.handlers.common import _create_stt_from_config
-        from patter.models import STTConfig
+        from getpatter.handlers.common import _create_stt_from_config
+        from getpatter.models import STTConfig
 
         config = STTConfig(provider="deepgram", api_key="dg-key", language="en")
         stt = _create_stt_from_config(config)
@@ -1032,8 +1032,8 @@ class TestCreateSTTFromConfig:
         assert stt.encoding == "linear16"
 
     def test_deepgram_for_twilio(self) -> None:
-        from patter.handlers.common import _create_stt_from_config
-        from patter.models import STTConfig
+        from getpatter.handlers.common import _create_stt_from_config
+        from getpatter.models import STTConfig
 
         config = STTConfig(provider="deepgram", api_key="dg-key", language="es")
         stt = _create_stt_from_config(config, for_twilio=True)
@@ -1042,8 +1042,8 @@ class TestCreateSTTFromConfig:
         assert stt.sample_rate == 8000
 
     def test_whisper(self) -> None:
-        from patter.handlers.common import _create_stt_from_config
-        from patter.models import STTConfig
+        from getpatter.handlers.common import _create_stt_from_config
+        from getpatter.models import STTConfig
 
         config = STTConfig(provider="whisper", api_key="sk-key", language="fr")
         stt = _create_stt_from_config(config)
@@ -1051,8 +1051,8 @@ class TestCreateSTTFromConfig:
         assert stt.__class__.__name__ == "WhisperSTT"
 
     def test_unknown_provider(self) -> None:
-        from patter.handlers.common import _create_stt_from_config
-        from patter.models import STTConfig
+        from getpatter.handlers.common import _create_stt_from_config
+        from getpatter.models import STTConfig
 
         config = STTConfig(provider="unknown", api_key="x")
         with pytest.raises(ValueError, match="Unknown STT provider"):
@@ -1064,8 +1064,8 @@ class TestCreateTTSFromConfig:
     """_create_tts_from_config creates the right adapter."""
 
     def test_elevenlabs(self) -> None:
-        from patter.handlers.common import _create_tts_from_config
-        from patter.models import TTSConfig
+        from getpatter.handlers.common import _create_tts_from_config
+        from getpatter.models import TTSConfig
 
         config = TTSConfig(provider="elevenlabs", api_key="el-key", voice="v1")
         tts = _create_tts_from_config(config)
@@ -1073,8 +1073,8 @@ class TestCreateTTSFromConfig:
         assert tts.__class__.__name__ == "ElevenLabsTTS"
 
     def test_openai(self) -> None:
-        from patter.handlers.common import _create_tts_from_config
-        from patter.models import TTSConfig
+        from getpatter.handlers.common import _create_tts_from_config
+        from getpatter.models import TTSConfig
 
         config = TTSConfig(provider="openai", api_key="sk-key", voice="alloy")
         tts = _create_tts_from_config(config)
@@ -1082,8 +1082,8 @@ class TestCreateTTSFromConfig:
         assert tts.__class__.__name__ == "OpenAITTS"
 
     def test_unknown_provider(self) -> None:
-        from patter.handlers.common import _create_tts_from_config
-        from patter.models import TTSConfig
+        from getpatter.handlers.common import _create_tts_from_config
+        from getpatter.models import TTSConfig
 
         config = TTSConfig(provider="unknown", api_key="x")
         with pytest.raises(ValueError, match="Unknown TTS provider"):
@@ -1101,7 +1101,7 @@ class TestOpenAITTSSynthesize:
 
     @pytest.mark.asyncio
     async def test_synthesize_streams_resampled_audio(self) -> None:
-        from patter.providers.openai_tts import OpenAITTS
+        from getpatter.providers.openai_tts import OpenAITTS
 
         tts = OpenAITTS(api_key="sk-test", voice="alloy", model="tts-1")
 
@@ -1134,7 +1134,7 @@ class TestOpenAITTSSynthesize:
     @pytest.mark.asyncio
     async def test_synthesize_raises_on_http_error(self) -> None:
         import httpx
-        from patter.providers.openai_tts import OpenAITTS
+        from getpatter.providers.openai_tts import OpenAITTS
 
         tts = OpenAITTS(api_key="sk-test")
 
@@ -1163,7 +1163,7 @@ class TestElevenLabsTTSSynthesize:
 
     @pytest.mark.asyncio
     async def test_synthesize_streams_audio(self) -> None:
-        from patter.providers.elevenlabs_tts import ElevenLabsTTS
+        from getpatter.providers.elevenlabs_tts import ElevenLabsTTS
 
         tts = ElevenLabsTTS(api_key="el-test", voice_id="v1")
 
@@ -1202,7 +1202,7 @@ class TestTwilioAdapterIO:
 
     @pytest.mark.asyncio
     async def test_provision_number(self) -> None:
-        from patter.providers.twilio_adapter import TwilioAdapter
+        from getpatter.providers.twilio_adapter import TwilioAdapter
 
         adapter = TwilioAdapter(account_sid="AC_test_sid_12345", auth_token="tok")
         mock_number = MagicMock()
@@ -1219,7 +1219,7 @@ class TestTwilioAdapterIO:
 
     @pytest.mark.asyncio
     async def test_provision_number_no_numbers(self) -> None:
-        from patter.providers.twilio_adapter import TwilioAdapter
+        from getpatter.providers.twilio_adapter import TwilioAdapter
 
         adapter = TwilioAdapter(account_sid="AC_test_sid_12345", auth_token="tok")
         adapter._twilio_client = MagicMock()
@@ -1230,7 +1230,7 @@ class TestTwilioAdapterIO:
 
     @pytest.mark.asyncio
     async def test_configure_number(self) -> None:
-        from patter.providers.twilio_adapter import TwilioAdapter
+        from getpatter.providers.twilio_adapter import TwilioAdapter
 
         adapter = TwilioAdapter(account_sid="AC_test_sid_12345", auth_token="tok")
         mock_num = MagicMock()
@@ -1242,7 +1242,7 @@ class TestTwilioAdapterIO:
 
     @pytest.mark.asyncio
     async def test_configure_number_not_found(self) -> None:
-        from patter.providers.twilio_adapter import TwilioAdapter
+        from getpatter.providers.twilio_adapter import TwilioAdapter
 
         adapter = TwilioAdapter(account_sid="AC_test_sid_12345", auth_token="tok")
         adapter._twilio_client = MagicMock()
@@ -1253,7 +1253,7 @@ class TestTwilioAdapterIO:
 
     @pytest.mark.asyncio
     async def test_initiate_call(self) -> None:
-        from patter.providers.twilio_adapter import TwilioAdapter
+        from getpatter.providers.twilio_adapter import TwilioAdapter
 
         adapter = TwilioAdapter(account_sid="AC_test_sid_12345", auth_token="tok")
         mock_call = MagicMock()
@@ -1266,7 +1266,7 @@ class TestTwilioAdapterIO:
 
     @pytest.mark.asyncio
     async def test_initiate_call_with_extra_params(self) -> None:
-        from patter.providers.twilio_adapter import TwilioAdapter
+        from getpatter.providers.twilio_adapter import TwilioAdapter
 
         adapter = TwilioAdapter(account_sid="AC_test_sid_12345", auth_token="tok")
         mock_call = MagicMock()
@@ -1284,7 +1284,7 @@ class TestTwilioAdapterIO:
 
     @pytest.mark.asyncio
     async def test_end_call(self) -> None:
-        from patter.providers.twilio_adapter import TwilioAdapter
+        from getpatter.providers.twilio_adapter import TwilioAdapter
 
         adapter = TwilioAdapter(account_sid="AC_test_sid_12345", auth_token="tok")
         adapter._twilio_client = MagicMock()
@@ -1293,7 +1293,7 @@ class TestTwilioAdapterIO:
         adapter._twilio_client.calls.return_value.update.assert_called_once_with(status="completed")
 
     def test_generate_stream_twiml(self) -> None:
-        from patter.providers.twilio_adapter import TwilioAdapter
+        from getpatter.providers.twilio_adapter import TwilioAdapter
 
         twiml = TwilioAdapter.generate_stream_twiml("wss://stream.example.com/ws")
         assert "wss://stream.example.com/ws" in twiml

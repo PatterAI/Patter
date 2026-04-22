@@ -3,9 +3,9 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from patter.server import EmbeddedServer
-from patter.local_config import LocalConfig
-from patter.models import Agent
+from getpatter.server import EmbeddedServer
+from getpatter.local_config import LocalConfig
+from getpatter.models import Agent
 
 
 def make_config(**kwargs) -> LocalConfig:

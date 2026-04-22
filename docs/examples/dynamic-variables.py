@@ -1,6 +1,6 @@
 """Dynamic variables in prompts — personalized calls."""
 import asyncio
-from patter import Patter, Twilio, OpenAIRealtime
+from getpatter import Patter, Twilio, OpenAIRealtime
 
 
 async def main():

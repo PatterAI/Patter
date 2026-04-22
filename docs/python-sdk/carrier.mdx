@@ -9,12 +9,12 @@ The carrier delivers the phone call to Patter. Patter supports **Twilio** and **
 
 You configure one carrier per `Patter` instance by passing an instance to the `carrier=` keyword argument. Each carrier class falls back to environment variables when constructor arguments are omitted.
 
-Each carrier ships as both a **flat alias** (`from patter import Twilio`) and a **namespaced** class (`from patter.carriers import twilio` → `twilio.Carrier()`). They are equivalent.
+Each carrier ships as both a **flat alias** (`from getpatter import Twilio`) and a **namespaced** class (`from getpatter.carriers import twilio` → `twilio.Carrier()`). They are equivalent.
 
 ## Twilio
 
 ```python
-from patter import Patter, Twilio
+from getpatter import Patter, Twilio
 
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")   # reads env
 # Or explicitly:
@@ -32,7 +32,7 @@ phone = Patter(
 Namespaced form:
 
 ```python
-from patter.carriers import twilio
+from getpatter.carriers import twilio
 
 carrier = twilio.Carrier()                            # reads env
 carrier = twilio.Carrier(account_sid="AC...", auth_token="...")
@@ -47,7 +47,7 @@ The Auth Token is also used to verify every Twilio webhook with HMAC-SHA1 agains
 ## Telnyx
 
 ```python
-from patter import Patter, Telnyx
+from getpatter import Patter, Telnyx
 
 phone = Patter(carrier=Telnyx(), phone_number="+15550001234")    # reads env
 # Or explicitly:
@@ -70,7 +70,7 @@ phone = Patter(
 Namespaced form:
 
 ```python
-from patter.carriers import telnyx
+from getpatter.carriers import telnyx
 
 carrier = telnyx.Carrier()                            # reads env
 ```

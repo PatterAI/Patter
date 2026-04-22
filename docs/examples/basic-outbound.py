@@ -10,7 +10,7 @@ Usage:
 """
 
 import asyncio
-from patter import Patter, IncomingMessage
+from getpatter import Patter, IncomingMessage
 
 DESTINATION = "+14155551234"   # Replace with a real number
 API_KEY = "pt_your_api_key_here"

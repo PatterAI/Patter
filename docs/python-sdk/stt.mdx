@@ -7,13 +7,13 @@ description: "Speech-to-text providers supported by Patter."
 
 STT is used in **pipeline mode** to transcribe caller audio before it reaches your LLM. If you use an [engine](/python-sdk/engines) such as `OpenAIRealtime` or `ElevenLabsConvAI`, speech recognition is handled internally by the engine and you do not configure STT separately.
 
-Each STT ships as both a **namespaced** class (`from patter.stt import deepgram` → `deepgram.STT()`) and a **flat alias** (`from patter import DeepgramSTT`). They are equivalent — pick whichever reads best. The flat aliases are convenient for short examples; the namespaced form avoids name collisions when you import several STTs together.
+Each STT ships as both a **namespaced** class (`from getpatter.stt import deepgram` → `deepgram.STT()`) and a **flat alias** (`from getpatter import DeepgramSTT`). They are equivalent — pick whichever reads best. The flat aliases are convenient for short examples; the namespaced form avoids name collisions when you import several STTs together.
 
 ## Quickstart
 
 ```python
 import asyncio
-from patter import Patter, Twilio, DeepgramSTT, ElevenLabsTTS
+from getpatter import Patter, Twilio, DeepgramSTT, ElevenLabsTTS
 
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")  # TWILIO_* from env
 
@@ -33,8 +33,8 @@ asyncio.run(main())
 The same agent using namespaced imports:
 
 ```python
-from patter.stt import deepgram
-from patter.tts import elevenlabs
+from getpatter.stt import deepgram
+from getpatter.tts import elevenlabs
 
 agent = phone.agent(
     stt=deepgram.STT(endpointing_ms=80),
@@ -47,19 +47,19 @@ agent = phone.agent(
 
 | Flat import | Namespaced import | Env var | Install extra |
 |-------------|-------------------|---------|---------------|
-| `DeepgramSTT` | `patter.stt.deepgram.STT` | `DEEPGRAM_API_KEY` | included |
-| `WhisperSTT` | `patter.stt.whisper.STT` | `OPENAI_API_KEY` | included |
-| `CartesiaSTT` | `patter.stt.cartesia.STT` | `CARTESIA_API_KEY` | `getpatter[cartesia]` |
-| `AssemblyAISTT` | `patter.stt.assemblyai.STT` | `ASSEMBLYAI_API_KEY` | `getpatter[assemblyai]` |
-| `SonioxSTT` | `patter.stt.soniox.STT` | `SONIOX_API_KEY` | `getpatter[soniox]` |
-| `SpeechmaticsSTT` | `patter.stt.speechmatics.STT` | `SPEECHMATICS_API_KEY` | `getpatter[speechmatics]` |
+| `DeepgramSTT` | `getpatter.stt.deepgram.STT` | `DEEPGRAM_API_KEY` | included |
+| `WhisperSTT` | `getpatter.stt.whisper.STT` | `OPENAI_API_KEY` | included |
+| `CartesiaSTT` | `getpatter.stt.cartesia.STT` | `CARTESIA_API_KEY` | `getpatter[cartesia]` |
+| `AssemblyAISTT` | `getpatter.stt.assemblyai.STT` | `ASSEMBLYAI_API_KEY` | `getpatter[assemblyai]` |
+| `SonioxSTT` | `getpatter.stt.soniox.STT` | `SONIOX_API_KEY` | `getpatter[soniox]` |
+| `SpeechmaticsSTT` | `getpatter.stt.speechmatics.STT` | `SPEECHMATICS_API_KEY` | `getpatter[speechmatics]` |
 
 ## Deepgram
 
 Streaming STT backed by Deepgram's `nova-3` model.
 
 ```python
-from patter import DeepgramSTT
+from getpatter import DeepgramSTT
 
 stt = DeepgramSTT()                                      # reads DEEPGRAM_API_KEY
 stt = DeepgramSTT(api_key="dg_...", endpointing_ms=80)   # explicit
@@ -83,7 +83,7 @@ stt = DeepgramSTT(api_key="dg_...", endpointing_ms=80)   # explicit
 HTTP-based STT via OpenAI Whisper. Reuses `OPENAI_API_KEY`.
 
 ```python
-from patter import WhisperSTT
+from getpatter import WhisperSTT
 
 stt = WhisperSTT()                           # reads OPENAI_API_KEY
 stt = WhisperSTT(api_key="sk-...", language="es")
@@ -100,7 +100,7 @@ stt = WhisperSTT(api_key="sk-...", language="es")
 Streaming STT using Cartesia's `ink-whisper`. See [Cartesia setup](/python-sdk/providers/cartesia).
 
 ```python
-from patter import CartesiaSTT
+from getpatter import CartesiaSTT
 
 stt = CartesiaSTT()                          # reads CARTESIA_API_KEY
 stt = CartesiaSTT(api_key="csk_...", language="en", sample_rate=16000)
@@ -111,7 +111,7 @@ stt = CartesiaSTT(api_key="csk_...", language="en", sample_rate=16000)
 Universal Streaming STT via the AssemblyAI v3 WebSocket API. See [AssemblyAI setup](/python-sdk/providers/assemblyai).
 
 ```python
-from patter import AssemblyAISTT
+from getpatter import AssemblyAISTT
 
 stt = AssemblyAISTT()                        # reads ASSEMBLYAI_API_KEY
 stt = AssemblyAISTT(api_key="aa_...")
@@ -122,7 +122,7 @@ stt = AssemblyAISTT(api_key="aa_...")
 Real-time STT via Soniox.
 
 ```python
-from patter import SonioxSTT
+from getpatter import SonioxSTT
 
 stt = SonioxSTT()                            # reads SONIOX_API_KEY
 ```
@@ -132,7 +132,7 @@ stt = SonioxSTT()                            # reads SONIOX_API_KEY
 Real-time STT via Speechmatics (Python SDK only — not yet ported to TypeScript).
 
 ```python
-from patter.stt import speechmatics
+from getpatter.stt import speechmatics
 
 stt = speechmatics.STT()                     # reads SPEECHMATICS_API_KEY
 ```

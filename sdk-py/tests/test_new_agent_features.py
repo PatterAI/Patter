@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from patter import (
+from getpatter import (
     CallControl,
     OpenAIRealtime,
     Patter,
@@ -14,8 +14,8 @@ from patter import (
     Twilio,
     tool,
 )
-from patter.models import Agent, CallControl, STTConfig, TTSConfig
-from patter.services.tool_executor import ToolExecutor
+from getpatter.models import Agent, CallControl, STTConfig, TTSConfig
+from getpatter.services.tool_executor import ToolExecutor
 
 
 def _local_phone():
@@ -253,7 +253,7 @@ class TestCallControl:
         assert not cc.ended
 
     def test_call_control_importable(self):
-        from patter import CallControl
+        from getpatter import CallControl
         assert CallControl is not None
 
     def test_ended_property_false_initially(self):

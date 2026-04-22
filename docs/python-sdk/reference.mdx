@@ -132,8 +132,8 @@ Disconnect from Patter. Stops the embedded server.
 ## Carriers
 
 ```python
-from patter import Twilio, Telnyx                 # flat aliases
-from patter.carriers import twilio, telnyx        # namespaced (twilio.Carrier, telnyx.Carrier)
+from getpatter import Twilio, Telnyx                 # flat aliases
+from getpatter.carriers import twilio, telnyx        # namespaced (twilio.Carrier, telnyx.Carrier)
 ```
 
 ### Twilio
@@ -160,8 +160,8 @@ class Telnyx:
 ## Engines
 
 ```python
-from patter import OpenAIRealtime, ElevenLabsConvAI              # flat aliases
-from patter.engines import openai, elevenlabs                     # namespaced
+from getpatter import OpenAIRealtime, ElevenLabsConvAI              # flat aliases
+from getpatter.engines import openai, elevenlabs                     # namespaced
 ```
 
 ### OpenAIRealtime
@@ -189,8 +189,8 @@ class ElevenLabsConvAI:
 ## STT classes
 
 ```python
-from patter import DeepgramSTT, WhisperSTT, CartesiaSTT, AssemblyAISTT, SonioxSTT
-from patter.stt import deepgram, whisper, cartesia, assemblyai, soniox, speechmatics
+from getpatter import DeepgramSTT, WhisperSTT, CartesiaSTT, AssemblyAISTT, SonioxSTT
+from getpatter.stt import deepgram, whisper, cartesia, assemblyai, soniox, speechmatics
 ```
 
 All classes accept `api_key: str | None = None` and fall back to the provider's standard env var. See the [STT page](/python-sdk/stt) for full constructor signatures.
@@ -200,8 +200,8 @@ All classes accept `api_key: str | None = None` and fall back to the provider's 
 ## TTS classes
 
 ```python
-from patter import ElevenLabsTTS, OpenAITTS, CartesiaTTS, RimeTTS, LMNTTTS
-from patter.tts import elevenlabs, openai, cartesia, rime, lmnt
+from getpatter import ElevenLabsTTS, OpenAITTS, CartesiaTTS, RimeTTS, LMNTTTS
+from getpatter.tts import elevenlabs, openai, cartesia, rime, lmnt
 ```
 
 All classes accept `api_key: str | None = None` and fall back to the provider's standard env var. See the [TTS page](/python-sdk/tts) for full constructor signatures.
@@ -211,7 +211,7 @@ All classes accept `api_key: str | None = None` and fall back to the provider's 
 ## Tunnels
 
 ```python
-from patter.tunnels import CloudflareTunnel, Static, Ngrok
+from getpatter.tunnels import CloudflareTunnel, Static, Ngrok
 ```
 
 | Class | Behavior |
@@ -227,7 +227,7 @@ from patter.tunnels import CloudflareTunnel, Static, Ngrok
 ## Tools & Guardrails
 
 ```python
-from patter import Tool, Guardrail, tool, guardrail
+from getpatter import Tool, Guardrail, tool, guardrail
 ```
 
 ### Tool
@@ -339,7 +339,7 @@ PatterError
 ```
 
 ```python
-from patter import PatterError, PatterConnectionError, AuthenticationError, ProvisionError
+from getpatter import PatterError, PatterConnectionError, AuthenticationError, ProvisionError
 ```
 
 ---
@@ -347,7 +347,7 @@ from patter import PatterError, PatterConnectionError, AuthenticationError, Prov
 ## Top-level exports
 
 ```python
-from patter import (
+from getpatter import (
     # Client
     Patter,
 
@@ -384,9 +384,9 @@ from patter import (
     PatterError, PatterConnectionError, AuthenticationError, ProvisionError,
 )
 
-from patter.carriers import twilio, telnyx
-from patter.engines import openai, elevenlabs
-from patter.stt import deepgram, whisper, cartesia, assemblyai, soniox, speechmatics
-from patter.tts import elevenlabs, openai, cartesia, rime, lmnt
-from patter.tunnels import CloudflareTunnel, Static, Ngrok
+from getpatter.carriers import twilio, telnyx
+from getpatter.engines import openai, elevenlabs
+from getpatter.stt import deepgram, whisper, cartesia, assemblyai, soniox, speechmatics
+from getpatter.tts import elevenlabs, openai, cartesia, rime, lmnt
+from getpatter.tunnels import CloudflareTunnel, Static, Ngrok
 ```

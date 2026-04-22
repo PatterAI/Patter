@@ -17,13 +17,13 @@ pip install "getpatter[lmnt]"
 
 ```python
 # Namespaced import
-from patter.tts import lmnt
+from getpatter.tts import lmnt
 
 tts = lmnt.TTS()                                          # reads LMNT_API_KEY
 tts = lmnt.TTS(model="blizzard", voice="leah")
 
 # Flat alias (equivalent)
-from patter import LMNTTTS
+from getpatter import LMNTTTS
 
 tts = LMNTTTS(model="blizzard", voice="leah")
 ```
@@ -32,7 +32,7 @@ In an agent:
 
 ```python
 import asyncio
-from patter import Patter, Twilio, DeepgramSTT, LMNTTTS
+from getpatter import Patter, Twilio, DeepgramSTT, LMNTTTS
 
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")
 
@@ -48,7 +48,7 @@ asyncio.run(phone.serve(agent))
 ## Low-level usage
 
 ```python
-from patter.providers.lmnt_tts import LMNTTTS as _LowLevelTTS
+from getpatter.providers.lmnt_tts import LMNTTTS as _LowLevelTTS
 
 tts = _LowLevelTTS(
     api_key="...",          # or LMNT_API_KEY env var

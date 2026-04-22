@@ -22,8 +22,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from patter.models import HookContext, PipelineHooks
-from patter.services.pipeline_hooks import PipelineHookExecutor
+from getpatter.models import HookContext, PipelineHooks
+from getpatter.services.pipeline_hooks import PipelineHookExecutor
 
 
 # ---------------------------------------------------------------------------
@@ -524,14 +524,14 @@ class TestAgentNewFields:
     accept values without breaking frozen semantics."""
 
     def test_agent_defaults_none(self):
-        from patter.models import Agent
+        from getpatter.models import Agent
         agent = Agent(system_prompt="hi")
         assert agent.vad is None
         assert agent.audio_filter is None
         assert agent.background_audio is None
 
     def test_agent_accepts_new_fields(self):
-        from patter.models import Agent
+        from getpatter.models import Agent
         sentinel_vad = object()
         sentinel_filter = object()
         sentinel_bg = object()
@@ -555,14 +555,14 @@ class TestCallControlSendDtmf:
     """send_dtmf() dispatches to the injected _send_dtmf_fn; warns otherwise."""
 
     async def test_send_dtmf_warns_when_not_wired(self, caplog):
-        from patter.models import CallControl
+        from getpatter.models import CallControl
         cc = CallControl("c", "a", "b", "twilio")
         with caplog.at_level(logging.WARNING):
             await cc.send_dtmf("123")
         assert any("send_dtmf" in r.message for r in caplog.records)
 
     async def test_send_dtmf_dispatches_with_delay(self):
-        from patter.models import CallControl
+        from getpatter.models import CallControl
         calls: list[tuple[str, int]] = []
 
         async def fake_send(digits: str, delay_ms: int) -> None:
@@ -573,7 +573,7 @@ class TestCallControlSendDtmf:
         assert calls == [("1234#", 500)]
 
     async def test_send_dtmf_default_delay(self):
-        from patter.models import CallControl
+        from getpatter.models import CallControl
         calls: list[tuple[str, int]] = []
 
         async def fake_send(digits: str, delay_ms: int) -> None:

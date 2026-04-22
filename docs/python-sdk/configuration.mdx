@@ -10,7 +10,7 @@ The `Patter` class is the main entry point for the SDK. Pass a carrier instance 
 ## Minimal config
 
 ```python
-from patter import Patter, Twilio
+from getpatter import Patter, Twilio
 
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")   # TWILIO_* from env
 ```
@@ -50,7 +50,7 @@ Every credential resolves from an env var when the matching argument is omitted.
 ### OpenAI Realtime on Twilio
 
 ```python
-from patter import Patter, Twilio, OpenAIRealtime
+from getpatter import Patter, Twilio, OpenAIRealtime
 
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")
 
@@ -64,7 +64,7 @@ agent = phone.agent(
 ### OpenAI Realtime on Telnyx
 
 ```python
-from patter import Patter, Telnyx, OpenAIRealtime
+from getpatter import Patter, Telnyx, OpenAIRealtime
 
 phone = Patter(carrier=Telnyx(), phone_number="+15550001234")
 
@@ -77,7 +77,7 @@ agent = phone.agent(
 ### Pipeline mode
 
 ```python
-from patter import Patter, Twilio, DeepgramSTT, ElevenLabsTTS
+from getpatter import Patter, Twilio, DeepgramSTT, ElevenLabsTTS
 
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")
 
@@ -106,7 +106,7 @@ phone = Patter(carrier=Twilio())
 ```python
 import os
 from dotenv import load_dotenv
-from patter import Patter, Twilio, OpenAIRealtime
+from getpatter import Patter, Twilio, OpenAIRealtime
 
 load_dotenv()
 

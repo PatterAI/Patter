@@ -1,4 +1,4 @@
-"""Unit tests for patter.client — the main Patter SDK client."""
+"""Unit tests for getpatter.client — the main Patter SDK client."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from patter import (
+from getpatter import (
     OpenAIRealtime,
     Telnyx,
     Tool,
@@ -14,9 +14,9 @@ from patter import (
     guardrail,
     tool,
 )
-from patter.client import Patter, DEFAULT_BACKEND_URL, DEFAULT_REST_URL
-from patter.exceptions import PatterConnectionError, ProvisionError
-from patter.models import Agent, IncomingMessage
+from getpatter.client import Patter, DEFAULT_BACKEND_URL, DEFAULT_REST_URL
+from getpatter.exceptions import PatterConnectionError, ProvisionError
+from getpatter.models import Agent, IncomingMessage
 
 
 # ---------------------------------------------------------------------------
@@ -208,7 +208,7 @@ class TestCall:
         with pytest.raises(ValueError, match="E.164"):
             await client.call(to="notanumber", agent=agent)
 
-    @patch("patter.client.TwilioAdapter", create=True)
+    @patch("getpatter.client.TwilioAdapter", create=True)
     async def test_call_local_twilio(self, mock_adapter_cls) -> None:
         """Local twilio call initiates via TwilioAdapter."""
         client = _local_phone()
@@ -217,7 +217,7 @@ class TestCall:
         mock_adapter.initiate_call = AsyncMock(return_value="CA_call_id")
 
         with patch(
-            "patter.providers.twilio_adapter.TwilioAdapter",
+            "getpatter.providers.twilio_adapter.TwilioAdapter",
             return_value=mock_adapter,
         ):
             await client.call(to="+15550009999", agent=agent)

@@ -6,7 +6,7 @@ stateless call to :func:`audioop.ratecv`, which discarded the resampler's
 filter state between chunks — the caller heard "pops" between chunks, or
 empty audio when a chunk's payload was smaller than the filter kernel.
 
-The fix (see :mod:`patter.providers.openai_tts`) keeps the ``ratecv``
+The fix (see :mod:`getpatter.providers.openai_tts`) keeps the ``ratecv``
 state across chunks **and** carries an odd trailing byte forward so every
 call receives a whole number of 16-bit samples. These tests lock both
 invariants in:
@@ -29,7 +29,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from patter.providers.openai_tts import OpenAITTS
+from getpatter.providers.openai_tts import OpenAITTS
 
 
 # ---------------------------------------------------------------------------

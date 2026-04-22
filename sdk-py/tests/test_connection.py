@@ -5,9 +5,9 @@ import pytest
 import websockets.exceptions
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from patter.connection import PatterConnection
-from patter.models import IncomingMessage
-from patter.exceptions import PatterConnectionError
+from getpatter.connection import PatterConnection
+from getpatter.models import IncomingMessage
+from getpatter.exceptions import PatterConnectionError
 
 
 def test_connection_init():
@@ -70,7 +70,7 @@ async def test_connect_establishes_websocket():
 
     handler = AsyncMock(return_value="reply")
 
-    with patch("patter.connection.websockets.connect", new_callable=AsyncMock, return_value=mock_ws):
+    with patch("getpatter.connection.websockets.connect", new_callable=AsyncMock, return_value=mock_ws):
         await conn.connect(on_message=handler)
 
     assert conn._ws is mock_ws
@@ -87,7 +87,7 @@ async def test_connect_failure_raises_connection_error():
     conn = PatterConnection(api_key="ap_test123")
 
     with patch(
-        "patter.connection.websockets.connect",
+        "getpatter.connection.websockets.connect",
         new_callable=AsyncMock,
         side_effect=ConnectionRefusedError("refused"),
     ):
@@ -105,7 +105,7 @@ async def test_connect_stores_lifecycle_callbacks():
     on_start = AsyncMock()
     on_end = AsyncMock()
 
-    with patch("patter.connection.websockets.connect", new_callable=AsyncMock, return_value=mock_ws):
+    with patch("getpatter.connection.websockets.connect", new_callable=AsyncMock, return_value=mock_ws):
         await conn.connect(on_message=on_msg, on_call_start=on_start, on_call_end=on_end)
 
     assert conn._on_call_start is on_start

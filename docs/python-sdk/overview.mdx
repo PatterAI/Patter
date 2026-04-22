@@ -23,7 +23,7 @@ pip install getpatter
 
 ```python
 import asyncio
-from patter import Patter, Twilio, OpenAIRealtime
+from getpatter import Patter, Twilio, OpenAIRealtime
 
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")    # TWILIO_* from env
 agent = phone.agent(engine=OpenAIRealtime(), system_prompt="You are a friendly receptionist.")

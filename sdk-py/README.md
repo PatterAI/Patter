@@ -39,7 +39,7 @@ export OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxx
 Four lines of Python:
 
 ```python
-from patter import Patter, Twilio, OpenAIRealtime
+from getpatter import Patter, Twilio, OpenAIRealtime
 
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")
 agent = phone.agent(engine=OpenAIRealtime(), system_prompt="You are a friendly receptionist for Acme Corp.", first_message="Hello! How can I help?")
@@ -72,15 +72,15 @@ Every provider reads its credentials from the environment by default. Pass `api_
 |---|---|
 | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` | `Twilio()` carrier |
 | `TELNYX_API_KEY`, `TELNYX_CONNECTION_ID`, `TELNYX_PUBLIC_KEY` (optional) | `Telnyx()` carrier |
-| `OPENAI_API_KEY` | `OpenAIRealtime`, `patter.stt.whisper.STT`, `patter.tts.openai.TTS` |
-| `ELEVENLABS_API_KEY`, `ELEVENLABS_AGENT_ID` | `ElevenLabsConvAI`, `patter.tts.elevenlabs.TTS` |
-| `DEEPGRAM_API_KEY` | `patter.stt.deepgram.STT` |
-| `CARTESIA_API_KEY` | `patter.stt.cartesia.STT`, `patter.tts.cartesia.TTS` |
-| `RIME_API_KEY` | `patter.tts.rime.TTS` |
-| `LMNT_API_KEY` | `patter.tts.lmnt.TTS` |
-| `SONIOX_API_KEY` | `patter.stt.soniox.STT` |
-| `SPEECHMATICS_API_KEY` | `patter.stt.speechmatics.STT` |
-| `ASSEMBLYAI_API_KEY` | `patter.stt.assemblyai.STT` |
+| `OPENAI_API_KEY` | `OpenAIRealtime`, `getpatter.stt.whisper.STT`, `getpatter.tts.openai.TTS` |
+| `ELEVENLABS_API_KEY`, `ELEVENLABS_AGENT_ID` | `ElevenLabsConvAI`, `getpatter.tts.elevenlabs.TTS` |
+| `DEEPGRAM_API_KEY` | `getpatter.stt.deepgram.STT` |
+| `CARTESIA_API_KEY` | `getpatter.stt.cartesia.STT`, `getpatter.tts.cartesia.TTS` |
+| `RIME_API_KEY` | `getpatter.tts.rime.TTS` |
+| `LMNT_API_KEY` | `getpatter.tts.lmnt.TTS` |
+| `SONIOX_API_KEY` | `getpatter.stt.soniox.STT` |
+| `SPEECHMATICS_API_KEY` | `getpatter.stt.speechmatics.STT` |
+| `ASSEMBLYAI_API_KEY` | `getpatter.stt.assemblyai.STT` |
 
 ```bash
 cp .env.example .env
@@ -176,7 +176,7 @@ await phone.call(
 Flat re-exports (short form):
 
 ```python
-from patter import (
+from getpatter import (
     Twilio, Telnyx,
     OpenAIRealtime, ElevenLabsConvAI,
     # STT / TTS classes live in namespaced modules — see below.
@@ -186,8 +186,8 @@ from patter import (
 Namespaced imports (one module per provider):
 
 ```python
-from patter.stt import deepgram, whisper, cartesia, soniox, speechmatics, assemblyai
-from patter.tts import elevenlabs, openai as openai_tts, cartesia as cartesia_tts, rime, lmnt
+from getpatter.stt import deepgram, whisper, cartesia, soniox, speechmatics, assemblyai
+from getpatter.tts import elevenlabs, openai as openai_tts, cartesia as cartesia_tts, rime, lmnt
 
 stt = deepgram.STT()                    # reads DEEPGRAM_API_KEY
 tts = elevenlabs.TTS(voice="rachel")    # reads ELEVENLABS_API_KEY
@@ -199,7 +199,7 @@ tts = elevenlabs.TTS(voice="rachel")    # reads ELEVENLABS_API_KEY
 
 ```python
 import asyncio
-from patter import Patter, Twilio, OpenAIRealtime
+from getpatter import Patter, Twilio, OpenAIRealtime
 
 async def main() -> None:
     phone = Patter(carrier=Twilio(), phone_number="+15550001234")
@@ -221,9 +221,9 @@ asyncio.run(main())
 ### Custom voice — Deepgram STT + ElevenLabs TTS
 
 ```python
-from patter import Patter, Twilio
-from patter.stt import deepgram
-from patter.tts import elevenlabs
+from getpatter import Patter, Twilio
+from getpatter.stt import deepgram
+from getpatter.tts import elevenlabs
 
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")
 agent = phone.agent(
@@ -237,7 +237,7 @@ await phone.serve(agent, tunnel=True)
 ### Tool calling
 
 ```python
-from patter import Patter, Twilio, OpenAIRealtime, Tool, tool
+from getpatter import Patter, Twilio, OpenAIRealtime, Tool, tool
 
 @tool
 async def check_availability(date: str) -> dict:
@@ -256,7 +256,7 @@ await phone.serve(agent, tunnel=True)
 ### Outbound calls
 
 ```python
-from patter import Patter, Twilio, OpenAIRealtime
+from getpatter import Patter, Twilio, OpenAIRealtime
 
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")
 agent = phone.agent(

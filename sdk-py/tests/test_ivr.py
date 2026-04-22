@@ -1,4 +1,4 @@
-"""Tests for ``patter.services.ivr``.
+"""Tests for ``getpatter.services.ivr``.
 
 Covers:
 - ``IVRActivity.tools`` builds a valid OpenAI-style function tool that
@@ -23,7 +23,7 @@ import pytest
 # whole module on CI runners without sklearn installed.
 pytest.importorskip("sklearn", reason="IVR tests require the 'ivr' extras (scikit-learn)")
 
-from patter.services.ivr import (  # noqa: E402
+from getpatter.services.ivr import (  # noqa: E402
     DtmfEvent,
     IVRActivity,
     TfidfLoopDetector,
