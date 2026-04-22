@@ -38,8 +38,18 @@ from getpatter.services.llm_loop import LLMLoop, LLMProvider
 # On the base CI matrix (no optional extras) those imports fail; skip
 # parametrized entries that need a missing package. The all-extras CI job
 # installs everything and exercises every branch.
-_ANTHROPIC_AVAILABLE = importlib.util.find_spec("anthropic") is not None
-_GOOGLE_GENAI_AVAILABLE = importlib.util.find_spec("google.genai") is not None
+#
+# ``find_spec`` for a dotted child path raises ``ModuleNotFoundError`` when the
+# parent doesn't exist (instead of returning None), so we catch it.
+def _has_module(name: str) -> bool:
+    try:
+        return importlib.util.find_spec(name) is not None
+    except ModuleNotFoundError:
+        return False
+
+
+_ANTHROPIC_AVAILABLE = _has_module("anthropic")
+_GOOGLE_GENAI_AVAILABLE = _has_module("google.genai")
 
 _skip_if_no_anthropic = pytest.mark.skipif(
     not _ANTHROPIC_AVAILABLE,
