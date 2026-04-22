@@ -89,7 +89,22 @@ When barge-in occurs:
 2. The caller's speech is processed normally
 3. The AI generates a new response
 
-No configuration is needed. Barge-in is always active.
+### Configuration
+
+Barge-in is enabled by default with a 300 ms hang-over window. Customize the sensitivity using `bargeInThresholdMs`:
+
+```typescript
+const agent = phone.agent({
+  systemPrompt: "...",
+  bargeInThresholdMs: 0, // Disable barge-in (exact interruption)
+});
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `bargeInThresholdMs` | `number` | `300` | Hang-over window in milliseconds. Set to `0` to disable barge-in. Higher values delay interruption detection. |
+
+A hang-over window of 300 ms prevents false positives from background noise while remaining responsive to genuine interruptions.
 
 ## Dynamic Variables
 

@@ -72,10 +72,15 @@ agent = phone.agent(
 | `model` | `str` | `"gpt-4o-mini-realtime-preview"` | Model ID for OpenAI Realtime. Usually inferred from the engine. |
 | `language` | `str` | `"en"` | BCP-47 language code. |
 | `first_message` | `str` | `""` | If set, the agent speaks this immediately when a call connects. |
-| `tools` | `list[Tool \| dict] \| None` | `None` | Tool definitions. See [Tools](/python-sdk/tools). |
-| `variables` | `dict \| None` | `None` | Dynamic variable substitutions for `{placeholder}` patterns in the system prompt. |
-| `guardrails` | `list[Guardrail \| dict] \| None` | `None` | Output guardrails. See [Guardrails](/python-sdk/guardrails). |
-| `hooks` | `PipelineHooks \| None` | `None` | Optional pipeline hooks for interception/instrumentation. |
+| `tools` | `list[Tool] \| None` | `None` | `Tool(...)` instances for function calling. See [Tools](/python-sdk/tools). |
+| `variables` | `dict \| None` | `None` | Dynamic variable substitutions for `{placeholder}` patterns in the system prompt. Values limited to 500 chars. |
+| `guardrails` | `list[Guardrail] \| None` | `None` | `Guardrail(...)` instances applied to LLM output. See [Guardrails](/python-sdk/guardrails). |
+| `hooks` | `PipelineHooks \| None` | `None` | Pipeline hooks for intercepting STT/TTS processing. Pipeline mode only. See [Events](/python-sdk/events). |
+| `text_transforms` | `list[Callable] \| None` | `None` | Text transformation functions applied to LLM output before TTS. Pipeline mode only. |
+| `vad` | `VADProvider \| None` | `None` | Voice activity detection provider (e.g. Silero). Pipeline mode only. |
+| `audio_filter` | `AudioFilter \| None` | `None` | Pre-STT audio filter (e.g. Krisp noise suppression). Pipeline mode only. |
+| `background_audio` | `BackgroundAudioPlayer \| None` | `None` | Hold music / ambient-cue mixer. Pipeline mode only. |
+| `barge_in_threshold_ms` | `int` | `300` | Sustained-voice window (ms) before treating caller audio as barge-in. Set to `0` to disable. |
 
 ## Agent Dataclass
 

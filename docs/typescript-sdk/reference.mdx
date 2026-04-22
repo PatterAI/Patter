@@ -198,6 +198,12 @@ interface AgentOptions {
   tools?: ToolDefinition[];
   variables?: Record<string, string>;
   guardrails?: Guardrail[];
+  hooks?: PipelineHooks;
+  textTransforms?: ((text: string) => string)[];
+  vad?: VADProvider;
+  audioFilter?: AudioFilter;
+  backgroundAudio?: BackgroundAudioPlayer;
+  bargeInThresholdMs?: number;
 }
 ```
 
@@ -232,6 +238,7 @@ interface LocalCallOptions {
   machineDetection?: boolean;
   voicemailMessage?: string;
   variables?: Record<string, string>;
+  ringTimeout?: number;
 }
 ```
 

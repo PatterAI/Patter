@@ -6,7 +6,7 @@ icon: "terminal"
 
 # API Reference
 
-Complete reference for the `patter` Python SDK (v0.5.0).
+Complete reference for the `getpatter` Python SDK (v0.5.0).
 
 ## Patter
 
@@ -48,18 +48,41 @@ def agent(
     model: str = "gpt-4o-mini-realtime-preview",
     language: str = "en",
     first_message: str = "",
-    tools: list[Tool | dict] | None = None,
+    tools: list[Tool] | None = None,
     variables: dict | None = None,
-    guardrails: list[Guardrail | dict] | None = None,
+    guardrails: list[Guardrail] | None = None,
     hooks: PipelineHooks | None = None,
+    text_transforms: list[Callable] | None = None,
+    vad: VADProvider | None = None,
+    audio_filter: AudioFilter | None = None,
+    background_audio: BackgroundAudioPlayer | None = None,
+    barge_in_threshold_ms: int = 300,
 ) -> Agent
 ```
 
 Pass `engine=OpenAIRealtime(...)` or `engine=ElevenLabsConvAI(...)` for end-to-end engines; omit `engine=` and pass `stt=`/`tts=` for pipeline mode.
 
-Create an `Agent` configuration. Validates credentials.
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `system_prompt` | `str` | *required* | Agent instructions. |
+| `engine` | `OpenAIRealtime \| ElevenLabsConvAI \| None` | `None` | End-to-end voice runtime. Omit for pipeline mode. |
+| `stt` | `STTProvider \| None` | `None` | STT instance for pipeline mode (e.g. `DeepgramSTT()`). |
+| `tts` | `TTSProvider \| None` | `None` | TTS instance for pipeline mode (e.g. `ElevenLabsTTS()`). |
+| `voice` | `str` | `"alloy"` | TTS voice name (when engine doesn't carry it). |
+| `model` | `str` | `"gpt-4o-mini-realtime-preview"` | AI model ID (when engine doesn't carry it). |
+| `language` | `str` | `"en"` | BCP-47 language code. |
+| `first_message` | `str` | `""` | Greeting spoken at call start. |
+| `tools` | `list[Tool] \| None` | `None` | `Tool(...)` instances for function calling. |
+| `variables` | `dict \| None` | `None` | Dynamic `{placeholder}` variable substitutions. |
+| `guardrails` | `list[Guardrail] \| None` | `None` | `Guardrail(...)` instances applied to LLM output. |
+| `hooks` | `PipelineHooks \| None` | `None` | Pipeline hooks for STT/TTS interception. |
+| `text_transforms` | `list[Callable] \| None` | `None` | Text transformation functions (pipeline mode). |
+| `vad` | `VADProvider \| None` | `None` | Voice activity detection provider (pipeline mode). |
+| `audio_filter` | `AudioFilter \| None` | `None` | Audio preprocessing filter (pipeline mode). |
+| `background_audio` | `BackgroundAudioPlayer \| None` | `None` | Background audio player (pipeline mode). |
+| `barge_in_threshold_ms` | `int` | `300` | Barge-in hang-over window (ms). Set to `0` to disable. |
 
-**Raises:** `ValueError` if required credentials are missing.
+**Raises:** `ValueError` if required credentials are missing or conflicting options are passed (e.g. both `engine` and `stt`/`tts`).
 
 ---
 
@@ -282,6 +305,12 @@ class Agent:
     tts: TTSConfig | TTSProvider | None = None
     variables: dict | None = None
     guardrails: list | None = None
+    hooks: PipelineHooks | None = None
+    text_transforms: list[Callable] | None = None
+    vad: VADProvider | None = None
+    audio_filter: AudioFilter | None = None
+    background_audio: BackgroundAudioPlayer | None = None
+    barge_in_threshold_ms: int = 300
 ```
 
 ### CallEvent
