@@ -459,6 +459,10 @@ export class StreamHandler {
         }
       } catch (e) {
         getLogger().error(`First message TTS error (${label}):`, e);
+      } finally {
+        // Drop any partial int16 byte to prevent cross-turn corruption
+        // if the stream threw before a complete sample was delivered.
+        this.ttsByteCarry = null;
       }
       if (firstChunkSent) {
         const turn = this.metricsAcc.recordTurnComplete(this.deps.agent.firstMessage);
@@ -557,6 +561,8 @@ export class StreamHandler {
       }
     } catch (e) {
       getLogger().error(`TTS streaming error (${this.deps.bridge.label}):`, e);
+    } finally {
+      this.ttsByteCarry = null;
     }
   }
 
@@ -820,6 +826,7 @@ export class StreamHandler {
       getLogger().error(`WebSocket remote error (${this.deps.bridge.label}):`, e);
     } finally {
       this.isSpeaking = false;
+      this.ttsByteCarry = null;
     }
     const responseText = parts.join('');
     this.metricsAcc.recordTtsComplete(responseText);

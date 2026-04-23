@@ -5,6 +5,7 @@
  */
 
 import {
+  calculateRealtimeCachedSavings,
   calculateRealtimeCost,
   calculateSttCost,
   calculateTelephonyCost,
@@ -28,6 +29,12 @@ export interface CostBreakdown {
   llm: number;
   telephony: number;
   total: number;
+  /**
+   * Amount saved on LLM cost thanks to OpenAI Realtime prompt caching.
+   * ``llm`` above is the net cost AFTER this discount. Dashboards can
+   * render ``saved $X (pct%)`` next to the LLM line when > 0.
+   */
+  llm_cached_savings?: number;
 }
 
 export interface TurnMetrics {
@@ -46,9 +53,11 @@ export interface CallMetrics {
   turns: TurnMetrics[];
   cost: CostBreakdown;
   latency_avg: LatencyBreakdown;
-  latency_p50: LatencyBreakdown;
   latency_p95: LatencyBreakdown;
-  latency_p99: LatencyBreakdown;
+  // Optional for backwards compatibility with external consumers that
+  // construct CallMetrics literals. Always populated by endCall().
+  latency_p50?: LatencyBreakdown;
+  latency_p99?: LatencyBreakdown;
   provider_mode: string;
   stt_provider: string;
   tts_provider: string;
@@ -139,6 +148,7 @@ export class CallMetricsAccumulator {
   private _totalSttAudioSeconds = 0;
   private _totalTtsCharacters = 0;
   private _totalRealtimeCost = 0;
+  private _totalRealtimeCachedSavings = 0;
   private _sttByteCount = 0;
   private _sttSampleRate = 16000;
   private _sttBytesPerSample = 2;
@@ -247,10 +257,15 @@ export class CallMetricsAccumulator {
   }
 
   recordRealtimeUsage(usage: {
-    input_token_details?: { audio_tokens?: number; text_tokens?: number };
+    input_token_details?: {
+      audio_tokens?: number;
+      text_tokens?: number;
+      cached_tokens_details?: { audio_tokens?: number; text_tokens?: number };
+    };
     output_token_details?: { audio_tokens?: number; text_tokens?: number };
   }): void {
     this._totalRealtimeCost += calculateRealtimeCost(usage, this._pricing);
+    this._totalRealtimeCachedSavings += calculateRealtimeCachedSavings(usage, this._pricing);
   }
 
   setActualTelephonyCost(cost: number): void {
@@ -377,6 +392,9 @@ export class CallMetricsAccumulator {
       llm: round(llm, 6),
       telephony: round(telephony, 6),
       total: round(total, 6),
+      llm_cached_savings: this._totalRealtimeCachedSavings > 0
+        ? round(this._totalRealtimeCachedSavings, 6)
+        : undefined,
     };
   }
 

@@ -10,6 +10,10 @@
  * matches what OpenAI actually bills.
  */
 
+/** Pricing table version identifier, updated in lockstep with sdk-py. */
+export const PRICING_VERSION = '2026.1';
+export const PRICING_LAST_UPDATED = '2026-04-23';
+
 export interface ProviderPricing {
   unit: string;
   price?: number;
@@ -71,7 +75,10 @@ export function mergePricing(
     if (merged[provider]) {
       merged[provider] = { ...merged[provider], ...values };
     } else {
-      merged[provider] = { unit: 'minute', ...values } as ProviderPricing;
+      // Fail-closed: when the user registers a brand-new provider without a
+      // ``unit`` field, leave it missing so ``calculate_*_cost`` returns 0
+      // instead of silently billing as minutes. Matches sdk-py behaviour.
+      merged[provider] = { ...values } as ProviderPricing;
     }
   }
   return merged;
@@ -145,7 +152,43 @@ export function calculateRealtimeCost(
   return cost;
 }
 
-/** Calculate telephony cost from call duration. */
+/**
+ * How much would have been paid if the cached portion of the input tokens
+ * had been billed at the full rate. Used to expose a "saved from prompt
+ * caching" figure on the dashboard.
+ */
+export function calculateRealtimeCachedSavings(
+  usage: {
+    input_token_details?: {
+      audio_tokens?: number;
+      text_tokens?: number;
+      cached_tokens_details?: { audio_tokens?: number; text_tokens?: number };
+    };
+  },
+  pricing: Record<string, ProviderPricing>,
+): number {
+  const config = pricing.openai_realtime;
+  if (!config || config.unit !== 'token') return 0;
+  const input = usage.input_token_details ?? {};
+  const cached = input.cached_tokens_details ?? {};
+  const cachedAudioRate = config.cached_audio_input_per_token ?? config.audio_input_per_token ?? 0;
+  const cachedTextRate = config.cached_text_input_per_token ?? config.text_input_per_token ?? 0;
+  const cachedAudio = Math.min(cached.audio_tokens ?? 0, input.audio_tokens ?? 0);
+  const cachedText = Math.min(cached.text_tokens ?? 0, input.text_tokens ?? 0);
+  const fullAudio = cachedAudio * (config.audio_input_per_token ?? 0);
+  const fullText = cachedText * (config.text_input_per_token ?? 0);
+  const discountedAudio = cachedAudio * cachedAudioRate;
+  const discountedText = cachedText * cachedTextRate;
+  return (fullAudio + fullText) - (discountedAudio + discountedText);
+}
+
+/**
+ * Calculate telephony cost from call duration.
+ *
+ * Twilio bills in whole-minute increments (any partial minute is rounded up
+ * to the next full minute per twilio.com/help/223132307). Telnyx bills
+ * per-second. We detect Twilio by provider name and apply the round-up.
+ */
 export function calculateTelephonyCost(
   provider: string,
   durationSeconds: number,
@@ -153,5 +196,8 @@ export function calculateTelephonyCost(
 ): number {
   const config = pricing[provider];
   if (!config || config.unit !== 'minute') return 0;
-  return (durationSeconds / 60) * (config.price ?? 0);
+  const minutes = provider === 'twilio'
+    ? Math.ceil(durationSeconds / 60)
+    : durationSeconds / 60;
+  return minutes * (config.price ?? 0);
 }

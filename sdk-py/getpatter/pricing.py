@@ -105,9 +105,11 @@ def calculate_realtime_cost(usage: dict, pricing: dict) -> float:
     if config.get("unit") != "token":
         return 0.0
 
-    input_details = usage.get("input_token_details", {})
-    output_details = usage.get("output_token_details", {})
-    cached = input_details.get("cached_tokens_details", {}) or {}
+    # Guard against OpenAI sending ``"input_token_details": null`` — dict.get
+    # returns None in that case and the chained .get() would crash.
+    input_details = usage.get("input_token_details") or {}
+    output_details = usage.get("output_token_details") or {}
+    cached = input_details.get("cached_tokens_details") or {}
 
     cached_audio_rate = config.get(
         "cached_audio_input_per_token", config.get("audio_input_per_token", 0)
@@ -131,11 +133,53 @@ def calculate_realtime_cost(usage: dict, pricing: dict) -> float:
     return cost
 
 
+def calculate_realtime_cached_savings(usage: dict, pricing: dict) -> float:
+    """How much would have been paid if the cached portion of input tokens had
+    been billed at the full rate. Used to expose a "saved from prompt caching"
+    figure on the dashboard.
+    """
+    config = pricing.get("openai_realtime", {})
+    if config.get("unit") != "token":
+        return 0.0
+    input_details = usage.get("input_token_details") or {}
+    cached = input_details.get("cached_tokens_details") or {}
+
+    cached_audio_rate = config.get(
+        "cached_audio_input_per_token", config.get("audio_input_per_token", 0)
+    )
+    cached_text_rate = config.get(
+        "cached_text_input_per_token", config.get("text_input_per_token", 0)
+    )
+
+    total_audio = input_details.get("audio_tokens", 0)
+    total_text = input_details.get("text_tokens", 0)
+    cached_audio = min(cached.get("audio_tokens", 0), total_audio)
+    cached_text = min(cached.get("text_tokens", 0), total_text)
+
+    full_cost = (
+        cached_audio * config.get("audio_input_per_token", 0)
+        + cached_text * config.get("text_input_per_token", 0)
+    )
+    discounted_cost = cached_audio * cached_audio_rate + cached_text * cached_text_rate
+    return full_cost - discounted_cost
+
+
 def calculate_telephony_cost(
     provider: str, duration_seconds: float, pricing: dict
 ) -> float:
-    """Calculate telephony cost from call duration."""
+    """Calculate telephony cost from call duration.
+
+    Twilio bills in whole-minute increments (any partial minute rounded up
+    per twilio.com/help/223132307). Telnyx bills per-second. Detection is
+    by provider name.
+    """
+    import math
+
     config = pricing.get(provider, {})
-    if config.get("unit") == "minute":
-        return (duration_seconds / 60.0) * config.get("price", 0.0)
-    return 0.0
+    if config.get("unit") != "minute":
+        return 0.0
+    if provider == "twilio":
+        minutes = math.ceil(duration_seconds / 60.0)
+    else:
+        minutes = duration_seconds / 60.0
+    return minutes * config.get("price", 0.0)

@@ -85,6 +85,51 @@ describe('calculateRealtimeCost', () => {
     const pricing = mergePricing();
     expect(calculateRealtimeCost({}, pricing)).toBe(0);
   });
+
+  it('applies cached rate to cached portion of input tokens', () => {
+    const pricing = mergePricing();
+    // 1000 audio in (800 cached), 500 text in (400 cached), 0 out.
+    const cost = calculateRealtimeCost(
+      {
+        input_token_details: {
+          audio_tokens: 1000,
+          text_tokens: 500,
+          cached_tokens_details: { audio_tokens: 800, text_tokens: 400 },
+        },
+        output_token_details: { audio_tokens: 0, text_tokens: 0 },
+      },
+      pricing,
+    );
+    // (1000-800)*1e-5 + 800*3e-7 + (500-400)*6e-7 + 400*6e-8
+    // = 0.002 + 0.00024 + 0.00006 + 0.000024 = 0.002324
+    expect(cost).toBeCloseTo(0.002324, 8);
+  });
+
+  it('clamps cached tokens > total so cost stays non-negative', () => {
+    const pricing = mergePricing();
+    const cost = calculateRealtimeCost(
+      {
+        input_token_details: {
+          audio_tokens: 100,
+          cached_tokens_details: { audio_tokens: 500 }, // malformed: > total
+        },
+      },
+      pricing,
+    );
+    // Clamped to 100 cached: 0 * 1e-5 + 100 * 3e-7 = 3e-5
+    expect(cost).toBeCloseTo(100 * 0.0000003, 10);
+    expect(cost).toBeGreaterThanOrEqual(0);
+  });
+
+  it('handles null input_token_details safely (no throw)', () => {
+    const pricing = mergePricing();
+    // OpenAI sometimes emits input_token_details = null on early errors
+    const cost = calculateRealtimeCost(
+      { input_token_details: undefined, output_token_details: { audio_tokens: 100 } },
+      pricing,
+    );
+    expect(cost).toBeCloseTo(100 * 0.00002, 10);
+  });
 });
 
 describe('calculateTelephonyCost', () => {

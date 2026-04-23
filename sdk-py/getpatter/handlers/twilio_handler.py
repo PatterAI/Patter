@@ -115,6 +115,12 @@ class TwilioAudioSender(AudioSender):
         self._chunk_count = 0
         self.last_confirmed_mark = ""
         self._input_is_mulaw_8k = input_is_mulaw_8k
+        # PCM16 alignment carry — HTTP streaming TTS providers (ElevenLabs,
+        # Cartesia, LMNT, Rime, TelnyxTTS) yield chunks of arbitrary byte
+        # length, including odd counts. Passing an odd buffer to
+        # ``audioop.ratecv`` raises ``audioop.error: not a whole number of
+        # frames``, crashing the TTS mid-sentence. Matches TS ttsByteCarry.
+        self._pcm16_carry: bytes = b""
         # Lazy import transcoding functions (only needed when transcoding)
         if not input_is_mulaw_8k:
             from getpatter.services.transcoding import pcm16_to_mulaw, resample_16k_to_8k  # type: ignore[import]
@@ -124,11 +130,21 @@ class TwilioAudioSender(AudioSender):
             self._pcm16_to_mulaw = None
             self._resample_16k_to_8k = None
 
+    def reset_pcm_carry(self) -> None:
+        """Drop any buffered odd byte. Call at the start of a new TTS synthesis."""
+        self._pcm16_carry = b""
+
     async def send_audio(self, pcm_audio: bytes) -> None:
         if self._input_is_mulaw_8k:
             mulaw = pcm_audio
         else:
-            resampled = self._resample_16k_to_8k(pcm_audio)
+            combined = self._pcm16_carry + pcm_audio if self._pcm16_carry else pcm_audio
+            aligned_len = len(combined) & ~1  # round down to even
+            self._pcm16_carry = combined[aligned_len:] if aligned_len < len(combined) else b""
+            aligned = combined[:aligned_len]
+            if not aligned:
+                return
+            resampled = self._resample_16k_to_8k(aligned)
             mulaw = self._pcm16_to_mulaw(resampled)
         encoded = base64.b64encode(mulaw).decode("ascii")
         await self._ws.send_text(

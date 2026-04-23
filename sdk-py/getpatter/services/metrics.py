@@ -13,6 +13,7 @@ from getpatter.models import (
     TurnMetrics,
 )
 from getpatter.pricing import (
+    calculate_realtime_cached_savings,
     calculate_realtime_cost,
     calculate_stt_cost,
     calculate_telephony_cost,
@@ -61,6 +62,7 @@ class CallMetricsAccumulator:
         self._total_stt_audio_seconds: float = 0.0
         self._total_tts_characters: int = 0
         self._total_realtime_cost: float = 0.0
+        self._total_realtime_cached_savings: float = 0.0
         # Byte counters for computing audio seconds from raw audio
         self._stt_byte_count: int = 0
         self._stt_sample_rate: int = 16000
@@ -165,8 +167,8 @@ class CallMetricsAccumulator:
 
     def record_realtime_usage(self, usage: dict) -> None:
         """Record OpenAI Realtime token usage from a ``response.done`` event."""
-        cost = calculate_realtime_cost(usage, self._pricing)
-        self._total_realtime_cost += cost
+        self._total_realtime_cost += calculate_realtime_cost(usage, self._pricing)
+        self._total_realtime_cached_savings += calculate_realtime_cached_savings(usage, self._pricing)
 
     def set_actual_telephony_cost(self, cost: float) -> None:
         """Set the actual telephony cost from the provider API (post-call).
@@ -307,6 +309,7 @@ class CallMetricsAccumulator:
             llm=round(llm_cost, 6),
             telephony=round(telephony_cost, 6),
             total=round(total, 6),
+            llm_cached_savings=round(self._total_realtime_cached_savings, 6),
         )
 
     def _completed_turns(self) -> list:

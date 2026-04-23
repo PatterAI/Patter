@@ -371,7 +371,10 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         from getpatter.services.tool_executor import ToolExecutor  # type: ignore[import]
 
         tool_executor = ToolExecutor()
-        waiting_first_audio = False
+        # Arm first-byte capture so that the firstMessage turn (started in
+        # start()) gets its tts_ms / total_ms recorded on the first audio
+        # chunk. Parity with TS ``responseAudioStarted=false`` class field.
+        waiting_first_audio = True
         current_agent_text = ""
         try:
             async for ev_type, ev_data in self._adapter.receive_events():
@@ -470,6 +473,13 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                                     }
                                 )
                         current_agent_text = ""
+                    elif self.metrics is not None and self.metrics.turn_active:
+                        # response_done without agent text = cancelled / empty
+                        # response. Close the active turn as interrupted so the
+                        # next speech_stopped can start a fresh turn cleanly.
+                        # Parity with TS handleAdapterEvent response_done path.
+                        self.metrics.record_turn_interrupted()
+                    waiting_first_audio = True
 
                 elif ev_type == "function_call":
                     func_data = ev_data
@@ -644,7 +654,10 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
         self._background_task = asyncio.create_task(self._forward_events())
 
     async def _forward_events(self) -> None:
-        waiting_first_audio = False
+        # Arm first-byte capture so that the firstMessage turn (started in
+        # start()) gets its tts_ms / total_ms recorded on the first audio
+        # chunk. Parity with TS ``responseAudioStarted=false`` class field.
+        waiting_first_audio = True
         current_agent_text = ""
         try:
             async for ev_type, ev_data in self._adapter.receive_events():
@@ -717,6 +730,11 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
                                     }
                                 )
                         current_agent_text = ""
+                    elif self.metrics is not None and self.metrics.turn_active:
+                        # response_done without agent text = cancelled / empty.
+                        # Close the active turn as interrupted — parity with TS.
+                        self.metrics.record_turn_interrupted()
+                    waiting_first_audio = True
 
                 elif ev_type == "interruption":
                     await self.audio_sender.send_clear()

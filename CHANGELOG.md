@@ -2,7 +2,47 @@
 
 ## 0.5.5 (2026-04-23)
 
-Cross-audit from two independent agent teams surfaced additional bugs in cost/latency instrumentation that the initial 0.5.4 fix didn't catch. This release adds the remaining fixes plus LiveKit/Pipecat-style observability improvements.
+Two waves of cross-audit (first: 3 agent teams on cost/latency/research; second: 11 specialised teams on cost/latency/audio/parity/OpenAI compliance/LiveKit-Pipecat benchmarking/Twilio pricing/test coverage/security/ship-readiness/dashboard UX) surfaced a long tail of bugs in 0.5.4's instrumentation. This release applies every HIGH/CRITICAL fix flagged plus LiveKit/Pipecat-style observability.
+
+### Fixed — cost accounting
+- **Python `calculate_realtime_cost` would crash on `input_token_details: null`** — `dict.get("...", {})` returns `None` when the key exists with a `None` value, and the chained `.get()` raised `AttributeError`. Switched to `or {}` fallback. TS was already safe via `??`.
+- **`cached_tokens_details` ignored** → cached portion was billed at full rate (up to ~33× overcharge on cached audio). Now subtracted from the total and re-billed at the cached rate.
+- **Twilio rounds partial minutes up** to the next whole minute ([twilio help 223132307](https://help.twilio.com/articles/223132307)). Our `(seconds/60) * rate` under-reported cost for every call ending on a non-minute boundary. `calculateTelephonyCost` / `calculate_telephony_cost` now apply `ceil(seconds/60)` for Twilio and keep per-second math for Telnyx (which bills per-second).
+- **Dashboard had no way to show "saved from cache"** — the `cached_tokens_details` discount was consumed inside `calculateRealtimeCost` and then thrown away. Added `CostBreakdown.llm_cached_savings` (propagated via new `calculateRealtimeCachedSavings` helper + `_totalRealtimeCachedSavings` accumulator) so UI can render `LLM $0.08 (saved $0.02 from prompt caching)`.
+- **`mergePricing` (TS) silently defaulted `unit: 'minute'`** for any new provider entry without an explicit unit, masking misconfiguration. Aligned to Python behaviour (fail-closed: cost = 0 when `unit` is missing).
+- **`PRICING_VERSION` / `PRICING_LAST_UPDATED` now exported from the TS pricing module** for parity with Python — lets cross-SDK observability dedupe by pricing table version.
+
+### Fixed — latency instrumentation
+- **Python `waiting_first_audio = False` default** meant the `firstMessage` turn's `tts_ms` / `total_ms` were never captured in Realtime mode (OpenAI + ElevenLabs ConvAI). Flipped to `True`. Same TS behaviour already — parity restored.
+- **Python `response_done` with empty `current_agent_text` left the turn dangling** (TS called `recordTurnInterrupted`, Python didn't). Both now close the active turn as interrupted so the next `speech_stopped` starts a clean turn.
+
+### Fixed — audio pipeline (Python)
+- **Python `TwilioAudioSender.send_audio` had no byte-alignment carry** — streaming TTS providers (ElevenLabs, Cartesia, LMNT, Rime, TelnyxTTS) yield chunks of arbitrary byte length including odd counts. Passing an odd buffer to `audioop.ratecv` raises `audioop.error: not a whole number of frames`, crashing the TTS mid-sentence. Now maintains a `_pcm16_carry` byte across calls. Parity with TS `StreamHandler.ttsByteCarry` fix in 0.5.4.
+- **TS `ttsByteCarry` could persist across turns on mid-chunk exceptions** (security M1: defensive). Wrapped the three TTS loops in `try/finally` so the carry is always dropped.
+
+### Security
+- **`agent.model` was interpolated into warn logs without sanitisation** — dev-supplied string with ANSI escapes could inject colour codes into log aggregators. Now passes through `sanitizeLogValue`.
+
+### Added — observability (LiveKit/Pipecat-style)
+- `CallMetrics.latency_p50` and `.latency_p99` alongside `latency_p95` and `latency_avg`. Lets dashboards show the full distribution (typical UX / SLA / cold-start outlier).
+- `CostBreakdown.llm_cached_savings` as described above.
+- Percentile formula upgraded from `floor(n*p)` (returned max for n<21) to Hyndman-Fan type 7 linear interpolation (same as `numpy.percentile` default). Meaningful on 2-3 sample sets.
+- `_completedTurns` helper excludes `[interrupted]` turns and zero-latency turns from every percentile + average computation, so barge-in / cancelled replacements stop dragging the reported numbers toward zero.
+
+### Changed — default rates (2026)
+| Provider | Old | New | Why |
+|---|---|---|---|
+| Twilio | $0.013/min | **$0.0085/min** | Old rate matched neither inbound ($0.0085) nor outbound ($0.0140). Default is now US inbound local (99% of receive-call use cases). |
+| OpenAI Realtime audio in | $100/M | **$10/M** | Recalibrated for `gpt-4o-mini-realtime-preview` (Patter default model). |
+| OpenAI Realtime audio out | $400/M | **$20/M** | Same (old value was ~20× wrong on default model). |
+| OpenAI Realtime text in / out | $5 / $20 per M | **$0.60 / $2.40 per M** | Same. |
+| OpenAI Realtime cached audio / text in | — (billed as full) | **$0.30/M / $0.06/M** | New fields. |
+
+Users running non-default Realtime models (`gpt-realtime`, `gpt-4o-realtime-preview`) get a startup warning with instructions to override. See pricing.ts / pricing.py comments for the multipliers.
+
+### Tests
+- Added cached-tokens happy path + over-total clamp + null-input-details regression tests in both TS and Python pricing suites.
+- Final: TS 1046/1046 · Py 1275/1275.
 
 ### Fixed — cost accounting
 - **Prompt caching was billed at full rate** — OpenAI Realtime sends `input_token_details.cached_tokens_details.{audio,text}_tokens` as a breakdown of already-counted totals; cached portions are billed at ~3% (audio cached $0.30/M vs full $10/M) and ~10% (text cached $0.06/M vs $0.60/M) of full rates. We were multiplying the full total by the full rate. On long calls with warm KV cache this overcharged display by up to ~30%. `calculateRealtimeCost` / `calculate_realtime_cost` now subtract cached from the full count and apply the reduced rate. `cached_audio_input_per_token` and `cached_text_input_per_token` added to `DEFAULT_PRICING.openai_realtime`.

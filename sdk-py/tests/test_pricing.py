@@ -113,6 +113,46 @@ class TestCalculateRealtimeCost:
         cost = calculate_realtime_cost(usage, pricing)
         assert cost == 0.0
 
+    def test_cached_tokens_discounted(self):
+        pricing = merge_pricing(None)
+        usage = {
+            "input_token_details": {
+                "audio_tokens": 1000,
+                "text_tokens": 500,
+                "cached_tokens_details": {"audio_tokens": 800, "text_tokens": 400},
+            },
+            "output_token_details": {"audio_tokens": 0, "text_tokens": 0},
+        }
+        cost = calculate_realtime_cost(usage, pricing)
+        # (1000-800)*1e-5 + 800*3e-7 + (500-400)*6e-7 + 400*6e-8
+        expected = 200 * 1e-5 + 800 * 3e-7 + 100 * 6e-7 + 400 * 6e-8
+        assert abs(cost - expected) < 1e-10
+
+    def test_cached_clamp_when_over_total(self):
+        pricing = merge_pricing(None)
+        usage = {
+            "input_token_details": {
+                "audio_tokens": 100,
+                "cached_tokens_details": {"audio_tokens": 500},
+            },
+        }
+        cost = calculate_realtime_cost(usage, pricing)
+        # Clamped to 100: all 100 billed at cached rate
+        expected = 100 * 3e-7
+        assert abs(cost - expected) < 1e-10
+        assert cost >= 0
+
+    def test_null_input_token_details_does_not_crash(self):
+        """OpenAI can emit ``null`` for input_token_details on early errors."""
+        pricing = merge_pricing(None)
+        usage = {
+            "input_token_details": None,  # null in JSON
+            "output_token_details": {"audio_tokens": 50},
+        }
+        # Must NOT raise AttributeError
+        cost = calculate_realtime_cost(usage, pricing)
+        assert abs(cost - 50 * 2e-5) < 1e-10
+
 
 class TestCalculateTelephonyCost:
     def test_twilio_cost(self):

@@ -147,6 +147,10 @@ class CostBreakdown:
     llm: float = 0.0
     telephony: float = 0.0
     total: float = 0.0
+    # Amount saved on LLM cost thanks to OpenAI Realtime prompt caching.
+    # ``llm`` above is the net cost AFTER this discount. Dashboards can
+    # render "saved $X (pct%)" next to the LLM line when > 0.
+    llm_cached_savings: float = 0.0
 
 
 @dataclass(frozen=True)
