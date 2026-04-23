@@ -34,8 +34,6 @@ describe('ElevenLabsConvAIAdapter', () => {
       'el_key',
       'agent_123',
       'some_voice_id',
-      'eleven_turbo_v2_5',
-      'it',
       'Ciao!',
     );
     expect(adapter).toBeDefined();
@@ -72,7 +70,7 @@ describe('ElevenLabsConvAIAdapter', () => {
   });
 
   it('connect() includes agent first_message when provided', async () => {
-    const adapter = new ElevenLabsConvAIAdapter('el_key', '', undefined, undefined, 'en', 'Hello!');
+    const adapter = new ElevenLabsConvAIAdapter('el_key', '', undefined, 'Hello!');
 
     const connectPromise = adapter.connect();
     const instance = (adapter as unknown as { ws: { emit: (e: string) => void; sent: string[] } }).ws;
