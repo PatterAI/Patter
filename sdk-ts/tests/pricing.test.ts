@@ -88,10 +88,11 @@ describe('calculateRealtimeCost', () => {
 });
 
 describe('calculateTelephonyCost', () => {
-  it('calculates twilio cost for 120 seconds', () => {
+  it('calculates twilio cost for 120 seconds (US inbound local default)', () => {
     const pricing = mergePricing();
     const cost = calculateTelephonyCost('twilio', 120, pricing);
-    expect(cost).toBeCloseTo(0.026, 3);
+    // 120s / 60 * $0.0085/min = $0.017
+    expect(cost).toBeCloseTo(0.017, 4);
   });
 
   it('calculates telnyx cost', () => {

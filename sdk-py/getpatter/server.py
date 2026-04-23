@@ -492,6 +492,23 @@ class EmbeddedServer:
         logger.info("Webhook URL: https://%s", self.config.webhook_url)
         logger.info("Phone:   %s", self.config.phone_number)
         logger.info("Agent:   %s / %s", self.agent.model, self.agent.voice)
+        # Warn if the agent runs a non-default Realtime model — DEFAULT_PRICING
+        # is calibrated for gpt-4o-mini-realtime-preview. Other models differ
+        # by 3-10x so cost display would under-report without an override.
+        model = self.agent.model or ""
+        if (
+            model
+            and model != "gpt-4o-mini-realtime-preview"
+            and "realtime" in model
+        ):
+            logger.warning(
+                "Agent uses %r but DEFAULT_PRICING.openai_realtime is "
+                "calibrated for 'gpt-4o-mini-realtime-preview'. Pass "
+                "Patter(pricing={'openai_realtime': {...}}) to set rates for "
+                "this model, otherwise the dashboard cost display will "
+                "under-report.",
+                model,
+            )
         if self.dashboard:
             print("\n──── Dashboard ─────────────────────────────────────")
             logger.info("URL: http://127.0.0.1:%s/", port)

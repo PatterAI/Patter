@@ -156,13 +156,13 @@ class TestLatencyCalculation:
         acc = _make_accumulator()
         for i in range(20):
             _record_turn(acc, f"T{i}", f"R{i}")
-        p95 = acc._compute_p95_latency()
+        p95 = acc._compute_percentile_latency(0.95)
         assert p95.stt_ms >= 0
         assert p95.total_ms >= 0
 
     def test_p95_latency_no_turns(self) -> None:
         acc = _make_accumulator()
-        p95 = acc._compute_p95_latency()
+        p95 = acc._compute_percentile_latency(0.95)
         assert p95 == LatencyBreakdown()
 
 

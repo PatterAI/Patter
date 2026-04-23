@@ -46,7 +46,9 @@ export interface CallMetrics {
   turns: TurnMetrics[];
   cost: CostBreakdown;
   latency_avg: LatencyBreakdown;
+  latency_p50: LatencyBreakdown;
   latency_p95: LatencyBreakdown;
+  latency_p99: LatencyBreakdown;
   provider_mode: string;
   stt_provider: string;
   tts_provider: string;
@@ -89,12 +91,27 @@ function hrTimeMs(): number {
   return sec * 1000 + ns / 1e6;
 }
 
-function p95(values: number[]): number {
+/**
+ * Percentile with linear interpolation between order statistics
+ * (Hyndman-Fan type 7, same as numpy.percentile default).
+ *
+ * Rationale: the previous ``floor(n * 0.95)`` variant returned the sample
+ * maximum for any n < 21, so p95 on short calls was indistinguishable from
+ * max. Linear interpolation produces sensible intermediate values even on
+ * 2–3 sample sets.
+ */
+function percentile(values: number[], p: number): number {
   if (values.length === 0) return 0;
   const sorted = [...values].sort((a, b) => a - b);
-  const idx = Math.min(Math.floor(sorted.length * 0.95), sorted.length - 1);
-  return sorted[idx];
+  if (sorted.length === 1) return sorted[0];
+  const rank = p * (sorted.length - 1);
+  const lo = Math.floor(rank);
+  const hi = Math.ceil(rank);
+  if (lo === hi) return sorted[lo];
+  const frac = rank - lo;
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * frac;
 }
+
 
 // ---- Accumulator ----
 
@@ -256,7 +273,9 @@ export class CallMetricsAccumulator {
 
     const cost = this._computeCost(duration);
     const latencyAvg = this._computeAverageLatency();
-    const latencyP95 = this._computeP95Latency();
+    const latencyP50 = this._computePercentileLatency(0.5);
+    const latencyP95 = this._computePercentileLatency(0.95);
+    const latencyP99 = this._computePercentileLatency(0.99);
 
     return {
       call_id: this.callId,
@@ -264,7 +283,9 @@ export class CallMetricsAccumulator {
       turns: [...this._turns],
       cost,
       latency_avg: latencyAvg,
+      latency_p50: latencyP50,
       latency_p95: latencyP95,
+      latency_p99: latencyP99,
       provider_mode: this.providerMode,
       stt_provider: this.sttProvider,
       tts_provider: this.ttsProvider,
@@ -308,14 +329,11 @@ export class CallMetricsAccumulator {
       total_ms = this._ttsFirstByte - this._turnStart;
     }
 
-    // In Realtime mode (openai_realtime), STT/LLM/TTS happen inside a single
-    // OpenAI pipeline so individual checkpoints are never recorded.  Attribute
-    // the entire end-to-end latency to the LLM bucket so dashboards display a
-    // meaningful breakdown bar instead of all-zero.
-    if (total_ms > 0 && stt_ms === 0 && llm_ms === 0 && tts_ms === 0) {
-      llm_ms = total_ms;
-    }
-
+    // Note: in Realtime mode OpenAI handles STT+LLM+TTS as a single opaque
+    // pipeline, so stt_ms / llm_ms / tts_ms stay 0 and only total_ms is
+    // meaningful. Dashboards should prefer total_ms as the end-to-end proxy
+    // and treat the component buckets as "unknown / bundled by provider"
+    // when total_ms > 0 but all three are 0.
     return {
       stt_ms: round(stt_ms, 1),
       llm_ms: round(llm_ms, 1),
@@ -362,28 +380,43 @@ export class CallMetricsAccumulator {
     };
   }
 
+  /**
+   * Turns eligible for latency statistics.
+   *
+   * Excludes turns marked ``[interrupted]`` (barge-in, cancelled replacements)
+   * because their recorded latency either reflects partial state or zero —
+   * including them would drag every p95/avg bucket toward meaningless numbers.
+   */
+  private _completedTurns(): TurnMetrics[] {
+    return this._turns.filter(
+      (t) => t.agent_text !== '[interrupted]' && t.latency.total_ms > 0,
+    );
+  }
+
   private _computeAverageLatency(): LatencyBreakdown {
-    if (this._turns.length === 0) {
+    const turns = this._completedTurns();
+    if (turns.length === 0) {
       return { stt_ms: 0, llm_ms: 0, tts_ms: 0, total_ms: 0 };
     }
-    const n = this._turns.length;
+    const n = turns.length;
     return {
-      stt_ms: round(this._turns.reduce((s, t) => s + t.latency.stt_ms, 0) / n, 1),
-      llm_ms: round(this._turns.reduce((s, t) => s + t.latency.llm_ms, 0) / n, 1),
-      tts_ms: round(this._turns.reduce((s, t) => s + t.latency.tts_ms, 0) / n, 1),
-      total_ms: round(this._turns.reduce((s, t) => s + t.latency.total_ms, 0) / n, 1),
+      stt_ms: round(turns.reduce((s, t) => s + t.latency.stt_ms, 0) / n, 1),
+      llm_ms: round(turns.reduce((s, t) => s + t.latency.llm_ms, 0) / n, 1),
+      tts_ms: round(turns.reduce((s, t) => s + t.latency.tts_ms, 0) / n, 1),
+      total_ms: round(turns.reduce((s, t) => s + t.latency.total_ms, 0) / n, 1),
     };
   }
 
-  private _computeP95Latency(): LatencyBreakdown {
-    if (this._turns.length === 0) {
+  private _computePercentileLatency(p: number): LatencyBreakdown {
+    const turns = this._completedTurns();
+    if (turns.length === 0) {
       return { stt_ms: 0, llm_ms: 0, tts_ms: 0, total_ms: 0 };
     }
     return {
-      stt_ms: round(p95(this._turns.map((t) => t.latency.stt_ms)), 1),
-      llm_ms: round(p95(this._turns.map((t) => t.latency.llm_ms)), 1),
-      tts_ms: round(p95(this._turns.map((t) => t.latency.tts_ms)), 1),
-      total_ms: round(p95(this._turns.map((t) => t.latency.total_ms)), 1),
+      stt_ms: round(percentile(turns.map((t) => t.latency.stt_ms), p), 1),
+      llm_ms: round(percentile(turns.map((t) => t.latency.llm_ms), p), 1),
+      tts_ms: round(percentile(turns.map((t) => t.latency.tts_ms), p), 1),
+      total_ms: round(percentile(turns.map((t) => t.latency.total_ms), p), 1),
     };
   }
 }

@@ -892,6 +892,18 @@ export class EmbeddedServer {
         getLogger().info(`Server on port ${port}`);
         getLogger().info(`Webhook: https://${this.config.webhookUrl}`);
         getLogger().info(`Phone:   ${this.config.phoneNumber}`);
+        // Warn if the agent runs a non-default Realtime model — DEFAULT_PRICING
+        // is calibrated for gpt-4o-mini-realtime-preview. Other models differ
+        // by 3-10x so cost display would under-report without an override.
+        const model = this.agent.model ?? '';
+        if (model && model !== 'gpt-4o-mini-realtime-preview' && model.includes('realtime')) {
+          getLogger().warn(
+            `Agent uses "${model}" but DEFAULT_PRICING.openai_realtime is ` +
+            'calibrated for "gpt-4o-mini-realtime-preview". Pass ' +
+            'Patter({ pricing: { openai_realtime: {...} } }) to set rates for ' +
+            'this model, otherwise the dashboard cost display will under-report.'
+          );
+        }
         if (this.dashboard) {
           console.log('\n──── Dashboard ─────────────────────────────────────');
           getLogger().info(`URL: http://127.0.0.1:${port}/`);

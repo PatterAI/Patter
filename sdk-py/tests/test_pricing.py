@@ -117,9 +117,9 @@ class TestCalculateRealtimeCost:
 class TestCalculateTelephonyCost:
     def test_twilio_cost(self):
         pricing = merge_pricing(None)
-        # 5 minutes at $0.013/min = $0.065
+        # 5 minutes at $0.0085/min (US inbound local default) = $0.0425
         cost = calculate_telephony_cost("twilio", 300.0, pricing)
-        assert abs(cost - 0.065) < 1e-6
+        assert abs(cost - 0.0425) < 1e-6
 
     def test_telnyx_cost(self):
         pricing = merge_pricing(None)

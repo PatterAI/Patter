@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.5.5 (2026-04-23)
+
+Cross-audit from two independent agent teams surfaced additional bugs in cost/latency instrumentation that the initial 0.5.4 fix didn't catch. This release adds the remaining fixes plus LiveKit/Pipecat-style observability improvements.
+
+### Fixed — cost accounting
+- **Prompt caching was billed at full rate** — OpenAI Realtime sends `input_token_details.cached_tokens_details.{audio,text}_tokens` as a breakdown of already-counted totals; cached portions are billed at ~3% (audio cached $0.30/M vs full $10/M) and ~10% (text cached $0.06/M vs $0.60/M) of full rates. We were multiplying the full total by the full rate. On long calls with warm KV cache this overcharged display by up to ~30%. `calculateRealtimeCost` / `calculate_realtime_cost` now subtract cached from the full count and apply the reduced rate. `cached_audio_input_per_token` and `cached_text_input_per_token` added to `DEFAULT_PRICING.openai_realtime`.
+- **Twilio default was $0.013/min** which matches neither US inbound local ($0.0085) nor US outbound local ($0.0140). Default is now **$0.0085/min** (US inbound local — the 99% case for voice agents receiving calls). Users on toll-free or outbound should override via `Patter({ pricing: { twilio: {...} } })`.
+- **Non-default Realtime models under-reported** — if you set `agent.model = "gpt-realtime"` or `"gpt-4o-realtime-preview"`, the dashboard still applied mini-tier rates (3-10× cheaper than actual). Startup now warns if `agent.model` is a realtime model other than `gpt-4o-mini-realtime-preview`, with instructions to override pricing.
+
+### Fixed — latency measurement
+- **Python missed the `audio → startTurn` fallback that TS had** (parity bug). When OpenAI emits `response.audio.delta` before `input_audio_buffer.speech_stopped` due to async event reordering, Python would produce a turn with `_turn_start=None` and all-zero latency, silently polluting p95 toward zero. Now matches TS — if audio arrives without an active turn, `start_turn()` fires defensively.
+- **Interrupted turns (barge-in, cancelled replacements) inflated p95/avg** — every `[interrupted]` turn entered the percentile buckets with `latency=0` or partial latency, dragging the reported numbers toward zero regardless of real performance. `_completed_turns` helper now filters them out of both p50/p95/p99 and average computations in both SDKs.
+- **`total_ms → llm_ms` fallback broke comparability** between pipeline and realtime modes. Removed. In Realtime mode `stt_ms/llm_ms/tts_ms` stay 0 (OpenAI bundles the pipeline internally) and only `total_ms` is meaningful — dashboards should prefer `total_ms` for Realtime and the component buckets for Pipeline.
+- **`recordSttComplete` was called in Python realtime but not TS** — produced different latency bucket splits between the two SDKs on identical calls. Added in TS `transcript_input` handler for parity.
+- **p95/p99 returned the sample maximum for any n < 21** — the previous `floor(n * 0.95)` formula was numerically meaningless on short calls. Replaced with linear interpolation between order statistics (Hyndman-Fan type 7, same as `numpy.percentile` default). Both SDKs.
+- **`firstMessage` latency wasn't measured in Python** (TS measured it for pipeline + realtime). Python now emits a turn-level metric for the first greeting in both modes.
+
+### Added — observability (LiveKit/Pipecat-style)
+- `CallMetrics` now exposes `latency_p50` and `latency_p99` alongside `latency_p95` and `latency_avg`. Useful to detect cold-start outliers (p99) and typical UX latency (p50). Dashboards can render all four side by side.
+- Both SDKs use the same percentile formula and same filtering (excludes interrupted turns).
+
 ## 0.5.4 (2026-04-23)
 
 ### Fixed

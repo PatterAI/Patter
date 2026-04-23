@@ -187,6 +187,10 @@ class CallMetrics:
     tts_provider: str = ""
     llm_provider: str = ""
     telephony_provider: str = ""
+    # Additional percentiles exposed for LiveKit/Pipecat-style dashboards.
+    # Default to zero so older consumers still construct CallMetrics cleanly.
+    latency_p50: LatencyBreakdown = field(default_factory=LatencyBreakdown)
+    latency_p99: LatencyBreakdown = field(default_factory=LatencyBreakdown)
 
 
 class CallControl:

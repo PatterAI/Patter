@@ -911,6 +911,9 @@ export class StreamHandler {
         this.currentAgentText = '';
         this.responseAudioStarted = false;
       }
+      // Marks ASR as complete — exposes a stt_ms bucket in Realtime mode
+      // distinct from the llm+tts portion. Parity with Python handler.
+      this.metricsAcc.recordSttComplete(inputText);
       if (this.deps.onTranscript) {
         await this.deps.onTranscript({
           role: 'user',

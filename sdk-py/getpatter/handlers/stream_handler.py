@@ -359,6 +359,10 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         logger.debug("OpenAI Realtime connected")
 
         if self.agent.first_message:
+            # Start measuring latency for the firstMessage turn (sendText →
+            # first audio byte). Parity with TS handler.
+            if self.metrics is not None:
+                self.metrics.start_turn()
             await self._adapter.send_text(self.agent.first_message)
 
         self._background_task = asyncio.create_task(self._forward_events())
@@ -372,6 +376,12 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         try:
             async for ev_type, ev_data in self._adapter.receive_events():
                 if ev_type == "audio":
+                    # Fallback: if audio arrives before speech_stopped (which
+                    # can happen when JS/async event loop reorders WS frames
+                    # under load, or with server VAD disabled) start the turn
+                    # now so latency is still measured. Parity with TS.
+                    if self.metrics is not None and not self.metrics.turn_active:
+                        self.metrics.start_turn()
                     if waiting_first_audio and self.metrics is not None:
                         self.metrics.record_tts_first_byte()
                         waiting_first_audio = False
@@ -639,6 +649,9 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
         try:
             async for ev_type, ev_data in self._adapter.receive_events():
                 if ev_type == "audio":
+                    # Fallback: audio before speech_stopped. Parity with TS.
+                    if self.metrics is not None and not self.metrics.turn_active:
+                        self.metrics.start_turn()
                     if waiting_first_audio and self.metrics is not None:
                         self.metrics.record_tts_first_byte()
                         waiting_first_audio = False
@@ -845,10 +858,31 @@ class PipelineStreamHandler(StreamHandler):
 
         logger.debug("Pipeline mode: STT + TTS connected")
 
-        # Play first_message if configured and no on_message handler
+        # Play first_message if configured and no on_message handler.
+        # Measure TTS-first-byte latency for parity with TS (`stream-handler.ts`).
         if self.agent.first_message and self.on_message is None and self._tts is not None:
+            if self.metrics is not None:
+                self.metrics.start_turn()
+            first_chunk_sent = False
             async for audio_chunk in self._tts.synthesize(self.agent.first_message):
+                if not first_chunk_sent:
+                    first_chunk_sent = True
+                    if self.metrics is not None:
+                        self.metrics.record_tts_first_byte()
                 await self.audio_sender.send_audio(audio_chunk)
+            if first_chunk_sent and self.metrics is not None:
+                turn = self.metrics.record_turn_complete(self.agent.first_message)
+                self.conversation_history.append(
+                    {"role": "assistant", "text": self.agent.first_message, "timestamp": time.time()}
+                )
+                if self.on_metrics and turn is not None:
+                    await self.on_metrics(
+                        {
+                            "call_id": self.call_id,
+                            "turn": turn,
+                            "cost_so_far": self.metrics.get_cost_so_far(),
+                        }
+                    )
 
         # CallControl for pipeline mode
         self._call_control = CallControl(

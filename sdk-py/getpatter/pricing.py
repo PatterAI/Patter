@@ -40,9 +40,17 @@ DEFAULT_PRICING: dict[str, dict] = {
         "audio_output_per_token": 0.00002,
         "text_input_per_token": 0.0000006,
         "text_output_per_token": 0.0000024,
+        # Prompt caching rates (official): audio cached $0.30/M ~= 3% of full,
+        # text cached $0.06/M = 10% of full. OpenAI bills the cached portion
+        # of input_token_details.{audio,text}_tokens at these reduced rates.
+        "cached_audio_input_per_token": 0.0000003,
+        "cached_text_input_per_token": 0.00000006,
     },
-    # Telephony — per minute of call duration
-    "twilio": {"unit": "minute", "price": 0.013},
+    # Telephony — per minute of call duration.
+    # twilio default = US inbound local (the 99% case for voice agents
+    # receiving calls on a local number). For US toll-free inbound ($0.022/min)
+    # or US outbound local ($0.0140/min), override via Patter(pricing={...}).
+    "twilio": {"unit": "minute", "price": 0.0085},
     "telnyx": {"unit": "minute", "price": 0.007},
 }
 
@@ -99,10 +107,25 @@ def calculate_realtime_cost(usage: dict, pricing: dict) -> float:
 
     input_details = usage.get("input_token_details", {})
     output_details = usage.get("output_token_details", {})
+    cached = input_details.get("cached_tokens_details", {}) or {}
+
+    cached_audio_rate = config.get(
+        "cached_audio_input_per_token", config.get("audio_input_per_token", 0)
+    )
+    cached_text_rate = config.get(
+        "cached_text_input_per_token", config.get("text_input_per_token", 0)
+    )
+
+    total_audio_in = input_details.get("audio_tokens", 0)
+    total_text_in = input_details.get("text_tokens", 0)
+    cached_audio_in = min(cached.get("audio_tokens", 0), total_audio_in)
+    cached_text_in = min(cached.get("text_tokens", 0), total_text_in)
 
     cost = 0.0
-    cost += input_details.get("audio_tokens", 0) * config.get("audio_input_per_token", 0)
-    cost += input_details.get("text_tokens", 0) * config.get("text_input_per_token", 0)
+    cost += (total_audio_in - cached_audio_in) * config.get("audio_input_per_token", 0)
+    cost += cached_audio_in * cached_audio_rate
+    cost += (total_text_in - cached_text_in) * config.get("text_input_per_token", 0)
+    cost += cached_text_in * cached_text_rate
     cost += output_details.get("audio_tokens", 0) * config.get("audio_output_per_token", 0)
     cost += output_details.get("text_tokens", 0) * config.get("text_output_per_token", 0)
     return cost

@@ -17,6 +17,8 @@ export interface ProviderPricing {
   audio_output_per_token?: number;
   text_input_per_token?: number;
   text_output_per_token?: number;
+  cached_audio_input_per_token?: number;
+  cached_text_input_per_token?: number;
 }
 
 export const DEFAULT_PRICING: Record<string, ProviderPricing> = {
@@ -39,9 +41,17 @@ export const DEFAULT_PRICING: Record<string, ProviderPricing> = {
     audio_output_per_token: 0.00002,
     text_input_per_token: 0.0000006,
     text_output_per_token: 0.0000024,
+    // Prompt caching rates (official): audio cached $0.30/M ~= 3% of full,
+    // text cached $0.06/M = 10% of full. OpenAI bills the cached portion of
+    // input_token_details.audio_tokens / text_tokens at these reduced rates.
+    cached_audio_input_per_token: 0.0000003,
+    cached_text_input_per_token: 0.00000006,
   },
-  // Telephony — per minute of call duration
-  twilio: { unit: 'minute', price: 0.013 },
+  // Telephony — per minute of call duration.
+  // twilio default = US inbound local (the 99% case for voice agents receiving
+  // calls on a local number). For US toll-free inbound ($0.022/min) or US
+  // outbound local ($0.0140/min), override via Patter({ pricing: { twilio: {...} } }).
+  twilio: { unit: 'minute', price: 0.0085 },
   telnyx: { unit: 'minute', price: 0.007 },
 };
 
@@ -89,10 +99,23 @@ export function calculateTtsCost(
   return (characterCount / 1000) * (config.price ?? 0);
 }
 
-/** Calculate OpenAI Realtime cost from token usage. */
+/**
+ * Calculate OpenAI Realtime cost from token usage.
+ *
+ * OpenAI bills the cached portion of ``input_token_details.audio_tokens`` and
+ * ``.text_tokens`` at the reduced cached rate (typically ~3% of full for audio,
+ * ~10% of full for text on the mini model). ``cached_tokens_details`` is a
+ * nested breakdown of the same ``input_token_details`` totals — the cached
+ * counts are already INCLUDED in the top-level totals, so we subtract them
+ * out before applying the full rate and add them back at the cached rate.
+ */
 export function calculateRealtimeCost(
   usage: {
-    input_token_details?: { audio_tokens?: number; text_tokens?: number };
+    input_token_details?: {
+      audio_tokens?: number;
+      text_tokens?: number;
+      cached_tokens_details?: { audio_tokens?: number; text_tokens?: number };
+    };
     output_token_details?: { audio_tokens?: number; text_tokens?: number };
   },
   pricing: Record<string, ProviderPricing>,
@@ -102,10 +125,21 @@ export function calculateRealtimeCost(
 
   const input = usage.input_token_details ?? {};
   const output = usage.output_token_details ?? {};
+  const cached = input.cached_tokens_details ?? {};
+
+  const cachedAudioRate = config.cached_audio_input_per_token ?? config.audio_input_per_token ?? 0;
+  const cachedTextRate = config.cached_text_input_per_token ?? config.text_input_per_token ?? 0;
+
+  const totalAudioIn = input.audio_tokens ?? 0;
+  const totalTextIn = input.text_tokens ?? 0;
+  const cachedAudioIn = Math.min(cached.audio_tokens ?? 0, totalAudioIn);
+  const cachedTextIn = Math.min(cached.text_tokens ?? 0, totalTextIn);
 
   let cost = 0;
-  cost += (input.audio_tokens ?? 0) * (config.audio_input_per_token ?? 0);
-  cost += (input.text_tokens ?? 0) * (config.text_input_per_token ?? 0);
+  cost += (totalAudioIn - cachedAudioIn) * (config.audio_input_per_token ?? 0);
+  cost += cachedAudioIn * cachedAudioRate;
+  cost += (totalTextIn - cachedTextIn) * (config.text_input_per_token ?? 0);
+  cost += cachedTextIn * cachedTextRate;
   cost += (output.audio_tokens ?? 0) * (config.audio_output_per_token ?? 0);
   cost += (output.text_tokens ?? 0) * (config.text_output_per_token ?? 0);
   return cost;
