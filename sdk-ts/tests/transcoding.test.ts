@@ -137,17 +137,37 @@ describe("resample16kTo8k", () => {
     expect(output.length).toBe(8);
   });
 
-  it("takes every 2nd sample", () => {
-    const input = Buffer.alloc(8); // 4 samples
+  it("applies anti-aliasing low-pass before decimating by 2", () => {
+    // 5-tap binomial filter [1, 4, 6, 4, 1] / 16 with edge-clamping.
+    // Input samples [100, 200, 300, 400] at 16 kHz produce 2 filtered samples at 8 kHz.
+    const input = Buffer.alloc(8);
     input.writeInt16LE(100, 0);
     input.writeInt16LE(200, 2);
     input.writeInt16LE(300, 4);
     input.writeInt16LE(400, 6);
 
     const output = resample16kTo8k(input);
-    expect(output.length).toBe(4); // 2 samples
-    expect(output.readInt16LE(0)).toBe(100); // sample 0
-    expect(output.readInt16LE(2)).toBe(300); // sample 2
+    expect(output.length).toBe(4);
+    // Output[0] at center=0 with edge-clamped s_m1, s_m2 = 100:
+    // (100 + 4*100 + 6*100 + 4*200 + 300 + 8) >> 4 = 2208 >> 4 = 138
+    expect(output.readInt16LE(0)).toBe(138);
+    // Output[1] at center=2 with edge-clamped s_p2 = 400:
+    // (100 + 4*200 + 6*300 + 4*400 + 400 + 8) >> 4 = 4708 >> 4 = 294
+    expect(output.readInt16LE(2)).toBe(294);
+  });
+
+  it("passes DC through unchanged (no aliasing on a constant signal)", () => {
+    // Filter is normalised (coefficients sum to 16, then >> 4) so a constant
+    // input must come out as the same constant.
+    const input = Buffer.alloc(20);
+    for (let i = 0; i < 10; i++) input.writeInt16LE(5000, i * 2);
+    const output = resample16kTo8k(input);
+    expect(output.length).toBe(10);
+    for (let i = 0; i < 5; i++) {
+      // Allow +/- 1 LSB for rounding with (sum + 8) >> 4.
+      const v = output.readInt16LE(i * 2);
+      expect(Math.abs(v - 5000)).toBeLessThanOrEqual(1);
+    }
   });
 });
 
@@ -156,22 +176,27 @@ describe("resample24kTo16k", () => {
     expect(resample24kTo16k(Buffer.alloc(0)).length).toBe(0);
   });
 
-  it("takes 2 of every 3 samples", () => {
-    // 6 samples -> 4 output samples
-    const input = Buffer.alloc(12); // 6 samples
+  it("linearly interpolates 3:2 ratio instead of raw picking", () => {
+    // 6 samples at 24 kHz -> 4 samples at 16 kHz.
+    // Output index i samples input at fractional position i * 1.5.
+    const input = Buffer.alloc(12);
     input.writeInt16LE(10, 0);
     input.writeInt16LE(20, 2);
-    input.writeInt16LE(30, 4);  // skipped
+    input.writeInt16LE(30, 4);
     input.writeInt16LE(40, 6);
     input.writeInt16LE(50, 8);
-    input.writeInt16LE(60, 10); // skipped
+    input.writeInt16LE(60, 10);
 
     const output = resample24kTo16k(input);
-    expect(output.length).toBe(8); // 4 samples * 2 bytes
+    expect(output.length).toBe(8);
+    // i=0 -> pos=0.0 -> s[0] = 10
     expect(output.readInt16LE(0)).toBe(10);
-    expect(output.readInt16LE(2)).toBe(20);
+    // i=1 -> pos=1.5 -> 0.5*(s[1]+s[2]) = 25
+    expect(output.readInt16LE(2)).toBe(25);
+    // i=2 -> pos=3.0 -> s[3] = 40
     expect(output.readInt16LE(4)).toBe(40);
-    expect(output.readInt16LE(6)).toBe(50);
+    // i=3 -> pos=4.5 -> 0.5*(s[4]+s[5]) = 55
+    expect(output.readInt16LE(6)).toBe(55);
   });
 
   it("produces correct output length for various input sizes", () => {
@@ -188,12 +213,14 @@ describe("resample24kTo16k", () => {
     const input = Buffer.alloc(8);
     input.writeInt16LE(100, 0);
     input.writeInt16LE(200, 2);
-    input.writeInt16LE(300, 4); // skipped (index 2)
+    input.writeInt16LE(300, 4);
     input.writeInt16LE(400, 6);
 
     const output = resample24kTo16k(input);
-    expect(output.length).toBe(4); // 2 samples
+    expect(output.length).toBe(4);
+    // i=0 -> pos=0.0 -> s[0] = 100
     expect(output.readInt16LE(0)).toBe(100);
-    expect(output.readInt16LE(2)).toBe(200);
+    // i=1 -> pos=1.5 -> 0.5*(s[1]+s[2]) = 250
+    expect(output.readInt16LE(2)).toBe(250);
   });
 });

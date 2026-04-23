@@ -1,8 +1,10 @@
 # Changelog
 
-## 0.5.3 (2026-04-23)
+## 0.5.4 (2026-04-23)
 
 ### Fixed
+- **Audio aliasing on Twilio calls (pipeline mode)** — `resample16kTo8k` in the TypeScript SDK was a naive 2:1 decimation (`y[i] = x[2i]`) with no anti-aliasing filter. On Twilio (which requires µ-law 8 kHz), every TTS chunk with energy between 4 kHz and 8 kHz — which is most of human speech, especially sibilant consonants — folded back into the 0-4 kHz output band as continuous hiss. Users reported hearing "a voice buried under constant background noise". Fixed by applying a 5-tap binomial low-pass FIR (`[1, 4, 6, 4, 1] / 16`) before decimation, bringing behaviour in line with the Python SDK which uses `audioop.ratecv` (itself anti-aliased). Parity bug confirmed — Python path was always clean; only TS was affected.
+- **Audio aliasing on 24 kHz → 16 kHz resampling** — same bug class in `resample24kTo16k`, used when OpenAI TTS (24 kHz native) runs in pipeline mode. Replaced the "take 2 of every 3 samples" logic with linear interpolation so content between 8 and 12 kHz doesn't alias into the 0-8 kHz band.
 - **Anthropic default model** — updated from `claude-3-5-sonnet-20241022` (deprecated by Anthropic, now returns `404 not_found_error`) to `claude-haiku-4-5-20251001`. Haiku 4.5 is faster, cheaper, and more suitable as a default for voice agents where every conversation turn costs a LLM call. Pass `model="claude-sonnet-4-6"` or similar to override.
 
 ### Changed (dependencies)

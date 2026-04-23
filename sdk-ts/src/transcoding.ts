@@ -117,7 +117,22 @@ export function resample8kTo16k(pcm8k: Buffer): Buffer {
 }
 
 /**
- * Downsample 16 kHz PCM16 to 8 kHz by taking every 2nd sample.
+ * Downsample 16 kHz PCM16 to 8 kHz with anti-aliasing.
+ *
+ * Uses a 5-tap binomial low-pass FIR filter ([1, 4, 6, 4, 1] / 16) applied
+ * to every pair of input samples before decimating by 2. The filter has
+ * cutoff around Fs/4, which is enough to suppress content between 4 kHz
+ * and 8 kHz in the input so it doesn't alias into the 0–4 kHz output band.
+ *
+ * A naive 2:1 decimation (``y[i] = x[2i]``) folds every frequency between
+ * 4 kHz and 8 kHz back on top of the signal as continuous hiss — very
+ * audible with TTS voice where sibilant consonants (/s/, /f/, /sh/) carry
+ * a lot of energy above 4 kHz. Mirrors the Python SDK which uses
+ * ``audioop.ratecv`` (itself anti-aliased).
+ *
+ * Chunk-boundary behaviour: samples outside the buffer are clamped to the
+ * nearest edge sample, not zero-padded. This avoids a click at the start
+ * of every chunk when the filter reaches before index 0.
  *
  * Output length = input length / 2.
  */
@@ -128,19 +143,32 @@ export function resample16kTo8k(pcm16k: Buffer): Buffer {
   const outSamples = Math.floor(sampleCount / 2);
   const out = Buffer.alloc(outSamples * 2);
 
+  const edge0 = sampleCount > 0 ? pcm16k.readInt16LE(0) : 0;
+  const edgeN = sampleCount > 0 ? pcm16k.readInt16LE((sampleCount - 1) * 2) : 0;
+
   for (let i = 0; i < outSamples; i++) {
-    const sample = pcm16k.readInt16LE(i * 2 * 2); // every 2nd sample
-    out.writeInt16LE(sample, i * 2);
+    const center = i * 2;
+    const sM2 = center - 2 >= 0 ? pcm16k.readInt16LE((center - 2) * 2) : edge0;
+    const sM1 = center - 1 >= 0 ? pcm16k.readInt16LE((center - 1) * 2) : edge0;
+    const s0 = pcm16k.readInt16LE(center * 2);
+    const sP1 = center + 1 < sampleCount ? pcm16k.readInt16LE((center + 1) * 2) : edgeN;
+    const sP2 = center + 2 < sampleCount ? pcm16k.readInt16LE((center + 2) * 2) : edgeN;
+
+    // Binomial 5-tap low-pass [1, 4, 6, 4, 1] / 16 then decimate by 2.
+    const filtered = (sM2 + 4 * sM1 + 6 * s0 + 4 * sP1 + sP2 + 8) >> 4;
+    out.writeInt16LE(Math.max(-32768, Math.min(32767, filtered)), i * 2);
   }
 
   return out;
 }
 
 /**
- * Downsample 24 kHz PCM16 to 16 kHz by taking 2 of every 3 samples.
+ * Downsample 24 kHz PCM16 to 16 kHz with linear interpolation.
  *
- * Matches the Python backend approach: for every group of 3 input samples,
- * output the 1st and 2nd, skip the 3rd.
+ * For a 3:2 ratio, each output sample is a weighted blend of the two
+ * neighbouring input samples rather than a raw pick-every-third. This
+ * eliminates aliasing of content between 8 kHz and 12 kHz into the
+ * output's 0–8 kHz band that would otherwise sound like background hiss.
  *
  * Output length = floor(inputSamples * 2 / 3) * 2 bytes.
  */
@@ -151,12 +179,15 @@ export function resample24kTo16k(pcm24k: Buffer): Buffer {
   const outSamples = Math.floor(sampleCount * 2 / 3);
   const out = Buffer.alloc(outSamples * 2);
 
-  let outIdx = 0;
-  for (let i = 0; i < sampleCount && outIdx < outSamples; i++) {
-    // Skip every 3rd sample (index 2, 5, 8, ...)
-    if (i % 3 === 2) continue;
-    out.writeInt16LE(pcm24k.readInt16LE(i * 2), outIdx * 2);
-    outIdx++;
+  for (let i = 0; i < outSamples; i++) {
+    // Map output index i to fractional input position: pos = i * 3 / 2.
+    const pos = i * 1.5;
+    const idx = Math.floor(pos);
+    const frac = pos - idx;
+    const s0 = pcm24k.readInt16LE(idx * 2);
+    const s1 = idx + 1 < sampleCount ? pcm24k.readInt16LE((idx + 1) * 2) : s0;
+    const interp = Math.round(s0 + (s1 - s0) * frac);
+    out.writeInt16LE(Math.max(-32768, Math.min(32767, interp)), i * 2);
   }
 
   return out;
