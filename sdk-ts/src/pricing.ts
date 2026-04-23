@@ -38,8 +38,10 @@ export const DEFAULT_PRICING: Record<string, ProviderPricing> = {
   cartesia_stt: { unit: 'minute', price: 0.0025 },
   // Soniox real-time STT — $0.12/hr = $0.002/min
   soniox: { unit: 'minute', price: 0.002 },
-  // Speechmatics Standard tier — $1.04/hr base; heavy discounts on commitment
-  speechmatics: { unit: 'minute', price: 0.0173 },
+  // Speechmatics Pro tier — $0.24/hr = $0.0040/min (new users land here).
+  // Previous $0.0173 default reflected a legacy Standard tier that was
+  // retired; users were being over-billed ~4.3x.
+  speechmatics: { unit: 'minute', price: 0.004 },
   // TTS — per 1,000 characters synthesized.
   // ElevenLabs default model is eleven_flash_v2_5 billed at $0.06/1k via the
   // direct API. The previous $0.18 matched only the Creator plan overage.
@@ -150,17 +152,38 @@ export function calculateRealtimeCost(
   const config = pricing.openai_realtime;
   if (!config || config.unit !== 'token') return 0;
 
-  const input = usage.input_token_details ?? {};
+  const input = (usage.input_token_details ?? {}) as {
+    audio_tokens?: number;
+    text_tokens?: number;
+    cached_tokens?: number;
+    cached_tokens_details?: { audio_tokens?: number; text_tokens?: number };
+  };
   const output = usage.output_token_details ?? {};
-  const cached = input.cached_tokens_details ?? {};
 
   const cachedAudioRate = config.cached_audio_input_per_token ?? config.audio_input_per_token ?? 0;
   const cachedTextRate = config.cached_text_input_per_token ?? config.text_input_per_token ?? 0;
 
   const totalAudioIn = input.audio_tokens ?? 0;
   const totalTextIn = input.text_tokens ?? 0;
-  const cachedAudioIn = Math.min(cached.audio_tokens ?? 0, totalAudioIn);
-  const cachedTextIn = Math.min(cached.text_tokens ?? 0, totalTextIn);
+
+  // cached_tokens_details is the preferred breakdown. When absent (older
+  // Azure OpenAI responses) fall back to the top-level cached_tokens scalar
+  // and pro-rate by the audio/text split so the discount still applies.
+  let cachedAudioIn: number;
+  let cachedTextIn: number;
+  const details = input.cached_tokens_details;
+  if (details && (details.audio_tokens !== undefined || details.text_tokens !== undefined)) {
+    cachedAudioIn = Math.min(details.audio_tokens ?? 0, totalAudioIn);
+    cachedTextIn = Math.min(details.text_tokens ?? 0, totalTextIn);
+  } else if (input.cached_tokens && input.cached_tokens > 0) {
+    const totalIn = totalAudioIn + totalTextIn;
+    const ratio = totalIn > 0 ? input.cached_tokens / totalIn : 0;
+    cachedAudioIn = Math.min(Math.round(totalAudioIn * ratio), totalAudioIn);
+    cachedTextIn = Math.min(Math.round(totalTextIn * ratio), totalTextIn);
+  } else {
+    cachedAudioIn = 0;
+    cachedTextIn = 0;
+  }
 
   let cost = 0;
   cost += (totalAudioIn - cachedAudioIn) * (config.audio_input_per_token ?? 0);
@@ -169,7 +192,9 @@ export function calculateRealtimeCost(
   cost += cachedTextIn * cachedTextRate;
   cost += (output.audio_tokens ?? 0) * (config.audio_output_per_token ?? 0);
   cost += (output.text_tokens ?? 0) * (config.text_output_per_token ?? 0);
-  return cost;
+  // Clamp ≥0 so mis-configured cached rates (higher than full) can never
+  // produce negative billing on the dashboard.
+  return Math.max(0, cost);
 }
 
 /**
@@ -199,7 +224,10 @@ export function calculateRealtimeCachedSavings(
   const fullText = cachedText * (config.text_input_per_token ?? 0);
   const discountedAudio = cachedAudio * cachedAudioRate;
   const discountedText = cachedText * cachedTextRate;
-  return (fullAudio + fullText) - (discountedAudio + discountedText);
+  // Clamp ≥0. If a user overrides cached_*_input_per_token to a rate
+  // HIGHER than full, the diff becomes negative — meaningless as a savings
+  // figure, so we render 0 instead of a negative number.
+  return Math.max(0, (fullAudio + fullText) - (discountedAudio + discountedText));
 }
 
 /**

@@ -33,8 +33,10 @@ DEFAULT_PRICING: dict[str, dict] = {
     "cartesia_stt": {"unit": "minute", "price": 0.0025},
     # Soniox real-time STT: $0.12/hr = $0.002/min
     "soniox": {"unit": "minute", "price": 0.002},
-    # Speechmatics Standard tier: $1.04/hr base
-    "speechmatics": {"unit": "minute", "price": 0.0173},
+    # Speechmatics Pro tier: $0.24/hr = $0.0040/min (new users land here).
+    # Previous $0.0173 reflected a retired Standard tier; users were
+    # being over-billed ~4.3x.
+    "speechmatics": {"unit": "minute", "price": 0.004},
     # TTS — per 1,000 characters synthesized.
     # ElevenLabs default model is eleven_flash_v2_5 at $0.06/1k via direct API.
     # The previous $0.18 matched only the Creator plan overage rate.
@@ -129,7 +131,7 @@ def calculate_realtime_cost(usage: dict, pricing: dict) -> float:
     # returns None in that case and the chained .get() would crash.
     input_details = usage.get("input_token_details") or {}
     output_details = usage.get("output_token_details") or {}
-    cached = input_details.get("cached_tokens_details") or {}
+    details = input_details.get("cached_tokens_details") or {}
 
     cached_audio_rate = config.get(
         "cached_audio_input_per_token", config.get("audio_input_per_token", 0)
@@ -140,8 +142,22 @@ def calculate_realtime_cost(usage: dict, pricing: dict) -> float:
 
     total_audio_in = input_details.get("audio_tokens", 0)
     total_text_in = input_details.get("text_tokens", 0)
-    cached_audio_in = min(cached.get("audio_tokens", 0), total_audio_in)
-    cached_text_in = min(cached.get("text_tokens", 0), total_text_in)
+
+    # Prefer cached_tokens_details breakdown. When absent (some Azure OpenAI
+    # responses) fall back to the top-level cached_tokens scalar and pro-rate
+    # by the audio/text split so the discount still applies.
+    if details and ("audio_tokens" in details or "text_tokens" in details):
+        cached_audio_in = min(details.get("audio_tokens", 0), total_audio_in)
+        cached_text_in = min(details.get("text_tokens", 0), total_text_in)
+    elif input_details.get("cached_tokens", 0) > 0:
+        cached_total = input_details["cached_tokens"]
+        total_in = total_audio_in + total_text_in
+        ratio = (cached_total / total_in) if total_in > 0 else 0
+        cached_audio_in = min(round(total_audio_in * ratio), total_audio_in)
+        cached_text_in = min(round(total_text_in * ratio), total_text_in)
+    else:
+        cached_audio_in = 0
+        cached_text_in = 0
 
     cost = 0.0
     cost += (total_audio_in - cached_audio_in) * config.get("audio_input_per_token", 0)
@@ -150,7 +166,8 @@ def calculate_realtime_cost(usage: dict, pricing: dict) -> float:
     cost += cached_text_in * cached_text_rate
     cost += output_details.get("audio_tokens", 0) * config.get("audio_output_per_token", 0)
     cost += output_details.get("text_tokens", 0) * config.get("text_output_per_token", 0)
-    return cost
+    # Clamp ≥0 — mis-configured cached rates can never produce negative bill.
+    return max(0.0, cost)
 
 
 def calculate_realtime_cached_savings(usage: dict, pricing: dict) -> float:

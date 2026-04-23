@@ -468,7 +468,13 @@ export class StreamHandler {
         const turn = this.metricsAcc.recordTurnComplete(this.deps.agent.firstMessage);
         if (turn) {
           this.deps.metricsStore.recordTurn({ call_id: this.callId, turn });
-          if (this.deps.onMetrics) await this.deps.onMetrics({ call_id: this.callId, turn });
+          if (this.deps.onMetrics) {
+            await this.deps.onMetrics({
+              call_id: this.callId,
+              turn,
+              cost_so_far: this.metricsAcc.getCostSoFar(),
+            });
+          }
         }
         this.history.push({ role: 'assistant', text: this.deps.agent.firstMessage, timestamp: Date.now() });
       }
@@ -582,6 +588,12 @@ export class StreamHandler {
   }
 
   private async processTranscript(transcript: { isFinal?: boolean; text?: string }): Promise<void> {
+    // Function-scope barge-in flag — set either by the upfront barge-in
+    // check below, or by the TTS loops downstream when ``isSpeaking`` flips
+    // mid-synthesis. Used to skip ``recordTurnComplete`` so a half-spoken
+    // turn is not double-counted (Python uses the same pattern).
+    let interrupted = false;
+
     // BUG #20 — barge-in: if TTS is mid-stream and the caller speaks,
     // any transcript with text flips ``isSpeaking`` to false so the TTS
     // sentence loop exits on its next check.
@@ -596,6 +608,7 @@ export class StreamHandler {
         getLogger().debug(`sendClear during barge-in failed: ${String(err)}`);
       }
       this.metricsAcc.recordTurnInterrupted();
+      interrupted = true;
     }
 
     if (!transcript.isFinal || !transcript.text) return;
@@ -775,7 +788,6 @@ export class StreamHandler {
       const chunker = new SentenceChunker();
       const sentences = [...chunker.push(responseText), ...chunker.flush()];
       const ttsFirstByteSent = { value: false };
-      let interrupted = false;
       this.isSpeaking = true;
 
       try {
@@ -795,10 +807,21 @@ export class StreamHandler {
       this.metricsAcc.recordTtsComplete(responseText);
     }
 
-    const turn = this.metricsAcc.recordTurnComplete(responseText);
-    if (turn) {
-      this.deps.metricsStore.recordTurn({ call_id: this.callId, turn });
-      if (this.deps.onMetrics) await this.deps.onMetrics({ call_id: this.callId, turn });
+    // Skip turn-complete when a barge-in already recorded the turn as
+    // interrupted — parity with Python ``if not interrupted``. Prevents
+    // double-counting / turn-count inflation / polluting p95.
+    if (!interrupted) {
+      const turn = this.metricsAcc.recordTurnComplete(responseText);
+      if (turn) {
+        this.deps.metricsStore.recordTurn({ call_id: this.callId, turn });
+        if (this.deps.onMetrics) {
+          await this.deps.onMetrics({
+            call_id: this.callId,
+            turn,
+            cost_so_far: this.metricsAcc.getCostSoFar(),
+          });
+        }
+      }
     }
   }
 
@@ -833,7 +856,13 @@ export class StreamHandler {
     const turn = this.metricsAcc.recordTurnComplete(responseText);
     if (turn) {
       this.deps.metricsStore.recordTurn({ call_id: this.callId, turn });
-      if (this.deps.onMetrics) await this.deps.onMetrics({ call_id: this.callId, turn });
+      if (this.deps.onMetrics) {
+        await this.deps.onMetrics({
+          call_id: this.callId,
+          turn,
+          cost_so_far: this.metricsAcc.getCostSoFar(),
+        });
+      }
     }
     if (responseText) this.history.push({ role: 'assistant', text: responseText, timestamp: Date.now() });
   }
@@ -964,6 +993,7 @@ export class StreamHandler {
           await this.deps.onMetrics({
             call_id: this.callId,
             turn,
+            cost_so_far: this.metricsAcc.getCostSoFar(),
           });
         }
         this.deps.metricsStore.recordTurn({ call_id: this.callId, turn });

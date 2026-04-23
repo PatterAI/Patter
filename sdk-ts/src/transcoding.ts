@@ -127,8 +127,12 @@ export function resample8kTo16k(pcm8k: Buffer): Buffer {
  * A naive 2:1 decimation (``y[i] = x[2i]``) folds every frequency between
  * 4 kHz and 8 kHz back on top of the signal as continuous hiss — very
  * audible with TTS voice where sibilant consonants (/s/, /f/, /sh/) carry
- * a lot of energy above 4 kHz. Mirrors the Python SDK which uses
- * ``audioop.ratecv`` (itself anti-aliased).
+ * a lot of energy above 4 kHz. Note: the Python SDK uses ``audioop.ratecv``
+ * which does NOT apply an anti-alias filter on downsample (it linearly
+ * interpolates between nearest input samples, which at an integer stride
+ * of 2 reduces to naive decimation). This 5-tap FIR is therefore the
+ * better-behaved of the two SDK implementations, though it still has ~8 dB
+ * droop at 3.4 kHz.
  *
  * Chunk-boundary behaviour: samples outside the buffer are clamped to the
  * nearest edge sample, not zero-padded. This avoids a click at the start

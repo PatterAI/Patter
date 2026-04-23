@@ -404,9 +404,9 @@ export class CallMetricsAccumulator {
       llm: round(llm, 6),
       telephony: round(telephony, 6),
       total: round(total, 6),
-      llm_cached_savings: this._totalRealtimeCachedSavings > 0
-        ? round(this._totalRealtimeCachedSavings, 6)
-        : undefined,
+      // Always emit (default 0) for parity with Python dataclass where
+      // llm_cached_savings is a required field with default 0.0.
+      llm_cached_savings: round(Math.max(0, this._totalRealtimeCachedSavings), 6),
     };
   }
 

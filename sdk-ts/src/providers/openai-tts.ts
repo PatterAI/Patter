@@ -120,7 +120,10 @@ export class OpenAITTS {
     // Process complete groups of 3 input samples → 2 output samples.
     while (i + 2 < samples.length) {
       out.push(samples[i]);
-      out.push(Math.trunc((samples[i + 1] + samples[i + 2]) / 2));
+      // Math.round (not trunc) to avoid a ~0.5 LSB DC bias over long
+      // voiced segments. trunc rounds toward zero, introducing an
+      // asymmetric bias on sign crossings.
+      out.push(Math.round((samples[i + 1] + samples[i + 2]) / 2));
       i += 3;
     }
     // Keep any unprocessed trailing samples (0, 1, or 2) for the next call.

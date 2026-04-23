@@ -59,10 +59,11 @@ export class GeminiLiveAdapter {
     private readonly apiKey: string,
     options: GeminiLiveOptions = {},
   ) {
-    // gemini-2.0-flash-exp was an experimental preview that was retired
-    // from Google's docs. The current Live API model is the 2.5-flash
-    // preview family. Callers can override via GeminiLive({ model: ... }).
-    this.model = options.model ?? 'gemini-live-2.5-flash-preview';
+    // gemini-2.0-flash-exp was experimental preview retired Dec 2024.
+    // gemini-live-2.5-flash-preview was shut down Dec 9, 2025.
+    // The current live-audio model in April 2026 is the native-audio variant.
+    // Callers can override via GeminiLive({ model: ... }).
+    this.model = options.model ?? 'gemini-live-2.5-flash-native-audio';
     this.voice = options.voice ?? 'Puck';
     this.instructions = options.instructions ?? '';
     this.language = options.language ?? 'en-US';
