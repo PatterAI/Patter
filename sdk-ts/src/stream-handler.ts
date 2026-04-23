@@ -152,6 +152,13 @@ export class StreamHandler {
   // BUG #22 throttle state — mirror Python impl.
   private lastCommitText = '';
   private lastCommitAt = 0;
+  // PCM16 byte-alignment carry for TTS streaming (pipeline mode).
+  // HTTP streams from ElevenLabs / OpenAI / Cartesia can yield chunks of any
+  // size, including odd byte counts. Silently dropping the trailing odd byte
+  // misaligns every subsequent int16 sample in the stream (hi/lo bytes get
+  // swapped), producing a voice drowned in loud hiss. We buffer the odd byte
+  // across chunks so resample/mulaw encoding always sees aligned int16 frames.
+  private ttsByteCarry: Buffer | null = null;
 
   private readonly history: ReturnType<typeof createHistoryManager>;
   private readonly metricsAcc: CallMetricsAccumulator;
@@ -383,14 +390,33 @@ export class StreamHandler {
   /**
    * Encode a PCM 16kHz audio chunk for the telephony provider.
    * Twilio requires mulaw 8kHz; Telnyx accepts PCM 16kHz natively.
+   *
+   * Maintains a 1-byte carry across calls so unaligned HTTP chunks from
+   * streaming TTS providers never byte-swap the PCM16 samples downstream.
    */
   private encodePipelineAudio(pcm16k: Buffer): string {
+    const aligned = this.alignPcm16(pcm16k);
+    if (aligned.length === 0) return '';
     if (this.deps.bridge.telephonyProvider === 'twilio') {
-      const pcm8k = resample16kTo8k(pcm16k);
+      const pcm8k = resample16kTo8k(aligned);
       const mulaw = pcm16ToMulaw(pcm8k);
       return mulaw.toString('base64');
     }
-    return pcm16k.toString('base64');
+    return aligned.toString('base64');
+  }
+
+  /**
+   * Prepend any carry byte from the previous chunk, return the even-length
+   * portion, and stash the final odd byte (if any) for the next call.
+   */
+  private alignPcm16(chunk: Buffer): Buffer {
+    const combined = this.ttsByteCarry
+      ? Buffer.concat([this.ttsByteCarry, chunk])
+      : chunk;
+    const alignedLen = combined.length & ~1;
+    this.ttsByteCarry =
+      alignedLen < combined.length ? combined.subarray(alignedLen) : null;
+    return combined.subarray(0, alignedLen);
   }
 
   // ---------------------------------------------------------------------------
@@ -424,6 +450,7 @@ export class StreamHandler {
     if (this.deps.agent.firstMessage && !this.deps.onMessage && this.tts) {
       this.metricsAcc.startTurn();
       let firstChunkSent = false;
+      this.ttsByteCarry = null;
       try {
         for await (const chunk of this.tts.synthesizeStream(this.deps.agent.firstMessage)) {
           if (!firstChunkSent) { firstChunkSent = true; this.metricsAcc.recordTtsFirstByte(); }
@@ -512,6 +539,7 @@ export class StreamHandler {
     const processedText = await hookExecutor.runBeforeSynthesize(transformed, hookCtx);
     if (processedText === null) return;
 
+    this.ttsByteCarry = null;
     try {
       for await (const chunk of this.tts.synthesizeStream(processedText)) {
         if (!this.isSpeaking) break;
@@ -779,6 +807,7 @@ export class StreamHandler {
       for await (const chunk of this.deps.remoteHandler.callWebSocket(onMessage, msgData)) {
         parts.push(chunk);
         if (this.tts) {
+          this.ttsByteCarry = null;
           for await (const audioChunk of this.tts.synthesizeStream(chunk)) {
             if (!this.isSpeaking) break;
             if (!wsTtsStarted) { wsTtsStarted = true; this.metricsAcc.recordTtsFirstByte(); }
