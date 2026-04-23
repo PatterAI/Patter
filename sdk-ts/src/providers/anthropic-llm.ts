@@ -229,7 +229,7 @@ interface OpenAIStyleMessage {
   name?: string;
 }
 
-export function toAnthropicMessages(
+function toAnthropicMessages(
   messages: Array<Record<string, unknown>>,
 ): { system: string; messages: AnthropicMessage[] } {
   const systemParts: string[] = [];

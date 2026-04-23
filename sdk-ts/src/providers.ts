@@ -82,19 +82,3 @@ export function elevenlabs(opts: { apiKey: string; voice?: string }): TTSConfig 
 export function openaiTts(opts: { apiKey: string; voice?: string }): TTSConfig {
   return new TTSConfigImpl("openai", opts.apiKey, opts.voice ?? "alloy");
 }
-
-export function cartesia(opts: { apiKey: string; voice?: string }): TTSConfig {
-  return new TTSConfigImpl(
-    "cartesia",
-    opts.apiKey,
-    opts.voice ?? "f786b574-daa5-4673-aa0c-cbe3e8534c02",
-  );
-}
-
-export function rime(opts: { apiKey: string; voice?: string }): TTSConfig {
-  return new TTSConfigImpl("rime", opts.apiKey, opts.voice ?? "astra");
-}
-
-export function lmnt(opts: { apiKey: string; voice?: string }): TTSConfig {
-  return new TTSConfigImpl("lmnt", opts.apiKey, opts.voice ?? "leah");
-}
