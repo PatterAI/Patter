@@ -238,3 +238,28 @@ class TestTwilioAudioSender:
         assert sender.last_confirmed_mark == ""
         sender.on_mark_confirmed("audio_1")
         assert sender.last_confirmed_mark == "audio_1"
+
+    async def test_reset_pcm_carry_drops_odd_byte(self) -> None:
+        """``reset_pcm_carry`` must discard the buffered odd byte so the next
+        TTS synthesis starts aligned. Parity with TS ``ttsByteCarry = null``
+        at every synth boundary."""
+        ws = AsyncMock()
+        ws.send_text = AsyncMock()
+        with patch(
+            "getpatter.services.transcoding.pcm16_to_mulaw",
+            lambda x: x,
+            create=True,
+        ), patch(
+            "getpatter.services.transcoding.resample_16k_to_8k",
+            lambda x: x,
+            create=True,
+        ):
+            sender = TwilioAudioSender(ws, stream_sid="MZ_test")
+
+        # Push an odd-length chunk — the last byte is buffered into carry
+        await sender.send_audio(b"\x00\x01\x02")
+        assert sender._pcm_carry._carry == b"\x02"
+
+        # Reset drops the carry so the next synth starts aligned
+        sender.reset_pcm_carry()
+        assert sender._pcm_carry._carry == b""

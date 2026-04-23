@@ -1,6 +1,15 @@
 import WebSocket from 'ws';
 import { getLogger } from '../logger';
 
+/**
+ * Supported OpenAI Realtime wire audio formats. See
+ * https://platform.openai.com/docs/guides/realtime for the full list.
+ * ``g711_ulaw`` matches what Twilio/Telnyx emit natively on the phone leg,
+ * so no transcoding is needed. ``pcm16`` is used in the terminal test-mode
+ * path and when the telephony provider negotiates L16/16000.
+ */
+export type OpenAIRealtimeAudioFormat = 'g711_ulaw' | 'g711_alaw' | 'pcm16';
+
 export class OpenAIRealtimeAdapter {
   private ws: WebSocket | null = null;
 
@@ -10,6 +19,10 @@ export class OpenAIRealtimeAdapter {
     private readonly voice: string = 'alloy',
     private readonly instructions: string = '',
     private readonly tools?: Array<{ name: string; description: string; parameters: Record<string, unknown> }>,
+    // Audio wire format negotiated with OpenAI Realtime. Mirrors the Python
+    // ``audio_format`` kwarg. Default ``g711_ulaw`` matches the Twilio/Telnyx
+    // inbound codec so audio flows through without transcoding.
+    private readonly audioFormat: OpenAIRealtimeAudioFormat = 'g711_ulaw',
   ) {}
 
   async connect(): Promise<void> {
@@ -37,8 +50,8 @@ export class OpenAIRealtimeAdapter {
         if (msg.type === 'session.created' && !sessionCreated) {
           sessionCreated = true;
           const config: Record<string, unknown> = {
-            input_audio_format: 'g711_ulaw',
-            output_audio_format: 'g711_ulaw',
+            input_audio_format: this.audioFormat,
+            output_audio_format: this.audioFormat,
             voice: this.voice,
             instructions: this.instructions || 'You are a helpful voice assistant. Be concise.',
             turn_detection: { type: 'server_vad', threshold: 0.5, prefix_padding_ms: 300, silence_duration_ms: 500 },

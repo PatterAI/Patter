@@ -5,6 +5,7 @@ import {
   calculateSttCost,
   calculateTtsCost,
   calculateRealtimeCost,
+  calculateRealtimeCachedSavings,
   calculateTelephonyCost,
 } from '../src/pricing';
 
@@ -134,6 +135,57 @@ describe('calculateRealtimeCost', () => {
       pricing,
     );
     expect(cost).toBeCloseTo(100 * 0.00002, 10);
+  });
+});
+
+describe('calculateRealtimeCachedSavings', () => {
+  it('returns positive savings on normal cached discount', () => {
+    const pricing = mergePricing();
+    const savings = calculateRealtimeCachedSavings(
+      {
+        input_token_details: {
+          audio_tokens: 1000,
+          text_tokens: 500,
+          cached_tokens_details: { audio_tokens: 800, text_tokens: 400 },
+        },
+      },
+      pricing,
+    );
+    // 800 * (1e-5 - 3e-7) + 400 * (6e-7 - 6e-8)
+    const expected = 800 * (0.00001 - 0.0000003) + 400 * (0.0000006 - 0.00000006);
+    expect(savings).toBeCloseTo(expected, 10);
+    expect(savings).toBeGreaterThan(0);
+  });
+
+  it('clamps to zero when cached rate misconfigured higher than full', () => {
+    // Parity with Python: if a user overrides cached rate above full, savings
+    // go negative — must clamp to 0 rather than render negative on dashboard.
+    const pricing = mergePricing({
+      openai_realtime: {
+        cached_audio_input_per_token: 0.0001, // 10x higher than full
+        cached_text_input_per_token: 0.00001,
+      },
+    });
+    const savings = calculateRealtimeCachedSavings(
+      {
+        input_token_details: {
+          audio_tokens: 1000,
+          text_tokens: 500,
+          cached_tokens_details: { audio_tokens: 500, text_tokens: 250 },
+        },
+      },
+      pricing,
+    );
+    expect(savings).toBe(0);
+  });
+
+  it('returns zero when no cached tokens', () => {
+    const pricing = mergePricing();
+    const savings = calculateRealtimeCachedSavings(
+      { input_token_details: { audio_tokens: 1000, text_tokens: 500 } },
+      pricing,
+    );
+    expect(savings).toBe(0);
   });
 });
 

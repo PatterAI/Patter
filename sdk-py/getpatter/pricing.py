@@ -198,7 +198,10 @@ def calculate_realtime_cached_savings(usage: dict, pricing: dict) -> float:
         + cached_text * config.get("text_input_per_token", 0)
     )
     discounted_cost = cached_audio * cached_audio_rate + cached_text * cached_text_rate
-    return full_cost - discounted_cost
+    # Clamp >= 0. If a user overrides cached_*_input_per_token to a rate HIGHER
+    # than full, the diff becomes negative -- meaningless as a savings figure,
+    # so we return 0 instead of a negative number. Matches TS parity.
+    return max(0.0, full_cost - discounted_cost)
 
 
 def calculate_telephony_cost(

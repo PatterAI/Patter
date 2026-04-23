@@ -115,33 +115,34 @@ class TwilioAudioSender(AudioSender):
         self._chunk_count = 0
         self.last_confirmed_mark = ""
         self._input_is_mulaw_8k = input_is_mulaw_8k
-        # PCM16 alignment carry — HTTP streaming TTS providers (ElevenLabs,
-        # Cartesia, LMNT, Rime, TelnyxTTS) yield chunks of arbitrary byte
-        # length, including odd counts. Passing an odd buffer to
-        # ``audioop.ratecv`` raises ``audioop.error: not a whole number of
-        # frames``, crashing the TTS mid-sentence. Matches TS ttsByteCarry.
-        self._pcm16_carry: bytes = b""
-        # Lazy import transcoding functions (only needed when transcoding)
+        # Lazy import transcoding helpers (only needed when transcoding).
+        # ``PcmCarry`` mirrors TS ``StreamHandler.alignPcm16``: HTTP TTS
+        # providers can yield odd-length chunks that would otherwise crash
+        # ``audioop.ratecv`` with "not a whole number of frames".
         if not input_is_mulaw_8k:
-            from getpatter.services.transcoding import pcm16_to_mulaw, resample_16k_to_8k  # type: ignore[import]
+            from getpatter.services.transcoding import (
+                PcmCarry,
+                pcm16_to_mulaw,
+                resample_16k_to_8k,
+            )
             self._pcm16_to_mulaw = pcm16_to_mulaw
             self._resample_16k_to_8k = resample_16k_to_8k
+            self._pcm_carry: PcmCarry | None = PcmCarry()
         else:
             self._pcm16_to_mulaw = None
             self._resample_16k_to_8k = None
+            self._pcm_carry = None
 
     def reset_pcm_carry(self) -> None:
         """Drop any buffered odd byte. Call at the start of a new TTS synthesis."""
-        self._pcm16_carry = b""
+        if self._pcm_carry is not None:
+            self._pcm_carry.reset()
 
     async def send_audio(self, pcm_audio: bytes) -> None:
         if self._input_is_mulaw_8k:
             mulaw = pcm_audio
         else:
-            combined = self._pcm16_carry + pcm_audio if self._pcm16_carry else pcm_audio
-            aligned_len = len(combined) & ~1  # round down to even
-            self._pcm16_carry = combined[aligned_len:] if aligned_len < len(combined) else b""
-            aligned = combined[:aligned_len]
+            aligned = self._pcm_carry.align(pcm_audio)  # type: ignore[union-attr]
             if not aligned:
                 return
             resampled = self._resample_16k_to_8k(aligned)

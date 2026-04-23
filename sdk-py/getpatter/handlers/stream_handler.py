@@ -42,6 +42,17 @@ logger = logging.getLogger("patter")
 # Shared tool definitions injected into every agent
 # ---------------------------------------------------------------------------
 
+# Short words / phrases that Whisper (and, less often, Deepgram) routinely
+# emit when fed silence or TTS echo on mulaw 8 kHz. Dropping them as turns
+# prevents the caller from entering a feedback loop where every silent frame
+# triggers a new LLM+TTS turn. Parity with TS ``HALLUCINATIONS``.
+_STT_HALLUCINATIONS: frozenset[str] = frozenset({
+    "you", "thank you", "thanks", "yeah", "yes", "no",
+    "okay", "ok", "uh", "um", "mmm", "hmm", ".", "bye",
+    "right", "cool",
+})
+
+
 TRANSFER_CALL_TOOL: dict = {
     "name": "transfer_call",
     "description": "Transfer the call to a human agent at the specified phone number",
@@ -93,6 +104,18 @@ class AudioSender(ABC):
     @abstractmethod
     async def send_mark(self, mark_name: str) -> None:
         """Send a playback mark (Twilio-specific; no-op on Telnyx)."""
+
+    def reset_pcm_carry(self) -> None:
+        """Drop any buffered odd byte from the PCM16 alignment carry.
+
+        Call at the start/end of a TTS synthesis block so a crash or
+        cancellation mid-sentence never bleeds a partial sample into the
+        next sentence. Default is a no-op; subclasses that keep a carry
+        buffer (e.g. ``TwilioAudioSender``) override this. Matches TS
+        parity where ``ttsByteCarry = null`` is reset at every synth
+        boundary.
+        """
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +295,24 @@ class StreamHandler(ABC):
     @abstractmethod
     async def cleanup(self) -> None:
         """Close provider connections and cancel background tasks."""
+
+    async def _emit_turn_metrics(self, turn, *, call_id: str | None = None) -> None:
+        """Emit a completed turn to the user-supplied on_metrics callback.
+
+        All emit sites share the same payload shape
+        (``{call_id, turn, cost_so_far}``). Callers remain responsible for
+        appending transcript entries / storing the turn; only the user-facing
+        callback is centralised here for parity with TS ``emitTurnMetrics``.
+        """
+        if not self.on_metrics or turn is None or self.metrics is None:
+            return
+        await self.on_metrics(
+            {
+                "call_id": call_id if call_id is not None else self.call_id,
+                "turn": turn,
+                "cost_so_far": self.metrics.get_cost_so_far(),
+            }
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -464,14 +505,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                         )
                         if self.metrics is not None:
                             turn = self.metrics.record_turn_complete(current_agent_text)
-                            if self.on_metrics:
-                                await self.on_metrics(
-                                    {
-                                        "call_id": self.call_id,
-                                        "turn": turn,
-                                        "cost_so_far": self.metrics.get_cost_so_far(),
-                                    }
-                                )
+                            await self._emit_turn_metrics(turn)
                         current_agent_text = ""
                     elif self.metrics is not None and self.metrics.turn_active:
                         # response_done without agent text = cancelled / empty
@@ -721,14 +755,7 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
                         )
                         if self.metrics is not None:
                             turn = self.metrics.record_turn_complete(current_agent_text)
-                            if self.on_metrics:
-                                await self.on_metrics(
-                                    {
-                                        "call_id": self.call_id,
-                                        "turn": turn,
-                                        "cost_so_far": self.metrics.get_cost_so_far(),
-                                    }
-                                )
+                            await self._emit_turn_metrics(turn)
                         current_agent_text = ""
                     elif self.metrics is not None and self.metrics.turn_active:
                         # response_done without agent text = cancelled / empty.
@@ -882,25 +909,26 @@ class PipelineStreamHandler(StreamHandler):
             if self.metrics is not None:
                 self.metrics.start_turn()
             first_chunk_sent = False
-            async for audio_chunk in self._tts.synthesize(self.agent.first_message):
-                if not first_chunk_sent:
-                    first_chunk_sent = True
-                    if self.metrics is not None:
-                        self.metrics.record_tts_first_byte()
-                await self.audio_sender.send_audio(audio_chunk)
+            # Drop any stale PCM16 carry byte from a prior synth (none at call
+            # start, but defensive for parity with TS ``ttsByteCarry = null``).
+            self.audio_sender.reset_pcm_carry()
+            try:
+                async for audio_chunk in self._tts.synthesize(self.agent.first_message):
+                    if not first_chunk_sent:
+                        first_chunk_sent = True
+                        if self.metrics is not None:
+                            self.metrics.record_tts_first_byte()
+                    await self.audio_sender.send_audio(audio_chunk)
+            finally:
+                # Drop any partial int16 byte to prevent cross-turn corruption
+                # if the stream threw before a complete sample was delivered.
+                self.audio_sender.reset_pcm_carry()
             if first_chunk_sent and self.metrics is not None:
                 turn = self.metrics.record_turn_complete(self.agent.first_message)
                 self.conversation_history.append(
                     {"role": "assistant", "text": self.agent.first_message, "timestamp": time.time()}
                 )
-                if self.on_metrics and turn is not None:
-                    await self.on_metrics(
-                        {
-                            "call_id": self.call_id,
-                            "turn": turn,
-                            "cost_so_far": self.metrics.get_cost_so_far(),
-                        }
-                    )
+                await self._emit_turn_metrics(turn)
 
         # CallControl for pipeline mode
         self._call_control = CallControl(
@@ -1002,6 +1030,11 @@ class PipelineStreamHandler(StreamHandler):
         )
         _tts_span.__enter__()
         gen = self._tts.synthesize(processed)
+        # Drop any stale PCM16 alignment carry byte between sentences — TTS
+        # providers yield arbitrary-length chunks, so an odd byte from the
+        # previous sentence would corrupt the first sample of this one.
+        # Matches TS ``ttsByteCarry = null`` reset at each synth boundary.
+        self.audio_sender.reset_pcm_carry()
         try:
             async for audio_chunk in gen:
                 if not self._is_speaking:
@@ -1021,6 +1054,9 @@ class PipelineStreamHandler(StreamHandler):
         finally:
             await gen.aclose()
             _tts_span.__exit__(None, None, None)
+            # Drop any partial int16 byte so cross-sentence corruption never
+            # leaks past an exception / early return.
+            self.audio_sender.reset_pcm_carry()
         return True
 
     async def _process_streaming_response(self, result, call_id: str) -> str:
@@ -1088,14 +1124,7 @@ class PipelineStreamHandler(StreamHandler):
             if self.metrics is not None:
                 self.metrics.record_tts_complete(response_text)
                 turn = self.metrics.record_turn_complete(response_text)
-                if self.on_metrics:
-                    await self.on_metrics(
-                        {
-                            "call_id": call_id,
-                            "turn": turn,
-                            "cost_so_far": self.metrics.get_cost_so_far(),
-                        }
-                    )
+                await self._emit_turn_metrics(turn, call_id=call_id)
         return response_text
 
     async def _process_regular_response(self, response_text: str, call_id: str) -> None:
@@ -1147,14 +1176,7 @@ class PipelineStreamHandler(StreamHandler):
             if self.metrics is not None:
                 self.metrics.record_tts_complete(response_text)
                 turn = self.metrics.record_turn_complete(response_text)
-                if self.on_metrics:
-                    await self.on_metrics(
-                        {
-                            "call_id": call_id,
-                            "turn": turn,
-                            "cost_so_far": self.metrics.get_cost_so_far(),
-                        }
-                    )
+                await self._emit_turn_metrics(turn, call_id=call_id)
 
     async def _stt_loop(self) -> None:
         # Per-loop state used to throttle back-to-back turns (BUG #22). When
@@ -1196,17 +1218,7 @@ class PipelineStreamHandler(StreamHandler):
                 _stripped = _normalised.rstrip(".,!?;: ").strip()
                 _since_last = _now - last_commit_at
 
-                # Whisper (and, to a lesser extent, Deepgram) routinely
-                # hallucinate a handful of short "filler" words when fed
-                # silence or TTS echo on mulaw 8 kHz. Dropping them as
-                # turns stops the caller from entering a feedback loop
-                # where every silent frame triggers a new LLM+TTS turn.
-                _HALLUCINATIONS = frozenset({
-                    "you", "thank you", "thanks", "yeah", "yes", "no",
-                    "okay", "ok", "uh", "um", "mmm", "hmm", ".", "bye",
-                    "right", "cool",
-                })
-                if _stripped in _HALLUCINATIONS or _stripped == "":
+                if _stripped in _STT_HALLUCINATIONS or _stripped == "":
                     logger.debug(
                         "Dropped likely STT hallucination: %r",
                         _normalised[:40],

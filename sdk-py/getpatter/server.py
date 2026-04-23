@@ -522,13 +522,15 @@ class EmbeddedServer:
             and model != "gpt-4o-mini-realtime-preview"
             and "realtime" in model
         ):
+            # Dev-supplied string — sanitize to avoid ANSI/log-injection in
+            # the startup warning, matching TS parity.
             logger.warning(
                 "Agent uses %r but DEFAULT_PRICING.openai_realtime is "
                 "calibrated for 'gpt-4o-mini-realtime-preview'. Pass "
                 "Patter(pricing={'openai_realtime': {...}}) to set rates for "
                 "this model, otherwise the dashboard cost display will "
                 "under-report.",
-                model,
+                sanitize_log_value(model),
             )
         if self.dashboard:
             print("\n──── Dashboard ─────────────────────────────────────")

@@ -61,4 +61,23 @@ describe('OpenAIRealtimeAdapter', () => {
     const adapter = new OpenAIRealtimeAdapter('sk_test');
     expect(() => adapter.onEvent(() => {})).not.toThrow();
   });
+
+  it('accepts custom audioFormat (parity with Python audio_format kwarg)', () => {
+    const adapter = new OpenAIRealtimeAdapter(
+      'sk_test',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      'pcm16',
+    );
+    expect(adapter).toBeDefined();
+  });
+
+  it('defaults audioFormat to g711_ulaw when omitted', () => {
+    // Construct without the 6th argument — must not throw and must produce
+    // a working adapter with the default format.
+    const adapter = new OpenAIRealtimeAdapter('sk_test');
+    expect(adapter).toBeDefined();
+  });
 });

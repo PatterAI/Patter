@@ -4,6 +4,7 @@ import pytest
 
 from getpatter.pricing import (
     DEFAULT_PRICING,
+    calculate_realtime_cached_savings,
     calculate_realtime_cost,
     calculate_stt_cost,
     calculate_telephony_cost,
@@ -154,6 +155,55 @@ class TestCalculateRealtimeCost:
         # Must NOT raise AttributeError
         cost = calculate_realtime_cost(usage, pricing)
         assert abs(cost - 50 * 2e-5) < 1e-10
+
+
+class TestCalculateRealtimeCachedSavings:
+    def test_positive_savings(self):
+        pricing = merge_pricing(None)
+        usage = {
+            "input_token_details": {
+                "audio_tokens": 1000,
+                "text_tokens": 500,
+                "cached_tokens_details": {"audio_tokens": 800, "text_tokens": 400},
+            },
+        }
+        savings = calculate_realtime_cached_savings(usage, pricing)
+        # 800 * (1e-5 - 3e-7) + 400 * (6e-7 - 6e-8)
+        expected = 800 * (1e-5 - 3e-7) + 400 * (6e-7 - 6e-8)
+        assert abs(savings - expected) < 1e-10
+        assert savings > 0
+
+    def test_misconfigured_cached_rate_higher_than_full_clamps_to_zero(self):
+        """If a user overrides cached rate HIGHER than full, savings would go
+        negative. Must clamp to 0 — matching TS parity."""
+        # cached_audio_input_per_token HIGHER than audio_input_per_token
+        pricing = merge_pricing({
+            "openai_realtime": {
+                "cached_audio_input_per_token": 0.0001,  # 10x higher than full
+                "cached_text_input_per_token": 0.00001,
+            }
+        })
+        usage = {
+            "input_token_details": {
+                "audio_tokens": 1000,
+                "text_tokens": 500,
+                "cached_tokens_details": {"audio_tokens": 500, "text_tokens": 250},
+            },
+        }
+        savings = calculate_realtime_cached_savings(usage, pricing)
+        # Would otherwise be negative; must clamp to 0
+        assert savings == 0.0
+
+    def test_no_cached_tokens_zero_savings(self):
+        pricing = merge_pricing(None)
+        usage = {
+            "input_token_details": {
+                "audio_tokens": 1000,
+                "text_tokens": 500,
+            },
+        }
+        savings = calculate_realtime_cached_savings(usage, pricing)
+        assert savings == 0.0
 
 
 class TestCalculateTelephonyCost:
