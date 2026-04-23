@@ -27,11 +27,31 @@ export interface ProviderPricing {
 
 export const DEFAULT_PRICING: Record<string, ProviderPricing> = {
   // STT — per minute of audio processed
-  deepgram: { unit: 'minute', price: 0.0043 },
+  // Deepgram Nova-3 streaming (monolingual) — the default model Patter ships.
+  // The previous $0.0043/min was the batch rate; streaming is $0.0077/min per
+  // deepgram.com/pricing. For multilingual Nova-3 ($0.0092/min) override.
+  deepgram: { unit: 'minute', price: 0.0077 },
   whisper: { unit: 'minute', price: 0.006 },
-  // TTS — per 1,000 characters synthesized
-  elevenlabs: { unit: '1k_chars', price: 0.18 },
+  // AssemblyAI Universal-Streaming — $0.15/hr = $0.0025/min
+  assemblyai: { unit: 'minute', price: 0.0025 },
+  // Cartesia ink-whisper streaming STT — ~$0.15/hr on usage plans
+  cartesia_stt: { unit: 'minute', price: 0.0025 },
+  // Soniox real-time STT — $0.12/hr = $0.002/min
+  soniox: { unit: 'minute', price: 0.002 },
+  // Speechmatics Standard tier — $1.04/hr base; heavy discounts on commitment
+  speechmatics: { unit: 'minute', price: 0.0173 },
+  // TTS — per 1,000 characters synthesized.
+  // ElevenLabs default model is eleven_flash_v2_5 billed at $0.06/1k via the
+  // direct API. The previous $0.18 matched only the Creator plan overage.
+  elevenlabs: { unit: '1k_chars', price: 0.06 },
   openai_tts: { unit: '1k_chars', price: 0.015 },
+  openai_tts_hd: { unit: '1k_chars', price: 0.030 },
+  // Cartesia Sonic TTS — ~1 credit/char, effective $0.030/1k chars on usage plans
+  cartesia_tts: { unit: '1k_chars', price: 0.030 },
+  // Rime mist v2 — $0.030/1k chars pay-as-you-go
+  rime: { unit: '1k_chars', price: 0.030 },
+  // LMNT aurora/blizzard — $0.050/1k chars Indie overage
+  lmnt: { unit: '1k_chars', price: 0.050 },
   // OpenAI Realtime — per token.
   // Calibrated for gpt-4o-mini-realtime-preview (the Patter default):
   //   audio  input  $10 / M  ->  0.00001 per token

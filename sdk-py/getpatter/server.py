@@ -197,16 +197,37 @@ class EmbeddedServer:
             if self.config.twilio_token:
                 try:
                     from twilio.request_validator import RequestValidator
-                    form_data = await request.form()
-                    validator = RequestValidator(self.config.twilio_token)
-                    url = str(request.url).replace("http://", "https://")
-                    signature = request.headers.get("X-Twilio-Signature", "")
-                    if not validator.validate(url, dict(form_data), signature):
-                        return Response(status_code=403, content="Invalid signature")
-                    return form_data
                 except ImportError:
-                    logger.warning("twilio package not installed; skipping signature validation")
-                    return await request.form()
+                    # SECURITY: fail closed when the twilio package is missing.
+                    # Previously we skipped signature validation and logged a
+                    # warning — a deployer who didn't install getpatter with
+                    # the twilio extra got an auth bypass. Now we reject.
+                    logger.error(
+                        "twilio package not installed but twilio_token is set — "
+                        "refusing to accept webhook without signature verification. "
+                        "Install with: pip install 'getpatter[local]' or "
+                        "`pip install twilio`."
+                    )
+                    return Response(status_code=503, content="Signature validator unavailable")
+                form_data = await request.form()
+                validator = RequestValidator(self.config.twilio_token)
+                # Use request.url verbatim when it carries .path / .query
+                # (Starlette URL in production). Under test harnesses that mock
+                # request.url as a plain string, fall back to that string and
+                # normalise the scheme to https. Proxy-induced scheme drift
+                # stays handled in both cases.
+                req_url = request.url
+                if hasattr(req_url, "path"):
+                    path_and_query = req_url.path
+                    if getattr(req_url, "query", ""):
+                        path_and_query += "?" + req_url.query
+                    url = f"https://{self.config.webhook_url}{path_and_query}"
+                else:
+                    url = str(req_url).replace("http://", "https://")
+                signature = request.headers.get("X-Twilio-Signature", "")
+                if not validator.validate(url, dict(form_data), signature):
+                    return Response(status_code=403, content="Invalid signature")
+                return form_data
             return await request.form()
 
         @app.post("/webhooks/twilio/voice")

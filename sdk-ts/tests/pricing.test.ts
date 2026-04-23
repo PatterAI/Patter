@@ -23,7 +23,9 @@ describe('DEFAULT_PRICING', () => {
 describe('mergePricing', () => {
   it('returns defaults when no overrides', () => {
     const merged = mergePricing();
-    expect(merged.deepgram.price).toBe(0.0043);
+    // Deepgram Nova-3 streaming (monolingual) — $0.0077/min. Updated from
+    // the batch rate $0.0043 in 0.5.6 — the default model is streaming.
+    expect(merged.deepgram.price).toBe(0.0077);
   });
 
   it('overrides individual provider values', () => {
@@ -42,7 +44,8 @@ describe('calculateSttCost', () => {
   it('calculates deepgram cost for 60 seconds', () => {
     const pricing = mergePricing();
     const cost = calculateSttCost('deepgram', 60, pricing);
-    expect(cost).toBeCloseTo(0.0043, 4);
+    // 60s / 60 * $0.0077/min (Nova-3 streaming monolingual) = $0.0077
+    expect(cost).toBeCloseTo(0.0077, 4);
   });
 
   it('returns 0 for unknown provider', () => {
@@ -55,7 +58,9 @@ describe('calculateTtsCost', () => {
   it('calculates elevenlabs cost for 1000 characters', () => {
     const pricing = mergePricing();
     const cost = calculateTtsCost('elevenlabs', 1000, pricing);
-    expect(cost).toBeCloseTo(0.18, 2);
+    // eleven_flash_v2_5 (the default model): $0.06/1k chars via direct API.
+    // The previous $0.18 matched only the Creator plan overage.
+    expect(cost).toBeCloseTo(0.06, 3);
   });
 
   it('calculates openai_tts cost', () => {

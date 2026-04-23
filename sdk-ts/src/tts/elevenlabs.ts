@@ -31,7 +31,7 @@ export class TTS extends _ElevenLabsTTS {
     super(
       key,
       opts.voiceId ?? "EXAVITQu4vr4xnSDxMaL",
-      opts.modelId ?? "eleven_turbo_v2_5",
+      opts.modelId ?? "eleven_flash_v2_5",
       opts.outputFormat ?? "pcm_16000",
     );
   }

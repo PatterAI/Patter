@@ -25,7 +25,7 @@ class TTS(_ElevenLabsTTS):
         api_key: str | None = None,
         *,
         voice_id: str = "EXAVITQu4vr4xnSDxMaL",
-        model_id: str = "eleven_turbo_v2_5",
+        model_id: str = "eleven_flash_v2_5",
         output_format: str = "pcm_16000",
     ) -> None:
         key = api_key or os.environ.get("ELEVENLABS_API_KEY")

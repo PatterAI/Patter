@@ -113,18 +113,16 @@ describe("Soak Tests", () => {
     // Verify turn count
     expect(metrics.turns).toHaveLength(NUM_TURNS);
 
-    // STT cost: deepgram = per minute
+    // STT cost: deepgram nova-3 streaming = $0.0077/min
     // total_audio = 1.5 * 1000 = 1500s = 25 min
-    // cost = 25 * 0.0043 = 0.1075
     const expectedStt =
-      (PER_TURN_AUDIO_SECONDS * NUM_TURNS) / 60.0 * 0.0043;
+      (PER_TURN_AUDIO_SECONDS * NUM_TURNS) / 60.0 * 0.0077;
     expect(Math.abs(metrics.cost.stt - Math.round(expectedStt * 1e6) / 1e6)).toBeLessThan(1e-6);
 
-    // TTS cost: elevenlabs = per 1k chars
+    // TTS cost: elevenlabs eleven_flash_v2_5 = $0.06/1k chars
     // total_chars = 20 * 1000 = 20000 = 20 k_chars
-    // cost = 20 * 0.18 = 3.6
     const expectedTts =
-      (AGENT_RESPONSE.length * NUM_TURNS) / 1000.0 * 0.18;
+      (AGENT_RESPONSE.length * NUM_TURNS) / 1000.0 * 0.06;
     expect(Math.abs(metrics.cost.tts - Math.round(expectedTts * 1e6) / 1e6)).toBeLessThan(1e-6);
 
     const growthPct = rssBefore > 0

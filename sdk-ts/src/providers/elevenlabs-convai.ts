@@ -11,7 +11,7 @@ export class ElevenLabsConvAIAdapter {
     private readonly apiKey: string,
     private readonly agentId: string = '',
     private readonly voiceId: string = 'EXAVITQu4vr4xnSDxMaL',
-    _modelId: string = 'eleven_turbo_v2_5',
+    _modelId: string = 'eleven_flash_v2_5',
     _language: string = 'en',
     private readonly firstMessage: string = '',
   ) {}

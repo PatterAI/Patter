@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.5.6 (2026-04-23)
+
+Third audit wave (9 specialised agents: latency+transcript bug hunt, per-provider cost audit, frequency spec research, transcoding implementation audit, transcoding best-practices research, LLM model verification, voice/format string verification, telephony adapter deep audit, voice provider integration review) surfaced dozens of bugs ranging from critical cost rate errors to stale model IDs. This release addresses the ones that ship a safer patch; the larger refactors (per-model pricing lookup, native `ulaw_8000` provider negotiation, 31-tap Kaiser half-band FIR, LLM pipeline token tracking, runtime WS reconnect) are being scoped for 0.6.0.
+
+### Fixed — cost accuracy
+- **Deepgram rate was batch not streaming** — `deepgram: $0.0043/min` was the batch/pre-recorded rate. Patter's Nova-3 streaming default actually bills at **$0.0077/min** (monolingual). Users were under-reporting cost by ~45%.
+- **ElevenLabs rate was Creator-plan overage not Flash/Turbo API** — `$0.18/1k chars` is only correct on the Creator plan's overage tier. The `eleven_flash_v2_5` / `eleven_turbo_v2_5` direct-API rate is **$0.06/1k chars**. Users on the API were over-reporting cost by ~3×.
+- **Six new provider pricing entries added** so their bills no longer silently display $0: `assemblyai` ($0.0025/min), `cartesia_stt` ($0.0025/min), `cartesia_tts` ($0.030/1k), `soniox` ($0.002/min), `speechmatics` ($0.0173/min), `rime` ($0.030/1k), `lmnt` ($0.050/1k), `openai_tts_hd` ($0.030/1k). Users still see $0 if they configure a provider we don't price yet — documented as a deferred item.
+
+### Fixed — model defaults
+- **Gemini Live default retired** — `gemini-2.0-flash-exp` was experimental preview, no longer in Google docs. Updated to `gemini-live-2.5-flash-preview`.
+- **ElevenLabs model default modernised** — `eleven_turbo_v2_5` → `eleven_flash_v2_5`. Drop-in replacement per ElevenLabs docs: same price tier, ~3× lower latency.
+
+### Fixed — metrics correctness
+- **Dangling-turn guard at call end** — abrupt hangup mid-turn used to drop the partial latency/cost state silently. `endCall()` / `end_call()` now call `recordTurnInterrupted()` if a turn is still active, so the state flushes cleanly and percentile stats filter it out via `_completedTurns`.
+- **Negative `tts_ms` in pipeline streaming** — `recordTtsFirstByte` can fire on the first sentence's first chunk before `recordLlmComplete` (which marks end-of-full-response). The subtraction produced negative ms that showed up as dashboard noise. Clamped to zero in both SDKs.
+
+### Fixed — security
+- **Python Twilio webhook could bypass signature verification** if the `twilio` package was missing. The ImportError fallback skipped validation and logged a warning; a deployer without `pip install 'getpatter[local]'` silently accepted any webhook body. Now fails closed with HTTP 503 and a hard error log.
+- Python Twilio signature URL is now reconstructed from `config.webhook_url` + `request.url.path` when the full Starlette URL is available, avoiding proxy scheme/port drift. Falls back to string-replace for mock test harnesses.
+
+### Verified (no change needed)
+- No hallucinated model IDs anywhere in the codebase.
+- Every ElevenLabs voice ID in the name-map still resolves to a live voice (ElevenLabs auto-routes legacy IDs). The `bella` alias now rebrands to the live "Sarah" voice — works but the label is outdated; kept for backwards compat.
+- Anthropic `claude-haiku-4-5-20251001`, `claude-sonnet-4-6`, `claude-opus-4-7` all match official Anthropic snapshot IDs.
+- Groq `llama-3.3-70b-versatile`, Deepgram `nova-3`, Cartesia `sonic-2`, LMNT `blizzard`, Rime `arcana`, Whisper `whisper-1`, OpenAI `tts-1` — all current in 2026.
+
+### Deferred to 0.6.0 (tracked)
+- **Per-model OpenAI Realtime pricing map**: default rates are calibrated for `gpt-4o-mini-realtime-preview`. Users on `gpt-realtime` (~3×) or `gpt-4o-realtime-preview` (~10×) still see under-reported cost. Startup warn (from 0.5.5) is the stopgap.
+- **Native `ulaw_8000` negotiation per provider when target is Twilio** — ElevenLabs, LMNT, Cartesia, Rime all accept `ulaw_8000` output format natively. Today we fall through a resample-then-mulaw chain that introduces aliasing. Switching to native negotiation per the ElevenLabs Twilio cookbook is the canonical fix.
+- **Replace 5-tap binomial FIR with Kaiser-windowed half-band (31-tap)** — industry stopband is 60-80 dB; our binomial is ~20 dB. `soxr` (LiveKit default) or `scipy.signal.resample_poly` if available.
+- **LLM pipeline token tracking** — `anthropic`, `groq`, `cerebras`, `google`, `openai` LLM adapters report latency but never emit token usage. Pipeline-mode `CostBreakdown.llm` is always $0, regardless of actual spend. New `record_llm_usage()` + per-model pricing entries.
+- **TS Telnyx outbound wrong codec** — TS `encodePipelineAudio` and `handleAdapterEvent` ship PCM16 16k to Telnyx that negotiated PCMU 8k. Telnyx customers see broken audio. Requires a `TelephonyBridge.encodeAudio` abstraction parity with Python's `TelnyxAudioSender`.
+- **TS OpenAI Realtime missing `audioFormat` parameter** — Python has it. Blocks TS Telnyx+Realtime.
+- **Runtime WebSocket error/close listeners** across all TS voice providers — today a mid-call WS drop is silent. Needs a shared `_retry.ts` helper.
+- **ElevenLabs ConvAI barge-in** — adapter never emits `interruption` event; stream handler has a handler for it that's dead code.
+- **Gemini Live never emits `transcript_input`** — `stt_ms` always 0 and `user_text` empty on every Gemini turn.
+- **Whisper is unsafe in pipeline mode** — emits `isFinal=true` every ~1s regardless of speech; triggers LLM mid-utterance. Needs VAD gating.
+- **Cerebras default `llama3.1-8b` deprecates May 27, 2026** — need migration to `gpt-oss-120b`.
+
 ## 0.5.5 (2026-04-23)
 
 Two waves of cross-audit (first: 3 agent teams on cost/latency/research; second: 11 specialised teams on cost/latency/audio/parity/OpenAI compliance/LiveKit-Pipecat benchmarking/Twilio pricing/test coverage/security/ship-readiness/dashboard UX) surfaced a long tail of bugs in 0.5.4's instrumentation. This release applies every HIGH/CRITICAL fix flagged plus LiveKit/Pipecat-style observability.

@@ -192,6 +192,12 @@ class CallMetricsAccumulator:
         """Calculate final costs and return frozen ``CallMetrics``."""
         duration = time.monotonic() - self._call_start
 
+        # Flush any dangling in-flight turn as interrupted so its partial state
+        # doesn't evaporate into the void on abrupt hangup. ``_completed_turns``
+        # drops it from percentile stats regardless.
+        if self.turn_active:
+            self.record_turn_interrupted()
+
         # Compute STT audio seconds from byte count if not already tracked
         if self._total_stt_audio_seconds == 0.0 and self._stt_byte_count > 0:
             self._total_stt_audio_seconds = (
@@ -251,6 +257,12 @@ class CallMetricsAccumulator:
 
         if self._llm_complete is not None and self._tts_first_byte is not None:
             tts_ms = (self._tts_first_byte - self._llm_complete) * 1000
+            # In pipeline streaming mode ``record_tts_first_byte`` can fire on
+            # the first sentence's first chunk BEFORE ``record_llm_complete``
+            # (which marks end-of-full-response). Clamp to zero — negatives
+            # would be noise on dashboards.
+            if tts_ms < 0:
+                tts_ms = 0
 
         if self._turn_start is not None and self._tts_first_byte is not None:
             total_ms = (self._tts_first_byte - self._turn_start) * 1000

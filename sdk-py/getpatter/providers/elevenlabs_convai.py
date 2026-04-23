@@ -22,7 +22,7 @@ class ElevenLabsConvAIAdapter:
         api_key: str,
         agent_id: str = "",
         voice_id: str = "EXAVITQu4vr4xnSDxMaL",
-        model_id: str = "eleven_turbo_v2_5",
+        model_id: str = "eleven_flash_v2_5",
         language: str = "it",
         first_message: str = "",
     ):

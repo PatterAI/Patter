@@ -75,7 +75,7 @@ export class ElevenLabsTTS {
   constructor(
     private readonly apiKey: string,
     voiceId: string = 'EXAVITQu4vr4xnSDxMaL',
-    private readonly modelId: string = 'eleven_turbo_v2_5',
+    private readonly modelId: string = 'eleven_flash_v2_5',
     private readonly outputFormat: string = 'pcm_16000',
   ) {
     this.voiceId = resolveVoiceId(voiceId);

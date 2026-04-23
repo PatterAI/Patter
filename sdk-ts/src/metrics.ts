@@ -281,6 +281,13 @@ export class CallMetricsAccumulator {
   endCall(): CallMetrics {
     const duration = (hrTimeMs() - this._callStart) / 1000;
 
+    // Flush any dangling in-flight turn as interrupted so its partial state
+    // doesn't evaporate into the void on abrupt hangup. The filter inside
+    // _completedTurns drops it from percentile stats regardless.
+    if (this.turnActive) {
+      this.recordTurnInterrupted();
+    }
+
     if (this._totalSttAudioSeconds === 0 && this._sttByteCount > 0) {
       this._totalSttAudioSeconds =
         this._sttByteCount / (this._sttSampleRate * this._sttBytesPerSample);
@@ -339,6 +346,11 @@ export class CallMetricsAccumulator {
     }
     if (this._llmComplete !== null && this._ttsFirstByte !== null) {
       tts_ms = this._ttsFirstByte - this._llmComplete;
+      // In pipeline streaming mode ``recordTtsFirstByte`` can fire on the
+      // first sentence's first chunk BEFORE ``recordLlmComplete`` (which
+      // marks the end of the full LLM response). Negative values would
+      // otherwise surface as noise on dashboards — clamp to zero.
+      if (tts_ms < 0) tts_ms = 0;
     }
     if (this._turnStart !== null && this._ttsFirstByte !== null) {
       total_ms = this._ttsFirstByte - this._turnStart;

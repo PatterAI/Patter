@@ -224,7 +224,7 @@ export function buildAIAdapter(config: LocalConfig, agent: AgentOptions, resolve
       engine.apiKey,
       engine.agentId,
       agent.voice ?? 'EXAVITQu4vr4xnSDxMaL',
-      'eleven_turbo_v2_5',
+      'eleven_flash_v2_5',
       agent.language ?? 'en',
       agent.firstMessage ?? '',
     );

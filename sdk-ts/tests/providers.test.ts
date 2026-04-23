@@ -128,10 +128,10 @@ describe("ElevenLabsTTS", () => {
     expect(t["voiceId"]).toBe("EXAVITQu4vr4xnSDxMaL");
   });
 
-  it("uses eleven_turbo_v2_5 model by default", () => {
+  it("uses eleven_flash_v2_5 model by default", () => {
     const tts = new ElevenLabsTTS("el_test");
     const t = tts as unknown as Record<string, unknown>;
-    expect(t["modelId"]).toBe("eleven_turbo_v2_5");
+    expect(t["modelId"]).toBe("eleven_flash_v2_5");
   });
 
   it("uses pcm_16000 output format by default", () => {

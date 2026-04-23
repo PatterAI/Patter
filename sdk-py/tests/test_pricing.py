@@ -40,9 +40,10 @@ class TestMergePricing:
 class TestCalculateSTTCost:
     def test_deepgram_cost(self):
         pricing = merge_pricing(None)
-        # 60 seconds = 1 minute at $0.0043/min
+        # 60 seconds = 1 minute at $0.0077/min (Nova-3 streaming monolingual,
+        # the Patter default). Previous $0.0043/min was the batch rate.
         cost = calculate_stt_cost("deepgram", 60.0, pricing)
-        assert abs(cost - 0.0043) < 1e-6
+        assert abs(cost - 0.0077) < 1e-6
 
     def test_whisper_cost(self):
         pricing = merge_pricing(None)
@@ -64,9 +65,10 @@ class TestCalculateSTTCost:
 class TestCalculateTTSCost:
     def test_elevenlabs_cost(self):
         pricing = merge_pricing(None)
-        # 1000 characters at $0.18/1k = $0.18
+        # 1000 characters at $0.06/1k = $0.06 (eleven_flash_v2_5 default;
+        # previous $0.18 was the Creator plan overage rate).
         cost = calculate_tts_cost("elevenlabs", 1000, pricing)
-        assert abs(cost - 0.18) < 1e-6
+        assert abs(cost - 0.06) < 1e-6
 
     def test_openai_tts_cost(self):
         pricing = merge_pricing(None)

@@ -46,7 +46,10 @@ class GeminiLiveAdapter:
     def __init__(
         self,
         api_key: str,
-        model: str = "gemini-2.0-flash-exp",
+        # gemini-2.0-flash-exp was experimental preview retired from docs.
+        # Current Live API model: gemini-live-2.5-flash-preview. Override via
+        # GeminiLive(model=...) if you need another variant.
+        model: str = "gemini-live-2.5-flash-preview",
         voice: str = "Puck",
         instructions: str = "",
         language: str = "en-US",
