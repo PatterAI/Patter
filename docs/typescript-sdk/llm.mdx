@@ -68,7 +68,7 @@ const llm2 = new openai.LLM({ apiKey: "sk-...", model: "gpt-4o-mini" });
 
 ### AnthropicLLM
 
-Anthropic Messages API with native streaming and `tool_use` blocks, normalised to Patter's chunk protocol. Default model `"claude-3-5-sonnet-20241022"`. Pass `maxTokens` to override the default token cap.
+Anthropic Messages API with native streaming and `tool_use` blocks, normalised to Patter's chunk protocol. Default model `"claude-haiku-4-5-20251001"`. Pass `maxTokens` to override the default token cap.
 
 ```typescript
 import { AnthropicLLM } from "getpatter";                 // flat
@@ -77,7 +77,7 @@ import * as anthropic from "getpatter/llm/anthropic";     // namespaced
 const llm = new AnthropicLLM();                           // reads ANTHROPIC_API_KEY
 const llm2 = new anthropic.LLM({
   apiKey: "sk-ant-...",
-  model: "claude-3-5-sonnet-20241022",
+  model: "claude-haiku-4-5-20251001",
   maxTokens: 2048,
 });
 ```

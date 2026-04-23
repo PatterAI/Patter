@@ -42,7 +42,7 @@ __all__ = ["AnthropicLLMProvider"]
 
 # Default model. Anthropic requires an explicit max_tokens for every request;
 # we use LiveKit's default of 1024 when the caller doesn't provide one.
-_DEFAULT_MODEL = "claude-3-5-sonnet-20241022"
+_DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 _DEFAULT_MAX_TOKENS = 1024
 
 
@@ -55,7 +55,7 @@ class AnthropicLLMProvider:
     Args:
         api_key: Anthropic API key. If omitted, ``ANTHROPIC_API_KEY`` is
             read from the environment.
-        model: Model identifier (e.g. ``"claude-3-5-sonnet-20241022"``).
+        model: Model identifier (e.g. ``"claude-haiku-4-5-20251001"``).
         max_tokens: Maximum tokens to generate per response.  Required
             by the Messages API; defaults to 1024.
         temperature: Optional sampling temperature.

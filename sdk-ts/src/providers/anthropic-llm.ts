@@ -31,7 +31,7 @@ import { getLogger } from '../logger';
 
 const DEFAULT_ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 const DEFAULT_ANTHROPIC_VERSION = '2023-06-01';
-const DEFAULT_MODEL = 'claude-3-5-sonnet-20241022';
+const DEFAULT_MODEL = 'claude-haiku-4-5-20251001';
 const DEFAULT_MAX_TOKENS = 1024;
 
 export interface AnthropicLLMOptions {

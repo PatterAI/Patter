@@ -76,9 +76,13 @@ export class GeminiLiveAdapter {
       // Variable module name avoids TS2307 when the peer dep is not installed.
       const modName = '@google/genai';
       genaiModule = (await import(modName)) as typeof genaiModule;
-    } catch (err) {
+    } catch {
       throw new Error(
-        "Gemini Live requires the '@google/genai' package. Install with: npm install @google/genai",
+        '\nGemini Live requires the "@google/genai" package, which is not installed.\n\n' +
+          '  Install:  npm install @google/genai\n\n' +
+          'This is an optional peer dependency of getpatter — it is only needed when\n' +
+          'you use GeminiLive as an agent engine. Other LLM/engine providers do not\n' +
+          'require it.\n',
       );
     }
 

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.5.3 (2026-04-23)
+
+### Fixed
+- **Anthropic default model** — updated from `claude-3-5-sonnet-20241022` (deprecated by Anthropic, now returns `404 not_found_error`) to `claude-haiku-4-5-20251001`. Haiku 4.5 is faster, cheaper, and more suitable as a default for voice agents where every conversation turn costs a LLM call. Pass `model="claude-sonnet-4-6"` or similar to override.
+
+### Changed (dependencies)
+- `npm install getpatter` is now ~90 MB instead of ~357 MB (-75%). Heavy optional runtimes are no longer installed by default:
+  - `onnxruntime-node` (~210 MB) moved to `peerDependencies` with `optional: true`. Required only if you use `SileroVAD` or `DeepFilterNetFilter`. Install with `npm install onnxruntime-node` when needed — the SDK throws a clear error at construction otherwise.
+  - `@google/genai` moved to `peerDependencies` with `optional: true`. Required only if you use `GeminiLive` as an engine. Install with `npm install @google/genai` when needed.
+- `cloudflared` moved from `optionalDependencies` to `dependencies` in the TypeScript SDK — the built-in tunnel (`Patter({ tunnel: true })`) is now guaranteed to Just Work out of the box (the npm `cloudflared` package auto-downloads the binary).
+- Python: the `cloudflared` binary is still required on PATH (via `brew install cloudflared` / `apt install cloudflared`) — there is no Python wrapper package available. The error at `tunnel=True` time already lists install options.
+- Python `getpatter[tunnel]` extra is now an empty alias kept for backwards compatibility.
+
+### Unchanged
+- All other optional extras (`getpatter[silero]`, `getpatter[anthropic]`, `getpatter[google]`, etc.) stay as extras.
+
 ## 0.5.2 (2026-04-23)
 
 ### Fixed

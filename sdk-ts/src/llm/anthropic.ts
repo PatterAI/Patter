@@ -4,7 +4,7 @@ import { AnthropicLLMProvider as _AnthropicLLM } from "../providers/anthropic-ll
 export interface AnthropicLLMOptions {
   /** API key. Falls back to ANTHROPIC_API_KEY env var when omitted. */
   apiKey?: string;
-  /** Anthropic Messages API model id (e.g. ``"claude-3-5-sonnet-20241022"``). */
+  /** Anthropic Messages API model id (e.g. ``"claude-haiku-4-5-20251001"``). */
   model?: string;
   /** Maximum number of tokens to sample. Defaults to the adapter default. */
   maxTokens?: number;
@@ -23,7 +23,7 @@ export interface AnthropicLLMOptions {
  * ```ts
  * import * as anthropic from "getpatter/llm/anthropic";
  * const llm = new anthropic.LLM();                                   // reads ANTHROPIC_API_KEY
- * const llm = new anthropic.LLM({ apiKey: "sk-ant-...", model: "claude-3-5-sonnet-20241022" });
+ * const llm = new anthropic.LLM({ apiKey: "sk-ant-...", model: "claude-haiku-4-5-20251001" });
  * ```
  */
 export class LLM extends _AnthropicLLM {
