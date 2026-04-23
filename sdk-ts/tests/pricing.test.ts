@@ -75,8 +75,10 @@ describe('calculateRealtimeCost', () => {
       },
       pricing,
     );
-    // 100*0.0001 + 50*0.000005 + 200*0.0004 + 30*0.00002
-    expect(cost).toBeCloseTo(0.09085, 5);
+    // gpt-4o-mini-realtime-preview rates (2026):
+    //   100*0.00001 + 50*0.0000006 + 200*0.00002 + 30*0.0000024
+    //   = 0.001 + 0.00003 + 0.004 + 0.000072 = 0.005102
+    expect(cost).toBeCloseTo(0.005102, 6);
   });
 
   it('returns 0 for empty usage', () => {

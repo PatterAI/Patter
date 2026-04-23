@@ -111,6 +111,8 @@ export class OpenAIRealtimeAdapter {
         safeInvoke('transcript_output', data.delta);
       } else if (t === 'input_audio_buffer.speech_started') {
         safeInvoke('speech_started', null);
+      } else if (t === 'input_audio_buffer.speech_stopped') {
+        safeInvoke('speech_stopped', null);
       } else if (t === 'conversation.item.input_audio_transcription.completed') {
         safeInvoke('transcript_input', data.transcript);
       } else if (t === 'response.function_call_arguments.done') {

@@ -84,6 +84,11 @@ class CallMetricsAccumulator:
 
     # ---- Turn lifecycle ----
 
+    @property
+    def turn_active(self) -> bool:
+        """True when ``start_turn`` was called and the turn is not yet completed."""
+        return self._turn_start is not None
+
     def start_turn(self) -> None:
         """Begin tracking a new conversation turn."""
         self._turn_start = time.monotonic()

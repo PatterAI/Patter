@@ -378,10 +378,23 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                     await self.audio_sender.send_audio(ev_data)
                     await self.audio_sender.send_mark(f"audio_{id(ev_data)}")
 
+                elif ev_type == "speech_stopped":
+                    # OpenAI server-side VAD detected end-of-user-speech.
+                    # This is the earliest reliable moment to start measuring
+                    # turn latency in Realtime mode — transcript_input arrives
+                    # noticeably later and understates end-to-end latency.
+                    if self.metrics is not None and not self.metrics.turn_active:
+                        self.metrics.start_turn()
+                    waiting_first_audio = True
+                    current_agent_text = ""
+
                 elif ev_type == "transcript_input":
                     logger.debug("User: %s", sanitize_log_value(ev_data))
                     if self.metrics is not None:
-                        self.metrics.start_turn()
+                        # Fallback: start turn here if speech_stopped was missed
+                        # (server VAD disabled or custom config).
+                        if not self.metrics.turn_active:
+                            self.metrics.start_turn()
                         self.metrics.record_stt_complete(ev_data)
                     waiting_first_audio = True
                     current_agent_text = ""
@@ -631,10 +644,19 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
                         waiting_first_audio = False
                     await self.audio_sender.send_audio(ev_data)
 
+                elif ev_type == "speech_stopped":
+                    # Start turn as soon as server VAD signals end-of-user-speech,
+                    # not on transcript_input (which arrives later and understates latency).
+                    if self.metrics is not None and not self.metrics.turn_active:
+                        self.metrics.start_turn()
+                    waiting_first_audio = True
+                    current_agent_text = ""
+
                 elif ev_type == "transcript_input":
                     logger.debug("User: %s", sanitize_log_value(ev_data))
                     if self.metrics is not None:
-                        self.metrics.start_turn()
+                        if not self.metrics.turn_active:
+                            self.metrics.start_turn()
                         self.metrics.record_stt_complete(ev_data)
                     waiting_first_audio = True
                     current_agent_text = ""

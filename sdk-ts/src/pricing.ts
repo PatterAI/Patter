@@ -1,8 +1,13 @@
 /**
  * Default provider pricing and merge utilities.
  *
- * Pricing is based on public provider rates (as of early 2025).
- * Developers can override any provider's pricing.
+ * Pricing reflects public provider rates as of 2026. These defaults
+ * are calibrated for the default models Patter ships with — notably
+ * ``gpt-4o-mini-realtime-preview`` for OpenAI Realtime. If you pick
+ * a different model (e.g. ``gpt-4o-realtime-preview`` or
+ * ``gpt-realtime``), override the ``openai_realtime`` entry via the
+ * ``pricing`` option on ``Patter()`` so the dashboard cost display
+ * matches what OpenAI actually bills.
  */
 
 export interface ProviderPricing {
@@ -21,13 +26,19 @@ export const DEFAULT_PRICING: Record<string, ProviderPricing> = {
   // TTS — per 1,000 characters synthesized
   elevenlabs: { unit: '1k_chars', price: 0.18 },
   openai_tts: { unit: '1k_chars', price: 0.015 },
-  // OpenAI Realtime — per token
+  // OpenAI Realtime — per token.
+  // Calibrated for gpt-4o-mini-realtime-preview (the Patter default):
+  //   audio  input  $10 / M  ->  0.00001 per token
+  //   audio  output $20 / M  ->  0.00002 per token
+  //   text   input  $0.60/ M ->  0.0000006 per token
+  //   text   output $2.40/ M ->  0.0000024 per token
+  // For gpt-4o-realtime-preview multiply by ~10, for gpt-realtime by ~3.
   openai_realtime: {
     unit: 'token',
-    audio_input_per_token: 0.0001,
-    audio_output_per_token: 0.0004,
-    text_input_per_token: 0.000005,
-    text_output_per_token: 0.00002,
+    audio_input_per_token: 0.00001,
+    audio_output_per_token: 0.00002,
+    text_input_per_token: 0.0000006,
+    text_output_per_token: 0.0000024,
   },
   // Telephony — per minute of call duration
   twilio: { unit: 'minute', price: 0.013 },

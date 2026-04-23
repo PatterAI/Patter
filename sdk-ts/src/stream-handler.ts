@@ -890,14 +890,27 @@ export class StreamHandler {
       // Send mark for barge-in accuracy
       this.chunkCount++;
       this.deps.bridge.sendMark(this.ws, `audio_${this.chunkCount}`, this.streamSid);
+    } else if (type === 'speech_stopped') {
+      // OpenAI's server VAD detected end-of-user-speech. This is the earliest
+      // reliable moment to start measuring turn latency in Realtime mode —
+      // ``transcript_input`` (transcription.completed) arrives tens of ms to
+      // seconds later and understates end-to-end latency dramatically.
+      if (!this.metricsAcc.turnActive) {
+        this.metricsAcc.startTurn();
+      }
+      this.currentAgentText = '';
+      this.responseAudioStarted = false;
     } else if (type === 'transcript_input') {
       const inputText = eventData as string;
       getLogger().debug(`User (${this.deps.bridge.label}): ${sanitizeLogValue(inputText)}`);
       this.history.push({ role: 'user', text: inputText, timestamp: Date.now() });
-      // Start a new turn when user finishes speaking (Realtime mode)
-      this.metricsAcc.startTurn();
-      this.currentAgentText = '';
-      this.responseAudioStarted = false;
+      // Fallback: if speech_stopped was missed (server VAD disabled, custom
+      // config, ...) still start the turn here so latency is non-zero.
+      if (!this.metricsAcc.turnActive) {
+        this.metricsAcc.startTurn();
+        this.currentAgentText = '';
+        this.responseAudioStarted = false;
+      }
       if (this.deps.onTranscript) {
         await this.deps.onTranscript({
           role: 'user',
