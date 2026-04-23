@@ -18,8 +18,7 @@ consumed by the Phase 2 dispatch layer, which is handled separately.
 
 from __future__ import annotations
 
-import inspect
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from getpatter.models import Guardrail

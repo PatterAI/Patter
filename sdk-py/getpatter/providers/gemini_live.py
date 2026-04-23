@@ -13,7 +13,6 @@ Patter's handlers manage session lifecycle externally.
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import logging
 from typing import Any, AsyncIterator

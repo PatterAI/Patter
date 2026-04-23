@@ -11,10 +11,10 @@ from collections import deque
 from urllib.parse import quote
 
 from getpatter.handlers.common import (
-    _create_stt_from_config,
-    _create_tts_from_config,
-    _resolve_variables,
-    _sanitize_variable_value,
+    _create_stt_from_config,  # noqa: F401 — re-exported for tests and external callers
+    _create_tts_from_config,  # noqa: F401 — re-exported for tests and external callers
+    _resolve_variables,  # noqa: F401 — re-exported for tests and external callers
+    _sanitize_variable_value,  # noqa: F401 — re-exported for tests and external callers
     _validate_e164,
 )
 from getpatter.utils.log_sanitize import mask_phone_number

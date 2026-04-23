@@ -12,15 +12,12 @@ to the appropriate StreamHandler.
 from __future__ import annotations
 
 import asyncio
-import base64
 import inspect
 import json
 import logging
-import re
 import time
 from abc import ABC, abstractmethod
 from collections import deque
-from typing import Any, Callable
 
 from getpatter.handlers.common import (
     _create_stt_from_config,
@@ -375,7 +372,6 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
 
     async def start(self) -> None:
         from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter  # type: ignore[import]
-        from getpatter.services.tool_executor import ToolExecutor  # type: ignore[import]
 
         agent_tools: list[dict] = [
             {
@@ -866,6 +862,9 @@ class PipelineStreamHandler(StreamHandler):
         self._llm_loop = None
         self._msg_accepts_call = False
         self._remote_handler = None
+        # Throttle state for back-to-back STT finals — see ``_commit_transcript``.
+        self._last_commit_text: str = ""
+        self._last_commit_at: float = 0.0
 
     async def start(self) -> None:
         from getpatter.models import CallControl
@@ -1178,70 +1177,66 @@ class PipelineStreamHandler(StreamHandler):
                 turn = self.metrics.record_turn_complete(response_text)
                 await self._emit_turn_metrics(turn, call_id=call_id)
 
+    async def _handle_barge_in(self, transcript) -> None:
+        """Caller spoke over in-flight TTS. Flip speaking flag, clear downstream
+        audio, record interruption. Mirrors TS ``handleBargeIn``.
+        """
+        if not (transcript.text and self._is_speaking):
+            return
+        logger.debug(
+            "Barge-in: caller spoke over agent (%s)",
+            sanitize_log_value(transcript.text[:40]),
+        )
+        self._is_speaking = False
+        try:
+            await self.audio_sender.send_clear()
+        except Exception as exc:
+            logger.debug("send_clear during barge-in failed: %s", exc)
+        if self.metrics is not None:
+            self.metrics.record_turn_interrupted()
+
+    def _commit_transcript(self, text: str) -> bool:
+        """Dedup + throttle + hallucination filter for final STT transcripts.
+
+        Mirrors TS ``commitTranscript``. Returns ``True`` if the transcript
+        should be committed to a turn, ``False`` if it must be dropped.
+        Drop reasons: common hallucinations, duplicate within 2 s, or any
+        final within 500 ms of the previous one.
+        """
+        now = time.time()
+        normalised = text.strip().lower()
+        stripped = normalised.rstrip(".,!?;: ").strip()
+        since_last = now - self._last_commit_at
+
+        if stripped in _STT_HALLUCINATIONS or stripped == "":
+            logger.debug("Dropped likely STT hallucination: %r", normalised[:40])
+            return False
+        if since_last < 2.0 and normalised == self._last_commit_text:
+            logger.debug(
+                "Dropped duplicate final transcript (%.1fs since last): %r",
+                since_last, normalised[:40],
+            )
+            return False
+        if since_last < 0.5:
+            logger.debug(
+                "Dropped back-to-back final transcript (%.2fs since last): %r",
+                since_last, normalised[:40],
+            )
+            return False
+        self._last_commit_text = normalised
+        self._last_commit_at = now
+        return True
+
     async def _stt_loop(self) -> None:
-        # Per-loop state used to throttle back-to-back turns (BUG #22). When
-        # the STT provider emits several nearly-identical final transcripts
-        # in quick succession (e.g. Whisper on mulaw 8 kHz repeatedly
-        # returning "you" / ".") we would otherwise kick off a new LLM+TTS
-        # turn for each, and the audio of consecutive turns overlaps on the
-        # caller's line. Dedup rules:
-        #   1. Drop a final transcript whose normalised text matches the
-        #      previous committed text within 2.0 s.
-        #   2. Drop a final transcript that lands within 500 ms of the last
-        #      committed turn — too tight to be a legitimate new utterance.
-        last_commit_text: str = ""
-        last_commit_at: float = 0.0
+        # Throttle state lives on the instance so ``_commit_transcript`` can be
+        # reused across iterations. See ``_commit_transcript`` for filter rules.
         try:
             async for transcript in self._stt.receive_transcripts():
-                # Barge-in: if the agent is currently speaking and the STT
-                # produces any transcript with text (even an interim one),
-                # flip `_is_speaking=False` + clear the downstream audio
-                # buffer so the in-flight TTS loop interrupts (BUG #20).
-                if transcript.text and self._is_speaking:
-                    logger.debug(
-                        "Barge-in: caller spoke over agent (%s)",
-                        sanitize_log_value(transcript.text[:40]),
-                    )
-                    self._is_speaking = False
-                    try:
-                        await self.audio_sender.send_clear()
-                    except Exception as exc:
-                        logger.debug("send_clear during barge-in failed: %s", exc)
-                    if self.metrics is not None:
-                        self.metrics.record_turn_interrupted()
+                await self._handle_barge_in(transcript)
                 if not (transcript.is_final and transcript.text):
                     continue
-
-                # --- Dedup / throttle / hallucination filter (BUG #22) -------
-                _now = time.time()
-                _normalised = transcript.text.strip().lower()
-                _stripped = _normalised.rstrip(".,!?;: ").strip()
-                _since_last = _now - last_commit_at
-
-                if _stripped in _STT_HALLUCINATIONS or _stripped == "":
-                    logger.debug(
-                        "Dropped likely STT hallucination: %r",
-                        _normalised[:40],
-                    )
+                if not self._commit_transcript(transcript.text):
                     continue
-
-                if _since_last < 2.0 and _normalised == last_commit_text:
-                    logger.debug(
-                        "Dropped duplicate final transcript (%.1fs since last): %r",
-                        _since_last,
-                        _normalised[:40],
-                    )
-                    continue
-                if _since_last < 0.5:
-                    logger.debug(
-                        "Dropped back-to-back final transcript (%.2fs since last): %r",
-                        _since_last,
-                        _normalised[:40],
-                    )
-                    continue
-                last_commit_text = _normalised
-                last_commit_at = _now
-                # -------------------------------------------------------------
 
                 # Record one STT span per final transcript turn. The span is
                 # short-lived (just the attribute set) because STT is
@@ -1393,9 +1388,9 @@ class PipelineStreamHandler(StreamHandler):
         if self._stt is None:
             return
         # Always forward caller audio to STT — even while the agent is
-        # speaking — so barge-in detection can trigger (BUG #20). When
-        # `barge_in_threshold_ms == 0` on the agent, skip the STT during
-        # TTS to avoid echo-loop costs (legacy behaviour).
+        # speaking — so barge-in detection can trigger. When
+        # ``barge_in_threshold_ms == 0`` on the agent, skip STT during TTS
+        # to avoid echo-loop costs (opt-out for noisy links).
         if self._is_speaking and getattr(self.agent, "barge_in_threshold_ms", 300) == 0:
             return
         # Inbound PCMU 8 kHz (Twilio always, Telnyx when streaming_start
@@ -1410,7 +1405,7 @@ class PipelineStreamHandler(StreamHandler):
 
         # before_send_to_stt hook — gate/transform the audio chunk before it
         # reaches the STT provider. Returning None drops the chunk (useful
-        # for custom VAD / echo-cancellation). See BUG #15.
+        # for custom VAD / echo-cancellation / PII redaction).
         hooks = getattr(self.agent, "hooks", None)
         if hooks is not None:
             hook_executor = PipelineHookExecutor(hooks)

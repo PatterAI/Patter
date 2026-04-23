@@ -5,7 +5,6 @@ from __future__ import annotations
 __all__ = ["MetricsStore", "MetricsStoreProtocol"]
 
 import asyncio
-import json
 import threading
 import time
 from dataclasses import asdict

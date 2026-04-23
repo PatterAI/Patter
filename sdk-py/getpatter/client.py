@@ -44,11 +44,6 @@ from getpatter.providers.base import STTProvider, TTSProvider
 from getpatter.services.llm_loop import LLMProvider
 
 if TYPE_CHECKING:  # pragma: no cover — typing only
-    from getpatter.carriers.twilio import Carrier as TwilioCarrier
-    from getpatter.carriers.telnyx import Carrier as TelnyxCarrier
-    from getpatter.engines.openai import Realtime as OpenAIRealtimeEngine
-    from getpatter.engines.elevenlabs import ConvAI as ElevenLabsConvAIEngine
-    from getpatter.tunnels import CloudflareTunnel, Ngrok, Static
     from getpatter._public_api import Tool
 
 DEFAULT_BACKEND_URL = "wss://api.getpatter.com"
