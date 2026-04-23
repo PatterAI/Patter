@@ -17,14 +17,14 @@ class TTS(_ElevenLabsTTS):
         from getpatter.tts import elevenlabs
 
         tts = elevenlabs.TTS()              # reads ELEVENLABS_API_KEY
-        tts = elevenlabs.TTS(api_key="...", voice_id="21m00Tcm4TlvDq8ikWAM")
+        tts = elevenlabs.TTS(api_key="...", voice_id="EXAVITQu4vr4xnSDxMaL")
     """
 
     def __init__(
         self,
         api_key: str | None = None,
         *,
-        voice_id: str = "21m00Tcm4TlvDq8ikWAM",
+        voice_id: str = "EXAVITQu4vr4xnSDxMaL",
         model_id: str = "eleven_turbo_v2_5",
         output_format: str = "pcm_16000",
     ) -> None:

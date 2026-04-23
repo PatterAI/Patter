@@ -53,8 +53,9 @@ _ELEVENLABS_VOICE_ID_BY_NAME = {
     "glinda": "z9fAnlkpzviPz146aGWa",
     "giovanni": "zcAOhNBS3c14rBihAFp1",
     "mimi": "zrHiDhphv9ZnVXBqCLjz",
+    "sarah": "EXAVITQu4vr4xnSDxMaL",
     # OpenAI voice-name aliases for convenience (map to reasonable EL voices).
-    "alloy": "21m00Tcm4TlvDq8ikWAM",
+    "alloy": "EXAVITQu4vr4xnSDxMaL",
 }
 
 _VOICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9]{20}$")
@@ -76,7 +77,7 @@ def resolve_voice_id(voice: str) -> str:
 
 
 class ElevenLabsTTS(TTSProvider):
-    def __init__(self, api_key: str, voice_id: str = "21m00Tcm4TlvDq8ikWAM", model_id: str = "eleven_turbo_v2_5", output_format: str = "pcm_16000"):
+    def __init__(self, api_key: str, voice_id: str = "EXAVITQu4vr4xnSDxMaL", model_id: str = "eleven_turbo_v2_5", output_format: str = "pcm_16000"):
         self.api_key = api_key; self.voice_id = resolve_voice_id(voice_id); self.model_id = model_id; self.output_format = output_format
         self._client = httpx.AsyncClient(base_url="https://api.elevenlabs.io/v1", headers={"xi-api-key": api_key}, timeout=30.0)
 

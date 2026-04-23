@@ -223,7 +223,7 @@ export function buildAIAdapter(config: LocalConfig, agent: AgentOptions, resolve
     return new ElevenLabsConvAIAdapter(
       engine.apiKey,
       engine.agentId,
-      agent.voice ?? '21m00Tcm4TlvDq8ikWAM',
+      agent.voice ?? 'EXAVITQu4vr4xnSDxMaL',
       'eleven_turbo_v2_5',
       agent.language ?? 'en',
       agent.firstMessage ?? '',
@@ -581,16 +581,8 @@ export class EmbeddedServer {
 
     // Mount dashboard and B2B API routes
     if (this.dashboard) {
-      if (!this.dashboardToken) {
-        getLogger().warn(
-          'Dashboard is enabled without authentication. ' +
-          'Set dashboardToken to protect call data. ' +
-          'This is safe for local development but should not be exposed on a public network.'
-        );
-      }
       mountDashboard(app, this.metricsStore, this.dashboardToken);
       mountApi(app, this.metricsStore, this.dashboardToken);
-      getLogger().info('Dashboard: http://127.0.0.1:' + port + '/');
     }
 
     // Twilio statusCallback — captures ringing/no-answer/busy/failed
@@ -862,7 +854,6 @@ export class EmbeddedServer {
         socket.destroy();
         return;
       }
-      getLogger().info(`Upgrade request: ${req.url}`);
       this.wss!.handleUpgrade(req, socket, head, (ws) => {
         wsConnectionsByIp.set(remoteIp, (wsConnectionsByIp.get(remoteIp) ?? 0) + 1);
         ws.once('close', () => {
@@ -879,7 +870,6 @@ export class EmbeddedServer {
 
     this.wss.on('connection', (ws, req) => {
       const url = new URL((req as { url?: string }).url ?? '', `http://localhost`);
-      getLogger().info(`WebSocket connected: ${(req as { url?: string }).url}`);
 
       // Track active connections for graceful shutdown
       this.activeConnections.add(ws);
@@ -899,19 +889,21 @@ export class EmbeddedServer {
       // Bind to loopback only. Public exposure should go through a reverse
       // proxy or tunnel so the Node process is never directly reachable.
       this.server!.listen(port, '127.0.0.1', () => {
-        getLogger().info(`
-██████╗  █████╗ ████████╗████████╗███████╗██████╗
-██╔══██╗██╔══██╗╚══██╔══╝╚══██╔══╝██╔════╝██╔══██╗
-██████╔╝███████║   ██║      ██║   █████╗  ██████╔╝
-██╔═══╝ ██╔══██║   ██║      ██║   ██╔══╝  ██╔══██╗
-██║     ██║  ██║   ██║      ██║   ███████╗██║  ██║
-╚═╝     ╚═╝  ╚═╝   ╚═╝      ╚═╝   ╚══════╝╚═╝  ╚═╝
-
-Connect AI agents to phone numbers in 4 lines of code
-`);
         getLogger().info(`Server on port ${port}`);
         getLogger().info(`Webhook: https://${this.config.webhookUrl}`);
-        getLogger().info(`Phone: ${this.config.phoneNumber}`);
+        getLogger().info(`Phone:   ${this.config.phoneNumber}`);
+        if (this.dashboard) {
+          console.log('\n──── Dashboard ─────────────────────────────────────');
+          getLogger().info(`URL: http://127.0.0.1:${port}/`);
+          if (!this.dashboardToken) {
+            getLogger().warn(
+              'Dashboard is enabled without authentication. ' +
+              'Set dashboardToken to protect call data. ' +
+              'This is safe for local development but should not be exposed on a public network.'
+            );
+          }
+          console.log('────────────────────────────────────────────────────\n');
+        }
         resolve();
       });
     });
@@ -969,7 +961,6 @@ Connect AI agents to phone numbers in 4 lines of code
           return;
         }
         const event = data.event;
-        getLogger().info(`WS event: ${event}`);
 
         if (event === 'start') {
           handler.setStreamSid(data.streamSid ?? '');
@@ -1032,8 +1023,6 @@ Connect AI agents to phone numbers in 4 lines of code
 
         const event = data.event ?? '';
         if (event === 'connected') return;  // first ping, nothing to do
-
-        getLogger().info(`Telnyx event: ${event}`);
 
         if (event === 'start' && !streamStarted) {
           streamStarted = true;

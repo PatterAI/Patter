@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.2 (2026-04-23)
+
+### Fixed
+- **ElevenLabs default voice** — changed from Rachel (`21m00Tcm4TlvDq8ikWAM`) to Sarah (`EXAVITQu4vr4xnSDxMaL`). Rachel is a library voice that free-tier ElevenLabs accounts cannot use, so `new ElevenLabsTTS()` / `ElevenLabsTTS()` without an explicit `voice_id` used to fail on the first synthesis with `402 paid_plan_required`. Sarah is a premade voice available to all accounts.
+- `alloy` alias now resolves to Sarah for the same reason.
+- Startup banner now renders at the top of the terminal output (before tunnel/webhook setup logs), with a visually distinct Dashboard section.
+- Reduced log noise during calls: removed per-frame `WS event:`, `Telnyx event:`, `Upgrade request:`, `WebSocket connected:` lines. Only `Call started` / `Call ended` remain.
+
+### Unchanged
+- The `rachel` alias still resolves to `21m00Tcm4TlvDq8ikWAM` — pass `voice="rachel"` explicitly to keep using it (requires a paid ElevenLabs plan).
+
 ## 0.5.1 (2026-04-22)
 
 ### Added
