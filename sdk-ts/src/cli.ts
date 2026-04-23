@@ -12,17 +12,7 @@ import express from 'express';
 import { MetricsStore } from './dashboard/store';
 import { mountDashboard, mountApi } from './dashboard/routes';
 import { getLogger } from './logger';
-
-const BANNER = `
-██████╗  █████╗ ████████╗████████╗███████╗██████╗
-██╔══██╗██╔══██╗╚══██╔══╝╚══██╔══╝██╔════╝██╔══██╗
-██████╔╝███████║   ██║      ██║   █████╗  ██████╔╝
-██╔═══╝ ██╔══██║   ██║      ██║   ██╔══╝  ██╔══██╗
-██║     ██║  ██║   ██║      ██║   ███████╗██║  ██║
-╚═╝     ╚═╝  ╚═╝   ╚═╝      ╚═╝   ╚══════╝╚═╝  ╚═╝
-
-Connect AI agents to phone numbers in 4 lines of code
-`;
+import { showBanner } from './banner';
 
 function parseArgs(argv: string[]): { port: number } {
   const args = argv.slice(2);
@@ -51,7 +41,7 @@ async function main(): Promise<void> {
 
   const { port } = parseArgs(process.argv);
 
-  console.log(BANNER);
+  showBanner();
 
   const store = new MetricsStore();
 

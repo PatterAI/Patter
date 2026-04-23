@@ -49,7 +49,8 @@ const ELEVENLABS_VOICE_ID_BY_NAME: Record<string, string> = {
   glinda: 'z9fAnlkpzviPz146aGWa',
   giovanni: 'zcAOhNBS3c14rBihAFp1',
   mimi: 'zrHiDhphv9ZnVXBqCLjz',
-  alloy: '21m00Tcm4TlvDq8ikWAM',
+  sarah: 'EXAVITQu4vr4xnSDxMaL',
+  alloy: 'EXAVITQu4vr4xnSDxMaL',
 };
 
 const VOICE_ID_PATTERN = /^[A-Za-z0-9]{20}$/;
@@ -73,7 +74,7 @@ export class ElevenLabsTTS {
 
   constructor(
     private readonly apiKey: string,
-    voiceId: string = '21m00Tcm4TlvDq8ikWAM',
+    voiceId: string = 'EXAVITQu4vr4xnSDxMaL',
     private readonly modelId: string = 'eleven_turbo_v2_5',
     private readonly outputFormat: string = 'pcm_16000',
   ) {

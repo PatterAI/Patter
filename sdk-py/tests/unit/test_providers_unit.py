@@ -156,7 +156,7 @@ class TestElevenLabsConvAIAdapter:
 
         adapter = ElevenLabsConvAIAdapter(api_key="el-test")
         assert adapter.agent_id == ""
-        assert adapter.voice_id == "21m00Tcm4TlvDq8ikWAM"
+        assert adapter.voice_id == "EXAVITQu4vr4xnSDxMaL"
         assert adapter.model_id == "eleven_turbo_v2_5"
         assert adapter.language == "it"
         assert adapter.first_message == ""

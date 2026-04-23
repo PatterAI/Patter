@@ -270,6 +270,9 @@ export class Patter {
       throw new Error('Cannot use both tunnel: true and webhookUrl. Pick one.');
     }
 
+    const { showBanner } = await import('./banner');
+    showBanner();
+
     if (wantsCloudflared) {
       const { startTunnel } = await import('./tunnel');
       this.tunnelHandle = await startTunnel(port);

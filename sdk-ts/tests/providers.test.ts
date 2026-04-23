@@ -125,7 +125,7 @@ describe("ElevenLabsTTS", () => {
   it("uses default voice id when not specified", () => {
     const tts = new ElevenLabsTTS("el_test");
     const t = tts as unknown as Record<string, unknown>;
-    expect(t["voiceId"]).toBe("21m00Tcm4TlvDq8ikWAM");
+    expect(t["voiceId"]).toBe("EXAVITQu4vr4xnSDxMaL");
   });
 
   it("uses eleven_turbo_v2_5 model by default", () => {

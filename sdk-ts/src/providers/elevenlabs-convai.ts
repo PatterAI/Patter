@@ -10,7 +10,7 @@ export class ElevenLabsConvAIAdapter {
   constructor(
     private readonly apiKey: string,
     private readonly agentId: string = '',
-    private readonly voiceId: string = '21m00Tcm4TlvDq8ikWAM',
+    private readonly voiceId: string = 'EXAVITQu4vr4xnSDxMaL',
     _modelId: string = 'eleven_turbo_v2_5',
     _language: string = 'en',
     private readonly firstMessage: string = '',

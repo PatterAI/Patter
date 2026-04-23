@@ -784,6 +784,9 @@ class Patter:
                 "Cannot use both tunnel=True and webhook_url. Pick one."
             )
 
+        from getpatter.banner import show_banner
+        show_banner()
+
         if tunnel:
             from getpatter.tunnel import start_tunnel
 

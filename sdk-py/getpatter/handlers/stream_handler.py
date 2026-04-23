@@ -602,7 +602,7 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
     async def start(self) -> None:
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter  # type: ignore[import]
 
-        voice = self.agent.voice if self.agent.voice != "alloy" else "21m00Tcm4TlvDq8ikWAM"
+        voice = self.agent.voice if self.agent.voice != "alloy" else "EXAVITQu4vr4xnSDxMaL"
         agent_id = ""
         el_config = getattr(self.agent, "elevenlabs_convai", None) or {}
         if isinstance(el_config, dict):

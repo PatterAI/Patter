@@ -175,14 +175,6 @@ class EmbeddedServer:
             from getpatter.dashboard.store import MetricsStore
             self._metrics_store = MetricsStore()
 
-            if not self.dashboard_token:
-                logger.warning(
-                    "Dashboard is enabled without authentication. "
-                    "Set dashboard_token to protect call data. "
-                    "This is safe for local development but should "
-                    "not be exposed on a public network."
-                )
-
             mount_dashboard(app, self._metrics_store, token=self.dashboard_token)
 
             from getpatter.api_routes import mount_api
@@ -496,15 +488,21 @@ class EmbeddedServer:
                     self.config.webhook_url,
                 )
 
-        from getpatter.banner import show_banner
-        show_banner()
-
         logger.info("Server starting on port %s", port)
         logger.info("Webhook URL: https://%s", self.config.webhook_url)
-        logger.info("Phone: %s", self.config.phone_number)
-        logger.info("Agent: %s / %s", self.agent.model, self.agent.voice)
+        logger.info("Phone:   %s", self.config.phone_number)
+        logger.info("Agent:   %s / %s", self.agent.model, self.agent.voice)
         if self.dashboard:
-            logger.info("Dashboard: http://127.0.0.1:%s", port)
+            print("\n──── Dashboard ─────────────────────────────────────")
+            logger.info("URL: http://127.0.0.1:%s/", port)
+            if not self.dashboard_token:
+                logger.warning(
+                    "Dashboard is enabled without authentication. "
+                    "Set dashboard_token to protect call data. "
+                    "This is safe for local development but should "
+                    "not be exposed on a public network."
+                )
+            print("────────────────────────────────────────────────────\n")
 
         # Suppress Uvicorn's "Uvicorn running on..." startup message
         # but keep request logs (INFO level) visible
