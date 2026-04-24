@@ -210,7 +210,7 @@ interface OpenAIStyleMessage {
   name?: string;
 }
 
-export function toGeminiContents(
+function toGeminiContents(
   messages: Array<Record<string, unknown>>,
 ): { systemInstruction: string; contents: GeminiContent[] } {
   const systemParts: string[] = [];

@@ -11,10 +11,10 @@ from collections import deque
 from urllib.parse import quote
 
 from getpatter.handlers.common import (
-    _create_stt_from_config,
-    _create_tts_from_config,
-    _resolve_variables,
-    _sanitize_variable_value,
+    _create_stt_from_config,  # noqa: F401 — re-exported for tests and external callers
+    _create_tts_from_config,  # noqa: F401 — re-exported for tests and external callers
+    _resolve_variables,  # noqa: F401 — re-exported for tests and external callers
+    _sanitize_variable_value,  # noqa: F401 — re-exported for tests and external callers
     _validate_e164,
 )
 from getpatter.utils.log_sanitize import mask_phone_number
@@ -115,20 +115,37 @@ class TwilioAudioSender(AudioSender):
         self._chunk_count = 0
         self.last_confirmed_mark = ""
         self._input_is_mulaw_8k = input_is_mulaw_8k
-        # Lazy import transcoding functions (only needed when transcoding)
+        # Lazy import transcoding helpers (only needed when transcoding).
+        # ``PcmCarry`` mirrors TS ``StreamHandler.alignPcm16``: HTTP TTS
+        # providers can yield odd-length chunks that would otherwise crash
+        # ``audioop.ratecv`` with "not a whole number of frames".
         if not input_is_mulaw_8k:
-            from getpatter.services.transcoding import pcm16_to_mulaw, resample_16k_to_8k  # type: ignore[import]
+            from getpatter.services.transcoding import (
+                PcmCarry,
+                pcm16_to_mulaw,
+                resample_16k_to_8k,
+            )
             self._pcm16_to_mulaw = pcm16_to_mulaw
             self._resample_16k_to_8k = resample_16k_to_8k
+            self._pcm_carry: PcmCarry | None = PcmCarry()
         else:
             self._pcm16_to_mulaw = None
             self._resample_16k_to_8k = None
+            self._pcm_carry = None
+
+    def reset_pcm_carry(self) -> None:
+        """Drop any buffered odd byte. Call at the start of a new TTS synthesis."""
+        if self._pcm_carry is not None:
+            self._pcm_carry.reset()
 
     async def send_audio(self, pcm_audio: bytes) -> None:
         if self._input_is_mulaw_8k:
             mulaw = pcm_audio
         else:
-            resampled = self._resample_16k_to_8k(pcm_audio)
+            aligned = self._pcm_carry.align(pcm_audio)  # type: ignore[union-attr]
+            if not aligned:
+                return
+            resampled = self._resample_16k_to_8k(aligned)
             mulaw = self._pcm16_to_mulaw(resampled)
         encoded = base64.b64encode(mulaw).decode("ascii")
         await self._ws.send_text(
@@ -259,6 +276,7 @@ async def twilio_stream_bridge(
                             "callee": callee,
                             "direction": "inbound",
                             "custom_params": custom_params,
+                            "telephony_provider": "twilio",
                         }
                     )
                     if not isinstance(_call_overrides, dict):

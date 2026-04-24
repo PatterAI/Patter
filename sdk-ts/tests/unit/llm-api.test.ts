@@ -99,7 +99,7 @@ describe("llm/anthropic", () => {
 
   it("LLM accepts a model override", () => {
     expect(
-      new anthropicLlm.LLM({ apiKey: "sk-ant-x", model: "claude-3-5-sonnet-20241022" }),
+      new anthropicLlm.LLM({ apiKey: "sk-ant-x", model: "claude-haiku-4-5-20251001" }),
     ).toBeDefined();
   });
 });

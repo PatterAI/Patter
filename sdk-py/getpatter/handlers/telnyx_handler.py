@@ -236,6 +236,7 @@ async def telnyx_stream_bridge(
                             "caller": caller,
                             "callee": callee,
                             "direction": "inbound",
+                            "telephony_provider": "telnyx",
                         }
                     )
                     if not isinstance(_call_overrides, dict):

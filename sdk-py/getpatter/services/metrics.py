@@ -13,6 +13,7 @@ from getpatter.models import (
     TurnMetrics,
 )
 from getpatter.pricing import (
+    calculate_realtime_cached_savings,
     calculate_realtime_cost,
     calculate_stt_cost,
     calculate_telephony_cost,
@@ -61,6 +62,7 @@ class CallMetricsAccumulator:
         self._total_stt_audio_seconds: float = 0.0
         self._total_tts_characters: int = 0
         self._total_realtime_cost: float = 0.0
+        self._total_realtime_cached_savings: float = 0.0
         # Byte counters for computing audio seconds from raw audio
         self._stt_byte_count: int = 0
         self._stt_sample_rate: int = 16000
@@ -83,6 +85,11 @@ class CallMetricsAccumulator:
         self._stt_bytes_per_sample = bytes_per_sample
 
     # ---- Turn lifecycle ----
+
+    @property
+    def turn_active(self) -> bool:
+        """True when ``start_turn`` was called and the turn is not yet completed."""
+        return self._turn_start is not None
 
     def start_turn(self) -> None:
         """Begin tracking a new conversation turn."""
@@ -160,8 +167,8 @@ class CallMetricsAccumulator:
 
     def record_realtime_usage(self, usage: dict) -> None:
         """Record OpenAI Realtime token usage from a ``response.done`` event."""
-        cost = calculate_realtime_cost(usage, self._pricing)
-        self._total_realtime_cost += cost
+        self._total_realtime_cost += calculate_realtime_cost(usage, self._pricing)
+        self._total_realtime_cached_savings += calculate_realtime_cached_savings(usage, self._pricing)
 
     def set_actual_telephony_cost(self, cost: float) -> None:
         """Set the actual telephony cost from the provider API (post-call).
@@ -185,6 +192,12 @@ class CallMetricsAccumulator:
         """Calculate final costs and return frozen ``CallMetrics``."""
         duration = time.monotonic() - self._call_start
 
+        # Flush any dangling in-flight turn as interrupted so its partial state
+        # doesn't evaporate into the void on abrupt hangup. ``_completed_turns``
+        # drops it from percentile stats regardless.
+        if self.turn_active:
+            self.record_turn_interrupted()
+
         # Compute STT audio seconds from byte count if not already tracked
         if self._total_stt_audio_seconds == 0.0 and self._stt_byte_count > 0:
             self._total_stt_audio_seconds = (
@@ -194,7 +207,9 @@ class CallMetricsAccumulator:
 
         cost = self._compute_cost(duration)
         latency_avg = self._compute_average_latency()
-        latency_p95 = self._compute_p95_latency()
+        latency_p50 = self._compute_percentile_latency(0.5)
+        latency_p95 = self._compute_percentile_latency(0.95)
+        latency_p99 = self._compute_percentile_latency(0.99)
 
         return CallMetrics(
             call_id=self.call_id,
@@ -202,7 +217,9 @@ class CallMetricsAccumulator:
             turns=tuple(self._turns),
             cost=cost,
             latency_avg=latency_avg,
+            latency_p50=latency_p50,
             latency_p95=latency_p95,
+            latency_p99=latency_p99,
             provider_mode=self.provider_mode,
             stt_provider=self.stt_provider,
             tts_provider=self.tts_provider,
@@ -240,17 +257,21 @@ class CallMetricsAccumulator:
 
         if self._llm_complete is not None and self._tts_first_byte is not None:
             tts_ms = (self._tts_first_byte - self._llm_complete) * 1000
+            # In pipeline streaming mode ``record_tts_first_byte`` can fire on
+            # the first sentence's first chunk BEFORE ``record_llm_complete``
+            # (which marks end-of-full-response). Clamp to zero — negatives
+            # would be noise on dashboards.
+            if tts_ms < 0:
+                tts_ms = 0
 
         if self._turn_start is not None and self._tts_first_byte is not None:
             total_ms = (self._tts_first_byte - self._turn_start) * 1000
 
-        # In Realtime mode, STT/LLM/TTS happen inside a single OpenAI
-        # pipeline so individual checkpoints are never recorded.  Attribute
-        # the entire end-to-end latency to the LLM bucket so dashboards
-        # display a meaningful breakdown bar instead of all-zero.
-        if total_ms > 0 and stt_ms == 0 and llm_ms == 0 and tts_ms == 0:
-            llm_ms = total_ms
-
+        # Note: in Realtime mode OpenAI handles STT+LLM+TTS as a single opaque
+        # pipeline, so stt_ms / llm_ms / tts_ms stay 0 and only total_ms is
+        # meaningful. Dashboards should prefer total_ms as the end-to-end
+        # proxy and treat the component buckets as "unknown / bundled by
+        # provider" when total_ms > 0 but all three are 0.
         return LatencyBreakdown(
             stt_ms=round(stt_ms, 1),
             llm_ms=round(llm_ms, 1),
@@ -300,37 +321,63 @@ class CallMetricsAccumulator:
             llm=round(llm_cost, 6),
             telephony=round(telephony_cost, 6),
             total=round(total, 6),
+            llm_cached_savings=round(self._total_realtime_cached_savings, 6),
         )
+
+    def _completed_turns(self) -> list:
+        """Turns eligible for latency statistics.
+
+        Excludes turns marked ``[interrupted]`` (barge-in, cancelled
+        replacements) because their recorded latency either reflects partial
+        state or zero — including them would drag every p95/avg bucket toward
+        meaningless numbers.
+        """
+        return [t for t in self._turns if t.agent_text != "[interrupted]" and t.latency.total_ms > 0]
 
     def _compute_average_latency(self) -> LatencyBreakdown:
-        """Compute average latency across all turns."""
-        if not self._turns:
+        """Compute average latency across completed turns."""
+        turns = self._completed_turns()
+        if not turns:
             return LatencyBreakdown()
 
-        n = len(self._turns)
+        n = len(turns)
         return LatencyBreakdown(
-            stt_ms=round(sum(t.latency.stt_ms for t in self._turns) / n, 1),
-            llm_ms=round(sum(t.latency.llm_ms for t in self._turns) / n, 1),
-            tts_ms=round(sum(t.latency.tts_ms for t in self._turns) / n, 1),
-            total_ms=round(sum(t.latency.total_ms for t in self._turns) / n, 1),
+            stt_ms=round(sum(t.latency.stt_ms for t in turns) / n, 1),
+            llm_ms=round(sum(t.latency.llm_ms for t in turns) / n, 1),
+            tts_ms=round(sum(t.latency.tts_ms for t in turns) / n, 1),
+            total_ms=round(sum(t.latency.total_ms for t in turns) / n, 1),
         )
 
-    def _compute_p95_latency(self) -> LatencyBreakdown:
-        """Compute 95th percentile latency across all turns."""
-        if not self._turns:
+    def _compute_percentile_latency(self, p: float) -> LatencyBreakdown:
+        """Compute an arbitrary percentile latency across completed turns.
+
+        Uses linear interpolation between order statistics (Hyndman-Fan type
+        7, same as numpy.percentile default). Previous ``floor()`` variant
+        returned the sample max for any n < 21, making p95/p99 on short calls
+        indistinguishable from max. Linear interpolation is meaningful even
+        on 2-3 sample sets.
+        """
+        turns = self._completed_turns()
+        if not turns:
             return LatencyBreakdown()
 
-        def p95(values: list[float]) -> float:
+        def pct(values: list[float]) -> float:
             if not values:
                 return 0.0
             sorted_v = sorted(values)
-            idx = int(len(sorted_v) * 0.95)
-            idx = min(idx, len(sorted_v) - 1)
-            return sorted_v[idx]
+            if len(sorted_v) == 1:
+                return sorted_v[0]
+            rank = p * (len(sorted_v) - 1)
+            lo = int(rank)
+            hi = min(lo + 1, len(sorted_v) - 1)
+            if lo == hi:
+                return sorted_v[lo]
+            frac = rank - lo
+            return sorted_v[lo] + (sorted_v[hi] - sorted_v[lo]) * frac
 
         return LatencyBreakdown(
-            stt_ms=round(p95([t.latency.stt_ms for t in self._turns]), 1),
-            llm_ms=round(p95([t.latency.llm_ms for t in self._turns]), 1),
-            tts_ms=round(p95([t.latency.tts_ms for t in self._turns]), 1),
-            total_ms=round(p95([t.latency.total_ms for t in self._turns]), 1),
+            stt_ms=round(pct([t.latency.stt_ms for t in turns]), 1),
+            llm_ms=round(pct([t.latency.llm_ms for t in turns]), 1),
+            tts_ms=round(pct([t.latency.tts_ms for t in turns]), 1),
+            total_ms=round(pct([t.latency.total_ms for t in turns]), 1),
         )

@@ -12,6 +12,13 @@ from fastapi import FastAPI, Request, Response, WebSocket
 
 from getpatter.local_config import LocalConfig
 from getpatter.models import Agent
+from getpatter.services.call_log import (
+    CallLogger,
+    alog_call_end,
+    alog_call_start,
+    alog_turn,
+    resolve_log_root,
+)
 from getpatter.utils.log_sanitize import sanitize_log_value
 
 logger = logging.getLogger("patter")
@@ -112,6 +119,8 @@ class EmbeddedServer:
         self.on_metrics = None
         self._telnyx_sig_warning_logged = False
         self._metrics_store = None
+        # Opt-in per-call filesystem logging (controlled by PATTER_LOG_DIR).
+        self._call_logger = CallLogger(resolve_log_root())
 
     def _wrap_callbacks(self):
         """Return (on_call_start, on_call_end, on_metrics) wrappers.
@@ -125,6 +134,24 @@ class EmbeddedServer:
         user_start = self.on_call_start
         user_end = self.on_call_end
         user_metrics = self.on_metrics
+        call_logger = self._call_logger
+        agent = self.agent
+
+        def _agent_snapshot() -> dict:
+            """Serialise minimal agent identity for log metadata."""
+            provider = getattr(agent, "provider", None)
+            engine = getattr(agent, "engine", None)
+            engine_kind = getattr(engine, "kind", None) if engine is not None else None
+            snapshot: dict = {
+                "provider": provider,
+                "engine": engine_kind,
+                "model": getattr(agent, "model", None),
+                "voice": getattr(agent, "voice", None),
+                "language": getattr(agent, "language", None),
+            }
+            if getattr(agent, "stt", None) is not None and getattr(agent, "tts", None) is not None and engine is None:
+                snapshot["mode"] = "pipeline"
+            return {k: v for k, v in snapshot.items() if v is not None}
 
         async def _on_call_start(data):
             if store is not None:
@@ -135,8 +162,19 @@ class EmbeddedServer:
                 notify_dashboard(data)
             except Exception:
                 pass
+            if call_logger.enabled:
+                await alog_call_start(
+                    call_logger,
+                    data.get("call_id", ""),
+                    caller=data.get("caller", "") or "",
+                    callee=data.get("callee", "") or "",
+                    telephony_provider=data.get("telephony_provider", "") or "",
+                    provider_mode=getattr(agent, "provider", "") or "",
+                    agent=_agent_snapshot(),
+                )
             if user_start is not None:
-                await user_start(data)
+                return await user_start(data)
+            return None
 
         async def _on_call_end(data):
             if store is not None:
@@ -147,12 +185,51 @@ class EmbeddedServer:
                 notify_dashboard(data)
             except Exception:
                 pass
+            if call_logger.enabled:
+                from dataclasses import asdict, is_dataclass
+
+                metrics_obj = data.get("metrics")
+                duration = getattr(metrics_obj, "duration_seconds", None) if metrics_obj else None
+                cost_obj = getattr(metrics_obj, "cost", None) if metrics_obj else None
+                cost_dict = asdict(cost_obj) if is_dataclass(cost_obj) else None
+                latency_dict = None
+                p95 = getattr(metrics_obj, "latency_p95", None) if metrics_obj else None
+                p50 = getattr(metrics_obj, "latency_p50", None) if metrics_obj else None
+                p99 = getattr(metrics_obj, "latency_p99", None) if metrics_obj else None
+                if p50 is not None or p95 is not None or p99 is not None:
+                    latency_dict = {
+                        "p50_ms": getattr(p50, "total_ms", None) if p50 else None,
+                        "p95_ms": getattr(p95, "total_ms", None) if p95 else None,
+                        "p99_ms": getattr(p99, "total_ms", None) if p99 else None,
+                    }
+                turns_count = (
+                    len(getattr(metrics_obj, "turns", []) or []) if metrics_obj else None
+                )
+                await alog_call_end(
+                    call_logger,
+                    data.get("call_id", ""),
+                    duration_seconds=duration,
+                    turns=turns_count,
+                    cost=cost_dict,
+                    latency=latency_dict,
+                )
             if user_end is not None:
                 await user_end(data)
 
         async def _on_metrics(data):
             if store is not None:
                 store.record_turn(data)
+            if call_logger.enabled:
+                from dataclasses import asdict, is_dataclass
+
+                turn = data.get("turn")
+                turn_dict: dict | None = None
+                if is_dataclass(turn):
+                    turn_dict = asdict(turn)
+                elif isinstance(turn, dict):
+                    turn_dict = turn
+                if turn_dict is not None:
+                    await alog_turn(call_logger, data.get("call_id", ""), turn_dict)
             if user_metrics is not None:
                 await user_metrics(data)
 
@@ -197,16 +274,37 @@ class EmbeddedServer:
             if self.config.twilio_token:
                 try:
                     from twilio.request_validator import RequestValidator
-                    form_data = await request.form()
-                    validator = RequestValidator(self.config.twilio_token)
-                    url = str(request.url).replace("http://", "https://")
-                    signature = request.headers.get("X-Twilio-Signature", "")
-                    if not validator.validate(url, dict(form_data), signature):
-                        return Response(status_code=403, content="Invalid signature")
-                    return form_data
                 except ImportError:
-                    logger.warning("twilio package not installed; skipping signature validation")
-                    return await request.form()
+                    # SECURITY: fail closed when the twilio package is missing.
+                    # Previously we skipped signature validation and logged a
+                    # warning — a deployer who didn't install getpatter with
+                    # the twilio extra got an auth bypass. Now we reject.
+                    logger.error(
+                        "twilio package not installed but twilio_token is set — "
+                        "refusing to accept webhook without signature verification. "
+                        "Install with: pip install 'getpatter[local]' or "
+                        "`pip install twilio`."
+                    )
+                    return Response(status_code=503, content="Signature validator unavailable")
+                form_data = await request.form()
+                validator = RequestValidator(self.config.twilio_token)
+                # Use request.url verbatim when it carries .path / .query
+                # (Starlette URL in production). Under test harnesses that mock
+                # request.url as a plain string, fall back to that string and
+                # normalise the scheme to https. Proxy-induced scheme drift
+                # stays handled in both cases.
+                req_url = request.url
+                if hasattr(req_url, "path"):
+                    path_and_query = req_url.path
+                    if getattr(req_url, "query", ""):
+                        path_and_query += "?" + req_url.query
+                    url = f"https://{self.config.webhook_url}{path_and_query}"
+                else:
+                    url = str(req_url).replace("http://", "https://")
+                signature = request.headers.get("X-Twilio-Signature", "")
+                if not validator.validate(url, dict(form_data), signature):
+                    return Response(status_code=403, content="Invalid signature")
+                return form_data
             return await request.form()
 
         @app.post("/webhooks/twilio/voice")
@@ -492,6 +590,25 @@ class EmbeddedServer:
         logger.info("Webhook URL: https://%s", self.config.webhook_url)
         logger.info("Phone:   %s", self.config.phone_number)
         logger.info("Agent:   %s / %s", self.agent.model, self.agent.voice)
+        # Warn if the agent runs a non-default Realtime model — DEFAULT_PRICING
+        # is calibrated for gpt-4o-mini-realtime-preview. Other models differ
+        # by 3-10x so cost display would under-report without an override.
+        model = self.agent.model or ""
+        if (
+            model
+            and model != "gpt-4o-mini-realtime-preview"
+            and "realtime" in model
+        ):
+            # Dev-supplied string — sanitize to avoid ANSI/log-injection in
+            # the startup warning, matching TS parity.
+            logger.warning(
+                "Agent uses %r but DEFAULT_PRICING.openai_realtime is "
+                "calibrated for 'gpt-4o-mini-realtime-preview'. Pass "
+                "Patter(pricing={'openai_realtime': {...}}) to set rates for "
+                "this model, otherwise the dashboard cost display will "
+                "under-report.",
+                sanitize_log_value(model),
+            )
         if self.dashboard:
             print("\n──── Dashboard ─────────────────────────────────────")
             logger.info("URL: http://127.0.0.1:%s/", port)

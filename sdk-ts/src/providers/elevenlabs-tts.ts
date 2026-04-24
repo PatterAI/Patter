@@ -63,7 +63,7 @@ const VOICE_ID_PATTERN = /^[A-Za-z0-9]{20}$/;
  * insensitive) are resolved via the internal table. Unknown strings are
  * returned as-is so custom voices keep working.
  */
-export function resolveVoiceId(voice: string): string {
+function resolveVoiceId(voice: string): string {
   if (!voice) return voice;
   if (VOICE_ID_PATTERN.test(voice)) return voice;
   return ELEVENLABS_VOICE_ID_BY_NAME[voice.toLowerCase()] ?? voice;
@@ -75,7 +75,7 @@ export class ElevenLabsTTS {
   constructor(
     private readonly apiKey: string,
     voiceId: string = 'EXAVITQu4vr4xnSDxMaL',
-    private readonly modelId: string = 'eleven_turbo_v2_5',
+    private readonly modelId: string = 'eleven_flash_v2_5',
     private readonly outputFormat: string = 'pcm_16000',
   ) {
     this.voiceId = resolveVoiceId(voiceId);

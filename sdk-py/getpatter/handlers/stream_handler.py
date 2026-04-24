@@ -12,15 +12,12 @@ to the appropriate StreamHandler.
 from __future__ import annotations
 
 import asyncio
-import base64
 import inspect
 import json
 import logging
-import re
 import time
 from abc import ABC, abstractmethod
 from collections import deque
-from typing import Any, Callable
 
 from getpatter.handlers.common import (
     _create_stt_from_config,
@@ -41,6 +38,17 @@ logger = logging.getLogger("patter")
 # ---------------------------------------------------------------------------
 # Shared tool definitions injected into every agent
 # ---------------------------------------------------------------------------
+
+# Short words / phrases that Whisper (and, less often, Deepgram) routinely
+# emit when fed silence or TTS echo on mulaw 8 kHz. Dropping them as turns
+# prevents the caller from entering a feedback loop where every silent frame
+# triggers a new LLM+TTS turn. Parity with TS ``HALLUCINATIONS``.
+_STT_HALLUCINATIONS: frozenset[str] = frozenset({
+    "you", "thank you", "thanks", "yeah", "yes", "no",
+    "okay", "ok", "uh", "um", "mmm", "hmm", ".", "bye",
+    "right", "cool",
+})
+
 
 TRANSFER_CALL_TOOL: dict = {
     "name": "transfer_call",
@@ -93,6 +101,18 @@ class AudioSender(ABC):
     @abstractmethod
     async def send_mark(self, mark_name: str) -> None:
         """Send a playback mark (Twilio-specific; no-op on Telnyx)."""
+
+    def reset_pcm_carry(self) -> None:
+        """Drop any buffered odd byte from the PCM16 alignment carry.
+
+        Call at the start/end of a TTS synthesis block so a crash or
+        cancellation mid-sentence never bleeds a partial sample into the
+        next sentence. Default is a no-op; subclasses that keep a carry
+        buffer (e.g. ``TwilioAudioSender``) override this. Matches TS
+        parity where ``ttsByteCarry = null`` is reset at every synth
+        boundary.
+        """
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +293,24 @@ class StreamHandler(ABC):
     async def cleanup(self) -> None:
         """Close provider connections and cancel background tasks."""
 
+    async def _emit_turn_metrics(self, turn, *, call_id: str | None = None) -> None:
+        """Emit a completed turn to the user-supplied on_metrics callback.
+
+        All emit sites share the same payload shape
+        (``{call_id, turn, cost_so_far}``). Callers remain responsible for
+        appending transcript entries / storing the turn; only the user-facing
+        callback is centralised here for parity with TS ``emitTurnMetrics``.
+        """
+        if not self.on_metrics or turn is None or self.metrics is None:
+            return
+        await self.on_metrics(
+            {
+                "call_id": call_id if call_id is not None else self.call_id,
+                "turn": turn,
+                "cost_so_far": self.metrics.get_cost_so_far(),
+            }
+        )
+
 
 # ---------------------------------------------------------------------------
 # OpenAI Realtime StreamHandler
@@ -334,7 +372,6 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
 
     async def start(self) -> None:
         from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter  # type: ignore[import]
-        from getpatter.services.tool_executor import ToolExecutor  # type: ignore[import]
 
         agent_tools: list[dict] = [
             {
@@ -359,6 +396,10 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         logger.debug("OpenAI Realtime connected")
 
         if self.agent.first_message:
+            # Start measuring latency for the firstMessage turn (sendText →
+            # first audio byte). Parity with TS handler.
+            if self.metrics is not None:
+                self.metrics.start_turn()
             await self._adapter.send_text(self.agent.first_message)
 
         self._background_task = asyncio.create_task(self._forward_events())
@@ -367,21 +408,43 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         from getpatter.services.tool_executor import ToolExecutor  # type: ignore[import]
 
         tool_executor = ToolExecutor()
-        waiting_first_audio = False
+        # Arm first-byte capture so that the firstMessage turn (started in
+        # start()) gets its tts_ms / total_ms recorded on the first audio
+        # chunk. Parity with TS ``responseAudioStarted=false`` class field.
+        waiting_first_audio = True
         current_agent_text = ""
         try:
             async for ev_type, ev_data in self._adapter.receive_events():
                 if ev_type == "audio":
+                    # Fallback: if audio arrives before speech_stopped (which
+                    # can happen when JS/async event loop reorders WS frames
+                    # under load, or with server VAD disabled) start the turn
+                    # now so latency is still measured. Parity with TS.
+                    if self.metrics is not None and not self.metrics.turn_active:
+                        self.metrics.start_turn()
                     if waiting_first_audio and self.metrics is not None:
                         self.metrics.record_tts_first_byte()
                         waiting_first_audio = False
                     await self.audio_sender.send_audio(ev_data)
                     await self.audio_sender.send_mark(f"audio_{id(ev_data)}")
 
+                elif ev_type == "speech_stopped":
+                    # OpenAI server-side VAD detected end-of-user-speech.
+                    # This is the earliest reliable moment to start measuring
+                    # turn latency in Realtime mode — transcript_input arrives
+                    # noticeably later and understates end-to-end latency.
+                    if self.metrics is not None and not self.metrics.turn_active:
+                        self.metrics.start_turn()
+                    waiting_first_audio = True
+                    current_agent_text = ""
+
                 elif ev_type == "transcript_input":
                     logger.debug("User: %s", sanitize_log_value(ev_data))
                     if self.metrics is not None:
-                        self.metrics.start_turn()
+                        # Fallback: start turn here if speech_stopped was missed
+                        # (server VAD disabled or custom config).
+                        if not self.metrics.turn_active:
+                            self.metrics.start_turn()
                         self.metrics.record_stt_complete(ev_data)
                     waiting_first_audio = True
                     current_agent_text = ""
@@ -438,15 +501,15 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                         )
                         if self.metrics is not None:
                             turn = self.metrics.record_turn_complete(current_agent_text)
-                            if self.on_metrics:
-                                await self.on_metrics(
-                                    {
-                                        "call_id": self.call_id,
-                                        "turn": turn,
-                                        "cost_so_far": self.metrics.get_cost_so_far(),
-                                    }
-                                )
+                            await self._emit_turn_metrics(turn)
                         current_agent_text = ""
+                    elif self.metrics is not None and self.metrics.turn_active:
+                        # response_done without agent text = cancelled / empty
+                        # response. Close the active turn as interrupted so the
+                        # next speech_stopped can start a fresh turn cleanly.
+                        # Parity with TS handleAdapterEvent response_done path.
+                        self.metrics.record_turn_interrupted()
+                    waiting_first_audio = True
 
                 elif ev_type == "function_call":
                     func_data = ev_data
@@ -621,20 +684,35 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
         self._background_task = asyncio.create_task(self._forward_events())
 
     async def _forward_events(self) -> None:
-        waiting_first_audio = False
+        # Arm first-byte capture so that the firstMessage turn (started in
+        # start()) gets its tts_ms / total_ms recorded on the first audio
+        # chunk. Parity with TS ``responseAudioStarted=false`` class field.
+        waiting_first_audio = True
         current_agent_text = ""
         try:
             async for ev_type, ev_data in self._adapter.receive_events():
                 if ev_type == "audio":
+                    # Fallback: audio before speech_stopped. Parity with TS.
+                    if self.metrics is not None and not self.metrics.turn_active:
+                        self.metrics.start_turn()
                     if waiting_first_audio and self.metrics is not None:
                         self.metrics.record_tts_first_byte()
                         waiting_first_audio = False
                     await self.audio_sender.send_audio(ev_data)
 
+                elif ev_type == "speech_stopped":
+                    # Start turn as soon as server VAD signals end-of-user-speech,
+                    # not on transcript_input (which arrives later and understates latency).
+                    if self.metrics is not None and not self.metrics.turn_active:
+                        self.metrics.start_turn()
+                    waiting_first_audio = True
+                    current_agent_text = ""
+
                 elif ev_type == "transcript_input":
                     logger.debug("User: %s", sanitize_log_value(ev_data))
                     if self.metrics is not None:
-                        self.metrics.start_turn()
+                        if not self.metrics.turn_active:
+                            self.metrics.start_turn()
                         self.metrics.record_stt_complete(ev_data)
                     waiting_first_audio = True
                     current_agent_text = ""
@@ -673,15 +751,13 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
                         )
                         if self.metrics is not None:
                             turn = self.metrics.record_turn_complete(current_agent_text)
-                            if self.on_metrics:
-                                await self.on_metrics(
-                                    {
-                                        "call_id": self.call_id,
-                                        "turn": turn,
-                                        "cost_so_far": self.metrics.get_cost_so_far(),
-                                    }
-                                )
+                            await self._emit_turn_metrics(turn)
                         current_agent_text = ""
+                    elif self.metrics is not None and self.metrics.turn_active:
+                        # response_done without agent text = cancelled / empty.
+                        # Close the active turn as interrupted — parity with TS.
+                        self.metrics.record_turn_interrupted()
+                    waiting_first_audio = True
 
                 elif ev_type == "interruption":
                     await self.audio_sender.send_clear()
@@ -786,6 +862,9 @@ class PipelineStreamHandler(StreamHandler):
         self._llm_loop = None
         self._msg_accepts_call = False
         self._remote_handler = None
+        # Throttle state for back-to-back STT finals — see ``_commit_transcript``.
+        self._last_commit_text: str = ""
+        self._last_commit_at: float = 0.0
 
     async def start(self) -> None:
         from getpatter.models import CallControl
@@ -823,10 +902,32 @@ class PipelineStreamHandler(StreamHandler):
 
         logger.debug("Pipeline mode: STT + TTS connected")
 
-        # Play first_message if configured and no on_message handler
+        # Play first_message if configured and no on_message handler.
+        # Measure TTS-first-byte latency for parity with TS (`stream-handler.ts`).
         if self.agent.first_message and self.on_message is None and self._tts is not None:
-            async for audio_chunk in self._tts.synthesize(self.agent.first_message):
-                await self.audio_sender.send_audio(audio_chunk)
+            if self.metrics is not None:
+                self.metrics.start_turn()
+            first_chunk_sent = False
+            # Drop any stale PCM16 carry byte from a prior synth (none at call
+            # start, but defensive for parity with TS ``ttsByteCarry = null``).
+            self.audio_sender.reset_pcm_carry()
+            try:
+                async for audio_chunk in self._tts.synthesize(self.agent.first_message):
+                    if not first_chunk_sent:
+                        first_chunk_sent = True
+                        if self.metrics is not None:
+                            self.metrics.record_tts_first_byte()
+                    await self.audio_sender.send_audio(audio_chunk)
+            finally:
+                # Drop any partial int16 byte to prevent cross-turn corruption
+                # if the stream threw before a complete sample was delivered.
+                self.audio_sender.reset_pcm_carry()
+            if first_chunk_sent and self.metrics is not None:
+                turn = self.metrics.record_turn_complete(self.agent.first_message)
+                self.conversation_history.append(
+                    {"role": "assistant", "text": self.agent.first_message, "timestamp": time.time()}
+                )
+                await self._emit_turn_metrics(turn)
 
         # CallControl for pipeline mode
         self._call_control = CallControl(
@@ -928,6 +1029,11 @@ class PipelineStreamHandler(StreamHandler):
         )
         _tts_span.__enter__()
         gen = self._tts.synthesize(processed)
+        # Drop any stale PCM16 alignment carry byte between sentences — TTS
+        # providers yield arbitrary-length chunks, so an odd byte from the
+        # previous sentence would corrupt the first sample of this one.
+        # Matches TS ``ttsByteCarry = null`` reset at each synth boundary.
+        self.audio_sender.reset_pcm_carry()
         try:
             async for audio_chunk in gen:
                 if not self._is_speaking:
@@ -947,6 +1053,9 @@ class PipelineStreamHandler(StreamHandler):
         finally:
             await gen.aclose()
             _tts_span.__exit__(None, None, None)
+            # Drop any partial int16 byte so cross-sentence corruption never
+            # leaks past an exception / early return.
+            self.audio_sender.reset_pcm_carry()
         return True
 
     async def _process_streaming_response(self, result, call_id: str) -> str:
@@ -1014,14 +1123,7 @@ class PipelineStreamHandler(StreamHandler):
             if self.metrics is not None:
                 self.metrics.record_tts_complete(response_text)
                 turn = self.metrics.record_turn_complete(response_text)
-                if self.on_metrics:
-                    await self.on_metrics(
-                        {
-                            "call_id": call_id,
-                            "turn": turn,
-                            "cost_so_far": self.metrics.get_cost_so_far(),
-                        }
-                    )
+                await self._emit_turn_metrics(turn, call_id=call_id)
         return response_text
 
     async def _process_regular_response(self, response_text: str, call_id: str) -> None:
@@ -1073,89 +1175,68 @@ class PipelineStreamHandler(StreamHandler):
             if self.metrics is not None:
                 self.metrics.record_tts_complete(response_text)
                 turn = self.metrics.record_turn_complete(response_text)
-                if self.on_metrics:
-                    await self.on_metrics(
-                        {
-                            "call_id": call_id,
-                            "turn": turn,
-                            "cost_so_far": self.metrics.get_cost_so_far(),
-                        }
-                    )
+                await self._emit_turn_metrics(turn, call_id=call_id)
+
+    async def _handle_barge_in(self, transcript) -> None:
+        """Caller spoke over in-flight TTS. Flip speaking flag, clear downstream
+        audio, record interruption. Mirrors TS ``handleBargeIn``.
+        """
+        if not (transcript.text and self._is_speaking):
+            return
+        logger.debug(
+            "Barge-in: caller spoke over agent (%s)",
+            sanitize_log_value(transcript.text[:40]),
+        )
+        self._is_speaking = False
+        try:
+            await self.audio_sender.send_clear()
+        except Exception as exc:
+            logger.debug("send_clear during barge-in failed: %s", exc)
+        if self.metrics is not None:
+            self.metrics.record_turn_interrupted()
+
+    def _commit_transcript(self, text: str) -> bool:
+        """Dedup + throttle + hallucination filter for final STT transcripts.
+
+        Mirrors TS ``commitTranscript``. Returns ``True`` if the transcript
+        should be committed to a turn, ``False`` if it must be dropped.
+        Drop reasons: common hallucinations, duplicate within 2 s, or any
+        final within 500 ms of the previous one.
+        """
+        now = time.time()
+        normalised = text.strip().lower()
+        stripped = normalised.rstrip(".,!?;: ").strip()
+        since_last = now - self._last_commit_at
+
+        if stripped in _STT_HALLUCINATIONS or stripped == "":
+            logger.debug("Dropped likely STT hallucination: %r", normalised[:40])
+            return False
+        if since_last < 2.0 and normalised == self._last_commit_text:
+            logger.debug(
+                "Dropped duplicate final transcript (%.1fs since last): %r",
+                since_last, normalised[:40],
+            )
+            return False
+        if since_last < 0.5:
+            logger.debug(
+                "Dropped back-to-back final transcript (%.2fs since last): %r",
+                since_last, normalised[:40],
+            )
+            return False
+        self._last_commit_text = normalised
+        self._last_commit_at = now
+        return True
 
     async def _stt_loop(self) -> None:
-        # Per-loop state used to throttle back-to-back turns (BUG #22). When
-        # the STT provider emits several nearly-identical final transcripts
-        # in quick succession (e.g. Whisper on mulaw 8 kHz repeatedly
-        # returning "you" / ".") we would otherwise kick off a new LLM+TTS
-        # turn for each, and the audio of consecutive turns overlaps on the
-        # caller's line. Dedup rules:
-        #   1. Drop a final transcript whose normalised text matches the
-        #      previous committed text within 2.0 s.
-        #   2. Drop a final transcript that lands within 500 ms of the last
-        #      committed turn — too tight to be a legitimate new utterance.
-        last_commit_text: str = ""
-        last_commit_at: float = 0.0
+        # Throttle state lives on the instance so ``_commit_transcript`` can be
+        # reused across iterations. See ``_commit_transcript`` for filter rules.
         try:
             async for transcript in self._stt.receive_transcripts():
-                # Barge-in: if the agent is currently speaking and the STT
-                # produces any transcript with text (even an interim one),
-                # flip `_is_speaking=False` + clear the downstream audio
-                # buffer so the in-flight TTS loop interrupts (BUG #20).
-                if transcript.text and self._is_speaking:
-                    logger.debug(
-                        "Barge-in: caller spoke over agent (%s)",
-                        sanitize_log_value(transcript.text[:40]),
-                    )
-                    self._is_speaking = False
-                    try:
-                        await self.audio_sender.send_clear()
-                    except Exception as exc:
-                        logger.debug("send_clear during barge-in failed: %s", exc)
-                    if self.metrics is not None:
-                        self.metrics.record_turn_interrupted()
+                await self._handle_barge_in(transcript)
                 if not (transcript.is_final and transcript.text):
                     continue
-
-                # --- Dedup / throttle / hallucination filter (BUG #22) -------
-                _now = time.time()
-                _normalised = transcript.text.strip().lower()
-                _stripped = _normalised.rstrip(".,!?;: ").strip()
-                _since_last = _now - last_commit_at
-
-                # Whisper (and, to a lesser extent, Deepgram) routinely
-                # hallucinate a handful of short "filler" words when fed
-                # silence or TTS echo on mulaw 8 kHz. Dropping them as
-                # turns stops the caller from entering a feedback loop
-                # where every silent frame triggers a new LLM+TTS turn.
-                _HALLUCINATIONS = frozenset({
-                    "you", "thank you", "thanks", "yeah", "yes", "no",
-                    "okay", "ok", "uh", "um", "mmm", "hmm", ".", "bye",
-                    "right", "cool",
-                })
-                if _stripped in _HALLUCINATIONS or _stripped == "":
-                    logger.debug(
-                        "Dropped likely STT hallucination: %r",
-                        _normalised[:40],
-                    )
+                if not self._commit_transcript(transcript.text):
                     continue
-
-                if _since_last < 2.0 and _normalised == last_commit_text:
-                    logger.debug(
-                        "Dropped duplicate final transcript (%.1fs since last): %r",
-                        _since_last,
-                        _normalised[:40],
-                    )
-                    continue
-                if _since_last < 0.5:
-                    logger.debug(
-                        "Dropped back-to-back final transcript (%.2fs since last): %r",
-                        _since_last,
-                        _normalised[:40],
-                    )
-                    continue
-                last_commit_text = _normalised
-                last_commit_at = _now
-                # -------------------------------------------------------------
 
                 # Record one STT span per final transcript turn. The span is
                 # short-lived (just the attribute set) because STT is
@@ -1307,9 +1388,9 @@ class PipelineStreamHandler(StreamHandler):
         if self._stt is None:
             return
         # Always forward caller audio to STT — even while the agent is
-        # speaking — so barge-in detection can trigger (BUG #20). When
-        # `barge_in_threshold_ms == 0` on the agent, skip the STT during
-        # TTS to avoid echo-loop costs (legacy behaviour).
+        # speaking — so barge-in detection can trigger. When
+        # ``barge_in_threshold_ms == 0`` on the agent, skip STT during TTS
+        # to avoid echo-loop costs (opt-out for noisy links).
         if self._is_speaking and getattr(self.agent, "barge_in_threshold_ms", 300) == 0:
             return
         # Inbound PCMU 8 kHz (Twilio always, Telnyx when streaming_start
@@ -1324,7 +1405,7 @@ class PipelineStreamHandler(StreamHandler):
 
         # before_send_to_stt hook — gate/transform the audio chunk before it
         # reaches the STT provider. Returning None drops the chunk (useful
-        # for custom VAD / echo-cancellation). See BUG #15.
+        # for custom VAD / echo-cancellation / PII redaction).
         hooks = getattr(self.agent, "hooks", None)
         if hooks is not None:
             hook_executor = PipelineHookExecutor(hooks)

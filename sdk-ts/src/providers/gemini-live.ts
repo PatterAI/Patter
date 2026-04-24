@@ -59,7 +59,11 @@ export class GeminiLiveAdapter {
     private readonly apiKey: string,
     options: GeminiLiveOptions = {},
   ) {
-    this.model = options.model ?? 'gemini-2.0-flash-exp';
+    // gemini-2.0-flash-exp was experimental preview retired Dec 2024.
+    // gemini-live-2.5-flash-preview was shut down Dec 9, 2025.
+    // The current live-audio model in April 2026 is the native-audio variant.
+    // Callers can override via GeminiLive({ model: ... }).
+    this.model = options.model ?? 'gemini-live-2.5-flash-native-audio';
     this.voice = options.voice ?? 'Puck';
     this.instructions = options.instructions ?? '';
     this.language = options.language ?? 'en-US';
@@ -76,9 +80,13 @@ export class GeminiLiveAdapter {
       // Variable module name avoids TS2307 when the peer dep is not installed.
       const modName = '@google/genai';
       genaiModule = (await import(modName)) as typeof genaiModule;
-    } catch (err) {
+    } catch {
       throw new Error(
-        "Gemini Live requires the '@google/genai' package. Install with: npm install @google/genai",
+        '\nGemini Live requires the "@google/genai" package, which is not installed.\n\n' +
+          '  Install:  npm install @google/genai\n\n' +
+          'This is an optional peer dependency of getpatter — it is only needed when\n' +
+          'you use GeminiLive as an agent engine. Other LLM/engine providers do not\n' +
+          'require it.\n',
       );
     }
 

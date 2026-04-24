@@ -88,10 +88,14 @@ function loadOnnxRuntime(): OnnxRuntime {
     const req = createRequire(__filename);
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     return req('onnxruntime-node') as OnnxRuntime;
-  } catch (err) {
+  } catch {
     throw new Error(
-      'onnxruntime-node is required for SileroVAD. Install it as an optional ' +
-        'dependency: `npm install onnxruntime-node`.',
+      '\nSileroVAD requires the "onnxruntime-node" package, which is not installed.\n\n' +
+        '  Install:  npm install onnxruntime-node\n\n' +
+        'This is an optional peer dependency of getpatter (~210 MB) — it is only\n' +
+        'needed when you use SileroVAD in pipeline mode. If you do not need VAD\n' +
+        '(e.g. you use OpenAI Realtime or ElevenLabs ConvAI), remove SileroVAD\n' +
+        'from your agent configuration.\n',
     );
   }
 }

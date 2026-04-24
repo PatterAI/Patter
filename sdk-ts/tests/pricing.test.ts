@@ -5,6 +5,7 @@ import {
   calculateSttCost,
   calculateTtsCost,
   calculateRealtimeCost,
+  calculateRealtimeCachedSavings,
   calculateTelephonyCost,
 } from '../src/pricing';
 
@@ -23,7 +24,9 @@ describe('DEFAULT_PRICING', () => {
 describe('mergePricing', () => {
   it('returns defaults when no overrides', () => {
     const merged = mergePricing();
-    expect(merged.deepgram.price).toBe(0.0043);
+    // Deepgram Nova-3 streaming (monolingual) — $0.0077/min. Updated from
+    // the batch rate $0.0043 in 0.5.6 — the default model is streaming.
+    expect(merged.deepgram.price).toBe(0.0077);
   });
 
   it('overrides individual provider values', () => {
@@ -42,7 +45,8 @@ describe('calculateSttCost', () => {
   it('calculates deepgram cost for 60 seconds', () => {
     const pricing = mergePricing();
     const cost = calculateSttCost('deepgram', 60, pricing);
-    expect(cost).toBeCloseTo(0.0043, 4);
+    // 60s / 60 * $0.0077/min (Nova-3 streaming monolingual) = $0.0077
+    expect(cost).toBeCloseTo(0.0077, 4);
   });
 
   it('returns 0 for unknown provider', () => {
@@ -55,7 +59,9 @@ describe('calculateTtsCost', () => {
   it('calculates elevenlabs cost for 1000 characters', () => {
     const pricing = mergePricing();
     const cost = calculateTtsCost('elevenlabs', 1000, pricing);
-    expect(cost).toBeCloseTo(0.18, 2);
+    // eleven_flash_v2_5 (the default model): $0.06/1k chars via direct API.
+    // The previous $0.18 matched only the Creator plan overage.
+    expect(cost).toBeCloseTo(0.06, 3);
   });
 
   it('calculates openai_tts cost', () => {
@@ -75,21 +81,120 @@ describe('calculateRealtimeCost', () => {
       },
       pricing,
     );
-    // 100*0.0001 + 50*0.000005 + 200*0.0004 + 30*0.00002
-    expect(cost).toBeCloseTo(0.09085, 5);
+    // gpt-4o-mini-realtime-preview rates (2026):
+    //   100*0.00001 + 50*0.0000006 + 200*0.00002 + 30*0.0000024
+    //   = 0.001 + 0.00003 + 0.004 + 0.000072 = 0.005102
+    expect(cost).toBeCloseTo(0.005102, 6);
   });
 
   it('returns 0 for empty usage', () => {
     const pricing = mergePricing();
     expect(calculateRealtimeCost({}, pricing)).toBe(0);
   });
+
+  it('applies cached rate to cached portion of input tokens', () => {
+    const pricing = mergePricing();
+    // 1000 audio in (800 cached), 500 text in (400 cached), 0 out.
+    const cost = calculateRealtimeCost(
+      {
+        input_token_details: {
+          audio_tokens: 1000,
+          text_tokens: 500,
+          cached_tokens_details: { audio_tokens: 800, text_tokens: 400 },
+        },
+        output_token_details: { audio_tokens: 0, text_tokens: 0 },
+      },
+      pricing,
+    );
+    // (1000-800)*1e-5 + 800*3e-7 + (500-400)*6e-7 + 400*6e-8
+    // = 0.002 + 0.00024 + 0.00006 + 0.000024 = 0.002324
+    expect(cost).toBeCloseTo(0.002324, 8);
+  });
+
+  it('clamps cached tokens > total so cost stays non-negative', () => {
+    const pricing = mergePricing();
+    const cost = calculateRealtimeCost(
+      {
+        input_token_details: {
+          audio_tokens: 100,
+          cached_tokens_details: { audio_tokens: 500 }, // malformed: > total
+        },
+      },
+      pricing,
+    );
+    // Clamped to 100 cached: 0 * 1e-5 + 100 * 3e-7 = 3e-5
+    expect(cost).toBeCloseTo(100 * 0.0000003, 10);
+    expect(cost).toBeGreaterThanOrEqual(0);
+  });
+
+  it('handles null input_token_details safely (no throw)', () => {
+    const pricing = mergePricing();
+    // OpenAI sometimes emits input_token_details = null on early errors
+    const cost = calculateRealtimeCost(
+      { input_token_details: undefined, output_token_details: { audio_tokens: 100 } },
+      pricing,
+    );
+    expect(cost).toBeCloseTo(100 * 0.00002, 10);
+  });
+});
+
+describe('calculateRealtimeCachedSavings', () => {
+  it('returns positive savings on normal cached discount', () => {
+    const pricing = mergePricing();
+    const savings = calculateRealtimeCachedSavings(
+      {
+        input_token_details: {
+          audio_tokens: 1000,
+          text_tokens: 500,
+          cached_tokens_details: { audio_tokens: 800, text_tokens: 400 },
+        },
+      },
+      pricing,
+    );
+    // 800 * (1e-5 - 3e-7) + 400 * (6e-7 - 6e-8)
+    const expected = 800 * (0.00001 - 0.0000003) + 400 * (0.0000006 - 0.00000006);
+    expect(savings).toBeCloseTo(expected, 10);
+    expect(savings).toBeGreaterThan(0);
+  });
+
+  it('clamps to zero when cached rate misconfigured higher than full', () => {
+    // Parity with Python: if a user overrides cached rate above full, savings
+    // go negative — must clamp to 0 rather than render negative on dashboard.
+    const pricing = mergePricing({
+      openai_realtime: {
+        cached_audio_input_per_token: 0.0001, // 10x higher than full
+        cached_text_input_per_token: 0.00001,
+      },
+    });
+    const savings = calculateRealtimeCachedSavings(
+      {
+        input_token_details: {
+          audio_tokens: 1000,
+          text_tokens: 500,
+          cached_tokens_details: { audio_tokens: 500, text_tokens: 250 },
+        },
+      },
+      pricing,
+    );
+    expect(savings).toBe(0);
+  });
+
+  it('returns zero when no cached tokens', () => {
+    const pricing = mergePricing();
+    const savings = calculateRealtimeCachedSavings(
+      { input_token_details: { audio_tokens: 1000, text_tokens: 500 } },
+      pricing,
+    );
+    expect(savings).toBe(0);
+  });
 });
 
 describe('calculateTelephonyCost', () => {
-  it('calculates twilio cost for 120 seconds', () => {
+  it('calculates twilio cost for 120 seconds (US inbound local default)', () => {
     const pricing = mergePricing();
     const cost = calculateTelephonyCost('twilio', 120, pricing);
-    expect(cost).toBeCloseTo(0.026, 3);
+    // 120s / 60 * $0.0085/min = $0.017
+    expect(cost).toBeCloseTo(0.017, 4);
   });
 
   it('calculates telnyx cost', () => {

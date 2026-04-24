@@ -110,7 +110,7 @@ describe('OpenAITTS', () => {
       expect(result.readInt16LE(2)).toBe(200);
     });
 
-    it('truncates to integer on interpolation', () => {
+    it('rounds to nearest integer on interpolation', () => {
       const input = Buffer.alloc(6);
       input.writeInt16LE(0, 0);
       input.writeInt16LE(1, 2);
@@ -119,8 +119,10 @@ describe('OpenAITTS', () => {
       const result = OpenAITTS.resample24kTo16k(input);
 
       expect(result.readInt16LE(0)).toBe(0);
-      // (1 + 2) / 2 = 1.5 -> truncated to 1
-      expect(result.readInt16LE(2)).toBe(1);
+      // (1 + 2) / 2 = 1.5 -> Math.round -> 2 (banker's rounding rule
+      // does not apply; JS Math.round always rounds .5 up toward +Inf).
+      // Switched from Math.trunc to avoid ~0.5 LSB DC bias on long streams.
+      expect(result.readInt16LE(2)).toBe(2);
     });
   });
 

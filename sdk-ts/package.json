@@ -65,14 +65,20 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "cloudflared": "^0.7.1",
     "express": "^5.2.1",
     "ws": "^8.18.0"
   },
   "optionalDependencies": {
-    "cloudflared": "^0.7.1",
-    "onnxruntime-node": "^1.18.0",
-    "node-cron": "^3.0.3",
-    "@google/genai": "^0.3.0"
+    "node-cron": "^3.0.3"
+  },
+  "peerDependencies": {
+    "@google/genai": "^0.3.0",
+    "onnxruntime-node": "^1.18.0"
+  },
+  "peerDependenciesMeta": {
+    "@google/genai": { "optional": true },
+    "onnxruntime-node": { "optional": true }
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",

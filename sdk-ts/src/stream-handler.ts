@@ -90,9 +90,33 @@ export function sanitizeLogValue(v: string, maxLen = 200): string {
   return cleaned.length > maxLen ? cleaned.slice(0, maxLen) + '...' : cleaned;
 }
 
+/**
+ * Mask an E.164 phone number for logging. Keeps only the last 4 characters
+ * to preserve enough context for correlation while avoiding PII leakage.
+ * Mirrors ``getpatter.utils.log_sanitize.mask_phone_number``.
+ */
+export function maskPhoneNumber(number: unknown): string {
+  if (!number) return '***';
+  const text = String(number);
+  if (text.length <= 4) return '***';
+  return `***${text.slice(-4)}`;
+}
+
 function isValidE164(number: string): boolean {
   return /^\+[1-9]\d{6,14}$/.test(number);
 }
+
+/**
+ * Short words / phrases that Whisper (and, less often, Deepgram) routinely
+ * emit when fed silence or TTS echo on mulaw 8 kHz. Dropping them as turns
+ * prevents the caller from entering a feedback loop where every silent frame
+ * triggers a new LLM+TTS turn.
+ */
+const HALLUCINATIONS = new Set([
+  'you', 'thank you', 'thanks', 'yeah', 'yes', 'no',
+  'okay', 'ok', 'uh', 'um', 'mmm', 'hmm', '.', 'bye',
+  'right', 'cool',
+]);
 
 // ---------------------------------------------------------------------------
 // StreamHandler context (immutable per-call configuration)
@@ -149,9 +173,16 @@ export class StreamHandler {
   private maxDurationTimer: ReturnType<typeof setTimeout> | null = null;
   private transcriptProcessing = false;
   private transcriptQueue: Array<{ isFinal?: boolean; text?: string }> = [];
-  // BUG #22 throttle state — mirror Python impl.
+  // Throttle state for back-to-back STT finals — see ``commitTranscript``.
   private lastCommitText = '';
   private lastCommitAt = 0;
+  // PCM16 byte-alignment carry for TTS streaming (pipeline mode).
+  // HTTP streams from ElevenLabs / OpenAI / Cartesia can yield chunks of any
+  // size, including odd byte counts. Silently dropping the trailing odd byte
+  // misaligns every subsequent int16 sample in the stream (hi/lo bytes get
+  // swapped), producing a voice drowned in loud hiss. We buffer the odd byte
+  // across chunks so resample/mulaw encoding always sees aligned int16 frames.
+  private ttsByteCarry: Buffer | null = null;
 
   private readonly history: ReturnType<typeof createHistoryManager>;
   private readonly metricsAcc: CallMetricsAccumulator;
@@ -185,6 +216,57 @@ export class StreamHandler {
     });
 
     getLogger().debug(`WebSocket connection opened (${deps.bridge.label})`);
+  }
+
+  /**
+   * Record a completed turn in the dashboard store and fire the user-supplied
+   * ``onMetrics`` callback. Centralises the 4 emit sites (firstMessage, pipeline
+   * streaming/regular LLM, WebSocket remote, Realtime response_done) so the
+   * payload shape lives in one place.
+   */
+  private async emitTurnMetrics(turn: unknown): Promise<void> {
+    if (turn == null) return;
+    this.deps.metricsStore.recordTurn({ call_id: this.callId, turn });
+    if (!this.deps.onMetrics) return;
+    await this.deps.onMetrics({
+      call_id: this.callId,
+      turn,
+      cost_so_far: this.metricsAcc.getCostSoFar(),
+    });
+  }
+
+  /** Reset the TTS odd-byte carry — call at every TTS stream entry/exit. */
+  private resetTtsCarry(): void {
+    this.ttsByteCarry = null;
+  }
+
+  /**
+   * Start call recording when configured. Currently Twilio-only — bridges may
+   * expose ``startRecording`` for parity when we add other carriers.
+   */
+  private async startRecordingIfRequested(callId: string): Promise<void> {
+    const { recording, config } = this.deps;
+    if (!recording || !config.twilioSid || !config.twilioToken || !callId) return;
+    if (!validateTwilioSid(callId)) {
+      getLogger().warn(`Recording skipped: invalid Twilio CallSid format ${JSON.stringify(callId)}`);
+      return;
+    }
+    try {
+      const recUrl = `https://api.twilio.com/2010-04-01/Accounts/${config.twilioSid}/Calls/${callId}/Recordings.json`;
+      const recResp = await fetch(recUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Basic ${Buffer.from(`${config.twilioSid}:${config.twilioToken}`).toString('base64')}`,
+        },
+      });
+      if (recResp.ok) {
+        getLogger().debug(`Recording started for ${callId}`);
+      } else {
+        getLogger().warn(`could not start recording: ${await recResp.text()}`);
+      }
+    } catch (e) {
+      getLogger().warn(`could not start recording: ${String(e)}`);
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -251,33 +333,12 @@ export class StreamHandler {
         caller: this.caller,
         callee: this.callee,
         direction: 'inbound',
+        telephony_provider: this.deps.bridge.telephonyProvider,
         ...(Object.keys(customParams).length > 0 ? { custom_params: customParams } : {}),
       });
     }
 
-    // Start recording (Twilio only)
-    if (this.deps.recording && this.deps.config.twilioSid && this.deps.config.twilioToken && callId) {
-      if (!validateTwilioSid(callId)) {
-        getLogger().warn(`Recording skipped: invalid Twilio CallSid format ${JSON.stringify(callId)}`);
-      } else {
-        try {
-          const recUrl = `https://api.twilio.com/2010-04-01/Accounts/${this.deps.config.twilioSid}/Calls/${callId}/Recordings.json`;
-          const recResp = await fetch(recUrl, {
-            method: 'POST',
-            headers: {
-              'Authorization': `Basic ${Buffer.from(`${this.deps.config.twilioSid}:${this.deps.config.twilioToken}`).toString('base64')}`,
-            },
-          });
-          if (recResp.ok) {
-            getLogger().debug(`Recording started for ${callId}`);
-          } else {
-            getLogger().warn(`could not start recording: ${await recResp.text()}`);
-          }
-        } catch (e) {
-          getLogger().warn(`could not start recording: ${String(e)}`);
-        }
-      }
-    }
+    await this.startRecordingIfRequested(callId);
 
     // Resolve dynamic variables in system prompt
     const agentVars = this.deps.sanitizeVariables(this.deps.agent.variables ?? {});
@@ -305,19 +366,19 @@ export class StreamHandler {
   async handleAudio(audioBuffer: Buffer): Promise<void> {
     const provider = this.deps.agent.provider ?? 'openai_realtime';
     if (provider === 'pipeline' && this.stt) {
-      // BUG #20: keep forwarding caller audio to STT during TTS so barge-in
-      // detection can trigger. Caller sets ``agent.bargeInThresholdMs=0`` to
-      // disable barge-in on noisy links.
+      // Keep forwarding caller audio to STT during TTS so barge-in can trigger.
+      // Callers set ``agent.bargeInThresholdMs=0`` to opt out entirely on noisy
+      // links (saves STT cost; loses interruption detection).
       if (this.isSpeaking && (this.deps.agent.bargeInThresholdMs ?? 300) === 0) {
         return;
       }
-      // BUG #12 / #19 audio path: both Twilio and Telnyx with the default
-      // streaming_start (PCMU bidirectional) deliver mulaw 8 kHz inbound
-      // — we always transcode to PCM16 16 kHz before STT.
+      // Both Twilio and Telnyx (with default streaming_start PCMU bidirectional)
+      // deliver mulaw 8 kHz — always transcode to PCM16 16 kHz before STT.
       const pcm8k = mulawToPcm16(audioBuffer);
       const pcm16k = resample8kTo16k(pcm8k);
 
-      // BUG #15: run the before_send_to_stt hook before forwarding.
+      // beforeSendToStt hook — gate/transform the audio chunk before it
+      // reaches STT (custom VAD, echo cancellation, PII redaction, ...).
       const hooks = this.deps.agent.hooks;
       if (hooks) {
         const hookExecutor = new PipelineHookExecutor(hooks);
@@ -383,14 +444,33 @@ export class StreamHandler {
   /**
    * Encode a PCM 16kHz audio chunk for the telephony provider.
    * Twilio requires mulaw 8kHz; Telnyx accepts PCM 16kHz natively.
+   *
+   * Maintains a 1-byte carry across calls so unaligned HTTP chunks from
+   * streaming TTS providers never byte-swap the PCM16 samples downstream.
    */
   private encodePipelineAudio(pcm16k: Buffer): string {
+    const aligned = this.alignPcm16(pcm16k);
+    if (aligned.length === 0) return '';
     if (this.deps.bridge.telephonyProvider === 'twilio') {
-      const pcm8k = resample16kTo8k(pcm16k);
+      const pcm8k = resample16kTo8k(aligned);
       const mulaw = pcm16ToMulaw(pcm8k);
       return mulaw.toString('base64');
     }
-    return pcm16k.toString('base64');
+    return aligned.toString('base64');
+  }
+
+  /**
+   * Prepend any carry byte from the previous chunk, return the even-length
+   * portion, and stash the final odd byte (if any) for the next call.
+   */
+  private alignPcm16(chunk: Buffer): Buffer {
+    const combined = this.ttsByteCarry
+      ? Buffer.concat([this.ttsByteCarry, chunk])
+      : chunk;
+    const alignedLen = combined.length & ~1;
+    this.ttsByteCarry =
+      alignedLen < combined.length ? combined.subarray(alignedLen) : null;
+    return combined.subarray(0, alignedLen);
   }
 
   // ---------------------------------------------------------------------------
@@ -424,6 +504,7 @@ export class StreamHandler {
     if (this.deps.agent.firstMessage && !this.deps.onMessage && this.tts) {
       this.metricsAcc.startTurn();
       let firstChunkSent = false;
+      this.resetTtsCarry();
       try {
         for await (const chunk of this.tts.synthesizeStream(this.deps.agent.firstMessage)) {
           if (!firstChunkSent) { firstChunkSent = true; this.metricsAcc.recordTtsFirstByte(); }
@@ -432,13 +513,13 @@ export class StreamHandler {
         }
       } catch (e) {
         getLogger().error(`First message TTS error (${label}):`, e);
+      } finally {
+        // Drop any partial int16 byte to prevent cross-turn corruption
+        // if the stream threw before a complete sample was delivered.
+        this.resetTtsCarry();
       }
       if (firstChunkSent) {
-        const turn = this.metricsAcc.recordTurnComplete(this.deps.agent.firstMessage);
-        if (turn) {
-          this.deps.metricsStore.recordTurn({ call_id: this.callId, turn });
-          if (this.deps.onMetrics) await this.deps.onMetrics({ call_id: this.callId, turn });
-        }
+        await this.emitTurnMetrics(this.metricsAcc.recordTurnComplete(this.deps.agent.firstMessage));
         this.history.push({ role: 'assistant', text: this.deps.agent.firstMessage, timestamp: Date.now() });
       }
     }
@@ -512,6 +593,7 @@ export class StreamHandler {
     const processedText = await hookExecutor.runBeforeSynthesize(transformed, hookCtx);
     if (processedText === null) return;
 
+    this.resetTtsCarry();
     try {
       for await (const chunk of this.tts.synthesizeStream(processedText)) {
         if (!this.isSpeaking) break;
@@ -529,6 +611,8 @@ export class StreamHandler {
       }
     } catch (e) {
       getLogger().error(`TTS streaming error (${this.deps.bridge.label}):`, e);
+    } finally {
+      this.resetTtsCarry();
     }
   }
 
@@ -548,53 +632,14 @@ export class StreamHandler {
   }
 
   private async processTranscript(transcript: { isFinal?: boolean; text?: string }): Promise<void> {
-    // BUG #20 — barge-in: if TTS is mid-stream and the caller speaks,
-    // any transcript with text flips ``isSpeaking`` to false so the TTS
-    // sentence loop exits on its next check.
-    if (transcript.text && this.isSpeaking) {
-      getLogger().debug(
-        `Barge-in: caller spoke over agent (${sanitizeLogValue(transcript.text.slice(0, 40))})`,
-      );
-      this.isSpeaking = false;
-      try {
-        this.deps.bridge.sendClear(this.ws, this.streamSid);
-      } catch (err) {
-        getLogger().debug(`sendClear during barge-in failed: ${String(err)}`);
-      }
-      this.metricsAcc.recordTurnInterrupted();
-    }
+    // Function-scope barge-in flag — set either by the upfront barge-in
+    // check, or by the TTS loops downstream when ``isSpeaking`` flips mid-
+    // synthesis. Prevents recordTurnComplete double-counting a half-spoken
+    // turn (Python uses the same pattern).
+    let interrupted = this.handleBargeIn(transcript);
 
     if (!transcript.isFinal || !transcript.text) return;
-
-    // BUG #22 — dedup + throttle + hallucination filter, mirror of the
-    // Python implementation in ``PipelineStreamHandler._stt_loop``.
-    const now = Date.now();
-    const normalised = transcript.text.trim().toLowerCase();
-    const stripped = normalised.replace(/[.,!?;: ]+$/, '').trim();
-    const sinceLastMs = now - this.lastCommitAt;
-    const HALLUCINATIONS = new Set([
-      'you', 'thank you', 'thanks', 'yeah', 'yes', 'no',
-      'okay', 'ok', 'uh', 'um', 'mmm', 'hmm', '.', 'bye',
-      'right', 'cool',
-    ]);
-    if (HALLUCINATIONS.has(stripped) || stripped === '') {
-      getLogger().debug(`Dropped likely STT hallucination: ${sanitizeLogValue(normalised.slice(0, 40))}`);
-      return;
-    }
-    if (sinceLastMs < 2000 && normalised === this.lastCommitText) {
-      getLogger().debug(
-        `Dropped duplicate final transcript (${(sinceLastMs / 1000).toFixed(1)}s since last): ${sanitizeLogValue(normalised.slice(0, 40))}`,
-      );
-      return;
-    }
-    if (sinceLastMs < 500) {
-      getLogger().debug(
-        `Dropped back-to-back final transcript (${(sinceLastMs / 1000).toFixed(2)}s since last): ${sanitizeLogValue(normalised.slice(0, 40))}`,
-      );
-      return;
-    }
-    this.lastCommitText = normalised;
-    this.lastCommitAt = now;
+    if (!this.commitTranscript(transcript.text)) return;
 
     const label = this.deps.bridge.label;
     getLogger().debug(`User (${label} pipeline): ${sanitizeLogValue(transcript.text)}`);
@@ -660,112 +705,188 @@ export class StreamHandler {
       if (isWebSocketUrl(this.deps.onMessage)) {
         await this.handleWebSocketResponse(msgData);
         return;
-      } else {
-        try {
-          responseText = await this.deps.remoteHandler.callWebhook(this.deps.onMessage, msgData);
-        } catch (e) {
-          getLogger().error(`Webhook remote error (${label}):`, e);
-          return;
-        }
+      }
+      try {
+        responseText = await this.deps.remoteHandler.callWebhook(this.deps.onMessage, msgData);
+      } catch (e) {
+        getLogger().error(`Webhook remote error (${label}):`, e);
+        return;
       }
     } else if (this.llmLoop) {
-      // --- Streaming LLM with sentence chunking ---
-      const callCtx = { call_id: this.callId, caller: this.caller, callee: this.callee };
-      const chunker = new SentenceChunker();
-      const allParts: string[] = [];
-      const ttsFirstByteSent = { value: false };
-      this.isSpeaking = true;
-      let llmError = false;
-
-      try {
-        try {
-          for await (const token of this.llmLoop.run(filteredTranscript, this.history.entries, callCtx)) {
-            allParts.push(token);
-
-            // Feed token to sentence chunker
-            const sentences = chunker.push(token);
-            for (const sentence of sentences) {
-              if (!this.isSpeaking) break;
-
-              // Guardrails check per-sentence
-              const guard = checkGuardrails(sentence, this.deps.agent.guardrails);
-              const sentenceText = guard
-                ? (guard.replacement ?? "I'm sorry, I can't respond to that.")
-                : sentence;
-
-              await this.synthesizeSentence(sentenceText, hookExecutor, hookCtx, ttsFirstByteSent);
-            }
-            if (!this.isSpeaking) break;
-          }
-        } catch (e) {
-          llmError = true;
-          chunker.reset(); // discard partial content on LLM error
-          getLogger().error(`LLM loop error (${label}):`, e);
-        }
-
-        this.metricsAcc.recordLlmComplete(); // record BEFORE TTS flush, not after
-
-        // Flush remaining text from chunker (skip if LLM errored)
-        if (!llmError && this.isSpeaking) {
-          for (const sentence of chunker.flush()) {
-            if (!this.isSpeaking) break;
-            const guard = checkGuardrails(sentence, this.deps.agent.guardrails);
-            const sentenceText = guard
-              ? (guard.replacement ?? "I'm sorry, I can't respond to that.")
-              : sentence;
-            await this.synthesizeSentence(sentenceText, hookExecutor, hookCtx, ttsFirstByteSent);
-          }
-        }
-      } finally {
-        this.isSpeaking = false; // guaranteed reset
-      }
-      responseText = allParts.join('');
+      responseText = await this.runPipelineLlm(filteredTranscript, hookExecutor, hookCtx);
     } else {
       return;
     }
 
     if (!responseText) return;
 
-    // For non-streaming paths (onMessage function/webhook): apply guardrails + TTS with chunking
-    if (!this.llmLoop) {
-      const guard = checkGuardrails(responseText, this.deps.agent.guardrails);
-      if (guard) {
-        getLogger().debug(`Guardrail '${guard.name}' triggered (pipeline)`);
-        responseText = guard.replacement ?? "I'm sorry, I can't respond to that.";
-      }
-
-      this.metricsAcc.recordLlmComplete();
-      this.history.push({ role: 'assistant', text: responseText, timestamp: Date.now() });
-
-      // Sentence-chunk the complete response for TTS
-      const chunker = new SentenceChunker();
-      const sentences = [...chunker.push(responseText), ...chunker.flush()];
-      const ttsFirstByteSent = { value: false };
-      let interrupted = false;
-      this.isSpeaking = true;
-
-      try {
-        for (const sentence of sentences) {
-          if (!this.isSpeaking) { interrupted = true; break; }
-          await this.synthesizeSentence(sentence, hookExecutor, hookCtx, ttsFirstByteSent);
-        }
-      } finally {
-        this.isSpeaking = false; // guaranteed reset
-      }
-
-      if (!interrupted) {
-        this.metricsAcc.recordTtsComplete(responseText);
-      }
-    } else {
+    if (this.llmLoop) {
       this.history.push({ role: 'assistant', text: responseText, timestamp: Date.now() });
       this.metricsAcc.recordTtsComplete(responseText);
+    } else {
+      interrupted = await this.runRegularLlm(responseText, hookExecutor, hookCtx) || interrupted;
+      // ``runRegularLlm`` returns the possibly-replaced text via side effect on
+      // history; recompute responseText from the last history entry for the
+      // turn-complete record.
+      responseText = this.history.entries[this.history.entries.length - 1]?.text ?? responseText;
     }
 
-    const turn = this.metricsAcc.recordTurnComplete(responseText);
-    if (turn) {
-      this.deps.metricsStore.recordTurn({ call_id: this.callId, turn });
-      if (this.deps.onMetrics) await this.deps.onMetrics({ call_id: this.callId, turn });
+    // Skip turn-complete when barge-in already recorded the turn as
+    // interrupted — mirrors Python ``if not interrupted``. Prevents
+    // double-counting / turn-count inflation / polluting p95.
+    if (!interrupted) {
+      await this.emitTurnMetrics(this.metricsAcc.recordTurnComplete(responseText));
     }
+  }
+
+  /**
+   * Barge-in: caller spoke over in-flight TTS. Flip ``isSpeaking`` so the
+   * sentence loop exits on its next check, clear downstream audio buffers,
+   * record the interruption, and return ``true`` so the caller skips the
+   * turn-complete record.
+   */
+  private handleBargeIn(transcript: { text?: string }): boolean {
+    if (!transcript.text || !this.isSpeaking) return false;
+    getLogger().debug(
+      `Barge-in: caller spoke over agent (${sanitizeLogValue(transcript.text.slice(0, 40))})`,
+    );
+    this.isSpeaking = false;
+    try {
+      this.deps.bridge.sendClear(this.ws, this.streamSid);
+    } catch (err) {
+      getLogger().debug(`sendClear during barge-in failed: ${String(err)}`);
+    }
+    this.metricsAcc.recordTurnInterrupted();
+    return true;
+  }
+
+  /**
+   * Dedup + throttle + hallucination filter for final STT transcripts.
+   * Mirrors ``PipelineStreamHandler._stt_loop`` on the Python side.
+   * Returns ``true`` when the transcript should be committed to a turn,
+   * ``false`` when it must be dropped. Drop reasons:
+   *   - text matches common short hallucinations ("you", "thanks", ...)
+   *   - duplicate final within 2 s of previous commit
+   *   - back-to-back finals under 500 ms (too tight to be real utterances)
+   */
+  private commitTranscript(text: string): boolean {
+    const now = Date.now();
+    const normalised = text.trim().toLowerCase();
+    const stripped = normalised.replace(/[.,!?;: ]+$/, '').trim();
+    const sinceLastMs = now - this.lastCommitAt;
+    if (HALLUCINATIONS.has(stripped) || stripped === '') {
+      getLogger().debug(`Dropped likely STT hallucination: ${sanitizeLogValue(normalised.slice(0, 40))}`);
+      return false;
+    }
+    if (sinceLastMs < 2000 && normalised === this.lastCommitText) {
+      getLogger().debug(
+        `Dropped duplicate final transcript (${(sinceLastMs / 1000).toFixed(1)}s since last): ${sanitizeLogValue(normalised.slice(0, 40))}`,
+      );
+      return false;
+    }
+    if (sinceLastMs < 500) {
+      getLogger().debug(
+        `Dropped back-to-back final transcript (${(sinceLastMs / 1000).toFixed(2)}s since last): ${sanitizeLogValue(normalised.slice(0, 40))}`,
+      );
+      return false;
+    }
+    this.lastCommitText = normalised;
+    this.lastCommitAt = now;
+    return true;
+  }
+
+  /**
+   * Streaming built-in LLM path with sentence chunking and per-sentence
+   * guardrails/TTS. Returns the concatenated response text.
+   */
+  private async runPipelineLlm(
+    filteredTranscript: string,
+    hookExecutor: PipelineHookExecutor,
+    hookCtx: HookContext,
+  ): Promise<string> {
+    const label = this.deps.bridge.label;
+    const callCtx = { call_id: this.callId, caller: this.caller, callee: this.callee };
+    const chunker = new SentenceChunker();
+    const allParts: string[] = [];
+    const ttsFirstByteSent = { value: false };
+    this.isSpeaking = true;
+    let llmError = false;
+
+    const guardAndSpeak = async (sentence: string): Promise<void> => {
+      const guard = checkGuardrails(sentence, this.deps.agent.guardrails);
+      const sentenceText = guard
+        ? (guard.replacement ?? "I'm sorry, I can't respond to that.")
+        : sentence;
+      await this.synthesizeSentence(sentenceText, hookExecutor, hookCtx, ttsFirstByteSent);
+    };
+
+    try {
+      try {
+        for await (const token of this.llmLoop!.run(filteredTranscript, this.history.entries, callCtx)) {
+          allParts.push(token);
+          for (const sentence of chunker.push(token)) {
+            if (!this.isSpeaking) break;
+            await guardAndSpeak(sentence);
+          }
+          if (!this.isSpeaking) break;
+        }
+      } catch (e) {
+        llmError = true;
+        chunker.reset(); // discard partial content on LLM error
+        getLogger().error(`LLM loop error (${label}):`, e);
+      }
+
+      this.metricsAcc.recordLlmComplete(); // record BEFORE TTS flush, not after
+
+      if (!llmError && this.isSpeaking) {
+        for (const sentence of chunker.flush()) {
+          if (!this.isSpeaking) break;
+          await guardAndSpeak(sentence);
+        }
+      }
+    } finally {
+      this.isSpeaking = false; // guaranteed reset
+    }
+    return allParts.join('');
+  }
+
+  /**
+   * Non-streaming path (onMessage function / webhook): apply output guardrails,
+   * push to history, sentence-chunk the text, synthesize. Returns ``true`` if
+   * TTS was interrupted mid-flight so the caller can skip turn-complete.
+   */
+  private async runRegularLlm(
+    responseText: string,
+    hookExecutor: PipelineHookExecutor,
+    hookCtx: HookContext,
+  ): Promise<boolean> {
+    const guard = checkGuardrails(responseText, this.deps.agent.guardrails);
+    let text = responseText;
+    if (guard) {
+      getLogger().debug(`Guardrail '${guard.name}' triggered (pipeline)`);
+      text = guard.replacement ?? "I'm sorry, I can't respond to that.";
+    }
+
+    this.metricsAcc.recordLlmComplete();
+    this.history.push({ role: 'assistant', text, timestamp: Date.now() });
+
+    const chunker = new SentenceChunker();
+    const sentences = [...chunker.push(text), ...chunker.flush()];
+    const ttsFirstByteSent = { value: false };
+    this.isSpeaking = true;
+    let interrupted = false;
+
+    try {
+      for (const sentence of sentences) {
+        if (!this.isSpeaking) { interrupted = true; break; }
+        await this.synthesizeSentence(sentence, hookExecutor, hookCtx, ttsFirstByteSent);
+      }
+    } finally {
+      this.isSpeaking = false; // guaranteed reset
+    }
+
+    if (!interrupted) this.metricsAcc.recordTtsComplete(text);
+    return interrupted;
   }
 
   /** Handle streaming WebSocket remote response with TTS. */
@@ -779,6 +900,7 @@ export class StreamHandler {
       for await (const chunk of this.deps.remoteHandler.callWebSocket(onMessage, msgData)) {
         parts.push(chunk);
         if (this.tts) {
+          this.resetTtsCarry();
           for await (const audioChunk of this.tts.synthesizeStream(chunk)) {
             if (!this.isSpeaking) break;
             if (!wsTtsStarted) { wsTtsStarted = true; this.metricsAcc.recordTtsFirstByte(); }
@@ -791,14 +913,11 @@ export class StreamHandler {
       getLogger().error(`WebSocket remote error (${this.deps.bridge.label}):`, e);
     } finally {
       this.isSpeaking = false;
+      this.resetTtsCarry();
     }
     const responseText = parts.join('');
     this.metricsAcc.recordTtsComplete(responseText);
-    const turn = this.metricsAcc.recordTurnComplete(responseText);
-    if (turn) {
-      this.deps.metricsStore.recordTurn({ call_id: this.callId, turn });
-      if (this.deps.onMetrics) await this.deps.onMetrics({ call_id: this.callId, turn });
-    }
+    await this.emitTurnMetrics(this.metricsAcc.recordTurnComplete(responseText));
     if (responseText) this.history.push({ role: 'assistant', text: responseText, timestamp: Date.now() });
   }
 
@@ -839,99 +958,119 @@ export class StreamHandler {
   }
 
   private async handleAdapterEvent(type: string, eventData: unknown): Promise<void> {
-    if (type === 'audio') {
-      // Record time-to-first-audio-byte as latency (Realtime mode).
-      // If no startTurn() was called yet (e.g. agent responding again without
-      // user input), start a new turn now so latency is still measured.
-      if (!this.responseAudioStarted) {
-        this.responseAudioStarted = true;
-        if (this.metricsAcc.turnActive === false) {
-          this.metricsAcc.startTurn();
-        }
-        this.metricsAcc.recordTtsFirstByte();
+    const handler = this.adapterEventHandlers[type];
+    if (handler) await handler(eventData);
+  }
+
+  /** Event-type → handler dispatch table for the Realtime adapter. */
+  private readonly adapterEventHandlers: Record<string, (eventData: unknown) => Promise<void>> = {
+    audio: async (eventData) => this.onAdapterAudio(eventData as Buffer),
+    speech_stopped: async () => this.onAdapterSpeechStopped(),
+    transcript_input: async (eventData) => this.onAdapterTranscriptInput(eventData as string),
+    transcript_output: async (eventData) => this.onAdapterTranscriptOutput(eventData as string),
+    response_done: async (eventData) => this.onAdapterResponseDone(eventData as Record<string, unknown> | null),
+    speech_started: async () => this.onAdapterSpeechInterrupt(),
+    interruption: async () => this.onAdapterSpeechInterrupt(),
+    function_call: async (eventData) => {
+      if (this.adapter instanceof OpenAIRealtimeAdapter) {
+        await this.handleFunctionCall(eventData as { call_id: string; name: string; arguments: string });
       }
-      let outAudio = eventData as Buffer;
-      // OpenAI Realtime outputs g711_ulaw 8kHz. If telephony is Telnyx (PCM 16kHz),
-      // transcode before sending. Twilio accepts mulaw natively.
-      if (this.deps.bridge.telephonyProvider === 'telnyx') {
-        outAudio = resample8kTo16k(mulawToPcm16(outAudio));
-      }
-      const encoded = outAudio.toString('base64');
-      this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
-      // Send mark for barge-in accuracy
-      this.chunkCount++;
-      this.deps.bridge.sendMark(this.ws, `audio_${this.chunkCount}`, this.streamSid);
-    } else if (type === 'transcript_input') {
-      const inputText = eventData as string;
-      getLogger().debug(`User (${this.deps.bridge.label}): ${sanitizeLogValue(inputText)}`);
-      this.history.push({ role: 'user', text: inputText, timestamp: Date.now() });
-      // Start a new turn when user finishes speaking (Realtime mode)
+    },
+  };
+
+  private async onAdapterAudio(eventData: Buffer): Promise<void> {
+    // Record time-to-first-audio-byte as latency (Realtime mode). If no
+    // startTurn() was called yet (e.g. agent responding again without user
+    // input), start a new turn now so latency is still measured.
+    if (!this.responseAudioStarted) {
+      this.responseAudioStarted = true;
+      if (this.metricsAcc.turnActive === false) this.metricsAcc.startTurn();
+      this.metricsAcc.recordTtsFirstByte();
+    }
+    // OpenAI Realtime outputs g711_ulaw 8 kHz. For Telnyx (PCM 16 kHz),
+    // transcode before sending; Twilio accepts mulaw natively.
+    const outAudio = this.deps.bridge.telephonyProvider === 'telnyx'
+      ? resample8kTo16k(mulawToPcm16(eventData))
+      : eventData;
+    this.deps.bridge.sendAudio(this.ws, outAudio.toString('base64'), this.streamSid);
+    // Send mark for barge-in accuracy.
+    this.chunkCount++;
+    this.deps.bridge.sendMark(this.ws, `audio_${this.chunkCount}`, this.streamSid);
+  }
+
+  private onAdapterSpeechStopped(): void {
+    // Server VAD end-of-speech is the earliest reliable moment to start
+    // measuring turn latency in Realtime mode — ``transcript_input``
+    // (transcription.completed) arrives noticeably later and understates
+    // end-to-end latency.
+    if (!this.metricsAcc.turnActive) this.metricsAcc.startTurn();
+    this.currentAgentText = '';
+    this.responseAudioStarted = false;
+  }
+
+  private async onAdapterTranscriptInput(inputText: string): Promise<void> {
+    getLogger().debug(`User (${this.deps.bridge.label}): ${sanitizeLogValue(inputText)}`);
+    this.history.push({ role: 'user', text: inputText, timestamp: Date.now() });
+    // Fallback: if speech_stopped was missed (server VAD disabled, custom
+    // config, ...) still start the turn here so latency is non-zero.
+    if (!this.metricsAcc.turnActive) {
       this.metricsAcc.startTurn();
       this.currentAgentText = '';
       this.responseAudioStarted = false;
-      if (this.deps.onTranscript) {
-        await this.deps.onTranscript({
-          role: 'user',
-          text: inputText,
-          call_id: this.callId,
-          history: [...this.history.entries],
-        });
-      }
-    } else if (type === 'transcript_output') {
-      const outputText = eventData as string;
-      if (outputText) {
-        const triggered = checkGuardrails(outputText, this.deps.agent.guardrails);
-        if (triggered) {
-          getLogger().debug(`Guardrail '${triggered.name}' triggered`);
-          if (this.adapter instanceof OpenAIRealtimeAdapter) {
-            this.adapter.cancelResponse();
-            await this.adapter.sendText(triggered.replacement ?? "I'm sorry, I can't respond to that.");
-          }
-        }
-        // Accumulate text — a single history entry is pushed on response_done
-        this.currentAgentText += outputText;
-      }
-    } else if (type === 'response_done') {
-      // Realtime mode: record usage and complete the turn
-      const responseData = eventData as Record<string, unknown> | null;
-      if (responseData) {
-        const usage = responseData.usage as {
-          input_token_details?: { audio_tokens?: number; text_tokens?: number };
-          output_token_details?: { audio_tokens?: number; text_tokens?: number };
-        } | undefined;
-        if (usage) {
-          this.metricsAcc.recordRealtimeUsage(usage);
-        }
-      }
-      if (this.currentAgentText) {
-        // Push the complete response as a single transcript entry
-        this.history.push({ role: 'assistant', text: this.currentAgentText, timestamp: Date.now() });
-        const turn = this.metricsAcc.recordTurnComplete(this.currentAgentText);
-        this.responseAudioStarted = false;
-        if (this.deps.onMetrics) {
-          await this.deps.onMetrics({
-            call_id: this.callId,
-            turn,
-          });
-        }
-        this.deps.metricsStore.recordTurn({ call_id: this.callId, turn });
-        this.currentAgentText = '';
-      } else {
-        // Empty response — discard the orphaned turn so it doesn't leak
-        this.metricsAcc.recordTurnInterrupted();
-        this.responseAudioStarted = false;
-      }
-    } else if (type === 'speech_started' || type === 'interruption') {
-      this.deps.bridge.sendClear(this.ws, this.streamSid);
+    }
+    // Marks ASR as complete — exposes a stt_ms bucket in Realtime mode
+    // distinct from the llm+tts portion. Parity with Python handler.
+    this.metricsAcc.recordSttComplete(inputText);
+    if (this.deps.onTranscript) {
+      await this.deps.onTranscript({
+        role: 'user',
+        text: inputText,
+        call_id: this.callId,
+        history: [...this.history.entries],
+      });
+    }
+  }
+
+  private async onAdapterTranscriptOutput(outputText: string): Promise<void> {
+    if (!outputText) return;
+    const triggered = checkGuardrails(outputText, this.deps.agent.guardrails);
+    if (triggered) {
+      getLogger().debug(`Guardrail '${triggered.name}' triggered`);
       if (this.adapter instanceof OpenAIRealtimeAdapter) {
         this.adapter.cancelResponse();
+        await this.adapter.sendText(triggered.replacement ?? "I'm sorry, I can't respond to that.");
       }
-      this.metricsAcc.recordTurnInterrupted();
-      this.currentAgentText = '';
-      this.responseAudioStarted = false;
-    } else if (type === 'function_call' && this.adapter instanceof OpenAIRealtimeAdapter) {
-      await this.handleFunctionCall(eventData as { call_id: string; name: string; arguments: string });
     }
+    // Accumulate text — a single history entry is pushed on response_done.
+    this.currentAgentText += outputText;
+  }
+
+  private async onAdapterResponseDone(responseData: Record<string, unknown> | null): Promise<void> {
+    if (responseData) {
+      const usage = responseData.usage as {
+        input_token_details?: { audio_tokens?: number; text_tokens?: number };
+        output_token_details?: { audio_tokens?: number; text_tokens?: number };
+      } | undefined;
+      if (usage) this.metricsAcc.recordRealtimeUsage(usage);
+    }
+    if (this.currentAgentText) {
+      this.history.push({ role: 'assistant', text: this.currentAgentText, timestamp: Date.now() });
+      this.responseAudioStarted = false;
+      await this.emitTurnMetrics(this.metricsAcc.recordTurnComplete(this.currentAgentText));
+      this.currentAgentText = '';
+    } else {
+      // Empty response — discard the orphaned turn so it doesn't leak.
+      this.metricsAcc.recordTurnInterrupted();
+      this.responseAudioStarted = false;
+    }
+  }
+
+  private onAdapterSpeechInterrupt(): void {
+    this.deps.bridge.sendClear(this.ws, this.streamSid);
+    if (this.adapter instanceof OpenAIRealtimeAdapter) this.adapter.cancelResponse();
+    this.metricsAcc.recordTurnInterrupted();
+    this.currentAgentText = '';
+    this.responseAudioStarted = false;
   }
 
   private async handleFunctionCall(fc: { call_id: string; name: string; arguments: string }): Promise<void> {

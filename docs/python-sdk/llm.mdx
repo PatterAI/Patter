@@ -71,7 +71,7 @@ llm = openai.LLM(api_key="sk-...", model="gpt-4o-mini")
 
 ### AnthropicLLM
 
-Anthropic Messages API with native streaming and `tool_use` blocks, normalised to Patter's chunk protocol. Default model `"claude-3-5-sonnet-20241022"`, default `max_tokens=1024` (Anthropic requires an explicit cap on every request).
+Anthropic Messages API with native streaming and `tool_use` blocks, normalised to Patter's chunk protocol. Default model `"claude-haiku-4-5-20251001"`, default `max_tokens=1024` (Anthropic requires an explicit cap on every request).
 
 ```python
 from getpatter import AnthropicLLM                 # flat
@@ -80,7 +80,7 @@ from getpatter.llm import anthropic                # namespaced
 llm = AnthropicLLM()                                # reads ANTHROPIC_API_KEY
 llm = anthropic.LLM(
     api_key="sk-ant-...",
-    model="claude-3-5-sonnet-20241022",
+    model="claude-haiku-4-5-20251001",
     max_tokens=2048,
 )
 ```

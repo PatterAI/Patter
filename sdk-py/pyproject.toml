@@ -145,10 +145,10 @@ scheduling = [
     "apscheduler>=3.10",
 ]
 # Built-in Cloudflare Quick Tunnel for local dev (``Patter(tunnel=True)``).
-# Cloudflare ships a thin Python wrapper around their ``cloudflared`` binary.
-tunnel = [
-    "cloudflared>=0.7",
-]
+# The ``cloudflared`` binary must be installed on PATH (brew / apt / manual).
+# There is no Python wrapper package — the SDK shells out to the binary.
+# Kept as an empty extra for parity with guides; no-op if invoked.
+tunnel = []
 
 [build-system]
 requires = ["setuptools>=68.0"]

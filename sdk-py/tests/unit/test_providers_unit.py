@@ -138,14 +138,14 @@ class TestElevenLabsConvAIAdapter:
             api_key="el-test",
             agent_id="agent-123",
             voice_id="voice-456",
-            model_id="eleven_turbo_v2_5",
+            model_id="eleven_flash_v2_5",
             language="en",
             first_message="Hello!",
         )
         assert adapter.api_key == "el-test"
         assert adapter.agent_id == "agent-123"
         assert adapter.voice_id == "voice-456"
-        assert adapter.model_id == "eleven_turbo_v2_5"
+        assert adapter.model_id == "eleven_flash_v2_5"
         assert adapter.language == "en"
         assert adapter.first_message == "Hello!"
         assert adapter._ws is None
@@ -157,7 +157,7 @@ class TestElevenLabsConvAIAdapter:
         adapter = ElevenLabsConvAIAdapter(api_key="el-test")
         assert adapter.agent_id == ""
         assert adapter.voice_id == "EXAVITQu4vr4xnSDxMaL"
-        assert adapter.model_id == "eleven_turbo_v2_5"
+        assert adapter.model_id == "eleven_flash_v2_5"
         assert adapter.language == "it"
         assert adapter.first_message == ""
 

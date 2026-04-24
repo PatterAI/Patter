@@ -17,14 +17,14 @@ class LLM(_AnthropicLLM):
         from getpatter.llm import anthropic
 
         llm = anthropic.LLM()                         # reads ANTHROPIC_API_KEY
-        llm = anthropic.LLM(api_key="sk-ant-...", model="claude-3-5-sonnet-20241022")
+        llm = anthropic.LLM(api_key="sk-ant-...", model="claude-haiku-4-5-20251001")
     """
 
     def __init__(
         self,
         api_key: str | None = None,
         *,
-        model: str = "claude-3-5-sonnet-20241022",
+        model: str = "claude-haiku-4-5-20251001",
         **kwargs,
     ) -> None:
         key = api_key or os.environ.get("ANTHROPIC_API_KEY")

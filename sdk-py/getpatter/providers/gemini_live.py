@@ -13,7 +13,6 @@ Patter's handlers manage session lifecycle externally.
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import logging
 from typing import Any, AsyncIterator
@@ -46,7 +45,11 @@ class GeminiLiveAdapter:
     def __init__(
         self,
         api_key: str,
-        model: str = "gemini-2.0-flash-exp",
+        # gemini-2.0-flash-exp was experimental preview retired Dec 2024.
+        # gemini-live-2.5-flash-preview was shut down Dec 9, 2025.
+        # Current live-audio model in April 2026 is the native-audio variant.
+        # Override via GeminiLive(model=...) if needed.
+        model: str = "gemini-live-2.5-flash-native-audio",
         voice: str = "Puck",
         instructions: str = "",
         language: str = "en-US",

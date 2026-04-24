@@ -1,0 +1,117 @@
+---
+title: "Call logging"
+description: "Opt-in per-call filesystem logs: metadata, transcripts, and operational events."
+icon: "folder-open"
+---
+
+Patter can persist every call to a directory tree on disk so you can replay transcripts, audit tool calls, and track latency/cost trends without running a hosted dashboard. Logging is **opt-in and off by default** — nothing is written unless you ask for it.
+
+## Enable
+
+Set `PATTER_LOG_DIR` before starting the server:
+
+```bash
+# Explicit path
+export PATTER_LOG_DIR=/var/log/patter
+
+# Or use the platform-idiomatic default directory
+export PATTER_LOG_DIR=auto
+```
+
+Platform defaults for `auto`:
+
+- macOS: `~/Library/Application Support/patter`
+- Linux: `$XDG_DATA_HOME/patter` (falls back to `~/.local/share/patter`)
+- Windows: `%LOCALAPPDATA%/patter`
+
+When the variable is unset, the logger is a no-op — no directories are created, no files are written.
+
+## Layout
+
+```
+<PATTER_LOG_DIR>/calls/YYYY/MM/DD/<call_id>/
+├── metadata.json     # envelope; written at call start, updated at call end
+├── transcript.jsonl  # one JSON object per turn (role/text/ts/latency/cost)
+└── events.jsonl      # operational events (tool_call, barge_in, error, ...)
+```
+
+`metadata.json` is written atomically (tmp file + rename) so a reader never sees a half-written file. JSONL files are append-only.
+
+## Metadata schema
+
+```json
+{
+  "schema_version": "1.0",
+  "call_id": "CA9a2b...",
+  "trace_id": null,
+  "started_at": "2026-04-23T18:02:12.413Z",
+  "ended_at":   "2026-04-23T18:03:47.892Z",
+  "duration_ms": 95479,
+  "status": "completed",
+  "caller": "***4567",
+  "callee": "***7890",
+  "telephony_provider": "twilio",
+  "provider_mode": "openai_realtime",
+  "agent": { "provider": "openai_realtime", "voice": "nova" },
+  "turns": 8,
+  "cost":    { "total": 0.1234, "stt": 0.01, "tts": 0.02, "llm": 0.08 },
+  "latency": { "p50_ms": 412, "p95_ms": 870, "p99_ms": 1240 },
+  "error": null
+}
+```
+
+## Phone redaction
+
+Caller / callee numbers in `metadata.json` are masked by default (last 4 digits). Change via:
+
+```bash
+# Mask last 4 digits (default): "***4567"
+export PATTER_LOG_REDACT_PHONE=mask
+
+# Store the full E.164 number (disables redaction)
+export PATTER_LOG_REDACT_PHONE=full
+
+# Replace with a sha256 prefix for correlation without storing the number
+export PATTER_LOG_REDACT_PHONE=hash_only
+```
+
+`transcript.jsonl` is **not** redacted — it can contain customer PII spoken during the call. Gate access to the log root and/or wire up your own redaction pipeline before exporting.
+
+## Retention
+
+Old day directories are cleaned up automatically. The sweep runs on ~2% of calls (sampled; no daemon) so a long-running server doesn't accumulate indefinitely.
+
+```bash
+# Default: 30 days
+export PATTER_LOG_RETENTION_DAYS=30
+
+# Disable cleanup (keep forever)
+export PATTER_LOG_RETENTION_DAYS=0
+```
+
+## Reading a call
+
+```python
+import json
+from pathlib import Path
+
+call_dir = Path("/var/log/patter/calls/2026/04/23/CA9a2b...")
+
+metadata = json.loads((call_dir / "metadata.json").read_text())
+print(f"{metadata['call_id']}: {metadata['duration_ms']}ms, ${metadata['cost']['total']:.4f}")
+
+with (call_dir / "transcript.jsonl").open() as fh:
+    for line in fh:
+        turn = json.loads(line)
+        print(f"[{turn['ts']}] {turn['role']}: {turn['text']}")
+```
+
+## Safety guarantees
+
+- File-write errors never raise into the call path — a full disk or a permissions hiccup logs a warning and the call continues uninterrupted.
+- Writes happen on a background thread (`asyncio.to_thread`) so they never block the audio pipeline.
+- When `PATTER_LOG_DIR` is unset, `CallLogger.enabled` is `False` and every method returns immediately.
+
+## Interop
+
+The on-disk shape is compatible with LiveKit-style session reports and Pipecat observer traces: `metadata.json` maps 1:1 to a LiveKit `SessionReport`, and `transcript.jsonl` rows slot into OpenTelemetry `gen_ai.*` turn spans. The TypeScript SDK writes the same schema, so a multi-runtime deployment produces a single coherent directory tree.
