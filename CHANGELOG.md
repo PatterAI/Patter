@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Added — per-call filesystem logging
+- **`CallLogger` (both SDKs)** — opt-in via `PATTER_LOG_DIR` env var. Writes per-call
+  `metadata.json` (atomic) + `transcript.jsonl` + `events.jsonl` under a
+  date-partitioned directory tree (`calls/YYYY/MM/DD/<call_id>/`). Schema is
+  identical in Python and TypeScript so multi-runtime deployments share one tree.
+- **Phone redaction** (`PATTER_LOG_REDACT_PHONE`): `mask` (default, last-4),
+  `full`, or `hash_only` (sha256 prefix).
+- **Retention sweep** (`PATTER_LOG_RETENTION_DAYS`, default 30) runs on ~2% of
+  calls — no daemon required. Set to `0` to keep forever.
+- `maskPhoneNumber` export added to TS `stream-handler` for parity with Python
+  `mask_phone_number`.
+- Docs: new `observability → call logging` page for both SDKs.
+
+### Fixed — user callback return value dropped
+- Python `EmbeddedServer._wrap_callbacks` silently threw away the value returned
+  by `on_call_start`, defeating per-call config overrides. Wrapper now returns
+  it so `apply_call_overrides` receives the user's dict.
+
 ## 0.5.6 (2026-04-23)
 
 Third audit wave (9 specialised agents: latency+transcript bug hunt, per-provider cost audit, frequency spec research, transcoding implementation audit, transcoding best-practices research, LLM model verification, voice/format string verification, telephony adapter deep audit, voice provider integration review) surfaced dozens of bugs ranging from critical cost rate errors to stale model IDs. This release addresses the ones that ship a safer patch; the larger refactors (per-model pricing lookup, native `ulaw_8000` provider negotiation, 31-tap Kaiser half-band FIR, LLM pipeline token tracking, runtime WS reconnect) are being scoped for 0.6.0.

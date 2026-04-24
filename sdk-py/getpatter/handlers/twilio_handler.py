@@ -276,6 +276,7 @@ async def twilio_stream_bridge(
                             "callee": callee,
                             "direction": "inbound",
                             "custom_params": custom_params,
+                            "telephony_provider": "twilio",
                         }
                     )
                     if not isinstance(_call_overrides, dict):

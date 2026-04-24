@@ -127,6 +127,7 @@
                 "pages": [
                   "python-sdk/metrics",
                   "python-sdk/dashboard",
+                  "python-sdk/call-logging",
                   "python-sdk/tracing"
                 ]
               },
@@ -208,7 +209,8 @@
                 "icon": "chart-line",
                 "pages": [
                   "typescript-sdk/metrics",
-                  "typescript-sdk/dashboard"
+                  "typescript-sdk/dashboard",
+                  "typescript-sdk/call-logging"
                 ]
               },
               {

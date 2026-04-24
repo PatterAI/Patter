@@ -90,6 +90,18 @@ export function sanitizeLogValue(v: string, maxLen = 200): string {
   return cleaned.length > maxLen ? cleaned.slice(0, maxLen) + '...' : cleaned;
 }
 
+/**
+ * Mask an E.164 phone number for logging. Keeps only the last 4 characters
+ * to preserve enough context for correlation while avoiding PII leakage.
+ * Mirrors ``getpatter.utils.log_sanitize.mask_phone_number``.
+ */
+export function maskPhoneNumber(number: unknown): string {
+  if (!number) return '***';
+  const text = String(number);
+  if (text.length <= 4) return '***';
+  return `***${text.slice(-4)}`;
+}
+
 function isValidE164(number: string): boolean {
   return /^\+[1-9]\d{6,14}$/.test(number);
 }
@@ -321,6 +333,7 @@ export class StreamHandler {
         caller: this.caller,
         callee: this.callee,
         direction: 'inbound',
+        telephony_provider: this.deps.bridge.telephonyProvider,
         ...(Object.keys(customParams).length > 0 ? { custom_params: customParams } : {}),
       });
     }

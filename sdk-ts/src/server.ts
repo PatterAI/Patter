@@ -15,6 +15,7 @@ import { StreamHandler, sanitizeLogValue } from './stream-handler';
 import { getLogger } from './logger';
 import type { TelephonyBridge } from './stream-handler';
 import type { AgentOptions, PipelineMessageHandler } from './types';
+import { CallLogger, resolveLogRoot } from './services/call-log';
 
 export interface LocalConfig {
   twilioSid?: string;
@@ -520,6 +521,8 @@ export class EmbeddedServer {
   readonly metricsStore: MetricsStore;
   private readonly pricing: ReturnType<typeof mergePricing>;
   private readonly remoteHandler = new RemoteMessageHandler();
+  /** Opt-in per-call filesystem logger (set via PATTER_LOG_DIR). */
+  private readonly callLogger: CallLogger = new CallLogger(resolveLogRoot());
 
   /** Active WebSocket connections tracked for graceful shutdown. */
   private readonly activeConnections = new Set<WSWebSocket>();
@@ -927,6 +930,7 @@ export class EmbeddedServer {
 
   /** Build the shared StreamHandlerDeps for the current server configuration. */
   private buildStreamHandlerDeps(bridge: TelephonyBridge): import('./stream-handler').StreamHandlerDeps {
+    const [wrappedStart, wrappedMetrics, wrappedEnd] = this.wrapLoggingCallbacks(bridge);
     return {
       config: this.config,
       agent: this.agent,
@@ -934,16 +938,106 @@ export class EmbeddedServer {
       metricsStore: this.metricsStore,
       pricing: this.pricing,
       remoteHandler: this.remoteHandler,
-      onCallStart: this.onCallStart,
-      onCallEnd: this.onCallEnd,
+      onCallStart: wrappedStart,
+      onCallEnd: wrappedEnd,
       onTranscript: this.onTranscript,
       onMessage: this.onMessage,
-      onMetrics: this.onMetrics,
+      onMetrics: wrappedMetrics,
       recording: this.recording,
       buildAIAdapter: (resolvedPrompt: string) => buildAIAdapter(this.config, this.agent, resolvedPrompt),
       sanitizeVariables,
       resolveVariables,
     };
+  }
+
+  /**
+   * Wrap user-supplied call lifecycle callbacks with CallLogger side-effects.
+   * When PATTER_LOG_DIR is unset, the logger is disabled and the returned
+   * wrappers degrade to just calling the user callbacks (still wrapped so
+   * the logger stays consistent with future configuration changes).
+   */
+  private wrapLoggingCallbacks(
+    bridge: TelephonyBridge,
+  ): [
+    typeof this.onCallStart,
+    typeof this.onMetrics,
+    typeof this.onCallEnd,
+  ] {
+    const logger = this.callLogger;
+    const agent = this.agent;
+    const userStart = this.onCallStart;
+    const userMetrics = this.onMetrics;
+    const userEnd = this.onCallEnd;
+
+    const agentSnapshot = (): Record<string, unknown> => {
+      const snap: Record<string, unknown> = {
+        provider: agent.provider,
+        model: (agent as { model?: string }).model,
+        voice: (agent as { voice?: string }).voice,
+        language: (agent as { language?: string }).language,
+      };
+      if (agent.stt && agent.tts && !('engine' in agent && (agent as { engine?: unknown }).engine)) {
+        snap.mode = 'pipeline';
+      }
+      return Object.fromEntries(Object.entries(snap).filter(([, v]) => v !== undefined));
+    };
+
+    const wrappedStart = async (data: Record<string, unknown>): Promise<void> => {
+      if (logger.enabled) {
+        const callId = typeof data.call_id === 'string' ? data.call_id : '';
+        logger.logCallStart(callId, {
+          caller: typeof data.caller === 'string' ? data.caller : '',
+          callee: typeof data.callee === 'string' ? data.callee : '',
+          telephonyProvider: bridge.telephonyProvider,
+          providerMode: agent.provider ?? '',
+          agent: agentSnapshot(),
+        });
+      }
+      if (userStart) await userStart(data);
+    };
+
+    const wrappedMetrics = async (data: Record<string, unknown>): Promise<void> => {
+      if (logger.enabled) {
+        const callId = typeof data.call_id === 'string' ? data.call_id : '';
+        const turn = data.turn;
+        if (turn && typeof turn === 'object') {
+          logger.logTurn(callId, turn as Record<string, unknown>);
+        }
+      }
+      if (userMetrics) await userMetrics(data);
+    };
+
+    const wrappedEnd = async (data: Record<string, unknown>): Promise<void> => {
+      if (logger.enabled) {
+        const callId = typeof data.call_id === 'string' ? data.call_id : '';
+        const metricsObj = (data.metrics ?? null) as
+          | (Record<string, unknown> & {
+              duration_seconds?: number;
+              turns?: unknown[];
+              cost?: Record<string, unknown>;
+              latency_p50?: { total_ms?: number };
+              latency_p95?: { total_ms?: number };
+              latency_p99?: { total_ms?: number };
+            })
+          | null;
+        const latency = metricsObj
+          ? {
+              p50_ms: metricsObj.latency_p50?.total_ms ?? null,
+              p95_ms: metricsObj.latency_p95?.total_ms ?? null,
+              p99_ms: metricsObj.latency_p99?.total_ms ?? null,
+            }
+          : null;
+        logger.logCallEnd(callId, {
+          durationSeconds: metricsObj?.duration_seconds,
+          turns: metricsObj?.turns?.length,
+          cost: metricsObj?.cost ?? null,
+          latency,
+        });
+      }
+      if (userEnd) await userEnd(data);
+    };
+
+    return [wrappedStart, wrappedMetrics, wrappedEnd];
   }
 
   // ---------------------------------------------------------------------------
