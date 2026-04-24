@@ -19,7 +19,7 @@ Installation extras:
 See ``pyproject.toml`` and the top-level README for the full matrix.
 """
 
-__version__ = "0.5.6"
+__version__ = "0.5.2"
 
 from getpatter.client import Patter
 from getpatter.models import (

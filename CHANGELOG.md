@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+Three audit waves (wave 1: 3 agent teams on cost/latency/research; wave 2: 11 specialised teams on cost/latency/audio/parity/OpenAI compliance/LiveKit-Pipecat benchmarking/Twilio pricing/test coverage/security/ship-readiness/dashboard UX; wave 3: 9 specialised agents on latency+transcript hunting, per-provider cost audit, frequency spec research, transcoding audit, LLM model verification, voice/format strings, telephony adapter deep audit, voice provider integration review) plus an initial audio+pricing pass surfaced roughly 50 bugs ranging from cost-rate errors to stale model IDs and byte-alignment audio corruption. Every HIGH/CRITICAL fix flagged is included here, along with opt-in per-call filesystem logging. The larger refactors (per-model pricing lookup, native `ulaw_8000` provider negotiation, 31-tap Kaiser half-band FIR, LLM pipeline token tracking, runtime WS reconnect) are scoped for a later release.
+
 ### Added — per-call filesystem logging
 - **`CallLogger` (both SDKs)** — opt-in via `PATTER_LOG_DIR` env var. Writes per-call
   `metadata.json` (atomic) + `transcript.jsonl` + `events.jsonl` under a
@@ -20,11 +22,7 @@
   by `on_call_start`, defeating per-call config overrides. Wrapper now returns
   it so `apply_call_overrides` receives the user's dict.
 
-## 0.5.6 (2026-04-23)
-
-Third audit wave (9 specialised agents: latency+transcript bug hunt, per-provider cost audit, frequency spec research, transcoding implementation audit, transcoding best-practices research, LLM model verification, voice/format string verification, telephony adapter deep audit, voice provider integration review) surfaced dozens of bugs ranging from critical cost rate errors to stale model IDs. This release addresses the ones that ship a safer patch; the larger refactors (per-model pricing lookup, native `ulaw_8000` provider negotiation, 31-tap Kaiser half-band FIR, LLM pipeline token tracking, runtime WS reconnect) are being scoped for 0.6.0.
-
-### Fixed — cost accuracy
+### Fixed — cost accuracy (third audit wave, 9 agents)
 - **Deepgram rate was batch not streaming** — `deepgram: $0.0043/min` was the batch/pre-recorded rate. Patter's Nova-3 streaming default actually bills at **$0.0077/min** (monolingual). Users were under-reporting cost by ~45%.
 - **ElevenLabs rate was Creator-plan overage not Flash/Turbo API** — `$0.18/1k chars` is only correct on the Creator plan's overage tier. The `eleven_flash_v2_5` / `eleven_turbo_v2_5` direct-API rate is **$0.06/1k chars**. Users on the API were over-reporting cost by ~3×.
 - **Six new provider pricing entries added** so their bills no longer silently display $0: `assemblyai` ($0.0025/min), `cartesia_stt` ($0.0025/min), `cartesia_tts` ($0.030/1k), `soniox` ($0.002/min), `speechmatics` ($0.0173/min), `rime` ($0.030/1k), `lmnt` ($0.050/1k), `openai_tts_hd` ($0.030/1k). Users still see $0 if they configure a provider we don't price yet — documented as a deferred item.
@@ -60,11 +58,7 @@ Third audit wave (9 specialised agents: latency+transcript bug hunt, per-provide
 - **Whisper is unsafe in pipeline mode** — emits `isFinal=true` every ~1s regardless of speech; triggers LLM mid-utterance. Needs VAD gating.
 - **Cerebras default `llama3.1-8b` deprecates May 27, 2026** — need migration to `gpt-oss-120b`.
 
-## 0.5.5 (2026-04-23)
-
-Two waves of cross-audit (first: 3 agent teams on cost/latency/research; second: 11 specialised teams on cost/latency/audio/parity/OpenAI compliance/LiveKit-Pipecat benchmarking/Twilio pricing/test coverage/security/ship-readiness/dashboard UX) surfaced a long tail of bugs in 0.5.4's instrumentation. This release applies every HIGH/CRITICAL fix flagged plus LiveKit/Pipecat-style observability.
-
-### Fixed — cost accounting
+### Fixed — cost accounting (first + second audit waves, 3 + 11 agents)
 - **Python `calculate_realtime_cost` would crash on `input_token_details: null`** — `dict.get("...", {})` returns `None` when the key exists with a `None` value, and the chained `.get()` raised `AttributeError`. Switched to `or {}` fallback. TS was already safe via `??`.
 - **`cached_tokens_details` ignored** → cached portion was billed at full rate (up to ~33× overcharge on cached audio). Now subtracted from the total and re-billed at the cached rate.
 - **Twilio rounds partial minutes up** to the next whole minute ([twilio help 223132307](https://help.twilio.com/articles/223132307)). Our `(seconds/60) * rate` under-reported cost for every call ending on a non-minute boundary. `calculateTelephonyCost` / `calculate_telephony_cost` now apply `ceil(seconds/60)` for Twilio and keep per-second math for Telnyx (which bills per-second).
@@ -121,9 +115,7 @@ Users running non-default Realtime models (`gpt-realtime`, `gpt-4o-realtime-prev
 - `CallMetrics` now exposes `latency_p50` and `latency_p99` alongside `latency_p95` and `latency_avg`. Useful to detect cold-start outliers (p99) and typical UX latency (p50). Dashboards can render all four side by side.
 - Both SDKs use the same percentile formula and same filtering (excludes interrupted turns).
 
-## 0.5.4 (2026-04-23)
-
-### Fixed
+### Fixed — initial audio + pricing pass
 - **OpenAI Realtime cost display was 5-20× inflated** — `DEFAULT_PRICING.openai_realtime` was calibrated for `gpt-4o-realtime-preview` at mid-2024 rates ($100/M audio input, $400/M audio output, the latter already wrong vs OpenAI's then-published $200/M). Patter's default model is `gpt-4o-mini-realtime-preview`, which is billed at 1/10 the non-mini rate. The combined error made the dashboard report numbers roughly 5-20× higher than what OpenAI actually charged. Recalibrated to 2026 mini rates ($10/M audio in, $20/M audio out, $0.60/M text in, $2.40/M text out). Users on a different Realtime model should override via `Patter({ pricing: { openai_realtime: { ... } } })`.
 - **Turn latency p95 artificially low in Realtime mode** — latency was measured from the `transcript_input` event (OpenAI's notification that ASR finished) to the first audio delta, but OpenAI generates the response in parallel with ASR so the two events arrive within tens of milliseconds of each other server-side. Real end-to-end latency is much higher. Now measuring from `input_audio_buffer.speech_stopped` (server VAD detected user finished talking) to first audio output — a truer proxy for user-perceived latency. Fallback to `transcript_input` kept for configs without server VAD.
 
