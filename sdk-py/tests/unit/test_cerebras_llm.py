@@ -16,12 +16,17 @@ from getpatter.providers.cerebras_llm import CerebrasLLMProvider
 
 
 def test_default_model_is_free_tier_safe() -> None:
-    provider = CerebrasLLMProvider(api_key="csk-test")
+    provider = CerebrasLLMProvider(api_key="csk-test", gzip_compression=False, msgpack_encoding=False)
     assert provider._model == "llama3.1-8b"
 
 
 def test_explicit_model_override_is_honoured() -> None:
-    provider = CerebrasLLMProvider(api_key="csk-test", model="llama-3.3-70b")
+    provider = CerebrasLLMProvider(
+        api_key="csk-test",
+        model="llama-3.3-70b",
+        gzip_compression=False,
+        msgpack_encoding=False,
+    )
     assert provider._model == "llama-3.3-70b"
 
 
@@ -29,7 +34,12 @@ def test_explicit_model_override_is_honoured() -> None:
 async def test_404_model_not_found_raises_recovery_hint() -> None:
     """A gated model surfaces a clear error with override candidates."""
 
-    provider = CerebrasLLMProvider(api_key="csk-test", model="gated-model")
+    provider = CerebrasLLMProvider(
+        api_key="csk-test",
+        model="gated-model",
+        gzip_compression=False,
+        msgpack_encoding=False,
+    )
 
     async def _raise_404(*_args: object, **_kwargs: object):
         raise RuntimeError(
@@ -58,7 +68,7 @@ async def test_404_model_not_found_raises_recovery_hint() -> None:
 async def test_other_errors_are_re_raised_unchanged() -> None:
     """Non-model errors should propagate unchanged."""
 
-    provider = CerebrasLLMProvider(api_key="csk-test")
+    provider = CerebrasLLMProvider(api_key="csk-test", gzip_compression=False, msgpack_encoding=False)
 
     async def _raise_other(*_args: object, **_kwargs: object):
         raise ValueError("unrelated failure")
