@@ -27,9 +27,18 @@ import { getLogger } from '../logger';
 import { parseOpenAISseStream } from './groq-llm';
 
 const CEREBRAS_BASE_URL = 'https://api.cerebras.ai/v1';
-// ``llama3.1-8b`` was retired by Cerebras; default to the current
-// production-grade model. Override via ``model`` option if needed.
-const DEFAULT_MODEL = 'llama-3.3-70b';
+// Default to the smallest fast Cerebras model available on the free tier so
+// the SDK works out of the box. ``llama-3.3-70b`` exists on Cerebras but is
+// gated to paid tiers — using it as default surfaces a confusing 404 for free
+// users. ``llama3.1-8b`` is 8B params, sub-100ms TTFT on Cerebras hardware,
+// and matches the LiveKit/Pipecat "small and fast for voice" philosophy.
+//
+// TODO(deprecation 2026-05-27): Cerebras has scheduled both ``llama3.1-8b``
+// and ``qwen-3-235b-a22b-instruct-2507`` for retirement on this date. Before
+// then, retest the free tier and switch the default to whichever 8B-class
+// model replaces them (likely a Llama 4 Scout variant). Track at
+// https://inference-docs.cerebras.ai/change-log
+const DEFAULT_MODEL = 'llama3.1-8b';
 
 export interface CerebrasLLMOptions {
   apiKey: string;
@@ -95,7 +104,20 @@ export class CerebrasLLMProvider implements LLMProvider {
 
     if (!response.ok) {
       const errText = await response.text();
-      getLogger().error(`Cerebras API error: ${response.status} ${errText}`);
+      // 404 on /chat/completions almost always means the model name isn't
+      // available on the caller's tier (Cerebras gates models per plan). The
+      // generic 404 message is opaque, so add a concrete recovery hint.
+      if (response.status === 404 && errText.includes('model_not_found')) {
+        getLogger().error(
+          `Cerebras: model "${this.model}" not available on your tier. ` +
+            `Override via \`new CerebrasLLM({ model: '<id>' })\` and list ` +
+            `tier-available ids with \`GET ${this.baseUrl}/models\` ` +
+            `(common: llama3.1-8b, qwen-3-235b-a22b-instruct-2507, llama-3.3-70b on paid). ` +
+            `Raw response: ${errText}`,
+        );
+      } else {
+        getLogger().error(`Cerebras API error: ${response.status} ${errText}`);
+      }
       return;
     }
 
