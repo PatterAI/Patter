@@ -249,6 +249,20 @@ class Patter:
         """Public read-only access to the API key (backward compatibility)."""
         return getattr(self, "_api_key", "")
 
+    @property
+    def metrics_store(self):
+        """Live ``MetricsStore`` for the embedded server (local mode only).
+
+        Returns ``None`` before ``serve()`` is called or when running in cloud
+        mode. Exposed so integrations like ``PatterTool`` can subscribe to
+        per-call lifecycle events (``call_initiated``, ``call_start``,
+        ``call_end``).
+        """
+        server = getattr(self, "_server", None)
+        if server is None:
+            return None
+        return getattr(server, "_metrics_store", None)
+
     async def connect(
         self,
         on_message: Callable[[IncomingMessage], Awaitable[str]],

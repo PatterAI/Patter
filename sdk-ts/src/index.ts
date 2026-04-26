@@ -74,6 +74,12 @@ export type {
 export { FallbackLLMProvider, AllProvidersFailedError, PartialStreamError } from "./fallback-provider";
 export type { FallbackLLMProviderOptions } from "./fallback-provider";
 export { RemoteMessageHandler, isRemoteUrl, isWebSocketUrl } from "./remote-message";
+export {
+  PatterTool,
+  type PatterToolOptions,
+  type PatterToolExecuteArgs,
+  type PatterToolResult,
+} from "./integrations";
 export { TestSession } from "./test-mode";
 export { ElevenLabsConvAIAdapter } from "./providers/elevenlabs-convai";
 export { OpenAIRealtimeAdapter } from "./providers/openai-realtime";

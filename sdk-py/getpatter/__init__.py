@@ -131,6 +131,9 @@ def mix_pcm(agent: bytes, bg: bytes, ratio: float) -> bytes:
     from getpatter.services.pcm_mixer import mix_pcm as _mix_pcm
     return _mix_pcm(agent, bg, ratio)
 
+# Integrations adapter for external agent frameworks (Hermes, OpenAI, etc.).
+from getpatter.integrations import PatterTool, PatterToolResult  # noqa: E402
+
 __all__ = [
     "Patter",
     "Agent",
@@ -206,4 +209,6 @@ __all__ = [
     "schedule_once",
     "schedule_interval",
     "mix_pcm",
+    "PatterTool",
+    "PatterToolResult",
 ]
