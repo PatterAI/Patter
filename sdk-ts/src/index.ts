@@ -36,8 +36,23 @@ export {
   PatterConnectionError,
   AuthenticationError,
   ProvisionError,
+  RateLimitError,
 } from "./errors";
-export { deepgram, whisper, elevenlabs, openaiTts } from "./providers";
+export {
+  deepgram,
+  whisper,
+  elevenlabs,
+  openaiTts,
+  soniox,
+  speechmatics,
+  assemblyai,
+  cartesia,
+  rime,
+  lmnt,
+  ultravox,
+  geminiLive,
+} from "./providers";
+export type { RealtimeConfig } from "./providers";
 export { DEFAULT_PRICING, mergePricing, calculateSttCost, calculateTtsCost, calculateRealtimeCost, calculateTelephonyCost } from "./pricing";
 export type { ProviderPricing } from "./pricing";
 export { CallMetricsAccumulator } from "./metrics";
@@ -49,8 +64,13 @@ export { makeAuthMiddleware } from "./dashboard/auth";
 export { callsToCsv, callsToJson } from "./dashboard/export";
 export { mountDashboard, mountApi } from "./dashboard/routes";
 export { notifyDashboard } from "./dashboard/persistence";
-export { LLMLoop, OpenAILLMProvider } from "./llm-loop";
-export type { LLMProvider, LLMChunk } from "./llm-loop";
+export { LLMLoop, OpenAILLMProvider, DefaultToolExecutor } from "./llm-loop";
+export type {
+  LLMProvider,
+  LLMChunk,
+  ToolExecutor,
+  DefaultToolExecutorOptions,
+} from "./llm-loop";
 export { FallbackLLMProvider, AllProvidersFailedError, PartialStreamError } from "./fallback-provider";
 export type { FallbackLLMProviderOptions } from "./fallback-provider";
 export { RemoteMessageHandler, isRemoteUrl, isWebSocketUrl } from "./remote-message";
@@ -106,6 +126,10 @@ export type { CerebrasLLMOptions } from "./llm/cerebras";
 export { LLM as GoogleLLM } from "./llm/google";
 export type { GoogleLLMOptions } from "./llm/google";
 
+// Voice Activity Detection (server-side) — Silero ONNX.
+export { SileroVAD } from "./providers/silero-vad";
+export type { SileroVADOptions, SileroSampleRate } from "./providers/silero-vad";
+
 // Telephony carriers.
 export { Carrier as Twilio } from "./carriers/twilio";
 export type { TwilioCarrierOptions } from "./carriers/twilio";
@@ -130,7 +154,13 @@ export {
   resample8kTo16k,
   resample16kTo8k,
   resample24kTo16k,
+  StatefulResampler,
+  PcmCarry,
+  createResampler16kTo8k,
+  createResampler8kTo16k,
+  createResampler24kTo16k,
 } from "./transcoding";
+export type { StatefulResamplerOptions } from "./transcoding";
 export { startTunnel } from "./tunnel";
 export type { TunnelHandle } from "./tunnel";
 export { ChatContext } from "./chat-context";
@@ -166,3 +196,40 @@ export type {
   FilePcmSource,
   RawPcmSource,
 } from "./services/background-audio";
+
+// Telephony adapters — direct REST clients mirroring the Python adapters.
+export { TwilioAdapter } from "./providers/twilio-adapter";
+export type {
+  TwilioAdapterOptions,
+  ProvisionNumberOptions as TwilioProvisionNumberOptions,
+  ProvisionNumberResult as TwilioProvisionNumberResult,
+  ConfigureNumberOptions as TwilioConfigureNumberOptions,
+  InitiateCallOptions as TwilioInitiateCallOptions,
+  InitiateCallResult as TwilioInitiateCallResult,
+} from "./providers/twilio-adapter";
+export { TelnyxAdapter } from "./providers/telnyx-adapter";
+export type {
+  ProvisionNumberOptions as TelnyxProvisionNumberOptions,
+  ProvisionNumberResult as TelnyxProvisionNumberResult,
+  ConfigureNumberOptions as TelnyxConfigureNumberOptions,
+  InitiateCallOptions as TelnyxInitiateCallOptions,
+  InitiateCallResult as TelnyxInitiateCallResult,
+  EndCallOptions as TelnyxEndCallOptions,
+} from "./providers/telnyx-adapter";
+
+// Observability — OTel-compatible tracing (optional peer dep).
+export {
+  initTracing,
+  startSpan,
+  isTracingEnabled,
+  SPAN_CALL,
+  SPAN_STT,
+  SPAN_LLM,
+  SPAN_TTS,
+  SPAN_TOOL,
+} from "./observability";
+export type {
+  Span,
+  InitTracingOptions,
+  CallEvent,
+} from "./observability";
