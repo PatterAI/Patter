@@ -70,15 +70,19 @@
     "ws": "^8.18.0"
   },
   "optionalDependencies": {
-    "node-cron": "^3.0.3"
-  },
-  "peerDependencies": {
-    "@google/genai": "^0.3.0",
+    "node-cron": "^3.0.3",
     "onnxruntime-node": "^1.18.0"
   },
+  "peerDependencies": {
+    "@google/genai": "^0.3.0"
+  },
   "peerDependenciesMeta": {
-    "@google/genai": { "optional": true },
-    "onnxruntime-node": { "optional": true }
+    "@google/genai": {
+      "optional": true
+    },
+    "onnxruntime-node": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",
