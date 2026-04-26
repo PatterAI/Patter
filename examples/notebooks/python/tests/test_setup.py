@@ -192,3 +192,41 @@ async def test_run_tts_concatenates_chunks():
 
     audio = await _setup.run_tts(FakeTTS(), "hi")
     assert audio == b"\x01\x02\x03\x04"
+
+
+def test_hangup_leftover_calls_iterates_active_twilio(monkeypatch, tmp_path):
+    import _setup
+
+    monkeypatch.setenv("TWILIO_ACCOUNT_SID", "ACtest00000000000000000000000000")
+    monkeypatch.setenv("TWILIO_AUTH_TOKEN", "x")
+    monkeypatch.setenv("TWILIO_PHONE_NUMBER", "+15555550100")
+    env = _setup.load(env_file=tmp_path / "missing.env")
+
+    hung_up: list = []
+
+    class _CallProxy:
+        def __init__(self, sid):
+            self.sid = sid
+
+        def update(self, status):
+            hung_up.append((self.sid, status))
+
+    class _Calls:
+        def list(self, **kw):
+            return [type("c", (), {"sid": "CAtest1"})()]
+
+        def __call__(self, sid):
+            return _CallProxy(sid)
+
+    class _Client:
+        def __init__(self, *_a, **_kw):
+            pass
+
+        @property
+        def calls(self):
+            return _Calls()
+
+    monkeypatch.setattr(_setup, "_TwilioClient", _Client, raising=False)
+
+    _setup.hangup_leftover_calls(env)
+    assert hung_up == [("CAtest1", "completed")]

@@ -227,6 +227,35 @@ async def run_tts(tts, text: str) -> bytes:
     return b"".join(chunks)
 
 
+try:
+    from twilio.rest import Client as _TwilioClient  # type: ignore[assignment]
+except ImportError:
+    _TwilioClient = None  # type: ignore[misc,assignment]
+
+
+def hangup_leftover_calls(env: NotebookEnv) -> None:
+    """Best-effort sweep — hang up any in-progress calls from the test numbers.
+
+    Use in a ``finally:`` after a live cell to keep stale calls from blocking
+    the next run. Failures are logged, never raised.
+    """
+    if not (env.twilio_sid and env.twilio_token and env.twilio_number):
+        return
+    if _TwilioClient is None:
+        print("⚪ twilio package not installed — skipping hangup sweep")
+        return
+    client = _TwilioClient(env.twilio_sid, env.twilio_token)
+    try:
+        for call in client.calls.list(from_=env.twilio_number, status="in-progress", limit=5):
+            try:
+                client.calls(call.sid).update(status="completed")
+                print(f"🔚 hung up stale call {call.sid}")
+            except Exception as exc:  # noqa: BLE001
+                print(f"⚠ could not hang up {call.sid}: {exc}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"⚠ Twilio sweep failed: {exc}")
+
+
 def load(env_file: Path | str | None = None) -> NotebookEnv:
     """Load .env if present, then construct NotebookEnv from process env."""
     if env_file is None:
