@@ -17,6 +17,7 @@ import type {
   ServeOptions,
 } from "./types";
 import { EmbeddedServer } from "./server";
+import type { MetricsStore } from "./dashboard/store";
 import { Carrier as TwilioCarrier } from "./carriers/twilio";
 import { Carrier as TelnyxCarrier } from "./carriers/telnyx";
 import { Realtime as OpenAIRealtime } from "./engines/openai";
@@ -65,6 +66,16 @@ export class Patter {
   private localConfig: ResolvedLocalConfig | null;
   private embeddedServer: EmbeddedServer | null = null;
   private tunnelHandle: TunnelHandle | null = null;
+
+  /**
+   * Live `MetricsStore` for the embedded server (local mode only). Returns
+   * `null` before `serve()` is called or when running in cloud mode.
+   * Exposed so integrations like `PatterTool` can subscribe to per-call
+   * lifecycle events (`call_initiated`, `call_start`, `call_end`).
+   */
+  get metricsStore(): MetricsStore | null {
+    return this.embeddedServer?.metricsStore ?? null;
+  }
 
   constructor(options: PatterOptions | LocalOptions) {
     // Local mode is selected when a ``carrier`` instance is present or the
