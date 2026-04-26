@@ -63,15 +63,17 @@ describe('WhisperSTT', () => {
     expect(true).toBe(true);
   });
 
-  it('onTranscript limits callbacks to 10', () => {
+  it('onTranscript accepts unlimited callbacks (Set-backed registry)', () => {
     const stt = new WhisperSTT('sk-test');
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-    for (let i = 0; i < 11; i++) {
+    // The previous 10-callback cap was dropped in favour of a Set; verify
+    // that registering many callbacks no longer warns.
+    for (let i = 0; i < 25; i++) {
       stt.onTranscript(vi.fn());
     }
 
-    expect(warnSpy).toHaveBeenCalledWith(
+    expect(warnSpy).not.toHaveBeenCalledWith(
       expect.stringContaining('maximum of 10 onTranscript callbacks'),
     );
     warnSpy.mockRestore();

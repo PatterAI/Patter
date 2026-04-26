@@ -12,8 +12,11 @@ const server = new EmbeddedServer(
   {
     phoneNumber: "+15551234567",
     twilioSid: "ACtest123456789",
-    twilioToken: "",          // empty → signature validation skipped
+    twilioToken: "",          // empty token paired with requireSignature:false below
     webhookUrl: "example.com",
+    // E2E tests post unsigned mock webhooks; opt out of the production-default
+    // signature enforcement so they reach the handlers instead of getting 503.
+    requireSignature: false,
   },
   {
     systemPrompt: "You are a test agent for E2E testing.",

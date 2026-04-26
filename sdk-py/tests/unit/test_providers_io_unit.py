@@ -306,7 +306,11 @@ class TestOpenAIRealtimeAdapterIO:
         events = []
         async for event in adapter.receive_events():
             events.append(event)
-        assert len(events) == 0
+        # The adapter now surfaces error events to the consumer (instead of
+        # silently dropping them) so callers can route them to fallback /
+        # observability. Expect a single ("error", payload) tuple.
+        assert len(events) == 1
+        assert events[0][0] == "error"
 
     @pytest.mark.asyncio
     async def test_receive_events_handles_connection_closed(self) -> None:

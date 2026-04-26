@@ -88,8 +88,13 @@ from getpatter.llm.google import LLM as GoogleLLM
 from getpatter.providers.twilio_adapter import TwilioAdapter
 from getpatter.providers.telnyx_adapter import TelnyxAdapter
 
-# VAD — opt-in (loads ONNX model on first use; needs the ``silero`` extra).
-from getpatter.providers.silero_vad import SileroVAD
+# VAD — opt-in (needs the ``silero`` extra: numpy + onnxruntime). Loaded
+# lazily so importing ``getpatter`` doesn't require those native deps.
+def __getattr__(name):
+    if name == "SileroVAD":
+        from getpatter.providers.silero_vad import SileroVAD as _SileroVAD
+        return _SileroVAD
+    raise AttributeError(f"module 'getpatter' has no attribute {name!r}")
 
 # Observability — opt-in OTel tracing.
 from getpatter.observability import (
