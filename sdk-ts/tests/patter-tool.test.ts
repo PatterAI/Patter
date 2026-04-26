@@ -173,9 +173,14 @@ describe('PatterTool — execute()', () => {
 
     vi.useFakeTimers();
     const promise = tool.execute({ to: '+15551234567', max_duration_sec: 5 });
-    // Advance past the timeout
+    // Attach the rejection handler synchronously, BEFORE advancing the fake
+    // timers. Otherwise vitest flags the rejection as "unhandled" because the
+    // rejection lands on the microtask queue before `expect().rejects` does.
+    const captured = promise.catch((err) => err);
     await vi.advanceTimersByTimeAsync(6000);
-    await expect(promise).rejects.toThrow(/timeout/);
+    const err = await captured;
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/timeout/);
     vi.useRealTimers();
   });
 });
