@@ -34,13 +34,49 @@
 // limitations under the License.
 
 import { createRequire } from 'node:module';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { VADEvent, VADProvider } from '../types';
 
 const SUPPORTED_SAMPLE_RATES = [8000, 16000] as const;
 export type SileroSampleRate = (typeof SUPPORTED_SAMPLE_RATES)[number];
 
-const DEFAULT_MODEL_PATH = path.join(__dirname, '..', 'resources', 'silero_vad.onnx');
+// Resolve __dirname in a way that works for both the CJS (dist/index.js)
+// and the ESM (dist/index.mjs) bundles tsup emits. Top-level ``__dirname``
+// is undefined in ESM, and ``import.meta`` is undefined in CJS — pick one.
+function resolveModuleDir(): string {
+  // CJS path: __dirname is a per-module binding, not a global. Detect via
+  // typeof inside a function that is only evaluated at runtime; bundlers
+  // preserve the reference in CJS output.
+  try {
+    // eslint-disable-next-line no-new-func
+    const cjsDir = new Function("return typeof __dirname !== 'undefined' ? __dirname : null")();
+    if (typeof cjsDir === 'string') return cjsDir;
+  } catch { /* fall through */ }
+  // ESM path
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const url = (import.meta as { url?: string }).url;
+    if (url) return path.dirname(fileURLToPath(url));
+  } catch { /* fall through */ }
+  return process.cwd();
+}
+
+const MODULE_DIR = resolveModuleDir();
+function resolveDefaultModelPath(): string {
+  // tsup ships resources/ alongside the bundled dist/index.{js,mjs}, so the
+  // ONNX model lives at MODULE_DIR/resources/silero_vad.onnx in published
+  // builds. When developing from source (src/providers/...), the model
+  // lives one level up in src/resources/ instead. Try both.
+  const candidates = [
+    path.join(MODULE_DIR, 'resources', 'silero_vad.onnx'),
+    path.join(MODULE_DIR, '..', 'resources', 'silero_vad.onnx'),
+  ];
+  for (const c of candidates) if (fs.existsSync(c)) return c;
+  return candidates[0];
+}
+const DEFAULT_MODEL_PATH = resolveDefaultModelPath();
 
 export interface SileroVADOptions {
   minSpeechDuration?: number;
@@ -82,20 +118,33 @@ export interface OnnxRuntime {
   ) => OnnxTensor;
 }
 
-function loadOnnxRuntime(): OnnxRuntime {
+async function loadOnnxRuntime(): Promise<OnnxRuntime> {
+  let firstErr: unknown;
+  // 1. Plain dynamic import — works when onnxruntime-node is hoisted to a
+  //    node_modules folder Node's resolver can find from the running script.
   try {
-    // Use createRequire so bundlers don't try to resolve onnxruntime-node at build time.
-    const req = createRequire(__filename);
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    // @ts-ignore -- onnxruntime-node is an optional peer dep; types may be absent
+    const mod = await import('onnxruntime-node');
+    return mod as unknown as OnnxRuntime;
+  } catch (e) {
+    firstErr = e;
+  }
+  // 2. Fallback: createRequire from the user's cwd. Catches the case where
+  //    onnxruntime-node is installed in the project root but the SDK lives
+  //    elsewhere (e.g. file: linked workspaces).
+  try {
+    const req = createRequire(path.join(process.cwd(), 'package.json'));
     return req('onnxruntime-node') as OnnxRuntime;
-  } catch {
+  } catch (e) {
+    const detail = (e as Error)?.message ?? String(e);
+    const original = (firstErr as Error)?.message ?? String(firstErr);
     throw new Error(
-      '\nSileroVAD requires the "onnxruntime-node" package, which is not installed.\n\n' +
+      '\nSileroVAD requires the "onnxruntime-node" package, which could not be resolved.\n\n' +
         '  Install:  npm install onnxruntime-node\n\n' +
         'This is an optional peer dependency of getpatter (~210 MB) — it is only\n' +
-        'needed when you use SileroVAD in pipeline mode. If you do not need VAD\n' +
-        '(e.g. you use OpenAI Realtime or ElevenLabs ConvAI), remove SileroVAD\n' +
-        'from your agent configuration.\n',
+        'needed when you use SileroVAD in pipeline mode.\n\n' +
+        `  import() failed: ${original}\n` +
+        `  cwd-require failed: ${detail}\n`,
     );
   }
 }
@@ -231,7 +280,7 @@ export class SileroVAD implements VADProvider {
       throw new Error('deactivationThreshold must be greater than 0');
     }
 
-    const runtime = loadOnnxRuntime();
+    const runtime = await loadOnnxRuntime();
     const modelPath = options.onnxFilePath ?? DEFAULT_MODEL_PATH;
     const session = await runtime.InferenceSession.create(modelPath, {
       interOpNumThreads: 1,
@@ -267,6 +316,25 @@ export class SileroVAD implements VADProvider {
   get sampleRate(): SileroSampleRate {
     return this.opts.sampleRate;
   }
+
+  /**
+   * Number of int16 PCM samples that must be provided per call to
+   * processFrame for the model to run one inference window.
+   *
+   * Constraint (ported from LiveKit Agents / Silero ONNX spec):
+   *   - 16 000 Hz → 512 samples (32 ms)
+   *   -  8 000 Hz → 256 samples (32 ms)
+   *
+   * Callers that feed raw audio in fixed-size chunks (e.g. WebSocket frames)
+   * should buffer incoming audio until at least numFramesRequired() int16
+   * samples are available before calling processFrame.  The provider
+   * internally buffers partial windows so smaller chunks are also safe, but
+   * passing exactly one window per call minimises heap allocation.
+   */
+  numFramesRequired(): number {
+    return this.opts.sampleRate === 8000 ? 256 : 512;
+  }
+
 
   async processFrame(pcmChunk: Buffer, sampleRate: number): Promise<VADEvent | null> {
     if (this.closed) {
@@ -309,8 +377,8 @@ export class SileroVAD implements VADProvider {
 
       const windowDuration = windowSize / this.opts.sampleRate;
       const transition = this.advanceState(p, windowDuration);
-      if (transition !== null && event === null) {
-        event = transition;
+      if (transition !== null) {
+        event = transition;  // overwrite — last event wins
       }
     }
 
