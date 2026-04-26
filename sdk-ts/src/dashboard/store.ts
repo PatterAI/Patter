@@ -353,7 +353,16 @@ export class MetricsStore extends EventEmitter {
           const meta = JSON.parse(raw) as Record<string, unknown>;
           const callId = (meta.call_id as string) || entry.name;
           if (!callId || seen.has(callId)) continue;
-          collected.push(metadataToCallRecord(callId, meta));
+          const record = metadataToCallRecord(callId, meta);
+          if (record === null) {
+            // Unparseable started_at → skip rather than insert as epoch 0
+            // (which would corrupt sort order forever).
+            getLogger().debug(
+              `MetricsStore.hydrate: skipping ${metadataPath}: unparseable started_at`,
+            );
+            continue;
+          }
+          collected.push(record);
           seen.add(callId);
         } catch (err) {
           getLogger().debug(
@@ -368,7 +377,12 @@ export class MetricsStore extends EventEmitter {
     // Stable order: oldest first (matches the order recordCallEnd would use).
     collected.sort((a, b) => (a.started_at || 0) - (b.started_at || 0));
 
+    // Re-check seen against this.calls before each insert. Defends against the
+    // (rare) case where hydrate() is invoked concurrently with itself or with
+    // live recordCallEnd() traffic — without this guard, the snapshot taken
+    // at the top of hydrate() can be stale by the time we reach the writes.
     for (const rec of collected) {
+      if (this.calls.some((c) => c.call_id === rec.call_id)) continue;
       this.calls.push(rec);
       if (this.calls.length > this.maxCalls) {
         this.calls = this.calls.slice(-this.maxCalls);
@@ -378,22 +392,19 @@ export class MetricsStore extends EventEmitter {
   }
 }
 
-/** Translate a CallLogger ``metadata.json`` payload into a ``CallRecord``. */
-function metadataToCallRecord(callId: string, meta: Record<string, unknown>): CallRecord {
-  const startedAtRaw = meta.started_at;
-  const endedAtRaw = meta.ended_at;
-  const startedAt =
-    typeof startedAtRaw === 'number'
-      ? startedAtRaw
-      : typeof startedAtRaw === 'string'
-        ? Date.parse(startedAtRaw) / 1000
-        : 0;
-  const endedAt =
-    typeof endedAtRaw === 'number'
-      ? endedAtRaw
-      : typeof endedAtRaw === 'string'
-        ? Date.parse(endedAtRaw) / 1000
-        : undefined;
+/**
+ * Translate a CallLogger ``metadata.json`` payload into a ``CallRecord``.
+ * Returns ``null`` when ``started_at`` is missing or unparseable — the record
+ * would otherwise be silently inserted with ``started_at = 0`` (Unix epoch),
+ * which corrupts every sort/range query that depends on it.
+ */
+function metadataToCallRecord(
+  callId: string,
+  meta: Record<string, unknown>,
+): CallRecord | null {
+  const startedAt = parseTimestamp(meta.started_at);
+  if (startedAt === null) return null;
+  const endedAt = parseTimestamp(meta.ended_at);
   const status = (meta.status as string | undefined) || 'completed';
   const metrics =
     meta.metrics && typeof meta.metrics === 'object'
@@ -407,10 +418,27 @@ function metadataToCallRecord(callId: string, meta: Record<string, unknown>): Ca
     caller: (meta.caller as string) || '',
     callee: (meta.callee as string) || '',
     direction: (meta.direction as string) || 'inbound',
-    started_at: Number.isFinite(startedAt) ? startedAt : 0,
-    ended_at: endedAt !== undefined && Number.isFinite(endedAt) ? endedAt : undefined,
+    started_at: startedAt,
+    ended_at: endedAt ?? undefined,
     status,
     metrics,
     transcript,
   };
+}
+
+/**
+ * Parse a metadata timestamp into Unix seconds. Accepts numbers (seconds)
+ * and ISO-8601 strings; returns ``null`` for missing, unrecognized, or
+ * unparseable values so callers can decide to skip the record rather than
+ * silently insert it as epoch 0.
+ */
+function parseTimestamp(raw: unknown): number | null {
+  if (typeof raw === 'number') {
+    return Number.isFinite(raw) ? raw : null;
+  }
+  if (typeof raw === 'string') {
+    const ms = Date.parse(raw);
+    return Number.isFinite(ms) ? ms / 1000 : null;
+  }
+  return null;
 }

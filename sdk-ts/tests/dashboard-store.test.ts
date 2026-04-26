@@ -272,4 +272,58 @@ describe('MetricsStore.hydrate', () => {
       fs.rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it('skips records with unparseable started_at (no silent epoch-0 insert)', () => {
+    const root = fs.mkdtempSync(`${os.tmpdir()}/patter-store-test-`);
+    try {
+      buildFixture(root, [{ id: 'CA-good', iso: '2026-04-26T15:00:00.000Z' }]);
+      const badDir = `${root}/calls/2026/04/26/CA-bad`;
+      fs.mkdirSync(badDir, { recursive: true });
+      fs.writeFileSync(
+        `${badDir}/metadata.json`,
+        JSON.stringify({
+          call_id: 'CA-bad',
+          caller: '+1',
+          callee: '+2',
+          started_at: 'not-a-date',
+        }),
+      );
+
+      const store = new MetricsStore();
+      expect(store.hydrate(root)).toBe(1);
+      const list = store.getCalls();
+      expect(list).toHaveLength(1);
+      expect(list[0].call_id).toBe('CA-good');
+      expect(list.find((c) => c.call_id === 'CA-bad')).toBeUndefined();
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts numeric (Unix-seconds) timestamps in metadata', () => {
+    const root = fs.mkdtempSync(`${os.tmpdir()}/patter-store-test-`);
+    try {
+      const callDir = `${root}/calls/2026/04/26/CA-numeric`;
+      fs.mkdirSync(callDir, { recursive: true });
+      fs.writeFileSync(
+        `${callDir}/metadata.json`,
+        JSON.stringify({
+          call_id: 'CA-numeric',
+          caller: '+1',
+          callee: '+2',
+          started_at: 1745683200,
+          ended_at: 1745683230,
+          status: 'completed',
+        }),
+      );
+
+      const store = new MetricsStore();
+      expect(store.hydrate(root)).toBe(1);
+      const list = store.getCalls();
+      expect(list[0].started_at).toBe(1745683200);
+      expect(list[0].ended_at).toBe(1745683230);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

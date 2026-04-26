@@ -111,7 +111,60 @@ def test_skips_non_numeric_directory_layers(tmp_path: Path, invalid_name: str) -
     _build_fixture(
         tmp_path, [{"id": "CA-only", "iso": "2026-04-26T15:00:00.000Z"}]
     )
-    # Add a noise dir at the year level
     (tmp_path / "calls" / invalid_name).mkdir(parents=True, exist_ok=True)
     store = MetricsStore()
     assert store.hydrate(str(tmp_path)) == 1
+
+
+def test_skips_records_with_unparseable_started_at(tmp_path: Path) -> None:
+    """A malformed ``started_at`` must NOT land in the store as epoch 0,
+    which would corrupt every sort/range query that depends on it."""
+    _build_fixture(
+        tmp_path, [{"id": "CA-good", "iso": "2026-04-26T15:00:00.000Z"}]
+    )
+    bad_dir = tmp_path / "calls" / "2026" / "04" / "26" / "CA-bad"
+    bad_dir.mkdir(parents=True, exist_ok=True)
+    (bad_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "call_id": "CA-bad",
+                "caller": "+1",
+                "callee": "+2",
+                "started_at": "not-a-date",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    store = MetricsStore()
+    assert store.hydrate(str(tmp_path)) == 1
+    listed = store.get_calls()
+    assert len(listed) == 1
+    assert listed[0]["call_id"] == "CA-good"
+    assert all(c["call_id"] != "CA-bad" for c in listed)
+
+
+def test_accepts_numeric_unix_seconds_timestamps(tmp_path: Path) -> None:
+    """Documented dual-format requirement: numeric (Unix-seconds) timestamps
+    must hydrate correctly alongside ISO strings."""
+    call_dir = tmp_path / "calls" / "2026" / "04" / "26" / "CA-numeric"
+    call_dir.mkdir(parents=True, exist_ok=True)
+    (call_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "call_id": "CA-numeric",
+                "caller": "+1",
+                "callee": "+2",
+                "started_at": 1745683200,
+                "ended_at": 1745683230,
+                "status": "completed",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    store = MetricsStore()
+    assert store.hydrate(str(tmp_path)) == 1
+    listed = store.get_calls()
+    assert listed[0]["started_at"] == 1745683200.0
+    assert listed[0]["ended_at"] == 1745683230.0

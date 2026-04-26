@@ -390,7 +390,6 @@ class MetricsStore:
         """
         import json
         import logging
-        import os
         from pathlib import Path
 
         if not log_root:
@@ -427,17 +426,33 @@ class MetricsStore:
                         if not call_id or call_id in seen:
                             continue
                         record = _metadata_to_call_record(call_id, meta)
+                        if record is None:
+                            # Unparseable started_at → skip rather than insert
+                            # as epoch 0 (which would corrupt sort order).
+                            log.debug(
+                                "MetricsStore.hydrate: skipping %s: "
+                                "unparseable started_at",
+                                meta_path,
+                            )
+                            continue
                         collected.append(record)
                         seen.add(call_id)
 
         # Stable order: oldest first (matches recordCallEnd's append order).
         collected.sort(key=lambda r: r.get("started_at") or 0)
 
-        # Suppress unused import warning if Path is only used above.
-        _ = os, json
+        # Re-check call_id presence under the lock before each insert.
+        # Defends against the rare case where hydrate() is invoked
+        # concurrently with itself or with live recordCallEnd traffic.
         with self._lock:
+            existing_ids = {
+                c.get("call_id") for c in self._calls if c.get("call_id")
+            }
             for rec in collected:
+                if rec["call_id"] in existing_ids:
+                    continue
                 self._calls.append(rec)
+                existing_ids.add(rec["call_id"])
                 if len(self._calls) > self._max_calls:
                     self._calls = self._calls[-self._max_calls :]
         return len(collected)
@@ -454,8 +469,15 @@ def _numeric_subdirs(parent):
             yield entry
 
 
-def _metadata_to_call_record(call_id: str, meta: dict[str, Any]) -> dict[str, Any]:
-    """Translate a CallLogger metadata.json payload into a CallRecord dict."""
+def _metadata_to_call_record(
+    call_id: str, meta: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Translate a CallLogger metadata.json payload into a CallRecord dict.
+
+    Returns ``None`` when ``started_at`` is missing or unparseable — the
+    record would otherwise be silently inserted with ``started_at = 0``
+    (Unix epoch), which corrupts every sort/range query that depends on it.
+    """
     from datetime import datetime
 
     def _to_seconds(raw: Any) -> float | None:
@@ -468,7 +490,9 @@ def _metadata_to_call_record(call_id: str, meta: dict[str, Any]) -> dict[str, An
                 return None
         return None
 
-    started = _to_seconds(meta.get("started_at")) or 0.0
+    started = _to_seconds(meta.get("started_at"))
+    if started is None:
+        return None
     ended = _to_seconds(meta.get("ended_at"))
     metrics = meta.get("metrics") if isinstance(meta.get("metrics"), dict) else None
     transcript = meta.get("transcript") if isinstance(meta.get("transcript"), list) else []
