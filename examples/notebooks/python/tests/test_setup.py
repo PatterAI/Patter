@@ -50,7 +50,8 @@ def test_load_reads_dotenv(tmp_path, monkeypatch):
 
 
 def test_load_returns_empty_strings_for_missing(tmp_path, monkeypatch):
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    for k in ("OPENAI_API_KEY", "ENABLE_LIVE_CALLS", "NOTEBOOK_MAX_COST_USD"):
+        monkeypatch.delenv(k, raising=False)
     import _setup
     env = _setup.load(env_file=tmp_path / "nonexistent.env")
     assert env.openai_key == ""
