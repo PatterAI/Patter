@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import AsyncIterator, Literal
+from dataclasses import dataclass, field
+from typing import Any, AsyncIterator, Literal
 
 
 # === STT ===
@@ -14,6 +14,24 @@ class Transcript:
     text: str
     is_final: bool
     confidence: float = 0.0
+    # Deepgram (and other providers) emit a faster end-of-utterance hint via
+    # ``speech_final``. Kept separate from ``is_final`` so callers can gate
+    # turn-ending on either signal independently.
+    speech_final: bool = False
+    # Set by Deepgram on the Results frame produced in response to a
+    # ``Finalize`` control message (used by :meth:`close` to flush trailing
+    # partials before tearing down the socket).
+    from_finalize: bool = False
+    # Provider-side request id (e.g. Deepgram's ``request_id``) — useful for
+    # post-call cost reconciliation and tracing.
+    request_id: str | None = None
+    # Per-word timings/metadata when the provider emits them. Shape is
+    # provider-specific; callers that consume it should introspect carefully.
+    words: list[dict[str, Any]] = field(default_factory=list)
+    # Type of event from the provider. ``Results`` is the default transcript
+    # frame; ``UtteranceEnd`` and ``SpeechStarted`` are VAD events emitted
+    # by Deepgram when ``vad_events=true``.
+    event_type: Literal["Results", "UtteranceEnd", "SpeechStarted"] = "Results"
 
 
 class STTProvider(ABC):

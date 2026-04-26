@@ -27,6 +27,7 @@ export interface AnthropicLLMOptions {
  * ```
  */
 export class LLM extends _AnthropicLLM {
+  static readonly providerKey = "anthropic";
   constructor(opts: AnthropicLLMOptions = {}) {
     const key = opts.apiKey ?? process.env.ANTHROPIC_API_KEY;
     if (!key) {

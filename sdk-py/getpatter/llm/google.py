@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from typing import ClassVar
 
 from getpatter.providers.google_llm import GoogleLLMProvider as _GoogleLLM
 
@@ -19,6 +20,8 @@ class LLM(_GoogleLLM):
         llm = google.LLM()                            # reads GEMINI_API_KEY or GOOGLE_API_KEY
         llm = google.LLM(api_key="AIza...", model="gemini-2.5-flash")
     """
+
+    provider_key: ClassVar[str] = "google"
 
     def __init__(
         self,

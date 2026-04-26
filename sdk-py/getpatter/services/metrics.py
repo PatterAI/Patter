@@ -5,6 +5,7 @@ from __future__ import annotations
 __all__ = ["CallMetricsAccumulator"]
 
 import time
+from typing import TYPE_CHECKING
 
 from getpatter.models import (
     CallMetrics,
@@ -13,6 +14,7 @@ from getpatter.models import (
     TurnMetrics,
 )
 from getpatter.pricing import (
+    calculate_llm_cost,
     calculate_realtime_cached_savings,
     calculate_realtime_cost,
     calculate_stt_cost,
@@ -21,12 +23,19 @@ from getpatter.pricing import (
     merge_pricing,
 )
 
+if TYPE_CHECKING:
+    from getpatter.observability.event_bus import EventBus
+
 
 class CallMetricsAccumulator:
     """Mutable accumulator for per-call cost and latency metrics.
 
     Created at call start, collects data during the call, and produces
     a frozen ``CallMetrics`` via ``end_call()``.
+
+    An optional :class:`~getpatter.observability.event_bus.EventBus` can be
+    attached via :meth:`attach_event_bus`; it receives typed metric events in
+    addition to the existing callback-based ``on_metrics`` path.
     """
 
     def __init__(
@@ -38,6 +47,7 @@ class CallMetricsAccumulator:
         tts_provider: str = "",
         llm_provider: str = "",
         pricing: dict | None = None,
+        report_only_initial_ttfb: bool = False,
     ) -> None:
         self.call_id = call_id
         self.provider_mode = provider_mode
@@ -46,6 +56,7 @@ class CallMetricsAccumulator:
         self.tts_provider = tts_provider
         self.llm_provider = llm_provider
         self._pricing = merge_pricing(pricing)
+        self._report_only_initial_ttfb = report_only_initial_ttfb
 
         self._call_start = time.monotonic()
         self._turns: list[TurnMetrics] = []
@@ -53,10 +64,14 @@ class CallMetricsAccumulator:
         # --- Per-turn timing state ---
         self._turn_start: float | None = None
         self._stt_complete: float | None = None
+        self._llm_first_token: float | None = None   # Fix 5: LLM TTFT start
+        self._llm_first_sentence: float | None = None  # Fix 3: first sentence boundary
         self._llm_complete: float | None = None
         self._tts_first_byte: float | None = None
         self._turn_user_text: str = ""
         self._turn_stt_audio_seconds: float = 0.0
+        # Cross-turn TTFT storage so _emit_turn_metrics can read it after reset
+        self._last_turn_llm_ttft_ms: float = 0.0
 
         # --- Cumulative usage counters ---
         self._total_stt_audio_seconds: float = 0.0
@@ -70,6 +85,42 @@ class CallMetricsAccumulator:
         # Actual provider costs (from post-call API queries)
         self._actual_telephony_cost: float | None = None
         self._actual_stt_cost: float | None = None
+        # LLM token usage accumulated across all turns (pipeline mode)
+        self._llm_total_input_tokens: int = 0
+        self._llm_total_output_tokens: int = 0
+        self._llm_total_cache_read_tokens: int = 0
+        self._llm_total_cache_write_tokens: int = 0
+        self._llm_provider_name: str = llm_provider
+        self._llm_model: str = ""
+
+        # --- EventBus integration (additive; does not replace callbacks) ---
+        self._event_bus: EventBus | None = None
+
+        # --- report_only_initial_ttfb guard flags ---
+        self._llm_ttfb_emitted: bool = False
+        self._tts_ttfb_emitted: bool = False
+
+        # --- EOUMetrics timestamps (LiveKit Pattern A) ---
+        self._vad_stopped_at: float | None = None
+        self._stt_final_at: float | None = None
+        self._turn_committed_at: float | None = None
+        self._on_user_turn_completed_delay_ms: float | None = None
+
+        # --- InterruptionMetrics counters (LiveKit Pattern B) ---
+        self._num_interruptions: int = 0
+        self._num_backchannels: int = 0
+        self._overlap_started_at: float | None = None
+
+    # ---- EventBus attachment ----
+
+    def attach_event_bus(self, bus: "EventBus") -> None:
+        """Attach an :class:`~getpatter.observability.event_bus.EventBus`.
+
+        The bus receives structured metric events in addition to any existing
+        callback-based ``on_metrics`` path. Safe to call multiple times (last
+        bus wins).
+        """
+        self._event_bus = bus
 
     def configure_stt_format(
         self, sample_rate: int = 16000, bytes_per_sample: int = 2
@@ -95,10 +146,71 @@ class CallMetricsAccumulator:
         """Begin tracking a new conversation turn."""
         self._turn_start = time.monotonic()
         self._stt_complete = None
+        self._llm_first_token = None
+        self._llm_first_sentence = None
         self._llm_complete = None
         self._tts_first_byte = None
         self._turn_user_text = ""
         self._turn_stt_audio_seconds = 0.0
+        # Reset per-turn TTFB guard flags
+        self._llm_ttfb_emitted = False
+        self._tts_ttfb_emitted = False
+        # Reset EOU timestamps for the new turn
+        self._vad_stopped_at = None
+        self._stt_final_at = None
+        self._turn_committed_at = None
+        self._on_user_turn_completed_delay_ms = None
+
+        if self._event_bus is not None:
+            self._event_bus.emit("turn_started", {"call_id": self.call_id})
+
+    def start_turn_if_idle(self) -> None:
+        """Start a new turn only when no turn is already open.
+
+        Call on the first inbound audio byte / non-final transcript so that
+        STT latency is measured from the start of speech rather than from the
+        final-transcript callback.  No-ops when a turn is already active so
+        duplicate calls (e.g. from multiple non-final callbacks) are harmless.
+        """
+        if self._turn_start is None:
+            self.start_turn()
+
+    def record_llm_first_token(self) -> None:
+        """Mark when the first LLM output token arrives (TTFT).
+
+        Call on the first streaming token yielded by the LLM. Used to compute
+        llm_ttft_ms = first_token - stt_complete, which is distinct from
+        llm_ms = llm_complete - stt_complete (full generation time).
+
+        When ``report_only_initial_ttfb=True`` is set, subsequent calls within
+        the same turn are silently ignored after the first emission.
+        """
+        if self._llm_first_token is None:
+            self._llm_first_token = time.monotonic()
+            if not self._report_only_initial_ttfb or not self._llm_ttfb_emitted:
+                self._llm_ttfb_emitted = True
+                if self._event_bus is not None and self._stt_complete is not None:
+                    from getpatter.observability.metric_types import TTFBMetrics
+                    self._event_bus.emit(
+                        "llm_metrics",
+                        TTFBMetrics(
+                            processor="llm",
+                            value=self._llm_first_token - self._stt_complete,
+                            model=self._llm_model or None,
+                        ),
+                    )
+
+    def record_llm_first_sentence(self) -> None:
+        """Mark when the first sentence boundary in the LLM stream is reached.
+
+        Call when SentenceChunker.push() first returns a non-empty list.
+        Used as the TTS span start instead of llm_complete so that
+        tts_ms is positive even in streaming-pipeline mode where TTS begins
+        before the full LLM response is done.  Falls back to llm_complete
+        when not set (realtime / non-streaming paths).
+        """
+        if self._llm_first_sentence is None:
+            self._llm_first_sentence = time.monotonic()
 
     def record_stt_complete(self, text: str, audio_seconds: float = 0.0) -> None:
         """Mark STT as complete for the current turn."""
@@ -107,14 +219,49 @@ class CallMetricsAccumulator:
         self._turn_stt_audio_seconds = audio_seconds
         self._total_stt_audio_seconds += audio_seconds
 
+        if self._event_bus is not None:
+            from getpatter.observability.metric_types import ProcessingMetrics
+            self._event_bus.emit(
+                "stt_metrics",
+                ProcessingMetrics(
+                    processor="stt",
+                    value=(
+                        (self._stt_complete - self._turn_start)
+                        if self._turn_start is not None
+                        else 0.0
+                    ),
+                ),
+            )
+
     def record_llm_complete(self) -> None:
         """Mark LLM/on_message as complete for the current turn."""
         self._llm_complete = time.monotonic()
 
     def record_tts_first_byte(self) -> None:
-        """Mark first TTS audio byte received for the current turn."""
+        """Mark first TTS audio byte received for the current turn.
+
+        When ``report_only_initial_ttfb=True`` is set, the bus emission is
+        suppressed after the first byte event per turn.
+        """
         if self._tts_first_byte is None:
             self._tts_first_byte = time.monotonic()
+            if not self._report_only_initial_ttfb or not self._tts_ttfb_emitted:
+                self._tts_ttfb_emitted = True
+                if self._event_bus is not None:
+                    tts_ref = (
+                        self._llm_first_sentence
+                        if self._llm_first_sentence is not None
+                        else self._llm_complete
+                    )
+                    if tts_ref is not None:
+                        from getpatter.observability.metric_types import TTFBMetrics
+                        self._event_bus.emit(
+                            "tts_metrics",
+                            TTFBMetrics(
+                                processor="tts",
+                                value=self._tts_first_byte - tts_ref,
+                            ),
+                        )
 
     def record_tts_complete(self, text: str) -> None:
         """Mark TTS synthesis as complete, accumulating character count."""
@@ -133,6 +280,15 @@ class CallMetricsAccumulator:
             timestamp=time.time(),
         )
         self._turns.append(turn)
+        if self._event_bus is not None:
+            self._event_bus.emit(
+                "turn_ended",
+                {"call_id": self.call_id, "turn": turn},
+            )
+            self._event_bus.emit(
+                "metrics_collected",
+                {"call_id": self.call_id, "turn": turn},
+            )
         self._reset_turn_state()
         return turn
 
@@ -159,6 +315,110 @@ class CallMetricsAccumulator:
         self._reset_turn_state()
         return turn
 
+    # ---- EOUMetrics — LiveKit Pattern A ----
+
+    def record_vad_stop(self, ts: float | None = None) -> None:
+        """Record the timestamp when VAD detects end-of-speech.
+
+        Args:
+            ts: Wall-clock timestamp (seconds). Defaults to ``time.time()``.
+        """
+        self._vad_stopped_at = ts if ts is not None else time.time()
+
+    def record_stt_final_timestamp(self, ts: float | None = None) -> None:
+        """Record the timestamp when the STT provider returns a final transcript.
+
+        Args:
+            ts: Wall-clock timestamp (seconds). Defaults to ``time.time()``.
+        """
+        self._stt_final_at = ts if ts is not None else time.time()
+
+    def record_turn_committed(self, ts: float | None = None) -> None:
+        """Record the timestamp when the pipeline commits the turn for LLM processing.
+
+        Args:
+            ts: Wall-clock timestamp (seconds). Defaults to ``time.time()``.
+        """
+        self._turn_committed_at = ts if ts is not None else time.time()
+        self._emit_eou_metrics()
+
+    def record_on_user_turn_completed_delay(self, delay_ms: float) -> None:
+        """Record the measured execution time of the on_user_turn_completed hook.
+
+        Args:
+            delay_ms: Hook execution time in milliseconds.
+        """
+        self._on_user_turn_completed_delay_ms = delay_ms
+
+    def _emit_eou_metrics(self) -> None:
+        """Emit ``EOUMetrics`` once all three EOU timestamps are available.
+
+        Guards against emitting garbage data when only a subset of timestamps
+        has been recorded (e.g. VAD skipped in non-local mode).
+        """
+        if (
+            self._vad_stopped_at is None
+            or self._stt_final_at is None
+            or self._turn_committed_at is None
+            or self._on_user_turn_completed_delay_ms is None
+        ):
+            return
+
+        if self._event_bus is None:
+            return
+
+        from getpatter.observability.metric_types import EOUMetrics
+
+        eou = EOUMetrics(
+            end_of_utterance_delay=self._turn_committed_at - self._vad_stopped_at,
+            transcription_delay=self._stt_final_at - self._vad_stopped_at,
+            on_user_turn_completed_delay=self._on_user_turn_completed_delay_ms / 1000.0,
+        )
+        self._event_bus.emit("eou_metrics", eou)
+
+    # ---- InterruptionMetrics — LiveKit Pattern B ----
+
+    def record_overlap_start(self, ts: float | None = None) -> None:
+        """Record when user speech begins overlapping agent playback.
+
+        Args:
+            ts: Wall-clock timestamp (seconds). Defaults to ``time.time()``.
+        """
+        self._overlap_started_at = ts if ts is not None else time.time()
+
+    def record_overlap_end(
+        self, was_interruption: bool = True, ts: float | None = None
+    ) -> None:
+        """Record when the overlap period ends and emit ``InterruptionMetrics``.
+
+        Args:
+            was_interruption: When ``True`` increments ``_num_interruptions``;
+                when ``False`` increments ``_num_backchannels``.
+            ts: End timestamp (seconds). Defaults to ``time.time()``.
+        """
+        if self._overlap_started_at is None:
+            return
+
+        end_ts = ts if ts is not None else time.time()
+        detection_delay = end_ts - self._overlap_started_at
+        self._overlap_started_at = None
+
+        if was_interruption:
+            self._num_interruptions += 1
+        else:
+            self._num_backchannels += 1
+
+        if self._event_bus is not None:
+            from getpatter.observability.metric_types import InterruptionMetrics
+
+            metrics = InterruptionMetrics(
+                total_duration=detection_delay,
+                detection_delay=detection_delay,
+                num_interruptions=self._num_interruptions,
+                num_backchannels=self._num_backchannels,
+            )
+            self._event_bus.emit("interruption", metrics)
+
     # ---- Usage tracking ----
 
     def add_stt_audio_bytes(self, byte_count: int) -> None:
@@ -169,6 +429,36 @@ class CallMetricsAccumulator:
         """Record OpenAI Realtime token usage from a ``response.done`` event."""
         self._total_realtime_cost += calculate_realtime_cost(usage, self._pricing)
         self._total_realtime_cached_savings += calculate_realtime_cached_savings(usage, self._pricing)
+
+    def record_llm_usage(
+        self,
+        provider: str,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
+    ) -> None:
+        """Accumulate LLM token usage for pipeline-mode cost calculation.
+
+        Call once per LLM response when a usage chunk is received from the
+        provider stream. Stacks across turns so end_call() can produce a
+        total LLM cost line.
+
+        Args:
+            provider: Provider key in LLM_PRICING (e.g. "anthropic", "openai").
+            model: Model identifier (e.g. "claude-haiku-4-5").
+            input_tokens: Non-cached input tokens at the full input rate.
+            output_tokens: Output tokens at the output rate.
+            cache_read_tokens: Tokens served from the provider prompt cache.
+            cache_write_tokens: Tokens that populated the cache this call.
+        """
+        self._llm_provider_name = provider
+        self._llm_model = model
+        self._llm_total_input_tokens += input_tokens
+        self._llm_total_output_tokens += output_tokens
+        self._llm_total_cache_read_tokens += cache_read_tokens
+        self._llm_total_cache_write_tokens += cache_write_tokens
 
     def set_actual_telephony_cost(self, cost: float) -> None:
         """Set the actual telephony cost from the provider API (post-call).
@@ -211,7 +501,7 @@ class CallMetricsAccumulator:
         latency_p95 = self._compute_percentile_latency(0.95)
         latency_p99 = self._compute_percentile_latency(0.99)
 
-        return CallMetrics(
+        result = CallMetrics(
             call_id=self.call_id,
             duration_seconds=round(duration, 2),
             turns=tuple(self._turns),
@@ -227,6 +517,11 @@ class CallMetricsAccumulator:
             telephony_provider=self.telephony_provider,
         )
 
+        if self._event_bus is not None:
+            self._event_bus.emit("call_ended", {"call_id": self.call_id, "metrics": result})
+
+        return result
+
     def get_cost_so_far(self) -> CostBreakdown:
         """Return current accumulated cost (for real-time ``on_metrics``)."""
         duration = time.monotonic() - self._call_start
@@ -237,6 +532,8 @@ class CallMetricsAccumulator:
     def _reset_turn_state(self) -> None:
         self._turn_start = None
         self._stt_complete = None
+        self._llm_first_token = None
+        self._llm_first_sentence = None
         self._llm_complete = None
         self._tts_first_byte = None
         self._turn_user_text = ""
@@ -246,6 +543,7 @@ class CallMetricsAccumulator:
         """Compute latency breakdown for the current turn."""
         stt_ms = 0.0
         llm_ms = 0.0
+        llm_ttft_ms = 0.0
         tts_ms = 0.0
         total_ms = 0.0
 
@@ -255,17 +553,25 @@ class CallMetricsAccumulator:
         if self._stt_complete is not None and self._llm_complete is not None:
             llm_ms = (self._llm_complete - self._stt_complete) * 1000
 
-        if self._llm_complete is not None and self._tts_first_byte is not None:
-            tts_ms = (self._tts_first_byte - self._llm_complete) * 1000
-            # In pipeline streaming mode ``record_tts_first_byte`` can fire on
-            # the first sentence's first chunk BEFORE ``record_llm_complete``
-            # (which marks end-of-full-response). Clamp to zero — negatives
-            # would be noise on dashboards.
-            if tts_ms < 0:
-                tts_ms = 0
+        # Fix 5: LLM TTFT = first-token time minus stt_complete.
+        if self._stt_complete is not None and self._llm_first_token is not None:
+            llm_ttft_ms = max(0.0, (self._llm_first_token - self._stt_complete) * 1000)
+
+        # Fix 3: TTS span starts from the first-sentence boundary rather than
+        # llm_complete.  In streaming-pipeline mode, record_tts_first_byte fires
+        # on the first audio chunk of the first sentence, which is always AFTER
+        # llm_first_sentence — so tts_ms = tts_first_byte - llm_first_sentence
+        # is always non-negative without clamping.  Fallback to llm_complete for
+        # realtime / non-streaming paths where llm_first_sentence is never set.
+        tts_ref = self._llm_first_sentence if self._llm_first_sentence is not None else self._llm_complete
+        if tts_ref is not None and self._tts_first_byte is not None:
+            tts_ms = max(0.0, (self._tts_first_byte - tts_ref) * 1000)
 
         if self._turn_start is not None and self._tts_first_byte is not None:
             total_ms = (self._tts_first_byte - self._turn_start) * 1000
+
+        # Persist TTFT so _emit_turn_metrics can include it after _reset_turn_state.
+        self._last_turn_llm_ttft_ms = llm_ttft_ms
 
         # Note: in Realtime mode OpenAI handles STT+LLM+TTS as a single opaque
         # pipeline, so stt_ms / llm_ms / tts_ms stay 0 and only total_ms is
@@ -277,7 +583,18 @@ class CallMetricsAccumulator:
             llm_ms=round(llm_ms, 1),
             tts_ms=round(tts_ms, 1),
             total_ms=round(total_ms, 1),
+            llm_ttft_ms=round(llm_ttft_ms, 1) if llm_ttft_ms else None,
         )
+
+    @property
+    def last_turn_llm_ttft_ms(self) -> float:
+        """LLM TTFT (first-token latency, ms) from the most recently completed turn.
+
+        Available after ``record_turn_complete`` or ``record_turn_interrupted``
+        returns.  Zero when the LLM first-token was not recorded (e.g. Realtime
+        / non-streaming paths).
+        """
+        return self._last_turn_llm_ttft_ms
 
     def _compute_cost(self, duration_seconds: float) -> CostBreakdown:
         """Compute cost breakdown from accumulated usage data."""
@@ -303,7 +620,19 @@ class CallMetricsAccumulator:
             tts_cost = calculate_tts_cost(
                 self.tts_provider, self._total_tts_characters, self._pricing
             )
-            llm_cost = 0.0  # Pipeline LLM cost is user-managed (their on_message)
+            # Pipeline LLM cost: calculated from accumulated token usage when
+            # record_llm_usage() was called; otherwise 0 (custom on_message).
+            if self._llm_total_input_tokens or self._llm_total_output_tokens:
+                llm_cost = calculate_llm_cost(
+                    provider=self._llm_provider_name,
+                    model=self._llm_model,
+                    input_tokens=self._llm_total_input_tokens,
+                    output_tokens=self._llm_total_output_tokens,
+                    cache_read_tokens=self._llm_total_cache_read_tokens,
+                    cache_write_tokens=self._llm_total_cache_write_tokens,
+                )
+            else:
+                llm_cost = 0.0
 
         # Prefer actual telephony cost from provider API over estimate
         if self._actual_telephony_cost is not None:
@@ -341,11 +670,14 @@ class CallMetricsAccumulator:
             return LatencyBreakdown()
 
         n = len(turns)
+        ttft_vals = [t.latency.llm_ttft_ms for t in turns if t.latency.llm_ttft_ms]
+        ttft_avg = round(sum(ttft_vals) / len(ttft_vals), 1) if ttft_vals else None
         return LatencyBreakdown(
             stt_ms=round(sum(t.latency.stt_ms for t in turns) / n, 1),
             llm_ms=round(sum(t.latency.llm_ms for t in turns) / n, 1),
             tts_ms=round(sum(t.latency.tts_ms for t in turns) / n, 1),
             total_ms=round(sum(t.latency.total_ms for t in turns) / n, 1),
+            llm_ttft_ms=ttft_avg,
         )
 
     def _compute_percentile_latency(self, p: float) -> LatencyBreakdown:
@@ -356,12 +688,37 @@ class CallMetricsAccumulator:
         returned the sample max for any n < 21, making p95/p99 on short calls
         indistinguishable from max. Linear interpolation is meaningful even
         on 2-3 sample sets.
+
+        Fix 4: Per-component, zero-valued entries are excluded before computing
+        percentiles.  Realtime turns and firstMessage turns never record
+        component-level latencies (stt_ms/llm_ms/tts_ms stay 0) and including
+        them would drag every component percentile bucket toward zero.  When all
+        values for a component are zero the result is returned as 0.0.
+        total_ms is NOT filtered because it is always populated for completed turns.
         """
         turns = self._completed_turns()
         if not turns:
             return LatencyBreakdown()
 
         def pct(values: list[float]) -> float:
+            # Filter out zeros so Realtime / firstMessage turns don't drag
+            # component-level buckets (stt, llm, tts) toward zero.
+            non_zero = [v for v in values if v > 0]
+            if not non_zero:
+                return 0.0
+            sorted_v = sorted(non_zero)
+            if len(sorted_v) == 1:
+                return sorted_v[0]
+            rank = p * (len(sorted_v) - 1)
+            lo = int(rank)
+            hi = min(lo + 1, len(sorted_v) - 1)
+            if lo == hi:
+                return sorted_v[lo]
+            frac = rank - lo
+            return sorted_v[lo] + (sorted_v[hi] - sorted_v[lo]) * frac
+
+        def pct_all(values: list[float]) -> float:
+            """Percentile over all values, including zeros (used for total_ms)."""
             if not values:
                 return 0.0
             sorted_v = sorted(values)
@@ -375,9 +732,11 @@ class CallMetricsAccumulator:
             frac = rank - lo
             return sorted_v[lo] + (sorted_v[hi] - sorted_v[lo]) * frac
 
+        ttft_pct_val = pct([t.latency.llm_ttft_ms for t in turns if t.latency.llm_ttft_ms is not None])
         return LatencyBreakdown(
             stt_ms=round(pct([t.latency.stt_ms for t in turns]), 1),
             llm_ms=round(pct([t.latency.llm_ms for t in turns]), 1),
             tts_ms=round(pct([t.latency.tts_ms for t in turns]), 1),
-            total_ms=round(pct([t.latency.total_ms for t in turns]), 1),
+            total_ms=round(pct_all([t.latency.total_ms for t in turns]), 1),
+            llm_ttft_ms=round(ttft_pct_val, 1) if ttft_pct_val else None,
         )

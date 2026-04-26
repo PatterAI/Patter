@@ -83,6 +83,16 @@ class _TokenAccumulator:
             return 0.0
         return self._confidence_sum / self._confidence_count
 
+    @property
+    def raw(self) -> tuple[float, int]:
+        """Expose the accumulator's running ``(sum, count)`` pair.
+
+        Mirrors the TypeScript ``TokenAccumulator.raw`` shape so external
+        consumers can blend confidences from multiple accumulators without
+        reaching into private attributes.
+        """
+        return (self._confidence_sum, self._confidence_count)
+
     def reset(self) -> None:
         self.text = ""
         self._confidence_sum = 0.0
@@ -316,12 +326,10 @@ class SonioxSTT(STTProvider):
             interim_text = (final_acc.text + non_final.text).strip()
             if interim_text and not emitted_final_this_msg:
                 # Blended confidence: average of whichever sides contributed.
-                total_count = (
-                    final_acc._confidence_count + non_final._confidence_count
-                )
-                total_sum = (
-                    final_acc._confidence_sum + non_final._confidence_sum
-                )
+                final_sum, final_count = final_acc.raw
+                non_final_sum, non_final_count = non_final.raw
+                total_count = final_count + non_final_count
+                total_sum = final_sum + non_final_sum
                 confidence = total_sum / total_count if total_count else 0.0
                 yield Transcript(
                     text=interim_text,

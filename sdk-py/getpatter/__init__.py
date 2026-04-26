@@ -37,7 +37,13 @@ from getpatter.models import (
     TTSConfig,
     TurnMetrics,
 )
-from getpatter.exceptions import PatterError, PatterConnectionError, AuthenticationError, ProvisionError
+from getpatter.exceptions import (
+    PatterError,
+    PatterConnectionError,
+    AuthenticationError,
+    ProvisionError,
+    RateLimitError,
+)
 from getpatter.services.sentence_chunker import SentenceChunker
 from getpatter.services.pipeline_hooks import PipelineHookExecutor
 from getpatter.services.text_transforms import filter_markdown, filter_emoji, filter_for_tts
@@ -76,6 +82,30 @@ from getpatter.llm.anthropic import LLM as AnthropicLLM
 from getpatter.llm.groq import LLM as GroqLLM
 from getpatter.llm.cerebras import LLM as CerebrasLLM
 from getpatter.llm.google import LLM as GoogleLLM
+
+# Telephony adapters — surface for tests + advanced integrations that need
+# direct access to provider-specific APIs (e.g. custom webhook wiring).
+from getpatter.providers.twilio_adapter import TwilioAdapter
+from getpatter.providers.telnyx_adapter import TelnyxAdapter
+
+# VAD — opt-in (needs the ``silero`` extra: numpy + onnxruntime). Loaded
+# lazily so importing ``getpatter`` doesn't require those native deps.
+def __getattr__(name):
+    if name == "SileroVAD":
+        from getpatter.providers.silero_vad import SileroVAD as _SileroVAD
+        return _SileroVAD
+    raise AttributeError(f"module 'getpatter' has no attribute {name!r}")
+
+# Observability — opt-in OTel tracing.
+from getpatter.observability import (
+    init_tracing,
+    start_span,
+    SPAN_CALL,
+    SPAN_STT,
+    SPAN_LLM,
+    SPAN_TTS,
+    SPAN_TOOL,
+)
 
 # Tunnel flat aliases.
 from getpatter.tunnels import CloudflareTunnel, Ngrok, Static as StaticTunnel
@@ -120,6 +150,7 @@ __all__ = [
     "PatterConnectionError",
     "AuthenticationError",
     "ProvisionError",
+    "RateLimitError",
     "SentenceChunker",
     "PipelineHookExecutor",
     "filter_markdown",
@@ -148,6 +179,16 @@ __all__ = [
     "GroqLLM",
     "CerebrasLLM",
     "GoogleLLM",
+    "TwilioAdapter",
+    "TelnyxAdapter",
+    "SileroVAD",
+    "init_tracing",
+    "start_span",
+    "SPAN_CALL",
+    "SPAN_STT",
+    "SPAN_LLM",
+    "SPAN_TTS",
+    "SPAN_TOOL",
     "CloudflareTunnel",
     "Ngrok",
     "StaticTunnel",

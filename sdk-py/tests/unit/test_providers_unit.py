@@ -43,7 +43,7 @@ class TestOpenAIRealtimeAdapter:
         from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
         adapter = OpenAIRealtimeAdapter(api_key="sk-test")
-        assert adapter.model == "gpt-4o-mini-realtime-preview"
+        assert adapter.model == "gpt-realtime-mini"
         assert adapter.voice == "alloy"
         assert adapter.audio_format == "g711_ulaw"
         assert adapter.tools is None

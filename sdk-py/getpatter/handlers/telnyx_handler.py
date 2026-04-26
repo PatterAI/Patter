@@ -26,13 +26,84 @@ from getpatter.handlers.stream_handler import (
 
 # DTMF digits accepted by the Telnyx ``send_dtmf`` command. Duration bounds
 # mirror Telnyx API constraints (100–500 ms per digit).
-_DTMF_ALLOWED = frozenset("0123456789*#ABCDabcd")
+#
+# ``w`` / ``W`` are Telnyx-specific pause characters (each inserts a 500 ms
+# wait before the next digit). They are sent as-is in the ``digits`` payload
+# — Telnyx interprets them server-side. Matches the Python handler with the
+# TS equivalent at ``sdk-ts/src/server.ts::TELNYX_DTMF_ALLOWED`` (Team 8).
+_DTMF_ALLOWED = frozenset("0123456789*#ABCDabcdwW")
 _DTMF_DEFAULT_DURATION_MS = 250
 
 # SIP URI validator — very permissive: ``sip:`` or ``sips:`` scheme plus a
 # non-empty host component, per Telnyx transfer semantics. E.164 numbers
 # are checked separately via ``_validate_e164``.
 _SIP_URI_RE = re.compile(r"^sips?:[^\s@]+(@[^\s]+)?$", re.IGNORECASE)
+
+
+# TODO: TS equivalent — mirror the pause-digit set (``w``/``W``) in
+# ``sdk-ts/src/server.ts`` ``TELNYX_DTMF_ALLOWED`` (Team 8).
+# Telnyx ``send_dtmf`` accepts ``w`` / ``W`` as a pause character (500 ms
+# wait per Telnyx docs) alongside DTMF digits and A-D letters.
+
+
+async def handle_amd_result(
+    *,
+    call_control_id: str,
+    result: str,
+    voicemail_message: str,
+    telnyx_key: str,
+) -> None:
+    """Drop a voicemail message when AMD classifies the call as answered by machine.
+
+    Mirrors Twilio's ``AnsweredBy == machine_end_beep/silence`` voicemail-drop
+    flow. Called from the ``/webhooks/telnyx/voice`` handler when the
+    ``call.machine.detection.ended`` event fires. Uses Telnyx's
+    ``actions/speak`` command to play the voicemail prompt and then hangs up.
+
+    Args:
+        call_control_id: Telnyx ``call_control_id`` from the webhook payload.
+        result: The AMD classification emitted by Telnyx (``machine``,
+            ``human``, ``not_sure``, ``fax``). Only ``machine`` triggers drop.
+        voicemail_message: Literal text to play via ``actions/speak``.
+        telnyx_key: Telnyx API key for the REST action calls.
+    """
+    if not call_control_id or not telnyx_key or not voicemail_message:
+        return
+    if result not in ("machine", "machine_detected"):
+        return
+    import httpx as _httpx
+    encoded_id = quote(call_control_id, safe="")
+    # Heuristic playback-duration estimate — ~150 ms per character, capped at
+    # 30 s. Avoids cutting the voicemail mid-sentence on hangup. The proper
+    # fix is to subscribe to Telnyx ``call.speak.ended`` and hang up there;
+    # kept as a TODO since the webhook plumbing change is broader than this
+    # handler.
+    estimated_ms = min(len(voicemail_message) * 150, 30_000)
+    client_state = base64.b64encode(b"voicemail-drop").decode("ascii")
+    try:
+        async with _httpx.AsyncClient(timeout=10.0) as _http:
+            # Speak the voicemail message. ``client_state`` is echoed back on
+            # ``call.speak.ended`` so a future handler can hang up there
+            # instead of relying on the heuristic sleep below.
+            await _http.post(
+                f"https://api.telnyx.com/v2/calls/{encoded_id}/actions/speak",
+                headers={"Authorization": f"Bearer {telnyx_key}"},
+                json={
+                    "payload": voicemail_message,
+                    "voice": "female",
+                    "language": "en-US",
+                    "client_state": client_state,
+                },
+            )
+            await asyncio.sleep(estimated_ms / 1000)
+            await _http.post(
+                f"https://api.telnyx.com/v2/calls/{encoded_id}/actions/hangup",
+                headers={"Authorization": f"Bearer {telnyx_key}"},
+                json={},
+            )
+        logger.info("Voicemail dropped for Telnyx call %s", call_control_id)
+    except Exception as exc:
+        logger.warning("Could not drop voicemail (Telnyx): %s", exc)
 
 
 def _is_valid_transfer_target(target: str) -> bool:
@@ -112,24 +183,48 @@ class TelnyxAudioSender(AudioSender):
         self._input_is_mulaw_8k = input_is_mulaw_8k
         # Lazy import transcoding when the caller sends PCM16 16 kHz and
         # we need to match the negotiated PCMU 8 kHz bidirectional stream.
+        # Uses a stateful resampler (StatefulResampler) so that audioop.ratecv
+        # filter state is preserved across chunks — avoids the click/pop
+        # artefact that occurs when the per-chunk stateless path restarts the
+        # IIR filter every 20 ms frame.
         if not input_is_mulaw_8k:
-            from getpatter.services.transcoding import pcm16_to_mulaw, resample_16k_to_8k  # type: ignore[import]
+            from getpatter.services.transcoding import (  # type: ignore[import]
+                create_resampler_16k_to_8k,
+                pcm16_to_mulaw,
+            )
             self._pcm16_to_mulaw = pcm16_to_mulaw
-            self._resample_16k_to_8k = resample_16k_to_8k
+            self._resampler = create_resampler_16k_to_8k()
         else:
             self._pcm16_to_mulaw = None
-            self._resample_16k_to_8k = None
+            self._resampler = None
 
     async def send_audio(self, audio: bytes) -> None:
         if self._input_is_mulaw_8k:
             mulaw = audio
         else:
-            resampled = self._resample_16k_to_8k(audio)
+            resampled = self._resampler.process(audio)  # type: ignore[union-attr]
             mulaw = self._pcm16_to_mulaw(resampled)
         encoded = base64.b64encode(mulaw).decode("ascii")
         await self._ws.send_text(
             json.dumps({"event": "media", "media": {"payload": encoded}})
         )
+
+    async def flush(self) -> None:
+        """Send any resampler tail bytes before closing the stream.
+
+        StatefulResampler.flush() drains the internal carry buffer.
+        Call this on the hangup / stop path to avoid clipping the last
+        audio frame. No-op when input_is_mulaw_8k=True.
+        """
+        if self._resampler is None or self._pcm16_to_mulaw is None:
+            return
+        tail = self._resampler.flush()
+        if tail:
+            mulaw = self._pcm16_to_mulaw(tail)
+            encoded = base64.b64encode(mulaw).decode("ascii")
+            await self._ws.send_text(
+                json.dumps({"event": "media", "media": {"payload": encoded}})
+            )
 
     async def send_clear(self) -> None:
         # Telnyx media stream clear signal. See BUG #18.
@@ -154,6 +249,7 @@ async def telnyx_stream_bridge(
     recording: bool = False,
     on_metrics=None,
     pricing: dict | None = None,
+    report_only_initial_ttfb: bool = False,
 ) -> None:
     """Bridge a Telnyx WebSocket media stream to the configured AI provider.
 
@@ -187,6 +283,7 @@ async def telnyx_stream_bridge(
     stream_started = False
 
     handler: OpenAIRealtimeStreamHandler | ElevenLabsConvAIStreamHandler | PipelineStreamHandler | None = None
+    audio_sender: TelnyxAudioSender | None = None
     metrics = None
 
     try:
@@ -259,6 +356,7 @@ async def telnyx_stream_bridge(
                     deepgram_key=deepgram_key,
                     elevenlabs_key=elevenlabs_key,
                     pricing=pricing,
+                    report_only_initial_ttfb=report_only_initial_ttfb,
                 )
                 # Telnyx uses PCM 16kHz (2 bytes/sample)
                 metrics.configure_stt_format(sample_rate=16000, bytes_per_sample=2)
@@ -271,11 +369,15 @@ async def telnyx_stream_bridge(
                 audio_sender = TelnyxAudioSender(websocket, input_is_mulaw_8k=_input_is_mulaw)
 
                 # --- Telnyx-specific call control helpers ---
-                async def _telnyx_transfer(number):
+                async def _telnyx_transfer(number, *, client_state: str | None = None):
                     """Blind-transfer the call via the Telnyx Call Control API.
 
                     Accepts either an E.164 phone number or a SIP URI
                     (``sip:user@host`` / ``sips:user@host``).
+
+                    ``client_state`` (optional) is a caller-supplied string
+                    that Telnyx will echo on every subsequent webhook for
+                    this call leg. Base64-encoded per Telnyx contract.
                     """
                     if not _is_valid_transfer_target(number):
                         logger.warning(
@@ -285,11 +387,17 @@ async def telnyx_stream_bridge(
                         return
                     if telnyx_key and call_id_actual:
                         import httpx as _httpx
+                        body: dict = {"to": number}
+                        if client_state:
+                            import base64 as _b64
+                            body["client_state"] = _b64.b64encode(
+                                client_state.encode("utf-8")
+                            ).decode("ascii")
                         async with _httpx.AsyncClient() as _http:
                             await _http.post(
-                                f"https://api.telnyx.com/v2/calls/{call_id_actual}/actions/transfer",
+                                f"https://api.telnyx.com/v2/calls/{quote(call_id_actual, safe='')}/actions/transfer",
                                 headers={"Authorization": f"Bearer {telnyx_key}"},
-                                json={"to": number},
+                                json=body,
                                 timeout=10.0,
                             )
                         logger.debug(
@@ -301,7 +409,7 @@ async def telnyx_stream_bridge(
                         import httpx as _httpx
                         async with _httpx.AsyncClient() as _http:
                             await _http.post(
-                                f"https://api.telnyx.com/v2/calls/{call_id_actual}/actions/hangup",
+                                f"https://api.telnyx.com/v2/calls/{quote(call_id_actual, safe='')}/actions/hangup",
                                 headers={"Authorization": f"Bearer {telnyx_key}"},
                                 json={},
                                 timeout=10.0,
@@ -337,7 +445,7 @@ async def telnyx_stream_bridge(
                     async with _httpx.AsyncClient() as _http:
                         for idx, digit in enumerate(filtered):
                             await _http.post(
-                                f"https://api.telnyx.com/v2/calls/{call_id_actual}/actions/send_dtmf",
+                                f"https://api.telnyx.com/v2/calls/{quote(call_id_actual, safe='')}/actions/send_dtmf",
                                 headers={"Authorization": f"Bearer {telnyx_key}"},
                                 json={
                                     "digits": digit,
@@ -361,7 +469,7 @@ async def telnyx_stream_bridge(
 
                     async with _httpx.AsyncClient() as _http:
                         resp = await _http.post(
-                            f"https://api.telnyx.com/v2/calls/{call_id_actual}/actions/record_start",
+                            f"https://api.telnyx.com/v2/calls/{quote(call_id_actual, safe='')}/actions/record_start",
                             headers={"Authorization": f"Bearer {telnyx_key}"},
                             json={"format": "mp3", "channels": "single"},
                             timeout=10.0,
@@ -383,7 +491,7 @@ async def telnyx_stream_bridge(
 
                     async with _httpx.AsyncClient() as _http:
                         resp = await _http.post(
-                            f"https://api.telnyx.com/v2/calls/{call_id_actual}/actions/record_stop",
+                            f"https://api.telnyx.com/v2/calls/{quote(call_id_actual, safe='')}/actions/record_stop",
                             headers={"Authorization": f"Bearer {telnyx_key}"},
                             json={},
                             timeout=10.0,
@@ -534,13 +642,21 @@ async def telnyx_stream_bridge(
 
                 async with _httpx.AsyncClient() as _http:
                     await _http.post(
-                        f"https://api.telnyx.com/v2/calls/{call_id_actual}/actions/record_stop",
+                        f"https://api.telnyx.com/v2/calls/{quote(call_id_actual, safe='')}/actions/record_stop",
                         headers={"Authorization": f"Bearer {telnyx_key}"},
                         json={},
                         timeout=5.0,
                     )
             except Exception as _exc:
                 logger.debug("Telnyx record_stop best-effort failed: %s", _exc)
+
+        # Flush resampler tail before tearing down — drains any carry bytes so
+        # the last audio frame isn't clipped on graceful shutdown.
+        if audio_sender is not None:
+            try:
+                await audio_sender.flush()
+            except Exception as _exc:
+                logger.debug("Telnyx audio_sender flush failed: %s", _exc)
 
         if handler is not None:
             await handler.cleanup()
@@ -552,7 +668,7 @@ async def telnyx_stream_bridge(
 
                 async with _httpx.AsyncClient() as _http:
                     resp = await _http.get(
-                        f"https://api.telnyx.com/v2/calls/{call_id_actual}",
+                        f"https://api.telnyx.com/v2/calls/{quote(call_id_actual, safe='')}",
                         headers={"Authorization": f"Bearer {telnyx_key}"},
                         timeout=5.0,
                     )

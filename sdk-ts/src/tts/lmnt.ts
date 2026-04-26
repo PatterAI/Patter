@@ -30,6 +30,7 @@ export interface LMNTTTSOptions {
  * ```
  */
 export class TTS extends _LMNTTTS {
+  static readonly providerKey = "lmnt";
   constructor(opts: LMNTTTSOptions = {}) {
     const key = opts.apiKey ?? process.env.LMNT_API_KEY;
     if (!key) {

@@ -69,16 +69,80 @@ function resolveVoiceId(voice: string): string {
   return ELEVENLABS_VOICE_ID_BY_NAME[voice.toLowerCase()] ?? voice;
 }
 
-export class ElevenLabsTTS {
-  private readonly voiceId: string;
+// Supported `output_format` values for the TTS stream endpoint.
+// `ulaw_8000` is the telephony-ready option for Twilio/Telnyx.
+export type ElevenLabsOutputFormat =
+  | 'mp3_22050_32'
+  | 'mp3_44100_32'
+  | 'mp3_44100_64'
+  | 'mp3_44100_96'
+  | 'mp3_44100_128'
+  | 'mp3_44100_192'
+  | 'pcm_8000'
+  | 'pcm_16000'
+  | 'pcm_22050'
+  | 'pcm_24000'
+  | 'pcm_44100'
+  | 'ulaw_8000';
 
+export interface ElevenLabsVoiceSettings {
+  stability?: number;
+  similarity_boost?: number;
+  style?: number;
+  use_speaker_boost?: boolean;
+}
+
+export interface ElevenLabsTTSOptions {
+  voiceId?: string;
+  modelId?: string;
+  outputFormat?: ElevenLabsOutputFormat;
+  voiceSettings?: ElevenLabsVoiceSettings;
+  languageCode?: string;
+  chunkSize?: number;
+}
+
+export class ElevenLabsTTS {
+  private readonly apiKey: string;
+  private readonly voiceId: string;
+  private readonly modelId: string;
+  private readonly outputFormat: ElevenLabsOutputFormat;
+  private readonly voiceSettings: ElevenLabsVoiceSettings | undefined;
+  private readonly languageCode: string | undefined;
+  private readonly chunkSize: number;
+
+  // Overloads: positional form (back-compat, accepts `string` for
+  // outputFormat so existing callers passing arbitrary strings keep
+  // compiling) and options-object form (strongly typed).
   constructor(
-    private readonly apiKey: string,
-    voiceId: string = 'EXAVITQu4vr4xnSDxMaL',
-    private readonly modelId: string = 'eleven_flash_v2_5',
-    private readonly outputFormat: string = 'pcm_16000',
+    apiKey: string,
+    voiceId?: string,
+    modelId?: string,
+    outputFormat?: ElevenLabsOutputFormat | string,
+  );
+  constructor(apiKey: string, options: ElevenLabsTTSOptions);
+  constructor(
+    apiKey: string,
+    voiceIdOrOptions: string | ElevenLabsTTSOptions = '21m00Tcm4TlvDq8ikWAM',
+    modelId: string = 'eleven_flash_v2_5',
+    outputFormat: ElevenLabsOutputFormat | string = 'pcm_16000',
   ) {
-    this.voiceId = resolveVoiceId(voiceId);
+    this.apiKey = apiKey;
+    if (typeof voiceIdOrOptions === 'object') {
+      const o = voiceIdOrOptions;
+      this.voiceId = resolveVoiceId(o.voiceId ?? '21m00Tcm4TlvDq8ikWAM');
+      this.modelId = o.modelId ?? 'eleven_flash_v2_5';
+      this.outputFormat = o.outputFormat ?? 'pcm_16000';
+      this.voiceSettings = o.voiceSettings;
+      this.languageCode = o.languageCode;
+      this.chunkSize = o.chunkSize ?? 4096;
+    } else {
+      this.voiceId = resolveVoiceId(voiceIdOrOptions);
+      this.modelId = modelId;
+      this.outputFormat = outputFormat as ElevenLabsOutputFormat;
+      this.voiceSettings = undefined;
+      this.languageCode = undefined;
+      this.chunkSize = 4096;
+    }
   }
 
   /**
@@ -98,10 +162,18 @@ export class ElevenLabsTTS {
    * Synthesise text and yield audio chunks as they arrive (streaming).
    *
    * The yielded buffers are raw PCM at 16 kHz (or whatever `outputFormat` is
-   * configured to).
+   * configured to). `chunkSize` controls the maximum yield size — 512 is a
+   * good choice for low-latency telephony.
    */
   async *synthesizeStream(text: string): AsyncGenerator<Buffer> {
     const url = `${ELEVENLABS_BASE_URL}/text-to-speech/${encodeURIComponent(this.voiceId)}/stream?output_format=${encodeURIComponent(this.outputFormat)}`;
+
+    const body: Record<string, unknown> = {
+      text,
+      model_id: this.modelId,
+    };
+    if (this.voiceSettings) body['voice_settings'] = this.voiceSettings;
+    if (this.languageCode) body['language_code'] = this.languageCode;
 
     const response = await fetch(url, {
       method: 'POST',
@@ -109,13 +181,13 @@ export class ElevenLabsTTS {
         'xi-api-key': this.apiKey,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ text, model_id: this.modelId }),
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(30_000),
     });
 
     if (!response.ok) {
-      const body = await response.text();
-      throw new Error(`ElevenLabs TTS error ${response.status}: ${body}`);
+      const errBody = await response.text();
+      throw new Error(`ElevenLabs TTS error ${response.status}: ${errBody}`);
     }
 
     if (!response.body) {
@@ -124,11 +196,15 @@ export class ElevenLabsTTS {
 
     const reader = response.body.getReader();
     try {
+      // `fetch` reader returns whatever-sized chunks the HTTP layer hands us;
+      // re-chunk to <= this.chunkSize so consumers get predictable framing.
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        if (value && value.length > 0) {
-          yield Buffer.from(value);
+        if (!value || value.length === 0) continue;
+        const buf = Buffer.from(value);
+        for (let offset = 0; offset < buf.length; offset += this.chunkSize) {
+          yield buf.subarray(offset, Math.min(offset + this.chunkSize, buf.length));
         }
       }
     } finally {

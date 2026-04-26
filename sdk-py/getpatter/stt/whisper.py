@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from typing import ClassVar
 
 from getpatter.providers.whisper_stt import WhisperSTT as _WhisperSTT
 
@@ -19,6 +20,8 @@ class STT(_WhisperSTT):
         stt = whisper.STT()                 # reads OPENAI_API_KEY
         stt = whisper.STT(api_key="sk-...", language="it")
     """
+
+    provider_key: ClassVar[str] = "whisper"
 
     def __init__(
         self,

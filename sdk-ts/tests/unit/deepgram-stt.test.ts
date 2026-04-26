@@ -210,7 +210,7 @@ describe('DeepgramSTT (deep)', () => {
       expect(cb).not.toHaveBeenCalled();
     });
 
-    it('ignores non-Results message types', async () => {
+    it('surfaces SpeechStarted as a Transcript with eventType=SpeechStarted', async () => {
       const stt = new DeepgramSTT('dg-key-123');
       const cb = vi.fn();
       stt.onTranscript(cb);
@@ -221,7 +221,28 @@ describe('DeepgramSTT (deep)', () => {
       await connectPromise;
 
       ws.emit('message', Buffer.from(JSON.stringify({ type: 'SpeechStarted' })));
-      expect(cb).not.toHaveBeenCalled();
+      expect(cb).toHaveBeenCalledOnce();
+      const transcript: Transcript = cb.mock.calls[0][0];
+      expect(transcript.eventType).toBe('SpeechStarted');
+      expect(transcript.text).toBe('');
+      expect(transcript.isFinal).toBe(false);
+    });
+
+    it('surfaces UtteranceEnd as a Transcript with eventType=UtteranceEnd', async () => {
+      const stt = new DeepgramSTT('dg-key-123');
+      const cb = vi.fn();
+      stt.onTranscript(cb);
+
+      const connectPromise = stt.connect();
+      const ws = latestWs();
+      ws.emit('open');
+      await connectPromise;
+
+      ws.emit('message', Buffer.from(JSON.stringify({ type: 'UtteranceEnd' })));
+      expect(cb).toHaveBeenCalledOnce();
+      const transcript: Transcript = cb.mock.calls[0][0];
+      expect(transcript.eventType).toBe('UtteranceEnd');
+      expect(transcript.isFinal).toBe(true);
     });
 
     it('captures requestId from Metadata message', async () => {
@@ -281,19 +302,49 @@ describe('DeepgramSTT (deep)', () => {
   // --- onTranscript ---
 
   describe('onTranscript()', () => {
-    it('replaces last callback when max (10) reached', () => {
+    it('registers more than 10 callbacks without dropping any (no 10-cap)', async () => {
       const stt = new DeepgramSTT('dg-key-123');
-      const callbacks = Array.from({ length: 10 }, () => vi.fn());
+      const callbacks = Array.from({ length: 15 }, () => vi.fn());
       for (const cb of callbacks) {
         stt.onTranscript(cb);
       }
 
-      const extraCb = vi.fn();
-      stt.onTranscript(extraCb);
+      const connectPromise = stt.connect();
+      const ws = latestWs();
+      ws.emit('open');
+      await connectPromise;
 
-      // The 11th callback should replace the 10th
-      // We can verify by checking no throw and the callback limit behavior
-      expect(true).toBe(true);
+      ws.emit('message', Buffer.from(JSON.stringify({
+        type: 'Results',
+        is_final: true,
+        speech_final: true,
+        channel: { alternatives: [{ transcript: 'hi', confidence: 1 }] },
+      })));
+
+      for (const cb of callbacks) {
+        expect(cb).toHaveBeenCalledOnce();
+      }
+    });
+
+    it('offTranscript unsubscribes a previously registered callback', async () => {
+      const stt = new DeepgramSTT('dg-key-123');
+      const cb = vi.fn();
+      stt.onTranscript(cb);
+      stt.offTranscript(cb);
+
+      const connectPromise = stt.connect();
+      const ws = latestWs();
+      ws.emit('open');
+      await connectPromise;
+
+      ws.emit('message', Buffer.from(JSON.stringify({
+        type: 'Results',
+        is_final: true,
+        speech_final: true,
+        channel: { alternatives: [{ transcript: 'hi', confidence: 1 }] },
+      })));
+
+      expect(cb).not.toHaveBeenCalled();
     });
   });
 
@@ -336,18 +387,32 @@ describe('DeepgramSTT (deep)', () => {
   // --- close ---
 
   describe('close()', () => {
-    it('sends CloseStream message and closes WebSocket', async () => {
-      const stt = new DeepgramSTT('dg-key-123');
+    it('sends Finalize immediately and delays CloseStream by ~100ms', async () => {
+      vi.useFakeTimers();
+      try {
+        const stt = new DeepgramSTT('dg-key-123');
 
-      const connectPromise = stt.connect();
-      const ws = latestWs();
-      ws.emit('open');
-      await connectPromise;
+        const connectPromise = stt.connect();
+        const ws = latestWs();
+        ws.emit('open');
+        await connectPromise;
 
-      stt.close();
+        ws.send.mockClear();
+        stt.close();
 
-      expect(ws.send).toHaveBeenCalledWith(JSON.stringify({ type: 'CloseStream' }));
-      expect(ws.close).toHaveBeenCalledOnce();
+        // Finalize should be sent synchronously; CloseStream must wait.
+        expect(ws.send).toHaveBeenCalledWith(JSON.stringify({ type: 'Finalize' }));
+        expect(ws.send).not.toHaveBeenCalledWith(JSON.stringify({ type: 'CloseStream' }));
+        expect(ws.close).not.toHaveBeenCalled();
+
+        // Advance past the drain window (FINALIZE_DRAIN_MS = 100).
+        vi.advanceTimersByTime(100);
+
+        expect(ws.send).toHaveBeenCalledWith(JSON.stringify({ type: 'CloseStream' }));
+        expect(ws.close).toHaveBeenCalledOnce();
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('does not throw when not connected', () => {
@@ -356,16 +421,23 @@ describe('DeepgramSTT (deep)', () => {
     });
 
     it('handles send error during close gracefully', async () => {
-      const stt = new DeepgramSTT('dg-key-123');
+      vi.useFakeTimers();
+      try {
+        const stt = new DeepgramSTT('dg-key-123');
 
-      const connectPromise = stt.connect();
-      const ws = latestWs();
-      ws.emit('open');
-      await connectPromise;
+        const connectPromise = stt.connect();
+        const ws = latestWs();
+        ws.emit('open');
+        await connectPromise;
 
-      ws.send.mockImplementation(() => { throw new Error('Socket already closed'); });
-      expect(() => stt.close()).not.toThrow();
-      expect(ws.close).toHaveBeenCalledOnce();
+        ws.send.mockImplementation(() => { throw new Error('Socket already closed'); });
+        expect(() => stt.close()).not.toThrow();
+        // CloseStream + ws.close still fire after the drain timer.
+        vi.advanceTimersByTime(100);
+        expect(ws.close).toHaveBeenCalledOnce();
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 });

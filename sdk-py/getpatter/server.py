@@ -268,9 +268,17 @@ class EmbeddedServer:
 
             Returns the parsed form on success, or a 403 Response when the
             signature is present but invalid.  When no auth token is
-            configured, or the `twilio` package is missing, the body is
-            returned without validation (logged once).
+            configured and ``config.require_signature`` is True (default),
+            returns a 503 Response — safety-first posture requires an
+            explicit opt-out to accept unsigned webhooks.
             """
+            if not self.config.twilio_token and getattr(self.config, "require_signature", True):
+                logger.error(
+                    "Twilio webhook rejected: twilio_token not configured and "
+                    "require_signature=True. Set twilio_token, or explicitly "
+                    "opt out with LocalConfig(require_signature=False)."
+                )
+                return Response(status_code=503, content="Webhook signature required")
             if self.config.twilio_token:
                 try:
                     from twilio.request_validator import RequestValidator
@@ -429,6 +437,7 @@ class EmbeddedServer:
                     recording=self.recording,
                     on_metrics=_metrics,
                     pricing=self.pricing,
+                    report_only_initial_ttfb=self.config.report_only_initial_ttfb,
                 )
             finally:
                 self._active_connections.discard(websocket)
@@ -439,12 +448,20 @@ class EmbeddedServer:
         async def telnyx_voice(request: Request):
             raw_body = await request.body()
             telnyx_public_key = getattr(self.config, "telnyx_public_key", "")
+            require_sig = getattr(self.config, "require_signature", True)
             if telnyx_public_key:
                 signature = request.headers.get("telnyx-signature-ed25519", "")
                 timestamp = request.headers.get("telnyx-timestamp", "")
                 if not _validate_telnyx_signature(raw_body, signature, timestamp, telnyx_public_key):
                     logger.warning("Telnyx webhook rejected: invalid or missing Ed25519 signature")
                     return Response(status_code=403, content="Invalid signature")
+            elif require_sig:
+                logger.error(
+                    "Telnyx webhook rejected: telnyx_public_key not configured "
+                    "and require_signature=True. Set telnyx_public_key, or "
+                    "explicitly opt out with LocalConfig(require_signature=False)."
+                )
+                return Response(status_code=503, content="Webhook signature required")
             elif not self._telnyx_sig_warning_logged:
                 self._telnyx_sig_warning_logged = True
                 logger.warning(
@@ -485,9 +502,10 @@ class EmbeddedServer:
             try:
                 if event_type == "call.initiated":
                     logger.info("Telnyx call.initiated %s — answering", call_control_id)
+                    from urllib.parse import quote as _quote
                     async with _httpx.AsyncClient(timeout=10.0) as client:
                         resp = await client.post(
-                            f"{api_base}/calls/{call_control_id}/actions/answer",
+                            f"{api_base}/calls/{_quote(call_control_id, safe='')}/actions/answer",
                             headers=auth_headers,
                             json={},
                         )
@@ -496,13 +514,13 @@ class EmbeddedServer:
                 elif event_type == "call.answered":
                     from urllib.parse import quote as _quote
                     stream_url = (
-                        f"wss://{self.config.webhook_url}/ws/telnyx/stream/{call_control_id}"
+                        f"wss://{self.config.webhook_url}/ws/telnyx/stream/{_quote(call_control_id, safe='')}"
                         f"?caller={_quote(caller)}&callee={_quote(callee)}"
                     )
                     logger.info("Telnyx call.answered %s — starting stream", call_control_id)
                     async with _httpx.AsyncClient(timeout=10.0) as client:
                         resp = await client.post(
-                            f"{api_base}/calls/{call_control_id}/actions/streaming_start",
+                            f"{api_base}/calls/{_quote(call_control_id, safe='')}/actions/streaming_start",
                             headers=auth_headers,
                             json={
                                 "stream_url": stream_url,
@@ -515,6 +533,24 @@ class EmbeddedServer:
                         )
                         if resp.status_code >= 400:
                             logger.warning("Telnyx streaming_start failed: %s %s", resp.status_code, resp.text)
+                elif event_type == "call.machine.detection.ended":
+                    # AMD (answering machine detection) result — mirror the
+                    # Twilio voicemail-drop flow when Telnyx reports the leg
+                    # was answered by a machine.
+                    amd_result = str(payload.get("result", ""))
+                    logger.info(
+                        "Telnyx AMD result for %s: %s",
+                        sanitize_log_value(call_control_id),
+                        sanitize_log_value(amd_result),
+                    )
+                    if self.voicemail_message:
+                        from getpatter.handlers.telnyx_handler import handle_amd_result
+                        await handle_amd_result(
+                            call_control_id=call_control_id,
+                            result=amd_result,
+                            voicemail_message=self.voicemail_message,
+                            telnyx_key=api_key,
+                        )
                 else:
                     logger.debug("Telnyx event ignored: %s", event_type)
             except Exception as exc:
@@ -541,6 +577,7 @@ class EmbeddedServer:
                     recording=self.recording,
                     on_metrics=_metrics,
                     pricing=self.pricing,
+                    report_only_initial_ttfb=self.config.report_only_initial_ttfb,
                 )
             finally:
                 self._active_connections.discard(websocket)
@@ -590,6 +627,23 @@ class EmbeddedServer:
         logger.info("Webhook URL: https://%s", self.config.webhook_url)
         logger.info("Phone:   %s", self.config.phone_number)
         logger.info("Agent:   %s / %s", self.agent.model, self.agent.voice)
+
+        # Startup-time warning when webhook signature enforcement is active
+        # but the verifying credential is missing. Surfacing this at startup
+        # prevents deployers from discovering it only via a first 503 response.
+        require_sig = getattr(self.config, "require_signature", True)
+        if require_sig:
+            provider = getattr(self.config, "telephony_provider", "")
+            if provider == "twilio" and not self.config.twilio_token:
+                logger.warning(
+                    "Twilio webhook enforcement ACTIVE but twilio_token is empty "
+                    "— webhooks will 503. Set require_signature=False for local dev."
+                )
+            if provider == "telnyx" and not getattr(self.config, "telnyx_public_key", ""):
+                logger.warning(
+                    "Telnyx webhook enforcement ACTIVE but telnyx_public_key is empty "
+                    "— webhooks will 503. Set require_signature=False for local dev."
+                )
         # Warn if the agent runs a non-default Realtime model — DEFAULT_PRICING
         # is calibrated for gpt-4o-mini-realtime-preview. Other models differ
         # by 3-10x so cost display would under-report without an override.

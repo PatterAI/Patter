@@ -66,7 +66,7 @@ class LMNTTTS(TTSProvider):
         if aiohttp is None:
             raise ImportError(
                 "aiohttp is required for LMNTTTS. "
-                "Install with: pip install patter[lmnt]"
+                "Install with: pip install getpatter[lmnt]"
             )
 
         resolved_key = api_key or os.environ.get("LMNT_API_KEY")

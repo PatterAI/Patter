@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from typing import ClassVar
 
 from getpatter.providers.assemblyai_stt import AssemblyAISTT as _AssemblyAISTT
 
@@ -19,6 +20,8 @@ class STT(_AssemblyAISTT):
         stt = assemblyai.STT()              # reads ASSEMBLYAI_API_KEY
         stt = assemblyai.STT(api_key="...", model="universal-streaming-multilingual")
     """
+
+    provider_key: ClassVar[str] = "assemblyai"
 
     def __init__(
         self,

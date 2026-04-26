@@ -138,34 +138,34 @@ class TestTwilioAudioSender:
     def _make_sender(self) -> tuple[TwilioAudioSender, AsyncMock]:
         ws = AsyncMock()
         ws.send_text = AsyncMock()
-        with patch("getpatter.handlers.twilio_handler.pcm16_to_mulaw", create=True), \
-             patch("getpatter.handlers.twilio_handler.resample_16k_to_8k", create=True):
-            # Patch the imports within the constructor
-            with patch(
-                "getpatter.services.transcoding.pcm16_to_mulaw",
-                side_effect=lambda x: x,
-                create=True,
-            ), patch(
-                "getpatter.services.transcoding.resample_16k_to_8k",
-                side_effect=lambda x: x,
-                create=True,
-            ):
-                sender = TwilioAudioSender(ws, stream_sid="MZ_test")
+        with patch(
+            "getpatter.services.transcoding.pcm16_to_mulaw",
+            side_effect=lambda x: x,
+            create=True,
+        ), patch(
+            "getpatter.services.transcoding.create_resampler_16k_to_8k",
+            return_value=MagicMock(process=MagicMock(side_effect=lambda x: x), flush=MagicMock(return_value=b"")),
+            create=True,
+        ):
+            sender = TwilioAudioSender(ws, stream_sid="MZ_test")
         return sender, ws
 
     async def test_send_audio(self) -> None:
         ws = AsyncMock()
         ws.send_text = AsyncMock()
-        mock_resample = MagicMock(side_effect=lambda x: x)
         mock_mulaw = MagicMock(side_effect=lambda x: x)
+        mock_resampler = MagicMock(
+            process=MagicMock(side_effect=lambda x: x),
+            flush=MagicMock(return_value=b""),
+        )
 
         with patch(
             "getpatter.services.transcoding.pcm16_to_mulaw",
             mock_mulaw,
             create=True,
         ), patch(
-            "getpatter.services.transcoding.resample_16k_to_8k",
-            mock_resample,
+            "getpatter.services.transcoding.create_resampler_16k_to_8k",
+            return_value=mock_resampler,
             create=True,
         ):
             sender = TwilioAudioSender(ws, stream_sid="MZ_test")
@@ -188,8 +188,8 @@ class TestTwilioAudioSender:
             lambda x: x,
             create=True,
         ), patch(
-            "getpatter.services.transcoding.resample_16k_to_8k",
-            lambda x: x,
+            "getpatter.services.transcoding.create_resampler_16k_to_8k",
+            return_value=MagicMock(process=MagicMock(side_effect=lambda x: x), flush=MagicMock(return_value=b"")),
             create=True,
         ):
             sender = TwilioAudioSender(ws, stream_sid="MZ_test")
@@ -208,8 +208,8 @@ class TestTwilioAudioSender:
             lambda x: x,
             create=True,
         ), patch(
-            "getpatter.services.transcoding.resample_16k_to_8k",
-            lambda x: x,
+            "getpatter.services.transcoding.create_resampler_16k_to_8k",
+            return_value=MagicMock(process=MagicMock(side_effect=lambda x: x), flush=MagicMock(return_value=b"")),
             create=True,
         ):
             sender = TwilioAudioSender(ws, stream_sid="MZ_test")
@@ -229,8 +229,8 @@ class TestTwilioAudioSender:
             lambda x: x,
             create=True,
         ), patch(
-            "getpatter.services.transcoding.resample_16k_to_8k",
-            lambda x: x,
+            "getpatter.services.transcoding.create_resampler_16k_to_8k",
+            return_value=MagicMock(process=MagicMock(side_effect=lambda x: x), flush=MagicMock(return_value=b"")),
             create=True,
         ):
             sender = TwilioAudioSender(ws, stream_sid="MZ_test")
@@ -250,8 +250,8 @@ class TestTwilioAudioSender:
             lambda x: x,
             create=True,
         ), patch(
-            "getpatter.services.transcoding.resample_16k_to_8k",
-            lambda x: x,
+            "getpatter.services.transcoding.create_resampler_16k_to_8k",
+            return_value=MagicMock(process=MagicMock(side_effect=lambda x: x), flush=MagicMock(return_value=b"")),
             create=True,
         ):
             sender = TwilioAudioSender(ws, stream_sid="MZ_test")

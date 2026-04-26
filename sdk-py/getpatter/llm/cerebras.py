@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from typing import ClassVar
 
 from getpatter.providers.cerebras_llm import CerebrasLLMProvider as _CerebrasLLM
 
@@ -17,14 +18,16 @@ class LLM(_CerebrasLLM):
         from getpatter.llm import cerebras
 
         llm = cerebras.LLM()                          # reads CEREBRAS_API_KEY
-        llm = cerebras.LLM(api_key="csk-...", model="llama3.1-8b")
+        llm = cerebras.LLM(api_key="csk-...", model="llama-3.3-70b")
     """
+
+    provider_key: ClassVar[str] = "cerebras"
 
     def __init__(
         self,
         api_key: str | None = None,
         *,
-        model: str = "llama3.1-8b",
+        model: str = "llama-3.3-70b",
         **kwargs,
     ) -> None:
         key = api_key or os.environ.get("CEREBRAS_API_KEY")

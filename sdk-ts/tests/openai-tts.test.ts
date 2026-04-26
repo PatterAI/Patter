@@ -184,7 +184,9 @@ describe('OpenAITTS', () => {
         body: { getReader: () => mockReader },
       }));
 
-      const tts = new OpenAITTS('sk-test');
+      // antiAlias: false preserves bit-exact downsample-only behaviour
+      // so the fixture values below remain valid.
+      const tts = new OpenAITTS('sk-test', 'alloy', 'gpt-4o-mini-tts', null, null, false);
       const chunks: Buffer[] = [];
       for await (const chunk of tts.synthesizeStream('hello')) {
         chunks.push(chunk);

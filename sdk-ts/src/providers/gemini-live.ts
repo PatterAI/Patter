@@ -9,6 +9,12 @@
  * not use Gemini Live do not pay the load cost. Install with:
  *
  *    npm install @google/genai
+ *
+ * NOTE: Native-audio Gemini Live models are **v1alpha-only**. We pass
+ * `httpOptions: { apiVersion: 'v1alpha' }` when constructing the client.
+ * When Google promotes native audio to GA, switch to `v1beta` / `v1` and
+ * update the default model below.
+ * See: https://ai.google.dev/gemini-api/docs/live
  */
 
 import { getLogger } from '../logger';
@@ -54,6 +60,12 @@ export class GeminiLiveAdapter {
   private receiveLoop: Promise<void> | null = null;
   private handlers: GeminiLiveEventHandler[] = [];
   private running = false;
+  /**
+   * Tracks call_id -> function name so tool responses can be sent back with
+   * the correct `name` field (Gemini expects the original function name,
+   * not the call_id).
+   */
+  private pendingToolCalls: Map<string, string> = new Map();
 
   constructor(
     private readonly apiKey: string,
@@ -61,9 +73,10 @@ export class GeminiLiveAdapter {
   ) {
     // gemini-2.0-flash-exp was experimental preview retired Dec 2024.
     // gemini-live-2.5-flash-preview was shut down Dec 9, 2025.
-    // The current live-audio model in April 2026 is the native-audio variant.
+    // Current native-audio live model (v1alpha-only) is the dated preview.
     // Callers can override via GeminiLive({ model: ... }).
-    this.model = options.model ?? 'gemini-live-2.5-flash-native-audio';
+    // TODO verify against Google docs: https://ai.google.dev/gemini-api/docs/live
+    this.model = options.model ?? 'gemini-2.5-flash-native-audio-preview-09-2025';
     this.voice = options.voice ?? 'Puck';
     this.instructions = options.instructions ?? '';
     this.language = options.language ?? 'en-US';
@@ -91,7 +104,11 @@ export class GeminiLiveAdapter {
     }
 
     const { GoogleGenAI } = genaiModule;
-    this.client = new GoogleGenAI({ apiKey: this.apiKey });
+    // Native-audio models require the v1alpha endpoint — see module doc.
+    this.client = new GoogleGenAI({
+      apiKey: this.apiKey,
+      httpOptions: { apiVersion: 'v1alpha' },
+    });
 
     const config: Record<string, unknown> = {
       responseModalities: ['AUDIO'],
@@ -157,9 +174,14 @@ export class GeminiLiveAdapter {
   async sendFunctionResult(callId: string, result: string): Promise<void> {
     if (!this.session) return;
     const sess = this.session as { sendToolResponse?: (args: unknown) => Promise<void> };
+    // Gemini requires the original function name in the response, not the
+    // call_id. Look it up from the map populated when the tool call was
+    // emitted; fall back to callId if we never saw this id (defensive).
+    const name = this.pendingToolCalls.get(callId) ?? callId;
+    this.pendingToolCalls.delete(callId);
     await sess.sendToolResponse?.({
       functionResponses: [
-        { id: callId, name: callId, response: { result } },
+        { id: callId, name, response: { result } },
       ],
     });
   }
@@ -236,9 +258,14 @@ export class GeminiLiveAdapter {
         if (r.toolCall) {
           for (const fn of r.toolCall.functionCalls ?? []) {
             const args = fn.args ?? {};
+            const callId = fn.id ?? '';
+            const fnName = fn.name ?? '';
+            if (callId && fnName) {
+              this.pendingToolCalls.set(callId, fnName);
+            }
             await this.emit('function_call', {
-              call_id: fn.id ?? '',
-              name: fn.name ?? '',
+              call_id: callId,
+              name: fnName,
               arguments: typeof args === 'string' ? args : JSON.stringify(args),
             });
           }
@@ -267,5 +294,6 @@ export class GeminiLiveAdapter {
       await this.receiveLoop.catch(() => undefined);
       this.receiveLoop = null;
     }
+    this.pendingToolCalls.clear();
   }
 }

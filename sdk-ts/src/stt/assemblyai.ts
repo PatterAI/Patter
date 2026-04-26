@@ -1,6 +1,7 @@
 /** AssemblyAI Universal Streaming STT for Patter pipeline mode. */
 import {
   AssemblyAISTT as _AssemblyAISTT,
+  type AssemblyAIDomain,
   type AssemblyAIEncoding,
   type AssemblyAIModel,
 } from "../providers/assemblyai-stt";
@@ -22,7 +23,7 @@ export interface AssemblyAISTTOptions {
   vadThreshold?: number;
   speakerLabels?: boolean;
   maxSpeakers?: number;
-  domain?: string;
+  domain?: AssemblyAIDomain;
 }
 
 /**
@@ -36,6 +37,7 @@ export interface AssemblyAISTTOptions {
  * ```
  */
 export class STT extends _AssemblyAISTT {
+  static readonly providerKey = "assemblyai";
   constructor(opts: AssemblyAISTTOptions = {}) {
     const key = opts.apiKey ?? process.env.ASSEMBLYAI_API_KEY;
     if (!key) {

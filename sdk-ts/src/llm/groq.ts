@@ -21,6 +21,7 @@ export interface GroqLLMOptions {
  * ```
  */
 export class LLM extends _GroqLLM {
+  static readonly providerKey = "groq";
   constructor(opts: GroqLLMOptions = {}) {
     const key = opts.apiKey ?? process.env.GROQ_API_KEY;
     if (!key) {

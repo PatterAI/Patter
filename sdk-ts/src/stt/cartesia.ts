@@ -22,6 +22,7 @@ export interface CartesiaSTTOptions {
  * ```
  */
 export class STT extends _CartesiaSTT {
+  static readonly providerKey = "cartesia_stt";
   constructor(opts: CartesiaSTTOptions = {}) {
     const key = opts.apiKey ?? process.env.CARTESIA_API_KEY;
     if (!key) {

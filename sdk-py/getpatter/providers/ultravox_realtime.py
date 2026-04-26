@@ -93,18 +93,23 @@ class UltravoxRealtimeAdapter:
                     "outputSampleRate": self.sample_rate,
                 }
             },
-            "firstSpeaker": "FIRST_SPEAKER_AGENT" if self.first_message else "FIRST_SPEAKER_USER",
             "recordingEnabled": False,
         }
         if self.voice:
             create_payload["voice"] = self.voice
         if self.instructions:
             create_payload["systemPrompt"] = self.instructions
+        # ``firstSpeaker`` and ``initialMessages`` are mutually exclusive on the
+        # Ultravox API: setting both causes the server to reject the call.
+        # Prefer ``initialMessages`` when a ``first_message`` is configured;
+        # otherwise default to FIRST_SPEAKER_USER (user speaks first).
         if self.first_message:
             create_payload["initialOutputMedium"] = "MESSAGE_MEDIUM_VOICE"
             create_payload["initialMessages"] = [
                 {"role": "MESSAGE_ROLE_AGENT", "text": self.first_message},
             ]
+        else:
+            create_payload["firstSpeaker"] = "FIRST_SPEAKER_USER"
         if self.tools:
             create_payload["selectedTools"] = [
                 {

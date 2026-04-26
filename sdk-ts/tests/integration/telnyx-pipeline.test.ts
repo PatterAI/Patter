@@ -123,8 +123,11 @@ describe('Integration: Telnyx + Pipeline', () => {
     await handler.handleAudio(mulaw);
     expect(stt.sendAudio).toHaveBeenCalledTimes(1);
     const forwarded = (stt.sendAudio as any).mock.calls[0][0] as Buffer;
-    // Transcoded output is PCM16 @ 16 kHz = 4× the mulaw byte count.
-    expect(forwarded.length).toBe(mulaw.length * 4);
+    // Transcoded output is PCM16 @ 16 kHz. The stateful 8k→16k resampler defers
+    // the last input sample until the next chunk so it can be correctly
+    // interpolated. For the first chunk of N mulaw bytes the output is
+    // (N - 1) * 4 bytes (the deferred sample pairs with the next chunk).
+    expect(forwarded.length).toBe((mulaw.length - 1) * 4);
   });
 
   it('pipeline mode processes transcript with onMessage handler', async () => {

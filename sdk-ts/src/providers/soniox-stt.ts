@@ -164,6 +164,9 @@ export class SonioxSTT {
   }
 
   async connect(): Promise<void> {
+    // Reset the accumulator so reconnection after close() does not carry
+    // stale final.text across streams.
+    this.final.reset();
     this.ws = new WebSocket(this.baseUrl);
 
     await new Promise<void>((resolve, reject) => {

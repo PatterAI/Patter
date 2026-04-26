@@ -43,6 +43,7 @@ def _make_server(**overrides) -> EmbeddedServer:
         openai_key="sk-test",
         webhook_url="test.ngrok.io",
         phone_number="+15551234567",
+        require_signature=False,
     )
     defaults = dict(config=cfg, agent=make_agent(), dashboard=True)
     defaults.update(overrides)

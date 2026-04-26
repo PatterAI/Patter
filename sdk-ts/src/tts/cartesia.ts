@@ -26,6 +26,7 @@ export interface CartesiaTTSOptions {
  * ```
  */
 export class TTS extends _CartesiaTTS {
+  static readonly providerKey = "cartesia_tts";
   constructor(opts: CartesiaTTSOptions = {}) {
     const key = opts.apiKey ?? process.env.CARTESIA_API_KEY;
     if (!key) {

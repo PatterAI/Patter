@@ -27,7 +27,9 @@ import { getLogger } from '../logger';
 import { parseOpenAISseStream } from './groq-llm';
 
 const CEREBRAS_BASE_URL = 'https://api.cerebras.ai/v1';
-const DEFAULT_MODEL = 'llama3.1-8b';
+// ``llama3.1-8b`` was retired by Cerebras; default to the current
+// production-grade model. Override via ``model`` option if needed.
+const DEFAULT_MODEL = 'llama-3.3-70b';
 
 export interface CerebrasLLMOptions {
   apiKey: string;
@@ -40,7 +42,7 @@ export interface CerebrasLLMOptions {
 /** LLM provider backed by Cerebras's OpenAI-compatible Inference API. */
 export class CerebrasLLMProvider implements LLMProvider {
   private readonly apiKey: string;
-  private readonly model: string;
+  readonly model: string;
   private readonly baseUrl: string;
   private readonly gzipCompression: boolean;
 
@@ -64,6 +66,7 @@ export class CerebrasLLMProvider implements LLMProvider {
       model: this.model,
       messages,
       stream: true,
+      stream_options: { include_usage: true },
     };
     if (tools) body.tools = tools;
 

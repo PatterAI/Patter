@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import Optional
+from typing import ClassVar, Optional
 
 from getpatter.providers.lmnt_tts import LMNTTTS as _LMNTTTS
 
@@ -20,6 +20,8 @@ class TTS(_LMNTTTS):
         tts = lmnt.TTS()                    # reads LMNT_API_KEY
         tts = lmnt.TTS(api_key="...", voice="leah")
     """
+
+    provider_key: ClassVar[str] = "lmnt"
 
     def __init__(
         self,

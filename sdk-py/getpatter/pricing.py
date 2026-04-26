@@ -17,8 +17,8 @@ bills.
 
 from __future__ import annotations
 
-PRICING_VERSION: str = "2026.1"
-PRICING_LAST_UPDATED: str = "2026-04-23"
+PRICING_VERSION: str = "2026.2"
+PRICING_LAST_UPDATED: str = "2026-04-24"
 
 DEFAULT_PRICING: dict[str, dict] = {
     # STT — per minute of audio processed.
@@ -202,6 +202,115 @@ def calculate_realtime_cached_savings(usage: dict, pricing: dict) -> float:
     # than full, the diff becomes negative -- meaningless as a savings figure,
     # so we return 0 instead of a negative number. Matches TS parity.
     return max(0.0, full_cost - discounted_cost)
+
+
+# ---------------------------------------------------------------------------
+# Chat/completion LLM pricing (per 1M tokens)
+# ---------------------------------------------------------------------------
+#
+# Rates reflect publicly listed provider pricing as of PRICING_LAST_UPDATED.
+# ``input`` / ``output`` are dollars per 1M tokens. Anthropic adds
+# ``cache_read`` (~10% of full input) and ``cache_write`` (~125% of full input)
+# for prompt caching. Groq / Cerebras / Google do not publicly expose cache
+# rates for these models, so only input/output are populated.
+LLM_PRICING: dict[str, dict[str, dict[str, float]]] = {
+    "openai": {
+        # Chat Completions LLM pricing (not Realtime — see DEFAULT_PRICING["openai_realtime"]).
+        # Rates: per 1M tokens as of 2026-04-24.
+        "gpt-4o":      {"input": 2.50,  "output": 10.00, "cache_read": 1.25},
+        "gpt-4o-mini": {"input": 0.15,  "output":  0.60, "cache_read": 0.075},
+        "gpt-4.1":     {"input": 3.00,  "output": 12.00, "cache_read": 0.75},
+        "gpt-4.1-mini":{"input": 0.80,  "output":  3.20, "cache_read": 0.20},
+        "o3":          {"input": 2.00,  "output":  8.00, "cache_read": 0.50},
+        "o4-mini":     {"input": 1.10,  "output":  4.40, "cache_read": 0.275},
+    },
+    "anthropic": {
+        "claude-opus-4-7": {
+            "input": 15.0,
+            "output": 75.0,
+            "cache_read": 1.5,
+            "cache_write": 18.75,
+        },
+        "claude-sonnet-4-6": {
+            "input": 3.0,
+            "output": 15.0,
+            "cache_read": 0.3,
+            "cache_write": 3.75,
+        },
+        "claude-haiku-4-5": {
+            "input": 1.0,
+            "output": 5.0,
+            "cache_read": 0.1,
+            "cache_write": 1.25,
+        },
+    },
+    "google": {
+        "gemini-2.5-pro": {"input": 1.25, "output": 10.0},
+        "gemini-2.5-flash": {"input": 0.30, "output": 2.50},
+        "gemini-live-2.5-flash-native-audio": {"input": 0.30, "output": 2.50},
+    },
+    "groq": {
+        "llama-3.3-70b-versatile": {"input": 0.59, "output": 0.79},
+        "llama-3.1-8b-instant": {"input": 0.05, "output": 0.08},
+    },
+    "cerebras": {
+        "llama-3.3-70b": {"input": 0.85, "output": 1.20},
+        "qwen-3-32b": {"input": 0.40, "output": 0.80},
+    },
+}
+
+
+def calculate_llm_cost(
+    provider: str,
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+) -> float:
+    """Calculate LLM cost from token counts using :data:`LLM_PRICING`.
+
+    Args:
+        provider: Provider key in :data:`LLM_PRICING` (``"anthropic"``,
+            ``"google"``, ``"groq"``, ``"cerebras"``).
+        model: Model identifier under the provider (e.g.
+            ``"claude-haiku-4-5"``).
+        input_tokens: Non-cached input tokens billed at the full rate.
+            Callers should subtract ``cache_read_tokens`` before passing
+            this value when they also pass cache_read_tokens separately.
+        output_tokens: Output tokens billed at the output rate.
+        cache_read_tokens: Input tokens served from Anthropic's prompt
+            cache; billed at the reduced ``cache_read`` rate.
+        cache_write_tokens: Input tokens that populated the cache this
+            call; billed at the ``cache_write`` rate.
+
+    Returns:
+        Total cost in USD. Returns ``0.0`` when the provider/model is not
+        listed so unknown models never produce bogus line items.
+    """
+    provider_table = LLM_PRICING.get(provider, {})
+    rates = provider_table.get(model, {})
+    if not rates:
+        # Fall back to the longest matching prefix in the provider's
+        # rate table. Lets us handle versioned model IDs like
+        # ``claude-haiku-4-5-20251001`` against a base entry of
+        # ``claude-haiku-4-5`` without forcing an exact match.
+        best_key = ""
+        for key in provider_table:
+            if model.startswith(key) and len(key) > len(best_key):
+                best_key = key
+        if best_key:
+            rates = provider_table.get(best_key, {})
+        if not rates:
+            return 0.0
+
+    # Per-1M-tokens rates are divided by 1_000_000 per token.
+    cost = 0.0
+    cost += (input_tokens / 1_000_000.0) * rates.get("input", 0.0)
+    cost += (output_tokens / 1_000_000.0) * rates.get("output", 0.0)
+    cost += (cache_read_tokens / 1_000_000.0) * rates.get("cache_read", 0.0)
+    cost += (cache_write_tokens / 1_000_000.0) * rates.get("cache_write", 0.0)
+    return max(0.0, cost)
 
 
 def calculate_telephony_cost(

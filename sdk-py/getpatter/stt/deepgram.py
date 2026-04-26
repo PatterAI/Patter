@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from typing import ClassVar
 
 from getpatter.providers.deepgram_stt import DeepgramSTT as _DeepgramSTT
 
@@ -19,6 +20,11 @@ class STT(_DeepgramSTT):
         stt = deepgram.STT()                # reads DEEPGRAM_API_KEY
         stt = deepgram.STT(api_key="dg_...", endpointing_ms=80)
     """
+
+    # Stable provider key for cost attribution / metrics. Matches the
+    # entry in ``pricing.py`` so handlers can resolve pricing without
+    # falling back to fragile ``__name__`` stripping.
+    provider_key: ClassVar[str] = "deepgram"
 
     def __init__(
         self,

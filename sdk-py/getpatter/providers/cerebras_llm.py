@@ -36,7 +36,9 @@ __all__ = ["CerebrasLLMProvider"]
 
 
 _CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1"
-_DEFAULT_MODEL = "llama3.1-8b"
+# ``llama3.1-8b`` was retired by Cerebras; default to the current
+# production-grade model. Override via ``model=`` if you need a different one.
+_DEFAULT_MODEL = "llama-3.3-70b"
 
 
 def _build_cerebras_client(
@@ -125,7 +127,7 @@ class CerebrasLLMProvider(OpenAILLMProvider):
 
     Args:
         api_key: Cerebras API key. Reads ``CEREBRAS_API_KEY`` if omitted.
-        model: Cerebras chat model ID. Defaults to ``llama3.1-8b``.
+        model: Cerebras chat model ID. Defaults to ``llama-3.3-70b``.
         base_url: Optional Cerebras base URL override.
         gzip_compression: Gzip request payloads for faster TTFT.
         msgpack_encoding: Encode request payloads with msgpack for smaller

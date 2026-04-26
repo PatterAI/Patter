@@ -82,8 +82,12 @@ export class PatterConnection {
           if (response != null) {
             await this.sendResponse(msg.callId, response);
           }
-        } catch {
-          // Don't crash on handler errors
+        } catch (err) {
+          // Don't crash on handler errors — surface them via the logger so
+          // prod-side issues can actually be diagnosed.
+          getLogger().error(
+            `[PatterConnection] onMessage handler threw for call ${msg.callId}: ${String(err)}`,
+          );
         }
       } else if (msgType === "call_start" && this.onCallStart) {
         await this.onCallStart(parsed);

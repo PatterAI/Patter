@@ -122,15 +122,21 @@ class TwilioAudioSender(AudioSender):
         if not input_is_mulaw_8k:
             from getpatter.services.transcoding import (
                 PcmCarry,
+                create_resampler_16k_to_8k,
                 pcm16_to_mulaw,
-                resample_16k_to_8k,
             )
             self._pcm16_to_mulaw = pcm16_to_mulaw
-            self._resample_16k_to_8k = resample_16k_to_8k
+            # StatefulResampler preserves audioop.ratecv IIR filter state
+            # across chunks (the old stateless path discarded the state token
+            # on every call, which caused aliasing artefacts even with
+            # PcmCarry alignment). PcmCarry is kept for odd-byte alignment
+            # because StatefulResampler.process() still expects even-length
+            # PCM16 input.
+            self._resampler = create_resampler_16k_to_8k()
             self._pcm_carry: PcmCarry | None = PcmCarry()
         else:
             self._pcm16_to_mulaw = None
-            self._resample_16k_to_8k = None
+            self._resampler = None
             self._pcm_carry = None
 
     def reset_pcm_carry(self) -> None:
@@ -145,7 +151,7 @@ class TwilioAudioSender(AudioSender):
             aligned = self._pcm_carry.align(pcm_audio)  # type: ignore[union-attr]
             if not aligned:
                 return
-            resampled = self._resample_16k_to_8k(aligned)
+            resampled = self._resampler.process(aligned)  # type: ignore[union-attr]
             mulaw = self._pcm16_to_mulaw(resampled)
         encoded = base64.b64encode(mulaw).decode("ascii")
         await self._ws.send_text(
@@ -179,6 +185,32 @@ class TwilioAudioSender(AudioSender):
     def on_mark_confirmed(self, mark_name: str) -> None:
         self.last_confirmed_mark = mark_name
 
+    async def flush(self) -> None:
+        """Send any resampler tail bytes before closing the stream.
+
+        Drains the StatefulResampler carry buffer and sends the remaining
+        even-aligned PCM16 → mulaw bytes to Twilio. Call this on the stop /
+        hangup path to avoid clipping the last audio frame. The PcmCarry
+        buffer is intentionally not drained here — any final odd byte is
+        sub-sample noise that would produce a single corrupted sample.
+        No-op when input_is_mulaw_8k=True.
+        """
+        if self._resampler is None or self._pcm16_to_mulaw is None:
+            return
+        tail = self._resampler.flush()
+        if tail:
+            mulaw = self._pcm16_to_mulaw(tail)
+            encoded = base64.b64encode(mulaw).decode("ascii")
+            await self._ws.send_text(
+                json.dumps(
+                    {
+                        "event": "media",
+                        "streamSid": self._stream_sid,
+                        "media": {"payload": encoded},
+                    }
+                )
+            )
+
 
 async def twilio_stream_bridge(
     websocket,
@@ -195,6 +227,7 @@ async def twilio_stream_bridge(
     recording: bool = False,
     on_metrics=None,
     pricing: dict | None = None,
+    report_only_initial_ttfb: bool = False,
 ) -> None:
     """Bridge a Twilio WebSocket media stream to the configured AI provider.
 
@@ -232,6 +265,7 @@ async def twilio_stream_bridge(
     transcript_entries: deque[dict] = deque(maxlen=200)
 
     handler: OpenAIRealtimeStreamHandler | ElevenLabsConvAIStreamHandler | PipelineStreamHandler | None = None
+    audio_sender: TwilioAudioSender | None = None
     metrics = None
 
     try:
@@ -318,6 +352,7 @@ async def twilio_stream_bridge(
                     deepgram_key=deepgram_key,
                     elevenlabs_key=elevenlabs_key,
                     pricing=pricing,
+                    report_only_initial_ttfb=report_only_initial_ttfb,
                 )
                 # Twilio uses mulaw 8kHz (1 byte/sample)
                 metrics.configure_stt_format(sample_rate=8000, bytes_per_sample=1)
@@ -465,6 +500,14 @@ async def twilio_stream_bridge(
     except Exception as exc:
         logger.exception("Stream error: %s", exc)
     finally:
+        # Flush resampler tail before tearing down — drains any carry bytes so
+        # the last audio frame isn't clipped on graceful shutdown.
+        if audio_sender is not None:
+            try:
+                await audio_sender.flush()
+            except Exception as _exc:
+                logger.debug("Twilio audio_sender flush failed: %s", _exc)
+
         if handler is not None:
             await handler.cleanup()
 

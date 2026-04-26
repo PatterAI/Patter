@@ -1,19 +1,16 @@
 /** Deepgram streaming STT for Patter pipeline mode. */
-import { DeepgramSTT as _DeepgramSTT } from "../providers/deepgram-stt";
+import {
+  DeepgramSTT as _DeepgramSTT,
+  type DeepgramSTTOptions as _DeepgramSTTOptions,
+} from "../providers/deepgram-stt";
 
-export interface DeepgramSTTOptions {
+// Re-export the canonical options type from the provider so callers have a
+// single source of truth and can import either path (BUG #13 follow-up).
+export type DeepgramSTTOptions = _DeepgramSTTOptions & {
   /** API key. Falls back to DEEPGRAM_API_KEY env var when omitted. */
   apiKey?: string;
   language?: string;
-  model?: string;
-  encoding?: string;
-  sampleRate?: number;
-  endpointingMs?: number;
-  utteranceEndMs?: number | null;
-  smartFormat?: boolean;
-  interimResults?: boolean;
-  vadEvents?: boolean;
-}
+};
 
 /**
  * Deepgram streaming STT.
@@ -26,6 +23,7 @@ export interface DeepgramSTTOptions {
  * ```
  */
 export class STT extends _DeepgramSTT {
+  static readonly providerKey = "deepgram";
   constructor(opts: DeepgramSTTOptions = {}) {
     const key = opts.apiKey ?? process.env.DEEPGRAM_API_KEY;
     if (!key) {

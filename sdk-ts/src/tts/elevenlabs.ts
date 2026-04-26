@@ -20,6 +20,7 @@ export interface ElevenLabsTTSOptions {
  * ```
  */
 export class TTS extends _ElevenLabsTTS {
+  static readonly providerKey = "elevenlabs";
   constructor(opts: ElevenLabsTTSOptions = {}) {
     const key = opts.apiKey ?? process.env.ELEVENLABS_API_KEY;
     if (!key) {

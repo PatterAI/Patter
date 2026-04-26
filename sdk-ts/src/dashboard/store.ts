@@ -221,6 +221,11 @@ export class MetricsStore extends EventEmitter {
     return null;
   }
 
+  /** Look up an active call by id (returns undefined if not active or unknown). */
+  getActive(callId: string): CallRecord | undefined {
+    return this.activeCalls.get(callId);
+  }
+
   getActiveCalls(): CallRecord[] {
     return Array.from(this.activeCalls.values());
   }

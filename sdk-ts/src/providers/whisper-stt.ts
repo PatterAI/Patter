@@ -20,6 +20,11 @@ const OPENAI_TRANSCRIPTION_URL = 'https://api.openai.com/v1/audio/transcriptions
 /** ~1 second of 16 kHz 16-bit mono audio. */
 const DEFAULT_BUFFER_SIZE = 16000 * 2;
 
+/** Models accepted by ``POST /v1/audio/transcriptions``. */
+const ALLOWED_MODELS = new Set(['whisper-1', 'gpt-4o-transcribe', 'gpt-4o-mini-transcribe']);
+
+export type WhisperResponseFormat = 'json' | 'verbose_json';
+
 /**
  * Wrap raw PCM16 data in a minimal WAV container.
  *
@@ -56,8 +61,13 @@ export class WhisperSTT {
   private readonly model: string;
   private readonly language: string | undefined;
   private readonly bufferSize: number;
-  private buffer: Buffer = Buffer.alloc(0);
-  private callbacks: TranscriptCallback[] = [];
+  private readonly responseFormat: WhisperResponseFormat;
+  // Accumulate chunks in an array and concat once on flush — avoids the
+  // per-``sendAudio`` O(n) ``Buffer.concat([buffer, chunk])`` that quickly
+  // dominates CPU when the phone leg delivers 20 ms frames.
+  private chunks: Buffer[] = [];
+  private bufferedBytes = 0;
+  private callbacks: Set<TranscriptCallback> = new Set();
   private running = false;
   private pendingTranscriptions: Promise<void>[] = [];
 
@@ -66,11 +76,18 @@ export class WhisperSTT {
     model: string = 'whisper-1',
     language?: string,
     bufferSize: number = DEFAULT_BUFFER_SIZE,
+    responseFormat: WhisperResponseFormat = 'json',
   ) {
+    if (!ALLOWED_MODELS.has(model)) {
+      throw new Error(
+        `WhisperSTT: unsupported model "${model}". Expected one of ${[...ALLOWED_MODELS].join(', ')}.`,
+      );
+    }
     this.apiKey = apiKey;
     this.model = model;
     this.language = language;
     this.bufferSize = bufferSize;
+    this.responseFormat = responseFormat;
   }
 
   /** Factory for Twilio calls — mulaw 8 kHz is transcoded upstream, so we still receive PCM 16-bit. */
@@ -80,19 +97,27 @@ export class WhisperSTT {
 
   async connect(): Promise<void> {
     this.running = true;
-    this.buffer = Buffer.alloc(0);
+    this.chunks = [];
+    this.bufferedBytes = 0;
   }
 
   sendAudio(audio: Buffer): void {
     if (!this.running) return;
 
-    this.buffer = Buffer.concat([this.buffer, audio]);
+    this.chunks.push(audio);
+    this.bufferedBytes += audio.length;
 
-    if (this.buffer.length >= this.bufferSize) {
-      const pcm = this.buffer;
-      this.buffer = Buffer.alloc(0);
+    if (this.bufferedBytes >= this.bufferSize) {
+      const pcm = this.flushChunks();
       this.trackTranscription(this.transcribeBuffer(pcm));
     }
+  }
+
+  private flushChunks(): Buffer {
+    const pcm = this.chunks.length === 1 ? this.chunks[0] : Buffer.concat(this.chunks, this.bufferedBytes);
+    this.chunks = [];
+    this.bufferedBytes = 0;
+    return pcm;
   }
 
   private trackTranscription(promise: Promise<void>): void {
@@ -103,29 +128,33 @@ export class WhisperSTT {
     this.pendingTranscriptions.push(wrapped);
   }
 
+  /**
+   * Register a transcript listener. Unlike the previous implementation
+   * which capped at 10 and silently replaced the last one, we now keep all
+   * registered callbacks in a Set; use {@link offTranscript} to remove one.
+   */
   onTranscript(callback: TranscriptCallback): void {
-    if (this.callbacks.length >= 10) {
-      getLogger().warn('WhisperSTT: maximum of 10 onTranscript callbacks reached; replacing the last callback.');
-      this.callbacks[this.callbacks.length - 1] = callback;
-      return;
-    }
-    this.callbacks.push(callback);
+    this.callbacks.add(callback);
+  }
+
+  offTranscript(callback: TranscriptCallback): void {
+    this.callbacks.delete(callback);
   }
 
   async close(): Promise<void> {
     this.running = false;
 
     // Flush remaining buffer if it has enough audio (~25% of threshold).
-    if (this.buffer.length >= this.bufferSize / 4) {
-      const pcm = this.buffer;
-      this.buffer = Buffer.alloc(0);
+    if (this.bufferedBytes >= this.bufferSize / 4) {
+      const pcm = this.flushChunks();
       this.trackTranscription(this.transcribeBuffer(pcm));
     } else {
-      this.buffer = Buffer.alloc(0);
+      this.chunks = [];
+      this.bufferedBytes = 0;
     }
 
     await Promise.allSettled(this.pendingTranscriptions);
-    this.callbacks = [];
+    this.callbacks.clear();
   }
 
   // ------------------------------------------------------------------
@@ -138,6 +167,7 @@ export class WhisperSTT {
     const formData = new FormData();
     formData.append('file', new Blob([wav.buffer.slice(wav.byteOffset, wav.byteOffset + wav.byteLength) as BlobPart], { type: 'audio/wav' }), 'audio.wav');
     formData.append('model', this.model);
+    formData.append('response_format', this.responseFormat);
     if (this.language) {
       formData.append('language', this.language);
     }
@@ -156,14 +186,17 @@ export class WhisperSTT {
         return;
       }
 
-      const json = (await resp.json()) as { text?: string };
+      const json = (await resp.json()) as {
+        text?: string;
+        segments?: Array<{ avg_logprob?: number }>;
+      };
       const text = (json.text ?? '').trim();
       if (!text) return;
 
       const transcript: Transcript = {
         text,
         isFinal: true,
-        confidence: 1.0,
+        confidence: extractConfidence(json),
       };
 
       for (const cb of this.callbacks) {
@@ -173,4 +206,21 @@ export class WhisperSTT {
       getLogger().error(`WhisperSTT transcription error: ${String(err)}`);
     }
   }
+}
+
+function extractConfidence(payload: { segments?: Array<{ avg_logprob?: number }> }): number {
+  // OpenAI's verbose_json returns per-segment ``avg_logprob``. We convert
+  // to a probability via exp() and clamp. When the field is absent (plain
+  // json) we return 1.0 to preserve prior behaviour.
+  const segments = payload.segments;
+  if (!segments || segments.length === 0) return 1.0;
+  const scores: number[] = [];
+  for (const seg of segments) {
+    const logp = seg.avg_logprob;
+    if (typeof logp === 'number') {
+      scores.push(Math.max(0, Math.min(1, Math.exp(logp))));
+    }
+  }
+  if (scores.length === 0) return 1.0;
+  return scores.reduce((a, b) => a + b, 0) / scores.length;
 }

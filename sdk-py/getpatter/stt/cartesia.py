@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from typing import ClassVar
 
 from getpatter.providers.cartesia_stt import CartesiaSTT as _CartesiaSTT
 
@@ -19,6 +20,8 @@ class STT(_CartesiaSTT):
         stt = cartesia.STT()                # reads CARTESIA_API_KEY
         stt = cartesia.STT(api_key="...", language="es")
     """
+
+    provider_key: ClassVar[str] = "cartesia_stt"
 
     def __init__(
         self,

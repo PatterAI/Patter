@@ -12,68 +12,79 @@ except ImportError:  # pragma: no cover
 from getpatter.providers.base import TTSProvider
 
 OPENAI_TTS_URL = "https://api.openai.com/v1/audio/speech"
+# ``gpt-4o-mini-tts`` is the first OpenAI TTS model that accepts an
+# ``instructions`` field (voice direction). Older models (``tts-1``,
+# ``tts-1-hd``) 400 if we include it, so we gate on this prefix.
+_INSTRUCTIONS_PREFIX = "gpt-4o-mini-tts"
 
 
 class OpenAITTS(TTSProvider):
-    def __init__(self, api_key: str, voice: str = "alloy", model: str = "tts-1"):
+    def __init__(
+        self,
+        api_key: str,
+        voice: str = "alloy",
+        model: str = "gpt-4o-mini-tts",
+        *,
+        instructions: str | None = None,
+        speed: float | None = None,
+    ):
         self.api_key = api_key
         self.voice = voice
         self.model = model
+        self.instructions = instructions
+        if speed is not None and not (0.25 <= speed <= 4.0):
+            raise ValueError("OpenAITTS: speed must be in [0.25, 4.0]")
+        self.speed = speed
+        # Use read-idle timeouts rather than a 30 s end-to-end wall clock so
+        # long TTS bodies streamed as a slow trickle don't get killed mid-way.
         self._client = httpx.AsyncClient(
-            headers={"Authorization": f"Bearer {api_key}"}, timeout=30.0
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=5.0),
         )
 
     def __repr__(self) -> str:
         return f"OpenAITTS(model={self.model!r}, voice={self.voice!r})"
 
     async def synthesize(self, text: str) -> AsyncIterator[bytes]:
-        request = self._client.build_request(
-            "POST",
-            OPENAI_TTS_URL,
-            json={
-                "model": self.model,
-                "input": text,
-                "voice": self.voice,
-                "response_format": "pcm",
-            },
-        )
+        if audioop is None:
+            # Without ``audioop`` / ``audioop-lts`` we would emit 24 kHz
+            # audio that the telephony pipeline transcodes as 16 kHz —
+            # users hear chipmunk voices. Fail loudly instead.
+            raise RuntimeError(
+                "OpenAITTS requires the 'audioop' (Python ≤3.12) or 'audioop-lts' "
+                "(Python 3.13+) module to resample 24 kHz PCM to 16 kHz. "
+                "Install 'audioop-lts' via pip to enable TTS."
+            )
+        body: dict = {
+            "model": self.model,
+            "input": text,
+            "voice": self.voice,
+            "response_format": "pcm",
+        }
+        if self.instructions is not None and self.model.startswith(_INSTRUCTIONS_PREFIX):
+            body["instructions"] = self.instructions
+        if self.speed is not None:
+            body["speed"] = self.speed
+        request = self._client.build_request("POST", OPENAI_TTS_URL, json=body)
         response = await self._client.send(request, stream=True)
         response.raise_for_status()
 
-        # ``audioop.ratecv`` resamples chunk-by-chunk while preserving
-        # cross-chunk filter state — critical because OpenAI streams the
-        # PCM body in arbitrary-sized slices and a stateless per-chunk
-        # downsample produced audible pops / dropped audio (the caller
-        # heard garbled or silent TTS in acceptance test 09).
-        state = None
-        carry = b""  # odd trailing byte between chunks (PCM16 = 2 B/sample)
+        # StatefulResampler preserves audioop.ratecv filter state across
+        # chunk boundaries, preventing the pops/garbled audio that occurred
+        # with the previous stateless per-chunk approach (acceptance test 09).
+        from getpatter.services.transcoding import create_resampler_24k_to_16k
+        resampler = create_resampler_24k_to_16k()
         try:
             async for chunk in response.aiter_bytes(chunk_size=4096):
                 if not chunk:
                     continue
-                buf = carry + chunk
-                # Keep only a whole number of 16-bit samples for the
-                # current ratecv call; stash the extra byte for next time.
-                usable_len = (len(buf) // 2) * 2
-                carry = buf[usable_len:]
-                buf = buf[:usable_len]
-                if not buf:
-                    continue
-                if audioop is None:
-                    # Fallback: no resample, downstream will try to
-                    # transcode 24 kHz as 16 kHz and sound wrong. Log once.
-                    yield buf
-                    continue
-                resampled, state = audioop.ratecv(
-                    buf,
-                    2,  # sample width (bytes)
-                    1,  # channels
-                    24000,  # in rate
-                    16000,  # out rate
-                    state,
-                )
+                resampled = resampler.process(chunk)
                 if resampled:
                     yield resampled
+            # Flush any buffered odd byte from the final chunk.
+            tail = resampler.flush()
+            if tail:
+                yield tail
         finally:
             await response.aclose()
 

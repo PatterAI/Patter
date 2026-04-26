@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from typing import ClassVar
 
 from getpatter.providers.elevenlabs_tts import ElevenLabsTTS as _ElevenLabsTTS
 
@@ -19,6 +20,8 @@ class TTS(_ElevenLabsTTS):
         tts = elevenlabs.TTS()              # reads ELEVENLABS_API_KEY
         tts = elevenlabs.TTS(api_key="...", voice_id="EXAVITQu4vr4xnSDxMaL")
     """
+
+    provider_key: ClassVar[str] = "elevenlabs"
 
     def __init__(
         self,

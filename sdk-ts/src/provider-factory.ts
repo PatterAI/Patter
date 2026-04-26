@@ -8,9 +8,36 @@
  */
 import type { AgentOptions } from './types';
 
+/** Per-word timings / metadata (Deepgram-shaped). Optional on every adapter. */
+export interface STTWord {
+  readonly word?: string;
+  readonly start?: number;
+  readonly end?: number;
+  readonly confidence?: number;
+  readonly punctuated_word?: string;
+  readonly speaker?: number;
+}
+
+/**
+ * Facade transcript shape — widened to surface richer provider fields
+ * (Deepgram emits all of them) without forcing adapters that only know
+ * ``text``/``isFinal`` to change. All non-text fields are optional.
+ */
 export interface STTTranscript {
   text: string;
   isFinal?: boolean;
+  /** Overall transcript confidence in [0, 1]. */
+  confidence?: number;
+  /** Provider-side end-of-utterance hint (faster than ``isFinal``). */
+  speechFinal?: boolean;
+  /** True when the result was produced in response to a Finalize command. */
+  fromFinalize?: boolean;
+  /** Provider request id (Deepgram populates this from the Metadata frame). */
+  requestId?: string;
+  /** Per-word timings / metadata when the provider emits them. */
+  words?: ReadonlyArray<STTWord>;
+  /** Which provider event this transcript represents (e.g. ``Results``). */
+  eventType?: string;
 }
 
 export type STTTranscriptCallback = (t: STTTranscript) => Promise<void> | void;

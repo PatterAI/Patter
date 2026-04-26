@@ -5,7 +5,7 @@ import json
 
 from getpatter.providers.base import Transcript
 from getpatter.services.session_manager import CallSession
-from getpatter.services.transcoding import pcm16_to_mulaw, resample_16k_to_8k
+from getpatter.services.transcoding import create_resampler_16k_to_8k, pcm16_to_mulaw
 
 
 class CallOrchestrator:
@@ -23,6 +23,10 @@ class CallOrchestrator:
         self._on_transcript = on_transcript
         self._on_call_start = on_call_start
         self._on_call_end = on_call_end
+        # Stateful resampler preserves audioop.ratecv IIR filter state across
+        # chunks so the filter is not reset every 20 ms frame (which causes
+        # audible artefacts). Only created when transcoding is needed.
+        self._resampler = create_resampler_16k_to_8k() if needs_transcoding else None
 
     async def handle_transcript(self, transcript: Transcript) -> None:
         if not transcript.is_final:
@@ -45,7 +49,7 @@ class CallOrchestrator:
             if not self._is_speaking:
                 break
             if self._needs_transcoding:
-                audio_chunk = resample_16k_to_8k(audio_chunk)
+                audio_chunk = self._resampler.process(audio_chunk)  # type: ignore[union-attr]
                 audio_chunk = pcm16_to_mulaw(audio_chunk)
             await self._send_audio_to_telephony(audio_chunk)
         self._is_speaking = False
@@ -78,6 +82,21 @@ class CallOrchestrator:
                 "direction": self._session.direction,
             })
 
+    async def flush_resampler(self) -> None:
+        """Drain the resampler carry buffer and send any tail bytes to telephony.
+
+        Must be called on graceful session shutdown before closing the WebSocket
+        so the final audio frame is not clipped. No-op when transcoding is
+        disabled (needs_transcoding=False).
+        """
+        if self._resampler is None:
+            return
+        tail = self._resampler.flush()
+        if tail:
+            mulaw_tail = pcm16_to_mulaw(tail)
+            await self._send_audio_to_telephony(mulaw_tail)
+
     async def send_call_end(self) -> None:
+        await self.flush_resampler()
         if self._on_call_end:
             await self._on_call_end({"call_id": self._session.call_id})

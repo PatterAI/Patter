@@ -161,6 +161,11 @@ class LatencyBreakdown:
     llm_ms: float = 0.0
     tts_ms: float = 0.0
     total_ms: float = 0.0
+    # Time-to-first-token for the LLM (stt_complete → first streaming token).
+    # ``None`` in Realtime / non-streaming paths where the LLM doesn't expose
+    # TTFT separately. Populated by ``CallMetricsAccumulator`` from
+    # ``record_llm_first_token``.
+    llm_ttft_ms: float | None = None
 
 
 @dataclass(frozen=True)

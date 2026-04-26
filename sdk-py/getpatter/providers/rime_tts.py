@@ -44,7 +44,10 @@ MIST_MODEL_TIMEOUT = 30
 
 
 def _is_mist_model(model: str) -> bool:
-    return "mist" in model
+    # Rime Mist-family model ids are ``mist``, ``mistv2``, etc. — always
+    # prefixed with ``mist``. Use ``startswith`` so unrelated model ids that
+    # happen to contain the substring don't accidentally match.
+    return model.startswith("mist")
 
 
 def _timeout_for_model(model: str) -> int:
@@ -84,7 +87,7 @@ class RimeTTS(TTSProvider):
         if aiohttp is None:
             raise ImportError(
                 "aiohttp is required for RimeTTS. "
-                "Install with: pip install patter[rime]"
+                "Install with: pip install getpatter[rime]"
             )
 
         resolved_key = api_key or os.environ.get("RIME_API_KEY")

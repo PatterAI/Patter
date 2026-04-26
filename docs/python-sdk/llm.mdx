@@ -103,7 +103,7 @@ Install: `pip install 'getpatter[groq]'`.
 
 ### CerebrasLLM
 
-Cerebras Inference API (OpenAI-compatible) at `https://api.cerebras.ai/v1`. Default model `"llama3.1-8b"`. Supports optional msgpack + gzip payload compression (enabled by default) to reduce time-to-first-token on large prompts — see [Cerebras payload optimization](https://inference-docs.cerebras.ai/payload-optimization).
+Cerebras Inference API (OpenAI-compatible) at `https://api.cerebras.ai/v1`. Default model `"llama-3.3-70b"`. Supports optional msgpack + gzip payload compression (enabled by default) to reduce time-to-first-token on large prompts — see [Cerebras payload optimization](https://inference-docs.cerebras.ai/payload-optimization).
 
 ```python
 from getpatter import CerebrasLLM                  # flat
@@ -112,7 +112,7 @@ from getpatter.llm import cerebras                 # namespaced
 llm = CerebrasLLM()                                 # reads CEREBRAS_API_KEY
 llm = cerebras.LLM(
     api_key="csk-...",
-    model="llama3.1-8b",
+    model="llama-3.3-70b",
     gzip_compression=True,                          # defaults to True
     msgpack_encoding=True,                          # defaults to True
 )

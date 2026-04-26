@@ -76,15 +76,29 @@ class OpenAILLMProvider:
         messages: list[dict],
         tools: list[dict] | None = None,
     ) -> AsyncIterator[dict]:
-        """Yield normalised chunks from OpenAI Chat Completions."""
+        """Yield normalised chunks from OpenAI Chat Completions.
+
+        Emits a final ``{"type": "usage", ...}`` chunk when the upstream
+        response includes a ``usage`` field (enabled via
+        ``stream_options={"include_usage": True}``). Downstream callers
+        use this to attribute real input/output token counts to the call
+        instead of estimating from text length.
+        """
         response = await self._client.chat.completions.create(
             model=self._model,
             messages=messages,
             tools=tools if tools else None,
             stream=True,
+            stream_options={"include_usage": True},
         )
 
+        last_usage = None
         async for chunk in response:
+            # Usage chunks have empty ``choices`` and a populated ``usage``.
+            usage = getattr(chunk, "usage", None)
+            if usage is not None:
+                last_usage = usage
+
             delta = chunk.choices[0].delta if chunk.choices else None
             if delta is None:
                 continue
@@ -101,6 +115,24 @@ class OpenAILLMProvider:
                         "name": tc.function.name if tc.function else None,
                         "arguments": tc.function.arguments if tc.function else None,
                     }
+
+        if last_usage is not None:
+            cache_read = 0
+            details = getattr(last_usage, "prompt_tokens_details", None)
+            if details is not None:
+                cache_read = getattr(details, "cached_tokens", 0) or 0
+            # OpenAI's prompt_tokens is the TOTAL input (uncached + cached).
+            # Subtract cached so input_tokens represents only the uncached
+            # portion and calculate_llm_cost doesn't bill cached tokens at
+            # the full input rate (mirrors sdk-ts/llm-loop.ts:296-305).
+            prompt_tokens = getattr(last_usage, "prompt_tokens", 0) or 0
+            uncached_input = max(0, prompt_tokens - cache_read)
+            yield {
+                "type": "usage",
+                "input_tokens": uncached_input,
+                "output_tokens": getattr(last_usage, "completion_tokens", 0) or 0,
+                "cache_read_tokens": cache_read,
+            }
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +166,7 @@ class LLMLoop:
         tools: list[dict] | None = None,
         tool_executor=None,
         llm_provider: LLMProvider | None = None,
+        metrics=None,
     ) -> None:
         if llm_provider is not None:
             self._provider = llm_provider
@@ -143,6 +176,24 @@ class LLMLoop:
         self._system_prompt = system_prompt
         self._tools = tools
         self._tool_executor = tool_executor
+        self._metrics = metrics
+        self._model = model
+        # Resolve the provider key for cost attribution. Prefer the
+        # ``provider_key`` ClassVar declared by wrapper classes (stable,
+        # matches ``pricing.py``); fall back to the legacy ``__name__``
+        # strip for custom user-defined providers.
+        if llm_provider is not None:
+            cls = type(llm_provider)
+            explicit = getattr(cls, "provider_key", None)
+            if explicit:
+                self._provider_name = explicit
+            else:
+                raw = cls.__name__.lower()
+                for suffix in ("llmprovider", "provider", "llm"):
+                    raw = raw.replace(suffix, "")
+                self._provider_name = raw or "custom"
+        else:
+            self._provider_name = "openai"
 
         # Build OpenAI-format tool definitions (without handler/webhook_url)
         self._openai_tools: list[dict] | None = None
@@ -214,6 +265,17 @@ class LLMLoop:
                         if content:
                             text_parts.append(content)
                             yield content
+
+                    elif chunk_type == "usage":
+                        if self._metrics is not None:
+                            self._metrics.record_llm_usage(
+                                provider=self._provider_name,
+                                model=self._model,
+                                input_tokens=chunk.get("input_tokens", 0),
+                                output_tokens=chunk.get("output_tokens", 0),
+                                cache_read_tokens=chunk.get("cache_read_input_tokens", 0),
+                                cache_write_tokens=chunk.get("cache_creation_input_tokens", 0),
+                            )
 
                     elif chunk_type == "tool_call":
                         has_tool_calls = True

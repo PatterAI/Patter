@@ -12,9 +12,9 @@ import { OpenAIRealtimeAdapter } from './providers/openai-realtime';
 import { ElevenLabsConvAIAdapter } from './providers/elevenlabs-convai';
 import { DeepgramSTT } from './providers/deepgram-stt';
 import { createTTS } from './provider-factory';
-import type { STTAdapter, TTSAdapter } from './provider-factory';
+import type { STTAdapter, TTSAdapter, STTTranscript } from './provider-factory';
 import { CallMetricsAccumulator } from './metrics';
-import { mulawToPcm16, pcm16ToMulaw, resample8kTo16k, resample16kTo8k } from './transcoding';
+import { mulawToPcm16, pcm16ToMulaw, StatefulResampler, createResampler8kTo16k, createResampler16kTo8k } from './transcoding';
 import { LLMLoop } from './llm-loop';
 import { RemoteMessageHandler, isRemoteUrl, isWebSocketUrl } from './remote-message';
 import { createHistoryManager, executeToolWebhook } from './handler-utils';
@@ -25,6 +25,8 @@ import { validateTwilioSid } from './server';
 import type { ProviderPricing } from './pricing';
 import { SentenceChunker } from './sentence-chunker';
 import { PipelineHookExecutor } from './pipeline-hooks';
+import { EventBus } from './observability/event-bus';
+import type { PatterEventType } from './observability/event-bus';
 
 type AIAdapter = OpenAIRealtimeAdapter | ElevenLabsConvAIAdapter;
 
@@ -139,6 +141,8 @@ export interface StreamHandlerDeps {
   readonly onMessage?: PipelineMessageHandler | string;
   readonly onMetrics?: (data: Record<string, unknown>) => Promise<void>;
   readonly recording: boolean;
+  /** When true, only the first TTFB per call is forwarded to the event bus. Default false. */
+  readonly reportOnlyInitialTtfb?: boolean;
   /** Build an AI adapter (OpenAI Realtime or ElevenLabs ConvAI). Injected to avoid circular imports. */
   readonly buildAIAdapter: (resolvedPrompt: string) => AIAdapter;
   /** Sanitize untrusted key-value variables map. */
@@ -164,6 +168,62 @@ export class StreamHandler {
   private stt: STTAdapter | null = null;
   private tts: TTSAdapter | null = null;
   private isSpeaking = false;
+  /** Set to true after a VAD error to suppress log spam for the rest of the call. */
+  private vadDisabled = false;
+  /**
+   * Monotonic counter incremented on every TTS-start. The grace timer
+   * scheduled by ``endSpeakingWithGrace`` only flips ``isSpeaking=false``
+   * if the counter still matches its capture — a new turn that started in
+   * the meantime invalidates the obsolete timer instead of clobbering its
+   * own ``isSpeaking=true``.
+   */
+  private speakingGeneration = 0;
+  /** Handle for the pending grace-period timer, so it can be cleared on cleanup. */
+  private graceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Mark the start of a TTS span. Use instead of setting isSpeaking directly. */
+  private beginSpeaking(): void {
+    this.speakingGeneration++;
+    this.isSpeaking = true;
+  }
+
+  /**
+   * Atomically end speaking AND invalidate any pending grace timer.
+   * Use instead of ``this.isSpeaking = false`` at barge-in sites.
+   */
+  private cancelSpeaking(): void {
+    this.speakingGeneration++; // invalidates pending grace timers
+    this.isSpeaking = false;
+  }
+
+  /** Cancel and clear the pending grace timer, if any. */
+  private clearGraceTimer(): void {
+    if (this.graceTimer !== null) {
+      clearTimeout(this.graceTimer);
+      this.graceTimer = null;
+    }
+  }
+
+  /**
+   * Mark the agent as no longer producing TTS, honoring a grace period that
+   * approximates the carrier's playback buffer. The user may still hear the
+   * agent for ~1 s after we finish pushing audio (Twilio buffers ~1500 ms);
+   * keeping isSpeaking=true through that window keeps the VAD-driven
+   * barge-in armed during the audible tail. Tunable via env.
+   */
+  private endSpeakingWithGrace(): void {
+    const grace = Number(process.env.PATTER_TTS_TAIL_GRACE_MS ?? 1500);
+    if (grace > 0) {
+      const gen = this.speakingGeneration;
+      this.clearGraceTimer();
+      this.graceTimer = setTimeout(() => {
+        this.graceTimer = null;
+        if (this.speakingGeneration === gen) this.isSpeaking = false;
+      }, grace);
+    } else {
+      this.isSpeaking = false;
+    }
+  }
   private llmLoop: LLMLoop | null = null;
   private chunkCount = 0;
   private callEndFired = false;
@@ -172,7 +232,7 @@ export class StreamHandler {
   private responseAudioStarted = false;
   private maxDurationTimer: ReturnType<typeof setTimeout> | null = null;
   private transcriptProcessing = false;
-  private transcriptQueue: Array<{ isFinal?: boolean; text?: string }> = [];
+  private transcriptQueue: STTTranscript[] = [];
   // Throttle state for back-to-back STT finals — see ``commitTranscript``.
   private lastCommitText = '';
   private lastCommitAt = 0;
@@ -183,9 +243,14 @@ export class StreamHandler {
   // swapped), producing a voice drowned in loud hiss. We buffer the odd byte
   // across chunks so resample/mulaw encoding always sees aligned int16 frames.
   private ttsByteCarry: Buffer | null = null;
+  // Per-session stateful resamplers eliminate chunk-boundary discontinuities.
+  // Created lazily on first use; reset() on call end.
+  private readonly inboundResampler: StatefulResampler = createResampler8kTo16k();
+  private readonly outboundResampler: StatefulResampler = createResampler16kTo8k();
 
   private readonly history: ReturnType<typeof createHistoryManager>;
   private readonly metricsAcc: CallMetricsAccumulator;
+  private readonly _eventBus: EventBus;
 
   constructor(deps: StreamHandlerDeps, ws: WSWebSocket, caller: string, callee: string) {
     this.deps = deps;
@@ -196,23 +261,50 @@ export class StreamHandler {
     this.history = createHistoryManager(200);
 
     // v0.5.0+: ``agent.stt`` / ``agent.tts`` are always STTAdapter / TTSAdapter
-    // instances (or undefined). Derive a provider name from the class for
-    // metrics; callers can identify providers by constructor name.
+    // instances (or undefined). Provider classes expose a static
+    // ``providerKey`` so we get a stable pricing/dashboard key (e.g. "deepgram")
+    // instead of the alias class name "STT". Falls back to constructor.name
+    // for any custom adapter that doesn't declare providerKey.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const sttKey = (deps.agent.stt?.constructor as any)?.providerKey;
     const sttProviderName = deps.agent.stt
-      ? (deps.agent.stt.constructor?.name ?? 'custom')
+      ? (sttKey ?? deps.agent.stt.constructor?.name ?? 'custom')
       : undefined;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ttsKey = (deps.agent.tts?.constructor as any)?.providerKey;
     const ttsProviderName = deps.agent.tts
-      ? (deps.agent.tts.constructor?.name ?? 'custom')
+      ? (ttsKey ?? deps.agent.tts.constructor?.name ?? 'custom')
       : undefined;
     const providerMode = deps.agent.provider ?? 'openai_realtime';
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const llmKey = (deps.agent.llm?.constructor as any)?.providerKey;
+    let llmProviderName: string;
+    if (deps.agent.llm) {
+      if (llmKey) {
+        llmProviderName = llmKey;
+      } else {
+        const stripped = (deps.agent.llm.constructor?.name ?? 'custom')
+          .replace(/LLMProvider$/i, '')
+          .replace(/LLM$/i, '')
+          .replace(/Provider$/i, '')
+          .toLowerCase();
+        llmProviderName = stripped || 'custom';
+      }
+    } else {
+      llmProviderName = providerMode === 'openai_realtime' ? 'openai_realtime' : 'openai';
+    }
 
+    this._eventBus = new EventBus();
     this.metricsAcc = new CallMetricsAccumulator({
       callId: '',
       providerMode,
       telephonyProvider: deps.bridge.telephonyProvider,
       sttProvider: sttProviderName,
       ttsProvider: ttsProviderName,
+      llmProvider: llmProviderName,
       pricing: deps.pricing,
+      eventBus: this._eventBus,
+      reportOnlyInitialTtfb: deps.reportOnlyInitialTtfb ?? false,
     });
 
     getLogger().debug(`WebSocket connection opened (${deps.bridge.label})`);
@@ -228,15 +320,49 @@ export class StreamHandler {
     if (turn == null) return;
     this.deps.metricsStore.recordTurn({ call_id: this.callId, turn });
     if (!this.deps.onMetrics) return;
+    // Fix 7 (Python parity, stream_handler.py:312): expose llm_ttft_ms at the
+    // top level of the metrics payload so consumers can read it without
+    // diving into turn.latency. The nested turn.latency.llm_ttft_ms is kept
+    // for backwards compatibility.
+    const turnMetrics = turn as { latency?: { llm_ttft_ms?: number } } | null;
+    const llm_ttft_ms = turnMetrics?.latency?.llm_ttft_ms;
     await this.deps.onMetrics({
       call_id: this.callId,
       turn,
+      ...(llm_ttft_ms !== undefined ? { llm_ttft_ms } : {}),
       cost_so_far: this.metricsAcc.getCostSoFar(),
     });
   }
 
   /** Reset the TTS odd-byte carry — call at every TTS stream entry/exit. */
   private resetTtsCarry(): void {
+    this.ttsByteCarry = null;
+  }
+
+  /**
+   * Flush both stateful resamplers and any TTS byte carry on call close.
+   * Emits tail bytes through the telephony bridge so the last ~20 ms of audio
+   * is not silently clipped on hangup. No-op if the WebSocket is already gone.
+   */
+  private flushResamplers(): void {
+    // Flush inbound resampler (caller audio → STT)
+    try {
+      const inTail = this.inboundResampler.flush();
+      if (inTail.length > 0 && this.stt) {
+        this.stt.sendAudio(inTail);
+      }
+    } catch { /* best effort */ }
+
+    // Flush outbound resampler (TTS → telephony, pipeline mode only)
+    try {
+      const outTail = this.outboundResampler.flush();
+      if (outTail.length > 0 && this.ws.readyState === this.ws.OPEN) {
+        const mulaw = pcm16ToMulaw(outTail);
+        this.deps.bridge.sendAudio(this.ws, mulaw.toString('base64'), this.streamSid);
+      }
+    } catch { /* best effort */ }
+
+    // Flush any leftover TTS carry byte (rare: only when last chunk was odd-length)
     this.ttsByteCarry = null;
   }
 
@@ -267,6 +393,32 @@ export class StreamHandler {
     } catch (e) {
       getLogger().warn(`could not start recording: ${String(e)}`);
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Public: observer API
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Subscribe to a Patter event on the per-call EventBus.
+   *
+   * The most common use-case is 'metrics_collected' — fired after every
+   * completed turn with the TurnMetrics payload.
+   *
+   * Returns an unsubscribe function; call it to stop receiving events.
+   *
+   * @example
+   * const off = handler.addObserver((payload) => {
+   *   console.log('turn metrics:', payload);
+   * });
+   * // later:
+   * off();
+   */
+  addObserver<T = unknown>(
+    cb: (payload: T) => void | Promise<void>,
+    event: PatterEventType = 'metrics_collected',
+  ): () => void {
+    return this._eventBus.on<T>(event, cb);
   }
 
   // ---------------------------------------------------------------------------
@@ -302,11 +454,14 @@ export class StreamHandler {
       getLogger().debug(`Custom params: ${sanitizeLogValue(JSON.stringify(customParams))}`);
     }
 
+    // Don't force direction='inbound' here. If the call was placed via
+    // phone.call() the store already has direction='outbound' from
+    // recordCallInitiated(); the store falls back to 'inbound' when no
+    // existing record is present (i.e. true inbound webhook).
     this.deps.metricsStore.recordCallStart({
       call_id: callId,
       caller: this.caller,
       callee: this.callee,
-      direction: 'inbound',
     });
 
     // Safety: auto-hangup after 1 hour to prevent runaway billing
@@ -323,16 +478,19 @@ export class StreamHandler {
         call_id: callId,
         caller: this.caller,
         callee: this.callee,
-        direction: 'inbound',
       });
     } catch { /* ignore */ }
 
     if (this.deps.onCallStart) {
+      // Resolve direction from the store: if the call was placed via
+      // phone.call() the store has direction='outbound', otherwise inbound.
+      const direction =
+        this.deps.metricsStore.getActive(callId)?.direction ?? 'inbound';
       await this.deps.onCallStart({
         call_id: callId,
         caller: this.caller,
         callee: this.callee,
-        direction: 'inbound',
+        direction,
         telephony_provider: this.deps.bridge.telephonyProvider,
         ...(Object.keys(customParams).length > 0 ? { custom_params: customParams } : {}),
       });
@@ -366,16 +524,67 @@ export class StreamHandler {
   async handleAudio(audioBuffer: Buffer): Promise<void> {
     const provider = this.deps.agent.provider ?? 'openai_realtime';
     if (provider === 'pipeline' && this.stt) {
-      // Keep forwarding caller audio to STT during TTS so barge-in can trigger.
-      // Callers set ``agent.bargeInThresholdMs=0`` to opt out entirely on noisy
-      // links (saves STT cost; loses interruption detection).
-      if (this.isSpeaking && (this.deps.agent.bargeInThresholdMs ?? 300) === 0) {
-        return;
-      }
       // Both Twilio and Telnyx (with default streaming_start PCMU bidirectional)
       // deliver mulaw 8 kHz — always transcode to PCM16 16 kHz before STT.
       const pcm8k = mulawToPcm16(audioBuffer);
-      const pcm16k = resample8kTo16k(pcm8k);
+      const pcm16k = this.inboundResampler.process(pcm8k);
+
+      // External VAD (e.g. Silero) when configured. Drives:
+      //  - Self-hearing avoidance: while the agent is speaking we DO NOT pipe
+      //    audio to STT, so STT can't transcribe the agent's own TTS feeding
+      //    back through the caller microphone.
+      //  - Fast barge-in: VAD speech_start during TTS triggers an immediate
+      //    interruption (no waiting for STT to emit a transcript).
+      //  - Endpointing-free STT: no need to wait for Deepgram's silence
+      //    timeout — we already know when the user is talking.
+      if (this.deps.agent.vad && !this.vadDisabled) {
+        try {
+          // H4: protect hot path against slow ONNX inference — if VAD takes
+          // longer than 25 ms, treat the frame as silent and continue.
+          const vadPromise = this.deps.agent.vad.processFrame(pcm16k, 16000);
+          const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 25));
+          const evt = await Promise.race([vadPromise, timeoutPromise]);
+          if (evt) {
+            // INFO-level log so the user can see VAD activity in the standard
+            // server output without flipping debug logging.
+            getLogger().info(
+              `[VAD] ${evt.type}  agentSpeaking=${this.isSpeaking}`,
+            );
+          }
+          if (evt?.type === 'speech_start') {
+            if (this.isSpeaking) {
+              getLogger().info('[VAD] speech_start during TTS → BARGE-IN');
+              this.metricsAcc.recordOverlapStart();
+              this.cancelSpeaking();
+              try {
+                this.deps.bridge.sendClear(this.ws, this.streamSid);
+              } catch (err) {
+                getLogger().debug(`sendClear during VAD barge-in failed: ${String(err)}`);
+              }
+              this.metricsAcc.recordTurnInterrupted();
+              this.metricsAcc.recordOverlapEnd(true);
+            }
+            this.metricsAcc.startTurnIfIdle();
+          } else if (evt?.type === 'speech_end') {
+            this.metricsAcc.recordVadStop();
+          }
+        } catch (err) {
+          // Disable VAD for the rest of the call to avoid log spam on repeated failures.
+          this.vadDisabled = true;
+          getLogger().warn(`VAD processFrame failed — disabling VAD for this call: ${String(err)}`);
+        }
+      }
+
+      // Self-hearing guard: when the agent is speaking, do NOT forward audio
+      // to STT. The agent's own TTS audio bleeds back through the caller mic
+      // and Deepgram would happily transcribe it. With external VAD we still
+      // detected barge-in above; without VAD we fall back to the legacy
+      // "always forward + bargeInThresholdMs" path so users without a VAD
+      // adapter aren't regressed.
+      if (this.isSpeaking) {
+        if (this.deps.agent.vad) return;
+        if ((this.deps.agent.bargeInThresholdMs ?? 300) === 0) return;
+      }
 
       // beforeSendToStt hook — gate/transform the audio chunk before it
       // reaches STT (custom VAD, echo cancellation, PII redaction, ...).
@@ -386,15 +595,17 @@ export class StreamHandler {
         const processed = await hookExecutor.runBeforeSendToStt(pcm16k, hookCtx);
         if (processed === null) return;
         this.stt.sendAudio(processed);
+        this.metricsAcc.addSttAudioBytes(processed.length);
       } else {
         this.stt.sendAudio(pcm16k);
+        this.metricsAcc.addSttAudioBytes(pcm16k.length);
       }
     } else if (this.adapter) {
       // OpenAI Realtime is configured for g711_ulaw so Twilio mulaw is fine.
       // ElevenLabs ConvAI expects PCM 16kHz — transcode Twilio mulaw first.
       if (this.adapter instanceof ElevenLabsConvAIAdapter && this.deps.bridge.telephonyProvider === 'twilio') {
         const pcm8k = mulawToPcm16(audioBuffer);
-        const pcm16k = resample8kTo16k(pcm8k);
+        const pcm16k = this.inboundResampler.process(pcm8k);
         this.adapter.sendAudio(pcm16k);
       } else {
         this.adapter.sendAudio(audioBuffer);
@@ -415,6 +626,8 @@ export class StreamHandler {
 
   /** Handle call stop / stream end. */
   async handleStop(): Promise<void> {
+    this.clearGraceTimer();
+    this.flushResamplers();
     await this.closeSttOnce();
     try { this.adapter?.close(); } catch { /* ignore */ }
     await this.fireCallEnd();
@@ -422,6 +635,8 @@ export class StreamHandler {
 
   /** Handle WebSocket close event. */
   async handleWsClose(): Promise<void> {
+    this.clearGraceTimer();
+    this.flushResamplers();
     // Drain STT first so in-flight transcripts fire before onCallEnd.
     await this.closeSttOnce();
     try { this.adapter?.close(); } catch { /* ignore */ }
@@ -452,7 +667,7 @@ export class StreamHandler {
     const aligned = this.alignPcm16(pcm16k);
     if (aligned.length === 0) return '';
     if (this.deps.bridge.telephonyProvider === 'twilio') {
-      const pcm8k = resample16kTo8k(aligned);
+      const pcm8k = this.outboundResampler.process(aligned);
       const mulaw = pcm16ToMulaw(pcm8k);
       return mulaw.toString('base64');
     }
@@ -533,9 +748,11 @@ export class StreamHandler {
             "`llm` for built-in LLMs, `onMessage` for custom logic.",
         );
       }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const providerModel = (this.deps.agent.llm as any)?.model ?? '';
       this.llmLoop = new LLMLoop(
         '', // apiKey unused when llmProvider is supplied
-        '', // model unused when llmProvider is supplied
+        providerModel, // propagate so calculateLlmCost can match the price row
         resolvedPrompt,
         this.deps.agent.tools as ToolDefinition[] | undefined,
         this.deps.agent.llm,
@@ -617,7 +834,7 @@ export class StreamHandler {
   }
 
   /** Handle a final transcript from STT in pipeline mode. */
-  private async handleTranscript(transcript: { isFinal?: boolean; text?: string }): Promise<void> {
+  private async handleTranscript(transcript: STTTranscript): Promise<void> {
     this.transcriptQueue.push(transcript);
     if (this.transcriptProcessing) return;
     this.transcriptProcessing = true;
@@ -631,12 +848,24 @@ export class StreamHandler {
     }
   }
 
-  private async processTranscript(transcript: { isFinal?: boolean; text?: string }): Promise<void> {
+  private async processTranscript(transcript: STTTranscript): Promise<void> {
     // Function-scope barge-in flag — set either by the upfront barge-in
     // check, or by the TTS loops downstream when ``isSpeaking`` flips mid-
     // synthesis. Prevents recordTurnComplete double-counting a half-spoken
     // turn (Python uses the same pattern).
     let interrupted = this.handleBargeIn(transcript);
+
+    // Fix 6 (Python parity): start the turn timer on the first non-empty STT
+    // partial/final so stt_ms measures from real speech onset rather than from
+    // the first silence audio byte. startTurnIfIdle() is a no-op if already open.
+    if (transcript.text) {
+      this.metricsAcc.startTurnIfIdle();
+    }
+
+    // Wave6B: record VAD stop timestamp when the STT provider signals speech end.
+    if (transcript.speechFinal) {
+      this.metricsAcc.recordVadStop();
+    }
 
     if (!transcript.isFinal || !transcript.text) return;
     if (!this.commitTranscript(transcript.text)) return;
@@ -644,8 +873,12 @@ export class StreamHandler {
     const label = this.deps.bridge.label;
     getLogger().debug(`User (${label} pipeline): ${sanitizeLogValue(transcript.text)}`);
 
-    this.metricsAcc.startTurn();
+    // Safety net: startTurnIfIdle() was already called above on first partial
+    // text; this second call is a no-op in the normal path but guards code paths
+    // (e.g. tests) that pass a final transcript without any preceding partial.
+    this.metricsAcc.startTurnIfIdle();
     this.metricsAcc.recordSttComplete(transcript.text);
+    this.metricsAcc.recordSttFinalTimestamp();
 
     if (this.deps.onTranscript) {
       await this.deps.onTranscript({
@@ -670,6 +903,11 @@ export class StreamHandler {
     this.history.push({ role: 'user', text: filteredTranscript, timestamp: Date.now() });
 
     let responseText = '';
+
+    // Wave6B: record that the transcript is being committed to the LLM.
+    // onUserTurnCompleted hook is not yet wired in TS — record 0 delay so EOU can still emit.
+    this.metricsAcc.recordOnUserTurnCompletedDelay(0);
+    this.metricsAcc.recordTurnCommitted();
 
     if (this.deps.onMessage && typeof this.deps.onMessage === 'function') {
       try {
@@ -750,13 +988,15 @@ export class StreamHandler {
     getLogger().debug(
       `Barge-in: caller spoke over agent (${sanitizeLogValue(transcript.text.slice(0, 40))})`,
     );
-    this.isSpeaking = false;
+    this.metricsAcc.recordOverlapStart();
+    this.cancelSpeaking();
     try {
       this.deps.bridge.sendClear(this.ws, this.streamSid);
     } catch (err) {
       getLogger().debug(`sendClear during barge-in failed: ${String(err)}`);
     }
     this.metricsAcc.recordTurnInterrupted();
+    this.metricsAcc.recordOverlapEnd(true);
     return true;
   }
 
@@ -809,24 +1049,30 @@ export class StreamHandler {
     const chunker = new SentenceChunker();
     const allParts: string[] = [];
     const ttsFirstByteSent = { value: false };
-    this.isSpeaking = true;
+    this.beginSpeaking();
     let llmError = false;
 
-    const guardAndSpeak = async (sentence: string): Promise<void> => {
+    const guardAndSpeak = async (sentence: string, isFirst: boolean): Promise<void> => {
+      // Fix 3/5: record first-sentence boundary before synthesizing first sentence.
+      if (isFirst) this.metricsAcc.recordLlmFirstSentenceComplete();
       const guard = checkGuardrails(sentence, this.deps.agent.guardrails);
       const sentenceText = guard
         ? (guard.replacement ?? "I'm sorry, I can't respond to that.")
         : sentence;
       await this.synthesizeSentence(sentenceText, hookExecutor, hookCtx, ttsFirstByteSent);
     };
+    let firstSentenceEmitted = false;
 
     try {
       try {
-        for await (const token of this.llmLoop!.run(filteredTranscript, this.history.entries, callCtx)) {
+        for await (const token of this.llmLoop!.run(filteredTranscript, this.history.entries, callCtx, this.metricsAcc)) {
+          // Fix 5: record first token for TTFT metric.
+          this.metricsAcc.recordLlmFirstToken();
           allParts.push(token);
           for (const sentence of chunker.push(token)) {
             if (!this.isSpeaking) break;
-            await guardAndSpeak(sentence);
+            await guardAndSpeak(sentence, !firstSentenceEmitted);
+            firstSentenceEmitted = true;
           }
           if (!this.isSpeaking) break;
         }
@@ -834,6 +1080,9 @@ export class StreamHandler {
         llmError = true;
         chunker.reset(); // discard partial content on LLM error
         getLogger().error(`LLM loop error (${label}):`, e);
+        // Fix 8: record turn as interrupted so it does not leak in metrics when
+        // the LLM throws without emitting any text.
+        this.metricsAcc.recordTurnInterrupted();
       }
 
       this.metricsAcc.recordLlmComplete(); // record BEFORE TTS flush, not after
@@ -841,11 +1090,12 @@ export class StreamHandler {
       if (!llmError && this.isSpeaking) {
         for (const sentence of chunker.flush()) {
           if (!this.isSpeaking) break;
-          await guardAndSpeak(sentence);
+          await guardAndSpeak(sentence, !firstSentenceEmitted);
+          firstSentenceEmitted = true;
         }
       }
     } finally {
-      this.isSpeaking = false; // guaranteed reset
+      this.endSpeakingWithGrace();
     }
     return allParts.join('');
   }
@@ -873,7 +1123,7 @@ export class StreamHandler {
     const chunker = new SentenceChunker();
     const sentences = [...chunker.push(text), ...chunker.flush()];
     const ttsFirstByteSent = { value: false };
-    this.isSpeaking = true;
+    this.beginSpeaking();
     let interrupted = false;
 
     try {
@@ -882,7 +1132,7 @@ export class StreamHandler {
         await this.synthesizeSentence(sentence, hookExecutor, hookCtx, ttsFirstByteSent);
       }
     } finally {
-      this.isSpeaking = false; // guaranteed reset
+      this.endSpeakingWithGrace();
     }
 
     if (!interrupted) this.metricsAcc.recordTtsComplete(text);
@@ -894,7 +1144,7 @@ export class StreamHandler {
     const onMessage = this.deps.onMessage as string;
     const parts: string[] = [];
     this.metricsAcc.recordLlmComplete();
-    this.isSpeaking = true;
+    this.beginSpeaking();
     let wsTtsStarted = false;
     try {
       for await (const chunk of this.deps.remoteHandler.callWebSocket(onMessage, msgData)) {
@@ -912,7 +1162,7 @@ export class StreamHandler {
     } catch (e) {
       getLogger().error(`WebSocket remote error (${this.deps.bridge.label}):`, e);
     } finally {
-      this.isSpeaking = false;
+      this.endSpeakingWithGrace();
       this.resetTtsCarry();
     }
     const responseText = parts.join('');
@@ -987,11 +1237,12 @@ export class StreamHandler {
       if (this.metricsAcc.turnActive === false) this.metricsAcc.startTurn();
       this.metricsAcc.recordTtsFirstByte();
     }
-    // OpenAI Realtime outputs g711_ulaw 8 kHz. For Telnyx (PCM 16 kHz),
-    // transcode before sending; Twilio accepts mulaw natively.
-    const outAudio = this.deps.bridge.telephonyProvider === 'telnyx'
-      ? resample8kTo16k(mulawToPcm16(eventData))
-      : eventData;
+    // OpenAI Realtime outputs g711_ulaw 8 kHz (PCMU). Both Twilio and Telnyx
+    // are configured for PCMU/mulaw 8 kHz (Telnyx uses stream_bidirectional_codec=PCMU)
+    // so the audio is already in the correct wire format — pass through untransformed.
+    // Do NOT resample here: inboundResampler is 8k→16k for the STT inbound path;
+    // reusing it on the outbound path corrupts both directions.
+    const outAudio = eventData;
     this.deps.bridge.sendAudio(this.ws, outAudio.toString('base64'), this.streamSid);
     // Send mark for barge-in accuracy.
     this.chunkCount++;

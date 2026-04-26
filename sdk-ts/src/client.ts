@@ -277,6 +277,10 @@ export class Patter {
       const { startTunnel } = await import('./tunnel');
       this.tunnelHandle = await startTunnel(port);
       webhookUrl = this.tunnelHandle.hostname;
+      // Propagate the freshly-resolved webhook host into localConfig so a
+      // subsequent call() in the same process reads the same hostname instead
+      // of the original undefined value.
+      this.localConfig = { ...this.localConfig, webhookUrl };
     }
 
     if (!webhookUrl) {

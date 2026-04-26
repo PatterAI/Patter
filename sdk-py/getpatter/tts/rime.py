@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import Optional
+from typing import ClassVar, Optional
 
 from getpatter.providers.rime_tts import RimeTTS as _RimeTTS
 
@@ -20,6 +20,8 @@ class TTS(_RimeTTS):
         tts = rime.TTS()                    # reads RIME_API_KEY
         tts = rime.TTS(api_key="...", speaker="astra")
     """
+
+    provider_key: ClassVar[str] = "rime"
 
     def __init__(
         self,

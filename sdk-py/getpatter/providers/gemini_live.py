@@ -8,6 +8,13 @@ which mirrors :class:`~getpatter.providers.openai_realtime.OpenAIRealtimeAdapter
 
 The heavy LiveKit lifecycle/resume machinery is intentionally NOT ported —
 Patter's handlers manage session lifecycle externally.
+
+NOTE: Native-audio Gemini Live models are **v1alpha-only**. The client must
+pass ``http_options={"api_version": "v1alpha"}`` when constructing the genai
+client (see :meth:`GeminiLiveAdapter.connect`). When Google promotes native
+audio to GA, move the default to ``v1beta`` or ``v1`` and update the default
+``model`` below accordingly.
+See: https://ai.google.dev/gemini-api/docs/live
 """
 
 from __future__ import annotations
@@ -47,9 +54,10 @@ class GeminiLiveAdapter:
         api_key: str,
         # gemini-2.0-flash-exp was experimental preview retired Dec 2024.
         # gemini-live-2.5-flash-preview was shut down Dec 9, 2025.
-        # Current live-audio model in April 2026 is the native-audio variant.
+        # Current native-audio live model (v1alpha only) is the dated preview.
         # Override via GeminiLive(model=...) if needed.
-        model: str = "gemini-live-2.5-flash-native-audio",
+        # TODO verify against Google docs: https://ai.google.dev/gemini-api/docs/live
+        model: str = "gemini-2.5-flash-native-audio-preview-09-2025",
         voice: str = "Puck",
         instructions: str = "",
         language: str = "en-US",
@@ -71,6 +79,10 @@ class GeminiLiveAdapter:
         self._session: Any = None
         self._session_cm: Any = None
         self._running = False
+        # Tracks call_id -> function name so tool responses can be sent back
+        # with the correct ``name`` field (Gemini expects the original function
+        # name, not the call_id).
+        self._pending_tool_calls: dict[str, str] = {}
 
     def __repr__(self) -> str:
         return (
@@ -161,11 +173,15 @@ class GeminiLiveAdapter:
         """Return a tool call result to Gemini and continue the turn."""
         if self._session is None:
             return
+        # Gemini requires the original function name in the response, not the
+        # call_id. Look it up from the map populated when the tool call was
+        # emitted; fall back to ``call_id`` if we never saw this id (defensive).
+        name = self._pending_tool_calls.pop(call_id, call_id)
         await self._session.send_tool_response(
             function_responses=[
                 {
                     "id": call_id,
-                    "name": call_id,  # LiveKit also fans out id as name fallback
+                    "name": name,
                     "response": {"result": result},
                 }
             ],
@@ -214,11 +230,15 @@ class GeminiLiveAdapter:
                 if tool_call is not None:
                     for fn in getattr(tool_call, "function_calls", []) or []:
                         args = getattr(fn, "args", {}) or {}
+                        call_id = getattr(fn, "id", "") or ""
+                        fn_name = getattr(fn, "name", "") or ""
+                        if call_id and fn_name:
+                            self._pending_tool_calls[call_id] = fn_name
                         yield (
                             "function_call",
                             {
-                                "call_id": getattr(fn, "id", "") or "",
-                                "name": getattr(fn, "name", "") or "",
+                                "call_id": call_id,
+                                "name": fn_name,
                                 "arguments": json.dumps(args)
                                 if not isinstance(args, str)
                                 else args,
@@ -243,3 +263,4 @@ class GeminiLiveAdapter:
                 self._session_cm = None
                 self._session = None
         self._client = None
+        self._pending_tool_calls.clear()
