@@ -11,8 +11,8 @@
  */
 
 /** Pricing table version identifier, updated in lockstep with sdk-py. */
-export const PRICING_VERSION = '2026.1';
-export const PRICING_LAST_UPDATED = '2026-04-23';
+export const PRICING_VERSION = '2026.2';
+export const PRICING_LAST_UPDATED = '2026-04-24';
 
 export interface ProviderPricing {
   unit: string;
@@ -228,6 +228,110 @@ export function calculateRealtimeCachedSavings(
   // HIGHER than full, the diff becomes negative — meaningless as a savings
   // figure, so we render 0 instead of a negative number.
   return Math.max(0, (fullAudio + fullText) - (discountedAudio + discountedText));
+}
+
+// ---------------------------------------------------------------------------
+// Chat/completion LLM pricing (per 1M tokens)
+// ---------------------------------------------------------------------------
+//
+// Rates reflect publicly listed provider pricing as of PRICING_LAST_UPDATED.
+// ``input`` / ``output`` are dollars per 1M tokens. Anthropic adds
+// ``cache_read`` (~10% of full input) and ``cache_write`` (~125% of full input)
+// for prompt caching. Groq / Cerebras / Google do not publicly expose cache
+// rates for these models, so only input/output are populated.
+
+export interface LlmModelPricing {
+  input: number;
+  output: number;
+  cache_read?: number;
+  cache_write?: number;
+}
+
+export const llmPricing: Record<string, Record<string, LlmModelPricing>> = {
+  anthropic: {
+    'claude-opus-4-7': {
+      input: 15.0,
+      output: 75.0,
+      cache_read: 1.5,
+      cache_write: 18.75,
+    },
+    'claude-sonnet-4-6': {
+      input: 3.0,
+      output: 15.0,
+      cache_read: 0.3,
+      cache_write: 3.75,
+    },
+    'claude-haiku-4-5': {
+      input: 1.0,
+      output: 5.0,
+      cache_read: 0.1,
+      cache_write: 1.25,
+    },
+  },
+  google: {
+    'gemini-2.5-pro': { input: 1.25, output: 10.0 },
+    'gemini-2.5-flash': { input: 0.30, output: 2.50 },
+    'gemini-live-2.5-flash-native-audio': { input: 0.30, output: 2.50 },
+  },
+  groq: {
+    'llama-3.3-70b-versatile': { input: 0.59, output: 0.79 },
+    'llama-3.1-8b-instant': { input: 0.05, output: 0.08 },
+  },
+  cerebras: {
+    'llama-3.3-70b': { input: 0.85, output: 1.20 },
+    'qwen-3-32b': { input: 0.40, output: 0.80 },
+  },
+  // OpenAI Chat Completions (non-Realtime) — mirrors sdk-py pricing table.
+  // Rates are per 1M tokens (USD), cache_read = cached input rate.
+  openai: {
+    'gpt-4o': { input: 2.50, output: 10.00, cache_read: 1.25 },
+    'gpt-4o-mini': { input: 0.15, output: 0.60, cache_read: 0.075 },
+    'gpt-4.1': { input: 3.00, output: 12.00, cache_read: 0.75 },
+    'gpt-4.1-mini': { input: 0.80, output: 3.20, cache_read: 0.20 },
+    'o3': { input: 2.00, output: 8.00, cache_read: 0.50 },
+    'o4-mini': { input: 1.10, output: 4.40, cache_read: 0.275 },
+  },
+};
+
+/**
+ * Calculate LLM cost from token counts using :data:`llmPricing`.
+ *
+ * Callers should subtract ``cacheReadTokens`` from ``inputTokens`` before
+ * passing when they also pass ``cacheReadTokens`` separately so cached
+ * tokens aren't double-billed. Returns 0 when the provider/model is not
+ * listed so unknown models never produce bogus line items.
+ */
+export function calculateLlmCost(
+  provider: string,
+  model: string,
+  inputTokens: number,
+  outputTokens: number,
+  cacheReadTokens: number = 0,
+  cacheWriteTokens: number = 0,
+): number {
+  const providerTable = llmPricing[provider];
+  if (!providerTable) return 0;
+  // Exact match first; fall back to longest-prefix match so versioned model
+  // ids like ``claude-haiku-4-5-20251001`` resolve against the canonical
+  // alias ``claude-haiku-4-5`` in the pricing table.
+  let rates = providerTable[model];
+  if (!rates) {
+    let bestKey = '';
+    for (const key of Object.keys(providerTable)) {
+      if (model.startsWith(key) && key.length > bestKey.length) {
+        bestKey = key;
+      }
+    }
+    if (bestKey) rates = providerTable[bestKey];
+  }
+  if (!rates) return 0;
+
+  let cost = 0;
+  cost += (inputTokens / 1_000_000) * (rates.input ?? 0);
+  cost += (outputTokens / 1_000_000) * (rates.output ?? 0);
+  cost += (cacheReadTokens / 1_000_000) * (rates.cache_read ?? 0);
+  cost += (cacheWriteTokens / 1_000_000) * (rates.cache_write ?? 0);
+  return Math.max(0, cost);
 }
 
 /**
