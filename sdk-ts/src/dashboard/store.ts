@@ -3,9 +3,18 @@
  *
  * Keeps the last `maxCalls` completed calls and tracks active calls.
  * Supports SSE event subscribers for real-time updates.
+ *
+ * Optional disk hydration: when `CallLogger` writes per-call records under
+ * `<root>/calls/YYYY/MM/DD/<call_id>/metadata.json`, calling
+ * `hydrate(logRoot)` on a fresh store rebuilds the in-memory list from those
+ * files so the dashboard survives process restarts (the persistence is in
+ * the JSONL/JSON files, the store is just a cache on top).
  */
 
 import { EventEmitter } from 'events';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { getLogger } from '../logger';
 
 export interface CallRecord {
   call_id: string;
@@ -299,4 +308,137 @@ export class MetricsStore extends EventEmitter {
   get callCount(): number {
     return this.calls.length;
   }
+
+  /**
+   * Rebuild the in-memory call list from `metadata.json` files written by
+   * `CallLogger` under `<logRoot>/calls/YYYY/MM/DD/<call_id>/`. Idempotent:
+   * call_ids already in the store are skipped. Errors per file are logged
+   * and swallowed so a single corrupt entry doesn't block hydration.
+   *
+   * Returns the number of calls newly added to the store.
+   *
+   * Safe to call before any traffic; intended to run once at server startup.
+   */
+  hydrate(logRoot: string | null | undefined): number {
+    if (!logRoot) return 0;
+    const callsRoot = path.join(logRoot, 'calls');
+    if (!fs.existsSync(callsRoot)) return 0;
+
+    const collected: CallRecord[] = [];
+    const seen = new Set<string>(this.calls.map((c) => c.call_id));
+
+    const walk = (dir: string, depth: number): void => {
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        const childPath = path.join(dir, entry.name);
+        if (depth < 3) {
+          // YYYY / MM / DD layers — descend only when name is numeric to
+          // skip stray files (DS_Store, indexes).
+          if (entry.isDirectory() && /^\d+$/.test(entry.name)) {
+            walk(childPath, depth + 1);
+          }
+          continue;
+        }
+        // depth === 3 → this is a per-call directory.
+        if (!entry.isDirectory()) continue;
+        const metadataPath = path.join(childPath, 'metadata.json');
+        if (!fs.existsSync(metadataPath)) continue;
+        try {
+          const raw = fs.readFileSync(metadataPath, 'utf8');
+          const meta = JSON.parse(raw) as Record<string, unknown>;
+          const callId = (meta.call_id as string) || entry.name;
+          if (!callId || seen.has(callId)) continue;
+          const record = metadataToCallRecord(callId, meta);
+          if (record === null) {
+            // Unparseable started_at → skip rather than insert as epoch 0
+            // (which would corrupt sort order forever).
+            getLogger().debug(
+              `MetricsStore.hydrate: skipping ${metadataPath}: unparseable started_at`,
+            );
+            continue;
+          }
+          collected.push(record);
+          seen.add(callId);
+        } catch (err) {
+          getLogger().debug(
+            `MetricsStore.hydrate: skipping ${metadataPath}: ${String(err)}`,
+          );
+        }
+      }
+    };
+
+    walk(callsRoot, 0);
+
+    // Stable order: oldest first (matches the order recordCallEnd would use).
+    collected.sort((a, b) => (a.started_at || 0) - (b.started_at || 0));
+
+    // Re-check seen against this.calls before each insert. Defends against the
+    // (rare) case where hydrate() is invoked concurrently with itself or with
+    // live recordCallEnd() traffic — without this guard, the snapshot taken
+    // at the top of hydrate() can be stale by the time we reach the writes.
+    for (const rec of collected) {
+      if (this.calls.some((c) => c.call_id === rec.call_id)) continue;
+      this.calls.push(rec);
+      if (this.calls.length > this.maxCalls) {
+        this.calls = this.calls.slice(-this.maxCalls);
+      }
+    }
+    return collected.length;
+  }
+}
+
+/**
+ * Translate a CallLogger ``metadata.json`` payload into a ``CallRecord``.
+ * Returns ``null`` when ``started_at`` is missing or unparseable — the record
+ * would otherwise be silently inserted with ``started_at = 0`` (Unix epoch),
+ * which corrupts every sort/range query that depends on it.
+ */
+function metadataToCallRecord(
+  callId: string,
+  meta: Record<string, unknown>,
+): CallRecord | null {
+  const startedAt = parseTimestamp(meta.started_at);
+  if (startedAt === null) return null;
+  const endedAt = parseTimestamp(meta.ended_at);
+  const status = (meta.status as string | undefined) || 'completed';
+  const metrics =
+    meta.metrics && typeof meta.metrics === 'object'
+      ? (meta.metrics as Record<string, unknown>)
+      : null;
+  const transcript = Array.isArray(meta.transcript)
+    ? (meta.transcript as CallRecord['transcript'])
+    : [];
+  return {
+    call_id: callId,
+    caller: (meta.caller as string) || '',
+    callee: (meta.callee as string) || '',
+    direction: (meta.direction as string) || 'inbound',
+    started_at: startedAt,
+    ended_at: endedAt ?? undefined,
+    status,
+    metrics,
+    transcript,
+  };
+}
+
+/**
+ * Parse a metadata timestamp into Unix seconds. Accepts numbers (seconds)
+ * and ISO-8601 strings; returns ``null`` for missing, unrecognized, or
+ * unparseable values so callers can decide to skip the record rather than
+ * silently insert it as epoch 0.
+ */
+function parseTimestamp(raw: unknown): number | null {
+  if (typeof raw === 'number') {
+    return Number.isFinite(raw) ? raw : null;
+  }
+  if (typeof raw === 'string') {
+    const ms = Date.parse(raw);
+    return Number.isFinite(ms) ? ms / 1000 : null;
+  }
+  return null;
 }

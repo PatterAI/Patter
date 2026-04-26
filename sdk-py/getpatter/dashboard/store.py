@@ -371,3 +371,141 @@ class MetricsStore:
     def call_count(self) -> int:
         with self._lock:
             return len(self._calls)
+
+    def hydrate(self, log_root: str | None) -> int:
+        """Rebuild the call list from on-disk metadata.json files.
+
+        ``CallLogger`` persists per-call envelopes under
+        ``<log_root>/calls/YYYY/MM/DD/<call_id>/metadata.json``. Calling
+        ``hydrate(log_root)`` once at server startup replays those files
+        into the in-memory store so the dashboard survives a restart (the
+        durable persistence is the JSONL/JSON files; this store is just a
+        cache on top).
+
+        Idempotent: ``call_id``s already in the store are skipped. Errors
+        per file are logged at debug level and swallowed so a single
+        corrupt entry doesn't block hydration.
+
+        Returns the number of calls newly added.
+        """
+        import json
+        import logging
+        from pathlib import Path
+
+        if not log_root:
+            return 0
+        calls_root = Path(log_root) / "calls"
+        if not calls_root.is_dir():
+            return 0
+
+        log = logging.getLogger("getpatter.dashboard.store")
+        collected: list[dict[str, Any]] = []
+        with self._lock:
+            seen = {c.get("call_id") for c in self._calls if c.get("call_id")}
+
+        for year in _numeric_subdirs(calls_root):
+            for month in _numeric_subdirs(year):
+                for day in _numeric_subdirs(month):
+                    for call_dir in day.iterdir():
+                        if not call_dir.is_dir():
+                            continue
+                        meta_path = call_dir / "metadata.json"
+                        if not meta_path.is_file():
+                            continue
+                        try:
+                            with open(meta_path, encoding="utf-8") as fh:
+                                meta = json.load(fh)
+                        except (OSError, json.JSONDecodeError) as exc:
+                            log.debug(
+                                "MetricsStore.hydrate: skipping %s: %s",
+                                meta_path,
+                                exc,
+                            )
+                            continue
+                        call_id = meta.get("call_id") or call_dir.name
+                        if not call_id or call_id in seen:
+                            continue
+                        record = _metadata_to_call_record(call_id, meta)
+                        if record is None:
+                            # Unparseable started_at → skip rather than insert
+                            # as epoch 0 (which would corrupt sort order).
+                            log.debug(
+                                "MetricsStore.hydrate: skipping %s: "
+                                "unparseable started_at",
+                                meta_path,
+                            )
+                            continue
+                        collected.append(record)
+                        seen.add(call_id)
+
+        # Stable order: oldest first (matches recordCallEnd's append order).
+        collected.sort(key=lambda r: r.get("started_at") or 0)
+
+        # Re-check call_id presence under the lock before each insert.
+        # Defends against the rare case where hydrate() is invoked
+        # concurrently with itself or with live recordCallEnd traffic.
+        with self._lock:
+            existing_ids = {
+                c.get("call_id") for c in self._calls if c.get("call_id")
+            }
+            for rec in collected:
+                if rec["call_id"] in existing_ids:
+                    continue
+                self._calls.append(rec)
+                existing_ids.add(rec["call_id"])
+                if len(self._calls) > self._max_calls:
+                    self._calls = self._calls[-self._max_calls :]
+        return len(collected)
+
+
+def _numeric_subdirs(parent):
+    """Yield direct subdirectories of ``parent`` whose name is all digits."""
+    try:
+        entries = list(parent.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if entry.is_dir() and entry.name.isdigit():
+            yield entry
+
+
+def _metadata_to_call_record(
+    call_id: str, meta: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Translate a CallLogger metadata.json payload into a CallRecord dict.
+
+    Returns ``None`` when ``started_at`` is missing or unparseable — the
+    record would otherwise be silently inserted with ``started_at = 0``
+    (Unix epoch), which corrupts every sort/range query that depends on it.
+    """
+    from datetime import datetime
+
+    def _to_seconds(raw: Any) -> float | None:
+        if isinstance(raw, (int, float)):
+            return float(raw)
+        if isinstance(raw, str):
+            try:
+                return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                return None
+        return None
+
+    started = _to_seconds(meta.get("started_at"))
+    if started is None:
+        return None
+    ended = _to_seconds(meta.get("ended_at"))
+    metrics = meta.get("metrics") if isinstance(meta.get("metrics"), dict) else None
+    transcript = meta.get("transcript") if isinstance(meta.get("transcript"), list) else []
+    record: dict[str, Any] = {
+        "call_id": call_id,
+        "caller": meta.get("caller") or "",
+        "callee": meta.get("callee") or "",
+        "direction": meta.get("direction") or "inbound",
+        "started_at": started,
+        "status": meta.get("status") or "completed",
+        "metrics": metrics,
+        "transcript": transcript,
+    }
+    if ended is not None:
+        record["ended_at"] = ended
+    return record

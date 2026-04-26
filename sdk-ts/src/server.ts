@@ -639,6 +639,22 @@ export class EmbeddedServer {
   ) {
     this.metricsStore = new MetricsStore();
     this.pricing = mergePricing(pricingOverrides as Record<string, { unit?: string; price?: number }> | undefined);
+
+    // Hydrate the dashboard from disk so /api/dashboard/calls survives a
+    // restart. CallLogger persists call metadata as JSONL/JSON under
+    // PATTER_LOG_DIR; if it's set, replay those files into the store.
+    // No-op when logging is disabled (PATTER_LOG_DIR unset).
+    const logRoot = resolveLogRoot();
+    if (logRoot) {
+      try {
+        const restored = this.metricsStore.hydrate(logRoot);
+        if (restored > 0) {
+          getLogger().info(`Dashboard hydrated ${restored} call(s) from ${logRoot}`);
+        }
+      } catch (err) {
+        getLogger().warn(`Dashboard hydration failed: ${String(err)}`);
+      }
+    }
   }
 
   async start(port: number = 8000): Promise<void> {
