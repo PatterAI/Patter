@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import logging
 import os
 from typing import Any, AsyncIterator
 
@@ -34,11 +35,22 @@ from getpatter.services.llm_loop import OpenAILLMProvider
 
 __all__ = ["CerebrasLLMProvider"]
 
+logger = logging.getLogger("getpatter.providers.cerebras_llm")
+
 
 _CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1"
-# ``llama3.1-8b`` was retired by Cerebras; default to the current
-# production-grade model. Override via ``model=`` if you need a different one.
-_DEFAULT_MODEL = "llama-3.3-70b"
+# Default to the smallest fast Cerebras model available on the free tier so
+# the SDK works out of the box. ``llama-3.3-70b`` exists on Cerebras but is
+# gated to paid tiers — using it as default surfaces a confusing 404 for free
+# users. ``llama3.1-8b`` is 8B params, sub-100ms TTFT on Cerebras hardware,
+# and matches the LiveKit/Pipecat "small and fast for voice" philosophy.
+#
+# TODO(deprecation 2026-05-27): Cerebras has scheduled both ``llama3.1-8b``
+# and ``qwen-3-235b-a22b-instruct-2507`` for retirement on this date. Before
+# then, retest the free tier and switch the default to whichever 8B-class
+# model replaces them (likely a Llama 4 Scout variant). Track at
+# https://inference-docs.cerebras.ai/change-log
+_DEFAULT_MODEL = "llama3.1-8b"
 
 
 def _build_cerebras_client(
@@ -127,7 +139,10 @@ class CerebrasLLMProvider(OpenAILLMProvider):
 
     Args:
         api_key: Cerebras API key. Reads ``CEREBRAS_API_KEY`` if omitted.
-        model: Cerebras chat model ID. Defaults to ``llama-3.3-70b``.
+        model: Cerebras chat model ID. Defaults to ``llama3.1-8b`` (free-tier
+            available, sub-100ms TTFT). Override with ``llama-3.3-70b`` on paid
+            tiers for higher quality, or query ``GET /v1/models`` to discover
+            tier-available IDs.
         base_url: Optional Cerebras base URL override.
         gzip_compression: Gzip request payloads for faster TTFT.
         msgpack_encoding: Encode request payloads with msgpack for smaller
@@ -176,5 +191,27 @@ class CerebrasLLMProvider(OpenAILLMProvider):
         messages: list[dict],
         tools: list[dict] | None = None,
     ) -> AsyncIterator[dict]:
-        async for chunk in super().stream(messages, tools):
-            yield chunk
+        # 404 model_not_found on Cerebras almost always means the model name
+        # isn't available on the caller's tier (Cerebras gates models per
+        # plan). Surface a concrete recovery hint at ERROR level, matching the
+        # TS provider's log-and-return contract — voice pipelines treat LLM
+        # provider failures as recoverable (the call continues, the user just
+        # hears no LLM response), so raising would be a behavioural change.
+        try:
+            async for chunk in super().stream(messages, tools):
+                yield chunk
+        except Exception as exc:
+            text = str(exc)
+            if "404" in text and "model_not_found" in text:
+                logger.error(
+                    'Cerebras: model "%s" not available on your tier. Override '
+                    "via `CerebrasLLM(model='<id>')` and list tier-available "
+                    "ids with `GET %s/models` (common: llama3.1-8b, "
+                    "qwen-3-235b-a22b-instruct-2507, llama-3.3-70b on paid). "
+                    "Upstream: %s",
+                    self._model,
+                    _CEREBRAS_BASE_URL,
+                    text,
+                )
+                return
+            raise
