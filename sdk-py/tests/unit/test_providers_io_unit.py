@@ -1027,7 +1027,16 @@ class TestTelnyxAdapterIO:
         from getpatter.providers.telnyx_adapter import TelnyxAdapter
 
         adapter = TelnyxAdapter(api_key="key_test", connection_id="conn_123")
+        # configure_number now reads ``resp.status_code`` (>= 400 triggers a
+        # warning + raise_for_status). Stub a 2xx response so the path runs
+        # cleanly under unit-test conditions.
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = ""
+        mock_resp.raise_for_status = MagicMock()
         adapter._client = AsyncMock()
+        adapter._client.patch.return_value = mock_resp
+
         await adapter.configure_number("+15551234567", "https://example.com/webhook")
         adapter._client.patch.assert_called_once()
 
