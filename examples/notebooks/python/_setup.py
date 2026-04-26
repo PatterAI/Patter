@@ -205,6 +205,28 @@ def load_fixture(rel_path: str) -> bytes:
     return data
 
 
+async def run_stt(stt, audio: bytes, *, chunk_size: int = 3200) -> str:
+    """Send audio in chunks through any STTProvider, collect the transcript."""
+    await stt.connect()
+    try:
+        for i in range(0, len(audio), chunk_size):
+            await stt.send_audio(audio[i : i + chunk_size])
+        out: list[str] = []
+        async for piece in stt.receive_transcripts():
+            out.append(piece)
+        return "".join(out)
+    finally:
+        await stt.close()
+
+
+async def run_tts(tts, text: str) -> bytes:
+    """Synthesize text via any TTSProvider, return concatenated bytes."""
+    chunks: list[bytes] = []
+    async for chunk in tts.synthesize(text):
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def load(env_file: Path | str | None = None) -> NotebookEnv:
     """Load .env if present, then construct NotebookEnv from process env."""
     if env_file is None:

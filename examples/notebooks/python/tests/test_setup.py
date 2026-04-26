@@ -163,3 +163,32 @@ def test_assert_redacted_passes_placeholder(tmp_path):
     ok = tmp_path / "ok.json"
     ok.write_text('{"From": "+15555550100"}')
     _setup._assert_redacted(ok.read_text(), str(ok))
+
+
+@pytest.mark.asyncio
+async def test_run_stt_aggregates_transcripts():
+    import _setup
+
+    class FakeSTT:
+        async def connect(self): pass
+        async def send_audio(self, chunk): pass
+        async def close(self): pass
+        async def receive_transcripts(self):
+            yield "hello "
+            yield "world"
+
+    transcript = await _setup.run_stt(FakeSTT(), b"\x00" * 16000)
+    assert transcript.strip() == "hello world"
+
+
+@pytest.mark.asyncio
+async def test_run_tts_concatenates_chunks():
+    import _setup
+
+    class FakeTTS:
+        async def synthesize(self, text):
+            yield b"\x01\x02"
+            yield b"\x03\x04"
+
+    audio = await _setup.run_tts(FakeTTS(), "hi")
+    assert audio == b"\x01\x02\x03\x04"
