@@ -265,14 +265,23 @@ class PatterTool:
         override_agent = self._phone.agent(**agent_kwargs)
 
         # Acquire the dial lock so concurrent execute() calls don't fight over
-        # which one captures the next call_initiated event.
+        # which one captures the next call_initiated event. Use try/finally
+        # to guarantee `_next_call_id` is cleared on every exit path —
+        # otherwise a TimeoutError leaves a completed-with-exception future
+        # in place, and the SSE consumer task would call `set_result` on it
+        # (raising InvalidStateError, silently swallowed) while the next
+        # legitimate execute() would wait on a stale future.
         assert self._dial_lock is not None
         async with self._dial_lock:
             loop = asyncio.get_running_loop()
             self._next_call_id = loop.create_future()
-            await self._phone.call(to=to, agent=override_agent)
-            call_id: str = await asyncio.wait_for(self._next_call_id, timeout=10.0)
-            self._next_call_id = None
+            try:
+                await self._phone.call(to=to, agent=override_agent)
+                call_id: str = await asyncio.wait_for(
+                    self._next_call_id, timeout=10.0
+                )
+            finally:
+                self._next_call_id = None
             end_future: asyncio.Future = loop.create_future()
             self._pending[call_id] = end_future
 

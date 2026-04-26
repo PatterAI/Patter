@@ -231,3 +231,60 @@ def test_register_hermes_rejects_non_registry() -> None:
     tool = PatterTool(phone=_FakePatter(), agent={"system_prompt": "x"})
     with pytest.raises(TypeError, match="Registry"):
         tool.register_hermes("not a registry")
+
+
+# --- concurrency / cleanup --------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_concurrent_execute_serializes_dials() -> None:
+    """Two parallel execute() calls must each capture their own call_id;
+    without the lock the second would clobber _next_call_id and hang."""
+
+    phone = _FakePatter()
+    tool = PatterTool(phone=phone, agent={"system_prompt": "x"})
+    a, b = await asyncio.gather(
+        tool.execute(to="+15551111111"),
+        tool.execute(to="+15552222222"),
+    )
+    assert a.call_id != b.call_id
+    assert {a.call_id, b.call_id} == {"CA-1", "CA-2"}
+
+
+@pytest.mark.asyncio
+async def test_next_call_id_resets_when_capture_times_out() -> None:
+    """If the call_initiated SSE never arrives, asyncio.wait_for raises
+    TimeoutError. The provider must clear ``_next_call_id`` so the next
+    legitimate execute() can run; otherwise the next call hangs on the
+    stale future."""
+
+    class _NoEmitPatter(_FakePatter):
+        async def call(self, *, to: str, agent: dict[str, Any]) -> None:
+            # Intentionally do nothing — no call_initiated, no call_end.
+            self._calls_issued.append({"to": to, "agent": agent, "call_id": ""})
+
+    phone = _NoEmitPatter()
+    tool = PatterTool(phone=phone, agent={"system_prompt": "x"})
+
+    # Patch asyncio.wait_for so the dial capture fails immediately instead
+    # of waiting 10s real-time. The TimeoutError must propagate AND the
+    # `_next_call_id` slot must be cleared so the next execute() works.
+    real_wait_for = asyncio.wait_for
+
+    async def _instant_timeout(awaitable: Any, timeout: float) -> Any:
+        # Cancel the awaitable to avoid the "task was destroyed but it is
+        # pending" warning, then raise.
+        if hasattr(awaitable, "cancel"):
+            awaitable.cancel()
+        raise asyncio.TimeoutError
+
+    import unittest.mock as _mock
+
+    with _mock.patch.object(asyncio, "wait_for", side_effect=_instant_timeout):
+        with pytest.raises(asyncio.TimeoutError):
+            await tool.execute(to="+15551234567")
+
+    # Slot must be cleared so the next legitimate dial isn't blocked.
+    assert tool._next_call_id is None
+    # And the unused real_wait_for stays referenced (linter happy).
+    _ = real_wait_for

@@ -203,4 +203,64 @@ describe('PatterTool — start/stop', () => {
     const tool = new PatterTool({ phone });
     await expect(tool.start()).rejects.toThrow(/agent/);
   });
+
+  it('stop detaches the SSE listener so the underlying store has no leaks', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const phone = new FakePatter() as any;
+    const tool = new PatterTool({ phone, agent: { systemPrompt: 'x' } });
+    await tool.start();
+    expect(phone.metricsStore.listenerCount('sse')).toBe(1);
+    await tool.stop();
+    expect(phone.metricsStore.listenerCount('sse')).toBe(0);
+  });
+});
+
+describe('PatterTool — concurrent execute()', () => {
+  it('serializes parallel dials so each call captures its own call_id', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const phone = new FakePatter() as any;
+    const tool = new PatterTool({ phone, agent: { systemPrompt: 'x' } });
+
+    // Fire two execute() calls in parallel — without the dial mutex, one
+    // would clobber pendingDial and hang forever.
+    const [a, b] = await Promise.all([
+      tool.execute({ to: '+15551111111' }),
+      tool.execute({ to: '+15552222222' }),
+    ]);
+
+    // Both calls completed and got distinct call_ids.
+    expect(a.call_id).not.toBe(b.call_id);
+    expect(new Set([a.call_id, b.call_id])).toEqual(new Set(['CA-1', 'CA-2']));
+    expect(phone.callsIssued.map((c: { to: string }) => c.to)).toEqual([
+      '+15551111111',
+      '+15552222222',
+    ]);
+  });
+
+  it('rejects with a clear message when call_initiated never fires', async () => {
+    class NoSseEmitPatter extends FakePatter {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      async call(opts: any): Promise<void> {
+        // Intentionally do NOT emit call_initiated and do NOT fire onCallEnd.
+        // Real-world equivalent: metrics store crashed mid-call.
+        this.callsIssued.push({ to: opts.to });
+      }
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const phone = new NoSseEmitPatter() as any;
+    const tool = new PatterTool({ phone, agent: { systemPrompt: 'x' } });
+
+    // Start so the dial can proceed; the promise will fail at the dial-capture
+    // timeout (≤10s real-time). Use fake timers to keep the test fast.
+    await tool.start();
+
+    vi.useFakeTimers();
+    const promise = tool.execute({ to: '+15551234567' });
+    const captured = promise.catch((err) => err);
+    await vi.advanceTimersByTimeAsync(11_000);
+    const err = await captured;
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/call_initiated/);
+    vi.useRealTimers();
+  });
 });

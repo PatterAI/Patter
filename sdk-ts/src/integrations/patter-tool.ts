@@ -75,6 +75,7 @@
 
 import { EventEmitter } from 'node:events';
 import type { Patter } from '../client';
+import type { MetricsStore, SSEEvent } from '../dashboard/store';
 import type { AgentOptions } from '../types';
 
 /** JSON-Schema of the call args. Identical wire shape across openai/anthropic/hermes. */
@@ -168,11 +169,24 @@ export class PatterTool {
   private readonly maxDurationSec: number;
   private readonly recording: boolean;
   private started = false;
-  /** Queue of pending dispatchers awaiting a call_id from the next `phone.call()`. */
+  /** Resolver for the next `call_initiated` SSE event. Only set inside the
+   *  dial mutex (`dialQueue`), so two parallel `execute()` calls never share
+   *  it and never lose a dispatch. */
   private pendingDial: ((callId: string) => void) | null = null;
+  /** Mutex that serializes the dial → call_id capture critical section.
+   *  Each `execute()` chains a continuation onto this promise so the
+   *  `pendingDial` slot is owned by exactly one caller at a time. */
+  private dialQueue: Promise<void> = Promise.resolve();
+  /** Captured SSE listener so `stop()` can detach it (prevents leaks when
+   *  the underlying Patter instance outlives this tool). */
+  private sseListener: ((event: SSEEvent) => void) | null = null;
+  /** Captured Patter metrics store, for cleanup in `stop()`. */
+  private metricsStoreRef: MetricsStore | null = null;
   /** call_id → pending promise machinery. */
   private readonly pending = new Map<string, PendingCall>();
   private readonly bus = new EventEmitter();
+  /** How long to wait for the `call_initiated` SSE before failing the dial. */
+  private static readonly DIAL_CAPTURE_TIMEOUT_MS = 10_000;
 
   constructor(opts: PatterToolOptions) {
     if (!opts.phone) {
@@ -259,7 +273,7 @@ export class PatterTool {
         'PatterTool.start: phone.metricsStore is null after serve() — is the dashboard disabled?',
       );
     }
-    store.on('sse', (event: { type: string; data: Record<string, unknown> }) => {
+    const listener = (event: SSEEvent) => {
       if (event.type === 'call_initiated' && this.pendingDial) {
         const callId = (event.data.call_id as string) || '';
         if (callId) {
@@ -268,7 +282,10 @@ export class PatterTool {
           dispatch(callId);
         }
       }
-    });
+    };
+    store.on('sse', listener);
+    this.sseListener = listener;
+    this.metricsStoreRef = store;
 
     this.started = true;
   }
@@ -276,6 +293,17 @@ export class PatterTool {
   /** Stop the underlying Patter server (and reject any pending calls). */
   async stop(): Promise<void> {
     if (!this.started) return;
+    // Detach the SSE listener so a long-lived `Patter` instance shared with
+    // other consumers doesn't accumulate dead listeners every time a tool is
+    // stopped/restarted.
+    if (this.metricsStoreRef && this.sseListener) {
+      this.metricsStoreRef.off('sse', this.sseListener);
+    }
+    this.sseListener = null;
+    this.metricsStoreRef = null;
+    // Drop any in-flight dial waiter (silently — caller will get the
+    // shutdown rejection from `pending` below if it ever set its waiter).
+    this.pendingDial = null;
     for (const [, p] of this.pending) {
       clearTimeout(p.timer);
       p.reject(new Error('PatterTool: shutdown while call pending'));
@@ -310,20 +338,14 @@ export class PatterTool {
       ...(args.first_message !== undefined ? { firstMessage: args.first_message } : {}),
     });
 
-    // Capture the call_id assigned by the metrics store when phone.call()
-    // dispatches recordCallInitiated. Set the dispatcher BEFORE issuing the
-    // dial to avoid the race window.
-    const callIdPromise = new Promise<string>((resolve) => {
-      this.pendingDial = resolve;
-    });
-
-    await this.phone.call({
-      to: args.to,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      agent: overrideAgent as any,
-    });
-
-    const callId = await callIdPromise;
+    // Serialize the dial → call_id capture across concurrent execute() calls.
+    // `pendingDial` is a single slot, so two parallel callers would clobber
+    // each other's resolver and one of them would hang forever waiting for
+    // an SSE event that already went to the other. Chain through dialQueue
+    // so exactly one execute() owns the slot at a time. Once the call_id is
+    // captured we release the queue immediately — the actual call_end can
+    // run concurrently with later dials.
+    const callId = await this.acquireCallId(args.to, overrideAgent);
 
     return new Promise<PatterToolResult>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -337,6 +359,54 @@ export class PatterTool {
         startedAt: Date.now() / 1000,
       });
     });
+  }
+
+  /** Issue the outbound dial under the mutex and return its assigned call_id. */
+  private async acquireCallId(to: string, agent: AgentOptions): Promise<string> {
+    // Chain on dialQueue. Each call replaces dialQueue with a tail promise so
+    // the *next* execute() can also enqueue. We resolve the queue promise as
+    // soon as we capture the call_id (or fail) so we don't hold the slot for
+    // the call's full duration.
+    let release!: () => void;
+    const slot = new Promise<void>((r) => {
+      release = r;
+    });
+    const previous = this.dialQueue;
+    this.dialQueue = previous.then(() => slot);
+    await previous;
+
+    // We now own the slot. Set up the dispatcher, dial, and wait for the
+    // call_initiated SSE — bounded by DIAL_CAPTURE_TIMEOUT_MS so a missed
+    // event doesn't hang the caller forever.
+    let captureTimer: NodeJS.Timeout | null = null;
+    try {
+      const callIdPromise = new Promise<string>((resolve, reject) => {
+        this.pendingDial = resolve;
+        captureTimer = setTimeout(() => {
+          this.pendingDial = null;
+          reject(
+            new Error(
+              `PatterTool.execute: did not observe call_initiated within ${PatterTool.DIAL_CAPTURE_TIMEOUT_MS}ms`,
+            ),
+          );
+        }, PatterTool.DIAL_CAPTURE_TIMEOUT_MS);
+      });
+
+      await this.phone.call({
+        to,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        agent: agent as any,
+      });
+
+      const callId = await callIdPromise;
+      if (captureTimer) clearTimeout(captureTimer);
+      return callId;
+    } finally {
+      // Always clear pendingDial; release the mutex so the next dial can run.
+      if (captureTimer) clearTimeout(captureTimer);
+      this.pendingDial = null;
+      release();
+    }
   }
 
   /**
