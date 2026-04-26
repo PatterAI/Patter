@@ -114,8 +114,18 @@ class MetricsStore:
             # If the call was pre-registered with ``record_call_initiated``
             # (e.g., outbound dial before media arrives), upgrade its status
             # to "in-progress" instead of overwriting the from/to metadata.
+            # Only overwrite ``direction`` when the caller explicitly passed
+            # one in ``data`` — otherwise we'd clobber the ``outbound`` set
+            # by ``record_call_initiated`` with the default ``inbound``.
             if existing is not None:
-                existing.update(event_data)
+                update_payload = {
+                    "call_id": event_data["call_id"],
+                    "caller": event_data["caller"],
+                    "callee": event_data["callee"],
+                }
+                if "direction" in data:
+                    update_payload["direction"] = data["direction"]
+                existing.update(update_payload)
                 existing["status"] = "in-progress"
                 existing.setdefault("turns", [])
             else:
@@ -274,6 +284,16 @@ class MetricsStore:
     def get_active_calls(self) -> list[dict[str, Any]]:
         with self._lock:
             return list(self._active_calls.values())
+
+    def get_active(self, call_id: str) -> dict[str, Any] | None:
+        """Return the active-call record for ``call_id`` if present.
+
+        Mirrors the TypeScript ``MetricsStore.getActive`` accessor used by
+        handlers that need to peek at the live call (e.g., to read the
+        current ``direction`` without taking a write lock).
+        """
+        with self._lock:
+            return self._active_calls.get(call_id)
 
     def get_aggregates(self) -> dict[str, Any]:
         with self._lock:
