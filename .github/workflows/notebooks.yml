@@ -1,0 +1,72 @@
+name: notebooks
+
+on:
+  pull_request:
+    paths:
+      - 'examples/notebooks/**'
+      - 'scripts/check_notebook_parity.py'
+      - 'scripts/scaffold_notebook.py'
+      - 'scripts/scan_notebook_secrets.py'
+      - 'scripts/generate_notebook_fixtures.py'
+      - '.github/workflows/notebooks.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'examples/notebooks/**'
+
+jobs:
+  parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python scripts/check_notebook_parity.py
+
+  outputs-stripped:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: assert outputs are stripped + no obvious secrets
+        run: |
+          for f in examples/notebooks/python/*.ipynb examples/notebooks/typescript/*.ipynb; do
+            if grep -q '"outputs": \[\(\s*{\)' "$f"; then
+              echo "FAIL: $f contains outputs (run nbstripout)"
+              exit 1
+            fi
+          done
+          python scripts/scan_notebook_secrets.py examples/notebooks/python/*.ipynb examples/notebooks/typescript/*.ipynb
+
+  setup-tests-python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -e "examples/notebooks/python[dev]"
+      - run: pytest examples/notebooks/python/tests -v
+
+  setup-tests-typescript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: cd examples/notebooks/typescript && npm install
+      - run: cd examples/notebooks/typescript && npm test
+
+  scaffold-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install pytest pytest-asyncio
+      - run: pytest scripts/test_scaffold_notebook.py scripts/test_check_notebook_parity.py scripts/test_generate_notebook_fixtures.py -v
