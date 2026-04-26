@@ -3,9 +3,18 @@
  *
  * Keeps the last `maxCalls` completed calls and tracks active calls.
  * Supports SSE event subscribers for real-time updates.
+ *
+ * Optional disk hydration: when `CallLogger` writes per-call records under
+ * `<root>/calls/YYYY/MM/DD/<call_id>/metadata.json`, calling
+ * `hydrate(logRoot)` on a fresh store rebuilds the in-memory list from those
+ * files so the dashboard survives process restarts (the persistence is in
+ * the JSONL/JSON files, the store is just a cache on top).
  */
 
 import { EventEmitter } from 'events';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { getLogger } from '../logger';
 
 export interface CallRecord {
   call_id: string;
@@ -299,4 +308,109 @@ export class MetricsStore extends EventEmitter {
   get callCount(): number {
     return this.calls.length;
   }
+
+  /**
+   * Rebuild the in-memory call list from `metadata.json` files written by
+   * `CallLogger` under `<logRoot>/calls/YYYY/MM/DD/<call_id>/`. Idempotent:
+   * call_ids already in the store are skipped. Errors per file are logged
+   * and swallowed so a single corrupt entry doesn't block hydration.
+   *
+   * Returns the number of calls newly added to the store.
+   *
+   * Safe to call before any traffic; intended to run once at server startup.
+   */
+  hydrate(logRoot: string | null | undefined): number {
+    if (!logRoot) return 0;
+    const callsRoot = path.join(logRoot, 'calls');
+    if (!fs.existsSync(callsRoot)) return 0;
+
+    const collected: CallRecord[] = [];
+    const seen = new Set<string>(this.calls.map((c) => c.call_id));
+
+    const walk = (dir: string, depth: number): void => {
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        const childPath = path.join(dir, entry.name);
+        if (depth < 3) {
+          // YYYY / MM / DD layers — descend only when name is numeric to
+          // skip stray files (DS_Store, indexes).
+          if (entry.isDirectory() && /^\d+$/.test(entry.name)) {
+            walk(childPath, depth + 1);
+          }
+          continue;
+        }
+        // depth === 3 → this is a per-call directory.
+        if (!entry.isDirectory()) continue;
+        const metadataPath = path.join(childPath, 'metadata.json');
+        if (!fs.existsSync(metadataPath)) continue;
+        try {
+          const raw = fs.readFileSync(metadataPath, 'utf8');
+          const meta = JSON.parse(raw) as Record<string, unknown>;
+          const callId = (meta.call_id as string) || entry.name;
+          if (!callId || seen.has(callId)) continue;
+          collected.push(metadataToCallRecord(callId, meta));
+          seen.add(callId);
+        } catch (err) {
+          getLogger().debug(
+            `MetricsStore.hydrate: skipping ${metadataPath}: ${String(err)}`,
+          );
+        }
+      }
+    };
+
+    walk(callsRoot, 0);
+
+    // Stable order: oldest first (matches the order recordCallEnd would use).
+    collected.sort((a, b) => (a.started_at || 0) - (b.started_at || 0));
+
+    for (const rec of collected) {
+      this.calls.push(rec);
+      if (this.calls.length > this.maxCalls) {
+        this.calls = this.calls.slice(-this.maxCalls);
+      }
+    }
+    return collected.length;
+  }
+}
+
+/** Translate a CallLogger ``metadata.json`` payload into a ``CallRecord``. */
+function metadataToCallRecord(callId: string, meta: Record<string, unknown>): CallRecord {
+  const startedAtRaw = meta.started_at;
+  const endedAtRaw = meta.ended_at;
+  const startedAt =
+    typeof startedAtRaw === 'number'
+      ? startedAtRaw
+      : typeof startedAtRaw === 'string'
+        ? Date.parse(startedAtRaw) / 1000
+        : 0;
+  const endedAt =
+    typeof endedAtRaw === 'number'
+      ? endedAtRaw
+      : typeof endedAtRaw === 'string'
+        ? Date.parse(endedAtRaw) / 1000
+        : undefined;
+  const status = (meta.status as string | undefined) || 'completed';
+  const metrics =
+    meta.metrics && typeof meta.metrics === 'object'
+      ? (meta.metrics as Record<string, unknown>)
+      : null;
+  const transcript = Array.isArray(meta.transcript)
+    ? (meta.transcript as CallRecord['transcript'])
+    : [];
+  return {
+    call_id: callId,
+    caller: (meta.caller as string) || '',
+    callee: (meta.callee as string) || '',
+    direction: (meta.direction as string) || 'inbound',
+    started_at: Number.isFinite(startedAt) ? startedAt : 0,
+    ended_at: endedAt !== undefined && Number.isFinite(endedAt) ? endedAt : undefined,
+    status,
+    metrics,
+    transcript,
+  };
 }

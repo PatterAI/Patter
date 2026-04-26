@@ -165,3 +165,111 @@ describe('MetricsStore', () => {
     expect(active[0].turns).toHaveLength(0);
   });
 });
+
+describe('MetricsStore.hydrate', () => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const fs = require('node:fs') as typeof import('node:fs');
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const os = require('node:os') as typeof import('node:os');
+
+  function buildFixture(
+    root: string,
+    calls: Array<{ id: string; iso: string; meta?: Record<string, unknown> }>,
+  ): void {
+    for (const c of calls) {
+      const date = new Date(c.iso);
+      const yyyy = String(date.getUTCFullYear()).padStart(4, '0');
+      const mm = String(date.getUTCMonth() + 1).padStart(2, '0');
+      const dd = String(date.getUTCDate()).padStart(2, '0');
+      const dir = `${root}/calls/${yyyy}/${mm}/${dd}/${c.id}`;
+      fs.mkdirSync(dir, { recursive: true });
+      const metadata = {
+        call_id: c.id,
+        caller: '+15550001111',
+        callee: '+15550002222',
+        direction: 'outbound',
+        started_at: date.toISOString(),
+        ended_at: new Date(date.getTime() + 30_000).toISOString(),
+        status: 'completed',
+        metrics: { p95_latency_ms: 1500 },
+        ...(c.meta ?? {}),
+      };
+      fs.writeFileSync(`${dir}/metadata.json`, JSON.stringify(metadata));
+    }
+  }
+
+  it('returns 0 when logRoot is null/undefined/missing', () => {
+    const store = new MetricsStore();
+    expect(store.hydrate(null)).toBe(0);
+    expect(store.hydrate(undefined)).toBe(0);
+    expect(store.hydrate(`/tmp/nonexistent-${Math.random()}`)).toBe(0);
+    expect(store.callCount).toBe(0);
+  });
+
+  it('rebuilds the call list from on-disk metadata files', () => {
+    const root = fs.mkdtempSync(`${os.tmpdir()}/patter-store-test-`);
+    try {
+      buildFixture(root, [
+        { id: 'CA-old', iso: '2026-04-25T10:00:00.000Z' },
+        { id: 'CA-new', iso: '2026-04-26T15:30:00.000Z' },
+      ]);
+      const store = new MetricsStore();
+      expect(store.hydrate(root)).toBe(2);
+      const list = store.getCalls();
+      expect(list[0].call_id).toBe('CA-new'); // newest first
+      expect(list[1].call_id).toBe('CA-old');
+      expect(list[0].metrics).toEqual({ p95_latency_ms: 1500 });
+      expect(list[0].direction).toBe('outbound');
+      expect(list[0].status).toBe('completed');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('skips already-known call_ids (idempotent on re-hydrate)', () => {
+    const root = fs.mkdtempSync(`${os.tmpdir()}/patter-store-test-`);
+    try {
+      buildFixture(root, [{ id: 'CA-1', iso: '2026-04-26T15:00:00.000Z' }]);
+      const store = new MetricsStore();
+      expect(store.hydrate(root)).toBe(1);
+      expect(store.hydrate(root)).toBe(0);
+      expect(store.callCount).toBe(1);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('tolerates corrupt metadata.json without aborting other entries', () => {
+    const root = fs.mkdtempSync(`${os.tmpdir()}/patter-store-test-`);
+    try {
+      buildFixture(root, [{ id: 'CA-good', iso: '2026-04-26T15:00:00.000Z' }]);
+      const badDir = `${root}/calls/2026/04/26/CA-bad`;
+      fs.mkdirSync(badDir, { recursive: true });
+      fs.writeFileSync(`${badDir}/metadata.json`, '{ not valid json');
+      const store = new MetricsStore();
+      expect(store.hydrate(root)).toBe(1);
+      expect(store.getCalls()[0].call_id).toBe('CA-good');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('respects maxCalls when hydrating large histories', () => {
+    const root = fs.mkdtempSync(`${os.tmpdir()}/patter-store-test-`);
+    try {
+      const calls = Array.from({ length: 7 }, (_, i) => ({
+        id: `CA-${i}`,
+        iso: `2026-04-26T15:0${i}:00.000Z`,
+      }));
+      buildFixture(root, calls);
+      const store = new MetricsStore({ maxCalls: 3 });
+      expect(store.hydrate(root)).toBe(7);
+      const list = store.getCalls();
+      expect(list).toHaveLength(3);
+      expect(list[0].call_id).toBe('CA-6');
+      expect(list[2].call_id).toBe('CA-4');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
