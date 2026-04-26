@@ -1094,8 +1094,18 @@ class TestBargeInInterrupt:
             f"Expected at most 1 TTS call after interrupt, got {len(tts_calls)}: {tts_calls}"
         )
 
-    async def test_is_speaking_reset_to_false_in_finally(self) -> None:
-        """_is_speaking must be False after the response is complete (finally block)."""
+    async def test_is_speaking_reset_to_false_in_finally(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_is_speaking must be False after the response is complete (finally block).
+
+        Sets PATTER_TTS_TAIL_GRACE_MS=0 to disable the carrier-buffer grace
+        period so the immediate-flip semantics this test was written for are
+        preserved. With grace > 0 (the default, used in production for VAD
+        barge-in coverage during Twilio's playback buffer), the flag stays
+        True for ~1.5s after response complete — see ``test_is_speaking_grace_period``.
+        """
+        monkeypatch.setenv("PATTER_TTS_TAIL_GRACE_MS", "0")
         agent = _make_agent()
         audio_sender = _make_audio_sender()
         handler = _make_handler(agent, audio_sender=audio_sender)
@@ -1118,8 +1128,11 @@ class TestBargeInInterrupt:
             "_is_speaking must be reset to False after response completes"
         )
 
-    async def test_is_speaking_reset_even_on_exception(self) -> None:
+    async def test_is_speaking_reset_even_on_exception(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """_is_speaking is reset by the finally block even if TTS raises."""
+        monkeypatch.setenv("PATTER_TTS_TAIL_GRACE_MS", "0")
         agent = _make_agent()
         audio_sender = _make_audio_sender()
         handler = _make_handler(agent, audio_sender=audio_sender)
