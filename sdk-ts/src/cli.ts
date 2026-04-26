@@ -5,6 +5,7 @@
  *
  * Usage:
  *   npx getpatter dashboard [--port 8000]
+ *   npx getpatter eval          (stub — evals are Python-only today)
  */
 
 import { createServer } from 'node:http';
@@ -32,10 +33,25 @@ function parseArgs(argv: string[]): { port: number } {
   return { port };
 }
 
+function printEvalStub(): void {
+  console.log(
+    'Evaluations are not yet available in the TypeScript SDK.\n' +
+      'Use the Python SDK instead:\n\n' +
+      '  pip install getpatter\n' +
+      '  patter eval --help\n\n' +
+      'See https://github.com/PatterAI/Patter for docs.',
+  );
+}
+
 async function main(): Promise<void> {
   const command = process.argv[2];
+  if (command === 'eval') {
+    printEvalStub();
+    process.exit(0);
+  }
   if (command !== 'dashboard') {
     console.log('Usage: getpatter dashboard [--port 8000]');
+    console.log('       getpatter eval          (stub — use Python SDK for evals)');
     process.exit(command ? 1 : 0);
   }
 

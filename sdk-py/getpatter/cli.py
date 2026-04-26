@@ -48,7 +48,7 @@ async def _run_dashboard(port: int) -> None:
     except ImportError:
         print(
             "The dashboard requires FastAPI and Uvicorn.\n"
-            "Install with:  pip install patter[local]"
+            "Install with:  pip install getpatter[local]"
         )
         sys.exit(1)
 

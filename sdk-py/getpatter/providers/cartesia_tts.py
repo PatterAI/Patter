@@ -73,7 +73,7 @@ class CartesiaTTS(TTSProvider):
         if aiohttp is None:
             raise ImportError(
                 "aiohttp is required for CartesiaTTS. "
-                "Install with: pip install patter[cartesia]"
+                "Install with: pip install getpatter[cartesia]"
             )
 
         resolved_key = api_key or os.environ.get("CARTESIA_API_KEY")

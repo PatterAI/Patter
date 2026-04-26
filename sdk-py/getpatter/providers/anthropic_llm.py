@@ -45,6 +45,12 @@ __all__ = ["AnthropicLLMProvider"]
 _DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 _DEFAULT_MAX_TOKENS = 1024
 
+# Canonical model aliases (Anthropic routes these to the latest snapshot).
+# Re-exported by ``getpatter.llm.anthropic`` for documentation / DX.
+CLAUDE_HAIKU_45_ALIAS = "claude-haiku-4-5"
+CLAUDE_SONNET_46_ALIAS = "claude-sonnet-4-6"
+CLAUDE_OPUS_47_ALIAS = "claude-opus-4-7"
+
 
 class AnthropicLLMProvider:
     """LLM provider backed by Anthropic's Messages API (streaming).

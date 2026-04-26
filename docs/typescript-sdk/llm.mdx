@@ -96,7 +96,7 @@ const llm2 = new groq.LLM({ apiKey: "gsk_...", model: "llama-3.3-70b-versatile" 
 
 ### CerebrasLLM
 
-Cerebras Inference API (OpenAI-compatible) at `https://api.cerebras.ai/v1`. Default model `"llama3.1-8b"`. Supports optional gzip request-body compression via `gzipCompression: true` to reduce time-to-first-token on large prompts — see [Cerebras payload optimization](https://inference-docs.cerebras.ai/payload-optimization).
+Cerebras Inference API (OpenAI-compatible) at `https://api.cerebras.ai/v1`. Default model `"llama-3.3-70b"`. Supports optional gzip request-body compression via `gzipCompression: true` to reduce time-to-first-token on large prompts — see [Cerebras payload optimization](https://inference-docs.cerebras.ai/payload-optimization).
 
 ```typescript
 import { CerebrasLLM } from "getpatter";                  // flat
@@ -105,7 +105,7 @@ import * as cerebras from "getpatter/llm/cerebras";       // namespaced
 const llm = new CerebrasLLM();                            // reads CEREBRAS_API_KEY
 const llm2 = new cerebras.LLM({
   apiKey: "csk-...",
-  model: "llama3.1-8b",
+  model: "llama-3.3-70b",
   gzipCompression: true,
 });
 ```

@@ -33,6 +33,14 @@ export interface LocalConfig {
    * are rejected with HTTP 403.
    */
   telnyxPublicKey?: string;
+  /**
+   * SECURITY: require valid webhook signatures on both Twilio and Telnyx
+   * inbound webhooks. When True (the default), a missing credential
+   * (twilioToken / telnyxPublicKey) causes the webhook to return
+   * 503 Service Unavailable instead of silently accepting the request.
+   * Set to false only for local development against mock providers.
+   */
+  requireSignature?: boolean;
 }
 
 type AIAdapter = OpenAIRealtimeAdapter | ElevenLabsConvAIAdapter;
@@ -80,27 +88,81 @@ function xmlEscape(s: string): string {
 
 /**
  * Validate that a webhook URL is safe to fetch (SSRF protection).
- * Blocks private/internal IP ranges and non-HTTP(S) schemes.
+ *
+ * Blocks:
+ *   - Non-HTTP(S) schemes (``file:``, ``javascript:``, etc.)
+ *   - IPv4 private, loopback, link-local, reserved ranges
+ *     (127/8, 10/8, 172.16/12, 192.168/16, 169.254/16, 0/8)
+ *   - IPv6 loopback and aliases (``::1``, ``::``, ``ip6-localhost``,
+ *     ``ip6-loopback``), unique-local (``fc00::/7``) and link-local
+ *     (``fe80::/10``) ranges
+ *   - Localhost hostnames (``localhost``) and cloud-metadata hostnames
+ *     (``metadata``, ``metadata.google.internal``, ``metadata.azure.com``)
+ *
+ * Mirrors Python's ``ipaddress.ip_address(...).is_private /
+ * .is_loopback / .is_link_local / .is_reserved`` behaviour.
  */
 export function validateWebhookUrl(url: string): void {
   const parsed = new URL(url);
   if (!['http:', 'https:'].includes(parsed.protocol)) {
     throw new Error(`Invalid webhook URL scheme: ${parsed.protocol}`);
   }
-  const hostname = parsed.hostname;
-  const blocked = [
-    /^127\./,
-    /^10\./,
-    /^172\.(1[6-9]|2\d|3[01])\./,
-    /^192\.168\./,
-    /^169\.254\./,
-    /^0\./,
-    /^::1$/,
-    /^localhost$/i,
-    /^metadata\.google\.internal$/i,
-  ];
-  if (blocked.some((re) => re.test(hostname))) {
-    throw new Error(`Webhook URL blocked: ${hostname} is a private/internal address`);
+  // Node's URL parser preserves IPv6 brackets on ``hostname`` — strip them so
+  // raw IPv6 literal checks can match. Lowercase for case-insensitive
+  // hostname/IP comparisons (hex digits are case-insensitive in IPv6).
+  const rawHost = parsed.hostname;
+  const host = rawHost.replace(/^\[/, '').replace(/\]$/, '').toLowerCase();
+
+  // --- Blocked hostnames (case-insensitive, exact match) ------------------
+  const BLOCKED_HOSTNAMES = new Set([
+    'localhost',
+    'ip6-localhost',
+    'ip6-loopback',
+    'metadata',
+    'metadata.google.internal',
+    'metadata.azure.com',
+  ]);
+  if (BLOCKED_HOSTNAMES.has(host)) {
+    throw new Error(`Webhook URL blocked: ${rawHost} is a private/internal address`);
+  }
+
+  // --- IPv4 literal checks ------------------------------------------------
+  const IPV4_RE = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+  const v4 = IPV4_RE.exec(host);
+  if (v4) {
+    const oct = v4.slice(1, 5).map((s) => parseInt(s, 10));
+    if (oct.some((n) => n < 0 || n > 255)) {
+      throw new Error(`Webhook URL blocked: ${rawHost} is not a valid IPv4 address`);
+    }
+    const [a, b] = oct;
+    if (
+      a === 0 ||                              // 0.0.0.0/8 (any 0.x)
+      a === 10 ||                             // 10.0.0.0/8
+      a === 127 ||                            // 127.0.0.0/8 loopback
+      (a === 169 && b === 254) ||             // 169.254.0.0/16 link-local
+      (a === 172 && b >= 16 && b <= 31) ||    // 172.16.0.0/12
+      (a === 192 && b === 168)                // 192.168.0.0/16
+    ) {
+      throw new Error(`Webhook URL blocked: ${rawHost} is a private/internal address`);
+    }
+    return;
+  }
+
+  // --- IPv6 literal checks (after bracket strip) --------------------------
+  // Heuristic detection: IPv6 literals contain ':'.
+  if (host.includes(':')) {
+    // Loopback / unspecified
+    if (host === '::1' || host === '::') {
+      throw new Error(`Webhook URL blocked: ${rawHost} is a private/internal address`);
+    }
+    // Unique local fc00::/7 — first hex group starts with "fc" or "fd"
+    if (/^fc[0-9a-f]{0,2}:/.test(host) || /^fd[0-9a-f]{0,2}:/.test(host)) {
+      throw new Error(`Webhook URL blocked: ${rawHost} is a private/internal address`);
+    }
+    // Link-local fe80::/10 — first hex group in [fe80, febf]
+    if (/^fe[89ab][0-9a-f]?:/.test(host)) {
+      throw new Error(`Webhook URL blocked: ${rawHost} is a private/internal address`);
+    }
   }
 }
 
@@ -137,7 +199,6 @@ function validateTelnyxSignature(
 
     const payload = `${timestamp}|${rawBody}`;
     const keyBuffer = Buffer.from(publicKey, 'base64');
-    const sigBuffer = Buffer.from(signature, 'base64');
 
     // Node 15+ supports Ed25519 natively via createPublicKey / verify
     const keyObject = crypto.createPublicKey({
@@ -145,7 +206,24 @@ function validateTelnyxSignature(
       format: 'der',
       type: 'spki',
     });
-    return crypto.verify(null, Buffer.from(payload), keyObject, sigBuffer);
+
+    // The telnyx-signature-ed25519 header may contain multiple comma-separated
+    // signatures during key rotation. Accept the webhook if any one of them
+    // verifies; fail-closed when none match (mirrors Python server.py:69-81).
+    for (const rawSig of signature.split(',')) {
+      const trimmed = rawSig.trim();
+      if (!trimmed) continue;
+      try {
+        const sigBuffer = Buffer.from(trimmed, 'base64');
+        if (crypto.verify(null, Buffer.from(payload), keyObject, sigBuffer)) {
+          return true;
+        }
+      } catch {
+        // Malformed signature entry — try the next one.
+        continue;
+      }
+    }
+    return false;
   } catch {
     return false;
   }
@@ -174,7 +252,13 @@ function validateTwilioSignature(
   const data = url + Object.keys(params).sort().reduce((acc, key) => acc + key + (params[key] ?? ''), '');
   const expected = crypto.createHmac('sha1', authToken).update(data).digest('base64');
   try {
-    return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+    const sigBuf = Buffer.from(signature);
+    const expBuf = Buffer.from(expected);
+    // timingSafeEqual throws when buffer lengths differ. Compare lengths
+    // explicitly first — buffer length is not a secret, so an early return
+    // on mismatch does not leak timing information about the secret itself.
+    if (sigBuf.length !== expBuf.length) return false;
+    return crypto.timingSafeEqual(sigBuf, expBuf);
   } catch {
     return false;
   }
@@ -349,8 +433,15 @@ function isValidTelnyxTransferTarget(target: string): boolean {
   return /^sips?:[^\s@]+(@[^\s]+)?$/i.test(target);
 }
 
-/** DTMF digits accepted by the Telnyx `send_dtmf` command. */
-const TELNYX_DTMF_ALLOWED = new Set('0123456789*#ABCDabcd');
+/**
+ * DTMF digits accepted by the Telnyx `send_dtmf` command.
+ *
+ * ``w`` / ``W`` are Telnyx-specific pause characters (each inserts a 500 ms
+ * wait before the next digit). They are sent as-is in the ``digits`` payload
+ * — Telnyx interprets them server-side. Mirrors the Python ``_DTMF_ALLOWED``
+ * set in ``sdk-py/getpatter/handlers/telnyx_handler.py``.
+ */
+const TELNYX_DTMF_ALLOWED = new Set('0123456789*#ABCDabcdwW');
 const TELNYX_DTMF_DURATION_MS = 250;
 
 async function sleep(ms: number): Promise<void> {
@@ -387,7 +478,7 @@ export class TelnyxBridge implements TelephonyBridge {
       return;
     }
     const telnyxKey = this.config.telnyxKey ?? '';
-    await fetch(`https://api.telnyx.com/v2/calls/${callId}/actions/transfer`, {
+    await fetch(`https://api.telnyx.com/v2/calls/${encodeURIComponent(callId)}/actions/transfer`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${telnyxKey}` },
       body: JSON.stringify({ to: toNumber }),
@@ -412,7 +503,7 @@ export class TelnyxBridge implements TelephonyBridge {
     }
     const duration = Math.max(100, Math.min(500, TELNYX_DTMF_DURATION_MS));
     for (let i = 0; i < filtered.length; i += 1) {
-      await fetch(`https://api.telnyx.com/v2/calls/${callId}/actions/send_dtmf`, {
+      await fetch(`https://api.telnyx.com/v2/calls/${encodeURIComponent(callId)}/actions/send_dtmf`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${telnyxKey}` },
         body: JSON.stringify({ digits: filtered[i], duration_millis: duration }),
@@ -428,7 +519,7 @@ export class TelnyxBridge implements TelephonyBridge {
     const telnyxKey = this.config.telnyxKey ?? '';
     if (!telnyxKey || !callId) return;
     try {
-      const resp = await fetch(`https://api.telnyx.com/v2/calls/${callId}/actions/record_start`, {
+      const resp = await fetch(`https://api.telnyx.com/v2/calls/${encodeURIComponent(callId)}/actions/record_start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${telnyxKey}` },
         body: JSON.stringify({ format: 'mp3', channels: 'single' }),
@@ -447,7 +538,7 @@ export class TelnyxBridge implements TelephonyBridge {
     const telnyxKey = this.config.telnyxKey ?? '';
     if (!telnyxKey || !callId) return;
     try {
-      const resp = await fetch(`https://api.telnyx.com/v2/calls/${callId}/actions/record_stop`, {
+      const resp = await fetch(`https://api.telnyx.com/v2/calls/${encodeURIComponent(callId)}/actions/record_stop`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${telnyxKey}` },
         body: JSON.stringify({}),
@@ -462,19 +553,23 @@ export class TelnyxBridge implements TelephonyBridge {
     }
   }
 
-  async endCall(callId: string, ws: WSWebSocket): Promise<void> {
-    // Hang up via Telnyx Call Control API, then close the media WebSocket
+  async endCall(callId: string, _ws: WSWebSocket): Promise<void> {
+    // Hang up via Telnyx Call Control API. We intentionally do NOT close the
+    // media WebSocket here — Telnyx will emit a ``stop`` frame in response
+    // to the hangup, and the stream handler's ``stop`` processing drives the
+    // WebSocket close (matches the Python ``_telnyx_hangup`` helper which
+    // never touches the WS). Closing it here races with the carrier's stop
+    // frame and truncates in-flight media.
     const telnyxKey = this.config.telnyxKey ?? '';
     if (callId && telnyxKey) {
       try {
-        await fetch(`https://api.telnyx.com/v2/calls/${callId}/actions/hangup`, {
+        await fetch(`https://api.telnyx.com/v2/calls/${encodeURIComponent(callId)}/actions/hangup`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${telnyxKey}` },
           body: JSON.stringify({}),
         });
       } catch { /* best effort — call may already be ended */ }
     }
-    ws.close();
   }
 
   createStt(agent: AgentOptions): Promise<STTAdapter | null> {
@@ -485,7 +580,7 @@ export class TelnyxBridge implements TelephonyBridge {
     if (this.config.telnyxKey && callId) {
       try {
         const resp = await fetch(
-          `https://api.telnyx.com/v2/calls/${callId}`,
+          `https://api.telnyx.com/v2/calls/${encodeURIComponent(callId)}`,
           {
             headers: { 'Authorization': `Bearer ${this.config.telnyxKey}` },
             signal: AbortSignal.timeout(5000),
@@ -552,6 +647,24 @@ export class EmbeddedServer {
       throw new Error(`Invalid webhookUrl: must be a hostname with no protocol prefix or path (got: '${this.config.webhookUrl}')`);
     }
 
+    // Startup-time warning when webhook signature enforcement is active but
+    // the verifying credential is missing. Surfacing this at startup prevents
+    // deployers from discovering the misconfiguration only via a first 503.
+    if (this.config.requireSignature !== false) {
+      if (this.config.telephonyProvider === 'twilio' && !this.config.twilioToken) {
+        getLogger().warn(
+          'Twilio webhook enforcement ACTIVE but twilioToken is empty — webhooks will 503. ' +
+            'Set requireSignature=false for local dev.',
+        );
+      }
+      if (this.config.telephonyProvider === 'telnyx' && !this.config.telnyxPublicKey) {
+        getLogger().warn(
+          'Telnyx webhook enforcement ACTIVE but telnyxPublicKey is empty — webhooks will 503. ' +
+            'Set requireSignature=false for local dev.',
+        );
+      }
+    }
+
     const app = express();
     // Capture raw body for Telnyx signature verification before JSON parsing.
     // The rawBody property is attached to the request object when needed.
@@ -598,6 +711,10 @@ export class EmbeddedServer {
           res.status(403).send('Invalid signature');
           return;
         }
+      } else if (this.config.requireSignature !== false) {
+        getLogger().error('Twilio webhook rejected: twilioToken not configured and requireSignature is not false');
+        res.status(503).send('Webhook signature required');
+        return;
       }
       const body = req.body as Record<string, string>;
       const callSid = sanitizeLogValue(body['CallSid'] ?? '');
@@ -624,6 +741,10 @@ export class EmbeddedServer {
           res.status(403).send('Invalid signature');
           return;
         }
+      } else if (this.config.requireSignature !== false) {
+        getLogger().error('Twilio webhook rejected: twilioToken not configured and requireSignature is not false');
+        res.status(503).send('Webhook signature required');
+        return;
       }
       const body = req.body as Record<string, string>;
       const recordingSid = sanitizeLogValue(body['RecordingSid'] ?? '');
@@ -642,6 +763,10 @@ export class EmbeddedServer {
           res.status(403).send('Invalid signature');
           return;
         }
+      } else if (this.config.requireSignature !== false) {
+        getLogger().error('Twilio webhook rejected: twilioToken not configured and requireSignature is not false');
+        res.status(503).send('Webhook signature required');
+        return;
       }
       const body = req.body as Record<string, string>;
       const answeredBy = body['AnsweredBy'] ?? '';
@@ -692,6 +817,10 @@ export class EmbeddedServer {
           res.status(403).send('Invalid signature');
           return;
         }
+      } else if (this.config.requireSignature !== false) {
+        getLogger().error('Twilio webhook rejected: twilioToken not configured and requireSignature is not false');
+        res.status(503).send('Webhook signature required');
+        return;
       } else if (!this.twilioTokenWarningLogged) {
         this.twilioTokenWarningLogged = true;
         getLogger().warn('Twilio webhook signature validation disabled — set twilioToken for production');
@@ -720,6 +849,9 @@ export class EmbeddedServer {
           getLogger().warn('Telnyx webhook rejected: invalid or missing Ed25519 signature');
           return res.status(403).send('Invalid signature');
         }
+      } else if (this.config.requireSignature !== false) {
+        getLogger().error('Telnyx webhook rejected: telnyxPublicKey not configured and requireSignature is not false');
+        return res.status(503).send('Webhook signature required');
       } else if (!this.telnyxSigWarningLogged) {
         this.telnyxSigWarningLogged = true;
         getLogger().warn('Telnyx webhook signature verification is disabled. Set telnyxPublicKey in LocalOptions for production use.');
@@ -733,6 +865,7 @@ export class EmbeddedServer {
             from?: string;
             to?: string;
             digit?: string;
+            result?: string;
             recording_urls?: { mp3?: string; wav?: string };
             public_recording_urls?: { mp3?: string; wav?: string };
           };
@@ -765,6 +898,23 @@ export class EmbeddedServer {
           '';
         if (recordingUrl) {
           getLogger().info(`Telnyx recording saved (webhook): ${sanitizeLogValue(recordingUrl)}`);
+        }
+        return res.status(200).send();
+      }
+
+      // AMD result — mirrors Twilio's ``AnsweredBy == machine_end_*``
+      // voicemail-drop flow. When Telnyx classifies the call as answered
+      // by machine we speak the configured ``voicemailMessage`` via
+      // ``actions/speak`` and then hang up via ``actions/hangup``.
+      // Matches ``sdk-py/getpatter/handlers/telnyx_handler.py::handle_amd_result``.
+      if (eventType === 'call.machine.detection.ended') {
+        const amdCallId = payload.call_control_id ?? '';
+        const amdResult = String(payload.result ?? '');
+        getLogger().info(
+          `Telnyx AMD result for ${sanitizeLogValue(amdCallId)}: ${sanitizeLogValue(amdResult)}`,
+        );
+        if (amdCallId && (amdResult === 'machine' || amdResult === 'machine_detected')) {
+          await this.handleTelnyxAmdVoicemail(amdCallId);
         }
         return res.status(200).send();
       }
@@ -922,6 +1072,53 @@ export class EmbeddedServer {
         resolve();
       });
     });
+  }
+
+  /**
+   * Handle a Telnyx ``call.machine.detection.ended`` event when AMD returns
+   * ``machine``: speak the configured voicemail message via ``actions/speak``
+   * then hang up via ``actions/hangup``. Mirrors the Python
+   * ``handle_amd_result`` helper.
+   */
+  private async handleTelnyxAmdVoicemail(callControlId: string): Promise<void> {
+    const telnyxKey = this.config.telnyxKey ?? '';
+    if (!callControlId || !telnyxKey || !this.voicemailMessage) {
+      return;
+    }
+    const encoded = encodeURIComponent(callControlId);
+    const headers = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${telnyxKey}`,
+    } as const;
+    try {
+      const speakResp = await fetch(
+        `https://api.telnyx.com/v2/calls/${encoded}/actions/speak`,
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            payload: this.voicemailMessage,
+            voice: 'female',
+            language: 'en-US',
+          }),
+          signal: AbortSignal.timeout(10_000),
+        },
+      );
+      if (!speakResp.ok) {
+        getLogger().warn(
+          `Telnyx voicemail speak failed: ${speakResp.status} ${(await speakResp.text()).slice(0, 200)}`,
+        );
+      }
+      await fetch(`https://api.telnyx.com/v2/calls/${encoded}/actions/hangup`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({}),
+        signal: AbortSignal.timeout(10_000),
+      });
+      getLogger().info(`Voicemail dropped for Telnyx call ${sanitizeLogValue(callControlId)}`);
+    } catch (e) {
+      getLogger().warn(`Could not drop voicemail (Telnyx): ${String(e)}`);
+    }
   }
 
   // ---------------------------------------------------------------------------

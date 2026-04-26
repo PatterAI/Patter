@@ -1,12 +1,25 @@
+import asyncio
 import json
 from typing import AsyncIterator
 from urllib.parse import urlencode
 
 import websockets
+from websockets.exceptions import InvalidStatus
 
+from getpatter.exceptions import AuthenticationError, PatterConnectionError, RateLimitError
 from getpatter.providers.base import STTProvider, Transcript
 
 DEEPGRAM_WS_URL = "wss://api.deepgram.com/v1/listen"
+
+# Deepgram closes idle sockets after 10 s with no audio. Send a KeepAlive
+# text frame every 4 s — well inside the 3–5 s window recommended by
+# Deepgram's docs.
+_KEEPALIVE_INTERVAL_SECONDS = 4.0
+
+# After sending Finalize on close() we give the server a short window to
+# flush any trailing partial as a Results frame before we send CloseStream.
+# Kept well below 500 ms total close-latency budget.
+_FINALIZE_DRAIN_SECONDS = 0.1
 
 
 class DeepgramSTT(STTProvider):
@@ -35,6 +48,7 @@ class DeepgramSTT(STTProvider):
         self.interim_results = interim_results
         self.vad_events = vad_events
         self._ws = None
+        self._keepalive_task: asyncio.Task[None] | None = None
         self.request_id: str | None = None
 
     def __repr__(self) -> str:
@@ -75,14 +89,59 @@ class DeepgramSTT(STTProvider):
             # utterance_end_ms has a hard minimum of 1000 on Deepgram's API.
             params["utterance_end_ms"] = str(max(int(self.utterance_end_ms), 1000))
         url = f"{DEEPGRAM_WS_URL}?{urlencode(params)}"
-        self._ws = await websockets.connect(
-            url,
-            additional_headers={"Authorization": f"Token {self.api_key}"},
-        )
+        try:
+            self._ws = await websockets.connect(
+                url,
+                additional_headers={"Authorization": f"Token {self.api_key}"},
+            )
+        except InvalidStatus as exc:
+            # websockets>=14 exposes the HTTP status via exc.response.status_code.
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            if status_code in (401, 403):
+                raise AuthenticationError(
+                    f"Deepgram rejected the API key (HTTP {status_code})."
+                ) from exc
+            if status_code == 429:
+                raise RateLimitError(
+                    "Deepgram rate limit exceeded (HTTP 429)."
+                ) from exc
+            raise PatterConnectionError(
+                f"Deepgram WebSocket upgrade failed (HTTP {status_code})."
+            ) from exc
+        except OSError as exc:
+            # Transient network / DNS / TLS issues — wrap so callers can
+            # distinguish from programmer errors.
+            raise PatterConnectionError(
+                f"Failed to connect to Deepgram: {exc}"
+            ) from exc
+
+        # Start the KeepAlive pump. Deepgram closes the socket after ~10 s of
+        # silence; a 4 s cadence keeps us comfortably inside that window.
+        self._keepalive_task = asyncio.create_task(self._keepalive_loop())
+
+    async def _keepalive_loop(self) -> None:
+        try:
+            while self._ws is not None and self._ws.state.name == "OPEN":
+                await asyncio.sleep(_KEEPALIVE_INTERVAL_SECONDS)
+                if self._ws is None or self._ws.state.name != "OPEN":
+                    return
+                try:
+                    await self._ws.send(json.dumps({"type": "KeepAlive"}))
+                except Exception:
+                    # Socket may have raced to close; the receive loop will
+                    # observe the closure and surface it to the caller.
+                    return
+        except asyncio.CancelledError:
+            raise
 
     async def send_audio(self, audio_chunk: bytes) -> None:
         if self._ws is None:
             raise RuntimeError("Not connected. Call connect() first.")
+        # Deepgram treats a zero-length binary frame as CloseStream — so
+        # silently drop empty chunks to avoid accidentally tearing down
+        # the session (e.g. when a VAD gate emits an empty buffer).
+        if len(audio_chunk) == 0:
+            return
         await self._ws.send(audio_chunk)
 
     def _parse_message(self, raw_message: str) -> Transcript | None:
@@ -92,6 +151,24 @@ class DeepgramSTT(STTProvider):
         if msg_type == "Metadata":
             self.request_id = data.get("request_id")
             return None
+
+        if msg_type == "SpeechStarted":
+            return Transcript(
+                text="",
+                is_final=False,
+                confidence=0.0,
+                event_type="SpeechStarted",
+                request_id=self.request_id,
+            )
+
+        if msg_type == "UtteranceEnd":
+            return Transcript(
+                text="",
+                is_final=True,
+                confidence=0.0,
+                event_type="UtteranceEnd",
+                request_id=self.request_id,
+            )
 
         if msg_type != "Results":
             return None
@@ -108,11 +185,19 @@ class DeepgramSTT(STTProvider):
         # is_final alone marks a stable utterance; speech_final is a faster
         # end-of-utterance hint from Deepgram's VAD. Accept either so the
         # pipeline doesn't wait up to utterance_end_ms on every turn.
-        is_final = bool(data.get("is_final", False) or data.get("speech_final", False))
+        speech_final = bool(data.get("speech_final", False))
+        is_final = bool(data.get("is_final", False) or speech_final)
+        from_finalize = bool(data.get("from_finalize", False))
+        words = best.get("words", []) or []
         return Transcript(
             text=text,
             is_final=is_final,
             confidence=best.get("confidence", 0.0),
+            speech_final=speech_final,
+            from_finalize=from_finalize,
+            request_id=self.request_id,
+            words=list(words),
+            event_type="Results",
         )
 
     async def receive_transcripts(self) -> AsyncIterator[Transcript]:
@@ -127,10 +212,33 @@ class DeepgramSTT(STTProvider):
                 yield transcript
 
     async def close(self) -> None:
-        if self._ws is not None:
+        # Cancel the KeepAlive pump first so it does not race the close
+        # handshake.
+        if self._keepalive_task is not None:
+            self._keepalive_task.cancel()
             try:
-                await self._ws.send(json.dumps({"type": "CloseStream"}))
+                await self._keepalive_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._keepalive_task = None
+
+        if self._ws is not None:
+            ws = self._ws
+            # Send Finalize first to flush any trailing partial into a
+            # final Results frame. Give the server a short drain window
+            # (bounded well below the 500 ms close-latency budget) before
+            # sending CloseStream.
+            try:
+                await ws.send(json.dumps({"type": "Finalize"}))
+                await asyncio.sleep(_FINALIZE_DRAIN_SECONDS)
             except Exception:
                 pass
-            await self._ws.close()
+            try:
+                await ws.send(json.dumps({"type": "CloseStream"}))
+            except Exception:
+                pass
+            try:
+                await ws.close()
+            except Exception:
+                pass
             self._ws = None

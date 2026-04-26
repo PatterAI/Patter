@@ -60,20 +60,34 @@ describe('validateWebhookUrl()', () => {
 
   it('blocks 0.x.x.x range', () => {
     expect(() => validateWebhookUrl('https://0.0.0.0/hook')).toThrow('private/internal address');
+    expect(() => validateWebhookUrl('https://0.1.2.3/hook')).toThrow('private/internal address');
   });
 
-  it('blocks IPv6 loopback (raw hostname)', () => {
-    // Node URL parses [::1] as hostname "[::1]" (with brackets), which
-    // does not match the regex ^::1$. This test documents current behavior.
-    // The function still blocks it if the regex matches the un-bracketed form.
-    // For production, this would need bracket stripping — testing the current behavior:
-    expect(() => validateWebhookUrl('http://[::1]:8080/hook')).not.toThrow();
+  it('blocks IPv6 loopback (bracketed literal)', () => {
+    expect(() => validateWebhookUrl('http://[::1]:8080/hook')).toThrow('private/internal address');
+    expect(() => validateWebhookUrl('http://[::]/hook')).toThrow('private/internal address');
+  });
+
+  it('blocks IPv6 unique-local (fc00::/7) and link-local (fe80::/10)', () => {
+    expect(() => validateWebhookUrl('http://[fc00::1]/hook')).toThrow('private/internal address');
+    expect(() => validateWebhookUrl('http://[fd12:3456::1]/hook')).toThrow('private/internal address');
+    expect(() => validateWebhookUrl('http://[fe80::1]/hook')).toThrow('private/internal address');
+  });
+
+  it('blocks ip6-localhost / ip6-loopback aliases', () => {
+    expect(() => validateWebhookUrl('http://ip6-localhost/hook')).toThrow('private/internal address');
+    expect(() => validateWebhookUrl('http://ip6-loopback/hook')).toThrow('private/internal address');
   });
 
   it('blocks metadata.google.internal', () => {
     expect(() => validateWebhookUrl('https://metadata.google.internal/hook')).toThrow(
       'private/internal address',
     );
+  });
+
+  it('blocks bare `metadata` and metadata.azure.com', () => {
+    expect(() => validateWebhookUrl('http://metadata/hook')).toThrow('private/internal address');
+    expect(() => validateWebhookUrl('https://metadata.azure.com/hook')).toThrow('private/internal address');
   });
 
   it('throws on malformed URL', () => {

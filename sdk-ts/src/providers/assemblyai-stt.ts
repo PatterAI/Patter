@@ -1,13 +1,7 @@
 /**
  * AssemblyAI Universal Streaming STT adapter for the Patter SDK pipeline mode.
  *
- * Implements a `DeepgramSTT`-shaped provider using AssemblyAI's v3 streaming
- * WebSocket API. Pure `ws` transport — does NOT depend on the vendor SDK.
- *
- * Algorithm adapted from LiveKit Agents (Apache 2.0):
- * https://github.com/livekit/agents
- * Source: livekit-plugins/livekit-plugins-assemblyai/livekit/plugins/assemblyai/stt.py
- * Upstream ref SHA: 78a66bcf79c5cea82989401c408f1dff4b961a5b
+ * Pure `ws` transport — does NOT depend on the vendor SDK.
  */
 
 import WebSocket from 'ws';
@@ -17,6 +11,8 @@ export interface Transcript {
   readonly text: string;
   readonly isFinal: boolean;
   readonly confidence: number;
+  /** Optional event hint, e.g. `"SpeechStarted"` for barge-in signals. */
+  readonly eventType?: string;
 }
 
 type TranscriptCallback = (transcript: Transcript) => void;
@@ -26,7 +22,10 @@ export type AssemblyAIEncoding = 'pcm_s16le' | 'pcm_mulaw';
 export type AssemblyAIModel =
   | 'universal-streaming-english'
   | 'universal-streaming-multilingual'
-  | 'u3-rt-pro';
+  | 'u3-rt-pro'
+  | 'whisper-rt';
+
+export type AssemblyAIDomain = 'general' | 'medical-v1';
 
 export interface AssemblyAISTTOptions {
   /** One of the AssemblyAI speech models. */
@@ -37,6 +36,11 @@ export interface AssemblyAISTTOptions {
   readonly sampleRate?: number;
   /** Override the streaming base URL (e.g. EU: `wss://streaming.eu.assemblyai.com`). */
   readonly baseUrl?: string;
+  /**
+   * Authenticate via `?token=<apiKey>` in the URL instead of the
+   * `Authorization` header. Default `false`.
+   */
+  readonly useQueryToken?: boolean;
   /** Enable automatic language detection (defaults: true for multilingual/u3-rt-pro). */
   readonly languageDetection?: boolean;
   /** 0..1 confidence required before end-of-turn is finalized. */
@@ -51,20 +55,24 @@ export interface AssemblyAISTTOptions {
   readonly keytermsPrompt?: readonly string[];
   /** Text prompt (u3-rt-pro only). */
   readonly prompt?: string;
-  /** VAD threshold (0..1). */
+  /** Accepted for backward compatibility but NOT sent — not a valid v3 param. */
   readonly vadThreshold?: number;
   /** Enable diarization / speaker labels. */
   readonly speakerLabels?: boolean;
   /** Max speakers for diarization. */
   readonly maxSpeakers?: number;
-  /** Domain hint (e.g. "medical"). */
-  readonly domain?: string;
+  /** Domain hint — must be `"general"` or `"medical-v1"`. */
+  readonly domain?: AssemblyAIDomain;
 }
 
 const DEFAULT_BASE_URL = 'wss://streaming.assemblyai.com';
-const DEFAULT_MIN_TURN_SILENCE_MS = 100;
+const DEFAULT_MIN_TURN_SILENCE_MS = 400;
 const CONNECT_TIMEOUT_MS = 10000;
-const MAX_CALLBACKS = 10;
+const TERMINATION_WAIT_TIMEOUT_MS = 500;
+const MIN_CHUNK_DURATION_MS = 50;
+const MAX_CHUNK_DURATION_MS = 1000;
+const RECONNECT_ERROR_CODES: ReadonlySet<number> = new Set([3005, 3008]);
+const VALID_DOMAINS: ReadonlySet<string> = new Set(['general', 'medical-v1']);
 
 interface AssemblyAIWord {
   readonly text?: string;
@@ -83,13 +91,24 @@ interface AssemblyAIEvent {
   readonly words?: readonly AssemblyAIWord[];
 }
 
+export class AssemblyAISTTNotConnectedError extends Error {
+  constructor(message = 'AssemblyAISTT is not connected') {
+    super(message);
+    this.name = 'AssemblyAISTTNotConnectedError';
+  }
+}
+
 export class AssemblyAISTT {
   private ws: WebSocket | null = null;
-  private callbacks: TranscriptCallback[] = [];
+  private readonly callbacks: Set<TranscriptCallback> = new Set();
+  private closing = false;
+  private reconnectAttempts = 0;
+  private terminationResolve: (() => void) | null = null;
+
   /** AssemblyAI session id — set when the `Begin` message arrives. */
-  public sessionId: string = '';
+  public sessionId: string | null = null;
   /** Unix timestamp when the AssemblyAI session expires. */
-  public expiresAt: number = 0;
+  public expiresAt: number | null = null;
 
   constructor(
     private readonly apiKey: string,
@@ -97,6 +116,19 @@ export class AssemblyAISTT {
   ) {
     if (!apiKey) {
       throw new Error('AssemblyAISTT requires a non-empty apiKey');
+    }
+    if (options.domain !== undefined && !VALID_DOMAINS.has(options.domain)) {
+      const hint =
+        (options.domain as string) === 'medical'
+          ? ' — did you mean "medical-v1"?'
+          : '';
+      throw new Error(
+        `AssemblyAISTT: invalid domain "${options.domain}"; expected one of [${Array.from(
+          VALID_DOMAINS,
+        )
+          .map((d) => `"${d}"`)
+          .join(', ')}]${hint}`,
+      );
     }
   }
 
@@ -139,11 +171,15 @@ export class AssemblyAISTT {
       keyterms_prompt: opts.keytermsPrompt ? JSON.stringify(opts.keytermsPrompt) : undefined,
       language_detection: languageDetection,
       prompt: opts.prompt,
-      vad_threshold: opts.vadThreshold,
+      // vad_threshold intentionally omitted — not a valid v3 parameter.
       speaker_labels: opts.speakerLabels,
       max_speakers: opts.maxSpeakers,
       domain: opts.domain,
     };
+
+    if (opts.useQueryToken) {
+      raw.token = this.apiKey;
+    }
 
     const params = new URLSearchParams();
     for (const [key, value] of Object.entries(raw)) {
@@ -159,32 +195,44 @@ export class AssemblyAISTT {
     return `${base}/v3/ws?${params.toString()}`;
   }
 
-  async connect(): Promise<void> {
-    const url = this.buildUrl();
-    this.ws = new WebSocket(url, {
-      headers: {
-        Authorization: this.apiKey,
-        'Content-Type': 'application/json',
-        'User-Agent': 'Patter/1.0 (integration=LiveKit-port)',
-      },
-    });
+  private buildHeaders(): Record<string, string> {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'User-Agent': 'Patter/1.0',
+    };
+    if (!this.options.useQueryToken) {
+      headers.Authorization = this.apiKey;
+    }
+    return headers;
+  }
 
+  async connect(): Promise<void> {
+    this.closing = false;
+    const url = this.buildUrl();
+    this.ws = new WebSocket(url, { headers: this.buildHeaders() });
+    await this.awaitOpen(this.ws);
+    this.attachHandlers(this.ws);
+  }
+
+  private async awaitOpen(ws: WebSocket): Promise<void> {
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(
         () => reject(new Error('AssemblyAI connect timeout')),
         CONNECT_TIMEOUT_MS,
       );
-      this.ws!.once('open', () => {
+      ws.once('open', () => {
         clearTimeout(timer);
         resolve();
       });
-      this.ws!.once('error', (err: Error) => {
+      ws.once('error', (err: Error) => {
         clearTimeout(timer);
         reject(err);
       });
     });
+  }
 
-    this.ws.on('message', (raw: WebSocket.RawData) => {
+  private attachHandlers(ws: WebSocket): void {
+    ws.on('message', (raw: WebSocket.RawData) => {
       let event: AssemblyAIEvent;
       try {
         event = JSON.parse(raw.toString()) as AssemblyAIEvent;
@@ -193,19 +241,59 @@ export class AssemblyAISTT {
       }
       this.handleEvent(event);
     });
+
+    ws.on('close', (code: number) => {
+      if (
+        !this.closing &&
+        RECONNECT_ERROR_CODES.has(code) &&
+        this.reconnectAttempts < 1
+      ) {
+        this.reconnectAttempts += 1;
+        getLogger().warn(
+          `AssemblyAISTT: close code ${code} — attempting single reconnect.`,
+        );
+        this.reconnect().catch((err: unknown) => {
+          getLogger().error('AssemblyAISTT reconnect failed', err);
+        });
+      }
+    });
+  }
+
+  private async reconnect(): Promise<void> {
+    const url = this.buildUrl();
+    this.ws = new WebSocket(url, { headers: this.buildHeaders() });
+    await this.awaitOpen(this.ws);
+    this.attachHandlers(this.ws);
   }
 
   private handleEvent(event: AssemblyAIEvent): void {
     const type = event.type;
 
     if (type === 'Begin') {
-      this.sessionId = event.id ?? '';
-      this.expiresAt = event.expires_at ?? 0;
+      this.sessionId = event.id ?? null;
+      this.expiresAt = event.expires_at ?? null;
+      return;
+    }
+
+    if (type === 'Termination') {
+      if (this.terminationResolve) {
+        this.terminationResolve();
+        this.terminationResolve = null;
+      }
+      return;
+    }
+
+    if (type === 'SpeechStarted') {
+      this.emit({
+        text: '',
+        isFinal: false,
+        confidence: 0,
+        eventType: 'SpeechStarted',
+      });
       return;
     }
 
     if (type !== 'Turn') {
-      // Ignore "SpeechStarted" / "Termination" — callers don't consume them here.
       return;
     }
 
@@ -215,7 +303,6 @@ export class AssemblyAISTT {
     const transcriptText = (event.transcript ?? '').trim();
 
     if (endOfTurn) {
-      // If format_turns requested, only surface the formatted version.
       if (this.options.formatTurns && !turnIsFormatted) return;
       if (!transcriptText) return;
       this.emit({
@@ -226,7 +313,6 @@ export class AssemblyAISTT {
       return;
     }
 
-    // Interim: concatenate cumulative word list.
     if (!words.length) return;
     const interim = words
       .map((w) => (w.text ?? '').trim())
@@ -247,31 +333,110 @@ export class AssemblyAISTT {
   }
 
   sendAudio(audio: Buffer): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new AssemblyAISTTNotConnectedError(
+        'AssemblyAISTT.sendAudio: WebSocket is not open',
+      );
+    }
+
+    const durationMs = this.estimateChunkDurationMs(audio.length);
+    if (
+      durationMs !== null &&
+      (durationMs < MIN_CHUNK_DURATION_MS || durationMs > MAX_CHUNK_DURATION_MS)
+    ) {
+      getLogger().warn(
+        `AssemblyAISTT: audio chunk duration ${durationMs.toFixed(1)}ms outside 50-1000ms bounds (may trigger error 3007).`,
+      );
+    }
+
     this.ws.send(audio);
   }
 
-  onTranscript(callback: TranscriptCallback): void {
-    if (this.callbacks.length >= MAX_CALLBACKS) {
-      getLogger().warn(
-        'AssemblyAISTT: maximum of 10 onTranscript callbacks reached; replacing the last callback.',
-      );
-      this.callbacks[this.callbacks.length - 1] = callback;
-      return;
-    }
-    this.callbacks.push(callback);
+  private estimateChunkDurationMs(byteLength: number): number | null {
+    if (byteLength <= 0) return null;
+    const sampleRate = this.options.sampleRate ?? 16000;
+    if (sampleRate <= 0) return null;
+    const bytesPerSample = (this.options.encoding ?? 'pcm_s16le') === 'pcm_s16le' ? 2 : 1;
+    const samples = byteLength / bytesPerSample;
+    return (samples / sampleRate) * 1000;
   }
 
-  close(): void {
-    if (this.ws) {
-      try {
-        this.ws.send(JSON.stringify({ type: 'Terminate' }));
-      } catch {
-        // ignore
-      }
-      this.ws.close();
-      this.ws = null;
+  /**
+   * Send an `UpdateConfiguration` frame to change settings mid-stream.
+   * Only defined fields are included.
+   */
+  updateConfiguration(params: {
+    keytermsPrompt?: readonly string[];
+    prompt?: string;
+    minTurnSilence?: number;
+    maxTurnSilence?: number;
+  }): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new AssemblyAISTTNotConnectedError(
+        'AssemblyAISTT.updateConfiguration: WebSocket is not open',
+      );
     }
+    const payload: Record<string, unknown> = { type: 'UpdateConfiguration' };
+    if (params.keytermsPrompt !== undefined) {
+      payload.keyterms_prompt = JSON.stringify(params.keytermsPrompt);
+    }
+    if (params.prompt !== undefined) {
+      payload.prompt = params.prompt;
+    }
+    if (params.minTurnSilence !== undefined) {
+      payload.min_turn_silence = params.minTurnSilence;
+    }
+    if (params.maxTurnSilence !== undefined) {
+      payload.max_turn_silence = params.maxTurnSilence;
+    }
+    this.ws.send(JSON.stringify(payload));
+  }
+
+  /** Force the server to finalize the current turn (for barge-in). */
+  forceEndpoint(): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new AssemblyAISTTNotConnectedError(
+        'AssemblyAISTT.forceEndpoint: WebSocket is not open',
+      );
+    }
+    this.ws.send(JSON.stringify({ type: 'ForceEndpoint' }));
+  }
+
+  onTranscript(callback: TranscriptCallback): () => void {
+    this.callbacks.add(callback);
+    return () => {
+      this.callbacks.delete(callback);
+    };
+  }
+
+  async close(): Promise<void> {
+    this.closing = true;
+    if (!this.ws) return;
+
+    try {
+      this.ws.send(JSON.stringify({ type: 'Terminate' }));
+    } catch {
+      // ignore
+    }
+
+    // Wait up to 500ms for Termination event from server.
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        this.terminationResolve = null;
+        resolve();
+      }, TERMINATION_WAIT_TIMEOUT_MS);
+      this.terminationResolve = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+    });
+
+    try {
+      this.ws.close();
+    } catch {
+      // ignore
+    }
+    this.ws = null;
   }
 }
 

@@ -12,3 +12,9 @@ class AuthenticationError(PatterError):
 
 class ProvisionError(PatterError):
     pass
+
+
+class RateLimitError(PatterConnectionError):
+    """Raised when a provider returns HTTP 429 on connect/upgrade."""
+
+    pass

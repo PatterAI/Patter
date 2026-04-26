@@ -32,6 +32,7 @@ def _make_server(**overrides) -> EmbeddedServer:
         openai_key="sk-test",
         webhook_url="test.ngrok.io",
         phone_number="+15551234567",
+        require_signature=False,
     )
     agent = make_agent()
     defaults = dict(config=cfg, agent=agent, dashboard=False)
@@ -308,6 +309,7 @@ class TestTwilioVoiceRoute:
             twilio_token="",  # empty = no validation
             openai_key="sk-test",
             webhook_url="test.ngrok.io",
+            require_signature=False,
         )
         app = srv._create_app()
         endpoint = _get_endpoint(app, "/webhooks/twilio/voice")
@@ -355,6 +357,7 @@ def _unauth_config() -> LocalConfig:
         twilio_token="",
         openai_key="sk-test",
         webhook_url="test.ngrok.io",
+        require_signature=False,
     )
 
 
@@ -571,6 +574,7 @@ class TestTelnyxVoiceRoute:
             openai_key="sk-test",
             webhook_url="test.ngrok.io",
             phone_number="+15551234567",
+            require_signature=False,
         )
         srv = EmbeddedServer(config=cfg, agent=make_agent(), dashboard=False)
         app = srv._create_app()

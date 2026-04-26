@@ -21,6 +21,7 @@ function makeConfig(overrides: Partial<LocalConfig> = {}): LocalConfig {
     phoneNumber: '+15550000000',
     webhookUrl: 'abc.ngrok.io',
     telephonyProvider: 'twilio',
+    requireSignature: false,
     ...overrides,
   };
 }

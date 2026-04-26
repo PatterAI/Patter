@@ -16,6 +16,7 @@
  * default loader that downloads the model on first use.
  */
 import { getLogger } from '../logger';
+import { StatefulResampler } from '../transcoding';
 import type { AudioFilter } from '../types';
 
 // Resolve the logger lazily so tests that swap it via ``setLogger`` after
@@ -65,25 +66,10 @@ async function loadOnnxRuntime(): Promise<OnnxRuntimeModule | null> {
   }
 }
 
-/** Linear-interpolation resampler (mono, Float32).  Good enough for the
- *  narrow-band / wide-band conversions DeepFilterNet needs around telephony
- *  audio. */
-function resample(samples: Float32Array, srcSr: number, dstSr: number): Float32Array {
-  if (srcSr === dstSr || samples.length === 0) {
-    return samples;
-  }
-  const dstLen = Math.max(1, Math.round((samples.length * dstSr) / srcSr));
-  const out = new Float32Array(dstLen);
-  const ratio = (samples.length - 1) / Math.max(1, dstLen - 1);
-  for (let i = 0; i < dstLen; i += 1) {
-    const srcIdx = i * ratio;
-    const lo = Math.floor(srcIdx);
-    const hi = Math.min(samples.length - 1, lo + 1);
-    const frac = srcIdx - lo;
-    out[i] = samples[lo] * (1 - frac) + samples[hi] * frac;
-  }
-  return out;
-}
+/**
+ * Convert a PCM16 Buffer to a Float32Array for ONNX inference.
+ * Kept as a thin helper — resampling is now handled by StatefulResampler.
+ */
 
 function pcm16ToFloat32(pcm: Buffer): Float32Array {
   const view = new Int16Array(pcm.buffer, pcm.byteOffset, Math.floor(pcm.byteLength / 2));
@@ -111,6 +97,11 @@ export class DeepFilterNetFilter implements AudioFilter {
   private ort: OnnxRuntimeModule | null = null;
   private warned = false;
   private closed = false;
+  // Fix 5: stateful resamplers for src_sr↔48k conversions so chunk-boundary
+  // samples are not discarded. Lazy-created and torn down on rate change.
+  private _resamplerSrcRate: number | null = null;
+  private _upsamplerInst: StatefulResampler | null = null;
+  private _downsamplerInst: StatefulResampler | null = null;
 
   constructor(options: DeepFilterNetOptions = {}) {
     this.modelPath = options.modelPath;
@@ -172,8 +163,20 @@ export class DeepFilterNetFilter implements AudioFilter {
     }
 
     try {
+      // Fix 5: use stateful resamplers so samples spanning chunk boundaries
+      // are not silently discarded (stateless np.interp-style had this bug).
+      if (this._resamplerSrcRate !== sampleRate) {
+        // Rate changed or first call — create fresh instances.
+        this._resamplerSrcRate = sampleRate;
+        this._upsamplerInst = new StatefulResampler({ srcRate: sampleRate, dstRate: DEEPFILTERNET_SR });
+        this._downsamplerInst = new StatefulResampler({ srcRate: DEEPFILTERNET_SR, dstRate: sampleRate });
+      }
+
       const samples = pcm16ToFloat32(pcmChunk);
-      const upsampled = resample(samples, sampleRate, DEEPFILTERNET_SR);
+      // Up-sample to 48 kHz using stateful resampler (PCM16 → Float32 → Resampler)
+      const pcm16Up = this._upsamplerInst!.process(float32ToPcm16(new Float32Array(samples)));
+      const upsampled = pcm16ToFloat32(pcm16Up);
+
       const inputName = session.inputNames[0];
       const outputName = session.outputNames[0];
       const tensor = new this.ort.Tensor('float32', upsampled, [1, upsampled.length]);
@@ -184,8 +187,10 @@ export class DeepFilterNetFilter implements AudioFilter {
         return pcmChunk;
       }
       const enhanced = output.data instanceof Float32Array ? output.data : new Float32Array(output.data);
-      const restored = resample(enhanced, DEEPFILTERNET_SR, sampleRate);
-      return float32ToPcm16(restored);
+      // Down-sample back to src_sr using stateful resampler
+      const pcm16Enhanced = float32ToPcm16(enhanced);
+      const pcm16Restored = this._downsamplerInst!.process(pcm16Enhanced);
+      return pcm16Restored;
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       log().error(`DeepFilterNetFilter.process failed: ${message}`);
@@ -194,6 +199,12 @@ export class DeepFilterNetFilter implements AudioFilter {
   }
 
   async close(): Promise<void> {
+    // Fix 5: flush stateful resamplers so tail samples are not clipped.
+    try { this._upsamplerInst?.flush(); } catch { /* best effort */ }
+    try { this._downsamplerInst?.flush(); } catch { /* best effort */ }
+    this._upsamplerInst = null;
+    this._downsamplerInst = null;
+
     if (this.session !== null && typeof this.session.release === 'function') {
       try {
         await this.session.release();

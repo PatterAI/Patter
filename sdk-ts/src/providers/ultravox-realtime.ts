@@ -74,16 +74,22 @@ export class UltravoxRealtimeAdapter {
           outputSampleRate: this.sampleRate,
         },
       },
-      firstSpeaker: this.firstMessage ? 'FIRST_SPEAKER_AGENT' : 'FIRST_SPEAKER_USER',
       recordingEnabled: false,
     };
     if (this.voice) body.voice = this.voice;
     if (this.instructions) body.systemPrompt = this.instructions;
+    // ``firstSpeaker`` and ``initialMessages`` are mutually exclusive on the
+    // Ultravox API: setting both causes the server to reject the call.
+    // Prefer ``initialMessages`` when a ``firstMessage`` is configured;
+    // otherwise default to FIRST_SPEAKER_USER (user speaks first). Matches
+    // the Python port in ``sdk-py/getpatter/providers/ultravox_realtime.py``.
     if (this.firstMessage) {
       body.initialOutputMedium = 'MESSAGE_MEDIUM_VOICE';
       body.initialMessages = [
         { role: 'MESSAGE_ROLE_AGENT', text: this.firstMessage },
       ];
+    } else {
+      body.firstSpeaker = 'FIRST_SPEAKER_USER';
     }
     if (this.tools?.length) {
       body.selectedTools = this.tools.map((t) => ({
@@ -143,11 +149,13 @@ export class UltravoxRealtimeAdapter {
   }
 
   async sendText(text: string): Promise<void> {
-    this.ws?.send(JSON.stringify({ type: 'input_text_message', text }));
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.ws.send(JSON.stringify({ type: 'input_text_message', text }));
   }
 
   async sendFunctionResult(callId: string, result: string): Promise<void> {
-    this.ws?.send(
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.ws.send(
       JSON.stringify({
         type: 'client_tool_result',
         invocationId: callId,
@@ -158,7 +166,8 @@ export class UltravoxRealtimeAdapter {
   }
 
   cancelResponse(): void {
-    this.ws?.send(JSON.stringify({ type: 'playback_clear_buffer' }));
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.ws.send(JSON.stringify({ type: 'playback_clear_buffer' }));
   }
 
   onEvent(handler: UltravoxEventHandler): void {

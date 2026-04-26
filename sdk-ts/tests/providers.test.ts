@@ -123,9 +123,11 @@ describe("ElevenLabsTTS", () => {
   });
 
   it("uses default voice id when not specified", () => {
+    // Class default is kept in sync with the factory default (`rachel`),
+    // so constructing without args gives the same voice as elevenlabs({}).
     const tts = new ElevenLabsTTS("el_test");
     const t = tts as unknown as Record<string, unknown>;
-    expect(t["voiceId"]).toBe("EXAVITQu4vr4xnSDxMaL");
+    expect(t["voiceId"]).toBe("21m00Tcm4TlvDq8ikWAM");
   });
 
   it("uses eleven_flash_v2_5 model by default", () => {

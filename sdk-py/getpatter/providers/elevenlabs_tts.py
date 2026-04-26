@@ -1,7 +1,24 @@
-from typing import AsyncIterator
+from typing import AsyncIterator, Literal, Optional
 import re
 import httpx
 from getpatter.providers.base import TTSProvider
+
+# Supported `output_format` values for the `/text-to-speech/{id}/stream`
+# endpoint. `ulaw_8000` is the telephony-ready option for Twilio/Telnyx.
+ElevenLabsOutputFormat = Literal[
+    "mp3_22050_32",
+    "mp3_44100_32",
+    "mp3_44100_64",
+    "mp3_44100_96",
+    "mp3_44100_128",
+    "mp3_44100_192",
+    "pcm_8000",
+    "pcm_16000",
+    "pcm_22050",
+    "pcm_24000",
+    "pcm_44100",
+    "ulaw_8000",
+]
 
 # Curated map of common ElevenLabs voice display names to their voice IDs. The
 # public API only accepts voice IDs (opaque 20-char strings), so callers that
@@ -77,19 +94,51 @@ def resolve_voice_id(voice: str) -> str:
 
 
 class ElevenLabsTTS(TTSProvider):
-    def __init__(self, api_key: str, voice_id: str = "EXAVITQu4vr4xnSDxMaL", model_id: str = "eleven_flash_v2_5", output_format: str = "pcm_16000"):
-        self.api_key = api_key; self.voice_id = resolve_voice_id(voice_id); self.model_id = model_id; self.output_format = output_format
-        self._client = httpx.AsyncClient(base_url="https://api.elevenlabs.io/v1", headers={"xi-api-key": api_key}, timeout=30.0)
+    def __init__(
+        self,
+        api_key: str,
+        voice_id: str = "21m00Tcm4TlvDq8ikWAM",
+        model_id: str = "eleven_flash_v2_5",
+        output_format: ElevenLabsOutputFormat = "pcm_16000",
+        voice_settings: Optional[dict] = None,
+        language_code: Optional[str] = None,
+        chunk_size: int = 4096,
+    ):
+        self.api_key = api_key
+        self.voice_id = resolve_voice_id(voice_id)
+        self.model_id = model_id
+        self.output_format = output_format
+        self.voice_settings = voice_settings
+        self.language_code = language_code
+        self.chunk_size = chunk_size
+        self._client = httpx.AsyncClient(
+            base_url="https://api.elevenlabs.io/v1",
+            headers={"xi-api-key": api_key},
+            timeout=30.0,
+        )
 
     def __repr__(self) -> str:
         return f"ElevenLabsTTS(model_id={self.model_id!r}, voice_id={self.voice_id!r})"
 
     async def synthesize(self, text: str) -> AsyncIterator[bytes]:
-        req = self._client.build_request("POST", f"/text-to-speech/{self.voice_id}/stream", json={"text": text, "model_id": self.model_id}, params={"output_format": self.output_format})
-        resp = await self._client.send(req, stream=True); resp.raise_for_status()
+        body: dict = {"text": text, "model_id": self.model_id}
+        if self.voice_settings:
+            body["voice_settings"] = self.voice_settings
+        if self.language_code:
+            body["language_code"] = self.language_code
+        req = self._client.build_request(
+            "POST",
+            f"/text-to-speech/{self.voice_id}/stream",
+            json=body,
+            params={"output_format": self.output_format},
+        )
+        resp = await self._client.send(req, stream=True)
+        resp.raise_for_status()
         try:
-            async for chunk in resp.aiter_bytes(chunk_size=4096): yield chunk
+            async for chunk in resp.aiter_bytes(chunk_size=self.chunk_size):
+                yield chunk
         finally:
             await resp.aclose()
 
-    async def close(self) -> None: await self._client.aclose()
+    async def close(self) -> None:
+        await self._client.aclose()

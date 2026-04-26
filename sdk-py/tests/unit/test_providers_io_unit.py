@@ -394,7 +394,13 @@ class TestElevenLabsConvAIAdapterIO:
             await adapter.connect()
 
         sent = json.loads(mock_ws.send.call_args[0][0])
-        assert "agent" not in sent.get("conversation_config_override", {})
+        # Default language="it" is still plumbed into agent config, but
+        # first_message is omitted when empty.
+        agent = sent["conversation_config_override"].get("agent", {})
+        assert agent.get("language") == "it"
+        assert "first_message" not in agent
+        # Close the background reader to avoid dangling tasks.
+        await adapter.close()
 
     @pytest.mark.asyncio
     async def test_send_audio_encodes_base64(self) -> None:
@@ -406,8 +412,21 @@ class TestElevenLabsConvAIAdapterIO:
         audio = b"\xaa\xbb\xcc"
         await adapter.send_audio(audio)
         sent = json.loads(adapter._ws.send.call_args[0][0])
-        assert sent["type"] == "audio"
-        assert base64.b64decode(sent["audio"]) == audio
+        # Per ElevenLabs ConvAI protocol, inbound user audio uses a top-level
+        # `user_audio_chunk` key (not `type: "audio"`).
+        assert "user_audio_chunk" in sent
+        assert base64.b64decode(sent["user_audio_chunk"]) == audio
+
+    async def _prime_adapter_with_ws(self, adapter, mock_ws):
+        """Start the background reader against a pre-built mock WS.
+
+        The new `connect()` contract spawns an internal reader task to
+        drain the socket into an async queue; tests that previously set
+        `_ws` directly must also kick off the reader.
+        """
+        adapter._ws = mock_ws
+        adapter._events = asyncio.Queue()
+        adapter._reader_task = asyncio.create_task(adapter._read_loop())
 
     @pytest.mark.asyncio
     async def test_receive_events_yields_audio(self) -> None:
@@ -416,11 +435,16 @@ class TestElevenLabsConvAIAdapterIO:
         adapter = ElevenLabsConvAIAdapter(api_key="el-test")
         audio_bytes = b"\xdd\xee"
         encoded = base64.b64encode(audio_bytes).decode("ascii")
-        adapter._ws = _AsyncIterableWS([json.dumps({"type": "audio", "audio": encoded})])
+        await self._prime_adapter_with_ws(
+            adapter,
+            _AsyncIterableWS([json.dumps({"type": "audio", "audio": encoded})]),
+        )
 
         events = []
         async for event in adapter.receive_events():
             events.append(event)
+        # First event is the audio chunk. A synthetic `response_done` may
+        # follow from the silence watcher — but only `audio` must lead.
         assert events[0] == ("audio", audio_bytes)
 
     @pytest.mark.asyncio
@@ -428,26 +452,36 @@ class TestElevenLabsConvAIAdapterIO:
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
         adapter = ElevenLabsConvAIAdapter(api_key="el-test")
-        adapter._ws = _AsyncIterableWS([
-            json.dumps({"type": "user_transcript", "text": "Hi"}),
-            json.dumps({"type": "agent_response", "text": "Hello"}),
-            json.dumps({"type": "interruption"}),
-        ])
+        await self._prime_adapter_with_ws(
+            adapter,
+            _AsyncIterableWS([
+                json.dumps({"type": "user_transcript", "text": "Hi"}),
+                json.dumps({"type": "agent_response", "text": "Hello"}),
+                json.dumps({"type": "interruption"}),
+            ]),
+        )
 
         events = []
         async for event in adapter.receive_events():
             events.append(event)
-        assert events[0] == ("transcript_input", "Hi")
-        assert events[1] == ("transcript_output", "Hello")
-        assert events[2] == ("response_done", {})
-        assert events[3] == ("interruption", None)
+        # New protocol: agent_response -> (transcript_output, response_start)
+        # and interruption finalizes the agent turn with response_done.
+        types = [t for t, _ in events]
+        assert ("transcript_input", "Hi") in events
+        assert ("transcript_output", "Hello") in events
+        assert "response_start" in types
+        assert "response_done" in types  # emitted by interruption
+        assert ("interruption", None) in events
 
     @pytest.mark.asyncio
     async def test_receive_events_empty_audio_skipped(self) -> None:
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
         adapter = ElevenLabsConvAIAdapter(api_key="el-test")
-        adapter._ws = _AsyncIterableWS([json.dumps({"type": "audio", "audio": ""})])
+        await self._prime_adapter_with_ws(
+            adapter,
+            _AsyncIterableWS([json.dumps({"type": "audio", "audio": ""})]),
+        )
 
         events = []
         async for event in adapter.receive_events():
@@ -455,16 +489,20 @@ class TestElevenLabsConvAIAdapterIO:
         assert len(events) == 0
 
     @pytest.mark.asyncio
-    async def test_receive_events_error_event_logged(self) -> None:
+    async def test_receive_events_error_event_yielded(self) -> None:
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
         adapter = ElevenLabsConvAIAdapter(api_key="el-test")
-        adapter._ws = _AsyncIterableWS([json.dumps({"type": "error", "message": "bad"})])
+        await self._prime_adapter_with_ws(
+            adapter,
+            _AsyncIterableWS([json.dumps({"type": "error", "message": "bad"})]),
+        )
 
         events = []
         async for event in adapter.receive_events():
             events.append(event)
-        assert len(events) == 0
+        # Error events are now surfaced to the consumer, not only logged.
+        assert events[0] == ("error", "bad")
 
     @pytest.mark.asyncio
     async def test_receive_events_handles_connection_closed(self) -> None:
@@ -472,7 +510,7 @@ class TestElevenLabsConvAIAdapterIO:
 
         adapter = ElevenLabsConvAIAdapter(api_key="el-test")
         adapter._running = True
-        adapter._ws = _ConnectionClosedWS()
+        await self._prime_adapter_with_ws(adapter, _ConnectionClosedWS())
 
         events = []
         async for event in adapter.receive_events():
@@ -489,6 +527,96 @@ class TestElevenLabsConvAIAdapterIO:
         async for event in adapter.receive_events():
             events.append(event)
         assert len(events) == 0
+
+    @pytest.mark.asyncio
+    async def test_connect_with_signed_url(self) -> None:
+        """use_signed_url=True fetches a signed URL and skips xi-api-key header."""
+        from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
+
+        adapter = ElevenLabsConvAIAdapter(
+            api_key="el-test", agent_id="agent_xyz", use_signed_url=True
+        )
+        mock_ws = AsyncMock()
+
+        # Build a minimal httpx.AsyncClient mock returning the signed-url payload.
+        class _Resp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"signed_url": "wss://signed.example/abc"}
+
+        class _Client:
+            def __init__(self, *a, **kw):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def get(self, *a, **kw):
+                return _Resp()
+
+        with patch("getpatter.providers.elevenlabs_convai.httpx.AsyncClient", _Client):
+            with patch(
+                "getpatter.providers.elevenlabs_convai.websockets.connect",
+                side_effect=_ws_connect_side_effect(mock_ws),
+            ) as mc:
+                await adapter.connect()
+
+        # The WS URL must be the signed one, and no xi-api-key header.
+        assert mc.call_args[0][0] == "wss://signed.example/abc"
+        assert "additional_headers" not in mc.call_args.kwargs
+        await adapter.close()
+
+    @pytest.mark.asyncio
+    async def test_ping_triggers_pong(self) -> None:
+        """A `ping` message is replied to with a matching `pong`."""
+        from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
+
+        adapter = ElevenLabsConvAIAdapter(api_key="el-test")
+        mock_ws = AsyncMock()
+        # Iterable messages include a ping.
+        mock_ws.__aiter__ = lambda self: _AsyncIterHelper([
+            json.dumps({"type": "ping", "ping_event": {"event_id": "xyz", "ping_ms": 0}}),
+        ])
+        adapter._ws = mock_ws
+        adapter._events = asyncio.Queue()
+        adapter._reader_task = asyncio.create_task(adapter._read_loop())
+
+        # Drain so the ping is processed.
+        events = []
+        async for event in adapter.receive_events():
+            events.append(event)
+
+        # At least one send call carries the pong.
+        sent_payloads = [json.loads(c.args[0]) for c in mock_ws.send.await_args_list]
+        assert {"type": "pong", "event_id": "xyz"} in sent_payloads
+
+    @pytest.mark.asyncio
+    async def test_conversation_initiation_metadata_captured(self) -> None:
+        from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
+
+        adapter = ElevenLabsConvAIAdapter(api_key="el-test")
+        meta = {
+            "type": "conversation_initiation_metadata",
+            "conversation_initiation_metadata_event": {
+                "conversation_id": "conv_abc",
+                "agent_output_audio_format": "pcm_16000",
+                "user_input_audio_format": "pcm_8000",
+            },
+        }
+        await self._prime_adapter_with_ws(adapter, _AsyncIterableWS([json.dumps(meta)]))
+
+        events = []
+        async for event in adapter.receive_events():
+            events.append(event)
+
+        assert adapter.conversation_id == "conv_abc"
+        assert adapter.agent_output_audio_format == "pcm_16000"
+        assert adapter.user_input_audio_format == "pcm_8000"
 
 
 # ---------------------------------------------------------------------------
@@ -752,9 +880,14 @@ class TestDeepgramSTTIO:
 
         await stt.close()
 
-        mock_ws.send.assert_called_once()
-        sent = json.loads(mock_ws.send.call_args[0][0])
-        assert sent["type"] == "CloseStream"
+        # close() sends Finalize → short drain → CloseStream, in that order,
+        # so the server has time to flush trailing partials before the stream
+        # is torn down.
+        assert mock_ws.send.await_count == 2
+        first = json.loads(mock_ws.send.await_args_list[0][0][0])
+        second = json.loads(mock_ws.send.await_args_list[1][0][0])
+        assert first["type"] == "Finalize"
+        assert second["type"] == "CloseStream"
         mock_ws.close.assert_called_once()
         assert stt._ws is None
 

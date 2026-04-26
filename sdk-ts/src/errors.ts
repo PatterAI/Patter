@@ -25,3 +25,11 @@ export class ProvisionError extends PatterError {
     this.name = "ProvisionError";
   }
 }
+
+/** Thrown when a provider returns HTTP 429 on connect/upgrade. */
+export class RateLimitError extends PatterConnectionError {
+  constructor(message: string) {
+    super(message);
+    this.name = "RateLimitError";
+  }
+}

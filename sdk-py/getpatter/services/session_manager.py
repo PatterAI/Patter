@@ -9,9 +9,15 @@ _logger = logging.getLogger("patter")
 
 @dataclass
 class CallSession:
-    call_id: str; phone_number: str; direction: str; caller: str; callee: str
-    stt: STTProvider | None = None; tts: TTSProvider | None = None
-    sdk_websocket: Any = None; telephony_websocket: Any = None
+    call_id: str
+    phone_number: str
+    direction: str
+    caller: str
+    callee: str
+    stt: STTProvider | None = None
+    tts: TTSProvider | None = None
+    sdk_websocket: Any = None
+    telephony_websocket: Any = None
     metadata: dict = field(default_factory=dict)
 
     async def cleanup(self) -> None:
@@ -31,10 +37,19 @@ class CallSession:
                 _logger.debug("Cleanup close error: %s", exc)
 
 class SessionManager:
-    def __init__(self): self._sessions: dict[str, CallSession] = {}
+    def __init__(self):
+        self._sessions: dict[str, CallSession] = {}
+
     def create_session(self, call_id, phone_number, direction, caller, callee) -> CallSession:
         s = CallSession(call_id=call_id, phone_number=phone_number, direction=direction, caller=caller, callee=callee)
-        self._sessions[call_id] = s; return s
-    def get_session(self, call_id) -> CallSession | None: return self._sessions.get(call_id)
-    def remove_session(self, call_id) -> None: self._sessions.pop(call_id, None)
-    def find_by_number(self, number) -> list[CallSession]: return [s for s in list(self._sessions.values()) if s.phone_number == number]
+        self._sessions[call_id] = s
+        return s
+
+    def get_session(self, call_id) -> CallSession | None:
+        return self._sessions.get(call_id)
+
+    def remove_session(self, call_id) -> None:
+        self._sessions.pop(call_id, None)
+
+    def find_by_number(self, number) -> list[CallSession]:
+        return [s for s in list(self._sessions.values()) if s.phone_number == number]

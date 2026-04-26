@@ -42,7 +42,6 @@ const API_VERSION = '2025-04-16';
 const USER_AGENT = 'Patter/1.0 (integration=LiveKit-port; provider=Cartesia)';
 const KEEPALIVE_INTERVAL_MS = 30000;
 const CONNECT_TIMEOUT_MS = 10000;
-const MAX_CALLBACKS = 10;
 
 interface CartesiaEvent {
   readonly type?: string;
@@ -55,10 +54,13 @@ interface CartesiaEvent {
 
 export class CartesiaSTT {
   private ws: WebSocket | null = null;
-  private callbacks: TranscriptCallback[] = [];
+  private callbacks: Set<TranscriptCallback> = new Set();
   private keepaliveTimer: ReturnType<typeof setInterval> | null = null;
-  /** Cartesia request id — set from the server transcript events. */
-  public requestId: string = '';
+  /**
+   * Cartesia request id — set from the server transcript events.
+   * `null` until the first transcript event arrives (matches Python's `None`).
+   */
+  public requestId: string | null = null;
 
   constructor(
     private readonly apiKey: string,
@@ -171,16 +173,22 @@ export class CartesiaSTT {
   }
 
   onTranscript(callback: TranscriptCallback): void {
-    if (this.callbacks.length >= MAX_CALLBACKS) {
-      getLogger().warn(
-        'CartesiaSTT: maximum of 10 onTranscript callbacks reached; replacing the last callback.',
-      );
-      this.callbacks[this.callbacks.length - 1] = callback;
-      return;
-    }
-    this.callbacks.push(callback);
+    this.callbacks.add(callback);
   }
 
+  /** Remove a previously registered transcript callback. */
+  offTranscript(callback: TranscriptCallback): void {
+    this.callbacks.delete(callback);
+  }
+
+  /**
+   * Synchronous best-effort close. Sends `finalize` and closes the socket
+   * without waiting for the server to flush any remaining transcripts.
+   *
+   * Limitation: any transcript events produced between the `finalize` send
+   * and the socket close may be dropped. Callers that need to guarantee all
+   * transcripts are delivered should await :meth:`closeAsync` instead.
+   */
   close(): void {
     if (this.keepaliveTimer) {
       clearInterval(this.keepaliveTimer);
@@ -194,6 +202,55 @@ export class CartesiaSTT {
       }
       this.ws.close();
       this.ws = null;
+    }
+  }
+
+  /**
+   * Graceful close that awaits the `finalize` send and the socket closing
+   * handshake, matching the Python adapter's behavior. Use this when you
+   * need any in-flight transcripts to be flushed before teardown.
+   */
+  async closeAsync(): Promise<void> {
+    if (this.keepaliveTimer) {
+      clearInterval(this.keepaliveTimer);
+      this.keepaliveTimer = null;
+    }
+    const ws = this.ws;
+    this.ws = null;
+    if (!ws) return;
+
+    // Best-effort: send `finalize` so the server flushes any trailing transcripts.
+    if (ws.readyState === WebSocket.OPEN) {
+      try {
+        await new Promise<void>((resolve) => {
+          ws.send('finalize', (err) => {
+            if (err) getLogger().warn(`CartesiaSTT finalize send failed: ${String(err)}`);
+            resolve();
+          });
+        });
+      } catch (err) {
+        getLogger().warn(`CartesiaSTT finalize error: ${String(err)}`);
+      }
+    }
+
+    // Wait for the socket to fully close so any final transcript events are
+    // delivered through the existing message handler before we return.
+    if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+      await new Promise<void>((resolve) => {
+        const done = (): void => {
+          ws.off('close', done);
+          ws.off('error', done);
+          resolve();
+        };
+        ws.once('close', done);
+        ws.once('error', done);
+        try {
+          ws.close();
+        } catch {
+          // ignore
+          resolve();
+        }
+      });
     }
   }
 }
