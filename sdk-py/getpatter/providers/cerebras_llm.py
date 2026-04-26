@@ -27,12 +27,15 @@ from __future__ import annotations
 
 import gzip
 import json
+import logging
 import os
 from typing import Any, AsyncIterator
 
 from getpatter.services.llm_loop import OpenAILLMProvider
 
 __all__ = ["CerebrasLLMProvider"]
+
+logger = logging.getLogger("getpatter.providers.cerebras_llm")
 
 
 _CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1"
@@ -188,21 +191,27 @@ class CerebrasLLMProvider(OpenAILLMProvider):
         messages: list[dict],
         tools: list[dict] | None = None,
     ) -> AsyncIterator[dict]:
+        # 404 model_not_found on Cerebras almost always means the model name
+        # isn't available on the caller's tier (Cerebras gates models per
+        # plan). Surface a concrete recovery hint at ERROR level, matching the
+        # TS provider's log-and-return contract — voice pipelines treat LLM
+        # provider failures as recoverable (the call continues, the user just
+        # hears no LLM response), so raising would be a behavioural change.
         try:
             async for chunk in super().stream(messages, tools):
                 yield chunk
         except Exception as exc:
-            # 404 model_not_found on Cerebras almost always means the model
-            # name isn't available on the caller's tier (Cerebras gates models
-            # per plan). Re-raise with a concrete recovery hint instead of the
-            # opaque upstream message.
             text = str(exc)
             if "404" in text and "model_not_found" in text:
-                raise RuntimeError(
-                    f'Cerebras: model "{self._model}" not available on your '
-                    f"tier. Override via `CerebrasLLM(model='<id>')` and list "
-                    f"tier-available ids with `GET {_CEREBRAS_BASE_URL}/models` "
-                    f"(common: llama3.1-8b, qwen-3-235b-a22b-instruct-2507, "
-                    f"llama-3.3-70b on paid). Upstream: {text}"
-                ) from exc
+                logger.error(
+                    'Cerebras: model "%s" not available on your tier. Override '
+                    "via `CerebrasLLM(model='<id>')` and list tier-available "
+                    "ids with `GET %s/models` (common: llama3.1-8b, "
+                    "qwen-3-235b-a22b-instruct-2507, llama-3.3-70b on paid). "
+                    "Upstream: %s",
+                    self._model,
+                    _CEREBRAS_BASE_URL,
+                    text,
+                )
+                return
             raise
