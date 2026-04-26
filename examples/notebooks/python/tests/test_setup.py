@@ -135,3 +135,31 @@ def test_cell_renders_banner_on_exception(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "kaboom" in out
     assert "test_cell" in out
+
+
+def test_load_fixture_returns_bytes():
+    import _setup
+    data = _setup.load_fixture("audio/hello_world_16khz_pcm.wav")
+    assert isinstance(data, bytes)
+    assert len(data) > 100
+
+
+def test_load_fixture_unknown_path_raises():
+    import _setup
+    with pytest.raises(FileNotFoundError):
+        _setup.load_fixture("audio/nonexistent.wav")
+
+
+def test_assert_redacted_blocks_real_phone(tmp_path):
+    import _setup
+    bad = tmp_path / "bad.json"
+    bad.write_text('{"From": "+14155551234"}')
+    with pytest.raises(ValueError, match="phone"):
+        _setup._assert_redacted(bad.read_text(), str(bad))
+
+
+def test_assert_redacted_passes_placeholder(tmp_path):
+    import _setup
+    ok = tmp_path / "ok.json"
+    ok.write_text('{"From": "+15555550100"}')
+    _setup._assert_redacted(ok.read_text(), str(ok))

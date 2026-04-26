@@ -180,6 +180,31 @@ def cell(
     print(f"✅ [{name}] {elapsed:.2f}s")
 
 
+import re
+
+_REAL_PHONE = re.compile(r"\+1[2-9]\d{9}")
+_REAL_TWILIO_SID = re.compile(r"\bAC[0-9a-f]{32}\b")
+
+
+def _assert_redacted(body: str, source: str) -> None:
+    for m in _REAL_PHONE.findall(body):
+        if m != "+15555550100":
+            raise ValueError(f"{source} contains non-placeholder phone {m}")
+    for m in _REAL_TWILIO_SID.findall(body):
+        if not (m.startswith("ACtest") or set(m[2:]) == {"0"}):
+            raise ValueError(f"{source} contains non-placeholder Twilio SID {m}")
+
+
+def load_fixture(rel_path: str) -> bytes:
+    path = FIXTURES / rel_path
+    if not path.exists():
+        raise FileNotFoundError(f"fixture not found: {path}")
+    data = path.read_bytes()
+    if path.suffix == ".json":
+        _assert_redacted(data.decode("utf-8"), str(path))
+    return data
+
+
 def load(env_file: Path | str | None = None) -> NotebookEnv:
     """Load .env if present, then construct NotebookEnv from process env."""
     if env_file is None:
