@@ -64,6 +64,61 @@ def _get(name: str, default: str = "") -> str:
     return os.getenv(name, default).strip()
 
 
+class NotebookSkip(Exception):
+    """Raised inside a cell to render a skip banner instead of an error."""
+
+
+_KEY_FIELD_MAP: dict[str, str] = {
+    "OPENAI_API_KEY": "openai_key",
+    "ANTHROPIC_API_KEY": "anthropic_key",
+    "GOOGLE_API_KEY": "google_key",
+    "GROQ_API_KEY": "groq_key",
+    "CEREBRAS_API_KEY": "cerebras_key",
+    "DEEPGRAM_API_KEY": "deepgram_key",
+    "ASSEMBLYAI_API_KEY": "assemblyai_key",
+    "SONIOX_API_KEY": "soniox_key",
+    "SPEECHMATICS_API_KEY": "speechmatics_key",
+    "CARTESIA_API_KEY": "cartesia_key",
+    "ELEVENLABS_API_KEY": "elevenlabs_key",
+    "ELEVENLABS_AGENT_ID": "elevenlabs_agent_id",
+    "LMNT_API_KEY": "lmnt_key",
+    "RIME_API_KEY": "rime_key",
+    "ULTRAVOX_API_KEY": "ultravox_key",
+    "TWILIO_ACCOUNT_SID": "twilio_sid",
+    "TWILIO_AUTH_TOKEN": "twilio_token",
+    "TWILIO_PHONE_NUMBER": "twilio_number",
+    "TELNYX_API_KEY": "telnyx_key",
+    "TELNYX_CONNECTION_ID": "telnyx_connection_id",
+    "TELNYX_PHONE_NUMBER": "telnyx_number",
+    "TELNYX_PUBLIC_KEY": "telnyx_public_key",
+    "TARGET_PHONE_NUMBER": "target_number",
+    "NGROK_AUTHTOKEN": "ngrok_token",
+    "PUBLIC_WEBHOOK_URL": "public_webhook_url",
+}
+
+
+def has_key(env: NotebookEnv, name: str) -> bool:
+    field_name = _KEY_FIELD_MAP.get(name)
+    if field_name is None:
+        return bool(_get(name))
+    return bool(getattr(env, field_name))
+
+
+def skip(reason: str) -> None:
+    raise NotebookSkip(reason)
+
+
+def skip_section(reason: str) -> None:
+    raise NotebookSkip(f"[section skipped] {reason}")
+
+
+def print_key_matrix(env: NotebookEnv, required) -> None:
+    print("Key matrix:")
+    for name in required:
+        marker = "✅" if has_key(env, name) else "⚪"
+        print(f"  {marker} {name}")
+
+
 def load(env_file: Path | str | None = None) -> NotebookEnv:
     """Load .env if present, then construct NotebookEnv from process env."""
     if env_file is None:

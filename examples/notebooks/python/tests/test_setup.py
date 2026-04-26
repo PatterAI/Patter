@@ -56,3 +56,35 @@ def test_load_returns_empty_strings_for_missing(tmp_path, monkeypatch):
     env = _setup.load(env_file=tmp_path / "nonexistent.env")
     assert env.openai_key == ""
     assert env.enable_live_calls is False
+
+
+def test_has_key_returns_true_when_set(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    import _setup
+    env = _setup.load(env_file=tmp_path / "missing.env")
+    assert _setup.has_key(env, "OPENAI_API_KEY") is True
+
+
+def test_has_key_returns_false_when_unset(monkeypatch, tmp_path):
+    monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)
+    import _setup
+    env = _setup.load(env_file=tmp_path / "missing.env")
+    assert _setup.has_key(env, "DEEPGRAM_API_KEY") is False
+
+
+def test_skip_raises_notebook_skip():
+    import _setup
+    with pytest.raises(_setup.NotebookSkip) as exc:
+        _setup.skip("missing key")
+    assert "missing key" in str(exc.value)
+
+
+def test_print_key_matrix_outputs_check_and_circle(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("OPENAI_API_KEY", "x")
+    monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)
+    import _setup
+    env = _setup.load(env_file=tmp_path / "missing.env")
+    _setup.print_key_matrix(env, required=["OPENAI_API_KEY", "DEEPGRAM_API_KEY"])
+    out = capsys.readouterr().out
+    assert "OPENAI_API_KEY" in out and "✅" in out
+    assert "DEEPGRAM_API_KEY" in out and "⚪" in out
