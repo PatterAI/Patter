@@ -68,7 +68,7 @@ interface OpenAIToolDef {
 /** LLM provider backed by Google Gemini (Developer API, streaming SSE). */
 export class GoogleLLMProvider implements LLMProvider {
   private readonly apiKey: string;
-  private readonly model: string;
+  readonly model: string;
   private readonly baseUrl: string;
   private readonly temperature?: number;
   private readonly maxOutputTokens?: number;
@@ -128,6 +128,9 @@ export class GoogleLLMProvider implements LLMProvider {
     const decoder = new TextDecoder();
     let buffer = '';
     let nextIndex = 0;
+    let lastUsage:
+      | { promptTokenCount?: number; candidatesTokenCount?: number; cachedContentTokenCount?: number }
+      | undefined;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -147,11 +150,23 @@ export class GoogleLLMProvider implements LLMProvider {
           candidates?: Array<{
             content?: { parts?: GeminiPart[] };
           }>;
+          usageMetadata?: {
+            promptTokenCount?: number;
+            candidatesTokenCount?: number;
+            cachedContentTokenCount?: number;
+          };
         };
         try {
           payload = JSON.parse(data);
         } catch {
           continue;
+        }
+
+        // Gemini emits usageMetadata on every chunk (running total). Don't
+        // yield until the stream is over — otherwise we'd double-count by
+        // accumulating partial sums.
+        if (payload.usageMetadata) {
+          lastUsage = payload.usageMetadata;
         }
 
         const candidate = payload.candidates?.[0];
@@ -176,6 +191,15 @@ export class GoogleLLMProvider implements LLMProvider {
           }
         }
       }
+    }
+
+    if (lastUsage) {
+      yield {
+        type: 'usage',
+        inputTokens: lastUsage.promptTokenCount,
+        outputTokens: lastUsage.candidatesTokenCount,
+        cacheReadInputTokens: lastUsage.cachedContentTokenCount ?? 0,
+      };
     }
 
     yield { type: 'done' };

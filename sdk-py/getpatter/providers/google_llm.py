@@ -147,7 +147,15 @@ class GoogleLLMProvider:
         # function_call part that we see.
         next_index = 0
 
+        last_usage = None
         async for response in stream:
+            # Gemini emits ``usage_metadata`` cumulatively on each chunk.
+            # Capture only the most recent value so we yield ONE usage
+            # event with the final totals (avoids double-counting).
+            usage = getattr(response, "usage_metadata", None)
+            if usage is not None:
+                last_usage = usage
+
             if not getattr(response, "candidates", None):
                 continue
             candidate = response.candidates[0]
@@ -176,6 +184,14 @@ class GoogleLLMProvider:
                 text = getattr(part, "text", None)
                 if text:
                     yield {"type": "text", "content": text}
+
+        if last_usage is not None:
+            yield {
+                "type": "usage",
+                "input_tokens": getattr(last_usage, "prompt_token_count", 0) or 0,
+                "output_tokens": getattr(last_usage, "candidates_token_count", 0) or 0,
+                "cache_read_tokens": getattr(last_usage, "cached_content_token_count", 0) or 0,
+            }
 
         yield {"type": "done"}
 

@@ -32,7 +32,7 @@ export interface GroqLLMOptions {
 /** LLM provider backed by Groq's OpenAI-compatible Chat Completions API. */
 export class GroqLLMProvider implements LLMProvider {
   private readonly apiKey: string;
-  private readonly model: string;
+  readonly model: string;
   private readonly baseUrl: string;
 
   constructor(options: GroqLLMOptions) {
@@ -54,6 +54,7 @@ export class GroqLLMProvider implements LLMProvider {
       model: this.model,
       messages,
       stream: true,
+      stream_options: { include_usage: true },
     };
     if (tools) body.tools = tools;
 
@@ -121,11 +122,35 @@ export async function* parseOpenAISseStream(
             }>;
           };
         }>;
+        usage?: {
+          prompt_tokens?: number;
+          completion_tokens?: number;
+          prompt_tokens_details?: { cached_tokens?: number };
+        };
+        // Some Groq deployments return ``x_groq.usage`` in the final chunk.
+        x_groq?: {
+          usage?: {
+            prompt_tokens?: number;
+            completion_tokens?: number;
+          };
+        };
       };
       try {
         chunk = JSON.parse(data);
       } catch {
         continue;
+      }
+
+      // Final chunk with usage (choices=[]). Forward for cost attribution.
+      const usage = chunk.usage ?? chunk.x_groq?.usage;
+      if (usage) {
+        const cached = chunk.usage?.prompt_tokens_details?.cached_tokens ?? 0;
+        yield {
+          type: 'usage',
+          inputTokens: usage.prompt_tokens,
+          outputTokens: usage.completion_tokens,
+          cacheReadInputTokens: cached,
+        };
       }
 
       const delta = chunk.choices?.[0]?.delta;

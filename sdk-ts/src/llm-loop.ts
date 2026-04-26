@@ -9,6 +9,162 @@
 import type { ToolDefinition } from './types';
 import { getLogger } from './logger';
 import { validateWebhookUrl } from './server';
+import { SPAN_TOOL, withSpan } from './observability/tracing';
+
+// ---------------------------------------------------------------------------
+// Tool execution — pluggable policy
+// ---------------------------------------------------------------------------
+
+/**
+ * Minimal interface for recording LLM usage chunks.
+ * Avoids a circular import from metrics.ts.
+ */
+export interface LlmUsageRecorder {
+  recordLlmUsage(
+    provider: string,
+    model: string,
+    inputTokens: number,
+    outputTokens: number,
+    cacheReadTokens?: number,
+    cacheCreationTokens?: number,
+  ): void;
+}
+
+const DEFAULT_TOOL_MAX_RETRIES = 2;
+const DEFAULT_TOOL_RETRY_DELAY_MS = 500;
+const DEFAULT_TOOL_TIMEOUT_MS = 10_000;
+const TOOL_MAX_RESPONSE_BYTES = 1 * 1024 * 1024;
+
+/**
+ * Pluggable tool executor — mirrors the Python ``ToolExecutor`` in
+ * ``sdk-py/getpatter/services/tool_executor.py``.
+ *
+ * Implementors receive a fully-resolved ``ToolDefinition`` (handler +/ webhook
+ * URL already validated by the SDK) and MUST return a JSON-stringifiable
+ * result. Errors should be returned as JSON like
+ * ``{ error: "...", fallback: true }`` rather than thrown.
+ */
+export interface ToolExecutor {
+  execute(
+    toolDef: ToolDefinition,
+    args: Record<string, unknown>,
+    callContext: Record<string, unknown>,
+  ): Promise<string>;
+}
+
+export interface DefaultToolExecutorOptions {
+  /** Total attempts = maxRetries + 1. Default: 2 (i.e. 3 attempts). */
+  maxRetries?: number;
+  /** Delay between attempts, in ms. */
+  retryDelayMs?: number;
+  /** Per-request timeout for webhook calls, in ms. */
+  requestTimeoutMs?: number;
+}
+
+/**
+ * Default executor — webhook with retry/fallback and local handler preference.
+ *
+ * This is the out-of-the-box behavior and is 1:1 equivalent to the previous
+ * inline logic in ``LLMLoop.executeTool``.
+ */
+export class DefaultToolExecutor implements ToolExecutor {
+  private readonly maxRetries: number;
+  private readonly retryDelayMs: number;
+  private readonly requestTimeoutMs: number;
+
+  constructor(opts: DefaultToolExecutorOptions = {}) {
+    this.maxRetries = opts.maxRetries ?? DEFAULT_TOOL_MAX_RETRIES;
+    this.retryDelayMs = opts.retryDelayMs ?? DEFAULT_TOOL_RETRY_DELAY_MS;
+    this.requestTimeoutMs = opts.requestTimeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS;
+  }
+
+  async execute(
+    toolDef: ToolDefinition,
+    args: Record<string, unknown>,
+    callContext: Record<string, unknown>,
+  ): Promise<string> {
+    // Prefer local handler.
+    if (toolDef.handler) {
+      try {
+        return await toolDef.handler(args, callContext);
+      } catch (e) {
+        return JSON.stringify({
+          error: `Tool handler error: ${String(e)}`,
+          fallback: true,
+        });
+      }
+    }
+
+    // Fall back to webhook with retry/backoff.
+    if (toolDef.webhookUrl) {
+      try {
+        validateWebhookUrl(toolDef.webhookUrl);
+      } catch (e) {
+        return JSON.stringify({ error: `Tool webhook URL rejected: ${String(e)}` });
+      }
+      const callId = typeof callContext.call_id === 'string' ? callContext.call_id : '';
+      return await withSpan(
+        SPAN_TOOL,
+        {
+          'patter.tool.name': toolDef.name,
+          'patter.tool.transport': 'webhook',
+          'patter.call.id': callId,
+        },
+        async (span) => {
+          const totalAttempts = this.maxRetries + 1;
+          for (let attempt = 0; attempt < totalAttempts; attempt++) {
+            span.setAttribute('patter.tool.attempt', attempt + 1);
+            try {
+              const resp = await fetch(toolDef.webhookUrl!, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  tool: toolDef.name,
+                  arguments: args,
+                  ...callContext,
+                  attempt: attempt + 1,
+                }),
+                signal: AbortSignal.timeout(this.requestTimeoutMs),
+              });
+              if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+              const result = JSON.stringify(await resp.json());
+              if (result.length > TOOL_MAX_RESPONSE_BYTES) {
+                return JSON.stringify({
+                  error: `Webhook response too large: ${result.length} bytes (max ${TOOL_MAX_RESPONSE_BYTES})`,
+                  fallback: true,
+                });
+              }
+              return result;
+            } catch (e) {
+              if (attempt < totalAttempts - 1) {
+                getLogger().warn(
+                  `Tool webhook '${toolDef.name}' failed (attempt ${attempt + 1}), retrying: ${String(e)}`,
+                );
+                await new Promise<void>((r) => setTimeout(r, this.retryDelayMs));
+              } else {
+                span.recordException(e);
+                return JSON.stringify({
+                  error: `Tool failed after ${totalAttempts} attempts: ${String(e)}`,
+                  fallback: true,
+                });
+              }
+            }
+          }
+          // Unreachable — the for-loop always returns.
+          return JSON.stringify({
+            error: `Tool '${toolDef.name}' exited retry loop unexpectedly`,
+            fallback: true,
+          });
+        },
+      );
+    }
+
+    return JSON.stringify({
+      error: `No handler or webhookUrl for tool '${toolDef.name}'`,
+      fallback: true,
+    });
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Provider interface
@@ -16,12 +172,17 @@ import { validateWebhookUrl } from './server';
 
 /** A single streaming chunk yielded by an LLM provider. */
 export interface LLMChunk {
-  type: 'text' | 'tool_call' | 'done';
+  type: 'text' | 'tool_call' | 'done' | 'usage';
   content?: string;
   index?: number;
   id?: string;
   name?: string;
   arguments?: string;
+  // Fix 10: usage chunk fields (emitted by providers that expose token counts)
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadInputTokens?: number;
+  cacheCreationInputTokens?: number;
 }
 
 /**
@@ -47,7 +208,7 @@ export interface LLMProvider {
 /** LLM provider backed by OpenAI Chat Completions (streaming). */
 export class OpenAILLMProvider implements LLMProvider {
   private readonly apiKey: string;
-  private readonly model: string;
+  readonly model: string;
 
   constructor(apiKey: string, model: string) {
     this.apiKey = apiKey;
@@ -62,6 +223,9 @@ export class OpenAILLMProvider implements LLMProvider {
       model: this.model,
       messages,
       stream: true,
+      // Ask OpenAI to include a final usage chunk so we can attribute token
+      // cost. Without this the dashboard shows LLM cost = 0 for OpenAI.
+      stream_options: { include_usage: true },
     };
     if (tools) {
       body.tools = tools;
@@ -114,11 +278,32 @@ export class OpenAILLMProvider implements LLMProvider {
               }>;
             };
           }>;
+          usage?: {
+            prompt_tokens?: number;
+            completion_tokens?: number;
+            prompt_tokens_details?: { cached_tokens?: number };
+          };
         };
         try {
           chunk = JSON.parse(data);
         } catch {
           continue;
+        }
+
+        // Final usage chunk arrives with choices=[] when stream_options
+        // include_usage is set. Forward it for cost attribution.
+        if (chunk.usage) {
+          const cached = chunk.usage.prompt_tokens_details?.cached_tokens ?? 0;
+          // OpenAI's prompt_tokens is the TOTAL input including cached tokens.
+          // Subtract cached so inputTokens represents only the uncached portion
+          // and calculateLlmCost doesn't bill cached tokens at the full rate.
+          const uncachedInput = Math.max(0, (chunk.usage.prompt_tokens ?? 0) - cached);
+          yield {
+            type: 'usage',
+            inputTokens: uncachedInput,
+            outputTokens: chunk.usage.completion_tokens,
+            cacheReadInputTokens: cached,
+          };
         }
 
         const delta = chunk.choices?.[0]?.delta;
@@ -179,6 +364,10 @@ export class LLMLoop {
     function: { name: string; description: string; parameters: Record<string, unknown> };
   }> | null;
   private readonly toolMap: Map<string, ToolDefinition>;
+  private toolExecutor: ToolExecutor;
+  // Fix 10: track provider/model so usage chunks can be attributed for billing.
+  private readonly _providerName: string;
+  private readonly _modelName: string;
 
   constructor(
     apiKey: string,
@@ -189,7 +378,28 @@ export class LLMLoop {
   ) {
     this.provider = llmProvider ?? new OpenAILLMProvider(apiKey, model);
     this.systemPrompt = systemPrompt;
+    // Derive a billing-friendly provider name. Prefer the static
+    // ``providerKey`` (stable, matches pricing keys); fall back to the
+    // class-name stripping heuristic for custom providers without it.
+    if (llmProvider) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const key = (llmProvider.constructor as any)?.providerKey;
+      if (key) {
+        this._providerName = key;
+      } else {
+        const stripped = (llmProvider.constructor?.name ?? 'custom')
+          .replace(/LLMProvider$/i, '')
+          .replace(/LLM$/i, '')
+          .replace(/Provider$/i, '')
+          .toLowerCase();
+        this._providerName = stripped || 'custom';
+      }
+    } else {
+      this._providerName = 'openai';
+    }
+    this._modelName = model;
     this.tools = tools ?? null;
+    this.toolExecutor = new DefaultToolExecutor();
 
     this.toolMap = new Map();
     this.openaiTools = null;
@@ -211,13 +421,26 @@ export class LLMLoop {
   }
 
   /**
+   * Swap in a custom tool executor (e.g. different retry policy, metrics
+   * wrapping, tenant-aware fan-out). The default is ``DefaultToolExecutor``.
+   */
+  setToolExecutor(executor: ToolExecutor): void {
+    this.toolExecutor = executor;
+  }
+
+  /**
    * Stream LLM response tokens, handling tool calls automatically.
    * Yields text tokens as they arrive from the LLM.
+   *
+   * @param metrics Optional usage recorder — when provided, usage chunks
+   *   from the provider are forwarded to {@link LlmUsageRecorder.recordLlmUsage}
+   *   so token costs are included in the call cost breakdown (fix 10).
    */
   async *run(
     userText: string,
     history: Array<{ role: string; text: string }>,
     callContext: Record<string, unknown>,
+    metrics?: LlmUsageRecorder,
   ): AsyncGenerator<string, void, unknown> {
     const messages = this.buildMessages(history, userText);
     const maxIterations = 10;
@@ -231,6 +454,16 @@ export class LLMLoop {
         if (chunk.type === 'text' && chunk.content) {
           textParts.push(chunk.content);
           yield chunk.content;
+        } else if (chunk.type === 'usage') {
+          // Fix 10: forward token usage to the metrics accumulator for billing.
+          metrics?.recordLlmUsage(
+            this._providerName,
+            this._modelName,
+            chunk.inputTokens ?? 0,
+            chunk.outputTokens ?? 0,
+            chunk.cacheReadInputTokens ?? 0,
+            chunk.cacheCreationInputTokens ?? 0,
+          );
         } else if (chunk.type === 'tool_call') {
           hasToolCalls = true;
           const idx = chunk.index ?? 0;
@@ -294,54 +527,7 @@ export class LLMLoop {
     if (!toolDef) {
       return JSON.stringify({ error: `Unknown tool: ${toolName}` });
     }
-
-    // Prefer local handler
-    if (toolDef.handler) {
-      try {
-        return await toolDef.handler(args, callContext);
-      } catch (e) {
-        return JSON.stringify({ error: `Tool handler error: ${String(e)}` });
-      }
-    }
-
-    // Fall back to webhook
-    if (toolDef.webhookUrl) {
-      try {
-        validateWebhookUrl(toolDef.webhookUrl);
-      } catch (e) {
-        return JSON.stringify({ error: `Tool webhook URL rejected: ${String(e)}` });
-      }
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          const resp = await fetch(toolDef.webhookUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              tool: toolName,
-              arguments: args,
-              ...callContext,
-              attempt: attempt + 1,
-            }),
-            signal: AbortSignal.timeout(10_000),
-          });
-          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-          const result = JSON.stringify(await resp.json());
-          const MAX_RESPONSE_BYTES = 1 * 1024 * 1024;
-          if (result.length > MAX_RESPONSE_BYTES) {
-            return JSON.stringify({ error: `Webhook response too large: ${result.length} bytes (max ${MAX_RESPONSE_BYTES})`, fallback: true });
-          }
-          return result;
-        } catch (e) {
-          if (attempt < 2) {
-            await new Promise<void>((r) => setTimeout(r, 500));
-          } else {
-            return JSON.stringify({ error: `Tool failed after 3 attempts: ${String(e)}` });
-          }
-        }
-      }
-    }
-
-    return JSON.stringify({ error: `No handler or webhookUrl for tool '${toolName}'` });
+    return this.toolExecutor.execute(toolDef, args, callContext);
   }
 
   private buildMessages(
