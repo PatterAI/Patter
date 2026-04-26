@@ -119,6 +119,67 @@ def print_key_matrix(env: NotebookEnv, required) -> None:
         print(f"  {marker} {name}")
 
 
+import contextlib
+import time
+import traceback
+from typing import Iterable, Iterator
+
+
+@contextlib.contextmanager
+def cell(
+    name: str,
+    *,
+    tier: int,
+    required: Iterable[str] = (),
+    env: NotebookEnv | None = None,
+) -> Iterator[bool]:
+    """Wrap every feature-tour or live cell.
+
+    Yields a boolean ``should_run``. The cell body should be guarded:
+
+        with _setup.cell("foo", tier=3, required=["OPENAI_API_KEY"], env=env) as ok:
+            if not ok:
+                pass
+            else:
+                # body
+                ...
+
+    Behaviour:
+        - Tier 4 cells yield False unless ``env.enable_live_calls`` is True.
+        - Cells with any unset required key yield False with a friendly banner.
+        - Exceptions inside the body are swallowed; a banner is printed but
+          notebook execution continues.
+    """
+    env = env if env is not None else load()
+    started = time.monotonic()
+
+    if tier == 4 and not env.enable_live_calls:
+        print(f"⚪ [{name}] skipped — set ENABLE_LIVE_CALLS=1 to enable T4 live calls.")
+        yield False
+        return
+
+    missing = [k for k in required if not has_key(env, k)]
+    if missing:
+        keys = ", ".join(missing)
+        print(f"⚪ [{name}] skipped — missing env: {keys}")
+        yield False
+        return
+
+    print(f"▶ [{name}] tier={tier}")
+    try:
+        yield True
+    except NotebookSkip as exc:
+        print(f"⚪ [{name}] {exc}")
+        return
+    except Exception as exc:  # noqa: BLE001
+        elapsed = time.monotonic() - started
+        print(f"❌ [{name}] failed after {elapsed:.2f}s: {type(exc).__name__}: {exc}")
+        traceback.print_exc(limit=4)
+        return
+    elapsed = time.monotonic() - started
+    print(f"✅ [{name}] {elapsed:.2f}s")
+
+
 def load(env_file: Path | str | None = None) -> NotebookEnv:
     """Load .env if present, then construct NotebookEnv from process env."""
     if env_file is None:

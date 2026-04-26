@@ -88,3 +88,50 @@ def test_print_key_matrix_outputs_check_and_circle(monkeypatch, tmp_path, capsys
     out = capsys.readouterr().out
     assert "OPENAI_API_KEY" in out and "✅" in out
     assert "DEEPGRAM_API_KEY" in out and "⚪" in out
+
+
+def test_cell_passes_when_keys_present(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("OPENAI_API_KEY", "x")
+    import _setup
+    env = _setup.load(env_file=tmp_path / "missing.env")
+    with _setup.cell("test_cell", tier=3, required=["OPENAI_API_KEY"], env=env) as ok:
+        if ok:
+            print("body ran")
+    out = capsys.readouterr().out
+    assert "body ran" in out
+
+
+def test_cell_skips_on_missing_key(monkeypatch, tmp_path, capsys):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    import _setup
+    env = _setup.load(env_file=tmp_path / "missing.env")
+    with _setup.cell("test_cell", tier=3, required=["OPENAI_API_KEY"], env=env) as ok:
+        if ok:
+            print("body ran")
+    out = capsys.readouterr().out
+    assert "body ran" not in out
+    assert "OPENAI_API_KEY" in out
+    assert "skipped" in out.lower()
+
+
+def test_cell_skips_on_tier_4_when_live_disabled(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("ENABLE_LIVE_CALLS", "0")
+    import _setup
+    env = _setup.load(env_file=tmp_path / "missing.env")
+    with _setup.cell("live_cell", tier=4, required=[], env=env) as ok:
+        if ok:
+            print("body ran")
+    out = capsys.readouterr().out
+    assert "body ran" not in out
+    assert "ENABLE_LIVE_CALLS" in out
+
+
+def test_cell_renders_banner_on_exception(tmp_path, capsys):
+    import _setup
+    env = _setup.load(env_file=tmp_path / "missing.env")
+    with _setup.cell("test_cell", tier=1, required=[], env=env) as ok:
+        if ok:
+            raise RuntimeError("kaboom")
+    out = capsys.readouterr().out
+    assert "kaboom" in out
+    assert "test_cell" in out
