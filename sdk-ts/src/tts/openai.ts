@@ -6,6 +6,16 @@ export interface OpenAITTSOptions {
   apiKey?: string;
   voice?: string;
   model?: string;
+  /** Voice-direction prompt (only honoured for gpt-4o-mini-tts and newer). */
+  instructions?: string;
+  /** Speech speed multiplier, must be in [0.25, 4.0] when set. */
+  speed?: number;
+  /**
+   * Enable anti-aliasing LPF ahead of the 3:2 decimation. Defaults to
+   * ``false`` for backwards-compatibility; set to ``true`` for cleaner
+   * audio on sibilants / fricatives.
+   */
+  antiAlias?: boolean;
 }
 
 /**
@@ -19,6 +29,7 @@ export interface OpenAITTSOptions {
  * ```
  */
 export class TTS extends _OpenAITTS {
+  static readonly providerKey = "openai_tts";
   constructor(opts: OpenAITTSOptions = {}) {
     const key = opts.apiKey ?? process.env.OPENAI_API_KEY;
     if (!key) {
@@ -27,6 +38,13 @@ export class TTS extends _OpenAITTS {
           "set OPENAI_API_KEY in the environment.",
       );
     }
-    super(key, opts.voice ?? "alloy", opts.model ?? "tts-1");
+    super(
+      key,
+      opts.voice ?? "alloy",
+      opts.model ?? "gpt-4o-mini-tts",
+      opts.instructions ?? null,
+      opts.speed ?? null,
+      opts.antiAlias ?? false,
+    );
   }
 }

@@ -19,6 +19,7 @@ export interface OpenAILLMOptions {
  * ```
  */
 export class LLM extends _OpenAILLM {
+  static readonly providerKey = "openai";
   constructor(opts: OpenAILLMOptions = {}) {
     const key = opts.apiKey ?? process.env.OPENAI_API_KEY;
     if (!key) {

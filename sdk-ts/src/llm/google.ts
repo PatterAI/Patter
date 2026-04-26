@@ -29,6 +29,7 @@ export interface GoogleLLMOptions {
  * ```
  */
 export class LLM extends _GoogleLLM {
+  static readonly providerKey = "google";
   constructor(opts: GoogleLLMOptions = {}) {
     const key =
       opts.apiKey ?? process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY;

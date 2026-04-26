@@ -4,7 +4,7 @@ import { CerebrasLLMProvider as _CerebrasLLM } from "../providers/cerebras-llm";
 export interface CerebrasLLMOptions {
   /** API key. Falls back to CEREBRAS_API_KEY env var when omitted. */
   apiKey?: string;
-  /** Model id (e.g. ``"llama3.1-8b"``). */
+  /** Model id (e.g. ``"llama-3.3-70b"``). */
   model?: string;
   /** Override the OpenAI-compatible base URL (rarely needed). */
   baseUrl?: string;
@@ -19,10 +19,11 @@ export interface CerebrasLLMOptions {
  * ```ts
  * import * as cerebras from "getpatter/llm/cerebras";
  * const llm = new cerebras.LLM();                              // reads CEREBRAS_API_KEY
- * const llm = new cerebras.LLM({ apiKey: "csk-...", model: "llama3.1-8b" });
+ * const llm = new cerebras.LLM({ apiKey: "csk-...", model: "llama-3.3-70b" });
  * ```
  */
 export class LLM extends _CerebrasLLM {
+  static readonly providerKey = "cerebras";
   constructor(opts: CerebrasLLMOptions = {}) {
     const key = opts.apiKey ?? process.env.CEREBRAS_API_KEY;
     if (!key) {

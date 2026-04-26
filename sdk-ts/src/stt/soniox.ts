@@ -27,6 +27,7 @@ export interface SonioxSTTOptions {
  * ```
  */
 export class STT extends _SonioxSTT {
+  static readonly providerKey = "soniox";
   constructor(opts: SonioxSTTOptions = {}) {
     const key = opts.apiKey ?? process.env.SONIOX_API_KEY;
     if (!key) {

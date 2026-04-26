@@ -1,5 +1,5 @@
 /** OpenAI Whisper STT for Patter pipeline mode. */
-import { WhisperSTT as _WhisperSTT } from "../providers/whisper-stt";
+import { WhisperSTT as _WhisperSTT, type WhisperResponseFormat } from "../providers/whisper-stt";
 
 export interface WhisperSTTOptions {
   /** API key. Falls back to OPENAI_API_KEY env var when omitted. */
@@ -7,6 +7,8 @@ export interface WhisperSTTOptions {
   model?: string;
   language?: string;
   bufferSize?: number;
+  /** ``"verbose_json"`` exposes segment-level confidence / timestamps. */
+  responseFormat?: WhisperResponseFormat;
 }
 
 /**
@@ -20,6 +22,7 @@ export interface WhisperSTTOptions {
  * ```
  */
 export class STT extends _WhisperSTT {
+  static readonly providerKey = "whisper";
   constructor(opts: WhisperSTTOptions = {}) {
     const key = opts.apiKey ?? process.env.OPENAI_API_KEY;
     if (!key) {
@@ -28,6 +31,6 @@ export class STT extends _WhisperSTT {
           "set OPENAI_API_KEY in the environment.",
       );
     }
-    super(key, opts.model ?? "whisper-1", opts.language, opts.bufferSize);
+    super(key, opts.model ?? "whisper-1", opts.language, opts.bufferSize, opts.responseFormat ?? "json");
   }
 }

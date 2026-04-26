@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import Optional
+from typing import ClassVar, Optional
 
 from getpatter.providers.cartesia_tts import CartesiaTTS as _CartesiaTTS
 
@@ -20,6 +20,8 @@ class TTS(_CartesiaTTS):
         tts = cartesia.TTS()                # reads CARTESIA_API_KEY
         tts = cartesia.TTS(api_key="...", voice="f786b574-...")
     """
+
+    provider_key: ClassVar[str] = "cartesia_tts"
 
     def __init__(
         self,

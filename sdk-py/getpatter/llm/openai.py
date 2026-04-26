@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from typing import ClassVar
 
 from getpatter.services.llm_loop import OpenAILLMProvider as _OpenAILLM
 
@@ -19,6 +20,8 @@ class LLM(_OpenAILLM):
         llm = openai.LLM()                            # reads OPENAI_API_KEY
         llm = openai.LLM(api_key="sk-...", model="gpt-4o-mini")
     """
+
+    provider_key: ClassVar[str] = "openai"
 
     def __init__(
         self,

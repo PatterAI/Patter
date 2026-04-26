@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from typing import ClassVar
 
 from getpatter.providers.groq_llm import GroqLLMProvider as _GroqLLM
 
@@ -19,6 +20,8 @@ class LLM(_GroqLLM):
         llm = groq.LLM()                              # reads GROQ_API_KEY
         llm = groq.LLM(api_key="gsk_...", model="llama-3.3-70b-versatile")
     """
+
+    provider_key: ClassVar[str] = "groq"
 
     def __init__(
         self,

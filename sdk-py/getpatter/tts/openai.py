@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from typing import ClassVar
 
 from getpatter.providers.openai_tts import OpenAITTS as _OpenAITTS
 
@@ -19,6 +20,8 @@ class TTS(_OpenAITTS):
         tts = openai.TTS()                  # reads OPENAI_API_KEY
         tts = openai.TTS(api_key="sk-...", voice="nova", model="tts-1-hd")
     """
+
+    provider_key: ClassVar[str] = "openai_tts"
 
     def __init__(
         self,

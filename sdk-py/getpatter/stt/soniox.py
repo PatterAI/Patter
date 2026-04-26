@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from typing import ClassVar
 
 from getpatter.providers.soniox_stt import SonioxSTT as _SonioxSTT
 
@@ -19,6 +20,8 @@ class STT(_SonioxSTT):
         stt = soniox.STT()                  # reads SONIOX_API_KEY
         stt = soniox.STT(api_key="...", language_hints=["en", "it"])
     """
+
+    provider_key: ClassVar[str] = "soniox"
 
     def __init__(
         self,

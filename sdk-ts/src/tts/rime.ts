@@ -30,6 +30,7 @@ export interface RimeTTSOptions {
  * ```
  */
 export class TTS extends _RimeTTS {
+  static readonly providerKey = "rime";
   constructor(opts: RimeTTSOptions = {}) {
     const key = opts.apiKey ?? process.env.RIME_API_KEY;
     if (!key) {
