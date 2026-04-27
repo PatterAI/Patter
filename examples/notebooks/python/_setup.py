@@ -291,7 +291,7 @@ def load(env_file: Path | str | None = None) -> NotebookEnv:
         target_number=_get("TARGET_PHONE_NUMBER"),
         ngrok_token=_get("NGROK_AUTHTOKEN"),
         public_webhook_url=_get("PUBLIC_WEBHOOK_URL"),
-        patter_version=_get("PATTER_VERSION", "0.5.2"),
+        patter_version=_get("PATTER_VERSION", "0.5.4"),
         enable_live_calls=_get("ENABLE_LIVE_CALLS", "0") == "1",
         max_call_seconds=int(_get("NOTEBOOK_MAX_CALL_SECONDS", "90")),
         max_cost_usd=float(_get("NOTEBOOK_MAX_COST_USD", "0.25")),

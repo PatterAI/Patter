@@ -81,7 +81,7 @@ export function load(opts: { envFile?: string } = {}): NotebookEnv {
     targetNumber: get("TARGET_PHONE_NUMBER"),
     ngrokToken: get("NGROK_AUTHTOKEN"),
     publicWebhookUrl: get("PUBLIC_WEBHOOK_URL"),
-    patterVersion: get("PATTER_VERSION", "0.5.2"),
+    patterVersion: get("PATTER_VERSION", "0.5.4"),
     enableLiveCalls: get("ENABLE_LIVE_CALLS", "0") === "1",
     maxCallSeconds: parseInt(get("NOTEBOOK_MAX_CALL_SECONDS", "90"), 10),
     maxCostUsd: parseFloat(get("NOTEBOOK_MAX_COST_USD", "0.25")),
