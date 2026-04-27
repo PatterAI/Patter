@@ -329,6 +329,12 @@ export class Patter {
     }
     const { phoneNumber, webhookUrl, carrier } = this.localConfig;
 
+    // Default ring timeout — 25 s limits phantom calls. Pass ``ringTimeout:
+    // 60`` for legacy parity, or ``ringTimeout: null`` to omit and let the
+    // carrier pick its own default.
+    const effectiveRingTimeout: number | null =
+      options.ringTimeout === undefined ? 25 : options.ringTimeout;
+
     if (carrier.kind === 'telnyx') {
       // Telnyx outbound call via Call Control API.
       // Note: ``stream_url``/``stream_track`` are NOT accepted on
@@ -343,8 +349,8 @@ export class Patter {
         from: phoneNumber,
         to: options.to,
       };
-      if (options.ringTimeout !== undefined) {
-        telnyxPayload.timeout_secs = Math.max(1, Math.floor(options.ringTimeout));
+      if (effectiveRingTimeout !== null && effectiveRingTimeout !== undefined) {
+        telnyxPayload.timeout_secs = Math.max(1, Math.floor(effectiveRingTimeout));
       }
       const response = await fetch('https://api.telnyx.com/v2/calls', {
         method: 'POST',
@@ -381,10 +387,16 @@ export class Patter {
     const twilioToken = carrier.authToken;
     const statusCallbackUrl = `https://${webhookUrl}/webhooks/twilio/status`;
     const url = `https://api.twilio.com/2010-04-01/Accounts/${twilioSid}/Calls.json`;
+    // Inline TwiML avoids the extra Twilio→webhook round-trip (~100-200ms)
+    // that the ``Url:`` parameter would trigger. Mirrors the Python adapter
+    // (``sdk-py/getpatter/providers/twilio_adapter.py``) which uses
+    // ``twiml=...`` for outbound calls.
+    const streamUrl = `wss://${webhookUrl}/ws/stream/outbound`;
+    const inlineTwiml = `<?xml version="1.0" encoding="UTF-8"?><Response><Connect><Stream url="${streamUrl}"/></Connect></Response>`;
     const params = new URLSearchParams({
       To: options.to,
       From: phoneNumber,
-      Url: `https://${webhookUrl}/webhooks/twilio/voice`,
+      Twiml: inlineTwiml,
       StatusCallback: statusCallbackUrl,
       StatusCallbackMethod: 'POST',
       // Full lifecycle so the dashboard sees ringing/no-answer/busy/failed
@@ -396,8 +408,8 @@ export class Patter {
       params.append('AsyncAmd', 'true');
       params.append('AsyncAmdStatusCallback', `https://${webhookUrl}/webhooks/twilio/amd`);
     }
-    if (options.ringTimeout !== undefined) {
-      params.append('Timeout', String(Math.max(1, Math.floor(options.ringTimeout))));
+    if (effectiveRingTimeout !== null && effectiveRingTimeout !== undefined) {
+      params.append('Timeout', String(Math.max(1, Math.floor(effectiveRingTimeout))));
     }
     // Store voicemail message on the running server so AMD webhook can use it
     if (options.voicemailMessage && this.embeddedServer) {

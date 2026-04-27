@@ -262,7 +262,7 @@ describe('Patter (local mode)', () => {
       ).rejects.toThrow("'to' must be in E.164 format");
     });
 
-    it('makes a Twilio outbound call via fetch', async () => {
+    it('makes a Twilio outbound call via fetch with inline TwiML', async () => {
       const client = new Patter({
         carrier: makeTwilioCarrier(),
         phoneNumber: '+15551234567',
@@ -278,6 +278,17 @@ describe('Patter (local mode)', () => {
       await client.call({ to: '+15559999999', agent: { systemPrompt: 'Hi' } });
       expect(fetchSpy).toHaveBeenCalledOnce();
       expect(fetchSpy.mock.calls[0][0]).toContain('api.twilio.com');
+      // Body must use inline ``Twiml`` (parity with the Python adapter) and
+      // must NOT use ``Url`` — that would force Twilio to make a webhook
+      // round-trip back to us, adding 100-200ms of dial latency.
+      const init = fetchSpy.mock.calls[0][1] as { body?: string };
+      const body = init?.body ?? '';
+      const params = new URLSearchParams(body);
+      expect(params.get('Url')).toBeNull();
+      const twiml = params.get('Twiml');
+      expect(twiml).not.toBeNull();
+      expect(twiml).toContain('<Connect>');
+      expect(twiml).toContain('<Stream url="wss://example.com/wh/ws/stream/outbound"');
     });
 
     it('throws ProvisionError on Twilio call failure', async () => {

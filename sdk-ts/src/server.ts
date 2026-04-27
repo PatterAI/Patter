@@ -949,29 +949,25 @@ export class EmbeddedServer {
 
       try {
         if (eventType === 'call.initiated') {
-          getLogger().info(`Telnyx call.initiated ${callControlId} — answering`);
-          const resp = await fetch(`${apiBase}/calls/${encodeURIComponent(callControlId)}/actions/answer`, {
-            method: 'POST',
-            headers: authHeaders,
-            body: JSON.stringify({}),
-            signal: AbortSignal.timeout(10_000),
-          });
-          if (!resp.ok) {
-            getLogger().warn(`Telnyx answer failed: ${resp.status} ${(await resp.text()).slice(0, 200)}`);
-          }
-        } else if (eventType === 'call.answered') {
+          // PERF — Telnyx accepts the streaming params inline on
+          // ``actions/answer`` and auto-starts the stream the moment the
+          // leg picks up. Folding ``streaming_start`` into the answer body
+          // removes the ``call.answered`` webhook round-trip and a second
+          // POST (~100-200 ms saved per inbound call).
           const caller = payload.from ?? '';
           const callee = payload.to ?? '';
           const streamUrl =
             `wss://${this.config.webhookUrl}/ws/stream/${encodeURIComponent(callControlId)}` +
             `?caller=${encodeURIComponent(caller)}&callee=${encodeURIComponent(callee)}`;
-          getLogger().info(`Telnyx call.answered ${callControlId} — starting stream`);
-          const resp = await fetch(`${apiBase}/calls/${encodeURIComponent(callControlId)}/actions/streaming_start`, {
+          getLogger().info(`Telnyx call.initiated ${callControlId} — answering with inline stream`);
+          const resp = await fetch(`${apiBase}/calls/${encodeURIComponent(callControlId)}/actions/answer`, {
             method: 'POST',
             headers: authHeaders,
             body: JSON.stringify({
               stream_url: streamUrl,
-              stream_track: 'both_tracks',
+              // ``inbound_track`` halves WS upstream bandwidth — outbound
+              // echo was always filtered downstream anyway.
+              stream_track: 'inbound_track',
               stream_bidirectional_mode: 'rtp',
               stream_bidirectional_codec: 'PCMU',
               stream_bidirectional_sampling_rate: 8000,
@@ -980,8 +976,13 @@ export class EmbeddedServer {
             signal: AbortSignal.timeout(10_000),
           });
           if (!resp.ok) {
-            getLogger().warn(`Telnyx streaming_start failed: ${resp.status} ${(await resp.text()).slice(0, 200)}`);
+            getLogger().warn(`Telnyx answer failed: ${resp.status} ${(await resp.text()).slice(0, 200)}`);
           }
+        } else if (eventType === 'call.answered') {
+          // No-op: ``call.initiated`` already submitted answer + streaming
+          // in a single call. Telnyx still emits ``call.answered`` as an
+          // informational event; acknowledge it without a redundant POST.
+          getLogger().debug(`Telnyx call.answered ${callControlId} — stream already active (inline)`);
         } else {
           getLogger().debug(`Telnyx event ignored: ${eventType}`);
         }
@@ -1200,13 +1201,16 @@ export class EmbeddedServer {
     const wrappedStart = async (data: Record<string, unknown>): Promise<void> => {
       if (logger.enabled) {
         const callId = typeof data.call_id === 'string' ? data.call_id : '';
-        logger.logCallStart(callId, {
-          caller: typeof data.caller === 'string' ? data.caller : '',
-          callee: typeof data.callee === 'string' ? data.callee : '',
-          telephonyProvider: bridge.telephonyProvider,
-          providerMode: agent.provider ?? '',
-          agent: agentSnapshot(),
-        });
+        // Fire-and-forget: call logging must never block the voice flow.
+        void logger
+          .logCallStart(callId, {
+            caller: typeof data.caller === 'string' ? data.caller : '',
+            callee: typeof data.callee === 'string' ? data.callee : '',
+            telephonyProvider: bridge.telephonyProvider,
+            providerMode: agent.provider ?? '',
+            agent: agentSnapshot(),
+          })
+          .catch((err) => getLogger().error(`call_log start error: ${String(err)}`));
       }
       if (userStart) await userStart(data);
     };
@@ -1216,7 +1220,10 @@ export class EmbeddedServer {
         const callId = typeof data.call_id === 'string' ? data.call_id : '';
         const turn = data.turn;
         if (turn && typeof turn === 'object') {
-          logger.logTurn(callId, turn as Record<string, unknown>);
+          // Fire-and-forget: call logging must never block the voice flow.
+          void logger
+            .logTurn(callId, turn as Record<string, unknown>)
+            .catch((err) => getLogger().error(`call_log turn error: ${String(err)}`));
         }
       }
       if (userMetrics) await userMetrics(data);
@@ -1242,12 +1249,15 @@ export class EmbeddedServer {
               p99_ms: metricsObj.latency_p99?.total_ms ?? null,
             }
           : null;
-        logger.logCallEnd(callId, {
-          durationSeconds: metricsObj?.duration_seconds,
-          turns: metricsObj?.turns?.length,
-          cost: metricsObj?.cost ?? null,
-          latency,
-        });
+        // Fire-and-forget: call logging must never block the voice flow.
+        void logger
+          .logCallEnd(callId, {
+            durationSeconds: metricsObj?.duration_seconds,
+            turns: metricsObj?.turns?.length,
+            cost: metricsObj?.cost ?? null,
+            latency,
+          })
+          .catch((err) => getLogger().error(`call_log end error: ${String(err)}`));
       }
       if (userEnd) await userEnd(data);
     };

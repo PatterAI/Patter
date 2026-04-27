@@ -70,15 +70,15 @@ describe('resolveLogRoot', () => {
 });
 
 describe('CallLogger (disabled)', () => {
-  it('is a no-op and never writes files', () => {
+  it('is a no-op and never writes files', async () => {
     const tmp = mkTmp();
     try {
       const logger = new CallLogger(null);
       expect(logger.enabled).toBe(false);
-      logger.logCallStart('c1', { caller: '+15551234567' });
-      logger.logTurn('c1', { role: 'user', text: 'hi' });
-      logger.logEvent('c1', 'tool_call', { name: 'lookup' });
-      logger.logCallEnd('c1', { durationSeconds: 10 });
+      await logger.logCallStart('c1', { caller: '+15551234567' });
+      await logger.logTurn('c1', { role: 'user', text: 'hi' });
+      await logger.logEvent('c1', 'tool_call', { name: 'lookup' });
+      await logger.logCallEnd('c1', { durationSeconds: 10 });
       expect(fs.readdirSync(tmp)).toHaveLength(0);
     } finally {
       rmTree(tmp);
@@ -99,10 +99,10 @@ describe('CallLogger (enabled)', () => {
     process.env = { ...originalEnv };
   });
 
-  it('writes metadata atomically on call start with default phone masking', () => {
+  it('writes metadata atomically on call start with default phone masking', async () => {
     process.env.PATTER_LOG_REDACT_PHONE = 'mask';
     const logger = new CallLogger(tmp);
-    logger.logCallStart('call-123', {
+    await logger.logCallStart('call-123', {
       caller: '+15551234567',
       callee: '+15557654321',
       telephonyProvider: 'twilio',
@@ -119,31 +119,31 @@ describe('CallLogger (enabled)', () => {
     expect(parsed.caller).toMatch(/^\*\*\*.*4567$/);
   });
 
-  it('honours full phone mode', () => {
+  it('honours full phone mode', async () => {
     process.env.PATTER_LOG_REDACT_PHONE = 'full';
     const logger = new CallLogger(tmp);
-    logger.logCallStart('c', { caller: '+15551234567' });
+    await logger.logCallStart('c', { caller: '+15551234567' });
     const parsed = JSON.parse(
       fs.readFileSync(findFile(tmp, 'metadata.json')!, 'utf8'),
     ) as Record<string, unknown>;
     expect(parsed.caller).toBe('+15551234567');
   });
 
-  it('hash_only mode produces sha256 hex prefix', () => {
+  it('hash_only mode produces sha256 hex prefix', async () => {
     process.env.PATTER_LOG_REDACT_PHONE = 'hash_only';
     const logger = new CallLogger(tmp);
-    logger.logCallStart('c', { caller: '+15551234567' });
+    await logger.logCallStart('c', { caller: '+15551234567' });
     const parsed = JSON.parse(
       fs.readFileSync(findFile(tmp, 'metadata.json')!, 'utf8'),
     ) as Record<string, string>;
     expect(parsed.caller).toMatch(/^sha256:[0-9a-f]{16}$/);
   });
 
-  it('appends JSONL turns with schema_version and ts', () => {
+  it('appends JSONL turns with schema_version and ts', async () => {
     const logger = new CallLogger(tmp);
-    logger.logCallStart('c1', {});
-    logger.logTurn('c1', { role: 'user', text: 'hello', turn_index: 0 });
-    logger.logTurn('c1', { role: 'assistant', text: 'hi!', turn_index: 0 });
+    await logger.logCallStart('c1', {});
+    await logger.logTurn('c1', { role: 'user', text: 'hello', turn_index: 0 });
+    await logger.logTurn('c1', { role: 'assistant', text: 'hi!', turn_index: 0 });
     const tPath = findFile(tmp, 'transcript.jsonl')!;
     const lines = fs.readFileSync(tPath, 'utf8').trim().split('\n');
     expect(lines).toHaveLength(2);
@@ -153,20 +153,20 @@ describe('CallLogger (enabled)', () => {
     expect(typeof first.ts).toBe('string');
   });
 
-  it('appends operational events to events.jsonl', () => {
+  it('appends operational events to events.jsonl', async () => {
     const logger = new CallLogger(tmp);
-    logger.logCallStart('c1', {});
-    logger.logEvent('c1', 'barge_in', { offset_ms: 850 });
+    await logger.logCallStart('c1', {});
+    await logger.logEvent('c1', 'barge_in', { offset_ms: 850 });
     const ePath = findFile(tmp, 'events.jsonl')!;
     const record = JSON.parse(fs.readFileSync(ePath, 'utf8').trim()) as Record<string, unknown>;
     expect(record.type).toBe('barge_in');
     expect((record.data as Record<string, unknown>).offset_ms).toBe(850);
   });
 
-  it('finalises metadata on call end and preserves original fields', () => {
+  it('finalises metadata on call end and preserves original fields', async () => {
     const logger = new CallLogger(tmp);
-    logger.logCallStart('c1', { caller: '+15551112222' });
-    logger.logCallEnd('c1', {
+    await logger.logCallStart('c1', { caller: '+15551112222' });
+    await logger.logCallEnd('c1', {
       durationSeconds: 42.5,
       turns: 3,
       cost: { total: 0.05, stt: 0.01 },
@@ -185,18 +185,18 @@ describe('CallLogger (enabled)', () => {
     expect(String(parsed.caller)).toMatch(/2222$/);
   });
 
-  it('write after root removal does not throw', () => {
+  it('write after root removal does not throw', async () => {
     const logger = new CallLogger(tmp);
-    logger.logCallStart('c1', {});
+    await logger.logCallStart('c1', {});
     rmTree(tmp);
-    expect(() => logger.logTurn('c1', { role: 'user', text: 'boom' })).not.toThrow();
-    expect(() => logger.logEvent('c1', 'error', { detail: 'sim' })).not.toThrow();
-    expect(() => logger.logCallEnd('c1', { durationSeconds: 1 })).not.toThrow();
+    await expect(logger.logTurn('c1', { role: 'user', text: 'boom' })).resolves.not.toThrow();
+    await expect(logger.logEvent('c1', 'error', { detail: 'sim' })).resolves.not.toThrow();
+    await expect(logger.logCallEnd('c1', { durationSeconds: 1 })).resolves.not.toThrow();
   });
 
-  it('logCallEnd without start still writes minimal envelope', () => {
+  it('logCallEnd without start still writes minimal envelope', async () => {
     const logger = new CallLogger(tmp);
-    logger.logCallEnd('orphan', { durationSeconds: 1, status: 'error', error: 'boom' });
+    await logger.logCallEnd('orphan', { durationSeconds: 1, status: 'error', error: 'boom' });
     const parsed = JSON.parse(
       fs.readFileSync(findFile(tmp, 'metadata.json')!, 'utf8'),
     ) as Record<string, unknown>;
