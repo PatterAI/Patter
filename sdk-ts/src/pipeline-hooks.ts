@@ -46,6 +46,50 @@ export class PipelineHookExecutor {
   }
 
   /**
+   * Run beforeLlm hook. Returns a possibly-modified messages list.
+   * Returning ``null`` from the hook means "keep the original" — the LLM
+   * call is too important to be silently vetoed.
+   * Fail-open: on exception, the original messages pass through.
+   */
+  async runBeforeLlm(
+    messages: Array<Record<string, unknown>>,
+    ctx: HookContext,
+  ): Promise<Array<Record<string, unknown>>> {
+    if (!this.hooks?.beforeLlm) return messages;
+    try {
+      const result = await this.hooks.beforeLlm(messages, ctx);
+      return result ?? messages;
+    } catch (e) {
+      getLogger().error('Pipeline hook beforeLlm threw:', e);
+      return messages;
+    }
+  }
+
+  /**
+   * Run afterLlm hook. Returns a possibly-modified assistant text.
+   * Returning ``null`` from the hook means "keep the original".
+   * Fail-open: on exception, the original text passes through.
+   */
+  async runAfterLlm(text: string, ctx: HookContext): Promise<string> {
+    if (!this.hooks?.afterLlm) return text;
+    try {
+      const result = await this.hooks.afterLlm(text, ctx);
+      return result ?? text;
+    } catch (e) {
+      getLogger().error('Pipeline hook afterLlm threw:', e);
+      return text;
+    }
+  }
+
+  /**
+   * Whether ``afterLlm`` is configured. Used by the LLM loop to decide
+   * whether to buffer streaming tokens before yielding them.
+   */
+  hasAfterLlm(): boolean {
+    return Boolean(this.hooks?.afterLlm);
+  }
+
+  /**
    * Run beforeSynthesize hook. Returns null if hook vetoes TTS for this sentence.
    * If no hook is defined, returns the text unchanged.
    */

@@ -105,6 +105,17 @@ export interface PipelineHooks {
   beforeSendToStt?: (audio: Buffer, ctx: HookContext) => Buffer | null | Promise<Buffer | null>;
   /** Called after STT produces a transcript, before LLM. Return null to skip this turn. */
   afterTranscribe?: (transcript: string, ctx: HookContext) => string | null | Promise<string | null>;
+  /** Called with the messages list before the LLM call.
+   *  Return null to keep them, or return a new list to replace
+   *  (useful for prompt injection, message filtering, RAG augmentation). */
+  beforeLlm?: (
+    messages: Array<Record<string, unknown>>,
+    ctx: HookContext,
+  ) => Array<Record<string, unknown>> | null | Promise<Array<Record<string, unknown>> | null>;
+  /** Called with the final assistant text after the LLM stream completes.
+   *  Return null to keep, or return a new string to replace
+   *  (useful for output validation, redaction, post-processing). */
+  afterLlm?: (text: string, ctx: HookContext) => string | null | Promise<string | null>;
   /** Called before TTS, per-sentence in streaming mode. Return null to skip TTS for this sentence. */
   beforeSynthesize?: (text: string, ctx: HookContext) => string | null | Promise<string | null>;
   /** Called after TTS produces an audio chunk. Return null to discard this chunk. */

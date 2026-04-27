@@ -1076,6 +1076,7 @@ class PipelineStreamHandler(StreamHandler):
                 tool_executor=tool_executor,
                 llm_provider=agent_llm,
                 metrics=self.metrics,
+                event_bus=self._event_bus,
             )
 
         # Create remote message handler once if on_message is a remote URL
@@ -1148,6 +1149,11 @@ class PipelineStreamHandler(StreamHandler):
                 if first_tts_chunk[0] and self.metrics is not None:
                     self.metrics.record_tts_first_byte()
                     first_tts_chunk[0] = False
+                if self._event_bus is not None:
+                    self._event_bus.emit(
+                        "tts_chunk",
+                        {"bytes": len(processed_audio)},
+                    )
                 await self.audio_sender.send_audio(processed_audio)
         finally:
             await gen.aclose()
@@ -1355,6 +1361,17 @@ class PipelineStreamHandler(StreamHandler):
                 # stt_ms measures from speech-start not final-transcript delivery.
                 if transcript.text and self.metrics is not None:
                     self.metrics.start_turn_if_idle()
+                # Emit fine-grained transcript events (additive — existing
+                # ``on_transcript`` callback path is unchanged).
+                if transcript.text and self._event_bus is not None:
+                    self._event_bus.emit(
+                        "transcript_partial" if not transcript.is_final else "transcript_final",
+                        {
+                            "text": transcript.text,
+                            "is_final": bool(transcript.is_final),
+                            "confidence": float(transcript.confidence or 0.0),
+                        },
+                    )
                 if not (transcript.is_final and transcript.text):
                     continue
                 if not self._commit_transcript(transcript.text):
@@ -1438,6 +1455,8 @@ class PipelineStreamHandler(StreamHandler):
                         filtered_text,
                         list(self.conversation_history),
                         call_ctx,
+                        hook_executor=hook_executor,
+                        hook_ctx=hook_ctx,
                     )
                     response_text = await self._process_streaming_response(result, self.call_id)
                     if response_text:

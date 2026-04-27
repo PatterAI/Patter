@@ -18,7 +18,13 @@ export type PatterEventType =
   | 'tts_metrics'
   | 'stt_metrics'
   | 'metrics_collected'
-  | 'call_ended';
+  | 'call_ended'
+  // Fine-grained pipeline events (additive — existing callbacks remain).
+  | 'transcript_partial'
+  | 'transcript_final'
+  | 'llm_chunk'
+  | 'tts_chunk'
+  | 'tool_call_started';
 
 type Listener<T = unknown> = (payload: T) => void | Promise<void>;
 

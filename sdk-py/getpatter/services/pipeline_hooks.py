@@ -72,6 +72,47 @@ class PipelineHookExecutor:
             logger.exception("Pipeline hook after_transcribe threw")
             return transcript
 
+    async def run_before_llm(
+        self, messages: list[dict], ctx: HookContext
+    ) -> list[dict]:
+        """Run before_llm hook. Returns a possibly-modified messages list.
+
+        ``None`` from the hook means "keep the original" (no veto semantic
+        — LLM calls are too important to silently drop).
+        Fail-open: if the hook raises, the original messages pass through.
+        """
+        hook = self._hooks.before_llm if self._hooks else None
+        if hook is None:
+            return messages
+        try:
+            result = await _call_hook(hook, messages, ctx)
+        except Exception:
+            logger.exception("Pipeline hook before_llm threw")
+            return messages
+        if result is None:
+            return messages
+        return result
+
+    async def run_after_llm(
+        self, text: str, ctx: HookContext
+    ) -> str:
+        """Run after_llm hook. Returns a possibly-modified assistant text.
+
+        ``None`` from the hook means "keep the original".
+        Fail-open: if the hook raises, the original text passes through.
+        """
+        hook = self._hooks.after_llm if self._hooks else None
+        if hook is None:
+            return text
+        try:
+            result = await _call_hook(hook, text, ctx)
+        except Exception:
+            logger.exception("Pipeline hook after_llm threw")
+            return text
+        if result is None:
+            return text
+        return result
+
     async def run_before_synthesize(
         self, text: str, ctx: HookContext
     ) -> str | None:

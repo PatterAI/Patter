@@ -167,6 +167,7 @@ class LLMLoop:
         tool_executor=None,
         llm_provider: LLMProvider | None = None,
         metrics=None,
+        event_bus=None,
     ) -> None:
         if llm_provider is not None:
             self._provider = llm_provider
@@ -177,6 +178,7 @@ class LLMLoop:
         self._tools = tools
         self._tool_executor = tool_executor
         self._metrics = metrics
+        self._event_bus = event_bus
         self._model = model
         # Resolve the provider key for cost attribution. Prefer the
         # ``provider_key`` ClassVar declared by wrapper classes (stable,
@@ -218,6 +220,8 @@ class LLMLoop:
         user_text: str,
         history: list[dict],
         call_context: dict,
+        hook_executor=None,
+        hook_ctx=None,
     ) -> AsyncGenerator[str, None]:
         """Stream LLM response tokens, handling tool calls automatically.
 
@@ -230,11 +234,35 @@ class LLMLoop:
             user_text: The user's latest transcribed utterance.
             history: Conversation history as ``[{role, text, timestamp}]``.
             call_context: Dict with ``call_id``, ``caller``, ``callee``.
+            hook_executor: Optional :class:`PipelineHookExecutor` — when
+                supplied, ``before_llm`` runs against the messages list
+                before each provider call, and ``after_llm`` runs against
+                the final assistant text once streaming completes.
+            hook_ctx: Optional :class:`HookContext` — required when
+                ``hook_executor`` is supplied.
 
         Yields:
             Text tokens as they arrive from the LLM.
         """
         messages = self._build_messages(history, user_text)
+        # before_llm hook runs once on the initial message list. Subsequent
+        # tool-call iterations re-submit augmented messages and skip the
+        # hook (running the hook on every iteration would let a poorly
+        # written hook trigger an infinite re-write loop).
+        # Note: ``after_llm`` rewriting is only meaningful pre-TTS, so when
+        # the hook is configured we buffer all tokens, run the hook, and
+        # yield the (possibly rewritten) text as a single chunk. Without
+        # the hook, streaming continues token-by-token as before.
+        has_after_llm = (
+            hook_executor is not None
+            and hook_ctx is not None
+            and getattr(hook_executor, "_hooks", None) is not None
+            and getattr(hook_executor._hooks, "after_llm", None) is not None
+        )
+        if hook_executor is not None and hook_ctx is not None:
+            messages = await hook_executor.run_before_llm(messages, hook_ctx)
+        # Accumulate yielded text across iterations for after_llm hook.
+        all_emitted_text: list[str] = []
 
         # Loop to handle tool calls — the LLM may call tools multiple times
         max_iterations = 10
@@ -264,7 +292,16 @@ class LLMLoop:
                         content = chunk.get("content", "")
                         if content:
                             text_parts.append(content)
-                            yield content
+                            if self._event_bus is not None:
+                                self._event_bus.emit(
+                                    "llm_chunk",
+                                    {"text": content, "iteration": iteration},
+                                )
+                            if has_after_llm:
+                                # Buffer; yield after the after_llm hook runs.
+                                all_emitted_text.append(content)
+                            else:
+                                yield content
 
                     elif chunk_type == "usage":
                         if self._metrics is not None:
@@ -286,6 +323,18 @@ class LLMLoop:
                                 "name": "",
                                 "arguments": "",
                             }
+                            # Emit tool_call_started the first time we see
+                            # a given index. ``args`` may still be empty —
+                            # streamed tool args arrive incrementally.
+                            if self._event_bus is not None:
+                                self._event_bus.emit(
+                                    "tool_call_started",
+                                    {
+                                        "index": idx,
+                                        "name": chunk.get("name") or "",
+                                        "args": chunk.get("arguments") or "",
+                                    },
+                                )
                         if chunk.get("id"):
                             tool_calls_accumulated[idx]["id"] = chunk["id"]
                         if chunk.get("name"):
@@ -297,6 +346,11 @@ class LLMLoop:
 
             # If no tool calls, we're done
             if not has_tool_calls:
+                if has_after_llm:
+                    final_text = "".join(all_emitted_text)
+                    rewritten = await hook_executor.run_after_llm(final_text, hook_ctx)
+                    if rewritten:
+                        yield rewritten
                 return
 
             # Execute tool calls and add results to messages

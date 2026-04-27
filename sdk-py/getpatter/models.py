@@ -46,13 +46,20 @@ class PipelineHooks:
     """Pipeline hooks for intercepting data at each stage (pipeline mode only).
 
     Each hook receives the data and a :class:`HookContext`. Return ``None``
-    to skip the downstream step. Hooks may be sync or async.
+    to skip the downstream step (or, for ``before_llm`` / ``after_llm``,
+    keep the original value). Hooks may be sync or async.
 
     Attributes:
         before_send_to_stt: Called with the raw PCM audio chunk before it is
             forwarded to the STT provider. Return ``None`` to drop the chunk
             (e.g., to implement custom VAD gating).
         after_transcribe: Called after STT, before LLM. Return ``None`` to skip turn.
+        before_llm: Called with the messages list before the LLM call.
+            Return ``None`` to keep them, or return a new list to replace
+            (useful for prompt injection, message filtering, RAG augmentation).
+        after_llm: Called with the final assistant text after the LLM stream
+            completes. Return ``None`` to keep, or return a new string to
+            replace (useful for output validation, redaction, post-processing).
         before_synthesize: Called before TTS, per-sentence in streaming mode.
             Return ``None`` to skip TTS for this sentence.
         after_synthesize: Called after TTS produces an audio chunk.
@@ -61,6 +68,8 @@ class PipelineHooks:
 
     before_send_to_stt: Callable | None = None
     after_transcribe: Callable | None = None
+    before_llm: Callable | None = None
+    after_llm: Callable | None = None
     before_synthesize: Callable | None = None
     after_synthesize: Callable | None = None
 

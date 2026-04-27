@@ -780,6 +780,7 @@ export class StreamHandler {
         this.deps.agent.tools as ToolDefinition[] | undefined,
         this.deps.agent.llm,
       );
+      this.llmLoop.setEventBus(this._eventBus);
       const llmLabel = this.deps.agent.llm.constructor?.name ?? 'custom';
       getLogger().debug(`Built-in LLM loop active (pipeline, ${label}, llm=${llmLabel})`);
     } else if (!this.deps.onMessage && this.deps.config.openaiKey) {
@@ -791,6 +792,7 @@ export class StreamHandler {
         resolvedPrompt,
         this.deps.agent.tools as ToolDefinition[] | undefined,
       );
+      this.llmLoop.setEventBus(this._eventBus);
       getLogger().debug(`Built-in LLM loop active (pipeline, ${label})`);
     }
 
@@ -1088,7 +1090,14 @@ export class StreamHandler {
 
     try {
       try {
-        for await (const token of this.llmLoop!.run(filteredTranscript, this.history.entries, callCtx, this.metricsAcc)) {
+        for await (const token of this.llmLoop!.run(
+          filteredTranscript,
+          this.history.entries,
+          callCtx,
+          this.metricsAcc,
+          hookExecutor,
+          hookCtx,
+        )) {
           // Fix 5: record first token for TTFT metric.
           this.metricsAcc.recordLlmFirstToken();
           allParts.push(token);
