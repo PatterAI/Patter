@@ -125,6 +125,30 @@ export interface ElevenLabsTTSOptions {
   chunkSize?: number;
 }
 
+/**
+ * ElevenLabs streaming TTS adapter.
+ *
+ * Supported `modelId` values are autocompleted via {@link ElevenLabsModel}.
+ * Default is `eleven_flash_v2_5` (lowest TTFT, ~75 ms).
+ *
+ * **Telephony optimization** — the constructor default
+ * `outputFormat='pcm_16000'` is correct for web playback, dashboard
+ * previews, and 16 kHz pipelines. For real phone calls, use the
+ * carrier-specific factories instead:
+ *
+ * - {@link ElevenLabsTTS.forTwilio} emits `ulaw_8000` natively. Twilio's
+ *   media-stream WebSocket expects μ-law @ 8 kHz, so the SDK normally
+ *   resamples 16 kHz → 8 kHz and PCM → μ-law before sending. Asking
+ *   ElevenLabs to produce μ-law directly skips that step (saves
+ *   ~30–80 ms first-byte plus per-frame CPU and avoids any resampling
+ *   aliasing).
+ * - {@link ElevenLabsTTS.forTelnyx} emits `pcm_16000`. Telnyx negotiates
+ *   L16/16000 on its bidirectional media WebSocket, so 16 kHz PCM is
+ *   already the format used end-to-end and no transcoding happens.
+ *   ElevenLabs *also* supports `ulaw_8000` if your Telnyx profile is
+ *   pinned to PCMU/8000 — pass `outputFormat: 'ulaw_8000'` explicitly
+ *   in that case.
+ */
 export class ElevenLabsTTS {
   private readonly apiKey: string;
   private readonly voiceId: string;
@@ -167,6 +191,59 @@ export class ElevenLabsTTS {
       this.languageCode = undefined;
       this.chunkSize = 4096;
     }
+  }
+
+  /**
+   * Construct an instance pre-configured for Twilio Media Streams.
+   *
+   * Sets `outputFormat='ulaw_8000'` so ElevenLabs emits μ-law @ 8 kHz
+   * directly — the exact wire format Twilio's media stream uses — letting
+   * the SDK skip the 16 kHz→8 kHz resample and PCM→μ-law conversion in
+   * `TwilioAudioSender`. Saves ~30–80 ms first-byte and per-frame CPU,
+   * and removes a potential aliasing source.
+   *
+   * `voiceSettings` defaults to a low-bandwidth-friendly profile
+   * (speaker boost off, modest stability) which sounds cleaner at 8 kHz
+   * μ-law than the studio default. Pass an explicit object to override.
+   */
+  static forTwilio(
+    apiKey: string,
+    options: Omit<ElevenLabsTTSOptions, 'outputFormat'> = {},
+  ): ElevenLabsTTS {
+    const voiceSettings: ElevenLabsVoiceSettings = options.voiceSettings ?? {
+      // Speaker boost adds high-frequency emphasis that aliases ugly over an
+      // 8 kHz μ-law line. Slightly higher stability tames the excursions
+      // that compander quantization noise can amplify.
+      stability: 0.6,
+      similarity_boost: 0.75,
+      use_speaker_boost: false,
+    };
+    return new ElevenLabsTTS(apiKey, {
+      ...options,
+      voiceSettings,
+      outputFormat: 'ulaw_8000',
+    });
+  }
+
+  /**
+   * Construct an instance pre-configured for Telnyx bidirectional media.
+   *
+   * Telnyx's default media-streaming codec is L16 PCM @ 16 kHz, which
+   * matches our default Telnyx handler. We pick `pcm_16000` so the audio
+   * flows end-to-end with zero resampling or transcoding.
+   *
+   * Trade-off: if your Telnyx profile is pinned to PCMU/8000 (μ-law),
+   * construct `ElevenLabsTTS` directly with `outputFormat: 'ulaw_8000'`
+   * — Telnyx supports that natively too.
+   */
+  static forTelnyx(
+    apiKey: string,
+    options: Omit<ElevenLabsTTSOptions, 'outputFormat'> = {},
+  ): ElevenLabsTTS {
+    return new ElevenLabsTTS(apiKey, {
+      ...options,
+      outputFormat: 'pcm_16000',
+    });
   }
 
   /**
