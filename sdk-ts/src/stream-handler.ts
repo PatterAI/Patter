@@ -619,8 +619,17 @@ export class StreamHandler {
       }
     } else if (this.adapter) {
       // OpenAI Realtime is configured for g711_ulaw so Twilio mulaw is fine.
-      // ElevenLabs ConvAI expects PCM 16kHz — transcode Twilio mulaw first.
-      if (this.adapter instanceof ElevenLabsConvAIAdapter && this.deps.bridge.telephonyProvider === 'twilio') {
+      // ElevenLabs ConvAI defaults to PCM 16kHz — transcode Twilio mulaw
+      // first. When ConvAI was constructed via ``ElevenLabsConvAIAdapter
+      // .forTwilio(...)`` (or any path that sets ``inputAudioFormat
+      // === 'ulaw_8000'``) we negotiated μ-law on both directions, so we
+      // forward the caller's μ-law bytes untouched — saves a decode +
+      // resample on every inbound frame.
+      if (
+        this.adapter instanceof ElevenLabsConvAIAdapter &&
+        this.deps.bridge.telephonyProvider === 'twilio' &&
+        this.adapter.inputAudioFormat !== 'ulaw_8000'
+      ) {
         const pcm8k = mulawToPcm16(audioBuffer);
         const pcm16k = this.inboundResampler.process(pcm8k);
         this.adapter.sendAudio(pcm16k);

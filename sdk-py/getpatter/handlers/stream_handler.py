@@ -725,6 +725,8 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
         on_metrics=None,
         conversation_history: deque | None = None,
         transcript_entries: deque | None = None,
+        output_audio_format: str | None = None,
+        input_audio_format: str | None = None,
     ) -> None:
         super().__init__(
             agent=agent,
@@ -741,8 +743,20 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
         )
         self._elevenlabs_key = elevenlabs_key
         self._for_twilio = for_twilio
+        # Caller-supplied codec overrides win over agent.elevenlabs_convai
+        # config (resolved at start() time so the integration test that
+        # mocks the adapter doesn't crash on a missing config dict).
+        self._output_audio_format_override = output_audio_format
+        self._input_audio_format_override = input_audio_format
+        # When True (set in start() once we know the negotiated formats),
+        # forward inbound caller audio as raw μ-law 8 kHz and skip the
+        # outbound PCM16 → μ-law transcode in the audio sender. Mirrors
+        # OpenAIRealtimeStreamHandler's ``audio_format='g711_ulaw'`` path.
+        self._native_mulaw_8k = False
         self._adapter = None
         # Per-handler StatefulResampler for Twilio mulaw 8 kHz -> PCM16 16 kHz.
+        # Only created when we actually need to resample (i.e. ConvAI
+        # negotiated PCM16 16 kHz, not native μ-law).
         self._resampler_8k_to_16k = None
 
     async def start(self) -> None:
@@ -761,13 +775,51 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
                 "and pass its id."
             )
 
+        # Resolve negotiated audio formats. Precedence (highest to lowest):
+        #   1. Explicit handler kwargs (output_audio_format / input_audio_format)
+        #   2. agent.elevenlabs_convai dict ("output_audio_format", "input_audio_format")
+        #   3. None — let ConvAI pick its server default (PCM16 16 kHz)
+        cfg_output = (
+            el_config.get("output_audio_format") if isinstance(el_config, dict) else None
+        )
+        cfg_input = (
+            el_config.get("input_audio_format") if isinstance(el_config, dict) else None
+        )
+        output_audio_format = self._output_audio_format_override or cfg_output
+        input_audio_format = self._input_audio_format_override or cfg_input
+
         self._adapter = ElevenLabsConvAIAdapter(
             api_key=self._elevenlabs_key,
             agent_id=agent_id,
             voice_id=voice,
             language=self.agent.language,
             first_message=self.agent.first_message,
+            output_audio_format=output_audio_format,
+            input_audio_format=input_audio_format,
         )
+
+        # Detect the μ-law 8 kHz fast-path. Both directions must be
+        # ulaw_8000 — mixing PCM16 with μ-law would force one transcode
+        # back, defeating the optimization.
+        self._native_mulaw_8k = (
+            output_audio_format == "ulaw_8000"
+            and input_audio_format == "ulaw_8000"
+        )
+        if self._native_mulaw_8k:
+            # Flip the audio sender into pass-through mode. Mirrors how
+            # OpenAIRealtimeStreamHandler relies on the bridge constructing
+            # the sender with ``input_is_mulaw_8k=True``. We can't change
+            # that wiring from inside the handler, so we mutate the flag
+            # in place — the AudioSender's ``send_audio`` checks it on
+            # every chunk, so flipping it before the first agent audio
+            # arrives is safe.
+            if hasattr(self.audio_sender, "_input_is_mulaw_8k"):
+                self.audio_sender._input_is_mulaw_8k = True  # type: ignore[attr-defined]
+            logger.debug(
+                "ElevenLabs ConvAI: native μ-law 8 kHz fast-path enabled "
+                "(skipping inbound resample + outbound transcode)"
+            )
+
         await self._adapter.connect()
         logger.debug("ElevenLabs ConvAI connected")
 
@@ -859,18 +911,26 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
             logger.exception("ElevenLabs ConvAI forward error: %s", exc)
 
     async def on_audio_received(self, audio_bytes: bytes) -> None:
-        if self._adapter is not None:
-            # ElevenLabs ConvAI expects PCM 16kHz. Twilio sends mulaw 8kHz.
-            if self._for_twilio:
-                from getpatter.services.transcoding import mulaw_to_pcm16
-                # Use per-handler StatefulResampler to preserve ratecv state.
-                if self._resampler_8k_to_16k is None:
-                    from getpatter.services.transcoding import create_resampler_8k_to_16k
-                    self._resampler_8k_to_16k = create_resampler_8k_to_16k()
-                pcm16k = self._resampler_8k_to_16k.process(mulaw_to_pcm16(audio_bytes))
-                await self._adapter.send_audio(pcm16k)
-            else:
-                await self._adapter.send_audio(audio_bytes)
+        if self._adapter is None:
+            return
+        # Native μ-law 8 kHz fast-path: ConvAI negotiated ulaw_8000 on the
+        # input side too, so the caller's μ-law bytes go through untouched.
+        # No mulaw → PCM16 decode, no 8 kHz → 16 kHz resample.
+        if self._native_mulaw_8k:
+            await self._adapter.send_audio(audio_bytes)
+            return
+        # Default path: ConvAI expects PCM16 16 kHz and Twilio sends μ-law
+        # 8 kHz, so decode + resample before forwarding.
+        if self._for_twilio:
+            from getpatter.services.transcoding import mulaw_to_pcm16
+            # Use per-handler StatefulResampler to preserve ratecv state.
+            if self._resampler_8k_to_16k is None:
+                from getpatter.services.transcoding import create_resampler_8k_to_16k
+                self._resampler_8k_to_16k = create_resampler_8k_to_16k()
+            pcm16k = self._resampler_8k_to_16k.process(mulaw_to_pcm16(audio_bytes))
+            await self._adapter.send_audio(pcm16k)
+        else:
+            await self._adapter.send_audio(audio_bytes)
 
     async def cleanup(self) -> None:
         if self._background_task:

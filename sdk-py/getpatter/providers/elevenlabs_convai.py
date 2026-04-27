@@ -24,6 +24,23 @@ class ElevenLabsConvAIAdapter:
 
     Handles full conversation: STT + LLM + TTS in one WebSocket.
     Uses ElevenLabs premium voices.
+
+    Telephony optimization
+    ----------------------
+    For real phone calls prefer the carrier-specific factories:
+
+    * :meth:`for_twilio` — negotiates ``ulaw_8000`` natively for both
+      directions. Twilio media streams are PCMU @ 8 kHz, so emitting and
+      accepting μ-law directly skips two resamples (16 kHz → 8 kHz outbound
+      and 8 kHz → 16 kHz inbound) plus the PCM ↔ μ-law transcode. Saves
+      ~30–80 ms first-byte and meaningful per-frame CPU on every turn.
+    * :meth:`for_telnyx` — negotiates ``ulaw_8000`` too. Telnyx
+      bidirectional media is PCMU @ 8 kHz when ``streaming_start`` requests
+      ``stream_bidirectional_codec=PCMU`` (our default), so the same μ-law
+      passthrough applies.
+
+    The bare constructor still defaults to PCM16 16 kHz (server defaults),
+    which is the right choice for non-telephony embeddings.
     """
 
     def __init__(
@@ -68,6 +85,79 @@ class ElevenLabsConvAIAdapter:
 
     def __repr__(self) -> str:
         return f"ElevenLabsConvAIAdapter(agent_id={self.agent_id!r}, model_id={self.model_id!r})"
+
+    # ------------------------------------------------------------------
+    # Telephony factories
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def for_twilio(
+        cls,
+        api_key: str,
+        agent_id: str,
+        *,
+        voice_id: str = "EXAVITQu4vr4xnSDxMaL",
+        model_id: str = "eleven_flash_v2_5",
+        language: str = "it",
+        first_message: str = "",
+        use_signed_url: bool = False,
+    ) -> "ElevenLabsConvAIAdapter":
+        """Build an adapter pre-configured for Twilio Media Streams.
+
+        Negotiates ``ulaw_8000`` for both ``output_audio_format`` and
+        ``input_audio_format`` so ElevenLabs ConvAI emits and accepts μ-law
+        @ 8 kHz directly — the exact wire format Twilio uses on its media
+        WebSocket. The SDK's stream handler detects this and skips both the
+        8 kHz → 16 kHz inbound resample and the 16 kHz → 8 kHz / PCM → μ-law
+        outbound transcode that ``TwilioAudioSender`` would otherwise
+        perform. Saves ~30–80 ms first-byte plus per-frame CPU on every
+        turn.
+        """
+        return cls(
+            api_key=api_key,
+            agent_id=agent_id,
+            voice_id=voice_id,
+            model_id=model_id,
+            language=language,
+            first_message=first_message,
+            output_audio_format="ulaw_8000",
+            input_audio_format="ulaw_8000",
+            use_signed_url=use_signed_url,
+        )
+
+    @classmethod
+    def for_telnyx(
+        cls,
+        api_key: str,
+        agent_id: str,
+        *,
+        voice_id: str = "EXAVITQu4vr4xnSDxMaL",
+        model_id: str = "eleven_flash_v2_5",
+        language: str = "it",
+        first_message: str = "",
+        use_signed_url: bool = False,
+    ) -> "ElevenLabsConvAIAdapter":
+        """Build an adapter pre-configured for Telnyx bidirectional media.
+
+        Telnyx negotiates PCMU @ 8 kHz when ``streaming_start`` sets
+        ``stream_bidirectional_codec=PCMU`` (the SDK default). Picking
+        ``ulaw_8000`` on both ConvAI directions removes every transcode on
+        the audio path — same trade-off as ``for_twilio``.
+
+        If your Telnyx profile is pinned to L16/16000 instead, use the bare
+        constructor with the default PCM16 formats.
+        """
+        return cls(
+            api_key=api_key,
+            agent_id=agent_id,
+            voice_id=voice_id,
+            model_id=model_id,
+            language=language,
+            first_message=first_message,
+            output_audio_format="ulaw_8000",
+            input_audio_format="ulaw_8000",
+            use_signed_url=use_signed_url,
+        )
 
     async def _fetch_signed_url(self) -> str:
         """Fetch a short-lived signed WS URL so we don't have to send the API key."""
