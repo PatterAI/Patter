@@ -79,3 +79,115 @@ describe('Cartesia TTS — model and API version', () => {
     });
   });
 });
+
+/**
+ * Telephony sample-rate factories.
+ *
+ * Cartesia accepts `sample_rate` directly in the request body. Asking for
+ * 8 kHz at the source skips the SDK-side 16 kHz → 8 kHz resample step
+ * before PCM → μ-law transcoding for Twilio. Telnyx's L16/16000 default
+ * already matches the bare-constructor default.
+ */
+describe('Cartesia TTS — telephony factories', () => {
+  const ORIGINAL_FETCH = global.fetch;
+  let lastBody: Record<string, unknown> | null = null;
+
+  beforeEach(() => {
+    lastBody = null;
+    global.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      lastBody = JSON.parse(init?.body as string);
+      return new Response(new Uint8Array([1, 2, 3, 4]), { status: 200 });
+    };
+  });
+
+  afterEach(() => {
+    global.fetch = ORIGINAL_FETCH;
+  });
+
+  describe('low-level CartesiaTTS', () => {
+    it('forTwilio sets sampleRate to 8000', async () => {
+      const tts = CartesiaTTS.forTwilio('ct-key');
+      await tts.synthesize('hello');
+      const outputFormat = lastBody?.output_format as { sample_rate: number; encoding: string };
+      expect(outputFormat.sample_rate).toBe(8000);
+      // Encoding stays PCM — μ-law transcoding still happens client-side.
+      expect(outputFormat.encoding).toBe('pcm_s16le');
+    });
+
+    it('forTwilio honours overrides (voice, language, speed) but pins sampleRate', async () => {
+      const tts = CartesiaTTS.forTwilio('ct-key', {
+        voice: 'custom-voice-id',
+        language: 'es',
+        speed: 'fast',
+        sampleRate: 24000, // ignored — the factory wins
+      } as unknown as Parameters<typeof CartesiaTTS.forTwilio>[1]);
+      await tts.synthesize('hola');
+      const outputFormat = lastBody?.output_format as { sample_rate: number };
+      expect(outputFormat.sample_rate).toBe(8000);
+      const voice = lastBody?.voice as { id: string };
+      expect(voice.id).toBe('custom-voice-id');
+      expect(lastBody?.language).toBe('es');
+    });
+
+    it('forTelnyx sets sampleRate to 16000', async () => {
+      const tts = CartesiaTTS.forTelnyx('ct-key');
+      await tts.synthesize('hello');
+      const outputFormat = lastBody?.output_format as { sample_rate: number };
+      expect(outputFormat.sample_rate).toBe(16000);
+    });
+
+    it('constructor default unchanged (16000)', async () => {
+      const tts = new CartesiaTTS('ct-key');
+      await tts.synthesize('hello');
+      const outputFormat = lastBody?.output_format as { sample_rate: number };
+      expect(outputFormat.sample_rate).toBe(16000);
+    });
+  });
+
+  describe('pipeline-mode TTS class', () => {
+    it('forTwilio (options-object form) sets sampleRate to 8000', async () => {
+      const tts = CartesiaPipelineTTS.forTwilio({ apiKey: 'ct-key' });
+      await tts.synthesize('hello');
+      const outputFormat = lastBody?.output_format as { sample_rate: number };
+      expect(outputFormat.sample_rate).toBe(8000);
+    });
+
+    it('forTwilio (positional form) is parent-compatible', async () => {
+      const tts = CartesiaPipelineTTS.forTwilio('ct-key');
+      await tts.synthesize('hello');
+      const outputFormat = lastBody?.output_format as { sample_rate: number };
+      expect(outputFormat.sample_rate).toBe(8000);
+    });
+
+    it('forTelnyx (options-object form) sets sampleRate to 16000', async () => {
+      const tts = CartesiaPipelineTTS.forTelnyx({ apiKey: 'ct-key' });
+      await tts.synthesize('hello');
+      const outputFormat = lastBody?.output_format as { sample_rate: number };
+      expect(outputFormat.sample_rate).toBe(16000);
+    });
+
+    it('forTwilio falls back to CARTESIA_API_KEY env var', async () => {
+      const prev = process.env.CARTESIA_API_KEY;
+      process.env.CARTESIA_API_KEY = 'env-key';
+      try {
+        const tts = CartesiaPipelineTTS.forTwilio();
+        await tts.synthesize('hello');
+        const outputFormat = lastBody?.output_format as { sample_rate: number };
+        expect(outputFormat.sample_rate).toBe(8000);
+      } finally {
+        if (prev === undefined) delete process.env.CARTESIA_API_KEY;
+        else process.env.CARTESIA_API_KEY = prev;
+      }
+    });
+
+    it('forTwilio without apiKey or env throws', () => {
+      const prev = process.env.CARTESIA_API_KEY;
+      delete process.env.CARTESIA_API_KEY;
+      try {
+        expect(() => CartesiaPipelineTTS.forTwilio()).toThrow(/CARTESIA_API_KEY/);
+      } finally {
+        if (prev !== undefined) process.env.CARTESIA_API_KEY = prev;
+      }
+    });
+  });
+});
