@@ -4,6 +4,69 @@ Newest entries at the top.
 
 ---
 
+### [2026-04-27] — Notebook series Phase 2: Quickstart everywhere
+
+**Type:** feat
+**Branch:** feat/notebook-series-skeleton
+
+**What it does:**
+
+Populates §1 (Quickstart, T1+T2 only) in all 24 notebooks. Every Python
+notebook now executes headless with **zero API keys** in <10s and prints a
+clean status line for each cell.
+
+The §1 cells exercise: SDK version sanity, local-mode `Patter` construction
+with a Twilio carrier, cloud-mode construction with `api_key=`, and the
+three engine types (OpenAI Realtime / ElevenLabs ConvAI / Pipeline) via
+`p.agent(engine=...)`.
+
+**Implementation details:**
+
+- Cells use the `with _setup.cell(...) as ok: if ok: body` pattern (the
+  Phase 1 design fix — `@contextmanager` cannot suppress the body once
+  yielded).
+- All cells import from `getpatter` (the actual package name), not `patter`.
+  The plan's original `patter.*` imports were speculative and got corrected
+  here.
+- `Patter` constructor uses `carrier=Twilio(...)` / `carrier=Telnyx(...)`,
+  not the older `twilio_sid=` flat kwargs.
+- `_section_titles` in `check_notebook_parity.py` now compares only the
+  first line of each markdown cell (the `### Heading`), not the full
+  multi-line body — descriptive prose can legitimately differ between
+  Python (`api_key=`) and TypeScript (`apiKey`).
+- `PATTER_VERSION` pin bumped 0.5.2 → 0.5.4 (latest published SDK).
+
+**Files changed:**
+
+| File | Change |
+|------|--------|
+| `scripts/quickstart_cells.py` | Canonical §1 cell sequence (py + ts) |
+| `scripts/inject_section.py` | Idempotent cell injection helper |
+| `scripts/inject_quickstart.py` | Driver that injects into all 24 notebooks |
+| `scripts/check_notebook_parity.py` | First-line-only heading comparison |
+| `examples/notebooks/{python,typescript}/[01-12]_*.ipynb` | §1 populated |
+| `examples/notebooks/.env.example` | Pin bumped to 0.5.4 |
+| `examples/notebooks/python/_setup.py` | Default version pin → 0.5.4 |
+| `examples/notebooks/typescript/_setup.ts` | Default version pin → 0.5.4 |
+
+**Tests added:**
+
+- `scripts/test_quickstart_cells.py` — 5 tests
+- `scripts/test_inject_section.py` — 3 tests
+
+**Acceptance:**
+
+- All 8 new tests + 29 from Phase 1 + 11 TS tests green.
+- Parity check green across all 12 pairs.
+- `nbclient` headless run of all 12 Python notebooks succeeds with 0 keys
+  set (every cell skips cleanly or prints the green status banner).
+
+**Breaking changes:** None.
+
+**Docs to update:** None.
+
+---
+
 ### [2026-04-24] — Notebook series Phase 1: Skeleton
 
 **Type:** feat
