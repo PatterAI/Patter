@@ -162,10 +162,13 @@ class EmbeddedServer:
         async def _on_call_start(data):
             if store is not None:
                 store.record_call_start(data)
-            # Notify standalone dashboard so active calls appear immediately
+            # Notify standalone dashboard so active calls appear immediately.
+            # Fire-and-forget via ``asyncio.create_task`` so the call_start
+            # fast path never blocks on dashboard responsiveness — even when
+            # the dashboard is offline (~1s connect timeout).
             try:
                 from getpatter.dashboard.persistence import notify_dashboard
-                notify_dashboard(data)
+                asyncio.create_task(notify_dashboard(data))
             except Exception:
                 pass
             if call_logger.enabled:
@@ -185,10 +188,12 @@ class EmbeddedServer:
         async def _on_call_end(data):
             if store is not None:
                 store.record_call_end(data, metrics=data.get("metrics"))
-            # Notify standalone dashboard (if running)
+            # Notify standalone dashboard (if running). Fire-and-forget via
+            # ``asyncio.create_task`` so the call_end path never blocks on
+            # dashboard responsiveness.
             try:
                 from getpatter.dashboard.persistence import notify_dashboard
-                notify_dashboard(data)
+                asyncio.create_task(notify_dashboard(data))
             except Exception:
                 pass
             if call_logger.enabled:
@@ -521,30 +526,31 @@ class EmbeddedServer:
 
             try:
                 if event_type == "call.initiated":
-                    logger.info("Telnyx call.initiated %s — answering", call_control_id)
-                    from urllib.parse import quote as _quote
-                    async with _httpx.AsyncClient(timeout=10.0) as client:
-                        resp = await client.post(
-                            f"{api_base}/calls/{_quote(call_control_id, safe='')}/actions/answer",
-                            headers=auth_headers,
-                            json={},
-                        )
-                        if resp.status_code >= 400:
-                            logger.warning("Telnyx answer failed: %s %s", resp.status_code, resp.text)
-                elif event_type == "call.answered":
+                    # PERF — Telnyx accepts the streaming params inline on
+                    # ``actions/answer`` and auto-starts the stream the moment
+                    # the leg picks up. Folding ``streaming_start`` into the
+                    # answer body removes both the ``call.answered`` webhook
+                    # round-trip and a second POST (~100-200 ms saved per
+                    # inbound call).
                     from urllib.parse import quote as _quote
                     stream_url = (
                         f"wss://{self.config.webhook_url}/ws/telnyx/stream/{_quote(call_control_id, safe='')}"
                         f"?caller={_quote(caller)}&callee={_quote(callee)}"
                     )
-                    logger.info("Telnyx call.answered %s — starting stream", call_control_id)
+                    logger.info(
+                        "Telnyx call.initiated %s — answering with inline stream",
+                        call_control_id,
+                    )
                     async with _httpx.AsyncClient(timeout=10.0) as client:
                         resp = await client.post(
-                            f"{api_base}/calls/{_quote(call_control_id, safe='')}/actions/streaming_start",
+                            f"{api_base}/calls/{_quote(call_control_id, safe='')}/actions/answer",
                             headers=auth_headers,
                             json={
                                 "stream_url": stream_url,
-                                "stream_track": "both_tracks",
+                                # ``inbound_track`` halves WS upstream
+                                # bandwidth — outbound echo was always
+                                # filtered downstream anyway.
+                                "stream_track": "inbound_track",
                                 "stream_bidirectional_mode": "rtp",
                                 "stream_bidirectional_codec": "PCMU",
                                 "stream_bidirectional_sampling_rate": 8000,
@@ -552,7 +558,16 @@ class EmbeddedServer:
                             },
                         )
                         if resp.status_code >= 400:
-                            logger.warning("Telnyx streaming_start failed: %s %s", resp.status_code, resp.text)
+                            logger.warning("Telnyx answer failed: %s %s", resp.status_code, resp.text)
+                elif event_type == "call.answered":
+                    # No-op: ``call.initiated`` already submitted answer +
+                    # streaming_start in a single call. Telnyx still emits
+                    # ``call.answered`` as an informational event; acknowledge
+                    # without making a redundant POST.
+                    logger.debug(
+                        "Telnyx call.answered %s — stream already active (inline)",
+                        call_control_id,
+                    )
                 elif event_type == "call.machine.detection.ended":
                     # AMD (answering machine detection) result — mirror the
                     # Twilio voicemail-drop flow when Telnyx reports the leg
