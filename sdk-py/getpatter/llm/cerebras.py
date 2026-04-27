@@ -18,7 +18,9 @@ class LLM(_CerebrasLLM):
         from getpatter.llm import cerebras
 
         llm = cerebras.LLM()                          # reads CEREBRAS_API_KEY
-        llm = cerebras.LLM(api_key="csk-...", model="llama-3.3-70b")
+        llm = cerebras.LLM(api_key="csk-...", model="gpt-oss-120b")
+        # smaller-context alternative:
+        llm = cerebras.LLM(api_key="csk-...", model="llama3.1-8b")
     """
 
     provider_key: ClassVar[str] = "cerebras"
@@ -27,7 +29,7 @@ class LLM(_CerebrasLLM):
         self,
         api_key: str | None = None,
         *,
-        model: str = "llama-3.3-70b",
+        model: str = "gpt-oss-120b",
         **kwargs,
     ) -> None:
         key = api_key or os.environ.get("CEREBRAS_API_KEY")

@@ -10,8 +10,24 @@ export interface GroqLLMOptions {
   baseUrl?: string;
   /** Sampling temperature [0, 2]. */
   temperature?: number;
-  /** Max tokens in the assistant response. */
+  /** Max tokens in the assistant response (sent as ``max_completion_tokens``). */
   maxTokens?: number;
+  /** OpenAI-style ``response_format`` for JSON mode / structured outputs. */
+  responseFormat?: Record<string, unknown>;
+  /** Whether to allow parallel tool calls. */
+  parallelToolCalls?: boolean;
+  /** ``"auto" | "none" | "required"`` or a specific tool object. */
+  toolChoice?: string | Record<string, unknown>;
+  /** Sampling seed. */
+  seed?: number;
+  /** Nucleus sampling cutoff in [0, 1]. */
+  topP?: number;
+  /** Penalty in [-2, 2] applied to repeated tokens. */
+  frequencyPenalty?: number;
+  /** Penalty in [-2, 2] applied to seen tokens. */
+  presencePenalty?: number;
+  /** Stop sequence(s). */
+  stop?: string | string[];
 }
 
 /**
@@ -39,6 +55,14 @@ export class LLM extends _GroqLLM {
       baseUrl: opts.baseUrl,
       temperature: opts.temperature,
       maxTokens: opts.maxTokens,
+      responseFormat: opts.responseFormat,
+      parallelToolCalls: opts.parallelToolCalls,
+      toolChoice: opts.toolChoice,
+      seed: opts.seed,
+      topP: opts.topP,
+      frequencyPenalty: opts.frequencyPenalty,
+      presencePenalty: opts.presencePenalty,
+      stop: opts.stop,
     });
   }
 }
