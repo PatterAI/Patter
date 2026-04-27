@@ -74,6 +74,10 @@ await phone.serve({ agent, tunnel: true });
 
 `tunnel: true` spawns a Cloudflare tunnel and points your Twilio number at it. In production, pass `webhook_url` / `webhookUrl` to the constructor instead. Every carrier and provider reads its credentials from environment variables by default; see each SDK's README for the full catalog.
 
+## How Patter compares
+
+Patter is purpose-built for production voice over real telephony. Out of the box you get **Twilio + Telnyx parity** (DTMF, transfer, AMD, voicemail drop, recording), **both architectures from one API** — speech-to-speech (Realtime / ConvAI engines) and the sandwich pipeline (STT → LLM → TTS) — and **production-grade barge-in / VAD / IVR primitives** that work the same on every carrier. Observability is vendor-neutral OpenTelemetry tracing, plus a built-in dashboard and tunnel; no extra collector required. The 4-line quickstart above replaces ~50 lines of glue you'd otherwise write against a generic voice-agent toolkit, and the **Python and TypeScript SDKs are identical** — same surface, same hooks, same events — so cross-runtime teams ship the same agent twice without rewriting it.
+
 ## Features
 
 | Feature | Method | Template |

@@ -8,6 +8,23 @@ _(no entries yet — next version will land here)_
 
 Cost-accuracy, audio-pipeline, and observability hardening across both SDKs, plus opt-in per-call filesystem logging.
 
+### Improved — Cerebras
+- **Default model bumped to `gpt-oss-120b`** (production tier, ~3000 tok/sec on WSE-3, no deprecation date) — replaces `llama-3.3-70b`, which is no longer in Cerebras's production catalogue. Docstrings updated against the verified model list at `inference-docs.cerebras.ai/models/overview`.
+- **TS retry + backoff on 5xx / 429** — single retry with exponential backoff, honouring `x-ratelimit-reset-tokens-minute` / `x-ratelimit-reset-requests-minute` advisory headers. Terminal failures now throw a typed `PatterError` (was: silent `getLogger().error()` + empty stream).
+- **`response_format` parameter** — Python and TS Cerebras providers accept the OpenAI-style structured-outputs dict (e.g. `{ type: "json_schema", json_schema: { ... } }`).
+- **Forward additional sampling kwargs** to Cerebras and Groq (both SDKs): `parallel_tool_calls`, `tool_choice`, `seed`, `top_p`, `frequency_penalty`, `presence_penalty`, `stop`.
+- **`max_tokens` → `max_completion_tokens` on the wire** for Cerebras and Groq; user-facing API still accepts `max_tokens` / `maxTokens`.
+- **`User-Agent: getpatter/<version>` header** added to Cerebras and Groq HTTP requests for upstream attribution.
+
+### Added — pipeline hooks
+- **`before_llm` / `after_llm` hooks** (`PipelineHooks` in both SDKs) — receive the messages list pre-LLM and the assistant text post-stream. `before_llm` enables prompt injection / RAG augmentation; `after_llm` enables output validation, redaction, and post-processing.
+- **New event types on the `EventBus`** (additive — existing callbacks unchanged): `transcript_partial`, `transcript_final`, `llm_chunk`, `tts_chunk`, `tool_call_started`. Subscribe via `on(...)` for fine-grained pipeline observability.
+
+### Added — providers
+- **OpenAITranscribeSTT** — first-class STT class for OpenAI's gpt-4o-transcribe and gpt-4o-mini-transcribe models (~10x faster than Whisper-1).
+- **ElevenLabs `eleven_v3`** — typed model literal added; v3 is now selectable via `model_id="eleven_v3"`.
+- **Cerebras: gzip compression now enabled by default in the TypeScript SDK** (Python already had it on). Reduces TTFT on prompts >2 KB. Pass `gzipCompression: false` to opt out.
+
 ### Added — per-call filesystem logging
 - **`CallLogger` (both SDKs)** — opt-in via `PATTER_LOG_DIR` env var. Writes per-call
   `metadata.json` (atomic) + `transcript.jsonl` + `events.jsonl` under a
@@ -60,7 +77,6 @@ Cost-accuracy, audio-pipeline, and observability hardening across both SDKs, plu
 - **ElevenLabs ConvAI barge-in** — adapter never emits `interruption` event; stream handler has a handler for it that's dead code.
 - **Gemini Live never emits `transcript_input`** — `stt_ms` always 0 and `user_text` empty on every Gemini turn.
 - **Whisper is unsafe in pipeline mode** — emits `isFinal=true` every ~1s regardless of speech; triggers LLM mid-utterance. Needs VAD gating.
-- **Cerebras default `llama3.1-8b` deprecates May 27, 2026** — need migration to `gpt-oss-120b`.
 
 ### Fixed — cost accounting (first + second audit waves, 3 + 11 agents)
 - **Python `calculate_realtime_cost` would crash on `input_token_details: null`** — `dict.get("...", {})` returns `None` when the key exists with a `None` value, and the chained `.get()` raised `AttributeError`. Switched to `or {}` fallback. TS was already safe via `??`.
