@@ -18,17 +18,17 @@ afterEach(() => {
 });
 
 describe('CerebrasLLMProvider default model', () => {
-  it('uses llama3.1-8b by default (free-tier available)', () => {
+  it('uses gpt-oss-120b by default (highest throughput on WSE-3)', () => {
     const provider = new CerebrasLLMProvider({ apiKey: 'csk-test' });
-    expect(provider.model).toBe('llama3.1-8b');
+    expect(provider.model).toBe('gpt-oss-120b');
   });
 
   it('honours explicit model override', () => {
     const provider = new CerebrasLLMProvider({
       apiKey: 'csk-test',
-      model: 'llama-3.3-70b',
+      model: 'llama3.1-8b',
     });
-    expect(provider.model).toBe('llama-3.3-70b');
+    expect(provider.model).toBe('llama3.1-8b');
   });
 });
 

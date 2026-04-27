@@ -59,12 +59,19 @@ def _failing_parent_stream(exc: Exception):
     return patch.object(OpenAILLMProvider, "stream", new=_raises)
 
 
-def test_default_model_is_free_tier_safe() -> None:
-    assert _provider()._model == "llama3.1-8b"
+def test_default_model_is_gpt_oss_120b() -> None:
+    """Default Cerebras model is the highest-throughput production tier.
+
+    On WSE-3 hardware, gpt-oss-120b runs at ~3000 tok/sec — well above the
+    TTS consumption rate (~150-300 tok/sec), so model size doesn't bottleneck
+    realtime voice. The 8B and preview models remain reachable via
+    ``model=`` for accounts whose tier doesn't include this default.
+    """
+    assert _provider()._model == "gpt-oss-120b"
 
 
 def test_explicit_model_override_is_honoured() -> None:
-    assert _provider("llama-3.3-70b")._model == "llama-3.3-70b"
+    assert _provider("llama3.1-8b")._model == "llama3.1-8b"
 
 
 @pytest.mark.asyncio

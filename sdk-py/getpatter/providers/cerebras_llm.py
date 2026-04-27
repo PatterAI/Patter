@@ -46,18 +46,18 @@ logger = logging.getLogger("getpatter.providers.cerebras_llm")
 
 
 _CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1"
-# Default to the smallest fast Cerebras model available on the free tier so
-# the SDK works out of the box. ``gpt-oss-120b`` is the highest-throughput
-# model (~3000 tok/sec on WSE-3) but is gated to paid tiers — using it as
-# default surfaces a confusing 404 for free users. ``llama3.1-8b`` is 8B
-# params, sub-100ms TTFT on Cerebras hardware, and free-tier eligible.
+# Default to ``gpt-oss-120b`` — the highest-throughput production model on
+# Cerebras's WSE-3 hardware (~3000 tok/sec, well above TTS consumption rate)
+# and not on a deprecation schedule. On the WSE-3 chip the model size is
+# bottlenecked by TTS consumption (~150-300 tok/sec) regardless of weights,
+# so a 120B model and an 8B model both saturate the downstream TTS pipeline
+# — picking the larger one buys higher answer quality at no realtime cost.
 #
-# TODO(deprecation 2026-05-27): Cerebras has scheduled both ``llama3.1-8b``
-# and ``qwen-3-235b-a22b-instruct-2507`` for retirement on this date. Before
-# then, retest the free tier and switch the default to whichever 8B-class
-# model replaces them (likely a Llama 4 Scout variant). Track at
-# https://inference-docs.cerebras.ai/change-log
-_DEFAULT_MODEL = "llama3.1-8b"
+# ``llama3.1-8b`` (deprecating 2026-05-27) and the preview models
+# ``qwen-3-235b-a22b-instruct-2507`` and ``zai-glm-4.7`` are reachable via
+# ``model="..."``. If your account tier returns 404 for ``gpt-oss-120b``
+# the provider's stream() logs a recovery hint listing override candidates.
+_DEFAULT_MODEL = "gpt-oss-120b"
 
 
 def _build_cerebras_client(
@@ -163,11 +163,12 @@ class CerebrasLLMProvider(OpenAILLMProvider):
 
     Args:
         api_key: Cerebras API key. Reads ``CEREBRAS_API_KEY`` if omitted.
-        model: Cerebras chat model ID. Defaults to ``llama3.1-8b`` (free-tier
-            available, sub-100ms TTFT). Override with ``gpt-oss-120b`` on paid
-            tiers for higher throughput (~3000 tok/sec), ``llama-3.3-70b`` for
-            balanced quality, or query ``GET /v1/models`` to discover
-            tier-available IDs.
+        model: Cerebras chat model ID. Defaults to ``gpt-oss-120b`` (highest
+            throughput on Cerebras WSE-3 at ~3000 tok/sec, no deprecation).
+            Override with ``llama3.1-8b`` for a smaller/free-tier model
+            (deprecating 2026-05-27), ``qwen-3-235b-a22b-instruct-2507`` for
+            a preview multilingual model, or query ``GET /v1/models`` to
+            discover tier-available IDs.
         base_url: Optional Cerebras base URL override.
         gzip_compression: Gzip request payloads for faster TTFT.
         msgpack_encoding: Encode request payloads with msgpack for smaller

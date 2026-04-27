@@ -29,18 +29,18 @@ import { VERSION } from '../version';
 import { parseOpenAISseStream } from './groq-llm';
 
 const CEREBRAS_BASE_URL = 'https://api.cerebras.ai/v1';
-// Default to the smallest fast Cerebras model available on the free tier so
-// the SDK works out of the box. ``gpt-oss-120b`` is the highest-throughput
-// model (~3000 tok/sec on WSE-3) but is gated to paid tiers — using it as
-// default surfaces a confusing 404 for free users. ``llama3.1-8b`` is 8B
-// params, sub-100ms TTFT on Cerebras hardware, and free-tier eligible.
+// Default to ``gpt-oss-120b`` — the highest-throughput production model on
+// Cerebras's WSE-3 hardware (~3000 tok/sec, well above TTS consumption rate)
+// and not on a deprecation schedule. On the WSE-3 chip the model size is
+// bottlenecked by TTS consumption (~150-300 tok/sec) regardless of weights,
+// so a 120B model and an 8B model both saturate the downstream TTS pipeline
+// — picking the larger one buys higher answer quality at no realtime cost.
 //
-// TODO(deprecation 2026-05-27): Cerebras has scheduled both ``llama3.1-8b``
-// and ``qwen-3-235b-a22b-instruct-2507`` for retirement on this date. Before
-// then, retest the free tier and switch the default to whichever 8B-class
-// model replaces them (likely a Llama 4 Scout variant). Track at
-// https://inference-docs.cerebras.ai/change-log
-const DEFAULT_MODEL = 'llama3.1-8b';
+// ``llama3.1-8b`` (deprecating 2026-05-27) and the preview models
+// ``qwen-3-235b-a22b-instruct-2507`` and ``zai-glm-4.7`` are reachable via
+// the ``model`` option. If your account tier returns 404 for the default,
+// the provider's stream() logs a recovery hint listing override candidates.
+const DEFAULT_MODEL = 'gpt-oss-120b';
 const RETRY_BACKOFF_BASE_MS = 500;
 
 export interface CerebrasLLMOptions {
