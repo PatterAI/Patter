@@ -24,7 +24,7 @@ import json
 import logging
 from typing import Any, AsyncIterator
 
-logger = logging.getLogger("patter.gemini_live")
+logger = logging.getLogger("getpatter.gemini_live")
 
 # Default PCM audio format used on the wire for Gemini Live.
 # Gemini Live requires PCM16 mono; sample-rate negotiation happens via

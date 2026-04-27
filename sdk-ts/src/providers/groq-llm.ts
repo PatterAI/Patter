@@ -27,6 +27,10 @@ export interface GroqLLMOptions {
   apiKey: string;
   model?: string;
   baseUrl?: string;
+  /** Sampling temperature [0, 2]. */
+  temperature?: number;
+  /** Max tokens in the assistant response. */
+  maxTokens?: number;
 }
 
 /** LLM provider backed by Groq's OpenAI-compatible Chat Completions API. */
@@ -34,6 +38,8 @@ export class GroqLLMProvider implements LLMProvider {
   private readonly apiKey: string;
   readonly model: string;
   private readonly baseUrl: string;
+  private readonly temperature?: number;
+  private readonly maxTokens?: number;
 
   constructor(options: GroqLLMOptions) {
     if (!options.apiKey) {
@@ -44,6 +50,8 @@ export class GroqLLMProvider implements LLMProvider {
     this.apiKey = options.apiKey;
     this.model = options.model ?? DEFAULT_MODEL;
     this.baseUrl = options.baseUrl ?? GROQ_BASE_URL;
+    this.temperature = options.temperature;
+    this.maxTokens = options.maxTokens;
   }
 
   async *stream(
@@ -56,6 +64,8 @@ export class GroqLLMProvider implements LLMProvider {
       stream: true,
       stream_options: { include_usage: true },
     };
+    if (this.temperature !== undefined) body.temperature = this.temperature;
+    if (this.maxTokens !== undefined) body.max_tokens = this.maxTokens;
     if (tools) body.tools = tools;
 
     const response = await fetch(`${this.baseUrl}/chat/completions`, {

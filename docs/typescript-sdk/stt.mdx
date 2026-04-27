@@ -8,7 +8,7 @@ icon: "microphone"
 
 STT is used in **pipeline mode** to transcribe caller audio before it reaches your LLM. If you use an [engine](/typescript-sdk/engines) such as `OpenAIRealtime` or `ElevenLabsConvAI`, speech recognition is handled internally by the engine.
 
-Each STT ships as both a **namespaced** class (`import * as deepgram from "getpatter/stt/deepgram"` → `new deepgram.STT()`) and a **flat alias** (`import { DeepgramSTT } from "getpatter"`). They are equivalent — the flat aliases are convenient for short examples, the namespaced form avoids name collisions when mixing providers.
+Every STT class is imported by name from the package barrel: `import { DeepgramSTT } from "getpatter"`.
 
 ## Quickstart
 
@@ -28,28 +28,15 @@ const agent = phone.agent({
 await phone.serve({ agent });
 ```
 
-The same agent using namespaced imports:
-
-```typescript
-import * as deepgram from "getpatter/stt/deepgram";
-import * as elevenlabs from "getpatter/tts/elevenlabs";
-
-const agent = phone.agent({
-  stt: new deepgram.STT({ endpointingMs: 80 }),
-  tts: new elevenlabs.TTS({ voiceId: "rachel" }),
-  systemPrompt: "You are a helpful assistant.",
-});
-```
-
 ## Supported providers
 
-| Flat import | Namespaced import | Env var |
-|-------------|-------------------|---------|
-| `DeepgramSTT` | `getpatter/stt/deepgram` → `STT` | `DEEPGRAM_API_KEY` |
-| `WhisperSTT` | `getpatter/stt/whisper` → `STT` | `OPENAI_API_KEY` |
-| `CartesiaSTT` | `getpatter/stt/cartesia` → `STT` | `CARTESIA_API_KEY` |
-| `AssemblyAISTT` | `getpatter/stt/assemblyai` → `STT` | `ASSEMBLYAI_API_KEY` |
-| `SonioxSTT` | `getpatter/stt/soniox` → `STT` | `SONIOX_API_KEY` |
+| Class | Env var |
+|-------|---------|
+| `DeepgramSTT` | `DEEPGRAM_API_KEY` |
+| `WhisperSTT` | `OPENAI_API_KEY` |
+| `CartesiaSTT` | `CARTESIA_API_KEY` |
+| `AssemblyAISTT` | `ASSEMBLYAI_API_KEY` |
+| `SonioxSTT` | `SONIOX_API_KEY` |
 
 <Info>
 Speechmatics is supported by the Python SDK but not yet by the TypeScript SDK — use the Python SDK if you need Speechmatics.

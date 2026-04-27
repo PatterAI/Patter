@@ -31,7 +31,7 @@ import logging
 import os
 from typing import Any, AsyncIterator
 
-logger = logging.getLogger("patter")
+logger = logging.getLogger("getpatter")
 
 __all__ = ["GoogleLLMProvider"]
 

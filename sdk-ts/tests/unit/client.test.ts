@@ -1,22 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Patter } from '../../src/client';
 import { Twilio, Telnyx } from '../../src/index';
-import { PatterConnectionError, ProvisionError } from '../../src/errors';
+import { ProvisionError } from '../../src/errors';
 
 // ---------------------------------------------------------------------------
 // Mock external dependencies at the module boundary
 // ---------------------------------------------------------------------------
-
-vi.mock('../../src/connection', () => {
-  class PatterConnection {
-    isConnected = false;
-    connect = vi.fn().mockResolvedValue(undefined);
-    disconnect = vi.fn().mockResolvedValue(undefined);
-    requestCall = vi.fn().mockResolvedValue(undefined);
-    constructor(_apiKey: string, _backendUrl: string) {}
-  }
-  return { PatterConnection };
-});
 
 vi.mock('../../src/server', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../../src/server')>();
@@ -47,246 +36,17 @@ function makeTelnyxCarrier() {
   return new Telnyx({ apiKey: 'KEY_123', connectionId: 'conn-1' });
 }
 
-describe('Patter (cloud mode)', () => {
-  let fetchSpy: ReturnType<typeof vi.spyOn>;
-
-  beforeEach(() => {
-    fetchSpy = vi.spyOn(globalThis, 'fetch');
+describe('Patter (cloud rejection)', () => {
+  it('throws a clear error when constructed with apiKey (cloud mode unavailable)', () => {
+    expect(
+      () => new Patter({ apiKey: 'pt_xxx' } as never),
+    ).toThrow(/Patter Cloud is not yet available/);
   });
 
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  it('constructs in cloud mode with apiKey', () => {
-    const client = new Patter({ apiKey: 'test-key-123' });
-    expect(client.apiKey).toBe('test-key-123');
-  });
-
-  it('uses custom backendUrl and restUrl', () => {
-    const client = new Patter({
-      apiKey: 'key',
-      backendUrl: 'wss://custom.example.com',
-      restUrl: 'https://custom.example.com',
-    });
-    expect(client.apiKey).toBe('key');
-  });
-
-  // --- createAgent ---
-
-  describe('createAgent()', () => {
-    it('creates an agent and returns mapped response', async () => {
-      const client = new Patter({ apiKey: 'key' });
-      fetchSpy.mockResolvedValueOnce({
-        status: 201,
-        ok: true,
-        json: async () => ({
-          id: 'agent-1',
-          name: 'TestBot',
-          system_prompt: 'Hello',
-          model: 'gpt-4o-mini-realtime-preview',
-          voice: 'alloy',
-          voice_provider: 'openai',
-          language: 'en',
-          first_message: null,
-          tools: null,
-        }),
-        text: async () => '',
-      } as Response);
-
-      const agent = await client.createAgent({
-        name: 'TestBot',
-        systemPrompt: 'Hello',
-      });
-
-      expect(agent.id).toBe('agent-1');
-      expect(agent.name).toBe('TestBot');
-      expect(agent.systemPrompt).toBe('Hello');
-      expect(agent.voice).toBe('alloy');
-    });
-
-    it('throws ProvisionError on non-201 status', async () => {
-      const client = new Patter({ apiKey: 'key' });
-      fetchSpy.mockResolvedValueOnce({
-        status: 500,
-        ok: false,
-        json: async () => ({}),
-        text: async () => 'Internal Server Error',
-      } as Response);
-
-      await expect(
-        client.createAgent({ name: 'Bot', systemPrompt: 'Sys' }),
-      ).rejects.toThrow(ProvisionError);
-    });
-  });
-
-  // --- listAgents ---
-
-  describe('listAgents()', () => {
-    it('returns an array of agents', async () => {
-      const client = new Patter({ apiKey: 'key' });
-      fetchSpy.mockResolvedValueOnce({
-        status: 200,
-        ok: true,
-        json: async () => [
-          {
-            id: 'a1',
-            name: 'Agent1',
-            system_prompt: 'p',
-            model: 'm',
-            voice: 'v',
-            voice_provider: 'openai',
-            language: 'en',
-            first_message: null,
-            tools: null,
-          },
-        ],
-        text: async () => '',
-      } as Response);
-
-      const agents = await client.listAgents();
-      expect(agents).toHaveLength(1);
-      expect(agents[0].id).toBe('a1');
-    });
-
-    it('throws ProvisionError on failure', async () => {
-      const client = new Patter({ apiKey: 'key' });
-      fetchSpy.mockResolvedValueOnce({
-        status: 403,
-        ok: false,
-        json: async () => ({}),
-        text: async () => 'Forbidden',
-      } as Response);
-
-      await expect(client.listAgents()).rejects.toThrow(ProvisionError);
-    });
-  });
-
-  // --- buyNumber ---
-
-  describe('buyNumber()', () => {
-    it('buys a number and returns mapped response', async () => {
-      const client = new Patter({ apiKey: 'key' });
-      fetchSpy.mockResolvedValueOnce({
-        status: 201,
-        ok: true,
-        json: async () => ({
-          id: 'num-1',
-          number: '+15551234567',
-          provider: 'twilio',
-          country: 'US',
-          status: 'active',
-          agent_id: null,
-        }),
-        text: async () => '',
-      } as Response);
-
-      const num = await client.buyNumber({ country: 'US' });
-      expect(num.number).toBe('+15551234567');
-      expect(num.provider).toBe('twilio');
-    });
-
-    it('throws ProvisionError on failure', async () => {
-      const client = new Patter({ apiKey: 'key' });
-      fetchSpy.mockResolvedValueOnce({
-        status: 400,
-        ok: false,
-        json: async () => ({}),
-        text: async () => 'Bad Request',
-      } as Response);
-
-      await expect(client.buyNumber()).rejects.toThrow(ProvisionError);
-    });
-  });
-
-  // --- assignAgent ---
-
-  describe('assignAgent()', () => {
-    it('assigns an agent to a number', async () => {
-      const client = new Patter({ apiKey: 'key' });
-      fetchSpy.mockResolvedValueOnce({
-        status: 200,
-        ok: true,
-        json: async () => ({}),
-        text: async () => '',
-      } as Response);
-
-      await expect(
-        client.assignAgent('num-1', 'agent-1'),
-      ).resolves.toBeUndefined();
-    });
-
-    it('throws ProvisionError on failure', async () => {
-      const client = new Patter({ apiKey: 'key' });
-      fetchSpy.mockResolvedValueOnce({
-        status: 500,
-        ok: false,
-        json: async () => ({}),
-        text: async () => 'Error',
-      } as Response);
-
-      await expect(
-        client.assignAgent('num-1', 'agent-1'),
-      ).rejects.toThrow(ProvisionError);
-    });
-  });
-
-  // --- listCalls ---
-
-  describe('listCalls()', () => {
-    it('returns an array of calls', async () => {
-      const client = new Patter({ apiKey: 'key' });
-      fetchSpy.mockResolvedValueOnce({
-        status: 200,
-        ok: true,
-        json: async () => [
-          {
-            id: 'call-1',
-            direction: 'inbound',
-            caller: '+15551111111',
-            callee: '+15552222222',
-            started_at: '2025-01-01T00:00:00Z',
-            ended_at: null,
-            duration_seconds: null,
-            status: 'in-progress',
-            transcript: null,
-          },
-        ],
-        text: async () => '',
-      } as Response);
-
-      const calls = await client.listCalls(10);
-      expect(calls).toHaveLength(1);
-      expect(calls[0].caller).toBe('+15551111111');
-    });
-
-    it('throws RangeError for invalid limit', async () => {
-      const client = new Patter({ apiKey: 'key' });
-      await expect(client.listCalls(0)).rejects.toThrow(RangeError);
-      await expect(client.listCalls(1001)).rejects.toThrow(RangeError);
-      await expect(client.listCalls(1.5)).rejects.toThrow(RangeError);
-    });
-
-    it('throws ProvisionError on failure', async () => {
-      const client = new Patter({ apiKey: 'key' });
-      fetchSpy.mockResolvedValueOnce({
-        status: 500,
-        ok: false,
-        json: async () => ({}),
-        text: async () => 'Error',
-      } as Response);
-
-      await expect(client.listCalls()).rejects.toThrow(ProvisionError);
-    });
-  });
-
-  // --- disconnect ---
-
-  describe('disconnect()', () => {
-    it('delegates to connection.disconnect', async () => {
-      const client = new Patter({ apiKey: 'key' });
-      await expect(client.disconnect()).resolves.toBeUndefined();
-    });
+  it('rejection message hints at local mode', () => {
+    expect(
+      () => new Patter({ apiKey: 'pt_xxx' } as never),
+    ).toThrow(/`carrier:` and `phoneNumber:`/);
   });
 });
 
@@ -307,7 +67,7 @@ describe('Patter (local mode)', () => {
       phoneNumber: '+15551234567',
       webhookUrl: 'example.com/wh',
     });
-    expect(client.apiKey).toBe('');
+    expect(client).toBeDefined();
   });
 
   it('throws if phoneNumber missing in local mode', () => {
@@ -329,11 +89,10 @@ describe('Patter (local mode)', () => {
     expect(phone).toBeDefined();
   });
 
-  it('throws if mode=local but carrier missing', () => {
+  it('throws if carrier missing', () => {
     expect(
       () =>
         new Patter({
-          mode: 'local',
           phoneNumber: '+15551234567',
           webhookUrl: 'example.com/wh',
         } as never),
@@ -408,15 +167,6 @@ describe('Patter (local mode)', () => {
   // --- serve() ---
 
   describe('serve()', () => {
-    it('throws if called in cloud mode', async () => {
-      const cloud = new Patter({ apiKey: 'key' });
-      await expect(
-        cloud.serve({
-          agent: { systemPrompt: 'Hi' },
-        }),
-      ).rejects.toThrow('serve() is only available in local mode');
-    });
-
     it('throws if agent is missing', async () => {
       const client = new Patter({
         carrier: makeTwilioCarrier(),
@@ -475,13 +225,6 @@ describe('Patter (local mode)', () => {
   // --- test() ---
 
   describe('test()', () => {
-    it('throws if called in cloud mode', async () => {
-      const cloud = new Patter({ apiKey: 'key' });
-      await expect(
-        cloud.test({ agent: { systemPrompt: 'Hi' } }),
-      ).rejects.toThrow('test() is only available in local mode');
-    });
-
     it('runs a test session in local mode', async () => {
       const client = new Patter({
         carrier: makeTwilioCarrier(),
@@ -589,17 +332,6 @@ describe('Patter (local mode)', () => {
       await expect(
         client.call({ to: '+15559999999', agent: { systemPrompt: 'Hi' } }),
       ).rejects.toThrow(ProvisionError);
-    });
-  });
-
-  // --- call() cloud mode ---
-
-  describe('call() in cloud mode', () => {
-    it('throws PatterConnectionError if not connected and no onMessage', async () => {
-      const client = new Patter({ apiKey: 'key' });
-      await expect(
-        client.call({ to: '+15559999999' }),
-      ).rejects.toThrow(PatterConnectionError);
     });
   });
 });

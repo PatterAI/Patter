@@ -37,9 +37,7 @@ new Patter(options: PatterOptions)
 ## Carriers
 
 ```typescript
-import { Twilio, Telnyx } from "getpatter";                         // flat aliases
-import * as twilio from "getpatter/carriers/twilio";                 // namespaced
-import * as telnyx from "getpatter/carriers/telnyx";
+import { Twilio, Telnyx } from "getpatter";
 ```
 
 ### Twilio
@@ -70,9 +68,7 @@ class Telnyx {
 ## Engines
 
 ```typescript
-import { OpenAIRealtime, ElevenLabsConvAI } from "getpatter";        // flat aliases
-import * as openai from "getpatter/engines/openai";                   // namespaced
-import * as elevenlabs from "getpatter/engines/elevenlabs";
+import { OpenAIRealtime, ElevenLabsConvAI } from "getpatter";
 ```
 
 ### OpenAIRealtime
@@ -105,11 +101,6 @@ class ElevenLabsConvAI {
 
 ```typescript
 import { DeepgramSTT, WhisperSTT, CartesiaSTT, AssemblyAISTT, SonioxSTT } from "getpatter";
-import * as deepgram from "getpatter/stt/deepgram";
-import * as whisper from "getpatter/stt/whisper";
-import * as cartesia from "getpatter/stt/cartesia";
-import * as assemblyai from "getpatter/stt/assemblyai";
-import * as soniox from "getpatter/stt/soniox";
 ```
 
 Each class accepts an options object with `apiKey?: string` and falls back to the provider's standard env var. See the [STT page](/typescript-sdk/stt) for full constructor signatures.
@@ -120,11 +111,6 @@ Each class accepts an options object with `apiKey?: string` and falls back to th
 
 ```typescript
 import { ElevenLabsTTS, OpenAITTS, CartesiaTTS, RimeTTS, LMNTTTS } from "getpatter";
-import * as elevenlabs from "getpatter/tts/elevenlabs";
-import * as openai from "getpatter/tts/openai";
-import * as cartesia from "getpatter/tts/cartesia";
-import * as rime from "getpatter/tts/rime";
-import * as lmnt from "getpatter/tts/lmnt";
 ```
 
 Each class accepts an options object with `apiKey?: string` and falls back to the provider's standard env var. See the [TTS page](/typescript-sdk/tts) for full constructor signatures.
@@ -135,11 +121,6 @@ Each class accepts an options object with `apiKey?: string` and falls back to th
 
 ```typescript
 import { OpenAILLM, AnthropicLLM, GroqLLM, CerebrasLLM, GoogleLLM } from "getpatter";
-import * as openai from "getpatter/llm/openai";
-import * as anthropic from "getpatter/llm/anthropic";
-import * as groq from "getpatter/llm/groq";
-import * as cerebras from "getpatter/llm/cerebras";
-import * as google from "getpatter/llm/google";
 ```
 
 Each class accepts an options object with `apiKey?: string` and falls back to the provider's standard env var (`GoogleLLM` prefers `GEMINI_API_KEY`, falls back to `GOOGLE_API_KEY`). Pass an instance via `phone.agent({ llm })` for pipeline mode. `llm` is mutually exclusive with `onMessage` on `serve()` and is ignored when `engine` is set. See the [LLM page](/typescript-sdk/llm) for full constructor signatures.
@@ -357,20 +338,4 @@ export {
 } from "getpatter";
 ```
 
-Namespaced modules:
-
-```typescript
-import * as twilio from "getpatter/carriers/twilio";
-import * as telnyx from "getpatter/carriers/telnyx";
-import * as openai from "getpatter/engines/openai";
-import * as elevenlabs from "getpatter/engines/elevenlabs";
-import * as deepgram from "getpatter/stt/deepgram";
-import * as whisper from "getpatter/stt/whisper";
-import * as cartesia from "getpatter/stt/cartesia";
-import * as openaiLlm from "getpatter/llm/openai";
-import * as anthropicLlm from "getpatter/llm/anthropic";
-import * as groqLlm from "getpatter/llm/groq";
-import * as cerebrasLlm from "getpatter/llm/cerebras";
-import * as googleLlm from "getpatter/llm/google";
-// etc.
-```
+All public classes are imported by name from the package barrel — there are no subpath entry points in `getpatter`.

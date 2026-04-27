@@ -12,8 +12,12 @@
  * one-time warning — we deliberately do not fake enhancement, so tests or
  * runtime audio quality metrics remain truthful.
  *
- * TODO: when DeepFilterNet3 has a stable community ONNX export, ship a
- * default loader that downloads the model on first use.
+ * Known limitation: each ``process()`` call runs the model on a single
+ * isolated chunk, which can introduce per-chunk discontinuities at
+ * sample-rate-conversion boundaries. The stateful resamplers in
+ * ``transcoding.ts`` carry phase across calls but the DFN inference itself
+ * does not — when DeepFilterNet3 ships a stable community ONNX export with
+ * a streaming-friendly graph, swap to that and remove this caveat.
  */
 import { getLogger } from '../logger';
 import { StatefulResampler } from '../transcoding';
@@ -54,12 +58,12 @@ type OnnxRuntimeModule = {
 };
 
 async function loadOnnxRuntime(): Promise<OnnxRuntimeModule | null> {
-  // ``onnxruntime-node`` is an optional peer dependency; loaded via a
-  // dynamic expression so TypeScript does not require it at build time.
+  // ``onnxruntime-node`` is an optional peer dependency. The variable
+  // module-name cast avoids a TS2307 hard build-time requirement when the
+  // peer dep is not installed (same pattern as gemini-live.ts).
   try {
-    const moduleName = 'onnxruntime-node';
-    const dynamicImport = new Function('m', 'return import(m)') as (m: string) => Promise<unknown>;
-    const mod = await dynamicImport(moduleName);
+    const specifier = 'onnxruntime-node' as string;
+    const mod = await import(specifier as string);
     return mod as OnnxRuntimeModule;
   } catch {
     return null;

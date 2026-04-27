@@ -92,7 +92,7 @@ cp .env.example .env
 # Edit .env with your API keys
 ```
 
-> **Telnyx:** Telnyx is a fully supported telephony provider alternative to Twilio. Both carriers receive equal support for DTMF, transfer, recording, and metrics.
+> **Telnyx:** Telnyx is a fully supported telephony provider alternative to Twilio. Both carriers receive equal support for DTMF, transfer, and metrics. Recording is Twilio-only.
 
 ## Voice Modes
 
@@ -167,7 +167,7 @@ await phone.serve(
 ```python
 await phone.call(
     to: str,
-    agent: Agent | None = None,            # required in local mode
+    agent: Agent | None = None,            # required
     from_number: str = "",
     first_message: str = "",
     machine_detection: bool = False,
@@ -195,7 +195,7 @@ from getpatter.stt import deepgram, whisper, cartesia, soniox, speechmatics, ass
 from getpatter.tts import elevenlabs, openai as openai_tts, cartesia as cartesia_tts, rime, lmnt
 
 stt = deepgram.STT()                    # reads DEEPGRAM_API_KEY
-tts = elevenlabs.TTS(voice="rachel")    # reads ELEVENLABS_API_KEY
+tts = elevenlabs.TTS(voice="sarah")     # reads ELEVENLABS_API_KEY
 ```
 
 ## Examples
@@ -233,7 +233,7 @@ from getpatter.tts import elevenlabs
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")
 agent = phone.agent(
     stt=deepgram.STT(),              # reads DEEPGRAM_API_KEY
-    tts=elevenlabs.TTS(voice="rachel"),   # reads ELEVENLABS_API_KEY
+    tts=elevenlabs.TTS(voice="sarah"),    # reads ELEVENLABS_API_KEY
     system_prompt="You are a helpful voice assistant.",
 )
 await phone.serve(agent, tunnel=True)
@@ -248,7 +248,7 @@ phone = Patter(carrier=Twilio(), phone_number="+15550001234")
 agent = phone.agent(
     stt=DeepgramSTT(),                     # reads DEEPGRAM_API_KEY
     llm=AnthropicLLM(),                    # reads ANTHROPIC_API_KEY
-    tts=ElevenLabsTTS(voice_id="rachel"),  # reads ELEVENLABS_API_KEY
+    tts=ElevenLabsTTS(voice_id="sarah"),   # reads ELEVENLABS_API_KEY
     system_prompt="You are a helpful voice assistant.",
 )
 await phone.serve(agent, tunnel=True)

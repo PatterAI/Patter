@@ -33,17 +33,11 @@ await phone.serve({ agent });                                                   
 
 That's the full file. Every provider class reads its API key from an env var when you omit `apiKey`, so as long as you have `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and `OPENAI_API_KEY` set, the example above is paste-runnable.
 
-## SDK Mode
+## How Patter runs
 
-Patter runs in **local mode**, embedding an Express server and all provider adapters directly in your application:
+Patter runs entirely in your own process — an embedded Express server and all provider adapters live directly in your application. Bring your own telephony (Twilio or Telnyx) and AI provider credentials; no external platform or hosted backend required.
 
-| Mode | Use Case | Requirements |
-|------|----------|--------------|
-| **Local** | Self-hosted, full control | Telephony + AI provider keys |
-
-<Info>
-  **Local mode** includes an embedded Express server and all provider adapters. Use it when you want full control over your infrastructure.
-</Info>
+<Note>A hosted Patter Cloud option will return in a future release.</Note>
 
 ## What's Next
 
@@ -52,7 +46,7 @@ Patter runs in **local mode**, embedding an Express server and all provider adap
     Connect your first agent to a phone call.
   </Card>
   <Card title="Configuration" icon="gear" href="/typescript-sdk/configuration">
-    All constructor parameters and mode options.
+    All constructor parameters and options.
   </Card>
   <Card title="Agents" icon="robot" href="/typescript-sdk/agents">
     Configure voice, model, tools, and guardrails.

@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from getpatter.models import HookContext, PipelineHooks
 
-logger = logging.getLogger("patter")
+logger = logging.getLogger("getpatter")
 
 
 async def _call_hook(hook, *args):

@@ -247,7 +247,6 @@ class TestRingTimeoutPropagation:
             phone_number="+15551234567",
         )
         phone = Patter.__new__(Patter)
-        phone._mode = "local"
         phone._local_config = cfg
         phone._server = None
 
@@ -285,7 +284,6 @@ class TestRingTimeoutPropagation:
             phone_number="+15551234567",
         )
         phone = Patter.__new__(Patter)
-        phone._mode = "local"
         phone._local_config = cfg
         phone._server = None
 
@@ -319,7 +317,6 @@ class TestRingTimeoutPropagation:
             phone_number="+15551234567",
         )
         phone = Patter.__new__(Patter)
-        phone._mode = "local"
         phone._local_config = cfg
         phone._server = None
 

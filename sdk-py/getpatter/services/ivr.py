@@ -40,7 +40,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 if TYPE_CHECKING:
     from getpatter.models import CallControl
 
-logger = logging.getLogger("patter.ivr")
+logger = logging.getLogger("getpatter.ivr")
 
 
 # ── DTMF event taxonomy ─────────────────────────────────────────────────

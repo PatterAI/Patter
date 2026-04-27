@@ -205,14 +205,26 @@ export interface LLMProvider {
 // Built-in OpenAI provider
 // ---------------------------------------------------------------------------
 
+/** Optional sampling kwargs forwarded into the OpenAI Chat Completions body. */
+export interface OpenAILLMSamplingOptions {
+  /** Sampling temperature [0, 2]. */
+  temperature?: number;
+  /** Max tokens in the assistant response. */
+  maxTokens?: number;
+}
+
 /** LLM provider backed by OpenAI Chat Completions (streaming). */
 export class OpenAILLMProvider implements LLMProvider {
   private readonly apiKey: string;
   readonly model: string;
+  private readonly temperature?: number;
+  private readonly maxTokens?: number;
 
-  constructor(apiKey: string, model: string) {
+  constructor(apiKey: string, model: string, sampling: OpenAILLMSamplingOptions = {}) {
     this.apiKey = apiKey;
     this.model = model;
+    this.temperature = sampling.temperature;
+    this.maxTokens = sampling.maxTokens;
   }
 
   async *stream(
@@ -227,6 +239,8 @@ export class OpenAILLMProvider implements LLMProvider {
       // cost. Without this the dashboard shows LLM cost = 0 for OpenAI.
       stream_options: { include_usage: true },
     };
+    if (this.temperature !== undefined) body.temperature = this.temperature;
+    if (this.maxTokens !== undefined) body.max_tokens = this.maxTokens;
     if (tools) {
       body.tools = tools;
     }

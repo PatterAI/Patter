@@ -143,7 +143,7 @@ class MetricsStore:
 
         Called from ``Patter.call()`` so that even calls that never reach the
         media channel (busy, no-answer, carrier-rejected) show up in the
-        dashboard. See BUG #06.
+        dashboard.
         """
         call_id = data.get("call_id", "")
         if not call_id:

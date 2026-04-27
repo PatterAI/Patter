@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 import websockets
 
-logger = logging.getLogger("patter")
+logger = logging.getLogger("getpatter")
 
 ELEVENLABS_CONVAI_URL = "wss://api.elevenlabs.io/v1/convai/conversation"
 ELEVENLABS_SIGNED_URL = (
@@ -29,7 +29,7 @@ class ElevenLabsConvAIAdapter:
     def __init__(
         self,
         api_key: str,
-        agent_id: str = "",
+        agent_id: str,
         voice_id: str = "EXAVITQu4vr4xnSDxMaL",
         model_id: str = "eleven_flash_v2_5",
         language: str = "it",
@@ -38,6 +38,12 @@ class ElevenLabsConvAIAdapter:
         input_audio_format: str | None = None,
         use_signed_url: bool = False,
     ):
+        if not agent_id:
+            raise ValueError(
+                "ElevenLabsConvAIAdapter requires a non-empty agent_id. "
+                "Create an agent in the ElevenLabs Conversational AI dashboard "
+                "and pass its id."
+            )
         self.api_key = api_key
         self.agent_id = agent_id
         self.voice_id = voice_id

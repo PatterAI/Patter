@@ -6,6 +6,10 @@ export interface OpenAILLMOptions {
   apiKey?: string;
   /** Chat Completions model id. Defaults to ``"gpt-4o-mini"``. */
   model?: string;
+  /** Sampling temperature [0, 2]. */
+  temperature?: number;
+  /** Max tokens in the assistant response. */
+  maxTokens?: number;
 }
 
 /**
@@ -15,7 +19,7 @@ export interface OpenAILLMOptions {
  * ```ts
  * import * as openai from "getpatter/llm/openai";
  * const llm = new openai.LLM();                           // reads OPENAI_API_KEY
- * const llm = new openai.LLM({ apiKey: "sk-...", model: "gpt-4o-mini" });
+ * const llm = new openai.LLM({ apiKey: "sk-...", model: "gpt-4o-mini", temperature: 0.4 });
  * ```
  */
 export class LLM extends _OpenAILLM {
@@ -27,6 +31,9 @@ export class LLM extends _OpenAILLM {
         "OpenAI LLM requires an apiKey. Pass { apiKey: 'sk-...' } or set OPENAI_API_KEY.",
       );
     }
-    super(key, opts.model ?? "gpt-4o-mini");
+    super(key, opts.model ?? "gpt-4o-mini", {
+      temperature: opts.temperature,
+      maxTokens: opts.maxTokens,
+    });
   }
 }

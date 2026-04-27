@@ -15,7 +15,7 @@ from typing import AsyncGenerator, AsyncIterator, Protocol, runtime_checkable
 
 from getpatter.observability.tracing import SPAN_LLM, start_span
 
-logger = logging.getLogger("patter")
+logger = logging.getLogger("getpatter")
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 # Patter Templates
 
-Each template is a standalone repository — clone, add your `.env`, and run. Both Python and TypeScript included.
+This directory is a **stub-redirect index**. The files in `developer/`, `enterprise/`, and `startup/` are not runnable on their own — each is a short pointer to a standalone template repository on GitHub. Open any stub to see the redirect URL, or use the table below to jump straight to the repo. Every template ships with both Python and TypeScript implementations.
 
 | Template | Description | Repo |
 |---|---|---|

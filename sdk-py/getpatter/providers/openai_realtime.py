@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 import websockets
 
-logger = logging.getLogger("patter.openai_realtime")
+logger = logging.getLogger("getpatter.openai_realtime")
 
 
 class OpenAIRealtimeAdapter:

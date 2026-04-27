@@ -8,7 +8,9 @@ icon: "house"
 
 Connect any AI agent to phone calls with 4 lines of code. Patter handles telephony, speech-to-text, and text-to-speech so you can focus on your agent.
 
-Patter is the open-source SDK that gives your AI agent a phone number. Point it at any function that returns a string and Patter handles the rest — telephony, speech-to-text, text-to-speech, and real-time audio streaming. You build the agent, we connect it to the phone. Works with Python and TypeScript, supports Twilio and Telnyx, and runs in both local and self-hosted modes.
+Patter is the open-source SDK that gives your AI agent a phone number. Point it at any function that returns a string and Patter handles the rest — telephony, speech-to-text, text-to-speech, and real-time audio streaming. You build the agent, we connect it to the phone. Works with Python and TypeScript, supports Twilio and Telnyx, and runs locally on your own infrastructure.
+
+<Note>A hosted Patter Cloud option will return in a future release. For now the SDK runs entirely in your process — bring your own carrier and AI provider credentials.</Note>
 
 <CardGroup cols={2}>
   <Card title="Quick Start" icon="rocket" href="/python-sdk/quickstart">
@@ -38,7 +40,7 @@ Your agent receives transcribed speech as text and returns a text response. Patt
 - **4 lines of code** — Write an async handler. Patter does the rest.
 - **Python & TypeScript** — Same API surface in both languages. Pick your stack.
 - **Multiple voice modes** — OpenAI Realtime, ElevenLabs ConvAI, or custom Pipeline (STT + TTS).
-- **Twilio & Telnyx** — Both telephony providers are fully supported with equal feature parity: DTMF, transfer, recording, and cost tracking.
+- **Twilio & Telnyx** — Both telephony providers are fully supported with equal feature parity: DTMF, transfer, and cost tracking. Recording is Twilio-only.
 - **Call transfer & recording** — Built-in system tools for transferring calls and enabling recording.
 - **Guardrails** — Block terms, run custom checks, or replace responses before they reach the caller.
 - **Built-in tunnel** — Cloudflare tunnel support, no ngrok required.

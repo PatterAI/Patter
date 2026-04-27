@@ -154,12 +154,20 @@ class TestElevenLabsConvAIAdapter:
     def test_init_defaults(self) -> None:
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
-        adapter = ElevenLabsConvAIAdapter(api_key="el-test")
-        assert adapter.agent_id == ""
+        adapter = ElevenLabsConvAIAdapter(api_key="el-test", agent_id="agent-test")
+        assert adapter.agent_id == "agent-test"
         assert adapter.voice_id == "EXAVITQu4vr4xnSDxMaL"
         assert adapter.model_id == "eleven_flash_v2_5"
         assert adapter.language == "it"
         assert adapter.first_message == ""
+
+    def test_init_requires_agent_id(self) -> None:
+        import pytest
+
+        from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
+
+        with pytest.raises(ValueError, match="agent_id"):
+            ElevenLabsConvAIAdapter(api_key="el-test", agent_id="")
 
     def test_repr(self) -> None:
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
@@ -173,14 +181,14 @@ class TestElevenLabsConvAIAdapter:
     async def test_send_audio_noop_when_no_ws(self) -> None:
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
-        adapter = ElevenLabsConvAIAdapter(api_key="el-test")
+        adapter = ElevenLabsConvAIAdapter(api_key="el-test", agent_id="agent-test")
         await adapter.send_audio(b"\x00\x01\x02\x03")
 
     @pytest.mark.asyncio
     async def test_close_when_no_ws(self) -> None:
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
-        adapter = ElevenLabsConvAIAdapter(api_key="el-test")
+        adapter = ElevenLabsConvAIAdapter(api_key="el-test", agent_id="agent-test")
         await adapter.close()
         assert adapter._running is False
         assert adapter._ws is None
@@ -189,7 +197,7 @@ class TestElevenLabsConvAIAdapter:
     async def test_close_when_ws_exists(self) -> None:
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
-        adapter = ElevenLabsConvAIAdapter(api_key="el-test")
+        adapter = ElevenLabsConvAIAdapter(api_key="el-test", agent_id="agent-test")
         adapter._ws = AsyncMock()
         adapter._running = True
         await adapter.close()

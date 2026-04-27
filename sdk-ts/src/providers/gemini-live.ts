@@ -75,7 +75,7 @@ export class GeminiLiveAdapter {
     // gemini-live-2.5-flash-preview was shut down Dec 9, 2025.
     // Current native-audio live model (v1alpha-only) is the dated preview.
     // Callers can override via GeminiLive({ model: ... }).
-    // TODO verify against Google docs: https://ai.google.dev/gemini-api/docs/live
+    // Default model — see https://ai.google.dev/gemini-api/docs/live
     this.model = options.model ?? 'gemini-2.5-flash-native-audio-preview-09-2025';
     this.voice = options.voice ?? 'Puck';
     this.instructions = options.instructions ?? '';

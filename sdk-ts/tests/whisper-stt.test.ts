@@ -8,17 +8,18 @@ describe('WhisperSTT', () => {
   });
 
   it('accepts custom model', () => {
-    const stt = new WhisperSTT('sk-test', 'whisper-1');
+    // New TS positional order matches Python: (apiKey, language, model, bufferSize)
+    const stt = new WhisperSTT('sk-test', undefined, 'whisper-1');
     expect(stt).toBeDefined();
   });
 
   it('accepts custom language', () => {
-    const stt = new WhisperSTT('sk-test', 'whisper-1', 'it');
+    const stt = new WhisperSTT('sk-test', 'it', 'whisper-1');
     expect(stt).toBeDefined();
   });
 
   it('accepts custom buffer size', () => {
-    const stt = new WhisperSTT('sk-test', 'whisper-1', 'en', 64000);
+    const stt = new WhisperSTT('sk-test', 'en', 'whisper-1', 64000);
     expect(stt).toBeDefined();
   });
 
@@ -82,7 +83,7 @@ describe('WhisperSTT', () => {
   it('buffers audio and triggers transcription at threshold', async () => {
     // Use a small buffer size so we can trigger transcription easily
     const bufferSize = 100;
-    const stt = new WhisperSTT('sk-test', 'whisper-1', 'en', bufferSize);
+    const stt = new WhisperSTT('sk-test', 'en', 'whisper-1', bufferSize);
 
     const mockResponse = {
       ok: true,
@@ -113,7 +114,7 @@ describe('WhisperSTT', () => {
 
   it('does not trigger callback for empty transcription', async () => {
     const bufferSize = 100;
-    const stt = new WhisperSTT('sk-test', 'whisper-1', 'en', bufferSize);
+    const stt = new WhisperSTT('sk-test', 'en', 'whisper-1', bufferSize);
 
     const mockResponse = {
       ok: true,
@@ -137,7 +138,7 @@ describe('WhisperSTT', () => {
 
   it('handles API errors gracefully', async () => {
     const bufferSize = 100;
-    const stt = new WhisperSTT('sk-test', 'whisper-1', 'en', bufferSize);
+    const stt = new WhisperSTT('sk-test', 'en', 'whisper-1', bufferSize);
 
     const mockResponse = {
       ok: false,
@@ -164,7 +165,7 @@ describe('WhisperSTT', () => {
 
   it('flushes remaining buffer on close when above 25% threshold', async () => {
     const bufferSize = 100;
-    const stt = new WhisperSTT('sk-test', 'whisper-1', 'en', bufferSize);
+    const stt = new WhisperSTT('sk-test', 'en', 'whisper-1', bufferSize);
 
     const mockResponse = {
       ok: true,
@@ -198,7 +199,7 @@ describe('WhisperSTT', () => {
 
   it('does not flush on close when buffer is below 25% threshold', async () => {
     const bufferSize = 100;
-    const stt = new WhisperSTT('sk-test', 'whisper-1', 'en', bufferSize);
+    const stt = new WhisperSTT('sk-test', 'en', 'whisper-1', bufferSize);
 
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
       ok: true,
@@ -222,7 +223,7 @@ describe('WhisperSTT', () => {
 
   it('sends correct headers and form data to OpenAI API', async () => {
     const bufferSize = 50;
-    const stt = new WhisperSTT('sk-my-key', 'whisper-1', 'fr', bufferSize);
+    const stt = new WhisperSTT('sk-my-key', 'fr', 'whisper-1', bufferSize);
 
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
       ok: true,

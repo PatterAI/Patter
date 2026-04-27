@@ -191,10 +191,16 @@ function validateTelnyxSignature(
 ): boolean {
 
   try {
-    // Reject if timestamp is missing or too old (replay attack protection)
+    // Reject if timestamp is missing or too old (replay attack protection).
+    // Telnyx sends ``telnyx-timestamp`` as seconds since epoch (per docs:
+    // https://developers.telnyx.com/docs/messaging/webhooks#webhook-signing).
+    // Heuristic: any value below 1e12 is seconds (a 2026 epoch in seconds is
+    // ~1.77e9, while milliseconds is ~1.77e12), so we promote to ms before
+    // comparing. This stays correct if Telnyx ever switches the unit.
     const ts = parseInt(timestamp, 10);
     if (!Number.isFinite(ts)) return false;
-    const ageMs = Date.now() - ts;
+    const tsMs = ts < 1e12 ? ts * 1000 : ts;
+    const ageMs = Date.now() - tsMs;
     if (ageMs < 0 || ageMs > toleranceSec * 1000) return false;
 
     const payload = `${timestamp}|${rawBody}`;
@@ -1090,6 +1096,17 @@ export class EmbeddedServer {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${telnyxKey}`,
     } as const;
+    // Heuristic playback-duration estimate — ~150 ms per character
+    // (≈14 chars/sec English speech) plus a 1500 ms buffer, capped at
+    // 30 s. Avoids cutting the voicemail mid-sentence on hangup. The
+    // proper fix is to subscribe to Telnyx ``call.speak.ended`` and hang
+    // up there; kept as a heuristic since the webhook plumbing change
+    // is broader than this handler. Mirrors
+    // ``sdk-py/getpatter/handlers/telnyx_handler.py::handle_amd_result``.
+    const estimatedMs = Math.min(
+      30_000,
+      Math.ceil((this.voicemailMessage.length / 14) * 1000) + 1500,
+    );
     try {
       const speakResp = await fetch(
         `https://api.telnyx.com/v2/calls/${encoded}/actions/speak`,
@@ -1109,6 +1126,7 @@ export class EmbeddedServer {
           `Telnyx voicemail speak failed: ${speakResp.status} ${(await speakResp.text()).slice(0, 200)}`,
         );
       }
+      await new Promise((resolve) => setTimeout(resolve, estimatedMs));
       await fetch(`https://api.telnyx.com/v2/calls/${encoded}/actions/hangup`, {
         method: 'POST',
         headers,
@@ -1275,7 +1293,12 @@ export class EmbeddedServer {
           const payload = data.media?.payload ?? '';
           handler.handleAudio(Buffer.from(payload, 'base64'));
         } else if (event === 'mark') {
-          // mark.name tracks last confirmed audio chunk (used for barge-in accuracy)
+          // Twilio confirms playback of a previously sent audio chunk.
+          // Forward the mark name so barge-in heuristics can compare it
+          // against the latest sent mark. Mirrors Python's
+          // ``twilio_handler.on_mark`` propagation.
+          const markName = String(data.mark?.name ?? '');
+          if (markName) await handler.onMark(markName);
         } else if (event === 'dtmf') {
           const digit = data.dtmf?.digit ?? '';
           await handler.handleDtmf(digit);

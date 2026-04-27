@@ -46,7 +46,7 @@ pip install getpatter
 ```
 
 ```python
-from patter import Patter, Twilio, OpenAIRealtime
+from getpatter import Patter, Twilio, OpenAIRealtime
 
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")
 agent = phone.agent(engine=OpenAIRealtime(), system_prompt="You are a friendly receptionist for Acme Corp.", first_message="Hello! How can I help?")
@@ -91,7 +91,6 @@ await phone.serve({ agent, tunnel: true });
 | Voicemail drop | `call(voicemailMessage="...")` | [patter-outbound-calls](https://github.com/PatterAI/patter-outbound-calls) |
 | Test mode (no phone) | `phone.test(agent)` | [docs](https://docs.getpatter.com) |
 | Built-in tunnel | Cloudflare (auto) | [docs](https://docs.getpatter.com) |
-| MCP server | `patter-mcp` CLI | [docs](https://docs.getpatter.com) |
 
 ## How It Works
 
@@ -168,7 +167,7 @@ cp .env.example .env
 # Edit .env with your API keys
 ```
 
-> **Telnyx:** Telnyx is a fully supported telephony provider alternative to Twilio. Both carriers receive equal support for DTMF, transfer, recording, and metrics.
+> **Telnyx:** Telnyx is a fully supported telephony provider alternative to Twilio. Both carriers receive equal support for DTMF, transfer, and metrics. Recording is Twilio-only.
 
 ### Docker
 

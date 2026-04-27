@@ -7,7 +7,6 @@
     "light": "#FFFFFF",
     "dark": "#18181B"
   },
-  "favicon": "/favicon.svg",
   "logo": {
     "light": "/logo/patter-logo.png",
     "dark": "/logo/patter-logo-dark.png",

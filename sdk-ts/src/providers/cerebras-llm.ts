@@ -37,6 +37,10 @@ export interface CerebrasLLMOptions {
   baseUrl?: string;
   /** Gzip request payloads for faster TTFT on large prompts. */
   gzipCompression?: boolean;
+  /** Sampling temperature [0, 2]. */
+  temperature?: number;
+  /** Max tokens in the assistant response. */
+  maxTokens?: number;
 }
 
 /** LLM provider backed by Cerebras's OpenAI-compatible Inference API. */
@@ -45,6 +49,8 @@ export class CerebrasLLMProvider implements LLMProvider {
   readonly model: string;
   private readonly baseUrl: string;
   private readonly gzipCompression: boolean;
+  private readonly temperature?: number;
+  private readonly maxTokens?: number;
 
   constructor(options: CerebrasLLMOptions) {
     if (!options.apiKey) {
@@ -56,6 +62,8 @@ export class CerebrasLLMProvider implements LLMProvider {
     this.model = options.model ?? DEFAULT_MODEL;
     this.baseUrl = options.baseUrl ?? CEREBRAS_BASE_URL;
     this.gzipCompression = options.gzipCompression ?? false;
+    this.temperature = options.temperature;
+    this.maxTokens = options.maxTokens;
   }
 
   async *stream(
@@ -68,6 +76,8 @@ export class CerebrasLLMProvider implements LLMProvider {
       stream: true,
       stream_options: { include_usage: true },
     };
+    if (this.temperature !== undefined) body.temperature = this.temperature;
+    if (this.maxTokens !== undefined) body.max_tokens = this.maxTokens;
     if (tools) body.tools = tools;
 
     const headers: Record<string, string> = {

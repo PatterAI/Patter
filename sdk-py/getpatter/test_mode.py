@@ -22,7 +22,7 @@ import logging
 import time
 import uuid
 
-logger = logging.getLogger("patter")
+logger = logging.getLogger("getpatter")
 
 
 class TestSession:

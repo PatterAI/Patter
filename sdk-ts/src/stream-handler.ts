@@ -624,6 +624,26 @@ export class StreamHandler {
     }
   }
 
+  /**
+   * Last mark name Twilio has confirmed playback of. Mirrors the Python
+   * ``TwilioAudioSender.last_confirmed_mark`` field — barge-in heuristics
+   * compare this against the latest sent mark to decide whether the agent's
+   * audio has actually reached the caller yet.
+   */
+  lastConfirmedMark = '';
+
+  /**
+   * Handle a Twilio ``mark`` event acknowledging that a previously sent
+   * audio chunk has been played out. Mirrors Python's
+   * ``twilio_handler.py``: ``audio_sender.on_mark_confirmed(mark_name)`` +
+   * ``handler.on_mark(mark_name)``.
+   */
+  async onMark(markName: string): Promise<void> {
+    if (markName) {
+      this.lastConfirmedMark = markName;
+    }
+  }
+
   /** Handle call stop / stream end. */
   async handleStop(): Promise<void> {
     this.clearGraceTimer();
@@ -658,7 +678,13 @@ export class StreamHandler {
 
   /**
    * Encode a PCM 16kHz audio chunk for the telephony provider.
-   * Twilio requires mulaw 8kHz; Telnyx accepts PCM 16kHz natively.
+   *
+   * Both Twilio and Telnyx negotiate PCMU (mulaw) 8 kHz on the bidirectional
+   * media stream — Twilio always, and Telnyx because ``streaming_start``
+   * (server.ts) requests ``stream_bidirectional_codec=PCMU`` at 8 kHz. So
+   * the wire format for both providers is mulaw 8 kHz; we resample 16 kHz
+   * PCM16 → 8 kHz then encode to mulaw. Mirrors the Python pipeline path
+   * (sdk-py/getpatter/handlers/telnyx_handler.py::TelnyxAudioSender).
    *
    * Maintains a 1-byte carry across calls so unaligned HTTP chunks from
    * streaming TTS providers never byte-swap the PCM16 samples downstream.
@@ -666,12 +692,9 @@ export class StreamHandler {
   private encodePipelineAudio(pcm16k: Buffer): string {
     const aligned = this.alignPcm16(pcm16k);
     if (aligned.length === 0) return '';
-    if (this.deps.bridge.telephonyProvider === 'twilio') {
-      const pcm8k = this.outboundResampler.process(aligned);
-      const mulaw = pcm16ToMulaw(pcm8k);
-      return mulaw.toString('base64');
-    }
-    return aligned.toString('base64');
+    const pcm8k = this.outboundResampler.process(aligned);
+    const mulaw = pcm16ToMulaw(pcm8k);
+    return mulaw.toString('base64');
   }
 
   /**

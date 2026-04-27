@@ -6,7 +6,7 @@ export interface Logger {
 }
 
 const defaultLogger: Logger = {
-  info: (msg, ...args) => console.log(`[PATTER] ${msg}`, ...args),
+  info: (msg, ...args) => console.info(`[PATTER] ${msg}`, ...args),
   warn: (msg, ...args) => console.warn(`[PATTER] WARNING: ${msg}`, ...args),
   error: (msg, ...args) => console.error(`[PATTER] ERROR: ${msg}`, ...args),
   debug: () => {},

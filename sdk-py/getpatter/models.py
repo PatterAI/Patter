@@ -9,7 +9,7 @@ if TYPE_CHECKING:
     from getpatter.providers.base import AudioFilter, BackgroundAudioPlayer, VADProvider
     from getpatter.services.llm_loop import LLMProvider
 
-logger = logging.getLogger("patter")
+logger = logging.getLogger("getpatter")
 
 
 @dataclass(frozen=True)

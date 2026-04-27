@@ -21,7 +21,7 @@ from getpatter.services.call_log import (
 )
 from getpatter.utils.log_sanitize import sanitize_log_value
 
-logger = logging.getLogger("patter")
+logger = logging.getLogger("getpatter")
 
 
 def _validate_telnyx_signature(
@@ -42,8 +42,14 @@ def _validate_telnyx_signature(
         ts = int(timestamp)
     except (TypeError, ValueError):
         return False
+    # Telnyx sends ``telnyx-timestamp`` as seconds since epoch (per docs:
+    # https://developers.telnyx.com/docs/messaging/webhooks#webhook-signing).
+    # Heuristic: any value below 1e12 is seconds (a 2026 epoch in seconds is
+    # ~1.77e9, while milliseconds is ~1.77e12), so promote to ms before
+    # comparing. Stays correct if Telnyx ever switches the unit.
+    ts_ms = ts * 1000 if ts < 1_000_000_000_000 else ts
     now_ms = int(time.time() * 1000)
-    age_ms = now_ms - ts
+    age_ms = now_ms - ts_ms
     if age_ms < 0 or age_ms > tolerance_sec * 1000:
         return False
     try:
@@ -336,7 +342,8 @@ class EmbeddedServer:
         # Twilio posts here for every status transition of a call
         # (initiated → ringing → in-progress → completed | no-answer |
         # busy | failed | canceled). Keeps the dashboard honest even when
-        # the call never reaches the media channel. See BUG #06.
+        # the call never reaches the media channel and no media-stream
+        # webhook is fired.
         @app.post("/webhooks/twilio/status")
         async def twilio_status_callback(request: Request):
             form_or_response = await _read_and_validate_twilio_form(request)
@@ -489,7 +496,7 @@ class EmbeddedServer:
             # Telnyx Call Control is a REST API — the webhook body is a
             # notification, not a command transport. We react by POSTing
             # actions/answer and actions/streaming_start to the Call Control
-            # REST endpoint. See BUG #16.
+            # REST endpoint.
             api_key = self.config.telnyx_key
             if not api_key:
                 logger.warning("Telnyx webhook: missing telnyx_key in LocalConfig")
@@ -498,6 +505,19 @@ class EmbeddedServer:
             import httpx as _httpx
             api_base = "https://api.telnyx.com/v2"
             auth_headers = {"Authorization": f"Bearer {api_key}"}
+
+            # DTMF received during the call — Telnyx fires
+            # ``call.dtmf.received`` as a notification webhook (separate from
+            # the in-band media-stream ``dtmf`` frame). Acknowledge it so
+            # Telnyx does not retry. Mirrors the TS server.
+            if event_type == "call.dtmf.received":
+                digit = str(payload.get("digit", "")).strip()
+                if digit:
+                    logger.info(
+                        "Telnyx DTMF received (webhook): %s",
+                        sanitize_log_value(digit),
+                    )
+                return Response(status_code=200)
 
             try:
                 if event_type == "call.initiated":
@@ -664,8 +684,12 @@ class EmbeddedServer:
                 sanitize_log_value(model),
             )
         if self.dashboard:
-            print("\n──── Dashboard ─────────────────────────────────────")
-            logger.info("URL: http://127.0.0.1:%s/", port)
+            logger.info(
+                "\n──── Dashboard ─────────────────────────────────────\n"
+                "URL: http://127.0.0.1:%s/\n"
+                "────────────────────────────────────────────────────\n",
+                port,
+            )
             if not self.dashboard_token:
                 logger.warning(
                     "Dashboard is enabled without authentication. "
@@ -673,7 +697,6 @@ class EmbeddedServer:
                     "This is safe for local development but should "
                     "not be exposed on a public network."
                 )
-            print("────────────────────────────────────────────────────\n")
 
         # Suppress Uvicorn's "Uvicorn running on..." startup message
         # but keep request logs (INFO level) visible

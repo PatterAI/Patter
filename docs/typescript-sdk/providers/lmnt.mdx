@@ -19,16 +19,10 @@ No vendor SDK is required — `LMNTTTS` uses the platform `fetch`, so it works o
 ## Usage
 
 ```typescript
-// Namespaced import
-import * as lmnt from "getpatter/tts/lmnt";
-
-const tts = new lmnt.TTS();                           // reads LMNT_API_KEY
-const tts = new lmnt.TTS({ model: "blizzard", voice: "leah" });
-
-// Flat alias (equivalent)
 import { LMNTTTS } from "getpatter";
 
-const tts = new LMNTTTS({ model: "blizzard", voice: "leah" });
+const tts = new LMNTTTS();                                            // reads LMNT_API_KEY
+const tts2 = new LMNTTTS({ model: "blizzard", voice: "leah" });
 ```
 
 In an agent:

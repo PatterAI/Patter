@@ -37,7 +37,7 @@ from getpatter.services.pipeline_hooks import PipelineHookExecutor
 from getpatter.services.sentence_chunker import SentenceChunker
 from getpatter.utils.log_sanitize import mask_phone_number, sanitize_log_value
 
-logger = logging.getLogger("patter")
+logger = logging.getLogger("getpatter")
 
 
 # ---------------------------------------------------------------------------
@@ -747,6 +747,13 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
         if isinstance(el_config, dict):
             agent_id = el_config.get("agent_id", "")
 
+        if not agent_id:
+            raise ValueError(
+                "ElevenLabs ConvAI requires agent.elevenlabs_convai={'agent_id': '...'}. "
+                "Create an agent in the ElevenLabs Conversational AI dashboard "
+                "and pass its id."
+            )
+
         self._adapter = ElevenLabsConvAIAdapter(
             api_key=self._elevenlabs_key,
             agent_id=agent_id,
@@ -1369,10 +1376,10 @@ class PipelineStreamHandler(StreamHandler):
                 logger.debug("User: %s", sanitize_log_value(transcript.text))
 
                 if self.metrics is not None:
-                    self.metrics.start_turn_if_idle()  # turn may already be open (Fix 1)
-                    # TODO Wave 7: pass per-turn audio_seconds by accumulating
-                    # audio bytes between start_turn and record_stt_complete.
-                    # Currently relies on total _stt_byte_count / end_call() estimation.
+                    self.metrics.start_turn_if_idle()  # turn may already be open
+                    # Known limitation: per-turn audio_seconds is not tracked
+                    # here; metrics rely on total _stt_byte_count plus the
+                    # end_call() estimation pass.
                     self.metrics.record_vad_stop()
                     self.metrics.record_stt_complete(transcript.text)
                     self.metrics.record_stt_final_timestamp()

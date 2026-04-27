@@ -7,21 +7,14 @@ export type {
   IncomingMessage,
   STTConfig,
   TTSConfig,
-  PatterOptions,
   LocalOptions,
   AgentOptions,
   ServeOptions,
   LocalCallOptions,
-  ConnectOptions,
-  CallOptions,
   MessageHandler,
   CallEventHandler,
   PipelineMessageHandler,
   ToolDefinition,
-  CreateAgentOptions,
-  Agent,
-  PhoneNumber,
-  Call,
   PipelineHooks,
   HookContext,
 } from "./types";
@@ -143,7 +136,7 @@ export { ConvAI as ElevenLabsConvAI } from "./engines/elevenlabs";
 export type { ConvAIOptions as ElevenLabsConvAIOptions } from "./engines/elevenlabs";
 
 // Tunnel markers.
-export { CloudflareTunnel, Static as StaticTunnel } from "./tunnels";
+export { CloudflareTunnel, Ngrok, Static as StaticTunnel } from "./tunnels";
 
 // Public API primitives.
 export { Tool, Guardrail, tool, guardrail } from "./public-api";
@@ -222,6 +215,7 @@ export {
   initTracing,
   startSpan,
   isTracingEnabled,
+  EventBus,
   SPAN_CALL,
   SPAN_STT,
   SPAN_LLM,
@@ -232,4 +226,5 @@ export type {
   Span,
   InitTracingOptions,
   CallEvent,
+  PatterEventType,
 } from "./observability";

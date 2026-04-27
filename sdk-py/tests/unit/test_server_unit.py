@@ -954,14 +954,16 @@ class TestDashboardAuth:
 
 
 class TestBanner:
-    """show_banner() prints the ASCII art banner."""
+    """show_banner() emits the ASCII art banner via the package logger."""
 
-    def test_show_banner_runs(self, capsys) -> None:
+    def test_show_banner_runs(self, caplog) -> None:
+        import logging
+
         from getpatter.banner import show_banner
 
-        show_banner()
-        captured = capsys.readouterr()
-        assert "██" in captured.out
+        with caplog.at_level(logging.INFO, logger="getpatter"):
+            show_banner()
+        assert any("██" in rec.getMessage() for rec in caplog.records)
 
 
 # ---------------------------------------------------------------------------

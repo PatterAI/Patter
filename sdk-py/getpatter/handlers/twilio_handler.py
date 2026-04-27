@@ -35,7 +35,7 @@ from getpatter.handlers.stream_handler import (
 _TRANSFER_CALL_TOOL = TRANSFER_CALL_TOOL
 _END_CALL_TOOL = END_CALL_TOOL
 
-logger = logging.getLogger("patter")
+logger = logging.getLogger("getpatter")
 
 # Maximum size (bytes) of a single WebSocket message accepted from Twilio.
 # Twilio audio frames are ~160 bytes (mulaw 8 kHz, 20 ms).  1 MB is
@@ -106,7 +106,7 @@ class TwilioAudioSender(AudioSender):
     When ``input_is_mulaw_8k`` is True, incoming bytes are already in Twilio's
     native codec (g711 mulaw @ 8 kHz) and are forwarded as-is. This is the
     correct path for OpenAI Realtime on Twilio — feeding OpenAI's 24 kHz PCM16
-    into a 16 → 8 kHz resampler produces audibly broken audio (see BUG #10).
+    into a 16 → 8 kHz resampler produces audibly broken audio.
     """
 
     def __init__(self, websocket, stream_sid: str, input_is_mulaw_8k: bool = False) -> None:

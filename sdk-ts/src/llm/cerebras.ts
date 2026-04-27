@@ -10,6 +10,10 @@ export interface CerebrasLLMOptions {
   baseUrl?: string;
   /** Gzip request payloads for faster TTFT on large prompts. */
   gzipCompression?: boolean;
+  /** Sampling temperature [0, 2]. */
+  temperature?: number;
+  /** Max tokens in the assistant response. */
+  maxTokens?: number;
 }
 
 /**
@@ -36,6 +40,8 @@ export class LLM extends _CerebrasLLM {
       model: opts.model,
       baseUrl: opts.baseUrl,
       gzipCompression: opts.gzipCompression,
+      temperature: opts.temperature,
+      maxTokens: opts.maxTokens,
     });
   }
 }

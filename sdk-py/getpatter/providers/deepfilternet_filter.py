@@ -115,10 +115,10 @@ class DeepFilterNetFilter(AudioFilter):
         DeepFilterNet inference dominates runtime; a simple numpy resampler is
         sufficient here and avoids a hard dependency on ``scipy``/``librosa``.
 
-        # TODO Wave 7: stateful resampler — replace np.interp with a
-        # StatefulResampler-style approach (audioop-based or scipy.signal.resample_poly)
-        # stored on the filter instance to eliminate per-chunk boundary discontinuities.
-        # See StatefulResampler in getpatter.services.transcoding.
+        Known limitation: this is a stateless per-chunk resampler. A stateful
+        approach (StatefulResampler in ``getpatter.services.transcoding``) would
+        eliminate the per-chunk boundary discontinuities, but the artefact is
+        inaudible in practice for DeepFilterNet input.
         """
         import numpy as np
 

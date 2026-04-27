@@ -1,18 +1,36 @@
-import { PatterConnection } from "./connection";
-import { PatterConnectionError, ProvisionError } from "./errors";
+/**
+ * Patter — local-mode SDK client.
+ *
+ * The SDK runs in a single mode: locally on your own infrastructure.  You
+ * bring a telephony carrier (``Twilio`` or ``Telnyx``) and Patter wires up the
+ * media plane, agent loop, and webhook server in your process.
+ *
+ * ```ts
+ * import { Patter, Twilio, OpenAIRealtime } from "getpatter";
+ *
+ * const phone = new Patter({
+ *   carrier: new Twilio(),
+ *   phoneNumber: "+15551234567",
+ *   tunnel: true,
+ * });
+ *
+ * await phone.serve({
+ *   agent: phone.agent({
+ *     engine: new OpenAIRealtime(),
+ *     systemPrompt: "You are a helpful receptionist.",
+ *   }),
+ * });
+ * ```
+ *
+ * Patter Cloud (a hosted backend that previously powered ``apiKey``-based
+ * usage) is not part of this release.  Cloud mode will return in a future
+ * release; until then, passing ``apiKey`` raises a clear error.
+ */
+import { ProvisionError } from "./errors";
 import type { TunnelHandle } from "./tunnel";
 import type {
-  PatterOptions,
   LocalOptions,
-  ConnectOptions,
-  CallOptions,
   LocalCallOptions,
-  STTConfig,
-  TTSConfig,
-  CreateAgentOptions,
-  Agent,
-  PhoneNumber,
-  Call,
   AgentOptions,
   ServeOptions,
 } from "./types";
@@ -24,29 +42,6 @@ import { ConvAI as ElevenLabsConvAI } from "./engines/elevenlabs";
 import { CloudflareTunnel, Static as StaticTunnel } from "./tunnels";
 import { getLogger } from "./logger";
 
-const DEFAULT_BACKEND_URL = "wss://api.getpatter.com";
-const DEFAULT_REST_URL = "https://api.getpatter.com";
-
-function sttConfigToDict(cfg: STTConfig): Record<string, unknown> {
-  const out: Record<string, unknown> = {
-    provider: cfg.provider,
-    api_key: cfg.apiKey,
-    language: cfg.language,
-  };
-  if (cfg.options) out.options = { ...cfg.options };
-  return out;
-}
-
-function ttsConfigToDict(cfg: TTSConfig): Record<string, unknown> {
-  const out: Record<string, unknown> = {
-    provider: cfg.provider,
-    api_key: cfg.apiKey,
-    voice: cfg.voice,
-  };
-  if (cfg.options) out.options = { ...cfg.options };
-  return out;
-}
-
 /** Internal local-mode state — holds carrier + resolved runtime settings. */
 export interface ResolvedLocalConfig {
   carrier: TwilioCarrier | TelnyxCarrier;
@@ -57,83 +52,64 @@ export interface ResolvedLocalConfig {
 }
 
 export class Patter {
-  readonly apiKey: string;
-  private readonly backendUrl: string;
-  private readonly restUrl: string;
-  private readonly connection: PatterConnection;
-  private readonly mode: 'cloud' | 'local';
-  private localConfig: ResolvedLocalConfig | null;
+  private localConfig: ResolvedLocalConfig;
   private embeddedServer: EmbeddedServer | null = null;
   private tunnelHandle: TunnelHandle | null = null;
 
-  constructor(options: PatterOptions | LocalOptions) {
-    // Local mode is selected when a ``carrier`` instance is present or the
-    // caller passes ``mode: 'local'`` explicitly.
-    const hasCarrier =
-      'carrier' in options &&
-      (options as LocalOptions).carrier !== undefined;
-    const isLocal =
-      ('mode' in options && options.mode === 'local') || hasCarrier;
+  constructor(options: LocalOptions) {
+    // Hard-fail if the caller passed a Patter Cloud ``apiKey``.  Cloud mode
+    // does not exist in this SDK release; surface the change loudly so users
+    // discover it immediately rather than silently sending traffic nowhere.
+    if ((options as { apiKey?: unknown }).apiKey !== undefined) {
+      throw new Error(
+        'Patter Cloud is not yet available in this SDK release. ' +
+          'Use local mode with `carrier:` and `phoneNumber:`. ' +
+          'Cloud mode will return in a future release.',
+      );
+    }
 
-    if (isLocal) {
-      const local = options as LocalOptions;
+    if (!options.phoneNumber) {
+      throw new Error('Local mode requires phoneNumber');
+    }
+    if (!options.carrier) {
+      throw new Error(
+        'Local mode requires a `carrier` instance. ' +
+          'Pass `carrier: new Twilio({...})` or `carrier: new Telnyx({...})`.',
+      );
+    }
 
-      if (!local.phoneNumber) {
-        throw new Error('Local mode requires phoneNumber');
-      }
-      if (!local.carrier) {
+    const carrier = options.carrier;
+
+    // Tunnel normalization — StaticTunnel's hostname becomes webhookUrl.
+    const tunnel = options.tunnel;
+    let tunnelWebhookUrl: string | undefined;
+    if (tunnel instanceof StaticTunnel) {
+      if (options.webhookUrl) {
         throw new Error(
-          'Local mode requires a `carrier` instance. ' +
-            'Pass `carrier: new Twilio({...})` or `carrier: new Telnyx({...})`.',
+          'Cannot use both `tunnel: new StaticTunnel(...)` and `webhookUrl`. ' +
+            'Pick one.',
         );
       }
-
-      const carrier = local.carrier;
-
-      // Tunnel normalization — StaticTunnel's hostname becomes webhookUrl.
-      const tunnel = local.tunnel;
-      let tunnelWebhookUrl: string | undefined;
-      if (tunnel instanceof StaticTunnel) {
-        if (local.webhookUrl) {
-          throw new Error(
-            'Cannot use both `tunnel: new StaticTunnel(...)` and `webhookUrl`. ' +
-              'Pick one.',
-          );
-        }
-        tunnelWebhookUrl = tunnel.hostname;
-      }
-
-      this.mode = 'local';
-      // Normalize webhookUrl: strip any http(s):// prefix and trailing slash
-      // so downstream callers that prefix 'wss://' or 'https://' don't double-scheme.
-      const rawWebhook = tunnelWebhookUrl ?? local.webhookUrl;
-      const normalizedWebhook = rawWebhook
-        ? rawWebhook.replace(/^https?:\/\//, '').replace(/\/$/, '')
-        : undefined;
-
-      this.localConfig = {
-        carrier,
-        phoneNumber: local.phoneNumber,
-        webhookUrl: normalizedWebhook,
-        tunnel: local.tunnel,
-        openaiKey: local.openaiKey,
-      };
-      this.apiKey = '';
-      this.backendUrl = DEFAULT_BACKEND_URL;
-      this.restUrl = DEFAULT_REST_URL;
-      this.connection = new PatterConnection('', DEFAULT_BACKEND_URL);
-    } else {
-      const cloudOpts = options as PatterOptions;
-      this.mode = 'cloud';
-      this.localConfig = null;
-      this.apiKey = cloudOpts.apiKey;
-      this.backendUrl = cloudOpts.backendUrl ?? DEFAULT_BACKEND_URL;
-      this.restUrl = cloudOpts.restUrl ?? DEFAULT_REST_URL;
-      this.connection = new PatterConnection(this.apiKey, this.backendUrl);
+      tunnelWebhookUrl = tunnel.hostname;
     }
+
+    // Normalize webhookUrl: strip any http(s):// prefix and trailing slash
+    // so downstream callers that prefix 'wss://' or 'https://' don't double-scheme.
+    const rawWebhook = tunnelWebhookUrl ?? options.webhookUrl;
+    const normalizedWebhook = rawWebhook
+      ? rawWebhook.replace(/^https?:\/\//, '').replace(/\/$/, '')
+      : undefined;
+
+    this.localConfig = {
+      carrier,
+      phoneNumber: options.phoneNumber,
+      webhookUrl: normalizedWebhook,
+      tunnel: options.tunnel,
+      openaiKey: options.openaiKey,
+    };
   }
 
-  // === Local mode ===
+  // === Agent definition ===
 
   agent(opts: AgentOptions): AgentOptions {
     let working: AgentOptions = { ...opts };
@@ -154,7 +130,7 @@ export class Patter {
         };
         // Surface the engine's apiKey to local config so pipeline-mode
         // ``LLMLoop`` and Realtime adapter have a key when no onMessage is set.
-        if (this.localConfig && !this.localConfig.openaiKey) {
+        if (!this.localConfig.openaiKey) {
           this.localConfig = { ...this.localConfig, openaiKey: engine.apiKey };
         }
       } else if (engine instanceof ElevenLabsConvAI) {
@@ -229,11 +205,9 @@ export class Patter {
     return working;
   }
 
-  async serve(opts: ServeOptions): Promise<void> {
-    if (this.mode !== 'local' || !this.localConfig) {
-      throw new Error('serve() is only available in local mode');
-    }
+  // === Serve / test / call ===
 
+  async serve(opts: ServeOptions): Promise<void> {
     // Validate agent
     if (!opts.agent || typeof opts.agent !== 'object') {
       throw new TypeError('agent is required. Use phone.agent() to create one.');
@@ -335,180 +309,129 @@ export class Patter {
   }
 
   async test(opts: ServeOptions): Promise<void> {
-    if (this.mode !== 'local') {
-      throw new Error('test() is only available in local mode');
-    }
     const { TestSession } = await import('./test-mode');
     const session = new TestSession();
     await session.run({
       agent: opts.agent,
-      openaiKey: this.localConfig?.openaiKey,
+      openaiKey: this.localConfig.openaiKey,
       onMessage: typeof opts.onMessage === 'function' ? opts.onMessage : undefined,
       onCallStart: opts.onCallStart,
       onCallEnd: opts.onCallEnd,
     });
   }
 
-  // === Cloud mode legacy ===
-
-  async connect(options: ConnectOptions): Promise<void> {
-    // Self-hosted: register number first
-    if (options.provider && options.providerKey && options.number) {
-      await this.registerNumber(
-        options.provider,
-        options.providerKey,
-        options.number,
-        options.providerSecret,
-        options.country ?? "US",
-        options.stt,
-        options.tts
-      );
+  async call(options: LocalCallOptions): Promise<void> {
+    if (!options.to) {
+      throw new Error("'to' phone number is required");
     }
+    if (!options.to.startsWith('+')) {
+      throw new Error(`'to' must be in E.164 format (e.g., '+1234567890'). Got: '${options.to}'`);
+    }
+    const { phoneNumber, webhookUrl, carrier } = this.localConfig;
 
-    await this.connection.connect({
-      onMessage: options.onMessage,
-      onCallStart: options.onCallStart,
-      onCallEnd: options.onCallEnd,
-    });
-  }
+    if (carrier.kind === 'telnyx') {
+      // Telnyx outbound call via Call Control API.
+      // Note: ``stream_url``/``stream_track`` are NOT accepted on
+      // ``POST /v2/calls`` — Telnyx ignores them at dial time. Streaming is
+      // started later via ``actions/streaming_start`` once the call is
+      // answered. Mirrors ``sdk-py/getpatter/providers/telnyx_adapter.py``.
+      const telnyxKey = carrier.apiKey;
+      const connectionId = carrier.connectionId;
 
-  async call(options: CallOptions | LocalCallOptions): Promise<void> {
-    if (this.mode === 'local') {
-      const localOpts = options as LocalCallOptions;
-      if (!localOpts.to) {
-        throw new Error("'to' phone number is required");
+      const telnyxPayload: Record<string, unknown> = {
+        connection_id: connectionId,
+        from: phoneNumber,
+        to: options.to,
+      };
+      if (options.ringTimeout !== undefined) {
+        telnyxPayload.timeout_secs = Math.max(1, Math.floor(options.ringTimeout));
       }
-      if (!localOpts.to.startsWith('+')) {
-        throw new Error(`'to' must be in E.164 format (e.g., '+1234567890'). Got: '${localOpts.to}'`);
-      }
-      if (!this.localConfig) {
-        throw new Error('local config missing');
-      }
-      const { phoneNumber, webhookUrl, carrier } = this.localConfig;
-
-      if (carrier.kind === 'telnyx') {
-        // Telnyx outbound call via Call Control API
-        const telnyxKey = carrier.apiKey;
-        const connectionId = carrier.connectionId;
-        const streamUrl =
-          `wss://${webhookUrl}/ws/stream/${encodeURIComponent(localOpts.to)}` +
-          `?caller=${encodeURIComponent(phoneNumber)}&callee=${encodeURIComponent(localOpts.to)}`;
-
-        const telnyxPayload: Record<string, unknown> = {
-          connection_id: connectionId,
-          from: phoneNumber,
-          to: localOpts.to,
-          stream_url: streamUrl,
-          stream_track: 'both_tracks',
-        };
-        if (localOpts.ringTimeout !== undefined) {
-          telnyxPayload.timeout_secs = Math.max(1, Math.floor(localOpts.ringTimeout));
-        }
-        const response = await fetch('https://api.telnyx.com/v2/calls', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${telnyxKey}`,
-          },
-          body: JSON.stringify(telnyxPayload),
-        });
-        if (!response.ok) {
-          throw new ProvisionError(`Failed to initiate Telnyx call: ${await response.text()}`);
-        }
-        if (this.embeddedServer) {
-          try {
-            const body = (await response.clone().json()) as { data?: { call_control_id?: string } };
-            const callId = body.data?.call_control_id;
-            if (callId) {
-              this.embeddedServer.metricsStore.recordCallInitiated({
-                call_id: callId,
-                caller: phoneNumber,
-                callee: localOpts.to,
-                direction: 'outbound',
-              });
-            }
-          } catch {
-            /* non-fatal */
-          }
-        }
-        return;
-      }
-
-      // Twilio
-      const twilioSid = carrier.accountSid;
-      const twilioToken = carrier.authToken;
-      const statusCallbackUrl = `https://${webhookUrl}/webhooks/twilio/status`;
-      const url = `https://api.twilio.com/2010-04-01/Accounts/${twilioSid}/Calls.json`;
-      const params = new URLSearchParams({
-        To: localOpts.to,
-        From: phoneNumber,
-        Url: `https://${webhookUrl}/webhooks/twilio/voice`,
-        StatusCallback: statusCallbackUrl,
-        StatusCallbackMethod: 'POST',
-        // Full lifecycle so the dashboard sees ringing/no-answer/busy/failed
-        // transitions even when media never arrives.
-        StatusCallbackEvent: 'initiated ringing answered completed',
-      });
-      if (localOpts.machineDetection) {
-        params.append('MachineDetection', 'DetectMessageEnd');
-        params.append('AsyncAmd', 'true');
-        params.append('AsyncAmdStatusCallback', `https://${webhookUrl}/webhooks/twilio/amd`);
-      }
-      if (localOpts.ringTimeout !== undefined) {
-        params.append('Timeout', String(Math.max(1, Math.floor(localOpts.ringTimeout))));
-      }
-      // Store voicemail message on the running server so AMD webhook can use it
-      if (localOpts.voicemailMessage && this.embeddedServer) {
-        this.embeddedServer.voicemailMessage = localOpts.voicemailMessage;
-      }
-      const response = await fetch(url, {
+      const response = await fetch('https://api.telnyx.com/v2/calls', {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          Authorization: `Basic ${Buffer.from(`${twilioSid}:${twilioToken}`).toString('base64')}`,
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${telnyxKey}`,
         },
-        body: params.toString(),
+        body: JSON.stringify(telnyxPayload),
       });
       if (!response.ok) {
-        throw new ProvisionError(`Failed to initiate call: ${await response.text()}`);
+        throw new ProvisionError(`Failed to initiate Telnyx call: ${await response.text()}`);
       }
-      // Pre-register the call so the dashboard shows attempts even when the
-      // callee never answers (no-answer, busy, carrier-rejected). BUG #06.
       if (this.embeddedServer) {
         try {
-          const body = (await response.clone().json()) as { sid?: string };
-          const callSid = body.sid;
-          if (callSid) {
+          const body = (await response.clone().json()) as { data?: { call_control_id?: string } };
+          const callId = body.data?.call_control_id;
+          if (callId) {
             this.embeddedServer.metricsStore.recordCallInitiated({
-              call_id: callSid,
+              call_id: callId,
               caller: phoneNumber,
-              callee: localOpts.to,
+              callee: options.to,
               direction: 'outbound',
             });
           }
         } catch {
-          /* non-fatal — the statusCallback will register anyway */
+          /* non-fatal */
         }
       }
       return;
     }
 
-    const cloudOpts = options as CallOptions;
-    if (!this.connection.isConnected) {
-      if (cloudOpts.onMessage) {
-        await this.connection.connect({ onMessage: cloudOpts.onMessage });
-      } else {
-        throw new PatterConnectionError(
-          "Not connected. Call connect() first or pass onMessage."
-        );
+    // Twilio
+    const twilioSid = carrier.accountSid;
+    const twilioToken = carrier.authToken;
+    const statusCallbackUrl = `https://${webhookUrl}/webhooks/twilio/status`;
+    const url = `https://api.twilio.com/2010-04-01/Accounts/${twilioSid}/Calls.json`;
+    const params = new URLSearchParams({
+      To: options.to,
+      From: phoneNumber,
+      Url: `https://${webhookUrl}/webhooks/twilio/voice`,
+      StatusCallback: statusCallbackUrl,
+      StatusCallbackMethod: 'POST',
+      // Full lifecycle so the dashboard sees ringing/no-answer/busy/failed
+      // transitions even when media never arrives.
+      StatusCallbackEvent: 'initiated ringing answered completed',
+    });
+    if (options.machineDetection) {
+      params.append('MachineDetection', 'DetectMessageEnd');
+      params.append('AsyncAmd', 'true');
+      params.append('AsyncAmdStatusCallback', `https://${webhookUrl}/webhooks/twilio/amd`);
+    }
+    if (options.ringTimeout !== undefined) {
+      params.append('Timeout', String(Math.max(1, Math.floor(options.ringTimeout))));
+    }
+    // Store voicemail message on the running server so AMD webhook can use it
+    if (options.voicemailMessage && this.embeddedServer) {
+      this.embeddedServer.voicemailMessage = options.voicemailMessage;
+    }
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Authorization: `Basic ${Buffer.from(`${twilioSid}:${twilioToken}`).toString('base64')}`,
+      },
+      body: params.toString(),
+    });
+    if (!response.ok) {
+      throw new ProvisionError(`Failed to initiate call: ${await response.text()}`);
+    }
+    // Pre-register the call so the dashboard shows attempts even when the
+    // callee never answers (no-answer, busy, carrier-rejected). BUG #06.
+    if (this.embeddedServer) {
+      try {
+        const body = (await response.clone().json()) as { sid?: string };
+        const callSid = body.sid;
+        if (callSid) {
+          this.embeddedServer.metricsStore.recordCallInitiated({
+            call_id: callSid,
+            caller: phoneNumber,
+            callee: options.to,
+            direction: 'outbound',
+          });
+        }
+      } catch {
+        /* non-fatal — the statusCallback will register anyway */
       }
     }
-
-    await this.connection.requestCall(
-      cloudOpts.fromNumber ?? "",
-      cloudOpts.to,
-      cloudOpts.firstMessage ?? ""
-    );
   }
 
   async disconnect(): Promise<void> {
@@ -519,100 +442,6 @@ export class Patter {
     if (this.embeddedServer) {
       await this.embeddedServer.stop();
       this.embeddedServer = null;
-    }
-    await this.connection.disconnect();
-  }
-
-  // === Agent Management ===
-
-  async createAgent(opts: CreateAgentOptions): Promise<Agent> {
-    const response = await fetch(`${this.restUrl}/api/agents`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-API-Key": this.apiKey },
-      body: JSON.stringify({
-        name: opts.name, system_prompt: opts.systemPrompt,
-        model: opts.model ?? "gpt-4o-mini-realtime-preview",
-        voice: opts.voice ?? "alloy", voice_provider: opts.voiceProvider ?? "openai",
-        language: opts.language ?? "en", first_message: opts.firstMessage ?? null,
-        tools: opts.tools?.map(t => ({ name: t.name, description: t.description, parameters: t.parameters, webhook_url: t.webhookUrl })) ?? null,
-      }),
-    });
-    if (response.status !== 201) throw new ProvisionError(`Failed to create agent: ${await response.text()}`);
-    const data = await response.json() as { id: string; name: string; system_prompt: string; model: string; voice: string; voice_provider: string; language: string; first_message: string | null; tools: unknown };
-    return { id: data.id, name: data.name, systemPrompt: data.system_prompt, model: data.model, voice: data.voice, voiceProvider: data.voice_provider, language: data.language, firstMessage: data.first_message, tools: data.tools as Agent['tools'] };
-  }
-
-  async listAgents(): Promise<Agent[]> {
-    const response = await fetch(`${this.restUrl}/api/agents`, { headers: { "X-API-Key": this.apiKey } });
-    if (!response.ok) throw new ProvisionError(`Failed to list agents: ${response.status}`);
-    const data = await response.json() as Array<{ id: string; name: string; system_prompt: string; model: string; voice: string; voice_provider: string; language: string; first_message: string | null; tools: unknown }>;
-    return data.map(a => ({ id: a.id, name: a.name, systemPrompt: a.system_prompt, model: a.model, voice: a.voice, voiceProvider: a.voice_provider, language: a.language, firstMessage: a.first_message, tools: a.tools as Agent['tools'] }));
-  }
-
-  async buyNumber(opts: { country?: string; provider?: string } = {}): Promise<PhoneNumber> {
-    const response = await fetch(`${this.restUrl}/api/numbers/buy`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-API-Key": this.apiKey },
-      body: JSON.stringify({ country: opts.country ?? "US", provider: opts.provider ?? "twilio" }),
-    });
-    if (response.status !== 201) throw new ProvisionError(`Failed to buy number: ${await response.text()}`);
-    const data = await response.json() as { id: string; number: string; provider: string; country: string; status: string; agent_id: string | null };
-    return { id: data.id, number: data.number, provider: data.provider, country: data.country, status: data.status, agentId: data.agent_id };
-  }
-
-  async assignAgent(numberId: string, agentId: string): Promise<void> {
-    const response = await fetch(`${this.restUrl}/api/phone-numbers/${numberId}/assign-agent`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-API-Key": this.apiKey },
-      body: JSON.stringify({ agent_id: agentId }),
-    });
-    if (response.status !== 200) throw new ProvisionError(`Failed to assign agent: ${await response.text()}`);
-  }
-
-  async listCalls(limit: number = 50): Promise<Call[]> {
-    if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
-      throw new RangeError(`limit must be an integer between 1 and 1000, got ${limit}`);
-    }
-    const response = await fetch(`${this.restUrl}/api/calls?limit=${limit}`, { headers: { "X-API-Key": this.apiKey } });
-    if (!response.ok) throw new ProvisionError(`Failed to list calls: ${response.status}`);
-    const data = await response.json() as Array<{ id: string; direction: string; caller: string; callee: string; started_at: string; ended_at: string | null; duration_seconds: number | null; status: string; transcript: Call['transcript'] }>;
-    return data.map(c => ({ id: c.id, direction: c.direction, caller: c.caller, callee: c.callee, startedAt: c.started_at, endedAt: c.ended_at, durationSeconds: c.duration_seconds, status: c.status, transcript: c.transcript }));
-  }
-
-  // Internal
-  private async registerNumber(
-    provider: string,
-    providerKey: string,
-    number: string,
-    providerSecret?: string,
-    country: string = "US",
-    stt?: STTConfig,
-    tts?: TTSConfig
-  ): Promise<void> {
-    const credentials: Record<string, string> = { api_key: providerKey };
-    if (providerSecret) credentials.api_secret = providerSecret;
-
-    const response = await fetch(`${this.restUrl}/api/phone-numbers`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-API-Key": this.apiKey,
-      },
-      body: JSON.stringify({
-        number,
-        provider,
-        provider_credentials: credentials,
-        country,
-        stt_config: stt ? (stt.toDict?.() ?? sttConfigToDict(stt)) : null,
-        tts_config: tts ? (tts.toDict?.() ?? ttsConfigToDict(tts)) : null,
-      }),
-    });
-
-    if (response.status === 409) return; // Already registered
-    if (response.status !== 201) {
-      throw new ProvisionError(
-        `Failed to register number: ${await response.text()}`
-      );
     }
   }
 }

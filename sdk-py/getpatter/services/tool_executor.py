@@ -8,7 +8,7 @@ import httpx
 
 from getpatter.observability.tracing import SPAN_TOOL, start_span
 
-logger = logging.getLogger("patter")
+logger = logging.getLogger("getpatter")
 
 # Maximum size of a tool webhook response (1 MB).  Responses larger than this
 # are rejected to prevent OOM when the result is forwarded to OpenAI.

@@ -44,13 +44,13 @@ Tool calling works across every provider — each adapter normalizes its vendor-
 
 ## Supported LLM providers
 
-| Flat import | Namespaced import | Env var | Install |
-|---|---|---|---|
-| `OpenAILLM` | `getpatter/llm/openai` → `LLM` | `OPENAI_API_KEY` | included |
-| `AnthropicLLM` | `getpatter/llm/anthropic` → `LLM` | `ANTHROPIC_API_KEY` | included |
-| `GroqLLM` | `getpatter/llm/groq` → `LLM` | `GROQ_API_KEY` | included |
-| `CerebrasLLM` | `getpatter/llm/cerebras` → `LLM` | `CEREBRAS_API_KEY` | included |
-| `GoogleLLM` | `getpatter/llm/google` → `LLM` | `GEMINI_API_KEY` (falls back to `GOOGLE_API_KEY`) | included |
+| Class | Env var | Install |
+|---|---|---|
+| `OpenAILLM` | `OPENAI_API_KEY` | included |
+| `AnthropicLLM` | `ANTHROPIC_API_KEY` | included |
+| `GroqLLM` | `GROQ_API_KEY` | included |
+| `CerebrasLLM` | `CEREBRAS_API_KEY` | included |
+| `GoogleLLM` | `GEMINI_API_KEY` (falls back to `GOOGLE_API_KEY`) | included |
 
 All classes accept an options object with `apiKey?: string` and fall back to the listed env var when it is omitted.
 
@@ -59,11 +59,10 @@ All classes accept an options object with `apiKey?: string` and fall back to the
 OpenAI Chat Completions with streaming + tool calling. Default model `"gpt-4o-mini"`.
 
 ```typescript
-import { OpenAILLM } from "getpatter";                    // flat
-import * as openai from "getpatter/llm/openai";           // namespaced
+import { OpenAILLM } from "getpatter";
 
 const llm = new OpenAILLM();                              // reads OPENAI_API_KEY
-const llm2 = new openai.LLM({ apiKey: "sk-...", model: "gpt-4o-mini" });
+const llm2 = new OpenAILLM({ apiKey: "sk-...", model: "gpt-4o-mini" });
 ```
 
 ### AnthropicLLM
@@ -71,11 +70,10 @@ const llm2 = new openai.LLM({ apiKey: "sk-...", model: "gpt-4o-mini" });
 Anthropic Messages API with native streaming and `tool_use` blocks, normalised to Patter's chunk protocol. Default model `"claude-haiku-4-5-20251001"`. Pass `maxTokens` to override the default token cap.
 
 ```typescript
-import { AnthropicLLM } from "getpatter";                 // flat
-import * as anthropic from "getpatter/llm/anthropic";     // namespaced
+import { AnthropicLLM } from "getpatter";
 
 const llm = new AnthropicLLM();                           // reads ANTHROPIC_API_KEY
-const llm2 = new anthropic.LLM({
+const llm2 = new AnthropicLLM({
   apiKey: "sk-ant-...",
   model: "claude-haiku-4-5-20251001",
   maxTokens: 2048,
@@ -87,11 +85,10 @@ const llm2 = new anthropic.LLM({
 Hardware-accelerated Llama inference via Groq's OpenAI-compatible Chat Completions API at `https://api.groq.com/openai/v1`. Default model `"llama-3.3-70b-versatile"`.
 
 ```typescript
-import { GroqLLM } from "getpatter";                      // flat
-import * as groq from "getpatter/llm/groq";               // namespaced
+import { GroqLLM } from "getpatter";
 
 const llm = new GroqLLM();                                // reads GROQ_API_KEY
-const llm2 = new groq.LLM({ apiKey: "gsk_...", model: "llama-3.3-70b-versatile" });
+const llm2 = new GroqLLM({ apiKey: "gsk_...", model: "llama-3.3-70b-versatile" });
 ```
 
 ### CerebrasLLM
@@ -99,11 +96,10 @@ const llm2 = new groq.LLM({ apiKey: "gsk_...", model: "llama-3.3-70b-versatile" 
 Cerebras Inference API (OpenAI-compatible) at `https://api.cerebras.ai/v1`. Default model `"llama-3.3-70b"`. Supports optional gzip request-body compression via `gzipCompression: true` to reduce time-to-first-token on large prompts — see [Cerebras payload optimization](https://inference-docs.cerebras.ai/payload-optimization).
 
 ```typescript
-import { CerebrasLLM } from "getpatter";                  // flat
-import * as cerebras from "getpatter/llm/cerebras";       // namespaced
+import { CerebrasLLM } from "getpatter";
 
 const llm = new CerebrasLLM();                            // reads CEREBRAS_API_KEY
-const llm2 = new cerebras.LLM({
+const llm2 = new CerebrasLLM({
   apiKey: "csk-...",
   model: "llama-3.3-70b",
   gzipCompression: true,
@@ -115,11 +111,10 @@ const llm2 = new cerebras.LLM({
 Google Gemini via the Developer API (streaming SSE). Default model `"gemini-2.5-flash"`.
 
 ```typescript
-import { GoogleLLM } from "getpatter";                    // flat
-import * as google from "getpatter/llm/google";           // namespaced
+import { GoogleLLM } from "getpatter";
 
 const llm = new GoogleLLM();                              // reads GEMINI_API_KEY, falls back to GOOGLE_API_KEY
-const llm2 = new google.LLM({ apiKey: "AIza...", model: "gemini-2.5-flash" });
+const llm2 = new GoogleLLM({ apiKey: "AIza...", model: "gemini-2.5-flash" });
 ```
 
 ## Custom LLM via `onMessage`

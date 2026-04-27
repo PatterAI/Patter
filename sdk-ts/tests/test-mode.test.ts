@@ -23,6 +23,7 @@ vi.mock('readline', () => {
 // Suppress console output during tests
 beforeEach(() => {
   vi.spyOn(console, 'log').mockImplementation(() => {});
+  vi.spyOn(console, 'info').mockImplementation(() => {});
   vi.spyOn(console, 'error').mockImplementation(() => {});
   vi.spyOn(console, 'warn').mockImplementation(() => {});
 });
@@ -107,8 +108,8 @@ describe('TestSession', () => {
     expect(transcript[0].role).toBe('assistant');
     expect(transcript[0].text).toBe('Welcome! How can I help you?');
 
-    // Also verify console.log was called with the first message
-    expect(console.log).toHaveBeenCalledWith(
+    // Also verify the logger info channel was called with the first message
+    expect(console.info).toHaveBeenCalledWith(
       expect.stringContaining('Welcome! How can I help you?'),
     );
   });
@@ -123,8 +124,8 @@ describe('TestSession', () => {
       onMessage,
     });
 
-    // /history prints conversation entries via console.log
-    const logCalls = (console.log as ReturnType<typeof vi.fn>).mock.calls.map(
+    // /history prints conversation entries via the logger info channel.
+    const logCalls = (console.info as ReturnType<typeof vi.fn>).mock.calls.map(
       (args) => args[0],
     );
     const historyLines = logCalls.filter(
@@ -147,7 +148,7 @@ describe('TestSession', () => {
     });
 
     expect(onCallEnd).toHaveBeenCalledOnce();
-    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('You hung up'));
+    expect(console.info).toHaveBeenCalledWith(expect.stringContaining('You hung up'));
   });
 
   it('handles /transfer command to end session', async () => {
@@ -158,7 +159,7 @@ describe('TestSession', () => {
       agent: baseAgent,
     });
 
-    expect(console.log).toHaveBeenCalledWith(
+    expect(console.info).toHaveBeenCalledWith(
       expect.stringContaining('Transfer -> +15559999999'),
     );
   });

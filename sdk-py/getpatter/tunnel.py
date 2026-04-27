@@ -17,7 +17,7 @@ import shutil
 from dataclasses import dataclass
 from typing import Callable
 
-logger = logging.getLogger("patter")
+logger = logging.getLogger("getpatter")
 
 _TUNNEL_URL_RE = re.compile(r"https://([a-zA-Z0-9._-]+\.trycloudflare\.com)")
 _STARTUP_TIMEOUT = 30  # seconds

@@ -346,20 +346,11 @@ class TestOpenAIRealtimeAdapterIO:
 class TestElevenLabsConvAIAdapterIO:
     """ElevenLabsConvAIAdapter with mocked WebSocket for I/O paths."""
 
-    @pytest.mark.asyncio
-    async def test_connect_without_agent_id(self) -> None:
+    def test_init_rejects_empty_agent_id(self) -> None:
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
-        adapter = ElevenLabsConvAIAdapter(api_key="el-test")
-        mock_ws = AsyncMock()
-
-        with patch("getpatter.providers.elevenlabs_convai.websockets.connect", side_effect=_ws_connect_side_effect(mock_ws)) as mc:
-            await adapter.connect()
-
-        assert adapter._running is True
-        call_url = mc.call_args[0][0]
-        assert "agent_id=" not in call_url
-        mock_ws.send.assert_called_once()
+        with pytest.raises(ValueError, match="agent_id"):
+            ElevenLabsConvAIAdapter(api_key="el-test", agent_id="")
 
     @pytest.mark.asyncio
     async def test_connect_with_agent_id(self) -> None:
@@ -378,7 +369,7 @@ class TestElevenLabsConvAIAdapterIO:
     async def test_connect_with_first_message(self) -> None:
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
-        adapter = ElevenLabsConvAIAdapter(api_key="el-test", first_message="Hi there!")
+        adapter = ElevenLabsConvAIAdapter(api_key="el-test", agent_id="agent-test", first_message="Hi there!")
         mock_ws = AsyncMock()
 
         with patch("getpatter.providers.elevenlabs_convai.websockets.connect", side_effect=_ws_connect_side_effect(mock_ws)):
@@ -391,7 +382,7 @@ class TestElevenLabsConvAIAdapterIO:
     async def test_connect_without_first_message(self) -> None:
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
-        adapter = ElevenLabsConvAIAdapter(api_key="el-test", first_message="")
+        adapter = ElevenLabsConvAIAdapter(api_key="el-test", agent_id="agent-test", first_message="")
         mock_ws = AsyncMock()
 
         with patch("getpatter.providers.elevenlabs_convai.websockets.connect", side_effect=_ws_connect_side_effect(mock_ws)):
@@ -410,7 +401,7 @@ class TestElevenLabsConvAIAdapterIO:
     async def test_send_audio_encodes_base64(self) -> None:
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
-        adapter = ElevenLabsConvAIAdapter(api_key="el-test")
+        adapter = ElevenLabsConvAIAdapter(api_key="el-test", agent_id="agent-test")
         adapter._ws = AsyncMock()
 
         audio = b"\xaa\xbb\xcc"
@@ -436,7 +427,7 @@ class TestElevenLabsConvAIAdapterIO:
     async def test_receive_events_yields_audio(self) -> None:
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
-        adapter = ElevenLabsConvAIAdapter(api_key="el-test")
+        adapter = ElevenLabsConvAIAdapter(api_key="el-test", agent_id="agent-test")
         audio_bytes = b"\xdd\xee"
         encoded = base64.b64encode(audio_bytes).decode("ascii")
         await self._prime_adapter_with_ws(
@@ -455,7 +446,7 @@ class TestElevenLabsConvAIAdapterIO:
     async def test_receive_events_yields_transcripts(self) -> None:
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
-        adapter = ElevenLabsConvAIAdapter(api_key="el-test")
+        adapter = ElevenLabsConvAIAdapter(api_key="el-test", agent_id="agent-test")
         await self._prime_adapter_with_ws(
             adapter,
             _AsyncIterableWS([
@@ -481,7 +472,7 @@ class TestElevenLabsConvAIAdapterIO:
     async def test_receive_events_empty_audio_skipped(self) -> None:
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
-        adapter = ElevenLabsConvAIAdapter(api_key="el-test")
+        adapter = ElevenLabsConvAIAdapter(api_key="el-test", agent_id="agent-test")
         await self._prime_adapter_with_ws(
             adapter,
             _AsyncIterableWS([json.dumps({"type": "audio", "audio": ""})]),
@@ -496,7 +487,7 @@ class TestElevenLabsConvAIAdapterIO:
     async def test_receive_events_error_event_yielded(self) -> None:
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
-        adapter = ElevenLabsConvAIAdapter(api_key="el-test")
+        adapter = ElevenLabsConvAIAdapter(api_key="el-test", agent_id="agent-test")
         await self._prime_adapter_with_ws(
             adapter,
             _AsyncIterableWS([json.dumps({"type": "error", "message": "bad"})]),
@@ -512,7 +503,7 @@ class TestElevenLabsConvAIAdapterIO:
     async def test_receive_events_handles_connection_closed(self) -> None:
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
-        adapter = ElevenLabsConvAIAdapter(api_key="el-test")
+        adapter = ElevenLabsConvAIAdapter(api_key="el-test", agent_id="agent-test")
         adapter._running = True
         await self._prime_adapter_with_ws(adapter, _ConnectionClosedWS())
 
@@ -525,7 +516,7 @@ class TestElevenLabsConvAIAdapterIO:
     async def test_receive_events_noop_when_no_ws(self) -> None:
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
-        adapter = ElevenLabsConvAIAdapter(api_key="el-test")
+        adapter = ElevenLabsConvAIAdapter(api_key="el-test", agent_id="agent-test")
         adapter._ws = None
         events = []
         async for event in adapter.receive_events():
@@ -580,7 +571,7 @@ class TestElevenLabsConvAIAdapterIO:
         """A `ping` message is replied to with a matching `pong`."""
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
-        adapter = ElevenLabsConvAIAdapter(api_key="el-test")
+        adapter = ElevenLabsConvAIAdapter(api_key="el-test", agent_id="agent-test")
         mock_ws = AsyncMock()
         # Iterable messages include a ping.
         mock_ws.__aiter__ = lambda self: _AsyncIterHelper([
@@ -603,7 +594,7 @@ class TestElevenLabsConvAIAdapterIO:
     async def test_conversation_initiation_metadata_captured(self) -> None:
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
-        adapter = ElevenLabsConvAIAdapter(api_key="el-test")
+        adapter = ElevenLabsConvAIAdapter(api_key="el-test", agent_id="agent-test")
         meta = {
             "type": "conversation_initiation_metadata",
             "conversation_initiation_metadata_event": {

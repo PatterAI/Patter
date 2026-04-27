@@ -35,7 +35,7 @@ import logging
 import os
 from typing import AsyncIterator
 
-logger = logging.getLogger("patter")
+logger = logging.getLogger("getpatter")
 
 __all__ = ["AnthropicLLMProvider"]
 

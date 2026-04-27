@@ -181,13 +181,6 @@ class TestSecretLeakage:
         # current behavior so we can catch regressions if masking is added.
         assert isinstance(output, str)
 
-    def test_patter_connection_repr_hides_api_key(self) -> None:
-        from getpatter.connection import PatterConnection
-
-        conn = PatterConnection(api_key=self.FAKE_API_KEY)
-        output = repr(conn)
-        assert self.FAKE_API_KEY not in output
-
     def test_twilio_adapter_repr_masks_credentials(self) -> None:
         """TwilioAdapter.__repr__ must not contain full account_sid."""
         # We cannot import TwilioAdapter without the twilio package,

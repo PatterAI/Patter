@@ -14,9 +14,10 @@ import asyncio
 import logging
 from typing import AsyncIterator
 
+from getpatter.exceptions import PatterError
 from getpatter.services.llm_loop import LLMProvider
 
-logger = logging.getLogger("patter")
+logger = logging.getLogger("getpatter")
 
 
 # ---------------------------------------------------------------------------
@@ -24,11 +25,11 @@ logger = logging.getLogger("patter")
 # ---------------------------------------------------------------------------
 
 
-class AllProvidersFailedError(Exception):
+class AllProvidersFailedError(PatterError):
     """Raised when every provider in the fallback chain has failed."""
 
 
-class PartialStreamError(Exception):
+class PartialStreamError(PatterError):
     """Raised when a provider fails after already yielding partial output."""
 
 

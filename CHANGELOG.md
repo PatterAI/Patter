@@ -2,7 +2,11 @@
 
 ## Unreleased
 
-Three audit waves (wave 1: 3 agent teams on cost/latency/research; wave 2: 11 specialised teams on cost/latency/audio/parity/OpenAI compliance/LiveKit-Pipecat benchmarking/Twilio pricing/test coverage/security/ship-readiness/dashboard UX; wave 3: 9 specialised agents on latency+transcript hunting, per-provider cost audit, frequency spec research, transcoding audit, LLM model verification, voice/format strings, telephony adapter deep audit, voice provider integration review) plus an initial audio+pricing pass surfaced roughly 50 bugs ranging from cost-rate errors to stale model IDs and byte-alignment audio corruption. Every HIGH/CRITICAL fix flagged is included here, along with opt-in per-call filesystem logging. The larger refactors (per-model pricing lookup, native `ulaw_8000` provider negotiation, 31-tap Kaiser half-band FIR, LLM pipeline token tracking, runtime WS reconnect) are scoped for a later release.
+_(no entries yet — next version will land here)_
+
+## 0.5.3 (2026-04-27)
+
+Cost-accuracy, audio-pipeline, and observability hardening across both SDKs, plus opt-in per-call filesystem logging.
 
 ### Added — per-call filesystem logging
 - **`CallLogger` (both SDKs)** — opt-in via `PATTER_LOG_DIR` env var. Writes per-call
@@ -154,7 +158,7 @@ Users running non-default Realtime models (`gpt-realtime`, `gpt-4o-realtime-prev
 ### Added
 - **First-class `llm=` selector on `phone.agent()`** — pick any of 5 LLM providers the same way you pick STT/TTS.
   - `OpenAILLM`, `AnthropicLLM`, `GroqLLM`, `CerebrasLLM`, `GoogleLLM` — all instance-based with env-var fallback.
-  - Namespaced imports: `from getpatter.llm import openai, anthropic, groq, cerebras, google` (Python) / `import * as anthropic from "getpatter/llm/anthropic"` (TypeScript).
+  - Namespaced imports: `from getpatter.llm import openai, anthropic, groq, cerebras, google` (Python) / `import * as anthropic from "getpatter/llm/anthropic"` (TypeScript). (Note: TypeScript subpath imports were not exposed in the published `exports` map; use flat barrel imports from `"getpatter"` instead.)
   - Flat imports: `from getpatter import AnthropicLLM, GroqLLM, ...` / `import { AnthropicLLM, GroqLLM, ... } from "getpatter"`.
 - Tool calling works across all 5 providers — each adapter normalizes to Patter's unified `{type: "text" | "tool_call" | "done"}` chunk protocol.
 - `GoogleLLM` reads `GEMINI_API_KEY` preferred, falls back to `GOOGLE_API_KEY`.
@@ -168,7 +172,8 @@ Users running non-default Realtime models (`gpt-realtime`, `gpt-4o-realtime-prev
 Patter 0.5.0 ships an instance-based API. Every provider — carriers, engines, STT, TTS, tunnels — is a typed class that reads its credentials from environment variables by default. The result is a four-line quickstart:
 
 ```python
-from patter import Patter, Twilio, OpenAIRealtime
+# (post-rename: package is now `getpatter` since 0.5.0)
+from getpatter import Patter, Twilio, OpenAIRealtime
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")
 agent = phone.agent(engine=OpenAIRealtime(), system_prompt="You are helpful.", first_message="Hello!")
 await phone.serve(agent)
@@ -182,7 +187,7 @@ await phone.serve(agent)
 - **TTS**: `ElevenLabsTTS`, `OpenAITTS`, `CartesiaTTS`, `RimeTTS`, `LMNTTTS` — same env-fallback pattern.
 - **Tunnels**: `CloudflareTunnel`, `StaticTunnel`, `Ngrok` — pass via `Patter(tunnel=...)` or use the `serve(tunnel=True)` dev shorthand.
 - **Primitives**: `Tool` + `@tool` decorator, `Guardrail` + `guardrail(...)` factory.
-- **Top-level flat re-exports** so everything is reachable with a single `from patter import ...` / `import { ... } from "getpatter"`.
+- **Top-level flat re-exports** so everything is reachable with a single `from getpatter import ...` / `import { ... } from "getpatter"`.
 
 ### Fixed
 

@@ -33,3 +33,42 @@ export class Static {
     this.hostname = opts.hostname;
   }
 }
+
+/**
+ * Ngrok tunnel marker — parity with the Python ``getpatter.tunnels.Ngrok``.
+ *
+ * Patter does not bundle the ngrok binary or auto-provision tunnels. This
+ * marker exists so applications can pass an existing ngrok hostname through
+ * the same code path as ``Static`` / ``CloudflareTunnel``. Constructing one
+ * without a hostname is allowed (mirrors the Python type), but ``start()``
+ * will throw — the user is expected to either pass a hostname or run the
+ * tunnel themselves and feed the resulting URL via ``Static``.
+ *
+ * @example
+ * ```ts
+ * import { Ngrok } from "getpatter/tunnels";
+ * const tunnel = new Ngrok({ hostname: "abc.ngrok.io" });
+ * ```
+ */
+export class Ngrok {
+  readonly kind = "ngrok" as const;
+  readonly hostname: string;
+
+  constructor(opts: { hostname?: string } = {}) {
+    this.hostname = opts.hostname ?? "";
+  }
+
+  /**
+   * Returns the configured hostname or throws if the marker was constructed
+   * without one. Patter does not start ngrok itself — the user is expected
+   * to either supply a hostname or run ngrok out-of-band.
+   */
+  start(): string {
+    if (!this.hostname) {
+      throw new Error(
+        'Ngrok requires a hostname; pass new Ngrok({ hostname: "abc.ngrok.io" })',
+      );
+    }
+    return this.hostname;
+  }
+}

@@ -18,18 +18,7 @@ import {
   StaticTunnel,
 } from '../../src/index';
 
-// Prevent actual EmbeddedServer / PatterConnection from running during tests.
-vi.mock('../../src/connection', () => {
-  class PatterConnection {
-    isConnected = false;
-    connect = vi.fn().mockResolvedValue(undefined);
-    disconnect = vi.fn().mockResolvedValue(undefined);
-    requestCall = vi.fn().mockResolvedValue(undefined);
-    constructor(_apiKey: string, _backendUrl: string) {}
-  }
-  return { PatterConnection };
-});
-
+// Prevent the actual EmbeddedServer from starting during tests.
 vi.mock('../../src/server', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../../src/server')>();
   class MockEmbeddedServer {
@@ -92,7 +81,6 @@ describe('Patter({ carrier })', () => {
       phoneNumber: '+15550001234',
     });
     expect(phone).toBeDefined();
-    expect(phone.apiKey).toBe('');
   });
 
   it('accepts a Telnyx carrier instance (local mode)', () => {
@@ -103,11 +91,10 @@ describe('Patter({ carrier })', () => {
     expect(phone).toBeDefined();
   });
 
-  it('throws without a carrier when mode is local', () => {
+  it('throws without a carrier', () => {
     expect(
       () =>
         new Patter({
-          mode: 'local',
           phoneNumber: '+15550001234',
         } as never),
     ).toThrow(/carrier/);

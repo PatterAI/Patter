@@ -8,6 +8,10 @@ export interface GroqLLMOptions {
   model?: string;
   /** Override the OpenAI-compatible base URL (rarely needed). */
   baseUrl?: string;
+  /** Sampling temperature [0, 2]. */
+  temperature?: number;
+  /** Max tokens in the assistant response. */
+  maxTokens?: number;
 }
 
 /**
@@ -33,6 +37,8 @@ export class LLM extends _GroqLLM {
       apiKey: key,
       model: opts.model,
       baseUrl: opts.baseUrl,
+      temperature: opts.temperature,
+      maxTokens: opts.maxTokens,
     });
   }
 }

@@ -12,7 +12,7 @@ import httpx
 
 from getpatter.providers.base import STTProvider, Transcript
 
-logger = logging.getLogger("patter")
+logger = logging.getLogger("getpatter")
 
 
 class _Transcript(Transcript):  # type: ignore[misc]

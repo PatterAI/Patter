@@ -19,7 +19,7 @@ Installation extras:
 See ``pyproject.toml`` and the top-level README for the full matrix.
 """
 
-__version__ = "0.5.2"
+__version__ = "0.5.3"
 
 from getpatter.client import Patter
 from getpatter.models import (
@@ -106,9 +106,17 @@ from getpatter.observability import (
     SPAN_TTS,
     SPAN_TOOL,
 )
+# `is_tracing_enabled` is the public top-level alias for parity with TypeScript
+# `isTracingEnabled`. The Python implementation lives at
+# ``getpatter.observability.tracing.is_enabled``.
+from getpatter.observability.tracing import is_enabled as is_tracing_enabled
+from getpatter.observability.event_bus import EventBus, PatterEventType
 
-# Tunnel flat aliases.
-from getpatter.tunnels import CloudflareTunnel, Ngrok, Static as StaticTunnel
+# Tunnel flat aliases. ``Static`` is the canonical name (matches the docstring
+# examples and the ``tunnel=Static(hostname=...)`` pattern); ``StaticTunnel``
+# is kept as an alias for symmetry with TypeScript and ``CloudflareTunnel``.
+from getpatter.tunnels import CloudflareTunnel, Ngrok, Static
+StaticTunnel = Static
 
 from getpatter.services.fallback_provider import (
     FallbackLLMProvider,
@@ -123,6 +131,79 @@ from getpatter.scheduler import (
     schedule_once,
     schedule_interval,
 )
+
+# Dashboard / metrics — parity with TypeScript ``MetricsStore``,
+# ``mountDashboard``, ``mountApi``, ``notifyDashboard``,
+# ``makeAuthMiddleware``, ``callsToCsv``, ``callsToJson``.
+from getpatter.dashboard.store import MetricsStore
+from getpatter.dashboard.routes import mount_dashboard
+from getpatter.api_routes import mount_api
+from getpatter.dashboard.persistence import notify_dashboard
+from getpatter.dashboard.auth import make_auth_dependency
+# TS exposes a single `makeAuthMiddleware`; in Python the FastAPI-idiomatic
+# equivalent is the dependency factory. Alias it as `make_auth_middleware`
+# for parity with the TS public surface — both names point at the same
+# callable so call sites coming from TS docs keep working.
+make_auth_middleware = make_auth_dependency
+from getpatter.dashboard.export import calls_to_csv, calls_to_json
+
+# LLM loop primitives — parity with TypeScript ``LLMLoop``,
+# ``OpenAILLMProvider`` and the ``LLMProvider`` protocol. Python has no
+# ``DefaultToolExecutor`` or standalone ``LLMChunk`` yet — see TODOs below.
+from getpatter.services.llm_loop import LLMLoop, LLMProvider, OpenAILLMProvider
+# TODO(parity): port DefaultToolExecutor from TS (sdk-ts/src/llm-loop.ts).
+# TODO(parity): port LLMChunk from TS (sdk-ts/src/llm-loop.ts).
+
+# Remote-message + test session helpers.
+from getpatter.services.remote_message import (
+    RemoteMessageHandler,
+    is_remote_url,
+    is_websocket_url,
+)
+from getpatter.test_mode import TestSession
+
+# Background-audio primitives — parity with TypeScript
+# ``BackgroundAudioPlayer`` / ``BuiltinAudioClip`` / ``mixPcm`` /
+# ``selectSoundFromList`` / ``builtinClipPath``.
+from getpatter.services.background_audio import (
+    BackgroundAudioPlayer,
+    BuiltinAudioClip,
+)
+# TODO(parity): port builtin_clip_path from TS (sdk-ts/src/services/background-audio.ts).
+# TODO(parity): port select_sound_from_list public helper from TS (currently a
+# private method on the Python ``BackgroundAudioPlayer``).
+
+# Audio transcoding helpers — parity with the TypeScript ``transcoding``
+# module. Python ships ``create_resampler_24k_to_16k`` only (no eager
+# ``resample_24k_to_16k`` one-shot helper exists yet).
+from getpatter.services.transcoding import (
+    PcmCarry,
+    StatefulResampler,
+    create_resampler_8k_to_16k,
+    create_resampler_16k_to_8k,
+    create_resampler_24k_to_16k,
+    mulaw_to_pcm16,
+    pcm16_to_mulaw,
+    resample_8k_to_16k,
+    resample_16k_to_8k,
+)
+# TODO(parity): port resample_24k_to_16k one-shot helper from TS
+# (sdk-py currently exposes only the stateful create_resampler_24k_to_16k factory).
+
+# Pricing helpers — parity with TypeScript ``DEFAULT_PRICING``,
+# ``mergePricing``, ``calculateSttCost``, ``calculateTtsCost``,
+# ``calculateRealtimeCost``, ``calculateTelephonyCost``.
+from getpatter.pricing import (
+    DEFAULT_PRICING,
+    calculate_realtime_cost,
+    calculate_stt_cost,
+    calculate_telephony_cost,
+    calculate_tts_cost,
+    merge_pricing,
+)
+
+# Per-call metrics accumulator (TypeScript: ``CallMetricsAccumulator``).
+from getpatter.services.metrics import CallMetricsAccumulator
 
 # Top-level re-export for parity with TypeScript ``mixPcm`` (see BUG #04g).
 # Import is lazy — `mix_pcm` triggers numpy import only on first call.
@@ -191,6 +272,7 @@ __all__ = [
     "SPAN_TOOL",
     "CloudflareTunnel",
     "Ngrok",
+    "Static",
     "StaticTunnel",
     "FallbackLLMProvider",
     "AllProvidersFailedError",
@@ -206,4 +288,48 @@ __all__ = [
     "schedule_once",
     "schedule_interval",
     "mix_pcm",
+    # Dashboard / metrics surface (parity with TS).
+    "MetricsStore",
+    "mount_dashboard",
+    "mount_api",
+    "notify_dashboard",
+    "make_auth_dependency",
+    "make_auth_middleware",
+    "calls_to_csv",
+    "calls_to_json",
+    # LLM loop primitives.
+    "LLMLoop",
+    "LLMProvider",
+    "OpenAILLMProvider",
+    # Remote message + test session.
+    "RemoteMessageHandler",
+    "is_remote_url",
+    "is_websocket_url",
+    "TestSession",
+    # Background audio.
+    "BackgroundAudioPlayer",
+    "BuiltinAudioClip",
+    # Transcoding.
+    "PcmCarry",
+    "StatefulResampler",
+    "create_resampler_8k_to_16k",
+    "create_resampler_16k_to_8k",
+    "create_resampler_24k_to_16k",
+    "mulaw_to_pcm16",
+    "pcm16_to_mulaw",
+    "resample_8k_to_16k",
+    "resample_16k_to_8k",
+    # Pricing.
+    "DEFAULT_PRICING",
+    "merge_pricing",
+    "calculate_stt_cost",
+    "calculate_tts_cost",
+    "calculate_realtime_cost",
+    "calculate_telephony_cost",
+    # Per-call metrics.
+    "CallMetricsAccumulator",
+    # Observability extras.
+    "is_tracing_enabled",
+    "EventBus",
+    "PatterEventType",
 ]

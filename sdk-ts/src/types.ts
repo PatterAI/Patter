@@ -18,11 +18,11 @@ export interface STTConfig {
   readonly apiKey: string;
   readonly language: string;
   /**
-   * Optional — when present, called by internal serialisation. Not required for
-   * callers that pass a plain object literal (``{ provider, apiKey, language }``)
-   * to maintain parity with the Python SDK, which accepts dataclass-like inputs.
+   * Serialise the config into a JSON-compatible dict for the wire protocol.
+   * Mandatory — matches Python's ``STTConfig.to_dict()``. Concrete classes
+   * returned by ``stt(...)``/``deepgram(...)`` etc. all implement it.
    */
-  toDict?(): Record<string, string | Record<string, unknown>>;
+  toDict(): Record<string, string | Record<string, unknown>>;
   /** Provider-specific knobs (e.g. Deepgram endpointing). */
   options?: Record<string, unknown>;
 }
@@ -31,40 +31,16 @@ export interface TTSConfig {
   readonly provider: string;
   readonly apiKey: string;
   readonly voice: string;
-  toDict?(): Record<string, string | Record<string, unknown>>;
+  /**
+   * Serialise the config into a JSON-compatible dict for the wire protocol.
+   * Mandatory — matches Python's ``TTSConfig.to_dict()``.
+   */
+  toDict(): Record<string, string | Record<string, unknown>>;
   options?: Record<string, unknown>;
 }
 
 export type MessageHandler = (msg: IncomingMessage) => Promise<string>;
 export type CallEventHandler = (data: Record<string, unknown>) => Promise<void>;
-
-export interface PatterOptions {
-  apiKey: string;
-  backendUrl?: string;
-  restUrl?: string;
-}
-
-export interface ConnectOptions {
-  onMessage: MessageHandler;
-  onCallStart?: CallEventHandler;
-  onCallEnd?: CallEventHandler;
-  provider?: string;
-  providerKey?: string;
-  providerSecret?: string;
-  number?: string;
-  country?: string;
-  stt?: STTConfig;
-  tts?: TTSConfig;
-}
-
-export interface CallOptions {
-  to: string;
-  onMessage?: MessageHandler;
-  firstMessage?: string;
-  fromNumber?: string;
-  agentId?: string;
-  machineDetection?: boolean;
-}
 
 export interface ToolDefinition {
   name: string;
@@ -76,60 +52,11 @@ export interface ToolDefinition {
   handler?: (args: Record<string, unknown>, context: Record<string, unknown>) => Promise<string>;
 }
 
-export interface CreateAgentOptions {
-  name: string;
-  systemPrompt: string;
-  model?: string;
-  voice?: string;
-  voiceProvider?: string;
-  language?: string;
-  firstMessage?: string;
-  tools?: ToolDefinition[];
-}
-
-export interface Agent {
-  id: string;
-  name: string;
-  systemPrompt: string;
-  model: string;
-  voice: string;
-  voiceProvider: string;
-  language: string;
-  firstMessage: string | null;
-  tools: ToolDefinition[] | null;
-}
-
-export interface PhoneNumber {
-  id: string;
-  number: string;
-  provider: string;
-  country: string;
-  status: string;
-  agentId: string | null;
-}
-
-export interface Call {
-  id: string;
-  direction: string;
-  caller: string;
-  callee: string;
-  startedAt: string;
-  endedAt: string | null;
-  durationSeconds: number | null;
-  status: string;
-  transcript: Array<{ role: string; text: string; timestamp: string }> | null;
-}
-
 // === Local mode ===
 
 export interface LocalOptions {
   /**
-   * Local mode is auto-detected when a ``carrier`` is passed. Pass
-   * ``mode: 'local'`` to force local mode explicitly.
-   */
-  mode?: 'local';
-  /**
-   * Telephony carrier instance. Required for local mode.
+   * Telephony carrier instance. Required.
    *
    * @example
    * ```ts

@@ -43,7 +43,6 @@ class TestCarrierDispatch:
             phone_number="+15550001234",
             webhook_url="abc.ngrok.io",
         )
-        assert phone._mode == "local"
         assert phone._local_config.telephony_provider == "twilio"
         assert phone._local_config.twilio_sid == "AC_test"
         assert phone._local_config.twilio_token == "tok"
@@ -54,7 +53,6 @@ class TestCarrierDispatch:
             phone_number="+15550001234",
             webhook_url="abc.ngrok.io",
         )
-        assert phone._mode == "local"
         assert phone._local_config.telephony_provider == "telnyx"
         assert phone._local_config.telnyx_key == "KEY"
         assert phone._local_config.telnyx_connection_id == "200"
@@ -340,7 +338,6 @@ class TestQuickstartSmoke:
         phone = Patter(carrier=Twilio(), phone_number="+15550001234")
         agent = phone.agent(engine=OpenAIRealtime(), system_prompt="hi")
 
-        assert phone._mode == "local"
         assert agent.provider == "openai_realtime"
         assert phone._local_config.twilio_sid == "AC_env"
         assert phone._local_config.openai_key == "sk-env"

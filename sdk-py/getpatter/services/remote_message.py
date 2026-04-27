@@ -18,7 +18,7 @@ from typing import AsyncGenerator
 
 import httpx
 
-logger = logging.getLogger("patter")
+logger = logging.getLogger("getpatter")
 
 # Maximum response size from webhook (64 KB)
 _MAX_RESPONSE_BYTES = 64 * 1024

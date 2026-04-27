@@ -104,13 +104,13 @@ jobs:
           # Skip the tests dir (they intentionally exercise suspicious
           # patterns) and assertions (B101 noise inside tests & assert-
           # heavy typing helpers).
-          bandit -r sdk-py/patter -ll -iii \
-            --exclude sdk-py/patter/dashboard/ui.py \
+          bandit -r sdk-py/getpatter -ll -iii \
+            --exclude sdk-py/getpatter/dashboard/ui.py \
             -f txt || true
       - name: Generate SARIF for Security tab
         run: |
-          bandit -r sdk-py/patter -ll -iii \
-            --exclude sdk-py/patter/dashboard/ui.py \
+          bandit -r sdk-py/getpatter -ll -iii \
+            --exclude sdk-py/getpatter/dashboard/ui.py \
             -f sarif -o bandit.sarif || true
       - uses: github/codeql-action/upload-sarif@v3
         # Only upload when the SARIF file was actually produced — if the

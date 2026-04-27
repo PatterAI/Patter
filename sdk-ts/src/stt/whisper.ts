@@ -31,6 +31,6 @@ export class STT extends _WhisperSTT {
           "set OPENAI_API_KEY in the environment.",
       );
     }
-    super(key, opts.model ?? "whisper-1", opts.language, opts.bufferSize, opts.responseFormat ?? "json");
+    super(key, opts.language, opts.model ?? "whisper-1", opts.bufferSize, opts.responseFormat ?? "json");
   }
 }
