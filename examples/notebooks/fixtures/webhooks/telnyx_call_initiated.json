@@ -1,0 +1,12 @@
+{
+  "data": {
+    "event_type": "call.initiated",
+    "id": "00000000-0000-0000-0000-000000000001",
+    "payload": {
+      "call_control_id": "v3:test",
+      "from": "+15555550100",
+      "to": "+15555550100",
+      "direction": "incoming"
+    }
+  }
+}

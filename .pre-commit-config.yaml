@@ -44,6 +44,7 @@ repos:
       - id: debug-statements
         files: ^sdk-py/.*\.py$
       - id: detect-private-key
+        exclude: ^examples/notebooks/fixtures/keys/telnyx_test_ed25519_.*\.pem$
       - id: mixed-line-ending
         args: [--fix=lf]
 
@@ -52,6 +53,23 @@ repos:
     rev: v8.18.4
     hooks:
       - id: gitleaks
+
+  # ── Notebook output stripping ───────────────────────────────────────────
+  - repo: https://github.com/kynan/nbstripout
+    rev: 0.7.1
+    hooks:
+      - id: nbstripout
+        files: ^examples/notebooks/.*\.ipynb$
+
+  # ── Notebook secret scan (high-entropy patterns inside .ipynb JSON) ────
+  - repo: local
+    hooks:
+      - id: notebook-secret-grep
+        name: notebook secret scan
+        entry: python3 scripts/scan_notebook_secrets.py
+        language: system
+        pass_filenames: true
+        files: ^examples/notebooks/.*\.ipynb$
 
   # ── TypeScript lint is covered by the dedicated 'typescript' job in
   # .github/workflows/test.yml (which does npm ci + npm run lint with the
