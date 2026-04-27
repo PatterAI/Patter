@@ -116,16 +116,20 @@ async def test_s2_1000_turn_conversation(make_accumulator: Any) -> None:
     # Verify turn count
     assert len(metrics.turns) == num_turns
 
-    # Verify STT cost: deepgram charges per minute
+    # Verify STT cost: deepgram nova-3 streaming = $0.0077/min
+    # (the older $0.0043/min was the batch/pre-recorded rate; Wave 12b3
+    # corrected it to the streaming rate which is what Patter actually uses).
     # total_audio = 1.5 * 1000 = 1500 seconds = 25 minutes
-    # cost = 25 * 0.0043 = 0.1075
-    expected_stt = (per_turn_audio_seconds * num_turns / 60.0) * 0.0043
+    # cost = 25 * 0.0077 = 0.1925
+    expected_stt = (per_turn_audio_seconds * num_turns / 60.0) * 0.0077
     assert abs(metrics.cost.stt - round(expected_stt, 6)) < 1e-6
 
-    # Verify TTS cost: elevenlabs charges per 1k chars
+    # Verify TTS cost: elevenlabs flash_v2_5 direct API = $0.06/1k chars
+    # (the older $0.18/1k was the Creator-plan overage tier; Wave 12b3
+    # corrected it to the API tier which matches what Patter actually pays).
     # total_chars = 20 * 1000 = 20000 chars = 20 k_chars
-    # cost = 20 * 0.18 = 3.6
-    expected_tts = (len(agent_response) * num_turns / 1000.0) * 0.18
+    # cost = 20 * 0.06 = 1.2
+    expected_tts = (len(agent_response) * num_turns / 1000.0) * 0.06
     assert abs(metrics.cost.tts - round(expected_tts, 6)) < 1e-6
 
     # Memory check

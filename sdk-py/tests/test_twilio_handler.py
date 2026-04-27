@@ -154,13 +154,19 @@ def test_telnyx_webhook_stream_url_contains_call_id():
     assert "ctrl_unique" in stream_cmd["params"]["stream_url"]
 
 
-def test_telnyx_webhook_stream_url_both_tracks():
+def test_telnyx_webhook_stream_url_inbound_track():
+    """Telnyx ``streaming_start`` is configured for ``inbound_track`` only.
+
+    Halves WS upstream bandwidth vs ``both_tracks``; the outbound echo
+    that Telnyx would otherwise forward is filtered downstream anyway,
+    so requesting only the inbound side from the start is leaner.
+    """
     from getpatter.handlers.telnyx_handler import telnyx_webhook_handler
 
     result = telnyx_webhook_handler("ctrl_123", "+1", "+2", "abc.ngrok.io")
     commands = result["commands"]
     stream_cmd = next(c for c in commands if c["command"] == "stream_start")
-    assert stream_cmd["params"]["stream_track"] == "both_tracks"
+    assert stream_cmd["params"]["stream_track"] == "inbound_track"
 
 
 def test_telnyx_webhook_stream_url_uses_telnyx_path():
