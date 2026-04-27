@@ -64,6 +64,7 @@ from getpatter.engines.elevenlabs import ConvAI as ElevenLabsConvAI
 # STT flat aliases — parity with sdk-ts/src/index.ts.
 from getpatter.stt.deepgram import STT as DeepgramSTT
 from getpatter.stt.whisper import STT as WhisperSTT
+from getpatter.stt.openai_transcribe import STT as OpenAITranscribeSTT
 from getpatter.stt.cartesia import STT as CartesiaSTT
 from getpatter.stt.soniox import STT as SonioxSTT
 from getpatter.stt.speechmatics import STT as SpeechmaticsSTT
@@ -246,6 +247,7 @@ __all__ = [
     "ElevenLabsConvAI",
     "DeepgramSTT",
     "WhisperSTT",
+    "OpenAITranscribeSTT",
     "CartesiaSTT",
     "SonioxSTT",
     "SpeechmaticsSTT",

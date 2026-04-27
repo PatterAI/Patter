@@ -89,6 +89,8 @@ export { STT as DeepgramSTT } from "./stt/deepgram";
 export type { DeepgramSTTOptions } from "./stt/deepgram";
 export { STT as WhisperSTT } from "./stt/whisper";
 export type { WhisperSTTOptions } from "./stt/whisper";
+export { STT as OpenAITranscribeSTT } from "./stt/openai-transcribe";
+export type { OpenAITranscribeSTTOptions } from "./stt/openai-transcribe";
 export { STT as CartesiaSTT } from "./stt/cartesia";
 export type { CartesiaSTTOptions } from "./stt/cartesia";
 export { STT as SonioxSTT } from "./stt/soniox";

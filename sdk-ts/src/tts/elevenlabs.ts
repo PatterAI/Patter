@@ -1,11 +1,17 @@
 /** ElevenLabs TTS for Patter pipeline mode. */
-import { ElevenLabsTTS as _ElevenLabsTTS } from "../providers/elevenlabs-tts";
+import { ElevenLabsTTS as _ElevenLabsTTS, type ElevenLabsModel } from "../providers/elevenlabs-tts";
+
+export type { ElevenLabsModel };
 
 export interface ElevenLabsTTSOptions {
   /** API key. Falls back to ELEVENLABS_API_KEY env var when omitted. */
   apiKey?: string;
   voiceId?: string;
-  modelId?: string;
+  /**
+   * ElevenLabs voice model ID. Default is ``eleven_flash_v2_5`` (lowest TTFT).
+   * Pass ``eleven_v3`` for highest quality, or any string for forward-compat.
+   */
+  modelId?: ElevenLabsModel | string;
   outputFormat?: string;
 }
 

@@ -25,6 +25,11 @@ describe('ElevenLabsTTS', () => {
       const tts = new ElevenLabsTTS('el-key', 'custom-voice', 'eleven_v2', 'pcm_24000');
       expect(tts).toBeDefined();
     });
+
+    it('accepts the typed eleven_v3 model literal', () => {
+      const tts = new ElevenLabsTTS('el-key', { modelId: 'eleven_v3' });
+      expect(tts).toBeDefined();
+    });
   });
 
   describe('synthesizeStream()', () => {

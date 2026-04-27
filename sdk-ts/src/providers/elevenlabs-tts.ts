@@ -69,6 +69,25 @@ function resolveVoiceId(voice: string): string {
   return ELEVENLABS_VOICE_ID_BY_NAME[voice.toLowerCase()] ?? voice;
 }
 
+/**
+ * Known stable ElevenLabs voice models (from the official ElevenLabs API
+ * reference). Provided as a string-literal union for autocomplete + type
+ * narrowing; the public ``modelId`` option also accepts ``string`` so
+ * users can pass forward-compat IDs we haven't enumerated yet.
+ *
+ * - ``eleven_v3`` — newest, highest quality (slower TTFT than Flash).
+ * - ``eleven_flash_v2_5`` — current default, fastest (~75 ms TTFT).
+ * - ``eleven_turbo_v2_5`` — balanced quality/speed.
+ * - ``eleven_multilingual_v2`` — best multilingual support.
+ * - ``eleven_monolingual_v1`` — legacy English-only.
+ */
+export type ElevenLabsModel =
+  | 'eleven_v3'
+  | 'eleven_flash_v2_5'
+  | 'eleven_turbo_v2_5'
+  | 'eleven_multilingual_v2'
+  | 'eleven_monolingual_v1';
+
 // Supported `output_format` values for the TTS stream endpoint.
 // `ulaw_8000` is the telephony-ready option for Twilio/Telnyx.
 export type ElevenLabsOutputFormat =
@@ -94,7 +113,12 @@ export interface ElevenLabsVoiceSettings {
 
 export interface ElevenLabsTTSOptions {
   voiceId?: string;
-  modelId?: string;
+  /**
+   * ElevenLabs voice model ID. The default ``eleven_flash_v2_5`` has the
+   * lowest TTFT (~75 ms). Pass ``eleven_v3`` for highest quality, or any
+   * arbitrary string for forward-compat with future models.
+   */
+  modelId?: ElevenLabsModel | string;
   outputFormat?: ElevenLabsOutputFormat;
   voiceSettings?: ElevenLabsVoiceSettings;
   languageCode?: string;

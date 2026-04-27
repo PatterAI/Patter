@@ -356,3 +356,43 @@ class TestPricing:
         from getpatter.pricing import PRICING_VERSION
 
         assert PRICING_VERSION
+
+
+@pytest.mark.unit
+class TestOpenAITranscribeSTT:
+    """OpenAITranscribeSTT — first-class wrapper around gpt-4o-transcribe."""
+
+    def test_default_model_is_gpt4o_transcribe(self) -> None:
+        from getpatter import OpenAITranscribeSTT
+
+        stt = OpenAITranscribeSTT(api_key="sk-test")
+        assert stt.model == "gpt-4o-transcribe"
+
+    def test_accepts_mini_variant(self) -> None:
+        from getpatter import OpenAITranscribeSTT
+
+        stt = OpenAITranscribeSTT(api_key="sk-test", model="gpt-4o-mini-transcribe")
+        assert stt.model == "gpt-4o-mini-transcribe"
+
+    def test_rejects_whisper_1(self) -> None:
+        from getpatter import OpenAITranscribeSTT
+
+        with pytest.raises(ValueError, match="unsupported model"):
+            OpenAITranscribeSTT(api_key="sk-test", model="whisper-1")
+
+
+@pytest.mark.unit
+class TestElevenLabsTTSModelLiteral:
+    """ElevenLabsTTS accepts the new ``eleven_v3`` model literal."""
+
+    def test_eleven_v3_constructs(self) -> None:
+        from getpatter.providers.elevenlabs_tts import ElevenLabsTTS
+
+        tts = ElevenLabsTTS(api_key="x", model_id="eleven_v3")
+        assert tts.model_id == "eleven_v3"
+
+    def test_default_remains_flash(self) -> None:
+        from getpatter.providers.elevenlabs_tts import ElevenLabsTTS
+
+        tts = ElevenLabsTTS(api_key="x")
+        assert tts.model_id == "eleven_flash_v2_5"

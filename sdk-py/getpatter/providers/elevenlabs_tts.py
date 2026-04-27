@@ -1,7 +1,20 @@
-from typing import AsyncIterator, Literal, Optional
+from typing import AsyncIterator, Literal, Optional, Union
 import re
 import httpx
 from getpatter.providers.base import TTSProvider
+
+# Known stable ElevenLabs voice models (from
+# https://elevenlabs.io/docs/api-reference/text-to-speech). Listed as a
+# ``Literal`` for autocomplete + static checking; the public ``model_id``
+# argument also accepts ``str`` so users can pass forward-compat IDs we
+# haven't enumerated yet.
+ElevenLabsModel = Literal[
+    "eleven_v3",
+    "eleven_flash_v2_5",
+    "eleven_turbo_v2_5",
+    "eleven_multilingual_v2",
+    "eleven_monolingual_v1",
+]
 
 # Supported `output_format` values for the `/text-to-speech/{id}/stream`
 # endpoint. `ulaw_8000` is the telephony-ready option for Twilio/Telnyx.
@@ -94,11 +107,25 @@ def resolve_voice_id(voice: str) -> str:
 
 
 class ElevenLabsTTS(TTSProvider):
+    """ElevenLabs streaming TTS adapter.
+
+    Supported ``model_id`` values (autocompleted via :data:`ElevenLabsModel`):
+
+    * ``eleven_v3`` — newest, highest quality (slower TTFT than Flash).
+    * ``eleven_flash_v2_5`` — current default, fastest (~75 ms TTFT).
+    * ``eleven_turbo_v2_5`` — balanced quality/speed.
+    * ``eleven_multilingual_v2`` — best multilingual support.
+    * ``eleven_monolingual_v1`` — legacy English-only.
+
+    The default remains ``eleven_flash_v2_5`` (lowest TTFT). Pass any
+    other string for forward-compat with future ElevenLabs models.
+    """
+
     def __init__(
         self,
         api_key: str,
         voice_id: str = "21m00Tcm4TlvDq8ikWAM",
-        model_id: str = "eleven_flash_v2_5",
+        model_id: Union[ElevenLabsModel, str] = "eleven_flash_v2_5",
         output_format: ElevenLabsOutputFormat = "pcm_16000",
         voice_settings: Optional[dict] = None,
         language_code: Optional[str] = None,
