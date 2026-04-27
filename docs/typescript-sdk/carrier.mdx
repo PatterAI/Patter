@@ -6,11 +6,11 @@ icon: "phone"
 
 # Carrier
 
-The carrier delivers the phone call to Patter. Patter supports **Twilio** and **Telnyx** with full feature parity (DTMF, call transfer, recording, AMD, status callbacks, cost tracking).
+The carrier delivers the phone call to Patter. Patter supports **Twilio** and **Telnyx**. Both share DTMF, call transfer, AMD, status callbacks, and cost tracking; recording is Twilio-only.
 
 You configure one carrier per `Patter` instance by passing an instance to the `carrier` field. Each carrier class falls back to environment variables when constructor arguments are omitted.
 
-Each carrier ships as both a **flat alias** (`import { Twilio } from "getpatter"`) and a **namespaced** class (`import * as twilio from "getpatter/carriers/twilio"` → `new twilio.Carrier()`). They are equivalent.
+Both carriers are imported by name from the package barrel: `import { Twilio, Telnyx } from "getpatter"`.
 
 ## Twilio
 
@@ -33,15 +33,6 @@ const phone = new Patter({
 |-----------|------|---------|-------------|
 | `accountSid` | `string` | — | Twilio Account SID (starts with `AC`). Reads from `TWILIO_ACCOUNT_SID` when omitted. |
 | `authToken` | `string` | — | Twilio Auth Token. Reads from `TWILIO_AUTH_TOKEN` when omitted. |
-
-Namespaced form:
-
-```typescript
-import * as twilio from "getpatter/carriers/twilio";
-
-const carrier = new twilio.Carrier();                 // reads env
-const carrier = new twilio.Carrier({ accountSid: "AC...", authToken: "..." });
-```
 
 On `serve()`, Patter automatically sets the `voice_url` on the Twilio number to `https://<webhookUrl>/webhooks/twilio/voice` via the Twilio REST API — no manual Console configuration needed.
 
@@ -75,14 +66,6 @@ const phone = new Patter({
 | `apiKey` | `string` | — | Telnyx API v2 key. Reads from `TELNYX_API_KEY` when omitted. |
 | `connectionId` | `string` | — | Call Control Application ID. Reads from `TELNYX_CONNECTION_ID` when omitted. |
 | `publicKey` | `string` | — | Optional. Ed25519 public key for webhook signature verification. Reads from `TELNYX_PUBLIC_KEY` when omitted. |
-
-Namespaced form:
-
-```typescript
-import * as telnyx from "getpatter/carriers/telnyx";
-
-const carrier = new telnyx.Carrier();                 // reads env
-```
 
 ### Signature verification
 

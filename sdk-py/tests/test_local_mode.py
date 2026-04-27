@@ -123,7 +123,6 @@ def test_agent_pipeline_is_immutable():
 
 def test_local_mode_auto_detected_from_twilio_carrier():
     phone = _twilio_phone()
-    assert phone._mode == "local"
     assert isinstance(phone._local_config, LocalConfig)
     assert phone._local_config.telephony_provider == "twilio"
 
@@ -134,20 +133,18 @@ def test_local_mode_auto_detected_from_telnyx_carrier():
         phone_number="+1555",
         webhook_url="x.ngrok.io",
     )
-    assert phone._mode == "local"
     assert phone._local_config.telephony_provider == "telnyx"
 
 
 def test_local_mode_explicit():
     phone = Patter(mode="local", phone_number="+1555", webhook_url="x.ngrok.io")
-    assert phone._mode == "local"
+    assert isinstance(phone._local_config, LocalConfig)
 
 
-def test_cloud_mode_when_api_key_given():
-    phone = Patter(api_key="pt_test123")
-    assert phone._mode == "cloud"
-    assert phone.api_key == "pt_test123"
-    assert hasattr(phone, "_connection")
+def test_api_key_raises_not_implemented():
+    """Passing api_key= raises NotImplementedError (cloud not yet available)."""
+    with pytest.raises(NotImplementedError, match="Patter Cloud is not yet available"):
+        Patter(api_key="pt_test123")
 
 
 # ---------------------------------------------------------------------------
@@ -175,14 +172,6 @@ def test_agent_factory():
 
 
 @pytest.mark.asyncio
-async def test_serve_raises_in_cloud_mode():
-    phone = Patter(api_key="pt_test")
-    agent = Agent(system_prompt="test")
-    with pytest.raises(PatterConnectionError, match="local mode"):
-        await phone.serve(agent)
-
-
-@pytest.mark.asyncio
 async def test_serve_calls_embedded_server():
     phone = _twilio_phone()
     agent = phone.agent(
@@ -201,18 +190,6 @@ async def test_serve_calls_embedded_server():
             dashboard_token="",
         )
         mock_server.start.assert_called_once_with(port=9000)
-
-
-# ---------------------------------------------------------------------------
-# connect() — raises in local mode
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_connect_raises_in_local_mode():
-    phone = _twilio_phone()
-    with pytest.raises(PatterConnectionError, match="local mode"):
-        await phone.connect(on_message=AsyncMock())
 
 
 # ---------------------------------------------------------------------------

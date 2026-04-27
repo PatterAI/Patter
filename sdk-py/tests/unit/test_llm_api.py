@@ -284,3 +284,87 @@ class TestFlatReExports:
         assert GroqLLM is ns_groq
         assert CerebrasLLM is ns_cerebras
         assert GoogleLLM is ns_google
+
+
+# ---------------------------------------------------------------------------
+# OpenAILLMProvider — sampling kwargs forwarding (Wave 10A refactor)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestOpenAIProviderSamplingKwargs:
+    """Sampling kwargs configured on the parent class are forwarded to
+    ``chat.completions.create`` (and ``max_tokens`` is mapped to
+    ``max_completion_tokens`` on the wire, per current OpenAI spec)."""
+
+    @pytest.mark.asyncio
+    async def test_kwargs_forwarded_to_chat_completions(self, monkeypatch) -> None:
+        from getpatter.services.llm_loop import OpenAILLMProvider
+
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+        provider = OpenAILLMProvider(
+            api_key="sk-test",
+            model="gpt-4o-mini",
+            temperature=0.6,
+            max_tokens=200,
+            response_format={"type": "json_object"},
+            seed=42,
+            top_p=0.9,
+            frequency_penalty=0.1,
+            presence_penalty=0.2,
+            stop=["END"],
+            tool_choice="auto",
+            parallel_tool_calls=True,
+        )
+
+        captured: dict = {}
+
+        async def _fake_create(**kwargs):
+            captured.update(kwargs)
+
+            async def _empty():
+                if False:  # pragma: no cover
+                    yield None
+
+            return _empty()
+
+        # Replace the bound coroutine on the underlying client.
+        provider._client.chat.completions.create = _fake_create  # type: ignore[assignment]
+
+        # Drain the generator so ``stream()`` actually invokes ``create``.
+        async for _ in provider.stream([{"role": "user", "content": "hi"}]):
+            pass
+
+        assert captured["model"] == "gpt-4o-mini"
+        assert captured["temperature"] == 0.6
+        # max_tokens is mapped to ``max_completion_tokens`` on the wire.
+        assert captured["max_completion_tokens"] == 200
+        assert "max_tokens" not in captured
+        assert captured["response_format"] == {"type": "json_object"}
+        assert captured["seed"] == 42
+        assert captured["top_p"] == 0.9
+        assert captured["frequency_penalty"] == 0.1
+        assert captured["presence_penalty"] == 0.2
+        assert captured["stop"] == ["END"]
+        assert captured["tool_choice"] == "auto"
+        assert captured["parallel_tool_calls"] is True
+        assert captured["stream"] is True
+        assert captured["stream_options"] == {"include_usage": True}
+
+    def test_user_agent_default_header(self) -> None:
+        from getpatter import __version__
+        from getpatter.services.llm_loop import OpenAILLMProvider
+
+        provider = OpenAILLMProvider(api_key="sk-test", model="gpt-4o-mini")
+        assert provider._user_agent == f"getpatter/{__version__}"
+
+    def test_user_agent_override(self) -> None:
+        from getpatter.services.llm_loop import OpenAILLMProvider
+
+        provider = OpenAILLMProvider(
+            api_key="sk-test",
+            model="gpt-4o-mini",
+            user_agent="myapp/1.0",
+        )
+        assert provider._user_agent == "myapp/1.0"

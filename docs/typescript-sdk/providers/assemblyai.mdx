@@ -16,19 +16,13 @@ npm install getpatter
 
 ## Usage
 
-Use the public STT class either namespaced or flat — both read from `ASSEMBLYAI_API_KEY` when `apiKey` is omitted.
+The class reads from `ASSEMBLYAI_API_KEY` when `apiKey` is omitted.
 
 ```typescript
-// Namespaced import
-import * as assemblyai from "getpatter/stt/assemblyai";
-
-const stt = new assemblyai.STT();                     // reads ASSEMBLYAI_API_KEY
-const stt = new assemblyai.STT({ apiKey: "aa_..." });
-
-// Flat alias (equivalent)
 import { AssemblyAISTT } from "getpatter";
 
-const stt = new AssemblyAISTT();
+const stt = new AssemblyAISTT();                                  // reads ASSEMBLYAI_API_KEY
+const stt2 = new AssemblyAISTT({ apiKey: "aa_..." });
 ```
 
 Plug it into an agent:

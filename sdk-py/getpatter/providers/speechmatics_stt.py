@@ -35,7 +35,7 @@ from typing import Any, AsyncIterator
 
 from getpatter.providers.base import STTProvider, Transcript
 
-logger = logging.getLogger("patter")
+logger = logging.getLogger("getpatter")
 
 
 SPEECHMATICS_INSTALL_HINT = (

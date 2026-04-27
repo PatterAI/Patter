@@ -37,8 +37,10 @@ export class ElevenLabsConvAIAdapter {
   public readonly modelId: string;
   private readonly language: string;
   private readonly firstMessage: string;
-  private readonly outputAudioFormat: string | undefined;
-  private readonly inputAudioFormat: string | undefined;
+  // Exposed publicly so the stream handler can detect μ-law negotiation
+  // (``"ulaw_8000"``) and skip resampling / transcoding on the audio path.
+  public readonly outputAudioFormat: string | undefined;
+  public readonly inputAudioFormat: string | undefined;
   private readonly useSignedUrl: boolean;
 
   // Populated from `conversation_initiation_metadata`.
@@ -87,6 +89,61 @@ export class ElevenLabsConvAIAdapter {
       this.inputAudioFormat = undefined;
       this.useSignedUrl = false;
     }
+  }
+
+  // ------------------------------------------------------------------
+  // Telephony factories
+  // ------------------------------------------------------------------
+
+  /**
+   * Build an adapter pre-configured for Twilio Media Streams.
+   *
+   * Negotiates `ulaw_8000` for both `outputAudioFormat` and
+   * `inputAudioFormat`, matching Twilio's μ-law @ 8 kHz wire format. The
+   * SDK's stream handler detects this and skips the 8 kHz → 16 kHz inbound
+   * resample and the 16 kHz → 8 kHz / PCM → μ-law outbound transcode.
+   * Saves ~30–80 ms first-byte plus per-frame CPU on every turn.
+   */
+  static forTwilio(
+    apiKey: string,
+    agentId: string,
+    options: Omit<
+      ElevenLabsConvAIOptions,
+      'apiKey' | 'agentId' | 'outputAudioFormat' | 'inputAudioFormat'
+    > = {},
+  ): ElevenLabsConvAIAdapter {
+    return new ElevenLabsConvAIAdapter({
+      ...options,
+      apiKey,
+      agentId,
+      outputAudioFormat: 'ulaw_8000',
+      inputAudioFormat: 'ulaw_8000',
+    });
+  }
+
+  /**
+   * Build an adapter pre-configured for Telnyx bidirectional media.
+   *
+   * Telnyx negotiates PCMU @ 8 kHz when `streaming_start` sets
+   * `stream_bidirectional_codec=PCMU` (the SDK default). Picking
+   * `ulaw_8000` on both ConvAI directions removes every transcode on the
+   * audio path — same optimization as `forTwilio`.
+   */
+  static forTelnyx(
+    apiKey: string,
+    agentId: string,
+    options: Omit<
+      ElevenLabsConvAIOptions,
+      'apiKey' | 'agentId' | 'outputAudioFormat' | 'inputAudioFormat'
+    > = {},
+  ): ElevenLabsConvAIAdapter {
+    return new ElevenLabsConvAIAdapter({
+      ...options,
+      apiKey,
+      agentId,
+      outputAudioFormat: 'ulaw_8000',
+      inputAudioFormat: 'ulaw_8000',
+    });
   }
 
   private async fetchSignedUrl(): Promise<string> {

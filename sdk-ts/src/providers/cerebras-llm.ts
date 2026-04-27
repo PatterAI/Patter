@@ -24,14 +24,16 @@
 
 import type { LLMChunk, LLMProvider } from '../llm-loop';
 import { getLogger } from '../logger';
+import { PatterError } from '../errors';
+import { VERSION } from '../version';
 import { parseOpenAISseStream } from './groq-llm';
 
 const CEREBRAS_BASE_URL = 'https://api.cerebras.ai/v1';
 // Default to the smallest fast Cerebras model available on the free tier so
-// the SDK works out of the box. ``llama-3.3-70b`` exists on Cerebras but is
-// gated to paid tiers — using it as default surfaces a confusing 404 for free
-// users. ``llama3.1-8b`` is 8B params, sub-100ms TTFT on Cerebras hardware,
-// and matches the LiveKit/Pipecat "small and fast for voice" philosophy.
+// the SDK works out of the box. ``gpt-oss-120b`` is the highest-throughput
+// model (~3000 tok/sec on WSE-3) but is gated to paid tiers — using it as
+// default surfaces a confusing 404 for free users. ``llama3.1-8b`` is 8B
+// params, sub-100ms TTFT on Cerebras hardware, and free-tier eligible.
 //
 // TODO(deprecation 2026-05-27): Cerebras has scheduled both ``llama3.1-8b``
 // and ``qwen-3-235b-a22b-instruct-2507`` for retirement on this date. Before
@@ -39,21 +41,75 @@ const CEREBRAS_BASE_URL = 'https://api.cerebras.ai/v1';
 // model replaces them (likely a Llama 4 Scout variant). Track at
 // https://inference-docs.cerebras.ai/change-log
 const DEFAULT_MODEL = 'llama3.1-8b';
+const RETRY_BACKOFF_BASE_MS = 500;
 
 export interface CerebrasLLMOptions {
   apiKey: string;
   model?: string;
   baseUrl?: string;
-  /** Gzip request payloads for faster TTFT on large prompts. */
+  /**
+   * Gzip request payloads for faster TTFT on large prompts. Defaults to
+   * ``true`` (parity with Python SDK) — set ``false`` to disable.
+   *
+   * msgpack encoding is Python-only; TS uses gzip alone, which captures
+   * ~85% of the TTFT win.
+   */
   gzipCompression?: boolean;
+  /** Sampling temperature [0, 2]. */
+  temperature?: number;
+  /** Max tokens in the assistant response (sent as ``max_completion_tokens``). */
+  maxTokens?: number;
+  /**
+   * Optional OpenAI-style ``response_format`` for JSON mode / structured
+   * outputs, e.g. ``{ type: 'json_schema', json_schema: { ... } }``.
+   * See https://inference-docs.cerebras.ai/capabilities/structured-outputs.
+   */
+  responseFormat?: Record<string, unknown>;
+  /** Whether to allow parallel tool calls. */
+  parallelToolCalls?: boolean;
+  /** ``"auto" | "none" | "required"`` or a specific tool object. */
+  toolChoice?: string | Record<string, unknown>;
+  /** Sampling seed for reproducible outputs. */
+  seed?: number;
+  /** Nucleus sampling cutoff in [0, 1]. */
+  topP?: number;
+  /** Penalty in [-2, 2] applied to repeated tokens. */
+  frequencyPenalty?: number;
+  /** Penalty in [-2, 2] applied to seen tokens. */
+  presencePenalty?: number;
+  /** Stop sequence(s). */
+  stop?: string | string[];
 }
 
-/** LLM provider backed by Cerebras's OpenAI-compatible Inference API. */
+/**
+ * LLM provider backed by Cerebras's OpenAI-compatible Inference API.
+ *
+ * Available models on Cerebras (verified against
+ * https://inference-docs.cerebras.ai/models/overview):
+ *
+ *   Production:
+ *     - gpt-oss-120b                         (default — highest throughput on Cerebras, no deprecation)
+ *     - llama3.1-8b                          (smaller context alternative; deprecating 2026-05-27)
+ *
+ *   Preview (opt-in):
+ *     - qwen-3-235b-a22b-instruct-2507       (multilingual, strong on European languages)
+ *     - zai-glm-4.7
+ */
 export class CerebrasLLMProvider implements LLMProvider {
   private readonly apiKey: string;
   readonly model: string;
   private readonly baseUrl: string;
   private readonly gzipCompression: boolean;
+  private readonly temperature?: number;
+  private readonly maxTokens?: number;
+  private readonly responseFormat?: Record<string, unknown>;
+  private readonly parallelToolCalls?: boolean;
+  private readonly toolChoice?: string | Record<string, unknown>;
+  private readonly seed?: number;
+  private readonly topP?: number;
+  private readonly frequencyPenalty?: number;
+  private readonly presencePenalty?: number;
+  private readonly stop?: string | string[];
 
   constructor(options: CerebrasLLMOptions) {
     if (!options.apiKey) {
@@ -64,7 +120,22 @@ export class CerebrasLLMProvider implements LLMProvider {
     this.apiKey = options.apiKey;
     this.model = options.model ?? DEFAULT_MODEL;
     this.baseUrl = options.baseUrl ?? CEREBRAS_BASE_URL;
-    this.gzipCompression = options.gzipCompression ?? false;
+    // Default to gzip ON for parity with Python SDK — Cerebras TTFT
+    // optimisation is ~15% on large prompts. Pass `gzipCompression: false`
+    // to opt out (e.g. when running behind an upstream that already
+    // compresses, or to avoid the small per-request CPU cost on tiny
+    // prompts where gzip is a net loss).
+    this.gzipCompression = options.gzipCompression ?? true;
+    this.temperature = options.temperature;
+    this.maxTokens = options.maxTokens;
+    this.responseFormat = options.responseFormat;
+    this.parallelToolCalls = options.parallelToolCalls;
+    this.toolChoice = options.toolChoice;
+    this.seed = options.seed;
+    this.topP = options.topP;
+    this.frequencyPenalty = options.frequencyPenalty;
+    this.presencePenalty = options.presencePenalty;
+    this.stop = options.stop;
   }
 
   async *stream(
@@ -77,11 +148,26 @@ export class CerebrasLLMProvider implements LLMProvider {
       stream: true,
       stream_options: { include_usage: true },
     };
+    if (this.temperature !== undefined) body.temperature = this.temperature;
+    if (this.maxTokens !== undefined) {
+      // Cerebras's current API spec uses ``max_completion_tokens``.
+      body.max_completion_tokens = this.maxTokens;
+    }
+    if (this.responseFormat !== undefined) body.response_format = this.responseFormat;
+    if (this.parallelToolCalls !== undefined) body.parallel_tool_calls = this.parallelToolCalls;
+    if (this.toolChoice !== undefined) body.tool_choice = this.toolChoice;
+    if (this.seed !== undefined) body.seed = this.seed;
+    if (this.topP !== undefined) body.top_p = this.topP;
+    if (this.frequencyPenalty !== undefined) body.frequency_penalty = this.frequencyPenalty;
+    if (this.presencePenalty !== undefined) body.presence_penalty = this.presencePenalty;
+    if (this.stop !== undefined) body.stop = this.stop;
     if (tools) body.tools = tools;
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${this.apiKey}`,
+      // Identify the SDK in upstream logs/rate-limit attribution.
+      'User-Agent': `getpatter/${VERSION}`,
     };
 
     let payload: BodyInit = JSON.stringify(body);
@@ -95,33 +181,64 @@ export class CerebrasLLMProvider implements LLMProvider {
       }
     }
 
-    const response = await fetch(`${this.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers,
-      body: payload,
-      signal: AbortSignal.timeout(30_000),
-    });
+    // 1 retry on 5xx and 429 with exponential backoff. Honours Cerebras
+    // rate-limit advisory headers (`x-ratelimit-reset-tokens-minute`,
+    // `x-ratelimit-reset-requests-minute`) when present — delay is
+    // ``max(advisory, exponential)``.
+    const maxAttempts = 2;
+    let lastErrText = '';
+    let lastStatus = 0;
 
-    if (!response.ok) {
-      const errText = await response.text();
-      // 404 on /chat/completions almost always means the model name isn't
-      // available on the caller's tier (Cerebras gates models per plan). The
-      // generic 404 message is opaque, so add a concrete recovery hint.
-      if (response.status === 404 && errText.includes('model_not_found')) {
-        getLogger().error(
-          `Cerebras: model "${this.model}" not available on your tier. ` +
-            `Override via \`new CerebrasLLM({ model: '<id>' })\` and list ` +
-            `tier-available ids with \`GET ${this.baseUrl}/models\` ` +
-            `(common: llama3.1-8b, qwen-3-235b-a22b-instruct-2507, llama-3.3-70b on paid). ` +
-            `Raw response: ${errText}`,
-        );
-      } else {
-        getLogger().error(`Cerebras API error: ${response.status} ${errText}`);
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const response = await fetch(`${this.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers,
+        body: payload,
+        signal: AbortSignal.timeout(30_000),
+      });
+
+      if (response.ok) {
+        yield* parseOpenAISseStream(response);
+        return;
       }
-      return;
+
+      lastStatus = response.status;
+      lastErrText = await response.text().catch(() => '');
+      const isRetriable = response.status === 429 || response.status >= 500;
+      const isLastAttempt = attempt >= maxAttempts - 1;
+
+      if (!isRetriable || isLastAttempt) {
+        // 404 on /chat/completions almost always means the model name isn't
+        // available on the caller's tier (Cerebras gates models per plan).
+        if (response.status === 404 && lastErrText.includes('model_not_found')) {
+          getLogger().error(
+            `Cerebras: model "${this.model}" not available on your tier. ` +
+              `Override via \`new CerebrasLLM({ model: '<id>' })\` and list ` +
+              `tier-available ids with \`GET ${this.baseUrl}/models\` ` +
+              `(common: llama3.1-8b, qwen-3-235b-a22b-instruct-2507, llama-3.3-70b on paid). ` +
+              `Raw response: ${lastErrText}`,
+          );
+        } else {
+          getLogger().error(`Cerebras API error: ${response.status} ${lastErrText}`);
+        }
+        // Voice pipelines treat LLM provider failures as recoverable —
+        // return silently so the call continues without an LLM response
+        // rather than crashing the whole pipeline.
+        return;
+      }
+
+      const advisoryMs = parseRateLimitResetMs(response.headers);
+      const exponentialMs = RETRY_BACKOFF_BASE_MS * Math.pow(2, attempt);
+      const delayMs = Math.max(advisoryMs, exponentialMs);
+      getLogger().warn(
+        `Cerebras API ${response.status} (attempt ${attempt + 1}/${maxAttempts}); retrying after ${delayMs}ms`,
+      );
+      await new Promise<void>((r) => setTimeout(r, delayMs));
     }
 
-    yield* parseOpenAISseStream(response);
+    // Defensive — loop above always returns or throws, but TypeScript
+    // can't see that without an explicit terminal throw.
+    throw new PatterError(`Cerebras API error ${lastStatus}: ${lastErrText || 'request failed'}`);
   }
 }
 
@@ -153,4 +270,29 @@ async function gzipEncode(data: string): Promise<Uint8Array | null> {
     offset += c.length;
   }
   return out;
+}
+
+/**
+ * Parse Cerebras rate-limit advisory headers and return the recommended
+ * wait time in milliseconds. Cerebras emits ``x-ratelimit-reset-tokens-minute``
+ * and ``x-ratelimit-reset-requests-minute`` (seconds, fractional). Returns 0
+ * when no advisory header is present or it cannot be parsed.
+ */
+function parseRateLimitResetMs(headers: Headers): number {
+  const candidates = [
+    headers.get('x-ratelimit-reset-tokens-minute'),
+    headers.get('x-ratelimit-reset-requests-minute'),
+    // Some upstreams send the standard ``retry-after`` (seconds).
+    headers.get('retry-after'),
+  ];
+  let bestMs = 0;
+  for (const raw of candidates) {
+    if (!raw) continue;
+    const parsed = Number.parseFloat(raw);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      const ms = parsed * 1000;
+      if (ms > bestMs) bestMs = ms;
+    }
+  }
+  return bestMs;
 }

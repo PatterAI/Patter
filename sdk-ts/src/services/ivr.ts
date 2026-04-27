@@ -27,6 +27,7 @@
  */
 
 import type { CallControl } from "../metrics";
+import { getLogger } from "../logger";
 
 // ---------------------------------------------------------------------------
 // DTMF event taxonomy
@@ -182,8 +183,7 @@ class DebouncedCall {
     this.timer = setTimeout(() => {
       this.timer = null;
       Promise.resolve(this.callback()).catch((err) => {
-        // eslint-disable-next-line no-console
-        console.error("IVR silence callback raised:", err);
+        getLogger().error("IVR silence callback raised:", err);
       });
     }, this.delayMs);
   }
@@ -295,8 +295,7 @@ export class IVRActivity {
           try {
             await this.onLoopDetected();
           } catch (err) {
-            // eslint-disable-next-line no-console
-            console.error("IVR onLoopDetected callback raised:", err);
+            getLogger().error("IVR onLoopDetected callback raised:", err);
           }
         }
       }
@@ -343,8 +342,7 @@ export class IVRActivity {
       try {
         await this.onSilence();
       } catch (err) {
-        // eslint-disable-next-line no-console
-        console.error("IVR onSilence callback raised:", err);
+        getLogger().error("IVR onSilence callback raised:", err);
       }
     }
   }

@@ -14,6 +14,17 @@
 export const DEFAULT_MIN_SENTENCE_LEN = 20;
 
 /**
+ * Minimum word count for emitting a "short" sentence (one whose total length
+ * is below `minSentenceLen`) as soon as a terminator is seen. Avoids emitting
+ * standalone single-word utterances ("Sì.", "Yes.") while still letting short
+ * greetings ("Hi there!") flush immediately for low TTS TTFB.
+ */
+export const DEFAULT_MIN_WORDS_FOR_SHORT_FLUSH = 2;
+
+/** Sentence-terminating characters (Latin + CJK). */
+const SENTENCE_TERMINATORS = '.!?。！？';
+
+/**
  * Split text into sentences using regex marker replacement.
  *
  * Returns an array of [sentence, startPos, endPos] tuples.
@@ -114,17 +125,36 @@ function splitSentences(
 export class SentenceChunker {
   private buffer = '';
   private readonly minSentenceLen: number;
+  private readonly minWordsForShortFlush: number;
 
-  constructor(options?: { minSentenceLen?: number }) {
+  constructor(options?: {
+    minSentenceLen?: number;
+    minWordsForShortFlush?: number;
+  }) {
     this.minSentenceLen = options?.minSentenceLen ?? DEFAULT_MIN_SENTENCE_LEN;
+    this.minWordsForShortFlush =
+      options?.minWordsForShortFlush ?? DEFAULT_MIN_WORDS_FOR_SHORT_FLUSH;
   }
 
-  /** Feed a token. Returns zero or more complete sentences. */
+  /**
+   * Feed a token. Returns zero or more complete sentences.
+   *
+   * Two emission paths:
+   * - **Standard path** — when the buffer is at least `minSentenceLen`
+   *   characters long and the regex tokenizer reports more than one
+   *   sentence, all but the last (potentially incomplete) are emitted.
+   * - **Short-flush path** — when the buffer is shorter than `minSentenceLen`
+   *   but ends with a sentence terminator AND has at least
+   *   `minWordsForShortFlush` whitespace-separated words, emit it
+   *   immediately. This drops TTS TTFB on short greetings like `"Hi there!"`
+   *   while keeping single-word utterances (`"Sì."`) buffered until
+   *   `flush()`.
+   */
   push(token: string): string[] {
     this.buffer += token;
 
     if (this.buffer.length < this.minSentenceLen) {
-      return [];
+      return this.maybeShortFlush();
     }
 
     const sentences = splitSentences(this.buffer, this.minSentenceLen);
@@ -144,6 +174,48 @@ export class SentenceChunker {
     this.buffer = sentences[sentences.length - 1]?.[0] ?? '';
 
     return result;
+  }
+
+  /**
+   * Emit the buffer when it's a short, complete single-sentence utterance.
+   *
+   * A buffer qualifies when **all** of these hold:
+   * 1. Last non-whitespace char is a sentence terminator.
+   * 2. Word count is at least `minWordsForShortFlush` (default 2 — keeps
+   *    single-word "Sì." / "Yes." buffered until `flush()`).
+   * 3. The buffer contains exactly one terminator (the trailing one).
+   *    Multiple terminators mean we may be mid-stream of a longer merged
+   *    utterance like `"Hey! Hi! Hello! This is a sentence."` — let the
+   *    standard path keep merging.
+   * 4. The char immediately before the terminator is NOT a digit (avoids
+   *    decimal mid-stream like `"f(x) = x * 2."` flushing before `54`).
+   * 5. The char immediately before the terminator is NOT an uppercase
+   *    ASCII letter (avoids acronym patterns like `"U.S."` / `"U."`).
+   */
+  private maybeShortFlush(): string[] {
+    const stripped = this.buffer.replace(/\s+$/, '');
+    if (!stripped) return [];
+    const last = stripped[stripped.length - 1];
+    if (!SENTENCE_TERMINATORS.includes(last)) return [];
+
+    // Only one terminator in the entire buffer (the trailing one).
+    let terminatorCount = 0;
+    for (const c of stripped) {
+      if (SENTENCE_TERMINATORS.includes(c)) terminatorCount++;
+    }
+    if (terminatorCount !== 1) return [];
+
+    const wordCount = stripped.split(/\s+/).filter((w) => w.length > 0).length;
+    if (wordCount < this.minWordsForShortFlush) return [];
+
+    // Don't flush on potential decimals or acronyms.
+    if (stripped.length >= 2) {
+      const prev = stripped[stripped.length - 2];
+      if (/\d/.test(prev) || /[A-Z]/.test(prev)) return [];
+    }
+
+    this.buffer = '';
+    return [stripped];
   }
 
   /** Flush remaining buffer as final sentence(s). Call at end of stream. */

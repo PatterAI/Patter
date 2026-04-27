@@ -463,12 +463,84 @@ describe('SentenceChunker', () => {
     });
 
     it('produces the expected sentences when fed token-by-token', () => {
+      // The short-flush path (added for low TTS TTFB on short greetings)
+      // may emit small complete sentences early, so token-by-token streaming
+      // can produce up to ~30% more sentences than the bulk reference. We
+      // therefore validate content equivalence (after whitespace
+      // normalisation) rather than the exact split.
       const c = new SentenceChunker(); // default minSentenceLen = 20
       const pushed = streamText(c, LIVEKIT_TEXT);
       const flushed = c.flush();
       const all = [...pushed, ...flushed];
 
-      expect(all).toEqual(EXPECTED_MIN_20);
+      expect(all.length).toBeGreaterThanOrEqual(EXPECTED_MIN_20.length);
+      expect(all.length).toBeLessThanOrEqual(EXPECTED_MIN_20.length + 4);
+
+      const normalise = (s: string) => s.replace(/\s+/g, ' ').trim();
+      expect(normalise(all.join(' '))).toBe(normalise(EXPECTED_MIN_20.join(' ')));
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Short-flush path — TTS TTFB optimisation for short greetings
+  // -------------------------------------------------------------------------
+
+  describe('short-flush path', () => {
+    it('emits "Hi there!" immediately on the !', () => {
+      const c = new SentenceChunker();
+      expect(c.push('Hi there!')).toEqual(['Hi there!']);
+    });
+
+    it('emits "Hello world." immediately on the .', () => {
+      const c = new SentenceChunker();
+      expect(c.push('Hello world.')).toEqual(['Hello world.']);
+    });
+
+    it('emits "Are you?" immediately on the ?', () => {
+      const c = new SentenceChunker();
+      expect(c.push('Are you?')).toEqual(['Are you?']);
+    });
+
+    it('does NOT emit single-word "Sì." standalone', () => {
+      const c = new SentenceChunker();
+      expect(c.push('Sì.')).toEqual([]);
+      // Survives a flush though.
+      expect(c.flush()).toEqual(['Sì.']);
+    });
+
+    it('does NOT emit single-word "Yes."', () => {
+      const c = new SentenceChunker();
+      expect(c.push('Yes.')).toEqual([]);
+    });
+
+    it('does NOT flush a buffer with no terminator', () => {
+      const c = new SentenceChunker();
+      expect(c.push('Hi there')).toEqual([]);
+    });
+
+    it('does NOT flush "f(x) = 2." (digit before terminator)', () => {
+      const c = new SentenceChunker();
+      expect(c.push('f(x) = 2.')).toEqual([]);
+    });
+
+    it('does NOT flush "The U.S." (acronym pattern)', () => {
+      const c = new SentenceChunker();
+      expect(c.push('The U.S.')).toEqual([]);
+    });
+
+    it('does NOT flush a buffer with multiple terminators ("Hey! Hi!")', () => {
+      const c = new SentenceChunker();
+      expect(c.push('Hey! Hi!')).toEqual([]);
+    });
+
+    it('honours a custom minWordsForShortFlush of 1', () => {
+      const c = new SentenceChunker({ minWordsForShortFlush: 1 });
+      expect(c.push('Yes.')).toEqual(['Yes.']);
+    });
+
+    it('handles trailing whitespace before the terminator-only buffer', () => {
+      const c = new SentenceChunker();
+      expect(c.push('Hi there!  \n')).toEqual(['Hi there!']);
     });
   });
 });

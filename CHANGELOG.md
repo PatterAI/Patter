@@ -2,7 +2,28 @@
 
 ## Unreleased
 
-Three audit waves (wave 1: 3 agent teams on cost/latency/research; wave 2: 11 specialised teams on cost/latency/audio/parity/OpenAI compliance/LiveKit-Pipecat benchmarking/Twilio pricing/test coverage/security/ship-readiness/dashboard UX; wave 3: 9 specialised agents on latency+transcript hunting, per-provider cost audit, frequency spec research, transcoding audit, LLM model verification, voice/format strings, telephony adapter deep audit, voice provider integration review) plus an initial audio+pricing pass surfaced roughly 50 bugs ranging from cost-rate errors to stale model IDs and byte-alignment audio corruption. Every HIGH/CRITICAL fix flagged is included here, along with opt-in per-call filesystem logging. The larger refactors (per-model pricing lookup, native `ulaw_8000` provider negotiation, 31-tap Kaiser half-band FIR, LLM pipeline token tracking, runtime WS reconnect) are scoped for a later release.
+_(no entries yet — next version will land here)_
+
+## 0.5.3 (2026-04-27)
+
+Cost-accuracy, audio-pipeline, and observability hardening across both SDKs, plus opt-in per-call filesystem logging.
+
+### Improved — Cerebras
+- **Default model bumped to `gpt-oss-120b`** (production tier, ~3000 tok/sec on WSE-3, no deprecation date) — replaces `llama-3.3-70b`, which is no longer in Cerebras's production catalogue. Docstrings updated against the verified model list at `inference-docs.cerebras.ai/models/overview`.
+- **TS retry + backoff on 5xx / 429** — single retry with exponential backoff, honouring `x-ratelimit-reset-tokens-minute` / `x-ratelimit-reset-requests-minute` advisory headers. Terminal failures now throw a typed `PatterError` (was: silent `getLogger().error()` + empty stream).
+- **`response_format` parameter** — Python and TS Cerebras providers accept the OpenAI-style structured-outputs dict (e.g. `{ type: "json_schema", json_schema: { ... } }`).
+- **Forward additional sampling kwargs** to Cerebras and Groq (both SDKs): `parallel_tool_calls`, `tool_choice`, `seed`, `top_p`, `frequency_penalty`, `presence_penalty`, `stop`.
+- **`max_tokens` → `max_completion_tokens` on the wire** for Cerebras and Groq; user-facing API still accepts `max_tokens` / `maxTokens`.
+- **`User-Agent: getpatter/<version>` header** added to Cerebras and Groq HTTP requests for upstream attribution.
+
+### Added — pipeline hooks
+- **`before_llm` / `after_llm` hooks** (`PipelineHooks` in both SDKs) — receive the messages list pre-LLM and the assistant text post-stream. `before_llm` enables prompt injection / RAG augmentation; `after_llm` enables output validation, redaction, and post-processing.
+- **New event types on the `EventBus`** (additive — existing callbacks unchanged): `transcript_partial`, `transcript_final`, `llm_chunk`, `tts_chunk`, `tool_call_started`. Subscribe via `on(...)` for fine-grained pipeline observability.
+
+### Added — providers
+- **OpenAITranscribeSTT** — first-class STT class for OpenAI's gpt-4o-transcribe and gpt-4o-mini-transcribe models (~10x faster than Whisper-1).
+- **ElevenLabs `eleven_v3`** — typed model literal added; v3 is now selectable via `model_id="eleven_v3"`.
+- **Cerebras: gzip compression now enabled by default in the TypeScript SDK** (Python already had it on). Reduces TTFT on prompts >2 KB. Pass `gzipCompression: false` to opt out.
 
 ### Added — per-call filesystem logging
 - **`CallLogger` (both SDKs)** — opt-in via `PATTER_LOG_DIR` env var. Writes per-call
@@ -56,7 +77,6 @@ Three audit waves (wave 1: 3 agent teams on cost/latency/research; wave 2: 11 sp
 - **ElevenLabs ConvAI barge-in** — adapter never emits `interruption` event; stream handler has a handler for it that's dead code.
 - **Gemini Live never emits `transcript_input`** — `stt_ms` always 0 and `user_text` empty on every Gemini turn.
 - **Whisper is unsafe in pipeline mode** — emits `isFinal=true` every ~1s regardless of speech; triggers LLM mid-utterance. Needs VAD gating.
-- **Cerebras default `llama3.1-8b` deprecates May 27, 2026** — need migration to `gpt-oss-120b`.
 
 ### Fixed — cost accounting (first + second audit waves, 3 + 11 agents)
 - **Python `calculate_realtime_cost` would crash on `input_token_details: null`** — `dict.get("...", {})` returns `None` when the key exists with a `None` value, and the chained `.get()` raised `AttributeError`. Switched to `or {}` fallback. TS was already safe via `??`.
@@ -154,7 +174,7 @@ Users running non-default Realtime models (`gpt-realtime`, `gpt-4o-realtime-prev
 ### Added
 - **First-class `llm=` selector on `phone.agent()`** — pick any of 5 LLM providers the same way you pick STT/TTS.
   - `OpenAILLM`, `AnthropicLLM`, `GroqLLM`, `CerebrasLLM`, `GoogleLLM` — all instance-based with env-var fallback.
-  - Namespaced imports: `from getpatter.llm import openai, anthropic, groq, cerebras, google` (Python) / `import * as anthropic from "getpatter/llm/anthropic"` (TypeScript).
+  - Namespaced imports: `from getpatter.llm import openai, anthropic, groq, cerebras, google` (Python) / `import * as anthropic from "getpatter/llm/anthropic"` (TypeScript). (Note: TypeScript subpath imports were not exposed in the published `exports` map; use flat barrel imports from `"getpatter"` instead.)
   - Flat imports: `from getpatter import AnthropicLLM, GroqLLM, ...` / `import { AnthropicLLM, GroqLLM, ... } from "getpatter"`.
 - Tool calling works across all 5 providers — each adapter normalizes to Patter's unified `{type: "text" | "tool_call" | "done"}` chunk protocol.
 - `GoogleLLM` reads `GEMINI_API_KEY` preferred, falls back to `GOOGLE_API_KEY`.
@@ -168,7 +188,8 @@ Users running non-default Realtime models (`gpt-realtime`, `gpt-4o-realtime-prev
 Patter 0.5.0 ships an instance-based API. Every provider — carriers, engines, STT, TTS, tunnels — is a typed class that reads its credentials from environment variables by default. The result is a four-line quickstart:
 
 ```python
-from patter import Patter, Twilio, OpenAIRealtime
+# (post-rename: package is now `getpatter` since 0.5.0)
+from getpatter import Patter, Twilio, OpenAIRealtime
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")
 agent = phone.agent(engine=OpenAIRealtime(), system_prompt="You are helpful.", first_message="Hello!")
 await phone.serve(agent)
@@ -182,7 +203,7 @@ await phone.serve(agent)
 - **TTS**: `ElevenLabsTTS`, `OpenAITTS`, `CartesiaTTS`, `RimeTTS`, `LMNTTTS` — same env-fallback pattern.
 - **Tunnels**: `CloudflareTunnel`, `StaticTunnel`, `Ngrok` — pass via `Patter(tunnel=...)` or use the `serve(tunnel=True)` dev shorthand.
 - **Primitives**: `Tool` + `@tool` decorator, `Guardrail` + `guardrail(...)` factory.
-- **Top-level flat re-exports** so everything is reachable with a single `from patter import ...` / `import { ... } from "getpatter"`.
+- **Top-level flat re-exports** so everything is reachable with a single `from getpatter import ...` / `import { ... } from "getpatter"`.
 
 ### Fixed
 

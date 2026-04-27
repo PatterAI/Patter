@@ -65,25 +65,31 @@ await phone.serve({ agent, tunnel: true });
 
 ### Installing cloudflared
 
-`cloudflared` is a small companion package (a Python/npm wrapper around Cloudflare's binary) that Patter spawns on demand. It is **not bundled by default** — the core `getpatter` package stays lean so builds that don't need a tunnel don't pay for it.
+The TypeScript SDK ships the `cloudflared` npm wrapper as a regular dependency, so `tunnel: true` Just Works out of the box (`npm install getpatter` is enough).
 
-Install it once:
+The Python SDK requires the `cloudflared` binary on your `PATH` — there is no Python wrapper package available. Install it once with your system package manager:
 
 <CodeGroup>
-```bash Python (with Patter)
-pip install "getpatter[tunnel]"
+```bash macOS
+brew install cloudflared
 ```
 
-```bash Python (standalone)
-pip install cloudflared
+```bash Linux
+# Debian/Ubuntu — official Cloudflare deb
+curl -L --output cloudflared.deb \
+  https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+sudo dpkg -i cloudflared.deb
+
+# or, if available in your repos
+sudo apt install cloudflared
 ```
 
-```bash TypeScript
-npm install cloudflared
+```bash Windows
+winget install --id Cloudflare.cloudflared
 ```
 </CodeGroup>
 
-Patter cannot install it for you at runtime — Python/npm forbid silent installs from inside a running process. If you pass `tunnel=True` / `tunnel: true` without `cloudflared` available, the SDK raises a clear error with the `pip install` / `npm install` command you need.
+If you pass `tunnel=True` (Python) without the `cloudflared` binary on `PATH`, the SDK raises a clear error with the install command you need. The legacy `pip install "getpatter[tunnel]"` extra is now an empty alias kept only for backwards compatibility.
 
 ### Twilio webhook auto-configuration
 

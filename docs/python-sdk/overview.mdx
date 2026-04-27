@@ -33,13 +33,11 @@ asyncio.run(phone.serve(agent))                                  # OPENAI_API_KE
 
 That's the full file. Every provider class reads its API key from an env var when you omit `api_key=` — so as long as you have `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and `OPENAI_API_KEY` set, the example above is paste-runnable.
 
-## SDK Modes
+## How Patter runs
 
-Patter runs in local/self-hosted mode. You bring your own telephony and AI provider credentials — no external platform required.
+Patter runs entirely in your own process. You bring your own telephony (Twilio or Telnyx) and AI provider credentials — no external platform or hosted backend required.
 
-| Mode | Use Case | Requirements |
-|------|----------|--------------|
-| **Local** | Self-hosted, full control | Telephony + AI provider keys |
+<Note>A hosted Patter Cloud option will return in a future release.</Note>
 
 ## What's Next
 
@@ -48,7 +46,7 @@ Patter runs in local/self-hosted mode. You bring your own telephony and AI provi
     Connect your first agent to a phone number.
   </Card>
   <Card title="Configuration" icon="gear" href="/python-sdk/configuration">
-    All constructor parameters and mode options.
+    All constructor parameters and options.
   </Card>
   <Card title="Agents" icon="robot" href="/python-sdk/agents">
     Configure voice, model, tools, and guardrails.

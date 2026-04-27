@@ -3,9 +3,11 @@
  *
  * Mirrors the Python ``PatterEventBus`` (sdk-py/getpatter/observability/event_bus.py).
  * Consumers subscribe with ``on()`` and receive typed payloads.  ``emit()`` is
- * synchronous but handles async listeners: rejections are surfaced as console
- * warnings rather than being swallowed or crashing the call.
+ * synchronous but handles async listeners: rejections are surfaced via the
+ * Patter logger rather than being swallowed or crashing the call.
  */
+
+import { getLogger } from '../logger';
 
 export type PatterEventType =
   | 'turn_started'
@@ -16,7 +18,13 @@ export type PatterEventType =
   | 'tts_metrics'
   | 'stt_metrics'
   | 'metrics_collected'
-  | 'call_ended';
+  | 'call_ended'
+  // Fine-grained pipeline events (additive — existing callbacks remain).
+  | 'transcript_partial'
+  | 'transcript_final'
+  | 'llm_chunk'
+  | 'tts_chunk'
+  | 'tool_call_started';
 
 type Listener<T = unknown> = (payload: T) => void | Promise<void>;
 
@@ -48,11 +56,11 @@ export class EventBus {
         const res = cb(payload);
         if (res && typeof (res as Promise<unknown>).catch === 'function') {
           (res as Promise<unknown>).catch((e) =>
-            console.warn(`[EventBus] listener for "${event}" rejected:`, e),
+            getLogger().warn(`[EventBus] listener for "${event}" rejected:`, e),
           );
         }
       } catch (e) {
-        console.warn(`[EventBus] listener for "${event}" threw:`, e);
+        getLogger().warn(`[EventBus] listener for "${event}" threw:`, e);
       }
     }
   }

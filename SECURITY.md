@@ -30,7 +30,7 @@ We are interested in vulnerabilities related to:
 
 ## Out of Scope
 
-- Feature requests (use [GitHub Issues](https://github.com/nicolotognoni/Patter/issues))
+- Feature requests (use [GitHub Issues](https://github.com/PatterAI/Patter/issues))
 - General bugs that do not have a security impact
 - Social engineering attacks
 - Denial of service (DoS) attacks

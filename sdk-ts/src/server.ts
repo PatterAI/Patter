@@ -191,10 +191,16 @@ function validateTelnyxSignature(
 ): boolean {
 
   try {
-    // Reject if timestamp is missing or too old (replay attack protection)
+    // Reject if timestamp is missing or too old (replay attack protection).
+    // Telnyx sends ``telnyx-timestamp`` as seconds since epoch (per docs:
+    // https://developers.telnyx.com/docs/messaging/webhooks#webhook-signing).
+    // Heuristic: any value below 1e12 is seconds (a 2026 epoch in seconds is
+    // ~1.77e9, while milliseconds is ~1.77e12), so we promote to ms before
+    // comparing. This stays correct if Telnyx ever switches the unit.
     const ts = parseInt(timestamp, 10);
     if (!Number.isFinite(ts)) return false;
-    const ageMs = Date.now() - ts;
+    const tsMs = ts < 1e12 ? ts * 1000 : ts;
+    const ageMs = Date.now() - tsMs;
     if (ageMs < 0 || ageMs > toleranceSec * 1000) return false;
 
     const payload = `${timestamp}|${rawBody}`;
@@ -959,29 +965,25 @@ export class EmbeddedServer {
 
       try {
         if (eventType === 'call.initiated') {
-          getLogger().info(`Telnyx call.initiated ${callControlId} — answering`);
-          const resp = await fetch(`${apiBase}/calls/${encodeURIComponent(callControlId)}/actions/answer`, {
-            method: 'POST',
-            headers: authHeaders,
-            body: JSON.stringify({}),
-            signal: AbortSignal.timeout(10_000),
-          });
-          if (!resp.ok) {
-            getLogger().warn(`Telnyx answer failed: ${resp.status} ${(await resp.text()).slice(0, 200)}`);
-          }
-        } else if (eventType === 'call.answered') {
+          // PERF — Telnyx accepts the streaming params inline on
+          // ``actions/answer`` and auto-starts the stream the moment the
+          // leg picks up. Folding ``streaming_start`` into the answer body
+          // removes the ``call.answered`` webhook round-trip and a second
+          // POST (~100-200 ms saved per inbound call).
           const caller = payload.from ?? '';
           const callee = payload.to ?? '';
           const streamUrl =
             `wss://${this.config.webhookUrl}/ws/stream/${encodeURIComponent(callControlId)}` +
             `?caller=${encodeURIComponent(caller)}&callee=${encodeURIComponent(callee)}`;
-          getLogger().info(`Telnyx call.answered ${callControlId} — starting stream`);
-          const resp = await fetch(`${apiBase}/calls/${encodeURIComponent(callControlId)}/actions/streaming_start`, {
+          getLogger().info(`Telnyx call.initiated ${callControlId} — answering with inline stream`);
+          const resp = await fetch(`${apiBase}/calls/${encodeURIComponent(callControlId)}/actions/answer`, {
             method: 'POST',
             headers: authHeaders,
             body: JSON.stringify({
               stream_url: streamUrl,
-              stream_track: 'both_tracks',
+              // ``inbound_track`` halves WS upstream bandwidth — outbound
+              // echo was always filtered downstream anyway.
+              stream_track: 'inbound_track',
               stream_bidirectional_mode: 'rtp',
               stream_bidirectional_codec: 'PCMU',
               stream_bidirectional_sampling_rate: 8000,
@@ -990,8 +992,13 @@ export class EmbeddedServer {
             signal: AbortSignal.timeout(10_000),
           });
           if (!resp.ok) {
-            getLogger().warn(`Telnyx streaming_start failed: ${resp.status} ${(await resp.text()).slice(0, 200)}`);
+            getLogger().warn(`Telnyx answer failed: ${resp.status} ${(await resp.text()).slice(0, 200)}`);
           }
+        } else if (eventType === 'call.answered') {
+          // No-op: ``call.initiated`` already submitted answer + streaming
+          // in a single call. Telnyx still emits ``call.answered`` as an
+          // informational event; acknowledge it without a redundant POST.
+          getLogger().debug(`Telnyx call.answered ${callControlId} — stream already active (inline)`);
         } else {
           getLogger().debug(`Telnyx event ignored: ${eventType}`);
         }
@@ -1106,6 +1113,17 @@ export class EmbeddedServer {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${telnyxKey}`,
     } as const;
+    // Heuristic playback-duration estimate — ~150 ms per character
+    // (≈14 chars/sec English speech) plus a 1500 ms buffer, capped at
+    // 30 s. Avoids cutting the voicemail mid-sentence on hangup. The
+    // proper fix is to subscribe to Telnyx ``call.speak.ended`` and hang
+    // up there; kept as a heuristic since the webhook plumbing change
+    // is broader than this handler. Mirrors
+    // ``sdk-py/getpatter/handlers/telnyx_handler.py::handle_amd_result``.
+    const estimatedMs = Math.min(
+      30_000,
+      Math.ceil((this.voicemailMessage.length / 14) * 1000) + 1500,
+    );
     try {
       const speakResp = await fetch(
         `https://api.telnyx.com/v2/calls/${encoded}/actions/speak`,
@@ -1125,6 +1143,7 @@ export class EmbeddedServer {
           `Telnyx voicemail speak failed: ${speakResp.status} ${(await speakResp.text()).slice(0, 200)}`,
         );
       }
+      await new Promise((resolve) => setTimeout(resolve, estimatedMs));
       await fetch(`https://api.telnyx.com/v2/calls/${encoded}/actions/hangup`, {
         method: 'POST',
         headers,
@@ -1198,13 +1217,16 @@ export class EmbeddedServer {
     const wrappedStart = async (data: Record<string, unknown>): Promise<void> => {
       if (logger.enabled) {
         const callId = typeof data.call_id === 'string' ? data.call_id : '';
-        logger.logCallStart(callId, {
-          caller: typeof data.caller === 'string' ? data.caller : '',
-          callee: typeof data.callee === 'string' ? data.callee : '',
-          telephonyProvider: bridge.telephonyProvider,
-          providerMode: agent.provider ?? '',
-          agent: agentSnapshot(),
-        });
+        // Fire-and-forget: call logging must never block the voice flow.
+        void logger
+          .logCallStart(callId, {
+            caller: typeof data.caller === 'string' ? data.caller : '',
+            callee: typeof data.callee === 'string' ? data.callee : '',
+            telephonyProvider: bridge.telephonyProvider,
+            providerMode: agent.provider ?? '',
+            agent: agentSnapshot(),
+          })
+          .catch((err) => getLogger().error(`call_log start error: ${String(err)}`));
       }
       if (userStart) await userStart(data);
     };
@@ -1214,7 +1236,10 @@ export class EmbeddedServer {
         const callId = typeof data.call_id === 'string' ? data.call_id : '';
         const turn = data.turn;
         if (turn && typeof turn === 'object') {
-          logger.logTurn(callId, turn as Record<string, unknown>);
+          // Fire-and-forget: call logging must never block the voice flow.
+          void logger
+            .logTurn(callId, turn as Record<string, unknown>)
+            .catch((err) => getLogger().error(`call_log turn error: ${String(err)}`));
         }
       }
       if (userMetrics) await userMetrics(data);
@@ -1240,12 +1265,15 @@ export class EmbeddedServer {
               p99_ms: metricsObj.latency_p99?.total_ms ?? null,
             }
           : null;
-        logger.logCallEnd(callId, {
-          durationSeconds: metricsObj?.duration_seconds,
-          turns: metricsObj?.turns?.length,
-          cost: metricsObj?.cost ?? null,
-          latency,
-        });
+        // Fire-and-forget: call logging must never block the voice flow.
+        void logger
+          .logCallEnd(callId, {
+            durationSeconds: metricsObj?.duration_seconds,
+            turns: metricsObj?.turns?.length,
+            cost: metricsObj?.cost ?? null,
+            latency,
+          })
+          .catch((err) => getLogger().error(`call_log end error: ${String(err)}`));
       }
       if (userEnd) await userEnd(data);
     };
@@ -1291,7 +1319,12 @@ export class EmbeddedServer {
           const payload = data.media?.payload ?? '';
           handler.handleAudio(Buffer.from(payload, 'base64'));
         } else if (event === 'mark') {
-          // mark.name tracks last confirmed audio chunk (used for barge-in accuracy)
+          // Twilio confirms playback of a previously sent audio chunk.
+          // Forward the mark name so barge-in heuristics can compare it
+          // against the latest sent mark. Mirrors Python's
+          // ``twilio_handler.on_mark`` propagation.
+          const markName = String(data.mark?.name ?? '');
+          if (markName) await handler.onMark(markName);
         } else if (event === 'dtmf') {
           const digit = data.dtmf?.digit ?? '';
           await handler.handleDtmf(digit);

@@ -188,7 +188,7 @@ def tool(fn: Callable[..., Any]) -> ToolDefinition:
     # takes ``(arguments, call_context)`` positionally we pass through,
     # otherwise we unpack ``arguments`` as keyword-args into the real call.
     # Without this adapter every ``@tool`` function fails at runtime with
-    # ``takes 1 positional argument but 2 were given`` (BUG #21).
+    # ``takes 1 positional argument but 2 were given``.
     _param_names = tuple(sig.parameters.keys())
     _is_legacy_twoarg = (
         len(_param_names) == 2 and _param_names == ("arguments", "call_context")

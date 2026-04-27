@@ -71,10 +71,22 @@ export class WhisperSTT {
   private running = false;
   private pendingTranscriptions: Promise<void>[] = [];
 
+  /**
+   * @param apiKey OpenAI API key.
+   * @param language ISO-639-1 language code (e.g. ``"en"``, ``"it"``). Optional.
+   * @param model One of ``whisper-1``, ``gpt-4o-transcribe``, ``gpt-4o-mini-transcribe``.
+   * @param bufferSize Bytes of PCM16 to buffer before each transcription request.
+   * @param responseFormat ``"json"`` (default) or ``"verbose_json"``.
+   *
+   * Argument order matches the Python SDK's ``WhisperSTT(api_key, language, model, response_format)``
+   * for cross-language parity. Pre-0.5.3 the TS positional order was
+   * ``(apiKey, model, language, bufferSize, responseFormat)`` — callers using
+   * the old order will need to swap ``language`` and ``model``.
+   */
   constructor(
     apiKey: string,
-    model: string = 'whisper-1',
     language?: string,
+    model: string = 'whisper-1',
     bufferSize: number = DEFAULT_BUFFER_SIZE,
     responseFormat: WhisperResponseFormat = 'json',
   ) {
@@ -92,7 +104,7 @@ export class WhisperSTT {
 
   /** Factory for Twilio calls — mulaw 8 kHz is transcoded upstream, so we still receive PCM 16-bit. */
   static forTwilio(apiKey: string, language: string = 'en', model: string = 'whisper-1'): WhisperSTT {
-    return new WhisperSTT(apiKey, model, language);
+    return new WhisperSTT(apiKey, language, model);
   }
 
   async connect(): Promise<void> {
@@ -144,13 +156,13 @@ export class WhisperSTT {
   async close(): Promise<void> {
     this.running = false;
 
-    // Flush remaining buffer if it has enough audio (~25% of threshold).
-    if (this.bufferedBytes >= this.bufferSize / 4) {
+    // Always flush whatever audio remains in the buffer so the trailing
+    // 0–250 ms before end-of-utterance are not silently dropped. Previously
+    // the buffer was only transcribed above ~25% of the threshold, which
+    // discarded short tail-end utterances entirely.
+    if (this.bufferedBytes > 0) {
       const pcm = this.flushChunks();
       this.trackTranscription(this.transcribeBuffer(pcm));
-    } else {
-      this.chunks = [];
-      this.bufferedBytes = 0;
     }
 
     await Promise.allSettled(this.pendingTranscriptions);

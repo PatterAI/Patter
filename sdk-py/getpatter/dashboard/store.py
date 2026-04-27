@@ -143,7 +143,7 @@ class MetricsStore:
 
         Called from ``Patter.call()`` so that even calls that never reach the
         media channel (busy, no-answer, carrier-rejected) show up in the
-        dashboard. See BUG #06.
+        dashboard.
         """
         call_id = data.get("call_id", "")
         if not call_id:
@@ -256,7 +256,10 @@ class MetricsStore:
                     "turns": [],
                     "cost": {"total": 0.0, "stt": 0.0, "tts": 0.0, "llm": 0.0, "telephony": 0.0},
                     "latency_avg": {"total_ms": 0.0},
+                    "latency_p50": {"total_ms": 0.0},
+                    "latency_p90": {"total_ms": 0.0},
                     "latency_p95": {"total_ms": 0.0},
+                    "latency_p99": {"total_ms": 0.0},
                     "provider_mode": "",
                 }
             self._calls.append(entry)

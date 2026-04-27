@@ -447,6 +447,89 @@ class TestSentenceChunkerEdgeCases:
 
 
 # ===========================================================================
+# Short-flush path — TTS TTFB optimisation for short greetings
+# ===========================================================================
+
+
+@pytest.mark.unit
+class TestSentenceChunkerShortFlush:
+    """The short-flush path emits a complete short utterance as soon as a
+    sentence terminator is seen — provided the buffer has at least N words
+    (default 2) and is not a potential abbreviation/decimal continuation."""
+
+    def test_short_greeting_emits_immediately(self) -> None:
+        """``"Hi there!"`` is 9 chars (< default 20) — must flush right away."""
+        chunker = SentenceChunker()
+        result = chunker.push("Hi there!")
+        assert result == ["Hi there!"]
+        # Buffer is consumed.
+        assert chunker._buffer == ""
+
+    def test_two_word_period_greeting_emits(self) -> None:
+        chunker = SentenceChunker()
+        result = chunker.push("Hello world.")
+        assert result == ["Hello world."]
+
+    def test_two_word_question_emits(self) -> None:
+        chunker = SentenceChunker()
+        result = chunker.push("Are you?")
+        assert result == ["Are you?"]
+
+    def test_single_word_does_not_flush(self) -> None:
+        """Single-word utterances stay buffered until ``flush()``."""
+        chunker = SentenceChunker()
+        assert chunker.push("Sì.") == []
+        assert chunker._buffer == "Sì."
+        # Survives a flush.
+        assert chunker.flush() == ["Sì."]
+
+    def test_yes_alone_does_not_flush(self) -> None:
+        chunker = SentenceChunker()
+        assert chunker.push("Yes.") == []
+
+    def test_no_terminator_does_not_flush(self) -> None:
+        chunker = SentenceChunker()
+        assert chunker.push("Hi there") == []
+        assert chunker._buffer == "Hi there"
+
+    def test_decimal_does_not_flush_mid_stream(self) -> None:
+        """``"f(x) = 2."`` must NOT flush — the next char might be a digit."""
+        chunker = SentenceChunker()
+        assert chunker.push("f(x) = 2.") == []
+
+    def test_acronym_does_not_flush_mid_stream(self) -> None:
+        """``"The U.S."`` must NOT flush — could be inside an acronym/sentence."""
+        chunker = SentenceChunker()
+        assert chunker.push("The U.S.") == []
+
+    def test_multiple_terminators_does_not_flush(self) -> None:
+        """``"Hey! Hi!"`` has two terminators — defer to the standard path."""
+        chunker = SentenceChunker()
+        assert chunker.push("Hey! Hi!") == []
+
+    def test_min_words_for_short_flush_configurable(self) -> None:
+        """Setting the threshold to 1 lets ``"Yes."`` flush immediately."""
+        chunker = SentenceChunker(min_words_for_short_flush=1)
+        assert chunker.push("Yes.") == ["Yes."]
+
+    def test_min_words_for_short_flush_three_blocks_two_words(self) -> None:
+        """Setting the threshold to 3 keeps two-word greetings buffered."""
+        chunker = SentenceChunker(min_words_for_short_flush=3)
+        assert chunker.push("Hi there!") == []
+        assert chunker.push(" Goodbye.") == []
+        # Now buffer is "Hi there! Goodbye." — first sentence emits.
+        result = chunker.push(" Done.")
+        # Should have emitted at least one sentence by now.
+        assert any("Hi there!" in s for s in result + chunker.flush())
+
+    def test_short_flush_does_not_break_on_trailing_whitespace(self) -> None:
+        """``"Hi there!  \n"`` — terminator hidden after whitespace must still flush."""
+        chunker = SentenceChunker()
+        result = chunker.push("Hi there!  \n")
+        assert result == ["Hi there!"]
+
+
+# ===========================================================================
 # Full LiveKit reference test
 # ===========================================================================
 
@@ -461,7 +544,7 @@ class TestLiveKitReference:
         assert result == EXPECTED_MIN_20
 
     def test_full_text_word_by_word(self) -> None:
-        """Feed TEXT word-by-word and verify sentence count and key content.
+        """Feed TEXT word-by-word and verify content + count is plausible.
 
         When text is split into individual word tokens (word + trailing space),
         the SentenceChunker stores stripped fragments as the residual buffer.
@@ -471,17 +554,19 @@ class TestLiveKitReference:
         boundary artefact of the regex-marker algorithm when operating on
         short partial buffers.
 
-        This test therefore checks:
-        1. The correct number of sentences is produced.
-        2. Every major content element (CJK strings, numbers, terminators)
-           is present in the output, regardless of minor spacing artefacts.
+        With the short-flush path (added for low TTS TTFB on short greetings),
+        streaming may emit short multi-word sentences (e.g. "This is a test.")
+        as soon as their terminator arrives instead of merging them with the
+        next sentence.  We therefore allow up to ~30% more sentences than the
+        bulk reference and still validate every major content element.
         """
         import re as _re
         normalised = _re.sub(r"\s+", " ", TEXT).strip()
         tokens = [w + " " for w in normalised.split(" ") if w]
         result = _chunker_all(tokens, min_sentence_len=20)
-        # Correct sentence count
-        assert len(result) == len(EXPECTED_MIN_20)
+        # Streaming may split fragments slightly more aggressively than bulk
+        # because the short-flush path emits genuine short sentences early.
+        assert len(EXPECTED_MIN_20) <= len(result) <= len(EXPECTED_MIN_20) + 4
         joined = " ".join(result)
         # Content that must be present (spacing-independent checks)
         content_markers = [
@@ -499,9 +584,19 @@ class TestLiveKitReference:
             assert marker in joined, f"Expected content not found: {marker!r}"
 
     def test_full_text_char_by_char(self) -> None:
-        """Feed TEXT one character at a time — most demanding streaming scenario."""
+        """Feed TEXT one character at a time — most demanding streaming scenario.
+
+        Streaming permits the short-flush path to emit small complete
+        sentences early, so the count may exceed ``EXPECTED_MIN_20``. We
+        validate content equivalence (after whitespace normalisation) rather
+        than the exact split.
+        """
         result = _chunker_all(list(TEXT), min_sentence_len=20)
-        assert result == EXPECTED_MIN_20
+        assert len(EXPECTED_MIN_20) <= len(result) <= len(EXPECTED_MIN_20) + 4
+        # Content must be equivalent to the bulk reference
+        import re as _re
+        normalise = lambda s: _re.sub(r"\s+", " ", s).strip()
+        assert normalise(" ".join(result)) == normalise(" ".join(EXPECTED_MIN_20))
 
     def test_sentence_count(self) -> None:
         result = _chunker_all([TEXT], min_sentence_len=20)

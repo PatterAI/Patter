@@ -6,7 +6,7 @@ icon: "phone"
 
 # Carrier
 
-The carrier delivers the phone call to Patter. Patter supports **Twilio** and **Telnyx** with full feature parity (DTMF, call transfer, recording, AMD, status callbacks, cost tracking).
+The carrier delivers the phone call to Patter. Patter supports **Twilio** and **Telnyx**. Both share DTMF, call transfer, AMD, status callbacks, and cost tracking; recording is Twilio-only.
 
 You configure one carrier per `Patter` instance by passing an instance to the `carrier=` keyword argument. Each carrier class falls back to environment variables when constructor arguments are omitted.
 

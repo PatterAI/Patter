@@ -114,7 +114,7 @@ def _is_valid_transfer_target(target: str) -> bool:
         return True
     return bool(_SIP_URI_RE.match(target))
 
-logger = logging.getLogger("patter")
+logger = logging.getLogger("getpatter")
 
 # Maximum size (bytes) of a single WebSocket message accepted from Telnyx.
 # Telnyx 16 kHz PCM frames are ~640 bytes (20 ms).  1 MB defends against
@@ -146,7 +146,10 @@ def telnyx_webhook_handler(
         f"wss://{webhook_base_url}/ws/telnyx/stream/{call_id}"
         f"?caller={quote(caller)}&callee={quote(callee)}"
     )
-    # Telnyx Call Control: answer first, then stream_start
+    # Telnyx Call Control: answer first, then stream_start.
+    # ``inbound_track`` halves WS upstream bandwidth — the bridge already
+    # filters outbound media downstream, so requesting only inbound at the
+    # source removes redundant frames.
     return {
         "commands": [
             {"command": "answer"},
@@ -154,7 +157,7 @@ def telnyx_webhook_handler(
                 "command": "stream_start",
                 "params": {
                     "stream_url": stream_url,
-                    "stream_track": "both_tracks",
+                    "stream_track": "inbound_track",
                 },
             },
         ]
@@ -169,13 +172,13 @@ class TelnyxAudioSender(AudioSender):
     """Sends audio to a Telnyx media-stream WebSocket.
 
     Telnyx expects outbound frames in the same codec negotiated at
-    ``streaming_start`` time (see BUG #16). The server currently negotiates
+    ``streaming_start`` time. The server currently negotiates
     PCMU 8 kHz bidirectional, so OpenAI Realtime is configured to emit
     ``g711_ulaw`` directly — the sender forwards the bytes as-is. For
     pipeline mode, ``input_is_mulaw_8k=False`` keeps the PCM16 16 kHz path
     (Telnyx transcodes on the RTP leg when negotiated as L16/16000).
 
-    Wire format (BUG #18): ``{"event": "media", "media": {"payload": b64}}``.
+    Wire format: ``{"event": "media", "media": {"payload": b64}}``.
     """
 
     def __init__(self, websocket, input_is_mulaw_8k: bool = False) -> None:
@@ -227,7 +230,7 @@ class TelnyxAudioSender(AudioSender):
             )
 
     async def send_clear(self) -> None:
-        # Telnyx media stream clear signal. See BUG #18.
+        # Telnyx media stream clear signal — flushes any buffered playback.
         await self._ws.send_text(json.dumps({"event": "clear"}))
 
     async def send_mark(self, mark_name: str) -> None:
@@ -297,7 +300,7 @@ async def telnyx_stream_bridge(
             data = json.loads(raw)
             # Telnyx media-stream WebSocket uses ``event`` (not
             # ``event_type``, which is a Call Control REST notification
-            # field). See BUG #17.
+            # field).
             event_type_telnyx = data.get("event", "")
 
             if event_type_telnyx == "connected":

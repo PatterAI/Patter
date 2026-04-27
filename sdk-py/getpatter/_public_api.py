@@ -1,7 +1,7 @@
 """Public top-level API surface for Patter — Phase 1a of the v0.5.0 refactor.
 
 This module centralises the new LiveKit-style, user-facing primitives so they
-can be re-exported from :mod:`patter` without cluttering the historical module
+can be re-exported from :mod:`getpatter` without cluttering the historical module
 layout. The Phase 1a goals are:
 
 * Expose a dedicated ``Tool`` dataclass (distinct from the legacy

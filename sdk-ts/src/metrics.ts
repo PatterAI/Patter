@@ -21,15 +21,40 @@ import type { EOUMetrics, InterruptionMetrics } from './observability/metric-typ
 
 export interface LatencyBreakdown {
   stt_ms: number;
-  /** Time-to-first-token (UX-facing latency): stt_complete → first LLM token. */
+  /**
+   * Backwards-compatible LLM bucket. With the split below, this now reflects
+   * the user-perceived first-token latency (TTFT) when streaming is available
+   * and the full generation time otherwise. Prefer ``llm_ttft_ms`` /
+   * ``llm_total_ms`` in new code.
+   */
   llm_ms: number;
-  /** Same as llm_ms, retained as an alias for older consumers. */
+  /** Time-to-first-token (UX-facing latency): stt_complete → first LLM token. */
   llm_ttft_ms?: number;
-  /** Total LLM generation time: stt_complete → last LLM token. Useful for cost
-   *  and throughput analysis (token-count proxy) but NOT what the user feels. */
+  /**
+   * Total LLM generation time: stt_complete → last LLM token. Distinct from
+   * ``llm_ms`` so cost/throughput analysis and TTFT can be tracked separately.
+   */
   llm_total_ms?: number;
   tts_ms: number;
   total_ms: number;
+  /**
+   * Endpoint latency: time from end-of-user-speech (VAD stop or STT
+   * ``speech_final``) to LLM dispatch. Captures the silence-detection +
+   * transcript-finalization gap. Optional — undefined when the source signal
+   * is missing.
+   */
+  endpoint_ms?: number;
+  /**
+   * Barge-in latency: time from user-interrupt detection to TTS playback
+   * actually halting (i.e. after ``sendClear`` returned). Optional — only
+   * populated on interrupted turns.
+   */
+  bargein_ms?: number;
+  /**
+   * Total TTS time: LLM-first-token (or first-sentence boundary) to last
+   * TTS audio byte sent. Optional — undefined when TTS never completed.
+   */
+  tts_total_ms?: number;
 }
 
 export interface CostBreakdown {
@@ -66,6 +91,7 @@ export interface CallMetrics {
   // Optional for backwards compatibility with external consumers that
   // construct CallMetrics literals. Always populated by endCall().
   latency_p50?: LatencyBreakdown;
+  latency_p90?: LatencyBreakdown;
   latency_p99?: LatencyBreakdown;
   provider_mode: string;
   stt_provider: string;
@@ -152,6 +178,18 @@ export class CallMetricsAccumulator {
   private _llmFirstSentenceComplete: number | null = null;
   private _llmComplete: number | null = null;
   private _ttsFirstByte: number | null = null;
+  /** Last TTS audio byte sent (hrTimeMs). Stamped by ``recordTtsComplete`` /
+   *  ``recordTtsCompleteTs``. Used to compute ``tts_total_ms``. */
+  private _ttsLastByte: number | null = null;
+  /** Endpoint signal (hrTimeMs) — VAD stop or STT speech_final, whichever
+   *  fires first. Used to compute ``endpoint_ms``. */
+  private _endpointSignalAt: number | null = null;
+  /** Monotonic stamp of LLM dispatch (paired with ``_endpointSignalAt``). */
+  private _turnCommittedMono: number | null = null;
+  /** Barge-in detected timestamp (hrTimeMs). */
+  private _bargeinDetectedAt: number | null = null;
+  /** TTS-stopped timestamp after barge-in (hrTimeMs). */
+  private _bargeinStoppedAt: number | null = null;
   private _turnUserText = '';
   private _turnSttAudioSeconds = 0;
 
@@ -242,6 +280,11 @@ export class CallMetricsAccumulator {
     this._llmFirstSentenceComplete = null;
     this._llmComplete = null;
     this._ttsFirstByte = null;
+    this._ttsLastByte = null;
+    this._endpointSignalAt = null;
+    this._turnCommittedMono = null;
+    this._bargeinDetectedAt = null;
+    this._bargeinStoppedAt = null;
     this._turnUserText = '';
     this._turnSttAudioSeconds = 0;
     // Reset EOU state for this turn
@@ -266,6 +309,10 @@ export class CallMetricsAccumulator {
   recordSttComplete(text: string, audioSeconds = 0): void {
     this._sttComplete = hrTimeMs();
     this._sttFinalAt = this._sttComplete;
+    // STT-final is the fallback endpoint signal when no VAD-stop fired earlier.
+    if (this._endpointSignalAt === null) {
+      this._endpointSignalAt = this._sttComplete;
+    }
     this._turnUserText = text;
     this._turnSttAudioSeconds = audioSeconds;
     this._totalSttAudioSeconds += audioSeconds;
@@ -308,6 +355,36 @@ export class CallMetricsAccumulator {
 
   recordTtsComplete(text: string): void {
     this._totalTtsCharacters += text.length;
+    if (this._ttsLastByte === null) {
+      this._ttsLastByte = hrTimeMs();
+    }
+  }
+
+  /**
+   * Capture the timestamp when the last TTS audio byte was sent on the wire.
+   * Useful when the caller wants to record the timing without bumping the
+   * character counter (e.g. interrupted turns where audio actually went out
+   * but synthesis was truncated).
+   */
+  recordTtsCompleteTs(ts?: number): void {
+    this._ttsLastByte = ts ?? hrTimeMs();
+  }
+
+  /**
+   * Mark the moment a user interrupt (barge-in) was detected. Pairs with
+   * ``recordTtsStopped`` to compute ``bargein_ms``.
+   */
+  recordBargeinDetected(ts?: number): void {
+    this._bargeinDetectedAt = ts ?? hrTimeMs();
+  }
+
+  /**
+   * Mark the moment TTS playback was actually halted after a barge-in. Call
+   * this *after* ``sendClear`` returns. Pairs with ``recordBargeinDetected``
+   * to compute ``bargein_ms``.
+   */
+  recordTtsStopped(ts?: number): void {
+    this._bargeinStoppedAt = ts ?? hrTimeMs();
   }
 
   recordTurnComplete(agentText: string): TurnMetrics {
@@ -353,6 +430,10 @@ export class CallMetricsAccumulator {
    */
   recordVadStop(ts?: number): void {
     this._vadStoppedAt = ts ?? hrTimeMs();
+    // First endpoint signal wins for endpoint_ms calculation.
+    if (this._endpointSignalAt === null) {
+      this._endpointSignalAt = this._vadStoppedAt;
+    }
   }
 
   /**
@@ -363,6 +444,10 @@ export class CallMetricsAccumulator {
    */
   recordSttFinalTimestamp(ts?: number): void {
     this._sttFinalAt = ts ?? hrTimeMs();
+    // First endpoint signal wins for endpoint_ms calculation.
+    if (this._endpointSignalAt === null) {
+      this._endpointSignalAt = this._sttFinalAt;
+    }
   }
 
   /**
@@ -372,6 +457,8 @@ export class CallMetricsAccumulator {
    */
   recordTurnCommitted(ts?: number): void {
     this._turnCommittedAt = ts ?? hrTimeMs();
+    // Always stamp a monotonic-ish reference (hrTimeMs) for endpoint_ms math.
+    this._turnCommittedMono = hrTimeMs();
     this.emitEouMetrics();
   }
 
@@ -527,6 +614,7 @@ export class CallMetricsAccumulator {
     const cost = this._computeCost(duration);
     const latencyAvg = this._computeAverageLatency();
     const latencyP50 = this._computePercentileLatency(0.5);
+    const latencyP90 = this._computePercentileLatency(0.9);
     const latencyP95 = this._computePercentileLatency(0.95);
     const latencyP99 = this._computePercentileLatency(0.99);
 
@@ -537,6 +625,7 @@ export class CallMetricsAccumulator {
       cost,
       latency_avg: latencyAvg,
       latency_p50: latencyP50,
+      latency_p90: latencyP90,
       latency_p95: latencyP95,
       latency_p99: latencyP99,
       provider_mode: this.providerMode,
@@ -564,6 +653,11 @@ export class CallMetricsAccumulator {
     this._llmFirstSentenceComplete = null;
     this._llmComplete = null;
     this._ttsFirstByte = null;
+    this._ttsLastByte = null;
+    this._endpointSignalAt = null;
+    this._turnCommittedMono = null;
+    this._bargeinDetectedAt = null;
+    this._bargeinStoppedAt = null;
     this._turnUserText = '';
     this._turnSttAudioSeconds = 0;
   }
@@ -572,8 +666,12 @@ export class CallMetricsAccumulator {
     let stt_ms = 0;
     let llm_ms = 0;
     let llm_ttft_ms: number | undefined;
+    let llm_total_ms: number | undefined;
     let tts_ms = 0;
     let total_ms = 0;
+    let endpoint_ms: number | undefined;
+    let bargein_ms: number | undefined;
+    let tts_total_ms: number | undefined;
 
     // ``stt_ms`` is the wall-clock window from the first audio byte with
     // detected speech to the final transcript. It includes the user's speech
@@ -591,15 +689,19 @@ export class CallMetricsAccumulator {
     // chunk, so the gap collapses to ~0. To get a meaningful value we'd need
     // an external VAD (Silero) signalling end-of-speech earlier. Deferred.
     // ``llm_ms`` is the user-facing latency that maps to UX: time-to-first-token
-    // from end-of-STT. The legacy "tokens-to-completion" is preserved as
-    // ``llm_total_ms`` for cost/quality analysis.
+    // from end-of-STT.  ``llm_total_ms`` captures the full generation duration
+    // (stt_complete → llm_complete) so it can be tracked separately for
+    // cost/throughput analysis.
     if (this._sttComplete !== null && this._llmFirstToken !== null) {
-      llm_ms = Math.max(0, this._llmFirstToken - this._sttComplete);
-      llm_ttft_ms = llm_ms;
+      llm_ttft_ms = Math.max(0, this._llmFirstToken - this._sttComplete);
+      llm_ms = llm_ttft_ms;
     } else if (this._sttComplete !== null && this._llmComplete !== null) {
       // Fallback when the provider doesn't surface first-token timing
       // (e.g. non-streaming providers).
       llm_ms = this._llmComplete - this._sttComplete;
+    }
+    if (this._sttComplete !== null && this._llmComplete !== null) {
+      llm_total_ms = Math.max(0, this._llmComplete - this._sttComplete);
     }
     // Fix 3: use first-sentence boundary as TTS span start when available.
     // In streaming pipeline mode recordTtsFirstByte fires mid-generation,
@@ -615,15 +717,29 @@ export class CallMetricsAccumulator {
       total_ms = this._ttsFirstByte - this._turnStart;
     }
 
+    // endpoint_ms — silence-detected (VAD / STT speech_final) → LLM dispatch.
+    if (this._endpointSignalAt !== null && this._turnCommittedMono !== null) {
+      endpoint_ms = Math.max(0, this._turnCommittedMono - this._endpointSignalAt);
+    }
+    // bargein_ms — interrupt detected → TTS actually halted.
+    if (this._bargeinDetectedAt !== null && this._bargeinStoppedAt !== null) {
+      bargein_ms = Math.max(0, this._bargeinStoppedAt - this._bargeinDetectedAt);
+    }
+    // tts_total_ms — LLM-first-token (or first-sentence boundary, fallback
+    // llm_complete) → last TTS audio byte sent on the wire.
+    const ttsTotalRef =
+      this._llmFirstToken ??
+      this._llmFirstSentenceComplete ??
+      this._llmComplete;
+    if (ttsTotalRef !== null && this._ttsLastByte !== null) {
+      tts_total_ms = Math.max(0, this._ttsLastByte - ttsTotalRef);
+    }
+
     // Note: in Realtime mode OpenAI handles STT+LLM+TTS as a single opaque
     // pipeline, so stt_ms / llm_ms / tts_ms stay 0 and only total_ms is
     // meaningful. Dashboards should prefer total_ms as the end-to-end proxy
     // and treat the component buckets as "unknown / bundled by provider"
     // when total_ms > 0 but all three are 0.
-    let llm_total_ms: number | undefined;
-    if (this._sttComplete !== null && this._llmComplete !== null) {
-      llm_total_ms = this._llmComplete - this._sttComplete;
-    }
     return {
       stt_ms: round(stt_ms, 1),
       llm_ms: round(llm_ms, 1),
@@ -631,6 +747,9 @@ export class CallMetricsAccumulator {
       ...(llm_total_ms !== undefined ? { llm_total_ms: round(llm_total_ms, 1) } : {}),
       tts_ms: round(tts_ms, 1),
       total_ms: round(total_ms, 1),
+      ...(endpoint_ms !== undefined ? { endpoint_ms: round(endpoint_ms, 1) } : {}),
+      ...(bargein_ms !== undefined ? { bargein_ms: round(bargein_ms, 1) } : {}),
+      ...(tts_total_ms !== undefined ? { tts_total_ms: round(tts_total_ms, 1) } : {}),
     };
   }
 
@@ -701,12 +820,28 @@ export class CallMetricsAccumulator {
     const ttftAvg = ttftValues.length > 0
       ? round(ttftValues.reduce((s, v) => s + v, 0) / ttftValues.length, 1)
       : undefined;
+    const optAvg = (key: keyof LatencyBreakdown): number | undefined => {
+      const vals = turns
+        .map((t) => t.latency[key])
+        .filter((v): v is number => typeof v === 'number' && v > 0);
+      return vals.length > 0
+        ? round(vals.reduce((s, v) => s + v, 0) / vals.length, 1)
+        : undefined;
+    };
+    const llmTotalAvg = optAvg('llm_total_ms');
+    const endpointAvg = optAvg('endpoint_ms');
+    const bargeinAvg = optAvg('bargein_ms');
+    const ttsTotalAvg = optAvg('tts_total_ms');
     return {
       stt_ms: round(turns.reduce((s, t) => s + t.latency.stt_ms, 0) / n, 1),
       llm_ms: round(turns.reduce((s, t) => s + t.latency.llm_ms, 0) / n, 1),
       ...(ttftAvg !== undefined ? { llm_ttft_ms: ttftAvg } : {}),
+      ...(llmTotalAvg !== undefined ? { llm_total_ms: llmTotalAvg } : {}),
       tts_ms: round(turns.reduce((s, t) => s + t.latency.tts_ms, 0) / n, 1),
       total_ms: round(turns.reduce((s, t) => s + t.latency.total_ms, 0) / n, 1),
+      ...(endpointAvg !== undefined ? { endpoint_ms: endpointAvg } : {}),
+      ...(bargeinAvg !== undefined ? { bargein_ms: bargeinAvg } : {}),
+      ...(ttsTotalAvg !== undefined ? { tts_total_ms: ttsTotalAvg } : {}),
     };
   }
 
@@ -725,12 +860,26 @@ export class CallMetricsAccumulator {
     const ttftP = ttftSamples.length > 0
       ? round(percentile(ttftSamples, p), 1)
       : undefined;
+    const optPct = (key: keyof LatencyBreakdown): number | undefined => {
+      const vals = turns
+        .map((t) => t.latency[key])
+        .filter((v): v is number => typeof v === 'number' && v > 0);
+      return vals.length > 0 ? round(percentile(vals, p), 1) : undefined;
+    };
+    const llmTotalP = optPct('llm_total_ms');
+    const endpointP = optPct('endpoint_ms');
+    const bargeinP = optPct('bargein_ms');
+    const ttsTotalP = optPct('tts_total_ms');
     return {
       stt_ms: round(percentile(nonZero(turns.map((t) => t.latency.stt_ms)), p), 1),
       llm_ms: round(percentile(nonZero(turns.map((t) => t.latency.llm_ms)), p), 1),
       ...(ttftP !== undefined ? { llm_ttft_ms: ttftP } : {}),
+      ...(llmTotalP !== undefined ? { llm_total_ms: llmTotalP } : {}),
       tts_ms: round(percentile(nonZero(turns.map((t) => t.latency.tts_ms)), p), 1),
       total_ms: round(percentile(nonZero(turns.map((t) => t.latency.total_ms)), p), 1),
+      ...(endpointP !== undefined ? { endpoint_ms: endpointP } : {}),
+      ...(bargeinP !== undefined ? { bargein_ms: bargeinP } : {}),
+      ...(ttsTotalP !== undefined ? { tts_total_ms: ttsTotalP } : {}),
     };
   }
 }

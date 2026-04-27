@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "line-voice-agent": {
+      "source": "cartesia-ai/skills",
+      "sourceType": "github",
+      "computedHash": "554487150dd3827fd69187d707e9e3c6da4f9db6272dea35c7ead9e3772cff65"
+    }
+  }
+}

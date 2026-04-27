@@ -32,6 +32,7 @@
 
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
+import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { getLogger } from '../logger';
@@ -108,22 +109,22 @@ function utcIso(tsSeconds?: number): string {
 
 // --- IO helpers ----------------------------------------------------------
 
-function atomicWriteJson(filePath: string, payload: unknown): void {
+async function atomicWriteJson(filePath: string, payload: unknown): Promise<void> {
   const dir = path.dirname(filePath);
-  fs.mkdirSync(dir, { recursive: true });
+  await fsp.mkdir(dir, { recursive: true });
   const tmp = path.join(dir, `.tmp.${process.pid}.${crypto.randomBytes(4).toString('hex')}.json`);
   try {
-    const fd = fs.openSync(tmp, 'w');
+    const handle = await fsp.open(tmp, 'w');
     try {
-      fs.writeFileSync(fd, JSON.stringify(payload, null, 2) + '\n', { encoding: 'utf8' });
-      fs.fsyncSync(fd);
+      await handle.writeFile(JSON.stringify(payload, null, 2) + '\n', { encoding: 'utf8' });
+      await handle.sync();
     } finally {
-      fs.closeSync(fd);
+      await handle.close();
     }
-    fs.renameSync(tmp, filePath);
+    await fsp.rename(tmp, filePath);
   } catch (err) {
     try {
-      fs.unlinkSync(tmp);
+      await fsp.unlink(tmp);
     } catch {
       // ignore
     }
@@ -131,9 +132,9 @@ function atomicWriteJson(filePath: string, payload: unknown): void {
   }
 }
 
-function appendJsonl(filePath: string, record: unknown): void {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.appendFileSync(filePath, JSON.stringify(record) + '\n', { encoding: 'utf8' });
+async function appendJsonl(filePath: string, record: unknown): Promise<void> {
+  await fsp.mkdir(path.dirname(filePath), { recursive: true });
+  await fsp.appendFile(filePath, JSON.stringify(record) + '\n', { encoding: 'utf8' });
 }
 
 // --- Types ---------------------------------------------------------------
@@ -206,7 +207,7 @@ export class CallLogger {
     return path.join(this.root, 'calls', year, month, day, safeId);
   }
 
-  logCallStart(callId: string, input: CallStartInput = {}): void {
+  async logCallStart(callId: string, input: CallStartInput = {}): Promise<void> {
     if (!this.enabled) return;
     const startedAt = Date.now() / 1000;
     const dir = this.callDir(callId, startedAt);
@@ -230,7 +231,7 @@ export class CallLogger {
       error: null,
     };
     try {
-      atomicWriteJson(path.join(dir, 'metadata.json'), metadata);
+      await atomicWriteJson(path.join(dir, 'metadata.json'), metadata);
     } catch (err) {
       getLogger().warn(`call_log write failed (${sanitizeLogValue(callId)}): ${sanitizeLogValue(String(err))}`);
     }
@@ -240,7 +241,7 @@ export class CallLogger {
     }
   }
 
-  logTurn(callId: string, turn: CallTurnRecord): void {
+  async logTurn(callId: string, turn: CallTurnRecord): Promise<void> {
     if (!this.enabled) return;
     const dir = this.callDir(callId);
     if (dir === null) return;
@@ -250,7 +251,7 @@ export class CallLogger {
       ...turn,
     };
     try {
-      appendJsonl(path.join(dir, 'transcript.jsonl'), record);
+      await appendJsonl(path.join(dir, 'transcript.jsonl'), record);
     } catch (err) {
       getLogger().warn(
         `call_log turn write failed (${sanitizeLogValue(callId)}): ${sanitizeLogValue(String(err))}`,
@@ -258,7 +259,7 @@ export class CallLogger {
     }
   }
 
-  logEvent(callId: string, eventType: string, payload: Record<string, unknown> = {}): void {
+  async logEvent(callId: string, eventType: string, payload: Record<string, unknown> = {}): Promise<void> {
     if (!this.enabled) return;
     const dir = this.callDir(callId);
     if (dir === null) return;
@@ -269,7 +270,7 @@ export class CallLogger {
       data: payload,
     };
     try {
-      appendJsonl(path.join(dir, 'events.jsonl'), record);
+      await appendJsonl(path.join(dir, 'events.jsonl'), record);
     } catch (err) {
       getLogger().warn(
         `call_log event write failed (${sanitizeLogValue(callId)}): ${sanitizeLogValue(String(err))}`,
@@ -277,14 +278,14 @@ export class CallLogger {
     }
   }
 
-  logCallEnd(callId: string, input: CallEndInput = {}): void {
+  async logCallEnd(callId: string, input: CallEndInput = {}): Promise<void> {
     if (!this.enabled) return;
     const dir = this.callDir(callId);
     if (dir === null) return;
     const metadataPath = path.join(dir, 'metadata.json');
     let existing: Record<string, unknown> = {};
     try {
-      existing = JSON.parse(fs.readFileSync(metadataPath, 'utf8')) as Record<string, unknown>;
+      existing = JSON.parse(await fsp.readFile(metadataPath, 'utf8')) as Record<string, unknown>;
     } catch {
       existing = {
         schema_version: SCHEMA_VERSION,
@@ -306,7 +307,7 @@ export class CallLogger {
       error: input.error ?? null,
     };
     try {
-      atomicWriteJson(metadataPath, merged);
+      await atomicWriteJson(metadataPath, merged);
     } catch (err) {
       getLogger().warn(
         `call_log finalize failed (${sanitizeLogValue(callId)}): ${sanitizeLogValue(String(err))}`,

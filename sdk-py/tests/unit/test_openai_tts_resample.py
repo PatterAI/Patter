@@ -209,3 +209,42 @@ class TestEdgeCases:
             break
         await gen.aclose()
         mock_resp.aclose.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# Latency tuning — chunk_size for aiter_bytes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestChunkSize:
+    """OpenAI TTS uses a 1024-byte chunk_size on aiter_bytes for low TTFB.
+
+    1024 bytes ≈ 21 ms at 24 kHz / 16-bit (vs ~85 ms at the previous 4096),
+    materially lowering time-to-first-byte on the streamed PCM. The
+    StatefulResampler is chunk-size-agnostic so the smaller granularity
+    must not introduce pops, byte loss, or alignment drift.
+    """
+
+    async def test_aiter_bytes_called_with_chunk_size_1024(self) -> None:
+        captured: dict[str, int] = {}
+
+        async def _aiter_bytes(chunk_size: int = 4096) -> AsyncIterator[bytes]:
+            captured["chunk_size"] = chunk_size
+            yield _pcm16([0] * 20)
+
+        mock_resp = AsyncMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.aclose = AsyncMock()
+        mock_resp.aiter_bytes = _aiter_bytes
+
+        tts = _make_tts()
+        tts._client = AsyncMock()
+        tts._client.build_request.return_value = MagicMock()
+        tts._client.send.return_value = mock_resp
+
+        async for _ in tts.synthesize("hi"):
+            pass
+
+        assert captured["chunk_size"] == 1024

@@ -7,6 +7,13 @@ Cerebras-specific base URL.  Payload compression (msgpack + gzip) is
 supported and enabled by default to reduce TTFT for large prompts —
 see https://inference-docs.cerebras.ai/payload-optimization.
 
+All OpenAI-spec sampling kwargs accepted by the parent
+(``response_format``, ``parallel_tool_calls``, ``tool_choice``, ``seed``,
+``top_p``, ``frequency_penalty``, ``presence_penalty``, ``stop``,
+``temperature``, ``max_tokens``) are inherited and forwarded to
+``chat.completions.create`` automatically — see
+:class:`OpenAILLMProvider` for the full list.
+
 Portions adapted from LiveKit Agents
 (https://github.com/livekit/agents, commit 78a66bcf79c5cea82989401c408f1dff4b961a5b,
 file livekit-plugins/livekit-plugins-cerebras/livekit/plugins/cerebras/llm.py),
@@ -40,10 +47,10 @@ logger = logging.getLogger("getpatter.providers.cerebras_llm")
 
 _CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1"
 # Default to the smallest fast Cerebras model available on the free tier so
-# the SDK works out of the box. ``llama-3.3-70b`` exists on Cerebras but is
-# gated to paid tiers — using it as default surfaces a confusing 404 for free
-# users. ``llama3.1-8b`` is 8B params, sub-100ms TTFT on Cerebras hardware,
-# and matches the LiveKit/Pipecat "small and fast for voice" philosophy.
+# the SDK works out of the box. ``gpt-oss-120b`` is the highest-throughput
+# model (~3000 tok/sec on WSE-3) but is gated to paid tiers — using it as
+# default surfaces a confusing 404 for free users. ``llama3.1-8b`` is 8B
+# params, sub-100ms TTFT on Cerebras hardware, and free-tier eligible.
 #
 # TODO(deprecation 2026-05-27): Cerebras has scheduled both ``llama3.1-8b``
 # and ``qwen-3-235b-a22b-instruct-2507`` for retirement on this date. Before
@@ -58,6 +65,7 @@ def _build_cerebras_client(
     base_url: str,
     use_msgpack: bool,
     use_gzip: bool,
+    default_headers: dict[str, str] | None = None,
 ):
     """Return an ``openai.AsyncOpenAI`` subclass that compresses requests."""
     try:
@@ -128,6 +136,10 @@ def _build_cerebras_client(
 
             return super()._build_request(options, retries_taken=retries_taken)
 
+    if default_headers:
+        return _CerebrasClient(
+            api_key=api_key, base_url=base_url, default_headers=default_headers
+        )
     return _CerebrasClient(api_key=api_key, base_url=base_url)
 
 
@@ -135,18 +147,35 @@ class CerebrasLLMProvider(OpenAILLMProvider):
     """LLM provider backed by Cerebras's OpenAI-compatible Inference API.
 
     Streams in the same ``{"type": "text" | "tool_call" | "done"}`` chunk
-    format as :class:`OpenAILLMProvider`.
+    format as :class:`OpenAILLMProvider`. All OpenAI-spec sampling kwargs
+    accepted by the parent are forwarded transparently.
+
+    Available models on Cerebras (verified against
+    https://inference-docs.cerebras.ai/models/overview):
+
+      Production:
+        - gpt-oss-120b                          (default — highest throughput on Cerebras, no deprecation)
+        - llama3.1-8b                           (smaller context alternative; deprecating 2026-05-27)
+
+      Preview (opt-in):
+        - qwen-3-235b-a22b-instruct-2507        (multilingual, strong on European languages)
+        - zai-glm-4.7
 
     Args:
         api_key: Cerebras API key. Reads ``CEREBRAS_API_KEY`` if omitted.
         model: Cerebras chat model ID. Defaults to ``llama3.1-8b`` (free-tier
-            available, sub-100ms TTFT). Override with ``llama-3.3-70b`` on paid
-            tiers for higher quality, or query ``GET /v1/models`` to discover
+            available, sub-100ms TTFT). Override with ``gpt-oss-120b`` on paid
+            tiers for higher throughput (~3000 tok/sec), ``llama-3.3-70b`` for
+            balanced quality, or query ``GET /v1/models`` to discover
             tier-available IDs.
         base_url: Optional Cerebras base URL override.
         gzip_compression: Gzip request payloads for faster TTFT.
         msgpack_encoding: Encode request payloads with msgpack for smaller
             wire size.  Requires ``msgpack>=1.0``.
+        **kwargs: Sampling kwargs forwarded to :class:`OpenAILLMProvider`
+            (``response_format``, ``parallel_tool_calls``, ``tool_choice``,
+            ``seed``, ``top_p``, ``frequency_penalty``, ``presence_penalty``,
+            ``stop``, ``temperature``, ``max_tokens``, ``user_agent``).
     """
 
     def __init__(
@@ -156,6 +185,7 @@ class CerebrasLLMProvider(OpenAILLMProvider):
         base_url: str = _CEREBRAS_BASE_URL,
         gzip_compression: bool = True,
         msgpack_encoding: bool = True,
+        **kwargs,
     ) -> None:
         try:
             from openai import AsyncOpenAI  # noqa: F401
@@ -172,31 +202,45 @@ class CerebrasLLMProvider(OpenAILLMProvider):
                 "or via the CEREBRAS_API_KEY environment variable."
             )
 
+        # Initialise parent state (model, sampling kwargs, _user_agent).
+        # The parent constructs an OpenAI-pointed AsyncOpenAI client which we
+        # immediately replace below with a Cerebras-pointed (and optionally
+        # compressing) client.
+        super().__init__(api_key=resolved_key, model=model, **kwargs)
+
+        ua_headers = {"User-Agent": self._user_agent}
+
         if gzip_compression or msgpack_encoding:
             self._client: Any = _build_cerebras_client(
                 api_key=resolved_key,
                 base_url=base_url,
                 use_msgpack=msgpack_encoding,
                 use_gzip=gzip_compression,
+                default_headers=ua_headers,
             )
         else:
             from openai import AsyncOpenAI
 
-            self._client = AsyncOpenAI(api_key=resolved_key, base_url=base_url)
-
-        self._model = model
+            self._client = AsyncOpenAI(
+                api_key=resolved_key,
+                base_url=base_url,
+                default_headers=ua_headers,
+            )
 
     async def stream(
         self,
         messages: list[dict],
         tools: list[dict] | None = None,
     ) -> AsyncIterator[dict]:
-        # 404 model_not_found on Cerebras almost always means the model name
-        # isn't available on the caller's tier (Cerebras gates models per
-        # plan). Surface a concrete recovery hint at ERROR level, matching the
-        # TS provider's log-and-return contract — voice pipelines treat LLM
-        # provider failures as recoverable (the call continues, the user just
-        # hears no LLM response), so raising would be a behavioural change.
+        """Stream from Cerebras, delegating SSE consumption to the parent.
+
+        404 ``model_not_found`` on Cerebras almost always means the model
+        name isn't available on the caller's tier (Cerebras gates models per
+        plan). The error is logged with a recovery hint at ERROR level and
+        the generator returns silently — voice pipelines treat LLM provider
+        failures as recoverable (the call continues; the user just hears no
+        LLM response), so raising would be a behavioural change.
+        """
         try:
             async for chunk in super().stream(messages, tools):
                 yield chunk

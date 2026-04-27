@@ -110,6 +110,27 @@ class TestOpenAIRealtimeAdapterIO:
         assert sent["type"] == "session.update"
         assert sent["session"]["voice"] == "alloy"
         assert sent["session"]["instructions"] == "Be helpful."
+        # Default silence_duration_ms is 300 (OpenAI's documented sweet-spot
+        # for snappier turns; saves ~200 ms vs the previous 500 default).
+        assert sent["session"]["turn_detection"]["silence_duration_ms"] == 300
+
+    @pytest.mark.asyncio
+    async def test_connect_honours_custom_silence_duration_ms(self) -> None:
+        """Constructor override must propagate into the session.update payload."""
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
+
+        adapter = OpenAIRealtimeAdapter(api_key="sk-test", silence_duration_ms=600)
+        mock_ws = AsyncMock()
+        mock_ws.recv.return_value = json.dumps({"type": "session.created"})
+
+        with patch(
+            "getpatter.providers.openai_realtime.websockets.connect",
+            side_effect=_ws_connect_side_effect(mock_ws),
+        ):
+            await adapter.connect()
+
+        sent = json.loads(mock_ws.send.call_args[0][0])
+        assert sent["session"]["turn_detection"]["silence_duration_ms"] == 600
 
     @pytest.mark.asyncio
     async def test_connect_with_tools(self) -> None:
@@ -346,20 +367,11 @@ class TestOpenAIRealtimeAdapterIO:
 class TestElevenLabsConvAIAdapterIO:
     """ElevenLabsConvAIAdapter with mocked WebSocket for I/O paths."""
 
-    @pytest.mark.asyncio
-    async def test_connect_without_agent_id(self) -> None:
+    def test_init_rejects_empty_agent_id(self) -> None:
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
-        adapter = ElevenLabsConvAIAdapter(api_key="el-test")
-        mock_ws = AsyncMock()
-
-        with patch("getpatter.providers.elevenlabs_convai.websockets.connect", side_effect=_ws_connect_side_effect(mock_ws)) as mc:
-            await adapter.connect()
-
-        assert adapter._running is True
-        call_url = mc.call_args[0][0]
-        assert "agent_id=" not in call_url
-        mock_ws.send.assert_called_once()
+        with pytest.raises(ValueError, match="agent_id"):
+            ElevenLabsConvAIAdapter(api_key="el-test", agent_id="")
 
     @pytest.mark.asyncio
     async def test_connect_with_agent_id(self) -> None:
@@ -378,7 +390,7 @@ class TestElevenLabsConvAIAdapterIO:
     async def test_connect_with_first_message(self) -> None:
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
-        adapter = ElevenLabsConvAIAdapter(api_key="el-test", first_message="Hi there!")
+        adapter = ElevenLabsConvAIAdapter(api_key="el-test", agent_id="agent-test", first_message="Hi there!")
         mock_ws = AsyncMock()
 
         with patch("getpatter.providers.elevenlabs_convai.websockets.connect", side_effect=_ws_connect_side_effect(mock_ws)):
@@ -391,7 +403,7 @@ class TestElevenLabsConvAIAdapterIO:
     async def test_connect_without_first_message(self) -> None:
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
-        adapter = ElevenLabsConvAIAdapter(api_key="el-test", first_message="")
+        adapter = ElevenLabsConvAIAdapter(api_key="el-test", agent_id="agent-test", first_message="")
         mock_ws = AsyncMock()
 
         with patch("getpatter.providers.elevenlabs_convai.websockets.connect", side_effect=_ws_connect_side_effect(mock_ws)):
@@ -410,7 +422,7 @@ class TestElevenLabsConvAIAdapterIO:
     async def test_send_audio_encodes_base64(self) -> None:
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
-        adapter = ElevenLabsConvAIAdapter(api_key="el-test")
+        adapter = ElevenLabsConvAIAdapter(api_key="el-test", agent_id="agent-test")
         adapter._ws = AsyncMock()
 
         audio = b"\xaa\xbb\xcc"
@@ -436,7 +448,7 @@ class TestElevenLabsConvAIAdapterIO:
     async def test_receive_events_yields_audio(self) -> None:
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
-        adapter = ElevenLabsConvAIAdapter(api_key="el-test")
+        adapter = ElevenLabsConvAIAdapter(api_key="el-test", agent_id="agent-test")
         audio_bytes = b"\xdd\xee"
         encoded = base64.b64encode(audio_bytes).decode("ascii")
         await self._prime_adapter_with_ws(
@@ -455,7 +467,7 @@ class TestElevenLabsConvAIAdapterIO:
     async def test_receive_events_yields_transcripts(self) -> None:
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
-        adapter = ElevenLabsConvAIAdapter(api_key="el-test")
+        adapter = ElevenLabsConvAIAdapter(api_key="el-test", agent_id="agent-test")
         await self._prime_adapter_with_ws(
             adapter,
             _AsyncIterableWS([
@@ -481,7 +493,7 @@ class TestElevenLabsConvAIAdapterIO:
     async def test_receive_events_empty_audio_skipped(self) -> None:
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
-        adapter = ElevenLabsConvAIAdapter(api_key="el-test")
+        adapter = ElevenLabsConvAIAdapter(api_key="el-test", agent_id="agent-test")
         await self._prime_adapter_with_ws(
             adapter,
             _AsyncIterableWS([json.dumps({"type": "audio", "audio": ""})]),
@@ -496,7 +508,7 @@ class TestElevenLabsConvAIAdapterIO:
     async def test_receive_events_error_event_yielded(self) -> None:
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
-        adapter = ElevenLabsConvAIAdapter(api_key="el-test")
+        adapter = ElevenLabsConvAIAdapter(api_key="el-test", agent_id="agent-test")
         await self._prime_adapter_with_ws(
             adapter,
             _AsyncIterableWS([json.dumps({"type": "error", "message": "bad"})]),
@@ -512,7 +524,7 @@ class TestElevenLabsConvAIAdapterIO:
     async def test_receive_events_handles_connection_closed(self) -> None:
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
-        adapter = ElevenLabsConvAIAdapter(api_key="el-test")
+        adapter = ElevenLabsConvAIAdapter(api_key="el-test", agent_id="agent-test")
         adapter._running = True
         await self._prime_adapter_with_ws(adapter, _ConnectionClosedWS())
 
@@ -525,7 +537,7 @@ class TestElevenLabsConvAIAdapterIO:
     async def test_receive_events_noop_when_no_ws(self) -> None:
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
-        adapter = ElevenLabsConvAIAdapter(api_key="el-test")
+        adapter = ElevenLabsConvAIAdapter(api_key="el-test", agent_id="agent-test")
         adapter._ws = None
         events = []
         async for event in adapter.receive_events():
@@ -580,7 +592,7 @@ class TestElevenLabsConvAIAdapterIO:
         """A `ping` message is replied to with a matching `pong`."""
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
-        adapter = ElevenLabsConvAIAdapter(api_key="el-test")
+        adapter = ElevenLabsConvAIAdapter(api_key="el-test", agent_id="agent-test")
         mock_ws = AsyncMock()
         # Iterable messages include a ping.
         mock_ws.__aiter__ = lambda self: _AsyncIterHelper([
@@ -603,7 +615,7 @@ class TestElevenLabsConvAIAdapterIO:
     async def test_conversation_initiation_metadata_captured(self) -> None:
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
-        adapter = ElevenLabsConvAIAdapter(api_key="el-test")
+        adapter = ElevenLabsConvAIAdapter(api_key="el-test", agent_id="agent-test")
         meta = {
             "type": "conversation_initiation_metadata",
             "conversation_initiation_metadata_event": {
@@ -742,13 +754,33 @@ class TestWhisperSTT:
         stt._client.aclose.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_close_skips_small_buffer(self) -> None:
+    async def test_close_flushes_small_buffer(self) -> None:
+        """Close must flush any non-empty buffer so trailing audio is not dropped."""
+        from getpatter.providers.whisper_stt import WhisperSTT
+
+        stt = WhisperSTT(api_key="sk-test")
+        stt._running = True
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"text": "tail"}
+        mock_response.raise_for_status = MagicMock()
+        stt._client = AsyncMock()
+        stt._client.post.return_value = mock_response
+        stt._buffer = bytearray(b"\x00" * 10)
+        await stt.close()
+
+        assert stt._running is False
+        stt._client.post.assert_called_once()
+        stt._client.aclose.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_close_empty_buffer_no_post(self) -> None:
+        """An empty buffer must not trigger a transcription call on close."""
         from getpatter.providers.whisper_stt import WhisperSTT
 
         stt = WhisperSTT(api_key="sk-test")
         stt._running = True
         stt._client = AsyncMock()
-        stt._buffer = bytearray(b"\x00" * 10)
+        stt._buffer = bytearray()
         await stt.close()
 
         assert stt._running is False

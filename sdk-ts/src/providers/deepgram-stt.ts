@@ -74,7 +74,13 @@ export interface DeepgramSTTOptions {
    * hard minimum of 1000 ms. Set to ``null`` to disable. Default ``1000``.
    */
   readonly utteranceEndMs?: number | null;
-  /** Enable smart formatting (punctuation + numerals). Default ``true``. */
+  /**
+   * Enable smart formatting (punctuation + numerals). Default ``false`` —
+   * smart formatting adds roughly 50–150 ms to TTFT on each final transcript
+   * and is rarely useful for telephony pipelines that pass the text straight
+   * to an LLM. Set to ``true`` for use cases (dashboards, raw transcripts)
+   * where the formatted text is surfaced directly to humans.
+   */
   readonly smartFormat?: boolean;
   /** Emit interim (non-final) transcripts. Default ``true``. */
   readonly interimResults?: boolean;
@@ -154,7 +160,7 @@ export class DeepgramSTT {
     this.sampleRate = sampleRate ?? opts.sampleRate ?? 16000;
     this.endpointingMs = opts.endpointingMs ?? 150;
     this.utteranceEndMs = opts.utteranceEndMs === null ? null : opts.utteranceEndMs ?? 1000;
-    this.smartFormat = opts.smartFormat ?? true;
+    this.smartFormat = opts.smartFormat ?? false;
     this.interimResults = opts.interimResults ?? true;
     this.vadEvents = opts.vadEvents ?? true;
   }

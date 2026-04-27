@@ -18,7 +18,7 @@ import aiohttp
 
 from getpatter.providers.base import STTProvider, Transcript
 
-logger = logging.getLogger("patter")
+logger = logging.getLogger("getpatter")
 
 DEFAULT_BASE_URL = "wss://streaming.assemblyai.com"
 DEFAULT_MIN_TURN_SILENCE_MS = 400

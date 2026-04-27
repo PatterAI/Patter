@@ -279,4 +279,57 @@ describe('ElevenLabsConvAIAdapter', () => {
     expect(errEvt).toBeDefined();
     expect(errEvt!.data).toBe('boom');
   });
+
+  // ----------------------------------------------------------------
+  // Telephony factories — native μ-law 8 kHz negotiation
+  // ----------------------------------------------------------------
+
+  describe('telephony factories', () => {
+    it('forTwilio() negotiates ulaw_8000 on both directions', () => {
+      const adapter = ElevenLabsConvAIAdapter.forTwilio('el_key', 'agent_123');
+      expect(adapter.outputAudioFormat).toBe('ulaw_8000');
+      expect(adapter.inputAudioFormat).toBe('ulaw_8000');
+    });
+
+    it('forTwilio() respects optional overrides', () => {
+      const adapter = ElevenLabsConvAIAdapter.forTwilio('el_key', 'agent_xyz', {
+        voiceId: 'custom_voice',
+        language: 'en',
+        firstMessage: 'Hi!',
+      });
+      expect(adapter.outputAudioFormat).toBe('ulaw_8000');
+      expect(adapter.inputAudioFormat).toBe('ulaw_8000');
+    });
+
+    it('forTelnyx() negotiates ulaw_8000 on both directions', () => {
+      const adapter = ElevenLabsConvAIAdapter.forTelnyx('el_key', 'agent_456');
+      expect(adapter.outputAudioFormat).toBe('ulaw_8000');
+      expect(adapter.inputAudioFormat).toBe('ulaw_8000');
+    });
+
+    it('bare constructor leaves audio formats undefined (server PCM16 default)', () => {
+      const adapter = new ElevenLabsConvAIAdapter('el_key', 'agent_x');
+      expect(adapter.outputAudioFormat).toBeUndefined();
+      expect(adapter.inputAudioFormat).toBeUndefined();
+    });
+
+    it('forTwilio() sends ulaw_8000 in conversation_config_override on connect()', async () => {
+      const adapter = ElevenLabsConvAIAdapter.forTwilio('el_key', 'agent_x');
+      const connectPromise = adapter.connect();
+      const instance = (adapter as unknown as {
+        ws: { emit: (e: string) => void; sent: string[] };
+      }).ws;
+      instance.emit('open');
+      await connectPromise;
+
+      const initMsg = JSON.parse(instance.sent[0]) as {
+        conversation_config_override: {
+          tts: { voice_id: string; output_format?: string };
+          asr?: { input_format?: string };
+        };
+      };
+      expect(initMsg.conversation_config_override.tts.output_format).toBe('ulaw_8000');
+      expect(initMsg.conversation_config_override.asr?.input_format).toBe('ulaw_8000');
+    });
+  });
 });

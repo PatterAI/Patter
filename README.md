@@ -46,7 +46,7 @@ pip install getpatter
 ```
 
 ```python
-from patter import Patter, Twilio, OpenAIRealtime
+from getpatter import Patter, Twilio, OpenAIRealtime
 
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")
 agent = phone.agent(engine=OpenAIRealtime(), system_prompt="You are a friendly receptionist for Acme Corp.", first_message="Hello! How can I help?")
@@ -74,6 +74,10 @@ await phone.serve({ agent, tunnel: true });
 
 `tunnel: true` spawns a Cloudflare tunnel and points your Twilio number at it. In production, pass `webhook_url` / `webhookUrl` to the constructor instead. Every carrier and provider reads its credentials from environment variables by default; see each SDK's README for the full catalog.
 
+## How Patter compares
+
+Patter is purpose-built for production voice over real telephony. Out of the box you get **Twilio + Telnyx parity** (DTMF, transfer, AMD, voicemail drop, recording), **both architectures from one API** — speech-to-speech (Realtime / ConvAI engines) and the sandwich pipeline (STT → LLM → TTS) — and **production-grade barge-in / VAD / IVR primitives** that work the same on every carrier. Observability is vendor-neutral OpenTelemetry tracing, plus a built-in dashboard and tunnel; no extra collector required. The 4-line quickstart above replaces ~50 lines of glue you'd otherwise write against a generic voice-agent toolkit, and the **Python and TypeScript SDKs are identical** — same surface, same hooks, same events — so cross-runtime teams ship the same agent twice without rewriting it.
+
 ## Features
 
 | Feature | Method | Template |
@@ -91,7 +95,6 @@ await phone.serve({ agent, tunnel: true });
 | Voicemail drop | `call(voicemailMessage="...")` | [patter-outbound-calls](https://github.com/PatterAI/patter-outbound-calls) |
 | Test mode (no phone) | `phone.test(agent)` | [docs](https://docs.getpatter.com) |
 | Built-in tunnel | Cloudflare (auto) | [docs](https://docs.getpatter.com) |
-| MCP server | `patter-mcp` CLI | [docs](https://docs.getpatter.com) |
 
 ## How It Works
 
@@ -168,7 +171,7 @@ cp .env.example .env
 # Edit .env with your API keys
 ```
 
-> **Telnyx:** Telnyx is a fully supported telephony provider alternative to Twilio. Both carriers receive equal support for DTMF, transfer, recording, and metrics.
+> **Telnyx:** Telnyx is a fully supported telephony provider alternative to Twilio. Both carriers receive equal support for DTMF, transfer, and metrics. Recording is Twilio-only.
 
 ### Docker
 

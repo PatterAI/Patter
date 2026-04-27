@@ -19,6 +19,28 @@ export interface TunnelHandle {
 }
 
 /**
+ * Minimal structural type for the subset of the ``cloudflared`` package we use.
+ * The package ships its own d.ts but is an optional peer dep, so we declare
+ * the shape locally to keep the import dynamic and the build green even when
+ * the package is not installed.
+ */
+interface TunnelInstance {
+  on(event: string, cb: (data: string) => void): void;
+  stop(): void;
+}
+
+interface CloudflaredModule {
+  /** cloudflared >=0.7: returns an EventEmitter-shaped object. */
+  Tunnel?: {
+    quick?: (url: string) => TunnelInstance;
+  };
+  /** cloudflared 0.5: returns ``{ url, stop }`` (or an EventEmitter). */
+  tunnel?: (args: Record<string, string>) => TunnelInstance & {
+    url?: Promise<string>;
+  };
+}
+
+/**
  * Start a cloudflared quick tunnel pointing to the given local port.
  *
  * @param port - Local port to tunnel to
@@ -26,10 +48,9 @@ export interface TunnelHandle {
  * @returns A handle with the public hostname and a stop function
  */
 export async function startTunnel(port: number, timeoutMs = 30_000): Promise<TunnelHandle> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let tunnelMod: any;
+  let tunnelMod: CloudflaredModule;
   try {
-    tunnelMod = await import('cloudflared' as string);
+    tunnelMod = (await import('cloudflared' as string)) as CloudflaredModule;
   } catch {
     throw new Error(
       'Built-in tunnel requires the "cloudflared" package. Install it with:\n\n' +
@@ -47,13 +68,19 @@ export async function startTunnel(port: number, timeoutMs = 30_000): Promise<Tun
   const TunnelClass = tunnelMod.Tunnel;
   const hasQuick = TunnelClass && typeof TunnelClass.quick === 'function';
 
-  let instance: { on: (event: string, cb: (data: string) => void) => void; stop: () => void };
+  let instance: TunnelInstance;
 
-  if (hasQuick) {
+  if (hasQuick && TunnelClass?.quick) {
     // New API (cloudflared 0.7+): Tunnel.quick(url) returns EventEmitter
     instance = TunnelClass.quick(`http://localhost:${port}`);
   } else {
     // Old API (cloudflared 0.5): tunnel({ '--url': ... }) returns { url: Promise, stop }
+    if (!tunnelMod.tunnel) {
+      throw new Error(
+        'Built-in tunnel: installed "cloudflared" package exposes neither ' +
+          '`Tunnel.quick` nor `tunnel({ "--url" })`. Upgrade with `npm install cloudflared@latest`.',
+      );
+    }
     const result = tunnelMod.tunnel({ '--url': `http://localhost:${port}` });
     if (result.url && typeof result.url.then === 'function') {
       // Old API with Promise-based URL

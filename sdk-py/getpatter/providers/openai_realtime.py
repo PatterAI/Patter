@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 import websockets
 
-logger = logging.getLogger("patter.openai_realtime")
+logger = logging.getLogger("getpatter.openai_realtime")
 
 
 class OpenAIRealtimeAdapter:
@@ -36,6 +36,10 @@ class OpenAIRealtimeAdapter:
         tool_choice: str | dict | None = None,
         input_audio_transcription_model: str = "whisper-1",
         vad_type: Literal["server_vad", "semantic_vad"] = "server_vad",
+        # OpenAI's documented sweet-spot for snappier turns. Lowering from the
+        # previous 500 ms saves ~200 ms per turn end. Override via constructor
+        # if a use case (e.g. dictation) needs more trailing silence.
+        silence_duration_ms: int = 300,
     ):
         self.api_key = api_key
         self.model = model
@@ -50,6 +54,7 @@ class OpenAIRealtimeAdapter:
         self.tool_choice = tool_choice
         self.input_audio_transcription_model = input_audio_transcription_model
         self.vad_type = vad_type
+        self.silence_duration_ms = silence_duration_ms
         self._ws: Any = None
         self._running = False
         # Track the assistant message currently being generated so we can
@@ -98,7 +103,7 @@ class OpenAIRealtimeAdapter:
                     "type": self.vad_type,
                     "threshold": 0.5,
                     "prefix_padding_ms": 300,
-                    "silence_duration_ms": 500,
+                    "silence_duration_ms": self.silence_duration_ms,
                 },
                 "input_audio_transcription": {
                     "model": self.input_audio_transcription_model,

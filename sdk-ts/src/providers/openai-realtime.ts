@@ -19,6 +19,13 @@ export interface OpenAIRealtimeOptions {
   toolChoice?: string | Record<string, unknown>;
   inputAudioTranscriptionModel?: string;
   vadType?: 'server_vad' | 'semantic_vad';
+  /**
+   * Trailing silence (ms) the server VAD waits for before treating the user's
+   * turn as complete. Defaults to 300 — OpenAI's documented sweet-spot for
+   * snappier turn-taking, ~200 ms faster than the previous 500 default.
+   * Increase for dictation-style flows where the user pauses mid-sentence.
+   */
+  silenceDurationMs?: number;
 }
 
 export class OpenAIRealtimeAdapter {
@@ -80,7 +87,7 @@ export class OpenAIRealtimeAdapter {
               type: this.options.vadType ?? 'server_vad',
               threshold: 0.5,
               prefix_padding_ms: 300,
-              silence_duration_ms: 500,
+              silence_duration_ms: this.options.silenceDurationMs ?? 300,
             },
             input_audio_transcription: { model: this.options.inputAudioTranscriptionModel ?? 'whisper-1' },
           };

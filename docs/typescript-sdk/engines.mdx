@@ -13,7 +13,7 @@ Patter ships with two engine classes today:
 - [`OpenAIRealtime`](#openairealtime) — OpenAI's Realtime API
 - [`ElevenLabsConvAI`](#elevenlabsconvai) — ElevenLabs Conversational AI
 
-Each class ships as both a **flat alias** (`import { OpenAIRealtime } from "getpatter"`) and a **namespaced** class (`import * as openai from "getpatter/engines/openai"` → `new openai.Realtime()`). They are equivalent.
+Both classes are imported by name from the package barrel: `import { OpenAIRealtime, ElevenLabsConvAI } from "getpatter"`.
 
 If you need full control over STT, LLM, and TTS independently, use [pipeline mode](/typescript-sdk/llm#pipeline-mode) instead and omit `engine`.
 
@@ -42,15 +42,6 @@ await phone.serve({ agent });
 | `voice` | `string` | `"alloy"` | One of `"alloy"`, `"ash"`, `"ballad"`, `"coral"`, `"echo"`, `"sage"`, `"shimmer"`, `"verse"`. |
 | `model` | `string` | `"gpt-4o-mini-realtime-preview"` | OpenAI Realtime model ID. |
 
-Namespaced form:
-
-```typescript
-import * as openai from "getpatter/engines/openai";
-
-const engine = new openai.Realtime();                 // reads OPENAI_API_KEY
-const engine = new openai.Realtime({ voice: "alloy" });
-```
-
 ## ElevenLabsConvAI
 
 ElevenLabs Conversational AI — premium voice quality using a managed agent configured in the ElevenLabs dashboard.
@@ -74,15 +65,6 @@ await phone.serve({ agent });
 | `apiKey` | `string` | — | ElevenLabs API key. Reads from `ELEVENLABS_API_KEY` when omitted. |
 | `agentId` | `string` | — | ElevenLabs agent ID (from the ConvAI dashboard). Reads from `ELEVENLABS_AGENT_ID` when omitted. |
 | `voice` | `string` | — | Optional override for the agent's default voice ID. |
-
-Namespaced form:
-
-```typescript
-import * as elevenlabs from "getpatter/engines/elevenlabs";
-
-const engine = new elevenlabs.ConvAI();               // reads env
-const engine = new elevenlabs.ConvAI({ agentId: "agent_abc123", voice: "rachel" });
-```
 
 ## What's Next
 

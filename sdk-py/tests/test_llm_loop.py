@@ -46,6 +46,10 @@ def _make_llm_loop(tools=None, tool_executor=None, provider=None):
     loop._system_prompt = "You are a test assistant."
     loop._tools = tools
     loop._tool_executor = tool_executor
+    loop._metrics = None
+    loop._event_bus = None
+    loop._model = "fake-model"
+    loop._provider_name = "fake"
     loop._openai_tools = None
     loop._tool_map = {}
     if tools:

@@ -23,7 +23,7 @@ import aiohttp
 
 from getpatter.providers.base import STTProvider, Transcript
 
-logger = logging.getLogger("patter")
+logger = logging.getLogger("getpatter")
 
 # Cartesia REST/WS base and protocol constants (port of cartesia/constants.py).
 DEFAULT_BASE_URL = "https://api.cartesia.ai"

@@ -68,6 +68,16 @@ class CallMetricsAccumulator:
         self._llm_first_sentence: float | None = None  # Fix 3: first sentence boundary
         self._llm_complete: float | None = None
         self._tts_first_byte: float | None = None
+        # Last TTS audio byte sent (for tts_total_ms). Captured by
+        # ``record_tts_complete`` which now also stamps the timestamp.
+        self._tts_last_byte: float | None = None
+        # Endpoint signal: silence detected (VAD stop OR STT speech_final).
+        # Recorded by ``record_vad_stop`` / ``record_stt_final_timestamp`` —
+        # whichever fires first becomes the endpoint reference.
+        self._endpoint_signal_at: float | None = None
+        # Barge-in detection / completion timestamps (for bargein_ms).
+        self._bargein_detected_at: float | None = None
+        self._bargein_stopped_at: float | None = None
         self._turn_user_text: str = ""
         self._turn_stt_audio_seconds: float = 0.0
         # Cross-turn TTFT storage so _emit_turn_metrics can read it after reset
@@ -104,6 +114,9 @@ class CallMetricsAccumulator:
         self._vad_stopped_at: float | None = None
         self._stt_final_at: float | None = None
         self._turn_committed_at: float | None = None
+        # Monotonic stamp of LLM dispatch — paired with
+        # ``_endpoint_signal_at`` to compute ``endpoint_ms``.
+        self._turn_committed_mono: float | None = None
         self._on_user_turn_completed_delay_ms: float | None = None
 
         # --- InterruptionMetrics counters (LiveKit Pattern B) ---
@@ -150,6 +163,10 @@ class CallMetricsAccumulator:
         self._llm_first_sentence = None
         self._llm_complete = None
         self._tts_first_byte = None
+        self._tts_last_byte = None
+        self._endpoint_signal_at = None
+        self._bargein_detected_at = None
+        self._bargein_stopped_at = None
         self._turn_user_text = ""
         self._turn_stt_audio_seconds = 0.0
         # Reset per-turn TTFB guard flags
@@ -159,6 +176,7 @@ class CallMetricsAccumulator:
         self._vad_stopped_at = None
         self._stt_final_at = None
         self._turn_committed_at = None
+        self._turn_committed_mono = None
         self._on_user_turn_completed_delay_ms = None
 
         if self._event_bus is not None:
@@ -264,8 +282,39 @@ class CallMetricsAccumulator:
                         )
 
     def record_tts_complete(self, text: str) -> None:
-        """Mark TTS synthesis as complete, accumulating character count."""
+        """Mark TTS synthesis as complete, accumulating character count.
+
+        Also captures the monotonic timestamp of the last TTS audio byte
+        sent on the wire so ``tts_total_ms`` (LLM-first-token → TTS done)
+        can be computed.  Idempotent within a turn — the first call wins.
+        """
         self._total_tts_characters += len(text)
+        if self._tts_last_byte is None:
+            self._tts_last_byte = time.monotonic()
+
+    def record_tts_complete_ts(self, ts: float | None = None) -> None:
+        """Capture the timestamp when the last TTS audio byte was sent.
+
+        Useful when the caller wants to record the timing without bumping
+        the character counter (e.g. interrupted turns where the byte
+        actually went out but the synthesis was truncated).
+        """
+        self._tts_last_byte = ts if ts is not None else time.monotonic()
+
+    def record_bargein_detected(self, ts: float | None = None) -> None:
+        """Mark the moment a user interrupt (barge-in) was detected.
+
+        Pairs with :meth:`record_tts_stopped` to compute ``bargein_ms``.
+        """
+        self._bargein_detected_at = ts if ts is not None else time.monotonic()
+
+    def record_tts_stopped(self, ts: float | None = None) -> None:
+        """Mark the moment TTS playback was actually halted after a barge-in.
+
+        Call this *after* ``audio_sender.send_clear()`` returns. Combined with
+        the matching ``record_bargein_detected`` it produces ``bargein_ms``.
+        """
+        self._bargein_stopped_at = ts if ts is not None else time.monotonic()
 
     def record_turn_complete(self, agent_text: str) -> TurnMetrics:
         """Finalize the current turn and return its metrics."""
@@ -324,6 +373,9 @@ class CallMetricsAccumulator:
             ts: Wall-clock timestamp (seconds). Defaults to ``time.time()``.
         """
         self._vad_stopped_at = ts if ts is not None else time.time()
+        # First endpoint signal wins for endpoint_ms calculation.
+        if self._endpoint_signal_at is None:
+            self._endpoint_signal_at = time.monotonic()
 
     def record_stt_final_timestamp(self, ts: float | None = None) -> None:
         """Record the timestamp when the STT provider returns a final transcript.
@@ -332,6 +384,9 @@ class CallMetricsAccumulator:
             ts: Wall-clock timestamp (seconds). Defaults to ``time.time()``.
         """
         self._stt_final_at = ts if ts is not None else time.time()
+        # First endpoint signal wins for endpoint_ms calculation.
+        if self._endpoint_signal_at is None:
+            self._endpoint_signal_at = time.monotonic()
 
     def record_turn_committed(self, ts: float | None = None) -> None:
         """Record the timestamp when the pipeline commits the turn for LLM processing.
@@ -340,6 +395,10 @@ class CallMetricsAccumulator:
             ts: Wall-clock timestamp (seconds). Defaults to ``time.time()``.
         """
         self._turn_committed_at = ts if ts is not None else time.time()
+        # Always stamp a monotonic reference for endpoint_ms even if the
+        # caller passed an explicit wall-clock ts (they are different
+        # clocks; we want monotonic for ms latency math).
+        self._turn_committed_mono = time.monotonic()
         self._emit_eou_metrics()
 
     def record_on_user_turn_completed_delay(self, delay_ms: float) -> None:
@@ -498,6 +557,7 @@ class CallMetricsAccumulator:
         cost = self._compute_cost(duration)
         latency_avg = self._compute_average_latency()
         latency_p50 = self._compute_percentile_latency(0.5)
+        latency_p90 = self._compute_percentile_latency(0.90)
         latency_p95 = self._compute_percentile_latency(0.95)
         latency_p99 = self._compute_percentile_latency(0.99)
 
@@ -508,6 +568,7 @@ class CallMetricsAccumulator:
             cost=cost,
             latency_avg=latency_avg,
             latency_p50=latency_p50,
+            latency_p90=latency_p90,
             latency_p95=latency_p95,
             latency_p99=latency_p99,
             provider_mode=self.provider_mode,
@@ -536,6 +597,10 @@ class CallMetricsAccumulator:
         self._llm_first_sentence = None
         self._llm_complete = None
         self._tts_first_byte = None
+        self._tts_last_byte = None
+        self._endpoint_signal_at = None
+        self._bargein_detected_at = None
+        self._bargein_stopped_at = None
         self._turn_user_text = ""
         self._turn_stt_audio_seconds = 0.0
 
@@ -573,6 +638,44 @@ class CallMetricsAccumulator:
         # Persist TTFT so _emit_turn_metrics can include it after _reset_turn_state.
         self._last_turn_llm_ttft_ms = llm_ttft_ms
 
+        # llm_total_ms — full generation duration (stt_complete → llm_complete).
+        llm_total_ms: float | None = None
+        if self._stt_complete is not None and self._llm_complete is not None:
+            llm_total_ms = max(0.0, (self._llm_complete - self._stt_complete) * 1000)
+
+        # endpoint_ms — silence detected (VAD or STT speech_final) → LLM dispatch.
+        endpoint_ms: float | None = None
+        if (
+            self._endpoint_signal_at is not None
+            and self._turn_committed_mono is not None
+        ):
+            endpoint_ms = max(0.0, (self._turn_committed_mono - self._endpoint_signal_at) * 1000)
+
+        # bargein_ms — interrupt detected → TTS actually halted.
+        bargein_ms: float | None = None
+        if (
+            self._bargein_detected_at is not None
+            and self._bargein_stopped_at is not None
+        ):
+            bargein_ms = max(0.0, (self._bargein_stopped_at - self._bargein_detected_at) * 1000)
+
+        # tts_total_ms — LLM-first-token (or first-sentence boundary) → last
+        # TTS audio byte sent.  Prefer ``llm_first_token`` so this captures
+        # the entire user-perceptible TTS span; fall back to first-sentence
+        # boundary (streaming) and finally to llm_complete.
+        tts_total_ms: float | None = None
+        tts_total_ref = (
+            self._llm_first_token
+            if self._llm_first_token is not None
+            else (
+                self._llm_first_sentence
+                if self._llm_first_sentence is not None
+                else self._llm_complete
+            )
+        )
+        if tts_total_ref is not None and self._tts_last_byte is not None:
+            tts_total_ms = max(0.0, (self._tts_last_byte - tts_total_ref) * 1000)
+
         # Note: in Realtime mode OpenAI handles STT+LLM+TTS as a single opaque
         # pipeline, so stt_ms / llm_ms / tts_ms stay 0 and only total_ms is
         # meaningful. Dashboards should prefer total_ms as the end-to-end
@@ -584,6 +687,10 @@ class CallMetricsAccumulator:
             tts_ms=round(tts_ms, 1),
             total_ms=round(total_ms, 1),
             llm_ttft_ms=round(llm_ttft_ms, 1) if llm_ttft_ms else None,
+            llm_total_ms=round(llm_total_ms, 1) if llm_total_ms is not None else None,
+            endpoint_ms=round(endpoint_ms, 1) if endpoint_ms is not None else None,
+            bargein_ms=round(bargein_ms, 1) if bargein_ms is not None else None,
+            tts_total_ms=round(tts_total_ms, 1) if tts_total_ms is not None else None,
         )
 
     @property
@@ -670,14 +777,22 @@ class CallMetricsAccumulator:
             return LatencyBreakdown()
 
         n = len(turns)
-        ttft_vals = [t.latency.llm_ttft_ms for t in turns if t.latency.llm_ttft_ms]
-        ttft_avg = round(sum(ttft_vals) / len(ttft_vals), 1) if ttft_vals else None
+
+        def _opt_avg(attr: str) -> float | None:
+            vals = [getattr(t.latency, attr) for t in turns if getattr(t.latency, attr) is not None]
+            return round(sum(vals) / len(vals), 1) if vals else None
+
+        ttft_avg = _opt_avg("llm_ttft_ms")
         return LatencyBreakdown(
             stt_ms=round(sum(t.latency.stt_ms for t in turns) / n, 1),
             llm_ms=round(sum(t.latency.llm_ms for t in turns) / n, 1),
             tts_ms=round(sum(t.latency.tts_ms for t in turns) / n, 1),
             total_ms=round(sum(t.latency.total_ms for t in turns) / n, 1),
             llm_ttft_ms=ttft_avg,
+            llm_total_ms=_opt_avg("llm_total_ms"),
+            endpoint_ms=_opt_avg("endpoint_ms"),
+            bargein_ms=_opt_avg("bargein_ms"),
+            tts_total_ms=_opt_avg("tts_total_ms"),
         )
 
     def _compute_percentile_latency(self, p: float) -> LatencyBreakdown:
@@ -732,6 +847,11 @@ class CallMetricsAccumulator:
             frac = rank - lo
             return sorted_v[lo] + (sorted_v[hi] - sorted_v[lo]) * frac
 
+        def _opt_pct(attr: str) -> float | None:
+            vals = [getattr(t.latency, attr) for t in turns if getattr(t.latency, attr) is not None]
+            v = pct(vals)
+            return round(v, 1) if v else None
+
         ttft_pct_val = pct([t.latency.llm_ttft_ms for t in turns if t.latency.llm_ttft_ms is not None])
         return LatencyBreakdown(
             stt_ms=round(pct([t.latency.stt_ms for t in turns]), 1),
@@ -739,4 +859,8 @@ class CallMetricsAccumulator:
             tts_ms=round(pct([t.latency.tts_ms for t in turns]), 1),
             total_ms=round(pct_all([t.latency.total_ms for t in turns]), 1),
             llm_ttft_ms=round(ttft_pct_val, 1) if ttft_pct_val else None,
+            llm_total_ms=_opt_pct("llm_total_ms"),
+            endpoint_ms=_opt_pct("endpoint_ms"),
+            bargein_ms=_opt_pct("bargein_ms"),
+            tts_total_ms=_opt_pct("tts_total_ms"),
         )

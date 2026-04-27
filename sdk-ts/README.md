@@ -91,7 +91,7 @@ cp .env.example .env
 # Edit .env with your API keys
 ```
 
-> **Telnyx:** Telnyx is a fully supported telephony provider alternative to Twilio. Both carriers receive equal support for DTMF, transfer, recording, and metrics.
+> **Telnyx:** Telnyx is a fully supported telephony provider alternative to Twilio. Both carriers receive equal support for DTMF, transfer, and metrics. Recording is Twilio-only.
 
 ## Voice Modes
 
@@ -110,7 +110,7 @@ new Patter({
   carrier: Twilio | Telnyx;
   phoneNumber: string;
   webhookUrl?: string;                              // Public hostname. Mutually exclusive with tunnel.
-  tunnel?: CloudflareTunnel | StaticTunnel;         // Or pass tunnel: true on serve() for dev.
+  tunnel?: CloudflareTunnel | StaticTunnel | boolean;  // `true` is shorthand for new CloudflareTunnel().
 })
 ```
 
@@ -119,7 +119,7 @@ new Patter({
 | `carrier` | `Twilio` / `Telnyx` | Carrier instance. Reads env vars by default. |
 | `phoneNumber` | `string` | Your phone number in E.164 format. |
 | `webhookUrl` | `string` | Public hostname your local server is reachable on. |
-| `tunnel` | instance | `new CloudflareTunnel()` or `new StaticTunnel({ hostname: ... })`. |
+| `tunnel` | `CloudflareTunnel \| StaticTunnel \| boolean` | `new CloudflareTunnel()`, `new StaticTunnel({ hostname: ... })`, or `true` (shorthand for `new CloudflareTunnel()`). |
 
 ### `phone.agent()`
 
@@ -226,7 +226,7 @@ import { Patter, Twilio, DeepgramSTT, ElevenLabsTTS } from "getpatter";
 const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
 const agent = phone.agent({
   stt: new DeepgramSTT(),                         // reads DEEPGRAM_API_KEY
-  tts: new ElevenLabsTTS({ voice: "rachel" }),    // reads ELEVENLABS_API_KEY
+  tts: new ElevenLabsTTS({ voice: "sarah" }),     // reads ELEVENLABS_API_KEY
   systemPrompt: "You are a helpful voice assistant.",
 });
 await phone.serve({ agent, tunnel: true });
@@ -241,7 +241,7 @@ const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" })
 const agent = phone.agent({
   stt: new DeepgramSTT(),                         // reads DEEPGRAM_API_KEY
   llm: new AnthropicLLM(),                        // reads ANTHROPIC_API_KEY
-  tts: new ElevenLabsTTS({ voiceId: "rachel" }),  // reads ELEVENLABS_API_KEY
+  tts: new ElevenLabsTTS({ voiceId: "sarah" }),   // reads ELEVENLABS_API_KEY
   systemPrompt: "You are a helpful voice assistant.",
 });
 await phone.serve({ agent, tunnel: true });

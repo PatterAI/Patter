@@ -19,6 +19,7 @@
 
 import type { LLMChunk, LLMProvider } from '../llm-loop';
 import { getLogger } from '../logger';
+import { VERSION } from '../version';
 
 const GROQ_BASE_URL = 'https://api.groq.com/openai/v1';
 const DEFAULT_MODEL = 'llama-3.3-70b-versatile';
@@ -27,6 +28,26 @@ export interface GroqLLMOptions {
   apiKey: string;
   model?: string;
   baseUrl?: string;
+  /** Sampling temperature [0, 2]. */
+  temperature?: number;
+  /** Max tokens in the assistant response (sent as ``max_completion_tokens``). */
+  maxTokens?: number;
+  /** OpenAI-style ``response_format`` for JSON mode / structured outputs. */
+  responseFormat?: Record<string, unknown>;
+  /** Whether to allow parallel tool calls. */
+  parallelToolCalls?: boolean;
+  /** ``"auto" | "none" | "required"`` or a specific tool object. */
+  toolChoice?: string | Record<string, unknown>;
+  /** Sampling seed. */
+  seed?: number;
+  /** Nucleus sampling cutoff in [0, 1]. */
+  topP?: number;
+  /** Penalty in [-2, 2] applied to repeated tokens. */
+  frequencyPenalty?: number;
+  /** Penalty in [-2, 2] applied to seen tokens. */
+  presencePenalty?: number;
+  /** Stop sequence(s). */
+  stop?: string | string[];
 }
 
 /** LLM provider backed by Groq's OpenAI-compatible Chat Completions API. */
@@ -34,6 +55,16 @@ export class GroqLLMProvider implements LLMProvider {
   private readonly apiKey: string;
   readonly model: string;
   private readonly baseUrl: string;
+  private readonly temperature?: number;
+  private readonly maxTokens?: number;
+  private readonly responseFormat?: Record<string, unknown>;
+  private readonly parallelToolCalls?: boolean;
+  private readonly toolChoice?: string | Record<string, unknown>;
+  private readonly seed?: number;
+  private readonly topP?: number;
+  private readonly frequencyPenalty?: number;
+  private readonly presencePenalty?: number;
+  private readonly stop?: string | string[];
 
   constructor(options: GroqLLMOptions) {
     if (!options.apiKey) {
@@ -44,6 +75,16 @@ export class GroqLLMProvider implements LLMProvider {
     this.apiKey = options.apiKey;
     this.model = options.model ?? DEFAULT_MODEL;
     this.baseUrl = options.baseUrl ?? GROQ_BASE_URL;
+    this.temperature = options.temperature;
+    this.maxTokens = options.maxTokens;
+    this.responseFormat = options.responseFormat;
+    this.parallelToolCalls = options.parallelToolCalls;
+    this.toolChoice = options.toolChoice;
+    this.seed = options.seed;
+    this.topP = options.topP;
+    this.frequencyPenalty = options.frequencyPenalty;
+    this.presencePenalty = options.presencePenalty;
+    this.stop = options.stop;
   }
 
   async *stream(
@@ -56,6 +97,20 @@ export class GroqLLMProvider implements LLMProvider {
       stream: true,
       stream_options: { include_usage: true },
     };
+    if (this.temperature !== undefined) body.temperature = this.temperature;
+    if (this.maxTokens !== undefined) {
+      // Groq accepts both, but ``max_completion_tokens`` is the modern OpenAI
+      // spec name and matches Cerebras/OpenAI parity.
+      body.max_completion_tokens = this.maxTokens;
+    }
+    if (this.responseFormat !== undefined) body.response_format = this.responseFormat;
+    if (this.parallelToolCalls !== undefined) body.parallel_tool_calls = this.parallelToolCalls;
+    if (this.toolChoice !== undefined) body.tool_choice = this.toolChoice;
+    if (this.seed !== undefined) body.seed = this.seed;
+    if (this.topP !== undefined) body.top_p = this.topP;
+    if (this.frequencyPenalty !== undefined) body.frequency_penalty = this.frequencyPenalty;
+    if (this.presencePenalty !== undefined) body.presence_penalty = this.presencePenalty;
+    if (this.stop !== undefined) body.stop = this.stop;
     if (tools) body.tools = tools;
 
     const response = await fetch(`${this.baseUrl}/chat/completions`, {
@@ -63,6 +118,7 @@ export class GroqLLMProvider implements LLMProvider {
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${this.apiKey}`,
+        'User-Agent': `getpatter/${VERSION}`,
       },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(30_000),

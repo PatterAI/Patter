@@ -44,7 +44,7 @@ from typing import Any
 
 from getpatter.utils.log_sanitize import mask_phone_number, sanitize_log_value
 
-logger = logging.getLogger("patter")
+logger = logging.getLogger("getpatter")
 
 # --- Schema constants -----------------------------------------------------
 

@@ -54,21 +54,6 @@ const agent = phone.agent({
 
 Available LLM providers: `OpenAILLM`, `AnthropicLLM`, `GroqLLM`, `CerebrasLLM`, `GoogleLLM`. Tool calling works across all five. See [LLM](/typescript-sdk/llm) for the full reference. For fully custom logic (multi-model routing, local models), drop `llm` and pass an `onMessage` callback to `serve()` instead — `llm` and `onMessage` are mutually exclusive.
 
-The same pipeline using namespaced imports:
-
-```typescript
-import * as deepgram from "getpatter/stt/deepgram";
-import * as anthropic from "getpatter/llm/anthropic";
-import * as elevenlabs from "getpatter/tts/elevenlabs";
-
-const agent = phone.agent({
-  stt: new deepgram.STT({ endpointingMs: 80 }),
-  llm: new anthropic.LLM(),
-  tts: new elevenlabs.TTS({ voiceId: "rachel" }),
-  systemPrompt: "You are a helpful assistant.",
-});
-```
-
 ## AgentOptions
 
 | Parameter | Type | Required | Default | Description |

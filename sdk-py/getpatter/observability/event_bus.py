@@ -18,6 +18,12 @@ PatterEventType = Literal[
     "stt_metrics",
     "metrics_collected",
     "call_ended",
+    # Fine-grained pipeline events (additive — existing callbacks remain).
+    "transcript_partial",
+    "transcript_final",
+    "llm_chunk",
+    "tts_chunk",
+    "tool_call_started",
 ]
 
 

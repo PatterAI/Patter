@@ -8,7 +8,7 @@ icon: "volume"
 
 TTS is used in **pipeline mode** to synthesize the agent's response audio. If you use an [engine](/typescript-sdk/engines) such as `OpenAIRealtime` or `ElevenLabsConvAI`, speech synthesis is handled internally by the engine.
 
-Each TTS ships as both a **namespaced** class (`import * as elevenlabs from "getpatter/tts/elevenlabs"` → `new elevenlabs.TTS()`) and a **flat alias** (`import { ElevenLabsTTS } from "getpatter"`). They are equivalent — the flat aliases are convenient for short examples, the namespaced form avoids name collisions when mixing providers.
+Every TTS class is imported by name from the package barrel: `import { ElevenLabsTTS } from "getpatter"`.
 
 ## Quickstart
 
@@ -27,28 +27,15 @@ const agent = phone.agent({
 await phone.serve({ agent });
 ```
 
-The same agent using namespaced imports:
-
-```typescript
-import * as deepgram from "getpatter/stt/deepgram";
-import * as elevenlabs from "getpatter/tts/elevenlabs";
-
-const agent = phone.agent({
-  stt: new deepgram.STT(),
-  tts: new elevenlabs.TTS({ voiceId: "rachel" }),
-  systemPrompt: "You are a helpful assistant.",
-});
-```
-
 ## Supported providers
 
-| Flat import | Namespaced import | Env var |
-|-------------|-------------------|---------|
-| `ElevenLabsTTS` | `getpatter/tts/elevenlabs` → `TTS` | `ELEVENLABS_API_KEY` |
-| `OpenAITTS` | `getpatter/tts/openai` → `TTS` | `OPENAI_API_KEY` |
-| `CartesiaTTS` | `getpatter/tts/cartesia` → `TTS` | `CARTESIA_API_KEY` |
-| `RimeTTS` | `getpatter/tts/rime` → `TTS` | `RIME_API_KEY` |
-| `LMNTTTS` | `getpatter/tts/lmnt` → `TTS` | `LMNT_API_KEY` |
+| Class | Env var |
+|-------|---------|
+| `ElevenLabsTTS` | `ELEVENLABS_API_KEY` |
+| `OpenAITTS` | `OPENAI_API_KEY` |
+| `CartesiaTTS` | `CARTESIA_API_KEY` |
+| `RimeTTS` | `RIME_API_KEY` |
+| `LMNTTTS` | `LMNT_API_KEY` |
 
 ## ElevenLabs
 

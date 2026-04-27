@@ -12,11 +12,13 @@ Design goals:
 
 Spans used by Patter:
 
-* ``patter.call`` — the top-level call span (created in the stream handler)
+* ``getpatter.call`` — the top-level call span (created in the stream handler)
 * ``getpatter.stt`` — a streamed STT inference
-* ``patter.llm`` — an LLM completion (per turn)
+* ``getpatter.llm`` — an LLM completion (per turn)
 * ``getpatter.tts`` — a TTS synthesis
-* ``patter.tool`` — a single tool invocation
+* ``getpatter.tool`` — a single tool invocation
+* ``getpatter.endpoint`` — silence-detected → LLM-dispatch window
+* ``getpatter.bargein`` — interrupt-detected → TTS-stopped window
 """
 
 from __future__ import annotations
@@ -32,11 +34,13 @@ ENV_FLAG = "PATTER_OTEL_ENABLED"
 SERVICE_NAME = "patter"
 
 # --- Span names -------------------------------------------------------------
-SPAN_CALL = "patter.call"
+SPAN_CALL = "getpatter.call"
 SPAN_STT = "getpatter.stt"
-SPAN_LLM = "patter.llm"
+SPAN_LLM = "getpatter.llm"
 SPAN_TTS = "getpatter.tts"
-SPAN_TOOL = "patter.tool"
+SPAN_TOOL = "getpatter.tool"
+SPAN_ENDPOINT = "getpatter.endpoint"
+SPAN_BARGEIN = "getpatter.bargein"
 
 # --- State ------------------------------------------------------------------
 _tracer: Any = None

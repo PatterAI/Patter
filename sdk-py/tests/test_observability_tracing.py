@@ -72,7 +72,7 @@ def test_init_tracing_with_sdk_sets_is_enabled(monkeypatch):
 
 def test_span_names_are_stable():
     assert tracing.SPAN_STT == "getpatter.stt"
-    assert tracing.SPAN_LLM == "patter.llm"
+    assert tracing.SPAN_LLM == "getpatter.llm"
     assert tracing.SPAN_TTS == "getpatter.tts"
-    assert tracing.SPAN_TOOL == "patter.tool"
-    assert tracing.SPAN_CALL == "patter.call"
+    assert tracing.SPAN_TOOL == "getpatter.tool"
+    assert tracing.SPAN_CALL == "getpatter.call"

@@ -18,11 +18,11 @@ export interface STTConfig {
   readonly apiKey: string;
   readonly language: string;
   /**
-   * Optional — when present, called by internal serialisation. Not required for
-   * callers that pass a plain object literal (``{ provider, apiKey, language }``)
-   * to maintain parity with the Python SDK, which accepts dataclass-like inputs.
+   * Serialise the config into a JSON-compatible dict for the wire protocol.
+   * Mandatory — matches Python's ``STTConfig.to_dict()``. Concrete classes
+   * returned by ``stt(...)``/``deepgram(...)`` etc. all implement it.
    */
-  toDict?(): Record<string, string | Record<string, unknown>>;
+  toDict(): Record<string, string | Record<string, unknown>>;
   /** Provider-specific knobs (e.g. Deepgram endpointing). */
   options?: Record<string, unknown>;
 }
@@ -31,40 +31,16 @@ export interface TTSConfig {
   readonly provider: string;
   readonly apiKey: string;
   readonly voice: string;
-  toDict?(): Record<string, string | Record<string, unknown>>;
+  /**
+   * Serialise the config into a JSON-compatible dict for the wire protocol.
+   * Mandatory — matches Python's ``TTSConfig.to_dict()``.
+   */
+  toDict(): Record<string, string | Record<string, unknown>>;
   options?: Record<string, unknown>;
 }
 
 export type MessageHandler = (msg: IncomingMessage) => Promise<string>;
 export type CallEventHandler = (data: Record<string, unknown>) => Promise<void>;
-
-export interface PatterOptions {
-  apiKey: string;
-  backendUrl?: string;
-  restUrl?: string;
-}
-
-export interface ConnectOptions {
-  onMessage: MessageHandler;
-  onCallStart?: CallEventHandler;
-  onCallEnd?: CallEventHandler;
-  provider?: string;
-  providerKey?: string;
-  providerSecret?: string;
-  number?: string;
-  country?: string;
-  stt?: STTConfig;
-  tts?: TTSConfig;
-}
-
-export interface CallOptions {
-  to: string;
-  onMessage?: MessageHandler;
-  firstMessage?: string;
-  fromNumber?: string;
-  agentId?: string;
-  machineDetection?: boolean;
-}
 
 export interface ToolDefinition {
   name: string;
@@ -76,60 +52,11 @@ export interface ToolDefinition {
   handler?: (args: Record<string, unknown>, context: Record<string, unknown>) => Promise<string>;
 }
 
-export interface CreateAgentOptions {
-  name: string;
-  systemPrompt: string;
-  model?: string;
-  voice?: string;
-  voiceProvider?: string;
-  language?: string;
-  firstMessage?: string;
-  tools?: ToolDefinition[];
-}
-
-export interface Agent {
-  id: string;
-  name: string;
-  systemPrompt: string;
-  model: string;
-  voice: string;
-  voiceProvider: string;
-  language: string;
-  firstMessage: string | null;
-  tools: ToolDefinition[] | null;
-}
-
-export interface PhoneNumber {
-  id: string;
-  number: string;
-  provider: string;
-  country: string;
-  status: string;
-  agentId: string | null;
-}
-
-export interface Call {
-  id: string;
-  direction: string;
-  caller: string;
-  callee: string;
-  startedAt: string;
-  endedAt: string | null;
-  durationSeconds: number | null;
-  status: string;
-  transcript: Array<{ role: string; text: string; timestamp: string }> | null;
-}
-
 // === Local mode ===
 
 export interface LocalOptions {
   /**
-   * Local mode is auto-detected when a ``carrier`` is passed. Pass
-   * ``mode: 'local'`` to force local mode explicitly.
-   */
-  mode?: 'local';
-  /**
-   * Telephony carrier instance. Required for local mode.
+   * Telephony carrier instance. Required.
    *
    * @example
    * ```ts
@@ -178,6 +105,17 @@ export interface PipelineHooks {
   beforeSendToStt?: (audio: Buffer, ctx: HookContext) => Buffer | null | Promise<Buffer | null>;
   /** Called after STT produces a transcript, before LLM. Return null to skip this turn. */
   afterTranscribe?: (transcript: string, ctx: HookContext) => string | null | Promise<string | null>;
+  /** Called with the messages list before the LLM call.
+   *  Return null to keep them, or return a new list to replace
+   *  (useful for prompt injection, message filtering, RAG augmentation). */
+  beforeLlm?: (
+    messages: Array<Record<string, unknown>>,
+    ctx: HookContext,
+  ) => Array<Record<string, unknown>> | null | Promise<Array<Record<string, unknown>> | null>;
+  /** Called with the final assistant text after the LLM stream completes.
+   *  Return null to keep, or return a new string to replace
+   *  (useful for output validation, redaction, post-processing). */
+  afterLlm?: (text: string, ctx: HookContext) => string | null | Promise<string | null>;
   /** Called before TTS, per-sentence in streaming mode. Return null to skip TTS for this sentence. */
   beforeSynthesize?: (text: string, ctx: HookContext) => string | null | Promise<string | null>;
   /** Called after TTS produces an audio chunk. Return null to discard this chunk. */
@@ -315,9 +253,10 @@ export interface LocalCallOptions {
   variables?: Record<string, string>;
   /**
    * Ring timeout in seconds. Forwarded to Twilio as `Timeout` and to Telnyx
-   * as `timeout_secs`. Defaults to the carrier default (~28 s on Twilio) when
-   * omitted. Increase for international routes where the remote carrier
-   * silences short US→IT rings.
+   * as `timeout_secs`. Defaults to **25 s** — the production-recommended
+   * value that limits phantom calls. Pass `60` for legacy carrier-default
+   * parity, or `null` to omit the parameter entirely (carrier picks its
+   * own default).
    */
-  ringTimeout?: number;
+  ringTimeout?: number | null;
 }

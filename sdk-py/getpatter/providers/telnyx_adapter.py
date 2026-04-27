@@ -18,8 +18,8 @@ class TelnyxAdapter(TelephonyProvider):
 
     async def provision_number(self, country: str) -> str:
         # Telnyx search filter uses nested ``filter[phone_number][country_code]``
-        # (not ``filter[country_code]``). See
-        # ``.claude/skills/telnyx-numbers-compliance-python/SKILL.md``.
+        # (not ``filter[country_code]``). See:
+        # https://developers.telnyx.com/api/numbers/list-available-phone-numbers
         resp = await self._client.get(
             "/available_phone_numbers",
             params={
@@ -52,8 +52,6 @@ class TelnyxAdapter(TelephonyProvider):
 
         ``number`` may be the phone_number ID or the E.164 string; the API
         accepts both identifiers but the phone_number ID is preferred.
-        # TODO: verify exact shape against live Telnyx portal — see
-        # ``.claude/skills/telnyx-numbers-compliance-python/SKILL.md``.
         """
         from urllib.parse import quote as _quote
         payload = {
@@ -68,7 +66,7 @@ class TelnyxAdapter(TelephonyProvider):
             # Surface the server-side error body so misconfigured
             # connection_ids / unknown numbers don't fail silently.
             import logging as _logging
-            _logging.getLogger("patter").warning(
+            _logging.getLogger("getpatter").warning(
                 "Telnyx configure_number returned %s: %s",
                 resp.status_code,
                 resp.text[:300],
@@ -93,8 +91,7 @@ class TelnyxAdapter(TelephonyProvider):
         argument is retained for interface parity (``TelephonyProvider``)
         but is intentionally unused here.
 
-        See ``.claude/skills/telnyx-voice-python/SKILL.md`` and the
-        ``call.answered`` handler in ``server.py`` for the full flow.
+        See the ``call.answered`` handler in ``server.py`` for the full flow.
 
         Args:
             from_number: Caller E.164 number (must be owned on the connection).

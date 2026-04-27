@@ -32,12 +32,19 @@ from getpatter.handlers.common import (
     _validate_e164,
 )
 from getpatter.models import HookContext
-from getpatter.observability.tracing import SPAN_STT, SPAN_TTS, start_span
+from getpatter.observability.tracing import (
+    SPAN_BARGEIN,
+    SPAN_ENDPOINT,
+    SPAN_LLM,
+    SPAN_STT,
+    SPAN_TTS,
+    start_span,
+)
 from getpatter.services.pipeline_hooks import PipelineHookExecutor
 from getpatter.services.sentence_chunker import SentenceChunker
 from getpatter.utils.log_sanitize import mask_phone_number, sanitize_log_value
 
-logger = logging.getLogger("patter")
+logger = logging.getLogger("getpatter")
 
 
 # ---------------------------------------------------------------------------
@@ -718,6 +725,8 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
         on_metrics=None,
         conversation_history: deque | None = None,
         transcript_entries: deque | None = None,
+        output_audio_format: str | None = None,
+        input_audio_format: str | None = None,
     ) -> None:
         super().__init__(
             agent=agent,
@@ -734,8 +743,20 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
         )
         self._elevenlabs_key = elevenlabs_key
         self._for_twilio = for_twilio
+        # Caller-supplied codec overrides win over agent.elevenlabs_convai
+        # config (resolved at start() time so the integration test that
+        # mocks the adapter doesn't crash on a missing config dict).
+        self._output_audio_format_override = output_audio_format
+        self._input_audio_format_override = input_audio_format
+        # When True (set in start() once we know the negotiated formats),
+        # forward inbound caller audio as raw μ-law 8 kHz and skip the
+        # outbound PCM16 → μ-law transcode in the audio sender. Mirrors
+        # OpenAIRealtimeStreamHandler's ``audio_format='g711_ulaw'`` path.
+        self._native_mulaw_8k = False
         self._adapter = None
         # Per-handler StatefulResampler for Twilio mulaw 8 kHz -> PCM16 16 kHz.
+        # Only created when we actually need to resample (i.e. ConvAI
+        # negotiated PCM16 16 kHz, not native μ-law).
         self._resampler_8k_to_16k = None
 
     async def start(self) -> None:
@@ -747,13 +768,58 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
         if isinstance(el_config, dict):
             agent_id = el_config.get("agent_id", "")
 
+        if not agent_id:
+            raise ValueError(
+                "ElevenLabs ConvAI requires agent.elevenlabs_convai={'agent_id': '...'}. "
+                "Create an agent in the ElevenLabs Conversational AI dashboard "
+                "and pass its id."
+            )
+
+        # Resolve negotiated audio formats. Precedence (highest to lowest):
+        #   1. Explicit handler kwargs (output_audio_format / input_audio_format)
+        #   2. agent.elevenlabs_convai dict ("output_audio_format", "input_audio_format")
+        #   3. None — let ConvAI pick its server default (PCM16 16 kHz)
+        cfg_output = (
+            el_config.get("output_audio_format") if isinstance(el_config, dict) else None
+        )
+        cfg_input = (
+            el_config.get("input_audio_format") if isinstance(el_config, dict) else None
+        )
+        output_audio_format = self._output_audio_format_override or cfg_output
+        input_audio_format = self._input_audio_format_override or cfg_input
+
         self._adapter = ElevenLabsConvAIAdapter(
             api_key=self._elevenlabs_key,
             agent_id=agent_id,
             voice_id=voice,
             language=self.agent.language,
             first_message=self.agent.first_message,
+            output_audio_format=output_audio_format,
+            input_audio_format=input_audio_format,
         )
+
+        # Detect the μ-law 8 kHz fast-path. Both directions must be
+        # ulaw_8000 — mixing PCM16 with μ-law would force one transcode
+        # back, defeating the optimization.
+        self._native_mulaw_8k = (
+            output_audio_format == "ulaw_8000"
+            and input_audio_format == "ulaw_8000"
+        )
+        if self._native_mulaw_8k:
+            # Flip the audio sender into pass-through mode. Mirrors how
+            # OpenAIRealtimeStreamHandler relies on the bridge constructing
+            # the sender with ``input_is_mulaw_8k=True``. We can't change
+            # that wiring from inside the handler, so we mutate the flag
+            # in place — the AudioSender's ``send_audio`` checks it on
+            # every chunk, so flipping it before the first agent audio
+            # arrives is safe.
+            if hasattr(self.audio_sender, "_input_is_mulaw_8k"):
+                self.audio_sender._input_is_mulaw_8k = True  # type: ignore[attr-defined]
+            logger.debug(
+                "ElevenLabs ConvAI: native μ-law 8 kHz fast-path enabled "
+                "(skipping inbound resample + outbound transcode)"
+            )
+
         await self._adapter.connect()
         logger.debug("ElevenLabs ConvAI connected")
 
@@ -845,18 +911,26 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
             logger.exception("ElevenLabs ConvAI forward error: %s", exc)
 
     async def on_audio_received(self, audio_bytes: bytes) -> None:
-        if self._adapter is not None:
-            # ElevenLabs ConvAI expects PCM 16kHz. Twilio sends mulaw 8kHz.
-            if self._for_twilio:
-                from getpatter.services.transcoding import mulaw_to_pcm16
-                # Use per-handler StatefulResampler to preserve ratecv state.
-                if self._resampler_8k_to_16k is None:
-                    from getpatter.services.transcoding import create_resampler_8k_to_16k
-                    self._resampler_8k_to_16k = create_resampler_8k_to_16k()
-                pcm16k = self._resampler_8k_to_16k.process(mulaw_to_pcm16(audio_bytes))
-                await self._adapter.send_audio(pcm16k)
-            else:
-                await self._adapter.send_audio(audio_bytes)
+        if self._adapter is None:
+            return
+        # Native μ-law 8 kHz fast-path: ConvAI negotiated ulaw_8000 on the
+        # input side too, so the caller's μ-law bytes go through untouched.
+        # No mulaw → PCM16 decode, no 8 kHz → 16 kHz resample.
+        if self._native_mulaw_8k:
+            await self._adapter.send_audio(audio_bytes)
+            return
+        # Default path: ConvAI expects PCM16 16 kHz and Twilio sends μ-law
+        # 8 kHz, so decode + resample before forwarding.
+        if self._for_twilio:
+            from getpatter.services.transcoding import mulaw_to_pcm16
+            # Use per-handler StatefulResampler to preserve ratecv state.
+            if self._resampler_8k_to_16k is None:
+                from getpatter.services.transcoding import create_resampler_8k_to_16k
+                self._resampler_8k_to_16k = create_resampler_8k_to_16k()
+            pcm16k = self._resampler_8k_to_16k.process(mulaw_to_pcm16(audio_bytes))
+            await self._adapter.send_audio(pcm16k)
+        else:
+            await self._adapter.send_audio(audio_bytes)
 
     async def cleanup(self) -> None:
         if self._background_task:
@@ -1069,6 +1143,7 @@ class PipelineStreamHandler(StreamHandler):
                 tool_executor=tool_executor,
                 llm_provider=agent_llm,
                 metrics=self.metrics,
+                event_bus=self._event_bus,
             )
 
         # Create remote message handler once if on_message is a remote URL
@@ -1141,6 +1216,11 @@ class PipelineStreamHandler(StreamHandler):
                 if first_tts_chunk[0] and self.metrics is not None:
                     self.metrics.record_tts_first_byte()
                     first_tts_chunk[0] = False
+                if self._event_bus is not None:
+                    self._event_bus.emit(
+                        "tts_chunk",
+                        {"bytes": len(processed_audio)},
+                    )
                 await self.audio_sender.send_audio(processed_audio)
         finally:
             await gen.aclose()
@@ -1164,6 +1244,11 @@ class PipelineStreamHandler(StreamHandler):
 
         interrupted = False
         llm_error = False
+        _llm_span = start_span(
+            SPAN_LLM,
+            {"patter.call.id": self.call_id},
+        )
+        _llm_span.__enter__()
         try:
             try:
                 async for token in result:
@@ -1223,6 +1308,10 @@ class PipelineStreamHandler(StreamHandler):
             # the audio tail still playing on the carrier so STT echo on
             # the trailing samples doesn't look like a fresh user turn.
             await self._end_speaking_with_grace()
+            try:
+                _llm_span.__exit__(None, None, None)
+            except Exception:  # pragma: no cover - defensive
+                pass
 
         response_text = "".join(full_response_parts)
 
@@ -1293,18 +1382,24 @@ class PipelineStreamHandler(StreamHandler):
             return
         if self.metrics is not None:
             self.metrics.record_overlap_start()
+            self.metrics.record_bargein_detected()
         logger.debug(
             "Barge-in: caller spoke over agent (%s)",
             sanitize_log_value(transcript.text[:40]),
         )
-        self._is_speaking = False
-        try:
-            await self.audio_sender.send_clear()
-        except Exception as exc:
-            logger.debug("send_clear during barge-in failed: %s", exc)
-        if self.metrics is not None:
-            self.metrics.record_turn_interrupted()
-            self.metrics.record_overlap_end(was_interruption=True)
+        with start_span(
+            SPAN_BARGEIN,
+            {"patter.call.id": self.call_id},
+        ):
+            self._is_speaking = False
+            try:
+                await self.audio_sender.send_clear()
+            except Exception as exc:
+                logger.debug("send_clear during barge-in failed: %s", exc)
+            if self.metrics is not None:
+                self.metrics.record_tts_stopped()
+                self.metrics.record_turn_interrupted()
+                self.metrics.record_overlap_end(was_interruption=True)
 
     def _commit_transcript(self, text: str) -> bool:
         """Dedup + throttle + hallucination filter for final STT transcripts.
@@ -1348,7 +1443,23 @@ class PipelineStreamHandler(StreamHandler):
                 # stt_ms measures from speech-start not final-transcript delivery.
                 if transcript.text and self.metrics is not None:
                     self.metrics.start_turn_if_idle()
-                if not (transcript.is_final and transcript.text):
+                # Emit fine-grained transcript events (additive — existing
+                # ``on_transcript`` callback path is unchanged).
+                if transcript.text and self._event_bus is not None:
+                    self._event_bus.emit(
+                        "transcript_partial" if not transcript.is_final else "transcript_final",
+                        {
+                            "text": transcript.text,
+                            "is_final": bool(transcript.is_final),
+                            "confidence": float(transcript.confidence or 0.0),
+                        },
+                    )
+                # Gate LLM dispatch on either ``is_final`` or ``speech_final``.
+                # Deepgram's ``speech_final`` is a faster end-of-utterance hint
+                # that fires before ``is_final`` on each turn — accepting it
+                # here removes ~300–700 ms of per-turn latency at parity with
+                # the TS handler.
+                if not ((transcript.is_final or transcript.speech_final) and transcript.text):
                     continue
                 if not self._commit_transcript(transcript.text):
                     continue
@@ -1369,13 +1480,35 @@ class PipelineStreamHandler(StreamHandler):
                 logger.debug("User: %s", sanitize_log_value(transcript.text))
 
                 if self.metrics is not None:
-                    self.metrics.start_turn_if_idle()  # turn may already be open (Fix 1)
-                    # TODO Wave 7: pass per-turn audio_seconds by accumulating
-                    # audio bytes between start_turn and record_stt_complete.
-                    # Currently relies on total _stt_byte_count / end_call() estimation.
+                    self.metrics.start_turn_if_idle()  # turn may already be open
+                    # Known limitation: per-turn audio_seconds is not tracked
+                    # here; metrics rely on total _stt_byte_count plus the
+                    # end_call() estimation pass.
                     self.metrics.record_vad_stop()
                     self.metrics.record_stt_complete(transcript.text)
                     self.metrics.record_stt_final_timestamp()
+
+                # Endpoint span — silence-detected → LLM-dispatch window. Open
+                # here (right after VAD stop / final transcript is recorded)
+                # and close it just before ``record_turn_committed`` below.
+                endpoint_span = start_span(
+                    SPAN_ENDPOINT,
+                    {"patter.call.id": self.call_id},
+                )
+                endpoint_span.__enter__()
+                # Wrapped in a list so the closure-style helper can flip the
+                # flag without needing ``nonlocal`` (we are inside a loop body,
+                # not a nested function — ``nonlocal`` would not bind here).
+                _endpoint_closed = [False]
+
+                def _close_endpoint_span() -> None:
+                    if _endpoint_closed[0]:
+                        return
+                    _endpoint_closed[0] = True
+                    try:
+                        endpoint_span.__exit__(None, None, None)
+                    except Exception:  # pragma: no cover - defensive
+                        pass
 
                 # Raw transcript always goes to dashboard/transcript log
                 self.transcript_entries.append(
@@ -1403,6 +1536,7 @@ class PipelineStreamHandler(StreamHandler):
                     logger.debug("afterTranscribe hook vetoed turn")
                     if self.metrics is not None:
                         self.metrics.record_turn_interrupted()
+                    _close_endpoint_span()
                     continue
 
                 if self.metrics is not None:
@@ -1411,6 +1545,7 @@ class PipelineStreamHandler(StreamHandler):
                     # No message handler or LLM loop — discard orphaned turn
                     if self.metrics is not None:
                         self.metrics.record_turn_interrupted()
+                    _close_endpoint_span()
                     continue
 
                 # Use filtered text in conversation history (sent to LLM)
@@ -1427,10 +1562,13 @@ class PipelineStreamHandler(StreamHandler):
                     }
                     if self.metrics is not None:
                         self.metrics.record_turn_committed()
+                    _close_endpoint_span()
                     result = self._llm_loop.run(
                         filtered_text,
                         list(self.conversation_history),
                         call_ctx,
+                        hook_executor=hook_executor,
+                        hook_ctx=hook_ctx,
                     )
                     response_text = await self._process_streaming_response(result, self.call_id)
                     if response_text:
@@ -1445,6 +1583,7 @@ class PipelineStreamHandler(StreamHandler):
                 # on_message handler path
                 if self.metrics is not None:
                     self.metrics.record_turn_committed()
+                _close_endpoint_span()
                 msg_data = {
                     "text": filtered_text,
                     "call_id": self.call_id,
@@ -1549,16 +1688,23 @@ class PipelineStreamHandler(StreamHandler):
                 if vad_event.type == "speech_start":
                     if self._is_speaking:
                         # Caller spoke over in-flight TTS — preempt now.
-                        try:
-                            await self.audio_sender.send_clear()
-                        except Exception as exc:
-                            logger.debug("send_clear during VAD barge-in failed: %s", exc)
                         if self.metrics is not None:
-                            self.metrics.record_turn_interrupted()
-                        # Force-flip immediately and bump the generation so a
-                        # pending grace-flip from the prior turn can't fight us.
-                        self._is_speaking = False
-                        self._speaking_generation += 1
+                            self.metrics.record_bargein_detected()
+                        with start_span(
+                            SPAN_BARGEIN,
+                            {"patter.call.id": self.call_id},
+                        ):
+                            try:
+                                await self.audio_sender.send_clear()
+                            except Exception as exc:
+                                logger.debug("send_clear during VAD barge-in failed: %s", exc)
+                            if self.metrics is not None:
+                                self.metrics.record_tts_stopped()
+                                self.metrics.record_turn_interrupted()
+                            # Force-flip immediately and bump the generation so a
+                            # pending grace-flip from the prior turn can't fight us.
+                            self._is_speaking = False
+                            self._speaking_generation += 1
                     if self.metrics is not None:
                         self.metrics.start_turn_if_idle()
                 elif vad_event.type == "speech_end":

@@ -49,7 +49,7 @@ The `LatencyBreakdown` object provides per-component latency in milliseconds:
 | `tts_ms` | Time from LLM response to first audio byte. |
 | `total_ms` | End-to-end latency (user speech to first audio). |
 
-Both `latency_avg` and `latency_p95` are available on `CallMetrics`.
+`CallMetrics` exposes the full distribution: `latency_avg`, `latency_p50` (median / typical UX), `latency_p95` (SLA), and `latency_p99` (cold-start outliers).
 
 ## Per-Turn Metrics
 
@@ -84,17 +84,29 @@ phone = Patter(
 )
 ```
 
-### Default Pricing
+### Default Pricing (2026)
 
 | Provider | Unit | Default Price |
 |----------|------|---------------|
-| Deepgram | per minute | $0.0043 |
+| Deepgram (Nova-3 streaming) | per minute | $0.0077 |
 | Whisper | per minute | $0.006 |
-| ElevenLabs | per 1k chars | $0.18 |
+| AssemblyAI | per minute | $0.0025 |
+| Cartesia STT (ink-whisper) | per minute | $0.0025 |
+| Soniox | per minute | $0.002 |
+| Speechmatics | per minute | $0.0173 |
+| ElevenLabs (Flash/Turbo v2.5 API) | per 1k chars | $0.06 |
 | OpenAI TTS | per 1k chars | $0.015 |
-| OpenAI Realtime | per token | varies by type |
-| Twilio | per minute | $0.013 |
+| OpenAI TTS HD | per 1k chars | $0.030 |
+| Cartesia TTS (sonic-2) | per 1k chars | $0.030 |
+| Rime (Arcana / Mist) | per 1k chars | $0.030 |
+| LMNT (Blizzard / Aurora) | per 1k chars | $0.050 |
+| OpenAI Realtime (gpt-4o-mini-realtime-preview) | per million tokens | $10 audio in / $20 audio out / $0.60 text in / $2.40 text out (cached: $0.30 audio / $0.06 text) |
+| Twilio (US inbound local) | per minute | $0.0085 (rounded up to whole minute, per Twilio) |
 | Telnyx | per minute | $0.007 |
+
+<Note>
+Patter calibrates Realtime rates for `gpt-4o-mini-realtime-preview` (the default). If you set `agent.model` to `gpt-realtime` or `gpt-4o-realtime-preview`, override `pricing.openai_realtime` to avoid under-reporting. Twilio defaults match US **inbound** local; users on outbound or toll-free should override.
+</Note>
 
 <Note>
   Default pricing is based on publicly listed provider rates and may become stale. Pass your own overrides for accurate cost tracking, or check the provider's pricing page.
@@ -134,7 +146,9 @@ from getpatter import CallMetrics, CostBreakdown, LatencyBreakdown, TurnMetrics
 | `turns` | `tuple[TurnMetrics, ...]` | Per-turn metrics. |
 | `cost` | `CostBreakdown` | Cost breakdown. |
 | `latency_avg` | `LatencyBreakdown` | Average latency. |
+| `latency_p50` | `LatencyBreakdown` | Median (50th percentile) latency. |
 | `latency_p95` | `LatencyBreakdown` | 95th percentile latency. |
+| `latency_p99` | `LatencyBreakdown` | 99th percentile latency (cold-start outliers). |
 | `provider_mode` | `str` | Voice mode used. |
 | `stt_provider` | `str` | STT provider name. |
 | `tts_provider` | `str` | TTS provider name. |

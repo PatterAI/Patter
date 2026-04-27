@@ -27,6 +27,12 @@ import { SentenceChunker } from './sentence-chunker';
 import { PipelineHookExecutor } from './pipeline-hooks';
 import { EventBus } from './observability/event-bus';
 import type { PatterEventType } from './observability/event-bus';
+import {
+  SPAN_BARGEIN,
+  SPAN_ENDPOINT,
+  SPAN_LLM,
+  startSpan,
+} from './observability/tracing';
 
 type AIAdapter = OpenAIRealtimeAdapter | ElevenLabsConvAIAdapter;
 
@@ -555,14 +561,25 @@ export class StreamHandler {
             if (this.isSpeaking) {
               getLogger().info('[VAD] speech_start during TTS → BARGE-IN');
               this.metricsAcc.recordOverlapStart();
-              this.cancelSpeaking();
+              this.metricsAcc.recordBargeinDetected();
+              const bargeinSpan = startSpan(SPAN_BARGEIN, { 'patter.call.id': this.callId });
               try {
-                this.deps.bridge.sendClear(this.ws, this.streamSid);
-              } catch (err) {
-                getLogger().debug(`sendClear during VAD barge-in failed: ${String(err)}`);
+                this.cancelSpeaking();
+                try {
+                  this.deps.bridge.sendClear(this.ws, this.streamSid);
+                } catch (err) {
+                  getLogger().debug(`sendClear during VAD barge-in failed: ${String(err)}`);
+                }
+                this.metricsAcc.recordTtsStopped();
+                this.metricsAcc.recordTurnInterrupted();
+                this.metricsAcc.recordOverlapEnd(true);
+              } finally {
+                try {
+                  bargeinSpan.end();
+                } catch {
+                  // Swallow.
+                }
               }
-              this.metricsAcc.recordTurnInterrupted();
-              this.metricsAcc.recordOverlapEnd(true);
             }
             this.metricsAcc.startTurnIfIdle();
           } else if (evt?.type === 'speech_end') {
@@ -602,8 +619,17 @@ export class StreamHandler {
       }
     } else if (this.adapter) {
       // OpenAI Realtime is configured for g711_ulaw so Twilio mulaw is fine.
-      // ElevenLabs ConvAI expects PCM 16kHz — transcode Twilio mulaw first.
-      if (this.adapter instanceof ElevenLabsConvAIAdapter && this.deps.bridge.telephonyProvider === 'twilio') {
+      // ElevenLabs ConvAI defaults to PCM 16kHz — transcode Twilio mulaw
+      // first. When ConvAI was constructed via ``ElevenLabsConvAIAdapter
+      // .forTwilio(...)`` (or any path that sets ``inputAudioFormat
+      // === 'ulaw_8000'``) we negotiated μ-law on both directions, so we
+      // forward the caller's μ-law bytes untouched — saves a decode +
+      // resample on every inbound frame.
+      if (
+        this.adapter instanceof ElevenLabsConvAIAdapter &&
+        this.deps.bridge.telephonyProvider === 'twilio' &&
+        this.adapter.inputAudioFormat !== 'ulaw_8000'
+      ) {
         const pcm8k = mulawToPcm16(audioBuffer);
         const pcm16k = this.inboundResampler.process(pcm8k);
         this.adapter.sendAudio(pcm16k);
@@ -621,6 +647,26 @@ export class StreamHandler {
     }
     if (this.deps.onTranscript) {
       await this.deps.onTranscript({ role: 'user', text: `[DTMF: ${digit}]`, call_id: this.callId });
+    }
+  }
+
+  /**
+   * Last mark name Twilio has confirmed playback of. Mirrors the Python
+   * ``TwilioAudioSender.last_confirmed_mark`` field — barge-in heuristics
+   * compare this against the latest sent mark to decide whether the agent's
+   * audio has actually reached the caller yet.
+   */
+  lastConfirmedMark = '';
+
+  /**
+   * Handle a Twilio ``mark`` event acknowledging that a previously sent
+   * audio chunk has been played out. Mirrors Python's
+   * ``twilio_handler.py``: ``audio_sender.on_mark_confirmed(mark_name)`` +
+   * ``handler.on_mark(mark_name)``.
+   */
+  async onMark(markName: string): Promise<void> {
+    if (markName) {
+      this.lastConfirmedMark = markName;
     }
   }
 
@@ -658,7 +704,13 @@ export class StreamHandler {
 
   /**
    * Encode a PCM 16kHz audio chunk for the telephony provider.
-   * Twilio requires mulaw 8kHz; Telnyx accepts PCM 16kHz natively.
+   *
+   * Both Twilio and Telnyx negotiate PCMU (mulaw) 8 kHz on the bidirectional
+   * media stream — Twilio always, and Telnyx because ``streaming_start``
+   * (server.ts) requests ``stream_bidirectional_codec=PCMU`` at 8 kHz. So
+   * the wire format for both providers is mulaw 8 kHz; we resample 16 kHz
+   * PCM16 → 8 kHz then encode to mulaw. Mirrors the Python pipeline path
+   * (sdk-py/getpatter/handlers/telnyx_handler.py::TelnyxAudioSender).
    *
    * Maintains a 1-byte carry across calls so unaligned HTTP chunks from
    * streaming TTS providers never byte-swap the PCM16 samples downstream.
@@ -666,12 +718,9 @@ export class StreamHandler {
   private encodePipelineAudio(pcm16k: Buffer): string {
     const aligned = this.alignPcm16(pcm16k);
     if (aligned.length === 0) return '';
-    if (this.deps.bridge.telephonyProvider === 'twilio') {
-      const pcm8k = this.outboundResampler.process(aligned);
-      const mulaw = pcm16ToMulaw(pcm8k);
-      return mulaw.toString('base64');
-    }
-    return aligned.toString('base64');
+    const pcm8k = this.outboundResampler.process(aligned);
+    const mulaw = pcm16ToMulaw(pcm8k);
+    return mulaw.toString('base64');
   }
 
   /**
@@ -757,6 +806,7 @@ export class StreamHandler {
         this.deps.agent.tools as ToolDefinition[] | undefined,
         this.deps.agent.llm,
       );
+      this.llmLoop.setEventBus(this._eventBus);
       const llmLabel = this.deps.agent.llm.constructor?.name ?? 'custom';
       getLogger().debug(`Built-in LLM loop active (pipeline, ${label}, llm=${llmLabel})`);
     } else if (!this.deps.onMessage && this.deps.config.openaiKey) {
@@ -768,6 +818,7 @@ export class StreamHandler {
         resolvedPrompt,
         this.deps.agent.tools as ToolDefinition[] | undefined,
       );
+      this.llmLoop.setEventBus(this._eventBus);
       getLogger().debug(`Built-in LLM loop active (pipeline, ${label})`);
     }
 
@@ -880,6 +931,21 @@ export class StreamHandler {
     this.metricsAcc.recordSttComplete(transcript.text);
     this.metricsAcc.recordSttFinalTimestamp();
 
+    // Endpoint span — silence-detected → LLM-dispatch window. The matching
+    // ``end()`` lives below right before ``recordTurnCommitted``. We use a
+    // small helper so every early-return path closes the span exactly once.
+    const endpointSpan = startSpan(SPAN_ENDPOINT, { 'patter.call.id': this.callId });
+    let endpointSpanClosed = false;
+    const closeEndpointSpan = (): void => {
+      if (endpointSpanClosed) return;
+      endpointSpanClosed = true;
+      try {
+        endpointSpan.end();
+      } catch {
+        // Swallow — span teardown should never crash the call path.
+      }
+    };
+
     if (this.deps.onTranscript) {
       await this.deps.onTranscript({
         role: 'user',
@@ -896,6 +962,7 @@ export class StreamHandler {
     if (filteredTranscript === null) {
       getLogger().debug(`afterTranscribe hook vetoed turn (${label})`);
       this.metricsAcc.recordTurnInterrupted();
+      closeEndpointSpan();
       return;
     }
 
@@ -908,6 +975,7 @@ export class StreamHandler {
     // onUserTurnCompleted hook is not yet wired in TS — record 0 delay so EOU can still emit.
     this.metricsAcc.recordOnUserTurnCompletedDelay(0);
     this.metricsAcc.recordTurnCommitted();
+    closeEndpointSpan();
 
     if (this.deps.onMessage && typeof this.deps.onMessage === 'function') {
       try {
@@ -989,14 +1057,25 @@ export class StreamHandler {
       `Barge-in: caller spoke over agent (${sanitizeLogValue(transcript.text.slice(0, 40))})`,
     );
     this.metricsAcc.recordOverlapStart();
-    this.cancelSpeaking();
+    this.metricsAcc.recordBargeinDetected();
+    const bargeinSpan = startSpan(SPAN_BARGEIN, { 'patter.call.id': this.callId });
     try {
-      this.deps.bridge.sendClear(this.ws, this.streamSid);
-    } catch (err) {
-      getLogger().debug(`sendClear during barge-in failed: ${String(err)}`);
+      this.cancelSpeaking();
+      try {
+        this.deps.bridge.sendClear(this.ws, this.streamSid);
+      } catch (err) {
+        getLogger().debug(`sendClear during barge-in failed: ${String(err)}`);
+      }
+      this.metricsAcc.recordTtsStopped();
+      this.metricsAcc.recordTurnInterrupted();
+      this.metricsAcc.recordOverlapEnd(true);
+    } finally {
+      try {
+        bargeinSpan.end();
+      } catch {
+        // Swallow.
+      }
     }
-    this.metricsAcc.recordTurnInterrupted();
-    this.metricsAcc.recordOverlapEnd(true);
     return true;
   }
 
@@ -1052,6 +1131,10 @@ export class StreamHandler {
     this.beginSpeaking();
     let llmError = false;
 
+    // Span lifetime: LLM dispatch → final token / TTS handoff. Always closed
+    // in the ``finally`` block so an early throw cannot leak a span.
+    const llmSpan = startSpan(SPAN_LLM, { 'patter.call.id': this.callId });
+
     const guardAndSpeak = async (sentence: string, isFirst: boolean): Promise<void> => {
       // Fix 3/5: record first-sentence boundary before synthesizing first sentence.
       if (isFirst) this.metricsAcc.recordLlmFirstSentenceComplete();
@@ -1065,7 +1148,14 @@ export class StreamHandler {
 
     try {
       try {
-        for await (const token of this.llmLoop!.run(filteredTranscript, this.history.entries, callCtx, this.metricsAcc)) {
+        for await (const token of this.llmLoop!.run(
+          filteredTranscript,
+          this.history.entries,
+          callCtx,
+          this.metricsAcc,
+          hookExecutor,
+          hookCtx,
+        )) {
           // Fix 5: record first token for TTFT metric.
           this.metricsAcc.recordLlmFirstToken();
           allParts.push(token);
@@ -1096,6 +1186,11 @@ export class StreamHandler {
       }
     } finally {
       this.endSpeakingWithGrace();
+      try {
+        llmSpan.end();
+      } catch {
+        // Swallow — span teardown should never crash the call path.
+      }
     }
     return allParts.join('');
   }

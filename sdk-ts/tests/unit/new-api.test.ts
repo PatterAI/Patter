@@ -169,6 +169,22 @@ describe("tts namespaces", () => {
     expect(() => new elevenlabsTts.TTS()).toThrow(/ELEVENLABS_API_KEY/);
   });
 
+  it("elevenlabs.TTS.forTwilio configures ulaw_8000", () => {
+    const tts = elevenlabsTts.TTS.forTwilio({ apiKey: "el_test" });
+    expect((tts as unknown as { outputFormat: string }).outputFormat).toBe("ulaw_8000");
+  });
+
+  it("elevenlabs.TTS.forTelnyx configures pcm_16000", () => {
+    const tts = elevenlabsTts.TTS.forTelnyx({ apiKey: "el_test" });
+    expect((tts as unknown as { outputFormat: string }).outputFormat).toBe("pcm_16000");
+  });
+
+  it("elevenlabs.TTS.forTwilio reads ELEVENLABS_API_KEY env", () => {
+    process.env.ELEVENLABS_API_KEY = "el_env";
+    const tts = elevenlabsTts.TTS.forTwilio();
+    expect((tts as unknown as { outputFormat: string }).outputFormat).toBe("ulaw_8000");
+  });
+
   it("openai.TTS accepts explicit apiKey", () => {
     expect(new openaiTts.TTS({ apiKey: "sk-test" })).toBeDefined();
   });

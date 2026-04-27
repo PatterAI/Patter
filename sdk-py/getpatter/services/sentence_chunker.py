@@ -18,6 +18,15 @@ import re
 # Fragments shorter than this are merged with the next sentence.
 DEFAULT_MIN_SENTENCE_LEN = 20
 
+# Minimum word count for emitting a "short" sentence (one whose total length
+# is below ``min_sentence_len``) as soon as a terminator is seen. This avoids
+# emitting standalone single-word utterances ("Sì.", "Yes.") while still
+# letting short greetings ("Hi there!") flush immediately for low TTS TTFB.
+DEFAULT_MIN_WORDS_FOR_SHORT_FLUSH = 2
+
+# Sentence-terminating characters (Latin + CJK).
+_SENTENCE_TERMINATORS = ".!?。！？"
+
 
 def _split_sentences(
     text: str,
@@ -110,16 +119,36 @@ class SentenceChunker:
             await tts.synthesize(sentence)
     """
 
-    def __init__(self, *, min_sentence_len: int = DEFAULT_MIN_SENTENCE_LEN) -> None:
+    def __init__(
+        self,
+        *,
+        min_sentence_len: int = DEFAULT_MIN_SENTENCE_LEN,
+        min_words_for_short_flush: int = DEFAULT_MIN_WORDS_FOR_SHORT_FLUSH,
+    ) -> None:
         self._buffer = ""
         self._min_sentence_len = min_sentence_len
+        self._min_words_for_short_flush = min_words_for_short_flush
 
     def push(self, token: str) -> list[str]:
-        """Feed a token. Returns zero or more complete sentences."""
+        """Feed a token. Returns zero or more complete sentences.
+
+        Two emission paths:
+
+        * **Standard path** — when the buffer is at least ``min_sentence_len``
+          characters long and the regex tokenizer reports more than one
+          sentence, all but the last (potentially incomplete) sentence are
+          emitted. This is the LiveKit-derived behaviour.
+        * **Short-flush path** — when the buffer is shorter than
+          ``min_sentence_len`` but ends with a sentence terminator AND the
+          preceding text has at least ``min_words_for_short_flush`` words
+          (default 2), emit it immediately. This drops TTS TTFB on short
+          greetings like ``"Hi there!"`` while keeping single-word
+          utterances (``"Sì."``) buffered until ``flush()``.
+        """
         self._buffer += token
 
         if len(self._buffer) < self._min_sentence_len:
-            return []
+            return self._maybe_short_flush()
 
         sentences = _split_sentences(
             self._buffer, min_sentence_len=self._min_sentence_len
@@ -139,6 +168,51 @@ class SentenceChunker:
         self._buffer = last_text
 
         return result
+
+    def _maybe_short_flush(self) -> list[str]:
+        """Emit the buffer when it's a short, complete single-sentence utterance.
+
+        A buffer qualifies when **all** of these hold:
+
+        1. Last non-whitespace char is a sentence terminator.
+        2. Word count is at least ``min_words_for_short_flush`` (default 2 —
+           keeps single-word "Sì." / "Yes." buffered until ``flush()``).
+        3. The buffer contains exactly one terminator (the trailing one).
+           Multiple terminators mean we may be mid-stream of a longer merged
+           utterance like ``"Hey! Hi! Hello! This is a sentence."`` — let
+           the standard path keep merging.
+        4. The char immediately before the terminator is **not** a digit
+           (avoids decimal mid-stream like ``"f(x) = x * 2."`` flushing
+           before the ``54`` arrives).
+        5. The char immediately before the terminator is **not** an
+           uppercase letter (avoids acronym patterns like ``"U.S."`` /
+           ``"U."`` flushing prematurely).
+
+        Together these gates preserve the LiveKit-derived merging behaviour
+        of the standard path while letting genuine short greetings flush
+        immediately for low TTS TTFB.
+        """
+        stripped = self._buffer.rstrip()
+        if not stripped or stripped[-1] not in _SENTENCE_TERMINATORS:
+            return []
+
+        # Only one terminator in the entire buffer (the trailing one).
+        if sum(1 for c in stripped if c in _SENTENCE_TERMINATORS) != 1:
+            return []
+
+        # Word count: ``"Hi there!".split()`` -> 2.
+        word_count = len(stripped.split())
+        if word_count < self._min_words_for_short_flush:
+            return []
+
+        # Don't flush on potential decimals or acronyms.
+        if len(stripped) >= 2:
+            prev = stripped[-2]
+            if prev.isdigit() or (prev.isascii() and prev.isupper()):
+                return []
+
+        self._buffer = ""
+        return [stripped]
 
     def flush(self) -> list[str]:
         """Flush remaining buffer as final sentence(s). Call at end of stream."""

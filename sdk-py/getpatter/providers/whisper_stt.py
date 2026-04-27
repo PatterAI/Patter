@@ -12,7 +12,7 @@ import httpx
 
 from getpatter.providers.base import STTProvider, Transcript
 
-logger = logging.getLogger("patter")
+logger = logging.getLogger("getpatter")
 
 
 class _Transcript(Transcript):  # type: ignore[misc]
@@ -151,9 +151,16 @@ class WhisperSTT(STTProvider):
                 continue
 
     async def close(self) -> None:
-        """Flush remaining buffer and close the HTTP client."""
+        """Flush remaining buffer and close the HTTP client.
+
+        Always flushes whatever audio remains in the buffer (when non-empty)
+        so the trailing 0–250 ms before end-of-utterance are not silently
+        dropped. Previously the buffer was only transcribed when it had
+        accumulated more than ~25% of ``BUFFER_SIZE_BYTES``, which discarded
+        short tail-end utterances entirely.
+        """
         self._running = False
-        if len(self._buffer) > BUFFER_SIZE_BYTES // 4:
+        if len(self._buffer) > 0:
             transcript = await self._transcribe_buffer(bytes(self._buffer))
             if transcript:
                 await self._transcript_queue.put(transcript)

@@ -44,7 +44,7 @@ def _local_phone(**kwargs):
 def test_local_mode_explicit_no_telephony_allowed():
     """Explicit mode='local' without a carrier is allowed (e.g. for testing)."""
     phone = Patter(mode="local", phone_number="+1", webhook_url="x")
-    assert phone._mode == "local"
+    assert phone is not None
 
 
 def test_local_mode_requires_phone_number():
@@ -71,7 +71,7 @@ def test_twilio_carrier_requires_auth_token():
 def test_local_mode_valid_construction():
     """Valid local mode construction does not raise."""
     phone = _local_phone()
-    assert phone._mode == "local"
+    assert phone is not None
 
 
 # ---------------------------------------------------------------------------

@@ -7,21 +7,14 @@ export type {
   IncomingMessage,
   STTConfig,
   TTSConfig,
-  PatterOptions,
   LocalOptions,
   AgentOptions,
   ServeOptions,
   LocalCallOptions,
-  ConnectOptions,
-  CallOptions,
   MessageHandler,
   CallEventHandler,
   PipelineMessageHandler,
   ToolDefinition,
-  CreateAgentOptions,
-  Agent,
-  PhoneNumber,
-  Call,
   PipelineHooks,
   HookContext,
 } from "./types";
@@ -102,6 +95,8 @@ export { STT as DeepgramSTT } from "./stt/deepgram";
 export type { DeepgramSTTOptions } from "./stt/deepgram";
 export { STT as WhisperSTT } from "./stt/whisper";
 export type { WhisperSTTOptions } from "./stt/whisper";
+export { STT as OpenAITranscribeSTT } from "./stt/openai-transcribe";
+export type { OpenAITranscribeSTTOptions } from "./stt/openai-transcribe";
 export { STT as CartesiaSTT } from "./stt/cartesia";
 export type { CartesiaSTTOptions } from "./stt/cartesia";
 export { STT as SonioxSTT } from "./stt/soniox";
@@ -149,7 +144,7 @@ export { ConvAI as ElevenLabsConvAI } from "./engines/elevenlabs";
 export type { ConvAIOptions as ElevenLabsConvAIOptions } from "./engines/elevenlabs";
 
 // Tunnel markers.
-export { CloudflareTunnel, Static as StaticTunnel } from "./tunnels";
+export { CloudflareTunnel, Ngrok, Static as StaticTunnel } from "./tunnels";
 
 // Public API primitives.
 export { Tool, Guardrail, tool, guardrail } from "./public-api";
@@ -228,14 +223,18 @@ export {
   initTracing,
   startSpan,
   isTracingEnabled,
+  EventBus,
   SPAN_CALL,
   SPAN_STT,
   SPAN_LLM,
   SPAN_TTS,
   SPAN_TOOL,
+  SPAN_ENDPOINT,
+  SPAN_BARGEIN,
 } from "./observability";
 export type {
   Span,
   InitTracingOptions,
   CallEvent,
+  PatterEventType,
 } from "./observability";

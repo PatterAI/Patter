@@ -16,7 +16,7 @@ import json
 import logging
 from typing import Any, AsyncIterator
 
-logger = logging.getLogger("patter.ultravox_realtime")
+logger = logging.getLogger("getpatter.ultravox_realtime")
 
 # Ultravox v1 REST endpoint used to create an ephemeral call. The call
 # response includes a ``joinUrl`` WebSocket URL that the client connects to

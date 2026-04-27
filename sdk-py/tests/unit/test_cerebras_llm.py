@@ -9,11 +9,17 @@ Behaviour matches the TS provider: log at ERROR level and exit the stream
 quietly. Voice pipelines treat LLM provider failures as recoverable (the
 call continues, the user just hears no LLM response), so raising would be
 a behavioural change for callers.
+
+The Cerebras ``stream()`` is now a thin wrapper over the parent
+``OpenAILLMProvider.stream`` (refactor: sampling kwargs live in the parent).
+Tests mock the parent's ``stream`` so the 404 try/except wrapper is what's
+exercised, regardless of which transport-layer call actually raised.
 """
 
 from __future__ import annotations
 
 import logging
+from typing import AsyncIterator
 from unittest.mock import patch
 
 import pytest
@@ -38,24 +44,19 @@ def _provider(model: str | None = None) -> CerebrasLLMProvider:
     return CerebrasLLMProvider(**kwargs)
 
 
-def _async_iter_raises(exc: Exception):
-    """Return an async-iterable that raises ``exc`` on the first ``__anext__``.
+def _failing_parent_stream(exc: Exception):
+    """Patch ``OpenAILLMProvider.stream`` to raise ``exc`` on iteration.
 
-    Replaces the prior ``side_effect=async_gen_func`` pattern, which relied on
-    the implicit semantics of mocking an async generator function. Returning
-    a real async iterable from ``side_effect`` is unambiguous: the mock call
-    returns this object, and the caller's ``async for`` invokes ``__anext__``,
-    which raises.
+    The Cerebras subclass calls ``super().stream(...)`` and wraps the
+    iterator in a try/except; the patched async generator raises so the
+    wrapper's exception path is what the test exercises.
     """
 
-    class _Iter:
-        def __aiter__(self):
-            return self
+    async def _raises(self, messages, tools=None):  # type: ignore[no-untyped-def]
+        raise exc
+        yield  # pragma: no cover — make the function an async generator
 
-        async def __anext__(self):
-            raise exc
-
-    return _Iter()
+    return patch.object(OpenAILLMProvider, "stream", new=_raises)
 
 
 def test_default_model_is_free_tier_safe() -> None:
@@ -81,12 +82,7 @@ async def test_404_model_not_found_is_logged_with_recovery_hint(
         '"code":"model_not_found"}'
     )
 
-    # Patch via the class object itself so MRO resolution from
-    # CerebrasLLMProvider's super().stream() unambiguously hits the mock,
-    # regardless of whether OpenAILLMProvider was imported under another name.
-    with patch.object(
-        OpenAILLMProvider, "stream", return_value=_async_iter_raises(upstream)
-    ):
+    with _failing_parent_stream(upstream):
         with caplog.at_level(logging.ERROR, logger="getpatter.providers.cerebras_llm"):
             chunks = [
                 chunk async for chunk in provider.stream([{"role": "user", "content": "hi"}])
@@ -108,9 +104,32 @@ async def test_other_errors_are_re_raised_unchanged() -> None:
 
     upstream = ValueError("unrelated failure")
 
-    with patch.object(
-        OpenAILLMProvider, "stream", return_value=_async_iter_raises(upstream)
-    ):
+    with _failing_parent_stream(upstream):
         with pytest.raises(ValueError, match="unrelated failure"):
             async for _ in provider.stream([{"role": "user", "content": "hi"}]):
                 pass
+
+
+@pytest.mark.asyncio
+async def test_stream_delegates_to_parent_for_chunks() -> None:
+    """Happy path: chunks yielded by the parent are forwarded unchanged.
+
+    Confirms the thin-wrapper design — Cerebras owns no SSE parsing of its
+    own; everything goes through ``OpenAILLMProvider.stream``.
+    """
+
+    provider = _provider()
+
+    parent_chunks = [
+        {"type": "text", "content": "hello"},
+        {"type": "text", "content": " world"},
+    ]
+
+    async def _yields(self, messages, tools=None) -> AsyncIterator[dict]:  # type: ignore[no-untyped-def]
+        for c in parent_chunks:
+            yield c
+
+    with patch.object(OpenAILLMProvider, "stream", new=_yields):
+        out = [c async for c in provider.stream([{"role": "user", "content": "hi"}])]
+
+    assert out == parent_chunks

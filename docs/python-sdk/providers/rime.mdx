@@ -67,7 +67,7 @@ tts = _LowLevelTTS(
     sample_rate=16000,
 )
 
-async for chunk in tts.synthesize("Ciao dal Patter pipeline."):
+async for chunk in tts.synthesize("Hello from the Patter pipeline."):
     ...
 
 await tts.close()

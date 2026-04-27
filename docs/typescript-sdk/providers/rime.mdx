@@ -19,16 +19,10 @@ No vendor SDK is required — `RimeTTS` uses the platform `fetch`, so it works o
 ## Usage
 
 ```typescript
-// Namespaced import
-import * as rime from "getpatter/tts/rime";
-
-const tts = new rime.TTS();                           // reads RIME_API_KEY
-const tts = new rime.TTS({ model: "arcana", speaker: "astra" });
-
-// Flat alias (equivalent)
 import { RimeTTS } from "getpatter";
 
-const tts = new RimeTTS({ model: "arcana", speaker: "astra" });
+const tts = new RimeTTS();                                            // reads RIME_API_KEY
+const tts2 = new RimeTTS({ model: "arcana", speaker: "astra" });
 ```
 
 In an agent:

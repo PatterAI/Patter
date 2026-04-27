@@ -1,30 +1,18 @@
 """Patter SDK — Connect AI agents to phone numbers in 4 lines of code.
 
-Three modes:
+Local mode (the only mode in this release):
 
-  Cloud (Patter-managed):
-    phone = Patter(api_key="pt_xxx")
-    await phone.connect(on_message=handler)
-    await phone.call(to="+39...", first_message="Ciao!")
-
-  Self-hosted (bring your own keys, Patter backend):
-    phone = Patter(api_key="pt_xxx", backend_url="ws://localhost:8000")
-    await phone.connect(
-        provider="twilio", provider_key="AC...",
-        number="+1...",
-        stt=DeepgramSTT(api_key="dg_..."),
-        tts=ElevenLabsTTS(api_key="el_..."),
-        on_message=handler,
-    )
-
-  Local (fully embedded, no Patter backend):
     phone = Patter(
         carrier=Twilio(account_sid="AC...", auth_token="..."),
-        phone_number="+1...",
+        phone_number="+15550001234",
         tunnel=Static(hostname="abc.ngrok.io"),
     )
     agent = phone.agent(engine=OpenAIRealtime(), system_prompt="hi")
     await phone.serve(agent, port=8000)
+
+Patter Cloud (the hosted backend) is not yet available in this SDK release;
+passing ``api_key=`` raises :class:`NotImplementedError`. Cloud mode will
+return in a future release.
 """
 
 from __future__ import annotations
@@ -32,13 +20,10 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any, Callable, Awaitable
 
-import httpx
+logger = logging.getLogger("getpatter")
 
-logger = logging.getLogger("patter")
-
-from getpatter.connection import PatterConnection
-from getpatter.exceptions import PatterConnectionError, ProvisionError
-from getpatter.models import Agent, Guardrail, IncomingMessage, STTConfig, TTSConfig
+from getpatter.exceptions import PatterConnectionError
+from getpatter.models import Agent, Guardrail, IncomingMessage
 from getpatter.local_config import LocalConfig
 from getpatter.providers.base import STTProvider, TTSProvider
 from getpatter.services.llm_loop import LLMProvider
@@ -46,18 +31,18 @@ from getpatter.services.llm_loop import LLMProvider
 if TYPE_CHECKING:  # pragma: no cover — typing only
     from getpatter._public_api import Tool
 
-DEFAULT_BACKEND_URL = "wss://api.getpatter.com"
-DEFAULT_REST_URL = "https://api.getpatter.com"
+
+_CLOUD_NOT_IMPLEMENTED_MSG = (
+    "Patter Cloud is not yet available in this SDK release. Use local mode "
+    "with a `carrier=` and `phone_number=`. Cloud mode will return in a "
+    "future release."
+)
 
 
 class Patter:
-    """Main Patter SDK client.
+    """Main Patter SDK client (local mode only).
 
-    Cloud mode::
-
-        phone = Patter(api_key="pt_xxx")
-
-    Local (embedded) mode::
+    Construct with a carrier and phone number::
 
         phone = Patter(
             carrier=Twilio(account_sid="AC...", auth_token="..."),
@@ -66,38 +51,40 @@ class Patter:
         )
 
     Args:
-        api_key: Your Patter API key (starts with ``pt_``). Required for cloud mode.
-        backend_url: WebSocket URL for the Patter backend (cloud/self-hosted).
-        rest_url: REST API URL for the Patter backend (cloud/self-hosted).
-        mode: ``"cloud"`` (default) or ``"local"``.  Auto-detected when
-            ``carrier`` is supplied without ``api_key``.
-        carrier: ``Twilio(...)`` or ``Telnyx(...)`` instance (local mode).
-        phone_number: Your phone number in E.164 format (local mode).
+        carrier: ``Twilio(...)`` or ``Telnyx(...)`` instance.
+        phone_number: Your phone number in E.164 format.
         webhook_url: Public hostname (no scheme) of this server, e.g.
-            ``"abc.ngrok.io"`` (local mode). Mutually exclusive with ``tunnel``.
-        tunnel: ``CloudflareTunnel()``, ``Ngrok(hostname=...)``, ``Static(hostname=...)``,
-            or ``True`` (alias for ``CloudflareTunnel()``). Used to expose the
-            embedded server publicly (local mode).
-        pricing: Optional pricing overrides for cost tracking (local mode).
+            ``"abc.ngrok.io"``. Mutually exclusive with ``tunnel``.
+        tunnel: ``CloudflareTunnel()``, ``Ngrok(hostname=...)``,
+            ``Static(hostname=...)``, or ``True`` (alias for
+            ``CloudflareTunnel()``). Used to expose the embedded server
+            publicly.
+        pricing: Optional pricing overrides for cost tracking.
     """
 
     def __init__(
         self,
-        # Cloud mode
-        api_key: str = "",
-        backend_url: str = DEFAULT_BACKEND_URL,
-        rest_url: str = DEFAULT_REST_URL,
-        # Mode override
-        mode: str = "cloud",
-        # Local mode — instance-based API
         carrier: Any = None,
         phone_number: str = "",
         webhook_url: str = "",
         tunnel: Any = None,
-        # Cost tracking
         pricing: dict | None = None,
+        **kwargs: Any,
     ) -> None:
-        self._mode = mode
+        # --- Reject cloud-mode kwargs explicitly ---
+        if "api_key" in kwargs or "backend_url" in kwargs or "rest_url" in kwargs:
+            raise NotImplementedError(_CLOUD_NOT_IMPLEMENTED_MSG)
+        # ``mode="local"`` is the historical opt-in flag. Accept it silently
+        # for backward compatibility; reject anything else.
+        mode = kwargs.pop("mode", "local")
+        if mode != "local":
+            raise NotImplementedError(_CLOUD_NOT_IMPLEMENTED_MSG)
+        if kwargs:
+            unexpected = ", ".join(sorted(kwargs))
+            raise TypeError(
+                f"Patter() got unexpected keyword argument(s): {unexpected}"
+            )
+
         self._pricing = pricing
 
         # --- Carrier normalisation ---
@@ -114,66 +101,39 @@ class Patter:
             webhook_url = tunnel_webhook
         self._tunnel_directive = tunnel_directive
 
-        # --- Mode detection ---
-        # Local mode is selected when either mode="local" is explicit OR a
-        # carrier instance is provided without an api_key.
-        if mode == "local" or (carrier_kind is not None and not api_key):
-            self._mode = "local"
+        twilio_sid = ""
+        twilio_token = ""
+        telnyx_key = ""
+        telnyx_connection_id = ""
+        telnyx_public_key = ""
 
-            twilio_sid = ""
-            twilio_token = ""
-            telnyx_key = ""
-            telnyx_connection_id = ""
-            telnyx_public_key = ""
+        if carrier_kind == "twilio":
+            twilio_sid = carrier_creds["account_sid"]
+            twilio_token = carrier_creds["auth_token"]
+        elif carrier_kind == "telnyx":
+            telnyx_key = carrier_creds["api_key"]
+            telnyx_connection_id = carrier_creds["connection_id"]
+            telnyx_public_key = carrier_creds.get("public_key", "")
 
-            if carrier_kind == "twilio":
-                twilio_sid = carrier_creds["account_sid"]
-                twilio_token = carrier_creds["auth_token"]
-            elif carrier_kind == "telnyx":
-                telnyx_key = carrier_creds["api_key"]
-                telnyx_connection_id = carrier_creds["connection_id"]
-                telnyx_public_key = carrier_creds.get("public_key", "")
+        # --- Local mode validation (only when a carrier is provided) ---
+        if carrier_kind is not None:
+            if not phone_number:
+                raise ValueError(
+                    "Local mode requires phone_number (e.g., phone_number='+15550001234')."
+                )
 
-            # --- Local mode validation (only when a carrier is provided) ---
-            if carrier_kind is not None:
-                if not phone_number:
-                    raise ValueError(
-                        "Local mode requires phone_number (e.g., phone_number='+15550001234')."
-                    )
-
-            self._local_config = LocalConfig(
-                telephony_provider=carrier_kind or "twilio",
-                twilio_sid=twilio_sid,
-                twilio_token=twilio_token,
-                telnyx_key=telnyx_key,
-                telnyx_connection_id=telnyx_connection_id,
-                telnyx_public_key=telnyx_public_key,
-                phone_number=phone_number,
-                webhook_url=webhook_url,
-            )
-            self._server = None
-            self._tunnel_handle = None
-            self._connection = None
-            self._http = None
-        else:
-            # Cloud / self-hosted mode (existing behaviour)
-            self._api_key = api_key
-            self._backend_url = backend_url
-            self._rest_url = rest_url
-            if self._mode != "local" and backend_url.startswith("ws://"):
-                from urllib.parse import urlparse
-                host = urlparse(backend_url).hostname
-                if host not in ("localhost", "127.0.0.1"):
-                    logger.warning(
-                        "Using unencrypted ws:// for non-localhost host '%s'. "
-                        "Use wss:// to protect your API key in transit.", host
-                    )
-            self._connection = PatterConnection(api_key=api_key, backend_url=backend_url)
-            self._http = httpx.AsyncClient(
-                base_url=rest_url,
-                headers={"X-API-Key": api_key},
-                timeout=30.0,
-            )
+        self._local_config = LocalConfig(
+            telephony_provider=carrier_kind or "twilio",
+            twilio_sid=twilio_sid,
+            twilio_token=twilio_token,
+            telnyx_key=telnyx_key,
+            telnyx_connection_id=telnyx_connection_id,
+            telnyx_public_key=telnyx_public_key,
+            phone_number=phone_number,
+            webhook_url=webhook_url,
+        )
+        self._server = None
+        self._tunnel_handle = None
 
     @staticmethod
     def _unpack_carrier(carrier: Any) -> tuple[str | None, dict]:
@@ -245,210 +205,132 @@ class Patter:
         )
 
     @property
-    def api_key(self) -> str:
-        """Public read-only access to the API key (backward compatibility)."""
-        return getattr(self, "_api_key", "")
-
-    @property
     def metrics_store(self):
-        """Live ``MetricsStore`` for the embedded server (local mode only).
+        """Live ``MetricsStore`` for the embedded server.
 
-        Returns ``None`` before ``serve()`` is called or when running in cloud
-        mode. Exposed so integrations like ``PatterTool`` can subscribe to
-        per-call lifecycle events (``call_initiated``, ``call_start``,
-        ``call_end``).
+        Returns ``None`` before ``serve()`` is called. Exposed so integrations
+        like ``PatterTool`` can subscribe to per-call lifecycle events
+        (``call_initiated``, ``call_start``, ``call_end``).
         """
         server = getattr(self, "_server", None)
         if server is None:
             return None
         return getattr(server, "_metrics_store", None)
 
-    async def connect(
-        self,
-        on_message: Callable[[IncomingMessage], Awaitable[str]],
-        on_call_start: Callable[[dict], Awaitable[None]] | None = None,
-        on_call_end: Callable[[dict], Awaitable[None]] | None = None,
-        *,
-        # Self-hosted mode (optional — omit for managed mode)
-        provider: str | None = None,
-        provider_key: str | None = None,
-        provider_secret: str | None = None,
-        number: str | None = None,
-        country: str = "US",
-        stt: STTConfig | None = None,
-        tts: TTSConfig | None = None,
-    ) -> None:
-        """Connect to Patter and start listening for calls.
-
-        Managed mode (recommended):
-            await phone.connect(on_message=handler)
-
-        Self-hosted mode:
-            await phone.connect(
-                provider="twilio", provider_key="AC...",
-                number="+1...", on_message=handler,
-            )
-        """
-        if self._mode == "local":
-            raise PatterConnectionError(
-                "connect() is not available in local mode. Use serve() instead."
-            )
-
-        # Self-hosted: register number with provider credentials
-        if provider and provider_key and number:
-            await self._register_number(
-                provider=provider,
-                provider_key=provider_key,
-                provider_secret=provider_secret,
-                number=number,
-                country=country,
-                stt=stt,
-                tts=tts,
-            )
-
-        await self._connection.connect(
-            on_message=on_message,
-            on_call_start=on_call_start,
-            on_call_end=on_call_end,
-        )
-
     async def call(
         self,
         to: str,
-        on_message: Callable[[IncomingMessage], Awaitable[str]] | None = None,
+        agent: Agent | None = None,
         first_message: str = "",
         from_number: str = "",
-        agent_id: str | None = None,
-        agent: Agent | None = None,
         machine_detection: bool = False,
         on_machine: Callable[[dict], Awaitable[None]] | None = None,
         voicemail_message: str = "",
-        ring_timeout: int | None = None,
+        ring_timeout: int | None = 25,
     ) -> None:
         """Make an outbound call.
 
-        Cloud mode:
-            await phone.call(to="+39123", on_message=handler, first_message="Ciao!")
-
-        Local mode:
-            await phone.call(to="+39123", agent=my_agent)
-
         Args:
             to: Phone number to call (E.164 format).
-            on_message: Handler for conversation (cloud mode). If not connected,
-                auto-connects.
-            first_message: What the AI says when the callee answers (cloud mode).
+            agent: ``Agent`` instance to use (required).
+            first_message: What the AI says when the callee answers.
             from_number: Number to call from. If empty, uses configured number.
-            agent_id: Agent ID to use (cloud mode, optional).
-            agent: ``Agent`` instance to use (local mode, required).
-            voicemail_message: If set and AMD detects a machine, speak this message
-                and hang up (local mode, requires machine_detection=True).
+            voicemail_message: If set and AMD detects a machine, speak this
+                message and hang up (requires machine_detection=True).
+            ring_timeout: Ring timeout in seconds before treating the call as
+                no-answer. Defaults to 25 s — the production-recommended value
+                that limits phantom calls. Pass ``ring_timeout=60`` for legacy
+                carrier-default parity, or ``None`` to omit the parameter
+                entirely (carrier picks its own default).
         """
-        if self._mode == "local":
-            if not agent:
-                raise PatterConnectionError(
-                    "Local mode call() requires the agent parameter."
-                )
-            if not isinstance(to, str) or not to.startswith("+"):
-                raise ValueError(
-                    f"'to' must be a phone number in E.164 format (e.g., '+1234567890'), got '{to}'."
-                )
-            # Store voicemail message on embedded server so AMD webhook can use it
-            if voicemail_message and self._server is not None:
-                self._server.voicemail_message = voicemail_message
-            config = self._local_config
-            if config.telephony_provider == "twilio":
-                from getpatter.providers.twilio_adapter import TwilioAdapter  # type: ignore[import]
+        if not agent:
+            raise PatterConnectionError(
+                "call() requires the agent parameter."
+            )
+        if not isinstance(to, str) or not to.startswith("+"):
+            raise ValueError(
+                f"'to' must be a phone number in E.164 format (e.g., '+1234567890'), got '{to}'."
+            )
+        # Store voicemail message on embedded server so AMD webhook can use it
+        if voicemail_message and self._server is not None:
+            self._server.voicemail_message = voicemail_message
+        config = self._local_config
+        if config.telephony_provider == "twilio":
+            from getpatter.providers.twilio_adapter import TwilioAdapter  # type: ignore[import]
 
-                adapter = TwilioAdapter(
-                    account_sid=config.twilio_sid,
-                    auth_token=config.twilio_token,
+            adapter = TwilioAdapter(
+                account_sid=config.twilio_sid,
+                auth_token=config.twilio_token,
+            )
+            stream_url = (
+                f"wss://{config.webhook_url}/ws/stream/outbound"
+            )
+            extra_params: dict = {}
+            if machine_detection:
+                extra_params["MachineDetection"] = "DetectMessageEnd"
+                extra_params["AsyncAmd"] = "true"
+                extra_params["AsyncAmdStatusCallback"] = (
+                    f"https://{config.webhook_url}/webhooks/twilio/amd"
                 )
-                stream_url = (
-                    f"wss://{config.webhook_url}/ws/stream/outbound"
-                )
-                extra_params: dict = {}
-                if machine_detection:
-                    extra_params["MachineDetection"] = "DetectMessageEnd"
-                    extra_params["AsyncAmd"] = "true"
-                    extra_params["AsyncAmdStatusCallback"] = (
-                        f"https://{config.webhook_url}/webhooks/twilio/amd"
-                    )
-                if ring_timeout is not None:
-                    extra_params["Timeout"] = int(ring_timeout)
-                # Status callback so the dashboard sees ringing/failed/
-                # no-answer transitions before any media webhook fires.
-                extra_params.setdefault(
-                    "StatusCallback",
-                    f"https://{config.webhook_url}/webhooks/twilio/status",
-                )
-                extra_params.setdefault("StatusCallbackMethod", "POST")
-                extra_params.setdefault(
-                    "StatusCallbackEvent",
-                    "initiated ringing answered completed",
-                )
-                call_id = await adapter.initiate_call(
-                    config.phone_number or from_number,
-                    to,
-                    stream_url,
-                    extra_params=extra_params,
-                )
-                logger.info("Outbound call initiated: %s", call_id)
-                # Pre-register the call so the dashboard surfaces attempts
-                # that never reach media (no-answer, busy, carrier-reject).
-                if self._server is not None and getattr(self._server, "_metrics_store", None) is not None:
-                    try:
-                        self._server._metrics_store.record_call_initiated({
-                            "call_id": call_id,
-                            "caller": config.phone_number or from_number,
-                            "callee": to,
-                            "direction": "outbound",
-                        })
-                    except Exception as exc:
-                        logger.debug("record_call_initiated: %s", exc)
-            elif config.telephony_provider == "telnyx":
-                from getpatter.providers.telnyx_adapter import TelnyxAdapter  # type: ignore[import]
+            if ring_timeout is not None:
+                extra_params["Timeout"] = int(ring_timeout)
+            # Status callback so the dashboard sees ringing/failed/
+            # no-answer transitions before any media webhook fires.
+            extra_params.setdefault(
+                "StatusCallback",
+                f"https://{config.webhook_url}/webhooks/twilio/status",
+            )
+            extra_params.setdefault("StatusCallbackMethod", "POST")
+            extra_params.setdefault(
+                "StatusCallbackEvent",
+                "initiated ringing answered completed",
+            )
+            call_id = await adapter.initiate_call(
+                config.phone_number or from_number,
+                to,
+                stream_url,
+                extra_params=extra_params,
+            )
+            logger.info("Outbound call initiated: %s", call_id)
+            # Pre-register the call so the dashboard surfaces attempts
+            # that never reach media (no-answer, busy, carrier-reject).
+            if self._server is not None and getattr(self._server, "_metrics_store", None) is not None:
+                try:
+                    self._server._metrics_store.record_call_initiated({
+                        "call_id": call_id,
+                        "caller": config.phone_number or from_number,
+                        "callee": to,
+                        "direction": "outbound",
+                    })
+                except Exception as exc:
+                    logger.debug("record_call_initiated: %s", exc)
+        elif config.telephony_provider == "telnyx":
+            from getpatter.providers.telnyx_adapter import TelnyxAdapter  # type: ignore[import]
 
-                adapter = TelnyxAdapter(
-                    api_key=config.telnyx_key,
-                    connection_id=config.telnyx_connection_id,
-                )
-                stream_url = (
-                    f"wss://{config.webhook_url}/ws/telnyx/stream/outbound"
-                )
-                call_id = await adapter.initiate_call(
-                    config.phone_number or from_number,
-                    to,
-                    stream_url,
-                    ring_timeout=ring_timeout,
-                )
-                logger.info("Outbound call initiated: %s", call_id)
-                if self._server is not None and getattr(self._server, "_metrics_store", None) is not None:
-                    try:
-                        self._server._metrics_store.record_call_initiated({
-                            "call_id": call_id,
-                            "caller": config.phone_number or from_number,
-                            "callee": to,
-                            "direction": "outbound",
-                        })
-                    except Exception as exc:
-                        logger.debug("record_call_initiated: %s", exc)
-            return
-
-        # Cloud mode
-        if not self._connection.is_connected:
-            if on_message:
-                await self._connection.connect(on_message=on_message)
-            else:
-                raise PatterConnectionError(
-                    "Not connected. Call connect() first or pass on_message."
-                )
-
-        await self._connection.request_call(
-            from_number=from_number,
-            to_number=to,
-            first_message=first_message,
-        )
+            adapter = TelnyxAdapter(
+                api_key=config.telnyx_key,
+                connection_id=config.telnyx_connection_id,
+            )
+            stream_url = (
+                f"wss://{config.webhook_url}/ws/telnyx/stream/outbound"
+            )
+            call_id = await adapter.initiate_call(
+                config.phone_number or from_number,
+                to,
+                stream_url,
+                ring_timeout=ring_timeout,
+            )
+            logger.info("Outbound call initiated: %s", call_id)
+            if self._server is not None and getattr(self._server, "_metrics_store", None) is not None:
+                try:
+                    self._server._metrics_store.record_call_initiated({
+                        "call_id": call_id,
+                        "caller": config.phone_number or from_number,
+                        "callee": to,
+                        "direction": "outbound",
+                    })
+                except Exception as exc:
+                    logger.debug("record_call_initiated: %s", exc)
 
     # === Local mode helpers ===
 
@@ -497,7 +379,7 @@ class Patter:
         engine: Any = None,
         llm: "LLMProvider | None" = None,
     ) -> Agent:
-        """Create an ``Agent`` configuration for local mode.
+        """Create an ``Agent`` configuration.
 
         The AI provider mode is derived from the arguments:
 
@@ -565,39 +447,38 @@ class Patter:
         stt_resolved = self._resolve_stt(stt)
         tts_resolved = self._resolve_tts(tts)
 
-        # In local mode we backfill any credentials the engine carries into
-        # LocalConfig so downstream validation / dispatch sees them even when
-        # the user didn't also set them on the Patter() constructor.
-        if self._mode == "local":
-            from dataclasses import replace
+        # Backfill any credentials the engine carries into LocalConfig so
+        # downstream validation / dispatch sees them even when the user
+        # didn't also set them on the Patter() constructor.
+        from dataclasses import replace
 
-            if openai_engine_key and not self._local_config.openai_key:
-                self._local_config = replace(
-                    self._local_config, openai_key=openai_engine_key
-                )
-            if elevenlabs_engine_key and not self._local_config.elevenlabs_key:
-                self._local_config = replace(
-                    self._local_config, elevenlabs_key=elevenlabs_engine_key
-                )
+        if openai_engine_key and not self._local_config.openai_key:
+            self._local_config = replace(
+                self._local_config, openai_key=openai_engine_key
+            )
+        if elevenlabs_engine_key and not self._local_config.elevenlabs_key:
+            self._local_config = replace(
+                self._local_config, elevenlabs_key=elevenlabs_engine_key
+            )
 
-            if provider == "openai_realtime" and not self._local_config.openai_key:
+        if provider == "openai_realtime" and not self._local_config.openai_key:
+            raise ValueError(
+                "OpenAI Realtime mode requires an OpenAI API key. Pass "
+                "engine=OpenAIRealtime(api_key='sk-...') or set OPENAI_API_KEY "
+                "in the environment."
+            )
+
+        if provider == "pipeline":
+            if stt_resolved is None:
                 raise ValueError(
-                    "OpenAI Realtime mode requires an OpenAI API key. Pass "
-                    "engine=OpenAIRealtime(api_key='sk-...') or set OPENAI_API_KEY "
-                    "in the environment."
+                    "Pipeline mode requires an STT provider instance. "
+                    "Pass stt=DeepgramSTT(api_key='...') (or another supported "
+                    "STTProvider) to agent()."
                 )
-
-            if provider == "pipeline":
-                if stt_resolved is None:
-                    raise ValueError(
-                        "Pipeline mode requires an STT provider instance. "
-                        "Pass stt=DeepgramSTT(api_key='...') (or another supported "
-                        "STTProvider) to agent()."
-                    )
-                # TTS may be omitted when the user supplies an on_message handler
-                # that returns pre-synthesised audio, but most users will need it.
-                # We no longer hard-require a TTS key on the Patter() constructor
-                # because the TTS instance carries its own credentials.
+            # TTS may be omitted when the user supplies an on_message handler
+            # that returns pre-synthesised audio, but most users will need it.
+            # We no longer hard-require a TTS key on the Patter() constructor
+            # because the TTS instance carries its own credentials.
 
         # --- Normalise tools ---
         tools_out: list[dict] | None = None
@@ -729,7 +610,7 @@ class Patter:
         dashboard_token: str = "",
         tunnel: bool = False,
     ) -> None:
-        """Start the embedded server for inbound calls (local mode only).
+        """Start the embedded server for inbound calls.
 
         This call blocks until the server is stopped.
 
@@ -753,12 +634,6 @@ class Patter:
                 Requires ``cloudflared`` binary on PATH. Mutually exclusive
                 with ``webhook_url``.
         """
-        if self._mode != "local":
-            raise PatterConnectionError(
-                "serve() is only available in local mode. "
-                "Initialise Patter with carrier=Twilio(...) / carrier=Telnyx(...) instead of api_key."
-            )
-
         if not isinstance(agent, Agent):
             raise TypeError(
                 f"agent must be an Agent instance, got {type(agent).__name__}. "
@@ -839,7 +714,7 @@ class Patter:
         on_call_start: Callable[[dict], Awaitable[None]] | None = None,
         on_call_end: Callable[[dict], Awaitable[None]] | None = None,
     ) -> None:
-        """Start an interactive terminal test session (local mode only).
+        """Start an interactive terminal test session.
 
         Simulates a phone call without telephony, STT, or TTS — pure
         text input/output.  When no ``on_message`` handler is provided and
@@ -851,10 +726,6 @@ class Patter:
             on_call_start: Optional call start callback.
             on_call_end: Optional call end callback.
         """
-        if self._mode != "local":
-            raise PatterConnectionError(
-                "test() is only available in local mode."
-            )
         if not isinstance(agent, Agent):
             raise TypeError(
                 f"agent must be an Agent instance, got {type(agent).__name__}."
@@ -871,141 +742,10 @@ class Patter:
             on_call_end=on_call_end,
         )
 
-    # === Agent Management ===
-
-    async def create_agent(
-        self,
-        name: str,
-        system_prompt: str,
-        model: str = "gpt-4o-mini-realtime-preview",
-        voice: str = "alloy",
-        voice_provider: str = "openai",
-        language: str = "en",
-        first_message: str | None = None,
-        tools: list[dict] | None = None,
-    ) -> dict:
-        """Create a voice AI agent."""
-        if self._mode == "local":
-            raise PatterConnectionError("This method is only available in cloud mode.")
-        response = await self._http.post("/api/agents", json={
-            "name": name, "system_prompt": system_prompt, "model": model,
-            "voice": voice, "voice_provider": voice_provider, "language": language,
-            "first_message": first_message, "tools": tools,
-        })
-        if response.status_code != 201:
-            raise ProvisionError(f"Failed to create agent: {response.text}")
-        return response.json()
-
-    async def list_agents(self) -> list[dict]:
-        """List all agents."""
-        if self._mode == "local":
-            raise PatterConnectionError("This method is only available in cloud mode.")
-        response = await self._http.get("/api/agents")
-        return response.json()
-
-    async def update_agent(self, agent_id: str, **kwargs) -> dict:
-        """Update an agent."""
-        if self._mode == "local":
-            raise PatterConnectionError("This method is only available in cloud mode.")
-        response = await self._http.patch(f"/api/agents/{agent_id}", json=kwargs)
-        if response.status_code != 200:
-            raise ProvisionError(f"Failed to update agent: {response.text}")
-        return response.json()
-
-    async def delete_agent(self, agent_id: str) -> None:
-        """Delete an agent."""
-        if self._mode == "local":
-            raise PatterConnectionError("This method is only available in cloud mode.")
-        response = await self._http.delete(f"/api/agents/{agent_id}")
-        if response.status_code != 204:
-            raise ProvisionError(f"Failed to delete agent: {response.text}")
-
-    # === Number Management ===
-
-    async def buy_number(self, country: str = "US", provider: str = "twilio") -> dict:
-        """Buy a phone number."""
-        if self._mode == "local":
-            raise PatterConnectionError("This method is only available in cloud mode.")
-        response = await self._http.post("/api/numbers/buy", json={"country": country, "provider": provider})
-        if response.status_code != 201:
-            raise ProvisionError(f"Failed to buy number: {response.text}")
-        return response.json()
-
-    async def list_numbers(self) -> list[dict]:
-        """List all phone numbers."""
-        if self._mode == "local":
-            raise PatterConnectionError("This method is only available in cloud mode.")
-        response = await self._http.get("/api/numbers")
-        return response.json()
-
-    async def assign_agent(self, number_id: str, agent_id: str) -> dict:
-        """Assign an agent to a phone number."""
-        if self._mode == "local":
-            raise PatterConnectionError("This method is only available in cloud mode.")
-        response = await self._http.post(f"/api/phone-numbers/{number_id}/assign-agent", json={"agent_id": agent_id})
-        if response.status_code != 200:
-            raise ProvisionError(f"Failed to assign agent: {response.text}")
-        return response.json()
-
-    # === Call Management ===
-
-    async def list_calls(self, limit: int = 50) -> list[dict]:
-        """List recent calls."""
-        if self._mode == "local":
-            raise PatterConnectionError("This method is only available in cloud mode.")
-        response = await self._http.get(f"/api/calls?limit={limit}")
-        return response.json()
-
-    async def get_call(self, call_id: str) -> dict:
-        """Get call details with transcript."""
-        if self._mode == "local":
-            raise PatterConnectionError("This method is only available in cloud mode.")
-        response = await self._http.get(f"/api/calls/{call_id}")
-        if response.status_code != 200:
-            raise ProvisionError(f"Call not found: {response.text}")
-        return response.json()
-
     async def disconnect(self) -> None:
-        """Disconnect from Patter."""
-        if self._mode == "local":
-            if self._server:
-                await self._server.stop()
-            if self._tunnel_handle:
-                self._tunnel_handle.stop()
-                self._tunnel_handle = None
-            return
-        await self._connection.disconnect()
-        await self._http.aclose()
-
-    # === Internal ===
-
-    async def _register_number(
-        self,
-        provider: str,
-        provider_key: str,
-        provider_secret: str | None,
-        number: str,
-        country: str,
-        stt: STTConfig | None,
-        tts: TTSConfig | None,
-    ) -> None:
-        if self._mode == "local":
-            raise PatterConnectionError("This method is only available in cloud mode.")
-        credentials: dict = {"api_key": provider_key}
-        if provider_secret:
-            credentials["api_secret"] = provider_secret
-        response = await self._http.post(
-            "/api/phone-numbers",
-            json={
-                "number": number,
-                "provider": provider,
-                "provider_credentials": credentials,
-                "country": country,
-                "stt_config": stt.to_dict() if stt else None,
-                "tts_config": tts.to_dict() if tts else None,
-            },
-        )
-        if response.status_code == 409:
-            return
-        if response.status_code != 201:
-            raise ProvisionError(f"Failed to register number: {response.text}")
+        """Stop the embedded server and any auto-started tunnel."""
+        if self._server:
+            await self._server.stop()
+        if self._tunnel_handle:
+            self._tunnel_handle.stop()
+            self._tunnel_handle = None

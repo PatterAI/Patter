@@ -7,6 +7,8 @@
  * OpenAI TTS 24kHz PCM).
  */
 
+import { getLogger } from './logger';
+
 // ---------- ITU-T G.711 mu-law tables ----------
 
 /**
@@ -506,7 +508,7 @@ let _warnedResample24kTo16k = false;
 export function resample8kTo16k(pcm8k: Buffer): Buffer {
   if (!_warnedResample8kTo16k) {
     _warnedResample8kTo16k = true;
-    console.warn(
+    getLogger().warn(
       '[patter] resample8kTo16k() is deprecated. ' +
       'Use createResampler8kTo16k() (StatefulResampler) to eliminate chunk-boundary discontinuities.',
     );
@@ -532,7 +534,7 @@ export function resample8kTo16k(pcm8k: Buffer): Buffer {
 export function resample16kTo8k(pcm16k: Buffer): Buffer {
   if (!_warnedResample16kTo8k) {
     _warnedResample16kTo8k = true;
-    console.warn(
+    getLogger().warn(
       '[patter] resample16kTo8k() is deprecated. ' +
       'Use createResampler16kTo8k() (StatefulResampler) to eliminate chunk-boundary discontinuities.',
     );
@@ -558,7 +560,7 @@ export function resample16kTo8k(pcm16k: Buffer): Buffer {
 export function resample24kTo16k(pcm24k: Buffer): Buffer {
   if (!_warnedResample24kTo16k) {
     _warnedResample24kTo16k = true;
-    console.warn(
+    getLogger().warn(
       '[patter] resample24kTo16k() is deprecated. ' +
       'Use createResampler24kTo16k() (StatefulResampler) or OpenAITTS.resampleStreaming for anti-aliased resampling.',
     );
