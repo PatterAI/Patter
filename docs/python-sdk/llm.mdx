@@ -73,6 +73,8 @@ llm = openai.LLM(api_key="sk-...", model="gpt-4o-mini")
 
 Anthropic Messages API with native streaming and `tool_use` blocks, normalised to Patter's chunk protocol. Default model `"claude-haiku-4-5-20251001"`, default `max_tokens=1024` (Anthropic requires an explicit cap on every request).
 
+Prompt caching is enabled by default — `cache_control: { type: "ephemeral" }` is attached to the system prompt and the last tool block, which cuts time-to-first-token on long system prompts and large tool catalogs. Pass `prompt_caching=False` to disable.
+
 ```python
 from getpatter import AnthropicLLM                 # flat
 from getpatter.llm import anthropic                # namespaced
@@ -103,7 +105,9 @@ Install: `pip install 'getpatter[groq]'`.
 
 ### CerebrasLLM
 
-Cerebras Inference API (OpenAI-compatible) at `https://api.cerebras.ai/v1`. Default model `"llama-3.3-70b"`. Supports optional msgpack + gzip payload compression (enabled by default) to reduce time-to-first-token on large prompts — see [Cerebras payload optimization](https://inference-docs.cerebras.ai/payload-optimization).
+Cerebras Inference API (OpenAI-compatible) at `https://api.cerebras.ai/v1`. Default model `"gpt-oss-120b"` — production tier, ~3000 tok/sec on WSE-3, no deprecation date. Pass `model="llama3.1-8b"` (8B params, sub-100ms TTFT) for the smaller free-tier alternative. The 404 `model_not_found` error includes a recovery hint listing other valid IDs (`qwen-3-235b-a22b-instruct-2507`, `llama-3.3-70b` on paid tier).
+
+Supports forwarding all OpenAI-style sampling kwargs (`response_format`, `parallel_tool_calls`, `tool_choice`, `seed`, `top_p`, `frequency_penalty`, `presence_penalty`, `stop`) and optional msgpack + gzip payload compression (enabled by default) — see [Cerebras payload optimization](https://inference-docs.cerebras.ai/payload-optimization). Failures retry once with exponential backoff and honour `x-ratelimit-reset-*` advisory headers; terminal errors raise `PatterError`.
 
 ```python
 from getpatter import CerebrasLLM                  # flat
@@ -112,9 +116,10 @@ from getpatter.llm import cerebras                 # namespaced
 llm = CerebrasLLM()                                 # reads CEREBRAS_API_KEY
 llm = cerebras.LLM(
     api_key="csk-...",
-    model="llama-3.3-70b",
+    model="gpt-oss-120b",                           # default
     gzip_compression=True,                          # defaults to True
     msgpack_encoding=True,                          # defaults to True
+    response_format={"type": "json_object"},        # OpenAI-style structured outputs
 )
 ```
 

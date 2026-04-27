@@ -18,6 +18,10 @@ Patter emits events at key moments during a call. Register callbacks in `serve()
 | `onMessage` | User transcript ready for response (pipeline mode) | `serve()` |
 | `onMetrics` | After each conversational turn completes | `serve()` |
 
+For **fine-grained pipeline observability** (every interim transcript, every LLM chunk, every TTS chunk, every tool start) subscribe to the [EventBus](#eventbus) below — it complements these callbacks rather than replacing them.
+
+For **mutating prompts and responses** (RAG augmentation, output validation, PII redaction) use [PipelineHooks](#pipelinehooks-beforellm--afterllm) — they sit *inside* the LLM step rather than firing alongside it.
+
 ## onCallStart
 
 Fires when a new call connects. Use it for logging, CRM lookups, or initializing per-call state.
@@ -236,6 +240,66 @@ await phone.serve({
   };
 }
 ```
+
+## EventBus
+
+The `EventBus` exposes fine-grained pipeline events that don't have first-class callbacks. Subscribe with `events.on(eventType, handler)` from anywhere you have a `Patter` reference.
+
+```typescript
+import { Patter, PatterEventType } from "getpatter";
+
+phone.events.on(PatterEventType.TRANSCRIPT_PARTIAL, (ev) => console.log("partial:", ev.text));
+phone.events.on(PatterEventType.LLM_CHUNK, (ev) => logChunk(ev.call_id, ev.text));
+```
+
+| `PatterEventType` | Fires |
+|---|---|
+| `TRANSCRIPT_PARTIAL` | Every interim STT result (before endpointing). |
+| `TRANSCRIPT_FINAL` | Every final STT result (after endpointing). Same payload as `onTranscript`. |
+| `LLM_CHUNK` | Every streamed LLM token / chunk. |
+| `TTS_CHUNK` | Every TTS audio chunk written to the carrier. |
+| `TOOL_CALL_STARTED` | Tool dispatched (paired with the existing `tool_call_completed` you can observe via `onCallEnd`). |
+
+Handlers are non-blocking (fire-and-forget). Throwing inside a handler logs the error but does not interrupt the call.
+
+---
+
+## PipelineHooks (`beforeLlm` / `afterLlm`)
+
+`PipelineHooks` mutate the conversation *inside* the LLM step. Use them for RAG augmentation, prompt rewriting, PII redaction, or output validation.
+
+```typescript
+import { Patter, Twilio, DeepgramSTT, AnthropicLLM, ElevenLabsTTS } from "getpatter";
+
+const agent = phone.agent({
+  stt: new DeepgramSTT(),
+  llm: new AnthropicLLM(),
+  tts: new ElevenLabsTTS({ voiceId: "rachel" }),
+  systemPrompt: "You are a helpful assistant.",
+  hooks: {
+    beforeLlm: async (messages, ctx) => {
+      // RAG: prepend retrieved context as a system message.
+      const docs = await retrieve(ctx.userText);
+      return [{ role: "system", content: `Context: ${docs}` }, ...messages];
+    },
+    afterLlm: async (text, ctx) => {
+      // Output validation: redact account numbers before TTS.
+      return redactAccounts(text);
+    },
+  },
+});
+```
+
+| Hook | Signature | Returns |
+|---|---|---|
+| `beforeLlm` | `(messages, ctx) => Message[] \| null` | New messages array, or `null` to skip the LLM call entirely. |
+| `afterLlm` | `(text, ctx) => string \| null` | Replacement text, or `null` to suppress TTS for this turn. |
+
+`HookContext` carries `callId`, `caller`, `callee`, and `history`. Hooks run in pipeline mode only — engines (`OpenAIRealtime`, `ElevenLabsConvAI`) bundle the LLM step internally.
+
+`PipelineHooks` also exposes `beforeStt` / `afterStt` and `beforeTts` / `afterTts` for audio-stage interception.
+
+---
 
 ## Type Signatures
 

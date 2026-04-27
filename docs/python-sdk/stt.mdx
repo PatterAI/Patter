@@ -50,6 +50,7 @@ agent = phone.agent(
 |-------------|-------------------|---------|---------------|
 | `DeepgramSTT` | `getpatter.stt.deepgram.STT` | `DEEPGRAM_API_KEY` | included |
 | `WhisperSTT` | `getpatter.stt.whisper.STT` | `OPENAI_API_KEY` | included |
+| `OpenAITranscribeSTT` | `getpatter.stt.openai_transcribe.STT` | `OPENAI_API_KEY` | included |
 | `CartesiaSTT` | `getpatter.stt.cartesia.STT` | `CARTESIA_API_KEY` | `getpatter[cartesia]` |
 | `AssemblyAISTT` | `getpatter.stt.assemblyai.STT` | `ASSEMBLYAI_API_KEY` | `getpatter[assemblyai]` |
 | `SonioxSTT` | `getpatter.stt.soniox.STT` | `SONIOX_API_KEY` | `getpatter[soniox]` |
@@ -75,7 +76,7 @@ stt = DeepgramSTT(api_key="dg_...", endpointing_ms=80)   # explicit
 | `sample_rate` | `int` | `16000` | Sample rate in Hz. |
 | `endpointing_ms` | `int` | `150` | Utterance endpointing in milliseconds. |
 | `utterance_end_ms` | `int \| None` | `1000` | Grace period after speech ends. |
-| `smart_format` | `bool` | `True` | Enable smart formatting (numbers, dates, punctuation). |
+| `smart_format` | `bool` | `False` | Smart formatting (numbers, dates, punctuation). Defaults to `False` because telephony agents feed transcripts straight back into an LLM, where smart-format rewrites can confuse downstream tool-call argument parsing. Pass `smart_format=True` to opt back in. |
 | `interim_results` | `bool` | `True` | Stream interim transcripts. |
 | `vad_events` | `bool` | `True` | Emit VAD start/end markers. |
 
@@ -95,6 +96,29 @@ stt = WhisperSTT(api_key="sk-...", language="es")
 | `api_key` | `str \| None` | `None` | API key — reads from `OPENAI_API_KEY` if omitted. |
 | `language` | `str` | `"en"` | BCP-47 language code. |
 | `model` | `str` | `"whisper-1"` | Whisper model ID. |
+
+<Note>
+Whisper on mulaw 8 kHz routinely hallucinates short fillers (`"you"`, `"."`, `"thank you"`) and emits `is_final=true` on every chunk regardless of speech. The pipeline drops these by default plus duplicate / sub-500 ms back-to-back finals, but for production prefer `OpenAITranscribeSTT` (`gpt-4o-transcribe`) — same `OPENAI_API_KEY`, ~10× faster, no hallucination floor.
+</Note>
+
+## OpenAI Transcribe (gpt-4o-transcribe)
+
+First-class STT for OpenAI's `gpt-4o-transcribe` and `gpt-4o-mini-transcribe` models — drop-in replacement for `WhisperSTT` with stronger multilingual quality and significantly lower latency. Reuses `OPENAI_API_KEY`.
+
+```python
+from getpatter import OpenAITranscribeSTT
+
+stt = OpenAITranscribeSTT()                                # reads OPENAI_API_KEY, defaults to gpt-4o-transcribe
+stt = OpenAITranscribeSTT(model="gpt-4o-mini-transcribe")  # cheaper variant
+stt = OpenAITranscribeSTT(api_key="sk-...", language="es")
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `api_key` | `str \| None` | `None` | API key — reads from `OPENAI_API_KEY` if omitted. |
+| `language` | `str \| None` | `None` | BCP-47 language code. Auto-detect when omitted. |
+| `model` | `str` | `"gpt-4o-transcribe"` | Either `"gpt-4o-transcribe"` or `"gpt-4o-mini-transcribe"`. |
+| `response_format` | `str` | `"json"` | Pass `"verbose_json"` to expose segment-level confidence and timestamps. |
 
 ## Cartesia
 
