@@ -69,6 +69,8 @@ const llm2 = new OpenAILLM({ apiKey: "sk-...", model: "gpt-4o-mini" });
 
 Anthropic Messages API with native streaming and `tool_use` blocks, normalised to Patter's chunk protocol. Default model `"claude-haiku-4-5-20251001"`. Pass `maxTokens` to override the default token cap.
 
+Prompt caching is enabled by default — `cache_control: { type: "ephemeral" }` is attached to the system prompt and the last tool block, which cuts time-to-first-token on long system prompts and large tool catalogs. Pass `promptCaching: false` to disable.
+
 ```typescript
 import { AnthropicLLM } from "getpatter";
 
@@ -93,7 +95,9 @@ const llm2 = new GroqLLM({ apiKey: "gsk_...", model: "llama-3.3-70b-versatile" }
 
 ### CerebrasLLM
 
-Cerebras Inference API (OpenAI-compatible) at `https://api.cerebras.ai/v1`. Default model `"llama-3.3-70b"`. Supports optional gzip request-body compression via `gzipCompression: true` to reduce time-to-first-token on large prompts — see [Cerebras payload optimization](https://inference-docs.cerebras.ai/payload-optimization).
+Cerebras Inference API (OpenAI-compatible) at `https://api.cerebras.ai/v1`. Default model `"gpt-oss-120b"` — production tier, ~3000 tok/sec on WSE-3, no deprecation date. Pass `model: "llama3.1-8b"` for the smaller free-tier alternative. The 404 `model_not_found` error includes a recovery hint listing other valid IDs.
+
+Supports forwarding OpenAI-style sampling kwargs (`responseFormat`, `parallelToolCalls`, `toolChoice`, `seed`, `topP`, `frequencyPenalty`, `presencePenalty`, `stop`) and gzip request-body compression (enabled by default) — see [Cerebras payload optimization](https://inference-docs.cerebras.ai/payload-optimization). Failures retry once with exponential backoff and honour `x-ratelimit-reset-*` advisory headers; terminal errors throw `PatterError`.
 
 ```typescript
 import { CerebrasLLM } from "getpatter";
@@ -101,8 +105,9 @@ import { CerebrasLLM } from "getpatter";
 const llm = new CerebrasLLM();                            // reads CEREBRAS_API_KEY
 const llm2 = new CerebrasLLM({
   apiKey: "csk-...",
-  model: "llama-3.3-70b",
-  gzipCompression: true,
+  model: "gpt-oss-120b",                                  // default
+  gzipCompression: true,                                  // defaults to true
+  responseFormat: { type: "json_object" },                // OpenAI-style structured outputs
 });
 ```
 

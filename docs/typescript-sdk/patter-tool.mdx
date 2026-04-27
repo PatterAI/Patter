@@ -1,0 +1,112 @@
+---
+title: "PatterTool — phone as a tool"
+description: "Wrap a Patter instance so external agents (LangChain, OpenAI Assistants, Anthropic Claude, Hermes, MCP) can place real phone calls as a single tool invocation."
+icon: "phone-arrow-up-right"
+---
+
+# PatterTool
+
+`PatterTool` exposes a live `Patter` instance as a single **`make_phone_call`** tool that any text-based agent framework can register and dispatch. The agent picks up the phone, Patter runs a short conversation against the caller, and the tool returns a JSON envelope with the call ID, status, transcript, cost, and metrics.
+
+This complements the **bring-your-own-agent** pattern (`serve({ onMessage: 'https://...' })`) with the **inverse pattern** — phone-as-tool — covering the two realistic migration paths from LiveKit / ElevenLabs ConvAI / Pipecat customers.
+
+| Pattern | Where the brain lives | Where Patter sits | Use this when… |
+|---|---|---|---|
+| **A — Bring-your-own agent** (HTTP/WS endpoint) | Customer's existing service | Patter is STT + LLM proxy + TTS | Customer already runs a voice agent and wants to swap the voice transport but keep their conversation logic. Use `serve({ onMessage: 'https://...' })`. |
+| **B — Phone as a tool** (this page) | Customer's text-based agent | Patter is a tool the agent calls | Customer's agent is text-driven but needs to make phone calls during a conversation. |
+
+## Quickstart
+
+```typescript
+import { Patter, Twilio, DeepgramSTT, AnthropicLLM, ElevenLabsTTS, PatterTool } from "getpatter";
+
+const phone = new Patter({
+  carrier: new Twilio(),
+  phoneNumber: "+15550001234",
+  webhookUrl: "api.example.com",            // stable hostname — not a tunnel
+});
+
+const tool = new PatterTool({
+  phone,
+  agent: {
+    stt: new DeepgramSTT(),
+    llm: new AnthropicLLM(),
+    tts: new ElevenLabsTTS({ voiceId: "rachel" }),
+  },
+});
+
+await tool.start();                          // boots phone.serve() once (idempotent)
+
+const result = await tool.execute({
+  to: "+15551234567",
+  goal: "Book a haircut for tomorrow at 3 pm.",
+});
+console.log(result);
+// → { call_id, status, duration_seconds, cost_usd, transcript, metrics }
+```
+
+## Schema exporters
+
+`PatterTool` ships three schema exporters with identical wire shape (parameter JSON-schema + result envelope), so a customer can switch frameworks without re-mapping fields.
+
+```typescript
+tool.openaiSchema();     // { type: "function", function: { name, description, parameters } }
+tool.anthropicSchema();  // { name, description, input_schema }
+tool.hermesSchema();     // { name, description, parameters }   // same shape as Anthropic input_schema
+```
+
+When a framework expects a JSON-string handler (Hermes, MCP), use `tool.hermesHandler()` — it executes the call and returns either a JSON-string result or `{"error": "..."}`.
+
+## Tool arguments (JSON-schema)
+
+Identical across all three exporters:
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `to` | string | ✓ | E.164 phone number |
+| `goal` | string | — | Becomes the in-call agent's system prompt |
+| `first_message` | string | — | First thing the agent speaks on answer |
+| `max_duration_sec` | integer | — | Hard timeout, default `180`, max `1800` |
+
+## Result envelope
+
+```typescript
+type PatterToolResult = {
+  call_id: string;
+  status: "completed" | "no-answer" | "busy" | "failed" | "timeout";
+  duration_seconds: number;
+  cost_usd: number;
+  transcript: { role: "agent" | "user"; text: string }[];
+  metrics: {
+    p95_latency_ms: number;
+    cost: { stt: number; tts: number; llm: number; telephony: number };
+  };
+};
+```
+
+## Concurrency & timeouts
+
+- `start()` is idempotent — call it from your bootstrap, or let `execute()` boot it lazily.
+- Concurrent `execute()` calls are serialised through a dial mutex so the per-`call_id` Future never races.
+- `max_duration_sec` is enforced via `setTimeout`; on timeout the tool hangs up the call and returns `status: "timeout"`.
+
+## Production deployment
+
+`PatterTool` boots `phone.serve()` once. Make sure the `Patter` instance was constructed with a **stable webhook hostname** in `webhookUrl` — never a tunnel — because Twilio/Telnyx need a long-lived HTTPS URL.
+
+For local development, use `tunnel: true` on the `Patter` constructor and let it spawn a cloudflared. For production deploys (Fly.io / Cloud Run / Fargate behind ALB), set `webhookUrl` to your public hostname and disable the tunnel.
+
+## Examples
+
+See [`examples/integrations/`](https://github.com/PatterAI/Patter/tree/main/examples/integrations) in the repo:
+
+- `hermes_phone_tool.py` — drop-in `tools/patter.py` for Hermes Agent.
+- `openai_assistant_phone_tool.ts` — minimal OpenAI Assistants run dispatching the tool.
+- `README.md` — Pattern A vs Pattern B decision matrix.
+
+## What's next
+
+<CardGroup cols={2}>
+  <Card title="Tools" icon="wrench" href="/typescript-sdk/tools">In-call tool calling (function calling within a Patter agent).</Card>
+  <Card title="Agents" icon="robot" href="/typescript-sdk/agents">Configure the in-call agent that PatterTool wraps.</Card>
+</CardGroup>

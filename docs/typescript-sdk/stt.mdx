@@ -34,6 +34,7 @@ await phone.serve({ agent });
 |-------|---------|
 | `DeepgramSTT` | `DEEPGRAM_API_KEY` |
 | `WhisperSTT` | `OPENAI_API_KEY` |
+| `OpenAITranscribeSTT` | `OPENAI_API_KEY` |
 | `CartesiaSTT` | `CARTESIA_API_KEY` |
 | `AssemblyAISTT` | `ASSEMBLYAI_API_KEY` |
 | `SonioxSTT` | `SONIOX_API_KEY` |
@@ -62,7 +63,7 @@ const stt = new DeepgramSTT({ apiKey: "dg_...", endpointingMs: 80 });
 | `sampleRate` | `number` | `16000` | Sample rate in Hz. |
 | `endpointingMs` | `number` | `150` | Utterance endpointing in milliseconds. |
 | `utteranceEndMs` | `number \| null` | `1000` | Grace period after speech ends. |
-| `smartFormat` | `boolean` | `true` | Smart formatting (numbers, dates, punctuation). |
+| `smartFormat` | `boolean` | `false` | Smart formatting (numbers, dates, punctuation). Defaults to `false` because telephony agents feed transcripts straight back into an LLM, where smart-format rewrites can confuse downstream tool-call argument parsing. Pass `smartFormat: true` to opt back in. |
 | `interimResults` | `boolean` | `true` | Stream interim transcripts. |
 | `vadEvents` | `boolean` | `true` | Emit VAD start/end markers. |
 
@@ -76,6 +77,29 @@ import { WhisperSTT } from "getpatter";
 const stt = new WhisperSTT();                                     // reads OPENAI_API_KEY
 const stt = new WhisperSTT({ apiKey: "sk-...", language: "es" });
 ```
+
+<Note>
+Whisper on mulaw 8 kHz routinely hallucinates short fillers (`"you"`, `"."`, `"thank you"`). For production prefer `OpenAITranscribeSTT` (`gpt-4o-transcribe`) — same `OPENAI_API_KEY`, ~10× faster, no hallucination floor.
+</Note>
+
+## OpenAI Transcribe (gpt-4o-transcribe)
+
+First-class STT for OpenAI's `gpt-4o-transcribe` and `gpt-4o-mini-transcribe` models — drop-in replacement for `WhisperSTT` with stronger multilingual quality and significantly lower latency. Reuses `OPENAI_API_KEY`.
+
+```typescript
+import { OpenAITranscribeSTT } from "getpatter";
+
+const stt = new OpenAITranscribeSTT();                                  // reads OPENAI_API_KEY, defaults to gpt-4o-transcribe
+const stt2 = new OpenAITranscribeSTT({ model: "gpt-4o-mini-transcribe" }); // cheaper variant
+const stt3 = new OpenAITranscribeSTT({ apiKey: "sk-...", language: "es" });
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `apiKey` | `string` | — | API key — reads from `OPENAI_API_KEY` if omitted. |
+| `language` | `string` | — | BCP-47 language code. Auto-detect when omitted. |
+| `model` | `string` | `"gpt-4o-transcribe"` | Either `"gpt-4o-transcribe"` or `"gpt-4o-mini-transcribe"`. |
+| `responseFormat` | `string` | `"json"` | Pass `"verbose_json"` to expose segment-level confidence and timestamps. |
 
 ## Cartesia
 

@@ -62,6 +62,7 @@ await phone.serve(agent, tunnel=True)
 | Call recording | `serve(recording=True)` | Record all calls |
 | Call transfer | `transfer_call` (auto-injected) | Transfer to a human |
 | Voicemail drop | `call(voicemail_message="...")` | Play message on voicemail |
+| Phone-as-a-tool (external agents) | `PatterTool(phone, agent).execute(...)` | Drop into LangChain / OpenAI Assistants / Hermes / MCP |
 
 ## Configuration
 
@@ -191,11 +192,13 @@ from getpatter import (
 Namespaced imports (one module per provider):
 
 ```python
-from getpatter.stt import deepgram, whisper, cartesia, soniox, speechmatics, assemblyai
+from getpatter.stt import deepgram, whisper, openai_transcribe, cartesia, soniox, speechmatics, assemblyai
 from getpatter.tts import elevenlabs, openai as openai_tts, cartesia as cartesia_tts, rime, lmnt
 
-stt = deepgram.STT()                    # reads DEEPGRAM_API_KEY
-tts = elevenlabs.TTS(voice="sarah")     # reads ELEVENLABS_API_KEY
+stt = deepgram.STT()                                  # reads DEEPGRAM_API_KEY
+stt = openai_transcribe.STT()                         # gpt-4o-transcribe — ~10× faster than Whisper
+tts = elevenlabs.TTS(voice_id="sarah")                # reads ELEVENLABS_API_KEY
+tts = elevenlabs.TTS.for_twilio(voice_id="sarah")     # μ-law @ 8 kHz native — no resample on Twilio
 ```
 
 ## Examples

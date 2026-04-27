@@ -95,6 +95,7 @@ Patter is purpose-built for production voice over real telephony. Out of the box
 | Voicemail drop | `call(voicemailMessage="...")` | [patter-outbound-calls](https://github.com/PatterAI/patter-outbound-calls) |
 | Test mode (no phone) | `phone.test(agent)` | [docs](https://docs.getpatter.com) |
 | Built-in tunnel | Cloudflare (auto) | [docs](https://docs.getpatter.com) |
+| Phone-as-a-tool (LangChain / OpenAI Assistants / Hermes) | `PatterTool(phone, agent).execute(...)` | [examples/integrations](./examples/integrations) |
 
 ## How It Works
 
@@ -196,8 +197,8 @@ Pipeline mode composes STT + LLM + TTS sequentially and inherits the latency of 
 - **ElevenLabs free tier** — the library voice catalog is not reachable via API (`402 Payment Required`). Set `ELEVENLABS_VOICE_ID` to a voice you own (cloned or generated) before `phone.serve()`. The SDK resolves ~45 well-known names (`"rachel"`, `"adam"`, …) to their UUIDs automatically; custom voices must be referenced by ID.
 - **Telnyx outbound** — calls will return `403 D38` until your connection has an "Outbound Profile" attached in the Telnyx portal. Inbound and Call Control answer flows work without it.
 - **Google Gemini free tier** — `gemini-2.0-flash` has a hard `quota=0` on the free tier. Enable billing on the project before using Gemini as the LLM.
-- **Whisper STT** — on mulaw 8 kHz inputs Whisper routinely hallucinates short fillers (`"you"`, `"."`, `"thank you"`). The pipeline drops these by default plus any duplicate / sub-500 ms back-to-back final, so you won't hear overlapping turns.
-- **Model IDs** — keep these updated per vendor release notes. Examples currently in use: `gpt-4o-mini-realtime-preview`, `claude-haiku-4-5`, `llama-3.3-70b-versatile` (Groq), `llama3.1-8b` (Cerebras).
+- **Whisper STT** — on mulaw 8 kHz inputs Whisper routinely hallucinates short fillers (`"you"`, `"."`, `"thank you"`). The pipeline drops these by default plus any duplicate / sub-500 ms back-to-back final, so you won't hear overlapping turns. For production prefer `OpenAITranscribeSTT` (`gpt-4o-transcribe`) — same `OPENAI_API_KEY`, ~10× faster, no hallucination floor.
+- **Model IDs** — keep these updated per vendor release notes. Examples currently in use: `gpt-4o-mini-realtime-preview`, `claude-haiku-4-5`, `llama-3.3-70b-versatile` (Groq), `gpt-oss-120b` (Cerebras default — pass `model="llama3.1-8b"` for the smaller free-tier alternative).
 
 ## API Reference
 

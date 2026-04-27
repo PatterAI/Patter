@@ -34,10 +34,15 @@ If `PATTER_OTEL_ENABLED` is not set, `init_tracing` returns `False` and every sp
 
 | Span name | Fires | Attributes |
 |---|---|---|
+| `getpatter.call` | One per call (root span) | `getpatter.call.id`, `getpatter.call.direction`, `getpatter.call.provider_mode` |
 | `getpatter.stt` | One per final transcript | `getpatter.stt.text_len`, `getpatter.stt.confidence` |
-| `getpatter.llm` | One per LLM iteration (incl. tool rounds) | `getpatter.llm.iteration`, `getpatter.llm.history_size` |
+| `getpatter.endpoint` | One per detected end-of-utterance | `getpatter.endpoint.silence_ms` |
+| `getpatter.llm` | One per LLM iteration (incl. tool rounds) — wraps the pipeline LLM call so TTFT is measured per turn | `getpatter.llm.iteration`, `getpatter.llm.history_size`, `getpatter.llm.ttft_ms` |
 | `getpatter.tts` | One per synthesized sentence | `getpatter.tts.text_len` |
+| `getpatter.bargein` | One per barge-in event | `getpatter.bargein.cancelled_text_len` |
 | `getpatter.tool` | One per tool invocation | `getpatter.tool.name`, `getpatter.tool.transport` |
+
+All TS spans use the same `getpatter.*` namespace as Python (the legacy `patter.*` names were normalised in 0.5.3 — both SDKs now emit identical span names so a single dashboard query works across runtimes).
 
 ## PII hygiene
 
@@ -65,5 +70,5 @@ print(is_enabled())
 **Collector refuses spans** → the endpoint defaults to OTLP/HTTP on port 4318. If you're running the gRPC-only OTel Collector image, switch to `otel/opentelemetry-collector-contrib` or enable the HTTP receiver in your collector config.
 
 <Info>
-Tracing is currently a Python-only feature. TypeScript parity is on the roadmap.
+Tracing has full TypeScript parity since 0.5.3 — span names, attributes, and PII hygiene are identical. See [TS Tracing](/typescript-sdk/tracing).
 </Info>

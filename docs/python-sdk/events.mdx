@@ -20,6 +20,10 @@ All callbacks are **async functions**. They are passed as parameters to `serve()
 | `on_message` | User message received (pipeline mode) |
 | `on_metrics` | After each conversation turn (real-time cost/latency) |
 
+For **fine-grained pipeline observability** (every interim transcript, every LLM chunk, every TTS chunk, every tool start) subscribe to the [EventBus](#eventbus) below — it complements these callbacks rather than replacing them.
+
+For **mutating prompts and responses** (RAG augmentation, output validation, PII redaction) use [PipelineHooks](#pipelinehooks-before_llm--after_llm) — they sit *inside* the LLM step rather than firing alongside it.
+
 ---
 
 ## on_call_start
@@ -127,6 +131,66 @@ async def on_message(event) -> str:
 ### Return Value
 
 Return a `str` with the agent's response. This text is sent to the TTS provider and played back to the caller.
+
+---
+
+## EventBus
+
+The `EventBus` exposes fine-grained pipeline events that don't have first-class callbacks. Subscribe with `on(event_type, handler)` from inside `on_call_start` (or any place you have a `Patter` reference).
+
+```python
+from getpatter import EventBus, PatterEventType
+
+# `phone.events` is the per-process EventBus.
+phone.events.on(PatterEventType.TRANSCRIPT_PARTIAL, lambda ev: print("partial:", ev["text"]))
+phone.events.on(PatterEventType.LLM_CHUNK, lambda ev: log_chunk(ev["call_id"], ev["text"]))
+```
+
+| `PatterEventType` | Fires |
+|---|---|
+| `TRANSCRIPT_PARTIAL` | Every interim STT result (before endpointing). |
+| `TRANSCRIPT_FINAL` | Every final STT result (after endpointing). Same payload as `on_transcript`. |
+| `LLM_CHUNK` | Every streamed LLM token / chunk. |
+| `TTS_CHUNK` | Every TTS audio chunk written to the carrier. |
+| `TOOL_CALL_STARTED` | Tool dispatched (paired with the existing `tool_call_completed` you can observe via `on_call_end`). |
+
+Handlers are non-blocking (run in a fire-and-forget task). Throwing inside a handler logs the error but does not interrupt the call.
+
+---
+
+## PipelineHooks (`before_llm` / `after_llm`)
+
+`PipelineHooks` mutate the conversation *inside* the LLM step. Use them for RAG augmentation, prompt rewriting, PII redaction, or output validation — anywhere you'd otherwise wedge logic between the STT and TTS stages.
+
+```python
+from getpatter import Patter, Twilio, DeepgramSTT, AnthropicLLM, ElevenLabsTTS, PipelineHooks
+
+async def before_llm(messages, ctx):
+    # RAG: prepend retrieved context as a system message.
+    docs = await retrieve(ctx.user_text)
+    return [{"role": "system", "content": f"Context: {docs}"}, *messages]
+
+async def after_llm(text, ctx):
+    # Output validation: redact account numbers before TTS.
+    return redact_accounts(text)
+
+agent = phone.agent(
+    stt=DeepgramSTT(),
+    llm=AnthropicLLM(),
+    tts=ElevenLabsTTS(voice_id="rachel"),
+    system_prompt="You are a helpful assistant.",
+    hooks=PipelineHooks(before_llm=before_llm, after_llm=after_llm),
+)
+```
+
+| Hook | Signature | Returns |
+|---|---|---|
+| `before_llm` | `(messages: list[dict], ctx: HookContext) -> list[dict] \| None` | New messages list, or `None` to skip the LLM call entirely. |
+| `after_llm` | `(text: str, ctx: HookContext) -> str \| None` | Replacement text, or `None` to suppress TTS for this turn. |
+
+`HookContext` carries `call_id`, `caller`, `callee`, and `history`. Hooks run in pipeline mode only — engines (`OpenAIRealtime`, `ElevenLabsConvAI`) bundle the LLM step internally.
+
+`PipelineHooks` also exposes `before_stt` / `after_stt` and `before_tts` / `after_tts` for audio-stage interception. See the [API Reference](/python-sdk/reference) for the full signature.
 
 ---
 
