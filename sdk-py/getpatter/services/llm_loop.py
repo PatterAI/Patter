@@ -11,7 +11,7 @@ __all__ = ["LLMLoop", "LLMProvider", "OpenAILLMProvider"]
 
 import json
 import logging
-from typing import AsyncGenerator, AsyncIterator, Protocol, runtime_checkable
+from typing import Any, AsyncGenerator, AsyncIterator, Protocol, runtime_checkable
 
 from getpatter.observability.tracing import SPAN_LLM, start_span
 
@@ -54,12 +54,50 @@ class LLMProvider(Protocol):
 class OpenAILLMProvider:
     """LLM provider backed by OpenAI Chat Completions (streaming).
 
+    Subclasses (Cerebras, Groq, ...) inherit the SSE streaming loop and the
+    optional sampling kwargs forwarded into ``chat.completions.create``.
+    Provider-specific subclasses only need to override the OpenAI client
+    construction (e.g. base URL, compression layer).
+
     Args:
         api_key: OpenAI API key.
         model: Chat model ID (e.g. ``"gpt-4o-mini"``).
+        response_format: Optional OpenAI-style ``response_format`` dict for
+            JSON mode / structured outputs (e.g.
+            ``{"type": "json_schema", "json_schema": {...}}``).
+        parallel_tool_calls: Whether to allow the model to emit multiple
+            tool calls in parallel.
+        tool_choice: ``"auto" | "none" | "required"`` or a specific tool dict.
+        seed: Sampling seed for reproducible outputs.
+        top_p: Nucleus sampling cutoff in [0, 1].
+        frequency_penalty: Penalty in [-2, 2] applied to repeated tokens.
+        presence_penalty: Penalty in [-2, 2] applied to seen tokens.
+        stop: Stop sequence(s) — string or list of strings.
+        temperature: Sampling temperature [0, 2].
+        max_tokens: Max tokens in the assistant response. Forwarded as
+            ``max_completion_tokens`` on the wire (current OpenAI spec —
+            ``max_tokens`` is now legacy and Cerebras/Groq mirror this).
+        user_agent: Optional User-Agent header. Defaults to
+            ``f"getpatter/{__version__}"`` for upstream attribution.
     """
 
-    def __init__(self, api_key: str, model: str) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        *,
+        response_format: dict | None = None,
+        parallel_tool_calls: bool | None = None,
+        tool_choice: str | dict | None = None,
+        seed: int | None = None,
+        top_p: float | None = None,
+        frequency_penalty: float | None = None,
+        presence_penalty: float | None = None,
+        stop: str | list[str] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        user_agent: str | None = None,
+    ) -> None:
         try:
             from openai import AsyncOpenAI
         except ImportError:
@@ -68,8 +106,71 @@ class OpenAILLMProvider:
                 "provider. Install it with: pip install openai"
             )
 
-        self._client = AsyncOpenAI(api_key=api_key)
+        # Default User-Agent identifies the SDK in upstream logs / rate-limit
+        # attribution. Imported lazily to avoid an ``__init__.py`` cycle.
+        if user_agent is None:
+            from getpatter import __version__ as _patter_version
+
+            user_agent = f"getpatter/{_patter_version}"
+
+        self._client = AsyncOpenAI(
+            api_key=api_key,
+            default_headers={"User-Agent": user_agent},
+        )
         self._model = model
+        self._user_agent = user_agent
+        self._response_format = response_format
+        self._parallel_tool_calls = parallel_tool_calls
+        self._tool_choice = tool_choice
+        self._seed = seed
+        self._top_p = top_p
+        self._frequency_penalty = frequency_penalty
+        self._presence_penalty = presence_penalty
+        self._stop = stop
+        self._temperature = temperature
+        self._max_tokens = max_tokens
+
+    def _build_completion_kwargs(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None,
+    ) -> dict[str, Any]:
+        """Assemble the kwargs dict forwarded to ``chat.completions.create``.
+
+        Sampling kwargs are only included when the user supplied a non-None
+        value, so the upstream provider applies its own defaults otherwise.
+        ``max_tokens`` is mapped to ``max_completion_tokens`` (current OpenAI
+        spec; ``max_tokens`` is now legacy).
+        """
+        kwargs: dict[str, Any] = {
+            "model": self._model,
+            "messages": messages,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        if tools:
+            kwargs["tools"] = tools
+        if self._response_format is not None:
+            kwargs["response_format"] = self._response_format
+        if self._parallel_tool_calls is not None:
+            kwargs["parallel_tool_calls"] = self._parallel_tool_calls
+        if self._tool_choice is not None:
+            kwargs["tool_choice"] = self._tool_choice
+        if self._seed is not None:
+            kwargs["seed"] = self._seed
+        if self._top_p is not None:
+            kwargs["top_p"] = self._top_p
+        if self._frequency_penalty is not None:
+            kwargs["frequency_penalty"] = self._frequency_penalty
+        if self._presence_penalty is not None:
+            kwargs["presence_penalty"] = self._presence_penalty
+        if self._stop is not None:
+            kwargs["stop"] = self._stop
+        if self._temperature is not None:
+            kwargs["temperature"] = self._temperature
+        if self._max_tokens is not None:
+            kwargs["max_completion_tokens"] = self._max_tokens
+        return kwargs
 
     async def stream(
         self,
@@ -83,14 +184,13 @@ class OpenAILLMProvider:
         ``stream_options={"include_usage": True}``). Downstream callers
         use this to attribute real input/output token counts to the call
         instead of estimating from text length.
+
+        All sampling kwargs configured on the instance (``temperature``,
+        ``response_format``, ``seed``, ...) are forwarded conditionally —
+        unset values are omitted so upstream defaults apply.
         """
-        response = await self._client.chat.completions.create(
-            model=self._model,
-            messages=messages,
-            tools=tools if tools else None,
-            stream=True,
-            stream_options={"include_usage": True},
-        )
+        kwargs = self._build_completion_kwargs(messages, tools)
+        response = await self._client.chat.completions.create(**kwargs)
 
         last_usage = None
         async for chunk in response:

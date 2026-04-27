@@ -211,8 +211,24 @@ export interface LLMProvider {
 export interface OpenAILLMSamplingOptions {
   /** Sampling temperature [0, 2]. */
   temperature?: number;
-  /** Max tokens in the assistant response. */
+  /** Max tokens in the assistant response (sent as ``max_completion_tokens``). */
   maxTokens?: number;
+  /** OpenAI-style ``response_format`` for JSON mode / structured outputs. */
+  responseFormat?: Record<string, unknown>;
+  /** Whether to allow parallel tool calls. */
+  parallelToolCalls?: boolean;
+  /** ``"auto" | "none" | "required"`` or a specific tool object. */
+  toolChoice?: string | Record<string, unknown>;
+  /** Sampling seed for reproducible outputs. */
+  seed?: number;
+  /** Nucleus sampling cutoff in [0, 1]. */
+  topP?: number;
+  /** Penalty in [-2, 2] applied to repeated tokens. */
+  frequencyPenalty?: number;
+  /** Penalty in [-2, 2] applied to seen tokens. */
+  presencePenalty?: number;
+  /** Stop sequence(s). */
+  stop?: string | string[];
 }
 
 /** LLM provider backed by OpenAI Chat Completions (streaming). */
@@ -221,12 +237,28 @@ export class OpenAILLMProvider implements LLMProvider {
   readonly model: string;
   private readonly temperature?: number;
   private readonly maxTokens?: number;
+  private readonly responseFormat?: Record<string, unknown>;
+  private readonly parallelToolCalls?: boolean;
+  private readonly toolChoice?: string | Record<string, unknown>;
+  private readonly seed?: number;
+  private readonly topP?: number;
+  private readonly frequencyPenalty?: number;
+  private readonly presencePenalty?: number;
+  private readonly stop?: string | string[];
 
   constructor(apiKey: string, model: string, sampling: OpenAILLMSamplingOptions = {}) {
     this.apiKey = apiKey;
     this.model = model;
     this.temperature = sampling.temperature;
     this.maxTokens = sampling.maxTokens;
+    this.responseFormat = sampling.responseFormat;
+    this.parallelToolCalls = sampling.parallelToolCalls;
+    this.toolChoice = sampling.toolChoice;
+    this.seed = sampling.seed;
+    this.topP = sampling.topP;
+    this.frequencyPenalty = sampling.frequencyPenalty;
+    this.presencePenalty = sampling.presencePenalty;
+    this.stop = sampling.stop;
   }
 
   async *stream(
@@ -242,7 +274,19 @@ export class OpenAILLMProvider implements LLMProvider {
       stream_options: { include_usage: true },
     };
     if (this.temperature !== undefined) body.temperature = this.temperature;
-    if (this.maxTokens !== undefined) body.max_tokens = this.maxTokens;
+    if (this.maxTokens !== undefined) {
+      // Current OpenAI spec uses ``max_completion_tokens``; ``max_tokens``
+      // is now legacy. Mirrors Cerebras/Groq parity.
+      body.max_completion_tokens = this.maxTokens;
+    }
+    if (this.responseFormat !== undefined) body.response_format = this.responseFormat;
+    if (this.parallelToolCalls !== undefined) body.parallel_tool_calls = this.parallelToolCalls;
+    if (this.toolChoice !== undefined) body.tool_choice = this.toolChoice;
+    if (this.seed !== undefined) body.seed = this.seed;
+    if (this.topP !== undefined) body.top_p = this.topP;
+    if (this.frequencyPenalty !== undefined) body.frequency_penalty = this.frequencyPenalty;
+    if (this.presencePenalty !== undefined) body.presence_penalty = this.presencePenalty;
+    if (this.stop !== undefined) body.stop = this.stop;
     if (tools) {
       body.tools = tools;
     }

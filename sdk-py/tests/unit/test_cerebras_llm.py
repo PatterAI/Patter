@@ -9,16 +9,23 @@ Behaviour matches the TS provider: log at ERROR level and exit the stream
 quietly. Voice pipelines treat LLM provider failures as recoverable (the
 call continues, the user just hears no LLM response), so raising would be
 a behavioural change for callers.
+
+The Cerebras ``stream()`` is now a thin wrapper over the parent
+``OpenAILLMProvider.stream`` (refactor: sampling kwargs live in the parent).
+Tests mock the parent's ``stream`` so the 404 try/except wrapper is what's
+exercised, regardless of which transport-layer call actually raised.
 """
 
 from __future__ import annotations
 
 import logging
-from unittest.mock import AsyncMock, patch
+from typing import AsyncIterator
+from unittest.mock import patch
 
 import pytest
 
 from getpatter.providers.cerebras_llm import CerebrasLLMProvider
+from getpatter.services.llm_loop import OpenAILLMProvider
 
 
 def _provider(model: str | None = None) -> CerebrasLLMProvider:
@@ -37,18 +44,19 @@ def _provider(model: str | None = None) -> CerebrasLLMProvider:
     return CerebrasLLMProvider(**kwargs)
 
 
-def _patch_chat_completions(provider: CerebrasLLMProvider, exc: Exception):
-    """Make ``provider._client.chat.completions.create`` raise ``exc``.
+def _failing_parent_stream(exc: Exception):
+    """Patch ``OpenAILLMProvider.stream`` to raise ``exc`` on iteration.
 
-    The cerebras ``stream()`` overrides the parent OpenAILLMProvider so it can
-    forward extra kwargs (response_format, parallel_tool_calls, etc.) — it
-    calls ``self._client.chat.completions.create`` directly rather than
-    ``super().stream()``. The 404-handling try/except wraps THAT call, so
-    tests must inject the failure at the same layer.
+    The Cerebras subclass calls ``super().stream(...)`` and wraps the
+    iterator in a try/except; the patched async generator raises so the
+    wrapper's exception path is what the test exercises.
     """
-    return patch.object(
-        provider._client.chat.completions, "create", new=AsyncMock(side_effect=exc)
-    )
+
+    async def _raises(self, messages, tools=None):  # type: ignore[no-untyped-def]
+        raise exc
+        yield  # pragma: no cover — make the function an async generator
+
+    return patch.object(OpenAILLMProvider, "stream", new=_raises)
 
 
 def test_default_model_is_free_tier_safe() -> None:
@@ -74,9 +82,7 @@ async def test_404_model_not_found_is_logged_with_recovery_hint(
         '"code":"model_not_found"}'
     )
 
-    # The 404 try/except wraps `self._client.chat.completions.create` — the
-    # exact call site where the upstream openai SDK raises.
-    with _patch_chat_completions(provider, upstream):
+    with _failing_parent_stream(upstream):
         with caplog.at_level(logging.ERROR, logger="getpatter.providers.cerebras_llm"):
             chunks = [
                 chunk async for chunk in provider.stream([{"role": "user", "content": "hi"}])
@@ -98,7 +104,32 @@ async def test_other_errors_are_re_raised_unchanged() -> None:
 
     upstream = ValueError("unrelated failure")
 
-    with _patch_chat_completions(provider, upstream):
+    with _failing_parent_stream(upstream):
         with pytest.raises(ValueError, match="unrelated failure"):
             async for _ in provider.stream([{"role": "user", "content": "hi"}]):
                 pass
+
+
+@pytest.mark.asyncio
+async def test_stream_delegates_to_parent_for_chunks() -> None:
+    """Happy path: chunks yielded by the parent are forwarded unchanged.
+
+    Confirms the thin-wrapper design — Cerebras owns no SSE parsing of its
+    own; everything goes through ``OpenAILLMProvider.stream``.
+    """
+
+    provider = _provider()
+
+    parent_chunks = [
+        {"type": "text", "content": "hello"},
+        {"type": "text", "content": " world"},
+    ]
+
+    async def _yields(self, messages, tools=None) -> AsyncIterator[dict]:  # type: ignore[no-untyped-def]
+        for c in parent_chunks:
+            yield c
+
+    with patch.object(OpenAILLMProvider, "stream", new=_yields):
+        out = [c async for c in provider.stream([{"role": "user", "content": "hi"}])]
+
+    assert out == parent_chunks
