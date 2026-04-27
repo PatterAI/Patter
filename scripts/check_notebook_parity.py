@@ -18,12 +18,21 @@ TS_DIR = REPO / "examples/notebooks/typescript"
 
 
 def _section_titles(path: Path) -> list[str]:
+    """Return each markdown cell's first line, when it's a heading (starts with #).
+
+    Only the heading is compared across language pairs — the descriptive prose
+    that follows can legitimately differ (snake_case vs camelCase, etc.).
+    """
     nb = json.loads(path.read_text())
     titles: list[str] = []
     for c in nb["cells"]:
         if c["cell_type"] != "markdown":
             continue
-        first_line = (c["source"][0] if c["source"] else "").strip()
+        if not c["source"]:
+            continue
+        # source[0] may itself contain multiple lines (Python implicit
+        # string concatenation in the cell helpers); split on the first \n.
+        first_line = c["source"][0].split("\n", 1)[0].strip()
         if first_line.startswith("#"):
             titles.append(first_line)
     return titles
