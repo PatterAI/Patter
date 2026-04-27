@@ -34,6 +34,15 @@ const DEFAULT_ANTHROPIC_VERSION = '2023-06-01';
 const DEFAULT_MODEL = 'claude-haiku-4-5-20251001';
 const DEFAULT_MAX_TOKENS = 1024;
 
+/**
+ * Anthropic prompt-caching beta header. Caching is now generally available
+ * but the explicit beta opt-in remains supported and ensures consistent
+ * behaviour across model snapshots that haven't yet promoted the feature.
+ *
+ * See: https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
+ */
+const PROMPT_CACHING_BETA = 'prompt-caching-2024-07-31';
+
 export interface AnthropicLLMOptions {
   apiKey: string;
   model?: string;
@@ -41,6 +50,19 @@ export interface AnthropicLLMOptions {
   temperature?: number;
   baseUrl?: string;
   anthropicVersion?: string;
+  /**
+   * Enable Anthropic prompt caching for the system prompt and tools.
+   * Defaults to ``true`` — for voice agents with long instruction-dense
+   * system prompts, the cache saves ~100-400 ms TTFT and ~90% of input-
+   * token cost on every cached turn. The cache lives ~5 minutes; the
+   * first request writes it, subsequent requests within that window
+   * hit it.
+   *
+   * Disable when the system prompt + tools combined are smaller than
+   * Anthropic's minimum cacheable size (~1024 tokens for Sonnet/Opus,
+   * ~2048 for Haiku) — caching has no effect below that threshold.
+   */
+  promptCaching?: boolean;
 }
 
 interface OpenAIToolDef {
@@ -66,6 +88,12 @@ interface AnthropicMessage {
   content: string | Array<Record<string, unknown>>;
 }
 
+interface AnthropicSystemBlock {
+  type: 'text';
+  text: string;
+  cache_control?: { type: 'ephemeral' };
+}
+
 /** LLM provider backed by Anthropic's Messages API (streaming). */
 export class AnthropicLLMProvider implements LLMProvider {
   private readonly apiKey: string;
@@ -74,6 +102,7 @@ export class AnthropicLLMProvider implements LLMProvider {
   private readonly temperature?: number;
   private readonly url: string;
   private readonly anthropicVersion: string;
+  private readonly promptCaching: boolean;
 
   constructor(options: AnthropicLLMOptions) {
     if (!options.apiKey) {
@@ -88,6 +117,7 @@ export class AnthropicLLMProvider implements LLMProvider {
     this.temperature = options.temperature;
     this.url = options.baseUrl ?? DEFAULT_ANTHROPIC_URL;
     this.anthropicVersion = options.anthropicVersion ?? DEFAULT_ANTHROPIC_VERSION;
+    this.promptCaching = options.promptCaching ?? true;
   }
 
   async *stream(
@@ -103,17 +133,53 @@ export class AnthropicLLMProvider implements LLMProvider {
       max_tokens: this.maxTokens,
       stream: true,
     };
-    if (system) body.system = system;
-    if (anthropicTools && anthropicTools.length > 0) body.tools = anthropicTools;
+    if (system) {
+      if (this.promptCaching) {
+        // Convert the system string into a single text block tagged with
+        // ``cache_control: ephemeral``. Anthropic caches every block up
+        // to and including the marked one, so a single marker on the
+        // only block is sufficient.
+        const block: AnthropicSystemBlock = {
+          type: 'text',
+          text: system,
+          cache_control: { type: 'ephemeral' },
+        };
+        body.system = [block];
+      } else {
+        body.system = system;
+      }
+    }
+    if (anthropicTools && anthropicTools.length > 0) {
+      if (this.promptCaching) {
+        // Per Anthropic's recommended pattern, tagging only the LAST
+        // tool block with ``cache_control`` caches the entire tool list
+        // (everything before the marker is cached implicitly).
+        const cachedTools: Array<Record<string, unknown>> = anthropicTools.map(
+          (t) => ({ ...t }),
+        );
+        cachedTools[cachedTools.length - 1] = {
+          ...cachedTools[cachedTools.length - 1],
+          cache_control: { type: 'ephemeral' },
+        };
+        body.tools = cachedTools;
+      } else {
+        body.tools = anthropicTools;
+      }
+    }
     if (this.temperature !== undefined) body.temperature = this.temperature;
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'x-api-key': this.apiKey,
+      'anthropic-version': this.anthropicVersion,
+    };
+    if (this.promptCaching) {
+      headers['anthropic-beta'] = PROMPT_CACHING_BETA;
+    }
 
     const response = await fetch(this.url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': this.apiKey,
-        'anthropic-version': this.anthropicVersion,
-      },
+      headers,
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(30_000),
     });

@@ -45,6 +45,12 @@ __all__ = ["AnthropicLLMProvider"]
 _DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 _DEFAULT_MAX_TOKENS = 1024
 
+# Anthropic prompt-caching beta header. Caching is now generally available,
+# but the explicit beta opt-in remains supported and ensures consistent
+# behaviour across model snapshots that haven't yet promoted the feature.
+# See: https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
+_PROMPT_CACHING_BETA = "prompt-caching-2024-07-31"
+
 # Canonical model aliases (Anthropic routes these to the latest snapshot).
 # Re-exported by ``getpatter.llm.anthropic`` for documentation / DX.
 CLAUDE_HAIKU_45_ALIAS = "claude-haiku-4-5"
@@ -66,6 +72,20 @@ class AnthropicLLMProvider:
             by the Messages API; defaults to 1024.
         temperature: Optional sampling temperature.
         base_url: Optional Anthropic API base URL override.
+        prompt_caching: Enable Anthropic prompt caching for the system
+            prompt and tools. Defaults to ``True`` because, for voice
+            agents with long instruction-dense system prompts, the cache
+            saves ~100-400 ms TTFT and ~90% of input-token cost on every
+            cached turn. The cache lives ~5 minutes; the first request
+            writes it, subsequent requests within that window hit it.
+
+            Disable (``prompt_caching=False``) when:
+              * The system prompt + tools combined are smaller than
+                Anthropic's minimum cacheable size (~1024 tokens for
+                Sonnet/Opus, ~2048 for Haiku at the time of writing)
+                — caching has no effect below that threshold.
+              * You explicitly want every turn to bypass the cache for
+                debugging or A/B comparisons.
     """
 
     def __init__(
@@ -75,6 +95,7 @@ class AnthropicLLMProvider:
         max_tokens: int = _DEFAULT_MAX_TOKENS,
         temperature: float | None = None,
         base_url: str | None = None,
+        prompt_caching: bool = True,
     ) -> None:
         try:
             import anthropic
@@ -98,6 +119,7 @@ class AnthropicLLMProvider:
         self._model = model
         self._max_tokens = max_tokens
         self._temperature = temperature
+        self._prompt_caching = prompt_caching
 
     async def stream(
         self,
@@ -119,11 +141,35 @@ class AnthropicLLMProvider:
             "max_tokens": self._max_tokens,
         }
         if system_prompt:
-            kwargs["system"] = system_prompt
+            if self._prompt_caching:
+                # Convert the system string into a single text block tagged
+                # with ``cache_control: ephemeral``. Anthropic caches every
+                # block up to and including the marked one, so a single
+                # marker on the only block is sufficient.
+                kwargs["system"] = [
+                    {
+                        "type": "text",
+                        "text": system_prompt,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ]
+            else:
+                kwargs["system"] = system_prompt
         if anthropic_tools:
+            if self._prompt_caching:
+                # Per Anthropic's recommended pattern, tagging only the LAST
+                # tool block with ``cache_control`` caches the entire tool
+                # list (everything before the marker is cached implicitly).
+                anthropic_tools = list(anthropic_tools)
+                anthropic_tools[-1] = {
+                    **anthropic_tools[-1],
+                    "cache_control": {"type": "ephemeral"},
+                }
             kwargs["tools"] = anthropic_tools
         if self._temperature is not None:
             kwargs["temperature"] = self._temperature
+        if self._prompt_caching:
+            kwargs["extra_headers"] = {"anthropic-beta": _PROMPT_CACHING_BETA}
 
         # tool_call_id -> stable "index" for the Patter chunk protocol.
         tool_indices: dict[str, int] = {}
