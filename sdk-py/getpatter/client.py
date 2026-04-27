@@ -213,7 +213,7 @@ class Patter:
         machine_detection: bool = False,
         on_machine: Callable[[dict], Awaitable[None]] | None = None,
         voicemail_message: str = "",
-        ring_timeout: int | None = None,
+        ring_timeout: int | None = 25,
     ) -> None:
         """Make an outbound call.
 
@@ -224,6 +224,11 @@ class Patter:
             from_number: Number to call from. If empty, uses configured number.
             voicemail_message: If set and AMD detects a machine, speak this
                 message and hang up (requires machine_detection=True).
+            ring_timeout: Ring timeout in seconds before treating the call as
+                no-answer. Defaults to 25 s — the production-recommended value
+                that limits phantom calls. Pass ``ring_timeout=60`` for legacy
+                carrier-default parity, or ``None`` to omit the parameter
+                entirely (carrier picks its own default).
         """
         if not agent:
             raise PatterConnectionError(

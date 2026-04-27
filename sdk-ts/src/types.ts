@@ -253,9 +253,10 @@ export interface LocalCallOptions {
   variables?: Record<string, string>;
   /**
    * Ring timeout in seconds. Forwarded to Twilio as `Timeout` and to Telnyx
-   * as `timeout_secs`. Defaults to the carrier default (~28 s on Twilio) when
-   * omitted. Increase for international routes where the remote carrier
-   * silences short US→IT rings.
+   * as `timeout_secs`. Defaults to **25 s** — the production-recommended
+   * value that limits phantom calls. Pass `60` for legacy carrier-default
+   * parity, or `null` to omit the parameter entirely (carrier picks its
+   * own default).
    */
-  ringTimeout?: number;
+  ringTimeout?: number | null;
 }

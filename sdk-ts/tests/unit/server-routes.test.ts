@@ -363,10 +363,14 @@ describe('EmbeddedServer route behavior', () => {
     }
   });
 
-  it('serves /webhooks/telnyx/voice for call.initiated event', async () => {
+  it('serves /webhooks/telnyx/voice for call.initiated with inline streaming params', async () => {
     // BUG #16 — Telnyx Call Control is REST-first: the webhook body is an
     // informational notification, so the SDK must POST ``actions/answer`` to
     // Telnyx and respond with 200 + empty body.
+    //
+    // PERF — the streaming params live INSIDE the answer body so Telnyx
+    // auto-starts the stream when the leg picks up. This removes the
+    // ``call.answered`` round-trip + a second POST (~100-200 ms).
     const originalFetch = globalThis.fetch;
     const telnyxFetchCalls: Array<[string | URL | Request, RequestInit | undefined]> = [];
     const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(
@@ -422,6 +426,12 @@ describe('EmbeddedServer route behavior', () => {
           typeof url === 'string' && url.includes('/calls/ctrl-123/actions/answer'),
         );
         expect(answerCall).toBeDefined();
+        // Validate the answer payload now carries the streaming params
+        // inline (PCMU bidirectional, inbound-only track).
+        const body = JSON.parse((answerCall?.[1]?.body as string) ?? '{}') as Record<string, unknown>;
+        expect(body.stream_url).toContain('ctrl-123');
+        expect(body.stream_track).toBe('inbound_track');
+        expect(body.stream_bidirectional_codec).toBe('PCMU');
       } finally {
         await server.stop();
       }
@@ -430,7 +440,10 @@ describe('EmbeddedServer route behavior', () => {
     }
   });
 
-  it('POSTs actions/streaming_start when telnyx call.answered arrives', async () => {
+  it('does not POST a second action when telnyx call.answered arrives', async () => {
+    // The streaming params are folded into ``actions/answer`` at
+    // ``call.initiated`` time, so ``call.answered`` is now a no-op
+    // acknowledgement — no redundant POSTs to Telnyx.
     const originalFetch = globalThis.fetch;
     const telnyxFetchCalls: Array<[string | URL | Request, RequestInit | undefined]> = [];
     const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(
@@ -481,15 +494,13 @@ describe('EmbeddedServer route behavior', () => {
 
         expect(resp.status).toBe(200);
 
+        // No streaming_start POST should be made — the answer body already
+        // carried the params.
         const startCall = telnyxFetchCalls.find(([url]) =>
-          typeof url === 'string' && url.includes('/calls/ctrl-456/actions/streaming_start'),
+          typeof url === 'string' && url.includes('/streaming_start'),
         );
-        expect(startCall).toBeDefined();
-        // Validate the streaming_start payload includes PCMU bidirectional.
-        const body = JSON.parse((startCall?.[1]?.body as string) ?? '{}') as Record<string, unknown>;
-        expect(body.stream_url).toContain('ctrl-456');
-        expect(body.stream_track).toBe('both_tracks');
-        expect(body.stream_bidirectional_codec).toBe('PCMU');
+        expect(startCall).toBeUndefined();
+        expect(telnyxFetchCalls.length).toBe(0);
       } finally {
         await server.stop();
       }

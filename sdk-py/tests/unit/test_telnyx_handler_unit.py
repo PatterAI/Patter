@@ -49,7 +49,9 @@ class TestTelnyxWebhookHandler:
         assert "caller=" in stream_url
         assert "callee=" in stream_url
 
-    def test_stream_track_both(self) -> None:
+    def test_stream_track_inbound_only(self) -> None:
+        # ``inbound_track`` halves WS upstream bandwidth and avoids the
+        # outbound-echo we used to filter on receive.
         result = telnyx_webhook_handler(
             call_id="id",
             caller="+1",
@@ -57,7 +59,7 @@ class TestTelnyxWebhookHandler:
             webhook_base_url="host",
         )
         params = result["commands"][1]["params"]
-        assert params["stream_track"] == "both_tracks"
+        assert params["stream_track"] == "inbound_track"
 
     def test_connection_id_optional(self) -> None:
         """connection_id is accepted but does not affect the output."""

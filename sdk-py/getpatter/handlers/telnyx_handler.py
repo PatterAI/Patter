@@ -146,7 +146,10 @@ def telnyx_webhook_handler(
         f"wss://{webhook_base_url}/ws/telnyx/stream/{call_id}"
         f"?caller={quote(caller)}&callee={quote(callee)}"
     )
-    # Telnyx Call Control: answer first, then stream_start
+    # Telnyx Call Control: answer first, then stream_start.
+    # ``inbound_track`` halves WS upstream bandwidth — the bridge already
+    # filters outbound media downstream, so requesting only inbound at the
+    # source removes redundant frames.
     return {
         "commands": [
             {"command": "answer"},
@@ -154,7 +157,7 @@ def telnyx_webhook_handler(
                 "command": "stream_start",
                 "params": {
                     "stream_url": stream_url,
-                    "stream_track": "both_tracks",
+                    "stream_track": "inbound_track",
                 },
             },
         ]

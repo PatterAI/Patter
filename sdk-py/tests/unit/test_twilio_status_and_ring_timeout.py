@@ -271,8 +271,9 @@ class TestRingTimeoutPropagation:
             assert extra_params["Timeout"] == 45
 
     @pytest.mark.asyncio
-    async def test_twilio_ring_timeout_omitted_when_none(self) -> None:
-        """Passing no ring_timeout must not inject Timeout into the payload."""
+    async def test_twilio_ring_timeout_default_is_25(self) -> None:
+        """Default ring_timeout is 25 s — the production-recommended value
+        that limits phantom calls. Pass ``ring_timeout=None`` to opt out."""
         from getpatter.client import Patter
 
         cfg = LocalConfig(
@@ -296,6 +297,40 @@ class TestRingTimeoutPropagation:
             )
 
             await phone.call(to="+15559876543", agent=make_agent())
+
+            extra_params = mock_adapter.initiate_call.await_args.kwargs[
+                "extra_params"
+            ]
+            assert extra_params["Timeout"] == 25
+
+    @pytest.mark.asyncio
+    async def test_twilio_ring_timeout_omitted_when_none(self) -> None:
+        """Passing ``ring_timeout=None`` explicitly must omit the param."""
+        from getpatter.client import Patter
+
+        cfg = LocalConfig(
+            telephony_provider="twilio",
+            twilio_sid="ACtest000000000000000000000000000",
+            twilio_token="tok_test",
+            openai_key="sk-test",
+            webhook_url="test.ngrok.io",
+            phone_number="+15551234567",
+        )
+        phone = Patter.__new__(Patter)
+        phone._local_config = cfg
+        phone._server = None
+
+        with patch(
+            "getpatter.providers.twilio_adapter.TwilioAdapter"
+        ) as mock_adapter_cls:
+            mock_adapter = mock_adapter_cls.return_value
+            mock_adapter.initiate_call = AsyncMock(
+                return_value="CA" + "8" * 32
+            )
+
+            await phone.call(
+                to="+15559876543", agent=make_agent(), ring_timeout=None,
+            )
 
             extra_params = mock_adapter.initiate_call.await_args.kwargs[
                 "extra_params"
