@@ -204,6 +204,19 @@ class Patter:
             f"instance, or bool, got {type(tunnel).__name__}"
         )
 
+    @property
+    def metrics_store(self):
+        """Live ``MetricsStore`` for the embedded server.
+
+        Returns ``None`` before ``serve()`` is called. Exposed so integrations
+        like ``PatterTool`` can subscribe to per-call lifecycle events
+        (``call_initiated``, ``call_start``, ``call_end``).
+        """
+        server = getattr(self, "_server", None)
+        if server is None:
+            return None
+        return getattr(server, "_metrics_store", None)
+
     async def call(
         self,
         to: str,

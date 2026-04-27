@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import logging
 import os
 from typing import Any, AsyncIterator
 
@@ -34,13 +35,22 @@ from getpatter.services.llm_loop import OpenAILLMProvider
 
 __all__ = ["CerebrasLLMProvider"]
 
+logger = logging.getLogger("getpatter.providers.cerebras_llm")
+
 
 _CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1"
-# Default to ``gpt-oss-120b`` — the highest-throughput production model on
-# Cerebras's WSE-3 hardware (~3000 tok/sec, well above TTS consumption rate)
-# and not on a deprecation schedule. Override via ``model=`` if you need a
-# smaller context window (``llama3.1-8b``) or a preview model.
-_DEFAULT_MODEL = "gpt-oss-120b"
+# Default to the smallest fast Cerebras model available on the free tier so
+# the SDK works out of the box. ``gpt-oss-120b`` is the highest-throughput
+# model (~3000 tok/sec on WSE-3) but is gated to paid tiers — using it as
+# default surfaces a confusing 404 for free users. ``llama3.1-8b`` is 8B
+# params, sub-100ms TTFT on Cerebras hardware, and free-tier eligible.
+#
+# TODO(deprecation 2026-05-27): Cerebras has scheduled both ``llama3.1-8b``
+# and ``qwen-3-235b-a22b-instruct-2507`` for retirement on this date. Before
+# then, retest the free tier and switch the default to whichever 8B-class
+# model replaces them (likely a Llama 4 Scout variant). Track at
+# https://inference-docs.cerebras.ai/change-log
+_DEFAULT_MODEL = "llama3.1-8b"
 
 
 def _build_cerebras_client(
@@ -145,7 +155,11 @@ class CerebrasLLMProvider(OpenAILLMProvider):
 
     Args:
         api_key: Cerebras API key. Reads ``CEREBRAS_API_KEY`` if omitted.
-        model: Cerebras chat model ID. Defaults to ``gpt-oss-120b``.
+        model: Cerebras chat model ID. Defaults to ``llama3.1-8b`` (free-tier
+            available, sub-100ms TTFT). Override with ``gpt-oss-120b`` on paid
+            tiers for higher throughput (~3000 tok/sec), ``llama-3.3-70b`` for
+            balanced quality, or query ``GET /v1/models`` to discover
+            tier-available IDs.
         base_url: Optional Cerebras base URL override.
         gzip_compression: Gzip request payloads for faster TTFT.
         msgpack_encoding: Encode request payloads with msgpack for smaller
@@ -246,6 +260,13 @@ class CerebrasLLMProvider(OpenAILLMProvider):
         Cerebras-specific options configured on construction. Cerebras's
         current API spec uses ``max_completion_tokens`` (the OpenAI-compat
         layer accepts both, but ``max_tokens`` is now legacy).
+
+        404 ``model_not_found`` on Cerebras almost always means the model
+        name isn't available on the caller's tier (Cerebras gates models per
+        plan). The error is logged with a recovery hint at ERROR level and
+        the generator returns silently — voice pipelines treat LLM provider
+        failures as recoverable (the call continues; the user just hears no
+        LLM response), so raising would be a behavioural change.
         """
         kwargs: dict[str, Any] = {
             "model": self._model,
@@ -277,7 +298,23 @@ class CerebrasLLMProvider(OpenAILLMProvider):
             # Cerebras's current API spec uses ``max_completion_tokens``.
             kwargs["max_completion_tokens"] = self._max_tokens
 
-        response = await self._client.chat.completions.create(**kwargs)
+        try:
+            response = await self._client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            text = str(exc)
+            if "404" in text and "model_not_found" in text:
+                logger.error(
+                    'Cerebras: model "%s" not available on your tier. Override '
+                    "via `CerebrasLLM(model='<id>')` and list tier-available "
+                    "ids with `GET %s/models` (common: llama3.1-8b, "
+                    "qwen-3-235b-a22b-instruct-2507, llama-3.3-70b on paid). "
+                    "Upstream: %s",
+                    self._model,
+                    _CEREBRAS_BASE_URL,
+                    text,
+                )
+                return
+            raise
 
         last_usage = None
         async for chunk in response:

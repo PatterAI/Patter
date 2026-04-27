@@ -263,6 +263,27 @@ class EmbeddedServer:
             from getpatter.dashboard.store import MetricsStore
             self._metrics_store = MetricsStore()
 
+            # Hydrate the dashboard from disk so /api/dashboard/calls survives
+            # a process restart. CallLogger persists call metadata as JSONL/JSON
+            # under PATTER_LOG_DIR; if it's set, replay those files into the
+            # store. No-op when logging is disabled.
+            log_root = resolve_log_root()
+            if log_root is not None:
+                try:
+                    restored = self._metrics_store.hydrate(str(log_root))
+                    if restored > 0:
+                        import logging
+
+                        logging.getLogger("getpatter.server").info(
+                            "Dashboard hydrated %d call(s) from %s", restored, log_root
+                        )
+                except Exception as exc:  # pragma: no cover - defensive
+                    import logging
+
+                    logging.getLogger("getpatter.server").warning(
+                        "Dashboard hydration failed: %s", exc
+                    )
+
             mount_dashboard(app, self._metrics_store, token=self.dashboard_token)
 
             from getpatter.api_routes import mount_api

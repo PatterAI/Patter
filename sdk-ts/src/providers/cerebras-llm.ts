@@ -29,11 +29,18 @@ import { VERSION } from '../version';
 import { parseOpenAISseStream } from './groq-llm';
 
 const CEREBRAS_BASE_URL = 'https://api.cerebras.ai/v1';
-// Default to ``gpt-oss-120b`` — the highest-throughput production model on
-// Cerebras's WSE-3 hardware (~3000 tok/sec, well above TTS consumption rate)
-// and not on a deprecation schedule. Override via ``model`` if you need a
-// smaller context window (``llama3.1-8b``) or a preview model.
-const DEFAULT_MODEL = 'gpt-oss-120b';
+// Default to the smallest fast Cerebras model available on the free tier so
+// the SDK works out of the box. ``gpt-oss-120b`` is the highest-throughput
+// model (~3000 tok/sec on WSE-3) but is gated to paid tiers — using it as
+// default surfaces a confusing 404 for free users. ``llama3.1-8b`` is 8B
+// params, sub-100ms TTFT on Cerebras hardware, and free-tier eligible.
+//
+// TODO(deprecation 2026-05-27): Cerebras has scheduled both ``llama3.1-8b``
+// and ``qwen-3-235b-a22b-instruct-2507`` for retirement on this date. Before
+// then, retest the free tier and switch the default to whichever 8B-class
+// model replaces them (likely a Llama 4 Scout variant). Track at
+// https://inference-docs.cerebras.ai/change-log
+const DEFAULT_MODEL = 'llama3.1-8b';
 const RETRY_BACKOFF_BASE_MS = 500;
 
 export interface CerebrasLLMOptions {
@@ -201,10 +208,23 @@ export class CerebrasLLMProvider implements LLMProvider {
       const isLastAttempt = attempt >= maxAttempts - 1;
 
       if (!isRetriable || isLastAttempt) {
-        getLogger().error(`Cerebras API error: ${response.status} ${lastErrText}`);
-        throw new PatterError(
-          `Cerebras API error ${response.status}: ${lastErrText || 'request failed'}`,
-        );
+        // 404 on /chat/completions almost always means the model name isn't
+        // available on the caller's tier (Cerebras gates models per plan).
+        if (response.status === 404 && lastErrText.includes('model_not_found')) {
+          getLogger().error(
+            `Cerebras: model "${this.model}" not available on your tier. ` +
+              `Override via \`new CerebrasLLM({ model: '<id>' })\` and list ` +
+              `tier-available ids with \`GET ${this.baseUrl}/models\` ` +
+              `(common: llama3.1-8b, qwen-3-235b-a22b-instruct-2507, llama-3.3-70b on paid). ` +
+              `Raw response: ${lastErrText}`,
+          );
+        } else {
+          getLogger().error(`Cerebras API error: ${response.status} ${lastErrText}`);
+        }
+        // Voice pipelines treat LLM provider failures as recoverable —
+        // return silently so the call continues without an LLM response
+        // rather than crashing the whole pipeline.
+        return;
       }
 
       const advisoryMs = parseRateLimitResetMs(response.headers);
