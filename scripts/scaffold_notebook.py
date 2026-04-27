@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import secrets
 from pathlib import Path
 
 KERNELS = {
@@ -15,12 +16,13 @@ KERNELS = {
 
 
 def _md(*lines: str) -> dict:
-    return {"cell_type": "markdown", "metadata": {}, "source": list(lines)}
+    return {"cell_type": "markdown", "id": secrets.token_hex(4), "metadata": {}, "source": list(lines)}
 
 
 def _code(source: str) -> dict:
     return {
         "cell_type": "code",
+        "id": secrets.token_hex(4),
         "metadata": {},
         "source": source.splitlines(keepends=True),
         "execution_count": None,

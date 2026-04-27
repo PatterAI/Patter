@@ -3,7 +3,7 @@
 All cells are tier=1 (pure offline, no network). They exercise:
 1. SDK version + import sanity
 2. Local-mode Patter construction (Twilio carrier)
-3. Cloud-mode Patter construction (api_key)
+3. Cloud-mode stub (currently raises NotImplementedError — cloud coming soon)
 4. Agent engine dispatch (Realtime / ConvAI / Pipeline)
 """
 
@@ -57,28 +57,31 @@ def quickstart_cells_python() -> list[dict]:
             "            phone_number='+15555550100',\n"
             "            webhook_url='https://example.com/webhook',\n"
             "        )\n"
-            "        # _mode is the documented internal field; auto-detected from carrier+api_key.\n"
-            "        assert p._mode == 'local', f'expected local, got {p._mode}'\n"
-            "        print(f'mode = {p._mode}')\n",
+            "        # Verify carrier is wired up via LocalConfig.\n"
+            "        assert p._local_config.telephony_provider == 'twilio'\n"
+            "        assert p._local_config.phone_number == '+15555550100'\n"
+            "        print(f'provider={p._local_config.telephony_provider}  phone={p._local_config.phone_number}')\n",
         ),
         _md(
-            "### Cloud mode\n"
-            "Same SDK, just an `api_key=` instead of a carrier — Patter cloud handles telephony.\n"
+            "### Cloud mode (coming soon)\n"
+            "When `api_key=` is supported, Patter cloud handles telephony. "
+            "For now, the SDK raises `NotImplementedError` — this cell verifies the guard.\n"
         ),
         _code(
             "qs_cloud_mode",
             "from getpatter import Patter\n"
             "with _setup.cell('cloud_mode', tier=1, env=env) as ok:\n"
             "    if ok:\n"
-            "        p = Patter(api_key='pt_test_xxx')\n"
-            "        assert p._mode == 'cloud', f'expected cloud, got {p._mode}'\n"
-            "        assert p.api_key == 'pt_test_xxx'\n"
-            "        print(f'mode = {p._mode}; api_key = {p.api_key[:8]}...')\n",
+            "        try:\n"
+            "            Patter(api_key='pt_test_xxx')\n"
+            "            raise AssertionError('expected NotImplementedError — cloud mode guard missing')\n"
+            "        except NotImplementedError as exc:\n"
+            "            print(f'cloud mode guard OK: {exc}')\n",
         ),
         _md(
             "### Three engine types\n"
             "An agent picks one of *OpenAI Realtime*, *ElevenLabs ConvAI*, or *Pipeline* "
-            "(STT + LLM + TTS). The factory derives the mode from `engine=` / `stt=`/`tts=`.\n"
+            "(STT + LLM + TTS). The factory derives the engine from `engine=` / `stt=`/`tts=`.\n"
         ),
         _code(
             "qs_agent_engines",
@@ -93,10 +96,11 @@ def quickstart_cells_python() -> list[dict]:
             "        )\n"
             "        rt = p.agent(system_prompt='hi', engine=OpenAIRealtime(api_key='sk-test'))\n"
             "        cv = p.agent(system_prompt='hi', engine=ElevenLabsConvAI(api_key='el-test', agent_id='a1'))\n"
-            "        pl = p.agent(system_prompt='hi')  # default: pipeline / OpenAI Realtime fallback\n"
-            "        print(f'realtime agent → {type(rt).__name__}')\n"
-            "        print(f'convai agent   → {type(cv).__name__}')\n"
-            "        print(f'pipeline agent → {type(pl).__name__}')\n",
+            "        pl = p.agent(system_prompt='hi')  # default: OpenAI Realtime fallback\n"
+            "        assert rt.provider == 'openai_realtime', rt.provider\n"
+            "        assert cv.provider == 'elevenlabs_convai', cv.provider\n"
+            "        assert pl.provider == 'openai_realtime', pl.provider\n"
+            "        print(f'rt.provider={rt.provider}  cv.provider={cv.provider}  pl.provider={pl.provider}')\n",
         ),
     ]
 
@@ -112,14 +116,11 @@ def quickstart_cells_typescript() -> list[dict]:
             'import { cell } from "./_setup.ts";\n'
             'import * as getpatter from "getpatter";\n'
             "await cell('version_check', { tier: 1, env }, () => {\n"
-            "  const v = (getpatter as any).version ?? 'unknown';\n"
-            "  console.log(`getpatter ${v} on ${typeof Deno !== 'undefined' ? `Deno ${Deno.version.deno}` : `Node ${process.version}`}`);\n"
+            "  const v = (getpatter as any).version ?? (getpatter as any).VERSION ?? 'unknown';\n"
+            "  console.log(`getpatter ${v}`);\n"
             "});\n",
         ),
-        _md(
-            "### Local mode\n"
-            "Construct a Patter instance with a Twilio carrier.\n"
-        ),
+        _md("### Local mode\nConstruct a Patter instance with a Twilio carrier.\n"),
         _code(
             "qs_local_mode",
             'import { Patter, Twilio } from "getpatter";\n'
@@ -132,21 +133,26 @@ def quickstart_cells_typescript() -> list[dict]:
             "    phoneNumber: '+15555550100',\n"
             "    webhookUrl: 'https://example.com/webhook',\n"
             "  });\n"
-            "  if ((p as any)._mode !== 'local') throw new Error(`expected local, got ${(p as any)._mode}`);\n"
-            "  console.log(`mode = ${(p as any)._mode}`);\n"
+            "  console.log('Patter local mode constructed OK');\n"
             "});\n",
         ),
         _md(
-            "### Cloud mode\n"
-            "Same SDK, just an `apiKey` — Patter cloud handles telephony.\n"
+            "### Cloud mode (coming soon)\n"
+            "When `apiKey` is supported, Patter cloud handles telephony. "
+            "For now, the SDK throws — this cell verifies the guard.\n"
         ),
         _code(
             "qs_cloud_mode",
             'import { Patter } from "getpatter";\n'
             "await cell('cloud_mode', { tier: 1, env }, () => {\n"
-            "  const p = new Patter({ apiKey: 'pt_test_xxx' });\n"
-            "  if ((p as any)._mode !== 'cloud') throw new Error(`expected cloud, got ${(p as any)._mode}`);\n"
-            "  console.log(`mode = ${(p as any)._mode}; apiKey = ${p.apiKey.slice(0, 8)}...`);\n"
+            "  try {\n"
+            "    new Patter({ apiKey: 'pt_test_xxx' } as any);\n"
+            "    throw new Error('expected error — cloud mode guard missing');\n"
+            "  } catch (e: any) {\n"
+            "    if (e.message?.includes('Cloud') || e.message?.includes('cloud') || e.message?.includes('apiKey')) {\n"
+            "      console.log(`cloud mode guard OK: ${e.message.slice(0, 80)}`);\n"
+            "    } else { throw e; }\n"
+            "  }\n"
             "});\n",
         ),
         _md(
@@ -165,9 +171,9 @@ def quickstart_cells_typescript() -> list[dict]:
             "  const rt = p.agent({ systemPrompt: 'hi', engine: new OpenAIRealtime({ apiKey: 'sk-test' }) });\n"
             "  const cv = p.agent({ systemPrompt: 'hi', engine: new ElevenLabsConvAI({ apiKey: 'el-test', agentId: 'a1' }) });\n"
             "  const pl = p.agent({ systemPrompt: 'hi' });\n"
-            "  console.log(`realtime agent → ${rt.constructor.name}`);\n"
-            "  console.log(`convai agent   → ${cv.constructor.name}`);\n"
-            "  console.log(`pipeline agent → ${pl.constructor.name}`);\n"
+            "  if (rt.provider !== 'openai_realtime') throw new Error(`expected openai_realtime, got ${rt.provider}`);\n"
+            "  if (cv.provider !== 'elevenlabs_convai') throw new Error(`expected elevenlabs_convai, got ${cv.provider}`);\n"
+            "  console.log(`rt=${rt.provider}  cv=${cv.provider}  pl=${pl.provider}`);\n"
             "});\n",
         ),
     ]
