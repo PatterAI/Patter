@@ -110,6 +110,27 @@ class TestOpenAIRealtimeAdapterIO:
         assert sent["type"] == "session.update"
         assert sent["session"]["voice"] == "alloy"
         assert sent["session"]["instructions"] == "Be helpful."
+        # Default silence_duration_ms is 300 (OpenAI's documented sweet-spot
+        # for snappier turns; saves ~200 ms vs the previous 500 default).
+        assert sent["session"]["turn_detection"]["silence_duration_ms"] == 300
+
+    @pytest.mark.asyncio
+    async def test_connect_honours_custom_silence_duration_ms(self) -> None:
+        """Constructor override must propagate into the session.update payload."""
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
+
+        adapter = OpenAIRealtimeAdapter(api_key="sk-test", silence_duration_ms=600)
+        mock_ws = AsyncMock()
+        mock_ws.recv.return_value = json.dumps({"type": "session.created"})
+
+        with patch(
+            "getpatter.providers.openai_realtime.websockets.connect",
+            side_effect=_ws_connect_side_effect(mock_ws),
+        ):
+            await adapter.connect()
+
+        sent = json.loads(mock_ws.send.call_args[0][0])
+        assert sent["session"]["turn_detection"]["silence_duration_ms"] == 600
 
     @pytest.mark.asyncio
     async def test_connect_with_tools(self) -> None:
@@ -733,13 +754,33 @@ class TestWhisperSTT:
         stt._client.aclose.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_close_skips_small_buffer(self) -> None:
+    async def test_close_flushes_small_buffer(self) -> None:
+        """Close must flush any non-empty buffer so trailing audio is not dropped."""
+        from getpatter.providers.whisper_stt import WhisperSTT
+
+        stt = WhisperSTT(api_key="sk-test")
+        stt._running = True
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"text": "tail"}
+        mock_response.raise_for_status = MagicMock()
+        stt._client = AsyncMock()
+        stt._client.post.return_value = mock_response
+        stt._buffer = bytearray(b"\x00" * 10)
+        await stt.close()
+
+        assert stt._running is False
+        stt._client.post.assert_called_once()
+        stt._client.aclose.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_close_empty_buffer_no_post(self) -> None:
+        """An empty buffer must not trigger a transcription call on close."""
         from getpatter.providers.whisper_stt import WhisperSTT
 
         stt = WhisperSTT(api_key="sk-test")
         stt._running = True
         stt._client = AsyncMock()
-        stt._buffer = bytearray(b"\x00" * 10)
+        stt._buffer = bytearray()
         await stt.close()
 
         assert stt._running is False

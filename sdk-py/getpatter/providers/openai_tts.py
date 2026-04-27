@@ -75,7 +75,12 @@ class OpenAITTS(TTSProvider):
         from getpatter.services.transcoding import create_resampler_24k_to_16k
         resampler = create_resampler_24k_to_16k()
         try:
-            async for chunk in response.aiter_bytes(chunk_size=4096):
+            # 1024-byte chunks ≈ 21 ms at 24 kHz / 16-bit (vs ~85 ms at the
+            # previous 4096), which lowers TTFB on the synthesized audio.
+            # The StatefulResampler is chunk-size-agnostic — it carries
+            # filter state and any odd trailing byte across chunks — so the
+            # smaller granularity does not introduce pops or alignment drift.
+            async for chunk in response.aiter_bytes(chunk_size=1024):
                 if not chunk:
                     continue
                 resampled = resampler.process(chunk)

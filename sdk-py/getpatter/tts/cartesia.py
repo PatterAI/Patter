@@ -11,7 +11,11 @@ __all__ = ["TTS"]
 
 
 class TTS(_CartesiaTTS):
-    """Cartesia HTTP TTS (``sonic-2`` family).
+    """Cartesia HTTP TTS (``sonic-3`` GA, ~90 ms TTFB).
+
+    The default model is ``sonic-3`` — Cartesia's current GA model. Voice IDs
+    from the previous ``sonic-2`` family (including the default Katie voice)
+    remain compatible.
 
     Example::
 
@@ -27,7 +31,7 @@ class TTS(_CartesiaTTS):
         self,
         api_key: str | None = None,
         *,
-        model: str = "sonic-2",
+        model: str = "sonic-3",
         voice: str = "f786b574-daa5-4673-aa0c-cbe3e8534c02",
         language: str = "en",
         sample_rate: int = 16000,

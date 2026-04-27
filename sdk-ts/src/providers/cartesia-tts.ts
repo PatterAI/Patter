@@ -23,10 +23,16 @@
  * word timestamps; this port focuses on the chunked-bytes HTTP API which
  * maps cleanly onto Patter's `synthesize(text)` contract and keeps the
  * provider dependency-free (just `fetch`).
+ *
+ * Default model is `sonic-3` (GA snapshot `sonic-3-2026-01-12`) — Cartesia's
+ * current GA model with a documented ~90 ms TTFB target. Voice IDs from the
+ * sonic-2 generation (including the default Katie voice) remain compatible.
  */
 
 const CARTESIA_BASE_URL = 'https://api.cartesia.ai';
-const CARTESIA_API_VERSION = '2024-11-13';
+// Cartesia API version pin — matches our STT integration and the Cartesia
+// Line skill. `2025-04-16` is the current GA snapshot.
+const CARTESIA_API_VERSION = '2025-04-16';
 const CARTESIA_DEFAULT_VOICE_ID = 'f786b574-daa5-4673-aa0c-cbe3e8534c02';
 
 export interface CartesiaTTSOptions {
@@ -55,7 +61,7 @@ export class CartesiaTTS {
 
   constructor(apiKey: string, opts: CartesiaTTSOptions = {}) {
     this.apiKey = apiKey;
-    this.model = opts.model ?? 'sonic-2';
+    this.model = opts.model ?? 'sonic-3';
     this.voice = opts.voice ?? CARTESIA_DEFAULT_VOICE_ID;
     this.language = opts.language ?? 'en';
     this.sampleRate = opts.sampleRate ?? 16000;

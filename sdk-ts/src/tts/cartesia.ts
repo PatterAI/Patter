@@ -16,7 +16,11 @@ export interface CartesiaTTSOptions {
 }
 
 /**
- * Cartesia TTS (sonic-2).
+ * Cartesia TTS (sonic-3 GA, ~90 ms TTFB).
+ *
+ * The default model is `sonic-3` — Cartesia's current GA model. Voice IDs
+ * from the previous `sonic-2` family (including the default Katie voice)
+ * remain compatible.
  *
  * @example
  * ```ts

@@ -126,6 +126,32 @@ describe('OpenAIRealtimeAdapter (deep)', () => {
       expect(sessionUpdate.session.instructions).toContain('helpful');
     });
 
+    it('defaults silence_duration_ms to 300 (low-latency turn-end)', async () => {
+      const adapter = new OpenAIRealtimeAdapter('sk-test');
+      const ws = await connectAdapter(adapter);
+
+      const sentMessages = ws.send.mock.calls.map((c: unknown[]) => JSON.parse(c[0] as string));
+      const sessionUpdate = sentMessages.find((m: { type: string }) => m.type === 'session.update');
+      expect(sessionUpdate.session.turn_detection.silence_duration_ms).toBe(300);
+    });
+
+    it('honours a custom silenceDurationMs option', async () => {
+      const adapter = new OpenAIRealtimeAdapter(
+        'sk-test',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { silenceDurationMs: 600 },
+      );
+      const ws = await connectAdapter(adapter);
+
+      const sentMessages = ws.send.mock.calls.map((c: unknown[]) => JSON.parse(c[0] as string));
+      const sessionUpdate = sentMessages.find((m: { type: string }) => m.type === 'session.update');
+      expect(sessionUpdate.session.turn_detection.silence_duration_ms).toBe(600);
+    });
+
     it('rejects on WebSocket error during connect', async () => {
       const adapter = new OpenAIRealtimeAdapter('sk-test');
 

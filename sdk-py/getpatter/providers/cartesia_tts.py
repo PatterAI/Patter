@@ -39,9 +39,12 @@ except ImportError:  # pragma: no cover
     aiohttp = None  # type: ignore
 
 CARTESIA_BASE_URL = "https://api.cartesia.ai"
-CARTESIA_API_VERSION = "2024-11-13"
+# Cartesia API version pin — kept in sync with our STT integration and the
+# Cartesia Line skill. ``2025-04-16`` is the current GA snapshot.
+CARTESIA_API_VERSION = "2025-04-16"
 
-# Cartesia's "Katie — Friendly Fixer" is the LiveKit default.
+# Cartesia's "Katie — Friendly Fixer" is the LiveKit default.  The voice ID
+# is stable across the sonic-2 / sonic-3 model bump.
 CARTESIA_DEFAULT_VOICE_ID = "f786b574-daa5-4673-aa0c-cbe3e8534c02"
 
 TTSEncoding = Literal["pcm_s16le"]
@@ -53,13 +56,18 @@ class CartesiaTTS(TTSProvider):
 
     Output is PCM_S16LE at the configured sample rate (default 16000 Hz so it
     lines up with Patter's telephony pipeline without a resample step).
+
+    Default model is ``sonic-3`` (GA snapshot ``sonic-3-2026-01-12``) — the
+    current Cartesia GA model, with a documented ~90 ms TTFB target. The
+    sonic-2 voice IDs (e.g. the default Katie voice) remain compatible on
+    sonic-3 so the upgrade is drop-in.
     """
 
     def __init__(
         self,
         api_key: Optional[str] = None,
         *,
-        model: str = "sonic-2",
+        model: str = "sonic-3",
         voice: str = CARTESIA_DEFAULT_VOICE_ID,
         language: str = "en",
         sample_rate: int = 16000,

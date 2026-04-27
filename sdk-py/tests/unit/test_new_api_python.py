@@ -247,6 +247,34 @@ class TestCartesiaTTS:
         with pytest.raises(ValueError, match="CARTESIA_API_KEY"):
             cartesia_tts.TTS()
 
+    def test_default_model_is_sonic_3(self) -> None:
+        """Default model must be ``sonic-3`` (current Cartesia GA, ~90 ms TTFB)."""
+        from getpatter.tts import cartesia as cartesia_tts
+
+        tts = cartesia_tts.TTS(api_key="ct_explicit")
+        assert tts.model == "sonic-3"
+
+    def test_default_api_version_is_2025_04_16(self) -> None:
+        """API version pin must match the current GA snapshot."""
+        from getpatter.tts import cartesia as cartesia_tts
+
+        tts = cartesia_tts.TTS(api_key="ct_explicit")
+        assert tts.api_version == "2025-04-16"
+
+    def test_low_level_default_model_is_sonic_3(self) -> None:
+        """The low-level provider class must also default to ``sonic-3``."""
+        from getpatter.providers.cartesia_tts import CartesiaTTS
+
+        tts = CartesiaTTS(api_key="ct_explicit")
+        assert tts.model == "sonic-3"
+
+    def test_model_override(self) -> None:
+        """Callers can still pin ``sonic-2`` for backwards compatibility."""
+        from getpatter.tts import cartesia as cartesia_tts
+
+        tts = cartesia_tts.TTS(api_key="ct_explicit", model="sonic-2")
+        assert tts.model == "sonic-2"
+
 
 class TestRimeTTS:
     def test_explicit_api_key(self) -> None:
