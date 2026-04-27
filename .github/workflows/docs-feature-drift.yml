@@ -20,7 +20,18 @@ permissions:
   issues: write
 
 jobs:
+  notebook-parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Notebook structure parity (Python ↔ TypeScript)
+        run: python scripts/check_notebook_parity.py
+
   drift-check:
+    needs: notebook-parity
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Patter repo

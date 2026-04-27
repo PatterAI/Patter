@@ -4,6 +4,126 @@ Newest entries at the top.
 
 ---
 
+### [2026-04-27] — Notebook series Phase 5: Polish — README, launcher, drift-cron
+
+**Type:** docs / chore
+**Branch:** feat/notebook-series-skeleton
+
+**What it does:**
+
+Finishes the notebook series with user-facing polish:
+- Rewrote `examples/notebooks/README.md` — series overview, quickstart for both
+  Python and TypeScript, full key matrix table (which env var unlocks which
+  cells per tier), per-topic description table, troubleshooting guide (missing
+  keys, Deno kernel install, ngrok setup, live-call checklist).
+- Updated `examples/notebooks/RELEASES.md` — structured run-log template with
+  instructions and a "Known issues by release" section.
+- Added `scripts/run_all_notebooks.sh` — headless execution of all 24 notebooks
+  via `jupyter nbconvert --execute`; strips outputs after each run; non-zero exit
+  if any notebook fails.
+- Hooked `check_notebook_parity.py` into the daily `docs-feature-drift` cron
+  workflow so Python↔TypeScript structure drift surfaces as a `docs-drift` issue
+  even without a PR.
+
+**Files changed:**
+
+| File | Change |
+|------|--------|
+| `examples/notebooks/README.md` | Comprehensive rewrite |
+| `examples/notebooks/RELEASES.md` | Structured template |
+| `scripts/run_all_notebooks.sh` | Headless launcher (new) |
+| `.github/workflows/docs-feature-drift.yml` | `notebook-parity` job added |
+
+**Breaking changes:** None.
+
+**Docs to update:** None — README is the doc.
+
+---
+
+### [2026-04-27] — Notebook series Phase 4: §3 Live Appendix everywhere
+
+**Type:** feat
+**Branch:** feat/notebook-series-skeleton
+
+**What it does:**
+
+Populates §3 (Live Appendix, T4) in all 24 notebooks. Every notebook now has
+a real-call cell gated behind `ENABLE_LIVE_CALLS=1`: pre-flight checklist +
+live call via `await p.call(env.target_number, agent=agent, first_message=...,
+ring_timeout=env.max_call_seconds)`, in a `try/finally` that sweeps leftover
+calls on teardown.
+
+Topic 07 (Telnyx) uses `carrier=Telnyx(api_key=..., public_key=...)`.
+Topic 10 (Advanced) uses `schedule_once(when, lambda: ...)` + `asyncio.sleep(8)`.
+Topic 09 (Guardrails) demonstrates a live guardrail blocking "competitor" mid-call.
+Topic 12 (Security) verifies HMAC-SHA1 on every inbound webhook during the call.
+
+**Files changed:**
+
+| File | Change |
+|------|--------|
+| `scripts/appendix_cells_01.py` – `appendix_cells_12.py` | 12 new files |
+| `scripts/inject_live_appendix.py` | Phase 4 driver |
+| `examples/notebooks/{python,typescript}/[01-12]_*.ipynb` | §3 populated |
+
+**Tests added:** None (T4 cells are manually exercised only).
+
+**Breaking changes:** None.
+
+**Docs to update:**
+- [x] `examples/notebooks/README.md` — updated in Phase 5.
+
+---
+
+### [2026-04-27] — Notebook series Phase 3: §2 Feature Tour everywhere
+
+**Type:** feat
+**Branch:** feat/notebook-series-skeleton
+
+**What it does:**
+
+Populates §2 (Feature Tour, T1+T2+T3) in all 24 notebooks — the exhaustive
+layer covering every public feature and every supported provider. Each T3 cell
+is wrapped with `with _setup.cell(name, tier=3, required=[...], env=env) as ok`
+so missing keys yield a yellow skip banner instead of an exception.
+
+Also fixed a critical `inject_section.py` idempotency bug: the old tag-based
+deduplication left stale markdown cells on re-injection, causing heading
+accumulation. Rewrote to range-based replacement using `_next_section_idx`
+(skips cells whose first line starts with the current `## §N` marker, stops
+at the first different `## §` heading).
+
+**Implementation details:**
+
+- `_next_section_idx(cells, after, current_marker)` — key function that makes
+  the injector truly idempotent; two-level fix: range-based replacement +
+  marker-aware end detection.
+- Section heading parity required careful matching: Python `### Heading` must
+  equal TypeScript `### Heading` byte-for-byte (parity checker compares first
+  source line only). Fixed 4 heading mismatches across sections 04, 06, 08, 12.
+- Added missing TS cells in section_cells_04 (OpenAI TTS live), section_cells_06
+  (Twilio sig invalid), section_cells_08 (tool inline), section_cells_12
+  (Twilio sig guard) to reach 12/12 parity.
+
+**Files changed:**
+
+| File | Change |
+|------|--------|
+| `scripts/inject_section.py` | Range-based idempotent injection (critical fix) |
+| `scripts/inject_feature_tour.py` | Phase 3 driver |
+| `scripts/section_cells_01.py` – `section_cells_12.py` | 12 files, §2 cells |
+| `examples/notebooks/{python,typescript}/[01-12]_*.ipynb` | §2 populated |
+
+**Tests added:**
+- `scripts/test_inject_section.py` — idempotency tests added for range-based logic
+
+**Breaking changes:** None.
+
+**Docs to update:**
+- [x] `examples/notebooks/README.md` — updated in Phase 5.
+
+---
+
 ### [2026-04-27] — Notebook series Phase 2: Quickstart everywhere
 
 **Type:** feat
