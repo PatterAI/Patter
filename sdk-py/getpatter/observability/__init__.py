@@ -24,7 +24,9 @@ from getpatter.observability.metric_types import (
     TTFBMetrics,
 )
 from getpatter.observability.tracing import (
+    SPAN_BARGEIN,
     SPAN_CALL,
+    SPAN_ENDPOINT,
     SPAN_LLM,
     SPAN_STT,
     SPAN_TOOL,
@@ -48,6 +50,8 @@ __all__ = [
     "SPAN_LLM",
     "SPAN_TTS",
     "SPAN_TOOL",
+    "SPAN_ENDPOINT",
+    "SPAN_BARGEIN",
     # Event bus
     "EventBus",
     "PatterEventType",

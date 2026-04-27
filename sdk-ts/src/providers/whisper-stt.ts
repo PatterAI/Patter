@@ -156,13 +156,13 @@ export class WhisperSTT {
   async close(): Promise<void> {
     this.running = false;
 
-    // Flush remaining buffer if it has enough audio (~25% of threshold).
-    if (this.bufferedBytes >= this.bufferSize / 4) {
+    // Always flush whatever audio remains in the buffer so the trailing
+    // 0–250 ms before end-of-utterance are not silently dropped. Previously
+    // the buffer was only transcribed above ~25% of the threshold, which
+    // discarded short tail-end utterances entirely.
+    if (this.bufferedBytes > 0) {
       const pcm = this.flushChunks();
       this.trackTranscription(this.transcribeBuffer(pcm));
-    } else {
-      this.chunks = [];
-      this.bufferedBytes = 0;
     }
 
     await Promise.allSettled(this.pendingTranscriptions);

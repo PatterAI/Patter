@@ -27,6 +27,12 @@ import { SentenceChunker } from './sentence-chunker';
 import { PipelineHookExecutor } from './pipeline-hooks';
 import { EventBus } from './observability/event-bus';
 import type { PatterEventType } from './observability/event-bus';
+import {
+  SPAN_BARGEIN,
+  SPAN_ENDPOINT,
+  SPAN_LLM,
+  startSpan,
+} from './observability/tracing';
 
 type AIAdapter = OpenAIRealtimeAdapter | ElevenLabsConvAIAdapter;
 
@@ -555,14 +561,25 @@ export class StreamHandler {
             if (this.isSpeaking) {
               getLogger().info('[VAD] speech_start during TTS → BARGE-IN');
               this.metricsAcc.recordOverlapStart();
-              this.cancelSpeaking();
+              this.metricsAcc.recordBargeinDetected();
+              const bargeinSpan = startSpan(SPAN_BARGEIN, { 'patter.call.id': this.callId });
               try {
-                this.deps.bridge.sendClear(this.ws, this.streamSid);
-              } catch (err) {
-                getLogger().debug(`sendClear during VAD barge-in failed: ${String(err)}`);
+                this.cancelSpeaking();
+                try {
+                  this.deps.bridge.sendClear(this.ws, this.streamSid);
+                } catch (err) {
+                  getLogger().debug(`sendClear during VAD barge-in failed: ${String(err)}`);
+                }
+                this.metricsAcc.recordTtsStopped();
+                this.metricsAcc.recordTurnInterrupted();
+                this.metricsAcc.recordOverlapEnd(true);
+              } finally {
+                try {
+                  bargeinSpan.end();
+                } catch {
+                  // Swallow.
+                }
               }
-              this.metricsAcc.recordTurnInterrupted();
-              this.metricsAcc.recordOverlapEnd(true);
             }
             this.metricsAcc.startTurnIfIdle();
           } else if (evt?.type === 'speech_end') {
@@ -905,6 +922,21 @@ export class StreamHandler {
     this.metricsAcc.recordSttComplete(transcript.text);
     this.metricsAcc.recordSttFinalTimestamp();
 
+    // Endpoint span — silence-detected → LLM-dispatch window. The matching
+    // ``end()`` lives below right before ``recordTurnCommitted``. We use a
+    // small helper so every early-return path closes the span exactly once.
+    const endpointSpan = startSpan(SPAN_ENDPOINT, { 'patter.call.id': this.callId });
+    let endpointSpanClosed = false;
+    const closeEndpointSpan = (): void => {
+      if (endpointSpanClosed) return;
+      endpointSpanClosed = true;
+      try {
+        endpointSpan.end();
+      } catch {
+        // Swallow — span teardown should never crash the call path.
+      }
+    };
+
     if (this.deps.onTranscript) {
       await this.deps.onTranscript({
         role: 'user',
@@ -921,6 +953,7 @@ export class StreamHandler {
     if (filteredTranscript === null) {
       getLogger().debug(`afterTranscribe hook vetoed turn (${label})`);
       this.metricsAcc.recordTurnInterrupted();
+      closeEndpointSpan();
       return;
     }
 
@@ -933,6 +966,7 @@ export class StreamHandler {
     // onUserTurnCompleted hook is not yet wired in TS — record 0 delay so EOU can still emit.
     this.metricsAcc.recordOnUserTurnCompletedDelay(0);
     this.metricsAcc.recordTurnCommitted();
+    closeEndpointSpan();
 
     if (this.deps.onMessage && typeof this.deps.onMessage === 'function') {
       try {
@@ -1014,14 +1048,25 @@ export class StreamHandler {
       `Barge-in: caller spoke over agent (${sanitizeLogValue(transcript.text.slice(0, 40))})`,
     );
     this.metricsAcc.recordOverlapStart();
-    this.cancelSpeaking();
+    this.metricsAcc.recordBargeinDetected();
+    const bargeinSpan = startSpan(SPAN_BARGEIN, { 'patter.call.id': this.callId });
     try {
-      this.deps.bridge.sendClear(this.ws, this.streamSid);
-    } catch (err) {
-      getLogger().debug(`sendClear during barge-in failed: ${String(err)}`);
+      this.cancelSpeaking();
+      try {
+        this.deps.bridge.sendClear(this.ws, this.streamSid);
+      } catch (err) {
+        getLogger().debug(`sendClear during barge-in failed: ${String(err)}`);
+      }
+      this.metricsAcc.recordTtsStopped();
+      this.metricsAcc.recordTurnInterrupted();
+      this.metricsAcc.recordOverlapEnd(true);
+    } finally {
+      try {
+        bargeinSpan.end();
+      } catch {
+        // Swallow.
+      }
     }
-    this.metricsAcc.recordTurnInterrupted();
-    this.metricsAcc.recordOverlapEnd(true);
     return true;
   }
 
@@ -1077,6 +1122,10 @@ export class StreamHandler {
     this.beginSpeaking();
     let llmError = false;
 
+    // Span lifetime: LLM dispatch → final token / TTS handoff. Always closed
+    // in the ``finally`` block so an early throw cannot leak a span.
+    const llmSpan = startSpan(SPAN_LLM, { 'patter.call.id': this.callId });
+
     const guardAndSpeak = async (sentence: string, isFirst: boolean): Promise<void> => {
       // Fix 3/5: record first-sentence boundary before synthesizing first sentence.
       if (isFirst) this.metricsAcc.recordLlmFirstSentenceComplete();
@@ -1128,6 +1177,11 @@ export class StreamHandler {
       }
     } finally {
       this.endSpeakingWithGrace();
+      try {
+        llmSpan.end();
+      } catch {
+        // Swallow — span teardown should never crash the call path.
+      }
     }
     return allParts.join('');
   }

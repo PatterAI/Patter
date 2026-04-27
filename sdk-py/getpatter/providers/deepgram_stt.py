@@ -33,10 +33,16 @@ class DeepgramSTT(STTProvider):
         *,
         endpointing_ms: int = 150,
         utterance_end_ms: int | None = 1000,
-        smart_format: bool = True,
+        smart_format: bool = False,
         interim_results: bool = True,
         vad_events: bool = True,
     ):
+        # ``smart_format`` defaults to ``False`` because punctuation and numeral
+        # formatting add roughly 50–150 ms to TTFT on each final transcript and
+        # are rarely useful for telephony pipelines that immediately feed the
+        # text into an LLM. Pass ``smart_format=True`` to opt back in for use
+        # cases (e.g. dashboards, transcripts) where the formatted text is
+        # surfaced directly to humans.
         self.api_key = api_key
         self.language = language
         self.model = model

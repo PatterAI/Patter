@@ -18,11 +18,15 @@ export const ENV_FLAG = 'PATTER_OTEL_ENABLED';
 export const SERVICE_NAME = 'patter';
 
 // --- Span names -------------------------------------------------------------
-export const SPAN_CALL = 'patter.call';
+// Normalized to ``getpatter.*`` for parity with the Python SDK and to avoid
+// the historical ``patter.*`` / ``getpatter.*`` mix that fragmented dashboards.
+export const SPAN_CALL = 'getpatter.call';
 export const SPAN_STT = 'getpatter.stt';
-export const SPAN_LLM = 'patter.llm';
+export const SPAN_LLM = 'getpatter.llm';
 export const SPAN_TTS = 'getpatter.tts';
-export const SPAN_TOOL = 'patter.tool';
+export const SPAN_TOOL = 'getpatter.tool';
+export const SPAN_ENDPOINT = 'getpatter.endpoint';
+export const SPAN_BARGEIN = 'getpatter.bargein';
 
 /**
  * Minimal span surface area — subset of the OTel ``Span`` API the Patter SDK

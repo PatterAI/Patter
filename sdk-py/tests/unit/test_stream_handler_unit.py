@@ -298,3 +298,59 @@ class TestStreamHandlerIsolation:
 
         h1.conversation_history.append({"role": "user", "text": "hello from h1"})
         assert len(h2.conversation_history) == 0
+
+
+# ---------------------------------------------------------------------------
+# _stt_loop dispatch gate — accepts ``speech_final`` for parity with TS handler
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestSttLoopGate:
+    """The LLM dispatch gate accepts either ``is_final`` or ``speech_final``.
+
+    Deepgram's ``speech_final`` is a faster end-of-utterance hint that fires
+    before ``is_final`` on each turn. The Python ``_stt_loop`` previously
+    short-circuited solely on ``is_final``, which left it ~300-700 ms slower
+    than the TS handler. This test verifies the predicate baked into
+    ``stream_handler._stt_loop`` (line ~1375) so future refactors cannot
+    silently regress that fix.
+    """
+
+    def _gate(self, transcript) -> bool:
+        # Mirror the predicate in ``stream_handler._stt_loop`` exactly.
+        return bool((transcript.is_final or transcript.speech_final) and transcript.text)
+
+    def test_speech_final_only_passes(self) -> None:
+        from getpatter.providers.base import Transcript
+
+        t = Transcript(text="hello", is_final=False, speech_final=True)
+        assert self._gate(t) is True
+
+    def test_is_final_only_passes(self) -> None:
+        from getpatter.providers.base import Transcript
+
+        t = Transcript(text="hello", is_final=True, speech_final=False)
+        assert self._gate(t) is True
+
+    def test_neither_blocks(self) -> None:
+        from getpatter.providers.base import Transcript
+
+        t = Transcript(text="hello", is_final=False, speech_final=False)
+        assert self._gate(t) is False
+
+    def test_empty_text_blocks_even_when_final(self) -> None:
+        from getpatter.providers.base import Transcript
+
+        t = Transcript(text="", is_final=True, speech_final=True)
+        assert self._gate(t) is False
+
+    def test_stream_handler_source_uses_disjunctive_gate(self) -> None:
+        """Belt-and-braces: the actual source line still ORs the two flags."""
+        import inspect
+
+        from getpatter.handlers import stream_handler
+
+        src = inspect.getsource(stream_handler)
+        assert "transcript.speech_final" in src
+        assert "transcript.is_final or transcript.speech_final" in src

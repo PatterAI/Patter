@@ -197,9 +197,34 @@ describe('WhisperSTT', () => {
     fetchSpy.mockRestore();
   });
 
-  it('does not flush on close when buffer is below 25% threshold', async () => {
+  it('flushes any non-empty buffer on close (no minimum threshold)', async () => {
+    // Trailing 0-250 ms of audio must be transcribed, not dropped, so close()
+    // now flushes whenever ``bufferedBytes > 0`` instead of waiting for ~25%.
     const bufferSize = 100;
     const stt = new WhisperSTT('sk-test', 'en', 'whisper-1', bufferSize);
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ text: 'tail' }),
+      text: async () => '',
+    } as Response);
+
+    await stt.connect();
+
+    // Send very little audio (well below the previous 25% gate)
+    stt.sendAudio(Buffer.alloc(10));
+
+    stt.close();
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    fetchSpy.mockRestore();
+  });
+
+  it('does not flush on close when buffer is empty', async () => {
+    const stt = new WhisperSTT('sk-test', 'en', 'whisper-1', 100);
 
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
       ok: true,
@@ -208,16 +233,11 @@ describe('WhisperSTT', () => {
     } as Response);
 
     await stt.connect();
-
-    // Send very little audio (below 25% of threshold)
-    stt.sendAudio(Buffer.alloc(10));
-
     stt.close();
 
     await new Promise((r) => setTimeout(r, 50));
 
     expect(fetchSpy).not.toHaveBeenCalled();
-
     fetchSpy.mockRestore();
   });
 

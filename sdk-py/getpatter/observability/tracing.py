@@ -17,6 +17,8 @@ Spans used by Patter:
 * ``getpatter.llm`` — an LLM completion (per turn)
 * ``getpatter.tts`` — a TTS synthesis
 * ``getpatter.tool`` — a single tool invocation
+* ``getpatter.endpoint`` — silence-detected → LLM-dispatch window
+* ``getpatter.bargein`` — interrupt-detected → TTS-stopped window
 """
 
 from __future__ import annotations
@@ -37,6 +39,8 @@ SPAN_STT = "getpatter.stt"
 SPAN_LLM = "getpatter.llm"
 SPAN_TTS = "getpatter.tts"
 SPAN_TOOL = "getpatter.tool"
+SPAN_ENDPOINT = "getpatter.endpoint"
+SPAN_BARGEIN = "getpatter.bargein"
 
 # --- State ------------------------------------------------------------------
 _tracer: Any = None

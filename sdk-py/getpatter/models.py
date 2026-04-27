@@ -175,6 +175,21 @@ class LatencyBreakdown:
     # TTFT separately. Populated by ``CallMetricsAccumulator`` from
     # ``record_llm_first_token``.
     llm_ttft_ms: float | None = None
+    # Total LLM generation time (stt_complete → llm_complete). Distinct from
+    # ``llm_ms`` (TTFT-style first-token latency) — this captures the full
+    # token-stream duration which is useful for cost / throughput analysis.
+    llm_total_ms: float | None = None
+    # Endpoint latency: time from end-of-user-speech (VAD stop or STT
+    # ``speech_final``) to LLM dispatch. Captures the silence-detection +
+    # transcript-finalization gap. ``None`` when the source signal is missing.
+    endpoint_ms: float | None = None
+    # Barge-in latency: time from user-interrupt detection to TTS playback
+    # actually halting (i.e. after ``audio_sender.send_clear()`` returned).
+    # ``None`` outside of an interrupted turn.
+    bargein_ms: float | None = None
+    # Total TTS time: LLM-first-token (or first-sentence boundary) to last
+    # TTS audio byte sent. ``None`` when TTS never completed.
+    tts_total_ms: float | None = None
 
 
 @dataclass(frozen=True)
@@ -208,6 +223,7 @@ class CallMetrics:
     # Additional percentiles exposed for LiveKit/Pipecat-style dashboards.
     # Default to zero so older consumers still construct CallMetrics cleanly.
     latency_p50: LatencyBreakdown = field(default_factory=LatencyBreakdown)
+    latency_p90: LatencyBreakdown = field(default_factory=LatencyBreakdown)
     latency_p99: LatencyBreakdown = field(default_factory=LatencyBreakdown)
 
 

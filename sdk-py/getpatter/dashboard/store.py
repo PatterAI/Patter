@@ -256,7 +256,10 @@ class MetricsStore:
                     "turns": [],
                     "cost": {"total": 0.0, "stt": 0.0, "tts": 0.0, "llm": 0.0, "telephony": 0.0},
                     "latency_avg": {"total_ms": 0.0},
+                    "latency_p50": {"total_ms": 0.0},
+                    "latency_p90": {"total_ms": 0.0},
                     "latency_p95": {"total_ms": 0.0},
+                    "latency_p99": {"total_ms": 0.0},
                     "provider_mode": "",
                 }
             self._calls.append(entry)

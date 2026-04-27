@@ -106,6 +106,8 @@ from getpatter.observability import (
     SPAN_LLM,
     SPAN_TTS,
     SPAN_TOOL,
+    SPAN_ENDPOINT,
+    SPAN_BARGEIN,
 )
 # `is_tracing_enabled` is the public top-level alias for parity with TypeScript
 # `isTracingEnabled`. The Python implementation lives at
@@ -272,6 +274,8 @@ __all__ = [
     "SPAN_LLM",
     "SPAN_TTS",
     "SPAN_TOOL",
+    "SPAN_ENDPOINT",
+    "SPAN_BARGEIN",
     "CloudflareTunnel",
     "Ngrok",
     "Static",

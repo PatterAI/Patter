@@ -223,6 +223,8 @@ export {
   SPAN_LLM,
   SPAN_TTS,
   SPAN_TOOL,
+  SPAN_ENDPOINT,
+  SPAN_BARGEIN,
 } from "./observability";
 export type {
   Span,

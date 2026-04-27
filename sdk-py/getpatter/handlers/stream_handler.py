@@ -32,7 +32,14 @@ from getpatter.handlers.common import (
     _validate_e164,
 )
 from getpatter.models import HookContext
-from getpatter.observability.tracing import SPAN_STT, SPAN_TTS, start_span
+from getpatter.observability.tracing import (
+    SPAN_BARGEIN,
+    SPAN_ENDPOINT,
+    SPAN_LLM,
+    SPAN_STT,
+    SPAN_TTS,
+    start_span,
+)
 from getpatter.services.pipeline_hooks import PipelineHookExecutor
 from getpatter.services.sentence_chunker import SentenceChunker
 from getpatter.utils.log_sanitize import mask_phone_number, sanitize_log_value
@@ -1177,6 +1184,11 @@ class PipelineStreamHandler(StreamHandler):
 
         interrupted = False
         llm_error = False
+        _llm_span = start_span(
+            SPAN_LLM,
+            {"patter.call.id": self.call_id},
+        )
+        _llm_span.__enter__()
         try:
             try:
                 async for token in result:
@@ -1236,6 +1248,10 @@ class PipelineStreamHandler(StreamHandler):
             # the audio tail still playing on the carrier so STT echo on
             # the trailing samples doesn't look like a fresh user turn.
             await self._end_speaking_with_grace()
+            try:
+                _llm_span.__exit__(None, None, None)
+            except Exception:  # pragma: no cover - defensive
+                pass
 
         response_text = "".join(full_response_parts)
 
@@ -1306,18 +1322,24 @@ class PipelineStreamHandler(StreamHandler):
             return
         if self.metrics is not None:
             self.metrics.record_overlap_start()
+            self.metrics.record_bargein_detected()
         logger.debug(
             "Barge-in: caller spoke over agent (%s)",
             sanitize_log_value(transcript.text[:40]),
         )
-        self._is_speaking = False
-        try:
-            await self.audio_sender.send_clear()
-        except Exception as exc:
-            logger.debug("send_clear during barge-in failed: %s", exc)
-        if self.metrics is not None:
-            self.metrics.record_turn_interrupted()
-            self.metrics.record_overlap_end(was_interruption=True)
+        with start_span(
+            SPAN_BARGEIN,
+            {"patter.call.id": self.call_id},
+        ):
+            self._is_speaking = False
+            try:
+                await self.audio_sender.send_clear()
+            except Exception as exc:
+                logger.debug("send_clear during barge-in failed: %s", exc)
+            if self.metrics is not None:
+                self.metrics.record_tts_stopped()
+                self.metrics.record_turn_interrupted()
+                self.metrics.record_overlap_end(was_interruption=True)
 
     def _commit_transcript(self, text: str) -> bool:
         """Dedup + throttle + hallucination filter for final STT transcripts.
@@ -1372,7 +1394,12 @@ class PipelineStreamHandler(StreamHandler):
                             "confidence": float(transcript.confidence or 0.0),
                         },
                     )
-                if not (transcript.is_final and transcript.text):
+                # Gate LLM dispatch on either ``is_final`` or ``speech_final``.
+                # Deepgram's ``speech_final`` is a faster end-of-utterance hint
+                # that fires before ``is_final`` on each turn — accepting it
+                # here removes ~300–700 ms of per-turn latency at parity with
+                # the TS handler.
+                if not ((transcript.is_final or transcript.speech_final) and transcript.text):
                     continue
                 if not self._commit_transcript(transcript.text):
                     continue
@@ -1401,6 +1428,28 @@ class PipelineStreamHandler(StreamHandler):
                     self.metrics.record_stt_complete(transcript.text)
                     self.metrics.record_stt_final_timestamp()
 
+                # Endpoint span — silence-detected → LLM-dispatch window. Open
+                # here (right after VAD stop / final transcript is recorded)
+                # and close it just before ``record_turn_committed`` below.
+                endpoint_span = start_span(
+                    SPAN_ENDPOINT,
+                    {"patter.call.id": self.call_id},
+                )
+                endpoint_span.__enter__()
+                # Wrapped in a list so the closure-style helper can flip the
+                # flag without needing ``nonlocal`` (we are inside a loop body,
+                # not a nested function — ``nonlocal`` would not bind here).
+                _endpoint_closed = [False]
+
+                def _close_endpoint_span() -> None:
+                    if _endpoint_closed[0]:
+                        return
+                    _endpoint_closed[0] = True
+                    try:
+                        endpoint_span.__exit__(None, None, None)
+                    except Exception:  # pragma: no cover - defensive
+                        pass
+
                 # Raw transcript always goes to dashboard/transcript log
                 self.transcript_entries.append(
                     {"role": "user", "text": transcript.text}
@@ -1427,6 +1476,7 @@ class PipelineStreamHandler(StreamHandler):
                     logger.debug("afterTranscribe hook vetoed turn")
                     if self.metrics is not None:
                         self.metrics.record_turn_interrupted()
+                    _close_endpoint_span()
                     continue
 
                 if self.metrics is not None:
@@ -1435,6 +1485,7 @@ class PipelineStreamHandler(StreamHandler):
                     # No message handler or LLM loop — discard orphaned turn
                     if self.metrics is not None:
                         self.metrics.record_turn_interrupted()
+                    _close_endpoint_span()
                     continue
 
                 # Use filtered text in conversation history (sent to LLM)
@@ -1451,6 +1502,7 @@ class PipelineStreamHandler(StreamHandler):
                     }
                     if self.metrics is not None:
                         self.metrics.record_turn_committed()
+                    _close_endpoint_span()
                     result = self._llm_loop.run(
                         filtered_text,
                         list(self.conversation_history),
@@ -1471,6 +1523,7 @@ class PipelineStreamHandler(StreamHandler):
                 # on_message handler path
                 if self.metrics is not None:
                     self.metrics.record_turn_committed()
+                _close_endpoint_span()
                 msg_data = {
                     "text": filtered_text,
                     "call_id": self.call_id,
@@ -1575,16 +1628,23 @@ class PipelineStreamHandler(StreamHandler):
                 if vad_event.type == "speech_start":
                     if self._is_speaking:
                         # Caller spoke over in-flight TTS — preempt now.
-                        try:
-                            await self.audio_sender.send_clear()
-                        except Exception as exc:
-                            logger.debug("send_clear during VAD barge-in failed: %s", exc)
                         if self.metrics is not None:
-                            self.metrics.record_turn_interrupted()
-                        # Force-flip immediately and bump the generation so a
-                        # pending grace-flip from the prior turn can't fight us.
-                        self._is_speaking = False
-                        self._speaking_generation += 1
+                            self.metrics.record_bargein_detected()
+                        with start_span(
+                            SPAN_BARGEIN,
+                            {"patter.call.id": self.call_id},
+                        ):
+                            try:
+                                await self.audio_sender.send_clear()
+                            except Exception as exc:
+                                logger.debug("send_clear during VAD barge-in failed: %s", exc)
+                            if self.metrics is not None:
+                                self.metrics.record_tts_stopped()
+                                self.metrics.record_turn_interrupted()
+                            # Force-flip immediately and bump the generation so a
+                            # pending grace-flip from the prior turn can't fight us.
+                            self._is_speaking = False
+                            self._speaking_generation += 1
                     if self.metrics is not None:
                         self.metrics.start_turn_if_idle()
                 elif vad_event.type == "speech_end":
