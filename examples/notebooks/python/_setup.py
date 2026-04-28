@@ -1,6 +1,7 @@
 """Shared helpers for every notebook in examples/notebooks/python/.
 
-Public surface (mirrored in typescript/_setup.ts):
+Public surface (mirrored in typescript/_setup.ts — Docker helpers pending,
+see tracking issue for inDocker/startDocker port):
     NotebookEnv      — frozen dataclass holding every env var the series reads
     load()           — parse .env and return NotebookEnv
     has_key()        — booleanise a key
@@ -19,8 +20,10 @@ Public surface (mirrored in typescript/_setup.ts):
 from __future__ import annotations
 
 import os
+import secrets
 import shutil
 import subprocess
+import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -261,9 +264,35 @@ def hangup_leftover_calls(env: NotebookEnv) -> None:
         print(f"⚠ Twilio sweep failed: {exc}")
 
 
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
 def in_docker() -> bool:
     """True if this kernel is running inside the patter-notebooks container."""
-    return os.environ.get("PATTER_NOTEBOOKS_IN_DOCKER") == "1" or Path("/.dockerenv").exists()
+    flag = os.environ.get("PATTER_NOTEBOOKS_IN_DOCKER", "").strip().lower()
+    return flag in _TRUTHY or Path("/.dockerenv").exists()
+
+
+def _generate_jupyter_token() -> str:
+    """Stable token per host user — survives `compose down`/`up` cycles.
+
+    Stored at ~/.config/patter-notebooks/jupyter_token. Generated on first
+    call. ``PATTER_NOTEBOOKS_NO_TOKEN=1`` bypasses entirely (opt-in only —
+    leaves Lab unauthenticated, intended for fully isolated dev VMs).
+    """
+    if os.environ.get("PATTER_NOTEBOOKS_NO_TOKEN", "").strip().lower() in _TRUTHY:
+        return ""
+    token_dir = Path.home() / ".config" / "patter-notebooks"
+    token_dir.mkdir(parents=True, exist_ok=True)
+    token_file = token_dir / "jupyter_token"
+    if token_file.exists():
+        token = token_file.read_text().strip()
+        if token:
+            return token
+    token = secrets.token_urlsafe(32)
+    token_file.write_text(token)
+    token_file.chmod(0o600)
+    return token
 
 
 def start_docker(
@@ -271,55 +300,76 @@ def start_docker(
     build: bool = True,
     detach: bool = True,
     open_url: bool = False,
-) -> None:
+) -> bool:
     """Optional: launch the patter-notebooks Docker stack from a notebook cell.
 
     No-op when the kernel is already inside the container. Otherwise runs
     ``docker compose up -d --build`` from ``examples/notebooks/python/`` and
-    prints the JupyterLab URL.
+    prints the JupyterLab URL with the auth token.
 
     Args:
         build:    pass ``--build`` to rebuild the image when the Dockerfile
                   or pyproject changed. Default True.
-        detach:   pass ``-d``. Default True (returns control to the cell).
+        detach:   pass ``-d``. Must be True — interactive mode would hang the
+                  kernel; explicit False prints a guard and returns False.
         open_url: also open the URL in the default browser via ``webbrowser``.
+
+    Returns:
+        True on success (container up or already inside one). False when the
+        environment is wrong (no docker, missing compose file, command failed).
 
     Idempotent — running twice just re-syncs the container state.
     """
     if in_docker():
         print("✓ already running inside the patter-notebooks Docker container")
-        return
+        return True
+
+    if not detach:
+        print("⚠ start_docker(detach=False) would block the kernel — "
+              "run `docker compose up` in a terminal instead")
+        return False
 
     if shutil.which("docker") is None:
         print("⚠ docker CLI not found on PATH — install Docker Desktop or skip this cell")
-        return
+        return False
 
     compose_file = PYTHON_NOTEBOOKS_DIR / "docker-compose.yml"
     if not compose_file.exists():
         print(f"⚠ {compose_file} not found — cannot start Docker stack")
-        return
+        return False
 
-    cmd = ["docker", "compose", "up"]
-    if detach:
-        cmd.append("-d")
+    token = _generate_jupyter_token()
+    cmd = ["docker", "compose", "up", "-d"]
     if build:
         cmd.append("--build")
 
+    env = {**os.environ, "JUPYTER_TOKEN": token}
     print(f"▶ {' '.join(cmd)}  (cwd={PYTHON_NOTEBOOKS_DIR})")
-    rc = subprocess.call(cmd, cwd=PYTHON_NOTEBOOKS_DIR)
-    if rc != 0:
-        print(f"❌ docker compose exited with code {rc}")
-        return
+    result = subprocess.run(
+        cmd,
+        cwd=PYTHON_NOTEBOOKS_DIR,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(f"❌ docker compose exited with code {result.returncode}")
+        if result.stdout:
+            print(f"--- stdout ---\n{result.stdout.rstrip()}")
+        if result.stderr:
+            print(f"--- stderr ---\n{result.stderr.rstrip()}")
+        return False
 
-    url = "http://localhost:8888/lab/tree/"
+    suffix = f"?token={token}" if token else ""
+    url = f"http://127.0.0.1:8888/lab/tree/{suffix}"
     print()
     print(f"✓ Docker stack up. Open: {url}")
-    print("  T2/T4 EmbeddedServer port: http://localhost:8765")
+    print("  T2/T4 EmbeddedServer port: http://127.0.0.1:8765")
     print("  Stop with: docker compose down  (run from examples/notebooks/python/)")
     if open_url:
-        import webbrowser
-
         webbrowser.open(url)
+    return True
 
 
 def load(env_file: Path | str | None = None) -> NotebookEnv:

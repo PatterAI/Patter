@@ -4,10 +4,14 @@ services:
       context: .
       args:
         PATTER_VERSION: ${PATTER_VERSION:-0.5.4}
+        PUID: ${PUID:-1000}
+        PGID: ${PGID:-1000}
     image: patter-notebooks-python
     ports:
-      - "8888:8888"   # JupyterLab
-      - "8765:8765"   # EmbeddedServer (T2/T4 cells)
+      # Loopback-only by default. Override the host side at your own risk —
+      # JupyterLab + the bind-mounted .env would expose every provider key.
+      - "127.0.0.1:8888:8888"   # JupyterLab
+      - "127.0.0.1:8765:8765"   # EmbeddedServer (T2/T4 cells)
     volumes:
       # Mount the whole notebooks tree so .env, fixtures, and TS notebooks are
       # all visible to _setup.py (which reads NOTEBOOKS_DIR/.env).
@@ -15,6 +19,7 @@ services:
     working_dir: /notebooks/python
     environment:
       - JUPYTER_PLATFORM_DIRS=1
+      - JUPYTER_TOKEN=${JUPYTER_TOKEN:-}
     env_file:
       - path: ../.env
         required: false

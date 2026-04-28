@@ -4,6 +4,73 @@ Newest entries at the top.
 
 ---
 
+### [2026-04-28] — Notebook Docker bootstrap: code-review fixes
+
+**Type:** fix
+**Branch:** feat/notebook-docker-launcher
+
+**What it does:**
+
+Addresses every CRITICAL/HIGH/MEDIUM finding from the multi-agent review of the
+initial Docker launcher commit:
+
+- **Loopback-only port maps** in `docker-compose.yml` (`127.0.0.1:8888:8888` /
+  `127.0.0.1:8765:8765`) so JupyterLab is never exposed to the LAN.
+- **Generated auth token by default.** `_setup._generate_jupyter_token()` writes
+  a 32-byte URL-safe secret to `~/.config/patter-notebooks/jupyter_token` (mode
+  `0o600`) on first run; subsequent runs reuse it. `start_docker()` injects it
+  via `JUPYTER_TOKEN` env var; the Dockerfile `CMD` reads it from env. Empty
+  token requires explicit opt-in via `PATTER_NOTEBOOKS_NO_TOKEN=1`.
+- **Non-root container.** Dockerfile creates `patter` (UID 1000 by default,
+  override via `PUID`/`PGID` build args) and drops `--allow-root`.
+- **Pinned deps.** New `examples/notebooks/python/requirements.txt` locks every
+  top-level dep at an exact version; Dockerfile installs from it.
+- **`start_docker() -> bool`.** Every early-return now returns False so
+  notebook callers can branch; `subprocess.run(..., check=False,
+  capture_output=True)` surfaces stdout/stderr on compose failure instead of
+  swallowing them.
+- **`detach=False` guard.** Refuses to launch (would hang the kernel) and
+  returns False with a banner pointing at the terminal.
+- **Robust env-var truthiness.** `in_docker()` accepts `1/true/yes/on`
+  (case-insensitive), not just literal `"1"`.
+- **Honest docstring.** `_setup.py` module docstring acknowledges the
+  TS-parity gap on the Docker helpers (tracked separately).
+- **Unit tests.** `tests/test_docker_bootstrap.py` covers truthy/falsy env
+  parsing, `/.dockerenv` marker, every `start_docker()` early-return branch,
+  command argv assembly, and token persistence (19 tests, all green).
+
+**Implementation details:**
+
+- Generated token persists across `compose down`/`up` cycles so users don't
+  need to re-bookmark the URL after a restart.
+- Top-level imports hoisted: `secrets` and `webbrowser` now at the top of
+  `_setup.py` (PEP 8). All other late imports stayed because they live with
+  domain-specific helpers further down the file.
+- Tests mock at the subprocess + filesystem boundary only; real Path
+  resolution and real argv assembly run unchanged.
+
+**Files changed:**
+
+| File | Change |
+|------|--------|
+| `examples/notebooks/python/Dockerfile` | Non-root user, requirements.txt, JUPYTER_TOKEN from env |
+| `examples/notebooks/python/docker-compose.yml` | Loopback ports, JUPYTER_TOKEN passthrough, PUID/PGID args |
+| `examples/notebooks/python/requirements.txt` | New — pinned top-level deps |
+| `examples/notebooks/python/_setup.py` | bool return, captured stderr, token gen, robust truthiness, detach guard |
+| `examples/notebooks/python/tests/test_docker_bootstrap.py` | New — 19 unit tests |
+
+**Tests added:**
+
+- `examples/notebooks/python/tests/test_docker_bootstrap.py` — 19 cases.
+
+**Breaking changes:** None — the launcher is still an opt-in commented cell.
+
+**Docs to update:**
+
+- [ ] Tracking issue for TypeScript notebook Docker launcher (filed separately).
+
+---
+
 ### [2026-04-28] — Notebook Docker bootstrap: optional in-cell launcher
 
 **Type:** feat
