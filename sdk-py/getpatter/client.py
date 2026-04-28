@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any, Callable, Awaitable
 logger = logging.getLogger("getpatter")
 
 from getpatter.exceptions import PatterConnectionError
-from getpatter.models import Agent, Guardrail, IncomingMessage
+from getpatter.models import Agent, Guardrail
 from getpatter.local_config import LocalConfig
 from getpatter.providers.base import STTProvider, TTSProvider
 from getpatter.services.llm_loop import LLMProvider
@@ -135,6 +135,9 @@ class Patter:
         self._server = None
         self._tunnel_handle = None
 
+        # Observability — set by _attach_span_exporter, default safe.
+        self._patter_side: str = "uut"
+
     @staticmethod
     def _unpack_carrier(carrier: Any) -> tuple[str | None, dict]:
         """Convert a ``Twilio(...)``/``Telnyx(...)`` instance to kind + creds.
@@ -244,9 +247,7 @@ class Patter:
                 entirely (carrier picks its own default).
         """
         if not agent:
-            raise PatterConnectionError(
-                "call() requires the agent parameter."
-            )
+            raise PatterConnectionError("call() requires the agent parameter.")
         if not isinstance(to, str) or not to.startswith("+"):
             raise ValueError(
                 f"'to' must be a phone number in E.164 format (e.g., '+1234567890'), got '{to}'."
@@ -262,9 +263,7 @@ class Patter:
                 account_sid=config.twilio_sid,
                 auth_token=config.twilio_token,
             )
-            stream_url = (
-                f"wss://{config.webhook_url}/ws/stream/outbound"
-            )
+            stream_url = f"wss://{config.webhook_url}/ws/stream/outbound"
             extra_params: dict = {}
             if machine_detection:
                 extra_params["MachineDetection"] = "DetectMessageEnd"
@@ -294,14 +293,19 @@ class Patter:
             logger.info("Outbound call initiated: %s", call_id)
             # Pre-register the call so the dashboard surfaces attempts
             # that never reach media (no-answer, busy, carrier-reject).
-            if self._server is not None and getattr(self._server, "_metrics_store", None) is not None:
+            if (
+                self._server is not None
+                and getattr(self._server, "_metrics_store", None) is not None
+            ):
                 try:
-                    self._server._metrics_store.record_call_initiated({
-                        "call_id": call_id,
-                        "caller": config.phone_number or from_number,
-                        "callee": to,
-                        "direction": "outbound",
-                    })
+                    self._server._metrics_store.record_call_initiated(
+                        {
+                            "call_id": call_id,
+                            "caller": config.phone_number or from_number,
+                            "callee": to,
+                            "direction": "outbound",
+                        }
+                    )
                 except Exception as exc:
                     logger.debug("record_call_initiated: %s", exc)
         elif config.telephony_provider == "telnyx":
@@ -311,9 +315,7 @@ class Patter:
                 api_key=config.telnyx_key,
                 connection_id=config.telnyx_connection_id,
             )
-            stream_url = (
-                f"wss://{config.webhook_url}/ws/telnyx/stream/outbound"
-            )
+            stream_url = f"wss://{config.webhook_url}/ws/telnyx/stream/outbound"
             call_id = await adapter.initiate_call(
                 config.phone_number or from_number,
                 to,
@@ -321,14 +323,19 @@ class Patter:
                 ring_timeout=ring_timeout,
             )
             logger.info("Outbound call initiated: %s", call_id)
-            if self._server is not None and getattr(self._server, "_metrics_store", None) is not None:
+            if (
+                self._server is not None
+                and getattr(self._server, "_metrics_store", None) is not None
+            ):
                 try:
-                    self._server._metrics_store.record_call_initiated({
-                        "call_id": call_id,
-                        "caller": config.phone_number or from_number,
-                        "callee": to,
-                        "direction": "outbound",
-                    })
+                    self._server._metrics_store.record_call_initiated(
+                        {
+                            "call_id": call_id,
+                            "caller": config.phone_number or from_number,
+                            "callee": to,
+                            "direction": "outbound",
+                        }
+                    )
                 except Exception as exc:
                     logger.debug("record_call_initiated: %s", exc)
 
@@ -484,9 +491,7 @@ class Patter:
         tools_out: list[dict] | None = None
         if tools is not None:
             if not isinstance(tools, list):
-                raise TypeError(
-                    f"tools must be a list, got {type(tools).__name__}."
-                )
+                raise TypeError(f"tools must be a list, got {type(tools).__name__}.")
             tools_out = [self._tool_to_dict(t, index=i) for i, t in enumerate(tools)]
 
         if variables is not None and not isinstance(variables, dict):
@@ -644,7 +649,12 @@ class Patter:
                 "Cannot pass both `llm=` on the agent and `on_message=` on serve(). "
                 "Pick one — `llm=` for built-in LLMs, `on_message=` for custom logic."
             )
-        if not isinstance(port, int) or isinstance(port, bool) or port < 1 or port > 65535:
+        if (
+            not isinstance(port, int)
+            or isinstance(port, bool)
+            or port < 1
+            or port > 65535
+        ):
             raise ValueError(
                 f"port must be an integer between 1 and 65535, got {port!r}."
             )
@@ -664,11 +674,10 @@ class Patter:
             tunnel = True
 
         if tunnel and config.webhook_url:
-            raise ValueError(
-                "Cannot use both tunnel=True and webhook_url. Pick one."
-            )
+            raise ValueError("Cannot use both tunnel=True and webhook_url. Pick one.")
 
         from getpatter.banner import show_banner
+
         show_banner()
 
         if tunnel:
@@ -741,6 +750,23 @@ class Patter:
             on_call_start=on_call_start,
             on_call_end=on_call_end,
         )
+
+    def _attach_span_exporter(self, exporter: Any, *, side: str = "uut") -> None:
+        """Wire an OTel span exporter into the SDK's tracer provider.
+
+        Public-but-underscore: consumed by ``patter-agent-runner`` via
+        ``getattr(phone, "_attach_span_exporter")``. The leading underscore
+        signals it is not part of the customer-facing API surface.
+
+        Args:
+            exporter: Any OTel ``SpanExporter`` (e.g. ``InMemorySpanExporter``,
+                ``OTLPSpanExporter``, or the runner's ``PatterSpanExporter``).
+            side: ``"driver"`` or ``"uut"``. Stamped on every cost/latency
+                span emitted during this Patter instance's call lifecycle.
+        """
+        from getpatter.observability.attributes import attach_span_exporter
+
+        attach_span_exporter(self, exporter, side=side)
 
     async def disconnect(self) -> None:
         """Stop the embedded server and any auto-started tunnel."""
