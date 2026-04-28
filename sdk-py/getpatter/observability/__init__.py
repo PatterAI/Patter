@@ -37,6 +37,11 @@ from getpatter.observability.tracing import (
     shutdown_tracing,
     start_span,
 )
+from getpatter.observability.attributes import (
+    attach_span_exporter,
+    patter_call_scope,
+    record_patter_attrs,
+)
 
 __all__ = [
     # Tracing
@@ -66,4 +71,8 @@ __all__ = [
     "InterruptionMetrics",
     "TTFBMetrics",
     "ProcessingMetrics",
+    # Span attributes (consumed by patter-agent-runner)
+    "attach_span_exporter",
+    "patter_call_scope",
+    "record_patter_attrs",
 ]
