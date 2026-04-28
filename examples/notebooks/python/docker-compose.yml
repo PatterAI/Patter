@@ -1,0 +1,21 @@
+services:
+  notebooks:
+    build:
+      context: .
+      args:
+        PATTER_VERSION: ${PATTER_VERSION:-0.5.4}
+    image: patter-notebooks-python
+    ports:
+      - "8888:8888"   # JupyterLab
+      - "8765:8765"   # EmbeddedServer (T2/T4 cells)
+    volumes:
+      # Mount the whole notebooks tree so .env, fixtures, and TS notebooks are
+      # all visible to _setup.py (which reads NOTEBOOKS_DIR/.env).
+      - ../:/notebooks
+    working_dir: /notebooks/python
+    environment:
+      - JUPYTER_PLATFORM_DIRS=1
+    env_file:
+      - path: ../.env
+        required: false
+    restart: unless-stopped

@@ -12,17 +12,22 @@ Public surface (mirrored in typescript/_setup.ts):
     run_stt()        — standardised STT roundtrip helper
     run_tts()        — standardised TTS roundtrip helper
     hangup_leftover_calls() — safety sweep for live appendix teardown
+    in_docker()      — True when running inside the patter-notebooks container
+    start_docker()   — optional: launch the patter-notebooks Docker stack
 """
 
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
 
-NOTEBOOKS_DIR = Path(__file__).resolve().parent.parent
+PYTHON_NOTEBOOKS_DIR = Path(__file__).resolve().parent
+NOTEBOOKS_DIR = PYTHON_NOTEBOOKS_DIR.parent
 FIXTURES = NOTEBOOKS_DIR / "fixtures"
 
 
@@ -254,6 +259,67 @@ def hangup_leftover_calls(env: NotebookEnv) -> None:
                 print(f"⚠ could not hang up {call.sid}: {exc}")
     except Exception as exc:  # noqa: BLE001
         print(f"⚠ Twilio sweep failed: {exc}")
+
+
+def in_docker() -> bool:
+    """True if this kernel is running inside the patter-notebooks container."""
+    return os.environ.get("PATTER_NOTEBOOKS_IN_DOCKER") == "1" or Path("/.dockerenv").exists()
+
+
+def start_docker(
+    *,
+    build: bool = True,
+    detach: bool = True,
+    open_url: bool = False,
+) -> None:
+    """Optional: launch the patter-notebooks Docker stack from a notebook cell.
+
+    No-op when the kernel is already inside the container. Otherwise runs
+    ``docker compose up -d --build`` from ``examples/notebooks/python/`` and
+    prints the JupyterLab URL.
+
+    Args:
+        build:    pass ``--build`` to rebuild the image when the Dockerfile
+                  or pyproject changed. Default True.
+        detach:   pass ``-d``. Default True (returns control to the cell).
+        open_url: also open the URL in the default browser via ``webbrowser``.
+
+    Idempotent — running twice just re-syncs the container state.
+    """
+    if in_docker():
+        print("✓ already running inside the patter-notebooks Docker container")
+        return
+
+    if shutil.which("docker") is None:
+        print("⚠ docker CLI not found on PATH — install Docker Desktop or skip this cell")
+        return
+
+    compose_file = PYTHON_NOTEBOOKS_DIR / "docker-compose.yml"
+    if not compose_file.exists():
+        print(f"⚠ {compose_file} not found — cannot start Docker stack")
+        return
+
+    cmd = ["docker", "compose", "up"]
+    if detach:
+        cmd.append("-d")
+    if build:
+        cmd.append("--build")
+
+    print(f"▶ {' '.join(cmd)}  (cwd={PYTHON_NOTEBOOKS_DIR})")
+    rc = subprocess.call(cmd, cwd=PYTHON_NOTEBOOKS_DIR)
+    if rc != 0:
+        print(f"❌ docker compose exited with code {rc}")
+        return
+
+    url = "http://localhost:8888/lab/tree/"
+    print()
+    print(f"✓ Docker stack up. Open: {url}")
+    print("  T2/T4 EmbeddedServer port: http://localhost:8765")
+    print("  Stop with: docker compose down  (run from examples/notebooks/python/)")
+    if open_url:
+        import webbrowser
+
+        webbrowser.open(url)
 
 
 def load(env_file: Path | str | None = None) -> NotebookEnv:

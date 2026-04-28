@@ -4,6 +4,64 @@ Newest entries at the top.
 
 ---
 
+### [2026-04-28] — Notebook Docker bootstrap: optional in-cell launcher
+
+**Type:** feat
+**Branch:** feat/notebook-series-skeleton
+
+**What it does:**
+
+Lets users run the Python notebook series inside a containerised JupyterLab
+without leaving the notebook. Two new scoped files (`Dockerfile`,
+`docker-compose.yml`) under `examples/notebooks/python/` build a Python 3.13
+image with `getpatter` (pinned to `PATTER_VERSION`, default 0.5.4), the helper
+deps from `pyproject.toml`, and JupyterLab. Compose mounts the parent
+`examples/notebooks/` tree at `/notebooks` so `_setup.py` still finds `.env`
+and `fixtures/`; ports 8888 (Lab) and 8765 (EmbeddedServer for T2/T4 cells)
+are published. `env_file` is marked `required: false` so §1 cells run with
+zero keys.
+
+`_setup.py` gains two helpers: `in_docker()` (checks
+`PATTER_NOTEBOOKS_IN_DOCKER=1` and `/.dockerenv`) and `start_docker(*, build,
+detach, open_url)` which shells out to `docker compose up -d --build` from the
+notebooks dir, no-ops when already inside the container or when the `docker`
+CLI is absent. Each of the 12 Python notebooks gets an optional markdown +
+commented code cell at the top — Run All on a fresh checkout still behaves
+identically because the launcher is commented by default.
+
+**Implementation details:**
+
+- Container detection prefers an explicit env var over `/.dockerenv` so future
+  rootless/podman-equivalent setups can opt in by exporting the same flag.
+- Insertion script is idempotent (skips notebooks that already contain the
+  `## Optional: run in Docker` marker), safe to re-run after future notebook
+  edits.
+- Compose uses the v2 `env_file: [{path, required: false}]` form to avoid
+  failing when users haven't created `.env` yet.
+
+**Files changed:**
+
+| File | Change |
+|------|--------|
+| `examples/notebooks/python/Dockerfile` | New — Python 3.13-slim + getpatter + JupyterLab + helpers |
+| `examples/notebooks/python/docker-compose.yml` | New — builds image, mounts `../`, optional `.env`, ports 8888/8765 |
+| `examples/notebooks/python/_setup.py` | Added `in_docker()` and `start_docker()`; exposed `PYTHON_NOTEBOOKS_DIR` |
+| `examples/notebooks/python/01_quickstart.ipynb` … `12_security.ipynb` | Inserted optional Docker markdown + code cell at the top of every notebook |
+
+**Tests added:** None — bootstrap is a no-op until uncommented, and existing
+notebook tests cover the helper module via import. Manual smoke: `docker
+compose config` validates and `python -c "import _setup; _setup.in_docker()"`
+returns False on host.
+
+**Breaking changes:** None.
+
+**Docs to update:**
+
+- [ ] `examples/notebooks/README.md` — add a "Run in Docker" section pointing
+      at the optional cell + compose file.
+
+---
+
 ### [2026-04-27] — Notebook series Phase 5: Polish — README, launcher, drift-cron
 
 **Type:** docs / chore
