@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import base64
 import json
-from collections import deque
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -81,10 +80,16 @@ class TestTwilioStreamBridgeLifecycle:
     @pytest.mark.asyncio
     @patch("getpatter.handlers.twilio_handler.OpenAIRealtimeStreamHandler")
     @patch("getpatter.handlers.twilio_handler.create_metrics_accumulator")
-    @patch("getpatter.handlers.twilio_handler.resolve_agent_prompt", return_value="prompt")
-    @patch("getpatter.handlers.twilio_handler.fetch_deepgram_cost", new_callable=AsyncMock)
+    @patch(
+        "getpatter.handlers.twilio_handler.resolve_agent_prompt", return_value="prompt"
+    )
+    @patch(
+        "getpatter.handlers.twilio_handler.fetch_deepgram_cost", new_callable=AsyncMock
+    )
     @patch("getpatter.services.transcoding.pcm16_to_mulaw", lambda x: x, create=True)
-    @patch("getpatter.services.transcoding.resample_16k_to_8k", lambda x: x, create=True)
+    @patch(
+        "getpatter.services.transcoding.resample_16k_to_8k", lambda x: x, create=True
+    )
     async def test_start_then_stop_fires_callbacks(
         self,
         mock_fetch_dg,
@@ -118,7 +123,7 @@ class TestTwilioStreamBridgeLifecycle:
         )
 
         ws.accept.assert_awaited_once()
-        mock_handler.start.assert_awaited_once()
+        mock_handler._run_with_scope.assert_awaited_once()
         mock_handler.cleanup.assert_awaited_once()
         on_call_start.assert_awaited_once()
         on_call_end.assert_awaited_once()
@@ -126,10 +131,16 @@ class TestTwilioStreamBridgeLifecycle:
     @pytest.mark.asyncio
     @patch("getpatter.handlers.twilio_handler.PipelineStreamHandler")
     @patch("getpatter.handlers.twilio_handler.create_metrics_accumulator")
-    @patch("getpatter.handlers.twilio_handler.resolve_agent_prompt", return_value="prompt")
-    @patch("getpatter.handlers.twilio_handler.fetch_deepgram_cost", new_callable=AsyncMock)
+    @patch(
+        "getpatter.handlers.twilio_handler.resolve_agent_prompt", return_value="prompt"
+    )
+    @patch(
+        "getpatter.handlers.twilio_handler.fetch_deepgram_cost", new_callable=AsyncMock
+    )
     @patch("getpatter.services.transcoding.pcm16_to_mulaw", lambda x: x, create=True)
-    @patch("getpatter.services.transcoding.resample_16k_to_8k", lambda x: x, create=True)
+    @patch(
+        "getpatter.services.transcoding.resample_16k_to_8k", lambda x: x, create=True
+    )
     async def test_pipeline_provider_creates_pipeline_handler(
         self,
         mock_fetch_dg,
@@ -154,15 +165,21 @@ class TestTwilioStreamBridgeLifecycle:
         )
 
         mock_handler_cls.assert_called_once()
-        mock_handler.start.assert_awaited_once()
+        mock_handler._run_with_scope.assert_awaited_once()
 
     @pytest.mark.asyncio
     @patch("getpatter.handlers.twilio_handler.ElevenLabsConvAIStreamHandler")
     @patch("getpatter.handlers.twilio_handler.create_metrics_accumulator")
-    @patch("getpatter.handlers.twilio_handler.resolve_agent_prompt", return_value="prompt")
-    @patch("getpatter.handlers.twilio_handler.fetch_deepgram_cost", new_callable=AsyncMock)
+    @patch(
+        "getpatter.handlers.twilio_handler.resolve_agent_prompt", return_value="prompt"
+    )
+    @patch(
+        "getpatter.handlers.twilio_handler.fetch_deepgram_cost", new_callable=AsyncMock
+    )
     @patch("getpatter.services.transcoding.pcm16_to_mulaw", lambda x: x, create=True)
-    @patch("getpatter.services.transcoding.resample_16k_to_8k", lambda x: x, create=True)
+    @patch(
+        "getpatter.services.transcoding.resample_16k_to_8k", lambda x: x, create=True
+    )
     async def test_elevenlabs_provider_creates_convai_handler(
         self,
         mock_fetch_dg,
@@ -192,10 +209,16 @@ class TestTwilioStreamBridgeLifecycle:
     @pytest.mark.asyncio
     @patch("getpatter.handlers.twilio_handler.OpenAIRealtimeStreamHandler")
     @patch("getpatter.handlers.twilio_handler.create_metrics_accumulator")
-    @patch("getpatter.handlers.twilio_handler.resolve_agent_prompt", return_value="prompt")
-    @patch("getpatter.handlers.twilio_handler.fetch_deepgram_cost", new_callable=AsyncMock)
+    @patch(
+        "getpatter.handlers.twilio_handler.resolve_agent_prompt", return_value="prompt"
+    )
+    @patch(
+        "getpatter.handlers.twilio_handler.fetch_deepgram_cost", new_callable=AsyncMock
+    )
     @patch("getpatter.services.transcoding.pcm16_to_mulaw", lambda x: x, create=True)
-    @patch("getpatter.services.transcoding.resample_16k_to_8k", lambda x: x, create=True)
+    @patch(
+        "getpatter.services.transcoding.resample_16k_to_8k", lambda x: x, create=True
+    )
     async def test_media_event_forwards_audio_to_handler(
         self,
         mock_fetch_dg,
@@ -225,10 +248,16 @@ class TestTwilioStreamBridgeLifecycle:
     @pytest.mark.asyncio
     @patch("getpatter.handlers.twilio_handler.OpenAIRealtimeStreamHandler")
     @patch("getpatter.handlers.twilio_handler.create_metrics_accumulator")
-    @patch("getpatter.handlers.twilio_handler.resolve_agent_prompt", return_value="prompt")
-    @patch("getpatter.handlers.twilio_handler.fetch_deepgram_cost", new_callable=AsyncMock)
+    @patch(
+        "getpatter.handlers.twilio_handler.resolve_agent_prompt", return_value="prompt"
+    )
+    @patch(
+        "getpatter.handlers.twilio_handler.fetch_deepgram_cost", new_callable=AsyncMock
+    )
     @patch("getpatter.services.transcoding.pcm16_to_mulaw", lambda x: x, create=True)
-    @patch("getpatter.services.transcoding.resample_16k_to_8k", lambda x: x, create=True)
+    @patch(
+        "getpatter.services.transcoding.resample_16k_to_8k", lambda x: x, create=True
+    )
     async def test_dtmf_event_calls_handler_and_transcript(
         self,
         mock_fetch_dg,
@@ -263,10 +292,16 @@ class TestTwilioStreamBridgeLifecycle:
     @pytest.mark.asyncio
     @patch("getpatter.handlers.twilio_handler.OpenAIRealtimeStreamHandler")
     @patch("getpatter.handlers.twilio_handler.create_metrics_accumulator")
-    @patch("getpatter.handlers.twilio_handler.resolve_agent_prompt", return_value="prompt")
-    @patch("getpatter.handlers.twilio_handler.fetch_deepgram_cost", new_callable=AsyncMock)
+    @patch(
+        "getpatter.handlers.twilio_handler.resolve_agent_prompt", return_value="prompt"
+    )
+    @patch(
+        "getpatter.handlers.twilio_handler.fetch_deepgram_cost", new_callable=AsyncMock
+    )
     @patch("getpatter.services.transcoding.pcm16_to_mulaw", lambda x: x, create=True)
-    @patch("getpatter.services.transcoding.resample_16k_to_8k", lambda x: x, create=True)
+    @patch(
+        "getpatter.services.transcoding.resample_16k_to_8k", lambda x: x, create=True
+    )
     async def test_mark_event_calls_on_mark(
         self,
         mock_fetch_dg,
@@ -295,10 +330,16 @@ class TestTwilioStreamBridgeLifecycle:
     @pytest.mark.asyncio
     @patch("getpatter.handlers.twilio_handler.OpenAIRealtimeStreamHandler")
     @patch("getpatter.handlers.twilio_handler.create_metrics_accumulator")
-    @patch("getpatter.handlers.twilio_handler.resolve_agent_prompt", return_value="prompt")
-    @patch("getpatter.handlers.twilio_handler.fetch_deepgram_cost", new_callable=AsyncMock)
+    @patch(
+        "getpatter.handlers.twilio_handler.resolve_agent_prompt", return_value="prompt"
+    )
+    @patch(
+        "getpatter.handlers.twilio_handler.fetch_deepgram_cost", new_callable=AsyncMock
+    )
     @patch("getpatter.services.transcoding.pcm16_to_mulaw", lambda x: x, create=True)
-    @patch("getpatter.services.transcoding.resample_16k_to_8k", lambda x: x, create=True)
+    @patch(
+        "getpatter.services.transcoding.resample_16k_to_8k", lambda x: x, create=True
+    )
     async def test_oversized_message_dropped(
         self,
         mock_fetch_dg,
@@ -306,7 +347,10 @@ class TestTwilioStreamBridgeLifecycle:
         mock_create_metrics,
         mock_handler_cls,
     ) -> None:
-        from getpatter.handlers.twilio_handler import twilio_stream_bridge, _MAX_WS_MESSAGE_BYTES
+        from getpatter.handlers.twilio_handler import (
+            twilio_stream_bridge,
+            _MAX_WS_MESSAGE_BYTES,
+        )
 
         # Send an oversized message then stop
         huge_msg = "x" * (_MAX_WS_MESSAGE_BYTES + 1)
@@ -330,10 +374,16 @@ class TestTwilioStreamBridgeLifecycle:
     @pytest.mark.asyncio
     @patch("getpatter.handlers.twilio_handler.OpenAIRealtimeStreamHandler")
     @patch("getpatter.handlers.twilio_handler.create_metrics_accumulator")
-    @patch("getpatter.handlers.twilio_handler.resolve_agent_prompt", return_value="prompt")
-    @patch("getpatter.handlers.twilio_handler.fetch_deepgram_cost", new_callable=AsyncMock)
+    @patch(
+        "getpatter.handlers.twilio_handler.resolve_agent_prompt", return_value="prompt"
+    )
+    @patch(
+        "getpatter.handlers.twilio_handler.fetch_deepgram_cost", new_callable=AsyncMock
+    )
     @patch("getpatter.services.transcoding.pcm16_to_mulaw", lambda x: x, create=True)
-    @patch("getpatter.services.transcoding.resample_16k_to_8k", lambda x: x, create=True)
+    @patch(
+        "getpatter.services.transcoding.resample_16k_to_8k", lambda x: x, create=True
+    )
     async def test_call_overrides_applied(
         self,
         mock_fetch_dg,
@@ -354,7 +404,9 @@ class TestTwilioStreamBridgeLifecycle:
         # Return overrides from on_call_start
         on_call_start = AsyncMock(return_value={"voice": "nova"})
 
-        with patch("getpatter.handlers.twilio_handler.apply_call_overrides") as mock_apply:
+        with patch(
+            "getpatter.handlers.twilio_handler.apply_call_overrides"
+        ) as mock_apply:
             mock_apply.return_value = make_agent(voice="nova")
             await twilio_stream_bridge(
                 websocket=ws,
@@ -368,10 +420,16 @@ class TestTwilioStreamBridgeLifecycle:
     @pytest.mark.asyncio
     @patch("getpatter.handlers.twilio_handler.OpenAIRealtimeStreamHandler")
     @patch("getpatter.handlers.twilio_handler.create_metrics_accumulator")
-    @patch("getpatter.handlers.twilio_handler.resolve_agent_prompt", return_value="prompt")
-    @patch("getpatter.handlers.twilio_handler.fetch_deepgram_cost", new_callable=AsyncMock)
+    @patch(
+        "getpatter.handlers.twilio_handler.resolve_agent_prompt", return_value="prompt"
+    )
+    @patch(
+        "getpatter.handlers.twilio_handler.fetch_deepgram_cost", new_callable=AsyncMock
+    )
     @patch("getpatter.services.transcoding.pcm16_to_mulaw", lambda x: x, create=True)
-    @patch("getpatter.services.transcoding.resample_16k_to_8k", lambda x: x, create=True)
+    @patch(
+        "getpatter.services.transcoding.resample_16k_to_8k", lambda x: x, create=True
+    )
     async def test_metrics_finalized_on_end(
         self,
         mock_fetch_dg,
@@ -417,10 +475,16 @@ class TestTwilioRecording:
     @pytest.mark.asyncio
     @patch("getpatter.handlers.twilio_handler.OpenAIRealtimeStreamHandler")
     @patch("getpatter.handlers.twilio_handler.create_metrics_accumulator")
-    @patch("getpatter.handlers.twilio_handler.resolve_agent_prompt", return_value="prompt")
-    @patch("getpatter.handlers.twilio_handler.fetch_deepgram_cost", new_callable=AsyncMock)
+    @patch(
+        "getpatter.handlers.twilio_handler.resolve_agent_prompt", return_value="prompt"
+    )
+    @patch(
+        "getpatter.handlers.twilio_handler.fetch_deepgram_cost", new_callable=AsyncMock
+    )
     @patch("getpatter.services.transcoding.pcm16_to_mulaw", lambda x: x, create=True)
-    @patch("getpatter.services.transcoding.resample_16k_to_8k", lambda x: x, create=True)
+    @patch(
+        "getpatter.services.transcoding.resample_16k_to_8k", lambda x: x, create=True
+    )
     async def test_recording_posts_to_twilio_api(
         self,
         mock_fetch_dg,
@@ -457,10 +521,16 @@ class TestTwilioRecording:
     @pytest.mark.asyncio
     @patch("getpatter.handlers.twilio_handler.OpenAIRealtimeStreamHandler")
     @patch("getpatter.handlers.twilio_handler.create_metrics_accumulator")
-    @patch("getpatter.handlers.twilio_handler.resolve_agent_prompt", return_value="prompt")
-    @patch("getpatter.handlers.twilio_handler.fetch_deepgram_cost", new_callable=AsyncMock)
+    @patch(
+        "getpatter.handlers.twilio_handler.resolve_agent_prompt", return_value="prompt"
+    )
+    @patch(
+        "getpatter.handlers.twilio_handler.fetch_deepgram_cost", new_callable=AsyncMock
+    )
     @patch("getpatter.services.transcoding.pcm16_to_mulaw", lambda x: x, create=True)
-    @patch("getpatter.services.transcoding.resample_16k_to_8k", lambda x: x, create=True)
+    @patch(
+        "getpatter.services.transcoding.resample_16k_to_8k", lambda x: x, create=True
+    )
     async def test_recording_skipped_for_invalid_call_sid(
         self,
         mock_fetch_dg,
@@ -491,4 +561,4 @@ class TestTwilioRecording:
         )
 
         # Handler should still be created and started
-        mock_handler.start.assert_awaited_once()
+        mock_handler._run_with_scope.assert_awaited_once()

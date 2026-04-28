@@ -32,7 +32,11 @@ def _stream_started_message(
 ) -> str:
     return _ws_message(
         "start",
-        start={"call_control_id": call_control_id, "from": "+15551111111", "to": "+15552222222"},
+        start={
+            "call_control_id": call_control_id,
+            "from": "+15551111111",
+            "to": "+15552222222",
+        },
     )
 
 
@@ -69,8 +73,12 @@ class TestTelnyxStreamBridgeLifecycle:
     @pytest.mark.asyncio
     @patch("getpatter.handlers.telnyx_handler.OpenAIRealtimeStreamHandler")
     @patch("getpatter.handlers.telnyx_handler.create_metrics_accumulator")
-    @patch("getpatter.handlers.telnyx_handler.resolve_agent_prompt", return_value="prompt")
-    @patch("getpatter.handlers.telnyx_handler.fetch_deepgram_cost", new_callable=AsyncMock)
+    @patch(
+        "getpatter.handlers.telnyx_handler.resolve_agent_prompt", return_value="prompt"
+    )
+    @patch(
+        "getpatter.handlers.telnyx_handler.fetch_deepgram_cost", new_callable=AsyncMock
+    )
     async def test_start_then_stop_fires_callbacks(
         self,
         mock_fetch_dg,
@@ -103,7 +111,7 @@ class TestTelnyxStreamBridgeLifecycle:
         )
 
         ws.accept.assert_awaited_once()
-        mock_handler.start.assert_awaited_once()
+        mock_handler._run_with_scope.assert_awaited_once()
         mock_handler.cleanup.assert_awaited_once()
         on_call_start.assert_awaited_once()
         on_call_end.assert_awaited_once()
@@ -111,8 +119,12 @@ class TestTelnyxStreamBridgeLifecycle:
     @pytest.mark.asyncio
     @patch("getpatter.handlers.telnyx_handler.PipelineStreamHandler")
     @patch("getpatter.handlers.telnyx_handler.create_metrics_accumulator")
-    @patch("getpatter.handlers.telnyx_handler.resolve_agent_prompt", return_value="prompt")
-    @patch("getpatter.handlers.telnyx_handler.fetch_deepgram_cost", new_callable=AsyncMock)
+    @patch(
+        "getpatter.handlers.telnyx_handler.resolve_agent_prompt", return_value="prompt"
+    )
+    @patch(
+        "getpatter.handlers.telnyx_handler.fetch_deepgram_cost", new_callable=AsyncMock
+    )
     async def test_pipeline_provider_creates_pipeline_handler(
         self,
         mock_fetch_dg,
@@ -137,13 +149,17 @@ class TestTelnyxStreamBridgeLifecycle:
         )
 
         mock_handler_cls.assert_called_once()
-        mock_handler.start.assert_awaited_once()
+        mock_handler._run_with_scope.assert_awaited_once()
 
     @pytest.mark.asyncio
     @patch("getpatter.handlers.telnyx_handler.ElevenLabsConvAIStreamHandler")
     @patch("getpatter.handlers.telnyx_handler.create_metrics_accumulator")
-    @patch("getpatter.handlers.telnyx_handler.resolve_agent_prompt", return_value="prompt")
-    @patch("getpatter.handlers.telnyx_handler.fetch_deepgram_cost", new_callable=AsyncMock)
+    @patch(
+        "getpatter.handlers.telnyx_handler.resolve_agent_prompt", return_value="prompt"
+    )
+    @patch(
+        "getpatter.handlers.telnyx_handler.fetch_deepgram_cost", new_callable=AsyncMock
+    )
     async def test_elevenlabs_provider_creates_convai_handler(
         self,
         mock_fetch_dg,
@@ -173,8 +189,12 @@ class TestTelnyxStreamBridgeLifecycle:
     @pytest.mark.asyncio
     @patch("getpatter.handlers.telnyx_handler.OpenAIRealtimeStreamHandler")
     @patch("getpatter.handlers.telnyx_handler.create_metrics_accumulator")
-    @patch("getpatter.handlers.telnyx_handler.resolve_agent_prompt", return_value="prompt")
-    @patch("getpatter.handlers.telnyx_handler.fetch_deepgram_cost", new_callable=AsyncMock)
+    @patch(
+        "getpatter.handlers.telnyx_handler.resolve_agent_prompt", return_value="prompt"
+    )
+    @patch(
+        "getpatter.handlers.telnyx_handler.fetch_deepgram_cost", new_callable=AsyncMock
+    )
     async def test_media_event_forwards_audio(
         self,
         mock_fetch_dg,
@@ -185,7 +205,11 @@ class TestTelnyxStreamBridgeLifecycle:
         from getpatter.handlers.telnyx_handler import telnyx_stream_bridge
 
         audio_bytes = b"\x00\x01" * 320
-        messages = [_stream_started_message(), _media_message(audio_bytes), _stream_stopped_message()]
+        messages = [
+            _stream_started_message(),
+            _media_message(audio_bytes),
+            _stream_stopped_message(),
+        ]
         ws = _make_mock_ws(messages)
 
         mock_handler = AsyncMock()
@@ -204,8 +228,12 @@ class TestTelnyxStreamBridgeLifecycle:
     @pytest.mark.asyncio
     @patch("getpatter.handlers.telnyx_handler.OpenAIRealtimeStreamHandler")
     @patch("getpatter.handlers.telnyx_handler.create_metrics_accumulator")
-    @patch("getpatter.handlers.telnyx_handler.resolve_agent_prompt", return_value="prompt")
-    @patch("getpatter.handlers.telnyx_handler.fetch_deepgram_cost", new_callable=AsyncMock)
+    @patch(
+        "getpatter.handlers.telnyx_handler.resolve_agent_prompt", return_value="prompt"
+    )
+    @patch(
+        "getpatter.handlers.telnyx_handler.fetch_deepgram_cost", new_callable=AsyncMock
+    )
     async def test_empty_audio_chunk_skipped(
         self,
         mock_fetch_dg,
@@ -216,10 +244,12 @@ class TestTelnyxStreamBridgeLifecycle:
         from getpatter.handlers.telnyx_handler import telnyx_stream_bridge
 
         # Empty audio chunk
-        empty_media = json.dumps({
-            "event_type": "media",
-            "payload": {"audio": {"chunk": ""}},
-        })
+        empty_media = json.dumps(
+            {
+                "event_type": "media",
+                "payload": {"audio": {"chunk": ""}},
+            }
+        )
         messages = [_stream_started_message(), empty_media, _stream_stopped_message()]
         ws = _make_mock_ws(messages)
 
@@ -239,8 +269,12 @@ class TestTelnyxStreamBridgeLifecycle:
     @pytest.mark.asyncio
     @patch("getpatter.handlers.telnyx_handler.OpenAIRealtimeStreamHandler")
     @patch("getpatter.handlers.telnyx_handler.create_metrics_accumulator")
-    @patch("getpatter.handlers.telnyx_handler.resolve_agent_prompt", return_value="prompt")
-    @patch("getpatter.handlers.telnyx_handler.fetch_deepgram_cost", new_callable=AsyncMock)
+    @patch(
+        "getpatter.handlers.telnyx_handler.resolve_agent_prompt", return_value="prompt"
+    )
+    @patch(
+        "getpatter.handlers.telnyx_handler.fetch_deepgram_cost", new_callable=AsyncMock
+    )
     async def test_oversized_message_dropped(
         self,
         mock_fetch_dg,
@@ -248,7 +282,10 @@ class TestTelnyxStreamBridgeLifecycle:
         mock_create_metrics,
         mock_handler_cls,
     ) -> None:
-        from getpatter.handlers.telnyx_handler import telnyx_stream_bridge, _MAX_WS_MESSAGE_BYTES
+        from getpatter.handlers.telnyx_handler import (
+            telnyx_stream_bridge,
+            _MAX_WS_MESSAGE_BYTES,
+        )
 
         huge_msg = "x" * (_MAX_WS_MESSAGE_BYTES + 1)
         messages = [_stream_started_message(), huge_msg, _stream_stopped_message()]
@@ -270,8 +307,12 @@ class TestTelnyxStreamBridgeLifecycle:
     @pytest.mark.asyncio
     @patch("getpatter.handlers.telnyx_handler.OpenAIRealtimeStreamHandler")
     @patch("getpatter.handlers.telnyx_handler.create_metrics_accumulator")
-    @patch("getpatter.handlers.telnyx_handler.resolve_agent_prompt", return_value="prompt")
-    @patch("getpatter.handlers.telnyx_handler.fetch_deepgram_cost", new_callable=AsyncMock)
+    @patch(
+        "getpatter.handlers.telnyx_handler.resolve_agent_prompt", return_value="prompt"
+    )
+    @patch(
+        "getpatter.handlers.telnyx_handler.fetch_deepgram_cost", new_callable=AsyncMock
+    )
     async def test_metrics_finalized_on_end(
         self,
         mock_fetch_dg,
@@ -306,8 +347,12 @@ class TestTelnyxStreamBridgeLifecycle:
     @pytest.mark.asyncio
     @patch("getpatter.handlers.telnyx_handler.OpenAIRealtimeStreamHandler")
     @patch("getpatter.handlers.telnyx_handler.create_metrics_accumulator")
-    @patch("getpatter.handlers.telnyx_handler.resolve_agent_prompt", return_value="prompt")
-    @patch("getpatter.handlers.telnyx_handler.fetch_deepgram_cost", new_callable=AsyncMock)
+    @patch(
+        "getpatter.handlers.telnyx_handler.resolve_agent_prompt", return_value="prompt"
+    )
+    @patch(
+        "getpatter.handlers.telnyx_handler.fetch_deepgram_cost", new_callable=AsyncMock
+    )
     async def test_call_overrides_applied(
         self,
         mock_fetch_dg,
@@ -327,7 +372,9 @@ class TestTelnyxStreamBridgeLifecycle:
 
         on_call_start = AsyncMock(return_value={"voice": "nova"})
 
-        with patch("getpatter.handlers.telnyx_handler.apply_call_overrides") as mock_apply:
+        with patch(
+            "getpatter.handlers.telnyx_handler.apply_call_overrides"
+        ) as mock_apply:
             mock_apply.return_value = make_agent(voice="nova")
             await telnyx_stream_bridge(
                 websocket=ws,
@@ -341,8 +388,12 @@ class TestTelnyxStreamBridgeLifecycle:
     @pytest.mark.asyncio
     @patch("getpatter.handlers.telnyx_handler.OpenAIRealtimeStreamHandler")
     @patch("getpatter.handlers.telnyx_handler.create_metrics_accumulator")
-    @patch("getpatter.handlers.telnyx_handler.resolve_agent_prompt", return_value="prompt")
-    @patch("getpatter.handlers.telnyx_handler.fetch_deepgram_cost", new_callable=AsyncMock)
+    @patch(
+        "getpatter.handlers.telnyx_handler.resolve_agent_prompt", return_value="prompt"
+    )
+    @patch(
+        "getpatter.handlers.telnyx_handler.fetch_deepgram_cost", new_callable=AsyncMock
+    )
     async def test_openai_realtime_uses_g711_ulaw_format(
         self,
         mock_fetch_dg,

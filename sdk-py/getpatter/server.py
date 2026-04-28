@@ -155,7 +155,11 @@ class EmbeddedServer:
                 "voice": getattr(agent, "voice", None),
                 "language": getattr(agent, "language", None),
             }
-            if getattr(agent, "stt", None) is not None and getattr(agent, "tts", None) is not None and engine is None:
+            if (
+                getattr(agent, "stt", None) is not None
+                and getattr(agent, "tts", None) is not None
+                and engine is None
+            ):
                 snapshot["mode"] = "pipeline"
             return {k: v for k, v in snapshot.items() if v is not None}
 
@@ -168,6 +172,7 @@ class EmbeddedServer:
             # the dashboard is offline (~1s connect timeout).
             try:
                 from getpatter.dashboard.persistence import notify_dashboard
+
                 asyncio.create_task(notify_dashboard(data))
             except Exception:
                 pass
@@ -193,6 +198,7 @@ class EmbeddedServer:
             # dashboard responsiveness.
             try:
                 from getpatter.dashboard.persistence import notify_dashboard
+
                 asyncio.create_task(notify_dashboard(data))
             except Exception:
                 pass
@@ -200,7 +206,11 @@ class EmbeddedServer:
                 from dataclasses import asdict, is_dataclass
 
                 metrics_obj = data.get("metrics")
-                duration = getattr(metrics_obj, "duration_seconds", None) if metrics_obj else None
+                duration = (
+                    getattr(metrics_obj, "duration_seconds", None)
+                    if metrics_obj
+                    else None
+                )
                 cost_obj = getattr(metrics_obj, "cost", None) if metrics_obj else None
                 cost_dict = asdict(cost_obj) if is_dataclass(cost_obj) else None
                 latency_dict = None
@@ -214,7 +224,9 @@ class EmbeddedServer:
                         "p99_ms": getattr(p99, "total_ms", None) if p99 else None,
                     }
                 turns_count = (
-                    len(getattr(metrics_obj, "turns", []) or []) if metrics_obj else None
+                    len(getattr(metrics_obj, "turns", []) or [])
+                    if metrics_obj
+                    else None
                 )
                 await alog_call_end(
                     call_logger,
@@ -261,6 +273,7 @@ class EmbeddedServer:
             from getpatter.dashboard.routes import mount_dashboard
 
             from getpatter.dashboard.store import MetricsStore
+
             self._metrics_store = MetricsStore()
 
             # Hydrate the dashboard from disk so /api/dashboard/calls survives
@@ -287,6 +300,7 @@ class EmbeddedServer:
             mount_dashboard(app, self._metrics_store, token=self.dashboard_token)
 
             from getpatter.api_routes import mount_api
+
             mount_api(app, self._metrics_store, token=self.dashboard_token)
 
         @app.get("/health")
@@ -304,7 +318,9 @@ class EmbeddedServer:
             returns a 503 Response — safety-first posture requires an
             explicit opt-out to accept unsigned webhooks.
             """
-            if not self.config.twilio_token and getattr(self.config, "require_signature", True):
+            if not self.config.twilio_token and getattr(
+                self.config, "require_signature", True
+            ):
                 logger.error(
                     "Twilio webhook rejected: twilio_token not configured and "
                     "require_signature=True. Set twilio_token, or explicitly "
@@ -325,7 +341,9 @@ class EmbeddedServer:
                         "Install with: pip install 'getpatter[local]' or "
                         "`pip install twilio`."
                     )
-                    return Response(status_code=503, content="Signature validator unavailable")
+                    return Response(
+                        status_code=503, content="Signature validator unavailable"
+                    )
                 form_data = await request.form()
                 validator = RequestValidator(self.config.twilio_token)
                 # Use request.url verbatim when it carries .path / .query
@@ -428,10 +446,15 @@ class EmbeddedServer:
                 and self.config.twilio_sid
                 and self.config.twilio_token
             ):
-                from getpatter.handlers.twilio_handler import _xml_escape, _validate_twilio_sid
+                from getpatter.handlers.twilio_handler import (
+                    _xml_escape,
+                    _validate_twilio_sid,
+                )
 
                 if not _validate_twilio_sid(call_sid, "CA"):
-                    logger.warning("AMD callback: invalid CallSid format %r, ignoring", call_sid)
+                    logger.warning(
+                        "AMD callback: invalid CallSid format %r, ignoring", call_sid
+                    )
                     return Response(content="", status_code=204)
 
                 import httpx as _httpx
@@ -471,6 +494,7 @@ class EmbeddedServer:
                     on_metrics=_metrics,
                     pricing=self.pricing,
                     report_only_initial_ttfb=self.config.report_only_initial_ttfb,
+                    patter_side=getattr(self, "_patter_side", "uut"),
                 )
             finally:
                 self._active_connections.discard(websocket)
@@ -485,8 +509,12 @@ class EmbeddedServer:
             if telnyx_public_key:
                 signature = request.headers.get("telnyx-signature-ed25519", "")
                 timestamp = request.headers.get("telnyx-timestamp", "")
-                if not _validate_telnyx_signature(raw_body, signature, timestamp, telnyx_public_key):
-                    logger.warning("Telnyx webhook rejected: invalid or missing Ed25519 signature")
+                if not _validate_telnyx_signature(
+                    raw_body, signature, timestamp, telnyx_public_key
+                ):
+                    logger.warning(
+                        "Telnyx webhook rejected: invalid or missing Ed25519 signature"
+                    )
                     return Response(status_code=403, content="Invalid signature")
             elif require_sig:
                 logger.error(
@@ -502,12 +530,17 @@ class EmbeddedServer:
                     "Set telnyx_public_key in LocalConfig for production use."
                 )
             import json as _json
+
             try:
                 body = _json.loads(raw_body)
             except (ValueError, TypeError):
                 return Response(status_code=400, content="Invalid JSON body")
-            if not isinstance(body.get("data"), dict) or not isinstance(body.get("data", {}).get("payload"), dict):
-                logger.warning("Telnyx webhook rejected: missing data.payload structure.")
+            if not isinstance(body.get("data"), dict) or not isinstance(
+                body.get("data", {}).get("payload"), dict
+            ):
+                logger.warning(
+                    "Telnyx webhook rejected: missing data.payload structure."
+                )
                 return Response(status_code=400, content="Invalid webhook structure")
             data = body["data"]
             event_type = data.get("event_type", "")
@@ -529,6 +562,7 @@ class EmbeddedServer:
                 return Response(status_code=500, content="Missing Telnyx API key")
 
             import httpx as _httpx
+
             api_base = "https://api.telnyx.com/v2"
             auth_headers = {"Authorization": f"Bearer {api_key}"}
 
@@ -554,6 +588,7 @@ class EmbeddedServer:
                     # round-trip and a second POST (~100-200 ms saved per
                     # inbound call).
                     from urllib.parse import quote as _quote
+
                     stream_url = (
                         f"wss://{self.config.webhook_url}/ws/telnyx/stream/{_quote(call_control_id, safe='')}"
                         f"?caller={_quote(caller)}&callee={_quote(callee)}"
@@ -579,7 +614,11 @@ class EmbeddedServer:
                             },
                         )
                         if resp.status_code >= 400:
-                            logger.warning("Telnyx answer failed: %s %s", resp.status_code, resp.text)
+                            logger.warning(
+                                "Telnyx answer failed: %s %s",
+                                resp.status_code,
+                                resp.text,
+                            )
                 elif event_type == "call.answered":
                     # No-op: ``call.initiated`` already submitted answer +
                     # streaming_start in a single call. Telnyx still emits
@@ -601,6 +640,7 @@ class EmbeddedServer:
                     )
                     if self.voicemail_message:
                         from getpatter.handlers.telnyx_handler import handle_amd_result
+
                         await handle_amd_result(
                             call_control_id=call_control_id,
                             result=amd_result,
@@ -634,6 +674,7 @@ class EmbeddedServer:
                     on_metrics=_metrics,
                     pricing=self.pricing,
                     report_only_initial_ttfb=self.config.report_only_initial_ttfb,
+                    patter_side=getattr(self, "_patter_side", "uut"),
                 )
             finally:
                 self._active_connections.discard(websocket)
@@ -667,9 +708,7 @@ class EmbeddedServer:
                     account_sid=self.config.twilio_sid,
                     auth_token=self.config.twilio_token,
                 )
-                webhook_url = (
-                    f"https://{self.config.webhook_url}/webhooks/twilio/voice"
-                )
+                webhook_url = f"https://{self.config.webhook_url}/webhooks/twilio/voice"
                 await adapter.configure_number(self.config.phone_number, webhook_url)
                 logger.info("Twilio webhook set to %s", webhook_url)
             except Exception as exc:
@@ -695,7 +734,9 @@ class EmbeddedServer:
                     "Twilio webhook enforcement ACTIVE but twilio_token is empty "
                     "— webhooks will 503. Set require_signature=False for local dev."
                 )
-            if provider == "telnyx" and not getattr(self.config, "telnyx_public_key", ""):
+            if provider == "telnyx" and not getattr(
+                self.config, "telnyx_public_key", ""
+            ):
                 logger.warning(
                     "Telnyx webhook enforcement ACTIVE but telnyx_public_key is empty "
                     "— webhooks will 503. Set require_signature=False for local dev."
@@ -704,11 +745,7 @@ class EmbeddedServer:
         # is calibrated for gpt-4o-mini-realtime-preview. Other models differ
         # by 3-10x so cost display would under-report without an override.
         model = self.agent.model or ""
-        if (
-            model
-            and model != "gpt-4o-mini-realtime-preview"
-            and "realtime" in model
-        ):
+        if model and model != "gpt-4o-mini-realtime-preview" and "realtime" in model:
             # Dev-supplied string — sanitize to avoid ANSI/log-injection in
             # the startup warning, matching TS parity.
             logger.warning(
@@ -738,9 +775,7 @@ class EmbeddedServer:
         # but keep request logs (INFO level) visible
         logging.getLogger("uvicorn.error").setLevel(logging.WARNING)
 
-        config = uvicorn.Config(
-            app, host="127.0.0.1", port=port, log_level="info"
-        )
+        config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="info")
         self._server = uvicorn.Server(config)
 
         # Register signal handlers for graceful shutdown
@@ -760,7 +795,10 @@ class EmbeddedServer:
             return
         self._shutting_down = True
 
-        logger.info("Graceful shutdown initiated — closing %d active connection(s)", len(self._active_connections))
+        logger.info(
+            "Graceful shutdown initiated — closing %d active connection(s)",
+            len(self._active_connections),
+        )
 
         # Signal all active WebSocket connections to close
         for ws in list(self._active_connections):

@@ -55,11 +55,26 @@ logger = logging.getLogger("getpatter")
 # emit when fed silence or TTS echo on mulaw 8 kHz. Dropping them as turns
 # prevents the caller from entering a feedback loop where every silent frame
 # triggers a new LLM+TTS turn. Parity with TS ``HALLUCINATIONS``.
-_STT_HALLUCINATIONS: frozenset[str] = frozenset({
-    "you", "thank you", "thanks", "yeah", "yes", "no",
-    "okay", "ok", "uh", "um", "mmm", "hmm", ".", "bye",
-    "right", "cool",
-})
+_STT_HALLUCINATIONS: frozenset[str] = frozenset(
+    {
+        "you",
+        "thank you",
+        "thanks",
+        "yeah",
+        "yes",
+        "no",
+        "okay",
+        "ok",
+        "uh",
+        "um",
+        "mmm",
+        "hmm",
+        ".",
+        "bye",
+        "right",
+        "cool",
+    }
+)
 
 
 TRANSFER_CALL_TOOL: dict = {
@@ -96,6 +111,7 @@ END_CALL_TOOL: dict = {
 # Audio sender protocol — abstracts Twilio vs Telnyx audio output
 # ---------------------------------------------------------------------------
 
+
 class AudioSender(ABC):
     """Protocol for sending audio back to a telephony WebSocket."""
 
@@ -131,6 +147,7 @@ class AudioSender(ABC):
 # Shared helpers
 # ---------------------------------------------------------------------------
 
+
 def resolve_agent_prompt(agent, custom_params: dict | None = None) -> str:
     """Resolve dynamic variables in the agent's system prompt."""
     resolved = agent.system_prompt
@@ -146,11 +163,22 @@ def resolve_agent_prompt(agent, custom_params: dict | None = None) -> str:
 
 def apply_call_overrides(agent, overrides: dict):
     """Return a new Agent with per-call config overrides applied."""
-    from getpatter.models import Agent as _Agent, STTConfig as _STTCfg, TTSConfig as _TTSCfg
+    from getpatter.models import (
+        Agent as _Agent,
+        STTConfig as _STTCfg,
+        TTSConfig as _TTSCfg,
+    )
     from dataclasses import asdict
 
     fields: dict = {}
-    for k in ("system_prompt", "voice", "model", "language", "first_message", "provider"):
+    for k in (
+        "system_prompt",
+        "voice",
+        "model",
+        "language",
+        "first_message",
+        "provider",
+    ):
         if k in overrides:
             fields[k] = overrides[k]
     if "stt_config" in overrides and isinstance(overrides["stt_config"], dict):
@@ -189,16 +217,14 @@ def create_metrics_accumulator(
         # wrapper classes (stable, matches ``pricing.py`` keys); fall
         # back to the legacy ``provider`` instance attribute.
         if agent.stt is not None:
-            stt_name = (
-                getattr(type(agent.stt), "provider_key", None)
-                or getattr(agent.stt, "provider", "")
+            stt_name = getattr(type(agent.stt), "provider_key", None) or getattr(
+                agent.stt, "provider", ""
             )
         else:
             stt_name = "deepgram" if deepgram_key else ""
         if agent.tts is not None:
-            tts_name = (
-                getattr(type(agent.tts), "provider_key", None)
-                or getattr(agent.tts, "provider", "")
+            tts_name = getattr(type(agent.tts), "provider_key", None) or getattr(
+                agent.tts, "provider", ""
             )
         else:
             tts_name = "elevenlabs" if elevenlabs_key else ""
@@ -250,18 +276,34 @@ def evaluate_guardrails(agent, response_text: str) -> tuple[bool, str]:
     guardrails = getattr(agent, "guardrails", None) or []
     for guard in guardrails:
         blocked = False
-        blocked_terms = guard.get("blocked_terms") if isinstance(guard, dict) else getattr(guard, "blocked_terms", None)
-        check_fn = guard.get("check") if isinstance(guard, dict) else getattr(guard, "check", None)
-        guard_name = guard.get("name") if isinstance(guard, dict) else getattr(guard, "name", "unnamed")
+        blocked_terms = (
+            guard.get("blocked_terms")
+            if isinstance(guard, dict)
+            else getattr(guard, "blocked_terms", None)
+        )
+        check_fn = (
+            guard.get("check")
+            if isinstance(guard, dict)
+            else getattr(guard, "check", None)
+        )
+        guard_name = (
+            guard.get("name")
+            if isinstance(guard, dict)
+            else getattr(guard, "name", "unnamed")
+        )
         if blocked_terms:
-            blocked = any(term.lower() in response_text.lower() for term in blocked_terms)
+            blocked = any(
+                term.lower() in response_text.lower() for term in blocked_terms
+            )
         if check_fn and not blocked:
             try:
                 blocked = bool(check_fn(response_text))
             except Exception as exc:
                 logger.warning("Guardrail '%s' check error: %s", guard_name, exc)
         if blocked:
-            logger.warning("Guardrail '%s' triggered on: %.50s", guard_name, response_text)
+            logger.warning(
+                "Guardrail '%s' triggered on: %.50s", guard_name, response_text
+            )
             return True, guard_name
     return False, ""
 
@@ -274,9 +316,17 @@ def get_guardrail_replacement(agent, guard_name: str) -> str:
     """
     guardrails = getattr(agent, "guardrails", None) or []
     for guard in guardrails:
-        name = guard.get("name") if isinstance(guard, dict) else getattr(guard, "name", "unnamed")
+        name = (
+            guard.get("name")
+            if isinstance(guard, dict)
+            else getattr(guard, "name", "unnamed")
+        )
         if name == guard_name:
-            r = (guard.get("replacement") if isinstance(guard, dict) else getattr(guard, "replacement", None))
+            r = (
+                guard.get("replacement")
+                if isinstance(guard, dict)
+                else getattr(guard, "replacement", None)
+            )
             if r:
                 return r
     return "I'm sorry, I can't respond to that."
@@ -285,6 +335,7 @@ def get_guardrail_replacement(agent, guard_name: str) -> str:
 # ---------------------------------------------------------------------------
 # Base StreamHandler
 # ---------------------------------------------------------------------------
+
 
 class StreamHandler(ABC):
     """Base class for provider-mode-specific stream handling.
@@ -324,8 +375,14 @@ class StreamHandler(ABC):
         self.transcript_entries: deque = transcript_entries or deque(maxlen=200)
         self._background_task: asyncio.Task | None = None
 
+        # Set by Patter._attach_span_exporter via attach_span_exporter; "uut" by default.
+        # Read once at handler start; later changes via the same Patter instance
+        # will not retroactively affect this handler's spans.
+        self._patter_side: str = getattr(self, "_patter_side", "uut")
+
         # Create one EventBus per handler instance and wire it to metrics.
         from getpatter.observability.event_bus import EventBus as _EventBus
+
         self._event_bus: _EventBus = _EventBus()
         if self.metrics is not None and hasattr(self.metrics, "attach_event_bus"):
             self.metrics.attach_event_bus(self._event_bus)
@@ -364,6 +421,29 @@ class StreamHandler(ABC):
     async def cleanup(self) -> None:
         """Close provider connections and cancel background tasks."""
 
+    async def _run_inner(self) -> None:
+        """The original per-call entry point; defaults to ``self.start()``.
+
+        Subclasses may override to insert handler-specific orchestration
+        between the scope wrapper and the existing ``start`` method, but the
+        default implementation is what the telephony bridges rely on.
+        """
+        await self.start()
+
+    async def _run_with_scope(self) -> None:
+        """Enter ``patter_call_scope`` for the call lifetime, then run the handler.
+
+        All spans emitted from provider plumbing during this call inherit
+        ``patter.call_id`` and ``patter.side`` via the helper's ContextVars.
+        Background tasks created via ``asyncio.create_task`` from inside the
+        scope copy the active context, so they continue to see the bound
+        ContextVars after this method returns.
+        """
+        from getpatter.observability.attributes import patter_call_scope
+
+        with patter_call_scope(call_id=self.call_id, side=self._patter_side):
+            await self._run_inner()
+
     async def _emit_turn_metrics(self, turn, *, call_id: str | None = None) -> None:
         """Emit a completed turn to the user-supplied on_metrics callback.
 
@@ -388,6 +468,7 @@ class StreamHandler(ABC):
 # ---------------------------------------------------------------------------
 # OpenAI Realtime StreamHandler
 # ---------------------------------------------------------------------------
+
 
 class OpenAIRealtimeStreamHandler(StreamHandler):
     """Handles the openai_realtime provider mode."""
@@ -527,9 +608,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                     self.conversation_history.append(
                         {"role": "user", "text": ev_data, "timestamp": time.time()}
                     )
-                    self.transcript_entries.append(
-                        {"role": "user", "text": ev_data}
-                    )
+                    self.transcript_entries.append({"role": "user", "text": ev_data})
                     if self.on_transcript:
                         await self.on_transcript(
                             {
@@ -543,10 +622,14 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                 elif ev_type == "transcript_output":
                     if ev_data:
                         response_text: str = ev_data
-                        blocked, guard_name = evaluate_guardrails(self.agent, response_text)
+                        blocked, guard_name = evaluate_guardrails(
+                            self.agent, response_text
+                        )
                         if blocked:
                             await self._adapter.cancel_response()
-                            replacement = get_guardrail_replacement(self.agent, guard_name)
+                            replacement = get_guardrail_replacement(
+                                self.agent, guard_name
+                            )
                             await self._adapter.send_text(replacement)
                             current_agent_text = ""
                         else:
@@ -569,7 +652,11 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                     if current_agent_text:
                         # Push complete response as single history entry
                         self.conversation_history.append(
-                            {"role": "assistant", "text": current_agent_text, "timestamp": time.time()}
+                            {
+                                "role": "assistant",
+                                "text": current_agent_text,
+                                "timestamp": time.time(),
+                            }
                         )
                         self.transcript_entries.append(
                             {"role": "assistant", "text": current_agent_text}
@@ -590,7 +677,11 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                     func_data = ev_data
                     if func_data["name"] == "transfer_call":
                         raw_args = func_data.get("arguments", "{}")
-                        args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                        args = (
+                            json.loads(raw_args)
+                            if isinstance(raw_args, str)
+                            else raw_args
+                        )
                         transfer_number = args.get("number", "")
                         if not _validate_e164(transfer_number):
                             logger.warning(
@@ -599,15 +690,23 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                             )
                             await self._adapter.send_function_result(
                                 func_data["call_id"],
-                                json.dumps({"error": "Invalid phone number format", "status": "rejected"}),
+                                json.dumps(
+                                    {
+                                        "error": "Invalid phone number format",
+                                        "status": "rejected",
+                                    }
+                                ),
                             )
                             continue
                         logger.debug(
-                            "Transferring call to %s", mask_phone_number(transfer_number)
+                            "Transferring call to %s",
+                            mask_phone_number(transfer_number),
                         )
                         await self._adapter.send_function_result(
                             func_data["call_id"],
-                            json.dumps({"status": "transferring", "to": transfer_number}),
+                            json.dumps(
+                                {"status": "transferring", "to": transfer_number}
+                            ),
                         )
                         if self._transfer_fn:
                             await self._transfer_fn(transfer_number)
@@ -623,7 +722,11 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
 
                     elif func_data["name"] == "end_call":
                         raw_args = func_data.get("arguments", "{}")
-                        args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                        args = (
+                            json.loads(raw_args)
+                            if isinstance(raw_args, str)
+                            else raw_args
+                        )
                         reason = args.get("reason", "conversation_complete")
                         logger.debug("Ending call: %s", reason)
                         await self._adapter.send_function_result(
@@ -644,10 +747,16 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
 
                     else:
                         tool_def = next(
-                            (t for t in (self.agent.tools or []) if t["name"] == func_data["name"]),
+                            (
+                                t
+                                for t in (self.agent.tools or [])
+                                if t["name"] == func_data["name"]
+                            ),
                             None,
                         )
-                        if tool_def and (tool_def.get("webhook_url") or tool_def.get("handler")):
+                        if tool_def and (
+                            tool_def.get("webhook_url") or tool_def.get("handler")
+                        ):
                             args = func_data.get("arguments", "{}")
                             if isinstance(args, str):
                                 args = json.loads(args)
@@ -673,10 +782,12 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
             return
         if self._input_transcode == "pcm16_16k_to_g711_ulaw":
             from getpatter.services.transcoding import pcm16_to_mulaw
+
             # Use per-handler StatefulResampler to preserve ratecv filter state
             # across chunks and prevent boundary artefacts.
             if self._resampler_16k_to_8k is None:
                 from getpatter.services.transcoding import create_resampler_16k_to_8k
+
                 self._resampler_16k_to_8k = create_resampler_16k_to_8k()
             audio_bytes = pcm16_to_mulaw(self._resampler_16k_to_8k.process(audio_bytes))
         await self._adapter.send_audio(audio_bytes)
@@ -705,6 +816,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
 # ---------------------------------------------------------------------------
 # ElevenLabs ConvAI StreamHandler
 # ---------------------------------------------------------------------------
+
 
 class ElevenLabsConvAIStreamHandler(StreamHandler):
     """Handles the elevenlabs_convai provider mode."""
@@ -762,7 +874,9 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
     async def start(self) -> None:
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter  # type: ignore[import]
 
-        voice = self.agent.voice if self.agent.voice != "alloy" else "EXAVITQu4vr4xnSDxMaL"
+        voice = (
+            self.agent.voice if self.agent.voice != "alloy" else "EXAVITQu4vr4xnSDxMaL"
+        )
         agent_id = ""
         el_config = getattr(self.agent, "elevenlabs_convai", None) or {}
         if isinstance(el_config, dict):
@@ -780,7 +894,9 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
         #   2. agent.elevenlabs_convai dict ("output_audio_format", "input_audio_format")
         #   3. None — let ConvAI pick its server default (PCM16 16 kHz)
         cfg_output = (
-            el_config.get("output_audio_format") if isinstance(el_config, dict) else None
+            el_config.get("output_audio_format")
+            if isinstance(el_config, dict)
+            else None
         )
         cfg_input = (
             el_config.get("input_audio_format") if isinstance(el_config, dict) else None
@@ -802,8 +918,7 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
         # ulaw_8000 — mixing PCM16 with μ-law would force one transcode
         # back, defeating the optimization.
         self._native_mulaw_8k = (
-            output_audio_format == "ulaw_8000"
-            and input_audio_format == "ulaw_8000"
+            output_audio_format == "ulaw_8000" and input_audio_format == "ulaw_8000"
         )
         if self._native_mulaw_8k:
             # Flip the audio sender into pass-through mode. Mirrors how
@@ -861,9 +976,7 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
                     self.conversation_history.append(
                         {"role": "user", "text": ev_data, "timestamp": time.time()}
                     )
-                    self.transcript_entries.append(
-                        {"role": "user", "text": ev_data}
-                    )
+                    self.transcript_entries.append({"role": "user", "text": ev_data})
                     if self.on_transcript:
                         await self.on_transcript(
                             {
@@ -886,7 +999,11 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
                 elif ev_type == "response_done":
                     if current_agent_text:
                         self.conversation_history.append(
-                            {"role": "assistant", "text": current_agent_text, "timestamp": time.time()}
+                            {
+                                "role": "assistant",
+                                "text": current_agent_text,
+                                "timestamp": time.time(),
+                            }
                         )
                         self.transcript_entries.append(
                             {"role": "assistant", "text": current_agent_text}
@@ -923,9 +1040,11 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
         # 8 kHz, so decode + resample before forwarding.
         if self._for_twilio:
             from getpatter.services.transcoding import mulaw_to_pcm16
+
             # Use per-handler StatefulResampler to preserve ratecv state.
             if self._resampler_8k_to_16k is None:
                 from getpatter.services.transcoding import create_resampler_8k_to_16k
+
                 self._resampler_8k_to_16k = create_resampler_8k_to_16k()
             pcm16k = self._resampler_8k_to_16k.process(mulaw_to_pcm16(audio_bytes))
             await self._adapter.send_audio(pcm16k)
@@ -950,6 +1069,7 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
 # ---------------------------------------------------------------------------
 # Pipeline StreamHandler (STT -> LLM -> TTS)
 # ---------------------------------------------------------------------------
+
 
 class PipelineStreamHandler(StreamHandler):
     """Handles the pipeline provider mode (configurable STT + LLM + TTS)."""
@@ -1043,6 +1163,7 @@ class PipelineStreamHandler(StreamHandler):
             self._stt = _create_stt_from_config(self.agent.stt, for_twilio=False)
         elif self._deepgram_key:
             from getpatter.providers.deepgram_stt import DeepgramSTT  # type: ignore[import]
+
             self._stt = DeepgramSTT(
                 api_key=self._deepgram_key,
                 language=self.agent.language,
@@ -1055,7 +1176,10 @@ class PipelineStreamHandler(StreamHandler):
             self._tts = _create_tts_from_config(self.agent.tts)
         elif self._elevenlabs_key:
             from getpatter.providers.elevenlabs_tts import ElevenLabsTTS  # type: ignore[import]
-            self._tts = ElevenLabsTTS(api_key=self._elevenlabs_key, voice_id=self.agent.voice)
+
+            self._tts = ElevenLabsTTS(
+                api_key=self._elevenlabs_key, voice_id=self.agent.voice
+            )
 
         if self._stt is None:
             logger.warning("Pipeline mode: no STT configured")
@@ -1069,7 +1193,11 @@ class PipelineStreamHandler(StreamHandler):
 
         # Play first_message if configured and no on_message handler.
         # Measure TTS-first-byte latency for parity with TS (`stream-handler.ts`).
-        if self.agent.first_message and self.on_message is None and self._tts is not None:
+        if (
+            self.agent.first_message
+            and self.on_message is None
+            and self._tts is not None
+        ):
             if self.metrics is not None:
                 self.metrics.start_turn()
             first_chunk_sent = False
@@ -1090,7 +1218,11 @@ class PipelineStreamHandler(StreamHandler):
             if first_chunk_sent and self.metrics is not None:
                 turn = self.metrics.record_turn_complete(self.agent.first_message)
                 self.conversation_history.append(
-                    {"role": "assistant", "text": self.agent.first_message, "timestamp": time.time()}
+                    {
+                        "role": "assistant",
+                        "text": self.agent.first_message,
+                        "timestamp": time.time(),
+                    }
                 )
                 await self._emit_turn_metrics(turn)
 
@@ -1147,7 +1279,11 @@ class PipelineStreamHandler(StreamHandler):
             )
 
         # Create remote message handler once if on_message is a remote URL
-        from getpatter.services.remote_message import is_remote_url, RemoteMessageHandler
+        from getpatter.services.remote_message import (
+            is_remote_url,
+            RemoteMessageHandler,
+        )
+
         if is_remote_url(self.on_message):
             self._remote_handler = RemoteMessageHandler()
 
@@ -1271,7 +1407,9 @@ class PipelineStreamHandler(StreamHandler):
                         if blocked:
                             sentence = get_guardrail_replacement(self.agent, guard_name)
 
-                        if not await self._synthesize_sentence(sentence, hook_executor, hook_ctx, first_tts_chunk):
+                        if not await self._synthesize_sentence(
+                            sentence, hook_executor, hook_ctx, first_tts_chunk
+                        ):
                             interrupted = True
                             break
 
@@ -1300,7 +1438,9 @@ class PipelineStreamHandler(StreamHandler):
                     if blocked:
                         sentence = get_guardrail_replacement(self.agent, guard_name)
 
-                    if not await self._synthesize_sentence(sentence, hook_executor, hook_ctx, first_tts_chunk):
+                    if not await self._synthesize_sentence(
+                        sentence, hook_executor, hook_ctx, first_tts_chunk
+                    ):
                         interrupted = True
                         break
         finally:
@@ -1338,9 +1478,7 @@ class PipelineStreamHandler(StreamHandler):
         self.conversation_history.append(
             {"role": "assistant", "text": response_text, "timestamp": time.time()}
         )
-        self.transcript_entries.append(
-            {"role": "assistant", "text": response_text}
-        )
+        self.transcript_entries.append({"role": "assistant", "text": response_text})
         # Use sentence chunking + hooks for consistent behavior with streaming path
         hooks = getattr(self.agent, "hooks", None)
         hook_executor = PipelineHookExecutor(hooks)
@@ -1420,13 +1558,15 @@ class PipelineStreamHandler(StreamHandler):
         if since_last < 2.0 and normalised == self._last_commit_text:
             logger.debug(
                 "Dropped duplicate final transcript (%.1fs since last): %r",
-                since_last, normalised[:40],
+                since_last,
+                normalised[:40],
             )
             return False
         if since_last < 0.5:
             logger.debug(
                 "Dropped back-to-back final transcript (%.2fs since last): %r",
-                since_last, normalised[:40],
+                since_last,
+                normalised[:40],
             )
             return False
         self._last_commit_text = normalised
@@ -1447,7 +1587,9 @@ class PipelineStreamHandler(StreamHandler):
                 # ``on_transcript`` callback path is unchanged).
                 if transcript.text and self._event_bus is not None:
                     self._event_bus.emit(
-                        "transcript_partial" if not transcript.is_final else "transcript_final",
+                        "transcript_partial"
+                        if not transcript.is_final
+                        else "transcript_final",
                         {
                             "text": transcript.text,
                             "is_final": bool(transcript.is_final),
@@ -1459,7 +1601,9 @@ class PipelineStreamHandler(StreamHandler):
                 # that fires before ``is_final`` on each turn — accepting it
                 # here removes ~300–700 ms of per-turn latency at parity with
                 # the TS handler.
-                if not ((transcript.is_final or transcript.speech_final) and transcript.text):
+                if not (
+                    (transcript.is_final or transcript.speech_final) and transcript.text
+                ):
                     continue
                 if not self._commit_transcript(transcript.text):
                     continue
@@ -1570,10 +1714,16 @@ class PipelineStreamHandler(StreamHandler):
                         hook_executor=hook_executor,
                         hook_ctx=hook_ctx,
                     )
-                    response_text = await self._process_streaming_response(result, self.call_id)
+                    response_text = await self._process_streaming_response(
+                        result, self.call_id
+                    )
                     if response_text:
                         self.conversation_history.append(
-                            {"role": "assistant", "text": response_text, "timestamp": time.time()}
+                            {
+                                "role": "assistant",
+                                "text": response_text,
+                                "timestamp": time.time(),
+                            }
                         )
                         self.transcript_entries.append(
                             {"role": "assistant", "text": response_text}
@@ -1595,14 +1745,20 @@ class PipelineStreamHandler(StreamHandler):
                 response_text = ""
                 streaming = False
 
-                from getpatter.services.remote_message import is_remote_url, is_websocket_url
+                from getpatter.services.remote_message import (
+                    is_remote_url,
+                    is_websocket_url,
+                )
+
                 if is_remote_url(self.on_message):
                     remote = self._remote_handler
                     if is_websocket_url(self.on_message):
                         result = remote.call_websocket(self.on_message, msg_data)
                         streaming = True
                     else:
-                        response_text = await remote.call_webhook(self.on_message, msg_data)
+                        response_text = await remote.call_webhook(
+                            self.on_message, msg_data
+                        )
                         streaming = False
                 elif self._msg_accepts_call:
                     result = self.on_message(msg_data, self._call_control)
@@ -1624,10 +1780,16 @@ class PipelineStreamHandler(StreamHandler):
                     return
 
                 if streaming:
-                    response_text = await self._process_streaming_response(result, self.call_id)
+                    response_text = await self._process_streaming_response(
+                        result, self.call_id
+                    )
                     if response_text:
                         self.conversation_history.append(
-                            {"role": "assistant", "text": response_text, "timestamp": time.time()}
+                            {
+                                "role": "assistant",
+                                "text": response_text,
+                                "timestamp": time.time(),
+                            }
                         )
                         self.transcript_entries.append(
                             {"role": "assistant", "text": response_text}
@@ -1664,10 +1826,12 @@ class PipelineStreamHandler(StreamHandler):
         # linear16 @ 16 kHz.
         if self._input_is_mulaw_8k:
             from getpatter.services.transcoding import mulaw_to_pcm16
+
             # Use per-handler StatefulResampler to preserve ratecv filter state
             # across audio chunks (prevents boundary artefacts at STT input).
             if self._resampler_8k_to_16k is None:
                 from getpatter.services.transcoding import create_resampler_8k_to_16k
+
                 self._resampler_8k_to_16k = create_resampler_8k_to_16k()
             pcm = self._resampler_8k_to_16k.process(mulaw_to_pcm16(audio_bytes))
         else:
@@ -1697,7 +1861,9 @@ class PipelineStreamHandler(StreamHandler):
                             try:
                                 await self.audio_sender.send_clear()
                             except Exception as exc:
-                                logger.debug("send_clear during VAD barge-in failed: %s", exc)
+                                logger.debug(
+                                    "send_clear during VAD barge-in failed: %s", exc
+                                )
                             if self.metrics is not None:
                                 self.metrics.record_tts_stopped()
                                 self.metrics.record_turn_interrupted()
@@ -1818,6 +1984,7 @@ class PipelineStreamHandler(StreamHandler):
 # Shared post-call metrics helpers
 # ---------------------------------------------------------------------------
 
+
 async def fetch_deepgram_cost(metrics, stt, deepgram_key: str) -> None:
     """Query Deepgram API for actual STT cost after a call ends."""
     if (
@@ -1848,7 +2015,12 @@ async def fetch_deepgram_cost(metrics, stt, deepgram_key: str) -> None:
                             timeout=5.0,
                         )
                         if req_resp.status_code == 200:
-                            usd = req_resp.json().get("response", {}).get("details", {}).get("usd", None)
+                            usd = (
+                                req_resp.json()
+                                .get("response", {})
+                                .get("details", {})
+                                .get("usd", None)
+                            )
                             if usd is not None:
                                 metrics.set_actual_stt_cost(float(usd))
                                 logger.debug("Deepgram actual cost: $%s", usd)
