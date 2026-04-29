@@ -82,6 +82,9 @@ class ElevenLabsConvAIAdapter:
         # Silence-tracking for synthetic `response_done` emission.
         self._silence_task: asyncio.Task | None = None
         self._agent_speaking = False
+        import time as _time
+
+        self._session_start_monotonic: float = _time.monotonic()
 
     def __repr__(self) -> str:
         return f"ElevenLabsConvAIAdapter(agent_id={self.agent_id!r}, model_id={self.model_id!r})"
@@ -292,7 +295,9 @@ class ElevenLabsConvAIAdapter:
 
                 if msg_type == "conversation_initiation_metadata":
                     meta = data.get("conversation_initiation_metadata_event") or data
-                    self.conversation_id = meta.get("conversation_id") or self.conversation_id
+                    self.conversation_id = (
+                        meta.get("conversation_id") or self.conversation_id
+                    )
                     self.agent_output_audio_format = (
                         meta.get("agent_output_audio_format")
                         or self.agent_output_audio_format
@@ -320,9 +325,7 @@ class ElevenLabsConvAIAdapter:
                         # Reset silence timer on every agent audio chunk.
                         self._reset_silence_timer()
                         self._agent_speaking = True
-                        await self._events.put(
-                            ("audio", base64.b64decode(audio_b64))
-                        )
+                        await self._events.put(("audio", base64.b64decode(audio_b64)))
                         # Schedule silence-based response_done.
                         self._silence_task = asyncio.create_task(
                             self._emit_response_done_after_silence()
@@ -355,9 +358,7 @@ class ElevenLabsConvAIAdapter:
 
                 if msg_type == "error":
                     err_text = (
-                        data.get("message")
-                        or data.get("error")
-                        or json.dumps(data)
+                        data.get("message") or data.get("error") or json.dumps(data)
                     )
                     logger.error("ElevenLabs ConvAI error: %s", err_text)
                     await self._events.put(("error", err_text))
@@ -393,8 +394,23 @@ class ElevenLabsConvAIAdapter:
                 return
             yield evt
 
+    def record_session_end(self) -> None:
+        """Emit patter.cost.realtime_minutes for the elapsed session duration."""
+        import time as _time
+
+        from getpatter.observability.attributes import record_patter_attrs
+
+        elapsed = _time.monotonic() - self._session_start_monotonic
+        record_patter_attrs(
+            {
+                "patter.cost.realtime_minutes": elapsed / 60.0,
+                "patter.realtime.provider": "elevenlabs_convai",
+            }
+        )
+
     async def close(self) -> None:
         """Close the connection and cancel the background reader."""
+        self.record_session_end()
         self._running = False
         self._reset_silence_timer()
         if self._reader_task and not self._reader_task.done():
