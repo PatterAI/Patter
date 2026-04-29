@@ -3,6 +3,7 @@ from getpatter.providers.base import TelephonyProvider
 
 TELNYX_API_BASE = "https://api.telnyx.com/v2"
 
+
 class TelnyxAdapter(TelephonyProvider):
     def __init__(self, api_key: str, connection_id: str = ""):
         self.api_key = api_key
@@ -54,6 +55,7 @@ class TelnyxAdapter(TelephonyProvider):
         accepts both identifiers but the phone_number ID is preferred.
         """
         from urllib.parse import quote as _quote
+
         payload = {
             "connection_id": self.connection_id,
             "tech_prefix_enabled": False,
@@ -66,6 +68,7 @@ class TelnyxAdapter(TelephonyProvider):
             # Surface the server-side error body so misconfigured
             # connection_ids / unknown numbers don't fail silently.
             import logging as _logging
+
             _logging.getLogger("getpatter").warning(
                 "Telnyx configure_number returned %s: %s",
                 resp.status_code,
@@ -112,7 +115,10 @@ class TelnyxAdapter(TelephonyProvider):
         if client_state:
             # Telnyx expects client_state as base64-encoded opaque string.
             import base64 as _b64
-            payload["client_state"] = _b64.b64encode(client_state.encode("utf-8")).decode("ascii")
+
+            payload["client_state"] = _b64.b64encode(
+                client_state.encode("utf-8")
+            ).decode("ascii")
         resp = await self._client.post("/calls", json=payload)
         resp.raise_for_status()
         return resp.json()["data"]["call_control_id"]
@@ -126,8 +132,27 @@ class TelnyxAdapter(TelephonyProvider):
         """
         import uuid as _uuid
         from urllib.parse import quote as _quote
+
         body = {"command_id": command_id or str(_uuid.uuid4())}
-        await self._client.post(f"/calls/{_quote(call_id, safe='')}/actions/hangup", json=body)
+        await self._client.post(
+            f"/calls/{_quote(call_id, safe='')}/actions/hangup", json=body
+        )
 
     async def close(self) -> None:
         await self._client.aclose()
+
+    def record_call_end(self, *, duration_seconds: float, direction: str) -> None:
+        """Emit patter.cost.telephony_minutes on the active span.
+
+        Called by the embedded server's hangup handler once the call's
+        wall-clock duration is known.
+        """
+        from getpatter.observability.attributes import record_patter_attrs
+
+        record_patter_attrs(
+            {
+                "patter.cost.telephony_minutes": duration_seconds / 60.0,
+                "patter.telephony": "telnyx",
+                "patter.direction": direction,
+            }
+        )

@@ -301,6 +301,11 @@ async def telnyx_stream_bridge(
     audio_sender: TelnyxAudioSender | None = None
     metrics = None
 
+    # Wall-clock duration tracking for patter.cost.telephony_minutes. Set on
+    # the ``start`` event so we measure only the bridged audio period, not
+    # the time spent waiting for the first frame.
+    _call_start_monotonic: float | None = None
+
     # ExitStack lets us enter ``patter_call_scope`` *after* the start frame
     # arrives (when call_id is known) while still keeping the scope active
     # for the entire WebSocket loop AND the finally cleanup block. All spans
@@ -329,6 +334,7 @@ async def telnyx_stream_bridge(
 
                 if event_type_telnyx == "start" and not stream_started:
                     stream_started = True
+                    _call_start_monotonic = time.monotonic()
                     start_info = data.get("start", {}) or {}
                     call_id_actual = start_info.get("call_control_id", "")
                     caller = start_info.get("from", "") or caller
@@ -720,6 +726,21 @@ async def telnyx_stream_bridge(
 
             if handler is not None:
                 await handler.cleanup()
+
+            # --- Observability: emit patter.cost.telephony_minutes ---
+            # Wired here so the span inherits patter.call_id / patter.side
+            # from the active patter_call_scope. Bridge is the inbound
+            # webhook endpoint, so direction is always "inbound" today.
+            if _call_start_monotonic is not None and telnyx_key:
+                try:
+                    from getpatter.providers.telnyx_adapter import TelnyxAdapter
+
+                    _duration = time.monotonic() - _call_start_monotonic
+                    TelnyxAdapter(api_key=telnyx_key).record_call_end(
+                        duration_seconds=_duration, direction="inbound"
+                    )
+                except Exception as exc:
+                    logger.debug("record_call_end failed: %s", exc)
 
             # --- Metrics: query actual telephony cost from Telnyx ---
             if metrics is not None and telnyx_key and call_id_actual:
