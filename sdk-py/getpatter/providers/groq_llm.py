@@ -85,3 +85,17 @@ class GroqLLMProvider(OpenAILLMProvider):
             base_url=base_url,
             default_headers={"User-Agent": self._user_agent},
         )
+
+    def _record_completion_cost(
+        self, *, prompt_tokens: int, completion_tokens: int
+    ) -> None:
+        """Stamp ``patter.cost.llm_*_tokens`` with the Groq provider tag."""
+        from getpatter.observability.attributes import record_patter_attrs
+
+        record_patter_attrs(
+            {
+                "patter.cost.llm_input_tokens": prompt_tokens,
+                "patter.cost.llm_output_tokens": completion_tokens,
+                "patter.llm.provider": "groq",
+            }
+        )
