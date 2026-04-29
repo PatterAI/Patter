@@ -93,9 +93,7 @@ class PipelineHookExecutor:
             return messages
         return result
 
-    async def run_after_llm(
-        self, text: str, ctx: HookContext
-    ) -> str:
+    async def run_after_llm(self, text: str, ctx: HookContext) -> str:
         """Run after_llm hook. Returns a possibly-modified assistant text.
 
         ``None`` from the hook means "keep the original".
@@ -113,9 +111,7 @@ class PipelineHookExecutor:
             return text
         return result
 
-    async def run_before_synthesize(
-        self, text: str, ctx: HookContext
-    ) -> str | None:
+    async def run_before_synthesize(self, text: str, ctx: HookContext) -> str | None:
         """Run beforeSynthesize hook. Returns None if hook vetoes TTS."""
         hook = self._hooks.before_synthesize if self._hooks else None
         if hook is None:
@@ -138,3 +134,18 @@ class PipelineHookExecutor:
         except Exception:
             logger.exception("Pipeline hook after_synthesize threw")
             return audio
+
+    def record_turn_latency(self, *, ttfb_ms: float, turn_ms: float) -> None:
+        """Emit ``patter.latency.{ttfb_ms,turn_ms}`` for the just-completed turn.
+
+        Stamped on the active span via :func:`record_patter_attrs`. No-op
+        when OTel is missing or no ``patter_call_scope`` is active.
+        """
+        from getpatter.observability.attributes import record_patter_attrs
+
+        record_patter_attrs(
+            {
+                "patter.latency.ttfb_ms": ttfb_ms,
+                "patter.latency.turn_ms": turn_ms,
+            }
+        )
