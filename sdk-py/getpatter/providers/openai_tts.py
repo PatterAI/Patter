@@ -45,7 +45,18 @@ class OpenAITTS(TTSProvider):
     def __repr__(self) -> str:
         return f"OpenAITTS(model={self.model!r}, voice={self.voice!r})"
 
+    def _record_synthesis_cost(self, text: str) -> None:
+        from getpatter.observability.attributes import record_patter_attrs
+
+        record_patter_attrs(
+            {
+                "patter.cost.tts_chars": len(text),
+                "patter.tts.provider": "openai_tts",
+            }
+        )
+
     async def synthesize(self, text: str) -> AsyncIterator[bytes]:
+        self._record_synthesis_cost(text)
         if audioop is None:
             # Without ``audioop`` / ``audioop-lts`` we would emit 24 kHz
             # audio that the telephony pipeline transcodes as 16 kHz —
@@ -61,7 +72,9 @@ class OpenAITTS(TTSProvider):
             "voice": self.voice,
             "response_format": "pcm",
         }
-        if self.instructions is not None and self.model.startswith(_INSTRUCTIONS_PREFIX):
+        if self.instructions is not None and self.model.startswith(
+            _INSTRUCTIONS_PREFIX
+        ):
             body["instructions"] = self.instructions
         if self.speed is not None:
             body["speed"] = self.speed
@@ -73,6 +86,7 @@ class OpenAITTS(TTSProvider):
         # chunk boundaries, preventing the pops/garbled audio that occurred
         # with the previous stateless per-chunk approach (acceptance test 09).
         from getpatter.services.transcoding import create_resampler_24k_to_16k
+
         resampler = create_resampler_24k_to_16k()
         try:
             # 1024-byte chunks ≈ 21 ms at 24 kHz / 16-bit (vs ~85 ms at the
