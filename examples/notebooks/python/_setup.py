@@ -19,13 +19,18 @@ see tracking issue for inDocker/startDocker port):
 
 from __future__ import annotations
 
+import contextlib
 import os
+import re
 import secrets
 import shutil
 import subprocess
+import time
+import traceback
 import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable, Iterator
 
 from dotenv import load_dotenv
 
@@ -127,12 +132,6 @@ def print_key_matrix(env: NotebookEnv, required) -> None:
         print(f"  {marker} {name}")
 
 
-import contextlib
-import time
-import traceback
-from typing import Iterable, Iterator
-
-
 @contextlib.contextmanager
 def cell(
     name: str,
@@ -187,8 +186,6 @@ def cell(
     elapsed = time.monotonic() - started
     print(f"✅ [{name}] {elapsed:.2f}s")
 
-
-import re
 
 _REAL_PHONE = re.compile(r"\+1[2-9]\d{9}")
 _REAL_TWILIO_SID = re.compile(r"\bAC[0-9a-f]{32}\b")
