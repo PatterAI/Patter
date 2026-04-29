@@ -280,6 +280,11 @@ async def twilio_stream_bridge(
     audio_sender: TwilioAudioSender | None = None
     metrics = None
 
+    # Wall-clock duration tracking for patter.cost.telephony_minutes. Set on
+    # the ``start`` event so we measure only the bridged audio period, not
+    # the time spent waiting for the first frame.
+    _call_start_monotonic: float | None = None
+
     # ExitStack lets us enter ``patter_call_scope`` *after* the start frame
     # arrives (when call_id is known) while still keeping the scope active
     # for the entire WebSocket loop AND the finally cleanup block. All spans
@@ -299,6 +304,7 @@ async def twilio_stream_bridge(
                 event = data.get("event", "")
 
                 if event == "start":
+                    _call_start_monotonic = time.monotonic()
                     stream_sid = data.get("streamSid", "")
                     start_data = data.get("start", {})
                     call_sid_actual = start_data.get("callSid", "")
@@ -562,6 +568,21 @@ async def twilio_stream_bridge(
 
             if handler is not None:
                 await handler.cleanup()
+
+            # --- Observability: emit patter.cost.telephony_minutes ---
+            # Wired here so the span inherits patter.call_id / patter.side
+            # from the active patter_call_scope. Bridge is the inbound
+            # webhook endpoint, so direction is always "inbound" today.
+            if _call_start_monotonic is not None and twilio_sid and twilio_token:
+                try:
+                    from getpatter.providers.twilio_adapter import TwilioAdapter
+
+                    _duration = time.monotonic() - _call_start_monotonic
+                    TwilioAdapter(
+                        account_sid=twilio_sid, auth_token=twilio_token
+                    ).record_call_end(duration_seconds=_duration, direction="inbound")
+                except Exception as exc:
+                    logger.debug("record_call_end failed: %s", exc)
 
             # --- Metrics: query actual telephony cost from Twilio ---
             if (

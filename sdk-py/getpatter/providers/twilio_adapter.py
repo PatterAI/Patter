@@ -4,6 +4,7 @@ from twilio.rest import Client as TwilioClient
 from twilio.twiml.voice_response import VoiceResponse, Connect
 from getpatter.providers.base import TelephonyProvider
 
+
 class TwilioAdapter(TelephonyProvider):
     def __init__(self, account_sid: str, auth_token: str):
         self.account_sid = account_sid
@@ -19,15 +20,26 @@ class TwilioAdapter(TelephonyProvider):
         return await loop.run_in_executor(None, partial(func, *args, **kwargs))
 
     async def provision_number(self, country: str) -> str:
-        available = await self._run_sync(self._twilio_client.available_phone_numbers(country).local.list, limit=1)
-        if not available: raise ValueError(f"No numbers for {country}")
-        purchased = await self._run_sync(self._twilio_client.incoming_phone_numbers.create, phone_number=available[0].phone_number)
+        available = await self._run_sync(
+            self._twilio_client.available_phone_numbers(country).local.list, limit=1
+        )
+        if not available:
+            raise ValueError(f"No numbers for {country}")
+        purchased = await self._run_sync(
+            self._twilio_client.incoming_phone_numbers.create,
+            phone_number=available[0].phone_number,
+        )
         return purchased.phone_number
 
     async def configure_number(self, number: str, webhook_url: str) -> None:
-        numbers = await self._run_sync(self._twilio_client.incoming_phone_numbers.list, phone_number=number)
-        if not numbers: raise ValueError(f"Number {number} not found")
-        await self._run_sync(numbers[0].update, voice_url=webhook_url, voice_method="POST")
+        numbers = await self._run_sync(
+            self._twilio_client.incoming_phone_numbers.list, phone_number=number
+        )
+        if not numbers:
+            raise ValueError(f"Number {number} not found")
+        await self._run_sync(
+            numbers[0].update, voice_url=webhook_url, voice_method="POST"
+        )
 
     async def initiate_call(
         self,
@@ -47,7 +59,25 @@ class TwilioAdapter(TelephonyProvider):
         return call.sid
 
     async def end_call(self, call_id: str) -> None:
-        await self._run_sync(self._twilio_client.calls(call_id).update, status="completed")
+        await self._run_sync(
+            self._twilio_client.calls(call_id).update, status="completed"
+        )
+
+    def record_call_end(self, *, duration_seconds: float, direction: str) -> None:
+        """Emit patter.cost.telephony_minutes on the active span.
+
+        Called by the embedded server's hangup handler once the call's
+        wall-clock duration is known.
+        """
+        from getpatter.observability.attributes import record_patter_attrs
+
+        record_patter_attrs(
+            {
+                "patter.cost.telephony_minutes": duration_seconds / 60.0,
+                "patter.telephony": "twilio",
+                "patter.direction": direction,
+            }
+        )
 
     @staticmethod
     def generate_stream_twiml(stream_url: str) -> str:
