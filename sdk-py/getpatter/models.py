@@ -99,6 +99,13 @@ class Agent:
     # and interrupting TTS. ``0`` disables barge-in entirely — useful on noisy
     # links (ngrok tunnels, speakerphone) where the agent can hear itself.
     barge_in_threshold_ms: int = 300
+    # When ``True``, the sentence chunker emits the first clause of each
+    # response on a soft punctuation boundary (",", em-dash, en-dash) once
+    # ~40 chars have accumulated. Saves 200-500 ms TTFA on the first
+    # sentence of each turn at the cost of slightly clipping prosody on the
+    # very first chunk. Hard-disabled when ``language`` starts with ``"it"``
+    # (Italian decimal comma would split mid-number). Default: ``False``.
+    aggressive_first_flush: bool = False
 
 
 @dataclass(frozen=True)

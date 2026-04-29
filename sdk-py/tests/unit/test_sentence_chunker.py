@@ -616,3 +616,166 @@ class TestLiveKitReference:
         import re
         normalise = lambda s: re.sub(r"\s+", " ", s).strip()
         assert normalise(joined_result) == normalise(joined_expected)
+
+
+# ---------------------------------------------------------------------------
+# Aggressive first-clause flush (opt-in)
+# ---------------------------------------------------------------------------
+
+class TestAggressiveFirstFlush:
+    """Phase 2 opt-in feature: emit the first clause of the response on a soft
+    punctuation boundary to minimise TTFA. All tests assume English; Italian
+    is hard-disabled regardless of the flag.
+    """
+
+    def test_default_off_invariant(self) -> None:
+        """Default constructor must not change behaviour."""
+        c = SentenceChunker()
+        out: list[str] = []
+        for t in ["Sure, ", "I can ", "definitely ", "help ", "you ", "now."]:
+            out.extend(c.push(t))
+        out.extend(c.flush())
+        assert out == ["Sure, I can definitely help you now."]
+
+    def test_aggressive_flush_fires_after_first_comma(self) -> None:
+        c = SentenceChunker(aggressive_first_flush=True)
+        emitted_during_push: list[str] = []
+        tokens = [
+            "Sure, ",
+            "I can ",
+            "definitely ",
+            "help ",
+            "you ",
+            "with ",
+            "that ",
+            "request",
+            ", ",
+            "right ",
+            "away.",
+        ]
+        for t in tokens:
+            emitted_during_push.extend(c.push(t))
+        emitted_during_push.extend(c.flush())
+        # Aggressive flush should produce TWO emissions: clause + final period.
+        assert len(emitted_during_push) == 2
+        assert emitted_during_push[0].endswith(",")
+        assert emitted_during_push[1] == "right away."
+
+    def test_aggressive_only_fires_for_first_sentence(self) -> None:
+        """Subsequent sentences must use the standard period boundary, not soft punct."""
+        c = SentenceChunker(aggressive_first_flush=True)
+        emitted: list[str] = []
+        for t in [
+            "Sure, ",
+            "I can help you with that today. ",
+            "Also, ",
+            "let me check inventory levels for you next.",
+        ]:
+            emitted.extend(c.push(t))
+        emitted.extend(c.flush())
+        # First emission is the aggressive comma flush, then standard sentence
+        # boundaries take over — the second comma must NOT trigger an emission.
+        assert emitted[0].endswith(",")
+        assert all("," not in s or s.endswith(".") for s in emitted[1:])
+
+    def test_aggressive_disabled_for_italian_language(self) -> None:
+        c = SentenceChunker(aggressive_first_flush=True, language="it")
+        out: list[str] = []
+        for t in [
+            "Certo, ",
+            "ti aiuto subito con questa richiesta importante. ",
+            "Vediamo subito.",
+        ]:
+            out.extend(c.push(t))
+        out.extend(c.flush())
+        # Italian disables the feature → standard sentence boundaries only.
+        assert out == [
+            "Certo, ti aiuto subito con questa richiesta importante.",
+            "Vediamo subito.",
+        ]
+
+    def test_decimal_guard_english(self) -> None:
+        """Comma between digits must not trigger flush (1,000 thousands)."""
+        c = SentenceChunker(aggressive_first_flush=True)
+        out: list[str] = []
+        for t in [
+            "The total is exactly ",
+            "1,",
+            "000 ",
+            "dollars for the entire week. ",
+            "Confirmed.",
+        ]:
+            out.extend(c.push(t))
+        out.extend(c.flush())
+        # No clause emission before the period; comma in 1,000 is protected.
+        assert out == [
+            "The total is exactly 1,000 dollars for the entire week.",
+            "Confirmed.",
+        ]
+
+    def test_currency_guard(self) -> None:
+        """Currency symbol within 8 chars before comma blocks flush."""
+        c = SentenceChunker(aggressive_first_flush=True)
+        out: list[str] = []
+        for t in ["The amount is $1,", "000 ", "for next week. ", "Confirmed."]:
+            out.extend(c.push(t))
+        out.extend(c.flush())
+        assert out == ["The amount is $1,000 for next week.", "Confirmed."]
+
+    def test_balanced_delimiter_guard_json(self) -> None:
+        """Open brace without close blocks flush — protects JSON payloads."""
+        c = SentenceChunker(aggressive_first_flush=True)
+        out: list[str] = []
+        for t in [
+            'Sending payload {"amount": 1000, "currency": "USD"} to backend ',
+            "now.",
+        ]:
+            out.extend(c.push(t))
+        out.extend(c.flush())
+        assert out == [
+            'Sending payload {"amount": 1000, "currency": "USD"} to backend now.'
+        ]
+
+    def test_ellipsis_guard(self) -> None:
+        """Ellipsis must not trigger soft-flush even though "..." includes "."""
+        c = SentenceChunker(aggressive_first_flush=True)
+        out: list[str] = []
+        for t in [
+            "Let me think about this for a moment... ",
+            "perhaps yes.",
+        ]:
+            out.extend(c.push(t))
+        out.extend(c.flush())
+        assert out == ["Let me think about this for a moment... perhaps yes."]
+
+    def test_first_flush_resets_after_flush(self) -> None:
+        """After a full flush(), the next response starts fresh."""
+        c = SentenceChunker(aggressive_first_flush=True)
+        # Turn 1
+        for t in ["Sure, ", "I can help you with that today, ", "no problem."]:
+            c.push(t)
+        c.flush()
+        # Turn 2 should also benefit from aggressive first flush
+        emitted: list[str] = []
+        for t in ["Of course, ", "I will check inventory levels right now, ", "one moment."]:
+            emitted.extend(c.push(t))
+        emitted.extend(c.flush())
+        assert emitted[0].endswith(",")
+
+    def test_first_flush_resets_after_reset(self) -> None:
+        c = SentenceChunker(aggressive_first_flush=True)
+        c.push("Sure, I can help you with that today, no problem.")
+        c.reset()
+        emitted: list[str] = []
+        for t in ["Of course, ", "I will check inventory levels right now, ", "one moment."]:
+            emitted.extend(c.push(t))
+        emitted.extend(c.flush())
+        assert emitted[0].endswith(",")
+
+    def test_below_min_len_does_not_flush(self) -> None:
+        """Buffer < aggressive_first_min_len must not trigger flush."""
+        c = SentenceChunker(aggressive_first_flush=True, aggressive_first_min_len=40)
+        out = c.push("Hi, ") + c.push("hello there.")
+        out += c.flush()
+        # "Hi, hello there." is 16 chars, well below 40 → no aggressive flush.
+        assert out == ["Hi, hello there."]

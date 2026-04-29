@@ -544,3 +544,176 @@ describe('SentenceChunker', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 2 — Aggressive first-clause flush (opt-in)
+// ---------------------------------------------------------------------------
+
+describe('SentenceChunker — aggressive first-clause flush', () => {
+  it('default OFF: no behaviour change', () => {
+    const c = new SentenceChunker();
+    const out: string[] = [];
+    for (const t of ['Sure, ', 'I can ', 'definitely ', 'help ', 'you ', 'now.']) {
+      out.push(...c.push(t));
+    }
+    out.push(...c.flush());
+    expect(out).toEqual(['Sure, I can definitely help you now.']);
+  });
+
+  it('aggressive flush fires after first comma when buffer ≥ 40 chars', () => {
+    const c = new SentenceChunker({ aggressiveFirstFlush: true });
+    const tokens = [
+      'Sure, ',
+      'I can ',
+      'definitely ',
+      'help ',
+      'you ',
+      'with ',
+      'that ',
+      'request',
+      ', ',
+      'right ',
+      'away.',
+    ];
+    const out: string[] = [];
+    for (const t of tokens) out.push(...c.push(t));
+    out.push(...c.flush());
+    expect(out).toHaveLength(2);
+    expect(out[0].endsWith(',')).toBe(true);
+    expect(out[1]).toBe('right away.');
+  });
+
+  it('only fires for the first sentence — subsequent sentences use period boundary', () => {
+    const c = new SentenceChunker({ aggressiveFirstFlush: true });
+    const out: string[] = [];
+    for (const t of [
+      'Sure, ',
+      'I can help you with that today. ',
+      'Also, ',
+      'let me check inventory levels for you next.',
+    ]) {
+      out.push(...c.push(t));
+    }
+    out.push(...c.flush());
+    expect(out[0].endsWith(',')).toBe(true);
+    for (let i = 1; i < out.length; i++) {
+      // After the first aggressive flush, no further comma-only emissions.
+      expect(out[i].endsWith(',') && !out[i].endsWith('.')).toBe(false);
+    }
+  });
+
+  it('Italian language hard-disables aggressive flush (decimal comma killer)', () => {
+    const c = new SentenceChunker({ aggressiveFirstFlush: true, language: 'it' });
+    const out: string[] = [];
+    for (const t of [
+      'Certo, ',
+      'ti aiuto subito con questa richiesta importante. ',
+      'Vediamo subito.',
+    ]) {
+      out.push(...c.push(t));
+    }
+    out.push(...c.flush());
+    expect(out).toEqual([
+      'Certo, ti aiuto subito con questa richiesta importante.',
+      'Vediamo subito.',
+    ]);
+  });
+
+  it('decimal guard: comma between digits does not trigger flush', () => {
+    const c = new SentenceChunker({ aggressiveFirstFlush: true });
+    const out: string[] = [];
+    for (const t of [
+      'The total is exactly ',
+      '1,',
+      '000 ',
+      'dollars for the entire week. ',
+      'Confirmed.',
+    ]) {
+      out.push(...c.push(t));
+    }
+    out.push(...c.flush());
+    expect(out).toEqual([
+      'The total is exactly 1,000 dollars for the entire week.',
+      'Confirmed.',
+    ]);
+  });
+
+  it('currency guard: $ within 8 chars before comma blocks flush', () => {
+    const c = new SentenceChunker({ aggressiveFirstFlush: true });
+    const out: string[] = [];
+    for (const t of ['The amount is $1,', '000 ', 'for next week. ', 'Confirmed.']) {
+      out.push(...c.push(t));
+    }
+    out.push(...c.flush());
+    expect(out).toEqual(['The amount is $1,000 for next week.', 'Confirmed.']);
+  });
+
+  it('balanced delimiter guard: open brace blocks flush (JSON payload)', () => {
+    const c = new SentenceChunker({ aggressiveFirstFlush: true });
+    const out: string[] = [];
+    for (const t of [
+      'Sending payload {"amount": 1000, "currency": "USD"} to backend ',
+      'now.',
+    ]) {
+      out.push(...c.push(t));
+    }
+    out.push(...c.flush());
+    expect(out).toEqual([
+      'Sending payload {"amount": 1000, "currency": "USD"} to backend now.',
+    ]);
+  });
+
+  it('ellipsis guard: "..." does not trigger flush', () => {
+    const c = new SentenceChunker({ aggressiveFirstFlush: true });
+    const out: string[] = [];
+    for (const t of ['Let me think about this for a moment... ', 'perhaps yes.']) {
+      out.push(...c.push(t));
+    }
+    out.push(...c.flush());
+    expect(out).toEqual(['Let me think about this for a moment... perhaps yes.']);
+  });
+
+  it('first-flush state resets after flush()', () => {
+    const c = new SentenceChunker({ aggressiveFirstFlush: true });
+    for (const t of ['Sure, ', 'I can help you with that today, ', 'no problem.']) {
+      c.push(t);
+    }
+    c.flush();
+    const turn2: string[] = [];
+    for (const t of [
+      'Of course, ',
+      'I will check inventory levels right now, ',
+      'one moment.',
+    ]) {
+      turn2.push(...c.push(t));
+    }
+    turn2.push(...c.flush());
+    expect(turn2[0].endsWith(',')).toBe(true);
+  });
+
+  it('first-flush state resets after reset()', () => {
+    const c = new SentenceChunker({ aggressiveFirstFlush: true });
+    c.push('Sure, I can help you with that today, no problem.');
+    c.reset();
+    const turn2: string[] = [];
+    for (const t of [
+      'Of course, ',
+      'I will check inventory levels right now, ',
+      'one moment.',
+    ]) {
+      turn2.push(...c.push(t));
+    }
+    turn2.push(...c.flush());
+    expect(turn2[0].endsWith(',')).toBe(true);
+  });
+
+  it('buffer below aggressiveFirstMinLen does not flush', () => {
+    const c = new SentenceChunker({
+      aggressiveFirstFlush: true,
+      aggressiveFirstMinLen: 40,
+    });
+    const out = [...c.push('Hi, '), ...c.push('hello there.')];
+    out.push(...c.flush());
+    expect(out).toEqual(['Hi, hello there.']);
+  });
+});
