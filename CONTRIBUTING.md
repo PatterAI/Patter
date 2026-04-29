@@ -31,7 +31,38 @@ npm run build
 4. Implement the feature
 5. Ensure all tests pass: `pytest tests/ -v` / `npm test`
 6. Commit with conventional commits: `feat:`, `fix:`, `docs:`
-7. Open a Pull Request against `main`
+7. **Validate locally**: `bash scripts/pr-validate.sh` (see below)
+8. Open a Pull Request against `main`
+
+## Pre-PR validation
+
+Run every PR-blocking CI check locally before opening the PR:
+
+```bash
+bash scripts/pr-validate.sh           # default: ~3-5 min
+bash scripts/pr-validate.sh --quick   # pre-commit + notebooks (~30s)
+bash scripts/pr-validate.sh --full    # default + e2e + all-extras (~10 min)
+```
+
+The script mirrors `.github/workflows/test.yml` and `notebooks.yml` so a
+green local run lines up with green CI. Selective skips: `--skip-py`,
+`--skip-ts`, `--skip-notebooks`, `--no-stop`.
+
+First-time setup:
+
+```bash
+pip install pre-commit==3.8.0          # required
+brew install gitleaks                   # optional — system fallback
+```
+
+If pre-commit's bundled tools don't work on your machine (hardened macOS,
+Go OOM during gitleaks build), use the documented escape hatches:
+
+```bash
+PR_VALIDATE_SKIP_GITLEAKS=1 PR_VALIDATE_SKIP_NBSTRIPOUT=1 bash scripts/pr-validate.sh
+```
+
+CI always runs the full unaltered suite, so these only affect local runs.
 
 ## Code Style
 
