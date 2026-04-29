@@ -146,6 +146,28 @@ class AssemblyAISTT(STTProvider):
         self._reconnect_attempts = 0
         self.session_id: str | None = None
         self.expires_at: int | None = None
+        self._audio_bytes_sent: int = 0
+
+    @property
+    def sample_rate(self) -> int:
+        return self._opts.sample_rate
+
+    @property
+    def encoding(self) -> str:
+        return self._opts.encoding
+
+    def _record_transcript_cost(self) -> None:
+        from getpatter.observability.attributes import record_patter_attrs
+
+        bytes_per_sample = 1 if self.encoding == "pcm_mulaw" else 2
+        seconds = self._audio_bytes_sent / float(self.sample_rate * bytes_per_sample)
+        record_patter_attrs(
+            {
+                "patter.cost.stt_seconds": seconds,
+                "patter.stt.provider": "assemblyai",
+            }
+        )
+        self._audio_bytes_sent = 0
 
     def __repr__(self) -> str:
         return (
@@ -175,8 +197,14 @@ class AssemblyAISTT(STTProvider):
 
         # u3-rt-pro defaults: min=100, max=min (so both 100 unless overridden)
         if opts.model == "u3-rt-pro":
-            min_silence = opts.min_turn_silence if opts.min_turn_silence is not None else 100
-            max_silence = opts.max_turn_silence if opts.max_turn_silence is not None else min_silence
+            min_silence = (
+                opts.min_turn_silence if opts.min_turn_silence is not None else 100
+            )
+            max_silence = (
+                opts.max_turn_silence
+                if opts.max_turn_silence is not None
+                else min_silence
+            )
         else:
             min_silence = opts.min_turn_silence
             max_silence = opts.max_turn_silence
@@ -266,6 +294,7 @@ class AssemblyAISTT(STTProvider):
                 duration_ms,
             )
 
+        self._audio_bytes_sent += len(audio_chunk)
         await self._ws.send_bytes(audio_chunk)
 
     def _estimate_chunk_duration_ms(self, byte_length: int) -> float | None:
@@ -324,6 +353,8 @@ class AssemblyAISTT(STTProvider):
                 )
             except asyncio.TimeoutError:
                 continue
+            if transcript.is_final:
+                self._record_transcript_cost()
             yield transcript
 
     async def _recv_loop(self) -> None:
