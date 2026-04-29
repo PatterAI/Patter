@@ -36,8 +36,11 @@ export class ConvAI {
     }
     if (!agent) {
       throw new Error(
-        "ElevenLabs ConvAI requires an agentId. Pass { agentId: 'agent_...' } or " +
-          "set ELEVENLABS_AGENT_ID in the environment.",
+        "ElevenLabs ConvAI requires an agentId. Create one in the ElevenLabs " +
+          "dashboard (https://elevenlabs.io/app/conversational-ai) — the " +
+          "agent ID is per-deployed-agent and cannot be derived from the " +
+          "API key alone. Then either pass { agentId: 'agent_...' } at " +
+          "construction or set ELEVENLABS_AGENT_ID in the environment.",
       );
     }
     this.apiKey = key;

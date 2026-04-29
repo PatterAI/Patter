@@ -50,6 +50,35 @@ export class ElevenLabsTTSError extends Error {
   }
 }
 
+/**
+ * Raised when the ElevenLabs WebSocket endpoint refuses synthesis because
+ * the account plan does not include WS streaming. Distinct from generic
+ * ``ElevenLabsTTSError`` so callers can catch this specifically and either
+ * upgrade their plan or fall back to the HTTP class.
+ *
+ * Free / Starter plans get ``payment_required`` from the server on the
+ * first synthesise call. The HTTP ``ElevenLabsTTS`` class works on every
+ * plan, so the simplest fix is to swap the import:
+ *
+ * ```ts
+ * // before — fails on Free / Starter:
+ * import { ElevenLabsWebSocketTTS } from "getpatter";
+ * // after:
+ * import { ElevenLabsTTS } from "getpatter";
+ * ```
+ */
+export class ElevenLabsPlanError extends ElevenLabsTTSError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ElevenLabsPlanError';
+  }
+}
+
+const PLAN_REQUIRED_MSG =
+  'ElevenLabs WS streaming requires a Pro plan or higher (the WS endpoint ' +
+  'returned `payment_required`). Either upgrade at https://elevenlabs.io/pricing, ' +
+  'or use the HTTP `ElevenLabsTTS` class which works on all plans (drop-in API).';
+
 function sanitiseLogStr(value: unknown, limit = 200): string {
   return String(value).replace(/[\r\n\x00]/g, ' ').slice(0, limit);
 }
@@ -205,7 +234,13 @@ export class ElevenLabsWebSocketTTS implements TTSAdapter {
       if (msg.error) {
         const sanitised = sanitiseLogStr(msg.error);
         getLogger().error('ElevenLabs WS reported error:', sanitised);
-        pendingError = new ElevenLabsTTSError(`ElevenLabs WS error: ${sanitised}`);
+        // Recognise plan-gated rejections so callers can catch them
+        // separately and either upgrade or fall back to the HTTP class.
+        if (sanitised === 'payment_required' || /payment[_ ]required/i.test(sanitised)) {
+          pendingError = new ElevenLabsPlanError(PLAN_REQUIRED_MSG);
+        } else {
+          pendingError = new ElevenLabsTTSError(`ElevenLabs WS error: ${sanitised}`);
+        }
         done = true;
         wakeWaiter();
         return;

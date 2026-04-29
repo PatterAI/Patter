@@ -17,6 +17,7 @@ return in a future release.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING, Any, Callable, Awaitable
 
@@ -134,6 +135,17 @@ class Patter:
         )
         self._server = None
         self._tunnel_handle = None
+        # tunnel_ready future — resolved once ``serve()`` knows the public
+        # webhook hostname (either statically configured or freshly minted by
+        # the tunnel). Initialised lazily below to avoid pulling asyncio
+        # imports into module-init.
+        self._tunnel_ready: "asyncio.Future[str] | None" = None
+        # Pre-resolve when webhook_url is static — no tunnel cold-start to
+        # wait on. We can't create the Future here (no running loop yet) so
+        # stash the value and create+resolve on first ``tunnel_ready`` access.
+        self._tunnel_ready_pre_resolved: str | None = (
+            webhook_url if webhook_url else None
+        )
 
     @staticmethod
     def _unpack_carrier(carrier: Any) -> tuple[str | None, dict]:
@@ -216,6 +228,43 @@ class Patter:
         if server is None:
             return None
         return getattr(server, "_metrics_store", None)
+
+    @property
+    def tunnel_ready(self) -> "asyncio.Future[str]":
+        """Future that resolves to the public webhook hostname.
+
+        Use this instead of guessing a ``time.sleep`` after a fire-and-forget
+        ``serve()`` task — the documented outbound pattern is now::
+
+            task = asyncio.create_task(phone.serve(agent, tunnel=True))
+            host = await phone.tunnel_ready
+            await phone.call(to=..., agent=agent)
+
+        For static ``webhook_url`` configurations the future resolves
+        immediately (no tunnel cold-start). For ``tunnel=True`` it resolves
+        after the cloudflared hostname is wired into ``LocalConfig``.
+        Rejects with the underlying exception if ``serve()`` fails before
+        the hostname is known.
+        """
+        if self._tunnel_ready is None:
+            loop = asyncio.get_event_loop()
+            self._tunnel_ready = loop.create_future()
+            if self._tunnel_ready_pre_resolved is not None:
+                self._tunnel_ready.set_result(self._tunnel_ready_pre_resolved)
+        return self._tunnel_ready
+
+    def _resolve_tunnel_ready(self, hostname: str) -> None:
+        """Resolve the tunnel-ready future. Safe to call multiple times."""
+        # Force lazy creation, then set if not already done.
+        fut = self.tunnel_ready
+        if not fut.done():
+            fut.set_result(hostname)
+
+    def _reject_tunnel_ready(self, err: BaseException) -> None:
+        """Reject the tunnel-ready future. Safe to call multiple times."""
+        fut = self.tunnel_ready
+        if not fut.done():
+            fut.set_exception(err)
 
     async def call(
         self,
@@ -674,20 +723,29 @@ class Patter:
         if tunnel:
             from getpatter.tunnel import start_tunnel
 
-            handle = await start_tunnel(port)
-            self._tunnel_handle = handle
-            # Replace config with the tunnel hostname (frozen dataclass)
-            from dataclasses import replace
+            try:
+                handle = await start_tunnel(port)
+                self._tunnel_handle = handle
+                # Replace config with the tunnel hostname (frozen dataclass)
+                from dataclasses import replace
 
-            config = replace(config, webhook_url=handle.hostname)
-            self._local_config = config
+                config = replace(config, webhook_url=handle.hostname)
+                self._local_config = config
+                # Resolve the tunnel-ready future for callers awaiting the
+                # public hostname before placing outbound calls.
+                self._resolve_tunnel_ready(handle.hostname)
+            except Exception as exc:
+                self._reject_tunnel_ready(exc)
+                raise
 
         if not config.webhook_url:
-            raise ValueError(
+            err = ValueError(
                 "No webhook_url configured. Either:\n"
                 "  - Pass webhook_url in the Patter constructor\n"
                 "  - Use tunnel=True in serve() to auto-create a tunnel"
             )
+            self._reject_tunnel_ready(err)
+            raise err
 
         from getpatter.server import EmbeddedServer
 

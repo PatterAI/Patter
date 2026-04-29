@@ -71,7 +71,7 @@
   "optionalDependencies": {
     "cloudflared": "^0.7.1",
     "node-cron": "^4.0.0",
-    "onnxruntime-node": "^1.18.0"
+    "onnxruntime-node": "~1.18.0"
   },
   "peerDependencies": {
     "@google/genai": "^0.3.0"

@@ -197,6 +197,14 @@ class LatencyBreakdown:
     # Total TTS time: LLM-first-token (or first-sentence boundary) to last
     # TTS audio byte sent. ``None`` when TTS never completed.
     tts_total_ms: float | None = None
+    # **User-perceived agent response latency** — the metric to watch on
+    # SLO / p95 dashboards. Computed as ``endpoint_ms + llm_ttft_ms +
+    # tts_ms`` when all three signals are available, ``None`` otherwise.
+    # Unlike ``total_ms`` (which includes the user's entire utterance and
+    # therefore grows with how long they spoke), ``agent_response_ms``
+    # isolates the system-controlled latency: silence detection + LLM TTFT
+    # + TTS first byte.
+    agent_response_ms: float | None = None
 
 
 @dataclass(frozen=True)

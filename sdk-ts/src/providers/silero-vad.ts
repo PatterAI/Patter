@@ -118,6 +118,27 @@ export interface OnnxRuntime {
   ) => OnnxTensor;
 }
 
+/**
+ * Heuristic to distinguish three failure modes for surface-up to the user:
+ *
+ * 1. **Module not found** — the package isn't installed at all. Install with
+ *    ``npm install onnxruntime-node@~1.18.0``.
+ * 2. **Native binding mismatch** — the package is installed but the prebuilt
+ *    ``.node`` for the host platform/arch is missing or corrupt (typical on
+ *    macOS x86_64 + post-1.18 versions where the bundled bin layout drifted).
+ *    Pin to ``~1.18.0`` or rebuild from source.
+ * 3. **API drift** — the installed version exposes a different internal
+ *    surface than the SDK was tested against (1.24+: ``listSupportedBackends``
+ *    moved/removed). Pin to ``~1.18.0``.
+ */
+function classifyOnnxError(err: unknown): 'missing' | 'binding' | 'api-drift' | 'unknown' {
+  const msg = (err as Error)?.message ?? String(err);
+  if (/Cannot find module ['"]?onnxruntime-node['"]?$/m.test(msg)) return 'missing';
+  if (/onnxruntime_binding\.node|napi-v\d/.test(msg)) return 'binding';
+  if (/listSupportedBackends|backend_\d/.test(msg)) return 'api-drift';
+  return 'unknown';
+}
+
 async function loadOnnxRuntime(): Promise<OnnxRuntime> {
   let firstErr: unknown;
   // 1. Plain dynamic import — works when onnxruntime-node is hoisted to a
@@ -135,17 +156,46 @@ async function loadOnnxRuntime(): Promise<OnnxRuntime> {
   try {
     const req = createRequire(path.join(process.cwd(), 'package.json'));
     return req('onnxruntime-node') as OnnxRuntime;
-  } catch (e) {
-    const detail = (e as Error)?.message ?? String(e);
+  } catch (secondErr) {
+    // Classify each failure separately — they may be different (the import
+    // could hit API drift while the require hits a missing native binding).
+    const importClass = classifyOnnxError(firstErr);
+    const requireClass = classifyOnnxError(secondErr);
     const original = (firstErr as Error)?.message ?? String(firstErr);
-    throw new Error(
-      '\nSileroVAD requires the "onnxruntime-node" package, which could not be resolved.\n\n' +
-        '  Install:  npm install onnxruntime-node\n\n' +
-        'This is an optional peer dependency of getpatter (~210 MB) — it is only\n' +
-        'needed when you use SileroVAD in pipeline mode.\n\n' +
-        `  import() failed: ${original}\n` +
-        `  cwd-require failed: ${detail}\n`,
+    const detail = (secondErr as Error)?.message ?? String(secondErr);
+
+    let header: string;
+    let remedy: string;
+    if (importClass === 'missing' && requireClass === 'missing') {
+      header = 'SileroVAD requires the "onnxruntime-node" package — it is not installed.';
+      remedy = '  Install:  npm install onnxruntime-node@~1.18.0\n\n' +
+        '  (~210 MB. Only needed when you actually use SileroVAD in pipeline mode.)';
+    } else if (importClass === 'api-drift' || requireClass === 'api-drift') {
+      header = 'SileroVAD found onnxruntime-node but the installed version uses an API the SDK does not support.';
+      remedy = '  Patter is currently tested against onnxruntime-node 1.18.x.\n\n' +
+        '  Fix:  npm install onnxruntime-node@~1.18.0\n\n' +
+        '  Versions 1.24+ removed `listSupportedBackends` from the public surface — track\n' +
+        '  https://github.com/PatterAI/Patter/issues for the SDK update that targets 1.24.';
+    } else if (importClass === 'binding' || requireClass === 'binding') {
+      header = 'SileroVAD found onnxruntime-node but the native binding for this platform is missing.';
+      remedy = '  Common cause on macOS x86_64: the prebuilt bin/ layout drifted between releases.\n\n' +
+        '  Fix:  npm install onnxruntime-node@~1.18.0\n\n' +
+        '  Or rebuild from source:  npm rebuild onnxruntime-node';
+    } else {
+      header = 'SileroVAD requires the "onnxruntime-node" package, which could not be resolved.';
+      remedy = '  Install:  npm install onnxruntime-node@~1.18.0\n\n' +
+        '  This is an optional peer dependency of getpatter (~210 MB).';
+    }
+
+    const err = new Error(
+      `\n${header}\n\n${remedy}\n\n` +
+        `  import() failed:     ${original}\n` +
+        `  cwd-require failed:  ${detail}\n`,
     );
+    // Attach the underlying causes so users running with --stack-trace-limit
+    // / debuggers can still drill into the real ONNX error chain.
+    (err as Error & { cause?: unknown }).cause = secondErr ?? firstErr;
+    throw err;
   }
 }
 

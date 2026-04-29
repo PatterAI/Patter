@@ -687,6 +687,28 @@ export class EmbeddedServer {
       }
     }
 
+    // Pipeline-mode barge-in fragility warning: without an external VAD
+    // adapter (Silero, Krisp, custom), the SDK falls back to the legacy
+    // "always forward + bargeInThresholdMs" path which is fragile on
+    // tunnel + speakerphone setups — the agent's own TTS leaks back into
+    // the inbound mic feed, STT transcribes it, and the heuristic gets
+    // confused so the cancel never fires. Only relevant in pipeline mode
+    // (no engine) with barge-in enabled.
+    if (
+      !this.agent.engine &&
+      !this.agent.vad &&
+      (this.agent.bargeInThresholdMs ?? 300) > 0
+    ) {
+      const ms = this.agent.bargeInThresholdMs ?? 300;
+      getLogger().warn(
+        `Pipeline mode without VAD: barge-in falls back to a fragile heuristic ` +
+          `(bargeInThresholdMs=${ms}) that misfires on tunnel/speakerphone ` +
+          `setups when the agent's own TTS leaks into the mic feed. ` +
+          `Recommended: pass \`vad: await SileroVAD.load({ sampleRate: 16000 })\` ` +
+          `on AgentOptions, or set bargeInThresholdMs: 0 to disable barge-in entirely.`,
+      );
+    }
+
     const app = express();
     // Capture raw body for Telnyx signature verification before JSON parsing.
     // The rawBody property is attached to the request object when needed.

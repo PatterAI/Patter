@@ -56,6 +56,9 @@ export class Patter {
   private localConfig: ResolvedLocalConfig;
   private embeddedServer: EmbeddedServer | null = null;
   private tunnelHandle: TunnelHandle | null = null;
+  private _tunnelReadyResolve!: (host: string) => void;
+  private _tunnelReadyReject!: (err: Error) => void;
+  private _tunnelReady: Promise<string>;
 
   /**
    * Live `MetricsStore` for the embedded server. Returns `null` before
@@ -65,6 +68,28 @@ export class Patter {
    */
   get metricsStore(): MetricsStore | null {
     return this.embeddedServer?.metricsStore ?? null;
+  }
+
+  /**
+   * Resolves to the public webhook hostname once the embedded server is
+   * ready to receive carrier callbacks. Use this instead of guessing a
+   * `setTimeout` after `void phone.serve()` — the documented outbound
+   * pattern is now:
+   *
+   * ```ts
+   * void phone.serve({ agent, tunnel: true });
+   * await phone.tunnelReady;
+   * await phone.call({ to: ..., agent });
+   * ```
+   *
+   * For static `webhookUrl` configurations the promise resolves
+   * immediately (no tunnel cold-start to wait on). For
+   * `tunnel: true` (cloudflared) it resolves after the tunnel hostname
+   * is wired into `localConfig.webhookUrl`. Rejects if `serve()` fails
+   * before the hostname is known.
+   */
+  get tunnelReady(): Promise<string> {
+    return this._tunnelReady;
   }
 
   constructor(options: LocalOptions) {
@@ -118,6 +143,18 @@ export class Patter {
       tunnel: options.tunnel,
       openaiKey: options.openaiKey,
     };
+
+    // Initialise the tunnel-ready deferred. If the caller already has a
+    // static webhookUrl (or StaticTunnel hostname), resolve immediately —
+    // there is no tunnel cold-start to wait on. Otherwise serve() will
+    // resolve it once the cloudflared hostname lands.
+    this._tunnelReady = new Promise<string>((resolve, reject) => {
+      this._tunnelReadyResolve = resolve;
+      this._tunnelReadyReject = reject;
+    });
+    if (normalizedWebhook) {
+      this._tunnelReadyResolve(normalizedWebhook);
+    }
   }
 
   // === Agent definition ===
@@ -259,21 +296,32 @@ export class Patter {
     showBanner();
 
     if (wantsCloudflared) {
-      const { startTunnel } = await import('./tunnel');
-      this.tunnelHandle = await startTunnel(port);
-      webhookUrl = this.tunnelHandle.hostname;
-      // Propagate the freshly-resolved webhook host into localConfig so a
-      // subsequent call() in the same process reads the same hostname instead
-      // of the original undefined value.
-      this.localConfig = { ...this.localConfig, webhookUrl };
+      try {
+        const { startTunnel } = await import('./tunnel');
+        this.tunnelHandle = await startTunnel(port);
+        webhookUrl = this.tunnelHandle.hostname;
+        // Propagate the freshly-resolved webhook host into localConfig so a
+        // subsequent call() in the same process reads the same hostname instead
+        // of the original undefined value.
+        this.localConfig = { ...this.localConfig, webhookUrl };
+        // Resolve the public deferred so callers awaiting `phone.tunnelReady`
+        // can proceed with `phone.call(...)` without race-prone setTimeouts.
+        this._tunnelReadyResolve(webhookUrl);
+      } catch (err) {
+        const e = err instanceof Error ? err : new Error(String(err));
+        this._tunnelReadyReject(e);
+        throw e;
+      }
     }
 
     if (!webhookUrl) {
-      throw new Error(
+      const err = new Error(
         'No webhookUrl configured. Either:\n' +
         '  - Pass webhookUrl in the Patter constructor\n' +
         '  - Use tunnel: true in serve() to auto-create a tunnel'
       );
+      this._tunnelReadyReject(err);
+      throw err;
     }
 
     const carrier = this.localConfig.carrier;

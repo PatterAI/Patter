@@ -55,6 +55,19 @@ export interface LatencyBreakdown {
    * TTS audio byte sent. Optional — undefined when TTS never completed.
    */
   tts_total_ms?: number;
+  /**
+   * **User-perceived agent response latency**: time from end-of-user-speech
+   * (VAD stop or STT ``speech_final``) to the first audio byte the agent
+   * sent back. Computed as ``endpoint_ms + llm_ttft_ms + tts_ms`` when all
+   * three signals are available — falls back to undefined otherwise.
+   *
+   * This is the metric you should watch for SLO / p95 dashboards. Unlike
+   * ``total_ms`` (which spans the user's entire utterance and therefore
+   * grows with how long the user spoke), ``agent_response_ms`` isolates
+   * the system-controlled latency: silence detection + LLM TTFT + TTS
+   * first byte.
+   */
+  agent_response_ms?: number;
 }
 
 export interface CostBreakdown {
@@ -735,6 +748,20 @@ export class CallMetricsAccumulator {
       tts_total_ms = Math.max(0, this._ttsLastByte - ttsTotalRef);
     }
 
+    // agent_response_ms — the user-perceived latency. Sum of the three
+    // system-controlled segments (silence detection, LLM TTFT, TTS
+    // first-byte). Undefined when any prerequisite signal is missing —
+    // we deliberately do NOT fall back to total_ms so dashboards can
+    // distinguish "metric available" vs "metric missing".
+    let agent_response_ms: number | undefined;
+    if (
+      endpoint_ms !== undefined &&
+      llm_ttft_ms !== undefined &&
+      tts_ms > 0
+    ) {
+      agent_response_ms = round(endpoint_ms + llm_ttft_ms + tts_ms, 1);
+    }
+
     // Note: in Realtime mode OpenAI handles STT+LLM+TTS as a single opaque
     // pipeline, so stt_ms / llm_ms / tts_ms stay 0 and only total_ms is
     // meaningful. Dashboards should prefer total_ms as the end-to-end proxy
@@ -750,6 +777,7 @@ export class CallMetricsAccumulator {
       ...(endpoint_ms !== undefined ? { endpoint_ms: round(endpoint_ms, 1) } : {}),
       ...(bargein_ms !== undefined ? { bargein_ms: round(bargein_ms, 1) } : {}),
       ...(tts_total_ms !== undefined ? { tts_total_ms: round(tts_total_ms, 1) } : {}),
+      ...(agent_response_ms !== undefined ? { agent_response_ms } : {}),
     };
   }
 

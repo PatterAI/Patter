@@ -86,6 +86,31 @@ class ElevenLabsTTSError(Exception):
     """Raised when the ElevenLabs WebSocket reports a server-side error."""
 
 
+class ElevenLabsPlanError(ElevenLabsTTSError):
+    """Raised when the WS endpoint refuses synthesis because the account
+    plan does not include WS streaming.
+
+    Free / Starter plans get ``payment_required`` from the server on the
+    first synthesise call. The HTTP :class:`ElevenLabsTTS` class works on
+    every plan, so the simplest fix is to swap the import:
+
+    .. code-block:: python
+
+        # before — fails on Free / Starter:
+        from getpatter import ElevenLabsWebSocketTTS as TTS
+        # after:
+        from getpatter import ElevenLabsTTS as TTS
+    """
+
+
+_PLAN_REQUIRED_MSG = (
+    "ElevenLabs WS streaming requires a Pro plan or higher (the WS endpoint "
+    "returned `payment_required`). Either upgrade at "
+    "https://elevenlabs.io/pricing, or use the HTTP `ElevenLabsTTS` class "
+    "which works on all plans (drop-in API)."
+)
+
+
 def _sanitise_log_str(value: object, *, limit: int = 200) -> str:
     """Render an untrusted server-supplied string for safe single-line logging.
 
@@ -328,8 +353,14 @@ class ElevenLabsWebSocketTTS(TTSProvider):
                 # frame containing both isFinal and error is not misread as
                 # a clean end-of-stream.
                 if msg.get("error"):
+                    err_str = _sanitise_log_str(msg["error"])
+                    # Recognise plan-gated rejections so callers can catch
+                    # them separately and either upgrade or fall back to
+                    # the HTTP class.
+                    if err_str == "payment_required" or "payment" in err_str.lower():
+                        raise ElevenLabsPlanError(_PLAN_REQUIRED_MSG)
                     raise ElevenLabsTTSError(
-                        f"ElevenLabs WS reported error: {_sanitise_log_str(msg['error'])}"
+                        f"ElevenLabs WS reported error: {err_str}"
                     )
 
                 audio_b64 = msg.get("audio")
