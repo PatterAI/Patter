@@ -65,6 +65,9 @@ class OpenAIRealtimeAdapter:
         # here and drained by ``receive_events`` before reading the socket.
         self._pending_events: deque[str] = deque()
         self._receive_task: asyncio.Task | None = None
+        import time as _time
+
+        self._session_start_monotonic: float = _time.monotonic()
 
     def __repr__(self) -> str:
         return f"OpenAIRealtimeAdapter(model={self.model!r}, voice={self.voice!r}, audio_format={self.audio_format!r})"
@@ -98,7 +101,8 @@ class OpenAIRealtimeAdapter:
                 "input_audio_format": self.audio_format,
                 "output_audio_format": self.audio_format,
                 "voice": self.voice,
-                "instructions": self.instructions or f"You are a helpful voice assistant. Respond in {self.language}. Be concise and natural.",
+                "instructions": self.instructions
+                or f"You are a helpful voice assistant. Respond in {self.language}. Be concise and natural.",
                 "turn_detection": {
                     "type": self.vad_type,
                     "threshold": 0.5,
@@ -112,7 +116,9 @@ class OpenAIRealtimeAdapter:
             if self.temperature is not None:
                 session_config["temperature"] = self.temperature
             if self.max_response_output_tokens is not None:
-                session_config["max_response_output_tokens"] = self.max_response_output_tokens
+                session_config["max_response_output_tokens"] = (
+                    self.max_response_output_tokens
+                )
             if self.modalities is not None:
                 session_config["modalities"] = self.modalities
             if self.tool_choice is not None:
@@ -127,10 +133,14 @@ class OpenAIRealtimeAdapter:
                     }
                     for t in self.tools
                 ]
-            await self._ws.send(json.dumps({
-                "type": "session.update",
-                "session": session_config,
-            }))
+            await self._ws.send(
+                json.dumps(
+                    {
+                        "type": "session.update",
+                        "session": session_config,
+                    }
+                )
+            )
 
             # Wait for ``session.updated`` ack before allowing any audio /
             # text traffic. Without this the first turn races the config
@@ -176,10 +186,14 @@ class OpenAIRealtimeAdapter:
         if self._ws is None:
             return
         encoded = base64.b64encode(audio).decode("ascii")
-        await self._ws.send(json.dumps({
-            "type": "input_audio_buffer.append",
-            "audio": encoded,
-        }))
+        await self._ws.send(
+            json.dumps(
+                {
+                    "type": "input_audio_buffer.append",
+                    "audio": encoded,
+                }
+            )
+        )
 
     async def receive_events(self):
         """Yield events from OpenAI Realtime API.
@@ -222,7 +236,8 @@ class OpenAIRealtimeAdapter:
                     # passed to ``conversation.item.truncate`` so a coarse
                     # estimate is good enough — the server clamps it.
                     self._current_response_audio_ms += _estimate_audio_ms(
-                        audio_bytes, self.audio_format,
+                        audio_bytes,
+                        self.audio_format,
                     )
                     yield ("audio", audio_bytes)
 
@@ -230,7 +245,10 @@ class OpenAIRealtimeAdapter:
                     # What the AI is saying (text)
                     yield ("transcript_output", data.get("delta", ""))
 
-                elif event_type in ("response.content_part.added", "response.output_item.added"):
+                elif event_type in (
+                    "response.content_part.added",
+                    "response.output_item.added",
+                ):
                     # Capture the in-flight assistant item id so we can
                     # truncate it precisely on barge-in.
                     item = data.get("item") or {}
@@ -246,16 +264,22 @@ class OpenAIRealtimeAdapter:
                 elif event_type == "input_audio_buffer.speech_stopped":
                     yield ("speech_stopped", None)
 
-                elif event_type == "conversation.item.input_audio_transcription.completed":
+                elif (
+                    event_type
+                    == "conversation.item.input_audio_transcription.completed"
+                ):
                     # What the user said
                     yield ("transcript_input", data.get("transcript", ""))
 
                 elif event_type == "response.function_call_arguments.done":
-                    yield ("function_call", {
-                        "call_id": data.get("call_id", ""),
-                        "name": data.get("name", ""),
-                        "arguments": data.get("arguments", "{}"),
-                    })
+                    yield (
+                        "function_call",
+                        {
+                            "call_id": data.get("call_id", ""),
+                            "name": data.get("name", ""),
+                            "arguments": data.get("arguments", "{}"),
+                        },
+                    )
 
                 elif event_type == "response.done":
                     # End of response — clear tracking state so the next
@@ -274,11 +298,14 @@ class OpenAIRealtimeAdapter:
                 # Surface unexpected closes so the caller can decide whether
                 # to reconnect. We intentionally don't reconnect here —
                 # telephony carriers handle session lifecycle.
-                yield ("error", {
-                    "type": "connection_closed",
-                    "code": getattr(exc, "code", None),
-                    "reason": getattr(exc, "reason", ""),
-                })
+                yield (
+                    "error",
+                    {
+                        "type": "connection_closed",
+                        "code": getattr(exc, "code", None),
+                        "reason": getattr(exc, "reason", ""),
+                    },
+                )
         finally:
             self._running = False
 
@@ -293,12 +320,16 @@ class OpenAIRealtimeAdapter:
             return
         if self._current_response_item_id:
             try:
-                await self._ws.send(json.dumps({
-                    "type": "conversation.item.truncate",
-                    "item_id": self._current_response_item_id,
-                    "content_index": 0,
-                    "audio_end_ms": self._current_response_audio_ms,
-                }))
+                await self._ws.send(
+                    json.dumps(
+                        {
+                            "type": "conversation.item.truncate",
+                            "item_id": self._current_response_item_id,
+                            "content_index": 0,
+                            "audio_end_ms": self._current_response_audio_ms,
+                        }
+                    )
+                )
             except Exception as exc:  # pragma: no cover
                 logger.debug("conversation.item.truncate failed: %s", exc)
         await self._ws.send(json.dumps({"type": "response.cancel"}))
@@ -307,32 +338,55 @@ class OpenAIRealtimeAdapter:
         """Send a text message to the AI (triggers a spoken response)."""
         if self._ws is None:
             return
-        await self._ws.send(json.dumps({
-            "type": "conversation.item.create",
-            "item": {
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_text", "text": text}],
-            },
-        }))
+        await self._ws.send(
+            json.dumps(
+                {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": text}],
+                    },
+                }
+            )
+        )
         await self._ws.send(json.dumps({"type": "response.create"}))
 
     async def send_function_result(self, call_id: str, result: str) -> None:
         """Send a function call result back to OpenAI and trigger a new response."""
         if self._ws is None:
             return
-        await self._ws.send(json.dumps({
-            "type": "conversation.item.create",
-            "item": {
-                "type": "function_call_output",
-                "call_id": call_id,
-                "output": result,
-            },
-        }))
+        await self._ws.send(
+            json.dumps(
+                {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": result,
+                    },
+                }
+            )
+        )
         await self._ws.send(json.dumps({"type": "response.create"}))
+
+    def record_session_end(self) -> None:
+        """Emit patter.cost.realtime_minutes for the elapsed session duration."""
+        import time as _time
+
+        from getpatter.observability.attributes import record_patter_attrs
+
+        elapsed = _time.monotonic() - self._session_start_monotonic
+        record_patter_attrs(
+            {
+                "patter.cost.realtime_minutes": elapsed / 60.0,
+                "patter.realtime.provider": "openai_realtime",
+            }
+        )
 
     async def close(self) -> None:
         """Close the connection and cancel any in-flight receive task."""
+        self.record_session_end()
         self._running = False
         task = self._receive_task
         if task is not None and not task.done():
