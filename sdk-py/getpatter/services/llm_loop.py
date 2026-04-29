@@ -227,12 +227,37 @@ class OpenAILLMProvider:
             # the full input rate (mirrors sdk-ts/llm-loop.ts:296-305).
             prompt_tokens = getattr(last_usage, "prompt_tokens", 0) or 0
             uncached_input = max(0, prompt_tokens - cache_read)
+            completion_tokens = getattr(last_usage, "completion_tokens", 0) or 0
+            self._record_completion_cost(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
             yield {
                 "type": "usage",
                 "input_tokens": uncached_input,
-                "output_tokens": getattr(last_usage, "completion_tokens", 0) or 0,
+                "output_tokens": completion_tokens,
                 "cache_read_tokens": cache_read,
             }
+
+    def _record_completion_cost(
+        self, *, prompt_tokens: int, completion_tokens: int
+    ) -> None:
+        """Stamp ``patter.cost.llm_*_tokens`` on the current span.
+
+        Subclasses (Groq, Cerebras) inherit this — the ``patter.llm.provider``
+        tag is overridden in the subclass to identify the upstream vendor.
+        Provider-specific subclasses with a different response shape (Anthropic,
+        Google) override this directly.
+        """
+        from getpatter.observability.attributes import record_patter_attrs
+
+        record_patter_attrs(
+            {
+                "patter.cost.llm_input_tokens": prompt_tokens,
+                "patter.cost.llm_output_tokens": completion_tokens,
+                "patter.llm.provider": "openai",
+            }
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -305,7 +330,9 @@ class LLMLoop:
                 fn = {
                     "name": t["name"],
                     "description": t.get("description", ""),
-                    "parameters": t.get("parameters", {"type": "object", "properties": {}}),
+                    "parameters": t.get(
+                        "parameters", {"type": "object", "properties": {}}
+                    ),
                 }
                 self._openai_tools.append({"type": "function", "function": fn})
 
@@ -410,8 +437,12 @@ class LLMLoop:
                                 model=self._model,
                                 input_tokens=chunk.get("input_tokens", 0),
                                 output_tokens=chunk.get("output_tokens", 0),
-                                cache_read_tokens=chunk.get("cache_read_input_tokens", 0),
-                                cache_write_tokens=chunk.get("cache_creation_input_tokens", 0),
+                                cache_read_tokens=chunk.get(
+                                    "cache_read_input_tokens", 0
+                                ),
+                                cache_write_tokens=chunk.get(
+                                    "cache_creation_input_tokens", 0
+                                ),
                             )
 
                     elif chunk_type == "tool_call":
@@ -440,7 +471,9 @@ class LLMLoop:
                         if chunk.get("name"):
                             tool_calls_accumulated[idx]["name"] = chunk["name"]
                         if chunk.get("arguments"):
-                            tool_calls_accumulated[idx]["arguments"] += chunk["arguments"]
+                            tool_calls_accumulated[idx]["arguments"] += chunk[
+                                "arguments"
+                            ]
             finally:
                 _span_cm.__exit__(None, None, None)
 
@@ -454,18 +487,23 @@ class LLMLoop:
                 return
 
             # Execute tool calls and add results to messages
-            assistant_msg: dict = {"role": "assistant", "content": "".join(text_parts) or None}
+            assistant_msg: dict = {
+                "role": "assistant",
+                "content": "".join(text_parts) or None,
+            }
             assistant_tool_calls = []
             for idx in sorted(tool_calls_accumulated.keys()):
                 tc = tool_calls_accumulated[idx]
-                assistant_tool_calls.append({
-                    "id": tc["id"],
-                    "type": "function",
-                    "function": {
-                        "name": tc["name"],
-                        "arguments": tc["arguments"],
-                    },
-                })
+                assistant_tool_calls.append(
+                    {
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["name"],
+                            "arguments": tc["arguments"],
+                        },
+                    }
+                )
             assistant_msg["tool_calls"] = assistant_tool_calls
             messages.append(assistant_msg)
 
@@ -477,11 +515,13 @@ class LLMLoop:
                     arguments = {}
 
                 result = await self._execute_tool(tool_name, arguments, call_context)
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc_data["id"],
-                    "content": result,
-                })
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc_data["id"],
+                        "content": result,
+                    }
+                )
 
             # Re-submit to LLM with tool results — next iteration will
             # either produce text or more tool calls
@@ -507,9 +547,7 @@ class LLMLoop:
 
         return json.dumps({"error": f"No executor available for tool '{tool_name}'"})
 
-    def _build_messages(
-        self, history: list[dict], user_text: str
-    ) -> list[dict]:
+    def _build_messages(self, history: list[dict], user_text: str) -> list[dict]:
         """Build OpenAI messages array from conversation history."""
         messages: list[dict] = [
             {"role": "system", "content": self._system_prompt},
