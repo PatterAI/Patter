@@ -4,6 +4,33 @@
 
 _(no entries yet — next version will land here)_
 
+## 0.5.5 (2026-04-28)
+
+OTel-driven cost and latency observability — every billable hot path now stamps `patter.cost.*` / `patter.latency.*` attributes on its span so external aggregators (notably `patter-agent-runner`) can compute per-call USD and latency without relying on the SDK's internal pricing table.
+
+### Added — span attributes (Python only this release; TS parity follow-up)
+- **`getpatter/observability/attributes.py`** — three new helpers: `record_patter_attrs`, `patter_call_scope` (context manager), `attach_span_exporter`. Lazy-OTel-guarded; no-op when the `[tracing]` extra is not installed.
+- **`Patter._attach_span_exporter(exporter, *, side="uut")`** — public hook consumed by `patter-agent-runner` to wire driver / UUT span streams. Default `side="uut"` preserves all existing behaviour.
+- **`patter_call_scope` enters at the bridge level** (Twilio + Telnyx WebSocket bridges) so the entire call lifetime — including hangup / cleanup — is bound to `patter.call_id` and `patter.side` ContextVars.
+
+### Added — per-provider cost emission (`patter.cost.*`)
+- **Telephony**: Twilio + Telnyx adapters emit `patter.cost.telephony_minutes`, `patter.telephony`, `patter.direction` on call end.
+- **STT**: Deepgram, AssemblyAI, Whisper, OpenAI-Transcribe, Soniox, Speechmatics, Cartesia adapters emit `patter.cost.stt_seconds`, `patter.stt.provider` per final transcript.
+- **TTS**: ElevenLabs, OpenAI, Cartesia, LMNT, Rime adapters emit `patter.cost.tts_chars`, `patter.tts.provider` per synthesis.
+- **LLM**: OpenAI (in `services/llm_loop.py`), Anthropic, Google Gemini, Groq, Cerebras emit `patter.cost.llm_input_tokens`, `patter.cost.llm_output_tokens`, `patter.llm.provider` after each completion.
+- **Realtime bundles**: OpenAI Realtime + ElevenLabs ConvAI emit `patter.cost.realtime_minutes`, `patter.realtime.provider` on session end.
+
+### Added — per-turn latency (`patter.latency.*`)
+- **Pipeline mode**: `PipelineHookExecutor.record_turn_latency(ttfb_ms, turn_ms)` is invoked from `StreamHandler._emit_turn_metrics`, which is the single funnel for every pipeline-mode turn. Realtime-mode latency follow-up tracked.
+
+### Decisions
+- ContextVar-based propagation chosen over kwarg-threading: avoids touching ~18 method signatures and supports the two-Patter-in-one-process driver/UUT split that `patter-agent-runner` uses.
+- `record_patter_attrs` falls back to a transient `patter.billable` span when no recording span is active, so providers don't need their own span boilerplate.
+- `attach_span_exporter` is idempotent on the same exporter object reference; warns when replacing a non-SDK `TracerProvider`.
+
+### Tests
+- `[nicolotognoni]-patter-sdk-acceptance/python/tests/observability/` — 33 mocked + unit tests covering helper API, scope propagation, exporter idempotency, and parametrized cost emission across all 19 provider variants.
+
 ## 0.5.3 (2026-04-27)
 
 Cost-accuracy, audio-pipeline, and observability hardening across both SDKs, plus opt-in per-call filesystem logging.
