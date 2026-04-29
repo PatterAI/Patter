@@ -157,6 +157,23 @@ class SonioxSTT(STTProvider):
         self._owns_session: bool = False
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._keepalive_task: asyncio.Task[None] | None = None
+        # Soniox always sends pcm_s16le (see ``_build_config``), so encoding
+        # is fixed; expose for observability cost computation.
+        self.encoding: str = "linear16"
+        self._audio_bytes_sent: int = 0
+
+    def _record_transcript_cost(self) -> None:
+        from getpatter.observability.attributes import record_patter_attrs
+
+        bytes_per_sample = 1 if self.encoding == "mulaw" else 2
+        seconds = self._audio_bytes_sent / float(self.sample_rate * bytes_per_sample)
+        record_patter_attrs(
+            {
+                "patter.cost.stt_seconds": seconds,
+                "patter.stt.provider": "soniox",
+            }
+        )
+        self._audio_bytes_sent = 0
 
     def __repr__(self) -> str:
         return (
@@ -253,6 +270,7 @@ class SonioxSTT(STTProvider):
             raise RuntimeError("SonioxSTT is not connected. Call connect() first.")
         if not audio_chunk:
             return
+        self._audio_bytes_sent += len(audio_chunk)
         await self._ws.send_bytes(audio_chunk)
 
     # ------------------------------------------------------------------
@@ -309,6 +327,7 @@ class SonioxSTT(STTProvider):
                     if _is_end_token(token):
                         # Endpoint detected — flush the accumulated final text.
                         if final_acc.text:
+                            self._record_transcript_cost()
                             yield Transcript(
                                 text=final_acc.text.strip(),
                                 is_final=True,
@@ -340,6 +359,7 @@ class SonioxSTT(STTProvider):
             if content.get("finished"):
                 # Final flush on server-side finish.
                 if final_acc.text:
+                    self._record_transcript_cost()
                     yield Transcript(
                         text=final_acc.text.strip(),
                         is_final=True,
