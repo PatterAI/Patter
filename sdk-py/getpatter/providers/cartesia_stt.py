@@ -104,6 +104,30 @@ class CartesiaSTT(STTProvider):
         self._transcript_queue: asyncio.Queue[Transcript] = asyncio.Queue()
         self._running = False
         self.request_id: str | None = None
+        self._audio_bytes_sent: int = 0
+
+    @property
+    def sample_rate(self) -> int:
+        return self._opts.sample_rate
+
+    @property
+    def encoding(self) -> str:
+        # Cartesia STT only accepts pcm_s16le today; surface a stable
+        # observability label that maps to "linear16" semantics.
+        return "linear16" if self._opts.encoding == "pcm_s16le" else self._opts.encoding
+
+    def _record_transcript_cost(self) -> None:
+        from getpatter.observability.attributes import record_patter_attrs
+
+        bytes_per_sample = 1 if self.encoding == "mulaw" else 2
+        seconds = self._audio_bytes_sent / float(self.sample_rate * bytes_per_sample)
+        record_patter_attrs(
+            {
+                "patter.cost.stt_seconds": seconds,
+                "patter.stt.provider": "cartesia",
+            }
+        )
+        self._audio_bytes_sent = 0
 
     def __repr__(self) -> str:
         return (
@@ -119,9 +143,9 @@ class CartesiaSTT(STTProvider):
         """
         base = self._base_url
         if base.startswith("http://"):
-            base = "ws://" + base[len("http://"):]
+            base = "ws://" + base[len("http://") :]
         elif base.startswith("https://"):
-            base = "wss://" + base[len("https://"):]
+            base = "wss://" + base[len("https://") :]
         elif not (base.startswith("ws://") or base.startswith("wss://")):
             base = "wss://" + base
 
@@ -152,6 +176,7 @@ class CartesiaSTT(STTProvider):
         """Forward a PCM s16le audio chunk to Cartesia."""
         if self._ws is None or self._ws.closed:
             raise RuntimeError("Not connected. Call connect() first.")
+        self._audio_bytes_sent += len(audio_chunk)
         await self._ws.send_bytes(audio_chunk)
 
     async def receive_transcripts(self) -> AsyncIterator[Transcript]:
@@ -163,6 +188,8 @@ class CartesiaSTT(STTProvider):
                 )
             except asyncio.TimeoutError:
                 continue
+            if transcript.is_final:
+                self._record_transcript_cost()
             yield transcript
 
     async def _keepalive_loop(self) -> None:
