@@ -23,8 +23,11 @@ class _Transcript(Transcript):  # type: ignore[misc]
     defaults for the rest) the way the old ad-hoc class allowed.
     """
 
-    def __init__(self, text: str, is_final: bool = True, confidence: float = 1.0) -> None:
+    def __init__(
+        self, text: str, is_final: bool = True, confidence: float = 1.0
+    ) -> None:
         super().__init__(text=text, is_final=is_final, confidence=confidence)
+
 
 OPENAI_TRANSCRIPTION_URL = "https://api.openai.com/v1/audio/transcriptions"
 # ~1 second of 16 kHz 16-bit mono audio
@@ -67,7 +70,12 @@ class WhisperSTT(STTProvider):
         self.language = language
         self.model = model
         self.response_format = response_format
+        # Whisper buffers PCM and uploads as 16 kHz / 16-bit / mono WAV;
+        # expose these so observability cost computation has explicit values.
+        self.sample_rate = 16000
+        self.encoding = "linear16"
         self._buffer = bytearray()
+        self._audio_bytes_sent: int = 0
         self._transcript_queue: asyncio.Queue[Transcript] = asyncio.Queue()
         self._running = False
         self._pending: set[asyncio.Task] = set()
@@ -75,6 +83,19 @@ class WhisperSTT(STTProvider):
             headers={"Authorization": f"Bearer {api_key}"},
             timeout=10.0,
         )
+
+    def _record_transcript_cost(self) -> None:
+        from getpatter.observability.attributes import record_patter_attrs
+
+        bytes_per_sample = 1 if self.encoding == "mulaw" else 2
+        seconds = self._audio_bytes_sent / float(self.sample_rate * bytes_per_sample)
+        record_patter_attrs(
+            {
+                "patter.cost.stt_seconds": seconds,
+                "patter.stt.provider": "whisper",
+            }
+        )
+        self._audio_bytes_sent = 0
 
     @classmethod
     def for_twilio(
@@ -98,6 +119,7 @@ class WhisperSTT(STTProvider):
 
     async def send_audio(self, audio_chunk: bytes) -> None:
         """Buffer incoming PCM audio and transcribe when the buffer is full."""
+        self._audio_bytes_sent += len(audio_chunk)
         self._buffer.extend(audio_chunk)
         if len(self._buffer) >= BUFFER_SIZE_BYTES:
             buf = bytes(self._buffer)
@@ -146,9 +168,14 @@ class WhisperSTT(STTProvider):
         """Async generator that yields transcripts as they arrive."""
         while self._running:
             try:
-                yield await asyncio.wait_for(self._transcript_queue.get(), timeout=0.1)
+                transcript = await asyncio.wait_for(
+                    self._transcript_queue.get(), timeout=0.1
+                )
             except asyncio.TimeoutError:
                 continue
+            if transcript.is_final:
+                self._record_transcript_cost()
+            yield transcript
 
     async def close(self) -> None:
         """Flush remaining buffer and close the HTTP client.
