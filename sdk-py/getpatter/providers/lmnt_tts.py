@@ -117,12 +117,23 @@ class LMNTTTS(TTSProvider):
             "top_p": self.top_p,
         }
 
+    def _record_synthesis_cost(self, text: str) -> None:
+        from getpatter.observability.attributes import record_patter_attrs
+
+        record_patter_attrs(
+            {
+                "patter.cost.tts_chars": len(text),
+                "patter.tts.provider": "lmnt",
+            }
+        )
+
     async def synthesize(self, text: str) -> AsyncIterator[bytes]:
         """Stream audio bytes for ``text``.
 
         With the default ``format='raw'`` these are PCM_S16LE chunks at the
         configured ``sample_rate``.
         """
+        self._record_synthesis_cost(text)
         session = self._ensure_session()
 
         headers = {
