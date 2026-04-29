@@ -165,8 +165,19 @@ class RimeTTS(TTSProvider):
 
         return payload
 
+    def _record_synthesis_cost(self, text: str) -> None:
+        from getpatter.observability.attributes import record_patter_attrs
+
+        record_patter_attrs(
+            {
+                "patter.cost.tts_chars": len(text),
+                "patter.tts.provider": "rime",
+            }
+        )
+
     async def synthesize(self, text: str) -> AsyncIterator[bytes]:
         """Stream raw PCM_S16LE bytes for ``text`` over HTTP."""
+        self._record_synthesis_cost(text)
         session = self._ensure_session()
         accept = "audio/pcm"
 
