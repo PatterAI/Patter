@@ -146,6 +146,11 @@ class Patter:
         self._tunnel_ready_pre_resolved: str | None = (
             webhook_url if webhook_url else None
         )
+        # ``ready`` is the safe signal for outbound calls — resolves only
+        # after ``serve()`` brings the embedded server up to ``listen``
+        # state. Never pre-resolved at construction even when webhook_url
+        # is static, because the WS routes only register inside ``serve()``.
+        self._ready: "asyncio.Future[str] | None" = None
 
     @staticmethod
     def _unpack_carrier(carrier: Any) -> tuple[str | None, dict]:
@@ -231,20 +236,15 @@ class Patter:
 
     @property
     def tunnel_ready(self) -> "asyncio.Future[str]":
-        """Future that resolves to the public webhook hostname.
+        """Future that resolves as soon as the public webhook hostname is known.
 
-        Use this instead of guessing a ``time.sleep`` after a fire-and-forget
-        ``serve()`` task — the documented outbound pattern is now::
+        **Prefer ``ready`` for outbound calls.** ``tunnel_ready`` resolves
+        before the embedded server is in ``listen`` state, so a
+        ``phone.call`` placed immediately afterwards can still race the
+        Twilio Media Streams upgrade and produce an 11100 call drop.
 
-            task = asyncio.create_task(phone.serve(agent, tunnel=True))
-            host = await phone.tunnel_ready
-            await phone.call(to=..., agent=agent)
-
-        For static ``webhook_url`` configurations the future resolves
-        immediately (no tunnel cold-start). For ``tunnel=True`` it resolves
-        after the cloudflared hostname is wired into ``LocalConfig``.
-        Rejects with the underlying exception if ``serve()`` fails before
-        the hostname is known.
+        Kept as a separate signal because some integrations (e.g. webhook
+        registration) only need the hostname, not the WS server.
         """
         if self._tunnel_ready is None:
             loop = asyncio.get_event_loop()
@@ -252,6 +252,26 @@ class Patter:
             if self._tunnel_ready_pre_resolved is not None:
                 self._tunnel_ready.set_result(self._tunnel_ready_pre_resolved)
         return self._tunnel_ready
+
+    @property
+    def ready(self) -> "asyncio.Future[str]":
+        """Future that resolves once the SDK is fully ready for callbacks.
+
+        Resolves after tunnel + carrier auto-config + embedded server
+        ``listen`` are all complete. This is the safe signal for outbound
+        calls — the documented pattern is::
+
+            task = asyncio.create_task(phone.serve(agent, tunnel=True))
+            host = await phone.ready
+            await phone.call(to=..., agent=agent)
+
+        Rejects with the underlying exception if ``serve()`` fails before
+        the server is listening.
+        """
+        if self._ready is None:
+            loop = asyncio.get_event_loop()
+            self._ready = loop.create_future()
+        return self._ready
 
     def _resolve_tunnel_ready(self, hostname: str) -> None:
         """Resolve the tunnel-ready future. Safe to call multiple times."""
@@ -263,6 +283,18 @@ class Patter:
     def _reject_tunnel_ready(self, err: BaseException) -> None:
         """Reject the tunnel-ready future. Safe to call multiple times."""
         fut = self.tunnel_ready
+        if not fut.done():
+            fut.set_exception(err)
+
+    def _resolve_ready(self, hostname: str) -> None:
+        """Resolve the server-ready future. Safe to call multiple times."""
+        fut = self.ready
+        if not fut.done():
+            fut.set_result(hostname)
+
+    def _reject_ready(self, err: BaseException) -> None:
+        """Reject the server-ready future. Safe to call multiple times."""
+        fut = self.ready
         if not fut.done():
             fut.set_exception(err)
 
@@ -330,10 +362,25 @@ class Patter:
                 f"https://{config.webhook_url}/webhooks/twilio/status",
             )
             extra_params.setdefault("StatusCallbackMethod", "POST")
-            extra_params.setdefault(
-                "StatusCallbackEvent",
-                "initiated ringing answered completed",
-            )
+            # ``StatusCallbackEvent`` must be a list (twilio-python
+            # serialises it as repeated query params), NOT a
+            # space-separated single string. Pass via the snake_case key
+            # ``status_callback_event`` that the twilio-python SDK
+            # documents — the space-separated form triggered Twilio
+            # notification 21626 ("invalid statusCallbackEvents") and on
+            # some ingestion paths also broke the answer-handler webhook
+            # (root cause of intermittent 11100 WS-upgrade failures).
+            # See https://www.twilio.com/docs/voice/api/call-resource#statuscallbackevent
+            if (
+                "StatusCallbackEvent" not in extra_params
+                and "status_callback_event" not in extra_params
+            ):
+                extra_params["status_callback_event"] = [
+                    "initiated",
+                    "ringing",
+                    "answered",
+                    "completed",
+                ]
             call_id = await adapter.initiate_call(
                 config.phone_number or from_number,
                 to,
@@ -763,7 +810,35 @@ class Patter:
         self._server.on_transcript = on_transcript
         self._server.on_message = on_message
         self._server.on_metrics = on_metrics
-        await self._server.start(port=port)
+
+        # Run uvicorn in a task so we can resolve ``phone.ready`` once it
+        # finishes its startup phase. ``server.start()`` itself awaits
+        # ``server.serve()`` which blocks until shutdown — so without the
+        # task wrapper we'd never get a chance to resolve.
+        serve_task = asyncio.create_task(self._server.start(port=port))
+        try:
+            # Poll uvicorn's ``started`` flag (set after the listen socket
+            # is bound and the lifespan startup phase completes).
+            deadline_loop = asyncio.get_event_loop()
+            start = deadline_loop.time()
+            while deadline_loop.time() - start < 30.0:
+                if serve_task.done():
+                    # Server failed during startup — propagate the error.
+                    await serve_task  # raises
+                inner = getattr(self._server, "_server", None)
+                if inner is not None and getattr(inner, "started", False):
+                    break
+                await asyncio.sleep(0.05)
+            else:
+                raise TimeoutError(
+                    "Embedded server did not reach 'started' state within 30s"
+                )
+            self._resolve_ready(config.webhook_url)
+        except BaseException as exc:
+            self._reject_ready(exc)
+            serve_task.cancel()
+            raise
+        await serve_task
 
     async def test(
         self,
