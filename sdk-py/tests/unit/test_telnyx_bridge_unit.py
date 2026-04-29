@@ -111,7 +111,7 @@ class TestTelnyxStreamBridgeLifecycle:
         )
 
         ws.accept.assert_awaited_once()
-        mock_handler._run_with_scope.assert_awaited_once()
+        mock_handler.start.assert_awaited_once()
         mock_handler.cleanup.assert_awaited_once()
         on_call_start.assert_awaited_once()
         on_call_end.assert_awaited_once()
@@ -149,7 +149,7 @@ class TestTelnyxStreamBridgeLifecycle:
         )
 
         mock_handler_cls.assert_called_once()
-        mock_handler._run_with_scope.assert_awaited_once()
+        mock_handler.start.assert_awaited_once()
 
     @pytest.mark.asyncio
     @patch("getpatter.handlers.telnyx_handler.ElevenLabsConvAIStreamHandler")

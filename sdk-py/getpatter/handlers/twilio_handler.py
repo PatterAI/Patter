@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import logging
 import re
@@ -10,6 +11,7 @@ import time
 from collections import deque
 from urllib.parse import quote
 
+from getpatter.observability.attributes import patter_call_scope
 from getpatter.handlers.common import (
     _create_stt_from_config,  # noqa: F401 — re-exported for tests and external callers
     _create_tts_from_config,  # noqa: F401 — re-exported for tests and external callers
@@ -278,335 +280,360 @@ async def twilio_stream_bridge(
     audio_sender: TwilioAudioSender | None = None
     metrics = None
 
-    try:
-        while True:
-            raw = await websocket.receive_text()
-            if len(raw) > _MAX_WS_MESSAGE_BYTES:
-                logger.warning(
-                    "Oversized WebSocket message dropped (%d bytes)", len(raw)
-                )
-                continue
-            data = json.loads(raw)
-            event = data.get("event", "")
+    # ExitStack lets us enter ``patter_call_scope`` *after* the start frame
+    # arrives (when call_id is known) while still keeping the scope active
+    # for the entire WebSocket loop AND the finally cleanup block. All spans
+    # emitted by provider plumbing during the call lifetime — including from
+    # ``handler.cleanup()``, telephony cost queries, and ``on_call_end`` —
+    # inherit ``patter.call_id`` and ``patter.side``.
+    with contextlib.ExitStack() as _scope_stack:
+        try:
+            while True:
+                raw = await websocket.receive_text()
+                if len(raw) > _MAX_WS_MESSAGE_BYTES:
+                    logger.warning(
+                        "Oversized WebSocket message dropped (%d bytes)", len(raw)
+                    )
+                    continue
+                data = json.loads(raw)
+                event = data.get("event", "")
 
-            if event == "start":
-                stream_sid = data.get("streamSid", "")
-                start_data = data.get("start", {})
-                call_sid_actual = start_data.get("callSid", "")
-                custom_params: dict = start_data.get("customParameters", {})
+                if event == "start":
+                    stream_sid = data.get("streamSid", "")
+                    start_data = data.get("start", {})
+                    call_sid_actual = start_data.get("callSid", "")
+                    custom_params: dict = start_data.get("customParameters", {})
 
-                # Single INFO line per call-start — full context in one place.
-                _mode = (
-                    f"engine={getattr(agent, 'provider', 'unknown')}"
-                    if getattr(agent, "engine", None) is None
-                    else f"engine={getattr(agent.engine, 'kind', 'unknown')}"
-                )
-                if (
-                    getattr(agent, "stt", None) is not None
-                    and getattr(agent, "tts", None) is not None
-                    and getattr(agent, "engine", None) is None
-                ):
-                    _mode = "pipeline"
-                logger.info(
-                    "Call started: %s (Twilio, %s, %s → %s)",
-                    call_sid_actual,
-                    _mode,
-                    caller or "?",
-                    callee or "?",
-                )
-                if custom_params:
-                    logger.debug("Custom params: %s", custom_params)
+                    # Single INFO line per call-start — full context in one place.
+                    _mode = (
+                        f"engine={getattr(agent, 'provider', 'unknown')}"
+                        if getattr(agent, "engine", None) is None
+                        else f"engine={getattr(agent.engine, 'kind', 'unknown')}"
+                    )
+                    if (
+                        getattr(agent, "stt", None) is not None
+                        and getattr(agent, "tts", None) is not None
+                        and getattr(agent, "engine", None) is None
+                    ):
+                        _mode = "pipeline"
+                    logger.info(
+                        "Call started: %s (Twilio, %s, %s → %s)",
+                        call_sid_actual,
+                        _mode,
+                        caller or "?",
+                        callee or "?",
+                    )
+                    if custom_params:
+                        logger.debug("Custom params: %s", custom_params)
 
-                # Fire on_call_start callback — may return per-call config overrides
-                _call_overrides = None
-                if on_call_start:
-                    _call_overrides = await on_call_start(
+                    # Fire on_call_start callback — may return per-call config overrides
+                    _call_overrides = None
+                    if on_call_start:
+                        _call_overrides = await on_call_start(
+                            {
+                                "call_id": call_sid_actual,
+                                "caller": caller,
+                                "callee": callee,
+                                "direction": "inbound",
+                                "custom_params": custom_params,
+                                "telephony_provider": "twilio",
+                            }
+                        )
+                        if not isinstance(_call_overrides, dict):
+                            _call_overrides = None
+
+                    # Apply per-call overrides (dynamic agent config)
+                    if _call_overrides:
+                        agent = apply_call_overrides(agent, _call_overrides)
+
+                    # Start recording if requested
+                    if recording and twilio_sid and twilio_token and call_sid_actual:
+                        if not _validate_twilio_sid(call_sid_actual, "CA"):
+                            logger.warning(
+                                "Recording skipped: invalid CallSid format %r",
+                                call_sid_actual,
+                            )
+                        else:
+                            import httpx as _httpx
+
+                            try:
+                                async with _httpx.AsyncClient() as _http:
+                                    await _http.post(
+                                        f"https://api.twilio.com/2010-04-01/Accounts/{twilio_sid}/Calls/{call_sid_actual}/Recordings.json",
+                                        auth=(twilio_sid, twilio_token),
+                                    )
+                                logger.debug(
+                                    "Recording started for %s", call_sid_actual
+                                )
+                            except Exception as _exc:
+                                logger.warning("Could not start recording: %s", _exc)
+
+                    resolved_prompt = resolve_agent_prompt(agent, custom_params)
+                    provider = getattr(agent, "provider", "openai_realtime")
+
+                    # Initialize metrics
+                    metrics = create_metrics_accumulator(
+                        call_id=call_sid_actual,
+                        provider=provider,
+                        telephony_provider="twilio",
+                        agent=agent,
+                        deepgram_key=deepgram_key,
+                        elevenlabs_key=elevenlabs_key,
+                        pricing=pricing,
+                        report_only_initial_ttfb=report_only_initial_ttfb,
+                    )
+                    # Twilio uses mulaw 8kHz (1 byte/sample)
+                    metrics.configure_stt_format(sample_rate=8000, bytes_per_sample=1)
+
+                    # Create audio sender. OpenAI Realtime on Twilio is configured
+                    # to emit g711_ulaw @ 8 kHz directly (see below), so for that
+                    # provider we skip the built-in PCM→mulaw transcoding path.
+                    # Pipeline / ConvAI still produce PCM16 @ 16 kHz.
+                    _input_is_mulaw = provider == "openai_realtime"
+                    audio_sender = TwilioAudioSender(
+                        websocket, stream_sid, input_is_mulaw_8k=_input_is_mulaw
+                    )
+
+                    # --- Twilio-specific call control helpers ---
+                    async def _twilio_transfer(number):
+                        if not _validate_e164(number):
+                            logger.warning(
+                                "transfer rejected: invalid number %s",
+                                mask_phone_number(number),
+                            )
+                            return
+                        if twilio_sid and twilio_token and call_sid_actual:
+                            if not _validate_twilio_sid(call_sid_actual, "CA"):
+                                logger.warning(
+                                    "transfer skipped: invalid CallSid %r",
+                                    call_sid_actual,
+                                )
+                                return
+                            import httpx as _httpx
+
+                            async with _httpx.AsyncClient() as _http:
+                                twiml = f"<Response><Dial>{_xml_escape(number)}</Dial></Response>"
+                                await _http.post(
+                                    f"https://api.twilio.com/2010-04-01/Accounts/{twilio_sid}/Calls/{call_sid_actual}.json",
+                                    auth=(twilio_sid, twilio_token),
+                                    data={"Twiml": twiml},
+                                )
+                            logger.debug(
+                                "Call transferred to %s", mask_phone_number(number)
+                            )
+
+                    async def _twilio_hangup():
+                        if twilio_sid and twilio_token and call_sid_actual:
+                            if not _validate_twilio_sid(call_sid_actual, "CA"):
+                                logger.warning(
+                                    "hangup skipped: invalid CallSid %r",
+                                    call_sid_actual,
+                                )
+                                return
+                            import httpx as _httpx
+
+                            async with _httpx.AsyncClient() as _http:
+                                await _http.post(
+                                    f"https://api.twilio.com/2010-04-01/Accounts/{twilio_sid}/Calls/{call_sid_actual}.json",
+                                    auth=(twilio_sid, twilio_token),
+                                    data={"Status": "completed"},
+                                )
+                            logger.debug("Call hung up")
+
+                    # Create the appropriate stream handler
+                    if provider == "pipeline":
+                        handler = PipelineStreamHandler(
+                            agent=agent,
+                            audio_sender=audio_sender,
+                            call_id=call_sid_actual,
+                            caller=caller,
+                            callee=callee,
+                            resolved_prompt=resolved_prompt,
+                            metrics=metrics,
+                            openai_key=openai_key,
+                            deepgram_key=deepgram_key,
+                            elevenlabs_key=elevenlabs_key,
+                            for_twilio=True,
+                            transfer_fn=_twilio_transfer,
+                            hangup_fn=_twilio_hangup,
+                            on_transcript=on_transcript,
+                            on_message=on_message,
+                            on_metrics=on_metrics,
+                            conversation_history=conversation_history,
+                            transcript_entries=transcript_entries,
+                        )
+                    elif provider == "elevenlabs_convai":
+                        handler = ElevenLabsConvAIStreamHandler(
+                            agent=agent,
+                            audio_sender=audio_sender,
+                            call_id=call_sid_actual,
+                            caller=caller,
+                            callee=callee,
+                            resolved_prompt=resolved_prompt,
+                            metrics=metrics,
+                            elevenlabs_key=elevenlabs_key,
+                            for_twilio=True,
+                            on_transcript=on_transcript,
+                            on_metrics=on_metrics,
+                            conversation_history=conversation_history,
+                            transcript_entries=transcript_entries,
+                        )
+                    else:
+                        handler = OpenAIRealtimeStreamHandler(
+                            agent=agent,
+                            audio_sender=audio_sender,
+                            call_id=call_sid_actual,
+                            caller=caller,
+                            callee=callee,
+                            resolved_prompt=resolved_prompt,
+                            metrics=metrics,
+                            openai_key=openai_key,
+                            transfer_fn=_twilio_transfer,
+                            hangup_fn=_twilio_hangup,
+                            on_transcript=on_transcript,
+                            on_metrics=on_metrics,
+                            conversation_history=conversation_history,
+                            transcript_entries=transcript_entries,
+                            # Twilio media streams are g711 mulaw @ 8 kHz. Asking
+                            # OpenAI to emit the same codec avoids a 24 kHz →
+                            # 16 kHz → 8 kHz resample chain that otherwise
+                            # produces a deep, slurred voice.
+                            audio_format="g711_ulaw",
+                        )
+
+                    # Inherit patter.side from the parent Patter instance so all
+                    # spans emitted during the call lifetime carry the right side.
+                    handler._patter_side = patter_side
+
+                    # Enter patter_call_scope NOW that call_id is known. The
+                    # ExitStack keeps the scope active until the end of the
+                    # outer ``with``, which encloses both the WebSocket loop
+                    # and the finally cleanup block. Cleanup paths (handler
+                    # cleanup, telephony cost queries, on_call_end) therefore
+                    # run inside the scope and emit spans bound to call_id.
+                    _scope_stack.enter_context(
+                        patter_call_scope(call_id=call_sid_actual, side=patter_side)
+                    )
+
+                    await handler.start()
+
+                elif event == "media":
+                    payload = data.get("media", {}).get("payload", "")
+                    mulaw_audio = base64.b64decode(payload)
+                    if handler is not None:
+                        await handler.on_audio_received(mulaw_audio)
+
+                elif event == "mark":
+                    mark_name = data.get("mark", {}).get("name", "")
+                    if isinstance(
+                        getattr(handler, "audio_sender", None), TwilioAudioSender
+                    ):
+                        handler.audio_sender.on_mark_confirmed(mark_name)
+                    if handler is not None:
+                        await handler.on_mark(mark_name)
+
+                elif event == "dtmf":
+                    digit = data.get("dtmf", {}).get("digit", "")
+                    logger.debug("DTMF: %s", digit)
+                    if handler is not None:
+                        await handler.on_dtmf(digit)
+                    if on_transcript:
+                        await on_transcript(
+                            {
+                                "role": "user",
+                                "text": f"[DTMF: {digit}]",
+                                "call_id": call_sid_actual,
+                            }
+                        )
+
+                elif event == "stop":
+                    break
+
+        except Exception as exc:
+            logger.exception("Stream error: %s", exc)
+        finally:
+            # Flush resampler tail before tearing down — drains any carry bytes so
+            # the last audio frame isn't clipped on graceful shutdown.
+            if audio_sender is not None:
+                try:
+                    await audio_sender.flush()
+                except Exception as _exc:
+                    logger.debug("Twilio audio_sender flush failed: %s", _exc)
+
+            if handler is not None:
+                await handler.cleanup()
+
+            # --- Metrics: query actual telephony cost from Twilio ---
+            if (
+                metrics is not None
+                and twilio_sid
+                and twilio_token
+                and call_sid_actual
+                and _validate_twilio_sid(call_sid_actual, "CA")
+            ):
+                try:
+                    import httpx as _httpx
+
+                    async with _httpx.AsyncClient() as _http:
+                        resp = await _http.get(
+                            f"https://api.twilio.com/2010-04-01/Accounts/{twilio_sid}/Calls/{call_sid_actual}.json",
+                            auth=(twilio_sid, twilio_token),
+                            timeout=5.0,
+                        )
+                        if resp.status_code == 200:
+                            call_data = resp.json()
+                            price = call_data.get("price")
+                            if price is not None:
+                                # Twilio returns price as negative string (e.g. "-0.0085")
+                                metrics.set_actual_telephony_cost(abs(float(price)))
+                                logger.debug(
+                                    "Twilio actual cost: $%s", abs(float(price))
+                                )
+                except Exception as exc:
+                    logger.debug("Could not fetch Twilio call cost: %s", exc)
+
+            # --- Metrics: query actual STT cost from Deepgram ---
+            stt = getattr(handler, "stt", None) if handler is not None else None
+            await fetch_deepgram_cost(metrics, stt, deepgram_key)
+
+            # --- Metrics: finalize ---
+            call_metrics = None
+            if metrics is not None:
+                try:
+                    call_metrics = metrics.end_call()
+                except Exception as exc:
+                    logger.warning("Metrics finalization error: %s", exc)
+            if on_call_end:
+                try:
+                    await on_call_end(
                         {
                             "call_id": call_sid_actual,
                             "caller": caller,
                             "callee": callee,
-                            "direction": "inbound",
-                            "custom_params": custom_params,
-                            "telephony_provider": "twilio",
+                            "ended_at": time.time(),
+                            "transcript": list(conversation_history),
+                            "metrics": call_metrics,
                         }
                     )
-                    if not isinstance(_call_overrides, dict):
-                        _call_overrides = None
+                except Exception as exc:
+                    logger.exception("on_call_end error: %s", exc)
 
-                # Apply per-call overrides (dynamic agent config)
-                if _call_overrides:
-                    agent = apply_call_overrides(agent, _call_overrides)
-
-                # Start recording if requested
-                if recording and twilio_sid and twilio_token and call_sid_actual:
-                    if not _validate_twilio_sid(call_sid_actual, "CA"):
-                        logger.warning(
-                            "Recording skipped: invalid CallSid format %r",
-                            call_sid_actual,
-                        )
-                    else:
-                        import httpx as _httpx
-
-                        try:
-                            async with _httpx.AsyncClient() as _http:
-                                await _http.post(
-                                    f"https://api.twilio.com/2010-04-01/Accounts/{twilio_sid}/Calls/{call_sid_actual}/Recordings.json",
-                                    auth=(twilio_sid, twilio_token),
-                                )
-                            logger.debug("Recording started for %s", call_sid_actual)
-                        except Exception as _exc:
-                            logger.warning("Could not start recording: %s", _exc)
-
-                resolved_prompt = resolve_agent_prompt(agent, custom_params)
-                provider = getattr(agent, "provider", "openai_realtime")
-
-                # Initialize metrics
-                metrics = create_metrics_accumulator(
-                    call_id=call_sid_actual,
-                    provider=provider,
-                    telephony_provider="twilio",
-                    agent=agent,
-                    deepgram_key=deepgram_key,
-                    elevenlabs_key=elevenlabs_key,
-                    pricing=pricing,
-                    report_only_initial_ttfb=report_only_initial_ttfb,
+            # Single INFO line per call-end — duration, turns, cost, latency.
+            if call_metrics is not None:
+                _dur = getattr(call_metrics, "duration_seconds", 0) or 0
+                _turns = len(getattr(call_metrics, "turns", []) or [])
+                _cost = getattr(getattr(call_metrics, "cost", None), "total", 0) or 0
+                _p95 = (
+                    getattr(getattr(call_metrics, "latency_p95", None), "total_ms", 0)
+                    or 0
                 )
-                # Twilio uses mulaw 8kHz (1 byte/sample)
-                metrics.configure_stt_format(sample_rate=8000, bytes_per_sample=1)
-
-                # Create audio sender. OpenAI Realtime on Twilio is configured
-                # to emit g711_ulaw @ 8 kHz directly (see below), so for that
-                # provider we skip the built-in PCM→mulaw transcoding path.
-                # Pipeline / ConvAI still produce PCM16 @ 16 kHz.
-                _input_is_mulaw = provider == "openai_realtime"
-                audio_sender = TwilioAudioSender(
-                    websocket, stream_sid, input_is_mulaw_8k=_input_is_mulaw
+                logger.info(
+                    "Call ended: %s (%.1fs, %d turns, cost=$%.4f, p95=%dms)",
+                    call_sid_actual,
+                    _dur,
+                    _turns,
+                    _cost,
+                    round(_p95),
                 )
-
-                # --- Twilio-specific call control helpers ---
-                async def _twilio_transfer(number):
-                    if not _validate_e164(number):
-                        logger.warning(
-                            "transfer rejected: invalid number %s",
-                            mask_phone_number(number),
-                        )
-                        return
-                    if twilio_sid and twilio_token and call_sid_actual:
-                        if not _validate_twilio_sid(call_sid_actual, "CA"):
-                            logger.warning(
-                                "transfer skipped: invalid CallSid %r", call_sid_actual
-                            )
-                            return
-                        import httpx as _httpx
-
-                        async with _httpx.AsyncClient() as _http:
-                            twiml = f"<Response><Dial>{_xml_escape(number)}</Dial></Response>"
-                            await _http.post(
-                                f"https://api.twilio.com/2010-04-01/Accounts/{twilio_sid}/Calls/{call_sid_actual}.json",
-                                auth=(twilio_sid, twilio_token),
-                                data={"Twiml": twiml},
-                            )
-                        logger.debug(
-                            "Call transferred to %s", mask_phone_number(number)
-                        )
-
-                async def _twilio_hangup():
-                    if twilio_sid and twilio_token and call_sid_actual:
-                        if not _validate_twilio_sid(call_sid_actual, "CA"):
-                            logger.warning(
-                                "hangup skipped: invalid CallSid %r", call_sid_actual
-                            )
-                            return
-                        import httpx as _httpx
-
-                        async with _httpx.AsyncClient() as _http:
-                            await _http.post(
-                                f"https://api.twilio.com/2010-04-01/Accounts/{twilio_sid}/Calls/{call_sid_actual}.json",
-                                auth=(twilio_sid, twilio_token),
-                                data={"Status": "completed"},
-                            )
-                        logger.debug("Call hung up")
-
-                # Create the appropriate stream handler
-                if provider == "pipeline":
-                    handler = PipelineStreamHandler(
-                        agent=agent,
-                        audio_sender=audio_sender,
-                        call_id=call_sid_actual,
-                        caller=caller,
-                        callee=callee,
-                        resolved_prompt=resolved_prompt,
-                        metrics=metrics,
-                        openai_key=openai_key,
-                        deepgram_key=deepgram_key,
-                        elevenlabs_key=elevenlabs_key,
-                        for_twilio=True,
-                        transfer_fn=_twilio_transfer,
-                        hangup_fn=_twilio_hangup,
-                        on_transcript=on_transcript,
-                        on_message=on_message,
-                        on_metrics=on_metrics,
-                        conversation_history=conversation_history,
-                        transcript_entries=transcript_entries,
-                    )
-                elif provider == "elevenlabs_convai":
-                    handler = ElevenLabsConvAIStreamHandler(
-                        agent=agent,
-                        audio_sender=audio_sender,
-                        call_id=call_sid_actual,
-                        caller=caller,
-                        callee=callee,
-                        resolved_prompt=resolved_prompt,
-                        metrics=metrics,
-                        elevenlabs_key=elevenlabs_key,
-                        for_twilio=True,
-                        on_transcript=on_transcript,
-                        on_metrics=on_metrics,
-                        conversation_history=conversation_history,
-                        transcript_entries=transcript_entries,
-                    )
-                else:
-                    handler = OpenAIRealtimeStreamHandler(
-                        agent=agent,
-                        audio_sender=audio_sender,
-                        call_id=call_sid_actual,
-                        caller=caller,
-                        callee=callee,
-                        resolved_prompt=resolved_prompt,
-                        metrics=metrics,
-                        openai_key=openai_key,
-                        transfer_fn=_twilio_transfer,
-                        hangup_fn=_twilio_hangup,
-                        on_transcript=on_transcript,
-                        on_metrics=on_metrics,
-                        conversation_history=conversation_history,
-                        transcript_entries=transcript_entries,
-                        # Twilio media streams are g711 mulaw @ 8 kHz. Asking
-                        # OpenAI to emit the same codec avoids a 24 kHz →
-                        # 16 kHz → 8 kHz resample chain that otherwise
-                        # produces a deep, slurred voice.
-                        audio_format="g711_ulaw",
-                    )
-
-                # Inherit patter.side from the parent Patter instance so all
-                # spans emitted during the call lifetime carry the right side.
-                handler._patter_side = patter_side
-                await handler._run_with_scope()
-
-            elif event == "media":
-                payload = data.get("media", {}).get("payload", "")
-                mulaw_audio = base64.b64decode(payload)
-                if handler is not None:
-                    await handler.on_audio_received(mulaw_audio)
-
-            elif event == "mark":
-                mark_name = data.get("mark", {}).get("name", "")
-                if isinstance(
-                    getattr(handler, "audio_sender", None), TwilioAudioSender
-                ):
-                    handler.audio_sender.on_mark_confirmed(mark_name)
-                if handler is not None:
-                    await handler.on_mark(mark_name)
-
-            elif event == "dtmf":
-                digit = data.get("dtmf", {}).get("digit", "")
-                logger.debug("DTMF: %s", digit)
-                if handler is not None:
-                    await handler.on_dtmf(digit)
-                if on_transcript:
-                    await on_transcript(
-                        {
-                            "role": "user",
-                            "text": f"[DTMF: {digit}]",
-                            "call_id": call_sid_actual,
-                        }
-                    )
-
-            elif event == "stop":
-                break
-
-    except Exception as exc:
-        logger.exception("Stream error: %s", exc)
-    finally:
-        # Flush resampler tail before tearing down — drains any carry bytes so
-        # the last audio frame isn't clipped on graceful shutdown.
-        if audio_sender is not None:
-            try:
-                await audio_sender.flush()
-            except Exception as _exc:
-                logger.debug("Twilio audio_sender flush failed: %s", _exc)
-
-        if handler is not None:
-            await handler.cleanup()
-
-        # --- Metrics: query actual telephony cost from Twilio ---
-        if (
-            metrics is not None
-            and twilio_sid
-            and twilio_token
-            and call_sid_actual
-            and _validate_twilio_sid(call_sid_actual, "CA")
-        ):
-            try:
-                import httpx as _httpx
-
-                async with _httpx.AsyncClient() as _http:
-                    resp = await _http.get(
-                        f"https://api.twilio.com/2010-04-01/Accounts/{twilio_sid}/Calls/{call_sid_actual}.json",
-                        auth=(twilio_sid, twilio_token),
-                        timeout=5.0,
-                    )
-                    if resp.status_code == 200:
-                        call_data = resp.json()
-                        price = call_data.get("price")
-                        if price is not None:
-                            # Twilio returns price as negative string (e.g. "-0.0085")
-                            metrics.set_actual_telephony_cost(abs(float(price)))
-                            logger.debug("Twilio actual cost: $%s", abs(float(price)))
-            except Exception as exc:
-                logger.debug("Could not fetch Twilio call cost: %s", exc)
-
-        # --- Metrics: query actual STT cost from Deepgram ---
-        stt = getattr(handler, "stt", None) if handler is not None else None
-        await fetch_deepgram_cost(metrics, stt, deepgram_key)
-
-        # --- Metrics: finalize ---
-        call_metrics = None
-        if metrics is not None:
-            try:
-                call_metrics = metrics.end_call()
-            except Exception as exc:
-                logger.warning("Metrics finalization error: %s", exc)
-        if on_call_end:
-            try:
-                await on_call_end(
-                    {
-                        "call_id": call_sid_actual,
-                        "caller": caller,
-                        "callee": callee,
-                        "ended_at": time.time(),
-                        "transcript": list(conversation_history),
-                        "metrics": call_metrics,
-                    }
-                )
-            except Exception as exc:
-                logger.exception("on_call_end error: %s", exc)
-
-        # Single INFO line per call-end — duration, turns, cost, latency.
-        if call_metrics is not None:
-            _dur = getattr(call_metrics, "duration_seconds", 0) or 0
-            _turns = len(getattr(call_metrics, "turns", []) or [])
-            _cost = getattr(getattr(call_metrics, "cost", None), "total", 0) or 0
-            _p95 = (
-                getattr(getattr(call_metrics, "latency_p95", None), "total_ms", 0) or 0
-            )
-            logger.info(
-                "Call ended: %s (%.1fs, %d turns, cost=$%.4f, p95=%dms)",
-                call_sid_actual,
-                _dur,
-                _turns,
-                _cost,
-                round(_p95),
-            )
-        else:
-            logger.info("Call ended: %s", call_sid_actual)
+            else:
+                logger.info("Call ended: %s", call_sid_actual)

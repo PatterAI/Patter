@@ -421,29 +421,6 @@ class StreamHandler(ABC):
     async def cleanup(self) -> None:
         """Close provider connections and cancel background tasks."""
 
-    async def _run_inner(self) -> None:
-        """The original per-call entry point; defaults to ``self.start()``.
-
-        Subclasses may override to insert handler-specific orchestration
-        between the scope wrapper and the existing ``start`` method, but the
-        default implementation is what the telephony bridges rely on.
-        """
-        await self.start()
-
-    async def _run_with_scope(self) -> None:
-        """Enter ``patter_call_scope`` for the call lifetime, then run the handler.
-
-        All spans emitted from provider plumbing during this call inherit
-        ``patter.call_id`` and ``patter.side`` via the helper's ContextVars.
-        Background tasks created via ``asyncio.create_task`` from inside the
-        scope copy the active context, so they continue to see the bound
-        ContextVars after this method returns.
-        """
-        from getpatter.observability.attributes import patter_call_scope
-
-        with patter_call_scope(call_id=self.call_id, side=self._patter_side):
-            await self._run_inner()
-
     async def _emit_turn_metrics(self, turn, *, call_id: str | None = None) -> None:
         """Emit a completed turn to the user-supplied on_metrics callback.
 

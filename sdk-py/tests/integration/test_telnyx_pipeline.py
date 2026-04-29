@@ -111,7 +111,7 @@ class TestTelnyxPipeline:
 
         ws.accept.assert_awaited_once()
         MockHandler.assert_called_once()
-        handler_instance._run_with_scope.assert_awaited_once()
+        handler_instance.start.assert_awaited_once()
         assert handler_instance.on_audio_received.await_count == 2
         handler_instance.cleanup.assert_awaited_once()
         on_call_start.assert_awaited_once()

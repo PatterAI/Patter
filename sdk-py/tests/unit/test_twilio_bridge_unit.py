@@ -123,7 +123,7 @@ class TestTwilioStreamBridgeLifecycle:
         )
 
         ws.accept.assert_awaited_once()
-        mock_handler._run_with_scope.assert_awaited_once()
+        mock_handler.start.assert_awaited_once()
         mock_handler.cleanup.assert_awaited_once()
         on_call_start.assert_awaited_once()
         on_call_end.assert_awaited_once()
@@ -165,7 +165,7 @@ class TestTwilioStreamBridgeLifecycle:
         )
 
         mock_handler_cls.assert_called_once()
-        mock_handler._run_with_scope.assert_awaited_once()
+        mock_handler.start.assert_awaited_once()
 
     @pytest.mark.asyncio
     @patch("getpatter.handlers.twilio_handler.ElevenLabsConvAIStreamHandler")
@@ -561,4 +561,4 @@ class TestTwilioRecording:
         )
 
         # Handler should still be created and started
-        mock_handler._run_with_scope.assert_awaited_once()
+        mock_handler.start.assert_awaited_once()
