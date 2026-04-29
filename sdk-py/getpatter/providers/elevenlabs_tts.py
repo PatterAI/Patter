@@ -243,7 +243,18 @@ class ElevenLabsTTS(TTSProvider):
             chunk_size=chunk_size,
         )
 
+    def _record_synthesis_cost(self, text: str) -> None:
+        from getpatter.observability.attributes import record_patter_attrs
+
+        record_patter_attrs(
+            {
+                "patter.cost.tts_chars": len(text),
+                "patter.tts.provider": "elevenlabs",
+            }
+        )
+
     async def synthesize(self, text: str) -> AsyncIterator[bytes]:
+        self._record_synthesis_cost(text)
         body: dict = {"text": text, "model_id": self.model_id}
         if self.voice_settings:
             body["voice_settings"] = self.voice_settings
