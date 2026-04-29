@@ -57,3 +57,8 @@ class OpenAITranscribeSTT(WhisperSTT):
             model=model,
             response_format=response_format,
         )
+        # Observability: ``_record_transcript_cost`` is inherited from
+        # ``WhisperSTT`` and emits ``patter.stt.provider="whisper"``. This
+        # is intentional — gpt-4o-transcribe shares the Whisper cost table,
+        # so a single tag keeps the dashboard's per-provider rollup
+        # consistent across the OpenAI transcription family.
