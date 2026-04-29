@@ -1232,7 +1232,10 @@ class PipelineStreamHandler(StreamHandler):
 
     async def _process_streaming_response(self, result, call_id: str) -> str:
         """Process a streaming (async generator) response through TTS with sentence chunking."""
-        chunker = SentenceChunker()
+        chunker = SentenceChunker(
+            aggressive_first_flush=getattr(self.agent, "aggressive_first_flush", False),
+            language=getattr(self.agent, "language", "en"),
+        )
         full_response_parts: list[str] = []
         self._begin_speaking()
         first_tts_chunk = [True]
@@ -1271,6 +1274,17 @@ class PipelineStreamHandler(StreamHandler):
                         if blocked:
                             sentence = get_guardrail_replacement(self.agent, guard_name)
 
+                        # Tier 2 — per-sentence after_llm transform. Runs
+                        # between the chunker and TTS so PII redaction /
+                        # persona overlay / refusal swap can edit individual
+                        # sentences without buffering the full LLM response.
+                        # Returning None drops the sentence silently.
+                        if hook_executor.has_after_llm_sentence():
+                            transformed = await hook_executor.run_after_llm_sentence(sentence, hook_ctx)
+                            if transformed is None:
+                                continue  # hook dropped this sentence
+                            sentence = transformed
+
                         if not await self._synthesize_sentence(sentence, hook_executor, hook_ctx, first_tts_chunk):
                             interrupted = True
                             break
@@ -1299,6 +1313,12 @@ class PipelineStreamHandler(StreamHandler):
                     blocked, guard_name = evaluate_guardrails(self.agent, sentence)
                     if blocked:
                         sentence = get_guardrail_replacement(self.agent, guard_name)
+
+                    if hook_executor.has_after_llm_sentence():
+                        transformed = await hook_executor.run_after_llm_sentence(sentence, hook_ctx)
+                        if transformed is None:
+                            continue
+                        sentence = transformed
 
                     if not await self._synthesize_sentence(sentence, hook_executor, hook_ctx, first_tts_chunk):
                         interrupted = True

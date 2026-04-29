@@ -529,11 +529,14 @@ export class LLMLoop {
         hookCtx,
       )) as OpenAIMessage[];
     }
-    // When after_llm is configured, buffer streaming tokens, run the
-    // hook against the final assistant text, and yield the (possibly
-    // rewritten) text as a single chunk. Without the hook, streaming
-    // continues token-by-token as before.
-    const hasAfterLlm = Boolean(hookExecutor?.hasAfterLlm() && hookCtx);
+    // Tier 3 (`onResponse`) — and the deprecated legacy callable that maps
+    // to it — buffer streaming tokens, run the hook against the final
+    // assistant text, and yield the (possibly rewritten) text as a single
+    // chunk. Tier 1 (`onChunk`) and tier 2 (`onSentence`) keep streaming.
+    // Tier 1 transform is applied inline below; tier 2 runs in the
+    // sentence chunker / stream-handler downstream.
+    const hasAfterLlmResponse = Boolean(hookExecutor?.hasAfterLlmResponse() && hookCtx);
+    const hasAfterLlmChunk = Boolean(hookExecutor?.hasAfterLlmChunk());
     const allEmittedText: string[] = [];
 
     for (let iter = 0; iter < maxIterations; iter++) {
@@ -543,12 +546,16 @@ export class LLMLoop {
 
       for await (const chunk of this.provider.stream(messages, this.openaiTools)) {
         if (chunk.type === 'text' && chunk.content) {
-          textParts.push(chunk.content);
-          this.eventBus?.emit('llm_chunk', { text: chunk.content, iteration: iter });
-          if (hasAfterLlm) {
-            allEmittedText.push(chunk.content);
+          // Tier 1 — per-token sync transform. Cheap, no buffering.
+          const content = hasAfterLlmChunk && hookExecutor
+            ? hookExecutor.runAfterLlmChunk(chunk.content)
+            : chunk.content;
+          textParts.push(content);
+          this.eventBus?.emit('llm_chunk', { text: content, iteration: iter });
+          if (hasAfterLlmResponse) {
+            allEmittedText.push(content);
           } else {
-            yield chunk.content;
+            yield content;
           }
         } else if (chunk.type === 'usage') {
           // Fix 10: forward token usage to the metrics accumulator for billing.
@@ -580,9 +587,9 @@ export class LLMLoop {
       }
 
       if (!hasToolCalls) {
-        if (hasAfterLlm && hookExecutor && hookCtx) {
+        if (hasAfterLlmResponse && hookExecutor && hookCtx) {
           const finalText = allEmittedText.join('');
-          const rewritten = await hookExecutor.runAfterLlm(finalText, hookCtx);
+          const rewritten = await hookExecutor.runAfterLlmResponse(finalText, hookCtx);
           if (rewritten) yield rewritten;
         }
         return;

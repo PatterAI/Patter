@@ -582,3 +582,149 @@ class TestCallControlSendDtmf:
         cc = CallControl("c", "a", "b", "twilio", _send_dtmf_fn=fake_send)
         await cc.send_dtmf("9")
         assert calls == [("9", 300)]
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — after_llm 3-tier API
+# ---------------------------------------------------------------------------
+
+import warnings as _warnings
+
+from getpatter.models import HookContext, PipelineHooks
+from getpatter.services.pipeline_hooks import (
+    PatterDeprecationWarning,
+    PipelineHookExecutor,
+)
+
+
+def _ctx() -> HookContext:
+    return HookContext(call_id="c1", caller="+1", callee="+2")
+
+
+class TestAfterLlmThreeTier:
+    """Phase 3: after_llm accepts (a) legacy callable, (b) dict, (c) Protocol-style obj."""
+
+    async def test_no_hook_passes_through(self) -> None:
+        ex = PipelineHookExecutor(None)
+        assert ex.has_after_llm() is False
+        assert ex.has_after_llm_response() is False
+        assert ex.has_after_llm_chunk() is False
+        assert ex.has_after_llm_sentence() is False
+        assert ex.run_after_llm_chunk("Hi") == "Hi"
+        assert await ex.run_after_llm_sentence("Hi.", _ctx()) == "Hi."
+        assert await ex.run_after_llm_response("Hi.", _ctx()) == "Hi."
+
+    async def test_legacy_callable_maps_to_on_response_with_warning(self) -> None:
+        # Reset global warned flag so we can verify the warning fires.
+        import getpatter.services.pipeline_hooks as ph
+        ph._legacy_after_llm_warned = False
+
+        async def legacy(text: str, ctx: HookContext) -> str:
+            return text.upper()
+
+        hooks = PipelineHooks(after_llm=legacy)
+        with _warnings.catch_warnings(record=True) as caught:
+            _warnings.simplefilter("always")
+            ex = PipelineHookExecutor(hooks)
+        # The deprecation warning must have surfaced.
+        deprecations = [w for w in caught if issubclass(w.category, PatterDeprecationWarning)]
+        assert len(deprecations) == 1
+        # And the legacy form maps to on_response semantics.
+        assert ex.has_after_llm_response() is True
+        assert ex.has_after_llm_sentence() is False
+        result = await ex.run_after_llm_response("hello world", _ctx())
+        assert result == "HELLO WORLD"
+
+    async def test_dict_form_three_tier(self) -> None:
+        async def on_sentence(s: str, ctx: HookContext) -> str:
+            return s.replace("foo", "bar")
+
+        async def on_response(t: str, ctx: HookContext) -> str:
+            return t + " (final)"
+
+        hooks = PipelineHooks(after_llm={
+            "on_chunk": lambda c: c.replace("X", "Y"),
+            "on_sentence": on_sentence,
+            "on_response": on_response,
+        })
+        ex = PipelineHookExecutor(hooks)
+        assert ex.has_after_llm_chunk() is True
+        assert ex.has_after_llm_sentence() is True
+        assert ex.has_after_llm_response() is True
+        assert ex.run_after_llm_chunk("aXbXc") == "aYbYc"
+        assert await ex.run_after_llm_sentence("foo bar baz", _ctx()) == "bar bar baz"
+        assert await ex.run_after_llm_response("hello", _ctx()) == "hello (final)"
+
+    async def test_object_form_three_tier(self) -> None:
+        class Hook:
+            def on_chunk(self, c: str) -> str:
+                return c.lower()
+            async def on_sentence(self, s: str, ctx: HookContext) -> str:
+                return f"[{s}]"
+            async def on_response(self, t: str, ctx: HookContext) -> str | None:
+                return None  # keep original
+
+        hooks = PipelineHooks(after_llm=Hook())
+        ex = PipelineHookExecutor(hooks)
+        assert ex.run_after_llm_chunk("HI") == "hi"
+        assert await ex.run_after_llm_sentence("there", _ctx()) == "[there]"
+        # on_response returning None keeps original
+        assert await ex.run_after_llm_response("text", _ctx()) == "text"
+
+    async def test_chunk_hook_failure_falls_open(self) -> None:
+        def boom(c: str) -> str:
+            raise RuntimeError("nope")
+
+        hooks = PipelineHooks(after_llm={"on_chunk": boom})
+        ex = PipelineHookExecutor(hooks)
+        # Hook raises → original chunk passes through unchanged.
+        assert ex.run_after_llm_chunk("hello") == "hello"
+
+    async def test_chunk_hook_non_string_return_falls_open(self) -> None:
+        hooks = PipelineHooks(after_llm={"on_chunk": lambda c: 42})
+        ex = PipelineHookExecutor(hooks)
+        assert ex.run_after_llm_chunk("hello") == "hello"
+
+    async def test_sentence_hook_returns_empty_drops_sentence(self) -> None:
+        async def drop(s, ctx):
+            return ""
+        hooks = PipelineHooks(after_llm={"on_sentence": drop})
+        ex = PipelineHookExecutor(hooks)
+        assert await ex.run_after_llm_sentence("kept", _ctx()) is None
+
+    async def test_sentence_hook_returns_none_keeps_original(self) -> None:
+        async def keep(s, ctx):
+            return None
+        hooks = PipelineHooks(after_llm={"on_sentence": keep})
+        ex = PipelineHookExecutor(hooks)
+        assert await ex.run_after_llm_sentence("kept", _ctx()) == "kept"
+
+    async def test_sentence_hook_failure_falls_open(self) -> None:
+        async def boom(s, ctx):
+            raise ValueError("oops")
+        hooks = PipelineHooks(after_llm={"on_sentence": boom})
+        ex = PipelineHookExecutor(hooks)
+        assert await ex.run_after_llm_sentence("text", _ctx()) == "text"
+
+    async def test_legacy_alias_methods_still_work(self) -> None:
+        async def legacy(text, ctx):
+            return text + "!"
+        hooks = PipelineHooks(after_llm=legacy)
+        ex = PipelineHookExecutor(hooks)
+        # has_after_llm() and run_after_llm() are deprecated aliases.
+        assert ex.has_after_llm() is True
+        assert await ex.run_after_llm("hi", _ctx()) == "hi!"
+
+    async def test_deprecation_warning_only_fires_once(self) -> None:
+        # Reset global state and verify subsequent constructions don't re-warn.
+        import getpatter.services.pipeline_hooks as ph
+        ph._legacy_after_llm_warned = False
+        async def legacy(t, c): return t
+        hooks = PipelineHooks(after_llm=legacy)
+        with _warnings.catch_warnings(record=True) as caught:
+            _warnings.simplefilter("always")
+            PipelineHookExecutor(hooks)
+            PipelineHookExecutor(hooks)  # second time — no new warning
+            PipelineHookExecutor(hooks)  # third — still no new warning
+        deprecations = [w for w in caught if issubclass(w.category, PatterDeprecationWarning)]
+        assert len(deprecations) == 1

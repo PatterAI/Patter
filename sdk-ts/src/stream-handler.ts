@@ -1125,7 +1125,10 @@ export class StreamHandler {
   ): Promise<string> {
     const label = this.deps.bridge.label;
     const callCtx = { call_id: this.callId, caller: this.caller, callee: this.callee };
-    const chunker = new SentenceChunker();
+    const chunker = new SentenceChunker({
+      aggressiveFirstFlush: this.deps.agent.aggressiveFirstFlush ?? false,
+      language: this.deps.agent.language,
+    });
     const allParts: string[] = [];
     const ttsFirstByteSent = { value: false };
     this.beginSpeaking();
@@ -1139,9 +1142,18 @@ export class StreamHandler {
       // Fix 3/5: record first-sentence boundary before synthesizing first sentence.
       if (isFirst) this.metricsAcc.recordLlmFirstSentenceComplete();
       const guard = checkGuardrails(sentence, this.deps.agent.guardrails);
-      const sentenceText = guard
+      let sentenceText = guard
         ? (guard.replacement ?? "I'm sorry, I can't respond to that.")
         : sentence;
+      // Tier 2 — per-sentence after_llm transform. Runs between the
+      // sentence chunker and TTS so PII redaction / persona overlay /
+      // refusal swap can edit individual sentences without buffering the
+      // full LLM response. Returning null from the hook drops the sentence.
+      if (hookExecutor.hasAfterLlmSentence()) {
+        const transformed = await hookExecutor.runAfterLlmSentence(sentenceText, hookCtx);
+        if (transformed === null) return; // hook dropped this sentence
+        sentenceText = transformed;
+      }
       await this.synthesizeSentence(sentenceText, hookExecutor, hookCtx, ttsFirstByteSent);
     };
     let firstSentenceEmitted = false;
@@ -1224,7 +1236,15 @@ export class StreamHandler {
     try {
       for (const sentence of sentences) {
         if (!this.isSpeaking) { interrupted = true; break; }
-        await this.synthesizeSentence(sentence, hookExecutor, hookCtx, ttsFirstByteSent);
+        let sentenceText = sentence;
+        // Tier 2 — apply per-sentence after_llm hook on non-streaming
+        // path too (parity with the streaming path's guardAndSpeak).
+        if (hookExecutor.hasAfterLlmSentence()) {
+          const transformed = await hookExecutor.runAfterLlmSentence(sentenceText, hookCtx);
+          if (transformed === null) continue; // hook dropped this sentence
+          sentenceText = transformed;
+        }
+        await this.synthesizeSentence(sentenceText, hookExecutor, hookCtx, ttsFirstByteSent);
       }
     } finally {
       this.endSpeakingWithGrace();
