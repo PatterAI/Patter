@@ -32,6 +32,7 @@ await phone.serve({ agent });
 | Class | Env var |
 |-------|---------|
 | `ElevenLabsTTS` | `ELEVENLABS_API_KEY` |
+| `ElevenLabsWebSocketTTS` | `ELEVENLABS_API_KEY` |
 | `OpenAITTS` | `OPENAI_API_KEY` |
 | `CartesiaTTS` | `CARTESIA_API_KEY` |
 | `RimeTTS` | `RIME_API_KEY` |
@@ -55,6 +56,10 @@ const tts = new ElevenLabsTTS({ apiKey: "...", voiceId: "EXAVITQu4vr4xnSDxMaL", 
 | `voiceId` | `string` | `"EXAVITQu4vr4xnSDxMaL"` (Sarah) | ElevenLabs voice ID (or name). |
 | `modelId` | `string` | `"eleven_turbo_v2_5"` | Model preset. |
 | `outputFormat` | `string` | `"pcm_16000"` | ElevenLabs output format. |
+
+<Note>
+  **WebSocket variant**: `ElevenLabsWebSocketTTS` is a drop-in alternative that streams audio over a WebSocket connection, saving ~50 ms of HTTP setup + TLS cold-start per utterance. See [ElevenLabs WebSocket TTS](/typescript-sdk/providers/elevenlabs-websocket) for the full reference and limitations.
+</Note>
 
 ## OpenAI
 

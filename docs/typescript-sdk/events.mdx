@@ -237,11 +237,74 @@ await phone.serve({
 }
 ```
 
+## Pipeline Hooks (`afterLlm`)
+
+`PipelineHooks` lets you intercept LLM output before it reaches the TTS engine. Pass it via `phone.agent({ hooks: { afterLlm: ... } })`. The new 3-tier API exposes three callbacks tuned to different latency budgets — pick the one that matches your work.
+
+```typescript
+import { Patter, Twilio, DeepgramSTT, AnthropicLLM, ElevenLabsTTS } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  stt: new DeepgramSTT(),
+  llm: new AnthropicLLM(),
+  tts: new ElevenLabsTTS(),
+  systemPrompt: "...",
+  hooks: {
+    afterLlm: {
+      onChunk: (chunk) => chunk.replace(/um/g, ""),                       // sync, ~0 ms
+      onSentence: async (s, ctx) => await redactPII(s),                   // async, 50–300 ms
+      onResponse: async (text, ctx) => await validateJsonSchema(text),    // async, 500 ms–2 s, BLOCKS streaming
+    },
+  },
+});
+```
+
+### Tier table
+
+| Tier | Sync / Async | Latency budget | When to use | Return semantics |
+|------|--------------|----------------|-------------|------------------|
+| `onChunk` | sync | ~0 ms (per token chunk) | Fast text rewrites: filter filler words, normalize whitespace. Runs on every streaming chunk before it is appended to the buffer. | Returns the rewritten chunk. Streaming continues immediately. |
+| `onSentence` | async | 50–300 ms (per sentence) | Per-sentence transformations that need a small amount of I/O: PII redaction, profanity replacement, lightweight enrichment. Runs once per detected sentence boundary. | Returns the rewritten sentence. Sentence is held until the promise resolves; subsequent sentences continue to stream. |
+| `onResponse` | async | 500 ms – 2 s (per full response) | Whole-response validation that must complete before audio plays: JSON schema checks, full-response moderation, summary substitution. **Blocks streaming** — TTS cannot start until this resolves. | Returns the rewritten full response (or rejects to abort). |
+
+### Migration from the legacy callable
+
+The legacy single-callable form is **deprecated** and will be removed in **v0.7.0**:
+
+```typescript
+// Legacy (deprecated, removed in v0.7.0):
+hooks: {
+  afterLlm: async (text, ctx) => text.toUpperCase(),
+}
+```
+
+Behavior of the legacy form during the deprecation window:
+
+- A bare callable is internally mapped to `onResponse` — it still works, with the same blocking semantics.
+- A `console.warn` is emitted **once per process** the first time a legacy callable is registered.
+- Migrate by moving your function into the `onResponse` slot; if your transform is per-chunk or per-sentence, switch to `onChunk` / `onSentence` for a latency win.
+
 ## Type Signatures
 
 ```typescript
 type CallEventHandler = (data: Record<string, unknown>) => Promise<void>;
 type PipelineMessageHandler = (data: Record<string, unknown>) => Promise<string>;
+
+interface AfterLlmHooks {
+  onChunk?: (chunk: string) => string;
+  onSentence?: (sentence: string, ctx: HookContext) => Promise<string>;
+  onResponse?: (text: string, ctx: HookContext) => Promise<string>;
+}
+
+interface PipelineHooks {
+  // 3-tier object form (recommended)
+  afterLlm?:
+    | AfterLlmHooks
+    // Legacy single-callable form (deprecated, removed in v0.7.0 — mapped to onResponse)
+    | ((text: string, ctx: HookContext) => Promise<string>);
+}
 ```
 
 ## Combining Callbacks

@@ -130,6 +130,83 @@ Return a `str` with the agent's response. This text is sent to the TTS provider 
 
 ---
 
+## Pipeline Hooks
+
+`PipelineHooks` lets you intercept data at each stage of the **pipeline mode** STT → LLM → TTS pipeline. Pass an instance via `phone.agent(hooks=...)`. Hooks may be sync or async; if a hook throws, the error is logged and the original value passes through unchanged (fail-open).
+
+```python
+from getpatter import PipelineHooks
+
+hooks = PipelineHooks(
+    before_send_to_stt=...,   # raw PCM in → drop chunk by returning None
+    after_transcribe=...,     # transcript in → skip turn by returning None
+    before_llm=...,           # messages list in → replace by returning new list
+    after_llm=...,            # see "after_llm 3-tier API" below
+    before_synthesize=...,    # sentence in → skip TTS for sentence by returning None
+    after_synthesize=...,     # audio chunk in → discard by returning None
+)
+
+agent = phone.agent(stt=..., llm=..., tts=..., hooks=hooks, system_prompt="...")
+```
+
+### `after_llm` — 3-tier API
+
+`after_llm` accepts either a **dict** with `on_chunk` / `on_sentence` / `on_response` keys, or any object exposing those attributes (dataclass, custom class, Protocol implementation).
+
+```python
+# Recommended: 3-tier API
+after_llm = {
+    "on_chunk":    lambda chunk: chunk.replace("um", ""),     # sync, ~0 ms
+    "on_sentence": async_redact_pii,                          # async, 50-300 ms
+    "on_response": async_validate_json_schema,                # async, 500 ms-2 s, BLOCKS streaming TTS
+}
+
+hooks = PipelineHooks(after_llm=after_llm)
+```
+
+| Tier | Sync/Async | Latency budget | When it runs | Return semantics |
+|------|------------|----------------|--------------|------------------|
+| `on_chunk(chunk: str) -> str` | sync | ~0 ms | Per LLM token chunk, before sentence aggregation | Return new string. Use for cheap text rewrites. |
+| `on_sentence(sentence: str, ctx: HookContext) -> str \| None` | async | 50–300 ms | Per complete sentence, between chunker and TTS | Return new sentence, `None` to keep original, or `""` to drop the sentence. |
+| `on_response(text: str, ctx: HookContext) -> str \| None` | async | 500 ms–2 s | Once at end of LLM stream, **blocks streaming TTS** | Return new text, or `None` to keep original. |
+
+Pick the **lowest tier** that does the job — `on_chunk` for fast string ops, `on_sentence` for per-sentence I/O (PII redaction, translation), `on_response` only when you need the whole response (JSON-schema validation, full-context moderation).
+
+### Migration: legacy `after_llm` callable
+
+The legacy single-callable form is still supported for backward compatibility but is deprecated:
+
+```python
+# Legacy (deprecated, removed in v0.7.0):
+hooks = PipelineHooks(
+    after_llm=lambda text, ctx: text.upper(),
+)
+```
+
+The legacy callable is mapped internally to the `on_response` slot and emits a one-shot `PatterDeprecationWarning` on first use. Migrate to the 3-tier dict to silence the warning and unlock the lower-latency `on_chunk` / `on_sentence` tiers.
+
+```python
+# Migrated:
+hooks = PipelineHooks(
+    after_llm={"on_response": async_uppercase},
+)
+```
+
+### `HookContext`
+
+Hooks that take a `ctx` argument receive a frozen `HookContext` dataclass:
+
+```python
+@dataclass(frozen=True)
+class HookContext:
+    call_id: str
+    caller: str
+    callee: str
+    history: tuple[dict, ...] = ()
+```
+
+---
+
 ## Conversation History
 
 All callbacks that include `history` receive it as a list of dictionaries:

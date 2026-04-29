@@ -110,7 +110,7 @@ Each class accepts an options object with `apiKey?: string` and falls back to th
 ## TTS classes
 
 ```typescript
-import { ElevenLabsTTS, OpenAITTS, CartesiaTTS, RimeTTS, LMNTTTS } from "getpatter";
+import { ElevenLabsTTS, ElevenLabsWebSocketTTS, OpenAITTS, CartesiaTTS, RimeTTS, LMNTTTS } from "getpatter";
 ```
 
 Each class accepts an options object with `apiKey?: string` and falls back to the provider's standard env var. See the [TTS page](/typescript-sdk/tts) for full constructor signatures.
@@ -201,6 +201,7 @@ interface AgentOptions {
   audioFilter?: AudioFilter;
   backgroundAudio?: BackgroundAudioPlayer;
   bargeInThresholdMs?: number;
+  aggressiveFirstFlush?: boolean;
 }
 ```
 
@@ -322,7 +323,7 @@ export {
   DeepgramSTT, WhisperSTT, CartesiaSTT, AssemblyAISTT, SonioxSTT,
 
   // TTS classes
-  ElevenLabsTTS, OpenAITTS, CartesiaTTS, RimeTTS, LMNTTTS,
+  ElevenLabsTTS, ElevenLabsWebSocketTTS, OpenAITTS, CartesiaTTS, RimeTTS, LMNTTTS,
 
   // LLM classes
   OpenAILLM, AnthropicLLM, GroqLLM, CerebrasLLM, GoogleLLM,

@@ -58,6 +58,7 @@ def agent(
     audio_filter: AudioFilter | None = None,
     background_audio: BackgroundAudioPlayer | None = None,
     barge_in_threshold_ms: int = 300,
+    aggressive_first_flush: bool = False,
 ) -> Agent
 ```
 
@@ -83,6 +84,7 @@ Pass `engine=OpenAIRealtime(...)` or `engine=ElevenLabsConvAI(...)` for end-to-e
 | `audio_filter` | `AudioFilter \| None` | `None` | Audio preprocessing filter (pipeline mode). |
 | `background_audio` | `BackgroundAudioPlayer \| None` | `None` | Background audio player (pipeline mode). |
 | `barge_in_threshold_ms` | `int` | `300` | Barge-in hang-over window (ms). Set to `0` to disable. |
+| `aggressive_first_flush` | `bool` | `False` | Emit the first clause on a soft punctuation boundary (`,`, em/en-dash) once buffer ≥40 chars. Saves 200–500 ms TTFA. Hard-disabled when `language` starts with `"it"`. Pipeline mode only. |
 
 **Raises:** `ValueError` if required credentials are missing or conflicting options are passed (e.g. both `engine` and `stt`/`tts`).
 
@@ -226,8 +228,8 @@ All classes accept `api_key: str | None = None` and fall back to the provider's 
 ## TTS classes
 
 ```python
-from getpatter import ElevenLabsTTS, OpenAITTS, CartesiaTTS, RimeTTS, LMNTTTS
-from getpatter.tts import elevenlabs, openai, cartesia, rime, lmnt
+from getpatter import ElevenLabsTTS, ElevenLabsWebSocketTTS, OpenAITTS, CartesiaTTS, RimeTTS, LMNTTTS
+from getpatter.tts import elevenlabs, elevenlabs_ws, openai, cartesia, rime, lmnt
 ```
 
 All classes accept `api_key: str | None = None` and fall back to the provider's standard env var. See the [TTS page](/python-sdk/tts) for full constructor signatures.
@@ -326,6 +328,7 @@ class Agent:
     audio_filter: AudioFilter | None = None
     background_audio: BackgroundAudioPlayer | None = None
     barge_in_threshold_ms: int = 300
+    aggressive_first_flush: bool = False
 ```
 
 ### CallEvent
@@ -406,7 +409,7 @@ from getpatter import (
     DeepgramSTT, WhisperSTT, CartesiaSTT, AssemblyAISTT, SonioxSTT,
 
     # TTS classes
-    ElevenLabsTTS, OpenAITTS, CartesiaTTS, RimeTTS, LMNTTTS,
+    ElevenLabsTTS, ElevenLabsWebSocketTTS, OpenAITTS, CartesiaTTS, RimeTTS, LMNTTTS,
 
     # LLM classes
     OpenAILLM, AnthropicLLM, GroqLLM, CerebrasLLM, GoogleLLM,

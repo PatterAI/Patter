@@ -110,6 +110,7 @@
                     "icon": "volume",
                     "pages": [
                       "python-sdk/tts",
+                      "python-sdk/providers/elevenlabs-websocket",
                       "python-sdk/providers/rime",
                       "python-sdk/providers/lmnt"
                     ]
@@ -193,6 +194,7 @@
                     "icon": "volume",
                     "pages": [
                       "typescript-sdk/tts",
+                      "typescript-sdk/providers/elevenlabs-websocket",
                       "typescript-sdk/providers/rime",
                       "typescript-sdk/providers/lmnt"
                     ]
