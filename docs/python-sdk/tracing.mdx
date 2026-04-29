@@ -53,6 +53,39 @@ from getpatter.observability import shutdown_tracing
 shutdown_tracing()
 ```
 
+## Cost and latency attributes (`patter.*`)
+
+Beyond the spans listed above, every billable hot path stamps `patter.cost.*` and `patter.latency.*` attributes on its span starting in 0.5.5. External aggregators (e.g. the [patter-agent-runner acceptance suite](https://github.com/PatterAI/patter-agent-runner)) read these directly to compute per-call USD and latency without touching the SDK's pricing table.
+
+| Attribute | Type | Where it fires |
+|---|---|---|
+| `patter.call_id`, `patter.side` | str | Every cost/latency span (routing tags) |
+| `patter.cost.telephony_minutes`, `patter.telephony`, `patter.direction` | float / str | Twilio + Telnyx adapters on call end |
+| `patter.cost.stt_seconds`, `patter.stt.provider` | float / str | Each final transcript (Deepgram, AssemblyAI, Whisper, OpenAI-Transcribe, Soniox, Speechmatics, Cartesia) |
+| `patter.cost.tts_chars`, `patter.tts.provider` | int / str | Each synthesis (ElevenLabs, OpenAI, Cartesia, LMNT, Rime) |
+| `patter.cost.llm_input_tokens`, `patter.cost.llm_output_tokens`, `patter.llm.provider` | int / int / str | Each completion (OpenAI, Anthropic, Google Gemini, Groq, Cerebras) |
+| `patter.cost.realtime_minutes`, `patter.realtime.provider` | float / str | OpenAI Realtime + ElevenLabs ConvAI on session end |
+| `patter.latency.ttfb_ms`, `patter.latency.turn_ms` | float | Per completed agent turn (pipeline mode) |
+
+The two routing tags (`patter.call_id`, `patter.side`) propagate via asyncio-safe ContextVars set at the top of the per-call WebSocket bridge, so all spans emitted under a call inherit them automatically — no manual wiring per span.
+
+### Attach a custom exporter (`Patter._attach_span_exporter`)
+
+Embedding tools that observe Patter from the outside can wire their own exporter without touching `PATTER_OTEL_ENABLED` or `init_tracing`:
+
+```python
+from opentelemetry.sdk.trace.export import SpanExporter
+from getpatter import Patter
+
+exporter: SpanExporter = my_exporter()  # any OTel SpanExporter
+phone = Patter(...)
+phone._attach_span_exporter(exporter, side="driver")  # or side="uut" (default)
+```
+
+`side` is stamped on every cost/latency span this Patter instance emits during its call lifecycle. It exists to disambiguate two-`Patter`-instances-in-one-process layouts (e.g. driver vs unit-under-test in agent-to-agent acceptance tests). Default is `"uut"` if you only have one instance.
+
+The leading underscore signals this is not part of the customer-facing API surface — it is a stable, public-but-underscore hook for tooling.
+
 ## Troubleshooting
 
 **No spans appear** → confirm `PATTER_OTEL_ENABLED=1` is set *in the process that calls `init_tracing`*. Quick check:
