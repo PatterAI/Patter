@@ -176,9 +176,33 @@ class AnthropicLLMProvider:
         current_tool_id: str | None = None
         current_tool_index: int | None = None
 
+        # Anthropic streams emit cumulative usage across two events:
+        # ``message_start`` carries ``input_tokens`` (and an initial
+        # ``output_tokens`` placeholder); ``message_delta`` carries the
+        # running ``output_tokens`` total. Capture both so the cost helper
+        # sees the final figures.
+        prompt_tokens = 0
+        completion_tokens = 0
+
         async with self._client.messages.stream(**kwargs) as stream:
             async for event in stream:
                 event_type = getattr(event, "type", None)
+
+                if event_type == "message_start":
+                    msg = getattr(event, "message", None)
+                    usage = getattr(msg, "usage", None) if msg is not None else None
+                    if usage is not None:
+                        prompt_tokens = getattr(usage, "input_tokens", 0) or 0
+                        completion_tokens = getattr(usage, "output_tokens", 0) or 0
+
+                elif event_type == "message_delta":
+                    usage = getattr(event, "usage", None)
+                    if usage is not None:
+                        # ``message_delta`` carries the running output total.
+                        completion_tokens = (
+                            getattr(usage, "output_tokens", completion_tokens)
+                            or completion_tokens
+                        )
 
                 if event_type == "content_block_start":
                     block = getattr(event, "content_block", None)
@@ -221,7 +245,27 @@ class AnthropicLLMProvider:
                     current_tool_id = None
                     current_tool_index = None
 
+        if prompt_tokens or completion_tokens:
+            self._record_completion_cost(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
+
         yield {"type": "done"}
+
+    def _record_completion_cost(
+        self, *, prompt_tokens: int, completion_tokens: int
+    ) -> None:
+        """Stamp ``patter.cost.llm_*_tokens`` on the current span."""
+        from getpatter.observability.attributes import record_patter_attrs
+
+        record_patter_attrs(
+            {
+                "patter.cost.llm_input_tokens": prompt_tokens,
+                "patter.cost.llm_output_tokens": completion_tokens,
+                "patter.llm.provider": "anthropic",
+            }
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -239,7 +283,9 @@ def _to_anthropic_tools(tools: list[dict]) -> list[dict]:
             {
                 "name": fn["name"],
                 "description": fn.get("description", ""),
-                "input_schema": fn.get("parameters", {"type": "object", "properties": {}}),
+                "input_schema": fn.get(
+                    "parameters", {"type": "object", "properties": {}}
+                ),
             }
         )
     return out
@@ -310,7 +356,9 @@ def _to_anthropic_messages(messages: list[dict]) -> tuple[str, list[dict]]:
                         {
                             "type": "tool_result",
                             "tool_use_id": tool_call_id,
-                            "content": content if isinstance(content, str) else json.dumps(content),
+                            "content": content
+                            if isinstance(content, str)
+                            else json.dumps(content),
                         }
                     ],
                 }
