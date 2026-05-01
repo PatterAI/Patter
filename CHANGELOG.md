@@ -10,6 +10,30 @@ Repository cleanup + bug-fix + parity wave. Most changes are internal hardening;
 - **Per-SDK tests live in `libraries/<lang>/tests/`** instead of inside the package directory. Cross-SDK integration tests at the repo root were removed; integration coverage now lives next to each SDK.
 - **In-repo `examples/` directory removed.** Examples are maintained in separate downstream repos and pulled into the docs as needed.
 
+### Breaking — internal SDK layout reorganised
+
+Internal layout reorganised for both SDKs; **PUBLIC API surface unchanged** (every `from getpatter import ...` / `import { ... } from "getpatter"` keeps resolving). Affects only callers that import internal modules directly (e.g. `from getpatter.handlers.twilio_handler import ...` — that path no longer exists).
+
+- **Python (`libraries/python/getpatter/`)**
+  - `handlers/twilio_handler.py` → `telephony/twilio.py`
+  - `handlers/telnyx_handler.py` → `telephony/telnyx.py`
+  - `handlers/common.py` → `telephony/common.py`
+  - `handlers/stream_handler.py` → `stream_handler.py` (top-level — it's the per-call orchestrator, not a telephony adapter; `handlers/` folder removed)
+  - `services/transcoding.py`, `services/pcm_mixer.py`, `services/background_audio.py` → `audio/*.py`
+  - `services/tool_decorator.py`, `services/tool_executor.py` → `tools/*.py`
+  - All other `services/*.py` (llm_loop, metrics, sentence_chunker, text_transforms, ivr, fallback_provider, pipeline_hooks, chat_context, call_log, remote_message) stay where they are.
+
+- **TypeScript (`libraries/typescript/src/`)**
+  - `carriers/twilio.ts` → `telephony/twilio.ts`
+  - `carriers/telnyx.ts` → `telephony/telnyx.ts`
+  - top-level `transcoding.ts` → `audio/transcoding.ts`
+  - `services/background-audio.ts` → `audio/background-audio.ts`
+  - top-level `tool-decorator.ts` → `tools/tool-decorator.ts`
+
+The `tts/` and `stt/` namespaces are unchanged — they expose `getpatter.{tts,stt}.<provider>.{TTS,STT}` with env-var auto-resolve and are real public API.
+
+Migration: if your code did `from getpatter.handlers.twilio_handler import ...` change it to `from getpatter.telephony.twilio import ...`. Public exports from the package root (e.g. `from getpatter import Patter`) are unaffected.
+
 ### Breaking — `Agent.provider` is a closed enum
 
 - `Agent.provider` (Python) is now typed `ProviderMode = Literal["openai_realtime", "elevenlabs_convai", "pipeline"]`; previously it was a free-form `str`. TypeScript `AgentOptions.provider` mirrors with the same union.
