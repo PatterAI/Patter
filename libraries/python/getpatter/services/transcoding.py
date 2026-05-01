@@ -7,8 +7,10 @@ Public API
 - ``PcmCarry``  — odd-byte alignment helper
 - ``StatefulResampler``  — stateful chunk-by-chunk resampler (preferred)
 - ``create_resampler_8k_to_16k`` / ``create_resampler_16k_to_8k``
-  / ``create_resampler_24k_to_16k``  — convenience factories
+  / ``create_resampler_24k_to_16k`` / ``create_resampler_24k_to_8k``
+  — convenience factories
 """
+
 from __future__ import annotations
 
 import warnings
@@ -33,6 +35,7 @@ __all__ = [
     "create_resampler_8k_to_16k",
     "create_resampler_16k_to_8k",
     "create_resampler_24k_to_16k",
+    "create_resampler_24k_to_8k",
 ]
 
 _AUDIOOP_MISSING_MSG = "audioop required: pip install getpatter[local]"
@@ -273,6 +276,11 @@ def create_resampler_16k_to_8k() -> StatefulResampler:
 def create_resampler_24k_to_16k() -> StatefulResampler:
     """Return a :class:`StatefulResampler` configured for 24 kHz → 16 kHz."""
     return StatefulResampler(src_rate=24000, dst_rate=16000)
+
+
+def create_resampler_24k_to_8k() -> StatefulResampler:
+    # Single ratecv state collapses the 24k→16k→8k chain into one step.
+    return StatefulResampler(src_rate=24000, dst_rate=8000)
 
 
 # ---------------------------------------------------------------------------

@@ -168,6 +168,8 @@ export interface StatefulResamplerOptions {
  * - 16 000 → 8 000 Hz  (2:1 decimation with 5-tap FIR anti-alias)
  * - 8 000 → 16 000 Hz  (1:2 linear interpolation)
  * - 24 000 → 16 000 Hz (3:2 linear interpolation)
+ * - 24 000 → 8 000 Hz  (3:1 decimation with linear interpolation;
+ *   collapses 24k→16k→8k chain — fix #46)
  *
  * All methods accept and return Buffer (PCM16-LE, mono by default).
  */
@@ -208,10 +210,15 @@ export class StatefulResampler {
       throw new Error('StatefulResampler: only mono (channels=1) is supported');
     }
     const key = `${this.srcRate}->${this.dstRate}`;
-    if (key !== '16000->8000' && key !== '8000->16000' && key !== '24000->16000') {
+    if (
+      key !== '16000->8000' &&
+      key !== '8000->16000' &&
+      key !== '24000->16000' &&
+      key !== '24000->8000'
+    ) {
       throw new Error(
         `StatefulResampler: unsupported conversion ${key}. ` +
-        'Supported: 16000->8000, 8000->16000, 24000->16000',
+        'Supported: 16000->8000, 8000->16000, 24000->16000, 24000->8000',
       );
     }
   }
@@ -232,6 +239,9 @@ export class StatefulResampler {
     }
     if (this.srcRate === 8000 && this.dstRate === 16000) {
       return this._upsample8kTo16k(aligned);
+    }
+    if (this.srcRate === 24000 && this.dstRate === 8000) {
+      return this._resample24kTo8k(aligned);
     }
     return this._resample24kTo16k(aligned);
   }
@@ -420,7 +430,7 @@ export class StatefulResampler {
   }
 
   // ---------------------------------------------------------------------------
-  // Private: 24 kHz → 16 kHz
+  // Private: 24 kHz → 16 kHz / 8 kHz
   // ---------------------------------------------------------------------------
 
   /**
@@ -432,6 +442,16 @@ export class StatefulResampler {
    * handled using `resample24Last`.
    */
   private _resample24kTo16k(buf: Buffer): Buffer {
+    return this._resample24kStep(buf, 24000 / 16000);
+  }
+
+  /** 3:1 decimation — collapses the 24k→16k→8k chain into a single step. */
+  private _resample24kTo8k(buf: Buffer): Buffer {
+    return this._resample24kStep(buf, 24000 / 8000);
+  }
+
+  /** Shared phase-stepping resampler used by 24→16 (step 1.5) and 24→8 (step 3). */
+  private _resample24kStep(buf: Buffer, step: number): Buffer {
     const sampleCount = buf.length >> 1;
     if (sampleCount === 0) return Buffer.alloc(0);
 
@@ -456,7 +476,7 @@ export class StatefulResampler {
 
       const interp = Math.round(s0 + (s1 - s0) * frac);
       outArr.push(Math.max(-32768, Math.min(32767, interp)));
-      phase += 24000 / 16000; // 1.5
+      phase += step;
     }
 
     this.resample24Last = buf.readInt16LE((sampleCount - 1) * 2);
@@ -482,6 +502,11 @@ export function createResampler8kTo16k(): StatefulResampler {
 /** Create a stateful 24 kHz → 16 kHz resampler (3:2 linear interpolation). */
 export function createResampler24kTo16k(): StatefulResampler {
   return new StatefulResampler({ srcRate: 24000, dstRate: 16000 });
+}
+
+/** Create a stateful 24 kHz → 8 kHz resampler (3:1 decimation, fix #46). */
+export function createResampler24kTo8k(): StatefulResampler {
+  return new StatefulResampler({ srcRate: 24000, dstRate: 8000 });
 }
 
 // ---------- Legacy stateless helpers (deprecated) ----------

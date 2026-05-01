@@ -64,6 +64,7 @@ class OpenAITTS(TTSProvider):
         *,
         instructions: str | None = None,
         speed: float | None = None,
+        target_sample_rate: int = 16000,
     ):
         self.api_key = api_key
         self.voice = voice
@@ -72,6 +73,9 @@ class OpenAITTS(TTSProvider):
         if speed is not None and not (0.25 <= speed <= 4.0):
             raise ValueError("OpenAITTS: speed must be in [0.25, 4.0]")
         self.speed = speed
+        if target_sample_rate not in (8000, 16000):
+            raise ValueError("OpenAITTS: target_sample_rate must be 8000 or 16000")
+        self.target_sample_rate = target_sample_rate
         # Use read-idle timeouts rather than a 30 s end-to-end wall clock so
         # long TTS bodies streamed as a slow trickle don't get killed mid-way.
         self._client = httpx.AsyncClient(
@@ -89,7 +93,7 @@ class OpenAITTS(TTSProvider):
             # users hear chipmunk voices. Fail loudly instead.
             raise RuntimeError(
                 "OpenAITTS requires the 'audioop' (Python ≤3.12) or 'audioop-lts' "
-                "(Python 3.13+) module to resample 24 kHz PCM to 16 kHz. "
+                "(Python 3.13+) module to resample 24 kHz PCM. "
                 "Install 'audioop-lts' via pip to enable TTS."
             )
         body: dict = {
@@ -111,9 +115,17 @@ class OpenAITTS(TTSProvider):
         # StatefulResampler preserves audioop.ratecv filter state across
         # chunk boundaries, preventing the pops/garbled audio that occurred
         # with the previous stateless per-chunk approach (acceptance test 09).
-        from getpatter.services.transcoding import create_resampler_24k_to_16k
+        # When ``target_sample_rate=8000`` the 24k→16k→8k chain is collapsed
+        # into a single ratecv step (fix #46) — saves CPU and latency on the
+        # 8 kHz mulaw telephony output path.
+        if self.target_sample_rate == 8000:
+            from getpatter.services.transcoding import create_resampler_24k_to_8k
 
-        resampler = create_resampler_24k_to_16k()
+            resampler = create_resampler_24k_to_8k()
+        else:
+            from getpatter.services.transcoding import create_resampler_24k_to_16k
+
+            resampler = create_resampler_24k_to_16k()
         try:
             # 1024-byte chunks ≈ 21 ms at 24 kHz / 16-bit (vs ~85 ms at the
             # previous 4096), which lowers TTFB on the synthesized audio.
