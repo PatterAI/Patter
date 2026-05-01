@@ -57,6 +57,7 @@ const END_TOKEN: string = SonioxEndpointToken.END;
 const FINALIZED_TOKEN: string = SonioxEndpointToken.FIN;
 const KEEPALIVE_INTERVAL_MS = 5000;
 
+/** Patter-normalised transcript event emitted by {@link SonioxSTT}. */
 export interface Transcript {
   readonly text: string;
   readonly isFinal: boolean;
@@ -114,6 +115,7 @@ class TokenAccumulator {
   }
 }
 
+/** Constructor options for {@link SonioxSTT}. */
 export interface SonioxSTTOptions {
   model?: SonioxModel | string;
   languageHints?: string[];
@@ -127,6 +129,7 @@ export interface SonioxSTTOptions {
   baseUrl?: string;
 }
 
+/** Streaming STT adapter for Soniox's real-time WebSocket API. */
 export class SonioxSTT {
   private ws: WebSocket | null = null;
   private callbacks: TranscriptCallback[] = [];
@@ -197,6 +200,7 @@ export class SonioxSTT {
     return config;
   }
 
+  /** Open the streaming WebSocket and send the initial config payload. */
   async connect(): Promise<void> {
     // Reset the accumulator so reconnection after close() does not carry
     // stale final.text across streams.
@@ -307,12 +311,14 @@ export class SonioxSTT {
     }
   }
 
+  /** Send a binary PCM16-LE audio chunk to Soniox for transcription. */
   sendAudio(audio: Buffer): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     if (audio.length === 0) return;
     this.ws.send(audio);
   }
 
+  /** Register a transcript listener (max 10 concurrent listeners). */
   onTranscript(callback: TranscriptCallback): void {
     if (this.callbacks.length >= 10) {
       getLogger().warn(
@@ -324,6 +330,7 @@ export class SonioxSTT {
     this.callbacks.push(callback);
   }
 
+  /** Send the empty-frame stream terminator and close the WebSocket. */
   close(): void {
     this.clearKeepalive();
     if (this.ws) {

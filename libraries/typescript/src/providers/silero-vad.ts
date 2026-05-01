@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 import type { VADEvent, VADProvider } from '../types';
 
 const SUPPORTED_SAMPLE_RATES = [8000, 16000] as const;
+/** Sample rates supported by the bundled Silero ONNX model (8 kHz or 16 kHz). */
 export type SileroSampleRate = (typeof SUPPORTED_SAMPLE_RATES)[number];
 
 // Resolve __dirname in a way that works for both the CJS (dist/index.js)
@@ -58,6 +59,7 @@ function resolveDefaultModelPath(): string {
 }
 const DEFAULT_MODEL_PATH = resolveDefaultModelPath();
 
+/** Options accepted by {@link SileroVAD.load}. */
 export interface SileroVADOptions {
   minSpeechDuration?: number;
   minSilenceDuration?: number;
@@ -73,17 +75,20 @@ export interface SileroVADOptions {
  * Minimal structural type for the subset of `onnxruntime-node` we depend on.
  * Declared locally so consumers don't need the package installed at build time.
  */
+/** Minimal subset of `onnxruntime-node`'s `InferenceSession` that Silero needs. */
 export interface OnnxInferenceSession {
   run(
     feeds: Record<string, OnnxTensor>,
   ): Promise<Record<string, OnnxTensor>>;
 }
 
+/** Minimal subset of an `onnxruntime-node` tensor used by Silero inference. */
 export interface OnnxTensor {
   readonly data: Float32Array | BigInt64Array;
   readonly dims: readonly number[];
 }
 
+/** Minimal `onnxruntime-node` module surface accepted by {@link SileroVAD}. */
 export interface OnnxRuntime {
   InferenceSession: {
     create(
@@ -344,6 +349,7 @@ export class SileroVAD implements VADProvider {
     return new SileroVAD(model, options);
   }
 
+  /** Sample rate (Hz) the underlying ONNX model was loaded with. */
   get sampleRate(): SileroSampleRate {
     return this.opts.sampleRate;
   }
@@ -367,6 +373,7 @@ export class SileroVAD implements VADProvider {
   }
 
 
+  /** Run VAD on a PCM16 chunk; returns a transition event or null if no change. */
   async processFrame(pcmChunk: Buffer, sampleRate: number): Promise<VADEvent | null> {
     if (this.closed) {
       throw new Error('SileroVAD is closed');
@@ -451,6 +458,7 @@ export class SileroVAD implements VADProvider {
     return null;
   }
 
+  /** Mark the VAD as closed; subsequent processFrame calls throw. */
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;

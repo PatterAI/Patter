@@ -1,3 +1,12 @@
+/**
+ * OpenAI Realtime WebSocket adapter for Patter's realtime mode.
+ *
+ * Wraps `wss://api.openai.com/v1/realtime` and exposes the unified
+ * Patter realtime contract (`connect / sendAudio / onEvent / close`) on
+ * {@link OpenAIRealtimeAdapter}. Audio negotiation defaults to
+ * `g711_ulaw` so traffic flows through Twilio/Telnyx without transcoding.
+ */
+
 import WebSocket from 'ws';
 import { getLogger } from '../logger';
 
@@ -13,6 +22,7 @@ export const OpenAIRealtimeAudioFormat = {
   G711_ALAW: 'g711_alaw',
   PCM16: 'pcm16',
 } as const;
+/** Union of {@link OpenAIRealtimeAudioFormat} string values. */
 export type OpenAIRealtimeAudioFormat =
   (typeof OpenAIRealtimeAudioFormat)[keyof typeof OpenAIRealtimeAudioFormat];
 
@@ -23,6 +33,7 @@ export const OpenAIRealtimeModel = {
   GPT_4O_REALTIME_PREVIEW: 'gpt-4o-realtime-preview',
   GPT_4O_MINI_REALTIME_PREVIEW: 'gpt-4o-mini-realtime-preview',
 } as const;
+/** Union of {@link OpenAIRealtimeModel} string values. */
 export type OpenAIRealtimeModel =
   (typeof OpenAIRealtimeModel)[keyof typeof OpenAIRealtimeModel];
 
@@ -40,6 +51,7 @@ export const OpenAIVoice = {
   SHIMMER: 'shimmer',
   VERSE: 'verse',
 } as const;
+/** Union of {@link OpenAIVoice} string values. */
 export type OpenAIVoice = (typeof OpenAIVoice)[keyof typeof OpenAIVoice];
 
 /** Models accepted by `input_audio_transcription` on Realtime sessions. */
@@ -48,6 +60,7 @@ export const OpenAITranscriptionModel = {
   GPT_4O_TRANSCRIBE: 'gpt-4o-transcribe',
   GPT_4O_MINI_TRANSCRIBE: 'gpt-4o-mini-transcribe',
 } as const;
+/** Union of {@link OpenAITranscriptionModel} string values. */
 export type OpenAITranscriptionModel =
   (typeof OpenAITranscriptionModel)[keyof typeof OpenAITranscriptionModel];
 
@@ -56,11 +69,14 @@ export const OpenAIRealtimeVADType = {
   SERVER_VAD: 'server_vad',
   SEMANTIC_VAD: 'semantic_vad',
 } as const;
+/** Union of {@link OpenAIRealtimeVADType} string values. */
 export type OpenAIRealtimeVADType =
   (typeof OpenAIRealtimeVADType)[keyof typeof OpenAIRealtimeVADType];
 
+/** Callback signature for events emitted by {@link OpenAIRealtimeAdapter}. */
 export type RealtimeEventCallback = (type: string, data: unknown) => void | Promise<void>;
 
+/** Constructor options for {@link OpenAIRealtimeAdapter}. */
 export interface OpenAIRealtimeOptions {
   temperature?: number;
   maxResponseOutputTokens?: number | 'inf';
@@ -77,6 +93,7 @@ export interface OpenAIRealtimeOptions {
   silenceDurationMs?: number;
 }
 
+/** Realtime WebSocket adapter for OpenAI's `gpt-realtime` family. */
 export class OpenAIRealtimeAdapter {
   private ws: WebSocket | null = null;
   private readonly eventCallbacks: Set<RealtimeEventCallback> = new Set();
@@ -103,6 +120,7 @@ export class OpenAIRealtimeAdapter {
     this.options = options;
   }
 
+  /** Open the Realtime WebSocket and apply the session configuration. */
   async connect(): Promise<void> {
     const url = `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(this.model)}`;
     this.ws = new WebSocket(url, {
@@ -200,6 +218,7 @@ export class OpenAIRealtimeAdapter {
     this.ensureMessageListener();
   }
 
+  /** Append a base64-encoded audio chunk to the realtime input buffer. */
   sendAudio(mulawAudio: Buffer): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     this.ws.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: mulawAudio.toString('base64') }));
@@ -218,6 +237,7 @@ export class OpenAIRealtimeAdapter {
     this.ensureMessageListener();
   }
 
+  /** Remove a previously registered {@link onEvent} callback. */
   offEvent(callback: RealtimeEventCallback): void {
     this.eventCallbacks.delete(callback);
   }
@@ -301,6 +321,7 @@ export class OpenAIRealtimeAdapter {
     });
   }
 
+  /** Truncate the in-flight assistant turn and cancel the active response. */
   cancelResponse(): void {
     if (!this.ws) return;
     // Truncate the in-flight assistant item first so the transcript stays
@@ -321,6 +342,7 @@ export class OpenAIRealtimeAdapter {
     this.ws.send(JSON.stringify({ type: 'response.cancel' }));
   }
 
+  /** Inject a user text turn and request a new response. */
   async sendText(text: string): Promise<void> {
     this.ws?.send(JSON.stringify({
       type: 'conversation.item.create',
@@ -329,6 +351,7 @@ export class OpenAIRealtimeAdapter {
     this.ws?.send(JSON.stringify({ type: 'response.create' }));
   }
 
+  /** Submit a tool/function-call result and request the next response. */
   async sendFunctionResult(callId: string, result: string): Promise<void> {
     this.ws?.send(JSON.stringify({
       type: 'conversation.item.create',
@@ -337,6 +360,7 @@ export class OpenAIRealtimeAdapter {
     this.ws?.send(JSON.stringify({ type: 'response.create' }));
   }
 
+  /** Stop the heartbeat, drop listeners, and close the Realtime WebSocket. */
   close(): void {
     if (this.heartbeat) {
       clearInterval(this.heartbeat);

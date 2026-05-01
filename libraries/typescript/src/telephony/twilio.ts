@@ -1,5 +1,6 @@
 /** Twilio carrier credentials holder for Patter. */
 
+/** Constructor options for the Twilio {@link Carrier}. */
 export interface TwilioCarrierOptions {
   /** Twilio Account SID. Falls back to TWILIO_ACCOUNT_SID env var. */
   accountSid?: string;

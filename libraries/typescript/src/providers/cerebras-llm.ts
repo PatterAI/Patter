@@ -40,11 +40,13 @@ export const CerebrasModel = {
   QWEN_3_235B_INSTRUCT: 'qwen-3-235b-a22b-instruct-2507',
   ZAI_GLM_4_7: 'zai-glm-4.7',
 } as const;
+/** Union of {@link CerebrasModel} string values. */
 export type CerebrasModel = (typeof CerebrasModel)[keyof typeof CerebrasModel];
 
 const DEFAULT_MODEL: string = CerebrasModel.GPT_OSS_120B;
 const RETRY_BACKOFF_BASE_MS = 500;
 
+/** Constructor options for {@link CerebrasLLMProvider}. */
 export interface CerebrasLLMOptions {
   apiKey: string;
   model?: string;
@@ -140,6 +142,7 @@ export class CerebrasLLMProvider implements LLMProvider {
     this.stop = options.stop;
   }
 
+  /** Stream Patter-format LLM chunks from the Cerebras chat completions API. */
   async *stream(
     messages: Array<Record<string, unknown>>,
     tools?: Array<Record<string, unknown>> | null,

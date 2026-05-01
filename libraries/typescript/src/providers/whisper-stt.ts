@@ -7,6 +7,7 @@
 
 import { getLogger } from '../logger';
 
+/** Patter-normalised transcript event emitted by {@link WhisperSTT}. */
 export interface Transcript {
   readonly text: string;
   readonly isFinal: boolean;
@@ -23,6 +24,7 @@ const DEFAULT_BUFFER_SIZE = 16000 * 2;
 /** Models accepted by ``POST /v1/audio/transcriptions``. */
 const ALLOWED_MODELS = new Set(['whisper-1', 'gpt-4o-transcribe', 'gpt-4o-mini-transcribe']);
 
+/** Response format requested from `POST /v1/audio/transcriptions`. */
 export type WhisperResponseFormat = 'json' | 'verbose_json';
 
 /**
@@ -56,6 +58,7 @@ function wrapPcmInWav(pcm: Buffer, sampleRate: number = 16000, channels: number 
   return Buffer.concat([header, pcm]);
 }
 
+/** Buffered STT adapter for OpenAI's Whisper transcription HTTP API. */
 export class WhisperSTT {
   private readonly apiKey: string;
   private readonly model: string;
@@ -107,12 +110,14 @@ export class WhisperSTT {
     return new WhisperSTT(apiKey, language, model);
   }
 
+  /** Reset the audio buffer and arm the adapter for incoming chunks. */
   async connect(): Promise<void> {
     this.running = true;
     this.chunks = [];
     this.bufferedBytes = 0;
   }
 
+  /** Buffer a PCM16 chunk; flushes to Whisper once `bufferSize` bytes are reached. */
   sendAudio(audio: Buffer): void {
     if (!this.running) return;
 
@@ -149,10 +154,12 @@ export class WhisperSTT {
     this.callbacks.add(callback);
   }
 
+  /** Remove a previously registered transcript listener. */
   offTranscript(callback: TranscriptCallback): void {
     this.callbacks.delete(callback);
   }
 
+  /** Flush any buffered audio, await pending transcriptions, and clear listeners. */
   async close(): Promise<void> {
     this.running = false;
 

@@ -1,3 +1,12 @@
+/**
+ * ElevenLabs streaming TTS adapter for the Patter SDK pipeline mode.
+ *
+ * Wraps the `text-to-speech/{voiceId}/stream` HTTP endpoint and exposes
+ * `synthesize` / `synthesizeStream` plus carrier-tuned factories on
+ * {@link ElevenLabsTTS}. Voice IDs and human-readable names both work via
+ * {@link resolveVoiceId}.
+ */
+
 const ELEVENLABS_BASE_URL = 'https://api.elevenlabs.io/v1';
 
 // Curated map of common ElevenLabs voice display names to their voice IDs.
@@ -89,6 +98,7 @@ export const ElevenLabsModel = {
   MULTILINGUAL_V2: 'eleven_multilingual_v2',
   MONOLINGUAL_V1: 'eleven_monolingual_v1',
 } as const;
+/** Union of {@link ElevenLabsModel} string values. */
 export type ElevenLabsModel = (typeof ElevenLabsModel)[keyof typeof ElevenLabsModel];
 
 // Supported `output_format` values for the TTS stream endpoint.
@@ -107,9 +117,11 @@ export const ElevenLabsOutputFormat = {
   PCM_44100: 'pcm_44100',
   ULAW_8000: 'ulaw_8000',
 } as const;
+/** Union of {@link ElevenLabsOutputFormat} string values. */
 export type ElevenLabsOutputFormat =
   (typeof ElevenLabsOutputFormat)[keyof typeof ElevenLabsOutputFormat];
 
+/** ElevenLabs voice tuning knobs forwarded as `voice_settings` in the request. */
 export interface ElevenLabsVoiceSettings {
   stability?: number;
   similarity_boost?: number;
@@ -117,6 +129,7 @@ export interface ElevenLabsVoiceSettings {
   use_speaker_boost?: boolean;
 }
 
+/** Constructor options for {@link ElevenLabsTTS}. */
 export interface ElevenLabsTTSOptions {
   voiceId?: string;
   /**

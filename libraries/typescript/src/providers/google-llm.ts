@@ -28,11 +28,13 @@ export const GoogleModel = {
   GEMINI_1_5_FLASH: 'gemini-1.5-flash',
   GEMINI_1_5_PRO: 'gemini-1.5-pro',
 } as const;
+/** Union of {@link GoogleModel} string values. */
 export type GoogleModel = (typeof GoogleModel)[keyof typeof GoogleModel];
 
 const DEFAULT_MODEL: string = GoogleModel.GEMINI_2_5_FLASH;
 const DEFAULT_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
 
+/** Constructor options for {@link GoogleLLMProvider}. */
 export interface GoogleLLMOptions {
   apiKey: string;
   model?: string;
@@ -89,6 +91,7 @@ export class GoogleLLMProvider implements LLMProvider {
     this.maxOutputTokens = options.maxOutputTokens;
   }
 
+  /** Stream Patter-format LLM chunks from the Gemini SSE endpoint. */
   async *stream(
     messages: Array<Record<string, unknown>>,
     tools?: Array<Record<string, unknown>> | null,

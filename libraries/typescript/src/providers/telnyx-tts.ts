@@ -14,6 +14,7 @@ import { getLogger } from '../logger';
 const TELNYX_TTS_WS_URL = 'wss://api.telnyx.com/v2/text-to-speech/speech';
 const DEFAULT_VOICE = 'Telnyx.NaturalHD.astra';
 
+/** Streaming TTS adapter for Telnyx's `/v2/text-to-speech/speech` WebSocket. */
 export class TelnyxTTS {
   constructor(
     private readonly apiKey: string,

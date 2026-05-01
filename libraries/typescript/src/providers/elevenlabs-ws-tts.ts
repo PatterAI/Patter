@@ -83,6 +83,7 @@ function sanitiseLogStr(value: unknown, limit = 200): string {
   return String(value).replace(/[\r\n\x00]/g, ' ').slice(0, limit);
 }
 
+/** Constructor options for {@link ElevenLabsWebSocketTTS}. */
 export interface ElevenLabsWebSocketTTSOptions {
   apiKey: string;
   voiceId?: string;
@@ -119,6 +120,7 @@ const CARRIER_NATIVE_FORMAT: Readonly<Record<string, string>> = {
   telnyx: 'pcm_16000',
 };
 
+/** WebSocket-based ElevenLabs TTS adapter — opt-in low-latency variant. */
 export class ElevenLabsWebSocketTTS implements TTSAdapter {
   static readonly providerKey = 'elevenlabs_ws';
   readonly apiKey: string;
@@ -412,6 +414,7 @@ export class ElevenLabsWebSocketTTS implements TTSAdapter {
     }
   }
 
+  /** No-op — connections are per-utterance and torn down inside synthesizeStream. */
   async close(): Promise<void> {
     // Connections are per-utterance, no persistent state to clean up.
   }

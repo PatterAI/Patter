@@ -11,6 +11,7 @@ import { getLogger } from '../logger';
 export const ULTRAVOX_DEFAULT_API_BASE = 'https://api.ultravox.ai/api';
 export const ULTRAVOX_DEFAULT_SR = 16000;
 
+/** Callback signature for events emitted by {@link UltravoxRealtimeAdapter}. */
 export type UltravoxEventHandler = (
   type:
     | 'audio'
@@ -34,6 +35,7 @@ interface UltravoxOptions {
   firstMessage?: string;
 }
 
+/** Realtime WebSocket adapter for Ultravox managed-agent calls. */
 export class UltravoxRealtimeAdapter {
   private readonly model: string;
   private readonly voice: string;
@@ -60,6 +62,7 @@ export class UltravoxRealtimeAdapter {
     this.firstMessage = options.firstMessage ?? '';
   }
 
+  /** Create the Ultravox call, fetch the joinUrl, and open the WebSocket. */
   async connect(): Promise<void> {
     // Step 1: create the call and get the joinUrl.
     const body: Record<string, unknown> = {
@@ -140,16 +143,19 @@ export class UltravoxRealtimeAdapter {
     });
   }
 
+  /** Send a binary PCM audio chunk to the Ultravox call. */
   sendAudio(pcm: Buffer): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     this.ws.send(pcm, { binary: true });
   }
 
+  /** Inject a user text message into the Ultravox conversation. */
   async sendText(text: string): Promise<void> {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     this.ws.send(JSON.stringify({ type: 'input_text_message', text }));
   }
 
+  /** Send a tool/function-call result back to Ultravox. */
   async sendFunctionResult(callId: string, result: string): Promise<void> {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     this.ws.send(
@@ -162,11 +168,13 @@ export class UltravoxRealtimeAdapter {
     );
   }
 
+  /** Clear the playback buffer to interrupt the agent's current response. */
   cancelResponse(): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     this.ws.send(JSON.stringify({ type: 'playback_clear_buffer' }));
   }
 
+  /** Register an event handler that receives every Ultravox event. */
   onEvent(handler: UltravoxEventHandler): void {
     this.handlers.push(handler);
   }
@@ -226,6 +234,7 @@ export class UltravoxRealtimeAdapter {
     }
   }
 
+  /** Close the Ultravox WebSocket and mark the adapter idle. */
   async close(): Promise<void> {
     this.running = false;
     if (this.ws) {

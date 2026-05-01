@@ -1,3 +1,11 @@
+/**
+ * OpenAI TTS adapter for Patter — HTTP `/v1/audio/speech` endpoint.
+ *
+ * Wraps `gpt-4o-mini-tts` (and legacy `tts-1*`) and ships a stateful
+ * 24 kHz → 16/8 kHz resampler with anti-alias LPF so the output drops
+ * directly into the telephony pipeline. See {@link OpenAITTS}.
+ */
+
 const OPENAI_TTS_URL = 'https://api.openai.com/v1/audio/speech';
 // OpenAI TTS models that accept a voice-direction ``instructions`` field.
 // Older models (``tts-1``, ``tts-1-hd``) 400 if we include it.
@@ -8,6 +16,7 @@ const LPF_ALPHA = 0.78;
 // Lowers LPF -3 dB to ~3 kHz at 24 kHz Fs, suppressing alias content above 4 kHz.
 const LPF_ALPHA_8K = 0.45;
 
+/** OpenAI TTS adapter with built-in streaming resample to 16/8 kHz. */
 export class OpenAITTS {
   constructor(
     private readonly apiKey: string,
@@ -235,6 +244,7 @@ export class OpenAITTS {
   }
 }
 
+/** Streaming-resample state passed across calls to {@link OpenAITTS.resampleStreaming}. */
 export interface ResampleCtx {
   carryByte: number | null;
   leftover: number[];

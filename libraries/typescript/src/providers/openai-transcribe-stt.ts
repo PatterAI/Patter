@@ -20,6 +20,7 @@ const ALLOWED_MODELS = new Set(['gpt-4o-transcribe', 'gpt-4o-mini-transcribe']);
 /** ~1 second of 16 kHz 16-bit mono audio — same default as WhisperSTT. */
 const DEFAULT_BUFFER_SIZE = 16000 * 2;
 
+/** STT adapter restricted to OpenAI's GPT-4o Transcribe model family. */
 export class OpenAITranscribeSTT extends WhisperSTT {
   /**
    * @param apiKey OpenAI API key.

@@ -32,6 +32,7 @@ export const LMNTSampleRate = {
 } as const;
 export type LMNTSampleRate = (typeof LMNTSampleRate)[keyof typeof LMNTSampleRate];
 
+/** Constructor options for {@link LMNTTTS}. */
 export interface LMNTTTSOptions {
   model?: LMNTModel;
   voice?: string;
@@ -43,6 +44,7 @@ export interface LMNTTTSOptions {
   baseUrl?: string;
 }
 
+/** LMNT TTS adapter backed by the `/v1/ai/speech/bytes` HTTP streaming endpoint. */
 export class LMNTTTS {
   private readonly apiKey: string;
   private readonly model: LMNTModel;
@@ -81,6 +83,7 @@ export class LMNTTTS {
     };
   }
 
+  /** Synthesize text and return the concatenated audio buffer. */
   async synthesize(text: string): Promise<Buffer> {
     const chunks: Buffer[] = [];
     for await (const chunk of this.synthesizeStream(text)) {

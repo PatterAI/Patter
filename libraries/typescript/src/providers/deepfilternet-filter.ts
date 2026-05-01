@@ -1,4 +1,4 @@
-/*
+/**
  * Copyright 2025 PatterAI
  *
  * Licensed under the MIT License.  See LICENSE at the repository root.
@@ -152,6 +152,7 @@ export class DeepFilterNetFilter implements AudioFilter {
     }
   }
 
+  /** Run noise suppression on a PCM16 chunk; pass-through when no model is loaded. */
   async process(pcmChunk: Buffer, sampleRate: number): Promise<Buffer> {
     if (this.closed) {
       throw new Error('DeepFilterNetFilter is closed');
@@ -202,6 +203,7 @@ export class DeepFilterNetFilter implements AudioFilter {
     }
   }
 
+  /** Flush resamplers, release the ONNX session, and mark the filter closed. */
   async close(): Promise<void> {
     // Fix 5: flush stateful resamplers so tail samples are not clipped.
     try { this._upsamplerInst?.flush(); } catch { /* best effort */ }

@@ -19,21 +19,25 @@ import { getLogger } from '../logger';
 
 const TELNYX_API_BASE = 'https://api.telnyx.com/v2';
 
+/** Options accepted by {@link TelnyxAdapter.provisionNumber}. */
 export interface ProvisionNumberOptions {
   /** ISO-3166-1 alpha-2 country code (e.g. ``"US"``). */
   countryCode: string;
 }
 
+/** Result returned by {@link TelnyxAdapter.provisionNumber}. */
 export interface ProvisionNumberResult {
   readonly phoneNumber: string;
   readonly orderId: string;
 }
 
+/** Options accepted by {@link TelnyxAdapter.configureNumber}. */
 export interface ConfigureNumberOptions {
   /** Telnyx Call Control Application / Connection ID. */
   connectionId: string;
 }
 
+/** Options accepted by {@link TelnyxAdapter.initiateCall}. */
 export interface InitiateCallOptions {
   from: string;
   to: string;
@@ -43,10 +47,12 @@ export interface InitiateCallOptions {
   clientState?: string;
 }
 
+/** Result returned by {@link TelnyxAdapter.initiateCall}. */
 export interface InitiateCallResult {
   readonly callControlId: string;
 }
 
+/** Options accepted by {@link TelnyxAdapter.endCall}. */
 export interface EndCallOptions {
   /** Idempotency key for the hangup command. */
   commandId?: string;
@@ -64,6 +70,7 @@ interface TelnyxCallPayload {
   data?: { call_control_id?: string };
 }
 
+/** Direct REST adapter for Telnyx Call Control & Numbers API. */
 export class TelnyxAdapter {
   private readonly apiKey: string;
   readonly connectionId: string | undefined;

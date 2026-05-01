@@ -21,6 +21,7 @@ import { getLogger } from '../logger';
 export const GEMINI_DEFAULT_INPUT_SR = 16000;
 export const GEMINI_DEFAULT_OUTPUT_SR = 24000;
 
+/** Callback signature for events emitted by {@link GeminiLiveAdapter}. */
 export type GeminiLiveEventHandler = (
   type:
     | 'audio'
@@ -43,6 +44,7 @@ interface GeminiLiveOptions {
   temperature?: number;
 }
 
+/** Realtime adapter for Google's Gemini Live native-audio API. */
 export class GeminiLiveAdapter {
   private readonly model: string;
   private readonly voice: string;
@@ -85,6 +87,7 @@ export class GeminiLiveAdapter {
     this.temperature = options.temperature ?? 0.8;
   }
 
+  /** Lazily import @google/genai, open a Live session, and start the receive loop. */
   async connect(): Promise<void> {
     let genaiModule: { GoogleGenAI: new (args: { apiKey: string; httpOptions?: Record<string, unknown> }) => unknown };
     try {
@@ -147,6 +150,7 @@ export class GeminiLiveAdapter {
     });
   }
 
+  /** Send a PCM audio chunk to Gemini as base64 inline data. */
   sendAudio(pcm: Buffer): void {
     if (!this.session || !this.running) return;
     const mime = `audio/pcm;rate=${this.inputSampleRate}`;
@@ -161,6 +165,7 @@ export class GeminiLiveAdapter {
     }
   }
 
+  /** Send a text turn to Gemini and mark the turn complete. */
   async sendText(text: string): Promise<void> {
     if (!this.session) return;
     const sess = this.session as { sendClientContent?: (args: unknown) => Promise<void> };
@@ -170,6 +175,7 @@ export class GeminiLiveAdapter {
     });
   }
 
+  /** Send a tool/function-call result back to Gemini. */
   async sendFunctionResult(callId: string, result: string): Promise<void> {
     if (!this.session) return;
     const sess = this.session as { sendToolResponse?: (args: unknown) => Promise<void> };
@@ -185,11 +191,13 @@ export class GeminiLiveAdapter {
     });
   }
 
+  /** No-op — Gemini Live barge-in is VAD-driven, not client-cancelled. */
   cancelResponse(): void {
     // Gemini Live barge-in is VAD-driven — explicit cancel not in v1alpha wire protocol.
     getLogger().debug('Gemini Live: cancelResponse is implicit via VAD');
   }
 
+  /** Register an event handler that receives every Gemini Live event. */
   onEvent(handler: GeminiLiveEventHandler): void {
     this.handlers.push(handler);
   }
@@ -277,6 +285,7 @@ export class GeminiLiveAdapter {
     }
   }
 
+  /** Close the Gemini Live session and stop the receive loop. */
   async close(): Promise<void> {
     this.running = false;
     if (this.session) {

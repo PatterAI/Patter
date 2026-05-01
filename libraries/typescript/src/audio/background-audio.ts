@@ -1,7 +1,8 @@
-/*
+/**
  * Background-audio mixer for the Patter TypeScript SDK. Patter routes
  * outbound PCM through the pipeline stream handler, so this module exposes
- * a ``start / mix / stop`` API that does no I/O of its own.
+ * a ``start / mix / stop`` API that does no I/O of its own. See
+ * {@link BackgroundAudioPlayer} for the public class.
  *
  * Notes:
  *
@@ -30,6 +31,7 @@ import type { BackgroundAudioPlayer as IBackgroundAudioPlayer } from '../types';
 // Builtin clip names (match Python ``BuiltinAudioClip``).
 // ---------------------------------------------------------------------------
 
+/** Names of the .ogg clips bundled with the SDK under ``resources/audio/``. */
 export const BuiltinAudioClip = {
   CITY_AMBIENCE: 'city-ambience.ogg',
   FOREST_AMBIENCE: 'forest-ambience.ogg',
@@ -40,6 +42,7 @@ export const BuiltinAudioClip = {
   HOLD_MUSIC: 'hold_music.ogg',
 } as const;
 
+/** Filename of one of the bundled clips (e.g. ``"city-ambience.ogg"``). */
 export type BuiltinAudioClipName = (typeof BuiltinAudioClip)[keyof typeof BuiltinAudioClip];
 
 /** Resolve a bundled clip name to its absolute path on disk. */
@@ -85,8 +88,10 @@ export interface BuiltinPcmSource {
   readonly probability?: number;
 }
 
+/** Tagged union of every input shape accepted by the player. */
 export type AudioSource = RawPcmSource | FilePcmSource | BuiltinPcmSource;
 
+/** A source plus optional probability weight + volume for list-style players. */
 export interface AudioConfig {
   readonly source: AudioSource;
   /** Probability weight used when ``BackgroundAudioPlayer`` receives a list. */
@@ -95,6 +100,7 @@ export interface AudioConfig {
   readonly volume?: number;
 }
 
+/** Constructor options for {@link BackgroundAudioPlayer}. */
 export interface BackgroundAudioOptions {
   /** Overall mix ratio [0, 1].  Defaults to 0.1 (typical hold-music ratio). */
   readonly volume?: number;
@@ -175,6 +181,7 @@ export function resamplePcm(src: Buffer, srcSr: number, dstSr: number): Buffer {
 // Probability-weighted selection.
 // ---------------------------------------------------------------------------
 
+/** Probability-weighted random pick from a list of {@link AudioConfig}. */
 export function selectSoundFromList(sounds: readonly AudioConfig[]): AudioConfig | null {
   const total = sounds.reduce((acc, s) => acc + (s.probability ?? 1), 0);
   if (total <= 0) return null;

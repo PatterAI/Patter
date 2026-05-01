@@ -1,10 +1,21 @@
+/**
+ * Deepgram streaming STT adapter for the Patter SDK pipeline mode.
+ *
+ * Pure `ws` transport — connects to `wss://api.deepgram.com/v1/listen` with
+ * a long-lived KeepAlive pump and emits Patter-normalised {@link Transcript}
+ * events through {@link DeepgramSTT.onTranscript}. See {@link DeepgramSTT}
+ * for the public class.
+ */
+
 import WebSocket from 'ws';
 import type { IncomingMessage } from 'http';
 import { AuthenticationError, PatterConnectionError, RateLimitError } from '../errors';
 import { getLogger } from '../logger';
 
+/** Which Deepgram server event a {@link Transcript} represents. */
 export type TranscriptEventType = 'Results' | 'UtteranceEnd' | 'SpeechStarted';
 
+/** Per-word timing/confidence record returned by Deepgram in `words[]`. */
 export interface DeepgramWord {
   readonly word?: string;
   readonly start?: number;
@@ -14,6 +25,7 @@ export interface DeepgramWord {
   readonly speaker?: number;
 }
 
+/** Patter-normalised transcript event emitted by {@link DeepgramSTT}. */
 export interface Transcript {
   readonly text: string;
   readonly isFinal: boolean;
@@ -139,6 +151,7 @@ interface DeepgramResultsMessage {
   };
 }
 
+/** Streaming STT adapter for Deepgram's `/v1/listen` WebSocket API. */
 export class DeepgramSTT {
   private ws: WebSocket | null = null;
   private readonly transcriptCallbacks = new Set<TranscriptCallback>();
@@ -238,6 +251,7 @@ export class DeepgramSTT {
     return `${DEEPGRAM_WS_URL}?${params.toString()}`;
   }
 
+  /** Open the streaming WebSocket and arm message + keepalive handlers. */
   async connect(): Promise<void> {
     await this.openSocket();
     this.running = true;
@@ -418,6 +432,7 @@ export class DeepgramSTT {
     }
   }
 
+  /** Send a binary audio chunk to Deepgram for transcription. */
   sendAudio(audio: Buffer): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     // Deepgram treats a zero-length binary frame as CloseStream — drop
@@ -427,22 +442,27 @@ export class DeepgramSTT {
     this.ws.send(audio);
   }
 
+  /** Register a transcript listener. */
   onTranscript(callback: TranscriptCallback): void {
     this.transcriptCallbacks.add(callback);
   }
 
+  /** Remove a previously registered transcript listener. */
   offTranscript(callback: TranscriptCallback): void {
     this.transcriptCallbacks.delete(callback);
   }
 
+  /** Register an error listener for socket / API failures. */
   onError(callback: ErrorCallback): void {
     this.errorCallbacks.add(callback);
   }
 
+  /** Remove a previously registered error listener. */
   offError(callback: ErrorCallback): void {
     this.errorCallbacks.delete(callback);
   }
 
+  /** Send Finalize, briefly drain trailing transcripts, then close the socket. */
   close(): void {
     this.running = false;
     this.clearKeepalive();

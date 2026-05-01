@@ -11,11 +11,13 @@ import { getLogger } from '../logger';
 
 const TWILIO_API_BASE = 'https://api.twilio.com/2010-04-01';
 
+/** Constructor options for {@link TwilioAdapter}. */
 export interface TwilioAdapterOptions {
   /** Optional Twilio edge region (e.g. ``ie1`` for Ireland). */
   region?: string;
 }
 
+/** Options accepted by {@link TwilioAdapter.provisionNumber}. */
 export interface ProvisionNumberOptions {
   /** ISO-3166-1 alpha-2 country code, e.g. ``"US"``. */
   countryCode: string;
@@ -23,11 +25,13 @@ export interface ProvisionNumberOptions {
   areaCode?: string;
 }
 
+/** Result returned by {@link TwilioAdapter.provisionNumber}. */
 export interface ProvisionNumberResult {
   readonly phoneNumber: string;
   readonly sid: string;
 }
 
+/** Options accepted by {@link TwilioAdapter.configureNumber}. */
 export interface ConfigureNumberOptions {
   /** URL Twilio should hit when the number receives a call. */
   voiceUrl: string;
@@ -35,6 +39,7 @@ export interface ConfigureNumberOptions {
   statusCallback?: string;
 }
 
+/** Options accepted by {@link TwilioAdapter.initiateCall}. */
 export interface InitiateCallOptions {
   from: string;
   to: string;
@@ -57,6 +62,7 @@ export interface InitiateCallOptions {
   extraParams?: Record<string, string>;
 }
 
+/** Result returned by {@link TwilioAdapter.initiateCall}. */
 export interface InitiateCallResult {
   readonly callSid: string;
 }
@@ -74,6 +80,7 @@ interface TwilioCallPayload {
   sid?: string;
 }
 
+/** Direct REST adapter for Twilio Programmable Voice & Numbers API. */
 export class TwilioAdapter {
   readonly accountSid: string;
   readonly region: string | undefined;

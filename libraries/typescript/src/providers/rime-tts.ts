@@ -38,6 +38,7 @@ function timeoutForModel(model: string): number {
   return MIST_MODEL_TIMEOUT_MS;
 }
 
+/** Constructor options for {@link RimeTTS}. */
 export interface RimeTTSOptions {
   model?: string;
   speaker?: string;
@@ -56,6 +57,7 @@ export interface RimeTTSOptions {
   baseUrl?: string;
 }
 
+/** Rime TTS adapter for the `users.rime.ai/v1/rime-tts` HTTP streaming endpoint. */
 export class RimeTTS {
   private readonly apiKey: string;
   private readonly model: string;
@@ -128,6 +130,7 @@ export class RimeTTS {
     return payload;
   }
 
+  /** Synthesize text and return the concatenated audio buffer. */
   async synthesize(text: string): Promise<Buffer> {
     const chunks: Buffer[] = [];
     for await (const chunk of this.synthesizeStream(text)) {

@@ -77,6 +77,7 @@ export const CartesiaTTSVoiceMode = {
 } as const;
 export type CartesiaTTSVoiceMode = (typeof CartesiaTTSVoiceMode)[keyof typeof CartesiaTTSVoiceMode];
 
+/** Constructor options for {@link CartesiaTTS}. */
 export interface CartesiaTTSOptions {
   model?: CartesiaTTSModel | string;
   voice?: string;
@@ -89,6 +90,7 @@ export interface CartesiaTTSOptions {
   apiVersion?: string;
 }
 
+/** Cartesia TTS provider backed by the HTTP `/tts/bytes` streaming endpoint. */
 export class CartesiaTTS {
   private readonly apiKey: string;
   private readonly model: string;

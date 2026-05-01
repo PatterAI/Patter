@@ -1,5 +1,6 @@
 /** Telnyx carrier credentials holder for Patter. */
 
+/** Constructor options for the Telnyx {@link Carrier}. */
 export interface TelnyxCarrierOptions {
   /** Telnyx API key. Falls back to TELNYX_API_KEY env var. */
   apiKey?: string;

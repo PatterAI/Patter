@@ -23,10 +23,12 @@ export const GroqModel = {
   MIXTRAL_8X7B: 'mixtral-8x7b-32768',
   GEMMA2_9B: 'gemma2-9b-it',
 } as const;
+/** Union of {@link GroqModel} string values. */
 export type GroqModel = (typeof GroqModel)[keyof typeof GroqModel];
 
 const DEFAULT_MODEL: string = GroqModel.LLAMA_3_3_70B_VERSATILE;
 
+/** Constructor options for {@link GroqLLMProvider}. */
 export interface GroqLLMOptions {
   apiKey: string;
   model?: string;
@@ -90,6 +92,7 @@ export class GroqLLMProvider implements LLMProvider {
     this.stop = options.stop;
   }
 
+  /** Stream Patter-format LLM chunks from the Groq chat completions API. */
   async *stream(
     messages: Array<Record<string, unknown>>,
     tools?: Array<Record<string, unknown>> | null,

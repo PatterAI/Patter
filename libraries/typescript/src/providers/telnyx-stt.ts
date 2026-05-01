@@ -10,6 +10,7 @@
 import WebSocket from 'ws';
 import { getLogger } from '../logger';
 
+/** Patter-normalised transcript event emitted by {@link TelnyxSTT}. */
 export interface Transcript {
   readonly text: string;
   readonly isFinal: boolean;
@@ -18,6 +19,7 @@ export interface Transcript {
 
 type TranscriptCallback = (transcript: Transcript) => void;
 
+/** Backing transcription engine accepted by Telnyx STT. */
 export type TelnyxTranscriptionEngine = 'telnyx' | 'google' | 'deepgram' | 'azure';
 
 const TELNYX_STT_WS_URL = 'wss://api.telnyx.com/v2/speech-to-text/transcription';
@@ -49,6 +51,7 @@ function createStreamingWavHeader(sampleRate: number, numChannels: number): Buff
   return header;
 }
 
+/** Streaming STT adapter for Telnyx's `/v2/speech-to-text` WebSocket. */
 export class TelnyxSTT {
   private ws: WebSocket | null = null;
   private callbacks: TranscriptCallback[] = [];
@@ -62,6 +65,7 @@ export class TelnyxSTT {
     private readonly baseUrl: string = TELNYX_STT_WS_URL,
   ) {}
 
+  /** Open the streaming WebSocket and arm message handlers. */
   async connect(): Promise<void> {
     const params = new URLSearchParams({
       transcription_engine: this.transcriptionEngine,
@@ -113,6 +117,7 @@ export class TelnyxSTT {
     });
   }
 
+  /** Send a binary PCM16 audio chunk; emits the WAV header on the first call. */
   sendAudio(audio: Buffer): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 
@@ -125,6 +130,7 @@ export class TelnyxSTT {
     this.ws.send(audio);
   }
 
+  /** Register a transcript listener (max 10 concurrent listeners). */
   onTranscript(callback: TranscriptCallback): void {
     if (this.callbacks.length >= 10) {
       getLogger().warn('TelnyxSTT: maximum of 10 onTranscript callbacks reached; replacing the last callback.');
@@ -134,6 +140,7 @@ export class TelnyxSTT {
     this.callbacks.push(callback);
   }
 
+  /** Close the streaming WebSocket. */
   close(): void {
     if (this.ws) {
       try {

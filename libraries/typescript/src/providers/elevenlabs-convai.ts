@@ -1,3 +1,11 @@
+/**
+ * ElevenLabs Conversational AI (ConvAI) WebSocket adapter for Patter.
+ *
+ * Wraps the `wss://api.elevenlabs.io/v1/convai/conversation` endpoint and
+ * normalises agent audio + transcript + control events into a single
+ * `onEvent(type, data)` callback. See {@link ElevenLabsConvAIAdapter}.
+ */
+
 import WebSocket from 'ws';
 import { getLogger } from '../logger';
 
@@ -9,6 +17,7 @@ const ELEVENLABS_SIGNED_URL =
 // chunks for this many ms after `agent_response`.
 const AGENT_SILENCE_MS = 500;
 
+/** Constructor options for {@link ElevenLabsConvAIAdapter}. */
 export interface ElevenLabsConvAIOptions {
   apiKey: string;
   agentId?: string;
@@ -23,6 +32,7 @@ export interface ElevenLabsConvAIOptions {
 
 type EventCallback = (type: string, data: unknown) => void | Promise<void>;
 
+/** WebSocket adapter for ElevenLabs ConvAI managed-agent conversations. */
 export class ElevenLabsConvAIAdapter {
   private ws: WebSocket | null = null;
   private eventCallback: EventCallback | null = null;
@@ -167,6 +177,7 @@ export class ElevenLabsConvAIAdapter {
     return data.signed_url;
   }
 
+  /** Open the ConvAI WebSocket and send the conversation init payload. */
   async connect(): Promise<void> {
     let wsUrl: string;
     let wsOptions: WebSocket.ClientOptions | undefined;
@@ -397,6 +408,7 @@ export class ElevenLabsConvAIAdapter {
     }
   }
 
+  /** Send a caller-side audio chunk to ConvAI as a base64 `user_audio_chunk`. */
   sendAudio(audioBytes: Buffer): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     // Per ElevenLabs ConvAI protocol: inbound caller audio is a JSON message
@@ -408,10 +420,12 @@ export class ElevenLabsConvAIAdapter {
     );
   }
 
+  /** Register the event callback that receives ConvAI server messages. */
   onEvent(callback: EventCallback): void {
     this.eventCallback = callback;
   }
 
+  /** Close the ConvAI WebSocket and release the event callback. */
   async close(): Promise<void> {
     this.clearSilenceTimer();
     if (!this.ws) {

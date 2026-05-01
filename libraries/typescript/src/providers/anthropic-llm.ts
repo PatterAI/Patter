@@ -35,6 +35,7 @@ export const AnthropicModel = {
   CLAUDE_3_5_SONNET_20241022: 'claude-3-5-sonnet-20241022',
   CLAUDE_3_5_HAIKU_20241022: 'claude-3-5-haiku-20241022',
 } as const;
+/** Union of {@link AnthropicModel} string values. */
 export type AnthropicModel = (typeof AnthropicModel)[keyof typeof AnthropicModel];
 
 const DEFAULT_MODEL: string = AnthropicModel.CLAUDE_HAIKU_4_5_20251001;
@@ -49,6 +50,7 @@ const DEFAULT_MAX_TOKENS = 1024;
  */
 const PROMPT_CACHING_BETA = 'prompt-caching-2024-07-31';
 
+/** Constructor options for {@link AnthropicLLMProvider}. */
 export interface AnthropicLLMOptions {
   apiKey: string;
   model?: string;
@@ -126,6 +128,7 @@ export class AnthropicLLMProvider implements LLMProvider {
     this.promptCaching = options.promptCaching ?? true;
   }
 
+  /** Stream Patter-format LLM chunks for the given OpenAI-style chat history. */
   async *stream(
     messages: Array<Record<string, unknown>>,
     tools?: Array<Record<string, unknown>> | null,

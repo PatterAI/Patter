@@ -8,6 +8,7 @@
 import WebSocket from 'ws';
 import { getLogger } from '../logger';
 
+/** Patter-normalised transcript event emitted by {@link CartesiaSTT}. */
 export interface Transcript {
   readonly text: string;
   readonly isFinal: boolean;
@@ -54,8 +55,10 @@ export const CartesiaSTTClientFrame = {
 export type CartesiaSTTClientFrame = (typeof CartesiaSTTClientFrame)[keyof typeof CartesiaSTTClientFrame];
 
 /** Cartesia STT currently only accepts 16-bit PCM little-endian. */
+/** Legacy encoding alias kept for callers using the bare string form. */
 export type CartesiaEncoding = 'pcm_s16le';
 
+/** Constructor options for {@link CartesiaSTT}. */
 export interface CartesiaSTTOptions {
   /** Cartesia STT model. Currently only `"ink-whisper"`. */
   readonly model?: CartesiaSTTModel | string;
@@ -84,6 +87,7 @@ interface CartesiaEvent {
   readonly message?: string;
 }
 
+/** Streaming STT adapter for Cartesia's ink-whisper WebSocket API. */
 export class CartesiaSTT {
   private ws: WebSocket | null = null;
   private callbacks: Set<TranscriptCallback> = new Set();
@@ -129,6 +133,7 @@ export class CartesiaSTT {
     return `${base}/stt/websocket?${params.toString()}`;
   }
 
+  /** Open the streaming WebSocket and arm message + keepalive handlers. */
   async connect(): Promise<void> {
     const url = this.buildWsUrl();
     this.ws = new WebSocket(url, {
@@ -199,11 +204,13 @@ export class CartesiaSTT {
     }
   }
 
+  /** Send a binary PCM16-LE audio chunk to Cartesia for transcription. */
   sendAudio(audio: Buffer): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     this.ws.send(audio);
   }
 
+  /** Register a transcript listener. */
   onTranscript(callback: TranscriptCallback): void {
     this.callbacks.add(callback);
   }

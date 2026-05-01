@@ -7,6 +7,7 @@
 import WebSocket from 'ws';
 import { getLogger } from '../logger';
 
+/** Patter-normalised transcript event emitted by {@link AssemblyAISTT}. */
 export interface Transcript {
   readonly text: string;
   readonly isFinal: boolean;
@@ -64,6 +65,7 @@ export const AssemblyAIClientFrame = {
 } as const;
 export type AssemblyAIClientFrame = (typeof AssemblyAIClientFrame)[keyof typeof AssemblyAIClientFrame];
 
+/** Constructor options for {@link AssemblyAISTT}. */
 export interface AssemblyAISTTOptions {
   /** One of the AssemblyAI speech models. */
   readonly model?: AssemblyAIModel;
@@ -131,6 +133,7 @@ interface AssemblyAIEvent {
   readonly words?: readonly AssemblyAIWord[];
 }
 
+/** Thrown when a method that needs an open WebSocket is called before connect. */
 export class AssemblyAISTTNotConnectedError extends Error {
   constructor(message = 'AssemblyAISTT is not connected') {
     super(message);
@@ -138,6 +141,7 @@ export class AssemblyAISTTNotConnectedError extends Error {
   }
 }
 
+/** Streaming STT adapter for AssemblyAI's v3 Universal Streaming API. */
 export class AssemblyAISTT {
   private ws: WebSocket | null = null;
   private readonly callbacks: Set<TranscriptCallback> = new Set();
@@ -251,6 +255,7 @@ export class AssemblyAISTT {
     return headers;
   }
 
+  /** Open the streaming WebSocket and arm message handlers. */
   async connect(): Promise<void> {
     this.closing = false;
     const url = this.buildUrl();
@@ -377,6 +382,7 @@ export class AssemblyAISTT {
     }
   }
 
+  /** Send a binary PCM/mu-law audio chunk to AssemblyAI for transcription. */
   sendAudio(audio: Buffer): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new AssemblyAISTTNotConnectedError(
@@ -453,6 +459,7 @@ export class AssemblyAISTT {
     this.ws.send(JSON.stringify({ type: AssemblyAIClientFrame.FORCE_ENDPOINT }));
   }
 
+  /** Register a transcript listener. Returns an unsubscribe function. */
   onTranscript(callback: TranscriptCallback): () => void {
     this.callbacks.add(callback);
     return () => {
@@ -460,6 +467,7 @@ export class AssemblyAISTT {
     };
   }
 
+  /** Send a Terminate frame, wait briefly for ack, and close the socket. */
   async close(): Promise<void> {
     this.closing = true;
     if (!this.ws) return;
