@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
+from enum import IntEnum, StrEnum
 from typing import AsyncIterator, Literal
 from urllib.parse import urlencode
 
@@ -26,8 +27,61 @@ TERMINATION_WAIT_TIMEOUT_S = 0.5
 MIN_CHUNK_DURATION_MS = 50
 MAX_CHUNK_DURATION_MS = 1000
 RECONNECT_ERROR_CODES = {3005, 3008}
-VALID_DOMAINS = {"general", "medical-v1"}
 
+
+class AssemblyAIEncoding(StrEnum):
+    """Audio encodings accepted by AssemblyAI's v3 streaming endpoint."""
+
+    PCM_S16LE = "pcm_s16le"
+    PCM_MULAW = "pcm_mulaw"
+
+
+class AssemblyAIModel(StrEnum):
+    """Known AssemblyAI Universal Streaming speech models."""
+
+    UNIVERSAL_STREAMING_ENGLISH = "universal-streaming-english"
+    UNIVERSAL_STREAMING_MULTILINGUAL = "universal-streaming-multilingual"
+    U3_RT_PRO = "u3-rt-pro"
+    WHISPER_RT = "whisper-rt"
+
+
+class AssemblyAIDomain(StrEnum):
+    """Valid ``domain`` values for AssemblyAI's v3 streaming endpoint."""
+
+    GENERAL = "general"
+    MEDICAL_V1 = "medical-v1"
+
+
+class AssemblyAISampleRate(IntEnum):
+    """Common PCM sample rates for AssemblyAI streaming input."""
+
+    HZ_8000 = 8000
+    HZ_16000 = 16000
+
+
+class AssemblyAIEventType(StrEnum):
+    """AssemblyAI v3 streaming server event types."""
+
+    BEGIN = "Begin"
+    TURN = "Turn"
+    SPEECH_STARTED = "SpeechStarted"
+    TERMINATION = "Termination"
+
+
+class AssemblyAIClientFrame(StrEnum):
+    """AssemblyAI v3 streaming client-side message types."""
+
+    UPDATE_CONFIGURATION = "UpdateConfiguration"
+    FORCE_ENDPOINT = "ForceEndpoint"
+    TERMINATE = "Terminate"
+
+
+VALID_DOMAINS = {AssemblyAIDomain.GENERAL.value, AssemblyAIDomain.MEDICAL_V1.value}
+
+# Backward-compatible Literal aliases — preserved verbatim for callers that
+# already type their kwargs against these names. ``StrEnum`` members compare
+# equal to their string values, so passing either an enum member or a plain
+# string works identically.
 Encoding = Literal["pcm_s16le", "pcm_mulaw"]
 SpeechModel = Literal[
     "universal-streaming-english",
@@ -45,9 +99,9 @@ class AssemblyAISTTOptions:
     See https://www.assemblyai.com/docs/universal-streaming
     """
 
-    sample_rate: int = 16000
-    encoding: Encoding = "pcm_s16le"
-    model: SpeechModel = "universal-streaming-english"
+    sample_rate: Union[AssemblyAISampleRate, int] = AssemblyAISampleRate.HZ_16000
+    encoding: Union[AssemblyAIEncoding, str] = AssemblyAIEncoding.PCM_S16LE
+    model: Union[AssemblyAIModel, str] = AssemblyAIModel.UNIVERSAL_STREAMING_ENGLISH
     language_detection: bool | None = None
     end_of_turn_confidence_threshold: float | None = None
     min_turn_silence: int | None = DEFAULT_MIN_TURN_SILENCE_MS
@@ -59,7 +113,7 @@ class AssemblyAISTTOptions:
     vad_threshold: float | None = None
     speaker_labels: bool | None = None
     max_speakers: int | None = None
-    domain: str | None = None
+    domain: Union[AssemblyAIDomain, str, None] = None
 
 
 class AssemblyAISTT(STTProvider):
@@ -97,9 +151,11 @@ class AssemblyAISTT(STTProvider):
         api_key: str,
         *,
         language: str = "en",
-        model: SpeechModel = "universal-streaming-english",
-        encoding: Encoding = "pcm_s16le",
-        sample_rate: int = 16000,
+        model: Union[
+            AssemblyAIModel, str
+        ] = AssemblyAIModel.UNIVERSAL_STREAMING_ENGLISH,
+        encoding: Union[AssemblyAIEncoding, str] = AssemblyAIEncoding.PCM_S16LE,
+        sample_rate: Union[AssemblyAISampleRate, int] = AssemblyAISampleRate.HZ_16000,
         base_url: str = DEFAULT_BASE_URL,
         use_query_token: bool = False,
         options: AssemblyAISTTOptions | None = None,
@@ -159,24 +215,32 @@ class AssemblyAISTT(STTProvider):
         api_key: str,
         *,
         language: str = "en",
-        model: SpeechModel = "universal-streaming-english",
+        model: Union[
+            AssemblyAIModel, str
+        ] = AssemblyAIModel.UNIVERSAL_STREAMING_ENGLISH,
     ) -> "AssemblyAISTT":
         """Create an AssemblyAI adapter configured for Twilio mulaw 8 kHz."""
         return cls(
             api_key=api_key,
             language=language,
             model=model,
-            encoding="pcm_mulaw",
-            sample_rate=8000,
+            encoding=AssemblyAIEncoding.PCM_MULAW,
+            sample_rate=AssemblyAISampleRate.HZ_8000,
         )
 
     def _build_url(self) -> str:
         opts = self._opts
 
         # u3-rt-pro defaults: min=100, max=min (so both 100 unless overridden)
-        if opts.model == "u3-rt-pro":
-            min_silence = opts.min_turn_silence if opts.min_turn_silence is not None else 100
-            max_silence = opts.max_turn_silence if opts.max_turn_silence is not None else min_silence
+        if opts.model == AssemblyAIModel.U3_RT_PRO:
+            min_silence = (
+                opts.min_turn_silence if opts.min_turn_silence is not None else 100
+            )
+            max_silence = (
+                opts.max_turn_silence
+                if opts.max_turn_silence is not None
+                else min_silence
+            )
         else:
             min_silence = opts.min_turn_silence
             max_silence = opts.max_turn_silence
@@ -184,7 +248,8 @@ class AssemblyAISTT(STTProvider):
         # Default language_detection: True for multilingual & u3-rt-pro, else False.
         if opts.language_detection is None:
             language_detection = (
-                "multilingual" in opts.model or opts.model == "u3-rt-pro"
+                "multilingual" in str(opts.model)
+                or opts.model == AssemblyAIModel.U3_RT_PRO
             )
         else:
             language_detection = opts.language_detection
@@ -275,7 +340,9 @@ class AssemblyAISTT(STTProvider):
         sample_rate = self._opts.sample_rate or 0
         if sample_rate <= 0:
             return None
-        bytes_per_sample = 2 if self._opts.encoding == "pcm_s16le" else 1
+        bytes_per_sample = (
+            2 if self._opts.encoding == AssemblyAIEncoding.PCM_S16LE else 1
+        )
         samples = byte_length / bytes_per_sample
         return (samples / sample_rate) * 1000.0
 
@@ -295,7 +362,9 @@ class AssemblyAISTT(STTProvider):
         if self._ws is None or self._ws.closed:
             raise RuntimeError("Not connected. Call connect() first.")
 
-        payload: dict[str, object] = {"type": "UpdateConfiguration"}
+        payload: dict[str, object] = {
+            "type": AssemblyAIClientFrame.UPDATE_CONFIGURATION.value
+        }
         if keyterms_prompt is not None:
             payload["keyterms_prompt"] = json.dumps(keyterms_prompt)
         if prompt is not None:
@@ -311,7 +380,9 @@ class AssemblyAISTT(STTProvider):
         """Force the server to finalize the current turn (for barge-in)."""
         if self._ws is None or self._ws.closed:
             raise RuntimeError("Not connected. Call connect() first.")
-        await self._ws.send_str(json.dumps({"type": "ForceEndpoint"}))
+        await self._ws.send_str(
+            json.dumps({"type": AssemblyAIClientFrame.FORCE_ENDPOINT.value})
+        )
 
     async def receive_transcripts(self) -> AsyncIterator[Transcript]:
         """Async generator yielding :class:`Transcript` events as they arrive."""
@@ -383,17 +454,17 @@ class AssemblyAISTT(STTProvider):
         """
         message_type = data.get("type")
 
-        if message_type == "Begin":
+        if message_type == AssemblyAIEventType.BEGIN:
             self.session_id = data.get("id")
             self.expires_at = data.get("expires_at")
             return
 
-        if message_type == "Termination":
+        if message_type == AssemblyAIEventType.TERMINATION:
             self._running = False
             self._termination_event.set()
             return
 
-        if message_type == "SpeechStarted":
+        if message_type == AssemblyAIEventType.SPEECH_STARTED:
             # Surface as a zero-text interim transcript so downstream barge-in
             # logic can react. ``event_type`` is a proper field on the shared
             # Transcript dataclass, so consumers can distinguish SpeechStarted
@@ -408,7 +479,7 @@ class AssemblyAISTT(STTProvider):
             )
             return
 
-        if message_type != "Turn":
+        if message_type != AssemblyAIEventType.TURN:
             return
 
         end_of_turn = bool(data.get("end_of_turn", False))
@@ -453,7 +524,9 @@ class AssemblyAISTT(STTProvider):
 
         if self._ws is not None and not self._ws.closed:
             try:
-                await self._ws.send_str(json.dumps({"type": "Terminate"}))
+                await self._ws.send_str(
+                    json.dumps({"type": AssemblyAIClientFrame.TERMINATE.value})
+                )
             except Exception:  # noqa: BLE001
                 pass
 

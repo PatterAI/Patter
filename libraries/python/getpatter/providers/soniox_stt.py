@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from enum import IntEnum, StrEnum
 from typing import Any, AsyncIterator
 
 import aiohttp
@@ -30,18 +31,57 @@ logger = logging.getLogger("getpatter")
 # Base URL for Soniox Speech-to-Text API (WebSocket).
 SONIOX_WS_URL = "wss://stt-rt.soniox.com/transcribe-websocket"
 
+
+class SonioxModel(StrEnum):
+    """Known Soniox real-time STT models."""
+
+    STT_RT_V4 = "stt-rt-v4"
+    STT_RT_V3 = "stt-rt-v3"
+    STT_RT_V2 = "stt-rt-v2"
+
+
+class SonioxAudioFormat(StrEnum):
+    """Audio formats accepted by Soniox real-time API."""
+
+    PCM_S16LE = "pcm_s16le"
+
+
+class SonioxSampleRate(IntEnum):
+    """Common PCM sample rates for Soniox streaming input."""
+
+    HZ_8000 = 8000
+    HZ_16000 = 16000
+    HZ_24000 = 24000
+
+
+class SonioxClientFrame(StrEnum):
+    """Soniox real-time client message ``type`` values."""
+
+    KEEPALIVE = "keepalive"
+
+
+class SonioxEndpointToken(StrEnum):
+    """Soniox token markers that signal a speech-segment endpoint."""
+
+    END = "<end>"
+    FIN = "<fin>"
+
+
 # Soniox keepalive payload (JSON).
-KEEPALIVE_MESSAGE = '{"type": "keepalive"}'
+KEEPALIVE_MESSAGE = json.dumps({"type": SonioxClientFrame.KEEPALIVE.value})
 # Tokens that mark a speech segment endpoint in the Soniox stream.
-END_TOKEN = "<end>"
-FINALIZED_TOKEN = "<fin>"
+END_TOKEN = SonioxEndpointToken.END.value
+FINALIZED_TOKEN = SonioxEndpointToken.FIN.value
 # Interval between keepalive messages while no audio is being sent.
 KEEPALIVE_INTERVAL_SEC = 5.0
 
 
 def _is_end_token(token: dict[str, Any]) -> bool:
     """Return True if the token marks an end or finalized event."""
-    return token.get("text") in (END_TOKEN, FINALIZED_TOKEN)
+    return token.get("text") in (
+        SonioxEndpointToken.END.value,
+        SonioxEndpointToken.FIN.value,
+    )
 
 
 class _TokenAccumulator:
@@ -114,10 +154,10 @@ class SonioxSTT(STTProvider):
         self,
         api_key: str,
         *,
-        model: str = "stt-rt-v4",
+        model: Union[SonioxModel, str] = SonioxModel.STT_RT_V4,
         language_hints: list[str] | None = None,
         language_hints_strict: bool = False,
-        sample_rate: int = 16000,
+        sample_rate: Union[SonioxSampleRate, int] = SonioxSampleRate.HZ_16000,
         num_channels: int = 1,
         enable_speaker_diarization: bool = False,
         enable_language_identification: bool = True,
@@ -158,7 +198,7 @@ class SonioxSTT(STTProvider):
         cls,
         api_key: str,
         language_hints: list[str] | None = None,
-        model: str = "stt-rt-v4",
+        model: Union[SonioxModel, str] = SonioxModel.STT_RT_V4,
     ) -> "SonioxSTT":
         """Create a Soniox adapter configured for Twilio-style 8 kHz linear PCM.
 
@@ -170,7 +210,7 @@ class SonioxSTT(STTProvider):
             api_key=api_key,
             model=model,
             language_hints=language_hints,
-            sample_rate=8000,
+            sample_rate=SonioxSampleRate.HZ_8000,
         )
 
     # ------------------------------------------------------------------
@@ -182,7 +222,7 @@ class SonioxSTT(STTProvider):
         config: dict[str, Any] = {
             "api_key": self.api_key,
             "model": self.model,
-            "audio_format": "pcm_s16le",
+            "audio_format": SonioxAudioFormat.PCM_S16LE.value,
             "num_channels": self.num_channels,
             "sample_rate": self.sample_rate,
             "enable_endpoint_detection": True,

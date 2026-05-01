@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import struct
+from enum import IntEnum, StrEnum
 from typing import AsyncIterator, Literal
 
 import aiohttp
@@ -19,9 +20,34 @@ from getpatter.providers.base import STTProvider, Transcript
 
 TELNYX_STT_WS_URL = "wss://api.telnyx.com/v2/speech-to-text/transcription"
 
-DEFAULT_SAMPLE_RATE = 16000
+
+class TelnyxTranscriptionEngine(StrEnum):
+    """Backend transcription engines accepted by Telnyx STT."""
+
+    TELNYX = "telnyx"
+    GOOGLE = "google"
+    DEEPGRAM = "deepgram"
+    AZURE = "azure"
+
+
+class TelnyxSTTSampleRate(IntEnum):
+    """Common PCM sample rates accepted by Telnyx STT."""
+
+    HZ_8000 = 8000
+    HZ_16000 = 16000
+    HZ_24000 = 24000
+
+
+class TelnyxSTTInputFormat(StrEnum):
+    """Input audio formats accepted by Telnyx STT."""
+
+    WAV = "wav"
+
+
+DEFAULT_SAMPLE_RATE = TelnyxSTTSampleRate.HZ_16000.value
 NUM_CHANNELS = 1
 
+# Backward-compatible Literal alias for type hints in older callers.
 TranscriptionEngine = Literal["telnyx", "google", "deepgram", "azure"]
 
 
@@ -71,8 +97,10 @@ class TelnyxSTT(STTProvider):
         api_key: str,
         language: str = "en",
         *,
-        transcription_engine: TranscriptionEngine = "telnyx",
-        sample_rate: int = DEFAULT_SAMPLE_RATE,
+        transcription_engine: Union[
+            TelnyxTranscriptionEngine, str
+        ] = TelnyxTranscriptionEngine.TELNYX,
+        sample_rate: Union[TelnyxSTTSampleRate, int] = TelnyxSTTSampleRate.HZ_16000,
         base_url: str = TELNYX_STT_WS_URL,
         session: aiohttp.ClientSession | None = None,
     ) -> None:
@@ -103,7 +131,7 @@ class TelnyxSTT(STTProvider):
         params = {
             "transcription_engine": self.transcription_engine,
             "language": self.language,
-            "input_format": "wav",
+            "input_format": TelnyxSTTInputFormat.WAV.value,
         }
         query_string = "&".join(f"{k}={v}" for k, v in params.items())
         url = f"{self.base_url}?{query_string}"

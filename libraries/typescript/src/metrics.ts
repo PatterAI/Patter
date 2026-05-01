@@ -15,7 +15,12 @@ import {
   type ProviderPricing,
 } from './pricing';
 import type { EventBus } from './observability/event-bus';
-import type { EOUMetrics, InterruptionMetrics } from './observability/metric-types';
+import type {
+  EOUMetrics,
+  InterruptionMetrics,
+  ProcessingMetrics,
+  TTFBMetrics,
+} from './observability/metric-types';
 
 // ---- Data types ----
 
@@ -329,12 +334,43 @@ export class CallMetricsAccumulator {
     this._turnUserText = text;
     this._turnSttAudioSeconds = audioSeconds;
     this._totalSttAudioSeconds += audioSeconds;
+
+    // Emit ProcessingMetrics for parity with Python services/metrics.py:
+    // record_stt_complete().  ``value`` is in seconds.
+    if (this._eventBus) {
+      const valueSec =
+        this._turnStart !== null
+          ? (this._sttComplete - this._turnStart) / 1000
+          : 0;
+      const payload: ProcessingMetrics = {
+        timestamp: Date.now() / 1000,
+        processor: 'stt',
+        model: null,
+        value: valueSec,
+      };
+      this._eventBus.emit('stt_metrics', payload);
+    }
   }
 
   /** Record the timestamp of the first LLM token (TTFT). No-op after first call. */
   recordLlmFirstToken(): void {
     if (this._llmFirstToken === null) {
       this._llmFirstToken = hrTimeMs();
+      // Emit TTFBMetrics for parity with Python services/metrics.py:
+      // record_llm_first_token().  ``value`` is in seconds.
+      if (
+        this._eventBus &&
+        this._sttComplete !== null &&
+        (!this._reportOnlyInitialTtfb || !this._initialTtfbEmitted)
+      ) {
+        const payload: TTFBMetrics = {
+          timestamp: Date.now() / 1000,
+          processor: 'llm',
+          model: null,
+          value: (this._llmFirstToken - this._sttComplete) / 1000,
+        };
+        this._eventBus.emit('llm_metrics', payload);
+      }
     }
   }
 
@@ -364,6 +400,26 @@ export class CallMetricsAccumulator {
       return;
     }
     this._initialTtfbEmitted = true;
+
+    // Emit TTFBMetrics for parity with Python services/metrics.py:
+    // record_tts_first_byte().  ``value`` is in seconds.  Use the
+    // first-sentence-complete timestamp when available (matches Py),
+    // otherwise fall back to llm_complete.
+    if (this._eventBus && this._ttsFirstByte !== null) {
+      const ttsRef =
+        this._llmFirstSentenceComplete !== null
+          ? this._llmFirstSentenceComplete
+          : this._llmComplete;
+      if (ttsRef !== null) {
+        const payload: TTFBMetrics = {
+          timestamp: Date.now() / 1000,
+          processor: 'tts',
+          model: null,
+          value: (this._ttsFirstByte - ttsRef) / 1000,
+        };
+        this._eventBus.emit('tts_metrics', payload);
+      }
+    }
   }
 
   recordTtsComplete(text: string): void {

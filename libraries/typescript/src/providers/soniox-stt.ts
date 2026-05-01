@@ -16,9 +16,45 @@ import WebSocket from 'ws';
 import { getLogger } from '../logger';
 
 const SONIOX_WS_URL = 'wss://stt-rt.soniox.com/transcribe-websocket';
-const KEEPALIVE_MESSAGE = '{"type": "keepalive"}';
-const END_TOKEN = '<end>';
-const FINALIZED_TOKEN = '<fin>';
+
+/** Known Soniox real-time STT models. */
+export const SonioxModel = {
+  STT_RT_V4: 'stt-rt-v4',
+  STT_RT_V3: 'stt-rt-v3',
+  STT_RT_V2: 'stt-rt-v2',
+} as const;
+export type SonioxModel = (typeof SonioxModel)[keyof typeof SonioxModel];
+
+/** Audio formats accepted by Soniox real-time API. */
+export const SonioxAudioFormat = {
+  PCM_S16LE: 'pcm_s16le',
+} as const;
+export type SonioxAudioFormat = (typeof SonioxAudioFormat)[keyof typeof SonioxAudioFormat];
+
+/** Common PCM sample rates for Soniox streaming input. */
+export const SonioxSampleRate = {
+  HZ_8000: 8000,
+  HZ_16000: 16000,
+  HZ_24000: 24000,
+} as const;
+export type SonioxSampleRate = (typeof SonioxSampleRate)[keyof typeof SonioxSampleRate];
+
+/** Soniox real-time client message `type` values. */
+export const SonioxClientFrame = {
+  KEEPALIVE: 'keepalive',
+} as const;
+export type SonioxClientFrame = (typeof SonioxClientFrame)[keyof typeof SonioxClientFrame];
+
+/** Soniox token markers that signal a speech-segment endpoint. */
+export const SonioxEndpointToken = {
+  END: '<end>',
+  FIN: '<fin>',
+} as const;
+export type SonioxEndpointToken = (typeof SonioxEndpointToken)[keyof typeof SonioxEndpointToken];
+
+const KEEPALIVE_MESSAGE = JSON.stringify({ type: SonioxClientFrame.KEEPALIVE });
+const END_TOKEN: string = SonioxEndpointToken.END;
+const FINALIZED_TOKEN: string = SonioxEndpointToken.FIN;
 const KEEPALIVE_INTERVAL_MS = 5000;
 
 export interface Transcript {
@@ -79,10 +115,10 @@ class TokenAccumulator {
 }
 
 export interface SonioxSTTOptions {
-  model?: string;
+  model?: SonioxModel | string;
   languageHints?: string[];
   languageHintsStrict?: boolean;
-  sampleRate?: number;
+  sampleRate?: SonioxSampleRate | number;
   numChannels?: number;
   enableSpeakerDiarization?: boolean;
   enableLanguageIdentification?: boolean;
@@ -119,10 +155,10 @@ export class SonioxSTT {
     }
 
     this.apiKey = apiKey;
-    this.model = options.model ?? 'stt-rt-v4';
+    this.model = options.model ?? SonioxModel.STT_RT_V4;
     this.languageHints = options.languageHints;
     this.languageHintsStrict = options.languageHintsStrict ?? false;
-    this.sampleRate = options.sampleRate ?? 16000;
+    this.sampleRate = options.sampleRate ?? SonioxSampleRate.HZ_16000;
     this.numChannels = options.numChannels ?? 1;
     this.enableSpeakerDiarization = options.enableSpeakerDiarization ?? false;
     this.enableLanguageIdentification = options.enableLanguageIdentification ?? true;
@@ -133,7 +169,10 @@ export class SonioxSTT {
 
   /** Factory for Twilio-style 8 kHz linear PCM. */
   static forTwilio(apiKey: string, languageHints?: string[]): SonioxSTT {
-    return new SonioxSTT(apiKey, { sampleRate: 8000, languageHints });
+    return new SonioxSTT(apiKey, {
+      sampleRate: SonioxSampleRate.HZ_8000,
+      languageHints,
+    });
   }
 
   private buildConfig(): Record<string, unknown> {

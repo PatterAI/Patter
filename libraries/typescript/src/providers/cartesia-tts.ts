@@ -35,11 +35,53 @@ const CARTESIA_BASE_URL = 'https://api.cartesia.ai';
 const CARTESIA_API_VERSION = '2025-04-16';
 const CARTESIA_DEFAULT_VOICE_ID = 'f786b574-daa5-4673-aa0c-cbe3e8534c02';
 
+/** Known Cartesia TTS models. */
+export const CartesiaTTSModel = {
+  SONIC_3: 'sonic-3',
+  SONIC_2: 'sonic-2',
+  SONIC: 'sonic',
+} as const;
+export type CartesiaTTSModel = (typeof CartesiaTTSModel)[keyof typeof CartesiaTTSModel];
+
+/** Audio container formats accepted by the Cartesia bytes endpoint. */
+export const CartesiaTTSContainer = {
+  RAW: 'raw',
+  WAV: 'wav',
+  MP3: 'mp3',
+} as const;
+export type CartesiaTTSContainer = (typeof CartesiaTTSContainer)[keyof typeof CartesiaTTSContainer];
+
+/** Audio encodings accepted by the Cartesia bytes endpoint. */
+export const CartesiaTTSEncoding = {
+  PCM_S16LE: 'pcm_s16le',
+  PCM_F32LE: 'pcm_f32le',
+  PCM_MULAW: 'pcm_mulaw',
+  PCM_ALAW: 'pcm_alaw',
+} as const;
+export type CartesiaTTSEncoding = (typeof CartesiaTTSEncoding)[keyof typeof CartesiaTTSEncoding];
+
+/** Common PCM sample rates accepted by the Cartesia bytes endpoint. */
+export const CartesiaTTSSampleRate = {
+  HZ_8000: 8000,
+  HZ_16000: 16000,
+  HZ_22050: 22050,
+  HZ_24000: 24000,
+  HZ_44100: 44100,
+} as const;
+export type CartesiaTTSSampleRate = (typeof CartesiaTTSSampleRate)[keyof typeof CartesiaTTSSampleRate];
+
+/** Voice-selection mode passed in the Cartesia bytes payload. */
+export const CartesiaTTSVoiceMode = {
+  ID: 'id',
+  EMBEDDING: 'embedding',
+} as const;
+export type CartesiaTTSVoiceMode = (typeof CartesiaTTSVoiceMode)[keyof typeof CartesiaTTSVoiceMode];
+
 export interface CartesiaTTSOptions {
-  model?: string;
+  model?: CartesiaTTSModel | string;
   voice?: string;
   language?: string;
-  sampleRate?: number;
+  sampleRate?: CartesiaTTSSampleRate | number;
   speed?: string | number;
   emotion?: string | string[];
   volume?: number;
@@ -61,10 +103,10 @@ export class CartesiaTTS {
 
   constructor(apiKey: string, opts: CartesiaTTSOptions = {}) {
     this.apiKey = apiKey;
-    this.model = opts.model ?? 'sonic-3';
+    this.model = opts.model ?? CartesiaTTSModel.SONIC_3;
     this.voice = opts.voice ?? CARTESIA_DEFAULT_VOICE_ID;
     this.language = opts.language ?? 'en';
-    this.sampleRate = opts.sampleRate ?? 16000;
+    this.sampleRate = opts.sampleRate ?? CartesiaTTSSampleRate.HZ_16000;
     this.speed = opts.speed;
     this.emotion =
       typeof opts.emotion === 'string' ? [opts.emotion] : opts.emotion;
@@ -86,7 +128,10 @@ export class CartesiaTTS {
     apiKey: string,
     options: Omit<CartesiaTTSOptions, 'sampleRate'> = {},
   ): CartesiaTTS {
-    return new CartesiaTTS(apiKey, { ...options, sampleRate: 8000 });
+    return new CartesiaTTS(apiKey, {
+      ...options,
+      sampleRate: CartesiaTTSSampleRate.HZ_8000,
+    });
   }
 
   /**
@@ -101,18 +146,21 @@ export class CartesiaTTS {
     apiKey: string,
     options: Omit<CartesiaTTSOptions, 'sampleRate'> = {},
   ): CartesiaTTS {
-    return new CartesiaTTS(apiKey, { ...options, sampleRate: 16000 });
+    return new CartesiaTTS(apiKey, {
+      ...options,
+      sampleRate: CartesiaTTSSampleRate.HZ_16000,
+    });
   }
 
   /** Build the JSON payload for the Cartesia bytes endpoint. */
   private buildPayload(text: string): Record<string, unknown> {
     const payload: Record<string, unknown> = {
       model_id: this.model,
-      voice: { mode: 'id', id: this.voice },
+      voice: { mode: CartesiaTTSVoiceMode.ID, id: this.voice },
       transcript: text,
       output_format: {
-        container: 'raw',
-        encoding: 'pcm_s16le',
+        container: CartesiaTTSContainer.RAW,
+        encoding: CartesiaTTSEncoding.PCM_S16LE,
         sample_rate: this.sampleRate,
       },
       language: this.language,

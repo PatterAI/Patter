@@ -344,4 +344,55 @@ describe('StreamHandler', () => {
       expect(handler).toBeDefined();
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Fix #35 — Barge-in cancels in-flight LLM stream
+  //
+  // Pre-fix: ``cancelSpeaking`` flipped ``isSpeaking=false`` and cleared
+  // downstream audio, but the ``for await`` loop kept consuming LLM tokens
+  // we would never speak — wasted cost and held the provider connection.
+  //
+  // Post-fix: ``cancelSpeaking`` aborts an ``AbortController`` whose
+  // ``signal`` is checked between tokens, breaking the loop early.
+  // -------------------------------------------------------------------------
+  describe('barge-in cancels in-flight LLM stream', () => {
+    it('aborts the AbortController on cancelSpeaking', () => {
+      const deps = makeDeps();
+      const ws = makeMockWs();
+      const handler = new StreamHandler(deps, ws, '+15551111111', '+15552222222');
+      // Simulate that runPipelineLlm has set up an AbortController for the turn.
+      const controller = new AbortController();
+      // Use bracket access to reach the private field for test purposes only.
+      (handler as unknown as { llmAbort: AbortController | null }).llmAbort =
+        controller;
+      (handler as unknown as { isSpeaking: boolean }).isSpeaking = true;
+
+      expect(controller.signal.aborted).toBe(false);
+      // cancelSpeaking is private — invoke the public surface that calls it.
+      (handler as unknown as { cancelSpeaking: () => void }).cancelSpeaking();
+      expect(controller.signal.aborted).toBe(true);
+    });
+
+    it('signal.aborted bounds tokens consumed below tokens emitted', async () => {
+      // Sentinel async-gen yielding a known number of tokens; if we don't
+      // honour the abort signal we would drain the entire generator.
+      async function* tokens() {
+        for (let i = 0; i < 50; i++) {
+          yield `tok${i}`;
+          // Yield to the microtask queue so other code can run between tokens.
+          await Promise.resolve();
+        }
+      }
+
+      const ctrl = new AbortController();
+      const consumed: string[] = [];
+      for await (const t of tokens()) {
+        if (ctrl.signal.aborted) break;
+        consumed.push(t);
+        if (consumed.length === 3) ctrl.abort();
+      }
+      expect(consumed.length).toBeLessThan(50);
+      expect(consumed.length).toBeLessThanOrEqual(4);
+    });
+  });
 });

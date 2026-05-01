@@ -1,4 +1,5 @@
-from typing import AsyncIterator
+from enum import StrEnum
+from typing import AsyncIterator, Union
 
 import httpx
 
@@ -11,19 +12,55 @@ except ImportError:  # pragma: no cover
 
 from getpatter.providers.base import TTSProvider
 
+
+class OpenAITTSModel(StrEnum):
+    """OpenAI TTS models accepted by ``POST /v1/audio/speech``."""
+
+    GPT_4O_MINI_TTS = "gpt-4o-mini-tts"
+    TTS_1 = "tts-1"
+    TTS_1_HD = "tts-1-hd"
+
+
+class OpenAITTSVoice(StrEnum):
+    """Built-in voices accepted by ``POST /v1/audio/speech``."""
+
+    ALLOY = "alloy"
+    ASH = "ash"
+    BALLAD = "ballad"
+    CORAL = "coral"
+    ECHO = "echo"
+    FABLE = "fable"
+    NOVA = "nova"
+    ONYX = "onyx"
+    SAGE = "sage"
+    SHIMMER = "shimmer"
+    VERSE = "verse"
+
+
+class OpenAITTSResponseFormat(StrEnum):
+    """Response audio formats accepted by ``POST /v1/audio/speech``."""
+
+    PCM = "pcm"
+    MP3 = "mp3"
+    OPUS = "opus"
+    AAC = "aac"
+    FLAC = "flac"
+    WAV = "wav"
+
+
 OPENAI_TTS_URL = "https://api.openai.com/v1/audio/speech"
 # ``gpt-4o-mini-tts`` is the first OpenAI TTS model that accepts an
 # ``instructions`` field (voice direction). Older models (``tts-1``,
 # ``tts-1-hd``) 400 if we include it, so we gate on this prefix.
-_INSTRUCTIONS_PREFIX = "gpt-4o-mini-tts"
+_INSTRUCTIONS_PREFIX = OpenAITTSModel.GPT_4O_MINI_TTS.value
 
 
 class OpenAITTS(TTSProvider):
     def __init__(
         self,
         api_key: str,
-        voice: str = "alloy",
-        model: str = "gpt-4o-mini-tts",
+        voice: Union[OpenAITTSVoice, str] = OpenAITTSVoice.ALLOY,
+        model: Union[OpenAITTSModel, str] = OpenAITTSModel.GPT_4O_MINI_TTS,
         *,
         instructions: str | None = None,
         speed: float | None = None,
@@ -59,9 +96,11 @@ class OpenAITTS(TTSProvider):
             "model": self.model,
             "input": text,
             "voice": self.voice,
-            "response_format": "pcm",
+            "response_format": OpenAITTSResponseFormat.PCM.value,
         }
-        if self.instructions is not None and self.model.startswith(_INSTRUCTIONS_PREFIX):
+        if self.instructions is not None and self.model.startswith(
+            _INSTRUCTIONS_PREFIX
+        ):
             body["instructions"] = self.instructions
         if self.speed is not None:
             body["speed"] = self.speed
@@ -73,6 +112,7 @@ class OpenAITTS(TTSProvider):
         # chunk boundaries, preventing the pops/garbled audio that occurred
         # with the previous stateless per-chunk approach (acceptance test 09).
         from getpatter.services.transcoding import create_resampler_24k_to_16k
+
         resampler = create_resampler_24k_to_16k()
         try:
             # 1024-byte chunks ≈ 21 ms at 24 kHz / 16-bit (vs ~85 ms at the

@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
+from enum import IntEnum, StrEnum
 from typing import AsyncIterator, Literal
 from urllib.parse import urlencode
 
@@ -26,10 +27,46 @@ API_VERSION = "2025-04-16"
 USER_AGENT = "Patter/1.0 (provider=Cartesia)"
 KEEPALIVE_INTERVAL_SECONDS = 30.0
 
-# Supported STT encoding (Cartesia STT currently only accepts PCM s16le).
-CartesiaEncoding = Literal["pcm_s16le"]
 
-# Only supported STT model at time of writing.
+class CartesiaSTTModel(StrEnum):
+    """Known Cartesia STT models."""
+
+    INK_WHISPER = "ink-whisper"
+
+
+class CartesiaSTTEncoding(StrEnum):
+    """Audio encodings accepted by Cartesia's STT websocket endpoint."""
+
+    PCM_S16LE = "pcm_s16le"
+
+
+class CartesiaSTTSampleRate(IntEnum):
+    """Common PCM sample rates accepted by Cartesia STT."""
+
+    HZ_8000 = 8000
+    HZ_16000 = 16000
+    HZ_24000 = 24000
+    HZ_44100 = 44100
+    HZ_48000 = 48000
+
+
+class CartesiaSTTServerEvent(StrEnum):
+    """Cartesia STT server event ``type`` values."""
+
+    TRANSCRIPT = "transcript"
+    FLUSH_DONE = "flush_done"
+    DONE = "done"
+    ERROR = "error"
+
+
+class CartesiaSTTClientFrame(StrEnum):
+    """Cartesia STT client-side text frames."""
+
+    FINALIZE = "finalize"
+
+
+# Backward-compatible Literal aliases — preserved verbatim.
+CartesiaEncoding = Literal["pcm_s16le"]
 CartesiaModel = Literal["ink-whisper"]
 
 
@@ -40,10 +77,10 @@ class CartesiaSTTOptions:
     See https://docs.cartesia.ai/2025-04-16/api-reference/stt/stt
     """
 
-    model: str = "ink-whisper"
+    model: Union[CartesiaSTTModel, str] = CartesiaSTTModel.INK_WHISPER
     language: str = "en"
-    encoding: CartesiaEncoding = "pcm_s16le"
-    sample_rate: int = 16000
+    encoding: Union[CartesiaSTTEncoding, str] = CartesiaSTTEncoding.PCM_S16LE
+    sample_rate: Union[CartesiaSTTSampleRate, int] = CartesiaSTTSampleRate.HZ_16000
 
 
 class CartesiaSTT(STTProvider):
@@ -71,9 +108,9 @@ class CartesiaSTT(STTProvider):
         api_key: str,
         *,
         language: str = "en",
-        model: str = "ink-whisper",
-        encoding: CartesiaEncoding = "pcm_s16le",
-        sample_rate: int = 16000,
+        model: Union[CartesiaSTTModel, str] = CartesiaSTTModel.INK_WHISPER,
+        encoding: Union[CartesiaSTTEncoding, str] = CartesiaSTTEncoding.PCM_S16LE,
+        sample_rate: Union[CartesiaSTTSampleRate, int] = CartesiaSTTSampleRate.HZ_16000,
         base_url: str = DEFAULT_BASE_URL,
         options: CartesiaSTTOptions | None = None,
     ) -> None:
@@ -202,7 +239,7 @@ class CartesiaSTT(STTProvider):
         - ``error``: server-side error
         """
         message_type = data.get("type")
-        if message_type == "transcript":
+        if message_type == CartesiaSTTServerEvent.TRANSCRIPT:
             text = (data.get("text") or "").strip()
             is_final = bool(data.get("is_final", False))
             if not text and not is_final:
@@ -217,12 +254,15 @@ class CartesiaSTT(STTProvider):
                 )
             return
 
-        if message_type == "error":
+        if message_type == CartesiaSTTServerEvent.ERROR:
             logger.error("Cartesia STT error: %s", data.get("message", "unknown"))
             return
 
-        if message_type in ("flush_done", "done"):
-            if message_type == "done":
+        if message_type in (
+            CartesiaSTTServerEvent.FLUSH_DONE,
+            CartesiaSTTServerEvent.DONE,
+        ):
+            if message_type == CartesiaSTTServerEvent.DONE:
                 self._running = False
             return
 
@@ -231,7 +271,7 @@ class CartesiaSTT(STTProvider):
         self._running = False
         if self._ws is not None and not self._ws.closed:
             try:
-                await self._ws.send_str("finalize")
+                await self._ws.send_str(CartesiaSTTClientFrame.FINALIZE.value)
             except Exception:  # noqa: BLE001
                 pass
             await self._ws.close()

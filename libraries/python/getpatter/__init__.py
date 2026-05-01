@@ -46,7 +46,11 @@ from getpatter.exceptions import (
 )
 from getpatter.services.sentence_chunker import SentenceChunker
 from getpatter.services.pipeline_hooks import PipelineHookExecutor
-from getpatter.services.text_transforms import filter_markdown, filter_emoji, filter_for_tts
+from getpatter.services.text_transforms import (
+    filter_markdown,
+    filter_emoji,
+    filter_for_tts,
+)
 
 # New v0.5.0 public API (Phase 1a). ``tool`` here is the unified factory that
 # supports both decorator use (``@tool`` on a typed function) and keyword
@@ -90,13 +94,27 @@ from getpatter.llm.google import LLM as GoogleLLM
 from getpatter.providers.twilio_adapter import TwilioAdapter
 from getpatter.providers.telnyx_adapter import TelnyxAdapter
 
+
 # VAD — opt-in (needs the ``silero`` extra: numpy + onnxruntime). Loaded
 # lazily so importing ``getpatter`` doesn't require those native deps.
 def __getattr__(name):
     if name == "SileroVAD":
         from getpatter.providers.silero_vad import SileroVAD as _SileroVAD
+
         return _SileroVAD
+    if name in {"SileroSampleRate", "SileroVADEventType", "SileroVADProviderTag"}:
+        from getpatter.providers import silero_vad as _silero_vad
+
+        return getattr(_silero_vad, name)
+    if name in {
+        "KrispSampleRate",
+        "KrispFrameDuration",
+    }:
+        from getpatter.providers import krisp_instance as _krisp_instance
+
+        return getattr(_krisp_instance, name)
     raise AttributeError(f"module 'getpatter' has no attribute {name!r}")
+
 
 # Observability — opt-in OTel tracing.
 from getpatter.observability import (
@@ -110,6 +128,7 @@ from getpatter.observability import (
     SPAN_ENDPOINT,
     SPAN_BARGEIN,
 )
+
 # `is_tracing_enabled` is the public top-level alias for parity with TypeScript
 # `isTracingEnabled`. The Python implementation lives at
 # ``getpatter.observability.tracing.is_enabled``.
@@ -120,6 +139,7 @@ from getpatter.observability.event_bus import EventBus, PatterEventType
 # examples and the ``tunnel=Static(hostname=...)`` pattern); ``StaticTunnel``
 # is kept as an alias for symmetry with TypeScript and ``CloudflareTunnel``.
 from getpatter.tunnels import CloudflareTunnel, Ngrok, Static
+
 StaticTunnel = Static
 
 from getpatter.services.fallback_provider import (
@@ -128,7 +148,12 @@ from getpatter.services.fallback_provider import (
     PartialStreamError,
 )
 from getpatter.services.chat_context import ChatContext, ChatMessage
-from getpatter.services.ivr import DtmfEvent, IVRActivity, TfidfLoopDetector, format_dtmf
+from getpatter.services.ivr import (
+    DtmfEvent,
+    IVRActivity,
+    TfidfLoopDetector,
+    format_dtmf,
+)
 from getpatter.scheduler import (
     ScheduleHandle,
     schedule_cron,
@@ -144,6 +169,7 @@ from getpatter.dashboard.routes import mount_dashboard
 from getpatter.api_routes import mount_api
 from getpatter.dashboard.persistence import notify_dashboard
 from getpatter.dashboard.auth import make_auth_dependency
+
 # TS exposes a single `makeAuthMiddleware`; in Python the FastAPI-idiomatic
 # equivalent is the dependency factory. Alias it as `make_auth_middleware`
 # for parity with the TS public surface — both names point at the same
@@ -209,15 +235,109 @@ from getpatter.pricing import (
 # Per-call metrics accumulator (TypeScript: ``CallMetricsAccumulator``).
 from getpatter.services.metrics import CallMetricsAccumulator
 
+
 # Top-level re-export for parity with TypeScript ``mixPcm`` (see BUG #04g).
 # Import is lazy — `mix_pcm` triggers numpy import only on first call.
 def mix_pcm(agent: bytes, bg: bytes, ratio: float) -> bytes:
     """Standalone PCM mixer — parity with TypeScript ``mixPcm(agent, bg, ratio)``."""
     from getpatter.services.pcm_mixer import mix_pcm as _mix_pcm
+
     return _mix_pcm(agent, bg, ratio)
+
 
 # Integrations adapter for external agent frameworks (Hermes, OpenAI, etc.).
 from getpatter.integrations import PatterTool, PatterToolResult  # noqa: E402
+
+# ----------------------------------------------------------------------
+# Provider-specific enums
+# ----------------------------------------------------------------------
+# Centralised re-export of per-provider ``StrEnum``/``IntEnum`` symbols so
+# user code gets autocomplete and type-checker support from the public
+# package surface (``from getpatter import DeepgramModel, …``). Mirrors the
+# TypeScript ``index.ts`` re-exports.
+from getpatter.providers.deepgram_stt import (  # noqa: E402
+    DeepgramEncoding,
+    DeepgramModel,
+    DeepgramSampleRate,
+)
+from getpatter.providers.elevenlabs_tts import (  # noqa: E402
+    ElevenLabsModel,
+    ElevenLabsOutputFormat,
+)
+from getpatter.providers.elevenlabs_ws_tts import (  # noqa: E402
+    ElevenLabsWSField,
+    ElevenLabsWSServerError,
+)
+from getpatter.providers.assemblyai_stt import (  # noqa: E402
+    AssemblyAIClientFrame,
+    AssemblyAIDomain,
+    AssemblyAIEncoding,
+    AssemblyAIEventType,
+    AssemblyAIModel,
+    AssemblyAISampleRate,
+)
+from getpatter.providers.soniox_stt import (  # noqa: E402
+    SonioxAudioFormat,
+    SonioxClientFrame,
+    SonioxEndpointToken,
+    SonioxModel,
+    SonioxSampleRate,
+)
+from getpatter.providers.speechmatics_stt import (  # noqa: E402
+    SpeechmaticsAudioEncoding,
+    SpeechmaticsOperatingPoint,
+    SpeechmaticsSampleRate,
+    TurnDetectionMode,
+)
+from getpatter.providers.cartesia_stt import (  # noqa: E402
+    CartesiaSTTClientFrame,
+    CartesiaSTTEncoding,
+    CartesiaSTTModel,
+    CartesiaSTTSampleRate,
+    CartesiaSTTServerEvent,
+)
+from getpatter.providers.telnyx_stt import (  # noqa: E402
+    TelnyxSTTInputFormat,
+    TelnyxSTTSampleRate,
+    TelnyxTranscriptionEngine,
+)
+from getpatter.providers.whisper_stt import (  # noqa: E402
+    WhisperModel,
+    WhisperResponseFormat,
+)
+from getpatter.providers.openai_tts import (  # noqa: E402
+    OpenAITTSModel,
+    OpenAITTSResponseFormat,
+    OpenAITTSVoice,
+)
+from getpatter.providers.telnyx_tts import (  # noqa: E402
+    TelnyxTTSSampleRate,
+    TelnyxTTSVoice,
+)
+from getpatter.providers.gemini_live import (  # noqa: E402
+    GeminiLiveApiVersion,
+    GeminiLiveEventType,
+    GeminiLiveModel,
+    GeminiLiveResponseModality,
+    GeminiLiveSampleRate,
+    GeminiLiveVoice,
+)
+from getpatter.providers.ultravox_realtime import (  # noqa: E402
+    UltravoxAdapterEvent,
+    UltravoxClientFrame,
+    UltravoxFirstSpeaker,
+    UltravoxMessageRole,
+    UltravoxModel,
+    UltravoxOutputMedium,
+    UltravoxParameterLocation,
+    UltravoxSampleRate,
+    UltravoxServerEvent,
+    UltravoxState,
+)
+from getpatter.providers.silero_onnx import (  # noqa: E402
+    OnnxExecutionProvider,
+    SileroOnnxSampleRate,
+)
 
 __all__ = [
     "Patter",

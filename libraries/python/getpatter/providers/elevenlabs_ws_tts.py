@@ -40,6 +40,7 @@ import asyncio
 import base64
 import json
 import logging
+from enum import StrEnum
 from typing import AsyncGenerator, Optional, Union
 from urllib.parse import quote, urlencode
 
@@ -59,6 +60,23 @@ from getpatter.providers.elevenlabs_tts import (
 )
 
 logger = logging.getLogger("getpatter")
+
+
+class ElevenLabsWSServerError(StrEnum):
+    """Error string values reported by the ElevenLabs streaming-input WS."""
+
+    PAYMENT_REQUIRED = "payment_required"
+
+
+class ElevenLabsWSField(StrEnum):
+    """Outbound JSON field names used in the streaming-input WS protocol."""
+
+    TEXT = "text"
+    FLUSH = "flush"
+    VOICE_SETTINGS = "voice_settings"
+    GENERATION_CONFIG = "generation_config"
+    CHUNK_LENGTH_SCHEDULE = "chunk_length_schedule"
+
 
 _WS_BASE = "wss://api.elevenlabs.io/v1/text-to-speech"
 
@@ -133,8 +151,10 @@ class ElevenLabsWebSocketTTS(TTSProvider):
         self,
         api_key: str,
         voice_id: str = "21m00Tcm4TlvDq8ikWAM",
-        model_id: Union[ElevenLabsModel, str] = "eleven_flash_v2_5",
-        output_format: ElevenLabsOutputFormat = "pcm_16000",
+        model_id: Union[ElevenLabsModel, str] = ElevenLabsModel.FLASH_V2_5,
+        output_format: Union[
+            ElevenLabsOutputFormat, str
+        ] = ElevenLabsOutputFormat.PCM_16000,
         voice_settings: Optional[dict] = None,
         language_code: Optional[str] = None,
         *,
@@ -194,7 +214,7 @@ class ElevenLabsWebSocketTTS(TTSProvider):
         api_key: str,
         *,
         voice_id: str = "21m00Tcm4TlvDq8ikWAM",
-        model_id: Union[ElevenLabsModel, str] = "eleven_flash_v2_5",
+        model_id: Union[ElevenLabsModel, str] = ElevenLabsModel.FLASH_V2_5,
         voice_settings: Optional[dict] = None,
         language_code: Optional[str] = None,
         auto_mode: bool = True,
@@ -217,7 +237,7 @@ class ElevenLabsWebSocketTTS(TTSProvider):
             api_key=api_key,
             voice_id=voice_id,
             model_id=model_id,
-            output_format="ulaw_8000",
+            output_format=ElevenLabsOutputFormat.ULAW_8000,
             voice_settings=voice_settings,
             language_code=language_code,
             auto_mode=auto_mode,
@@ -230,7 +250,7 @@ class ElevenLabsWebSocketTTS(TTSProvider):
         api_key: str,
         *,
         voice_id: str = "21m00Tcm4TlvDq8ikWAM",
-        model_id: Union[ElevenLabsModel, str] = "eleven_flash_v2_5",
+        model_id: Union[ElevenLabsModel, str] = ElevenLabsModel.FLASH_V2_5,
         voice_settings: Optional[dict] = None,
         language_code: Optional[str] = None,
         auto_mode: bool = True,
@@ -241,7 +261,7 @@ class ElevenLabsWebSocketTTS(TTSProvider):
             api_key=api_key,
             voice_id=voice_id,
             model_id=model_id,
-            output_format="pcm_16000",
+            output_format=ElevenLabsOutputFormat.PCM_16000,
             voice_settings=voice_settings,
             language_code=language_code,
             auto_mode=auto_mode,
@@ -358,7 +378,10 @@ class ElevenLabsWebSocketTTS(TTSProvider):
                     # Recognise plan-gated rejections so callers can catch
                     # them separately and either upgrade or fall back to
                     # the HTTP class.
-                    if err_str == "payment_required" or "payment" in err_str.lower():
+                    if (
+                        err_str == ElevenLabsWSServerError.PAYMENT_REQUIRED
+                        or "payment" in err_str.lower()
+                    ):
                         raise ElevenLabsPlanError(_PLAN_REQUIRED_MSG)
                     raise ElevenLabsTTSError(f"ElevenLabs WS reported error: {err_str}")
 

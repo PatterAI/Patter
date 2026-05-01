@@ -186,6 +186,13 @@ export class StreamHandler {
   private speakingGeneration = 0;
   /** Handle for the pending grace-period timer, so it can be cleared on cleanup. */
   private graceTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * AbortController for the current LLM streaming consumption.  Aborted by
+   * ``cancelSpeaking`` so the in-flight LLM stream stops generating tokens
+   * we will never speak — saves provider cost and frees the connection
+   * earlier.  Mirrors Python ``_llm_cancel_event``.
+   */
+  private llmAbort: AbortController | null = null;
 
   /** Mark the start of a TTS span. Use instead of setting isSpeaking directly. */
   private beginSpeaking(): void {
@@ -196,10 +203,20 @@ export class StreamHandler {
   /**
    * Atomically end speaking AND invalidate any pending grace timer.
    * Use instead of ``this.isSpeaking = false`` at barge-in sites.
+   *
+   * Also aborts the in-flight LLM stream (if any) so the provider stops
+   * billing tokens we will never speak.
    */
   private cancelSpeaking(): void {
     this.speakingGeneration++; // invalidates pending grace timers
     this.isSpeaking = false;
+    if (this.llmAbort !== null) {
+      try {
+        this.llmAbort.abort();
+      } catch {
+        // No-op — abort() throws nothing in modern runtimes, but be defensive.
+      }
+    }
   }
 
   /** Cancel and clear the pending grace timer, if any. */
@@ -1135,6 +1152,12 @@ export class StreamHandler {
     const allParts: string[] = [];
     const ttsFirstByteSent = { value: false };
     this.beginSpeaking();
+    // Fresh AbortController per turn so a stale abort from a previous
+    // barge-in cannot terminate this stream.  ``cancelSpeaking`` aborts
+    // it; the consumption loop checks ``signal.aborted`` between tokens
+    // to break early and free the upstream LLM connection.
+    this.llmAbort = new AbortController();
+    const llmSignal = this.llmAbort.signal;
     let llmError = false;
 
     // Span lifetime: LLM dispatch → final token / TTS handoff. Always closed
@@ -1171,6 +1194,7 @@ export class StreamHandler {
           hookExecutor,
           hookCtx,
         )) {
+          if (llmSignal.aborted) break;
           // Fix 5: record first token for TTFT metric.
           this.metricsAcc.recordLlmFirstToken();
           allParts.push(token);
@@ -1179,15 +1203,20 @@ export class StreamHandler {
             await guardAndSpeak(sentence, !firstSentenceEmitted);
             firstSentenceEmitted = true;
           }
-          if (!this.isSpeaking) break;
+          if (!this.isSpeaking || llmSignal.aborted) break;
         }
       } catch (e) {
-        llmError = true;
-        chunker.reset(); // discard partial content on LLM error
-        getLogger().error(`LLM loop error (${label}):`, e);
-        // Fix 8: record turn as interrupted so it does not leak in metrics when
-        // the LLM throws without emitting any text.
-        this.metricsAcc.recordTurnInterrupted();
+        // Treat AbortError as a clean barge-in cancellation, not an LLM error.
+        const isAbort =
+          (e as Error)?.name === 'AbortError' || llmSignal.aborted;
+        if (!isAbort) {
+          llmError = true;
+          chunker.reset(); // discard partial content on LLM error
+          getLogger().error(`LLM loop error (${label}):`, e);
+          // Fix 8: record turn as interrupted so it does not leak in metrics when
+          // the LLM throws without emitting any text.
+          this.metricsAcc.recordTurnInterrupted();
+        }
       }
 
       this.metricsAcc.recordLlmComplete(); // record BEFORE TTS flush, not after
@@ -1201,6 +1230,10 @@ export class StreamHandler {
       }
     } finally {
       this.endSpeakingWithGrace();
+      // Drop the per-turn abort controller so the next turn starts with a
+      // fresh one and barge-ins on the next turn cannot accidentally fire
+      // an already-aborted signal.
+      this.llmAbort = null;
       try {
         llmSpan.end();
       } catch {

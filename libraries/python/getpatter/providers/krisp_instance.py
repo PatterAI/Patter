@@ -13,10 +13,33 @@ from __future__ import annotations
 
 import logging
 import os
+from enum import IntEnum
 from threading import Lock
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+class KrispSampleRate(IntEnum):
+    """Sample rates accepted by the Krisp VIVA SDK ``SamplingRate`` enum."""
+
+    HZ_8000 = 8000
+    HZ_16000 = 16000
+    HZ_24000 = 24000
+    HZ_32000 = 32000
+    HZ_44100 = 44100
+    HZ_48000 = 48000
+
+
+class KrispFrameDuration(IntEnum):
+    """Frame durations (ms) accepted by the Krisp VIVA SDK ``FrameDuration`` enum."""
+
+    MS_10 = 10
+    MS_15 = 15
+    MS_20 = 20
+    MS_30 = 30
+    MS_32 = 32
+
 
 # Lazy/optional import of the proprietary Krisp Audio SDK.  We deliberately do
 # not raise at import time; the error surface is deferred to ``acquire`` so

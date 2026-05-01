@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections import deque
-from dataclasses import asdict
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -19,7 +17,6 @@ from getpatter.handlers.stream_handler import (
     evaluate_guardrails,
     resolve_agent_prompt,
 )
-from getpatter.models import Agent, STTConfig, TTSConfig
 
 from tests.conftest import make_agent
 
@@ -90,7 +87,13 @@ class TestApplyCallOverrides:
         agent = make_agent()
         updated = apply_call_overrides(
             agent,
-            {"tts_config": {"provider": "elevenlabs", "api_key": "k", "voice": "rachel"}},
+            {
+                "tts_config": {
+                    "provider": "elevenlabs",
+                    "api_key": "k",
+                    "voice": "rachel",
+                }
+            },
         )
         assert updated.tts is not None
         assert updated.tts.provider == "elevenlabs"
@@ -119,7 +122,12 @@ class TestEvaluateGuardrails:
     def test_blocked_terms_match(self) -> None:
         agent = make_agent(
             guardrails=[
-                {"name": "medical", "blocked_terms": ["diagnosis", "prescription"], "check": None, "replacement": "See a doctor."}
+                {
+                    "name": "medical",
+                    "blocked_terms": ["diagnosis", "prescription"],
+                    "check": None,
+                    "replacement": "See a doctor.",
+                }
             ]
         )
         blocked, name = evaluate_guardrails(agent, "I recommend a diagnosis")
@@ -129,7 +137,12 @@ class TestEvaluateGuardrails:
     def test_blocked_terms_case_insensitive(self) -> None:
         agent = make_agent(
             guardrails=[
-                {"name": "profanity", "blocked_terms": ["BadWord"], "check": None, "replacement": "No."}
+                {
+                    "name": "profanity",
+                    "blocked_terms": ["BadWord"],
+                    "check": None,
+                    "replacement": "No.",
+                }
             ]
         )
         blocked, _ = evaluate_guardrails(agent, "this has badword in it")
@@ -138,7 +151,12 @@ class TestEvaluateGuardrails:
     def test_check_function(self) -> None:
         agent = make_agent(
             guardrails=[
-                {"name": "custom", "blocked_terms": None, "check": lambda t: "secret" in t.lower(), "replacement": "Nope."}
+                {
+                    "name": "custom",
+                    "blocked_terms": None,
+                    "check": lambda t: "secret" in t.lower(),
+                    "replacement": "Nope.",
+                }
             ]
         )
         blocked, _ = evaluate_guardrails(agent, "This is a SECRET message")
@@ -149,7 +167,12 @@ class TestEvaluateGuardrails:
         check_fn = MagicMock(return_value=False)
         agent = make_agent(
             guardrails=[
-                {"name": "combo", "blocked_terms": ["bad"], "check": check_fn, "replacement": "Blocked."}
+                {
+                    "name": "combo",
+                    "blocked_terms": ["bad"],
+                    "check": check_fn,
+                    "replacement": "Blocked.",
+                }
             ]
         )
         blocked, _ = evaluate_guardrails(agent, "this is bad")
@@ -159,7 +182,12 @@ class TestEvaluateGuardrails:
     def test_unblocked_response(self) -> None:
         agent = make_agent(
             guardrails=[
-                {"name": "g1", "blocked_terms": ["forbidden"], "check": None, "replacement": "No."}
+                {
+                    "name": "g1",
+                    "blocked_terms": ["forbidden"],
+                    "check": None,
+                    "replacement": "No.",
+                }
             ]
         )
         blocked, _ = evaluate_guardrails(agent, "this is perfectly fine")
@@ -169,7 +197,12 @@ class TestEvaluateGuardrails:
         """A failing check function does not crash — treated as not blocked."""
         agent = make_agent(
             guardrails=[
-                {"name": "buggy", "blocked_terms": None, "check": lambda t: 1/0, "replacement": "Oops."}
+                {
+                    "name": "buggy",
+                    "blocked_terms": None,
+                    "check": lambda t: 1 / 0,
+                    "replacement": "Oops.",
+                }
             ]
         )
         blocked, _ = evaluate_guardrails(agent, "trigger")
@@ -279,21 +312,36 @@ class TestStreamHandlerIsolation:
         """Two handlers with separate deques do not cross-contaminate."""
 
         class _ConcreteHandler(StreamHandler):
-            async def start(self): pass
-            async def on_audio_received(self, audio_bytes): pass
-            async def cleanup(self): pass
+            async def start(self):
+                pass
+
+            async def on_audio_received(self, audio_bytes):
+                pass
+
+            async def cleanup(self):
+                pass
 
         agent = make_agent()
         sender = AsyncMock(spec=AudioSender)
         metrics = MagicMock()
 
         h1 = _ConcreteHandler(
-            agent=agent, audio_sender=sender, call_id="c1",
-            caller="+1", callee="+2", resolved_prompt="p1", metrics=metrics,
+            agent=agent,
+            audio_sender=sender,
+            call_id="c1",
+            caller="+1",
+            callee="+2",
+            resolved_prompt="p1",
+            metrics=metrics,
         )
         h2 = _ConcreteHandler(
-            agent=agent, audio_sender=sender, call_id="c2",
-            caller="+3", callee="+4", resolved_prompt="p2", metrics=metrics,
+            agent=agent,
+            audio_sender=sender,
+            call_id="c2",
+            caller="+3",
+            callee="+4",
+            resolved_prompt="p2",
+            metrics=metrics,
         )
 
         h1.conversation_history.append({"role": "user", "text": "hello from h1"})
@@ -319,7 +367,9 @@ class TestSttLoopGate:
 
     def _gate(self, transcript) -> bool:
         # Mirror the predicate in ``stream_handler._stt_loop`` exactly.
-        return bool((transcript.is_final or transcript.speech_final) and transcript.text)
+        return bool(
+            (transcript.is_final or transcript.speech_final) and transcript.text
+        )
 
     def test_speech_final_only_passes(self) -> None:
         from getpatter.providers.base import Transcript
@@ -354,3 +404,76 @@ class TestSttLoopGate:
         src = inspect.getsource(stream_handler)
         assert "transcript.speech_final" in src
         assert "transcript.is_final or transcript.speech_final" in src
+
+
+# ---------------------------------------------------------------------------
+# Fix #35 — Barge-in cancels in-flight LLM stream
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestBargeInCancelsLlmStream:
+    """``_handle_barge_in`` must signal the LLM consumer to stop fetching tokens.
+
+    The pre-fix behaviour flipped ``_is_speaking=False`` and cleared the
+    audio sender, but kept consuming LLM tokens to completion — wasted cost.
+    """
+
+    async def test_barge_in_sets_llm_cancel_event(self) -> None:
+        """Mid-stream barge-in flips the cancel event so the consume loop breaks."""
+        from getpatter.handlers.stream_handler import PipelineStreamHandler
+        from getpatter.providers.base import Transcript
+
+        # Build a minimal handler shell — bypass __init__, populate just the
+        # fields ``_handle_barge_in`` reads.
+        handler = object.__new__(PipelineStreamHandler)
+        handler._is_speaking = True
+        handler.metrics = None
+        handler.call_id = "test-call"
+        handler.audio_sender = MagicMock()
+        handler.audio_sender.send_clear = AsyncMock()
+        # Pre-create the cancel event the way ``_process_streaming_response``
+        # would for an active turn.
+        handler._llm_cancel_event = asyncio.Event()
+        assert not handler._llm_cancel_event.is_set()
+
+        await handler._handle_barge_in(
+            Transcript(text="hold on", is_final=True, speech_final=True)
+        )
+
+        assert handler._llm_cancel_event.is_set(), (
+            "barge-in must set the LLM cancel event so the consumer halts"
+        )
+
+    async def test_consume_loop_breaks_when_cancel_event_set_mid_stream(
+        self,
+    ) -> None:
+        """A sentinel async-gen yields a known number of tokens; cancellation
+        bounds the consumed count well below the total emitted."""
+
+        async def llm_tokens():
+            for i in range(50):
+                yield f"tok{i} "
+                # Yield to event loop so other tasks can fire mid-stream.
+                await asyncio.sleep(0)
+
+        # Emulate the consume-loop pattern from _process_streaming_response.
+        cancel = asyncio.Event()
+        consumed: list[str] = []
+
+        async def consume() -> None:
+            gen = llm_tokens()
+            async for token in gen:
+                if cancel.is_set():
+                    break
+                consumed.append(token)
+                if len(consumed) == 3:
+                    cancel.set()
+            if hasattr(gen, "aclose"):
+                await gen.aclose()
+
+        await consume()
+
+        # Without cancellation we would have 50 tokens; the cancel must bound it.
+        assert len(consumed) < 50
+        assert len(consumed) <= 4  # one extra possible due to ordering

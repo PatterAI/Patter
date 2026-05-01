@@ -12,13 +12,15 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
+from typing import Any, Union
 
 from getpatter.providers.base import AudioFilter
 from getpatter.providers.krisp_instance import (
     KRISP_AUDIO_AVAILABLE,
     KRISP_FRAME_DURATIONS,
     KRISP_NOT_INSTALLED_MESSAGE,
+    KrispFrameDuration,
+    KrispSampleRate,
     KrispSDKManager,
     int_to_krisp_frame_duration,
     int_to_krisp_sample_rate,
@@ -59,8 +61,8 @@ class KrispVivaFilter(AudioFilter):
         self,
         model_path: str | None = None,
         noise_suppression_level: int = 100,
-        frame_duration_ms: int = 10,
-        sample_rate: int | None = None,
+        frame_duration_ms: Union[KrispFrameDuration, int] = KrispFrameDuration.MS_10,
+        sample_rate: Union[KrispSampleRate, int, None] = None,
     ) -> None:
         if not KRISP_AUDIO_AVAILABLE or krisp_audio is None:
             raise RuntimeError(KRISP_NOT_INSTALLED_MESSAGE)
@@ -101,7 +103,9 @@ class KrispVivaFilter(AudioFilter):
                     f"{sorted(KRISP_FRAME_DURATIONS.keys())}"
                 )
 
-            init_sample_rate = sample_rate if sample_rate is not None else 16000
+            init_sample_rate = (
+                sample_rate if sample_rate is not None else KrispSampleRate.HZ_16000
+            )
             self._create_session(init_sample_rate)
             logger.info(
                 "Krisp filter initialised (model=%s, sr=%s Hz)",

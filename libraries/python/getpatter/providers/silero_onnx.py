@@ -13,6 +13,7 @@ from __future__ import annotations
 import atexit
 import importlib.resources
 from contextlib import ExitStack, nullcontext
+from enum import IntEnum, StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -25,7 +26,25 @@ _resource_files = ExitStack()
 atexit.register(_resource_files.close)
 
 
-SUPPORTED_SAMPLE_RATES = [8000, 16000]
+class SileroOnnxSampleRate(IntEnum):
+    """Sample rates supported by the bundled Silero VAD ONNX model."""
+
+    HZ_8000 = 8000
+    HZ_16000 = 16000
+
+
+class OnnxExecutionProvider(StrEnum):
+    """ONNX Runtime execution provider names used by ``new_inference_session``."""
+
+    CPU = "CPUExecutionProvider"
+    CUDA = "CUDAExecutionProvider"
+    COREML = "CoreMLExecutionProvider"
+
+
+SUPPORTED_SAMPLE_RATES = [
+    SileroOnnxSampleRate.HZ_8000.value,
+    SileroOnnxSampleRate.HZ_16000.value,
+]
 
 
 def new_inference_session(
@@ -62,9 +81,14 @@ def new_inference_session(
     opts.intra_op_num_threads = 1
     opts.execution_mode = onnxruntime.ExecutionMode.ORT_SEQUENTIAL
 
-    if force_cpu and "CPUExecutionProvider" in onnxruntime.get_available_providers():
+    if (
+        force_cpu
+        and OnnxExecutionProvider.CPU.value in onnxruntime.get_available_providers()
+    ):
         session = onnxruntime.InferenceSession(
-            path, providers=["CPUExecutionProvider"], sess_options=opts
+            path,
+            providers=[OnnxExecutionProvider.CPU.value],
+            sess_options=opts,
         )
     else:
         session = onnxruntime.InferenceSession(path, sess_options=opts)

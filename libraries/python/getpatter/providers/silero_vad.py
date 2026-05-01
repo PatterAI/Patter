@@ -19,6 +19,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
+from enum import IntEnum, StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -37,6 +38,28 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 SLOW_INFERENCE_THRESHOLD = 0.2  # late by 200ms
+
+
+class SileroSampleRate(IntEnum):
+    """Sample rates supported by the bundled Silero VAD ONNX model."""
+
+    HZ_8000 = 8000
+    HZ_16000 = 16000
+
+
+class SileroVADEventType(StrEnum):
+    """VAD transition types emitted by :class:`SileroVAD`."""
+
+    SPEECH_START = "speech_start"
+    SPEECH_END = "speech_end"
+    SILENCE = "silence"
+
+
+class SileroVADProviderTag(StrEnum):
+    """Provider/model identifier strings exposed via the public properties."""
+
+    MODEL = "silero"
+    PROVIDER = "ONNX"
 
 
 @dataclass
@@ -100,7 +123,9 @@ class SileroVAD(VADProvider):
         min_silence_duration: float = 0.55,
         prefix_padding_duration: float = 0.5,
         activation_threshold: float = 0.5,
-        sample_rate: Literal[8000, 16000] = 16000,
+        sample_rate: Union[
+            SileroSampleRate, Literal[8000, 16000]
+        ] = SileroSampleRate.HZ_16000,
         force_cpu: bool = True,
         onnx_file_path: Path | str | None = None,
         deactivation_threshold: float | None = None,
@@ -166,11 +191,11 @@ class SileroVAD(VADProvider):
 
     @property
     def model(self) -> str:
-        return "silero"
+        return SileroVADProviderTag.MODEL.value
 
     @property
     def provider(self) -> str:
-        return "ONNX"
+        return SileroVADProviderTag.PROVIDER.value
 
     @property
     def sample_rate(self) -> int:
@@ -260,7 +285,7 @@ class SileroVAD(VADProvider):
                 if self._speech_threshold_duration >= opts.min_speech_duration:
                     self._pub_speaking = True
                     return VADEvent(
-                        type="speech_start",
+                        type=SileroVADEventType.SPEECH_START.value,
                         confidence=float(p),
                         duration_ms=self._speech_threshold_duration * 1000.0,
                     )
@@ -274,7 +299,7 @@ class SileroVAD(VADProvider):
             ):
                 self._pub_speaking = False
                 return VADEvent(
-                    type="speech_end",
+                    type=SileroVADEventType.SPEECH_END.value,
                     confidence=float(p),
                     duration_ms=self._silence_threshold_duration * 1000.0,
                 )

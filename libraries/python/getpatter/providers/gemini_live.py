@@ -18,16 +18,68 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from enum import IntEnum, StrEnum
 from typing import Any, AsyncIterator
 
 logger = logging.getLogger("getpatter.gemini_live")
+
+
+class GeminiLiveModel(StrEnum):
+    """Known Gemini Live (v1alpha) realtime models."""
+
+    NATIVE_AUDIO_PREVIEW_09_2025 = "gemini-2.5-flash-native-audio-preview-09-2025"
+    LIVE_2_5_FLASH_PREVIEW = "gemini-live-2.5-flash-preview"
+    LIVE_2_0_FLASH_EXP = "gemini-2.0-flash-exp"
+
+
+class GeminiLiveVoice(StrEnum):
+    """Built-in voices accepted by Gemini Live ``PrebuiltVoiceConfig``."""
+
+    PUCK = "Puck"
+    CHARON = "Charon"
+    KORE = "Kore"
+    FENRIR = "Fenrir"
+    AOEDE = "Aoede"
+
+
+class GeminiLiveResponseModality(StrEnum):
+    """Response modalities accepted by Gemini Live."""
+
+    AUDIO = "AUDIO"
+    TEXT = "TEXT"
+
+
+class GeminiLiveApiVersion(StrEnum):
+    """Gemini API versions."""
+
+    V1ALPHA = "v1alpha"
+    V1BETA = "v1beta"
+    V1 = "v1"
+
+
+class GeminiLiveSampleRate(IntEnum):
+    """Sample rates Gemini Live accepts on the input/output streams."""
+
+    HZ_16000 = 16000
+    HZ_24000 = 24000
+
+
+class GeminiLiveEventType(StrEnum):
+    """Adapter-level event-type strings yielded by :meth:`receive_events`."""
+
+    AUDIO = "audio"
+    TRANSCRIPT_OUTPUT = "transcript_output"
+    FUNCTION_CALL = "function_call"
+    RESPONSE_DONE = "response_done"
+    SPEECH_STARTED = "speech_started"
+
 
 # Default PCM audio format used on the wire for Gemini Live.
 # Gemini Live requires PCM16 mono; sample-rate negotiation happens via
 # ``speech_config``. Patter callers should resample to 16 kHz before calling
 # :meth:`GeminiLiveAdapter.send_audio`.
-DEFAULT_INPUT_SAMPLE_RATE_HZ = 16000
-DEFAULT_OUTPUT_SAMPLE_RATE_HZ = 24000
+DEFAULT_INPUT_SAMPLE_RATE_HZ = GeminiLiveSampleRate.HZ_16000.value
+DEFAULT_OUTPUT_SAMPLE_RATE_HZ = GeminiLiveSampleRate.HZ_24000.value
 
 
 class GeminiLiveAdapter:
@@ -53,13 +105,19 @@ class GeminiLiveAdapter:
         # Current native-audio live model (v1alpha only) is the dated preview.
         # Override via GeminiLive(model=...) if needed.
         # TODO verify against Google docs: https://ai.google.dev/gemini-api/docs/live
-        model: str = "gemini-2.5-flash-native-audio-preview-09-2025",
-        voice: str = "Puck",
+        model: Union[
+            GeminiLiveModel, str
+        ] = GeminiLiveModel.NATIVE_AUDIO_PREVIEW_09_2025,
+        voice: Union[GeminiLiveVoice, str] = GeminiLiveVoice.PUCK,
         instructions: str = "",
         language: str = "en-US",
         tools: list[dict] | None = None,
-        input_sample_rate: int = DEFAULT_INPUT_SAMPLE_RATE_HZ,
-        output_sample_rate: int = DEFAULT_OUTPUT_SAMPLE_RATE_HZ,
+        input_sample_rate: Union[
+            GeminiLiveSampleRate, int
+        ] = GeminiLiveSampleRate.HZ_16000,
+        output_sample_rate: Union[
+            GeminiLiveSampleRate, int
+        ] = GeminiLiveSampleRate.HZ_24000,
         temperature: float = 0.8,
     ) -> None:
         self.api_key = api_key
@@ -103,7 +161,7 @@ class GeminiLiveAdapter:
 
         self._client = genai.Client(
             api_key=self.api_key,
-            http_options={"api_version": "v1alpha"},
+            http_options={"api_version": GeminiLiveApiVersion.V1ALPHA.value},
         )
 
         speech_config = genai_types.SpeechConfig(
@@ -116,7 +174,7 @@ class GeminiLiveAdapter:
         )
 
         config: dict[str, Any] = {
-            "response_modalities": ["AUDIO"],
+            "response_modalities": [GeminiLiveResponseModality.AUDIO.value],
             "speech_config": speech_config,
             "temperature": self.temperature,
         }
@@ -213,14 +271,17 @@ class GeminiLiveAdapter:
                         for part in getattr(model_turn, "parts", []) or []:
                             inline = getattr(part, "inline_data", None)
                             if inline is not None and getattr(inline, "data", None):
-                                yield ("audio", inline.data)
+                                yield (GeminiLiveEventType.AUDIO.value, inline.data)
                             text = getattr(part, "text", None)
                             if text:
-                                yield ("transcript_output", text)
+                                yield (
+                                    GeminiLiveEventType.TRANSCRIPT_OUTPUT.value,
+                                    text,
+                                )
                     if getattr(server_content, "turn_complete", False):
-                        yield ("response_done", None)
+                        yield (GeminiLiveEventType.RESPONSE_DONE.value, None)
                     if getattr(server_content, "interrupted", False):
-                        yield ("speech_started", None)
+                        yield (GeminiLiveEventType.SPEECH_STARTED.value, None)
 
                 tool_call = getattr(response, "tool_call", None)
                 if tool_call is not None:
@@ -231,7 +292,7 @@ class GeminiLiveAdapter:
                         if call_id and fn_name:
                             self._pending_tool_calls[call_id] = fn_name
                         yield (
-                            "function_call",
+                            GeminiLiveEventType.FUNCTION_CALL.value,
                             {
                                 "call_id": call_id,
                                 "name": fn_name,

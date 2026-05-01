@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import ipaddress
 import logging
+import re
 import signal
 import time
+from collections import defaultdict
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request, Response, WebSocket
 
@@ -22,6 +26,78 @@ from getpatter.services.call_log import (
 from getpatter.utils.log_sanitize import sanitize_log_value
 
 logger = logging.getLogger("getpatter")
+
+# Hostnames that resolve to private/internal infrastructure even when not
+# literal IPs.  Mirrors libraries/typescript/src/server.ts:117-124.
+_BLOCKED_WEBHOOK_HOSTNAMES = frozenset(
+    {
+        "localhost",
+        "ip6-localhost",
+        "ip6-loopback",
+        "metadata",
+        "metadata.google.internal",
+        "metadata.azure.com",
+    }
+)
+
+# Maximum concurrent WebSocket connections allowed from a single client IP.
+# Mirrors libraries/typescript/src/server.ts:1041 (MAX_WS_PER_IP = 10).
+MAX_WS_PER_IP = 10
+
+
+def validate_webhook_url(url: str) -> bool:
+    """Return True when *url* is safe to fetch (SSRF protection).
+
+    Blocks:
+      * Non-HTTP(S) schemes (``file:``, ``javascript:``, etc.)
+      * IPv4 loopback / private / link-local / reserved ranges
+        (127/8, 10/8, 172.16/12, 192.168/16, 169.254/16, 0/8)
+      * IPv6 loopback (``::1``, ``::``), unique-local ``fc00::/7`` and
+        link-local ``fe80::/10``
+      * Localhost aliases and cloud-metadata hostnames
+
+    Mirrors :func:`validateWebhookUrl` in
+    ``libraries/typescript/src/server.ts`` and the existing
+    :func:`getpatter.services.tool_executor._validate_webhook_url`.
+    Returns False rather than raising so callers can decide how to react.
+    """
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    if parsed.scheme not in ("http", "https"):
+        return False
+    raw_host = parsed.hostname or ""
+    if not raw_host:
+        return False
+    host = raw_host.strip("[]").lower()
+    if host in _BLOCKED_WEBHOOK_HOSTNAMES:
+        return False
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        # Hostname (not a literal IP) — DNS resolution at fetch time can
+        # still hit private space, but we avoid blocking the event loop
+        # with a sync resolver here.  This matches the TS counterpart.
+        return True
+    if (
+        addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local
+        or addr.is_reserved
+        or addr.is_unspecified
+    ):
+        return False
+    return True
+
+
+def _client_ip_for_ws(websocket: WebSocket) -> str:
+    """Best-effort remote IP for a WebSocket, normalising IPv4-mapped IPv6."""
+    client = websocket.client
+    if client is None:
+        return "unknown"
+    raw = client.host or "unknown"
+    return re.sub(r"^::ffff:", "", raw)
 
 
 def _validate_telnyx_signature(
@@ -127,6 +203,9 @@ class EmbeddedServer:
         self._metrics_store = None
         # Opt-in per-call filesystem logging (controlled by PATTER_LOG_DIR).
         self._call_logger = CallLogger(resolve_log_root())
+        # Per-client-IP active WebSocket counter for DoS protection.
+        # Mirrors TS server.ts:1042 (wsConnectionsByIp).
+        self._ws_conn_counts: defaultdict[str, int] = defaultdict(int)
 
     def _wrap_callbacks(self):
         """Return (on_call_start, on_call_end, on_metrics) wrappers.
@@ -155,7 +234,11 @@ class EmbeddedServer:
                 "voice": getattr(agent, "voice", None),
                 "language": getattr(agent, "language", None),
             }
-            if getattr(agent, "stt", None) is not None and getattr(agent, "tts", None) is not None and engine is None:
+            if (
+                getattr(agent, "stt", None) is not None
+                and getattr(agent, "tts", None) is not None
+                and engine is None
+            ):
                 snapshot["mode"] = "pipeline"
             return {k: v for k, v in snapshot.items() if v is not None}
 
@@ -168,6 +251,7 @@ class EmbeddedServer:
             # the dashboard is offline (~1s connect timeout).
             try:
                 from getpatter.dashboard.persistence import notify_dashboard
+
                 asyncio.create_task(notify_dashboard(data))
             except Exception:
                 pass
@@ -193,6 +277,7 @@ class EmbeddedServer:
             # dashboard responsiveness.
             try:
                 from getpatter.dashboard.persistence import notify_dashboard
+
                 asyncio.create_task(notify_dashboard(data))
             except Exception:
                 pass
@@ -200,7 +285,11 @@ class EmbeddedServer:
                 from dataclasses import asdict, is_dataclass
 
                 metrics_obj = data.get("metrics")
-                duration = getattr(metrics_obj, "duration_seconds", None) if metrics_obj else None
+                duration = (
+                    getattr(metrics_obj, "duration_seconds", None)
+                    if metrics_obj
+                    else None
+                )
                 cost_obj = getattr(metrics_obj, "cost", None) if metrics_obj else None
                 cost_dict = asdict(cost_obj) if is_dataclass(cost_obj) else None
                 latency_dict = None
@@ -214,7 +303,9 @@ class EmbeddedServer:
                         "p99_ms": getattr(p99, "total_ms", None) if p99 else None,
                     }
                 turns_count = (
-                    len(getattr(metrics_obj, "turns", []) or []) if metrics_obj else None
+                    len(getattr(metrics_obj, "turns", []) or [])
+                    if metrics_obj
+                    else None
                 )
                 await alog_call_end(
                     call_logger,
@@ -261,6 +352,7 @@ class EmbeddedServer:
             from getpatter.dashboard.routes import mount_dashboard
 
             from getpatter.dashboard.store import MetricsStore
+
             self._metrics_store = MetricsStore()
 
             # Hydrate the dashboard from disk so /api/dashboard/calls survives
@@ -287,6 +379,7 @@ class EmbeddedServer:
             mount_dashboard(app, self._metrics_store, token=self.dashboard_token)
 
             from getpatter.api_routes import mount_api
+
             mount_api(app, self._metrics_store, token=self.dashboard_token)
 
         @app.get("/health")
@@ -304,7 +397,9 @@ class EmbeddedServer:
             returns a 503 Response — safety-first posture requires an
             explicit opt-out to accept unsigned webhooks.
             """
-            if not self.config.twilio_token and getattr(self.config, "require_signature", True):
+            if not self.config.twilio_token and getattr(
+                self.config, "require_signature", True
+            ):
                 logger.error(
                     "Twilio webhook rejected: twilio_token not configured and "
                     "require_signature=True. Set twilio_token, or explicitly "
@@ -325,7 +420,9 @@ class EmbeddedServer:
                         "Install with: pip install 'getpatter[local]' or "
                         "`pip install twilio`."
                     )
-                    return Response(status_code=503, content="Signature validator unavailable")
+                    return Response(
+                        status_code=503, content="Signature validator unavailable"
+                    )
                 form_data = await request.form()
                 validator = RequestValidator(self.config.twilio_token)
                 # Use request.url verbatim when it carries .path / .query
@@ -428,23 +525,36 @@ class EmbeddedServer:
                 and self.config.twilio_sid
                 and self.config.twilio_token
             ):
-                from getpatter.handlers.twilio_handler import _xml_escape, _validate_twilio_sid
+                from getpatter.handlers.twilio_handler import (
+                    _xml_escape,
+                    _validate_twilio_sid,
+                )
 
                 if not _validate_twilio_sid(call_sid, "CA"):
-                    logger.warning("AMD callback: invalid CallSid format %r, ignoring", call_sid)
+                    logger.warning(
+                        "AMD callback: invalid CallSid format %r, ignoring", call_sid
+                    )
                     return Response(content="", status_code=204)
 
                 import httpx as _httpx
 
                 twiml = f"<Response><Say>{_xml_escape(self.voicemail_message)}</Say><Hangup/></Response>"
                 try:
-                    async with _httpx.AsyncClient() as _http:
+                    async with _httpx.AsyncClient(timeout=10.0) as _http:
                         await _http.post(
                             f"https://api.twilio.com/2010-04-01/Accounts/{self.config.twilio_sid}/Calls/{call_sid}.json",
                             auth=(self.config.twilio_sid, self.config.twilio_token),
                             data={"Twiml": twiml},
                         )
                     logger.info("Voicemail dropped for %s", call_sid)
+                except _httpx.TimeoutException as exc:
+                    # Mirrors TS server.ts:834 fetch with AbortSignal.timeout(10_000).
+                    # Voicemail-drop is best-effort — degrade gracefully rather
+                    # than block call-flow when Twilio is slow / unreachable.
+                    logger.warning(
+                        "Voicemail-drop timed out (>10s); continuing without it: %s",
+                        exc,
+                    )
                 except Exception as exc:
                     logger.warning("Could not drop voicemail: %s", exc)
 
@@ -452,6 +562,17 @@ class EmbeddedServer:
 
         @app.websocket("/ws/stream/{call_id}")
         async def twilio_stream_handler(websocket: WebSocket, call_id: str):
+            # Per-IP DoS cap (mirrors TS server.ts:1041-1064).
+            client_ip = _client_ip_for_ws(websocket)
+            if self._ws_conn_counts[client_ip] >= MAX_WS_PER_IP:
+                logger.warning(
+                    "WebSocket upgrade rejected: too many connections from %s",
+                    client_ip,
+                )
+                # Close before accept = HTTP 429 to the upgrading client.
+                await websocket.close(code=1008, reason="Too Many Requests")
+                return
+            self._ws_conn_counts[client_ip] += 1
             self._active_connections.add(websocket)
             try:
                 _start, _end, _metrics = self._wrap_callbacks()
@@ -474,6 +595,11 @@ class EmbeddedServer:
                 )
             finally:
                 self._active_connections.discard(websocket)
+                remaining = self._ws_conn_counts[client_ip] - 1
+                if remaining <= 0:
+                    self._ws_conn_counts.pop(client_ip, None)
+                else:
+                    self._ws_conn_counts[client_ip] = remaining
 
         # --- Telnyx ---
 
@@ -485,8 +611,12 @@ class EmbeddedServer:
             if telnyx_public_key:
                 signature = request.headers.get("telnyx-signature-ed25519", "")
                 timestamp = request.headers.get("telnyx-timestamp", "")
-                if not _validate_telnyx_signature(raw_body, signature, timestamp, telnyx_public_key):
-                    logger.warning("Telnyx webhook rejected: invalid or missing Ed25519 signature")
+                if not _validate_telnyx_signature(
+                    raw_body, signature, timestamp, telnyx_public_key
+                ):
+                    logger.warning(
+                        "Telnyx webhook rejected: invalid or missing Ed25519 signature"
+                    )
                     return Response(status_code=403, content="Invalid signature")
             elif require_sig:
                 logger.error(
@@ -502,12 +632,17 @@ class EmbeddedServer:
                     "Set telnyx_public_key in LocalConfig for production use."
                 )
             import json as _json
+
             try:
                 body = _json.loads(raw_body)
             except (ValueError, TypeError):
                 return Response(status_code=400, content="Invalid JSON body")
-            if not isinstance(body.get("data"), dict) or not isinstance(body.get("data", {}).get("payload"), dict):
-                logger.warning("Telnyx webhook rejected: missing data.payload structure.")
+            if not isinstance(body.get("data"), dict) or not isinstance(
+                body.get("data", {}).get("payload"), dict
+            ):
+                logger.warning(
+                    "Telnyx webhook rejected: missing data.payload structure."
+                )
                 return Response(status_code=400, content="Invalid webhook structure")
             data = body["data"]
             event_type = data.get("event_type", "")
@@ -529,6 +664,7 @@ class EmbeddedServer:
                 return Response(status_code=500, content="Missing Telnyx API key")
 
             import httpx as _httpx
+
             api_base = "https://api.telnyx.com/v2"
             auth_headers = {"Authorization": f"Bearer {api_key}"}
 
@@ -554,6 +690,7 @@ class EmbeddedServer:
                     # round-trip and a second POST (~100-200 ms saved per
                     # inbound call).
                     from urllib.parse import quote as _quote
+
                     stream_url = (
                         f"wss://{self.config.webhook_url}/ws/telnyx/stream/{_quote(call_control_id, safe='')}"
                         f"?caller={_quote(caller)}&callee={_quote(callee)}"
@@ -579,7 +716,11 @@ class EmbeddedServer:
                             },
                         )
                         if resp.status_code >= 400:
-                            logger.warning("Telnyx answer failed: %s %s", resp.status_code, resp.text)
+                            logger.warning(
+                                "Telnyx answer failed: %s %s",
+                                resp.status_code,
+                                resp.text,
+                            )
                 elif event_type == "call.answered":
                     # No-op: ``call.initiated`` already submitted answer +
                     # streaming_start in a single call. Telnyx still emits
@@ -601,6 +742,7 @@ class EmbeddedServer:
                     )
                     if self.voicemail_message:
                         from getpatter.handlers.telnyx_handler import handle_amd_result
+
                         await handle_amd_result(
                             call_control_id=call_control_id,
                             result=amd_result,
@@ -616,6 +758,16 @@ class EmbeddedServer:
 
         @app.websocket("/ws/telnyx/stream/{call_id}")
         async def telnyx_stream_handler(websocket: WebSocket, call_id: str):
+            # Per-IP DoS cap (mirrors TS server.ts:1041-1064).
+            client_ip = _client_ip_for_ws(websocket)
+            if self._ws_conn_counts[client_ip] >= MAX_WS_PER_IP:
+                logger.warning(
+                    "WebSocket upgrade rejected: too many connections from %s",
+                    client_ip,
+                )
+                await websocket.close(code=1008, reason="Too Many Requests")
+                return
+            self._ws_conn_counts[client_ip] += 1
             self._active_connections.add(websocket)
             try:
                 _start, _end, _metrics = self._wrap_callbacks()
@@ -637,6 +789,11 @@ class EmbeddedServer:
                 )
             finally:
                 self._active_connections.discard(websocket)
+                remaining = self._ws_conn_counts[client_ip] - 1
+                if remaining <= 0:
+                    self._ws_conn_counts.pop(client_ip, None)
+                else:
+                    self._ws_conn_counts[client_ip] = remaining
 
         self._app = app
         return app
@@ -667,9 +824,13 @@ class EmbeddedServer:
                     account_sid=self.config.twilio_sid,
                     auth_token=self.config.twilio_token,
                 )
-                webhook_url = (
-                    f"https://{self.config.webhook_url}/webhooks/twilio/voice"
-                )
+                webhook_url = f"https://{self.config.webhook_url}/webhooks/twilio/voice"
+                # SSRF guard: refuse to configure Twilio against private/loopback
+                # hosts; mirrors libraries/typescript/src/server.ts:105 helper.
+                if not validate_webhook_url(webhook_url):
+                    raise ValueError(
+                        f"Refusing to configure Twilio with unsafe webhook URL: {webhook_url}"
+                    )
                 await adapter.configure_number(self.config.phone_number, webhook_url)
                 logger.info("Twilio webhook set to %s", webhook_url)
             except Exception as exc:
@@ -695,7 +856,9 @@ class EmbeddedServer:
                     "Twilio webhook enforcement ACTIVE but twilio_token is empty "
                     "— webhooks will 503. Set require_signature=False for local dev."
                 )
-            if provider == "telnyx" and not getattr(self.config, "telnyx_public_key", ""):
+            if provider == "telnyx" and not getattr(
+                self.config, "telnyx_public_key", ""
+            ):
                 logger.warning(
                     "Telnyx webhook enforcement ACTIVE but telnyx_public_key is empty "
                     "— webhooks will 503. Set require_signature=False for local dev."
@@ -714,11 +877,7 @@ class EmbeddedServer:
             and getattr(self.agent, "tts", None) is not None
         )
         bargein_ms = getattr(self.agent, "barge_in_threshold_ms", 300)
-        if (
-            is_pipeline
-            and getattr(self.agent, "vad", None) is None
-            and bargein_ms > 0
-        ):
+        if is_pipeline and getattr(self.agent, "vad", None) is None and bargein_ms > 0:
             logger.warning(
                 "Pipeline mode without VAD: barge-in falls back to a fragile "
                 "heuristic (barge_in_threshold_ms=%d) that misfires on tunnel/"
@@ -733,11 +892,7 @@ class EmbeddedServer:
         # is calibrated for gpt-4o-mini-realtime-preview. Other models differ
         # by 3-10x so cost display would under-report without an override.
         model = self.agent.model or ""
-        if (
-            model
-            and model != "gpt-4o-mini-realtime-preview"
-            and "realtime" in model
-        ):
+        if model and model != "gpt-4o-mini-realtime-preview" and "realtime" in model:
             # Dev-supplied string — sanitize to avoid ANSI/log-injection in
             # the startup warning, matching TS parity.
             logger.warning(
@@ -767,9 +922,7 @@ class EmbeddedServer:
         # but keep request logs (INFO level) visible
         logging.getLogger("uvicorn.error").setLevel(logging.WARNING)
 
-        config = uvicorn.Config(
-            app, host="127.0.0.1", port=port, log_level="info"
-        )
+        config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="info")
         self._server = uvicorn.Server(config)
 
         # Register signal handlers for graceful shutdown
@@ -789,7 +942,10 @@ class EmbeddedServer:
             return
         self._shutting_down = True
 
-        logger.info("Graceful shutdown initiated — closing %d active connection(s)", len(self._active_connections))
+        logger.info(
+            "Graceful shutdown initiated — closing %d active connection(s)",
+            len(self._active_connections),
+        )
 
         # Signal all active WebSocket connections to close
         for ws in list(self._active_connections):

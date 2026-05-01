@@ -13,15 +13,98 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from enum import IntEnum, StrEnum
 from typing import Any, AsyncIterator
 
 logger = logging.getLogger("getpatter.ultravox_realtime")
+
+
+class UltravoxModel(StrEnum):
+    """Known Ultravox realtime models."""
+
+    FIXIE_AI_ULTRAVOX = "fixie-ai/ultravox"
+
+
+class UltravoxSampleRate(IntEnum):
+    """Sample rates accepted by Ultravox's realtime WebSocket."""
+
+    HZ_8000 = 8000
+    HZ_16000 = 16000
+    HZ_24000 = 24000
+    HZ_48000 = 48000
+
+
+class UltravoxFirstSpeaker(StrEnum):
+    """Who speaks first on call start."""
+
+    USER = "FIRST_SPEAKER_USER"
+    AGENT = "FIRST_SPEAKER_AGENT"
+
+
+class UltravoxMessageRole(StrEnum):
+    """Roles accepted in ``initialMessages``."""
+
+    AGENT = "MESSAGE_ROLE_AGENT"
+    USER = "MESSAGE_ROLE_USER"
+
+
+class UltravoxOutputMedium(StrEnum):
+    """Output media for the initial agent message."""
+
+    VOICE = "MESSAGE_MEDIUM_VOICE"
+    TEXT = "MESSAGE_MEDIUM_TEXT"
+
+
+class UltravoxParameterLocation(StrEnum):
+    """Locations for Ultravox tool ``dynamicParameters``."""
+
+    BODY = "PARAMETER_LOCATION_BODY"
+    QUERY = "PARAMETER_LOCATION_QUERY"
+    PATH = "PARAMETER_LOCATION_PATH"
+
+
+class UltravoxClientFrame(StrEnum):
+    """Outbound (client → server) WebSocket message types."""
+
+    INPUT_TEXT_MESSAGE = "input_text_message"
+    CLIENT_TOOL_RESULT = "client_tool_result"
+    PLAYBACK_CLEAR_BUFFER = "playback_clear_buffer"
+
+
+class UltravoxServerEvent(StrEnum):
+    """Inbound (server → client) WebSocket message types."""
+
+    TRANSCRIPT = "transcript"
+    CLIENT_TOOL_INVOCATION = "client_tool_invocation"
+    STATE = "state"
+    PLAYBACK_CLEAR_BUFFER = "playback_clear_buffer"
+
+
+class UltravoxState(StrEnum):
+    """Server-reported call states."""
+
+    LISTENING = "listening"
+    IDLE = "idle"
+    THINKING = "thinking"
+    SPEAKING = "speaking"
+
+
+class UltravoxAdapterEvent(StrEnum):
+    """Adapter-level event-type strings yielded by :meth:`receive_events`."""
+
+    AUDIO = "audio"
+    TRANSCRIPT_INPUT = "transcript_input"
+    TRANSCRIPT_OUTPUT = "transcript_output"
+    FUNCTION_CALL = "function_call"
+    SPEECH_STARTED = "speech_started"
+    RESPONSE_DONE = "response_done"
+
 
 # Ultravox v1 REST endpoint used to create an ephemeral call. The call
 # response includes a ``joinUrl`` WebSocket URL that the client connects to
 # for the audio/event stream.
 DEFAULT_API_BASE = "https://api.ultravox.ai/api"
-DEFAULT_SAMPLE_RATE_HZ = 16000
+DEFAULT_SAMPLE_RATE_HZ = UltravoxSampleRate.HZ_16000.value
 
 
 class UltravoxRealtimeAdapter:
@@ -40,13 +123,13 @@ class UltravoxRealtimeAdapter:
     def __init__(
         self,
         api_key: str,
-        model: str = "fixie-ai/ultravox",
+        model: Union[UltravoxModel, str] = UltravoxModel.FIXIE_AI_ULTRAVOX,
         voice: str = "",
         instructions: str = "",
         language: str = "en",
         tools: list[dict] | None = None,
         api_base: str = DEFAULT_API_BASE,
-        sample_rate: int = DEFAULT_SAMPLE_RATE_HZ,
+        sample_rate: Union[UltravoxSampleRate, int] = UltravoxSampleRate.HZ_16000,
         first_message: str = "",
     ) -> None:
         self.api_key = api_key
@@ -103,12 +186,15 @@ class UltravoxRealtimeAdapter:
         # Prefer ``initialMessages`` when a ``first_message`` is configured;
         # otherwise default to FIRST_SPEAKER_USER (user speaks first).
         if self.first_message:
-            create_payload["initialOutputMedium"] = "MESSAGE_MEDIUM_VOICE"
+            create_payload["initialOutputMedium"] = UltravoxOutputMedium.VOICE.value
             create_payload["initialMessages"] = [
-                {"role": "MESSAGE_ROLE_AGENT", "text": self.first_message},
+                {
+                    "role": UltravoxMessageRole.AGENT.value,
+                    "text": self.first_message,
+                },
             ]
         else:
-            create_payload["firstSpeaker"] = "FIRST_SPEAKER_USER"
+            create_payload["firstSpeaker"] = UltravoxFirstSpeaker.USER.value
         if self.tools:
             create_payload["selectedTools"] = [
                 {
@@ -161,7 +247,7 @@ class UltravoxRealtimeAdapter:
         await self._ws.send_str(
             json.dumps(
                 {
-                    "type": "input_text_message",
+                    "type": UltravoxClientFrame.INPUT_TEXT_MESSAGE.value,
                     "text": text,
                 }
             )
@@ -174,7 +260,7 @@ class UltravoxRealtimeAdapter:
         await self._ws.send_str(
             json.dumps(
                 {
-                    "type": "client_tool_result",
+                    "type": UltravoxClientFrame.CLIENT_TOOL_RESULT.value,
                     "invocationId": call_id,
                     "result": result,
                     "responseType": "tool-response",
@@ -186,7 +272,9 @@ class UltravoxRealtimeAdapter:
         """Ask the agent to stop speaking immediately (barge-in)."""
         if self._ws is None:
             return
-        await self._ws.send_str(json.dumps({"type": "playback_clear_buffer"}))
+        await self._ws.send_str(
+            json.dumps({"type": UltravoxClientFrame.PLAYBACK_CLEAR_BUFFER.value})
+        )
 
     async def receive_events(self) -> AsyncIterator[tuple[str, Any]]:
         """Yield ``(event_type, payload)`` tuples from the Ultravox WebSocket.
@@ -210,7 +298,7 @@ class UltravoxRealtimeAdapter:
         try:
             async for msg in self._ws:
                 if msg.type == aiohttp.WSMsgType.BINARY:
-                    yield ("audio", msg.data)
+                    yield (UltravoxAdapterEvent.AUDIO.value, msg.data)
                 elif msg.type == aiohttp.WSMsgType.TEXT:
                     try:
                         event = json.loads(msg.data)
@@ -237,31 +325,31 @@ class UltravoxRealtimeAdapter:
     ) -> AsyncIterator[tuple[str, Any]]:
         """Map an Ultravox JSON event to Patter adapter event tuples."""
         etype = event.get("type", "")
-        if etype == "transcript":
+        if etype == UltravoxServerEvent.TRANSCRIPT:
             role = event.get("role", "")
             text = event.get("text", "") or event.get("delta", "")
             is_final = bool(event.get("final", False))
             if role == "user" and is_final and text:
-                yield ("transcript_input", text)
+                yield (UltravoxAdapterEvent.TRANSCRIPT_INPUT.value, text)
             elif role == "agent" and text:
-                yield ("transcript_output", text)
-        elif etype == "client_tool_invocation":
+                yield (UltravoxAdapterEvent.TRANSCRIPT_OUTPUT.value, text)
+        elif etype == UltravoxServerEvent.CLIENT_TOOL_INVOCATION:
             yield (
-                "function_call",
+                UltravoxAdapterEvent.FUNCTION_CALL.value,
                 {
                     "call_id": event.get("invocationId", ""),
                     "name": event.get("toolName", ""),
                     "arguments": json.dumps(event.get("parameters", {})),
                 },
             )
-        elif etype == "state":
+        elif etype == UltravoxServerEvent.STATE:
             state = event.get("state", "")
-            if state == "listening":
-                yield ("speech_started", None)
-            elif state == "idle":
-                yield ("response_done", None)
-        elif etype == "playback_clear_buffer":
-            yield ("speech_started", None)
+            if state == UltravoxState.LISTENING:
+                yield (UltravoxAdapterEvent.SPEECH_STARTED.value, None)
+            elif state == UltravoxState.IDLE:
+                yield (UltravoxAdapterEvent.RESPONSE_DONE.value, None)
+        elif etype == UltravoxServerEvent.PLAYBACK_CLEAR_BUFFER:
+            yield (UltravoxAdapterEvent.SPEECH_STARTED.value, None)
 
     async def close(self) -> None:
         """Close the WebSocket and underlying HTTP session."""
@@ -295,7 +383,7 @@ def _tool_params_to_ultravox(parameters: dict[str, Any]) -> list[dict[str, Any]]
         out.append(
             {
                 "name": name,
-                "location": "PARAMETER_LOCATION_BODY",
+                "location": UltravoxParameterLocation.BODY.value,
                 "schema": schema,
                 "required": name in required,
             }

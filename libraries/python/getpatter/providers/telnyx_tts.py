@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import json
+from enum import IntEnum, StrEnum
 from typing import AsyncIterator
 
 import aiohttp
@@ -19,8 +20,27 @@ from getpatter.providers.base import TTSProvider
 
 TELNYX_TTS_WS_URL = "wss://api.telnyx.com/v2/text-to-speech/speech"
 
-DEFAULT_VOICE = "Telnyx.NaturalHD.astra"
-DEFAULT_SAMPLE_RATE = 16000
+
+class TelnyxTTSVoice(StrEnum):
+    """Common Telnyx NaturalHD voices accepted by the TTS endpoint."""
+
+    NATURAL_HD_ASTRA = "Telnyx.NaturalHD.astra"
+    NATURAL_HD_LUNA = "Telnyx.NaturalHD.luna"
+    NATURAL_HD_ATLAS = "Telnyx.NaturalHD.atlas"
+    NATURAL_HD_HERA = "Telnyx.NaturalHD.hera"
+    NATURAL_HD_ZEUS = "Telnyx.NaturalHD.zeus"
+
+
+class TelnyxTTSSampleRate(IntEnum):
+    """Sample rates supported by the Telnyx TTS WebSocket endpoint."""
+
+    HZ_8000 = 8000
+    HZ_16000 = 16000
+    HZ_24000 = 24000
+
+
+DEFAULT_VOICE = TelnyxTTSVoice.NATURAL_HD_ASTRA.value
+DEFAULT_SAMPLE_RATE = TelnyxTTSSampleRate.HZ_16000.value
 NUM_CHANNELS = 1
 
 
@@ -38,7 +58,7 @@ class TelnyxTTS(TTSProvider):
     def __init__(
         self,
         api_key: str,
-        voice: str = DEFAULT_VOICE,
+        voice: Union[TelnyxTTSVoice, str] = TelnyxTTSVoice.NATURAL_HD_ASTRA,
         *,
         base_url: str = TELNYX_TTS_WS_URL,
         session: aiohttp.ClientSession | None = None,

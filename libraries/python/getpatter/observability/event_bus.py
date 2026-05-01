@@ -69,4 +69,4 @@ class EventBus:
                 if hasattr(result, "__await__"):
                     asyncio.create_task(result)  # noqa: RUF006
             except Exception:
-                logger.exception("event listener %s failed", event)
+                logger.exception("event_bus listener raised")

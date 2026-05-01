@@ -425,8 +425,11 @@ class TwilioBridge implements TelephonyBridge {
             getLogger().info(`Twilio actual cost: $${Math.abs(parseFloat(data.price))}`);
           }
         }
-      } catch {
-        // Fallback to estimated cost
+      } catch (err) {
+        // Fallback to estimated cost. Mirrors Py handlers/twilio_handler.py:538-539.
+        getLogger().debug(
+          `queryTelephonyCost(twilio) failed: ${(err as Error)?.message ?? err}`,
+        );
       }
     }
   }
@@ -600,8 +603,11 @@ export class TelnyxBridge implements TelephonyBridge {
             getLogger().info(`Telnyx actual cost: $${Math.abs(parseFloat(amount))}`);
           }
         }
-      } catch {
-        // Fallback to estimated cost
+      } catch (err) {
+        // Fallback to estimated cost. Mirrors Py handlers/twilio_handler.py:538-539.
+        getLogger().debug(
+          `queryTelephonyCost(telnyx) failed: ${(err as Error)?.message ?? err}`,
+        );
       }
     }
   }
@@ -831,6 +837,9 @@ export class EmbeddedServer {
         const twiml = `<Response><Say>${xmlEscape(this.voicemailMessage)}</Say><Hangup/></Response>`;
         try {
           const vmUrl = `https://api.twilio.com/2010-04-01/Accounts/${this.config.twilioSid}/Calls/${callSid}.json`;
+          // Voicemail-drop is best-effort — degrade gracefully on slow/unreachable
+          // Twilio API rather than blocking call-flow indefinitely (mirrors
+          // Python server.py voicemail-drop httpx timeout=10.0).
           const vmResp = await fetch(vmUrl, {
             method: 'POST',
             headers: {
@@ -838,6 +847,7 @@ export class EmbeddedServer {
               'Authorization': `Basic ${Buffer.from(`${this.config.twilioSid}:${this.config.twilioToken}`).toString('base64')}`,
             },
             body: new URLSearchParams({ Twiml: twiml }).toString(),
+            signal: AbortSignal.timeout(10_000),
           });
           if (vmResp.ok) {
             getLogger().info(`Voicemail dropped for ${sanitizeLogValue(callSid)}`);

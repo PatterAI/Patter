@@ -56,11 +56,11 @@ export class EventBus {
         const res = cb(payload);
         if (res && typeof (res as Promise<unknown>).catch === 'function') {
           (res as Promise<unknown>).catch((e) =>
-            getLogger().warn(`[EventBus] listener for "${event}" rejected:`, e),
+            getLogger().error(`[EventBus] listener for "${event}" rejected:`, e),
           );
         }
       } catch (e) {
-        getLogger().warn(`[EventBus] listener for "${event}" threw:`, e);
+        getLogger().error(`[EventBus] listener for "${event}" threw:`, e);
       }
     }
   }

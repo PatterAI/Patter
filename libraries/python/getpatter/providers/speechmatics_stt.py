@@ -20,8 +20,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from enum import Enum
-from typing import Any, AsyncIterator
+from enum import Enum, IntEnum, StrEnum
+from typing import Any, AsyncIterator, Union
 
 from getpatter.providers.base import STTProvider, Transcript
 
@@ -47,6 +47,27 @@ class TurnDetectionMode(str, Enum):
     FIXED = "fixed"
     ADAPTIVE = "adaptive"
     SMART_TURN = "smart_turn"
+
+
+class SpeechmaticsSampleRate(IntEnum):
+    """Common PCM sample rates for Speechmatics streaming input."""
+
+    HZ_8000 = 8000
+    HZ_16000 = 16000
+    HZ_44100 = 44100
+
+
+class SpeechmaticsAudioEncoding(StrEnum):
+    """Audio encodings accepted by Speechmatics's real-time API."""
+
+    PCM_S16LE = "pcm_s16le"
+
+
+class SpeechmaticsOperatingPoint(StrEnum):
+    """Speechmatics operating points (accuracy vs latency trade-off)."""
+
+    ENHANCED = "enhanced"
+    STANDARD = "standard"
 
 
 def _require_voice_sdk() -> Any:
@@ -98,7 +119,9 @@ class SpeechmaticsSTT(STTProvider):
         base_url: str | None = None,
         language: str = "en",
         turn_detection_mode: TurnDetectionMode = TurnDetectionMode.ADAPTIVE,
-        sample_rate: int = 16000,
+        sample_rate: Union[
+            SpeechmaticsSampleRate, int
+        ] = SpeechmaticsSampleRate.HZ_16000,
         enable_diarization: bool = False,
         max_delay: float | None = None,
         end_of_utterance_silence_trigger: float | None = None,

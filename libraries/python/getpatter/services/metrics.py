@@ -696,7 +696,7 @@ class CallMetricsAccumulator:
         # we deliberately do NOT fall back to total_ms so dashboards can
         # distinguish "metric available" vs "metric missing".
         agent_response_ms: float | None = None
-        if endpoint_ms is not None and llm_ttft_ms and tts_ms > 0:
+        if endpoint_ms is not None and llm_ttft_ms is not None and tts_ms > 0:
             agent_response_ms = round(endpoint_ms + llm_ttft_ms + tts_ms, 1)
 
         # Note: in Realtime mode OpenAI handles STT+LLM+TTS as a single opaque

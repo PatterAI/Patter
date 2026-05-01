@@ -17,15 +17,52 @@ export interface Transcript {
 
 type TranscriptCallback = (transcript: Transcript) => void;
 
-export type AssemblyAIEncoding = 'pcm_s16le' | 'pcm_mulaw';
+/** Audio encodings accepted by AssemblyAI's v3 streaming endpoint. */
+export const AssemblyAIEncoding = {
+  PCM_S16LE: 'pcm_s16le',
+  PCM_MULAW: 'pcm_mulaw',
+} as const;
+export type AssemblyAIEncoding = (typeof AssemblyAIEncoding)[keyof typeof AssemblyAIEncoding];
 
-export type AssemblyAIModel =
-  | 'universal-streaming-english'
-  | 'universal-streaming-multilingual'
-  | 'u3-rt-pro'
-  | 'whisper-rt';
+/** Known AssemblyAI Universal Streaming speech models. */
+export const AssemblyAIModel = {
+  UNIVERSAL_STREAMING_ENGLISH: 'universal-streaming-english',
+  UNIVERSAL_STREAMING_MULTILINGUAL: 'universal-streaming-multilingual',
+  U3_RT_PRO: 'u3-rt-pro',
+  WHISPER_RT: 'whisper-rt',
+} as const;
+export type AssemblyAIModel = (typeof AssemblyAIModel)[keyof typeof AssemblyAIModel];
 
-export type AssemblyAIDomain = 'general' | 'medical-v1';
+/** Valid `domain` values for AssemblyAI's v3 streaming endpoint. */
+export const AssemblyAIDomain = {
+  GENERAL: 'general',
+  MEDICAL_V1: 'medical-v1',
+} as const;
+export type AssemblyAIDomain = (typeof AssemblyAIDomain)[keyof typeof AssemblyAIDomain];
+
+/** Common PCM sample rates for AssemblyAI streaming input. */
+export const AssemblyAISampleRate = {
+  HZ_8000: 8000,
+  HZ_16000: 16000,
+} as const;
+export type AssemblyAISampleRate = (typeof AssemblyAISampleRate)[keyof typeof AssemblyAISampleRate];
+
+/** AssemblyAI v3 streaming server event types. */
+export const AssemblyAIEventType = {
+  BEGIN: 'Begin',
+  TURN: 'Turn',
+  SPEECH_STARTED: 'SpeechStarted',
+  TERMINATION: 'Termination',
+} as const;
+export type AssemblyAIEventType = (typeof AssemblyAIEventType)[keyof typeof AssemblyAIEventType];
+
+/** AssemblyAI v3 streaming client-side message types. */
+export const AssemblyAIClientFrame = {
+  UPDATE_CONFIGURATION: 'UpdateConfiguration',
+  FORCE_ENDPOINT: 'ForceEndpoint',
+  TERMINATE: 'Terminate',
+} as const;
+export type AssemblyAIClientFrame = (typeof AssemblyAIClientFrame)[keyof typeof AssemblyAIClientFrame];
 
 export interface AssemblyAISTTOptions {
   /** One of the AssemblyAI speech models. */
@@ -72,7 +109,10 @@ const TERMINATION_WAIT_TIMEOUT_MS = 500;
 const MIN_CHUNK_DURATION_MS = 50;
 const MAX_CHUNK_DURATION_MS = 1000;
 const RECONNECT_ERROR_CODES: ReadonlySet<number> = new Set([3005, 3008]);
-const VALID_DOMAINS: ReadonlySet<string> = new Set(['general', 'medical-v1']);
+const VALID_DOMAINS: ReadonlySet<string> = new Set([
+  AssemblyAIDomain.GENERAL,
+  AssemblyAIDomain.MEDICAL_V1,
+]);
 
 interface AssemblyAIWord {
   readonly text?: string;
@@ -133,23 +173,27 @@ export class AssemblyAISTT {
   }
 
   /** Factory for Twilio calls — mulaw 8 kHz. */
-  static forTwilio(apiKey: string, model: AssemblyAIModel = 'universal-streaming-english'): AssemblyAISTT {
+  static forTwilio(
+    apiKey: string,
+    model: AssemblyAIModel = AssemblyAIModel.UNIVERSAL_STREAMING_ENGLISH,
+  ): AssemblyAISTT {
     return new AssemblyAISTT(apiKey, {
       model,
-      encoding: 'pcm_mulaw',
-      sampleRate: 8000,
+      encoding: AssemblyAIEncoding.PCM_MULAW,
+      sampleRate: AssemblyAISampleRate.HZ_8000,
     });
   }
 
   private buildUrl(): string {
     const opts = this.options;
-    const model: AssemblyAIModel = opts.model ?? 'universal-streaming-english';
-    const encoding: AssemblyAIEncoding = opts.encoding ?? 'pcm_s16le';
-    const sampleRate: number = opts.sampleRate ?? 16000;
+    const model: AssemblyAIModel =
+      opts.model ?? AssemblyAIModel.UNIVERSAL_STREAMING_ENGLISH;
+    const encoding: AssemblyAIEncoding = opts.encoding ?? AssemblyAIEncoding.PCM_S16LE;
+    const sampleRate: number = opts.sampleRate ?? AssemblyAISampleRate.HZ_16000;
 
     let minSilence: number | undefined;
     let maxSilence: number | undefined;
-    if (model === 'u3-rt-pro') {
+    if (model === AssemblyAIModel.U3_RT_PRO) {
       minSilence = opts.minTurnSilence ?? 100;
       maxSilence = opts.maxTurnSilence ?? minSilence;
     } else {
@@ -158,7 +202,8 @@ export class AssemblyAISTT {
     }
 
     const languageDetection =
-      opts.languageDetection ?? (model.includes('multilingual') || model === 'u3-rt-pro');
+      opts.languageDetection ??
+      (model.includes('multilingual') || model === AssemblyAIModel.U3_RT_PRO);
 
     const raw: Record<string, unknown> = {
       sample_rate: sampleRate,
@@ -269,13 +314,13 @@ export class AssemblyAISTT {
   private handleEvent(event: AssemblyAIEvent): void {
     const type = event.type;
 
-    if (type === 'Begin') {
+    if (type === AssemblyAIEventType.BEGIN) {
       this.sessionId = event.id ?? null;
       this.expiresAt = event.expires_at ?? null;
       return;
     }
 
-    if (type === 'Termination') {
+    if (type === AssemblyAIEventType.TERMINATION) {
       if (this.terminationResolve) {
         this.terminationResolve();
         this.terminationResolve = null;
@@ -283,17 +328,17 @@ export class AssemblyAISTT {
       return;
     }
 
-    if (type === 'SpeechStarted') {
+    if (type === AssemblyAIEventType.SPEECH_STARTED) {
       this.emit({
         text: '',
         isFinal: false,
         confidence: 0,
-        eventType: 'SpeechStarted',
+        eventType: AssemblyAIEventType.SPEECH_STARTED,
       });
       return;
     }
 
-    if (type !== 'Turn') {
+    if (type !== AssemblyAIEventType.TURN) {
       return;
     }
 
@@ -354,9 +399,13 @@ export class AssemblyAISTT {
 
   private estimateChunkDurationMs(byteLength: number): number | null {
     if (byteLength <= 0) return null;
-    const sampleRate = this.options.sampleRate ?? 16000;
+    const sampleRate = this.options.sampleRate ?? AssemblyAISampleRate.HZ_16000;
     if (sampleRate <= 0) return null;
-    const bytesPerSample = (this.options.encoding ?? 'pcm_s16le') === 'pcm_s16le' ? 2 : 1;
+    const bytesPerSample =
+      (this.options.encoding ?? AssemblyAIEncoding.PCM_S16LE) ===
+      AssemblyAIEncoding.PCM_S16LE
+        ? 2
+        : 1;
     const samples = byteLength / bytesPerSample;
     return (samples / sampleRate) * 1000;
   }
@@ -376,7 +425,9 @@ export class AssemblyAISTT {
         'AssemblyAISTT.updateConfiguration: WebSocket is not open',
       );
     }
-    const payload: Record<string, unknown> = { type: 'UpdateConfiguration' };
+    const payload: Record<string, unknown> = {
+      type: AssemblyAIClientFrame.UPDATE_CONFIGURATION,
+    };
     if (params.keytermsPrompt !== undefined) {
       payload.keyterms_prompt = JSON.stringify(params.keytermsPrompt);
     }
@@ -399,7 +450,7 @@ export class AssemblyAISTT {
         'AssemblyAISTT.forceEndpoint: WebSocket is not open',
       );
     }
-    this.ws.send(JSON.stringify({ type: 'ForceEndpoint' }));
+    this.ws.send(JSON.stringify({ type: AssemblyAIClientFrame.FORCE_ENDPOINT }));
   }
 
   onTranscript(callback: TranscriptCallback): () => void {
@@ -414,7 +465,7 @@ export class AssemblyAISTT {
     if (!this.ws) return;
 
     try {
-      this.ws.send(JSON.stringify({ type: 'Terminate' }));
+      this.ws.send(JSON.stringify({ type: AssemblyAIClientFrame.TERMINATE }));
     } catch {
       // ignore
     }

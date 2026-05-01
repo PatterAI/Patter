@@ -6,6 +6,7 @@ import asyncio
 import io
 import logging
 import wave
+from enum import StrEnum
 from typing import AsyncIterator, Literal
 
 import httpx
@@ -13,6 +14,25 @@ import httpx
 from getpatter.providers.base import STTProvider, Transcript
 
 logger = logging.getLogger("getpatter")
+
+
+class WhisperModel(StrEnum):
+    """Models accepted by ``POST /v1/audio/transcriptions``.
+
+    ``gpt-4o-transcribe`` and ``gpt-4o-mini-transcribe`` were added alongside
+    the realtime-mini GA and share the same endpoint.
+    """
+
+    WHISPER_1 = "whisper-1"
+    GPT_4O_TRANSCRIBE = "gpt-4o-transcribe"
+    GPT_4O_MINI_TRANSCRIBE = "gpt-4o-mini-transcribe"
+
+
+class WhisperResponseFormat(StrEnum):
+    """Response formats accepted by ``POST /v1/audio/transcriptions``."""
+
+    JSON = "json"
+    VERBOSE_JSON = "verbose_json"
 
 
 class _Transcript(Transcript):  # type: ignore[misc]
@@ -23,8 +43,11 @@ class _Transcript(Transcript):  # type: ignore[misc]
     defaults for the rest) the way the old ad-hoc class allowed.
     """
 
-    def __init__(self, text: str, is_final: bool = True, confidence: float = 1.0) -> None:
+    def __init__(
+        self, text: str, is_final: bool = True, confidence: float = 1.0
+    ) -> None:
         super().__init__(text=text, is_final=is_final, confidence=confidence)
+
 
 OPENAI_TRANSCRIPTION_URL = "https://api.openai.com/v1/audio/transcriptions"
 # ~1 second of 16 kHz 16-bit mono audio
@@ -33,7 +56,7 @@ BUFFER_SIZE_BYTES = 16000 * 2
 # Models accepted by ``POST /v1/audio/transcriptions``. ``gpt-4o-transcribe``
 # and ``gpt-4o-mini-transcribe`` were added alongside the realtime-mini GA
 # and share the same endpoint.
-_ALLOWED_MODELS = {"whisper-1", "gpt-4o-transcribe", "gpt-4o-mini-transcribe"}
+_ALLOWED_MODELS = {m.value for m in WhisperModel}
 
 
 class WhisperSTT(STTProvider):
@@ -55,8 +78,10 @@ class WhisperSTT(STTProvider):
         self,
         api_key: str,
         language: str = "en",
-        model: str = "whisper-1",
-        response_format: Literal["json", "verbose_json"] = "json",
+        model: Union[WhisperModel, str] = WhisperModel.WHISPER_1,
+        response_format: Union[
+            WhisperResponseFormat, Literal["json", "verbose_json"]
+        ] = WhisperResponseFormat.JSON,
     ) -> None:
         if model not in _ALLOWED_MODELS:
             raise ValueError(
@@ -81,7 +106,7 @@ class WhisperSTT(STTProvider):
         cls,
         api_key: str,
         language: str = "en",
-        model: str = "whisper-1",
+        model: Union[WhisperModel, str] = WhisperModel.WHISPER_1,
     ) -> "WhisperSTT":
         """Factory mirroring the TS ``forTwilio`` helper.
 

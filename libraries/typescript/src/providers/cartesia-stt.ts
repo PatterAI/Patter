@@ -16,18 +16,55 @@ export interface Transcript {
 
 type TranscriptCallback = (transcript: Transcript) => void;
 
+/** Known Cartesia STT models. */
+export const CartesiaSTTModel = {
+  INK_WHISPER: 'ink-whisper',
+} as const;
+export type CartesiaSTTModel = (typeof CartesiaSTTModel)[keyof typeof CartesiaSTTModel];
+
+/** Audio encodings accepted by Cartesia's STT websocket endpoint. */
+export const CartesiaSTTEncoding = {
+  PCM_S16LE: 'pcm_s16le',
+} as const;
+export type CartesiaSTTEncoding = (typeof CartesiaSTTEncoding)[keyof typeof CartesiaSTTEncoding];
+
+/** Common PCM sample rates accepted by Cartesia STT. */
+export const CartesiaSTTSampleRate = {
+  HZ_8000: 8000,
+  HZ_16000: 16000,
+  HZ_24000: 24000,
+  HZ_44100: 44100,
+  HZ_48000: 48000,
+} as const;
+export type CartesiaSTTSampleRate = (typeof CartesiaSTTSampleRate)[keyof typeof CartesiaSTTSampleRate];
+
+/** Cartesia STT server event `type` values. */
+export const CartesiaSTTServerEvent = {
+  TRANSCRIPT: 'transcript',
+  FLUSH_DONE: 'flush_done',
+  DONE: 'done',
+  ERROR: 'error',
+} as const;
+export type CartesiaSTTServerEvent = (typeof CartesiaSTTServerEvent)[keyof typeof CartesiaSTTServerEvent];
+
+/** Cartesia STT client-side text frames. */
+export const CartesiaSTTClientFrame = {
+  FINALIZE: 'finalize',
+} as const;
+export type CartesiaSTTClientFrame = (typeof CartesiaSTTClientFrame)[keyof typeof CartesiaSTTClientFrame];
+
 /** Cartesia STT currently only accepts 16-bit PCM little-endian. */
 export type CartesiaEncoding = 'pcm_s16le';
 
 export interface CartesiaSTTOptions {
   /** Cartesia STT model. Currently only `"ink-whisper"`. */
-  readonly model?: string;
+  readonly model?: CartesiaSTTModel | string;
   /** BCP-47 language code. */
   readonly language?: string;
   /** PCM encoding; Cartesia only supports `pcm_s16le`. */
-  readonly encoding?: CartesiaEncoding;
+  readonly encoding?: CartesiaSTTEncoding | CartesiaEncoding;
   /** Sample rate in Hz. Cartesia accepts 8000, 16000, 24000, 44100, 48000. */
-  readonly sampleRate?: number;
+  readonly sampleRate?: CartesiaSTTSampleRate | number;
   /** Override base URL (HTTP or WS). Defaults to Cartesia prod. */
   readonly baseUrl?: string;
 }
@@ -82,9 +119,9 @@ export class CartesiaSTT {
 
     const language = opts.language ?? 'en';
     const params = new URLSearchParams({
-      model: opts.model ?? 'ink-whisper',
-      sample_rate: String(opts.sampleRate ?? 16000),
-      encoding: opts.encoding ?? 'pcm_s16le',
+      model: opts.model ?? CartesiaSTTModel.INK_WHISPER,
+      sample_rate: String(opts.sampleRate ?? CartesiaSTTSampleRate.HZ_16000),
+      encoding: opts.encoding ?? CartesiaSTTEncoding.PCM_S16LE,
       cartesia_version: API_VERSION,
       api_key: this.apiKey,
       language,
@@ -136,7 +173,7 @@ export class CartesiaSTT {
 
   private handleEvent(event: CartesiaEvent): void {
     const type = event.type;
-    if (type === 'transcript') {
+    if (type === CartesiaSTTServerEvent.TRANSCRIPT) {
       const text = (event.text ?? '').trim();
       const isFinal = Boolean(event.is_final);
       if (!text && !isFinal) return;
@@ -149,7 +186,7 @@ export class CartesiaSTT {
       return;
     }
 
-    if (type === 'error') {
+    if (type === CartesiaSTTServerEvent.ERROR) {
       getLogger().error(`Cartesia STT error: ${event.message ?? 'unknown'}`);
       return;
     }
@@ -191,7 +228,7 @@ export class CartesiaSTT {
     }
     if (this.ws) {
       try {
-        this.ws.send('finalize');
+        this.ws.send(CartesiaSTTClientFrame.FINALIZE);
       } catch {
         // ignore
       }
@@ -218,7 +255,7 @@ export class CartesiaSTT {
     if (ws.readyState === WebSocket.OPEN) {
       try {
         await new Promise<void>((resolve) => {
-          ws.send('finalize', (err) => {
+          ws.send(CartesiaSTTClientFrame.FINALIZE, (err) => {
             if (err) getLogger().warn(`CartesiaSTT finalize send failed: ${String(err)}`);
             resolve();
           });
