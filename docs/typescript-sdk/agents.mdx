@@ -76,6 +76,7 @@ Available LLM providers: `OpenAILLM`, `AnthropicLLM`, `GroqLLM`, `CerebrasLLM`, 
 | `audioFilter` | `AudioFilter` | No | — | Audio preprocessing filter. |
 | `backgroundAudio` | `BackgroundAudioPlayer` | No | — | Background audio player. |
 | `bargeInThresholdMs` | `number` | No | `300` | Barge-in hang-over window (ms). Set to `0` to disable. |
+| `aggressiveFirstFlush` | `boolean` | No | `false` | Opt-in low-latency mode: emits the first clause on soft punctuation (`,`, em-dash) once the buffer reaches ≥40 chars. Saves 200–500 ms TTFA. Hard-disabled when `language="it"` (Italian punctuation patterns are incompatible). |
 
 ## Validation Rules
 

@@ -106,6 +106,8 @@ export type { AssemblyAISTTOptions } from "./stt/assemblyai";
 // New namespaced TTS classes.
 export { TTS as ElevenLabsTTS } from "./tts/elevenlabs";
 export type { ElevenLabsTTSOptions } from "./tts/elevenlabs";
+export { TTS as ElevenLabsWebSocketTTS } from "./tts/elevenlabs-ws";
+export type { ElevenLabsWebSocketOptions } from "./tts/elevenlabs-ws";
 export { TTS as OpenAITTS } from "./tts/openai";
 export type { OpenAITTSOptions } from "./tts/openai";
 export { TTS as CartesiaTTS } from "./tts/cartesia";

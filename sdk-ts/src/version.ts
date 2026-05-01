@@ -5,4 +5,4 @@
  * both bundled (no JSON loader) and ESM/CJS dual-export environments without
  * platform-specific JSON-import flags.
  */
-export const VERSION = '0.5.3';
+export const VERSION = '0.5.5';

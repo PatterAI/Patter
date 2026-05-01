@@ -4,6 +4,56 @@
 
 _(no entries yet — next version will land here)_
 
+## 0.5.5 (2026-04-28)
+
+Latency-pass 1: TTFA optimisations grounded in the ElevenLabs latency posts and a head-to-head review of competing production voice-AI stacks. All changes are additive or opt-in — existing call sites keep their current behaviour unchanged.
+
+### Improved — sentence chunker
+
+- **Italian abbreviations** added to the prefix list (Sig, Sgr, Dott, Prof, Avv, Ing, Geom, Rag, Arch, On, Egr, Spett, Gent, Ill) and the suffix list (ecc, cit, cap, sez, art, pag, fig, tab, cfr, vol, ed). Sentences like _"Ho incontrato il Sig. Rossi alla riunione di stamattina."_ are no longer split on the abbreviation period.
+- **English abbreviations** expanded with the Pipecat NLTK Punkt set: `Gen.`, `Sen.`, `Rep.`, `Lt.`, `Cpt.`, `Capt.`, `Col.`, `Cmdr.`, `Adm.`, `vs.`, `etc.`, `No.`, `Vol.`, `pp.`, `cf.`, `ca.`, `op.`, plus address forms `Mt.`, `Hwy.`, `Rt.`, `Pl.`, `Ave.`, `Blvd.`, `Sq.`. Phrases like _"Compare A vs. B"_ and _"Met Gen. Smith and Sen. Davis"_ no longer split mid-abbreviation.
+- **Suffix + starter pattern preserves the period** (e.g. _"Patter Inc. He left."_ now keeps `Inc.` in the emitted sentence — previously dropped to `Inc`).
+- **All-caps name flush fixed** (Pipecat issue #1692). Previously the gate-5 acronym guard blocked *any* uppercase-preceded period, so _"I was speaking with RAMESH."_ would sit in the buffer forever. Now only purely-uppercase ASCII words ≤3 chars (U, US, USA, NATO patterns) are treated as acronyms.
+- **Multilingual terminator support**. The terminator set now includes ASCII semicolon `;`, Unicode ellipsis `…`, full-width semicolon `；`, full-width period `．`, half-width Japanese period `｡`, plus the Pipecat-derived non-Latin set: Hindi/Devanagari `। ॥`, Arabic `؟ ؛ ۔ ؏`, Armenian `։`, Ethiopic `። ፧`, Khmer `។ ៕`, Burmese `။`, Tibetan `༎ ༏`. Hindi text like _"यह हिन्दी का एक वाक्य है।"_ now flushes correctly.
+- **Cross-SDK parity fixture** at `tests/parity/scenarios/sentence_chunker.json` — 61 cases covering EN/IT/CJK/Hindi/Arabic punctuation, decimals, abbreviations, currency, dates, ellipsis, JSON, lists, all-caps names. Standalone runner at `tests/parity/sentence_chunker_parity.py` verifies Python and TypeScript emit identical sentence streams (53 / 61 PASS, 8 documented quirks/regressions).
+
+### Added — opt-in aggressive first-clause flush
+
+- New `aggressiveFirstFlush` (TS) / `aggressive_first_flush` (Python) option on `Agent`/`AgentOptions`. **Default: false.** When enabled, the chunker emits the first clause of each response on a soft punctuation boundary (`,`, em-dash, en-dash) once ≥40 chars accumulate — saves 200–500 ms TTFA on the first sentence of each turn.
+- **Eight guards** prevent regressions on the safe-but-aggressive path: minimum length, decimal-comma (`3,14`), currency (`$1,000`, `€1.000,50`), thousands-separator, balanced parens/brackets/braces/quotes (protects JSON), ellipsis (`...`, `…`), comma-before-quote, sub-token ambiguity (requires post-terminator char).
+- **Italian language hard-disables** the feature regardless of caller preference (decimal-comma + dot-thousands inversion would split mid-number). Pass `language: "it"` and the flag is ignored.
+- ElevenLabs `optimize_streaming_latency` is **deprecated** by ElevenLabs and is **not** added — the help-centre note flagged during research.
+
+### Added — `after_llm` 3-tier hook API
+
+- New shape: `afterLlm: { onChunk, onSentence, onResponse }` (TS) / `after_llm = AfterLLMHook(...)` (Python). All three methods optional, all sync-or-async.
+  - **`onChunk` (tier 1)** — per-token sync transform (~0 ms budget). Use for regex replace, markdown strip, profanity char-swap. Does NOT block streaming.
+  - **`onSentence` (tier 2)** — per-sentence rewrite (~50–300 ms). Runs between the chunker and TTS. Returning `null` keeps original; returning `""` drops the sentence silently. Use for PII redaction, persona overlay, refusal swap.
+  - **`onResponse` (tier 3)** — per-full-response rewrite. Buffers tokens, blocks streaming TTS. Use only when sentence-level rewrite is insufficient.
+- **Backward-compatible adapter**: the legacy `(text, ctx) => string` callable still works and is mapped to `onResponse`. A one-shot `PatterDeprecationWarning` (subclass of both `DeprecationWarning` and `UserWarning` so it surfaces by default in Python) is emitted on first construction. Scheduled removal: 0.7.0.
+- The LLM loop now buffers only when tier-3 `onResponse` is configured; tier-1 `onChunk` is applied inline before yielding (zero latency cost), tier-2 `onSentence` runs in the stream handler between the chunker and TTS.
+
+### Added — `ElevenLabsWebSocketTTS`
+
+- New opt-in TTS class targeting the ElevenLabs `stream-input` WebSocket endpoint (`wss://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream-input`). Saves the per-utterance HTTP request setup time (~50 ms) and avoids the HTTP cold-start TLS handshake on bursty calls.
+- **Drop-in API** matching `ElevenLabsTTS`: same `synthesize()` / `synthesizeStream()` signature, same `for_twilio()` / `for_telnyx()` factories, same default model (`eleven_flash_v2_5`).
+- `auto_mode=true` by default — ElevenLabs handles internal chunk scheduling. Pass `auto_mode=False` + `chunk_length_schedule=[120, 160, 250, 290]` to take manual control.
+- `inactivity_timeout=60 s` (default) — extends the WS keep-alive past the 20 s default to cover tool-call latency.
+- `eleven_v3` is **rejected** at construction with a clear error (the WS endpoint does not support v3 — use the HTTP class).
+- The HTTP `ElevenLabsTTS` class is **untouched** — both options coexist and the user picks per-call.
+
+### Test coverage
+
+- 31 new unit tests (20 Python + 11 TypeScript) for `ElevenLabsWebSocketTTS`.
+- 22 new unit tests (11 Python + 11 TypeScript) for `aggressiveFirstFlush`.
+- 20 new unit tests (11 Python + 9 TypeScript) for the `after_llm` 3-tier API.
+- Parity fixture: 53 / 61 PASS, 8 XFAIL (3 known-fix regressions resolved in Phase 1; 5 by-design quirks documented).
+
+### Internal
+
+- `resolveVoiceId` is now a public export of `providers/elevenlabs-tts.ts` so the WS variant can share voice-name resolution.
+- `tests/parity/sentence_chunker_parity.py` accepts `--side python | typescript | both` and `--strict` (treats XFAIL as hard fail).
+
 ## 0.5.4 (2026-04-27)
 
 Fast-follow to align the Cerebras default with what 0.5.3 already promised in docs and changelog.

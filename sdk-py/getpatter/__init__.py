@@ -19,7 +19,7 @@ Installation extras:
 See ``pyproject.toml`` and the top-level README for the full matrix.
 """
 
-__version__ = "0.5.4"
+__version__ = "0.5.5"
 
 from getpatter.client import Patter
 from getpatter.models import (
@@ -72,6 +72,7 @@ from getpatter.stt.assemblyai import STT as AssemblyAISTT
 
 # TTS flat aliases.
 from getpatter.tts.elevenlabs import TTS as ElevenLabsTTS
+from getpatter.tts.elevenlabs_ws import TTS as ElevenLabsWebSocketTTS
 from getpatter.tts.openai import TTS as OpenAITTS
 from getpatter.tts.cartesia import TTS as CartesiaTTS
 from getpatter.tts.rime import TTS as RimeTTS
@@ -258,6 +259,7 @@ __all__ = [
     "SpeechmaticsSTT",
     "AssemblyAISTT",
     "ElevenLabsTTS",
+    "ElevenLabsWebSocketTTS",
     "OpenAITTS",
     "CartesiaTTS",
     "RimeTTS",

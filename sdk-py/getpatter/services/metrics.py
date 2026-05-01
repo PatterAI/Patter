@@ -676,6 +676,15 @@ class CallMetricsAccumulator:
         if tts_total_ref is not None and self._tts_last_byte is not None:
             tts_total_ms = max(0.0, (self._tts_last_byte - tts_total_ref) * 1000)
 
+        # agent_response_ms — the user-perceived latency. Sum of the three
+        # system-controlled segments (silence detection + LLM TTFT + TTS
+        # first-byte). Undefined when any prerequisite signal is missing —
+        # we deliberately do NOT fall back to total_ms so dashboards can
+        # distinguish "metric available" vs "metric missing".
+        agent_response_ms: float | None = None
+        if endpoint_ms is not None and llm_ttft_ms and tts_ms > 0:
+            agent_response_ms = round(endpoint_ms + llm_ttft_ms + tts_ms, 1)
+
         # Note: in Realtime mode OpenAI handles STT+LLM+TTS as a single opaque
         # pipeline, so stt_ms / llm_ms / tts_ms stay 0 and only total_ms is
         # meaningful. Dashboards should prefer total_ms as the end-to-end
@@ -691,6 +700,7 @@ class CallMetricsAccumulator:
             endpoint_ms=round(endpoint_ms, 1) if endpoint_ms is not None else None,
             bargein_ms=round(bargein_ms, 1) if bargein_ms is not None else None,
             tts_total_ms=round(tts_total_ms, 1) if tts_total_ms is not None else None,
+            agent_response_ms=agent_response_ms,
         )
 
     @property

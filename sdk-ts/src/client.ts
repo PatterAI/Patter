@@ -56,6 +56,12 @@ export class Patter {
   private localConfig: ResolvedLocalConfig;
   private embeddedServer: EmbeddedServer | null = null;
   private tunnelHandle: TunnelHandle | null = null;
+  private _tunnelReadyResolve!: (host: string) => void;
+  private _tunnelReadyReject!: (err: Error) => void;
+  private _tunnelReady: Promise<string>;
+  private _readyResolve!: (host: string) => void;
+  private _readyReject!: (err: Error) => void;
+  private _ready: Promise<string>;
 
   /**
    * Live `MetricsStore` for the embedded server. Returns `null` before
@@ -65,6 +71,44 @@ export class Patter {
    */
   get metricsStore(): MetricsStore | null {
     return this.embeddedServer?.metricsStore ?? null;
+  }
+
+  /**
+   * Resolves to the public webhook hostname as soon as it is known —
+   * either statically configured or freshly minted by the tunnel.
+   *
+   * **Prefer `phone.ready` for outbound calls.** This promise resolves
+   * before the embedded HTTP / WebSocket server is in `listen` state, so
+   * a `phone.call` placed immediately afterwards can still race the
+   * Twilio Media Streams upgrade and produce a "11100 Invalid URL
+   * format" call drop on answer.
+   *
+   * Kept as a separate signal because some integrations (e.g. webhook
+   * registration) only need the hostname, not the WS server.
+   */
+  get tunnelReady(): Promise<string> {
+    return this._tunnelReady;
+  }
+
+  /**
+   * Resolves to the public webhook hostname once the SDK is fully ready
+   * to handle carrier callbacks: tunnel resolved, carrier auto-config
+   * complete, and the embedded HTTP / WS server in `listen` state.
+   *
+   * Use this for outbound calls instead of guessing `setTimeout` after
+   * `void phone.serve(...)`:
+   *
+   * ```ts
+   * void phone.serve({ agent, tunnel: true });
+   * await phone.ready;
+   * await phone.call({ to: '+15550001234', agent });
+   * ```
+   *
+   * Rejects with the underlying exception if `serve()` fails before the
+   * server is listening.
+   */
+  get ready(): Promise<string> {
+    return this._ready;
   }
 
   constructor(options: LocalOptions) {
@@ -118,6 +162,30 @@ export class Patter {
       tunnel: options.tunnel,
       openaiKey: options.openaiKey,
     };
+
+    // Initialise the tunnel-ready deferred. If the caller already has a
+    // static webhookUrl (or StaticTunnel hostname), resolve immediately —
+    // there is no tunnel cold-start to wait on. Otherwise serve() will
+    // resolve it once the cloudflared hostname lands.
+    this._tunnelReady = new Promise<string>((resolve, reject) => {
+      this._tunnelReadyResolve = resolve;
+      this._tunnelReadyReject = reject;
+    });
+    // See `_ready.catch` below — same rationale.
+    this._tunnelReady.catch(() => {});
+    if (normalizedWebhook) {
+      this._tunnelReadyResolve(normalizedWebhook);
+    }
+    // ``ready`` resolves only after ``serve()`` has the embedded server
+    // in listen state — never pre-resolved at construction even when
+    // webhookUrl is static. This is the safe signal for outbound calls.
+    this._ready = new Promise<string>((resolve, reject) => {
+      this._readyResolve = resolve;
+      this._readyReject = reject;
+    });
+    // Suppress Node's unhandled-rejection warning for callers that never
+    // touch `phone.ready`. Awaiters of `phone.ready` still see the error.
+    this._ready.catch(() => {});
   }
 
   // === Agent definition ===
@@ -219,6 +287,19 @@ export class Patter {
   // === Serve / test / call ===
 
   async serve(opts: ServeOptions): Promise<void> {
+    try {
+      await this._serveImpl(opts);
+    } catch (err) {
+      // Make sure ``ready`` is rejected on any failure path so callers
+      // doing ``await phone.ready`` after ``void phone.serve(...)`` don't
+      // hang forever. Idempotent — no-op if ``ready`` already resolved.
+      const e = err instanceof Error ? err : new Error(String(err));
+      this._readyReject(e);
+      throw e;
+    }
+  }
+
+  private async _serveImpl(opts: ServeOptions): Promise<void> {
     // Validate agent
     if (!opts.agent || typeof opts.agent !== 'object') {
       throw new TypeError('agent is required. Use phone.agent() to create one.');
@@ -259,21 +340,32 @@ export class Patter {
     showBanner();
 
     if (wantsCloudflared) {
-      const { startTunnel } = await import('./tunnel');
-      this.tunnelHandle = await startTunnel(port);
-      webhookUrl = this.tunnelHandle.hostname;
-      // Propagate the freshly-resolved webhook host into localConfig so a
-      // subsequent call() in the same process reads the same hostname instead
-      // of the original undefined value.
-      this.localConfig = { ...this.localConfig, webhookUrl };
+      try {
+        const { startTunnel } = await import('./tunnel');
+        this.tunnelHandle = await startTunnel(port);
+        webhookUrl = this.tunnelHandle.hostname;
+        // Propagate the freshly-resolved webhook host into localConfig so a
+        // subsequent call() in the same process reads the same hostname instead
+        // of the original undefined value.
+        this.localConfig = { ...this.localConfig, webhookUrl };
+        // Resolve the public deferred so callers awaiting `phone.tunnelReady`
+        // can proceed with `phone.call(...)` without race-prone setTimeouts.
+        this._tunnelReadyResolve(webhookUrl);
+      } catch (err) {
+        const e = err instanceof Error ? err : new Error(String(err));
+        this._tunnelReadyReject(e);
+        throw e;
+      }
     }
 
     if (!webhookUrl) {
-      throw new Error(
+      const err = new Error(
         'No webhookUrl configured. Either:\n' +
         '  - Pass webhookUrl in the Patter constructor\n' +
         '  - Use tunnel: true in serve() to auto-create a tunnel'
       );
+      this._tunnelReadyReject(err);
+      throw err;
     }
 
     const carrier = this.localConfig.carrier;
@@ -316,7 +408,16 @@ export class Patter {
       opts.dashboard ?? true,
       opts.dashboardToken ?? '',
     );
-    await this.embeddedServer.start(port);
+    try {
+      await this.embeddedServer.start(port);
+      // Server is now in `listen` state on 127.0.0.1:port — safe to place
+      // outbound calls because the WS upgrade has a route to land on.
+      this._readyResolve(webhookUrl);
+    } catch (err) {
+      const e = err instanceof Error ? err : new Error(String(err));
+      this._readyReject(e);
+      throw e;
+    }
   }
 
   async test(opts: ServeOptions): Promise<void> {
@@ -410,10 +511,17 @@ export class Patter {
       Twiml: inlineTwiml,
       StatusCallback: statusCallbackUrl,
       StatusCallbackMethod: 'POST',
-      // Full lifecycle so the dashboard sees ringing/no-answer/busy/failed
-      // transitions even when media never arrives.
-      StatusCallbackEvent: 'initiated ringing answered completed',
     });
+    // StatusCallbackEvent is a multi-value parameter — Twilio expects
+    // repeated keys, NOT a space-separated single value. The previous
+    // ``'initiated ringing answered completed'`` form triggered Twilio
+    // notification 21626 ("invalid statusCallbackEvents") on every call,
+    // and on some ingestion paths also broke the answer-handler webhook
+    // (root cause of intermittent 11100 WS-upgrade failures).
+    // See https://www.twilio.com/docs/voice/api/call-resource#statuscallbackevent
+    for (const evt of ['initiated', 'ringing', 'answered', 'completed']) {
+      params.append('StatusCallbackEvent', evt);
+    }
     if (options.machineDetection) {
       params.append('MachineDetection', 'DetectMessageEnd');
       params.append('AsyncAmd', 'true');
@@ -439,9 +547,15 @@ export class Patter {
     }
     // Pre-register the call so the dashboard shows attempts even when the
     // callee never answers (no-answer, busy, carrier-rejected). BUG #06.
+    // Also log the Twilio notifications URL so users can self-diagnose
+    // call-quality issues (warning 21626, fatal 11100, etc.) without
+    // having to hunt them down via the Twilio Console.
     if (this.embeddedServer) {
       try {
-        const body = (await response.clone().json()) as { sid?: string };
+        const body = (await response.clone().json()) as {
+          sid?: string;
+          subresource_uris?: { notifications?: string };
+        };
         const callSid = body.sid;
         if (callSid) {
           this.embeddedServer.metricsStore.recordCallInitiated({
@@ -450,6 +564,14 @@ export class Patter {
             callee: options.to,
             direction: 'outbound',
           });
+          const notificationsPath = body.subresource_uris?.notifications;
+          if (notificationsPath) {
+            getLogger().info(
+              `Outbound call ${callSid} placed. ` +
+                `Twilio notifications: https://api.twilio.com${notificationsPath} ` +
+                '(check here if the call drops with no audio).',
+            );
+          }
         }
       } catch {
         /* non-fatal — the statusCallback will register anyway */

@@ -63,7 +63,7 @@ const VOICE_ID_PATTERN = /^[A-Za-z0-9]{20}$/;
  * insensitive) are resolved via the internal table. Unknown strings are
  * returned as-is so custom voices keep working.
  */
-function resolveVoiceId(voice: string): string {
+export function resolveVoiceId(voice: string): string {
   if (!voice) return voice;
   if (VOICE_ID_PATTERN.test(voice)) return voice;
   return ELEVENLABS_VOICE_ID_BY_NAME[voice.toLowerCase()] ?? voice;

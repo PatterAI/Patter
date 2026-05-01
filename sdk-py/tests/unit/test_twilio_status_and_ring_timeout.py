@@ -373,9 +373,12 @@ class TestRingTimeoutPropagation:
                 == "https://test.ngrok.io/webhooks/twilio/status"
             )
             assert extra["StatusCallbackMethod"] == "POST"
-            # Events we care about for BUG #06.
-            assert "ringing" in extra["StatusCallbackEvent"]
-            assert "completed" in extra["StatusCallbackEvent"]
+            # Events we care about for BUG #06. Now passed as a list under
+            # the snake_case key the twilio-python SDK expects (see
+            # 2026-04-29 fix for Twilio notification 21626).
+            events = extra.get("status_callback_event") or extra.get("StatusCallbackEvent")
+            assert "ringing" in events
+            assert "completed" in events
 
     @pytest.mark.asyncio
     async def test_telnyx_ring_timeout_becomes_timeout_secs(self) -> None:

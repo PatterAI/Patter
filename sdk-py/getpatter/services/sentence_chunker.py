@@ -24,8 +24,43 @@ DEFAULT_MIN_SENTENCE_LEN = 20
 # letting short greetings ("Hi there!") flush immediately for low TTS TTFB.
 DEFAULT_MIN_WORDS_FOR_SHORT_FLUSH = 2
 
-# Sentence-terminating characters (Latin + CJK).
-_SENTENCE_TERMINATORS = ".!?。！？"
+# Sentence-terminating characters. Includes Latin (`. ! ?`), full-width CJK
+# (`。 ！ ？`), Japanese half-width (`｡`), full-width semicolon (`；`), full-
+# width period (`．`), and Western ellipsis (`…`). Set ported from Pipecat's
+# `SENTENCE_ENDING_PUNCTUATION` (BSD-2-Clause, Daily) so we share the same
+# coverage on multilingual responses.
+_SENTENCE_TERMINATORS = ".!?…;。！？；．｡"
+
+# Unambiguous non-Latin sentence terminators — punctuation that cannot also
+# appear in numbers, abbreviations, or URLs in the script's typical usage,
+# so a buffer ending in one of these can be flushed without a regex pass.
+# Ported from Pipecat (BSD-2). Covers Hindi/Devanagari (। ॥), Arabic
+# (؟ ؛ ۔ ؏), Armenian (։ ՜ ՞), Ethiopic (። ፧), Khmer (។ ៕), Burmese (။),
+# Tibetan (༎ ༏), Thai (no terminator — relies on whitespace), and the
+# Japanese half-width set we already have.
+_UNAMBIGUOUS_NON_LATIN_TERMINATORS = "।॥؟؛۔؏։፧።។៕။༎༏"
+
+# Pre-built regex character class covering both Latin/CJK and the
+# non-Latin terminators above. Used by `_split_sentences` to mark `<stop>`.
+_TERMINATOR_REGEX_CLASS = "".join(
+    re.escape(c) for c in sorted(set(_SENTENCE_TERMINATORS + _UNAMBIGUOUS_NON_LATIN_TERMINATORS))
+)
+
+# "Soft" punctuation marks that terminate a clause but not a full sentence.
+# These are candidates for the optional aggressive first-clause flush only.
+# Includes em-dash (U+2014) and en-dash (U+2013); excludes ":" (often used
+# as "Name: …" in LLM output) and ";" (rare in conversational speech).
+_SOFT_TERMINATORS = ",—–"
+
+# Default minimum buffer length before the aggressive first-clause flush is
+# allowed to fire. Below ~40 chars TTS prosody suffers; ElevenLabs internally
+# buffers up to 120 chars by default (``chunk_length_schedule``), so very
+# short fragments are merged regardless of what we send.
+DEFAULT_AGGRESSIVE_FIRST_MIN_LEN = 40
+
+# Currency symbols that, when present near a comma, indicate the comma is a
+# decimal/thousands separator and must not be treated as a clause boundary.
+_CURRENCY_SYMBOLS = "$€£¥₹₩"
 
 
 def _split_sentences(
@@ -39,8 +74,22 @@ def _split_sentences(
     The text must not contain literal ``<prd>`` or ``<stop>`` substrings.
     """
     alphabets = r"([A-Za-z])"
-    prefixes = r"(Mr|St|Mrs|Ms|Dr)[.]"
-    suffixes = r"(Inc|Ltd|Jr|Sr|Co)"
+    # Title/honorific prefixes that take a trailing period (English + Italian).
+    # The period after these is preserved (treated as part of the word, not as
+    # sentence end). Italian additions: Sig, Sgr, Dott, Prof, Avv, Ing, Geom,
+    # Rag, Arch, On, Egr, Spett, Gent, Ill. English additions from the Pipecat
+    # NLTK Punkt set: Gen, Sen, Rep, Lt, Cpt, Capt, Col, Cmdr, Adm.
+    prefixes = (
+        r"(Mr|St|Mrs|Ms|Dr|Sig|Sgr|Dott|Prof|Avv|Ing|Geom|Rag|Arch|On|Egr|"
+        r"Spett|Gent|Ill|Gen|Sen|Rep|Lt|Cpt|Capt|Col|Cmdr|Adm)[.]"
+    )
+    # Suffix-style abbreviations: typically lowercase Italian ones (ecc, art,
+    # pag, …) plus the existing English company-suffix list. English additions
+    # from Pipecat NLTK Punkt: vs, etc, e.g., i.e., No, Vol, pp, cf, ca, op.
+    suffixes = (
+        r"(Inc|Ltd|Jr|Sr|Co|ecc|cit|cap|sez|art|pag|fig|tab|cfr|vol|ed|"
+        r"vs|etc|No|Vol|pp|cf|ca|op|Mt|Hwy|Rt|Pl|Ave|Blvd|Sq)"
+    )
     starters = (
         r"(Mr|Mrs|Ms|Dr|Prof|Capt|Cpt|Lt|He\s|She\s|It\s|They\s|Their\s|"
         r"Our\s|We\s|But\s|However\s|That\s|This\s|Wherever)"
@@ -68,13 +117,15 @@ def _split_sentences(
         text,
     )
     text = re.sub(alphabets + r"[.]" + alphabets + r"[.]", r"\1<prd>\2<prd>", text)
-    text = re.sub(r" " + suffixes + r"[.] " + starters, r" \1<stop> \2", text)
+    # Preserve the period of the suffix abbreviation when it precedes a starter,
+    # e.g. "Patter Inc. He left" → keep "Inc." in the emitted sentence.
+    text = re.sub(r" " + suffixes + r"[.] " + starters, r" \1.<stop> \2", text)
     text = re.sub(r" " + suffixes + r"[.]", r" \1<prd>", text)
     text = re.sub(r" " + alphabets + r"[.]", r" \1<prd>", text)
 
-    # Mark sentence-ending punctuation (including CJK)
-    text = re.sub(r'([.!?\u3002\uff01\uff1f])(["\u201d])', r"\1\2<stop>", text)
-    text = re.sub(r'([.!?\u3002\uff01\uff1f])(?!["\u201d])', r"\1<stop>", text)
+    # Mark sentence-ending punctuation (Latin + CJK + non-Latin scripts).
+    text = re.sub(rf"([{_TERMINATOR_REGEX_CLASS}])([\"\u201d])", r"\1\2<stop>", text)
+    text = re.sub(rf"([{_TERMINATOR_REGEX_CLASS}])(?![\"\u201d])", r"\1<stop>", text)
 
     # Restore periods
     text = text.replace("<prd>", ".")
@@ -124,10 +175,21 @@ class SentenceChunker:
         *,
         min_sentence_len: int = DEFAULT_MIN_SENTENCE_LEN,
         min_words_for_short_flush: int = DEFAULT_MIN_WORDS_FOR_SHORT_FLUSH,
+        aggressive_first_flush: bool = False,
+        aggressive_first_min_len: int = DEFAULT_AGGRESSIVE_FIRST_MIN_LEN,
+        language: str = "en",
     ) -> None:
         self._buffer = ""
         self._min_sentence_len = min_sentence_len
         self._min_words_for_short_flush = min_words_for_short_flush
+        self._aggressive_first_min_len = aggressive_first_min_len
+        self._language = (language or "en").lower()
+        # Italian uses comma as decimal separator (3,14) and dot as thousands
+        # separator (1.000) — both invert the English convention. Aggressive
+        # comma-flush would split decimals, so we hard-disable it for Italian
+        # regardless of caller preference.
+        self._aggressive_first_flush = aggressive_first_flush and not self._language.startswith("it")
+        self._is_first_flush = True
 
     def push(self, token: str) -> list[str]:
         """Feed a token. Returns zero or more complete sentences.
@@ -146,6 +208,17 @@ class SentenceChunker:
           utterances (``"Sì."``) buffered until ``flush()``.
         """
         self._buffer += token
+
+        # Aggressive first-clause flush: when enabled, emit the first clause
+        # of the response on a soft punctuation boundary (",", em/en-dash) as
+        # soon as enough characters accumulate. Saves 200-500 ms TTFA on the
+        # first sentence of each turn. Subsequent sentences fall through to
+        # the standard sentence-boundary path.
+        if self._aggressive_first_flush and self._is_first_flush:
+            flushed = self._maybe_aggressive_first_flush()
+            if flushed is not None:
+                self._is_first_flush = False
+                return [flushed]
 
         if len(self._buffer) < self._min_sentence_len:
             return self._maybe_short_flush()
@@ -205,19 +278,118 @@ class SentenceChunker:
         if word_count < self._min_words_for_short_flush:
             return []
 
-        # Don't flush on potential decimals or acronyms.
+        # Don't flush on potential decimals.
         if len(stripped) >= 2:
             prev = stripped[-2]
-            if prev.isdigit() or (prev.isascii() and prev.isupper()):
+            if prev.isdigit():
+                return []
+            # Don't flush on short all-caps acronyms ("U.", "US.", "USA.") —
+            # these are likely abbreviation periods, not sentence ends. Only
+            # block if the trailing word is **purely uppercase** AND **at most
+            # 3 chars** (matches U/US/USA/NATO patterns without dots; longer
+            # all-caps words like RAMESH or SPEAKING are real sentences).
+            # Pipecat issue #1692 bug: blocking arbitrary uppercase prevented
+            # `"Speaking with RAMESH."` from ever flushing.
+            terminator = stripped[-1]
+            last_word = stripped.rstrip(_SENTENCE_TERMINATORS).split()[-1] if stripped.rstrip(_SENTENCE_TERMINATORS).split() else ""
+            if (
+                terminator == "."
+                and last_word.isascii()
+                and last_word.isupper()
+                and len(last_word) <= 3
+            ):
                 return []
 
         self._buffer = ""
         return [stripped]
 
+    def _maybe_aggressive_first_flush(self) -> str | None:
+        """Try to flush the first clause of the response on a soft punctuation
+        boundary (comma / em-dash / en-dash) to minimise TTFA.
+
+        Returns the flushed clause text (terminator stripped) or ``None`` if
+        no safe boundary is found. All of these guards must pass:
+
+        1. **Min length** — buffer ≥ ``aggressive_first_min_len`` (default 40).
+        2. **Trailing terminator** — last non-whitespace char in
+           ``_SOFT_TERMINATORS``.
+        3. **Decimal/thousands guard** — refuse if the comma is between two
+           digits (``3,14``) or surrounded by digit-thousands grouping.
+        4. **Currency guard** — refuse if a currency symbol appears in the
+           preceding 8 characters (``€1.000,50``).
+        5. **Balanced delimiter** — refuse if open parens/brackets/braces or
+           unmatched double-quotes still pending (avoids splitting JSON,
+           parenthetical asides, quoted speech).
+        6. **Ellipsis** — refuse if buffer ends with ``...`` or ``…`` (it's an
+           intentional pause, not a clause boundary).
+        7. **Sub-token ambiguity** — only fire when at least one trailing char
+           after the terminator has arrived OR the terminator is followed by
+           whitespace (avoids firing mid-token when next char might extend
+           the number/abbreviation).
+        """
+        rstripped = self._buffer.rstrip()
+        if len(rstripped) < self._aggressive_first_min_len:
+            return None
+
+        last_char = rstripped[-1]
+        if last_char not in _SOFT_TERMINATORS:
+            return None
+
+        pos = len(rstripped) - 1
+
+        # Sub-token ambiguity: require at least one char (whitespace or other)
+        # in the original buffer after the terminator. Without this we may
+        # fire mid-decimal before the next digit arrives.
+        if pos + 1 >= len(self._buffer):
+            return None
+        next_char = self._buffer[pos + 1]
+
+        # Decimal/thousands guard for comma: refuse if surrounded by digits.
+        if last_char == ",":
+            prev_char = rstripped[pos - 1] if pos >= 1 else ""
+            if prev_char.isdigit() and next_char.isdigit():
+                return None
+            # Also refuse for "1,000" thousands separator pattern: digit-comma-
+            # whitespace-or-end is OK only when not in a number context. Be
+            # conservative — if a digit immediately precedes the comma and the
+            # last 4 chars contain another comma in a digit context, skip.
+            tail = rstripped[max(0, pos - 6):pos]
+            if prev_char.isdigit() and ("," in tail and any(c.isdigit() for c in tail)):
+                return None
+
+        # Currency guard: any currency symbol in the trailing 8 chars before
+        # the terminator suggests a number context.
+        snippet = rstripped[max(0, pos - 8):pos]
+        if any(c in snippet for c in _CURRENCY_SYMBOLS):
+            return None
+
+        # Balanced delimiter guard.
+        opens = sum(rstripped.count(c) for c in "([{")
+        closes = sum(rstripped.count(c) for c in ")]}")
+        if opens > closes:
+            return None
+        # Odd number of double-quotes ⇒ inside a quoted span; don't split.
+        if rstripped.count('"') % 2 != 0:
+            return None
+
+        # Ellipsis guard.
+        if rstripped.endswith("...") or rstripped.endswith("…"):
+            return None
+
+        # Comma-before-quote guard (orphan fragment).
+        if last_char == "," and next_char == '"':
+            return None
+
+        # All guards passed. Emit the clause and trim the buffer.
+        flushed = rstripped
+        self._buffer = self._buffer[len(rstripped):].lstrip()
+        return flushed
+
     def flush(self) -> list[str]:
         """Flush remaining buffer as final sentence(s). Call at end of stream."""
         remaining = self._buffer.strip()
         self._buffer = ""
+        self._is_first_flush = True
 
         if not remaining:
             return []
@@ -227,3 +399,4 @@ class SentenceChunker:
     def reset(self) -> None:
         """Discard buffered text. Call on interrupt."""
         self._buffer = ""
+        self._is_first_flush = True

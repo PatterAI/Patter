@@ -148,6 +148,38 @@ A hang-over window of 300 ms prevents false positives from background noise whil
 
 ---
 
+## Aggressive First-Flush (Low-Latency)
+
+In **pipeline mode**, the sentence chunker normally waits for a hard sentence terminator (`.`, `!`, `?`, etc.) before emitting a chunk to TTS. With `aggressive_first_flush=True` on `phone.agent(...)`, the chunker emits the **first clause** of each response on a soft punctuation boundary (`,`, em-dash `—`, en-dash `–`) once the buffer reaches ~40 characters.
+
+```python
+agent = phone.agent(
+    stt=DeepgramSTT(),
+    llm=AnthropicLLM(),
+    tts=ElevenLabsTTS(voice_id="rachel"),
+    system_prompt="You are a helpful assistant.",
+    aggressive_first_flush=True,
+)
+```
+
+**Trade-off:** Saves **200–500 ms** of time-to-first-audio (TTFA) on the first sentence of each turn, at the cost of slightly clipped prosody on the very first chunk.
+
+<Warning>
+`aggressive_first_flush` is **hard-disabled when `language` starts with `"it"`** (Italian). Italian uses the comma as a decimal separator (`12,5`), so an aggressive flush would split mid-number. The flag silently has no effect for Italian agents.
+</Warning>
+
+### Sentence chunker — abbreviations & terminators
+
+The chunker does not split on common abbreviations (no spurious sentence breaks after `Dr.`, `vs.`, etc.). Coverage:
+
+- **English:** `Mr`, `Mrs`, `Ms`, `Dr`, `St`, `Jr`, `Sr`, `Prof`, `Hon`, `Rev`, `vs`, `etc`, `Gen`, `Sen`, plus the standard month/measurement set.
+- **Italian:** `Sig`, `Sig.ra`, `Sgr`, `Dott`, `Dott.ssa`, `Prof`, `Avv`, `Ing`, `Geom`, `Rag`, `Arch`, `On`, `Egr`, `Spett`, `Gent`, `Ill`, plus business/legal abbreviations like `S.p.A.`, `S.r.l.`, `S.a.s.`, `ecc`.
+- **Multilingual sentence terminators:** Latin (`. ! ?`), Western ellipsis (`…`), CJK (`。 ！ ？ ｡ ． ；`), Hindi/Devanagari (`। ॥`), Arabic (`؟ ؛ ۔ ؏`), Armenian (`։ ՜ ՞`), Ethiopic (`። ፧`), Khmer (`។ ៕`), Burmese (`။`), Tibetan (`༎ ༏`).
+
+This means the chunker streams cleanly on multilingual responses without hand-tuning.
+
+---
+
 ## AI Disclosure
 
 Many jurisdictions require disclosure that the caller is speaking with an AI. Patter does not automatically inject a disclosure message. Instead, use the `first_message` field on your agent configuration to include an appropriate disclosure at the start of every call:

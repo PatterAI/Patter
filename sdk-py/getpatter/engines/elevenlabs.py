@@ -35,6 +35,15 @@ class ConvAI:
                 "ElevenLabs ConvAI engine requires an api_key. Pass "
                 "api_key='...' or set ELEVENLABS_API_KEY in the environment."
             )
+        if not agent:
+            raise ValueError(
+                "ElevenLabs ConvAI engine requires an agent_id. Create one "
+                "in the ElevenLabs dashboard "
+                "(https://elevenlabs.io/app/conversational-ai) — the agent "
+                "ID is per-deployed-agent and cannot be derived from the "
+                "API key alone. Then either pass agent_id='ag_...' at "
+                "construction or set ELEVENLABS_AGENT_ID in the environment."
+            )
         object.__setattr__(self, "api_key", key)
         object.__setattr__(self, "agent_id", agent)
 

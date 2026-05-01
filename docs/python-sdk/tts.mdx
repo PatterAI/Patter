@@ -48,6 +48,7 @@ agent = phone.agent(
 | Flat import | Namespaced import | Env var | Install extra |
 |-------------|-------------------|---------|---------------|
 | `ElevenLabsTTS` | `getpatter.tts.elevenlabs.TTS` | `ELEVENLABS_API_KEY` | included |
+| `ElevenLabsWebSocketTTS` | `getpatter.tts.elevenlabs_ws.TTS` | `ELEVENLABS_API_KEY` | included |
 | `OpenAITTS` | `getpatter.tts.openai.TTS` | `OPENAI_API_KEY` | included |
 | `CartesiaTTS` | `getpatter.tts.cartesia.TTS` | `CARTESIA_API_KEY` | `getpatter[cartesia]` |
 | `RimeTTS` | `getpatter.tts.rime.TTS` | `RIME_API_KEY` | `getpatter[rime]` |
@@ -87,6 +88,20 @@ tts = ElevenLabsTTS.for_telnyx(voice_id="rachel")
 ```
 
 `CartesiaTTS.for_twilio()` / `for_telnyx()` and `ElevenLabsConvAI.for_twilio()` / `for_telnyx()` work the same way. Use them whenever you know the call will go out over Twilio or Telnyx — they shave tens of milliseconds off TTFB and drop CPU on long calls.
+
+### WebSocket variant
+
+`ElevenLabsWebSocketTTS` is an opt-in low-latency drop-in for `ElevenLabsTTS` that uses the `/stream-input` WebSocket endpoint. It saves ~50 ms of HTTP request setup per utterance and avoids TLS cold-starts on bursty traffic. See the [ElevenLabs WebSocket setup page](/python-sdk/providers/elevenlabs-websocket) for full details.
+
+```python
+from getpatter import ElevenLabsWebSocketTTS
+
+tts = ElevenLabsWebSocketTTS()                       # reads ELEVENLABS_API_KEY
+tts = ElevenLabsWebSocketTTS.for_twilio(api_key="...")   # ulaw_8000 native
+tts = ElevenLabsWebSocketTTS.for_telnyx(api_key="...")   # pcm_16000 native
+```
+
+<Note>The WebSocket endpoint does not support `eleven_v3*` models — use the HTTP `ElevenLabsTTS` for v3.</Note>
 
 ## OpenAI
 

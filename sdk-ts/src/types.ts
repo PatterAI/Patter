@@ -99,6 +99,33 @@ export interface HookContext {
   readonly history: ReadonlyArray<{ role: string; text: string }>;
 }
 
+/**
+ * Streaming-friendly post-LLM transform hook. Three tiers, all optional:
+ *
+ * - **`onChunk`** — per-token pure transform. Sync, must be fast (~0 ms
+ *   budget). Use for: regex replace, markdown strip, profanity char-swap.
+ * - **`onSentence`** — per-sentence rewrite. Runs between the sentence
+ *   chunker and TTS. Returns rewritten text or `null` to keep original;
+ *   ``""`` (empty string) drops the sentence silently. Latency budget
+ *   ~50–300 ms. Use for: PII redaction, persona overlay, refusal swap.
+ * - **`onResponse`** — per-full-response rewrite. **Blocks streaming TTS**
+ *   until the LLM stream completes, then runs once on the full text.
+ *   Latency cost: 500 ms – 2 s. Use only when sentence-level rewrite is
+ *   insufficient (e.g. structured output validation). Avoid in latency-
+ *   sensitive paths.
+ *
+ * The legacy single-callable signature `(text, ctx) => string` is still
+ * accepted; it maps to `onResponse` and emits a deprecation warning.
+ */
+export interface AfterLLMHook {
+  onChunk?: (chunk: string) => string;
+  onSentence?: (sentence: string, ctx: HookContext) => string | null | Promise<string | null>;
+  onResponse?: (text: string, ctx: HookContext) => string | null | Promise<string | null>;
+}
+
+/** Legacy single-callable form of after_llm. Maps to `onResponse`. @deprecated Pass `{ onResponse }` instead. */
+export type AfterLLMLegacy = (text: string, ctx: HookContext) => string | null | Promise<string | null>;
+
 export interface PipelineHooks {
   /** Called with the raw PCM audio chunk before it is forwarded to the STT provider.
    *  Return null to drop the chunk (e.g., for custom VAD gating). */
@@ -112,10 +139,16 @@ export interface PipelineHooks {
     messages: Array<Record<string, unknown>>,
     ctx: HookContext,
   ) => Array<Record<string, unknown>> | null | Promise<Array<Record<string, unknown>> | null>;
-  /** Called with the final assistant text after the LLM stream completes.
-   *  Return null to keep, or return a new string to replace
-   *  (useful for output validation, redaction, post-processing). */
-  afterLlm?: (text: string, ctx: HookContext) => string | null | Promise<string | null>;
+  /**
+   * Post-LLM transform. Pass either:
+   * - the new **3-tier object** (`{ onChunk, onSentence, onResponse }`) for
+   *   streaming-friendly per-chunk / per-sentence / per-response transforms;
+   * - or the **legacy callable** `(text, ctx) => string` (deprecated) which
+   *   maps to `onResponse` semantics and blocks streaming TTS.
+   *
+   * See `AfterLLMHook` for the full tier contract.
+   */
+  afterLlm?: AfterLLMHook | AfterLLMLegacy;
   /** Called before TTS, per-sentence in streaming mode. Return null to skip TTS for this sentence. */
   beforeSynthesize?: (text: string, ctx: HookContext) => string | null | Promise<string | null>;
   /** Called after TTS produces an audio chunk. Return null to discard this chunk. */
@@ -210,6 +243,18 @@ export interface AgentOptions {
    * Default: 300.
    */
   bargeInThresholdMs?: number;
+  /**
+   * When true, the sentence chunker emits the first clause of each response
+   * on a soft punctuation boundary (",", em-dash, en-dash) once ~40 chars
+   * have accumulated. Saves 200–500 ms TTFA on the first sentence of each
+   * turn at the cost of slightly clipping prosody on the very first chunk.
+   * Hard-disabled when ``language`` starts with ``"it"`` (Italian decimal
+   * comma would split mid-number). Default: false.
+   *
+   * See SentenceChunker constructor for the full guard list (decimal,
+   * currency, balanced delimiter, ellipsis).
+   */
+  aggressiveFirstFlush?: boolean;
 }
 
 export type PipelineMessageHandler = (data: Record<string, unknown>) => Promise<string>;

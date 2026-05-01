@@ -349,15 +349,19 @@ class LLMLoop:
         # tool-call iterations re-submit augmented messages and skip the
         # hook (running the hook on every iteration would let a poorly
         # written hook trigger an infinite re-write loop).
-        # Note: ``after_llm`` rewriting is only meaningful pre-TTS, so when
-        # the hook is configured we buffer all tokens, run the hook, and
-        # yield the (possibly rewritten) text as a single chunk. Without
-        # the hook, streaming continues token-by-token as before.
-        has_after_llm = (
+        # Tier 3 (``on_response``) — and the deprecated legacy callable that
+        # maps to it — buffer streaming tokens, run the hook against the
+        # final assistant text, and yield the (possibly rewritten) text as
+        # a single chunk. Tier 1 (``on_chunk``) and tier 2 (``on_sentence``)
+        # keep streaming. Tier 1 transform is applied inline below; tier 2
+        # runs in the sentence chunker / stream-handler downstream.
+        has_after_llm_response = bool(
             hook_executor is not None
             and hook_ctx is not None
-            and getattr(hook_executor, "_hooks", None) is not None
-            and getattr(hook_executor._hooks, "after_llm", None) is not None
+            and hook_executor.has_after_llm_response()
+        )
+        has_after_llm_chunk = bool(
+            hook_executor is not None and hook_executor.has_after_llm_chunk()
         )
         if hook_executor is not None and hook_ctx is not None:
             messages = await hook_executor.run_before_llm(messages, hook_ctx)
@@ -391,14 +395,17 @@ class LLMLoop:
                     if chunk_type == "text":
                         content = chunk.get("content", "")
                         if content:
+                            # Tier 1 — per-token sync transform. Cheap, no buffering.
+                            if has_after_llm_chunk:
+                                content = hook_executor.run_after_llm_chunk(content)
                             text_parts.append(content)
                             if self._event_bus is not None:
                                 self._event_bus.emit(
                                     "llm_chunk",
                                     {"text": content, "iteration": iteration},
                                 )
-                            if has_after_llm:
-                                # Buffer; yield after the after_llm hook runs.
+                            if has_after_llm_response:
+                                # Buffer; yield after the on_response hook runs.
                                 all_emitted_text.append(content)
                             else:
                                 yield content
@@ -446,9 +453,11 @@ class LLMLoop:
 
             # If no tool calls, we're done
             if not has_tool_calls:
-                if has_after_llm:
+                if has_after_llm_response:
                     final_text = "".join(all_emitted_text)
-                    rewritten = await hook_executor.run_after_llm(final_text, hook_ctx)
+                    rewritten = await hook_executor.run_after_llm_response(
+                        final_text, hook_ctx
+                    )
                     if rewritten:
                         yield rewritten
                 return

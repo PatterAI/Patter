@@ -488,3 +488,103 @@ describe('PipelineHookExecutor — beforeSendToStt', () => {
     expect(errorSpy).toHaveBeenCalled();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 3 — afterLlm 3-tier API
+// ---------------------------------------------------------------------------
+
+describe('PipelineHookExecutor — afterLlm 3-tier', () => {
+  it('no hook: pass-through, all has* return false', async () => {
+    const ex = new PipelineHookExecutor(undefined);
+    expect(ex.hasAfterLlm()).toBe(false);
+    expect(ex.hasAfterLlmResponse()).toBe(false);
+    expect(ex.hasAfterLlmChunk()).toBe(false);
+    expect(ex.hasAfterLlmSentence()).toBe(false);
+    expect(ex.runAfterLlmChunk('Hi')).toBe('Hi');
+    expect(await ex.runAfterLlmSentence('Hi.', makeCtx())).toBe('Hi.');
+    expect(await ex.runAfterLlmResponse('Hi.', makeCtx())).toBe('Hi.');
+  });
+
+  it('legacy callable maps to onResponse semantics', async () => {
+    // Deprecation warning is emitted once per process so we cannot reliably
+    // assert it here without resetting global state — the behavioural check
+    // (legacy callable runs as on_response) is the load-bearing guarantee.
+    const hooks: PipelineHooks = {
+      afterLlm: async (text: string) => text.toUpperCase(),
+    };
+    const ex = new PipelineHookExecutor(hooks);
+    expect(ex.hasAfterLlmResponse()).toBe(true);
+    expect(ex.hasAfterLlmSentence()).toBe(false);
+    expect(await ex.runAfterLlmResponse('hello world', makeCtx())).toBe('HELLO WORLD');
+  });
+
+  it('object form: all three tiers wired', async () => {
+    const hooks: PipelineHooks = {
+      afterLlm: {
+        onChunk: (c) => c.replace(/X/g, 'Y'),
+        onSentence: async (s) => s.replace('foo', 'bar'),
+        onResponse: async (t) => t + ' (final)',
+      },
+    };
+    const ex = new PipelineHookExecutor(hooks);
+    expect(ex.hasAfterLlmChunk()).toBe(true);
+    expect(ex.hasAfterLlmSentence()).toBe(true);
+    expect(ex.hasAfterLlmResponse()).toBe(true);
+    expect(ex.runAfterLlmChunk('aXbXc')).toBe('aYbYc');
+    expect(await ex.runAfterLlmSentence('foo bar baz', makeCtx())).toBe('bar bar baz');
+    expect(await ex.runAfterLlmResponse('hello', makeCtx())).toBe('hello (final)');
+  });
+
+  it('chunk hook failure falls open (returns original)', () => {
+    const hooks: PipelineHooks = {
+      afterLlm: { onChunk: () => { throw new Error('boom'); } },
+    };
+    const ex = new PipelineHookExecutor(hooks);
+    expect(ex.runAfterLlmChunk('hello')).toBe('hello');
+  });
+
+  it('chunk hook non-string return falls open', () => {
+    const hooks: PipelineHooks = {
+      afterLlm: { onChunk: ((c: string) => 42 as unknown as string) },
+    };
+    const ex = new PipelineHookExecutor(hooks);
+    expect(ex.runAfterLlmChunk('hello')).toBe('hello');
+  });
+
+  it('sentence hook returning empty string drops sentence', async () => {
+    const hooks: PipelineHooks = {
+      afterLlm: { onSentence: async () => '' },
+    };
+    const ex = new PipelineHookExecutor(hooks);
+    expect(await ex.runAfterLlmSentence('kept', makeCtx())).toBeNull();
+  });
+
+  it('sentence hook returning null keeps original', async () => {
+    const hooks: PipelineHooks = {
+      afterLlm: { onSentence: async () => null },
+    };
+    const ex = new PipelineHookExecutor(hooks);
+    expect(await ex.runAfterLlmSentence('kept', makeCtx())).toBe('kept');
+  });
+
+  it('sentence hook failure falls open', async () => {
+    const hooks: PipelineHooks = {
+      afterLlm: {
+        onSentence: async () => {
+          throw new Error('oops');
+        },
+      },
+    };
+    const ex = new PipelineHookExecutor(hooks);
+    expect(await ex.runAfterLlmSentence('text', makeCtx())).toBe('text');
+  });
+
+  it('legacy alias methods still work', async () => {
+    const hooks: PipelineHooks = {
+      afterLlm: async (text: string) => text + '!',
+    };
+    const ex = new PipelineHookExecutor(hooks);
+    expect(ex.hasAfterLlm()).toBe(true);
+    expect(await ex.runAfterLlm('hi', makeCtx())).toBe('hi!');
+  });
+});

@@ -1,0 +1,125 @@
+---
+title: "ElevenLabs WebSocket"
+description: "Opt-in low-latency WebSocket variant of ElevenLabsTTS. Drop-in API, saves ~50 ms per utterance."
+icon: "bolt"
+---
+
+# ElevenLabs WebSocket TTS
+
+`ElevenLabsWebSocketTTS` is an **opt-in, low-latency** variant of [`ElevenLabsTTS`](/python-sdk/tts#elevenlabs) that streams over the ElevenLabs `/v1/text-to-speech/{voice_id}/stream-input` WebSocket endpoint instead of the HTTP `/stream` endpoint.
+
+It is a drop-in replacement: same constructor surface, same `synthesize(text)` async iterator, same telephony factories (`for_twilio`, `for_telnyx`).
+
+## Why use it
+
+- **Saves ~50 ms HTTP request setup per utterance.** No new HTTP request / TLS handshake is built for each turn.
+- **Avoids cold-start TLS** when calls are bursty (the WebSocket holds a warm connection for the duration of the utterance).
+- **Native telephony output formats** — μ-law @ 8 kHz for Twilio and PCM @ 16 kHz for Telnyx, no client-side resampling.
+
+When **not** to use it:
+
+- You need `eleven_v3` / `eleven_v3_preview` — those models are **not** supported by the stream-input WebSocket. Use the HTTP [`ElevenLabsTTS`](/python-sdk/tts#elevenlabs) instead.
+- Your traffic is so low that the per-utterance HTTP round trip is irrelevant.
+
+## Install
+
+`websockets` is already a runtime dependency of `getpatter`, so no extra install is required:
+
+```bash
+pip install getpatter
+```
+
+## Quickstart
+
+```python
+from getpatter import ElevenLabsWebSocketTTS
+
+# Reads ELEVENLABS_API_KEY from env
+tts = ElevenLabsWebSocketTTS()
+
+# Twilio-native μ-law @ 8 kHz (no resampling)
+tts = ElevenLabsWebSocketTTS.for_twilio(api_key="...")
+
+# Telnyx-native PCM @ 16 kHz
+tts = ElevenLabsWebSocketTTS.for_telnyx(api_key="...")
+```
+
+Namespaced import:
+
+```python
+from getpatter.tts import elevenlabs_ws
+
+tts = elevenlabs_ws.TTS()
+tts = elevenlabs_ws.TTS.for_twilio(api_key="...")
+```
+
+In an agent:
+
+```python
+import asyncio
+from getpatter import Patter, Twilio, DeepgramSTT, AnthropicLLM, ElevenLabsWebSocketTTS
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
+agent = phone.agent(
+    stt=DeepgramSTT(),
+    llm=AnthropicLLM(),
+    tts=ElevenLabsWebSocketTTS.for_twilio(api_key="..."),
+    system_prompt="You are a helpful assistant.",
+)
+
+asyncio.run(phone.serve(agent))
+```
+
+## Constructor parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `api_key` | `str \| None` | `None` | API key — reads from `ELEVENLABS_API_KEY` if omitted. |
+| `voice_id` | `str` | `"21m00Tcm4TlvDq8ikWAM"` | ElevenLabs voice ID (or name). |
+| `model_id` | `str` | `"eleven_flash_v2_5"` | Model preset. `eleven_v3*` is **not** supported on this endpoint. |
+| `output_format` | `str` | `"pcm_16000"` | Wire format. Use `"ulaw_8000"` for Twilio Media Streams or `"pcm_16000"` for Telnyx. |
+| `voice_settings` | `dict \| None` | `None` | Voice settings (`stability`, `similarity_boost`, `use_speaker_boost`, …). |
+| `language_code` | `str \| None` | `None` | ISO 639-1 language code. |
+| `auto_mode` | `bool` | `True` | When `True`, ElevenLabs handles internal chunk scheduling. Pass `False` to take manual control via `chunk_length_schedule`. |
+| `inactivity_timeout` | `int` | `60` | Seconds the server holds the WS open with no input before closing. Max documented value: 180. |
+| `chunk_length_schedule` | `list[int] \| None` | `None` | Custom chunk schedule. Each value must be in `[5, 500]`. Only honored when `auto_mode=False`. |
+| `open_timeout` | `float` | `5.0` | Seconds to wait for the WS handshake before raising. |
+| `frame_timeout` | `float` | `30.0` | Seconds to wait for each subsequent server frame before raising `ElevenLabsTTSError`. |
+
+## Telephony factories
+
+`ElevenLabsWebSocketTTS.for_twilio(...)` and `ElevenLabsWebSocketTTS.for_telnyx(...)` mirror the HTTP variant. They pre-set `output_format` and (for Twilio) tune `voice_settings` for low-bandwidth μ-law:
+
+```python
+# Twilio: ulaw_8000 + speaker_boost off, moderate stability
+tts = ElevenLabsWebSocketTTS.for_twilio(api_key="...")
+
+# Telnyx: pcm_16000 native
+tts = ElevenLabsWebSocketTTS.for_telnyx(api_key="...")
+```
+
+## Limitations
+
+- **`eleven_v3` family is rejected at construction time.** The stream-input WebSocket does not support v3 models. Use the HTTP [`ElevenLabsTTS`](/python-sdk/tts#elevenlabs) instead.
+- **Per-utterance lifecycle.** A new WebSocket is opened and closed per `synthesize(text)` call, matching HTTP semantics. A pooled WS shared across turns of the same call session is on the roadmap.
+- **`optimize_streaming_latency`** is officially deprecated by ElevenLabs and is not exposed.
+
+## Errors
+
+```python
+from getpatter.providers.elevenlabs_ws_tts import ElevenLabsTTSError
+```
+
+`ElevenLabsTTSError` is raised when:
+
+- The server emits a JSON `error` frame.
+- No frame is received within `frame_timeout` seconds (stalled connection).
+- A binary audio frame exceeds the safety cap (`512 KB`).
+
+The connection is always closed in `finally`, and a best-effort `close_context` message is sent so ElevenLabs stops billing for unconsumed audio.
+
+## See also
+
+- [TTS overview](/python-sdk/tts) — provider table and shared concepts.
+- HTTP variant: [`ElevenLabsTTS`](/python-sdk/tts#elevenlabs).

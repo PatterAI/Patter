@@ -1,0 +1,100 @@
+---
+title: "ElevenLabs WebSocket TTS"
+description: "Opt-in WebSocket variant of ElevenLabsTTS that trims HTTP setup latency."
+icon: "waveform"
+---
+
+# ElevenLabs WebSocket TTS
+
+`ElevenLabsWebSocketTTS` is a drop-in alternative to [`ElevenLabsTTS`](/typescript-sdk/tts#elevenlabs) that streams audio over a WebSocket connection instead of the standard HTTP streaming endpoint. The public API is identical to the HTTP variant — the only difference is the transport.
+
+## Why use it
+
+The WebSocket variant saves roughly **50 ms of HTTP setup + TLS cold-start per utterance** compared to `ElevenLabsTTS`. On chatty conversational workloads this shaves real time off every agent turn. Use it when:
+
+- You are latency-bound on TTS time-to-first-byte.
+- Your model is one of the streaming-friendly `eleven_flash_v2_5` / `eleven_turbo_v2_5` families.
+- You do **not** need `eleven_v3*` (see [Limitations](#limitations)).
+
+If those conditions do not hold, stay on the HTTP variant — it is simpler and more forgiving on flaky networks.
+
+## Install
+
+```bash
+npm install getpatter
+```
+
+## Usage
+
+```typescript
+import { ElevenLabsWebSocketTTS } from "getpatter";
+
+const tts = new ElevenLabsWebSocketTTS();                       // reads ELEVENLABS_API_KEY
+const twilio = ElevenLabsWebSocketTTS.forTwilio({ apiKey: "..." });  // ulaw_8000 preset
+const telnyx = ElevenLabsWebSocketTTS.forTelnyx({ apiKey: "..." });  // pcm_16000 preset
+```
+
+In an agent:
+
+```typescript
+// npx tsx example.ts
+import { Patter, Twilio, DeepgramSTT, ElevenLabsWebSocketTTS } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  stt: new DeepgramSTT(),                                  // DEEPGRAM_API_KEY from env
+  tts: ElevenLabsWebSocketTTS.forTwilio({}),               // ELEVENLABS_API_KEY from env
+  systemPrompt: "You are a helpful assistant.",
+});
+
+await phone.serve({ agent });
+```
+
+## Constructor
+
+```typescript
+new ElevenLabsWebSocketTTS(opts?: ElevenLabsWebSocketTTSOptions)
+ElevenLabsWebSocketTTS.forTwilio(opts?: ElevenLabsWebSocketTTSOptions)  // outputFormat: "ulaw_8000"
+ElevenLabsWebSocketTTS.forTelnyx(opts?: ElevenLabsWebSocketTTSOptions)  // outputFormat: "pcm_16000"
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `apiKey` | `string` | — | API key. Reads from `ELEVENLABS_API_KEY` if omitted. |
+| `voiceId` | `string` | `"21m00Tcm4TlvDq8ikWAM"` (Rachel) | ElevenLabs voice ID. |
+| `modelId` | `string` | `"eleven_flash_v2_5"` | Model preset. Must be a streaming-compatible model. |
+| `outputFormat` | `string` | `"pcm_16000"` | ElevenLabs output format. Use `"ulaw_8000"` for Twilio, `"pcm_16000"` for Telnyx. |
+| `voiceSettings` | `VoiceSettings` | — | Stability, similarity boost, style, and speaker boost overrides. |
+| `languageCode` | `string` | — | BCP-47 language code forwarded to ElevenLabs. |
+| `autoMode` | `boolean` | `true` | Server-side automatic flushing when the input ends. |
+| `inactivityTimeout` | `number` | `60` | Seconds the WebSocket stays open without input before the server closes it. |
+| `chunkLengthSchedule` | `number[]` | — | Server-side chunking schedule for streamed text. |
+| `chunkSize` | `number` | — | Audio chunk size hint for the receive side. |
+
+## Limitations
+
+- **`eleven_v3*` is not supported.** The v3 model family does not work over the WebSocket transport — fall back to the HTTP [`ElevenLabsTTS`](/typescript-sdk/tts#elevenlabs) for those models.
+- **Per-utterance lifecycle.** A fresh WebSocket connection is opened and closed for each agent utterance. The latency win comes from a faster handshake, not from session reuse.
+- **Network sensitivity.** WebSocket connections are more sensitive to flaky links than short-lived HTTP requests. On unreliable networks the HTTP variant is safer.
+
+## Errors
+
+`ElevenLabsTTSError` is thrown on:
+
+- Server-reported errors over the WebSocket frame.
+- Stalled connections (no audio frames received within the inactivity window).
+- Authentication failures (missing or invalid `apiKey`).
+
+```typescript
+import { ElevenLabsWebSocketTTS, ElevenLabsTTSError } from "getpatter";
+
+try {
+  const tts = new ElevenLabsWebSocketTTS({ apiKey: "..." });
+  // ...
+} catch (err) {
+  if (err instanceof ElevenLabsTTSError) {
+    console.error("ElevenLabs WS TTS failed:", err.message);
+  }
+}
+```
