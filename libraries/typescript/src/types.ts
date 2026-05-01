@@ -1,3 +1,8 @@
+/**
+ * Public type definitions for the Patter SDK — agent options, pipeline hooks,
+ * provider config envelopes, and serve/call request/response shapes.
+ */
+
 import type { Carrier as TwilioCarrier } from "./telephony/twilio";
 import type { Carrier as TelnyxCarrier } from "./telephony/telnyx";
 import type { Realtime } from "./engines/openai";
@@ -7,12 +12,14 @@ import type { Tool as ToolInstance } from "./public-api";
 import type { STTAdapter, TTSAdapter } from "./provider-factory";
 import type { LLMProvider } from "./llm-loop";
 
+/** Inbound message handed to a `MessageHandler` per turn (legacy single-turn API). */
 export interface IncomingMessage {
   readonly text: string;
   readonly callId: string;
   readonly caller: string;
 }
 
+/** STT provider configuration envelope (provider name + key + language + provider-specific options). */
 export interface STTConfig {
   readonly provider: string;
   readonly apiKey: string;
@@ -27,6 +34,7 @@ export interface STTConfig {
   options?: Record<string, unknown>;
 }
 
+/** TTS provider configuration envelope (provider name + key + voice + provider-specific options). */
 export interface TTSConfig {
   readonly provider: string;
   readonly apiKey: string;
@@ -39,9 +47,12 @@ export interface TTSConfig {
   options?: Record<string, unknown>;
 }
 
+/** Single-turn message handler — receives the user's transcript, returns the agent's reply. */
 export type MessageHandler = (msg: IncomingMessage) => Promise<string>;
+/** Generic call-lifecycle callback (start/end/transcript/metrics). */
 export type CallEventHandler = (data: Record<string, unknown>) => Promise<void>;
 
+/** Internal shape of a tool definition (matches `Tool` from `public-api.ts`). */
 export interface ToolDefinition {
   name: string;
   description: string;
@@ -54,6 +65,7 @@ export interface ToolDefinition {
 
 // === Local mode ===
 
+/** Constructor options for `new Patter({...})` in local-server mode. */
 export interface LocalOptions {
   /**
    * Telephony carrier instance. Required.
@@ -81,6 +93,7 @@ export interface LocalOptions {
   openaiKey?: string;
 }
 
+/** Internal shape of a guardrail (matches `Guardrail` class from `public-api.ts`). */
 export interface Guardrail {
   /** Name for logging when triggered */
   name: string;
@@ -92,6 +105,7 @@ export interface Guardrail {
   replacement?: string;
 }
 
+/** Per-call context passed to every pipeline hook. */
 export interface HookContext {
   readonly callId: string;
   readonly caller: string;
@@ -126,6 +140,7 @@ export interface AfterLLMHook {
 /** Legacy single-callable form of after_llm. Maps to `onResponse`. @deprecated Pass `{ onResponse }` instead. */
 export type AfterLLMLegacy = (text: string, ctx: HookContext) => string | null | Promise<string | null>;
 
+/** Optional callbacks fired at each stage of the STT→LLM→TTS pipeline. */
 export interface PipelineHooks {
   /** Called with the raw PCM audio chunk before it is forwarded to the STT provider.
    *  Return null to drop the chunk (e.g., for custom VAD gating). */
@@ -194,6 +209,7 @@ export interface BackgroundAudioPlayer {
  *    (see ``Patter.agent()`` for the resolution).
  * 3. Otherwise, the AgentOptions default is used.
  */
+/** Configuration for a local-mode voice AI agent (passed to `phone.agent({...})`). */
 export interface AgentOptions {
   systemPrompt: string;
   /**
@@ -285,8 +301,10 @@ export interface AgentOptions {
   aggressiveFirstFlush?: boolean;
 }
 
+/** Pipeline-mode message handler — given full turn context, returns the agent's reply. */
 export type PipelineMessageHandler = (data: Record<string, unknown>) => Promise<string>;
 
+/** Options for `Patter.serve({...})`. */
 export interface ServeOptions {
   agent: AgentOptions;
   port?: number;
@@ -316,6 +334,7 @@ export interface ServeOptions {
   dashboardPersist?: boolean;
 }
 
+/** Options for `Patter.call({...})` to place an outbound call. */
 export interface LocalCallOptions {
   to: string;
   agent: AgentOptions;

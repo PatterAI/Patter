@@ -1,3 +1,8 @@
+/**
+ * Embedded HTTP/WebSocket server — wires Express webhooks for the configured
+ * carrier (Twilio or Telnyx) into the per-call `StreamHandler` and dashboard.
+ */
+
 import crypto from 'node:crypto';
 import express from 'express';
 import { createServer, Server as HTTPServer } from 'http';
@@ -17,6 +22,7 @@ import type { TelephonyBridge } from './stream-handler';
 import type { AgentOptions, PipelineMessageHandler } from './types';
 import { CallLogger, resolveLogRoot } from './services/call-log';
 
+/** Resolved configuration consumed by `EmbeddedServer` (carrier credentials, webhook URL, etc.). */
 export interface LocalConfig {
   twilioSid?: string;
   twilioToken?: string;
@@ -620,6 +626,7 @@ export class TelnyxBridge implements TelephonyBridge {
 /** Maximum seconds to wait for active calls to finish during graceful shutdown. */
 const GRACEFUL_SHUTDOWN_TIMEOUT_MS = 10_000;
 
+/** HTTP+WebSocket server that hosts the carrier webhook surface and per-call media streams. */
 export class EmbeddedServer {
   private server: HTTPServer | null = null;
   private wss: WebSocketServer | null = null;
@@ -669,6 +676,7 @@ export class EmbeddedServer {
     }
   }
 
+  /** Bind HTTP + WebSocket listeners on `port`, mount carrier webhooks and dashboard routes. */
   async start(port: number = 8000): Promise<void> {
     const webhookUrlPattern = /^[a-zA-Z0-9][a-zA-Z0-9.\-]+[a-zA-Z0-9]$/;
     if (!webhookUrlPattern.test(this.config.webhookUrl)) {

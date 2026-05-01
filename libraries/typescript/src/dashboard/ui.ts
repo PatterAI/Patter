@@ -5,6 +5,7 @@
 
 /* eslint-disable no-useless-escape */
 
+/** Self-contained dashboard HTML+CSS+JS bundle served from `GET /`. */
 export const DASHBOARD_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>

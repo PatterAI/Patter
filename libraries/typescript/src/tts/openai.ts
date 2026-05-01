@@ -1,6 +1,7 @@
 /** OpenAI TTS for Patter pipeline mode. */
 import { OpenAITTS as _OpenAITTS } from "../providers/openai-tts";
 
+/** Constructor options for the OpenAI `TTS` adapter. */
 export interface OpenAITTSOptions {
   /** API key. Falls back to OPENAI_API_KEY env var when omitted. */
   apiKey?: string;

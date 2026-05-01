@@ -1,6 +1,7 @@
 /** Cartesia streaming STT for Patter pipeline mode. */
 import { CartesiaSTT as _CartesiaSTT, type CartesiaEncoding } from "../providers/cartesia-stt";
 
+/** Constructor options for the Cartesia `STT` adapter. */
 export interface CartesiaSTTOptions {
   /** API key. Falls back to CARTESIA_API_KEY env var when omitted. */
   apiKey?: string;

@@ -10,6 +10,7 @@
 
 import type { ToolDefinition } from "./types";
 
+/** Options accepted by `new Guardrail(...)` / `guardrail(...)`. */
 export interface GuardrailOptions {
   /** Name for logging when triggered. */
   name: string;
@@ -55,11 +56,13 @@ export function guardrail(opts: GuardrailOptions): Guardrail {
   return new Guardrail(opts);
 }
 
+/** Async handler invoked in-process when the LLM calls a `Tool`. */
 export type ToolHandler = (
   args: Record<string, unknown>,
   context: Record<string, unknown>,
 ) => Promise<string>;
 
+/** Options accepted by `new Tool(...)` / `tool(...)`. */
 export interface ToolOptions {
   /** Tool name (visible to the LLM). */
   name: string;

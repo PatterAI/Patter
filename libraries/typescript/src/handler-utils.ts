@@ -1,3 +1,8 @@
+/**
+ * Stream-handler utilities — capped conversation history and SSRF-validated
+ * tool-webhook execution shared across the various per-call handlers.
+ */
+
 import { validateWebhookUrl } from './server';
 import { getLogger } from './logger';
 

@@ -1,6 +1,7 @@
 /** Soniox streaming STT for Patter pipeline mode. */
 import { SonioxSTT as _SonioxSTT } from "../providers/soniox-stt";
 
+/** Constructor options for the Soniox `STT` adapter. */
 export interface SonioxSTTOptions {
   /** API key. Falls back to SONIOX_API_KEY env var when omitted. */
   apiKey?: string;

@@ -1,6 +1,7 @@
 /** Anthropic Claude LLM for Patter pipeline mode. */
 import { AnthropicLLMProvider as _AnthropicLLM } from "../providers/anthropic-llm";
 
+/** Constructor options for the Anthropic Claude `LLM` adapter. */
 export interface AnthropicLLMOptions {
   /** API key. Falls back to ANTHROPIC_API_KEY env var when omitted. */
   apiKey?: string;

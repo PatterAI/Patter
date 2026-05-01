@@ -6,6 +6,7 @@ import {
   type LMNTSampleRate,
 } from "../providers/lmnt-tts";
 
+/** Constructor options for the LMNT `TTS` adapter. */
 export interface LMNTTTSOptions {
   /** API key. Falls back to LMNT_API_KEY env var when omitted. */
   apiKey?: string;

@@ -14,6 +14,7 @@
 
 import http from 'node:http';
 
+/** Fire-and-forget POST a completed call payload into a locally-running dashboard, if any. */
 export function notifyDashboard(
   callData: Record<string, unknown>,
   port = 8000,

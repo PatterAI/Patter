@@ -12,8 +12,10 @@ import { randomUUID } from "node:crypto";
 // Types
 // ---------------------------------------------------------------------------
 
+/** Role tag attached to every `ChatMessage`. */
 export type ChatRole = "system" | "user" | "assistant" | "tool";
 
+/** Single immutable entry in a `ChatContext` history. */
 export interface ChatMessage {
   readonly id: string;
   readonly role: ChatRole;
@@ -23,6 +25,7 @@ export interface ChatMessage {
   readonly toolCallId?: string;
 }
 
+/** Wire shape produced by `ChatContext.toOpenAI()` (matches OpenAI Chat Completions). */
 export interface OpenAIMessage {
   role: string;
   content: string;
@@ -30,11 +33,13 @@ export interface OpenAIMessage {
   tool_call_id?: string;
 }
 
+/** Single message in `AnthropicConversion.messages`. */
 export interface AnthropicMessage {
   role: string;
   content: string;
 }
 
+/** Result of `ChatContext.toAnthropic()` — system prompt extracted from the message list. */
 export interface AnthropicConversion {
   system: string | undefined;
   messages: ReadonlyArray<AnthropicMessage>;
@@ -73,6 +78,7 @@ function createMessage(
 // ChatContext
 // ---------------------------------------------------------------------------
 
+/** Mutable conversation history with system-prompt-aware truncation and provider conversion helpers. */
 export class ChatContext {
   private items: ChatMessage[];
 
@@ -87,24 +93,28 @@ export class ChatContext {
   // Add messages
   // -------------------------------------------------------------------------
 
+  /** Append a user message and return the created `ChatMessage`. */
   addUser(content: string): ChatMessage {
     const msg = createMessage("user", content);
     this.items = [...this.items, msg];
     return msg;
   }
 
+  /** Append an assistant message and return the created `ChatMessage`. */
   addAssistant(content: string): ChatMessage {
     const msg = createMessage("assistant", content);
     this.items = [...this.items, msg];
     return msg;
   }
 
+  /** Append a system message and return the created `ChatMessage`. */
   addSystem(content: string): ChatMessage {
     const msg = createMessage("system", content);
     this.items = [...this.items, msg];
     return msg;
   }
 
+  /** Append a tool-result message tied to a tool-call id. */
   addToolResult(content: string, toolCallId: string): ChatMessage {
     const msg = createMessage("tool", content, { toolCallId });
     this.items = [...this.items, msg];
@@ -115,15 +125,18 @@ export class ChatContext {
   // Access
   // -------------------------------------------------------------------------
 
+  /** Return a snapshot of all messages currently in the context. */
   getMessages(): ReadonlyArray<ChatMessage> {
     return [...this.items];
   }
 
+  /** Return the last `n` messages (or `[]` when `n <= 0`). */
   getLastN(n: number): ReadonlyArray<ChatMessage> {
     if (n <= 0) return [];
     return [...this.items.slice(-n)];
   }
 
+  /** Number of messages currently in the context. */
   get length(): number {
     return this.items.length;
   }
@@ -157,6 +170,7 @@ export class ChatContext {
   // Provider format conversion
   // -------------------------------------------------------------------------
 
+  /** Convert the conversation to the OpenAI Chat Completions message format. */
   toOpenAI(): OpenAIMessage[] {
     return this.items.map((msg) => {
       const result: OpenAIMessage = {
@@ -199,6 +213,7 @@ export class ChatContext {
   // Copy
   // -------------------------------------------------------------------------
 
+  /** Return a new `ChatContext` with the same messages (independent storage). */
   copy(): ChatContext {
     const ctx = new ChatContext();
     ctx.items = this.items.map((msg) => ({ ...msg }));
@@ -209,10 +224,12 @@ export class ChatContext {
   // Serialization
   // -------------------------------------------------------------------------
 
+  /** Serialize the context to a JSON-safe object. */
   toJSON(): ChatContextJSON {
     return { messages: [...this.items] };
   }
 
+  /** Reconstruct a `ChatContext` from the result of `toJSON()`. */
   static fromJSON(data: ChatContextJSON): ChatContext {
     const ctx = new ChatContext();
     ctx.items = (data.messages ?? []).map((msg) => Object.freeze({ ...msg }));

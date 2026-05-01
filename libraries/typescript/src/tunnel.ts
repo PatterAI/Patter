@@ -11,6 +11,7 @@ import { getLogger } from './logger';
 
 const log = getLogger();
 
+/** Handle returned by `startTunnel` exposing the public hostname and a stopper. */
 export interface TunnelHandle {
   /** Public hostname (no protocol), e.g. "random-name.trycloudflare.com" */
   hostname: string;

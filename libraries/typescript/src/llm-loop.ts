@@ -55,6 +55,7 @@ export interface ToolExecutor {
   ): Promise<string>;
 }
 
+/** Constructor options for `DefaultToolExecutor`. */
 export interface DefaultToolExecutorOptions {
   /** Total attempts = maxRetries + 1. Default: 2 (i.e. 3 attempts). */
   maxRetries?: number;
@@ -262,6 +263,7 @@ export class OpenAILLMProvider implements LLMProvider {
     this.stop = sampling.stop;
   }
 
+  /** Stream OpenAI Chat Completions chunks for the given messages/tools. */
   async *stream(
     messages: Array<Record<string, unknown>>,
     tools?: Array<Record<string, unknown>> | null,
@@ -418,6 +420,7 @@ interface ToolCallAccumulator {
 // LLM loop
 // ---------------------------------------------------------------------------
 
+/** Default phone-friendly preamble prepended to user system prompts unless `disablePhonePreamble` is set. */
 export const DEFAULT_PHONE_PREAMBLE =
   'You are speaking on a live phone call. Respond concisely. ' +
   'Do not use markdown, headers, bullet lists, code fences, or emojis. ' +
@@ -425,6 +428,7 @@ export const DEFAULT_PHONE_PREAMBLE =
   'Keep replies under 2 sentences unless the caller asks for detail.';
 
 
+/** Pipeline-mode LLM driver: runs the chat loop, dispatches tool calls, and emits text deltas. */
 export class LLMLoop {
   private readonly provider: LLMProvider;
   private readonly systemPrompt: string;

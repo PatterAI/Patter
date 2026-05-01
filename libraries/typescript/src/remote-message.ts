@@ -27,6 +27,7 @@ function validateWebSocketUrl(url: string): void {
   validateWebhookUrl(translated);
 }
 
+/** Dispatches per-turn messages to a remote HTTP webhook or WebSocket endpoint. */
 export class RemoteMessageHandler {
   private readonly webhookSecret: string | undefined;
 

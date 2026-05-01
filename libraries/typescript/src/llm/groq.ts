@@ -1,6 +1,7 @@
 /** Groq LLM for Patter pipeline mode. */
 import { GroqLLMProvider as _GroqLLM } from "../providers/groq-llm";
 
+/** Constructor options for the Groq `LLM` adapter. */
 export interface GroqLLMOptions {
   /** API key. Falls back to GROQ_API_KEY env var when omitted. */
   apiKey?: string;

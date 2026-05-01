@@ -47,6 +47,7 @@ export const ErrorCode = {
 
 export type ErrorCode = (typeof ErrorCode)[keyof typeof ErrorCode];
 
+/** Base class for every error thrown by the Patter SDK. */
 export class PatterError extends Error {
   /** Stable, machine-readable error code. Subclasses set the default. */
   readonly code: ErrorCode;
@@ -58,6 +59,7 @@ export class PatterError extends Error {
   }
 }
 
+/** Network / WebSocket / HTTP-level connectivity failure when talking to a provider. */
 export class PatterConnectionError extends PatterError {
   constructor(message: string, options?: { code?: ErrorCode }) {
     super(message, { code: options?.code ?? ErrorCode.CONNECTION });
@@ -65,6 +67,7 @@ export class PatterConnectionError extends PatterError {
   }
 }
 
+/** Provider rejected our credentials (HTTP 401/403, invalid webhook signature, etc.). */
 export class AuthenticationError extends PatterError {
   constructor(message: string, options?: { code?: ErrorCode }) {
     super(message, { code: options?.code ?? ErrorCode.AUTH });
@@ -72,6 +75,7 @@ export class AuthenticationError extends PatterError {
   }
 }
 
+/** Phone-number provisioning or carrier setup failed. */
 export class ProvisionError extends PatterError {
   constructor(message: string, options?: { code?: ErrorCode }) {
     super(message, { code: options?.code ?? ErrorCode.PROVISION });

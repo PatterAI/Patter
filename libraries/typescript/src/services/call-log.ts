@@ -38,9 +38,12 @@ import * as path from 'node:path';
 import { getLogger } from '../logger';
 import { sanitizeLogValue, maskPhoneNumber } from '../stream-handler';
 
+/** Schema version embedded in every metadata/turn/event record. */
 export const SCHEMA_VERSION = '1.0';
+/** Default `PATTER_LOG_RETENTION_DAYS` when the env var is unset. */
 export const DEFAULT_RETENTION_DAYS = 30;
 
+/** Phone-number redaction mode controlled by `PATTER_LOG_REDACT_PHONE`. */
 export type RedactMode = 'full' | 'mask' | 'hash_only';
 
 // --- Paths ---------------------------------------------------------------
@@ -139,6 +142,7 @@ async function appendJsonl(filePath: string, record: unknown): Promise<void> {
 
 // --- Types ---------------------------------------------------------------
 
+/** Fields written to `metadata.json` when a call starts. */
 export interface CallStartInput {
   readonly caller?: string;
   readonly callee?: string;
@@ -148,6 +152,7 @@ export interface CallStartInput {
   readonly traceId?: string | null;
 }
 
+/** Fields merged into `metadata.json` when a call ends. */
 export interface CallEndInput {
   readonly durationSeconds?: number;
   readonly turns?: number;
@@ -157,6 +162,7 @@ export interface CallEndInput {
   readonly error?: string | null;
 }
 
+/** Single turn record appended to `transcript.jsonl`. */
 export interface CallTurnRecord {
   readonly timestamp?: number;
   readonly [key: string]: unknown;
@@ -192,6 +198,7 @@ export class CallLogger {
     }
   }
 
+  /** True when a log root was configured and is writable. */
   get enabled(): boolean {
     return this.root !== null;
   }
@@ -207,6 +214,7 @@ export class CallLogger {
     return path.join(this.root, 'calls', year, month, day, safeId);
   }
 
+  /** Write the initial `metadata.json` for a new call. */
   async logCallStart(callId: string, input: CallStartInput = {}): Promise<void> {
     if (!this.enabled) return;
     const startedAt = Date.now() / 1000;
@@ -241,6 +249,7 @@ export class CallLogger {
     }
   }
 
+  /** Append a single turn record to the call's `transcript.jsonl`. */
   async logTurn(callId: string, turn: CallTurnRecord): Promise<void> {
     if (!this.enabled) return;
     const dir = this.callDir(callId);
@@ -259,6 +268,7 @@ export class CallLogger {
     }
   }
 
+  /** Append an operational event (tool_call, barge_in, error, …) to `events.jsonl`. */
   async logEvent(callId: string, eventType: string, payload: Record<string, unknown> = {}): Promise<void> {
     if (!this.enabled) return;
     const dir = this.callDir(callId);
@@ -278,6 +288,7 @@ export class CallLogger {
     }
   }
 
+  /** Merge end-of-call fields into the existing `metadata.json`. */
   async logCallEnd(callId: string, input: CallEndInput = {}): Promise<void> {
     if (!this.enabled) return;
     const dir = this.callDir(callId);

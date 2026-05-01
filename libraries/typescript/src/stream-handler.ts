@@ -92,6 +92,7 @@ function checkGuardrails(text: string, guardrails: Guardrail[] | undefined): Gua
   return null;
 }
 
+/** Strip control characters and truncate a string before writing it to logs. */
 export function sanitizeLogValue(v: string, maxLen = 200): string {
   // eslint-disable-next-line no-control-regex
   const cleaned = v.replace(/[\x00-\x1f\x7f]/g, '');
@@ -130,6 +131,7 @@ const HALLUCINATIONS = new Set([
 // StreamHandler context (immutable per-call configuration)
 // ---------------------------------------------------------------------------
 
+/** Per-call dependencies injected into `StreamHandler` (immutable for the call's lifetime). */
 export interface StreamHandlerDeps {
   readonly config: {
     readonly openaiKey?: string;
@@ -161,6 +163,7 @@ export interface StreamHandlerDeps {
 // StreamHandler — manages a single call session
 // ---------------------------------------------------------------------------
 
+/** Per-call session controller — owns the AI adapter, STT/TTS pipeline, and metrics. */
 export class StreamHandler {
   private readonly deps: StreamHandlerDeps;
   private readonly ws: WSWebSocket;
@@ -454,6 +457,7 @@ export class StreamHandler {
    * @param callId       Call SID (Twilio) or call_control_id (Telnyx)
    * @param customParams TwiML custom parameters (Twilio only, empty for Telnyx)
    */
+  /** Initialize per-call state, build the AI adapter, and dispatch the `onCallStart` callback. */
   async handleCallStart(callId: string, customParams: Record<string, string> = {}): Promise<void> {
     this.callId = callId;
     this.metricsAcc.callId = callId;
@@ -539,11 +543,13 @@ export class StreamHandler {
   }
 
   /** Set the stream SID (Twilio only, called after parsing 'start' event). */
+  /** Set the carrier-side stream id (Twilio `streamSid` / Telnyx stream identifier). */
   setStreamSid(sid: string): void {
     this.streamSid = sid;
   }
 
   /** Handle an incoming audio chunk (already decoded from base64). */
+  /** Forward inbound audio bytes to the AI adapter and (in pipeline mode) the STT provider. */
   async handleAudio(audioBuffer: Buffer): Promise<void> {
     const provider = this.deps.agent.provider ?? 'openai_realtime';
     if (provider === 'pipeline' && this.stt) {
@@ -657,6 +663,7 @@ export class StreamHandler {
   }
 
   /** Handle a DTMF keypress event (Twilio only). */
+  /** Handle an inbound DTMF tone from the caller. */
   async handleDtmf(digit: string): Promise<void> {
     getLogger().debug(`DTMF: ${digit}`);
     if (this.adapter instanceof OpenAIRealtimeAdapter) {
@@ -681,6 +688,7 @@ export class StreamHandler {
    * ``twilio_handler.py``: ``audio_sender.on_mark_confirmed(mark_name)`` +
    * ``handler.on_mark(mark_name)``.
    */
+  /** Handle a Twilio Media Streams `mark` event acknowledging audio playback boundaries. */
   async onMark(markName: string): Promise<void> {
     if (markName) {
       this.lastConfirmedMark = markName;
@@ -688,6 +696,7 @@ export class StreamHandler {
   }
 
   /** Handle call stop / stream end. */
+  /** Handle a carrier-emitted `stop` event signalling the call has ended. */
   async handleStop(): Promise<void> {
     this.clearGraceTimer();
     this.flushResamplers();
@@ -697,6 +706,7 @@ export class StreamHandler {
   }
 
   /** Handle WebSocket close event. */
+  /** Tear down adapter, STT/TTS, and per-call state when the carrier WebSocket closes. */
   async handleWsClose(): Promise<void> {
     this.clearGraceTimer();
     this.flushResamplers();

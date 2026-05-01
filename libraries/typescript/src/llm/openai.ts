@@ -1,6 +1,7 @@
 /** OpenAI LLM for Patter pipeline mode. */
 import { OpenAILLMProvider as _OpenAILLM } from "../llm-loop";
 
+/** Constructor options for the OpenAI Chat Completions `LLM` adapter. */
 export interface OpenAILLMOptions {
   /** API key. Falls back to OPENAI_API_KEY env var when omitted. */
   apiKey?: string;

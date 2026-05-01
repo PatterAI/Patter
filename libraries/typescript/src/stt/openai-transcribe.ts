@@ -2,6 +2,7 @@
 import { OpenAITranscribeSTT as _OpenAITranscribeSTT } from "../providers/openai-transcribe-stt";
 import type { WhisperResponseFormat } from "../providers/whisper-stt";
 
+/** Constructor options for the OpenAI Transcribe `STT` adapter. */
 export interface OpenAITranscribeSTTOptions {
   /** API key. Falls back to OPENAI_API_KEY env var when omitted. */
   apiKey?: string;

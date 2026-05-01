@@ -114,6 +114,7 @@ const DEFAULT_DESCRIPTION =
   'call status, duration in seconds, and cost. Use this when the user asks you to call ' +
   'someone, schedule appointments by phone, or otherwise reach a human via voice.';
 
+/** Constructor options for `PatterTool`. */
 export interface PatterToolOptions {
   /**
    * Patter instance to dial through. Must be in local mode (have a `carrier`).
@@ -138,6 +139,7 @@ export interface PatterToolOptions {
   recording?: boolean;
 }
 
+/** Args accepted by `PatterTool.execute()` (and the OpenAI/Anthropic/Hermes tool schemas). */
 export interface PatterToolExecuteArgs {
   to: string;
   goal?: string;
@@ -145,6 +147,7 @@ export interface PatterToolExecuteArgs {
   max_duration_sec?: number;
 }
 
+/** Result envelope returned by `PatterTool.execute()` once the underlying call ends. */
 export interface PatterToolResult {
   call_id: string;
   status: string;
@@ -161,6 +164,7 @@ interface PendingCall {
   startedAt: number;
 }
 
+/** Wraps a live `Patter` instance as a tool callable from external agent frameworks. */
 export class PatterTool {
   readonly name: string;
   readonly description: string;
@@ -321,6 +325,7 @@ export class PatterTool {
 
   // --- Execution ----------------------------------------------------------
 
+  /** Place an outbound call and resolve once it ends with the transcript and metrics. */
   async execute(args: PatterToolExecuteArgs): Promise<PatterToolResult> {
     if (!this.started) await this.start();
     if (!args || typeof args.to !== 'string' || !args.to.startsWith('+')) {

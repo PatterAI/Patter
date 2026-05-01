@@ -1,6 +1,7 @@
 /** Cartesia TTS for Patter pipeline mode. */
 import { CartesiaTTS as _CartesiaTTS } from "../providers/cartesia-tts";
 
+/** Constructor options for the Cartesia `TTS` adapter. */
 export interface CartesiaTTSOptions {
   /** API key. Falls back to CARTESIA_API_KEY env var when omitted. */
   apiKey?: string;

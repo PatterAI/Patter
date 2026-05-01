@@ -6,6 +6,7 @@ import {
   type AssemblyAIModel,
 } from "../providers/assemblyai-stt";
 
+/** Constructor options for the AssemblyAI `STT` adapter. */
 export interface AssemblyAISTTOptions {
   /** API key. Falls back to ASSEMBLYAI_API_KEY env var when omitted. */
   apiKey?: string;

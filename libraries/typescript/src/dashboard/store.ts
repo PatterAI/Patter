@@ -16,6 +16,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { getLogger } from '../logger';
 
+/** Snapshot of a call as held by the dashboard store. */
 export interface CallRecord {
   call_id: string;
   caller: string;
@@ -35,11 +36,13 @@ export interface CallRecord {
   [key: string]: unknown;
 }
 
+/** Server-Sent-Event payload broadcast by `MetricsStore` for live UI updates. */
 export interface SSEEvent {
   type: string;
   data: Record<string, unknown>;
 }
 
+/** In-memory bounded ring buffer of recent calls plus active-call tracking. */
 export class MetricsStore extends EventEmitter {
   private readonly maxCalls: number;
   private calls: CallRecord[] = [];
@@ -63,6 +66,7 @@ export class MetricsStore extends EventEmitter {
     this.emit('sse', { type: eventType, data } as SSEEvent);
   }
 
+  /** Mark a call as in-progress (creates the row if it does not yet exist). */
   recordCallStart(data: Record<string, unknown>): void {
     const callId = (data.call_id as string) || '';
     if (!callId) return;
@@ -168,6 +172,7 @@ export class MetricsStore extends EventEmitter {
     this.publish('call_status', { call_id: callId, status, ...extra });
   }
 
+  /** Append a single conversation turn to an active call and broadcast it via SSE. */
   recordTurn(data: Record<string, unknown>): void {
     const callId = (data.call_id as string) || '';
     const turn = data.turn;
@@ -182,6 +187,7 @@ export class MetricsStore extends EventEmitter {
     this.publish('turn_complete', { call_id: callId, turn: turn as Record<string, unknown> });
   }
 
+  /** Move a call from active to completed and persist its final metrics. */
   recordCallEnd(data: Record<string, unknown>, metrics?: Record<string, unknown> | null): void {
     const callId = (data.call_id as string) || '';
     if (!callId) return;
@@ -218,11 +224,13 @@ export class MetricsStore extends EventEmitter {
     });
   }
 
+  /** Return a window of completed calls in newest-first order. */
   getCalls(limit = 50, offset = 0): CallRecord[] {
     const ordered = [...this.calls].reverse();
     return ordered.slice(offset, offset + limit);
   }
 
+  /** Look up a completed call by id (newest match wins). */
   getCall(callId: string): CallRecord | null {
     for (let i = this.calls.length - 1; i >= 0; i--) {
       if (this.calls[i].call_id === callId) return this.calls[i];
@@ -235,10 +243,12 @@ export class MetricsStore extends EventEmitter {
     return this.activeCalls.get(callId);
   }
 
+  /** Return all currently active (not yet ended) calls. */
   getActiveCalls(): CallRecord[] {
     return Array.from(this.activeCalls.values());
   }
 
+  /** Compute summary statistics across the buffered call history. */
   getAggregates(): Record<string, unknown> {
     const totalCalls = this.calls.length;
     if (totalCalls === 0) {
@@ -296,6 +306,7 @@ export class MetricsStore extends EventEmitter {
     };
   }
 
+  /** Return calls whose `started_at` falls within `[fromTs, toTs]` (Unix seconds). */
   getCallsInRange(fromTs = 0, toTs = 0): CallRecord[] {
     return this.calls.filter((call) => {
       const started = call.started_at || 0;
@@ -305,6 +316,7 @@ export class MetricsStore extends EventEmitter {
     });
   }
 
+  /** Number of completed calls currently in the ring buffer. */
   get callCount(): number {
     return this.calls.length;
   }

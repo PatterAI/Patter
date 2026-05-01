@@ -24,6 +24,7 @@ import type {
 
 // ---- Data types ----
 
+/** Per-turn latency breakdown across the STT/LLM/TTS pipeline. */
 export interface LatencyBreakdown {
   stt_ms: number;
   /**
@@ -75,6 +76,7 @@ export interface LatencyBreakdown {
   agent_response_ms?: number;
 }
 
+/** Per-call cost breakdown by component (STT/TTS/LLM/telephony) plus the total. */
 export interface CostBreakdown {
   stt: number;
   tts: number;
@@ -89,6 +91,7 @@ export interface CostBreakdown {
   llm_cached_savings?: number;
 }
 
+/** Metrics captured for a single conversation turn. */
 export interface TurnMetrics {
   turn_index: number;
   user_text: string;
@@ -99,6 +102,7 @@ export interface TurnMetrics {
   timestamp: number;
 }
 
+/** Aggregated metrics for an entire call (turns, costs, latency percentiles). */
 export interface CallMetrics {
   call_id: string;
   duration_seconds: number;
@@ -120,6 +124,7 @@ export interface CallMetrics {
 
 // ---- CallControl interface ----
 
+/** Programmatic control surface for a live call (transfer, hangup, DTMF). */
 export interface CallControl {
   /** Transfer the call to a different number or SIP URI. */
   transfer(number: string): Promise<void>;
@@ -177,6 +182,7 @@ function percentile(values: number[], p: number): number {
 
 // ---- Accumulator ----
 
+/** Mutable per-call accumulator that stamps timestamps and emits final `CallMetrics`. */
 export class CallMetricsAccumulator {
   callId: string;
   readonly providerMode: string;
@@ -291,6 +297,7 @@ export class CallMetricsAccumulator {
     return this._turnStart !== null;
   }
 
+  /** Begin a new turn — stamps the turn start timestamp and resets per-turn state. */
   startTurn(): void {
     this._turnStart = hrTimeMs();
     this._sttComplete = null;
@@ -324,6 +331,7 @@ export class CallMetricsAccumulator {
     }
   }
 
+  /** Stamp end-of-STT, capture the user's transcript, and accrue billed STT seconds. */
   recordSttComplete(text: string, audioSeconds = 0): void {
     this._sttComplete = hrTimeMs();
     this._sttFinalAt = this._sttComplete;
@@ -386,10 +394,12 @@ export class CallMetricsAccumulator {
     }
   }
 
+  /** Stamp end-of-LLM (last token received). */
   recordLlmComplete(): void {
     this._llmComplete = hrTimeMs();
   }
 
+  /** Stamp first TTS audio byte sent on the wire (used to compute TTS TTFB). */
   recordTtsFirstByte(): void {
     if (this._ttsFirstByte === null) {
       this._ttsFirstByte = hrTimeMs();
@@ -422,6 +432,7 @@ export class CallMetricsAccumulator {
     }
   }
 
+  /** Record final TTS text length and stamp the last-byte timestamp. */
   recordTtsComplete(text: string): void {
     this._totalTtsCharacters += text.length;
     if (this._ttsLastByte === null) {
@@ -456,6 +467,7 @@ export class CallMetricsAccumulator {
     this._bargeinStoppedAt = ts ?? hrTimeMs();
   }
 
+  /** Close the current turn cleanly and append a `TurnMetrics` record. */
   recordTurnComplete(agentText: string): TurnMetrics {
     const latency = this._computeTurnLatency();
     const turn: TurnMetrics = {
@@ -474,6 +486,7 @@ export class CallMetricsAccumulator {
     return turn;
   }
 
+  /** Close the current turn as interrupted (barge-in) and return the recorded metrics. */
   recordTurnInterrupted(): TurnMetrics | null {
     if (this._turnStart === null) return null;
     const latency = this._computeTurnLatency();
@@ -548,6 +561,7 @@ export class CallMetricsAccumulator {
    * ``transcriptionDelay``       = turnCommitted − vadStopped  (ms)
    * ``onUserTurnCompletedDelay`` = caller-supplied delta (ms) or 0
    */
+  /** Emit `EOUMetrics` once VAD-stop, STT-final, and turn-committed timestamps are all known. */
   emitEouMetrics(): void {
     if (
       this._vadStoppedAt === null ||
@@ -611,10 +625,12 @@ export class CallMetricsAccumulator {
 
   // ---- Usage tracking ----
 
+  /** Accumulate inbound STT audio bytes for cost calculation when seconds are unknown. */
   addSttAudioBytes(byteCount: number): void {
     this._sttByteCount += byteCount;
   }
 
+  /** Record an OpenAI Realtime usage payload and roll up its cost + cached-savings. */
   recordRealtimeUsage(usage: {
     input_token_details?: {
       audio_tokens?: number;
@@ -627,10 +643,12 @@ export class CallMetricsAccumulator {
     this._totalRealtimeCachedSavings += calculateRealtimeCachedSavings(usage, this._pricing);
   }
 
+  /** Override the carrier-billed telephony cost (e.g. exact value reported via Twilio API). */
   setActualTelephonyCost(cost: number): void {
     this._actualTelephonyCost = cost;
   }
 
+  /** Override the provider-billed STT cost when an exact figure is available. */
   setActualSttCost(cost: number): void {
     this._actualSttCost = cost;
   }
@@ -665,6 +683,7 @@ export class CallMetricsAccumulator {
 
   // ---- Finalize ----
 
+  /** Finalize the call: flush any in-flight turn, compute aggregates, and return `CallMetrics`. */
   endCall(): CallMetrics {
     const duration = (hrTimeMs() - this._callStart) / 1000;
 
@@ -708,6 +727,7 @@ export class CallMetricsAccumulator {
     return metrics;
   }
 
+  /** Return the cost breakdown for the call so far without ending it. */
   getCostSoFar(): CostBreakdown {
     const duration = (hrTimeMs() - this._callStart) / 1000;
     return this._computeCost(duration);

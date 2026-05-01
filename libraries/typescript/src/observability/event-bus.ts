@@ -9,6 +9,7 @@
 
 import { getLogger } from '../logger';
 
+/** String tag identifying every event type the `EventBus` knows how to dispatch. */
 export type PatterEventType =
   | 'turn_started'
   | 'turn_ended'
@@ -28,6 +29,7 @@ export type PatterEventType =
 
 type Listener<T = unknown> = (payload: T) => void | Promise<void>;
 
+/** In-process pub/sub for Patter call-lifecycle events. */
 export class EventBus {
   private readonly listeners = new Map<PatterEventType, Set<Listener>>();
 

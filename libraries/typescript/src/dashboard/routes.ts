@@ -23,6 +23,7 @@ import { callsToCsv, callsToJson } from './export';
 import { DASHBOARD_HTML } from './ui';
 import type { MetricsStore, SSEEvent } from './store';
 
+/** Mount the dashboard UI + read-only `/api/dashboard/*` routes onto an Express app. */
 export function mountDashboard(app: Express, store: MetricsStore, token = ''): void {
   const auth = makeAuthMiddleware(token);
 
@@ -121,6 +122,7 @@ export function mountDashboard(app: Express, store: MetricsStore, token = ''): v
   });
 }
 
+/** Mount the B2B-style `/api/v1/*` JSON routes onto an Express app. */
 export function mountApi(app: Express, store: MetricsStore, token = ''): void {
   const auth = makeAuthMiddleware(token);
 

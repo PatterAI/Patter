@@ -1,6 +1,7 @@
 /** Rime TTS for Patter pipeline mode. */
 import { RimeTTS as _RimeTTS } from "../providers/rime-tts";
 
+/** Constructor options for the Rime `TTS` adapter. */
 export interface RimeTTSOptions {
   /** API key. Falls back to RIME_API_KEY env var when omitted. */
   apiKey?: string;

@@ -12,8 +12,10 @@
 
 import { getLogger } from './logger';
 
+/** Callback fired by the scheduler — sync or async, return value ignored. */
 export type JobCallback = () => void | Promise<void>;
 
+/** Handle returned by `scheduleCron`/`scheduleOnce`/`scheduleInterval` for cancellation. */
 export interface ScheduleHandle {
   readonly jobId: string;
   cancel(): void;

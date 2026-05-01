@@ -6,6 +6,7 @@
  * ``EventBus`` from ``CallMetricsAccumulator``.
  */
 
+/** Provider/model metadata attached to most metric payloads. */
 export interface Metadata {
   modelName?: string | null;
   modelProvider?: string | null;
@@ -13,6 +14,7 @@ export interface Metadata {
 
 // ---- LLM usage ----
 
+/** Token-usage breakdown for a single LLM completion. */
 export interface LLMUsage {
   promptTokens: number;
   completionTokens: number;
@@ -24,12 +26,14 @@ export interface LLMUsage {
 
 // ---- Realtime usage ----
 
+/** Per-modality breakdown of cached tokens reported by Realtime providers. */
 export interface CachedTokenDetails {
   audioTokens: number;
   textTokens: number;
   imageTokens: number;
 }
 
+/** Realtime input-token breakdown (audio, text, image, cached). */
 export interface InputTokenDetails {
   audioTokens: number;
   textTokens: number;
@@ -38,12 +42,14 @@ export interface InputTokenDetails {
   cachedTokensDetails?: CachedTokenDetails | null;
 }
 
+/** Realtime output-token breakdown (text, audio, image). */
 export interface OutputTokenDetails {
   textTokens: number;
   audioTokens: number;
   imageTokens: number;
 }
 
+/** Aggregate token-and-duration usage for a Realtime session. */
 export interface RealtimeUsage {
   sessionDurationSeconds: number;
   tokensPerSecond: number;
@@ -90,6 +96,7 @@ export interface InterruptionMetrics {
 
 // ---- TTFB / processing metrics ----
 
+/** Time-to-first-byte for a single processor (STT/LLM/TTS). */
 export interface TTFBMetrics {
   timestamp: number;
   processor: string;
@@ -97,6 +104,7 @@ export interface TTFBMetrics {
   value: number;
 }
 
+/** Total processing time for a single processor stage. */
 export interface ProcessingMetrics {
   timestamp: number;
   processor: string;

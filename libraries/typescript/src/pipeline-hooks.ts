@@ -40,6 +40,7 @@ function normaliseAfterLlm(
   return hook;
 }
 
+/** Runs user-defined pipeline hooks (`beforeSendToStt`, `afterTranscribe`, …) with fail-open semantics. */
 export class PipelineHookExecutor {
   private readonly hooks: PipelineHooks | undefined;
   private readonly afterLlm: AfterLLMHook | undefined;

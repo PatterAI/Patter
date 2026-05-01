@@ -3,6 +3,7 @@ import { ElevenLabsTTS as _ElevenLabsTTS, type ElevenLabsModel } from "../provid
 
 export type { ElevenLabsModel };
 
+/** Constructor options for the ElevenLabs `TTS` adapter. */
 export interface ElevenLabsTTSOptions {
   /** API key. Falls back to ELEVENLABS_API_KEY env var when omitted. */
   apiKey?: string;

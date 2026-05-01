@@ -7,6 +7,7 @@ import type { ElevenLabsModel } from '../providers/elevenlabs-tts';
 
 export type { ElevenLabsModel };
 
+/** Constructor options for the ElevenLabs WebSocket `TTS` adapter. */
 export interface ElevenLabsWebSocketOptions {
   /** API key. Falls back to ELEVENLABS_API_KEY env var when omitted. */
   apiKey?: string;
@@ -23,6 +24,7 @@ export interface ElevenLabsWebSocketOptions {
   chunkLengthSchedule?: number[];
 }
 
+/** Options for the carrier-specific factories — same as the constructor minus `outputFormat`. */
 export type ElevenLabsWebSocketCarrierOptions = Omit<ElevenLabsWebSocketOptions, 'outputFormat'>;
 
 function resolveApiKey(apiKey: string | undefined): string {

@@ -1,6 +1,7 @@
 /** Google Gemini LLM for Patter pipeline mode. */
 import { GoogleLLMProvider as _GoogleLLM } from "../providers/google-llm";
 
+/** Constructor options for the Google Gemini `LLM` adapter. */
 export interface GoogleLLMOptions {
   /**
    * API key. Falls back to ``GEMINI_API_KEY`` first, then ``GOOGLE_API_KEY``.

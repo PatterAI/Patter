@@ -40,6 +40,7 @@ export interface STTTranscript {
   eventType?: string;
 }
 
+/** Callback invoked by an `STTAdapter` for each (partial or final) transcript event. */
 export type STTTranscriptCallback = (t: STTTranscript) => Promise<void> | void;
 
 /** Shape shared by every STT adapter in the SDK. */
@@ -50,6 +51,7 @@ export interface STTAdapter {
   close(): void | Promise<void>;
 }
 
+/** Shape shared by every TTS adapter in the SDK. */
 export interface TTSAdapter {
   synthesizeStream(text: string): AsyncIterable<Buffer>;
 }

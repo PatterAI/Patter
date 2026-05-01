@@ -31,6 +31,7 @@ export const DTMF_EVENTS = [
   "*", "#", "A", "B", "C", "D",
 ] as const;
 
+/** Single DTMF tone value (a member of `DTMF_EVENTS`). */
 export type DtmfEvent = (typeof DTMF_EVENTS)[number];
 
 /** Join DTMF events into a space-separated debug string. */
@@ -84,6 +85,7 @@ function cosineSimilarity(a: Map<string, number>, b: Map<string, number>): numbe
 // TfidfLoopDetector
 // ---------------------------------------------------------------------------
 
+/** Constructor options for `TfidfLoopDetector`. */
 export interface TfidfLoopDetectorOptions {
   /** Number of recent chunks to keep in the comparison window. */
   windowSize?: number;
@@ -127,11 +129,13 @@ export class TfidfLoopDetector {
     this.consecutiveThreshold = consecutiveThreshold;
   }
 
+  /** Forget all previously observed chunks and reset the consecutive-hit counter. */
   reset(): void {
     this.chunks = [];
     this.consecutiveSimilar = 0;
   }
 
+  /** Record a new transcript chunk in the rolling window. */
   addChunk(text: string): void {
     this.chunks.push({ text, vec: bagOfWords(text) });
     if (this.chunks.length > this.windowSize) {
@@ -139,6 +143,7 @@ export class TfidfLoopDetector {
     }
   }
 
+  /** Returns true once the most recent chunks look like a repeated IVR prompt. */
   checkLoopDetection(): boolean {
     if (this.chunks.length < 2) return false;
 
@@ -197,6 +202,7 @@ export type LoopCallback = () => Promise<void> | void;
 /** Async callback fired after sustained silence. */
 export type SilenceCallback = () => Promise<void> | void;
 
+/** Constructor options for `IVRActivity`. */
 export interface IVRActivityOptions {
   /** Seconds of combined silence before firing `onSilence`. Default `5.0`. */
   maxSilenceDuration?: number;
@@ -267,15 +273,18 @@ export class IVRActivity {
     );
   }
 
+  /** Begin tracking transcripts and silence; call once per call. */
   async start(): Promise<void> {
     this.started = true;
   }
 
+  /** Stop tracking and cancel any pending silence timer. */
   async stop(): Promise<void> {
     this.debouncedSilence.cancel();
     this.started = false;
   }
 
+  /** Feed a final user-side transcript chunk into the loop detector. */
   async onUserTranscribed(text: string): Promise<void> {
     if (!this.started || !text) return;
 
@@ -294,16 +303,19 @@ export class IVRActivity {
     }
   }
 
+  /** Record the current user-turn state (e.g. `"listening"`, `"away"`). */
   noteUserState(state: string): void {
     this.currentUserState = state;
     this.scheduleSilenceCheck();
   }
 
+  /** Record the current agent-turn state (e.g. `"idle"`, `"listening"`). */
   noteAgentState(state: string): void {
     this.currentAgentState = state;
     this.scheduleSilenceCheck();
   }
 
+  /** Tool definitions to expose to the LLM (currently only `send_dtmf_events`). */
   get tools(): IVRToolDefinition[] {
     return [this.buildSendDtmfTool()];
   }

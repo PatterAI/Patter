@@ -1,6 +1,7 @@
 /** OpenAI Whisper STT for Patter pipeline mode. */
 import { WhisperSTT as _WhisperSTT, type WhisperResponseFormat } from "../providers/whisper-stt";
 
+/** Constructor options for the Whisper `STT` adapter. */
 export interface WhisperSTTOptions {
   /** API key. Falls back to OPENAI_API_KEY env var when omitted. */
   apiKey?: string;

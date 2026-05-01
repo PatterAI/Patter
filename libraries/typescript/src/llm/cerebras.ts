@@ -1,6 +1,7 @@
 /** Cerebras LLM for Patter pipeline mode. */
 import { CerebrasLLMProvider as _CerebrasLLM } from "../providers/cerebras-llm";
 
+/** Constructor options for the Cerebras `LLM` adapter. */
 export interface CerebrasLLMOptions {
   /** API key. Falls back to CEREBRAS_API_KEY env var when omitted. */
   apiKey?: string;

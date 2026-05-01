@@ -20,6 +20,7 @@ function timingSafeCompare(a: string, b: string): boolean {
   return crypto.timingSafeEqual(aBuf, bBuf);
 }
 
+/** Build an Express middleware that gates the dashboard behind a static bearer token. */
 export function makeAuthMiddleware(token: string = '') {
   return (req: Request, res: Response, next: NextFunction): void => {
     if (!token) {

@@ -1,5 +1,6 @@
 /** ElevenLabs ConvAI engine — marker class for Patter client dispatch. */
 
+/** Constructor options for the ElevenLabs `ConvAI` engine marker. */
 export interface ConvAIOptions {
   /** API key. Falls back to ELEVENLABS_API_KEY env var when omitted. */
   apiKey?: string;

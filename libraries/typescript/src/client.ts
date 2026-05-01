@@ -52,6 +52,7 @@ export interface ResolvedLocalConfig {
   openaiKey?: string;
 }
 
+/** Top-level SDK entry point — wraps a carrier + embedded server + agent loop. */
 export class Patter {
   private localConfig: ResolvedLocalConfig;
   private embeddedServer: EmbeddedServer | null = null;
@@ -190,6 +191,7 @@ export class Patter {
 
   // === Agent definition ===
 
+  /** Resolve user-supplied agent options against engine defaults and return the merged config. */
   agent(opts: AgentOptions): AgentOptions {
     let working: AgentOptions = { ...opts };
 
@@ -286,6 +288,7 @@ export class Patter {
 
   // === Serve / test / call ===
 
+  /** Boot the embedded HTTP/WebSocket server, configure the carrier webhook, and resolve `ready`. */
   async serve(opts: ServeOptions): Promise<void> {
     try {
       await this._serveImpl(opts);
@@ -420,6 +423,7 @@ export class Patter {
     }
   }
 
+  /** Run the agent in interactive terminal-test mode (no real telephony). */
   async test(opts: ServeOptions): Promise<void> {
     const { TestSession } = await import('./test-mode');
     const session = new TestSession();
@@ -432,6 +436,7 @@ export class Patter {
     });
   }
 
+  /** Place an outbound call via the configured carrier. */
   async call(options: LocalCallOptions): Promise<void> {
     if (!options.to) {
       throw new Error("'to' phone number is required");
@@ -579,6 +584,7 @@ export class Patter {
     }
   }
 
+  /** Stop the embedded server and any running tunnel; safe to call multiple times. */
   async disconnect(): Promise<void> {
     if (this.tunnelHandle) {
       this.tunnelHandle.stop();

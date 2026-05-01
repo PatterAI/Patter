@@ -12,6 +12,7 @@
 
 /** Pricing table version identifier, updated in lockstep with sdk-py. */
 export const PRICING_VERSION = '2026.2';
+/** ISO date the pricing table was last refreshed against public provider rates. */
 export const PRICING_LAST_UPDATED = '2026-04-24';
 
 /**
@@ -24,8 +25,10 @@ export const PricingUnit = {
   THOUSAND_CHARS: '1k_chars',
   TOKEN: 'token',
 } as const;
+/** String value for one of the entries in `PricingUnit`. */
 export type PricingUnitValue = (typeof PricingUnit)[keyof typeof PricingUnit];
 
+/** Single provider's pricing entry inside `DEFAULT_PRICING` or a user override map. */
 export interface ProviderPricing {
   /**
    * Billing unit. The library ships with values from :data:`PricingUnit`,
@@ -43,6 +46,7 @@ export interface ProviderPricing {
   cached_text_input_per_token?: number;
 }
 
+/** Built-in pricing table — overridable via `Patter({ pricing: {...} })`. */
 export const DEFAULT_PRICING: Record<string, ProviderPricing> = {
   // STT — per minute of audio processed
   // Deepgram Nova-3 streaming (monolingual) — the default model Patter ships.
@@ -258,6 +262,7 @@ export function calculateRealtimeCachedSavings(
 // for prompt caching. Groq / Cerebras / Google do not publicly expose cache
 // rates for these models, so only input/output are populated.
 
+/** Per-1M-token rates for a single LLM model (input, output, optional cache reads/writes). */
 export interface LlmModelPricing {
   input: number;
   output: number;
@@ -265,6 +270,7 @@ export interface LlmModelPricing {
   cache_write?: number;
 }
 
+/** Per-provider, per-model rate card for chat/completion LLM cost calculation. */
 export const llmPricing: Record<string, Record<string, LlmModelPricing>> = {
   anthropic: {
     'claude-opus-4-7': {

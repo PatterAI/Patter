@@ -11,7 +11,9 @@ import type { CallControl } from './metrics';
 import { LLMLoop } from './llm-loop';
 import { getLogger } from './logger';
 
+/** Drives an interactive terminal-based test "call" against an agent. */
 export class TestSession {
+  /** Run a REPL-style session that loops user input through the agent's LLM/onMessage handler. */
   async run(opts: {
     agent: AgentOptions;
     openaiKey?: string;

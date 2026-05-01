@@ -14,7 +14,9 @@
  */
 import { getLogger } from '../logger';
 
+/** Environment variable that gates all OpenTelemetry wire-up. */
 export const ENV_FLAG = 'PATTER_OTEL_ENABLED';
+/** Default `service.name` reported on exported spans. */
 export const SERVICE_NAME = 'patter';
 
 // --- Span names -------------------------------------------------------------
@@ -38,6 +40,7 @@ export interface Span {
   end(): void;
 }
 
+/** Options for `initTracing()`. */
 export interface InitTracingOptions {
   serviceName?: string;
   otlpEndpoint?: string;
@@ -360,7 +363,7 @@ export async function withSpan<T>(
   }
 }
 
-/** Reset internal state (primarily for tests). */
+/** Internal: reset module state (primarily for tests; not part of the public API). */
 export function _resetTracingForTesting(): void {
   otel = null;
   initialized = false;

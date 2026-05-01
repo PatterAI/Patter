@@ -1,5 +1,6 @@
 /** OpenAI Realtime engine — marker class for Patter client dispatch. */
 
+/** Constructor options for the OpenAI `Realtime` engine marker. */
 export interface RealtimeOptions {
   /** API key. Falls back to OPENAI_API_KEY env var when omitted. */
   apiKey?: string;

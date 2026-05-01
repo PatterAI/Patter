@@ -14,6 +14,7 @@ import { getLogger } from './logger';
 // Options
 // ---------------------------------------------------------------------------
 
+/** Constructor options for `FallbackLLMProvider`. */
 export interface FallbackLLMProviderOptions {
   /** Number of retry attempts per provider before moving to the next (default 1). */
   readonly maxRetryPerProvider?: number;
@@ -45,6 +46,7 @@ export class PartialStreamError extends Error {
 // FallbackLLMProvider
 // ---------------------------------------------------------------------------
 
+/** LLM provider that delegates to a sequence of underlying providers, falling back on failure. */
 export class FallbackLLMProvider implements LLMProvider {
   private readonly providers: ReadonlyArray<LLMProvider>;
   private readonly availability: boolean[];
@@ -127,6 +129,7 @@ export class FallbackLLMProvider implements LLMProvider {
   // LLMProvider implementation
   // -----------------------------------------------------------------------
 
+  /** Streaming entry point — yields chunks from the first provider that succeeds. */
   async *stream(
     messages: Array<Record<string, unknown>>,
     tools?: Array<Record<string, unknown>> | null,
