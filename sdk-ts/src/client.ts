@@ -171,6 +171,8 @@ export class Patter {
       this._tunnelReadyResolve = resolve;
       this._tunnelReadyReject = reject;
     });
+    // See `_ready.catch` below — same rationale.
+    this._tunnelReady.catch(() => {});
     if (normalizedWebhook) {
       this._tunnelReadyResolve(normalizedWebhook);
     }
@@ -181,6 +183,9 @@ export class Patter {
       this._readyResolve = resolve;
       this._readyReject = reject;
     });
+    // Suppress Node's unhandled-rejection warning for callers that never
+    // touch `phone.ready`. Awaiters of `phone.ready` still see the error.
+    this._ready.catch(() => {});
   }
 
   // === Agent definition ===
