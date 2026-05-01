@@ -130,16 +130,20 @@ class PlayHandle:
         self._done: asyncio.Future[None] = asyncio.get_event_loop().create_future()
 
     def done(self) -> bool:
+        """Return ``True`` when playback has finished or :meth:`stop` was called."""
         return self._done.done()
 
     def stop(self) -> None:
+        """Mark this handle complete; idempotent if already done."""
         if not self._done.done():
             self._done.set_result(None)
 
     async def wait_for_playout(self) -> None:
+        """Await playback completion (shielded against task cancellation)."""
         await asyncio.shield(self._done)
 
     def __await__(self):
+        """Allow ``await handle`` as shorthand for :meth:`wait_for_playout`."""
         return self.wait_for_playout().__await__()
 
 

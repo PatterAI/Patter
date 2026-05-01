@@ -1,3 +1,10 @@
+"""OpenAI Realtime API adapter — all-in-one STT + LLM + TTS over WebSocket.
+
+Used in ``stream_handler`` as the ``openai_realtime`` provider mode. Drives
+:class:`OpenAIRealtimeAdapter` which negotiates audio format, dispatches tool
+calls, and streams audio in both directions.
+"""
+
 import asyncio
 import base64
 import json

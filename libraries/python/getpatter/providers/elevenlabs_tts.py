@@ -1,3 +1,10 @@
+"""ElevenLabs HTTP streaming TTS adapter.
+
+Implements :class:`getpatter.providers.base.TTSProvider` against the
+``/v1/text-to-speech/{voice_id}/stream`` endpoint. For per-call latency
+sensitive use cases prefer :mod:`elevenlabs_ws_tts` (WebSocket).
+"""
+
 from enum import StrEnum
 from typing import AsyncIterator, Optional, Union
 import re
@@ -10,6 +17,8 @@ from getpatter.providers.base import TTSProvider
 # enum members usable as plain strings, so existing callers passing literal
 # string model IDs continue to work unchanged.
 class ElevenLabsModel(StrEnum):
+    """Known ElevenLabs voice synthesis models accepted by the TTS endpoints."""
+
     V3 = "eleven_v3"
     FLASH_V2_5 = "eleven_flash_v2_5"
     TURBO_V2_5 = "eleven_turbo_v2_5"
@@ -20,6 +29,8 @@ class ElevenLabsModel(StrEnum):
 # Supported ``output_format`` values for the ``/text-to-speech/{id}/stream``
 # endpoint. ``ULAW_8000`` is the telephony-ready option for Twilio/Telnyx.
 class ElevenLabsOutputFormat(StrEnum):
+    """Output formats accepted by ElevenLabs' TTS streaming endpoint."""
+
     MP3_22050_32 = "mp3_22050_32"
     MP3_44100_32 = "mp3_44100_32"
     MP3_44100_64 = "mp3_44100_64"
@@ -247,6 +258,7 @@ class ElevenLabsTTS(TTSProvider):
         )
 
     async def synthesize(self, text: str) -> AsyncIterator[bytes]:
+        """Stream TTS audio for *text* one chunk at a time."""
         body: dict = {"text": text, "model_id": self.model_id}
         if self.voice_settings:
             body["voice_settings"] = self.voice_settings
@@ -267,4 +279,5 @@ class ElevenLabsTTS(TTSProvider):
             await resp.aclose()
 
     async def close(self) -> None:
+        """Close the underlying HTTP client."""
         await self._client.aclose()

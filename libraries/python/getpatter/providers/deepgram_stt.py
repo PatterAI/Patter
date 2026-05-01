@@ -1,3 +1,11 @@
+"""Deepgram streaming STT adapter.
+
+Implements :class:`getpatter.providers.base.STTProvider` against Deepgram's
+v1 ``/listen`` WebSocket endpoint. Handles KeepAlive pings, ``Finalize`` /
+``CloseStream`` graceful shutdown, and normalises ``SpeechStarted`` /
+``UtteranceEnd`` VAD events alongside ``Results`` transcripts.
+"""
+
 import asyncio
 import json
 from enum import IntEnum, StrEnum
@@ -64,6 +72,8 @@ _FINALIZE_DRAIN_SECONDS = 0.1
 
 
 class DeepgramSTT(STTProvider):
+    """Streaming STT adapter for Deepgram's v1 ``/listen`` WebSocket API."""
+
     def __init__(
         self,
         api_key: str,
@@ -120,6 +130,7 @@ class DeepgramSTT(STTProvider):
         )
 
     async def connect(self) -> None:
+        """Open the Deepgram WebSocket and start the KeepAlive loop."""
         params = {
             "model": self.model,
             "language": self.language,
@@ -182,6 +193,7 @@ class DeepgramSTT(STTProvider):
             raise
 
     async def send_audio(self, audio_chunk: bytes) -> None:
+        """Send a PCM/mulaw audio chunk to Deepgram. Empty chunks are dropped."""
         if self._ws is None:
             raise RuntimeError("Not connected. Call connect() first.")
         # Deepgram treats a zero-length binary frame as CloseStream — so
@@ -248,6 +260,7 @@ class DeepgramSTT(STTProvider):
         )
 
     async def receive_transcripts(self) -> AsyncIterator[Transcript]:
+        """Yield :class:`Transcript` events parsed from the Deepgram stream."""
         if self._ws is None:
             raise RuntimeError("Not connected. Call connect() first.")
 
@@ -259,6 +272,7 @@ class DeepgramSTT(STTProvider):
                 yield transcript
 
     async def close(self) -> None:
+        """Send Finalize + CloseStream, then close the Deepgram WebSocket."""
         # Cancel the KeepAlive pump first so it does not race the close
         # handshake.
         if self._keepalive_task is not None:

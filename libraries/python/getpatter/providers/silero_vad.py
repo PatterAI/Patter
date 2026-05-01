@@ -87,6 +87,7 @@ class _ExpFilter:
         self._filtered: float | None = None
 
     def apply(self, exp: float, sample: float) -> float:
+        """Apply the exponential filter to *sample* with a per-call exponent."""
         if self._filtered is None:
             self._filtered = sample
         else:
@@ -95,6 +96,7 @@ class _ExpFilter:
         return self._filtered
 
     def reset(self) -> None:
+        """Drop the buffered filter state."""
         self._filtered = None
 
 
@@ -191,14 +193,17 @@ class SileroVAD(VADProvider):
 
     @property
     def model(self) -> str:
+        """Identifier of the underlying VAD model (``silero``)."""
         return SileroVADProviderTag.MODEL.value
 
     @property
     def provider(self) -> str:
+        """Identifier of the provider tag (``silero``)."""
         return SileroVADProviderTag.PROVIDER.value
 
     @property
     def sample_rate(self) -> int:
+        """Configured inference sample rate (8000 or 16000 Hz)."""
         return self._opts.sample_rate
 
     async def process_frame(

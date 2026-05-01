@@ -149,6 +149,7 @@ class TwilioAudioSender(AudioSender):
             self._pcm_carry.reset()
 
     async def send_audio(self, pcm_audio: bytes) -> None:
+        """Send a chunk of audio to Twilio, transcoding to mulaw 8 kHz when needed."""
         if self._input_is_mulaw_8k:
             mulaw = pcm_audio
         else:
@@ -169,11 +170,13 @@ class TwilioAudioSender(AudioSender):
         )
 
     async def send_clear(self) -> None:
+        """Tell Twilio to flush any buffered playback (used on barge-in)."""
         await self._ws.send_text(
             json.dumps({"event": "clear", "streamSid": self._stream_sid})
         )
 
     async def send_mark(self, mark_name: str) -> None:
+        """Send a Twilio media-stream mark frame to track playback completion."""
         self._chunk_count += 1
         actual_name = f"audio_{self._chunk_count}"
         await self._ws.send_text(
@@ -187,6 +190,7 @@ class TwilioAudioSender(AudioSender):
         )
 
     def on_mark_confirmed(self, mark_name: str) -> None:
+        """Record that Twilio has finished playing back the named mark."""
         self.last_confirmed_mark = mark_name
 
     async def flush(self) -> None:

@@ -100,6 +100,7 @@ class _TokenAccumulator:
         self._confidence_count: int = 0
 
     def update(self, token: dict[str, Any]) -> None:
+        """Append a Soniox token's text and accumulate its confidence."""
         self.text += token.get("text", "")
         confidence = token.get("confidence")
         if confidence is not None:
@@ -108,6 +109,7 @@ class _TokenAccumulator:
 
     @property
     def confidence(self) -> float:
+        """Mean per-token confidence in ``[0.0, 1.0]`` (0.0 when no tokens)."""
         if self._confidence_count == 0:
             return 0.0
         return self._confidence_sum / self._confidence_count
@@ -123,6 +125,7 @@ class _TokenAccumulator:
         return (self._confidence_sum, self._confidence_count)
 
     def reset(self) -> None:
+        """Clear accumulated text and confidence state."""
         self.text = ""
         self._confidence_sum = 0.0
         self._confidence_count = 0

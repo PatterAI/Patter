@@ -9,8 +9,16 @@ from typing import Any, AsyncIterator, Literal
 
 # === STT ===
 
+
 @dataclass
 class Transcript:
+    """A transcription result emitted by an :class:`STTProvider`.
+
+    ``is_final`` distinguishes provisional partials from finalised utterances;
+    additional fields carry provider-specific hints (``speech_final``,
+    ``event_type``) and metadata used for cost reconciliation.
+    """
+
     text: str
     is_final: bool
     confidence: float = 0.0
@@ -35,29 +43,47 @@ class Transcript:
 
 
 class STTProvider(ABC):
+    """Abstract base class for streaming speech-to-text providers."""
+
     @abstractmethod
-    async def connect(self) -> None: ...
+    async def connect(self) -> None:
+        """Open the provider connection (WebSocket, gRPC, etc.)."""
+
     @abstractmethod
-    async def send_audio(self, audio_chunk: bytes) -> None: ...
+    async def send_audio(self, audio_chunk: bytes) -> None:
+        """Forward a single PCM/mulaw audio chunk to the provider."""
+
     @abstractmethod
-    async def receive_transcripts(self) -> AsyncIterator[Transcript]: ...
+    async def receive_transcripts(self) -> AsyncIterator[Transcript]:
+        """Yield :class:`Transcript` events as they arrive from the provider."""
+
     @abstractmethod
-    async def close(self) -> None: ...
+    async def close(self) -> None:
+        """Close the provider connection and release resources."""
 
 
 # === TTS ===
 
+
 class TTSProvider(ABC):
+    """Abstract base class for streaming text-to-speech providers."""
+
     @abstractmethod
-    async def synthesize(self, text: str) -> AsyncIterator[bytes]: ...
+    async def synthesize(self, text: str) -> AsyncIterator[bytes]:
+        """Synthesize *text*, yielding raw audio bytes as they become available."""
+
     @abstractmethod
-    async def close(self) -> None: ...
+    async def close(self) -> None:
+        """Close the TTS connection and release resources."""
 
 
 # === Telephony ===
 
+
 @dataclass
 class CallInfo:
+    """Lightweight descriptor for an active call (id, parties, direction)."""
+
     call_id: str
     caller: str
     callee: str
@@ -65,17 +91,29 @@ class CallInfo:
 
 
 class TelephonyProvider(ABC):
+    """Abstract base class for carrier adapters (Twilio, Telnyx, ...)."""
+
     @abstractmethod
-    async def provision_number(self, country: str) -> str: ...
+    async def provision_number(self, country: str) -> str:
+        """Buy or reserve a phone number from the carrier in the given ISO country."""
+
     @abstractmethod
-    async def configure_number(self, number: str, webhook_url: str) -> None: ...
+    async def configure_number(self, number: str, webhook_url: str) -> None:
+        """Point the carrier-side webhook for *number* at *webhook_url*."""
+
     @abstractmethod
-    async def initiate_call(self, from_number: str, to_number: str, stream_url: str) -> str: ...
+    async def initiate_call(
+        self, from_number: str, to_number: str, stream_url: str
+    ) -> str:
+        """Place an outbound call and bridge the media stream to *stream_url*."""
+
     @abstractmethod
-    async def end_call(self, call_id: str) -> None: ...
+    async def end_call(self, call_id: str) -> None:
+        """Hang up the named call via the carrier API."""
 
 
 # === VAD (Voice Activity Detection) ===
+
 
 @dataclass
 class VADEvent:
@@ -109,10 +147,12 @@ class VADProvider(ABC):
         """Process a PCM frame. Returns an event when state changes, else None."""
 
     @abstractmethod
-    async def close(self) -> None: ...
+    async def close(self) -> None:
+        """Release any model or backend resources held by the VAD."""
 
 
 # === Audio filter (noise cancellation, gain, EQ) ===
+
 
 class AudioFilter(ABC):
     """Pre-STT audio filter.
@@ -126,10 +166,12 @@ class AudioFilter(ABC):
         """Transform input PCM, return filtered PCM (same sample rate)."""
 
     @abstractmethod
-    async def close(self) -> None: ...
+    async def close(self) -> None:
+        """Release any backend resources held by the filter."""
 
 
 # === Background audio (hold music, ambient cues) ===
+
 
 class BackgroundAudioPlayer(ABC):
     """Mixes background audio (hold music, thinking cues) with TTS output.
@@ -139,11 +181,13 @@ class BackgroundAudioPlayer(ABC):
     """
 
     @abstractmethod
-    async def start(self) -> None: ...
+    async def start(self) -> None:
+        """Decode the background source and arm the mixer."""
 
     @abstractmethod
     async def mix(self, agent_pcm: bytes, sample_rate: int) -> bytes:
         """Mix the given agent PCM with the current background source."""
 
     @abstractmethod
-    async def stop(self) -> None: ...
+    async def stop(self) -> None:
+        """Stop playback and release decoded buffers."""

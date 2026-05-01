@@ -128,6 +128,7 @@ class TelnyxTTS(TTSProvider):
                 pass
 
     async def close(self) -> None:
+        """Close the underlying HTTP session if this provider owns it."""
         if self._owns_session and self._session is not None:
             try:
                 await self._session.close()

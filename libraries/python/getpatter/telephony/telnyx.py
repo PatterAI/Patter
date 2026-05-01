@@ -206,6 +206,7 @@ class TelnyxAudioSender(AudioSender):
             self._resampler = None
 
     async def send_audio(self, audio: bytes) -> None:
+        """Send a PCM (or mulaw) audio chunk to the Telnyx media stream."""
         if self._input_is_mulaw_8k:
             mulaw = audio
         else:
@@ -234,10 +235,12 @@ class TelnyxAudioSender(AudioSender):
             )
 
     async def send_clear(self) -> None:
+        """Tell Telnyx to flush any buffered outbound playback (barge-in)."""
         # Telnyx media stream clear signal — flushes any buffered playback.
         await self._ws.send_text(json.dumps({"event": "clear"}))
 
     async def send_mark(self, mark_name: str) -> None:
+        """No-op: Telnyx media streams do not support playback marks."""
         # Telnyx media streams do not support playback marks — no-op.
         pass
 

@@ -1,3 +1,10 @@
+"""OpenAI HTTP TTS adapter (``POST /v1/audio/speech``).
+
+Implements :class:`getpatter.providers.base.TTSProvider`. Streams 24 kHz PCM
+from OpenAI and resamples to 16 kHz or 8 kHz so the telephony output path can
+forward bytes without an additional resample stage.
+"""
+
 from enum import StrEnum
 from typing import AsyncIterator, Union
 
@@ -56,6 +63,8 @@ _INSTRUCTIONS_PREFIX = OpenAITTSModel.GPT_4O_MINI_TTS.value
 
 
 class OpenAITTS(TTSProvider):
+    """OpenAI HTTP TTS provider with built-in 24k→target-rate resampling."""
+
     def __init__(
         self,
         api_key: str,
@@ -87,6 +96,7 @@ class OpenAITTS(TTSProvider):
         return f"OpenAITTS(model={self.model!r}, voice={self.voice!r})"
 
     async def synthesize(self, text: str) -> AsyncIterator[bytes]:
+        """Stream PCM audio for *text* resampled to ``target_sample_rate``."""
         if audioop is None:
             # Without ``audioop`` / ``audioop-lts`` we would emit 24 kHz
             # audio that the telephony pipeline transcodes as 16 kHz —
@@ -146,6 +156,7 @@ class OpenAITTS(TTSProvider):
             await response.aclose()
 
     async def close(self) -> None:
+        """Close the underlying HTTP client."""
         await self._client.aclose()
 
     @staticmethod

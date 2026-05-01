@@ -124,6 +124,7 @@ class TelnyxSTT(STTProvider):
         )
 
     async def connect(self) -> None:
+        """Open the Telnyx Speech-to-Text WebSocket and start the recv loop."""
         if self._session is None:
             self._session = aiohttp.ClientSession()
             self._owns_session = True
@@ -141,6 +142,7 @@ class TelnyxSTT(STTProvider):
         self._recv_task = asyncio.create_task(self._recv_loop())
 
     async def send_audio(self, audio_chunk: bytes) -> None:
+        """Send a PCM audio chunk; prefixes the streaming WAV header on the first call."""
         if self._ws is None:
             raise RuntimeError("Not connected. Call connect() first.")
 
@@ -152,6 +154,7 @@ class TelnyxSTT(STTProvider):
         await self._ws.send_bytes(audio_chunk)
 
     async def receive_transcripts(self) -> AsyncIterator[Transcript]:
+        """Yield :class:`Transcript` items as Telnyx returns transcription frames."""
         if self._ws is None:
             raise RuntimeError("Not connected. Call connect() first.")
         while True:
@@ -197,6 +200,7 @@ class TelnyxSTT(STTProvider):
         )
 
     async def close(self) -> None:
+        """Cancel the recv task, close the socket, and release the HTTP session."""
         if self._recv_task is not None:
             self._recv_task.cancel()
             try:

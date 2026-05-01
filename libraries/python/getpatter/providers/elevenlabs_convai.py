@@ -1,3 +1,10 @@
+"""ElevenLabs Conversational AI (ConvAI) end-to-end voice provider.
+
+Bridges a carrier media stream to a single ElevenLabs ConvAI WebSocket that
+handles STT, LLM, and TTS in one hop. Used in :mod:`stream_handler` as the
+``elevenlabs_convai`` provider mode.
+"""
+
 import asyncio
 import base64
 import json
@@ -292,7 +299,9 @@ class ElevenLabsConvAIAdapter:
 
                 if msg_type == "conversation_initiation_metadata":
                     meta = data.get("conversation_initiation_metadata_event") or data
-                    self.conversation_id = meta.get("conversation_id") or self.conversation_id
+                    self.conversation_id = (
+                        meta.get("conversation_id") or self.conversation_id
+                    )
                     self.agent_output_audio_format = (
                         meta.get("agent_output_audio_format")
                         or self.agent_output_audio_format
@@ -320,9 +329,7 @@ class ElevenLabsConvAIAdapter:
                         # Reset silence timer on every agent audio chunk.
                         self._reset_silence_timer()
                         self._agent_speaking = True
-                        await self._events.put(
-                            ("audio", base64.b64decode(audio_b64))
-                        )
+                        await self._events.put(("audio", base64.b64decode(audio_b64)))
                         # Schedule silence-based response_done.
                         self._silence_task = asyncio.create_task(
                             self._emit_response_done_after_silence()
@@ -355,9 +362,7 @@ class ElevenLabsConvAIAdapter:
 
                 if msg_type == "error":
                     err_text = (
-                        data.get("message")
-                        or data.get("error")
-                        or json.dumps(data)
+                        data.get("message") or data.get("error") or json.dumps(data)
                     )
                     logger.error("ElevenLabs ConvAI error: %s", err_text)
                     await self._events.put(("error", err_text))

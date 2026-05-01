@@ -132,14 +132,17 @@ class OnnxModel:
 
     @property
     def sample_rate(self) -> int:
+        """Sample rate (Hz) the underlying ONNX session was configured for."""
         return self._sample_rate
 
     @property
     def window_size_samples(self) -> int:
+        """Number of samples per inference window."""
         return self._window_size_samples
 
     @property
     def context_size(self) -> int:
+        """Number of carry-over samples between inference windows."""
         return self._context_size
 
     def __call__(self, x: np.ndarray) -> float:

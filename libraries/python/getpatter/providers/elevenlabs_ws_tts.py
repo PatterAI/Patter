@@ -458,5 +458,6 @@ class ElevenLabsWebSocketTTS(TTSProvider):
                 pass
 
     async def close(self) -> None:
+        """No-op: connections are per-utterance and closed inline."""
         # No persistent state to clean up — connections are per-utterance.
         return None

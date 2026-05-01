@@ -47,12 +47,14 @@ _AUDIOOP_MISSING_MSG = "audioop required: pip install getpatter[local]"
 
 
 def mulaw_to_pcm16(mulaw_data: bytes) -> bytes:
+    """Decode mu-law (G.711) bytes to signed 16-bit linear PCM."""
     if audioop is None:
         raise ImportError(_AUDIOOP_MISSING_MSG)
     return audioop.ulaw2lin(mulaw_data, 2)
 
 
 def pcm16_to_mulaw(pcm_data: bytes) -> bytes:
+    """Encode signed 16-bit linear PCM bytes to mu-law (G.711)."""
     if audioop is None:
         raise ImportError(_AUDIOOP_MISSING_MSG)
     return audioop.lin2ulaw(pcm_data, 2)
@@ -279,6 +281,7 @@ def create_resampler_24k_to_16k() -> StatefulResampler:
 
 
 def create_resampler_24k_to_8k() -> StatefulResampler:
+    """Return a :class:`StatefulResampler` configured for 24 kHz → 8 kHz."""
     # Single ratecv state collapses the 24k→16k→8k chain into one step.
     return StatefulResampler(src_rate=24000, dst_rate=8000)
 

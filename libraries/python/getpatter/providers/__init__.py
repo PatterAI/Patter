@@ -30,6 +30,7 @@ def deepgram(
 
 
 def whisper(api_key: str, language: str = "en") -> STTConfig:
+    """Config helper for OpenAI Whisper STT."""
     return STTConfig(provider="whisper", api_key=api_key, language=language)
 
 
@@ -44,10 +45,12 @@ def speechmatics(api_key: str, language: str = "en") -> STTConfig:
 
 
 def elevenlabs(api_key: str, voice: str = "rachel") -> TTSConfig:
+    """Config helper for ElevenLabs TTS."""
     return TTSConfig(provider="elevenlabs", api_key=api_key, voice=voice)
 
 
 def openai_tts(api_key: str, voice: str = "alloy") -> TTSConfig:
+    """Config helper for OpenAI TTS."""
     return TTSConfig(provider="openai", api_key=api_key, voice=voice)
 
 
