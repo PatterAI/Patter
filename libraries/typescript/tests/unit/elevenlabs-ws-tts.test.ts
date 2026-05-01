@@ -134,6 +134,56 @@ describe('ElevenLabsWebSocketTTS — URL build', () => {
   });
 });
 
+describe('ElevenLabsWebSocketTTS — carrier auto-flip', () => {
+  it('twilio carrier flips default format to ulaw_8000', () => {
+    const tts = new ElevenLabsWebSocketTTS({ apiKey: 'k' });
+    expect(tts.outputFormat).toBe('pcm_16000');
+    tts.setTelephonyCarrier('twilio');
+    expect(tts.outputFormat).toBe('ulaw_8000');
+  });
+
+  it('twilio carrier auto-flip is reflected in WS connect URL', () => {
+    // End-to-end: after carrier auto-flip, the URL must request ulaw_8000
+    // so ElevenLabs encodes server-side and we skip client-side transcode.
+    const tts = new ElevenLabsWebSocketTTS({ apiKey: 'k', voiceId: 'v1' });
+    tts.setTelephonyCarrier('twilio');
+    const url: string = (tts as unknown as { buildUrl(): string }).buildUrl();
+    expect(url).toContain('output_format=ulaw_8000');
+  });
+
+  it('telnyx carrier keeps default pcm_16000', () => {
+    const tts = new ElevenLabsWebSocketTTS({ apiKey: 'k' });
+    tts.setTelephonyCarrier('telnyx');
+    expect(tts.outputFormat).toBe('pcm_16000');
+  });
+
+  it('explicit outputFormat is respected over carrier hint', () => {
+    const tts = new ElevenLabsWebSocketTTS({ apiKey: 'k', outputFormat: 'pcm_16000' });
+    tts.setTelephonyCarrier('twilio');
+    expect(tts.outputFormat).toBe('pcm_16000');
+  });
+
+  it('explicit ulaw_8000 is preserved on telnyx carrier hint', () => {
+    const tts = new ElevenLabsWebSocketTTS({ apiKey: 'k', outputFormat: 'ulaw_8000' });
+    tts.setTelephonyCarrier('telnyx');
+    expect(tts.outputFormat).toBe('ulaw_8000');
+  });
+
+  it('forTwilio factory counts as explicit (carrier hint is no-op)', () => {
+    const tts = ElevenLabsWebSocketTTS.forTwilio({ apiKey: 'k' });
+    tts.setTelephonyCarrier('telnyx');
+    expect(tts.outputFormat).toBe('ulaw_8000');
+  });
+
+  it('unknown carrier is a no-op', () => {
+    const tts = new ElevenLabsWebSocketTTS({ apiKey: 'k' });
+    tts.setTelephonyCarrier('custom');
+    expect(tts.outputFormat).toBe('pcm_16000');
+    tts.setTelephonyCarrier('');
+    expect(tts.outputFormat).toBe('pcm_16000');
+  });
+});
+
 describe('ElevenLabsWebSocketTTS — synthesizeStream protocol', () => {
   it('sends init, text+flush at start; EOS only at finally; yields decoded audio', async () => {
     const tts = new ElevenLabsWebSocketTTS({ apiKey: 'k' });

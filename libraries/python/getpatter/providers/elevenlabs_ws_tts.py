@@ -152,9 +152,7 @@ class ElevenLabsWebSocketTTS(TTSProvider):
         api_key: str,
         voice_id: str = "21m00Tcm4TlvDq8ikWAM",
         model_id: Union[ElevenLabsModel, str] = ElevenLabsModel.FLASH_V2_5,
-        output_format: Union[
-            ElevenLabsOutputFormat, str
-        ] = ElevenLabsOutputFormat.PCM_16000,
+        output_format: Optional[Union[ElevenLabsOutputFormat, str]] = None,
         voice_settings: Optional[dict] = None,
         language_code: Optional[str] = None,
         *,
@@ -177,7 +175,19 @@ class ElevenLabsWebSocketTTS(TTSProvider):
         self._api_key = api_key
         self.voice_id = resolve_voice_id(voice_id)
         self.model_id = model_id
-        self.output_format = output_format
+        # Track whether the caller explicitly chose an ``output_format``. When
+        # left unset (``None``), we default to PCM 16 kHz for backward-compat
+        # but allow ``set_telephony_carrier`` to auto-flip to the carrier's
+        # native format (``ulaw_8000`` for Twilio) so ElevenLabs encodes
+        # server-side and we skip a client-side mulaw transcode. When the
+        # caller passed an explicit value, ``set_telephony_carrier`` is a
+        # no-op — the user's choice is respected.
+        self._output_format_explicit = output_format is not None
+        self.output_format = (
+            output_format
+            if output_format is not None
+            else ElevenLabsOutputFormat.PCM_16000
+        )
         self.voice_settings = voice_settings
         self.language_code = language_code
         self.auto_mode = auto_mode
@@ -267,6 +277,37 @@ class ElevenLabsWebSocketTTS(TTSProvider):
             auto_mode=auto_mode,
             inactivity_timeout=inactivity_timeout,
         )
+
+    # ------------------------------------------------------------------
+    # Carrier auto-detect — wired by StreamHandler.start()
+    # ------------------------------------------------------------------
+
+    # Map of telephony carrier → ElevenLabs WS-native ``output_format`` for
+    # zero-transcode delivery to the carrier wire. Twilio Media Streams
+    # speaks PCMU/μ-law @ 8 kHz; Telnyx negotiates linear PCM 16 kHz.
+    _CARRIER_NATIVE_FORMAT: dict[str, ElevenLabsOutputFormat] = {
+        "twilio": ElevenLabsOutputFormat.ULAW_8000,
+        "telnyx": ElevenLabsOutputFormat.PCM_16000,
+    }
+
+    def set_telephony_carrier(self, carrier: str) -> None:
+        """Hook called by ``StreamHandler`` to advise the carrier wire format.
+
+        When the user did NOT pass an explicit ``output_format`` to
+        ``__init__``, this flips the format to the carrier's native wire
+        codec — saving a client-side transcode step. Calling with an
+        unknown carrier (``""`` / ``"custom"``) is a no-op.
+
+        When ``output_format`` was explicitly passed (incl. via the
+        ``for_twilio`` / ``for_telnyx`` factories), this method is a no-op
+        — the user's choice always wins.
+        """
+        if self._output_format_explicit:
+            return
+        native = self._CARRIER_NATIVE_FORMAT.get(carrier)
+        if native is None:
+            return
+        self.output_format = native
 
     # ------------------------------------------------------------------
     # Streaming

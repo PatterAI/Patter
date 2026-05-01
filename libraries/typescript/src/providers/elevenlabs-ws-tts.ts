@@ -109,18 +109,41 @@ interface ElevenLabsWsMessage {
   error?: string;
 }
 
+/**
+ * Map of telephony carrier → ElevenLabs WS-native ``output_format`` for
+ * zero-transcode delivery to the carrier wire. Twilio Media Streams speaks
+ * PCMU/μ-law @ 8 kHz; Telnyx negotiates linear PCM 16 kHz.
+ */
+const CARRIER_NATIVE_FORMAT: Readonly<Record<string, string>> = {
+  twilio: 'ulaw_8000',
+  telnyx: 'pcm_16000',
+};
+
 export class ElevenLabsWebSocketTTS implements TTSAdapter {
   static readonly providerKey = 'elevenlabs_ws';
   readonly apiKey: string;
   readonly voiceId: string;
   readonly modelId: string;
-  readonly outputFormat: string;
   readonly voiceSettings?: Record<string, unknown>;
   readonly languageCode?: string;
   readonly autoMode: boolean;
   readonly inactivityTimeout: number;
   readonly chunkLengthSchedule?: number[];
   readonly chunkSize: number;
+
+  /**
+   * The wire format requested over the ElevenLabs WS. Initially set from
+   * the constructor; ``setTelephonyCarrier`` may auto-flip it to the
+   * carrier's native codec when the caller did NOT pass ``outputFormat``
+   * explicitly.
+   */
+  private _outputFormat: string;
+  private readonly _outputFormatExplicit: boolean;
+
+  /** Public read-only view of the (possibly auto-flipped) wire format. */
+  get outputFormat(): string {
+    return this._outputFormat;
+  }
 
   constructor(opts: ElevenLabsWebSocketTTSOptions) {
     if (opts.modelId === 'eleven_v3') {
@@ -132,13 +155,39 @@ export class ElevenLabsWebSocketTTS implements TTSAdapter {
     this.apiKey = opts.apiKey;
     this.voiceId = resolveVoiceId(opts.voiceId ?? '21m00Tcm4TlvDq8ikWAM');
     this.modelId = opts.modelId ?? 'eleven_flash_v2_5';
-    this.outputFormat = opts.outputFormat ?? 'pcm_16000';
+    // Track whether the caller explicitly chose an ``outputFormat``. When
+    // left undefined, default to PCM 16 kHz for backward-compat but allow
+    // ``setTelephonyCarrier`` to auto-flip to the carrier's native format
+    // (``ulaw_8000`` for Twilio) so ElevenLabs encodes server-side and we
+    // skip a client-side mulaw transcode. When the caller passed an
+    // explicit value, ``setTelephonyCarrier`` is a no-op — user wins.
+    this._outputFormatExplicit = opts.outputFormat !== undefined;
+    this._outputFormat = opts.outputFormat ?? 'pcm_16000';
     this.voiceSettings = opts.voiceSettings;
     this.languageCode = opts.languageCode;
     this.autoMode = opts.autoMode ?? true;
     this.inactivityTimeout = opts.inactivityTimeout ?? DEFAULT_INACTIVITY_TIMEOUT;
     this.chunkLengthSchedule = opts.chunkLengthSchedule;
     this.chunkSize = opts.chunkSize ?? DEFAULT_CHUNK_SIZE;
+  }
+
+  /**
+   * Hook called by ``StreamHandler`` to advise the carrier wire format.
+   *
+   * When the user did NOT pass an explicit ``outputFormat`` in the
+   * constructor options, this flips the format to the carrier's native
+   * wire codec — saving a client-side transcode step. Calling with an
+   * unknown carrier (``""`` / ``"custom"``) is a no-op.
+   *
+   * When ``outputFormat`` was explicitly passed (incl. via the
+   * ``forTwilio`` / ``forTelnyx`` factories), this method is a no-op —
+   * the user's choice always wins.
+   */
+  setTelephonyCarrier(carrier: string): void {
+    if (this._outputFormatExplicit) return;
+    const native = CARRIER_NATIVE_FORMAT[carrier];
+    if (!native) return;
+    this._outputFormat = native;
   }
 
   /** Pre-configured for Twilio Media Streams (`ulaw_8000`). */

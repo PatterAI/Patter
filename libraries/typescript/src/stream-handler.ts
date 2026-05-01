@@ -766,6 +766,25 @@ export class StreamHandler {
     // v0.5.0+: TTS is a pre-instantiated adapter on ``agent.tts`` or null.
     this.tts = await createTTS(this.deps.agent);
 
+    // Advise the TTS adapter of the telephony carrier so it can pick a
+    // wire-native ``outputFormat`` (e.g. ``ulaw_8000`` on Twilio) and
+    // skip a client-side transcode. The hook is opt-in per-adapter:
+    // adapters that don't expose ``setTelephonyCarrier`` keep their
+    // constructed format. Adapters that do (e.g. ElevenLabsWebSocketTTS)
+    // only auto-flip when the user did NOT explicitly pass outputFormat.
+    if (this.tts) {
+      const carrierAware = this.tts as unknown as {
+        setTelephonyCarrier?: (c: string) => void;
+      };
+      if (typeof carrierAware.setTelephonyCarrier === 'function') {
+        try {
+          carrierAware.setTelephonyCarrier(this.deps.bridge.telephonyProvider);
+        } catch (e) {
+          getLogger().debug(`TTS setTelephonyCarrier failed (${label}): ${String(e)}`);
+        }
+      }
+    }
+
     if (!this.stt) {
       getLogger().debug(`Pipeline mode (${label}): no STT configured`);
     }

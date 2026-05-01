@@ -1158,6 +1158,23 @@ class PipelineStreamHandler(StreamHandler):
                 api_key=self._elevenlabs_key, voice_id=self.agent.voice
             )
 
+        # Advise the TTS adapter of the telephony carrier so it can pick a
+        # wire-native ``output_format`` (e.g. ``ulaw_8000`` on Twilio) and
+        # skip a client-side transcode. The hook is opt-in per-adapter:
+        # adapters that don't expose ``set_telephony_carrier`` keep their
+        # constructed format. Adapters that do (e.g. ElevenLabsWebSocketTTS)
+        # only auto-flip when the user did NOT explicitly pass output_format.
+        if self._tts is not None and hasattr(self._tts, "set_telephony_carrier"):
+            try:
+                self._tts.set_telephony_carrier(
+                    "twilio" if self._for_twilio else "telnyx"
+                )
+            except Exception:  # pragma: no cover - defensive; adapter bug
+                logger.debug(
+                    "TTS set_telephony_carrier failed; using construction-time format",
+                    exc_info=True,
+                )
+
         if self._stt is None:
             logger.warning("Pipeline mode: no STT configured")
         if self._tts is None:

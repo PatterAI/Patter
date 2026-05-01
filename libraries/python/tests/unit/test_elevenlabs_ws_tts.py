@@ -12,7 +12,7 @@ import base64
 import json
 from collections import deque
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -140,6 +140,7 @@ class _FakeWebSocket:
             # only when the consumer was expecting more; for a clean end
             # the test relies on isFinal having been emitted earlier.
             from websockets.exceptions import ConnectionClosedOK
+
             raise ConnectionClosedOK(None, None)
         return self._frames.popleft()
 
@@ -152,6 +153,7 @@ class _FakeWebSocket:
         # awaitable as required by ``await asyncio.wait_for(connect)``.
         async def _self() -> "_FakeWebSocket":
             return self
+
         return _self().__await__()
 
 
@@ -258,35 +260,101 @@ class TestSynthesizeProtocol:
 # ---------------------------------------------------------------------------
 
 
+class TestCarrierAutoFlip:
+    """``set_telephony_carrier`` flips ``output_format`` to the carrier's
+    wire-native codec only when the user did not explicitly pass an
+    ``output_format`` to the constructor.
+
+    Tagged ``unit`` — exercises real provider class, no network involved.
+    """
+
+    def test_twilio_carrier_flips_default_to_ulaw_8000(self) -> None:
+        # No explicit output_format → constructor picks PCM_16000 default.
+        tts = ElevenLabsWebSocketTTS(api_key="k")
+        assert tts.output_format == "pcm_16000"
+        tts.set_telephony_carrier("twilio")
+        assert tts.output_format == "ulaw_8000"
+
+    def test_twilio_carrier_url_contains_ulaw_8000(self) -> None:
+        # End-to-end: after carrier auto-flip, the WS connect URL must
+        # request ulaw_8000 so ElevenLabs encodes server-side and we
+        # skip the Python-side mulaw transcode.
+        tts = ElevenLabsWebSocketTTS(api_key="k", voice_id="v1")
+        tts.set_telephony_carrier("twilio")
+        url = tts._build_url()
+        assert "output_format=ulaw_8000" in url
+
+    def test_telnyx_carrier_keeps_pcm_16000(self) -> None:
+        tts = ElevenLabsWebSocketTTS(api_key="k")
+        tts.set_telephony_carrier("telnyx")
+        assert tts.output_format == "pcm_16000"
+
+    def test_explicit_format_is_respected_over_carrier_hint(self) -> None:
+        # User explicitly chose pcm_16000 — Twilio carrier hint must NOT
+        # silently flip them to ulaw_8000.
+        tts = ElevenLabsWebSocketTTS(api_key="k", output_format="pcm_16000")
+        tts.set_telephony_carrier("twilio")
+        assert tts.output_format == "pcm_16000"
+
+    def test_explicit_ulaw_is_preserved_on_telnyx(self) -> None:
+        tts = ElevenLabsWebSocketTTS(api_key="k", output_format="ulaw_8000")
+        tts.set_telephony_carrier("telnyx")
+        assert tts.output_format == "ulaw_8000"
+
+    def test_for_twilio_factory_counts_as_explicit(self) -> None:
+        # The factory passes output_format=ulaw_8000 internally —
+        # subsequent carrier hints must not override.
+        tts = ElevenLabsWebSocketTTS.for_twilio(api_key="k")
+        tts.set_telephony_carrier("telnyx")
+        assert tts.output_format == "ulaw_8000"
+
+    def test_unknown_carrier_is_noop(self) -> None:
+        tts = ElevenLabsWebSocketTTS(api_key="k")
+        tts.set_telephony_carrier("custom")
+        assert tts.output_format == "pcm_16000"
+        tts.set_telephony_carrier("")
+        assert tts.output_format == "pcm_16000"
+
+
 class TestPublicWrapper:
-    def test_public_class_resolves_env_api_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_public_class_resolves_env_api_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setenv("ELEVENLABS_API_KEY", "env-key-123")
         from getpatter.tts.elevenlabs_ws import TTS
+
         tts = TTS()
         assert tts.api_key == "env-key-123"
 
     def test_public_class_explicit_api_key(self) -> None:
         from getpatter.tts.elevenlabs_ws import TTS
+
         tts = TTS(api_key="explicit-key")
         assert tts.api_key == "explicit-key"
 
-    def test_public_class_raises_when_no_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_public_class_raises_when_no_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
         from getpatter.tts.elevenlabs_ws import TTS
+
         with pytest.raises(ValueError, match="requires an api_key"):
             TTS()
 
     def test_public_for_twilio_factory(self) -> None:
         from getpatter.tts.elevenlabs_ws import TTS
+
         tts = TTS.for_twilio(api_key="k")
         assert tts.output_format == "ulaw_8000"
 
     def test_public_for_telnyx_factory(self) -> None:
         from getpatter.tts.elevenlabs_ws import TTS
+
         tts = TTS.for_telnyx(api_key="k")
         assert tts.output_format == "pcm_16000"
 
     def test_re_exported_from_top_level(self) -> None:
         from getpatter import ElevenLabsWebSocketTTS as TopLevel
         from getpatter.tts.elevenlabs_ws import TTS
+
         assert TopLevel is TTS
