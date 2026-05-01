@@ -15,15 +15,18 @@ libraries/python/
     ├── __init__.py
     ├── client.py           # Patter entry point
     ├── models.py           # public dataclasses (frozen=True)
-    ├── exceptions.py
-    ├── pricing.py
+    ├── exceptions.py       # PatterError + ErrorCode enum
+    ├── pricing.py          # PricingUnit enum + provider price tables
     ├── server.py           # FastAPI app
-    ├── handlers/           # per-call lifecycle, telephony adapters
+    ├── stream_handler.py   # per-call orchestrator
+    ├── telephony/          # Twilio + Telnyx adapters (twilio.py / telnyx.py / common.py)
+    ├── audio/              # transcoding, pcm_mixer, background_audio
+    ├── tools/              # tool_decorator, tool_executor
     ├── providers/          # voice / LLM / STT / TTS providers
-    ├── services/           # llm_loop, metrics, transcoding, etc.
-    ├── observability/
+    ├── services/           # llm_loop, metrics, sentence_chunker, text_transforms, ivr, ...
+    ├── observability/      # event_bus + OTel tracing
     ├── dashboard/
-    ├── tts/ stt/
+    ├── tts/ stt/           # public namespaces (env-var auto-resolve)
     └── ...
 ```
 

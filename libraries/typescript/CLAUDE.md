@@ -18,16 +18,18 @@ libraries/typescript/
     ├── index.ts            # public entry — re-exports
     ├── client.ts           # Patter entry point
     ├── types.ts            # public interfaces (readonly)
-    ├── errors.ts
-    ├── pricing.ts
+    ├── errors.ts           # PatterError + ErrorCode enum
+    ├── pricing.ts          # PricingUnit + provider price tables
     ├── server.ts           # Express app
     ├── stream-handler.ts   # per-call lifecycle
-    ├── handlers/           # telephony adapters
+    ├── telephony/          # Twilio + Telnyx adapters (twilio.ts / telnyx.ts)
+    ├── audio/              # transcoding, background-audio
+    ├── tools/              # tool-decorator
     ├── providers/          # voice / LLM / STT / TTS providers
-    ├── services/           # llm-loop, metrics, transcoding, etc.
+    ├── services/           # call-log, ivr (mostly top-level files in src/)
     ├── observability/
     ├── dashboard/
-    ├── tts/ stt/
+    ├── tts/ stt/           # public namespaces (env-var auto-resolve)
     └── ...
 ```
 
