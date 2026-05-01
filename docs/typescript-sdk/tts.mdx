@@ -40,22 +40,38 @@ await phone.serve({ agent });
 
 ## ElevenLabs
 
-Streaming HTTP TTS via ElevenLabs `eleven_turbo_v2_5`.
+Streaming HTTP TTS via ElevenLabs. Default model `"eleven_flash_v2_5"` (~75 ms TTFB, drop-in replacement for `eleven_turbo_v2_5`). Other valid `modelId` literals: `"eleven_v3"`, `"eleven_turbo_v2_5"`, `"eleven_multilingual_v2"`, `"eleven_monolingual_v1"`.
 
 ```typescript
 import { ElevenLabsTTS } from "getpatter";
 
 const tts = new ElevenLabsTTS();                                  // reads ELEVENLABS_API_KEY
-const tts = new ElevenLabsTTS({ voiceId: "rachel" });
-const tts = new ElevenLabsTTS({ apiKey: "...", voiceId: "EXAVITQu4vr4xnSDxMaL", modelId: "eleven_turbo_v2_5" });
+const tts2 = new ElevenLabsTTS({ voiceId: "rachel" });
+const tts3 = new ElevenLabsTTS({ apiKey: "...", voiceId: "EXAVITQu4vr4xnSDxMaL", modelId: "eleven_v3" });
 ```
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `apiKey` | `string` | — | API key — reads from `ELEVENLABS_API_KEY` if omitted. |
 | `voiceId` | `string` | `"EXAVITQu4vr4xnSDxMaL"` (Sarah) | ElevenLabs voice ID (or name). |
-| `modelId` | `string` | `"eleven_turbo_v2_5"` | Model preset. |
+| `modelId` | `ElevenLabsModel \| string` | `"eleven_flash_v2_5"` | Typed literal: `eleven_flash_v2_5` / `eleven_turbo_v2_5` / `eleven_v3` / `eleven_multilingual_v2` / `eleven_monolingual_v1`. |
 | `outputFormat` | `string` | `"pcm_16000"` | ElevenLabs output format. |
+
+### Telephony factories — `forTwilio()` / `forTelnyx()`
+
+When ElevenLabs runs in pipeline mode behind a phone carrier you can negotiate the carrier-native codec at the ElevenLabs HTTP layer and skip per-chunk SDK-side transcoding. The factory variants do that for you:
+
+```typescript
+import { ElevenLabsTTS } from "getpatter";
+
+// Twilio Media Streams: μ-law @ 8 kHz native — no resample, no μ-law encode in JS.
+const tts = ElevenLabsTTS.forTwilio({ voiceId: "rachel" });
+
+// Telnyx default: PCM @ 16 kHz native — no resample.
+const tts2 = ElevenLabsTTS.forTelnyx({ voiceId: "rachel" });
+```
+
+`CartesiaTTS.forTwilio()` / `forTelnyx()` and `ElevenLabsConvAI.forTwilio()` / `forTelnyx()` work the same way. Use them whenever you know the call will go out over Twilio or Telnyx — they shave tens of milliseconds off TTFB and drop CPU on long calls.
 
 <Note>
   **WebSocket variant**: `ElevenLabsWebSocketTTS` is a drop-in alternative that streams audio over a WebSocket connection, saving ~50 ms of HTTP setup + TLS cold-start per utterance. See [ElevenLabs WebSocket TTS](/typescript-sdk/providers/elevenlabs-websocket) for the full reference and limitations.

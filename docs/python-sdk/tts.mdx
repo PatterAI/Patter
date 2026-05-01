@@ -56,22 +56,38 @@ agent = phone.agent(
 
 ## ElevenLabs
 
-Streaming HTTP TTS via ElevenLabs `eleven_turbo_v2_5`.
+Streaming HTTP TTS via ElevenLabs. Default model `"eleven_flash_v2_5"` (~75 ms TTFB, drop-in replacement for `eleven_turbo_v2_5`). Other valid `model_id` literals: `"eleven_v3"`, `"eleven_turbo_v2_5"`, `"eleven_multilingual_v2"`, `"eleven_monolingual_v1"`.
 
 ```python
 from getpatter import ElevenLabsTTS
 
 tts = ElevenLabsTTS()                        # reads ELEVENLABS_API_KEY
 tts = ElevenLabsTTS(voice_id="rachel")
-tts = ElevenLabsTTS(api_key="...", voice_id="EXAVITQu4vr4xnSDxMaL", model_id="eleven_turbo_v2_5")
+tts = ElevenLabsTTS(api_key="...", voice_id="EXAVITQu4vr4xnSDxMaL", model_id="eleven_v3")
 ```
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `api_key` | `str \| None` | `None` | API key — reads from `ELEVENLABS_API_KEY` if omitted. |
 | `voice_id` | `str` | `"EXAVITQu4vr4xnSDxMaL"` (Sarah) | ElevenLabs voice ID (or name). |
-| `model_id` | `str` | `"eleven_turbo_v2_5"` | Model preset. |
+| `model_id` | `ElevenLabsModel \| str` | `"eleven_flash_v2_5"` | Typed literal: `eleven_flash_v2_5` / `eleven_turbo_v2_5` / `eleven_v3` / `eleven_multilingual_v2` / `eleven_monolingual_v1`. |
 | `output_format` | `str` | `"pcm_16000"` | ElevenLabs output format. |
+
+### Telephony factories — `for_twilio()` / `for_telnyx()`
+
+When ElevenLabs runs in pipeline mode behind a phone carrier you can negotiate the carrier-native codec at the ElevenLabs HTTP layer and skip per-chunk SDK-side transcoding. The factory variants do that for you:
+
+```python
+from getpatter import ElevenLabsTTS
+
+# Twilio Media Streams: μ-law @ 8 kHz native — no resample, no μ-law encode in Python.
+tts = ElevenLabsTTS.for_twilio(voice_id="rachel")
+
+# Telnyx default: PCM @ 16 kHz native — no resample.
+tts = ElevenLabsTTS.for_telnyx(voice_id="rachel")
+```
+
+`CartesiaTTS.for_twilio()` / `for_telnyx()` and `ElevenLabsConvAI.for_twilio()` / `for_telnyx()` work the same way. Use them whenever you know the call will go out over Twilio or Telnyx — they shave tens of milliseconds off TTFB and drop CPU on long calls.
 
 ### WebSocket variant
 

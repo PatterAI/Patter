@@ -62,6 +62,7 @@ await phone.serve({ agent, tunnel: true });
 | Call recording | `serve({ recording: true })` | Record all calls |
 | Call transfer | `transfer_call` (auto-injected) | Transfer to a human |
 | Voicemail drop | `call({ voicemailMessage: "..." })` | Play message on voicemail |
+| Phone-as-a-tool (external agents) | `new PatterTool({ phone, agent }).execute(...)` | Drop into LangChain / OpenAI Assistants / Hermes / MCP |
 
 ## Configuration
 
@@ -182,7 +183,7 @@ import {
   // Engines
   OpenAIRealtime, ElevenLabsConvAI,
   // STT
-  DeepgramSTT, WhisperSTT, CartesiaSTT, SonioxSTT, AssemblyAISTT,
+  DeepgramSTT, WhisperSTT, OpenAITranscribeSTT, CartesiaSTT, SonioxSTT, AssemblyAISTT,
   // TTS
   ElevenLabsTTS, OpenAITTS, CartesiaTTS, RimeTTS, LMNTTTS,
   // LLM
@@ -191,6 +192,8 @@ import {
   CloudflareTunnel, StaticTunnel,
   // Primitives
   Tool, Guardrail, tool, guardrail,
+  // Integrations
+  PatterTool,
 } from "getpatter";
 ```
 

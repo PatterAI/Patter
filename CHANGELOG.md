@@ -6,7 +6,7 @@ _(no entries yet — next version will land here)_
 
 ## 0.5.5 (2026-04-28)
 
-Latency-pass 1: TTFA optimisations grounded in the ElevenLabs latency posts and a head-to-head review of Pipecat / LiveKit / Cartesia / OpenAI Realtime production patterns. All changes are additive or opt-in — existing call sites keep their current behaviour unchanged.
+Latency-pass 1: TTFA optimisations grounded in the ElevenLabs latency posts and a head-to-head review of competing production voice-AI stacks. All changes are additive or opt-in — existing call sites keep their current behaviour unchanged.
 
 ### Improved — sentence chunker
 
@@ -56,7 +56,11 @@ Latency-pass 1: TTFA optimisations grounded in the ElevenLabs latency posts and 
 
 ## 0.5.4 (2026-04-27)
 
-Cerebras default bumped to `gpt-oss-120b` (already shipped in 0.5.3 — re-released as 0.5.4 to fix a release-pipeline issue with no code differences).
+Fast-follow to align the Cerebras default with what 0.5.3 already promised in docs and changelog.
+
+### Changed — Cerebras default model
+- **Default model bumped to `gpt-oss-120b`** (production tier, ~3000 tok/sec on WSE-3, no deprecation date) in both Python and TypeScript SDKs. 0.5.3 had temporarily kept the default at `llama3.1-8b` while `gpt-oss-120b` rolled out across the Cerebras catalogue; that's no longer needed. Pass `model="llama3.1-8b"` (or any free-tier ID) to opt back into the smaller model.
+- 404 `model_not_found` recovery hint and the `"common: …"` candidate list updated to surface `gpt-oss-120b` first. The `TODO(deprecation 2026-05-27)` note for `llama3.1-8b` retirement is preserved in the source.
 
 ## 0.5.3 (2026-04-27)
 

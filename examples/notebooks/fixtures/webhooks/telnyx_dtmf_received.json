@@ -1,0 +1,10 @@
+{
+  "data": {
+    "event_type": "call.dtmf.received",
+    "id": "00000000-0000-0000-0000-000000000002",
+    "payload": {
+      "call_control_id": "v3:test",
+      "digit": "5"
+    }
+  }
+}

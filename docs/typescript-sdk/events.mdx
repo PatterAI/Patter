@@ -18,6 +18,10 @@ Patter emits events at key moments during a call. Register callbacks in `serve()
 | `onMessage` | User transcript ready for response (pipeline mode) | `serve()` |
 | `onMetrics` | After each conversational turn completes | `serve()` |
 
+For **fine-grained pipeline observability** (every interim transcript, every LLM chunk, every TTS chunk, every tool start) subscribe to the [EventBus](#eventbus) below — it complements these callbacks rather than replacing them.
+
+For **mutating prompts and responses** (RAG augmentation, output validation, PII redaction) use [PipelineHooks](#pipelinehooks-beforellm--afterllm) — they sit *inside* the LLM step rather than firing alongside it.
+
 ## onCallStart
 
 Fires when a new call connects. Use it for logging, CRM lookups, or initializing per-call state.
@@ -237,6 +241,29 @@ await phone.serve({
 }
 ```
 
+## EventBus
+
+The `EventBus` exposes fine-grained pipeline events that don't have first-class callbacks. Subscribe with `events.on(eventType, handler)` from anywhere you have a `Patter` reference.
+
+```typescript
+import { Patter, PatterEventType } from "getpatter";
+
+phone.events.on(PatterEventType.TRANSCRIPT_PARTIAL, (ev) => console.log("partial:", ev.text));
+phone.events.on(PatterEventType.LLM_CHUNK, (ev) => logChunk(ev.call_id, ev.text));
+```
+
+| `PatterEventType` | Fires |
+|---|---|
+| `TRANSCRIPT_PARTIAL` | Every interim STT result (before endpointing). |
+| `TRANSCRIPT_FINAL` | Every final STT result (after endpointing). Same payload as `onTranscript`. |
+| `LLM_CHUNK` | Every streamed LLM token / chunk. |
+| `TTS_CHUNK` | Every TTS audio chunk written to the carrier. |
+| `TOOL_CALL_STARTED` | Tool dispatched (paired with the existing `tool_call_completed` you can observe via `onCallEnd`). |
+
+Handlers are non-blocking (fire-and-forget). Throwing inside a handler logs the error but does not interrupt the call.
+
+---
+
 ## Pipeline Hooks (`afterLlm`)
 
 `PipelineHooks` lets you intercept LLM output before it reaches the TTS engine. Pass it via `phone.agent({ hooks: { afterLlm: ... } })`. The new 3-tier API exposes three callbacks tuned to different latency budgets — pick the one that matches your work.
@@ -269,6 +296,10 @@ const agent = phone.agent({
 | `onSentence` | async | 50–300 ms (per sentence) | Per-sentence transformations that need a small amount of I/O: PII redaction, profanity replacement, lightweight enrichment. Runs once per detected sentence boundary. | Returns the rewritten sentence. Sentence is held until the promise resolves; subsequent sentences continue to stream. |
 | `onResponse` | async | 500 ms – 2 s (per full response) | Whole-response validation that must complete before audio plays: JSON schema checks, full-response moderation, summary substitution. **Blocks streaming** — TTS cannot start until this resolves. | Returns the rewritten full response (or rejects to abort). |
 
+`HookContext` carries `callId`, `caller`, `callee`, and `history`. Hooks run in pipeline mode only — engines (`OpenAIRealtime`, `ElevenLabsConvAI`) bundle the LLM step internally.
+
+`PipelineHooks` also exposes `beforeStt` / `afterStt` and `beforeTts` / `afterTts` for audio-stage interception.
+
 ### Migration from the legacy callable
 
 The legacy single-callable form is **deprecated** and will be removed in **v0.7.0**:
@@ -285,6 +316,8 @@ Behavior of the legacy form during the deprecation window:
 - A bare callable is internally mapped to `onResponse` — it still works, with the same blocking semantics.
 - A `console.warn` is emitted **once per process** the first time a legacy callable is registered.
 - Migrate by moving your function into the `onResponse` slot; if your transform is per-chunk or per-sentence, switch to `onChunk` / `onSentence` for a latency win.
+
+---
 
 ## Type Signatures
 

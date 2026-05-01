@@ -401,18 +401,26 @@ from getpatter import (
 
     # Carriers
     Twilio, Telnyx,
+    TwilioAdapter, TelnyxAdapter,                  # advanced: direct adapter access
 
     # Engines
     OpenAIRealtime, ElevenLabsConvAI,
 
     # STT classes
-    DeepgramSTT, WhisperSTT, CartesiaSTT, AssemblyAISTT, SonioxSTT,
+    DeepgramSTT, WhisperSTT, OpenAITranscribeSTT,
+    CartesiaSTT, AssemblyAISTT, SonioxSTT, SpeechmaticsSTT,
 
     # TTS classes
     ElevenLabsTTS, ElevenLabsWebSocketTTS, OpenAITTS, CartesiaTTS, RimeTTS, LMNTTTS,
 
     # LLM classes
     OpenAILLM, AnthropicLLM, GroqLLM, CerebrasLLM, GoogleLLM,
+
+    # VAD (opt-in: pip install 'getpatter[silero]')
+    SileroVAD,
+
+    # Integrations
+    PatterTool,                                    # phone-as-a-tool for external agents
 
     # Public primitives
     Tool, Guardrail, tool, guardrail,
@@ -422,6 +430,12 @@ from getpatter import (
     LatencyBreakdown, IncomingMessage, TurnMetrics, PipelineHooks,
     HookContext, STTConfig, TTSConfig,
 
+    # Observability
+    init_tracing, is_tracing_enabled, start_span,
+    SPAN_CALL, SPAN_STT, SPAN_LLM, SPAN_TTS, SPAN_TOOL,
+    SPAN_ENDPOINT, SPAN_BARGEIN,
+    EventBus, PatterEventType,
+
     # Services / utilities
     SentenceChunker, PipelineHookExecutor,
     filter_markdown, filter_emoji, filter_for_tts,
@@ -429,15 +443,16 @@ from getpatter import (
     ChatContext, ChatMessage,
     IVRActivity, TfidfLoopDetector, DtmfEvent, format_dtmf,
     ScheduleHandle, schedule_cron, schedule_once, schedule_interval,
-    mix_pcm,
+    BackgroundAudioPlayer, BuiltinAudioClip, mix_pcm,
 
     # Errors
-    PatterError, PatterConnectionError, AuthenticationError, ProvisionError,
+    PatterError, PatterConnectionError, AuthenticationError,
+    ProvisionError, RateLimitError,
 )
 
 from getpatter.carriers import twilio, telnyx
 from getpatter.engines import openai, elevenlabs
-from getpatter.stt import deepgram, whisper, cartesia, assemblyai, soniox, speechmatics
+from getpatter.stt import deepgram, whisper, openai_transcribe, cartesia, assemblyai, soniox, speechmatics
 from getpatter.tts import elevenlabs, openai, cartesia, rime, lmnt
 from getpatter.llm import openai, anthropic, groq, cerebras, google
 from getpatter.tunnels import CloudflareTunnel, Static, Ngrok

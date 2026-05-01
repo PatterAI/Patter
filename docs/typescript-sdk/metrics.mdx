@@ -51,11 +51,16 @@ The `LatencyBreakdown` object provides per-component latency in milliseconds:
 | Field | Description |
 |-------|-------------|
 | `stt_ms` | Time from user speech to transcript. |
-| `llm_ms` | Time from transcript to LLM response. |
-| `tts_ms` | Time from LLM response to first audio byte. |
+| `endpoint_ms` | Time the endpointer waited after the last word before declaring end-of-utterance. |
+| `llm_ttft_ms` | Time from end-of-utterance to the first LLM token. |
+| `llm_total_ms` | Time from end-of-utterance to the last LLM token (full response). |
+| `llm_ms` | Alias for `llm_ttft_ms` (kept for back-compat). |
+| `tts_ms` | Time from first LLM token to first TTS audio byte. |
+| `tts_total_ms` | Time from first LLM token to last TTS audio byte. |
+| `bargein_ms` | Time from caller voice detected to TTS playback cancelled (only set on barge-in turns). |
 | `total_ms` | End-to-end latency (user speech to first audio). |
 
-`CallMetrics` exposes the full distribution: `latency_avg`, `latency_p50` (median / typical UX), `latency_p95` (SLA), and `latency_p99` (cold-start outliers).
+`CallMetrics` exposes the full distribution: `latency_avg`, `latency_p50` (median / typical UX), `latency_p90` (steady-state outliers), `latency_p95` (SLA), and `latency_p99` (cold-start outliers).
 
 ## Per-Turn Metrics
 

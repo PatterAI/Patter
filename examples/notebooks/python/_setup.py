@@ -1,0 +1,298 @@
+"""Shared helpers for every notebook in examples/notebooks/python/.
+
+Public surface (mirrored in typescript/_setup.ts):
+    NotebookEnv      — frozen dataclass holding every env var the series reads
+    load()           — parse .env and return NotebookEnv
+    has_key()        — booleanise a key
+    print_key_matrix() — render a ✅/⚪️ table at notebook open
+    cell()           — context manager wrapping every feature cell
+    skip()           — raise NotebookSkip inside a cell
+    skip_section()   — same, for whole sections (live appendix gate)
+    load_fixture()   — load bytes from examples/notebooks/fixtures/
+    run_stt()        — standardised STT roundtrip helper
+    run_tts()        — standardised TTS roundtrip helper
+    hangup_leftover_calls() — safety sweep for live appendix teardown
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+NOTEBOOKS_DIR = Path(__file__).resolve().parent.parent
+FIXTURES = NOTEBOOKS_DIR / "fixtures"
+
+
+@dataclass(frozen=True)
+class NotebookEnv:
+    openai_key: str
+    anthropic_key: str
+    google_key: str
+    groq_key: str
+    cerebras_key: str
+    deepgram_key: str
+    assemblyai_key: str
+    soniox_key: str
+    speechmatics_key: str
+    cartesia_key: str
+    elevenlabs_key: str
+    elevenlabs_voice_id: str
+    elevenlabs_agent_id: str
+    lmnt_key: str
+    rime_key: str
+    ultravox_key: str
+    twilio_sid: str
+    twilio_token: str
+    twilio_number: str
+    telnyx_key: str
+    telnyx_connection_id: str
+    telnyx_number: str
+    telnyx_public_key: str
+    target_number: str
+    ngrok_token: str
+    public_webhook_url: str
+    patter_version: str
+    enable_live_calls: bool
+    max_call_seconds: int
+    max_cost_usd: float
+
+
+def _get(name: str, default: str = "") -> str:
+    return os.getenv(name, default).strip()
+
+
+class NotebookSkip(Exception):
+    """Raised inside a cell to render a skip banner instead of an error."""
+
+
+_KEY_FIELD_MAP: dict[str, str] = {
+    "OPENAI_API_KEY": "openai_key",
+    "ANTHROPIC_API_KEY": "anthropic_key",
+    "GOOGLE_API_KEY": "google_key",
+    "GROQ_API_KEY": "groq_key",
+    "CEREBRAS_API_KEY": "cerebras_key",
+    "DEEPGRAM_API_KEY": "deepgram_key",
+    "ASSEMBLYAI_API_KEY": "assemblyai_key",
+    "SONIOX_API_KEY": "soniox_key",
+    "SPEECHMATICS_API_KEY": "speechmatics_key",
+    "CARTESIA_API_KEY": "cartesia_key",
+    "ELEVENLABS_API_KEY": "elevenlabs_key",
+    "ELEVENLABS_AGENT_ID": "elevenlabs_agent_id",
+    "LMNT_API_KEY": "lmnt_key",
+    "RIME_API_KEY": "rime_key",
+    "ULTRAVOX_API_KEY": "ultravox_key",
+    "TWILIO_ACCOUNT_SID": "twilio_sid",
+    "TWILIO_AUTH_TOKEN": "twilio_token",
+    "TWILIO_PHONE_NUMBER": "twilio_number",
+    "TELNYX_API_KEY": "telnyx_key",
+    "TELNYX_CONNECTION_ID": "telnyx_connection_id",
+    "TELNYX_PHONE_NUMBER": "telnyx_number",
+    "TELNYX_PUBLIC_KEY": "telnyx_public_key",
+    "TARGET_PHONE_NUMBER": "target_number",
+    "NGROK_AUTHTOKEN": "ngrok_token",
+    "PUBLIC_WEBHOOK_URL": "public_webhook_url",
+}
+
+
+def has_key(env: NotebookEnv, name: str) -> bool:
+    field_name = _KEY_FIELD_MAP.get(name)
+    if field_name is None:
+        return bool(_get(name))
+    return bool(getattr(env, field_name))
+
+
+def skip(reason: str) -> None:
+    raise NotebookSkip(reason)
+
+
+def skip_section(reason: str) -> None:
+    raise NotebookSkip(f"[section skipped] {reason}")
+
+
+def print_key_matrix(env: NotebookEnv, required) -> None:
+    print("Key matrix:")
+    for name in required:
+        marker = "✅" if has_key(env, name) else "⚪"
+        print(f"  {marker} {name}")
+
+
+import contextlib
+import time
+import traceback
+from typing import Iterable, Iterator
+
+
+@contextlib.contextmanager
+def cell(
+    name: str,
+    *,
+    tier: int,
+    required: Iterable[str] = (),
+    env: NotebookEnv | None = None,
+) -> Iterator[bool]:
+    """Wrap every feature-tour or live cell.
+
+    Yields a boolean ``should_run``. The cell body should be guarded:
+
+        with _setup.cell("foo", tier=3, required=["OPENAI_API_KEY"], env=env) as ok:
+            if not ok:
+                pass
+            else:
+                # body
+                ...
+
+    Behaviour:
+        - Tier 4 cells yield False unless ``env.enable_live_calls`` is True.
+        - Cells with any unset required key yield False with a friendly banner.
+        - Exceptions inside the body are swallowed; a banner is printed but
+          notebook execution continues.
+    """
+    env = env if env is not None else load()
+    started = time.monotonic()
+
+    if tier == 4 and not env.enable_live_calls:
+        print(f"⚪ [{name}] skipped — set ENABLE_LIVE_CALLS=1 to enable T4 live calls.")
+        yield False
+        return
+
+    missing = [k for k in required if not has_key(env, k)]
+    if missing:
+        keys = ", ".join(missing)
+        print(f"⚪ [{name}] skipped — missing env: {keys}")
+        yield False
+        return
+
+    print(f"▶ [{name}] tier={tier}")
+    try:
+        yield True
+    except NotebookSkip as exc:
+        print(f"⚪ [{name}] {exc}")
+        return
+    except Exception as exc:  # noqa: BLE001
+        elapsed = time.monotonic() - started
+        print(f"❌ [{name}] failed after {elapsed:.2f}s: {type(exc).__name__}: {exc}")
+        traceback.print_exc(limit=4)
+        return
+    elapsed = time.monotonic() - started
+    print(f"✅ [{name}] {elapsed:.2f}s")
+
+
+import re
+
+_REAL_PHONE = re.compile(r"\+1[2-9]\d{9}")
+_REAL_TWILIO_SID = re.compile(r"\bAC[0-9a-f]{32}\b")
+
+
+def _assert_redacted(body: str, source: str) -> None:
+    for m in _REAL_PHONE.findall(body):
+        if m != "+15555550100":
+            raise ValueError(f"{source} contains non-placeholder phone {m}")
+    for m in _REAL_TWILIO_SID.findall(body):
+        if not (m.startswith("ACtest") or set(m[2:]) == {"0"}):
+            raise ValueError(f"{source} contains non-placeholder Twilio SID {m}")
+
+
+def load_fixture(rel_path: str) -> bytes:
+    path = FIXTURES / rel_path
+    if not path.exists():
+        raise FileNotFoundError(f"fixture not found: {path}")
+    data = path.read_bytes()
+    if path.suffix == ".json":
+        _assert_redacted(data.decode("utf-8"), str(path))
+    return data
+
+
+async def run_stt(stt, audio: bytes, *, chunk_size: int = 3200) -> str:
+    """Send audio in chunks through any STTProvider, collect the transcript."""
+    await stt.connect()
+    try:
+        for i in range(0, len(audio), chunk_size):
+            await stt.send_audio(audio[i : i + chunk_size])
+        out: list[str] = []
+        async for piece in stt.receive_transcripts():
+            out.append(piece)
+        return "".join(out)
+    finally:
+        await stt.close()
+
+
+async def run_tts(tts, text: str) -> bytes:
+    """Synthesize text via any TTSProvider, return concatenated bytes."""
+    chunks: list[bytes] = []
+    async for chunk in tts.synthesize(text):
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+try:
+    from twilio.rest import Client as _TwilioClient  # type: ignore[assignment]
+except ImportError:
+    _TwilioClient = None  # type: ignore[misc,assignment]
+
+
+def hangup_leftover_calls(env: NotebookEnv) -> None:
+    """Best-effort sweep — hang up any in-progress calls from the test numbers.
+
+    Use in a ``finally:`` after a live cell to keep stale calls from blocking
+    the next run. Failures are logged, never raised.
+    """
+    if not (env.twilio_sid and env.twilio_token and env.twilio_number):
+        return
+    if _TwilioClient is None:
+        print("⚪ twilio package not installed — skipping hangup sweep")
+        return
+    client = _TwilioClient(env.twilio_sid, env.twilio_token)
+    try:
+        for call in client.calls.list(from_=env.twilio_number, status="in-progress", limit=5):
+            try:
+                client.calls(call.sid).update(status="completed")
+                print(f"🔚 hung up stale call {call.sid}")
+            except Exception as exc:  # noqa: BLE001
+                print(f"⚠ could not hang up {call.sid}: {exc}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"⚠ Twilio sweep failed: {exc}")
+
+
+def load(env_file: Path | str | None = None) -> NotebookEnv:
+    """Load .env if present, then construct NotebookEnv from process env."""
+    if env_file is None:
+        env_file = NOTEBOOKS_DIR / ".env"
+    env_file = Path(env_file)
+    if env_file.exists():
+        load_dotenv(env_file, override=False)
+
+    return NotebookEnv(
+        openai_key=_get("OPENAI_API_KEY"),
+        anthropic_key=_get("ANTHROPIC_API_KEY"),
+        google_key=_get("GOOGLE_API_KEY"),
+        groq_key=_get("GROQ_API_KEY"),
+        cerebras_key=_get("CEREBRAS_API_KEY"),
+        deepgram_key=_get("DEEPGRAM_API_KEY"),
+        assemblyai_key=_get("ASSEMBLYAI_API_KEY"),
+        soniox_key=_get("SONIOX_API_KEY"),
+        speechmatics_key=_get("SPEECHMATICS_API_KEY"),
+        cartesia_key=_get("CARTESIA_API_KEY"),
+        elevenlabs_key=_get("ELEVENLABS_API_KEY"),
+        elevenlabs_voice_id=_get("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM"),
+        elevenlabs_agent_id=_get("ELEVENLABS_AGENT_ID"),
+        lmnt_key=_get("LMNT_API_KEY"),
+        rime_key=_get("RIME_API_KEY"),
+        ultravox_key=_get("ULTRAVOX_API_KEY"),
+        twilio_sid=_get("TWILIO_ACCOUNT_SID"),
+        twilio_token=_get("TWILIO_AUTH_TOKEN"),
+        twilio_number=_get("TWILIO_PHONE_NUMBER"),
+        telnyx_key=_get("TELNYX_API_KEY"),
+        telnyx_connection_id=_get("TELNYX_CONNECTION_ID"),
+        telnyx_number=_get("TELNYX_PHONE_NUMBER"),
+        telnyx_public_key=_get("TELNYX_PUBLIC_KEY"),
+        target_number=_get("TARGET_PHONE_NUMBER"),
+        ngrok_token=_get("NGROK_AUTHTOKEN"),
+        public_webhook_url=_get("PUBLIC_WEBHOOK_URL"),
+        patter_version=_get("PATTER_VERSION", "0.5.4"),
+        enable_live_calls=_get("ENABLE_LIVE_CALLS", "0") == "1",
+        max_call_seconds=int(_get("NOTEBOOK_MAX_CALL_SECONDS", "90")),
+        max_cost_usd=float(_get("NOTEBOOK_MAX_COST_USD", "0.25")),
+    )

@@ -132,6 +132,13 @@
                 ]
               },
               {
+                "group": "Integrations",
+                "icon": "plug",
+                "pages": [
+                  "python-sdk/patter-tool"
+                ]
+              },
+              {
                 "group": "Development",
                 "icon": "code",
                 "pages": [
@@ -211,7 +218,15 @@
                 "pages": [
                   "typescript-sdk/metrics",
                   "typescript-sdk/dashboard",
-                  "typescript-sdk/call-logging"
+                  "typescript-sdk/call-logging",
+                  "typescript-sdk/tracing"
+                ]
+              },
+              {
+                "group": "Integrations",
+                "icon": "plug",
+                "pages": [
+                  "typescript-sdk/patter-tool"
                 ]
               },
               {
