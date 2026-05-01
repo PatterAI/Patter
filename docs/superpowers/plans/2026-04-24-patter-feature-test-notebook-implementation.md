@@ -6321,8 +6321,3 @@ Two execution options:
 Recommended: **Inline for Phase 1 (Tasks 1–22)**, then **subagent-driven for Phases 2–5** once the foundation is green and tasks are independent.
 
 Which approach?
-
-
-
-
-

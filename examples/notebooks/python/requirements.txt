@@ -1,0 +1,15 @@
+# Pinned top-level deps for the patter-notebooks-python image.
+# Regenerate this file with `pip-compile requirements.in` once a .in file is
+# introduced. For now, top-level pins are explicit; transitive deps float
+# within the constraints of these majors.
+getpatter==0.5.4
+jupyterlab==4.2.5
+ipykernel==6.29.5
+ipython==8.27.0
+nbclient==0.10.0
+jupyter-client==8.6.3
+python-dotenv==1.0.1
+httpx==0.27.2
+twilio==9.3.6
+telnyx==2.1.5
+pyngrok==7.2.0
