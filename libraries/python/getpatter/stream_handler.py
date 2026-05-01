@@ -499,6 +499,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         self._resampler_16k_to_8k = None
 
     async def start(self) -> None:
+        """Connect to OpenAI Realtime, register tools, and begin event forwarding."""
         from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter  # type: ignore[import]
 
         agent_tools: list[dict] = [
@@ -750,6 +751,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
             logger.exception("OpenAI Realtime forward error: %s", exc)
 
     async def on_audio_received(self, audio_bytes: bytes) -> None:
+        """Forward decoded telephony audio to the OpenAI Realtime session (transcoding if needed)."""
         if self._adapter is None:
             return
         if self._input_transcode == "pcm16_16k_to_g711_ulaw":
@@ -765,12 +767,14 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         await self._adapter.send_audio(audio_bytes)
 
     async def on_dtmf(self, digit: str) -> None:
+        """Forward a DTMF keypress to the model as a synthetic user message."""
         if self._adapter is not None:
             await self._adapter.send_text(
                 f"The user pressed key {digit} on their phone keypad."
             )
 
     async def cleanup(self) -> None:
+        """Cancel the event-forward task and close the OpenAI Realtime adapter."""
         if self._background_task:
             self._background_task.cancel()
             try:
@@ -844,6 +848,7 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
         self._resampler_8k_to_16k = None
 
     async def start(self) -> None:
+        """Connect to the ElevenLabs ConvAI agent and begin event forwarding."""
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter  # type: ignore[import]
 
         voice = (
@@ -1000,6 +1005,7 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
             logger.exception("ElevenLabs ConvAI forward error: %s", exc)
 
     async def on_audio_received(self, audio_bytes: bytes) -> None:
+        """Forward decoded telephony audio to ConvAI (μ-law fast-path or resampled PCM16)."""
         if self._adapter is None:
             return
         # Native μ-law 8 kHz fast-path: ConvAI negotiated ulaw_8000 on the
@@ -1024,6 +1030,7 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
             await self._adapter.send_audio(audio_bytes)
 
     async def cleanup(self) -> None:
+        """Cancel the event-forward task and close the ConvAI adapter."""
         if self._background_task:
             self._background_task.cancel()
             try:
@@ -1129,6 +1136,7 @@ class PipelineStreamHandler(StreamHandler):
         self._resampler_8k_to_16k = None
 
     async def start(self) -> None:
+        """Initialize STT/TTS providers, hooks, and start the STT receive loop."""
         from getpatter.models import CallControl
 
         # Create STT. Pipeline mode always transcodes Twilio mulaw 8 kHz →
@@ -1859,6 +1867,7 @@ class PipelineStreamHandler(StreamHandler):
             logger.exception("Pipeline STT loop error: %s", exc)
 
     async def on_audio_received(self, audio_bytes: bytes) -> None:
+        """Forward caller audio to STT (transcoding to PCM16 16 kHz, running VAD/hooks)."""
         if self._stt is None:
             return
         # Always forward caller audio to STT — even while the agent is
@@ -2004,6 +2013,7 @@ class PipelineStreamHandler(StreamHandler):
         asyncio.create_task(_flip_after_grace())
 
     async def cleanup(self) -> None:
+        """Cancel the STT loop and close STT/TTS/remote-message adapters."""
         if self._stt_task:
             self._stt_task.cancel()
             try:

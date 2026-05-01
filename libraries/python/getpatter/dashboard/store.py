@@ -100,6 +100,7 @@ class MetricsStore:
     # --- Recording ---
 
     def record_call_start(self, data: dict[str, Any]) -> None:
+        """Record the moment a call's media stream begins (publishes ``call_start``)."""
         call_id = data.get("call_id", "")
         if not call_id:
             return
@@ -161,7 +162,13 @@ class MetricsStore:
             # Don't clobber a pre-existing record (e.g. inbound already moved
             # to "in-progress"). First writer wins.
             self._active_calls.setdefault(call_id, entry)
-        self._publish("call_initiated", {k: entry[k] for k in ("call_id", "caller", "callee", "direction", "status")})
+        self._publish(
+            "call_initiated",
+            {
+                k: entry[k]
+                for k in ("call_id", "caller", "callee", "direction", "status")
+            },
+        )
 
     def update_call_status(self, call_id: str, status: str, **extra: Any) -> None:
         """Update the status of an active or completed call.
@@ -173,7 +180,14 @@ class MetricsStore:
         """
         if not call_id or not status:
             return
-        terminal = status in {"completed", "no-answer", "busy", "failed", "canceled", "webhook_error"}
+        terminal = status in {
+            "completed",
+            "no-answer",
+            "busy",
+            "failed",
+            "canceled",
+            "webhook_error",
+        }
         with self._lock:
             active = self._active_calls.get(call_id)
             if active is not None:
@@ -196,7 +210,7 @@ class MetricsStore:
                     self._active_calls.pop(call_id, None)
                     self._calls.append(entry)
                     if len(self._calls) > self._max_calls:
-                        self._calls = self._calls[-self._max_calls:]
+                        self._calls = self._calls[-self._max_calls :]
             else:
                 # Call already completed — patch the existing row if found.
                 for call in reversed(self._calls):
@@ -208,6 +222,7 @@ class MetricsStore:
         self._publish("call_status", {"call_id": call_id, "status": status, **extra})
 
     def record_turn(self, data: dict[str, Any]) -> None:
+        """Append a completed conversation turn to the active call (publishes ``turn_complete``)."""
         call_id = data.get("call_id", "")
         turn = data.get("turn")
         if not call_id or turn is None:
@@ -223,6 +238,7 @@ class MetricsStore:
     def record_call_end(
         self, data: dict[str, Any], metrics: CallMetrics | None = None
     ) -> None:
+        """Move a call from the active set into history with final metrics (publishes ``call_end``)."""
         call_id = data.get("call_id", "")
         if not call_id:
             return
@@ -240,7 +256,11 @@ class MetricsStore:
                 entry["started_at"] = active.get("started_at", 0)
                 # Preserve any explicit status (no-answer, busy, ...) set by
                 # a statusCallback during the call. Fall back to "completed".
-                entry["status"] = active.get("status", "completed") if active.get("status") != "in-progress" else "completed"
+                entry["status"] = (
+                    active.get("status", "completed")
+                    if active.get("status") != "in-progress"
+                    else "completed"
+                )
             else:
                 entry.setdefault("status", "completed")
             if metrics is not None:
@@ -254,7 +274,13 @@ class MetricsStore:
                 entry["metrics"] = {
                     "duration_seconds": max(0.0, float(ended - started)),
                     "turns": [],
-                    "cost": {"total": 0.0, "stt": 0.0, "tts": 0.0, "llm": 0.0, "telephony": 0.0},
+                    "cost": {
+                        "total": 0.0,
+                        "stt": 0.0,
+                        "tts": 0.0,
+                        "llm": 0.0,
+                        "telephony": 0.0,
+                    },
                     "latency_avg": {"total_ms": 0.0},
                     "latency_p50": {"total_ms": 0.0},
                     "latency_p90": {"total_ms": 0.0},
@@ -267,17 +293,22 @@ class MetricsStore:
                 self._calls = self._calls[-self._max_calls :]
             event_metrics = entry.get("metrics")
         # Publish outside lock to avoid deadlock with subscribe/unsubscribe
-        self._publish("call_end", {
-            "call_id": call_id,
-            "metrics": event_metrics,
-        })
+        self._publish(
+            "call_end",
+            {
+                "call_id": call_id,
+                "metrics": event_metrics,
+            },
+        )
 
     def get_calls(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+        """Return the most recent completed calls, newest first."""
         with self._lock:
             ordered = list(reversed(self._calls))
             return ordered[offset : offset + limit]
 
     def get_call(self, call_id: str) -> dict[str, Any] | None:
+        """Return the completed-call record for ``call_id`` if present."""
         with self._lock:
             for call in reversed(self._calls):
                 if call["call_id"] == call_id:
@@ -285,6 +316,7 @@ class MetricsStore:
             return None
 
     def get_active_calls(self) -> list[dict[str, Any]]:
+        """Return the currently in-flight calls."""
         with self._lock:
             return list(self._active_calls.values())
 
@@ -299,6 +331,7 @@ class MetricsStore:
             return self._active_calls.get(call_id)
 
     def get_aggregates(self) -> dict[str, Any]:
+        """Compute aggregate stats (call count, cost, avg duration, latency) across history."""
         with self._lock:
             total_calls = len(self._calls)
             if total_calls == 0:
@@ -308,7 +341,10 @@ class MetricsStore:
                     "avg_duration": 0.0,
                     "avg_latency_ms": 0.0,
                     "cost_breakdown": {
-                        "stt": 0.0, "tts": 0.0, "llm": 0.0, "telephony": 0.0,
+                        "stt": 0.0,
+                        "tts": 0.0,
+                        "llm": 0.0,
+                        "telephony": 0.0,
                     },
                     "active_calls": len(self._active_calls),
                 }
@@ -372,6 +408,7 @@ class MetricsStore:
 
     @property
     def call_count(self) -> int:
+        """Number of completed calls currently held in memory."""
         with self._lock:
             return len(self._calls)
 
@@ -448,9 +485,7 @@ class MetricsStore:
         # Defends against the rare case where hydrate() is invoked
         # concurrently with itself or with live recordCallEnd traffic.
         with self._lock:
-            existing_ids = {
-                c.get("call_id") for c in self._calls if c.get("call_id")
-            }
+            existing_ids = {c.get("call_id") for c in self._calls if c.get("call_id")}
             for rec in collected:
                 if rec["call_id"] in existing_ids:
                     continue
@@ -498,7 +533,9 @@ def _metadata_to_call_record(
         return None
     ended = _to_seconds(meta.get("ended_at"))
     metrics = meta.get("metrics") if isinstance(meta.get("metrics"), dict) else None
-    transcript = meta.get("transcript") if isinstance(meta.get("transcript"), list) else []
+    transcript = (
+        meta.get("transcript") if isinstance(meta.get("transcript"), list) else []
+    )
     record: dict[str, Any] = {
         "call_id": call_id,
         "caller": meta.get("caller") or "",

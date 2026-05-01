@@ -1,3 +1,12 @@
+"""Public dataclasses and runtime models for the Patter SDK.
+
+These are the primary types users construct (``Agent``, ``Guardrail``,
+``PipelineHooks``, ``STTConfig``, ``TTSConfig``) and observe
+(``CallMetrics``, ``LatencyBreakdown``, ``CostBreakdown``, ``CallControl``).
+All public configs are frozen dataclasses for immutability — see
+``.claude/rules/immutability.md``.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -162,6 +171,8 @@ class CallEvent:
 
 @dataclass(frozen=True)
 class IncomingMessage:
+    """Inbound user utterance forwarded to ``on_message`` handlers."""
+
     text: str
     call_id: str
     caller: str
@@ -169,6 +180,8 @@ class IncomingMessage:
 
 @dataclass(frozen=True)
 class STTConfig:
+    """Pipeline-mode STT provider selection (provider key + credentials + options)."""
+
     provider: str
     api_key: str
     language: str = "en"
@@ -177,6 +190,7 @@ class STTConfig:
     options: dict | None = None
 
     def to_dict(self) -> dict:
+        """Serialize to a plain dict for transport / logging."""
         out = {
             "provider": self.provider,
             "api_key": self.api_key,
@@ -189,12 +203,15 @@ class STTConfig:
 
 @dataclass(frozen=True)
 class TTSConfig:
+    """Pipeline-mode TTS provider selection (provider key + credentials + voice)."""
+
     provider: str
     api_key: str
     voice: str = "alloy"
     options: dict | None = None
 
     def to_dict(self) -> dict:
+        """Serialize to a plain dict for transport / logging."""
         out = {"provider": self.provider, "api_key": self.api_key, "voice": self.voice}
         if self.options:
             out["options"] = dict(self.options)

@@ -184,6 +184,7 @@ class CallLogger:
 
     @property
     def enabled(self) -> bool:
+        """True when a writable log root is configured."""
         return self._root is not None
 
     # -- Path helpers -----------------------------------------------------
@@ -415,6 +416,7 @@ class CallLogger:
 
 
 async def alog_call_start(logger_: CallLogger | None, *args, **kwargs) -> None:
+    """Async wrapper around :meth:`CallLogger.log_call_start` (offloads blocking I/O)."""
     if logger_ is None or not logger_.enabled:
         return
     await asyncio.to_thread(logger_.log_call_start, *args, **kwargs)
@@ -423,6 +425,7 @@ async def alog_call_start(logger_: CallLogger | None, *args, **kwargs) -> None:
 async def alog_turn(
     logger_: CallLogger | None, call_id: str, turn: dict[str, Any]
 ) -> None:
+    """Async wrapper around :meth:`CallLogger.log_turn`."""
     if logger_ is None or not logger_.enabled:
         return
     await asyncio.to_thread(logger_.log_turn, call_id, turn)
@@ -434,12 +437,14 @@ async def alog_event(
     event_type: str,
     payload: dict[str, Any] | None = None,
 ) -> None:
+    """Async wrapper around :meth:`CallLogger.log_event`."""
     if logger_ is None or not logger_.enabled:
         return
     await asyncio.to_thread(logger_.log_event, call_id, event_type, payload)
 
 
 async def alog_call_end(logger_: CallLogger | None, call_id: str, **kwargs) -> None:
+    """Async wrapper around :meth:`CallLogger.log_call_end`."""
     if logger_ is None or not logger_.enabled:
         return
     await asyncio.to_thread(logger_.log_call_end, call_id, **kwargs)

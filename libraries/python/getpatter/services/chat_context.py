@@ -62,6 +62,7 @@ class ChatContext:
     # ------------------------------------------------------------------
 
     def add_user(self, content: str) -> ChatMessage:
+        """Append a user-role message and return the created :class:`ChatMessage`."""
         msg = ChatMessage(
             id=_generate_id(),
             role="user",
@@ -72,6 +73,7 @@ class ChatContext:
         return msg
 
     def add_assistant(self, content: str) -> ChatMessage:
+        """Append an assistant-role message and return the created :class:`ChatMessage`."""
         msg = ChatMessage(
             id=_generate_id(),
             role="assistant",
@@ -82,6 +84,7 @@ class ChatContext:
         return msg
 
     def add_system(self, content: str) -> ChatMessage:
+        """Append a system-role message and return the created :class:`ChatMessage`."""
         msg = ChatMessage(
             id=_generate_id(),
             role="system",
@@ -92,6 +95,7 @@ class ChatContext:
         return msg
 
     def add_tool_result(self, content: str, tool_call_id: str) -> ChatMessage:
+        """Append a tool-result message linked to ``tool_call_id``."""
         msg = ChatMessage(
             id=_generate_id(),
             role="tool",
@@ -118,6 +122,7 @@ class ChatContext:
 
     @property
     def length(self) -> int:
+        """Total number of messages currently held in the context."""
         return len(self._items)
 
     # ------------------------------------------------------------------
@@ -201,7 +206,11 @@ class ChatContext:
                     "content": msg.content,
                     "timestamp": msg.timestamp,
                     **({"name": msg.name} if msg.name is not None else {}),
-                    **({"tool_call_id": msg.tool_call_id} if msg.tool_call_id is not None else {}),
+                    **(
+                        {"tool_call_id": msg.tool_call_id}
+                        if msg.tool_call_id is not None
+                        else {}
+                    ),
                 }
                 for msg in self._items
             ]
