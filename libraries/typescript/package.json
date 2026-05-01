@@ -10,7 +10,7 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/PatterAI/Patter.git",
-    "directory": "sdk-ts"
+    "directory": "libraries/typescript"
   },
   "homepage": "https://www.getpatter.com",
   "bugs": {

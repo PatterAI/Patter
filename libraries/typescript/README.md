@@ -309,7 +309,7 @@ const agent = phone.agent({
 Pull requests are welcome.
 
 ```bash
-cd sdk-ts && npm install && npm test
+cd libraries/typescript && npm install && npm test
 ```
 
 Please open an issue before submitting large changes so we can discuss the approach first.

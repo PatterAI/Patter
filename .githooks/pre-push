@@ -8,7 +8,7 @@ echo "🔍 Running pre-push checks..."
 
 # Python SDK tests
 echo "📦 Python SDK tests..."
-cd sdk-py
+cd libraries/python
 if command -v python3 &>/dev/null; then
     python3 -m pytest tests/ -q --tb=line 2>&1 | tail -3
     if [ $? -ne 0 ]; then
@@ -20,7 +20,7 @@ cd ..
 
 # TypeScript SDK tests
 echo "📦 TypeScript SDK tests..."
-cd sdk-ts
+cd libraries/typescript
 if [ -d "node_modules" ]; then
     npm test 2>&1 | tail -3
     if [ $? -ne 0 ]; then

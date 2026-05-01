@@ -18,6 +18,8 @@ venv/
 htmlcov/
 .claude/
 CLAUDE.md
+# Per-library CLAUDE.md files MUST be tracked (quickstarts for AI agents).
+!libraries/*/CLAUDE.md
 node_modules/
 *.sqlite
 *.log

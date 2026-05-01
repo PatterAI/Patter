@@ -4,7 +4,7 @@ name: Docs Feature Drift Check
 #   - the canonical feature inventory (patter_sdk_features.xlsx, stored in the
 #     patter-assets sibling repo)
 #   - the Mintlify documentation under docs/
-#   - the public SDK surface (sdk-py/patter/__init__.py + sdk-ts/src/index.ts)
+#   - the public SDK surface (libraries/python/getpatter/__init__.py + libraries/typescript/src/index.ts)
 #
 # Opens or updates a single issue labelled `docs-drift` listing every mismatch.
 # If there is nothing to report, closes the issue (if open).
@@ -61,8 +61,8 @@ jobs:
           python scripts/check_feature_docs_drift.py \
             --xlsx patter-assets/patter_sdk_features.xlsx \
             --docs docs/ \
-            --py-init sdk-py/patter/__init__.py \
-            --ts-index sdk-ts/src/index.ts \
+            --py-init libraries/python/getpatter/__init__.py \
+            --ts-index libraries/typescript/src/index.ts \
             --output drift-report.md
         continue-on-error: true
 

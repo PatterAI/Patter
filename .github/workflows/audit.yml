@@ -9,15 +9,15 @@ on:
   push:
     branches: [main]
     paths:
-      - 'sdk-py/pyproject.toml'
-      - 'sdk-ts/package.json'
-      - 'sdk-ts/package-lock.json'
+      - 'libraries/python/pyproject.toml'
+      - 'libraries/typescript/package.json'
+      - 'libraries/typescript/package-lock.json'
       - '.github/workflows/audit.yml'
   pull_request:
     paths:
-      - 'sdk-py/pyproject.toml'
-      - 'sdk-ts/package.json'
-      - 'sdk-ts/package-lock.json'
+      - 'libraries/python/pyproject.toml'
+      - 'libraries/typescript/package.json'
+      - 'libraries/typescript/package-lock.json'
       - '.github/workflows/audit.yml'
   schedule:
     # Monday 06:00 UTC — catch CVEs that land over the weekend.
@@ -35,16 +35,16 @@ jobs:
         with:
           python-version: '3.12'
           cache: 'pip'
-          cache-dependency-path: sdk-py/pyproject.toml
+          cache-dependency-path: libraries/python/pyproject.toml
       - name: Install pip-audit
         run: pip install pip-audit
       - name: Install SDK runtime deps
         run: |
-          cd sdk-py
+          cd libraries/python
           pip install -e ".[local]"
       - name: Run pip-audit (warn-only)
         run: |
-          cd sdk-py
+          cd libraries/python
           # --strict would fail the job on any finding; we keep it
           # advisory for now because telephony SDKs often depend on
           # httpx/cryptography versions that get CVEs patched weeks
@@ -61,21 +61,21 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
-          cache-dependency-path: sdk-ts/package-lock.json
+          cache-dependency-path: libraries/typescript/package-lock.json
       - name: Install dependencies (no scripts)
         run: |
-          cd sdk-ts
+          cd libraries/typescript
           npm ci --ignore-scripts
       - name: Run npm audit
         run: |
-          cd sdk-ts
+          cd libraries/typescript
           # `--audit-level=high` keeps low/moderate noise out of the
           # CI log — the scheduled run still catches them via --json.
           npm audit --omit=dev --audit-level=high || true
       - name: Upload full JSON report
         if: always()
         run: |
-          cd sdk-ts
+          cd libraries/typescript
           npm audit --json --omit=dev > ../npm-audit.json || true
       - uses: actions/upload-artifact@v4
         if: always()
@@ -99,18 +99,18 @@ jobs:
         # result lands in the GitHub Security tab. Stock ``bandit`` only
         # supports csv/custom/html/json/screen/txt/xml/yaml.
         run: pip install 'bandit[toml]' bandit-sarif-formatter
-      - name: Run bandit on sdk-py
+      - name: Run bandit on Python SDK
         run: |
           # Skip the tests dir (they intentionally exercise suspicious
           # patterns) and assertions (B101 noise inside tests & assert-
           # heavy typing helpers).
-          bandit -r sdk-py/getpatter -ll -iii \
-            --exclude sdk-py/getpatter/dashboard/ui.py \
+          bandit -r libraries/python/getpatter -ll -iii \
+            --exclude libraries/python/getpatter/dashboard/ui.py \
             -f txt || true
       - name: Generate SARIF for Security tab
         run: |
-          bandit -r sdk-py/getpatter -ll -iii \
-            --exclude sdk-py/getpatter/dashboard/ui.py \
+          bandit -r libraries/python/getpatter -ll -iii \
+            --exclude libraries/python/getpatter/dashboard/ui.py \
             -f sarif -o bandit.sarif || true
       - uses: github/codeql-action/upload-sarif@v3
         # Only upload when the SARIF file was actually produced — if the

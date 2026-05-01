@@ -175,32 +175,32 @@ fi
 
 # ── Python SDK ──────────────────────────────────────────────────────────
 if [ "$SKIP_PY" = "0" ] && [ "$MODE" != "quick" ]; then
-    run_check "sdk-py: install (.[dev])" pip \
-        bash -c "cd sdk-py && pip install -e '.[dev]' --quiet"
-    run_check "sdk-py: tests" pytest \
-        bash -c "cd sdk-py && pytest tests/ -q --tb=line"
-    run_check "sdk-py: security tests" pytest \
-        bash -c "cd sdk-py && pytest tests/security/ -q -m security"
+    run_check "python: install (.[dev])" pip \
+        bash -c "cd libraries/python && pip install -e '.[dev]' --quiet"
+    run_check "python: tests" pytest \
+        bash -c "cd libraries/python && pytest tests/ -q --tb=line"
+    run_check "python: security tests" pytest \
+        bash -c "cd libraries/python && pytest tests/security/ -q -m security"
     if [ "$MODE" = "full" ]; then
-        run_check "sdk-py: all-extras tests (slow)" pytest \
-            bash -c "cd sdk-py && pip install -e '.[dev,silero,deepfilternet,ivr,anthropic,groq,cerebras,google,cartesia,soniox,assemblyai,rime,lmnt,ultravox,gemini-live,evals,tracing,scheduling,background-audio,telnyx-ai]' --quiet && pytest tests/ -q --tb=line"
+        run_check "python: all-extras tests (slow)" pytest \
+            bash -c "cd libraries/python && pip install -e '.[dev,silero,deepfilternet,ivr,anthropic,groq,cerebras,google,cartesia,soniox,assemblyai,rime,lmnt,ultravox,gemini-live,evals,tracing,scheduling,background-audio,telnyx-ai]' --quiet && pytest tests/ -q --tb=line"
     fi
 fi
 
 # ── TypeScript SDK ──────────────────────────────────────────────────────
 if [ "$SKIP_TS" = "0" ] && [ "$MODE" != "quick" ]; then
-    if [ -d sdk-ts ] && [ -f sdk-ts/package.json ]; then
-        run_check "sdk-ts: install" npm \
-            bash -c "cd sdk-ts && npm ci --silent"
-        run_check "sdk-ts: lint (tsc --noEmit)" npm \
-            bash -c "cd sdk-ts && npm run lint"
-        run_check "sdk-ts: tests" npm \
-            bash -c "cd sdk-ts && npm test --silent"
-        run_check "sdk-ts: build" npm \
-            bash -c "cd sdk-ts && npm run build --silent"
+    if [ -d libraries/typescript ] && [ -f libraries/typescript/package.json ]; then
+        run_check "typescript: install" npm \
+            bash -c "cd libraries/typescript && npm ci --silent"
+        run_check "typescript: lint (tsc --noEmit)" npm \
+            bash -c "cd libraries/typescript && npm run lint"
+        run_check "typescript: tests" npm \
+            bash -c "cd libraries/typescript && npm test --silent"
+        run_check "typescript: build" npm \
+            bash -c "cd libraries/typescript && npm run build --silent"
         if [ "$MODE" = "full" ]; then
-            run_check "sdk-ts: e2e (Playwright, slow)" npx \
-                bash -c "cd sdk-ts && npx playwright install --with-deps && npx playwright test"
+            run_check "typescript: e2e (Playwright, slow)" npx \
+                bash -c "cd libraries/typescript && npx playwright install --with-deps && npx playwright test"
         fi
     fi
 fi

@@ -310,7 +310,7 @@ agent = phone.agent(
 Pull requests are welcome.
 
 ```bash
-cd sdk-py && pip install -e ".[dev]" && pytest tests/ -v
+cd libraries/python && pip install -e ".[dev]" && pytest tests/ -v
 ```
 
 Please open an issue before submitting large changes so we can discuss the approach first.

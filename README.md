@@ -95,7 +95,7 @@ Patter is purpose-built for production voice over real telephony. Out of the box
 | Voicemail drop | `call(voicemailMessage="...")` | [patter-outbound-calls](https://github.com/PatterAI/patter-outbound-calls) |
 | Test mode (no phone) | `phone.test(agent)` | [docs](https://docs.getpatter.com) |
 | Built-in tunnel | Cloudflare (auto) | [docs](https://docs.getpatter.com) |
-| Phone-as-a-tool (LangChain / OpenAI Assistants / Hermes) | `PatterTool(phone, agent).execute(...)` | [examples/integrations](./examples/integrations) |
+| Phone-as-a-tool (LangChain / OpenAI Assistants / Hermes) | `PatterTool(phone, agent).execute(...)` | [docs](https://docs.getpatter.com) |
 
 ## How It Works
 
@@ -242,10 +242,10 @@ Pull requests are welcome.
 
 ```bash
 # Python SDK
-cd sdk-py && pip install -e ".[dev]" && pytest tests/ -v
+cd libraries/python && pip install -e ".[dev]" && pytest tests/ -v
 
 # TypeScript SDK
-cd sdk-ts && npm install && npm test
+cd libraries/typescript && npm install && npm test
 ```
 
 Please open an issue before submitting large changes so we can discuss the approach first.

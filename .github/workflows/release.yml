@@ -27,12 +27,12 @@ jobs:
         run: pip install build
       - name: Build package
         run: |
-          cd sdk-py
+          cd libraries/python
           python -m build
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          packages-dir: sdk-py/dist/
+          packages-dir: libraries/python/dist/
 
   release-ts-sdk:
     name: Publish TypeScript SDK to npm
@@ -46,12 +46,12 @@ jobs:
           registry-url: "https://registry.npmjs.org"
       - name: Install and build
         run: |
-          cd sdk-ts
+          cd libraries/typescript
           npm ci
           npm run build
       - name: Publish to npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          cd sdk-ts
+          cd libraries/typescript
           npm publish
