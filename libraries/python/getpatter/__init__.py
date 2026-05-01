@@ -38,6 +38,7 @@ from getpatter.models import (
     TurnMetrics,
 )
 from getpatter.exceptions import (
+    ErrorCode,
     PatterError,
     PatterConnectionError,
     AuthenticationError,
@@ -212,6 +213,7 @@ from getpatter.services.transcoding import (
     create_resampler_8k_to_16k,
     create_resampler_16k_to_8k,
     create_resampler_24k_to_16k,
+    create_resampler_24k_to_8k,
     mulaw_to_pcm16,
     pcm16_to_mulaw,
     resample_8k_to_16k,
@@ -354,6 +356,7 @@ __all__ = [
     "STTConfig",
     "TTSConfig",
     "TurnMetrics",
+    "ErrorCode",
     "PatterError",
     "PatterConnectionError",
     "AuthenticationError",
@@ -446,6 +449,7 @@ __all__ = [
     "create_resampler_8k_to_16k",
     "create_resampler_16k_to_8k",
     "create_resampler_24k_to_16k",
+    "create_resampler_24k_to_8k",
     "mulaw_to_pcm16",
     "pcm16_to_mulaw",
     "resample_8k_to_16k",

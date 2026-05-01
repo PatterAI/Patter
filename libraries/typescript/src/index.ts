@@ -25,6 +25,7 @@ export { SentenceChunker, DEFAULT_MIN_SENTENCE_LEN } from "./sentence-chunker";
 export { PipelineHookExecutor } from "./pipeline-hooks";
 export { filterMarkdown, filterEmoji, filterForTTS } from "./text-transforms";
 export {
+  ErrorCode,
   PatterError,
   PatterConnectionError,
   AuthenticationError,
@@ -162,6 +163,7 @@ export {
   createResampler16kTo8k,
   createResampler8kTo16k,
   createResampler24kTo16k,
+  createResampler24kTo8k,
 } from "./transcoding";
 export type { StatefulResamplerOptions } from "./transcoding";
 export { startTunnel } from "./tunnel";
