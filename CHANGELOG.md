@@ -93,6 +93,10 @@ Migration: if your code did `from getpatter.handlers.twilio_handler import ...` 
 - TypeScript: const-object + value-union, optional `{ code }` constructor option on every subclass. Class→code mapping matches Python byte-for-byte (asserted in test parity).
 - Backward-compatible: every existing `Foo("msg")` / `new Foo("msg")` call site keeps working.
 
+### Documentation
+
+- **Docstring / JSDoc sweep across both SDKs.** Every public module, class, function, method, interface, and exported type now has a description. Pre-existing docstrings were left untouched; the pass added ~75 Python docstrings and ~290 TypeScript JSDoc blocks across 100+ files. No behaviour changes.
+
 ### Cleanup
 
 - All competitor license headers (LiveKit, Pipecat, Apache, etc.) removed from source files. New rule `.claude/rules/no-competitor-references.md` codifies the policy.
