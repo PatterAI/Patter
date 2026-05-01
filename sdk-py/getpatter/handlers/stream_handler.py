@@ -1144,6 +1144,9 @@ class PipelineStreamHandler(StreamHandler):
                 llm_provider=agent_llm,
                 metrics=self.metrics,
                 event_bus=self._event_bus,
+                disable_phone_preamble=getattr(
+                    self.agent, "disable_phone_preamble", False
+                ),
             )
 
         # Create remote message handler once if on_message is a remote URL

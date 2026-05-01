@@ -108,6 +108,9 @@ class TestSession:
                 system_prompt=resolved_prompt,
                 tools=agent.tools,
                 tool_executor=tool_executor,
+                disable_phone_preamble=getattr(
+                    agent, "disable_phone_preamble", False
+                ),
             )
 
         # Set up CallControl

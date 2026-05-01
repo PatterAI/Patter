@@ -78,6 +78,7 @@ class TestBuildMessages:
             model="gpt-4o-mini",
             system_prompt="You are helpful.",
             llm_provider=MockLLMProvider([]),
+            disable_phone_preamble=True,
         )
         messages = loop._build_messages([], "Hello")
         assert messages[0]["role"] == "system"
@@ -91,6 +92,7 @@ class TestBuildMessages:
             model="gpt-4o-mini",
             system_prompt="System.",
             llm_provider=MockLLMProvider([]),
+            disable_phone_preamble=True,
         )
         history = [
             {"role": "user", "text": "First"},
@@ -101,6 +103,32 @@ class TestBuildMessages:
         assert messages[1]["content"] == "First"
         assert messages[2]["content"] == "Reply"
         assert messages[3]["content"] == "Second"
+
+    def test_phone_preamble_default(self) -> None:
+        from getpatter.services.llm_loop import DEFAULT_PHONE_PREAMBLE
+
+        loop = LLMLoop(
+            openai_key="",
+            model="gpt-4o-mini",
+            system_prompt="You are helpful.",
+            llm_provider=MockLLMProvider([]),
+        )
+        messages = loop._build_messages([], "Hello")
+        assert messages[0]["role"] == "system"
+        assert DEFAULT_PHONE_PREAMBLE in messages[0]["content"]
+        assert "You are helpful." in messages[0]["content"]
+
+    def test_phone_preamble_only_when_system_prompt_empty(self) -> None:
+        from getpatter.services.llm_loop import DEFAULT_PHONE_PREAMBLE
+
+        loop = LLMLoop(
+            openai_key="",
+            model="gpt-4o-mini",
+            system_prompt="",
+            llm_provider=MockLLMProvider([]),
+        )
+        messages = loop._build_messages([], "Hello")
+        assert messages[0]["content"] == DEFAULT_PHONE_PREAMBLE
 
 
 # ---------------------------------------------------------------------------

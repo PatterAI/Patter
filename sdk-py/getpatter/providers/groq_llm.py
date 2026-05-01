@@ -7,19 +7,6 @@ that points at ``https://api.groq.com/openai/v1``. All sampling kwargs
 ``top_p``, ``frequency_penalty``, ``presence_penalty``, ``stop``,
 ``temperature``, ``max_tokens``) are inherited from the parent and
 forwarded to ``chat.completions.create`` automatically.
-
-Portions adapted from LiveKit Agents
-(https://github.com/livekit/agents, commit 78a66bcf79c5cea82989401c408f1dff4b961a5b,
-file livekit-plugins/livekit-plugins-groq/livekit/plugins/groq/services.py),
-licensed under Apache License 2.0. Copyright LiveKit, Inc.
-
-Adaptations from the LiveKit source:
-  * LiveKit's ``groq.LLM`` subclasses the LiveKit OpenAI LLM (which
-    depends on the ``livekit.agents`` runtime). Patter's analogue
-    subclasses :class:`OpenAILLMProvider`, which talks to the Chat
-    Completions API directly via the official ``openai`` SDK.
-  * Kept Groq-specific defaults (``llama-3.3-70b-versatile`` model,
-    ``GROQ_API_KEY`` env var, Groq base URL).
 """
 
 from __future__ import annotations

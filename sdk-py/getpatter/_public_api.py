@@ -1,7 +1,7 @@
 """Public top-level API surface for Patter — Phase 1a of the v0.5.0 refactor.
 
-This module centralises the new LiveKit-style, user-facing primitives so they
-can be re-exported from :mod:`getpatter` without cluttering the historical module
+This module centralises the new user-facing primitives so they can be
+re-exported from :mod:`getpatter` without cluttering the historical module
 layout. The Phase 1a goals are:
 
 * Expose a dedicated ``Tool`` dataclass (distinct from the legacy
@@ -63,9 +63,7 @@ class Tool:
                 "Tool accepts exactly one of handler or webhook_url, not both"
             )
         if not has_handler and not has_webhook:
-            raise ValueError(
-                "Tool requires either a handler callable or a webhook_url"
-            )
+            raise ValueError("Tool requires either a handler callable or a webhook_url")
 
 
 def tool(

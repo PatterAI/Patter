@@ -67,9 +67,9 @@ _WS_BASE = "wss://api.elevenlabs.io/v1/text-to-speech"
 # voice agents may pause for tool-call latency.
 DEFAULT_INACTIVITY_TIMEOUT = 60
 
-# Connect timeout — Pipecat uses 5s on the same hot path. The previous 15s
-# default left dead air on the carrier WebSocket while a stuck DNS / TLS
-# handshake was retried.
+# Connect timeout — 5s keeps the carrier WebSocket from sitting in dead air
+# while a stuck DNS / TLS handshake is retried. The previous 15s default was
+# long enough for a caller to notice the silence.
 DEFAULT_OPEN_TIMEOUT = 5.0
 
 # Per-frame receive timeout. If the server stalls (no audio, no isFinal,
@@ -320,6 +320,7 @@ class ElevenLabsWebSocketTTS(TTSProvider):
             await ws.send(json.dumps({"text": text + " ", "flush": True}))
 
             from websockets.exceptions import ConnectionClosedOK
+
             while True:
                 try:
                     raw = await asyncio.wait_for(ws.recv(), timeout=self.frame_timeout)
@@ -359,13 +360,14 @@ class ElevenLabsWebSocketTTS(TTSProvider):
                     # the HTTP class.
                     if err_str == "payment_required" or "payment" in err_str.lower():
                         raise ElevenLabsPlanError(_PLAN_REQUIRED_MSG)
-                    raise ElevenLabsTTSError(
-                        f"ElevenLabs WS reported error: {err_str}"
-                    )
+                    raise ElevenLabsTTSError(f"ElevenLabs WS reported error: {err_str}")
 
                 audio_b64 = msg.get("audio")
                 if audio_b64:
-                    if not isinstance(audio_b64, str) or len(audio_b64) > MAX_AUDIO_B64_SIZE:
+                    if (
+                        not isinstance(audio_b64, str)
+                        or len(audio_b64) > MAX_AUDIO_B64_SIZE
+                    ):
                         logger.warning(
                             "ElevenLabs WS audio frame too large or malformed, skipping"
                         )

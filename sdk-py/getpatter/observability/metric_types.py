@@ -1,7 +1,8 @@
 """Typed metric data models for Patter pipeline events.
 
-Shapes mirror LiveKit Agents ``livekit.agents.metrics`` for cross-SDK
-compatibility. All models are frozen dataclasses (no pydantic dependency).
+All models are frozen dataclasses (no pydantic dependency) and form Patter's
+canonical observability surface — emitted by :mod:`getpatter.services.metrics`
+and consumed by the dashboard, EventBus subscribers, and exporters.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ class CachedTokenDetails:
 
 @dataclass(frozen=True)
 class InputTokenDetails:
-    """Detailed input token breakdown (mirrors OpenAI / LiveKit shapes)."""
+    """Detailed input token breakdown."""
 
     audio_tokens: int = 0
     text_tokens: int = 0
@@ -49,7 +50,7 @@ class OutputTokenDetails:
 
 @dataclass(frozen=True)
 class LLMUsage:
-    """LLM token usage for a single response (matches LiveKit ``CompletionUsage``)."""
+    """LLM token usage for a single response."""
 
     prompt_tokens: int = 0
     completion_tokens: int = 0
@@ -72,9 +73,11 @@ class RealtimeUsage:
 
 @dataclass(frozen=True)
 class EOUMetrics:
-    """End-of-utterance timing metrics (LiveKit Pattern A).
+    """End-of-utterance timing metrics.
 
-    All delay fields are in **seconds**.
+    All delay fields are in **seconds**. Captures the timing relationship
+    between VAD stop, STT final transcript, and the moment the pipeline
+    commits the turn for LLM processing.
     """
 
     end_of_utterance_delay: float
@@ -87,7 +90,7 @@ class EOUMetrics:
 
 @dataclass(frozen=True)
 class InterruptionMetrics:
-    """Barge-in / overlap metrics (LiveKit Pattern B, no ML classification).
+    """Barge-in / overlap metrics — heuristic only, no ML classification.
 
     All duration fields are in **seconds**.
     """
@@ -103,7 +106,7 @@ class InterruptionMetrics:
 
 @dataclass(frozen=True)
 class TTFBMetrics:
-    """Time-to-first-byte latency for a pipeline stage (mirrors Pipecat)."""
+    """Time-to-first-byte latency for a pipeline stage."""
 
     processor: str
     value: float

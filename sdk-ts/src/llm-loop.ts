@@ -12,6 +12,7 @@ import type { EventBus } from './observability/event-bus';
 import { getLogger } from './logger';
 import { validateWebhookUrl } from './server';
 import { SPAN_TOOL, withSpan } from './observability/tracing';
+import { PatterConnectionError } from './errors';
 
 // ---------------------------------------------------------------------------
 // Tool execution — pluggable policy
@@ -304,7 +305,9 @@ export class OpenAILLMProvider implements LLMProvider {
     if (!response.ok) {
       const errText = await response.text();
       getLogger().error(`LLM API error: ${response.status} ${errText}`);
-      return;
+      throw new PatterConnectionError(
+        `LLM API returned ${response.status}: ${errText.slice(0, 200)}`,
+      );
     }
 
     const reader = response.body?.getReader();
@@ -415,6 +418,13 @@ interface ToolCallAccumulator {
 // LLM loop
 // ---------------------------------------------------------------------------
 
+export const DEFAULT_PHONE_PREAMBLE =
+  'You are speaking on a live phone call. Respond concisely. ' +
+  'Do not use markdown, headers, bullet lists, code fences, or emojis. ' +
+  'Spell out numbers, currencies, dates, and units in natural spoken language. ' +
+  'Keep replies under 2 sentences unless the caller asks for detail.';
+
+
 export class LLMLoop {
   private readonly provider: LLMProvider;
   private readonly systemPrompt: string;
@@ -436,9 +446,16 @@ export class LLMLoop {
     systemPrompt: string,
     tools?: ToolDefinition[] | null,
     llmProvider?: LLMProvider,
+    disablePhonePreamble: boolean = false,
   ) {
     this.provider = llmProvider ?? new OpenAILLMProvider(apiKey, model);
-    this.systemPrompt = systemPrompt;
+    if (disablePhonePreamble) {
+      this.systemPrompt = systemPrompt;
+    } else {
+      this.systemPrompt = systemPrompt
+        ? `${DEFAULT_PHONE_PREAMBLE}\n\n${systemPrompt}`
+        : DEFAULT_PHONE_PREAMBLE;
+    }
     // Derive a billing-friendly provider name. Prefer the static
     // ``providerKey`` (stable, matches pricing keys); fall back to the
     // class-name stripping heuristic for custom providers without it.

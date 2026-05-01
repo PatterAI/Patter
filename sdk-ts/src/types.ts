@@ -198,6 +198,13 @@ export interface AgentOptions {
   /** Tool definitions — ``Tool`` class instances from ``getpatter``. */
   tools?: Array<ToolInstance>;
   /**
+   * When ``true``, ship ``systemPrompt`` to the LLM verbatim. Default
+   * (``false``) prepends a phone-friendly preamble that instructs the
+   * model to avoid markdown, emojis, bullet lists, and verbose replies —
+   * the conventions live phone calls require.
+   */
+  disablePhonePreamble?: boolean;
+  /**
    * Realtime / ConvAI engine instance. When present, the agent runs in the
    * matching mode (``openai_realtime`` or ``elevenlabs_convai``). When absent,
    * pipeline mode is selected if ``stt`` and ``tts`` are provided.

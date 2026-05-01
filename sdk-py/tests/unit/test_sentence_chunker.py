@@ -12,12 +12,12 @@ from getpatter.services.sentence_chunker import (
 
 
 # ---------------------------------------------------------------------------
-# Full reference text + expected output (adapted from LiveKit test_tokenizer.py)
+# Full reference text + expected output for sentence-boundary detection.
 # ---------------------------------------------------------------------------
 
 TEXT = (
     "Hi! "
-    "LiveKit is a platform for live audio and video applications and services. \n\n"
+    "Patter is a platform for live audio and video applications and services. \n\n"
     "R.T.C stands for Real-Time Communication... again R.T.C. "
     "Mr. Theo is testing the sentence tokenizer. "
     "\nThis is a test. Another test. "
@@ -27,12 +27,12 @@ TEXT = (
     "Hey!\n Hi! Hello! "
     "\n\n"
     "This is a sentence. 这是一个中文句子。これは日本語の文章です。"
-    "你好！LiveKit是一个直播音频和视频应用程序和服务的平台。"
+    "你好！Patter是一个直播音频和视频应用程序和服务的平台。"
     "\nThis is a sentence contains   consecutive spaces."
 )
 
 EXPECTED_MIN_20 = [
-    "Hi! LiveKit is a platform for live audio and video applications and services.",
+    "Hi! Patter is a platform for live audio and video applications and services.",
     "R.T.C stands for Real-Time Communication... again R.T.C.",
     "Mr. Theo is testing the sentence tokenizer.",
     "This is a test. Another test.",
@@ -40,7 +40,7 @@ EXPECTED_MIN_20 = [
     "f(x) = x * 2.54 + 42.",
     "Hey! Hi! Hello! This is a sentence.",
     "这是一个中文句子。 これは日本語の文章です。",
-    "你好！ LiveKit是一个直播音频和视频应用程序和服务的平台。",
+    "你好！ Patter是一个直播音频和视频应用程序和服务的平台。",
     "This is a sentence contains   consecutive spaces.",
 ]
 
@@ -50,12 +50,16 @@ EXPECTED_MIN_20 = [
 # ---------------------------------------------------------------------------
 
 
-def _sentences_only(text: str, min_sentence_len: int = DEFAULT_MIN_SENTENCE_LEN) -> list[str]:
+def _sentences_only(
+    text: str, min_sentence_len: int = DEFAULT_MIN_SENTENCE_LEN
+) -> list[str]:
     """Return only the sentence strings from _split_sentences."""
     return [s for s, _, _ in _split_sentences(text, min_sentence_len=min_sentence_len)]
 
 
-def _chunker_all(tokens: list[str], min_sentence_len: int = DEFAULT_MIN_SENTENCE_LEN) -> list[str]:
+def _chunker_all(
+    tokens: list[str], min_sentence_len: int = DEFAULT_MIN_SENTENCE_LEN
+) -> list[str]:
     """Feed all tokens through SentenceChunker and collect every sentence."""
     chunker = SentenceChunker(min_sentence_len=min_sentence_len)
     results: list[str] = []
@@ -162,7 +166,7 @@ class TestSplitSentencesWebsites:
         assert len(result) == 1
 
     def test_io_not_split(self) -> None:
-        result = _sentences_only("Check livekit.io out.", min_sentence_len=1)
+        result = _sentences_only("Check getpatter.io out.", min_sentence_len=1)
         assert len(result) == 1
 
 
@@ -240,7 +244,9 @@ class TestSplitSentencesMinLen:
     def test_fragments_at_boundary(self) -> None:
         # Fragments exactly at min_sentence_len should pass through
         # "Exactly twenty chars." is 21 chars — emitted as its own sentence
-        result = _sentences_only("Exactly twenty chars. Next sentence here.", min_sentence_len=20)
+        result = _sentences_only(
+            "Exactly twenty chars. Next sentence here.", min_sentence_len=20
+        )
         assert len(result) >= 1
 
     def test_min_len_zero_no_merging(self) -> None:
@@ -530,13 +536,13 @@ class TestSentenceChunkerShortFlush:
 
 
 # ===========================================================================
-# Full LiveKit reference test
+# Full reference text — sentence boundary detection over a long fixture
 # ===========================================================================
 
 
 @pytest.mark.unit
-class TestLiveKitReference:
-    """Full reference test adapted from LiveKit's test_tokenizer.py."""
+class TestFullReferenceText:
+    """Full reference test exercising sentence boundary detection."""
 
     def test_full_text_bulk(self) -> None:
         """Feed entire TEXT at once and verify the output matches EXPECTED_MIN_20."""
@@ -561,6 +567,7 @@ class TestLiveKitReference:
         bulk reference and still validate every major content element.
         """
         import re as _re
+
         normalised = _re.sub(r"\s+", " ", TEXT).strip()
         tokens = [w + " " for w in normalised.split(" ") if w]
         result = _chunker_all(tokens, min_sentence_len=20)
@@ -570,7 +577,7 @@ class TestLiveKitReference:
         joined = " ".join(result)
         # Content that must be present (spacing-independent checks)
         content_markers = [
-            "LiveKit is a platform",
+            "Patter is a platform",
             "Real-Time Communication",
             "Theo is testing",  # "Mr." may be concatenated without space
             "is a test",
@@ -595,6 +602,7 @@ class TestLiveKitReference:
         assert len(EXPECTED_MIN_20) <= len(result) <= len(EXPECTED_MIN_20) + 4
         # Content must be equivalent to the bulk reference
         import re as _re
+
         normalise = lambda s: _re.sub(r"\s+", " ", s).strip()
         assert normalise(" ".join(result)) == normalise(" ".join(EXPECTED_MIN_20))
 
@@ -614,6 +622,7 @@ class TestLiveKitReference:
         joined_expected = " ".join(EXPECTED_MIN_20)
         # Both joined forms should carry the same non-whitespace content
         import re
+
         normalise = lambda s: re.sub(r"\s+", " ", s).strip()
         assert normalise(joined_result) == normalise(joined_expected)
 
@@ -621,6 +630,7 @@ class TestLiveKitReference:
 # ---------------------------------------------------------------------------
 # Aggressive first-clause flush (opt-in)
 # ---------------------------------------------------------------------------
+
 
 class TestAggressiveFirstFlush:
     """Phase 2 opt-in feature: emit the first clause of the response on a soft
@@ -757,7 +767,11 @@ class TestAggressiveFirstFlush:
         c.flush()
         # Turn 2 should also benefit from aggressive first flush
         emitted: list[str] = []
-        for t in ["Of course, ", "I will check inventory levels right now, ", "one moment."]:
+        for t in [
+            "Of course, ",
+            "I will check inventory levels right now, ",
+            "one moment.",
+        ]:
             emitted.extend(c.push(t))
         emitted.extend(c.flush())
         assert emitted[0].endswith(",")
@@ -767,7 +781,11 @@ class TestAggressiveFirstFlush:
         c.push("Sure, I can help you with that today, no problem.")
         c.reset()
         emitted: list[str] = []
-        for t in ["Of course, ", "I will check inventory levels right now, ", "one moment."]:
+        for t in [
+            "Of course, ",
+            "I will check inventory levels right now, ",
+            "one moment.",
+        ]:
             emitted.extend(c.push(t))
         emitted.extend(c.flush())
         assert emitted[0].endswith(",")

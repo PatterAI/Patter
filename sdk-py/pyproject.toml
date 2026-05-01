@@ -117,9 +117,9 @@ cerebras = [
 google = [
     "google-genai>=1.55",
 ]
-# Background audio player (hold music + ambient cues). Ports LiveKit Agents'
-# BackgroundAudioPlayer and mixes bundled .ogg clips with the outbound PCM
-# stream. Requires numpy for PCM math and soundfile for .ogg decoding.
+# Background audio player (hold music + ambient cues). Mixes bundled .ogg
+# clips with the outbound PCM stream. Requires numpy for PCM math and
+# soundfile for .ogg decoding.
 background-audio = [
     "numpy>=1.26",
     "soundfile>=0.12",

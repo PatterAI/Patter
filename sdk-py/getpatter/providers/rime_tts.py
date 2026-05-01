@@ -1,21 +1,3 @@
-# Portions of this file are adapted from LiveKit Agents (Apache License 2.0):
-#   https://github.com/livekit/agents
-#   livekit-plugins/livekit-plugins-rime/livekit/plugins/rime/tts.py
-#   Source commit: 78a66bcf79c5cea82989401c408f1dff4b961a5b
-#
-# Copyright 2023 LiveKit, Inc.
-# Modifications (c) 2025 PatterAI
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-
 """Rime TTS provider — HTTP chunked PCM endpoint, pure aiohttp.
 
 Both Arcana and Mist model families are supported. Requests Rime's
@@ -98,9 +80,8 @@ class RimeTTS(TTSProvider):
             )
 
         if speaker is None:
-            # Upstream LiveKit uses "cove" (DefaultMistVoice) for Mist models
-            # and "astra" for Arcana. We mirror the Arcana default here and
-            # let callers override for Mist.
+            # Sensible defaults: "cove" (DefaultMistVoice) for Mist models,
+            # "astra" for Arcana. Callers can override either.
             speaker = "cove" if _is_mist_model(model) else "astra"
 
         self.api_key = resolved_key

@@ -5,9 +5,6 @@
  * Uses regex-based marker replacement for robust sentence boundary
  * detection, handling abbreviations, acronyms, decimals, websites,
  * ellipsis, and CJK punctuation.
- *
- * Algorithm adapted from LiveKit Agents (Apache 2.0):
- * https://github.com/livekit/agents
  */
 
 /** Default minimum sentence length before emitting. */
@@ -25,16 +22,14 @@ export const DEFAULT_MIN_WORDS_FOR_SHORT_FLUSH = 2;
  * Sentence-terminating characters. Includes Latin (`. ! ?`), full-width CJK
  * (`。 ！ ？`), Japanese half-width (`｡`), full-width semicolon (`；`),
  * full-width period (`．`), Western ellipsis (`…`), and ASCII semicolon (`;`).
- * Set ported from Pipecat's `SENTENCE_ENDING_PUNCTUATION` (BSD-2-Clause,
- * Daily) so we share the same coverage on multilingual responses.
  */
 const SENTENCE_TERMINATORS = '.!?…;。！？；．｡';
 
 /**
  * Unambiguous non-Latin sentence terminators — punctuation that cannot also
  * appear in numbers, abbreviations, or URLs in the script's typical usage.
- * Ported from Pipecat (BSD-2). Hindi/Devanagari (। ॥), Arabic (؟ ؛ ۔ ؏),
- * Armenian (։), Ethiopic (። ፧), Khmer (។ ៕), Burmese (။), Tibetan (༎ ༏).
+ * Hindi/Devanagari (। ॥), Arabic (؟ ؛ ۔ ؏), Armenian (։), Ethiopic (። ፧),
+ * Khmer (។ ៕), Burmese (။), Tibetan (༎ ༏).
  */
 const UNAMBIGUOUS_NON_LATIN_TERMINATORS = '।॥؟؛۔؏։፧።។៕။༎༏';
 
@@ -81,12 +76,12 @@ function splitSentences(
   const alphabets = '([A-Za-z])';
   // Title/honorific prefixes that take a trailing period (English + Italian).
   // Italian: Sig, Sgr, Dott, Prof, Avv, Ing, Geom, Rag, Arch, On, Egr, Spett,
-  // Gent, Ill. English additions from Pipecat NLTK Punkt: Gen, Sen, Rep, Lt,
+  // Gent, Ill. English additions from NLTK Punkt: Gen, Sen, Rep, Lt,
   // Cpt, Capt, Col, Cmdr, Adm.
   const prefixes =
     '(Mr|St|Mrs|Ms|Dr|Sig|Sgr|Dott|Prof|Avv|Ing|Geom|Rag|Arch|On|Egr|' +
     'Spett|Gent|Ill|Gen|Sen|Rep|Lt|Cpt|Capt|Col|Cmdr|Adm)[.]';
-  // Suffix-style abbreviations. EN additions from Pipecat NLTK Punkt:
+  // Suffix-style abbreviations. EN additions from NLTK Punkt:
   // vs, etc, No, Vol, pp, cf, ca, op, plus address-style abbrevs Mt, Hwy,
   // Rt, Pl, Ave, Blvd, Sq.
   const suffixes =
@@ -317,9 +312,7 @@ export class SentenceChunker {
       // are likely abbreviation periods, not sentence ends. Only block if
       // the trailing word is **purely uppercase ASCII** AND **at most 3
       // chars** (matches U/US/USA/NATO patterns; longer all-caps words
-      // like RAMESH or SPEAKING are real sentences). Pipecat issue #1692
-      // bug: blocking arbitrary uppercase prevented `"...with RAMESH."`
-      // from ever flushing.
+      // like RAMESH or SPEAKING are real sentences).
       const terminator = stripped[stripped.length - 1];
       if (terminator === '.') {
         const stripTerm = stripped.replace(

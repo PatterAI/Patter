@@ -13,21 +13,6 @@ All OpenAI-spec sampling kwargs accepted by the parent
 ``temperature``, ``max_tokens``) are inherited and forwarded to
 ``chat.completions.create`` automatically — see
 :class:`OpenAILLMProvider` for the full list.
-
-Portions adapted from LiveKit Agents
-(https://github.com/livekit/agents, commit 78a66bcf79c5cea82989401c408f1dff4b961a5b,
-file livekit-plugins/livekit-plugins-cerebras/livekit/plugins/cerebras/llm.py),
-licensed under Apache License 2.0. Copyright 2026 LiveKit, Inc.
-
-Adaptations from the LiveKit source:
-  * LiveKit's ``cerebras.LLM`` subclasses the LiveKit OpenAI LLM; Patter's
-    analogue subclasses :class:`OpenAILLMProvider`.
-  * Ported the ``_CerebrasClient`` helper that overrides ``_build_request``
-    to compress payloads with msgpack/gzip.  When either compression
-    option is enabled we construct this custom client; otherwise we fall
-    back to the stock ``openai.AsyncOpenAI`` client.
-  * Dropped LiveKit's ``NotGivenOr`` sentinel plumbing in favour of plain
-    ``Optional`` kwargs that match Patter's Python idioms.
 """
 
 from __future__ import annotations
@@ -92,9 +77,8 @@ def _build_cerebras_client(
     class _CerebrasClient(openai.AsyncOpenAI):
         """AsyncOpenAI subclass that compresses requests via msgpack/gzip.
 
-        Adapted from LiveKit's ``cerebras._CerebrasClient``.  Overrides
-        ``_build_request`` to serialise ``json_data`` directly into the
-        target binary format and sets the appropriate ``Content-Type``
+        Overrides ``_build_request`` to serialise ``json_data`` directly into
+        the target binary format and sets the appropriate ``Content-Type``
         and ``Content-Encoding`` headers.
         """
 

@@ -1,13 +1,9 @@
 """Gemini Live realtime adapter.
 
-Partially adapted (~65% port) from LiveKit Agents
-(livekit-plugins/livekit-plugins-google/livekit/plugins/google/realtime/realtime_api.py,
-Apache 2.0) at commit referenced in the PR body. Reframed to Patter's simpler
-realtime adapter surface (``connect``/``send_audio``/``receive_events``/``close``)
-which mirrors :class:`~getpatter.providers.openai_realtime.OpenAIRealtimeAdapter`.
-
-The heavy LiveKit lifecycle/resume machinery is intentionally NOT ported —
-Patter's handlers manage session lifecycle externally.
+Patter's adapter surface — ``connect`` / ``send_audio`` / ``receive_events`` /
+``close`` — matches :class:`~getpatter.providers.openai_realtime.OpenAIRealtimeAdapter`,
+so callers can swap providers without touching the handler. Session lifecycle
+(reconnects, resumes) is managed by Patter's handlers, not by the adapter.
 
 NOTE: Native-audio Gemini Live models are **v1alpha-only**. The client must
 pass ``http_options={"api_version": "v1alpha"}`` when constructing the genai

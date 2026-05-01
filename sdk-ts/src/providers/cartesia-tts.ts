@@ -1,28 +1,10 @@
-// Portions of this file are adapted from LiveKit Agents (Apache License 2.0):
-//   https://github.com/livekit/agents
-//   livekit-plugins/livekit-plugins-cartesia/livekit/plugins/cartesia/tts.py
-//   Source commit: 78a66bcf79c5cea82989401c408f1dff4b961a5b
-//
-// Copyright 2023 LiveKit, Inc.
-// Modifications (c) 2025 PatterAI
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-
 /**
  * Cartesia TTS provider — HTTP `/tts/bytes` endpoint.
  *
- * The upstream LiveKit plugin also offers a WebSocket streaming mode with
- * word timestamps; this port focuses on the chunked-bytes HTTP API which
- * maps cleanly onto Patter's `synthesize(text)` contract and keeps the
- * provider dependency-free (just `fetch`).
+ * Cartesia also offers a WebSocket streaming mode with word timestamps;
+ * this provider focuses on the chunked-bytes HTTP API which maps cleanly
+ * onto Patter's `synthesize(text)` contract and keeps the provider
+ * dependency-free (just `fetch`).
  *
  * Default model is `sonic-3` (GA snapshot `sonic-3-2026-01-12`) — Cartesia's
  * current GA model with a documented ~90 ms TTFB target. Voice IDs from the

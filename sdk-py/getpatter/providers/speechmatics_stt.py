@@ -5,21 +5,11 @@ Uses the official ``speechmatics-voice[smart]`` SDK (imported lazily so the
 dependency remains optional) to stream PCM audio to the Speechmatics real-time
 API and yield :class:`~getpatter.providers.base.Transcript` events.
 
-Adapted from LiveKit Agents (Apache 2.0):
-https://github.com/livekit/agents
-(source: livekit-plugins/livekit-plugins-speechmatics/livekit/plugins/speechmatics/stt.py
- at commit 78a66bcf79c5cea82989401c408f1dff4b961a5b)
-
-Changes from upstream:
-- Replaced ``stt.STT`` / ``stt.RecognizeStream`` hierarchy with Patter's
-  :class:`~getpatter.providers.base.STTProvider`.
-- Converted the dual-task (audio send / message receive) pipeline into a
-  queue-fed AsyncIterator, matching the pattern in ``DeepgramSTT`` /
-  ``WhisperSTT``.
-- Dropped LiveKit-specific types (``SpeechEvent``, ``LanguageCode``,
-  ``APIConnectOptions``), speaker-update side channels and diagnostics.
-- Lazy-imports ``speechmatics.voice`` so consumers that do not install the
-  ``speechmatics`` extra can still import the rest of the SDK.
+The audio-send / message-receive pipeline is exposed via a queue-fed
+AsyncIterator, matching the pattern used by ``DeepgramSTT`` and
+``WhisperSTT``. ``speechmatics.voice`` is imported lazily so consumers that
+do not install the ``speechmatics`` extra can still import the rest of the
+SDK.
 
 Install with::
 
@@ -50,7 +40,7 @@ class TurnDetectionMode(str, Enum):
     """Endpoint / turn-detection handling mode.
 
     Mirrors the values accepted by ``speechmatics.voice.VoiceAgentConfigPreset``.
-    See LiveKit's original documentation for the semantic differences.
+    See the Speechmatics docs for the semantic differences between modes.
     """
 
     EXTERNAL = "external"
@@ -122,13 +112,11 @@ class SpeechmaticsSTT(STTProvider):
         if not api_key:
             raise ValueError("Speechmatics api_key is required")
 
-        # Validate ranges (mirrors LiveKit's upstream checks).
+        # Validate ranges per the Speechmatics Voice SDK contract.
         if end_of_utterance_silence_trigger is not None and not (
             0 < end_of_utterance_silence_trigger < 2
         ):
-            raise ValueError(
-                "end_of_utterance_silence_trigger must be between 0 and 2"
-            )
+            raise ValueError("end_of_utterance_silence_trigger must be between 0 and 2")
         if (
             end_of_utterance_max_delay is not None
             and end_of_utterance_silence_trigger is not None
@@ -286,9 +274,7 @@ class SpeechmaticsSTT(STTProvider):
         if not joined:
             return None
 
-        confidence = (
-            sum(confidences) / len(confidences) if confidences else 1.0
-        )
+        confidence = sum(confidences) / len(confidences) if confidences else 1.0
         return Transcript(text=joined, is_final=is_final, confidence=confidence)
 
     async def receive_transcripts(self) -> AsyncIterator[Transcript]:

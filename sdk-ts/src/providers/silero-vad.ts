@@ -1,37 +1,17 @@
 /**
- * Silero VAD provider (TypeScript port).
+ * Silero VAD provider.
  *
  * Acoustic voice activity detection backed by the Silero ONNX model. Buffers
  * incoming int16 LE PCM frames, runs inference on fixed-size windows
  * (256 samples at 8 kHz, 512 at 16 kHz), applies an exponential probability
  * filter, and emits VADEvent transitions (speech_start / speech_end).
  *
- * Ported from LiveKit Agents (Apache 2.0):
- *   https://github.com/livekit/agents
- * Sources:
- *   - livekit-plugins/livekit-plugins-silero/livekit/plugins/silero/vad.py
- *   - livekit-plugins/livekit-plugins-silero/livekit/plugins/silero/onnx_model.py
- *
- * Adaptations for Patter:
+ * Notes:
  *   - Input is raw PCM `Buffer` (int16 LE, mono) via
- *     `processFrame(pcmChunk, sampleRate)`, not `livekit.rtc.AudioFrame`.
+ *     `processFrame(pcmChunk, sampleRate)`.
  *   - onnxruntime-node is loaded lazily as an optional dependency.
- *   - Emits `VADEvent` (Patter protocol) instead of LiveKit event types.
+ *   - Emits `VADEvent` (Patter protocol).
  */
-
-// Copyright 2023 LiveKit, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 import { createRequire } from 'node:module';
 import * as fs from 'node:fs';
@@ -199,7 +179,7 @@ async function loadOnnxRuntime(): Promise<OnnxRuntime> {
   }
 }
 
-/** Exponential smoothing filter (ported from livekit.agents.utils.ExpFilter). */
+/** Exponential smoothing filter. */
 class ExpFilter {
   private filtered: number | null = null;
 
@@ -314,7 +294,7 @@ export class SileroVAD implements VADProvider {
   ) {}
 
   /**
-   * Load the Silero VAD model. Defaults match the LiveKit Silero plugin.
+   * Load the Silero VAD model.
    * Throws if `onnxruntime-node` is not installed.
    */
   static async load(options: SileroVADOptions = {}): Promise<SileroVAD> {
@@ -371,7 +351,7 @@ export class SileroVAD implements VADProvider {
    * Number of int16 PCM samples that must be provided per call to
    * processFrame for the model to run one inference window.
    *
-   * Constraint (ported from LiveKit Agents / Silero ONNX spec):
+   * Constraint (Silero ONNX spec):
    *   - 16 000 Hz → 512 samples (32 ms)
    *   -  8 000 Hz → 256 samples (32 ms)
    *

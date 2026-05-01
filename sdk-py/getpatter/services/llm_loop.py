@@ -240,6 +240,14 @@ class OpenAILLMProvider:
 # ---------------------------------------------------------------------------
 
 
+DEFAULT_PHONE_PREAMBLE = (
+    "You are speaking on a live phone call. Respond concisely. "
+    "Do not use markdown, headers, bullet lists, code fences, or emojis. "
+    "Spell out numbers, currencies, dates, and units in natural spoken language. "
+    "Keep replies under 2 sentences unless the caller asks for detail."
+)
+
+
 class LLMLoop:
     """Streaming LLM with tool calling for pipeline mode.
 
@@ -268,13 +276,21 @@ class LLMLoop:
         llm_provider: LLMProvider | None = None,
         metrics=None,
         event_bus=None,
+        disable_phone_preamble: bool = False,
     ) -> None:
         if llm_provider is not None:
             self._provider = llm_provider
         else:
             self._provider = OpenAILLMProvider(api_key=openai_key, model=model)
 
-        self._system_prompt = system_prompt
+        if disable_phone_preamble:
+            self._system_prompt = system_prompt
+        else:
+            self._system_prompt = (
+                f"{DEFAULT_PHONE_PREAMBLE}\n\n{system_prompt}"
+                if system_prompt
+                else DEFAULT_PHONE_PREAMBLE
+            )
         self._tools = tools
         self._tool_executor = tool_executor
         self._metrics = metrics
@@ -305,7 +321,9 @@ class LLMLoop:
                 fn = {
                     "name": t["name"],
                     "description": t.get("description", ""),
-                    "parameters": t.get("parameters", {"type": "object", "properties": {}}),
+                    "parameters": t.get(
+                        "parameters", {"type": "object", "properties": {}}
+                    ),
                 }
                 self._openai_tools.append({"type": "function", "function": fn})
 
@@ -417,8 +435,8 @@ class LLMLoop:
                                 model=self._model,
                                 input_tokens=chunk.get("input_tokens", 0),
                                 output_tokens=chunk.get("output_tokens", 0),
-                                cache_read_tokens=chunk.get("cache_read_input_tokens", 0),
-                                cache_write_tokens=chunk.get("cache_creation_input_tokens", 0),
+                                cache_read_tokens=chunk.get("cache_read_tokens", 0),
+                                cache_write_tokens=chunk.get("cache_write_tokens", 0),
                             )
 
                     elif chunk_type == "tool_call":
@@ -447,7 +465,9 @@ class LLMLoop:
                         if chunk.get("name"):
                             tool_calls_accumulated[idx]["name"] = chunk["name"]
                         if chunk.get("arguments"):
-                            tool_calls_accumulated[idx]["arguments"] += chunk["arguments"]
+                            tool_calls_accumulated[idx]["arguments"] += chunk[
+                                "arguments"
+                            ]
             finally:
                 _span_cm.__exit__(None, None, None)
 
@@ -463,18 +483,23 @@ class LLMLoop:
                 return
 
             # Execute tool calls and add results to messages
-            assistant_msg: dict = {"role": "assistant", "content": "".join(text_parts) or None}
+            assistant_msg: dict = {
+                "role": "assistant",
+                "content": "".join(text_parts) or None,
+            }
             assistant_tool_calls = []
             for idx in sorted(tool_calls_accumulated.keys()):
                 tc = tool_calls_accumulated[idx]
-                assistant_tool_calls.append({
-                    "id": tc["id"],
-                    "type": "function",
-                    "function": {
-                        "name": tc["name"],
-                        "arguments": tc["arguments"],
-                    },
-                })
+                assistant_tool_calls.append(
+                    {
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["name"],
+                            "arguments": tc["arguments"],
+                        },
+                    }
+                )
             assistant_msg["tool_calls"] = assistant_tool_calls
             messages.append(assistant_msg)
 
@@ -486,11 +511,13 @@ class LLMLoop:
                     arguments = {}
 
                 result = await self._execute_tool(tool_name, arguments, call_context)
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc_data["id"],
-                    "content": result,
-                })
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc_data["id"],
+                        "content": result,
+                    }
+                )
 
             # Re-submit to LLM with tool results — next iteration will
             # either produce text or more tool calls
@@ -516,9 +543,7 @@ class LLMLoop:
 
         return json.dumps({"error": f"No executor available for tool '{tool_name}'"})
 
-    def _build_messages(
-        self, history: list[dict], user_text: str
-    ) -> list[dict]:
+    def _build_messages(self, history: list[dict], user_text: str) -> list[dict]:
         """Build OpenAI messages array from conversation history."""
         messages: list[dict] = [
             {"role": "system", "content": self._system_prompt},

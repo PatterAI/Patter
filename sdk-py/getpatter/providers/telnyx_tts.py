@@ -1,28 +1,10 @@
 """Telnyx Text-to-Speech provider (WebSocket streaming).
 
-Bridges the Telnyx `/v2/text-to-speech/speech` WebSocket API to Patter's
-:class:`~getpatter.providers.base.TTSProvider` interface.
-
-Algorithm and WebSocket protocol adapted from LiveKit Agents (Apache 2.0):
-https://github.com/livekit/agents
-Source: ``livekit-plugins/livekit-plugins-telnyx/livekit/plugins/telnyx/tts.py``
-Commit SHA (ref=main): 78a66bcf79c5cea82989401c408f1dff4b961a5b
-
-The source project is licensed under the Apache 2.0 license:
-https://www.apache.org/licenses/LICENSE-2.0
-
-Changes vs. upstream:
-    - Replaced ``livekit.agents.tts.TTS`` base class with Patter's ``TTSProvider``
-      abstract class.
-    - Replaced ``SynthesizeStream`` + event channel plumbing with a plain
-      ``AsyncIterator[bytes]`` from :meth:`synthesize`.
-    - Dropped LiveKit-specific utilities (``AudioStreamDecoder``,
-      ``gracefully_cancel``, ``Plugin`` registry, segment/request IDs).
-    - Default voice preserved: ``Telnyx.NaturalHD.astra``.
-    - The server returns MP3-encoded audio. Upstream used LiveKit's
-      ``AudioStreamDecoder``; we yield raw MP3 bytes to the caller which must
-      decode them. Downstream Patter code that expects PCM should pipe through
-      a decoder (e.g., ``ffmpeg`` / ``pydub``).
+Bridges the Telnyx ``/v2/text-to-speech/speech`` WebSocket API to Patter's
+:class:`~getpatter.providers.base.TTSProvider` interface. The server returns
+MP3-encoded audio; we yield raw MP3 bytes to the caller. Downstream Patter
+code that expects PCM should pipe through a decoder (e.g. ``ffmpeg`` /
+``pydub``).
 """
 
 from __future__ import annotations

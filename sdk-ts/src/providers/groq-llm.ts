@@ -3,18 +3,8 @@
  *
  * Groq exposes an OpenAI-compatible Chat Completions API. We reuse the
  * streaming code path by implementing the same SSE parser as
- * ``OpenAILLMProvider`` but pointed at ``api.groq.com``.
- *
- * Portions adapted from LiveKit Agents
- * (https://github.com/livekit/agents, commit
- * 78a66bcf79c5cea82989401c408f1dff4b961a5b,
- * file livekit-plugins/livekit-plugins-groq/livekit/plugins/groq/services.py),
- * licensed under Apache License 2.0. Copyright LiveKit, Inc.
- *
- * Adaptations from the LiveKit source:
- *   * Ported the Python ``groq.LLM`` subclass (which subclasses the
- *     LiveKit OpenAI plugin) into a tiny TypeScript wrapper that swaps
- *     the base URL and defaults to ``llama-3.3-70b-versatile``.
+ * ``OpenAILLMProvider`` but pointed at ``api.groq.com``. Defaults to
+ * ``llama-3.3-70b-versatile``.
  */
 
 import type { LLMChunk, LLMProvider } from '../llm-loop';

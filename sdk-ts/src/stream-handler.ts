@@ -805,6 +805,7 @@ export class StreamHandler {
         resolvedPrompt,
         this.deps.agent.tools as ToolDefinition[] | undefined,
         this.deps.agent.llm,
+        this.deps.agent.disablePhonePreamble ?? false,
       );
       this.llmLoop.setEventBus(this._eventBus);
       const llmLabel = this.deps.agent.llm.constructor?.name ?? 'custom';
@@ -817,6 +818,8 @@ export class StreamHandler {
         llmModel,
         resolvedPrompt,
         this.deps.agent.tools as ToolDefinition[] | undefined,
+        undefined,
+        this.deps.agent.disablePhonePreamble ?? false,
       );
       this.llmLoop.setEventBus(this._eventBus);
       getLogger().debug(`Built-in LLM loop active (pipeline, ${label})`);

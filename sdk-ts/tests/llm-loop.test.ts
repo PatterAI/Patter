@@ -21,7 +21,14 @@ describe('LLMLoop', () => {
   });
 
   it('buildMessages constructs correct message array', () => {
-    const loop = new LLMLoop('sk-test', 'gpt-4o-mini', 'System prompt.');
+    const loop = new LLMLoop(
+      'sk-test',
+      'gpt-4o-mini',
+      'System prompt.',
+      undefined,
+      undefined,
+      true, // disablePhonePreamble — keep verbatim for this assertion
+    );
     // Access private method via any
     const messages = (loop as unknown as { buildMessages: (h: Array<{ role: string; text: string }>, t: string) => unknown[] }).buildMessages(
       [
@@ -36,6 +43,15 @@ describe('LLMLoop', () => {
     expect((messages[0] as { content: string }).content).toBe('System prompt.');
     expect((messages[3] as { role: string }).role).toBe('user');
     expect((messages[3] as { content: string }).content).toBe('How are you?');
+  });
+
+  it('prepends default phone preamble when not disabled', async () => {
+    const { DEFAULT_PHONE_PREAMBLE } = await import('../src/llm-loop');
+    const loop = new LLMLoop('sk-test', 'gpt-4o-mini', 'You are helpful.');
+    const messages = (loop as unknown as { buildMessages: (h: Array<{ role: string; text: string }>, t: string) => Array<{ role: string; content: string }> }).buildMessages([], 'Hi');
+    expect(messages[0].role).toBe('system');
+    expect(messages[0].content).toContain(DEFAULT_PHONE_PREAMBLE);
+    expect(messages[0].content).toContain('You are helpful.');
   });
 
   it('executeTool calls handler when available', async () => {
@@ -237,7 +253,7 @@ describe('LLMLoop', () => {
       expect(globalThis.fetch).toHaveBeenCalledTimes(1);
     });
 
-    it('returns early on HTTP error from OpenAI', async () => {
+    it('throws PatterConnectionError on HTTP error from OpenAI', async () => {
       globalThis.fetch = vi.fn().mockResolvedValue({
         ok: false,
         status: 429,
@@ -247,10 +263,17 @@ describe('LLMLoop', () => {
 
       const loop = new LLMLoop('sk-test', 'gpt-4o-mini', 'System.');
       const tokens: string[] = [];
-      for await (const token of loop.run('Hi', [], {})) {
-        tokens.push(token);
+      let caught: unknown = null;
+      try {
+        for await (const token of loop.run('Hi', [], {})) {
+          tokens.push(token);
+        }
+      } catch (err) {
+        caught = err;
       }
 
+      expect(caught).toBeInstanceOf(Error);
+      expect((caught as Error).message).toContain('429');
       expect(tokens).toEqual([]);
     });
   });

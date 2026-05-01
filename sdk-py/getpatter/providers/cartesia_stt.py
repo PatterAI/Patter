@@ -3,11 +3,6 @@ Cartesia STT (ink-whisper) adapter for the Patter SDK pipeline mode.
 
 Implements the STTProvider ABC using Cartesia's streaming WebSocket API.
 Pure-aiohttp transport — does NOT depend on the vendor SDK.
-
-Algorithm adapted from LiveKit Agents (Apache 2.0):
-https://github.com/livekit/agents
-Source: livekit-plugins/livekit-plugins-cartesia/livekit/plugins/cartesia/stt.py
-Upstream ref SHA: 78a66bcf79c5cea82989401c408f1dff4b961a5b
 """
 
 from __future__ import annotations
@@ -28,7 +23,7 @@ logger = logging.getLogger("getpatter")
 # Cartesia REST/WS base and protocol constants (port of cartesia/constants.py).
 DEFAULT_BASE_URL = "https://api.cartesia.ai"
 API_VERSION = "2025-04-16"
-USER_AGENT = "Patter/1.0 (integration=LiveKit-port; provider=Cartesia)"
+USER_AGENT = "Patter/1.0 (provider=Cartesia)"
 KEEPALIVE_INTERVAL_SECONDS = 30.0
 
 # Supported STT encoding (Cartesia STT currently only accepts PCM s16le).
@@ -119,9 +114,9 @@ class CartesiaSTT(STTProvider):
         """
         base = self._base_url
         if base.startswith("http://"):
-            base = "ws://" + base[len("http://"):]
+            base = "ws://" + base[len("http://") :]
         elif base.startswith("https://"):
-            base = "wss://" + base[len("https://"):]
+            base = "wss://" + base[len("https://") :]
         elif not (base.startswith("ws://") or base.startswith("wss://")):
             base = "wss://" + base
 

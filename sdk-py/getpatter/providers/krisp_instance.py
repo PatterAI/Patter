@@ -1,25 +1,8 @@
-# Copyright 2023 LiveKit, Inc.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 """Krisp VIVA SDK singleton manager with reference counting.
 
-Adapted from LiveKit Agents (Apache 2.0):
-https://github.com/livekit/agents/blob/main/livekit-plugins/livekit-plugins-krisp/livekit/plugins/krisp/krisp_instance.py
-
-This module provides a singleton manager for the Krisp VIVA SDK with reference
-counting, ensuring proper initialization and cleanup when multiple components
-(filters) use the SDK.
+Provides a singleton manager for the Krisp VIVA SDK with reference counting,
+ensuring proper initialization and cleanup when multiple components (filters)
+use the SDK.
 
 The Krisp SDK is a proprietary component that must be installed separately via
 ``pip install krisp-audio`` and requires a valid license key provided through
@@ -185,9 +168,7 @@ class KrispSDKManager:
         with cls._lock:
             if cls._reference_count > 0:
                 cls._reference_count -= 1
-                logger.debug(
-                    "Krisp SDK reference count: %s", cls._reference_count
-                )
+                logger.debug("Krisp SDK reference count: %s", cls._reference_count)
 
                 # Destroy SDK when last reference is released
                 if cls._reference_count == 0 and cls._initialized:

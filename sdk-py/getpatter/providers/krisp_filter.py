@@ -1,27 +1,8 @@
-# Copyright 2023 LiveKit, Inc.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 """Krisp VIVA noise-reduction :class:`AudioFilter` for Patter.
 
-Adapted from LiveKit Agents (Apache 2.0):
-https://github.com/livekit/agents/blob/main/livekit-plugins/livekit-plugins-krisp/livekit/plugins/krisp/viva_filter.py
-
-The original LiveKit implementation subclasses ``rtc.FrameProcessor`` and
-operates on :class:`livekit.rtc.AudioFrame`.  Patter does not depend on
-livekit-rtc, so this port implements :class:`getpatter.providers.base.AudioFilter`
-directly, exposing an ``async process(pcm_chunk, sample_rate) -> bytes`` API
-that integrates with ``PipelineStreamHandler``.
+Implements :class:`getpatter.providers.base.AudioFilter` directly, exposing
+an ``async process(pcm_chunk, sample_rate) -> bytes`` API that integrates
+with ``PipelineStreamHandler``.
 
 Requires the proprietary Krisp Audio SDK; see
 :mod:`getpatter.providers.krisp_instance` for setup instructions.
@@ -99,25 +80,19 @@ class KrispVivaFilter(AudioFilter):
             raise RuntimeError(f"Failed to acquire Krisp SDK: {e}") from e
 
         try:
-            self._model_path = model_path or os.getenv(
-                "KRISP_VIVA_FILTER_MODEL_PATH"
-            )
+            self._model_path = model_path or os.getenv("KRISP_VIVA_FILTER_MODEL_PATH")
             if not self._model_path:
                 logger.error(
                     "Model path is not provided and "
                     "KRISP_VIVA_FILTER_MODEL_PATH is not set."
                 )
-                raise ValueError(
-                    "Model path for KrispVivaFilter must be provided."
-                )
+                raise ValueError("Model path for KrispVivaFilter must be provided.")
 
             if not self._model_path.endswith(".kef"):
                 raise ValueError("Model is expected with .kef extension")
 
             if not os.path.isfile(self._model_path):
-                raise FileNotFoundError(
-                    f"Model file not found: {self._model_path}"
-                )
+                raise FileNotFoundError(f"Model file not found: {self._model_path}")
 
             if frame_duration_ms not in KRISP_FRAME_DURATIONS:
                 raise ValueError(
@@ -153,9 +128,7 @@ class KrispVivaFilter(AudioFilter):
 
         nc_cfg = krisp_audio.NcSessionConfig()
         nc_cfg.inputSampleRate = int_to_krisp_sample_rate(sample_rate)
-        nc_cfg.inputFrameDuration = int_to_krisp_frame_duration(
-            self._frame_duration_ms
-        )
+        nc_cfg.inputFrameDuration = int_to_krisp_frame_duration(self._frame_duration_ms)
         nc_cfg.outputSampleRate = nc_cfg.inputSampleRate
         nc_cfg.modelInfo = model_info
 
@@ -188,9 +161,7 @@ class KrispVivaFilter(AudioFilter):
         if self._session is None or self._sample_rate != sample_rate:
             self._create_session(sample_rate)
 
-        expected_samples = int(
-            (sample_rate * self._frame_duration_ms) / 1000
-        )
+        expected_samples = int((sample_rate * self._frame_duration_ms) / 1000)
         audio_samples = np.frombuffer(pcm_chunk, dtype=np.int16)
         if len(audio_samples) != expected_samples:
             raise ValueError(

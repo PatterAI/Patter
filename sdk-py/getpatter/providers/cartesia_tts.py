@@ -1,28 +1,11 @@
-# Portions of this file are adapted from LiveKit Agents (Apache License 2.0):
-#   https://github.com/livekit/agents
-#   livekit-plugins/livekit-plugins-cartesia/livekit/plugins/cartesia/tts.py
-#   Source commit: 78a66bcf79c5cea82989401c408f1dff4b961a5b
-#
-# Copyright 2023 LiveKit, Inc.
-# Modifications (c) 2025 PatterAI
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-
 """Cartesia TTS provider — HTTP bytes endpoint, pure aiohttp.
 
-The upstream LiveKit Agents plugin also supports a WebSocket streaming mode
-with word timestamps, sentence tokenization, and connection pooling. This
-port focuses on the chunked-bytes HTTP API which maps cleanly to Patter's
+Targets the chunked-bytes HTTP API which maps cleanly to Patter's
 ``TTSProvider.synthesize(text) -> AsyncIterator[bytes]`` contract and
-requires no vendor SDK.
+requires no vendor SDK. Cartesia also exposes a richer WebSocket streaming
+mode with word timestamps and sentence tokenization; that mode is not used
+here because the HTTP API already meets Patter's TTFB target while keeping
+the dependency surface minimal.
 """
 
 from __future__ import annotations
@@ -43,7 +26,7 @@ CARTESIA_BASE_URL = "https://api.cartesia.ai"
 # Cartesia Line skill. ``2025-04-16`` is the current GA snapshot.
 CARTESIA_API_VERSION = "2025-04-16"
 
-# Cartesia's "Katie — Friendly Fixer" is the LiveKit default.  The voice ID
+# Cartesia's "Katie — Friendly Fixer" is a sensible default. The voice ID
 # is stable across the sonic-2 / sonic-3 model bump.
 CARTESIA_DEFAULT_VOICE_ID = "f786b574-daa5-4673-aa0c-cbe3e8534c02"
 

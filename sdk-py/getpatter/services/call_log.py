@@ -17,8 +17,8 @@ files are append-only. All timestamps are UTC ISO-8601 with millisecond
 precision. Phone numbers in ``metadata.json`` are masked by default via
 :func:`getpatter.utils.log_sanitize.mask_phone_number`.
 
-Schema follows industry convention (LiveKit/Pipecat-compatible trace
-shape; fields map to OpenTelemetry ``gen_ai.*`` semantic conventions).
+Schema follows industry convention — fields map to OpenTelemetry
+``gen_ai.*`` semantic conventions.
 
 Environment variables:
 
@@ -126,7 +126,9 @@ def _redact_phone(raw: str) -> str:
 
 def _utc_iso(ts: float | None = None) -> str:
     """Return an RFC 3339 / ISO 8601 UTC timestamp with millisecond precision."""
-    moment = datetime.fromtimestamp(ts if ts is not None else time.time(), tz=timezone.utc)
+    moment = datetime.fromtimestamp(
+        ts if ts is not None else time.time(), tz=timezone.utc
+    )
     return moment.strftime("%Y-%m-%dT%H:%M:%S.") + f"{moment.microsecond // 1000:03d}Z"
 
 
@@ -136,7 +138,9 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     Guarantees a reader never sees a half-written file even across crashes.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".tmp.", suffix=".json")
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=".tmp.", suffix=".json"
+    )
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, ensure_ascii=False, indent=2, default=str)
@@ -189,7 +193,14 @@ class CallLogger:
             return None
         dt = datetime.fromtimestamp(started_at or time.time(), tz=timezone.utc)
         safe_id = sanitize_log_value(call_id, max_len=64).replace("/", "_") or "unknown"
-        return self._root / "calls" / f"{dt.year:04d}" / f"{dt.month:02d}" / f"{dt.day:02d}" / safe_id
+        return (
+            self._root
+            / "calls"
+            / f"{dt.year:04d}"
+            / f"{dt.month:02d}"
+            / f"{dt.day:02d}"
+            / safe_id
+        )
 
     # -- Public API -------------------------------------------------------
 
@@ -321,7 +332,9 @@ class CallLogger:
         existing.update(
             {
                 "ended_at": _utc_iso(),
-                "duration_ms": round(duration_seconds * 1000, 1) if duration_seconds is not None else None,
+                "duration_ms": round(duration_seconds * 1000, 1)
+                if duration_seconds is not None
+                else None,
                 "status": status,
                 "turns": turns,
                 "cost": cost,
@@ -362,7 +375,12 @@ class CallLogger:
                         if not day_dir.is_dir() or not day_dir.name.isdigit():
                             continue
                         try:
-                            dt = datetime(int(year_dir.name), int(month_dir.name), int(day_dir.name), tzinfo=timezone.utc)
+                            dt = datetime(
+                                int(year_dir.name),
+                                int(month_dir.name),
+                                int(day_dir.name),
+                                tzinfo=timezone.utc,
+                            )
                         except ValueError:
                             continue
                         if dt.timestamp() < cutoff:
@@ -402,7 +420,9 @@ async def alog_call_start(logger_: CallLogger | None, *args, **kwargs) -> None:
     await asyncio.to_thread(logger_.log_call_start, *args, **kwargs)
 
 
-async def alog_turn(logger_: CallLogger | None, call_id: str, turn: dict[str, Any]) -> None:
+async def alog_turn(
+    logger_: CallLogger | None, call_id: str, turn: dict[str, Any]
+) -> None:
     if logger_ is None or not logger_.enabled:
         return
     await asyncio.to_thread(logger_.log_turn, call_id, turn)

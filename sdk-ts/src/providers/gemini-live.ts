@@ -1,9 +1,8 @@
 /**
  * Gemini Live realtime adapter.
  *
- * Partially adapted (~65% port) from LiveKit Agents
- * (livekit-plugins-google, Apache 2.0). Reframed to Patter's realtime adapter
- * surface — connect / sendAudio / onEvent / close — matching OpenAIRealtimeAdapter.
+ * Implements Patter's realtime adapter surface — connect / sendAudio /
+ * onEvent / close — matching OpenAIRealtimeAdapter.
  *
  * Uses the @google/genai SDK lazily imported at connect() so consumers that do
  * not use Gemini Live do not pay the load cost. Install with:

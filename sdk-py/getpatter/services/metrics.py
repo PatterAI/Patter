@@ -64,7 +64,7 @@ class CallMetricsAccumulator:
         # --- Per-turn timing state ---
         self._turn_start: float | None = None
         self._stt_complete: float | None = None
-        self._llm_first_token: float | None = None   # Fix 5: LLM TTFT start
+        self._llm_first_token: float | None = None  # Fix 5: LLM TTFT start
         self._llm_first_sentence: float | None = None  # Fix 3: first sentence boundary
         self._llm_complete: float | None = None
         self._tts_first_byte: float | None = None
@@ -110,7 +110,7 @@ class CallMetricsAccumulator:
         self._llm_ttfb_emitted: bool = False
         self._tts_ttfb_emitted: bool = False
 
-        # --- EOUMetrics timestamps (LiveKit Pattern A) ---
+        # --- EOUMetrics timestamps ---
         self._vad_stopped_at: float | None = None
         self._stt_final_at: float | None = None
         self._turn_committed_at: float | None = None
@@ -119,7 +119,7 @@ class CallMetricsAccumulator:
         self._turn_committed_mono: float | None = None
         self._on_user_turn_completed_delay_ms: float | None = None
 
-        # --- InterruptionMetrics counters (LiveKit Pattern B) ---
+        # --- InterruptionMetrics counters ---
         self._num_interruptions: int = 0
         self._num_backchannels: int = 0
         self._overlap_started_at: float | None = None
@@ -209,6 +209,7 @@ class CallMetricsAccumulator:
                 self._llm_ttfb_emitted = True
                 if self._event_bus is not None and self._stt_complete is not None:
                     from getpatter.observability.metric_types import TTFBMetrics
+
                     self._event_bus.emit(
                         "llm_metrics",
                         TTFBMetrics(
@@ -239,6 +240,7 @@ class CallMetricsAccumulator:
 
         if self._event_bus is not None:
             from getpatter.observability.metric_types import ProcessingMetrics
+
             self._event_bus.emit(
                 "stt_metrics",
                 ProcessingMetrics(
@@ -273,6 +275,7 @@ class CallMetricsAccumulator:
                     )
                     if tts_ref is not None:
                         from getpatter.observability.metric_types import TTFBMetrics
+
                         self._event_bus.emit(
                             "tts_metrics",
                             TTFBMetrics(
@@ -364,7 +367,7 @@ class CallMetricsAccumulator:
         self._reset_turn_state()
         return turn
 
-    # ---- EOUMetrics — LiveKit Pattern A ----
+    # ---- EOUMetrics ----
 
     def record_vad_stop(self, ts: float | None = None) -> None:
         """Record the timestamp when VAD detects end-of-speech.
@@ -435,7 +438,7 @@ class CallMetricsAccumulator:
         )
         self._event_bus.emit("eou_metrics", eou)
 
-    # ---- InterruptionMetrics — LiveKit Pattern B ----
+    # ---- InterruptionMetrics ----
 
     def record_overlap_start(self, ts: float | None = None) -> None:
         """Record when user speech begins overlapping agent playback.
@@ -487,7 +490,9 @@ class CallMetricsAccumulator:
     def record_realtime_usage(self, usage: dict) -> None:
         """Record OpenAI Realtime token usage from a ``response.done`` event."""
         self._total_realtime_cost += calculate_realtime_cost(usage, self._pricing)
-        self._total_realtime_cached_savings += calculate_realtime_cached_savings(usage, self._pricing)
+        self._total_realtime_cached_savings += calculate_realtime_cached_savings(
+            usage, self._pricing
+        )
 
     def record_llm_usage(
         self,
@@ -549,9 +554,8 @@ class CallMetricsAccumulator:
 
         # Compute STT audio seconds from byte count if not already tracked
         if self._total_stt_audio_seconds == 0.0 and self._stt_byte_count > 0:
-            self._total_stt_audio_seconds = (
-                self._stt_byte_count
-                / (self._stt_sample_rate * self._stt_bytes_per_sample)
+            self._total_stt_audio_seconds = self._stt_byte_count / (
+                self._stt_sample_rate * self._stt_bytes_per_sample
             )
 
         cost = self._compute_cost(duration)
@@ -579,7 +583,9 @@ class CallMetricsAccumulator:
         )
 
         if self._event_bus is not None:
-            self._event_bus.emit("call_ended", {"call_id": self.call_id, "metrics": result})
+            self._event_bus.emit(
+                "call_ended", {"call_id": self.call_id, "metrics": result}
+            )
 
         return result
 
@@ -628,7 +634,11 @@ class CallMetricsAccumulator:
         # llm_first_sentence — so tts_ms = tts_first_byte - llm_first_sentence
         # is always non-negative without clamping.  Fallback to llm_complete for
         # realtime / non-streaming paths where llm_first_sentence is never set.
-        tts_ref = self._llm_first_sentence if self._llm_first_sentence is not None else self._llm_complete
+        tts_ref = (
+            self._llm_first_sentence
+            if self._llm_first_sentence is not None
+            else self._llm_complete
+        )
         if tts_ref is not None and self._tts_first_byte is not None:
             tts_ms = max(0.0, (self._tts_first_byte - tts_ref) * 1000)
 
@@ -649,7 +659,9 @@ class CallMetricsAccumulator:
             self._endpoint_signal_at is not None
             and self._turn_committed_mono is not None
         ):
-            endpoint_ms = max(0.0, (self._turn_committed_mono - self._endpoint_signal_at) * 1000)
+            endpoint_ms = max(
+                0.0, (self._turn_committed_mono - self._endpoint_signal_at) * 1000
+            )
 
         # bargein_ms — interrupt detected → TTS actually halted.
         bargein_ms: float | None = None
@@ -657,7 +669,9 @@ class CallMetricsAccumulator:
             self._bargein_detected_at is not None
             and self._bargein_stopped_at is not None
         ):
-            bargein_ms = max(0.0, (self._bargein_stopped_at - self._bargein_detected_at) * 1000)
+            bargein_ms = max(
+                0.0, (self._bargein_stopped_at - self._bargein_detected_at) * 1000
+            )
 
         # tts_total_ms — LLM-first-token (or first-sentence boundary) → last
         # TTS audio byte sent.  Prefer ``llm_first_token`` so this captures
@@ -778,7 +792,11 @@ class CallMetricsAccumulator:
         state or zero — including them would drag every p95/avg bucket toward
         meaningless numbers.
         """
-        return [t for t in self._turns if t.agent_text != "[interrupted]" and t.latency.total_ms > 0]
+        return [
+            t
+            for t in self._turns
+            if t.agent_text != "[interrupted]" and t.latency.total_ms > 0
+        ]
 
     def _compute_average_latency(self) -> LatencyBreakdown:
         """Compute average latency across completed turns."""
@@ -789,7 +807,11 @@ class CallMetricsAccumulator:
         n = len(turns)
 
         def _opt_avg(attr: str) -> float | None:
-            vals = [getattr(t.latency, attr) for t in turns if getattr(t.latency, attr) is not None]
+            vals = [
+                getattr(t.latency, attr)
+                for t in turns
+                if getattr(t.latency, attr) is not None
+            ]
             return round(sum(vals) / len(vals), 1) if vals else None
 
         ttft_avg = _opt_avg("llm_ttft_ms")
@@ -858,11 +880,17 @@ class CallMetricsAccumulator:
             return sorted_v[lo] + (sorted_v[hi] - sorted_v[lo]) * frac
 
         def _opt_pct(attr: str) -> float | None:
-            vals = [getattr(t.latency, attr) for t in turns if getattr(t.latency, attr) is not None]
+            vals = [
+                getattr(t.latency, attr)
+                for t in turns
+                if getattr(t.latency, attr) is not None
+            ]
             v = pct(vals)
             return round(v, 1) if v else None
 
-        ttft_pct_val = pct([t.latency.llm_ttft_ms for t in turns if t.latency.llm_ttft_ms is not None])
+        ttft_pct_val = pct(
+            [t.latency.llm_ttft_ms for t in turns if t.latency.llm_ttft_ms is not None]
+        )
         return LatencyBreakdown(
             stt_ms=round(pct([t.latency.stt_ms for t in turns]), 1),
             llm_ms=round(pct([t.latency.llm_ms for t in turns]), 1),

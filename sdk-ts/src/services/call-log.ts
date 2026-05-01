@@ -19,8 +19,8 @@
  * ``maskPhoneNumber``.
  *
  * Schema matches ``sdk-py/getpatter/services/call_log.py`` for cross-SDK
- * compatibility (LiveKit/Pipecat-compatible trace shape; fields map to
- * OpenTelemetry ``gen_ai.*`` semantic conventions).
+ * compatibility; fields map to OpenTelemetry ``gen_ai.*`` semantic
+ * conventions.
  *
  * Environment variables:
  *

@@ -1,20 +1,8 @@
 """Anthropic Claude LLM provider for Patter's pipeline mode.
 
-This provider implements the :class:`getpatter.services.llm_loop.LLMProvider`
-protocol on top of Anthropic's Messages API with streaming.  Tool calls
-are translated from Anthropic's ``tool_use`` content blocks into the
-OpenAI-compatible ``{"type": "tool_call", ...}`` chunk format that the
-:class:`~getpatter.services.llm_loop.LLMLoop` expects.
+Implements the :class:`getpatter.services.llm_loop.LLMProvider` protocol on
+top of Anthropic's Messages API with streaming. The provider:
 
-Portions adapted from LiveKit Agents
-(https://github.com/livekit/agents, commit 78a66bcf79c5cea82989401c408f1dff4b961a5b,
-file livekit-plugins/livekit-plugins-anthropic/livekit/plugins/anthropic/llm.py),
-licensed under Apache License 2.0. Copyright 2023 LiveKit, Inc.
-
-Adaptations from the LiveKit source:
-  * Reshaped the ``llm.LLM`` / ``llm.LLMStream`` class pair into a single
-    :class:`AnthropicLLMProvider` that conforms to Patter's duck-typed
-    ``LLMProvider`` Protocol (``async def stream(messages, tools)``).
   * Translates OpenAI-formatted messages (``role``/``content``/
     ``tool_calls``/``tool_call_id``) into Anthropic's Messages API shape
     (single ``system`` string, ``user``/``assistant`` turns with
@@ -23,9 +11,6 @@ Adaptations from the LiveKit source:
   * Maps Anthropic stream events (``content_block_start``,
     ``content_block_delta``, ``content_block_stop``) to the Patter chunk
     protocol ``{"type": "text"|"tool_call"|"done", ...}``.
-  * Dropped LiveKit-specific concerns (``APIConnectOptions``,
-    ``chat_ctx.to_provider_format``, metrics events, retry wrapping)
-    that don't apply to Patter's thinner runtime.
 """
 
 from __future__ import annotations
@@ -41,7 +26,7 @@ __all__ = ["AnthropicLLMProvider"]
 
 
 # Default model. Anthropic requires an explicit max_tokens for every request;
-# we use LiveKit's default of 1024 when the caller doesn't provide one.
+# we use a default of 1024 when the caller doesn't provide one.
 _DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 _DEFAULT_MAX_TOKENS = 1024
 
@@ -239,7 +224,9 @@ def _to_anthropic_tools(tools: list[dict]) -> list[dict]:
             {
                 "name": fn["name"],
                 "description": fn.get("description", ""),
-                "input_schema": fn.get("parameters", {"type": "object", "properties": {}}),
+                "input_schema": fn.get(
+                    "parameters", {"type": "object", "properties": {}}
+                ),
             }
         )
     return out
@@ -310,7 +297,9 @@ def _to_anthropic_messages(messages: list[dict]) -> tuple[str, list[dict]]:
                         {
                             "type": "tool_result",
                             "tool_use_id": tool_call_id,
-                            "content": content if isinstance(content, str) else json.dumps(content),
+                            "content": content
+                            if isinstance(content, str)
+                            else json.dumps(content),
                         }
                     ],
                 }

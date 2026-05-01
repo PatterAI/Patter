@@ -1,27 +1,13 @@
 """Google Gemini LLM provider for Patter's pipeline mode.
 
-Backed by the ``google-genai`` SDK (``google.genai.Client``) which
-supports both the Gemini Developer API and Vertex AI.  This provider
-bridges Patter's OpenAI-style chunk protocol with Gemini's
-``generate_content_stream`` event format.
+Backed by the ``google-genai`` SDK (``google.genai.Client``) which supports
+both the Gemini Developer API and Vertex AI. The provider:
 
-Portions adapted from LiveKit Agents
-(https://github.com/livekit/agents, commit 78a66bcf79c5cea82989401c408f1dff4b961a5b,
-file livekit-plugins/livekit-plugins-google/livekit/plugins/google/llm.py),
-licensed under Apache License 2.0. Copyright 2023 LiveKit, Inc.
-
-Adaptations from the LiveKit source:
-  * Collapsed the ``llm.LLM`` / ``llm.LLMStream`` pair into a single
-    :class:`GoogleLLMProvider` that satisfies Patter's ``LLMProvider``
-    Protocol (``async def stream(messages, tools)``).
   * Translates OpenAI-formatted messages into Gemini ``Content`` turns
-    (including ``function_call`` / ``function_response`` parts) so
-    callers don't need a second message format.
-  * Maps Gemini stream events (``text`` parts, ``function_call`` parts)
-    to the Patter chunk protocol ``{"type": "text"|"tool_call"|"done"}``.
-  * Dropped LiveKit-specific machinery (``thought_signatures``,
-    ``APIConnectOptions``, metrics/usage events, retry wrapping) that
-    don't apply to Patter's thinner runtime.
+    (including ``function_call`` / ``function_response`` parts) so callers
+    don't need a second message format.
+  * Maps Gemini stream events (``text`` parts, ``function_call`` parts) to
+    the Patter chunk protocol ``{"type": "text"|"tool_call"|"done"}``.
 """
 
 from __future__ import annotations
@@ -80,12 +66,15 @@ class GoogleLLMProvider:
         use_vertexai = (
             vertexai
             if vertexai
-            else os.environ.get("GOOGLE_GENAI_USE_VERTEXAI", "0").lower() in ["true", "1"]
+            else os.environ.get("GOOGLE_GENAI_USE_VERTEXAI", "0").lower()
+            in ["true", "1"]
         )
 
         resolved_key: str | None = None
         gcp_project = project or os.environ.get("GOOGLE_CLOUD_PROJECT")
-        gcp_location = location or os.environ.get("GOOGLE_CLOUD_LOCATION") or "us-central1"
+        gcp_location = (
+            location or os.environ.get("GOOGLE_CLOUD_LOCATION") or "us-central1"
+        )
 
         if use_vertexai:
             if not gcp_project:
@@ -190,7 +179,10 @@ class GoogleLLMProvider:
                 "type": "usage",
                 "input_tokens": getattr(last_usage, "prompt_token_count", 0) or 0,
                 "output_tokens": getattr(last_usage, "candidates_token_count", 0) or 0,
-                "cache_read_tokens": getattr(last_usage, "cached_content_token_count", 0) or 0,
+                "cache_read_tokens": getattr(
+                    last_usage, "cached_content_token_count", 0
+                )
+                or 0,
             }
 
         yield {"type": "done"}
@@ -281,9 +273,7 @@ def _to_gemini_contents(messages: list[dict]) -> tuple[str, list[Any]]:
             tool_call_id = msg.get("tool_call_id", "")
             raw = msg.get("content", "")
             try:
-                response_dict = (
-                    json.loads(raw) if isinstance(raw, str) else dict(raw)
-                )
+                response_dict = json.loads(raw) if isinstance(raw, str) else dict(raw)
                 if not isinstance(response_dict, dict):
                     response_dict = {"result": response_dict}
             except (json.JSONDecodeError, TypeError):

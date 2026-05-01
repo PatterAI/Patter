@@ -2,20 +2,10 @@
  * Telnyx Text-to-Speech adapter (WebSocket streaming).
  *
  * Bridges the Telnyx `/v2/text-to-speech/speech` WebSocket API to the
- * Patter SDK pipeline-mode TTS interface.
- *
- * Algorithm and WebSocket protocol adapted from LiveKit Agents (Apache 2.0):
- * https://github.com/livekit/agents
- * Source: `livekit-plugins/livekit-plugins-telnyx/livekit/plugins/telnyx/tts.py`
- * Commit SHA (ref=main): 78a66bcf79c5cea82989401c408f1dff4b961a5b
- *
- * The source project is licensed under the Apache 2.0 license:
- * https://www.apache.org/licenses/LICENSE-2.0
- *
- * Changes vs. upstream: ported semantically to TypeScript (`ws` + `Buffer`),
- * replaced LiveKit's `SynthesizeStream`/`AudioEmitter` with the same
- * `synthesize` / `synthesizeStream` method shape used by the other Patter
- * TTS providers (ElevenLabs, OpenAI). The stream yields raw MP3 bytes.
+ * Patter SDK pipeline-mode TTS interface. Implemented in TypeScript
+ * (`ws` + `Buffer`) with the same `synthesize` / `synthesizeStream`
+ * method shape used by the other Patter TTS providers (ElevenLabs,
+ * OpenAI). The stream yields raw MP3 bytes.
  */
 
 import WebSocket from 'ws';

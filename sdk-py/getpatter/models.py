@@ -84,17 +84,33 @@ class Agent:
     language: str = "en"
     first_message: str = ""
     tools: list[dict] | None = None
-    provider: str = "openai_realtime"  # "openai_realtime" | "elevenlabs_convai" | "pipeline"
+    provider: str = (
+        "openai_realtime"  # "openai_realtime" | "elevenlabs_convai" | "pipeline"
+    )
     stt: STTConfig | None = None  # which STT provider to use in pipeline mode
     tts: TTSConfig | None = None  # which TTS provider to use in pipeline mode
-    variables: dict | None = None  # Dynamic variables for ``{placeholder}`` substitution in system_prompt
-    guardrails: list[Guardrail | dict] | None = None  # List of Guardrail objects or guardrail dicts
+    variables: dict | None = (
+        None  # Dynamic variables for ``{placeholder}`` substitution in system_prompt
+    )
+    guardrails: list[Guardrail | dict] | None = (
+        None  # List of Guardrail objects or guardrail dicts
+    )
     hooks: PipelineHooks | None = None  # Pipeline hooks for pipeline mode
-    text_transforms: list[Callable] | None = None  # Text transforms applied to LLM output before TTS
-    vad: "VADProvider | None" = None  # Optional server-side VAD (e.g., Silero) — pipeline mode only
-    audio_filter: "AudioFilter | None" = None  # Optional pre-STT audio filter (noise cancel) — pipeline mode only
-    background_audio: "BackgroundAudioPlayer | None" = None  # Optional background audio mixer — pipeline mode only
-    llm: "LLMProvider | None" = None  # Optional built-in LLM provider for pipeline mode (e.g., AnthropicLLM())
+    text_transforms: list[Callable] | None = (
+        None  # Text transforms applied to LLM output before TTS
+    )
+    vad: "VADProvider | None" = (
+        None  # Optional server-side VAD (e.g., Silero) — pipeline mode only
+    )
+    audio_filter: "AudioFilter | None" = (
+        None  # Optional pre-STT audio filter (noise cancel) — pipeline mode only
+    )
+    background_audio: "BackgroundAudioPlayer | None" = (
+        None  # Optional background audio mixer — pipeline mode only
+    )
+    llm: "LLMProvider | None" = (
+        None  # Optional built-in LLM provider for pipeline mode (e.g., AnthropicLLM())
+    )
     # Minimum sustained voice (ms) before treating caller audio as a barge-in
     # and interrupting TTS. ``0`` disables barge-in entirely — useful on noisy
     # links (ngrok tunnels, speakerphone) where the agent can hear itself.
@@ -106,11 +122,17 @@ class Agent:
     # very first chunk. Hard-disabled when ``language`` starts with ``"it"``
     # (Italian decimal comma would split mid-number). Default: ``False``.
     aggressive_first_flush: bool = False
+    # Patter prepends a default phone-friendly preamble to ``system_prompt``
+    # so the LLM responds in spoken-language style (no markdown, emojis,
+    # bullet lists, code blocks; numbers and dates spelled out; replies kept
+    # short). Set to ``True`` to disable and ship ``system_prompt`` verbatim.
+    disable_phone_preamble: bool = False
 
 
 @dataclass(frozen=True)
 class CallEvent:
     """Call lifecycle event."""
+
     call_id: str
     caller: str = ""
     callee: str = ""
@@ -134,7 +156,11 @@ class STTConfig:
     options: dict | None = None
 
     def to_dict(self) -> dict:
-        out = {"provider": self.provider, "api_key": self.api_key, "language": self.language}
+        out = {
+            "provider": self.provider,
+            "api_key": self.api_key,
+            "language": self.language,
+        }
         if self.options:
             out["options"] = dict(self.options)
         return out
@@ -235,7 +261,7 @@ class CallMetrics:
     tts_provider: str = ""
     llm_provider: str = ""
     telephony_provider: str = ""
-    # Additional percentiles exposed for LiveKit/Pipecat-style dashboards.
+    # Additional percentiles exposed for richer latency dashboards.
     # Default to zero so older consumers still construct CallMetrics cleanly.
     latency_p50: LatencyBreakdown = field(default_factory=LatencyBreakdown)
     latency_p90: LatencyBreakdown = field(default_factory=LatencyBreakdown)

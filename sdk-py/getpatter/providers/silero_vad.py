@@ -8,31 +8,10 @@ windows (256 samples at 8 kHz, 512 at 16 kHz), applies an exponential
 probability filter, and emits :class:`~getpatter.providers.base.VADEvent`
 transitions (``speech_start`` / ``speech_end`` / ``silence``).
 
-Ported from LiveKit Agents (Apache 2.0):
-https://github.com/livekit/agents
-Source: livekit-plugins/livekit-plugins-silero/livekit/plugins/silero/vad.py
-
-Adaptations for Patter:
-  - Input is raw PCM ``bytes`` (int16, little-endian, mono) via
-    ``process_frame(pcm_chunk, sample_rate)``, not ``livekit.rtc.AudioFrame``.
-  - No IPC / inference runner: onnxruntime runs inline in a
-    ``loop.run_in_executor`` worker thread.
-  - Emits ``VADEvent`` (Patter protocol) instead of LiveKit event types.
+Input is raw PCM ``bytes`` (int16, little-endian, mono) via
+``process_frame(pcm_chunk, sample_rate)``. ``onnxruntime`` runs inline in a
+``loop.run_in_executor`` worker thread to keep the event loop responsive.
 """
-
-# Copyright 2023 LiveKit, Inc.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 from __future__ import annotations
 
@@ -73,10 +52,9 @@ class _VADOptions:
 class _ExpFilter:
     """Exponential smoothing filter.
 
-    Ported from ``livekit.agents.utils.ExpFilter`` (Apache 2.0). Returns a
-    smoothed value using ``a = alpha**exp`` as the smoothing coefficient so
-    that callers can adapt per-sample weight based on how stale the filter
-    state is relative to the incoming sample.
+    Returns a smoothed value using ``a = alpha**exp`` as the smoothing
+    coefficient so that callers can adapt per-sample weight based on how
+    stale the filter state is relative to the incoming sample.
     """
 
     def __init__(self, alpha: float) -> None:
@@ -89,7 +67,7 @@ class _ExpFilter:
         if self._filtered is None:
             self._filtered = sample
         else:
-            a = self._alpha ** exp
+            a = self._alpha**exp
             self._filtered = a * self._filtered + (1 - a) * sample
         return self._filtered
 
@@ -135,9 +113,8 @@ class SileroVAD(VADProvider):
             min_silence_duration: Minimum continuous silence duration (seconds)
                 before a ``speech_end`` event is emitted after speech.
             prefix_padding_duration: Padding added to the start of detected
-                speech. Preserved for parity with LiveKit; not currently used
-                for audio re-emission in the Patter port since callers already
-                own the upstream PCM buffer.
+                speech. Reserved for future use; callers currently own the
+                upstream PCM buffer so re-emission isn't required.
             activation_threshold: Probability threshold above which a frame is
                 considered speech.
             sample_rate: Inference sample rate (8000 or 16000 Hz).
@@ -267,9 +244,7 @@ class SileroVAD(VADProvider):
 
         return event
 
-    def _advance_state(
-        self, p: float, window_duration: float
-    ) -> VADEvent | None:
+    def _advance_state(self, p: float, window_duration: float) -> VADEvent | None:
         """Update internal speaking state based on filtered probability.
 
         Returns a VADEvent on transitions, None otherwise.

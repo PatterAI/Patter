@@ -12,22 +12,12 @@ failure modes:
    detection). A debounced timer triggers a follow-up action after
    ``max_silence_duration`` seconds of combined silence.
 
-The public surface mirrors LiveKit ``IVRActivity`` but is wired to
-Patter's ``CallControl`` abstraction rather than LiveKit rooms, so
-transcripts are pushed in explicitly by the caller (typically
+Transcripts are pushed in explicitly by the caller (typically
 ``PipelineStreamHandler``) through ``on_user_transcribed``.
 
 Optional extras install::
 
     pip install "getpatter[ivr]"
-
-Algorithm adapted from LiveKit Agents (Apache 2.0):
-https://github.com/livekit/agents
-
-Source:
-- livekit-agents/livekit/agents/voice/ivr/ivr_activity.py
-- livekit-agents/livekit/agents/beta/tools/send_dtmf.py
-LiveKit SHA at port time: 78a66bcf79c5cea82989401c408f1dff4b961a5b
 """
 
 from __future__ import annotations
@@ -44,6 +34,7 @@ logger = logging.getLogger("getpatter.ivr")
 
 
 # ── DTMF event taxonomy ─────────────────────────────────────────────────
+
 
 class DtmfEvent(str, Enum):
     """Valid DTMF tones. ``value`` is the literal keypad character.
@@ -77,14 +68,12 @@ def format_dtmf(events: list[DtmfEvent]) -> str:
 
 # ── Debounced silence detector ──────────────────────────────────────────
 
+
 class _DebouncedCall:
     """Schedule an async callback after a quiet period.
 
     Reset each time ``schedule()`` is called; the most recent schedule
     "wins". ``cancel()`` stops any pending call.
-
-    This replaces LiveKit's ``Debounced`` helper without the LiveKit
-    async primitives.
     """
 
     def __init__(
@@ -120,6 +109,7 @@ class _DebouncedCall:
 
 
 # ── TF-IDF loop detector ────────────────────────────────────────────────
+
 
 class TfidfLoopDetector:
     """Detect repeated IVR prompts via TF-IDF cosine similarity.
@@ -281,7 +271,7 @@ class IVRActivity:
         self._debounced_silence.cancel()
         self._started = False
 
-    # Backwards-compat alias mirroring the LiveKit ``aclose`` name.
+    # Backwards-compat alias for callers that prefer ``aclose``.
     aclose = stop
 
     # ── external event hooks ─────────────────────────────────────────
@@ -311,8 +301,8 @@ class IVRActivity:
     def note_user_state(self, state: str) -> None:
         """Record the user's latest voice activity state.
 
-        ``state`` is one of ``"listening"``, ``"speaking"``, ``"away"``
-        in the LiveKit taxonomy; any other value is treated as "active".
+        ``state`` is one of ``"listening"``, ``"speaking"``, ``"away"``;
+        any other value is treated as "active".
         """
         self._current_user_state = state
         self._schedule_silence_check()

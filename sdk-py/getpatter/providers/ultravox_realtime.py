@@ -1,12 +1,11 @@
 """Ultravox realtime adapter.
 
-Partially adapted (~70% port) from LiveKit Agents
-(livekit-plugins/livekit-plugins-ultravox/livekit/plugins/ultravox/realtime/realtime_model.py,
-Apache 2.0). Ultravox uses a pure WebSocket + aiohttp protocol — no vendor
-SDK — so the port is substantially lighter than the Gemini one.
+Ultravox speaks a pure WebSocket + aiohttp protocol with no vendor SDK,
+which keeps this adapter substantially lighter than the Gemini Live one.
 
-Reframed to Patter's ``connect``/``send_audio``/``receive_events``/``close``
-surface, matching :class:`~getpatter.providers.openai_realtime.OpenAIRealtimeAdapter`.
+The surface — ``connect`` / ``send_audio`` / ``receive_events`` / ``close`` —
+matches :class:`~getpatter.providers.openai_realtime.OpenAIRealtimeAdapter`,
+so callers can swap providers without touching the handler.
 """
 
 from __future__ import annotations
@@ -28,7 +27,7 @@ DEFAULT_SAMPLE_RATE_HZ = 16000
 class UltravoxRealtimeAdapter:
     """Bridges a bidirectional audio stream to an Ultravox realtime call.
 
-    Flow (matches LiveKit plugin):
+    Flow:
         1. POST ``/calls`` to create a call and receive a ``joinUrl``.
         2. Open the ``joinUrl`` WebSocket.
         3. Binary frames on the socket are PCM16 audio (both directions).
@@ -116,7 +115,9 @@ class UltravoxRealtimeAdapter:
                     "temporaryTool": {
                         "modelToolName": t["name"],
                         "description": t.get("description", ""),
-                        "dynamicParameters": _tool_params_to_ultravox(t.get("parameters", {})),
+                        "dynamicParameters": _tool_params_to_ultravox(
+                            t.get("parameters", {})
+                        ),
                     }
                 }
                 for t in self.tools
@@ -157,21 +158,29 @@ class UltravoxRealtimeAdapter:
         """Send a text turn. Ultravox treats this as ``input_text_message``."""
         if self._ws is None:
             return
-        await self._ws.send_str(json.dumps({
-            "type": "input_text_message",
-            "text": text,
-        }))
+        await self._ws.send_str(
+            json.dumps(
+                {
+                    "type": "input_text_message",
+                    "text": text,
+                }
+            )
+        )
 
     async def send_function_result(self, call_id: str, result: str) -> None:
         """Return a client tool result."""
         if self._ws is None:
             return
-        await self._ws.send_str(json.dumps({
-            "type": "client_tool_result",
-            "invocationId": call_id,
-            "result": result,
-            "responseType": "tool-response",
-        }))
+        await self._ws.send_str(
+            json.dumps(
+                {
+                    "type": "client_tool_result",
+                    "invocationId": call_id,
+                    "result": result,
+                    "responseType": "tool-response",
+                }
+            )
+        )
 
     async def cancel_response(self) -> None:
         """Ask the agent to stop speaking immediately (barge-in)."""
@@ -283,10 +292,12 @@ def _tool_params_to_ultravox(parameters: dict[str, Any]) -> list[dict[str, Any]]
     required = set(parameters.get("required", []) or [])
     out: list[dict[str, Any]] = []
     for name, schema in props.items():
-        out.append({
-            "name": name,
-            "location": "PARAMETER_LOCATION_BODY",
-            "schema": schema,
-            "required": name in required,
-        })
+        out.append(
+            {
+                "name": name,
+                "location": "PARAMETER_LOCATION_BODY",
+                "schema": schema,
+                "required": name in required,
+            }
+        )
     return out

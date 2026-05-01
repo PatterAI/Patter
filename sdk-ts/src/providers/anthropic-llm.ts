@@ -7,16 +7,8 @@
  * Anthropic shape and the vendor event stream is normalised back into
  * Patter's ``{ type: 'text' | 'tool_call' | 'done' }`` chunk protocol.
  *
- * Portions adapted from LiveKit Agents
- * (https://github.com/livekit/agents, commit
- * 78a66bcf79c5cea82989401c408f1dff4b961a5b,
- * file livekit-plugins/livekit-plugins-anthropic/livekit/plugins/anthropic/llm.py),
- * licensed under Apache License 2.0. Copyright 2023 LiveKit, Inc.
- *
- * Adaptations from the LiveKit source:
- *   * Ported the Python async class pair (``llm.LLM`` /
- *     ``llm.LLMStream``) into a single TypeScript class that satisfies
- *     Patter's ``LLMProvider`` interface.
+ * Implementation notes:
+ *   * Single TypeScript class satisfying Patter's ``LLMProvider`` interface.
  *   * Uses native ``fetch`` + SSE parsing instead of the official
  *     ``@anthropic-ai/sdk`` to keep Patter's runtime dependencies lean
  *     (mirrors how ``OpenAILLMProvider`` is implemented in

@@ -7,21 +7,13 @@
  * and ``tools`` shapes, and streamed response parts are normalised to
  * Patter's ``{ type: 'text' | 'tool_call' | 'done' }`` chunks.
  *
- * Portions adapted from LiveKit Agents
- * (https://github.com/livekit/agents, commit
- * 78a66bcf79c5cea82989401c408f1dff4b961a5b,
- * file livekit-plugins/livekit-plugins-google/livekit/plugins/google/llm.py),
- * licensed under Apache License 2.0. Copyright 2023 LiveKit, Inc.
- *
- * Adaptations from the LiveKit source:
- *   * LiveKit uses the ``google-genai`` Python SDK. The TypeScript port
- *     uses native ``fetch`` against the REST SSE endpoint so we don't
+ * Implementation notes:
+ *   * Uses native ``fetch`` against the REST SSE endpoint so we don't
  *     pull in a large SDK dependency.
- *   * Collapsed the Python ``llm.LLM`` / ``llm.LLMStream`` pair into a
- *     single class that satisfies Patter's ``LLMProvider`` interface.
- *   * Dropped Vertex AI support (which requires GCP auth) — only the
- *     Developer API (API key) path is ported. Vertex can be added by a
- *     follow-up PR once credential plumbing is in place.
+ *   * Single class that satisfies Patter's ``LLMProvider`` interface.
+ *   * Vertex AI support (which requires GCP auth) is not included — only
+ *     the Developer API (API key) path is supported. Vertex can be added
+ *     by a follow-up PR once credential plumbing is in place.
  */
 
 import type { LLMChunk, LLMProvider } from '../llm-loop';

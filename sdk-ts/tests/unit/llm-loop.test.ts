@@ -421,7 +421,7 @@ describe('OpenAILLMProvider', () => {
     expect(tokens).toEqual(['Hello', ' world']);
   });
 
-  it('handles non-ok response gracefully', async () => {
+  it('throws PatterConnectionError on non-ok HTTP response', async () => {
     fetchSpy.mockResolvedValueOnce({
       ok: false,
       status: 500,
@@ -432,10 +432,17 @@ describe('OpenAILLMProvider', () => {
 
     const provider = new OpenAILLMProvider('api-key', 'gpt-4o');
     const tokens: LLMChunk[] = [];
-    for await (const chunk of provider.stream([{ role: 'user', content: 'Hi' }])) {
-      tokens.push(chunk);
+    let caught: unknown = null;
+    try {
+      for await (const chunk of provider.stream([{ role: 'user', content: 'Hi' }])) {
+        tokens.push(chunk);
+      }
+    } catch (err) {
+      caught = err;
     }
 
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toContain('500');
     expect(tokens).toHaveLength(0);
   });
 

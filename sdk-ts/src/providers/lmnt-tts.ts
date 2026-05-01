@@ -1,21 +1,3 @@
-// Portions of this file are adapted from LiveKit Agents (Apache License 2.0):
-//   https://github.com/livekit/agents
-//   livekit-plugins/livekit-plugins-lmnt/livekit/plugins/lmnt/tts.py
-//   Source commit: 78a66bcf79c5cea82989401c408f1dff4b961a5b
-//
-// Copyright 2023 LiveKit, Inc.
-// Modifications (c) 2025 PatterAI
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-
 /**
  * LMNT TTS provider — HTTP `/v1/ai/speech/bytes` endpoint.
  *
@@ -55,7 +37,7 @@ export class LMNTTTS {
     this.apiKey = apiKey;
     this.model = opts.model ?? 'blizzard';
     this.voice = opts.voice ?? 'leah';
-    // Mirror the upstream language defaults: blizzard => auto, else => en.
+    // Language defaults: blizzard => auto, else => en.
     this.language =
       opts.language ?? (this.model === 'blizzard' ? 'auto' : 'en');
     this.format = opts.format ?? 'raw';

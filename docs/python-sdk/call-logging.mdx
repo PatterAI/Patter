@@ -114,4 +114,4 @@ with (call_dir / "transcript.jsonl").open() as fh:
 
 ## Interop
 
-The on-disk shape is compatible with LiveKit-style session reports and Pipecat observer traces: `metadata.json` maps 1:1 to a LiveKit `SessionReport`, and `transcript.jsonl` rows slot into OpenTelemetry `gen_ai.*` turn spans. The TypeScript SDK writes the same schema, so a multi-runtime deployment produces a single coherent directory tree.
+Patter session reports include per-turn STT/LLM/TTS spans, tool invocations, latency metrics, and barge-in events. `transcript.jsonl` rows slot into OpenTelemetry `gen_ai.*` turn spans. The TypeScript SDK writes the same schema, so a multi-runtime deployment produces a single coherent directory tree.

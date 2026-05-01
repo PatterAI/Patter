@@ -7,19 +7,11 @@
  * compression to reduce TTFT for requests with large prompts
  * (see https://inference-docs.cerebras.ai/payload-optimization).
  *
- * Portions adapted from LiveKit Agents
- * (https://github.com/livekit/agents, commit
- * 78a66bcf79c5cea82989401c408f1dff4b961a5b,
- * file livekit-plugins/livekit-plugins-cerebras/livekit/plugins/cerebras/llm.py),
- * licensed under Apache License 2.0. Copyright 2026 LiveKit, Inc.
- *
- * Adaptations from the LiveKit source:
- *   * LiveKit's ``cerebras.LLM`` subclasses the LiveKit OpenAI plugin.
- *     Patter's analogue is a tiny wrapper around ``fetch`` that swaps
- *     the base URL and default model.
- *   * The msgpack payload optimisation from LiveKit is Python-only
- *     (msgpack in Node land isn't as standard); only gzip compression
- *     is ported. Enable with ``gzipCompression: true``.
+ * Implementation notes:
+ *   * Tiny wrapper around ``fetch`` that swaps the base URL and default
+ *     model relative to the OpenAI-compatible API.
+ *   * Gzip compression of the request body is supported via
+ *     ``gzipCompression: true`` (default).
  */
 
 import type { LLMChunk, LLMProvider } from '../llm-loop';

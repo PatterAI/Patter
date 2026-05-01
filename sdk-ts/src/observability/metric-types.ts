@@ -55,7 +55,7 @@ export interface RealtimeUsage {
 // ---- EOU metrics ----
 
 /**
- * End-of-utterance timing breakdown (LiveKit Pattern A).
+ * End-of-utterance timing breakdown.
  *
  * ``endOfUtteranceDelay``     ms from VAD stop → STT final.
  * ``transcriptionDelay``      ms from VAD stop → turn committed to LLM.
@@ -76,8 +76,7 @@ export interface EOUMetrics {
  * Barge-in / interruption measurement.
  *
  * ``predictionDuration`` is always 0 in the simplified no-ML implementation;
- * it is reserved for a future ML-based overlap classifier (matching LiveKit's
- * ``VADInterruptionDetector``).
+ * it is reserved for a future ML-based overlap classifier.
  */
 export interface InterruptionMetrics {
   timestamp: number;

@@ -15,12 +15,12 @@ function streamText(chunker: SentenceChunker, text: string): string[] {
 }
 
 // ---------------------------------------------------------------------------
-// Constant from the LiveKit reference test
+// Reference text + expected output for sentence-boundary detection.
 // ---------------------------------------------------------------------------
 
-const LIVEKIT_TEXT =
+const REFERENCE_TEXT =
   'Hi! ' +
-  'LiveKit is a platform for live audio and video applications and services. \n\n' +
+  'Patter is a platform for live audio and video applications and services. \n\n' +
   'R.T.C stands for Real-Time Communication... again R.T.C. ' +
   'Mr. Theo is testing the sentence tokenizer. ' +
   '\nThis is a test. Another test. ' +
@@ -30,11 +30,11 @@ const LIVEKIT_TEXT =
   'Hey!\n Hi! Hello! ' +
   '\n\n' +
   'This is a sentence. 这是一个中文句子。これは日本語の文章です。' +
-  '你好！LiveKit是一个直播音频和视频应用程序和服务的平台。' +
+  '你好！Patter是一个直播音频和视频应用程序和服务的平台。' +
   '\nThis is a sentence contains   consecutive spaces.';
 
 const EXPECTED_MIN_20 = [
-  'Hi! LiveKit is a platform for live audio and video applications and services.',
+  'Hi! Patter is a platform for live audio and video applications and services.',
   'R.T.C stands for Real-Time Communication... again R.T.C.',
   'Mr. Theo is testing the sentence tokenizer.',
   'This is a test. Another test.',
@@ -42,7 +42,7 @@ const EXPECTED_MIN_20 = [
   'f(x) = x * 2.54 + 42.',
   'Hey! Hi! Hello! This is a sentence.',
   '这是一个中文句子。 これは日本語の文章です。',
-  '你好！ LiveKit是一个直播音频和视频应用程序和服务的平台。',
+  '你好！ Patter是一个直播音频和视频应用程序和服务的平台。',
   'This is a sentence contains   consecutive spaces.',
 ];
 
@@ -225,11 +225,11 @@ describe('SentenceChunker', () => {
     it('does NOT split at .org, .net, .io domains', () => {
       const c = new SentenceChunker({ minSentenceLen: 1 });
       const out = [
-        ...c.push('Check livekit.io and nodejs.org. Done.'),
+        ...c.push('Check getpatter.io and nodejs.org. Done.'),
         ...c.flush(),
       ];
       const joined = out.join(' ');
-      expect(joined).toContain('livekit.io');
+      expect(joined).toContain('getpatter.io');
       expect(joined).toContain('nodejs.org');
     });
   });
@@ -449,13 +449,13 @@ describe('SentenceChunker', () => {
   });
 
   // -------------------------------------------------------------------------
-  // LiveKit reference test
+  // Full reference text — sentence boundary detection over a long fixture
   // -------------------------------------------------------------------------
 
-  describe('LiveKit reference test', () => {
-    it('produces the expected sentences from the full LiveKit text (batch push)', () => {
+  describe('full reference text', () => {
+    it('produces the expected sentences from the full reference text (batch push)', () => {
       const c = new SentenceChunker(); // default minSentenceLen = 20
-      const pushed = c.push(LIVEKIT_TEXT);
+      const pushed = c.push(REFERENCE_TEXT);
       const flushed = c.flush();
       const all = [...pushed, ...flushed];
 
@@ -469,7 +469,7 @@ describe('SentenceChunker', () => {
       // therefore validate content equivalence (after whitespace
       // normalisation) rather than the exact split.
       const c = new SentenceChunker(); // default minSentenceLen = 20
-      const pushed = streamText(c, LIVEKIT_TEXT);
+      const pushed = streamText(c, REFERENCE_TEXT);
       const flushed = c.flush();
       const all = [...pushed, ...flushed];
 

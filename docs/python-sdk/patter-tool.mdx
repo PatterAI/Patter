@@ -8,7 +8,7 @@ icon: "phone-arrow-up-right"
 
 `PatterTool` exposes a live `Patter` instance as a single **`make_phone_call`** tool that any text-based agent framework can register and dispatch. The agent picks up the phone, Patter runs a short conversation against the caller, and the tool returns a JSON envelope with the call ID, status, transcript, cost, and metrics.
 
-This complements the **bring-your-own-agent** pattern (`serve(on_message=...)`) with the **inverse pattern** — phone-as-tool — covering the two realistic migration paths from LiveKit / ElevenLabs ConvAI / Pipecat customers.
+This complements the **bring-your-own-agent** pattern (`serve(on_message=...)`) with the **inverse pattern** — phone-as-tool — exposing any Patter-built voice agent as an MCP-compatible tool that other agent frameworks can call as if it were a local function.
 
 | Pattern | Where the brain lives | Where Patter sits | Use this when… |
 |---|---|---|---|

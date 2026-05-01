@@ -1,11 +1,8 @@
 /**
  * Ultravox realtime adapter.
  *
- * Partially adapted (~70% port) from LiveKit Agents
- * (livekit-plugins-ultravox, Apache 2.0). Pure WebSocket protocol — no vendor SDK.
- *
- * Reframed to Patter's connect / sendAudio / onEvent / close surface,
- * matching OpenAIRealtimeAdapter.
+ * Pure WebSocket protocol — no vendor SDK. Implements Patter's connect /
+ * sendAudio / onEvent / close surface, matching OpenAIRealtimeAdapter.
  */
 
 import WebSocket from 'ws';

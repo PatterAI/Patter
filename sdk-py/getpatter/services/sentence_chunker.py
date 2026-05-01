@@ -5,9 +5,6 @@ Accumulates streaming LLM tokens and yields complete sentences.
 Uses regex-based marker replacement for robust sentence boundary
 detection, handling abbreviations, acronyms, decimals, websites,
 ellipsis, and CJK punctuation.
-
-Algorithm adapted from LiveKit Agents (Apache 2.0):
-https://github.com/livekit/agents
 """
 
 from __future__ import annotations
@@ -26,24 +23,24 @@ DEFAULT_MIN_WORDS_FOR_SHORT_FLUSH = 2
 
 # Sentence-terminating characters. Includes Latin (`. ! ?`), full-width CJK
 # (`。 ！ ？`), Japanese half-width (`｡`), full-width semicolon (`；`), full-
-# width period (`．`), and Western ellipsis (`…`). Set ported from Pipecat's
-# `SENTENCE_ENDING_PUNCTUATION` (BSD-2-Clause, Daily) so we share the same
-# coverage on multilingual responses.
+# width period (`．`), and Western ellipsis (`…`). Covers the most common
+# multilingual response shapes.
 _SENTENCE_TERMINATORS = ".!?…;。！？；．｡"
 
 # Unambiguous non-Latin sentence terminators — punctuation that cannot also
 # appear in numbers, abbreviations, or URLs in the script's typical usage,
 # so a buffer ending in one of these can be flushed without a regex pass.
-# Ported from Pipecat (BSD-2). Covers Hindi/Devanagari (। ॥), Arabic
-# (؟ ؛ ۔ ؏), Armenian (։ ՜ ՞), Ethiopic (። ፧), Khmer (។ ៕), Burmese (။),
-# Tibetan (༎ ༏), Thai (no terminator — relies on whitespace), and the
-# Japanese half-width set we already have.
+# Covers Hindi/Devanagari (। ॥), Arabic (؟ ؛ ۔ ؏), Armenian (։ ՜ ՞),
+# Ethiopic (። ፧), Khmer (។ ៕), Burmese (။), Tibetan (༎ ༏), Thai (no
+# terminator — relies on whitespace), and the Japanese half-width set we
+# already have.
 _UNAMBIGUOUS_NON_LATIN_TERMINATORS = "।॥؟؛۔؏։፧።។៕။༎༏"
 
 # Pre-built regex character class covering both Latin/CJK and the
 # non-Latin terminators above. Used by `_split_sentences` to mark `<stop>`.
 _TERMINATOR_REGEX_CLASS = "".join(
-    re.escape(c) for c in sorted(set(_SENTENCE_TERMINATORS + _UNAMBIGUOUS_NON_LATIN_TERMINATORS))
+    re.escape(c)
+    for c in sorted(set(_SENTENCE_TERMINATORS + _UNAMBIGUOUS_NON_LATIN_TERMINATORS))
 )
 
 # "Soft" punctuation marks that terminate a clause but not a full sentence.
@@ -77,15 +74,15 @@ def _split_sentences(
     # Title/honorific prefixes that take a trailing period (English + Italian).
     # The period after these is preserved (treated as part of the word, not as
     # sentence end). Italian additions: Sig, Sgr, Dott, Prof, Avv, Ing, Geom,
-    # Rag, Arch, On, Egr, Spett, Gent, Ill. English additions from the Pipecat
-    # NLTK Punkt set: Gen, Sen, Rep, Lt, Cpt, Capt, Col, Cmdr, Adm.
+    # Rag, Arch, On, Egr, Spett, Gent, Ill. English additions from the NLTK
+    # Punkt training set: Gen, Sen, Rep, Lt, Cpt, Capt, Col, Cmdr, Adm.
     prefixes = (
         r"(Mr|St|Mrs|Ms|Dr|Sig|Sgr|Dott|Prof|Avv|Ing|Geom|Rag|Arch|On|Egr|"
         r"Spett|Gent|Ill|Gen|Sen|Rep|Lt|Cpt|Capt|Col|Cmdr|Adm)[.]"
     )
     # Suffix-style abbreviations: typically lowercase Italian ones (ecc, art,
     # pag, …) plus the existing English company-suffix list. English additions
-    # from Pipecat NLTK Punkt: vs, etc, e.g., i.e., No, Vol, pp, cf, ca, op.
+    # from the NLTK Punkt training set: vs, etc, e.g., i.e., No, Vol, pp, cf, ca, op.
     suffixes = (
         r"(Inc|Ltd|Jr|Sr|Co|ecc|cit|cap|sez|art|pag|fig|tab|cfr|vol|ed|"
         r"vs|etc|No|Vol|pp|cf|ca|op|Mt|Hwy|Rt|Pl|Ave|Blvd|Sq)"
@@ -188,7 +185,9 @@ class SentenceChunker:
         # separator (1.000) — both invert the English convention. Aggressive
         # comma-flush would split decimals, so we hard-disable it for Italian
         # regardless of caller preference.
-        self._aggressive_first_flush = aggressive_first_flush and not self._language.startswith("it")
+        self._aggressive_first_flush = (
+            aggressive_first_flush and not self._language.startswith("it")
+        )
         self._is_first_flush = True
 
     def push(self, token: str) -> list[str]:
@@ -199,7 +198,7 @@ class SentenceChunker:
         * **Standard path** — when the buffer is at least ``min_sentence_len``
           characters long and the regex tokenizer reports more than one
           sentence, all but the last (potentially incomplete) sentence are
-          emitted. This is the LiveKit-derived behaviour.
+          emitted.
         * **Short-flush path** — when the buffer is shorter than
           ``min_sentence_len`` but ends with a sentence terminator AND the
           preceding text has at least ``min_words_for_short_flush`` words
@@ -261,9 +260,9 @@ class SentenceChunker:
            uppercase letter (avoids acronym patterns like ``"U.S."`` /
            ``"U."`` flushing prematurely).
 
-        Together these gates preserve the LiveKit-derived merging behaviour
-        of the standard path while letting genuine short greetings flush
-        immediately for low TTS TTFB.
+        Together these gates preserve the merging behaviour of the standard
+        path while letting genuine short greetings flush immediately for low
+        TTS TTFB.
         """
         stripped = self._buffer.rstrip()
         if not stripped or stripped[-1] not in _SENTENCE_TERMINATORS:
@@ -287,11 +286,14 @@ class SentenceChunker:
             # these are likely abbreviation periods, not sentence ends. Only
             # block if the trailing word is **purely uppercase** AND **at most
             # 3 chars** (matches U/US/USA/NATO patterns without dots; longer
-            # all-caps words like RAMESH or SPEAKING are real sentences).
-            # Pipecat issue #1692 bug: blocking arbitrary uppercase prevented
-            # `"Speaking with RAMESH."` from ever flushing.
+            # all-caps words like RAMESH or SPEAKING are real sentences and
+            # must still be allowed to flush).
             terminator = stripped[-1]
-            last_word = stripped.rstrip(_SENTENCE_TERMINATORS).split()[-1] if stripped.rstrip(_SENTENCE_TERMINATORS).split() else ""
+            last_word = (
+                stripped.rstrip(_SENTENCE_TERMINATORS).split()[-1]
+                if stripped.rstrip(_SENTENCE_TERMINATORS).split()
+                else ""
+            )
             if (
                 terminator == "."
                 and last_word.isascii()
@@ -353,13 +355,13 @@ class SentenceChunker:
             # whitespace-or-end is OK only when not in a number context. Be
             # conservative — if a digit immediately precedes the comma and the
             # last 4 chars contain another comma in a digit context, skip.
-            tail = rstripped[max(0, pos - 6):pos]
+            tail = rstripped[max(0, pos - 6) : pos]
             if prev_char.isdigit() and ("," in tail and any(c.isdigit() for c in tail)):
                 return None
 
         # Currency guard: any currency symbol in the trailing 8 chars before
         # the terminator suggests a number context.
-        snippet = rstripped[max(0, pos - 8):pos]
+        snippet = rstripped[max(0, pos - 8) : pos]
         if any(c in snippet for c in _CURRENCY_SYMBOLS):
             return None
 
@@ -382,7 +384,7 @@ class SentenceChunker:
 
         # All guards passed. Emit the clause and trim the buffer.
         flushed = rstripped
-        self._buffer = self._buffer[len(rstripped):].lstrip()
+        self._buffer = self._buffer[len(rstripped) :].lstrip()
         return flushed
 
     def flush(self) -> list[str]:

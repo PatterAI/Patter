@@ -4,10 +4,6 @@ Silero VAD ONNX model wrapper.
 Low-level adapter around ``onnxruntime.InferenceSession`` that exposes a
 single-sample inference method for the Silero VAD model. Handles the
 context window, RNN state, and buffered input required by the model.
-
-Ported from LiveKit Agents (Apache 2.0):
-https://github.com/livekit/agents
-Source: livekit-plugins/livekit-plugins-silero/livekit/plugins/silero/onnx_model.py
 """
 
 # mypy: disable-error-code=unused-ignore

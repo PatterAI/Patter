@@ -32,8 +32,8 @@ import { getLogger } from '../logger';
 const WS_BASE = 'wss://api.elevenlabs.io/v1/text-to-speech';
 export const DEFAULT_INACTIVITY_TIMEOUT = 60;
 const DEFAULT_CHUNK_SIZE = 4096;
-// Pipecat uses 5s on the same hot path. The previous 15s default left dead
-// air on the carrier WebSocket while a stuck DNS/TLS handshake was retried.
+// 5s on the same hot path. The previous 15s default left dead air on
+// the carrier WebSocket while a stuck DNS/TLS handshake was retried.
 const CONNECT_TIMEOUT_MS = 5_000;
 // Per-frame receive timeout — guards against a stalled server keeping the
 // generator alive indefinitely (matches Python ``frame_timeout`` default).

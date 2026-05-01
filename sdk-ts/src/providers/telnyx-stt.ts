@@ -2,19 +2,9 @@
  * Telnyx Speech-to-Text adapter (WebSocket streaming).
  *
  * Bridges the Telnyx `/v2/speech-to-text/transcription` WebSocket API to the
- * Patter SDK pipeline-mode STT interface.
- *
- * Algorithm and WebSocket protocol adapted from LiveKit Agents (Apache 2.0):
- * https://github.com/livekit/agents
- * Source: `livekit-plugins/livekit-plugins-telnyx/livekit/plugins/telnyx/stt.py`
- * Commit SHA (ref=main): 78a66bcf79c5cea82989401c408f1dff4b961a5b
- *
- * The source project is licensed under the Apache 2.0 license:
- * https://www.apache.org/licenses/LICENSE-2.0
- *
- * Changes vs. upstream: ported semantically to TypeScript (`ws` + `Buffer`),
- * replaced LiveKit's `SpeechStream`/event channel with a callback-based
- * interface matching the other Patter STT providers (Deepgram, Whisper).
+ * Patter SDK pipeline-mode STT interface. Implemented in TypeScript
+ * (`ws` + `Buffer`) with a callback-based interface matching the other
+ * Patter STT providers (Deepgram, Whisper).
  */
 
 import WebSocket from 'ws';
@@ -34,11 +24,7 @@ const TELNYX_STT_WS_URL = 'wss://api.telnyx.com/v2/speech-to-text/transcription'
 const DEFAULT_SAMPLE_RATE = 16000;
 const NUM_CHANNELS = 1;
 
-/**
- * Build a streaming WAV header with maximum possible data size.
- *
- * Adapted from LiveKit Agents (Apache 2.0).
- */
+/** Build a streaming WAV header with maximum possible data size. */
 function createStreamingWavHeader(sampleRate: number, numChannels: number): Buffer {
   const bytesPerSample = 2;
   const byteRate = sampleRate * numChannels * bytesPerSample;

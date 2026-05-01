@@ -7,20 +7,9 @@ accumulates ``is_final`` tokens into segments and flushes them when an
 ``<end>`` / ``<fin>`` endpoint token is received, following the Soniox
 real-time protocol.
 
-Adapted from LiveKit Agents (Apache 2.0):
-https://github.com/livekit/agents
-(source: livekit-plugins/livekit-plugins-soniox/livekit/plugins/soniox/stt.py
- at commit 78a66bcf79c5cea82989401c408f1dff4b961a5b)
-
-Changes from upstream:
-- Replaced ``stt.STT`` / ``stt.SpeechStream`` hierarchy with Patter's
-  :class:`~getpatter.providers.base.STTProvider`.
-- Converted the multi-task ``_run`` pipeline into a queue-based
-  AsyncIterator-friendly implementation mirroring ``DeepgramSTT`` /
-  ``WhisperSTT``.
-- Removed the reconnection loop, LiveKit type dependencies, translation
-  metadata plumbing, and language-identification events; kept the raw
-  transcript text + confidence surface required by Patter pipelines.
+Implementation surfaces only the raw transcript text + confidence required
+by Patter pipelines (no translation metadata or language-identification
+events).
 """
 
 from __future__ import annotations

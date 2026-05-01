@@ -16,14 +16,6 @@
  * equivalent battle-tested package in the std library, so we ship a
  * minimal in-house bag-of-words + cosine-similarity implementation.
  * It is intentionally simple — enough to match repeated IVR prompts.
- *
- * Algorithm adapted from LiveKit Agents (Apache 2.0):
- * https://github.com/livekit/agents
- *
- * Source:
- *  - livekit-agents/livekit/agents/voice/ivr/ivr_activity.py
- *  - livekit-agents/livekit/agents/beta/tools/send_dtmf.py
- * LiveKit SHA at port time: 78a66bcf79c5cea82989401c408f1dff4b961a5b
  */
 
 import type { CallControl } from "../metrics";

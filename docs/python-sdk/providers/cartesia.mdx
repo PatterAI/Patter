@@ -1,12 +1,12 @@
 ---
 title: "Cartesia"
-description: "Cartesia STT (ink-whisper) and TTS (sonic) providers. Ported from LiveKit Agents."
+description: "Cartesia STT (ink-whisper) and TTS (sonic) providers."
 icon: "waveform"
 ---
 
 # Cartesia STT
 
-Streaming speech-to-text using Cartesia's `ink-whisper` model. Ported from LiveKit Agents (Apache 2.0) — pure-`aiohttp` transport, no vendor SDK required.
+Streaming speech-to-text using Cartesia's `ink-whisper` model. Pure-`aiohttp` transport, no vendor SDK required.
 
 ## Install
 
@@ -106,7 +106,3 @@ agent = phone.agent(
 | `speed` | `None` | `"fastest" ... "slowest"` or float in `[0.6, 2.0]`. |
 | `emotion` | `None` | See Cartesia's emotion list. |
 | `volume` | `None` | Float in `[0.5, 2.0]` for sonic-3. |
-
-## Attribution
-
-Ported from [LiveKit Agents](https://github.com/livekit/agents) (`livekit-plugins-cartesia`, Apache License 2.0).

@@ -11,7 +11,7 @@ second one.
 
 | Pattern | Where the brain lives | Where Patter sits | Use this when… |
 |---|---|---|---|
-| **A — Bring-your-own agent** (HTTP/WS endpoint) | Customer's existing service | Patter does STT + LLM proxy + TTS | Customer already runs a voice agent on LiveKit/ElevenLabs ConvAI/Pipecat and wants to swap the voice transport but keep their conversation logic. Use `serve({ onMessage: 'https://my-agent.example.com/respond' })` — already supported natively. |
+| **A — Bring-your-own agent** (HTTP/WS endpoint) | Customer's existing service | Patter does STT + LLM proxy + TTS | Customer already runs a voice agent and wants to swap the voice transport but keep their conversation logic. Use `serve({ onMessage: 'https://my-agent.example.com/respond' })` — already supported natively. |
 | **B — Phone as a tool** | Customer's text-based agent (LangChain, OpenAI Assistant, Claude, Hermes) | Patter is a tool the agent calls | Customer's agent is text-driven but needs to make phone calls during a conversation. The `PatterTool` adapter lives here. |
 
 ## Files

@@ -79,6 +79,8 @@ export class TestSession {
         llmModel,
         resolvedPrompt,
         agent.tools as import('./types').ToolDefinition[] | undefined,
+        undefined,
+        agent.disablePhonePreamble ?? false,
       );
     }
 

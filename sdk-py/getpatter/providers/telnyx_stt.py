@@ -1,23 +1,9 @@
 """Telnyx Speech-to-Text provider (WebSocket streaming).
 
-Bridges the Telnyx `/v2/speech-to-text/transcription` WebSocket API to Patter's
-:class:`~getpatter.providers.base.STTProvider` interface.
-
-Algorithm and WebSocket protocol adapted from LiveKit Agents (Apache 2.0):
-https://github.com/livekit/agents
-Source: ``livekit-plugins/livekit-plugins-telnyx/livekit/plugins/telnyx/stt.py``
-Commit SHA (ref=main): 78a66bcf79c5cea82989401c408f1dff4b961a5b
-
-The source project is licensed under the Apache 2.0 license:
-https://www.apache.org/licenses/LICENSE-2.0
-
-Changes vs. upstream:
-    - Replaced ``livekit.agents.stt.STT`` base class with Patter's ``STTProvider``
-      abstract class.
-    - Replaced ``SpeechStream`` / event channel plumbing with an
-      ``AsyncIterator[Transcript]`` via :meth:`receive_transcripts`.
-    - Dropped LiveKit-specific utilities (``AudioByteStream``,
-      ``gracefully_cancel``, ``Plugin`` registry) in favour of plain ``asyncio``.
+Bridges the Telnyx ``/v2/speech-to-text/transcription`` WebSocket API to
+Patter's :class:`~getpatter.providers.base.STTProvider` interface. Streams
+PCM audio in and yields :class:`~getpatter.providers.base.Transcript`
+events out via :meth:`receive_transcripts`.
 """
 
 from __future__ import annotations
@@ -40,10 +26,7 @@ TranscriptionEngine = Literal["telnyx", "google", "deepgram", "azure"]
 
 
 def _create_streaming_wav_header(sample_rate: int, num_channels: int) -> bytes:
-    """Create a WAV header for streaming with maximum possible size.
-
-    Adapted from LiveKit Agents (Apache 2.0).
-    """
+    """Create a WAV header for streaming with maximum possible size."""
     bytes_per_sample = 2
     byte_rate = sample_rate * num_channels * bytes_per_sample
     block_align = num_channels * bytes_per_sample

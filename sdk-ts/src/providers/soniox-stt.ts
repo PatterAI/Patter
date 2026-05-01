@@ -5,12 +5,7 @@
  * `is_final` tokens and flushes them on `<end>`/`<fin>` endpoint tokens,
  * mirroring the Python `SonioxSTT` adapter.
  *
- * Adapted from LiveKit Agents (Apache 2.0):
- * https://github.com/livekit/agents
- * (source: livekit-plugins/livekit-plugins-soniox/livekit/plugins/soniox/stt.py
- *  at commit 78a66bcf79c5cea82989401c408f1dff4b961a5b)
- *
- * Speechmatics TypeScript adapter is **intentionally not ported**: the
+ * Speechmatics TypeScript adapter is **intentionally not implemented**: the
  * official Speechmatics Voice SDK (`speechmatics.voice`) is Python-only at
  * the time of writing. Python users should install the optional
  * `speechmatics` extra; TypeScript users need to wait for an official

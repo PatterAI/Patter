@@ -1,35 +1,18 @@
 /*
- * Copyright 2023 LiveKit, Inc.
+ * Background-audio mixer for the Patter TypeScript SDK. Patter routes
+ * outbound PCM through the pipeline stream handler, so this module exposes
+ * a ``start / mix / stop`` API that does no I/O of its own.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+ * Notes:
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
- * Port of ``livekit.agents.voice.background_audio`` (Apache 2.0) to the
- * Patter TypeScript SDK.  The original LiveKit implementation publishes an
- * audio track into a WebRTC room; Patter routes outbound PCM through the
- * pipeline stream handler, so this port exposes a ``start / mix / stop``
- * API that does no I/O of its own.
- *
- * Key adaptations:
- *
- *  - ``rtc.AudioMixer`` is replaced by a ~40-line pure-JavaScript PCM mix
- *    operating on ``Buffer`` (see :func:`mixPcm` below).  Clipping is done
- *    against the int16 range.
- *  - ``rtc.AudioSource`` / ``rtc.TrackPublishOptions`` are removed.
- *  - ``.ogg`` decoding is not done in this module.  Node does not bundle a
+ *  - PCM mixing is a ~40-line pure-JavaScript routine operating on
+ *    ``Buffer`` (see :func:`mixPcm` below). Clipping is done against the
+ *    int16 range.
+ *  - ``.ogg`` decoding is not done in this module. Node does not bundle a
  *    Vorbis decoder and shipping a native one would triple the SDK size.
  *    Instead, callers supply a :class:`RawPcmSource` (pre-decoded int16
  *    mono LE PCM at a known sample rate) OR a :class:`DecodedSource` via a
- *    user-supplied decoder.  The Python SDK ships the bundled ``.ogg``
+ *    user-supplied decoder. The Python SDK ships the bundled ``.ogg``
  *    clips and their decoder; the TS package exposes the raw files next to
  *    this module for users who wire up their own decoder.
  *
@@ -113,7 +96,7 @@ export interface AudioConfig {
 }
 
 export interface BackgroundAudioOptions {
-  /** Overall mix ratio [0, 1].  Defaults to 0.1 (LiveKit's hold-music ratio). */
+  /** Overall mix ratio [0, 1].  Defaults to 0.1 (typical hold-music ratio). */
   readonly volume?: number;
   /** When true the source restarts on exhaustion. */
   readonly loop?: boolean;
@@ -189,7 +172,7 @@ export function resamplePcm(src: Buffer, srcSr: number, dstSr: number): Buffer {
 }
 
 // ---------------------------------------------------------------------------
-// Probability-weighted selection (port of upstream ``_select_sound_from_list``).
+// Probability-weighted selection.
 // ---------------------------------------------------------------------------
 
 export function selectSoundFromList(sounds: readonly AudioConfig[]): AudioConfig | null {

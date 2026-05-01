@@ -1,27 +1,7 @@
-# Copyright 2023 LiveKit, Inc.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 """Background audio player (hold music / ambient cues) for Patter.
 
-Port of ``livekit.agents.voice.background_audio`` (Apache 2.0), upstream:
-https://github.com/livekit/agents/blob/main/livekit-agents/livekit/agents/voice/background_audio.py
-
-The original LiveKit implementation publishes a dedicated audio track into a
-WebRTC room using ``rtc.AudioSource`` + ``rtc.AudioMixer``.  Patter has no
-WebRTC track model — outbound audio flows directly through
-``PipelineStreamHandler``.  This port therefore strips the room/track plumbing
-and exposes a small mixing API:
+Mixes a background audio source (hold music, office ambience, etc.) into the
+outbound PCM stream produced by ``PipelineStreamHandler``. Public surface:
 
     player = BackgroundAudioPlayer(BuiltinAudioClip.HOLD_MUSIC, volume=0.1, loop=True)
     await player.start()
@@ -29,19 +9,15 @@ and exposes a small mixing API:
     ...
     await player.stop()
 
-Selected adaptations vs. upstream:
+Implementation notes:
 
-* ``rtc.AudioMixer`` is replaced by :class:`getpatter.services.pcm_mixer.PcmMixer`,
-  a numpy-only synchronous mixer (~80 lines) that operates on raw int16 PCM.
-* ``rtc.AudioSource`` / ``rtc.TrackPublishOptions`` are removed — mixing
-  happens in-line in the outbound stream handler.
-* ``.ogg`` decoding uses :mod:`soundfile` (libsndfile, Apache 2.0-compatible)
-  and is resampled to the caller's sample rate with lightweight linear
-  interpolation.  This avoids the deprecated ``audioop`` module and keeps the
-  dependency surface small.
-* ``BuiltinAudioClip`` and the probability-weighted ``AudioConfig`` selection
-  semantics are preserved so users porting code from LiveKit Agents can keep
-  their configuration verbatim.
+* Mixing is delegated to :class:`getpatter.services.pcm_mixer.PcmMixer`, a
+  numpy-only synchronous mixer (~80 lines) that operates on raw int16 PCM.
+* ``.ogg`` decoding uses :mod:`soundfile` (libsndfile) and is resampled to the
+  caller's sample rate with lightweight linear interpolation. This avoids the
+  deprecated ``audioop`` module and keeps the dependency surface small.
+* :class:`AudioConfig` supports probability-weighted random selection so
+  callers can configure a list of candidate clips with weights.
 
 Optional dependencies (``pip install 'getpatter[background-audio]'``):
 ``numpy``, ``soundfile``.
@@ -79,8 +55,8 @@ logger = logging.getLogger(__name__)
 class BuiltinAudioClip(enum.Enum):
     """Enumerates the audio clips bundled with Patter.
 
-    All clips are sourced from LiveKit Agents and redistributed under the
-    original licences noted in ``patter/resources/audio/NOTICE``.
+    Original licences for redistributed audio assets are recorded in
+    ``patter/resources/audio/NOTICE``.
     """
 
     CITY_AMBIENCE = "city-ambience.ogg"
@@ -182,8 +158,8 @@ class BackgroundAudioPlayer(_BaseBackgroundAudioPlayer):
         or a list of :class:`AudioConfig` (in which case one entry is chosen
         at start time using probability-weighted random selection).
     volume:
-        Master mix ratio in ``[0.0, 1.0]``.  The default of ``0.1`` matches
-        LiveKit Agents' hold-music default.
+        Master mix ratio in ``[0.0, 1.0]``.  The default of ``0.1`` is a safe
+        value for hold-music behind active speech.
     loop:
         If ``True`` the background source restarts when exhausted.  Hold
         music typically sets ``loop=True``; short cues (``keyboard-typing``)
@@ -226,7 +202,7 @@ class BackgroundAudioPlayer(_BaseBackgroundAudioPlayer):
         self._position: int = 0
 
     # ------------------------------------------------------------------
-    # Source selection (port of upstream _select_sound_from_list)
+    # Source selection
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -234,7 +210,7 @@ class BackgroundAudioPlayer(_BaseBackgroundAudioPlayer):
         """Pick one ``AudioConfig`` from *sounds* using its probabilities.
 
         Returns ``None`` when the sum of probabilities is below 1.0 and the
-        roll falls in the "silence" band — matches upstream semantics.
+        roll falls in the "silence" band.
         """
         total = sum(s.probability for s in sounds)
         if total <= 0:
@@ -286,9 +262,8 @@ class BackgroundAudioPlayer(_BaseBackgroundAudioPlayer):
         """Decode *path* into ``(int16 mono array, sample_rate)``.
 
         ``soundfile`` returns float32 in the range ``[-1, 1]``.  We convert to
-        int16 and collapse multi-channel streams to mono by averaging, which
-        matches the behaviour of the LiveKit ``audio_frames_from_file``
-        helper for telephony-grade use.
+        int16 and collapse multi-channel streams to mono by averaging — a
+        sensible default for telephony-grade audio.
         """
         data, sr = sf.read(path, dtype="float32", always_2d=True)
         # data shape: (frames, channels)

@@ -1,12 +1,10 @@
 """
 Lightweight PCM mixer used by :mod:`getpatter.services.background_audio`.
 
-Replaces ``livekit.rtc.AudioMixer`` from the LiveKit Agents framework.  Patter
-does not depend on ``livekit-rtc`` and streams raw 16-bit little-endian PCM
-frames directly through its ``PipelineStreamHandler``, so a full buffered
-mixer with its own capture/clock loop is unnecessary.  This module provides a
-synchronous, pure-numpy mix of two PCM buffers that is deterministic and
-trivial to unit-test.
+Patter streams raw 16-bit little-endian PCM frames directly through its
+``PipelineStreamHandler``, so a full buffered mixer with its own capture /
+clock loop is unnecessary.  This module provides a synchronous, pure-numpy
+mix of two PCM buffers that is deterministic and trivial to unit-test.
 
 Intended usage::
 

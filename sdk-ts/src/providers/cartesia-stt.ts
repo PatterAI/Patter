@@ -3,11 +3,6 @@
  *
  * Implements a `DeepgramSTT`-shaped provider using Cartesia's streaming
  * WebSocket API. Pure `ws` transport — does NOT depend on the vendor SDK.
- *
- * Algorithm adapted from LiveKit Agents (Apache 2.0):
- * https://github.com/livekit/agents
- * Source: livekit-plugins/livekit-plugins-cartesia/livekit/plugins/cartesia/stt.py
- * Upstream ref SHA: 78a66bcf79c5cea82989401c408f1dff4b961a5b
  */
 
 import WebSocket from 'ws';
@@ -39,7 +34,7 @@ export interface CartesiaSTTOptions {
 
 const DEFAULT_BASE_URL = 'https://api.cartesia.ai';
 const API_VERSION = '2025-04-16';
-const USER_AGENT = 'Patter/1.0 (integration=LiveKit-port; provider=Cartesia)';
+const USER_AGENT = 'Patter/1.0';
 const KEEPALIVE_INTERVAL_MS = 30000;
 const CONNECT_TIMEOUT_MS = 10000;
 
