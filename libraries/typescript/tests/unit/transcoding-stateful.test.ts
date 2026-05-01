@@ -8,7 +8,7 @@ import {
   resample8kTo16k,
   resample16kTo8k,
   resample24kTo16k,
-} from '../../src/transcoding';
+} from '../../src/audio/transcoding';
 
 // ---------------------------------------------------------------------------
 // Helpers

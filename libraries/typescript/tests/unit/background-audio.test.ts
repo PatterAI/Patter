@@ -11,7 +11,7 @@ import {
   resamplePcm,
   selectSoundFromList,
   type AudioConfig,
-} from '../../src/services/background-audio';
+} from '../../src/audio/background-audio';
 
 // ---------------------------------------------------------------------------
 // Synthetic PCM helpers

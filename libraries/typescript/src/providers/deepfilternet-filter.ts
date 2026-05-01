@@ -20,7 +20,7 @@
  * a streaming-friendly graph, swap to that and remove this caveat.
  */
 import { getLogger } from '../logger';
-import { StatefulResampler } from '../transcoding';
+import { StatefulResampler } from '../audio/transcoding';
 import type { AudioFilter } from '../types';
 
 // Resolve the logger lazily so tests that swap it via ``setLogger`` after

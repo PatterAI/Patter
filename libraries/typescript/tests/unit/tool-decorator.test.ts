@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { defineTool } from '../../src/tool-decorator';
+import { defineTool } from '../../src/tools/tool-decorator';
 
 // ---------------------------------------------------------------------------
 // Fixtures

@@ -5,7 +5,7 @@ import {
   resample8kTo16k,
   resample16kTo8k,
   resample24kTo16k,
-} from "../src/transcoding";
+} from "../src/audio/transcoding";
 
 describe("mulawToPcm16", () => {
   it("decodes silence (mulaw 0xFF) to near-zero PCM", () => {

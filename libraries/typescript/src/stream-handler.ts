@@ -14,7 +14,7 @@ import { DeepgramSTT } from './providers/deepgram-stt';
 import { createTTS } from './provider-factory';
 import type { STTAdapter, TTSAdapter, STTTranscript } from './provider-factory';
 import { CallMetricsAccumulator } from './metrics';
-import { mulawToPcm16, pcm16ToMulaw, StatefulResampler, createResampler8kTo16k, createResampler16kTo8k } from './transcoding';
+import { mulawToPcm16, pcm16ToMulaw, StatefulResampler, createResampler8kTo16k, createResampler16kTo8k } from './audio/transcoding';
 import { LLMLoop } from './llm-loop';
 import { RemoteMessageHandler, isRemoteUrl, isWebSocketUrl } from './remote-message';
 import { createHistoryManager, executeToolWebhook } from './handler-utils';

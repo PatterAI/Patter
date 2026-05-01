@@ -1,6 +1,6 @@
 export { Patter } from "./client";
-export { defineTool } from "./tool-decorator";
-export type { DefineToolInput, ParamSpec } from "./tool-decorator";
+export { defineTool } from "./tools/tool-decorator";
+export type { DefineToolInput, ParamSpec } from "./tools/tool-decorator";
 export type { Logger } from "./logger";
 export { getLogger, setLogger } from "./logger";
 export type {
@@ -135,10 +135,10 @@ export { SileroVAD } from "./providers/silero-vad";
 export type { SileroVADOptions, SileroSampleRate } from "./providers/silero-vad";
 
 // Telephony carriers.
-export { Carrier as Twilio } from "./carriers/twilio";
-export type { TwilioCarrierOptions } from "./carriers/twilio";
-export { Carrier as Telnyx } from "./carriers/telnyx";
-export type { TelnyxCarrierOptions } from "./carriers/telnyx";
+export { Carrier as Twilio } from "./telephony/twilio";
+export type { TwilioCarrierOptions } from "./telephony/twilio";
+export { Carrier as Telnyx } from "./telephony/telnyx";
+export type { TelnyxCarrierOptions } from "./telephony/telnyx";
 
 // Realtime / ConvAI engines.
 export { Realtime as OpenAIRealtime } from "./engines/openai";
@@ -164,8 +164,8 @@ export {
   createResampler8kTo16k,
   createResampler24kTo16k,
   createResampler24kTo8k,
-} from "./transcoding";
-export type { StatefulResamplerOptions } from "./transcoding";
+} from "./audio/transcoding";
+export type { StatefulResamplerOptions } from "./audio/transcoding";
 export { startTunnel } from "./tunnel";
 export type { TunnelHandle } from "./tunnel";
 export { ChatContext } from "./chat-context";
@@ -191,7 +191,7 @@ export {
   mixPcm,
   resamplePcm,
   selectSoundFromList,
-} from "./services/background-audio";
+} from "./audio/background-audio";
 export type {
   AudioConfig,
   AudioSource,
@@ -200,7 +200,7 @@ export type {
   BuiltinPcmSource,
   FilePcmSource,
   RawPcmSource,
-} from "./services/background-audio";
+} from "./audio/background-audio";
 
 // Telephony adapters — direct REST clients mirroring the Python adapters.
 export { TwilioAdapter } from "./providers/twilio-adapter";

@@ -1,5 +1,5 @@
-import type { Carrier as TwilioCarrier } from "./carriers/twilio";
-import type { Carrier as TelnyxCarrier } from "./carriers/telnyx";
+import type { Carrier as TwilioCarrier } from "./telephony/twilio";
+import type { Carrier as TelnyxCarrier } from "./telephony/telnyx";
 import type { Realtime } from "./engines/openai";
 import type { ConvAI } from "./engines/elevenlabs";
 import type { CloudflareTunnel, Static as StaticTunnel } from "./tunnels";

@@ -24,8 +24,8 @@ import * as cartesiaTts from "../../src/tts/cartesia";
 import * as rimeTts from "../../src/tts/rime";
 import * as lmntTts from "../../src/tts/lmnt";
 
-import * as twilioCarrier from "../../src/carriers/twilio";
-import * as telnyxCarrier from "../../src/carriers/telnyx";
+import * as twilioCarrier from "../../src/telephony/twilio";
+import * as telnyxCarrier from "../../src/telephony/telnyx";
 
 import * as openaiEngine from "../../src/engines/openai";
 import * as elevenlabsEngine from "../../src/engines/elevenlabs";

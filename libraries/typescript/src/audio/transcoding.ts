@@ -7,7 +7,7 @@
  * OpenAI TTS 24kHz PCM).
  */
 
-import { getLogger } from './logger';
+import { getLogger } from '../logger';
 
 // ---------- ITU-T G.711 mu-law tables ----------
 

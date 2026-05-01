@@ -14,7 +14,7 @@ export interface TelnyxCarrierOptions {
  *
  * @example
  * ```ts
- * import * as telnyx from "getpatter/carriers/telnyx";
+ * import * as telnyx from "getpatter/telephony/telnyx";
  * const carrier = new telnyx.Carrier();                     // reads env
  * const carrier = new telnyx.Carrier({ apiKey: "KEY...", connectionId: "123" });
  * ```

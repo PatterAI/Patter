@@ -12,7 +12,7 @@ export interface TwilioCarrierOptions {
  *
  * @example
  * ```ts
- * import * as twilio from "getpatter/carriers/twilio";
+ * import * as twilio from "getpatter/telephony/twilio";
  * const carrier = new twilio.Carrier();                     // reads env
  * const carrier = new twilio.Carrier({ accountSid: "AC...", authToken: "..." });
  * ```

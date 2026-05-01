@@ -20,7 +20,7 @@
  * ```
  */
 
-import type { ToolDefinition } from "./types";
+import type { ToolDefinition } from "../types";
 
 // ── Public types ────────────────────────────────────────────────────────
 

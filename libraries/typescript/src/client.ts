@@ -36,8 +36,8 @@ import type {
 } from "./types";
 import { EmbeddedServer } from "./server";
 import type { MetricsStore } from "./dashboard/store";
-import { Carrier as TwilioCarrier } from "./carriers/twilio";
-import { Carrier as TelnyxCarrier } from "./carriers/telnyx";
+import { Carrier as TwilioCarrier } from "./telephony/twilio";
+import { Carrier as TelnyxCarrier } from "./telephony/telnyx";
 import { Realtime as OpenAIRealtime } from "./engines/openai";
 import { ConvAI as ElevenLabsConvAI } from "./engines/elevenlabs";
 import { CloudflareTunnel, Static as StaticTunnel } from "./tunnels";
