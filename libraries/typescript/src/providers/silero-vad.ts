@@ -124,7 +124,8 @@ async function loadOnnxRuntime(): Promise<OnnxRuntime> {
   // 1. Plain dynamic import — works when onnxruntime-node is hoisted to a
   //    node_modules folder Node's resolver can find from the running script.
   try {
-    // @ts-expect-error -- onnxruntime-node is an optional peer dep; types may be absent
+    // onnxruntime-node is an optional peer dep; resolved dynamically so the
+    // SDK keeps installing on systems that don't need server-side VAD.
     const mod = await import('onnxruntime-node');
     return mod as unknown as OnnxRuntime;
   } catch (e) {

@@ -1,3 +1,16 @@
+"""Tool webhook executor with SSRF protection and response-size guard.
+
+Tools registered via ``@tool`` (function-backed) execute inline; tools backed
+by an external HTTP webhook are dispatched through this module. The dispatcher
+validates the URL against an SSRF blocklist (private/loopback IPs, cloud
+metadata endpoints, hostname aliases like ``localhost``), enforces a 1 MB
+response cap to protect downstream LLM token budgets, and emits an OTel span
+for each call.
+
+Concurrency: the executor is fully async and reuses one ``httpx.AsyncClient``
+per call to avoid the connection-setup tax on tool-heavy turns.
+"""
+
 import asyncio
 import ipaddress
 import json
@@ -16,14 +29,16 @@ _MAX_RESPONSE_BYTES = 1 * 1024 * 1024
 
 # Hostnames that must never be targeted by a webhook, even when they are not
 # literal IPs (DNS-based SSRF to cloud metadata endpoints or localhost aliases).
-_BLOCKED_HOSTNAMES = frozenset({
-    "localhost",
-    "localhost.localdomain",
-    "ip6-localhost",
-    "ip6-loopback",
-    "metadata.google.internal",
-    "metadata",
-})
+_BLOCKED_HOSTNAMES = frozenset(
+    {
+        "localhost",
+        "localhost.localdomain",
+        "ip6-localhost",
+        "ip6-loopback",
+        "metadata.google.internal",
+        "metadata",
+    }
+)
 
 
 def _validate_webhook_url(url: str) -> None:
@@ -51,8 +66,15 @@ def _validate_webhook_url(url: str) -> None:
     # synchronous socket.gethostbyname() would block the async event loop.
     try:
         addr = ipaddress.ip_address(hostname)
-        if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved:
-            raise ValueError(f"Webhook URL points to a private/reserved address: {hostname!r}")
+        if (
+            addr.is_private
+            or addr.is_loopback
+            or addr.is_link_local
+            or addr.is_reserved
+        ):
+            raise ValueError(
+                f"Webhook URL points to a private/reserved address: {hostname!r}"
+            )
     except ValueError as exc:
         # Re-raise only our own ValueError (private IP rejection), not the
         # ip_address() parsing error which just means it's a hostname.
@@ -92,15 +114,26 @@ class ToolExecutor:
             SPAN_TOOL,
             {
                 "patter.tool.name": tool_name,
-                "patter.tool.transport": "handler" if handler is not None else ("webhook" if webhook_url else "none"),
+                "patter.tool.transport": "handler"
+                if handler is not None
+                else ("webhook" if webhook_url else "none"),
                 "patter.call.id": call_context.get("call_id", ""),
             },
         ):
             if handler is not None:
-                return await self._execute_handler(tool_name, arguments, call_context, handler)
+                return await self._execute_handler(
+                    tool_name, arguments, call_context, handler
+                )
             if webhook_url:
-                return await self._execute_webhook(tool_name, arguments, call_context, webhook_url)
-            return json.dumps({"error": f"Tool '{tool_name}' has no handler or webhook_url", "fallback": True})
+                return await self._execute_webhook(
+                    tool_name, arguments, call_context, webhook_url
+                )
+            return json.dumps(
+                {
+                    "error": f"Tool '{tool_name}' has no handler or webhook_url",
+                    "fallback": True,
+                }
+            )
 
     async def _execute_handler(
         self,
@@ -119,7 +152,9 @@ class ToolExecutor:
             return json.dumps(result)
         except Exception as e:
             logger.error("Tool handler '%s' raised: %s", tool_name, e)
-            return json.dumps({"error": f"Tool handler error: {str(e)}", "fallback": True})
+            return json.dumps(
+                {"error": f"Tool handler error: {str(e)}", "fallback": True}
+            )
 
     async def _execute_webhook(
         self,
