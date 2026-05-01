@@ -119,11 +119,11 @@ class OpenAITTS(TTSProvider):
         # into a single ratecv step (fix #46) — saves CPU and latency on the
         # 8 kHz mulaw telephony output path.
         if self.target_sample_rate == 8000:
-            from getpatter.services.transcoding import create_resampler_24k_to_8k
+            from getpatter.audio.transcoding import create_resampler_24k_to_8k
 
             resampler = create_resampler_24k_to_8k()
         else:
-            from getpatter.services.transcoding import create_resampler_24k_to_16k
+            from getpatter.audio.transcoding import create_resampler_24k_to_16k
 
             resampler = create_resampler_24k_to_16k()
         try:

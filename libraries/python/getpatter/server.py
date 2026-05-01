@@ -58,7 +58,7 @@ def validate_webhook_url(url: str) -> bool:
 
     Mirrors :func:`validateWebhookUrl` in
     ``libraries/typescript/src/server.ts`` and the existing
-    :func:`getpatter.services.tool_executor._validate_webhook_url`.
+    :func:`getpatter.tools.tool_executor._validate_webhook_url`.
     Returns False rather than raising so callers can decide how to react.
     """
     try:
@@ -339,11 +339,11 @@ class EmbeddedServer:
 
     def _create_app(self):
         """Build the FastAPI application with webhook + stream routes."""
-        from getpatter.handlers.twilio_handler import (
+        from getpatter.telephony.twilio import (
             twilio_webhook_handler,
             twilio_stream_bridge,
         )
-        from getpatter.handlers.telnyx_handler import telnyx_stream_bridge
+        from getpatter.telephony.telnyx import telnyx_stream_bridge
 
         app = FastAPI(title="Patter Local Server")
 
@@ -525,7 +525,7 @@ class EmbeddedServer:
                 and self.config.twilio_sid
                 and self.config.twilio_token
             ):
-                from getpatter.handlers.twilio_handler import (
+                from getpatter.telephony.twilio import (
                     _xml_escape,
                     _validate_twilio_sid,
                 )
@@ -741,7 +741,7 @@ class EmbeddedServer:
                         sanitize_log_value(amd_result),
                     )
                     if self.voicemail_message:
-                        from getpatter.handlers.telnyx_handler import handle_amd_result
+                        from getpatter.telephony.telnyx import handle_amd_result
 
                         await handle_amd_result(
                             call_control_id=call_control_id,

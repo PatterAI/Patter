@@ -1,4 +1,4 @@
-"""Unit tests for getpatter.handlers.twilio_handler — TwiML, validation, audio sender."""
+"""Unit tests for getpatter.telephony.twilio — TwiML, validation, audio sender."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from getpatter.handlers.twilio_handler import (
+from getpatter.telephony.twilio import (
     TwilioAudioSender,
     _validate_twilio_sid,
     _xml_escape,
@@ -139,11 +139,11 @@ class TestTwilioAudioSender:
         ws = AsyncMock()
         ws.send_text = AsyncMock()
         with patch(
-            "getpatter.services.transcoding.pcm16_to_mulaw",
+            "getpatter.audio.transcoding.pcm16_to_mulaw",
             side_effect=lambda x: x,
             create=True,
         ), patch(
-            "getpatter.services.transcoding.create_resampler_16k_to_8k",
+            "getpatter.audio.transcoding.create_resampler_16k_to_8k",
             return_value=MagicMock(process=MagicMock(side_effect=lambda x: x), flush=MagicMock(return_value=b"")),
             create=True,
         ):
@@ -160,11 +160,11 @@ class TestTwilioAudioSender:
         )
 
         with patch(
-            "getpatter.services.transcoding.pcm16_to_mulaw",
+            "getpatter.audio.transcoding.pcm16_to_mulaw",
             mock_mulaw,
             create=True,
         ), patch(
-            "getpatter.services.transcoding.create_resampler_16k_to_8k",
+            "getpatter.audio.transcoding.create_resampler_16k_to_8k",
             return_value=mock_resampler,
             create=True,
         ):
@@ -184,11 +184,11 @@ class TestTwilioAudioSender:
         ws = AsyncMock()
         ws.send_text = AsyncMock()
         with patch(
-            "getpatter.services.transcoding.pcm16_to_mulaw",
+            "getpatter.audio.transcoding.pcm16_to_mulaw",
             lambda x: x,
             create=True,
         ), patch(
-            "getpatter.services.transcoding.create_resampler_16k_to_8k",
+            "getpatter.audio.transcoding.create_resampler_16k_to_8k",
             return_value=MagicMock(process=MagicMock(side_effect=lambda x: x), flush=MagicMock(return_value=b"")),
             create=True,
         ):
@@ -204,11 +204,11 @@ class TestTwilioAudioSender:
         ws = AsyncMock()
         ws.send_text = AsyncMock()
         with patch(
-            "getpatter.services.transcoding.pcm16_to_mulaw",
+            "getpatter.audio.transcoding.pcm16_to_mulaw",
             lambda x: x,
             create=True,
         ), patch(
-            "getpatter.services.transcoding.create_resampler_16k_to_8k",
+            "getpatter.audio.transcoding.create_resampler_16k_to_8k",
             return_value=MagicMock(process=MagicMock(side_effect=lambda x: x), flush=MagicMock(return_value=b"")),
             create=True,
         ):
@@ -225,11 +225,11 @@ class TestTwilioAudioSender:
     def test_on_mark_confirmed(self) -> None:
         ws = AsyncMock()
         with patch(
-            "getpatter.services.transcoding.pcm16_to_mulaw",
+            "getpatter.audio.transcoding.pcm16_to_mulaw",
             lambda x: x,
             create=True,
         ), patch(
-            "getpatter.services.transcoding.create_resampler_16k_to_8k",
+            "getpatter.audio.transcoding.create_resampler_16k_to_8k",
             return_value=MagicMock(process=MagicMock(side_effect=lambda x: x), flush=MagicMock(return_value=b"")),
             create=True,
         ):
@@ -246,11 +246,11 @@ class TestTwilioAudioSender:
         ws = AsyncMock()
         ws.send_text = AsyncMock()
         with patch(
-            "getpatter.services.transcoding.pcm16_to_mulaw",
+            "getpatter.audio.transcoding.pcm16_to_mulaw",
             lambda x: x,
             create=True,
         ), patch(
-            "getpatter.services.transcoding.create_resampler_16k_to_8k",
+            "getpatter.audio.transcoding.create_resampler_16k_to_8k",
             return_value=MagicMock(process=MagicMock(side_effect=lambda x: x), flush=MagicMock(return_value=b"")),
             create=True,
         ):

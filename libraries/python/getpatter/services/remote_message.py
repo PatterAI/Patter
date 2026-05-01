@@ -78,7 +78,8 @@ class RemoteMessageHandler:
                 "and phone numbers will be sent in plaintext. "
                 "Use https:// in production."
             )
-        from getpatter.services.tool_executor import _validate_webhook_url
+        from getpatter.tools.tool_executor import _validate_webhook_url
+
         try:
             _validate_webhook_url(url)
         except ValueError as exc:
@@ -105,9 +106,7 @@ class RemoteMessageHandler:
             return str(body)
         return response.text
 
-    async def call_websocket(
-        self, url: str, data: dict
-    ) -> AsyncGenerator[str, None]:
+    async def call_websocket(self, url: str, data: dict) -> AsyncGenerator[str, None]:
         """Send transcript via WebSocket, yield response chunks.
 
         Sends the message data as JSON. Receives one or more JSON frames
@@ -130,21 +129,31 @@ class RemoteMessageHandler:
             )
         import ipaddress
         from urllib.parse import urlparse
-        from getpatter.services.tool_executor import _BLOCKED_HOSTNAMES
+        from getpatter.tools.tool_executor import _BLOCKED_HOSTNAMES
+
         parsed = urlparse(url)
         if parsed.scheme not in ("ws", "wss"):
-            logger.warning("on_message WebSocket URL rejected: invalid scheme %r", parsed.scheme)
+            logger.warning(
+                "on_message WebSocket URL rejected: invalid scheme %r", parsed.scheme
+            )
             return
         hostname = parsed.hostname or ""
         if not hostname:
             logger.warning("on_message WebSocket URL rejected: missing hostname")
             return
         if hostname.lower() in _BLOCKED_HOSTNAMES:
-            logger.warning("on_message WebSocket URL rejected: blocked hostname %r", hostname)
+            logger.warning(
+                "on_message WebSocket URL rejected: blocked hostname %r", hostname
+            )
             return
         try:
             addr = ipaddress.ip_address(hostname)
-            if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved:
+            if (
+                addr.is_private
+                or addr.is_loopback
+                or addr.is_link_local
+                or addr.is_reserved
+            ):
                 logger.warning(
                     "on_message WebSocket URL rejected: points to private/reserved address %r",
                     hostname,

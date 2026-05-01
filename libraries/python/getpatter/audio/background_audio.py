@@ -11,7 +11,7 @@ outbound PCM stream produced by ``PipelineStreamHandler``. Public surface:
 
 Implementation notes:
 
-* Mixing is delegated to :class:`getpatter.services.pcm_mixer.PcmMixer`, a
+* Mixing is delegated to :class:`getpatter.audio.pcm_mixer.PcmMixer`, a
   numpy-only synchronous mixer (~80 lines) that operates on raw int16 PCM.
 * ``.ogg`` decoding uses :mod:`soundfile` (libsndfile) and is resampled to the
   caller's sample rate with lightweight linear interpolation. This avoids the
@@ -33,7 +33,7 @@ from importlib import resources
 from typing import NamedTuple, Union
 
 from getpatter.providers.base import BackgroundAudioPlayer as _BaseBackgroundAudioPlayer
-from getpatter.services.pcm_mixer import PcmMixer
+from getpatter.audio.pcm_mixer import PcmMixer
 
 try:  # numpy + soundfile are optional
     import numpy as np
@@ -175,7 +175,7 @@ class BackgroundAudioPlayer(_BaseBackgroundAudioPlayer):
     ) -> None:
         if not _AUDIO_DEPS_AVAILABLE:
             raise ImportError(
-                "getpatter.services.background_audio requires numpy and "
+                "getpatter.audio.background_audio requires numpy and "
                 "soundfile. Install the 'background-audio' extra: "
                 "pip install 'getpatter[background-audio]'."
             )

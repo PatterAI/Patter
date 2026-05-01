@@ -499,7 +499,7 @@ async def test_guardrail_triggers_cancel_and_replacement():
     mock_adapter.receive_events = MagicMock(return_value=fake_events())
 
     with patch("getpatter.providers.openai_realtime.OpenAIRealtimeAdapter", return_value=mock_adapter):
-        from getpatter.handlers.twilio_handler import twilio_stream_bridge
+        from getpatter.telephony.twilio import twilio_stream_bridge
 
         try:
             await asyncio.wait_for(
@@ -573,7 +573,7 @@ async def test_guardrail_does_not_trigger_on_clean_response():
     mock_adapter.receive_events = MagicMock(return_value=fake_events())
 
     with patch("getpatter.providers.openai_realtime.OpenAIRealtimeAdapter", return_value=mock_adapter):
-        from getpatter.handlers.twilio_handler import twilio_stream_bridge
+        from getpatter.telephony.twilio import twilio_stream_bridge
 
         try:
             await asyncio.wait_for(

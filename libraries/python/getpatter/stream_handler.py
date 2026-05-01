@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     pass
 
-from getpatter.handlers.common import (
+from getpatter.telephony.common import (
     _create_stt_from_config,
     _create_tts_from_config,
     _resolve_variables,
@@ -533,7 +533,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         self._background_task = asyncio.create_task(self._forward_events())
 
     async def _forward_events(self) -> None:
-        from getpatter.services.tool_executor import ToolExecutor  # type: ignore[import]
+        from getpatter.tools.tool_executor import ToolExecutor  # type: ignore[import]
 
         tool_executor = ToolExecutor()
         # Arm first-byte capture so that the firstMessage turn (started in
@@ -753,12 +753,12 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         if self._adapter is None:
             return
         if self._input_transcode == "pcm16_16k_to_g711_ulaw":
-            from getpatter.services.transcoding import pcm16_to_mulaw
+            from getpatter.audio.transcoding import pcm16_to_mulaw
 
             # Use per-handler StatefulResampler to preserve ratecv filter state
             # across chunks and prevent boundary artefacts.
             if self._resampler_16k_to_8k is None:
-                from getpatter.services.transcoding import create_resampler_16k_to_8k
+                from getpatter.audio.transcoding import create_resampler_16k_to_8k
 
                 self._resampler_16k_to_8k = create_resampler_16k_to_8k()
             audio_bytes = pcm16_to_mulaw(self._resampler_16k_to_8k.process(audio_bytes))
@@ -1011,11 +1011,11 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
         # Default path: ConvAI expects PCM16 16 kHz and Twilio sends μ-law
         # 8 kHz, so decode + resample before forwarding.
         if self._for_twilio:
-            from getpatter.services.transcoding import mulaw_to_pcm16
+            from getpatter.audio.transcoding import mulaw_to_pcm16
 
             # Use per-handler StatefulResampler to preserve ratecv state.
             if self._resampler_8k_to_16k is None:
-                from getpatter.services.transcoding import create_resampler_8k_to_16k
+                from getpatter.audio.transcoding import create_resampler_8k_to_16k
 
                 self._resampler_8k_to_16k = create_resampler_8k_to_16k()
             pcm16k = self._resampler_8k_to_16k.process(mulaw_to_pcm16(audio_bytes))
@@ -1255,7 +1255,7 @@ class PipelineStreamHandler(StreamHandler):
 
         if self.on_message is None and (agent_llm is not None or self._openai_key):
             from getpatter.services.llm_loop import LLMLoop
-            from getpatter.services.tool_executor import ToolExecutor
+            from getpatter.tools.tool_executor import ToolExecutor
 
             tool_executor = ToolExecutor() if self.agent.tools else None
             llm_model = self.agent.model
@@ -1872,12 +1872,12 @@ class PipelineStreamHandler(StreamHandler):
         # up-sampled to 16 kHz before hitting STT adapters configured for
         # linear16 @ 16 kHz.
         if self._input_is_mulaw_8k:
-            from getpatter.services.transcoding import mulaw_to_pcm16
+            from getpatter.audio.transcoding import mulaw_to_pcm16
 
             # Use per-handler StatefulResampler to preserve ratecv filter state
             # across audio chunks (prevents boundary artefacts at STT input).
             if self._resampler_8k_to_16k is None:
-                from getpatter.services.transcoding import create_resampler_8k_to_16k
+                from getpatter.audio.transcoding import create_resampler_8k_to_16k
 
                 self._resampler_8k_to_16k = create_resampler_8k_to_16k()
             pcm = self._resampler_8k_to_16k.process(mulaw_to_pcm16(audio_bytes))

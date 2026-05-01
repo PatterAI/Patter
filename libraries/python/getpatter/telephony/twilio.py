@@ -10,7 +10,7 @@ import time
 from collections import deque
 from urllib.parse import quote
 
-from getpatter.handlers.common import (
+from getpatter.telephony.common import (
     _create_stt_from_config,  # noqa: F401 — re-exported for tests and external callers
     _create_tts_from_config,  # noqa: F401 — re-exported for tests and external callers
     _resolve_variables,  # noqa: F401 — re-exported for tests and external callers
@@ -18,7 +18,7 @@ from getpatter.handlers.common import (
     _validate_e164,
 )
 from getpatter.utils.log_sanitize import mask_phone_number
-from getpatter.handlers.stream_handler import (
+from getpatter.stream_handler import (
     END_CALL_TOOL,
     TRANSFER_CALL_TOOL,
     AudioSender,
@@ -56,7 +56,7 @@ def _validate_twilio_sid(sid: str, prefix: str = "CA") -> bool:
         return False
     if not sid.startswith(prefix):
         return False
-    return bool(re.match(r'^[A-Z]{2}[0-9a-f]{32}$', sid))
+    return bool(re.match(r"^[A-Z]{2}[0-9a-f]{32}$", sid))
 
 
 def _xml_escape(s: str) -> str:
@@ -100,6 +100,7 @@ def twilio_webhook_handler(
 # Twilio AudioSender — transcodes PCM 16 kHz to mulaw 8 kHz
 # ---------------------------------------------------------------------------
 
+
 class TwilioAudioSender(AudioSender):
     """Sends audio to a Twilio WebSocket, transcoding PCM to mulaw.
 
@@ -109,7 +110,9 @@ class TwilioAudioSender(AudioSender):
     into a 16 → 8 kHz resampler produces audibly broken audio.
     """
 
-    def __init__(self, websocket, stream_sid: str, input_is_mulaw_8k: bool = False) -> None:
+    def __init__(
+        self, websocket, stream_sid: str, input_is_mulaw_8k: bool = False
+    ) -> None:
         self._ws = websocket
         self._stream_sid = stream_sid
         self._chunk_count = 0
@@ -120,11 +123,12 @@ class TwilioAudioSender(AudioSender):
         # providers can yield odd-length chunks that would otherwise crash
         # ``audioop.ratecv`` with "not a whole number of frames".
         if not input_is_mulaw_8k:
-            from getpatter.services.transcoding import (
+            from getpatter.audio.transcoding import (
                 PcmCarry,
                 create_resampler_16k_to_8k,
                 pcm16_to_mulaw,
             )
+
             self._pcm16_to_mulaw = pcm16_to_mulaw
             # StatefulResampler preserves audioop.ratecv IIR filter state
             # across chunks (the old stateless path discarded the state token
@@ -264,7 +268,12 @@ async def twilio_stream_bridge(
     conversation_history: deque[dict] = deque(maxlen=200)
     transcript_entries: deque[dict] = deque(maxlen=200)
 
-    handler: OpenAIRealtimeStreamHandler | ElevenLabsConvAIStreamHandler | PipelineStreamHandler | None = None
+    handler: (
+        OpenAIRealtimeStreamHandler
+        | ElevenLabsConvAIStreamHandler
+        | PipelineStreamHandler
+        | None
+    ) = None
     audio_sender: TwilioAudioSender | None = None
     metrics = None
 
@@ -288,14 +297,21 @@ async def twilio_stream_bridge(
                 # Single INFO line per call-start — full context in one place.
                 _mode = (
                     f"engine={getattr(agent, 'provider', 'unknown')}"
-                    if getattr(agent, 'engine', None) is None
+                    if getattr(agent, "engine", None) is None
                     else f"engine={getattr(agent.engine, 'kind', 'unknown')}"
                 )
-                if getattr(agent, 'stt', None) is not None and getattr(agent, 'tts', None) is not None and getattr(agent, 'engine', None) is None:
+                if (
+                    getattr(agent, "stt", None) is not None
+                    and getattr(agent, "tts", None) is not None
+                    and getattr(agent, "engine", None) is None
+                ):
                     _mode = "pipeline"
                 logger.info(
                     "Call started: %s (Twilio, %s, %s → %s)",
-                    call_sid_actual, _mode, caller or '?', callee or '?',
+                    call_sid_actual,
+                    _mode,
+                    caller or "?",
+                    callee or "?",
                 )
                 if custom_params:
                     logger.debug("Custom params: %s", custom_params)
@@ -376,9 +392,12 @@ async def twilio_stream_bridge(
                         return
                     if twilio_sid and twilio_token and call_sid_actual:
                         if not _validate_twilio_sid(call_sid_actual, "CA"):
-                            logger.warning("transfer skipped: invalid CallSid %r", call_sid_actual)
+                            logger.warning(
+                                "transfer skipped: invalid CallSid %r", call_sid_actual
+                            )
                             return
                         import httpx as _httpx
+
                         async with _httpx.AsyncClient() as _http:
                             twiml = f"<Response><Dial>{_xml_escape(number)}</Dial></Response>"
                             await _http.post(
@@ -393,9 +412,12 @@ async def twilio_stream_bridge(
                 async def _twilio_hangup():
                     if twilio_sid and twilio_token and call_sid_actual:
                         if not _validate_twilio_sid(call_sid_actual, "CA"):
-                            logger.warning("hangup skipped: invalid CallSid %r", call_sid_actual)
+                            logger.warning(
+                                "hangup skipped: invalid CallSid %r", call_sid_actual
+                            )
                             return
                         import httpx as _httpx
+
                         async with _httpx.AsyncClient() as _http:
                             await _http.post(
                                 f"https://api.twilio.com/2010-04-01/Accounts/{twilio_sid}/Calls/{call_sid_actual}.json",
@@ -475,7 +497,9 @@ async def twilio_stream_bridge(
 
             elif event == "mark":
                 mark_name = data.get("mark", {}).get("name", "")
-                if isinstance(getattr(handler, "audio_sender", None), TwilioAudioSender):
+                if isinstance(
+                    getattr(handler, "audio_sender", None), TwilioAudioSender
+                ):
                     handler.audio_sender.on_mark_confirmed(mark_name)
                 if handler is not None:
                     await handler.on_mark(mark_name)
@@ -566,13 +590,19 @@ async def twilio_stream_bridge(
 
         # Single INFO line per call-end — duration, turns, cost, latency.
         if call_metrics is not None:
-            _dur = getattr(call_metrics, 'duration_seconds', 0) or 0
-            _turns = len(getattr(call_metrics, 'turns', []) or [])
-            _cost = getattr(getattr(call_metrics, 'cost', None), 'total', 0) or 0
-            _p95 = getattr(getattr(call_metrics, 'latency_p95', None), 'total_ms', 0) or 0
+            _dur = getattr(call_metrics, "duration_seconds", 0) or 0
+            _turns = len(getattr(call_metrics, "turns", []) or [])
+            _cost = getattr(getattr(call_metrics, "cost", None), "total", 0) or 0
+            _p95 = (
+                getattr(getattr(call_metrics, "latency_p95", None), "total_ms", 0) or 0
+            )
             logger.info(
                 "Call ended: %s (%.1fs, %d turns, cost=$%.4f, p95=%dms)",
-                call_sid_actual, _dur, _turns, _cost, round(_p95),
+                call_sid_actual,
+                _dur,
+                _turns,
+                _cost,
+                round(_p95),
             )
         else:
             logger.info("Call ended: %s", call_sid_actual)

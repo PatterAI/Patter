@@ -1,4 +1,4 @@
-"""Unit tests for getpatter.handlers.stream_handler — shared helpers, base class, guardrails."""
+"""Unit tests for getpatter.stream_handler — shared helpers, base class, guardrails."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from getpatter.handlers.stream_handler import (
+from getpatter.stream_handler import (
     AudioSender,
     END_CALL_TOOL,
     StreamHandler,
@@ -399,7 +399,7 @@ class TestSttLoopGate:
         """Belt-and-braces: the actual source line still ORs the two flags."""
         import inspect
 
-        from getpatter.handlers import stream_handler
+        from getpatter import stream_handler
 
         src = inspect.getsource(stream_handler)
         assert "transcript.speech_final" in src
@@ -421,7 +421,7 @@ class TestBargeInCancelsLlmStream:
 
     async def test_barge_in_sets_llm_cancel_event(self) -> None:
         """Mid-stream barge-in flips the cancel event so the consume loop breaks."""
-        from getpatter.handlers.stream_handler import PipelineStreamHandler
+        from getpatter.stream_handler import PipelineStreamHandler
         from getpatter.providers.base import Transcript
 
         # Build a minimal handler shell — bypass __init__, populate just the

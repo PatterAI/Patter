@@ -1,4 +1,4 @@
-"""Unit tests for :mod:`getpatter.services.pcm_mixer`.
+"""Unit tests for :mod:`getpatter.audio.pcm_mixer`.
 
 All tests are deterministic and use synthetic PCM (sine waves + silence).
 No audio playback or external assets are required.
@@ -14,7 +14,7 @@ pytest.importorskip("numpy", reason="pcm_mixer requires numpy")
 
 import numpy as np  # noqa: E402
 
-from getpatter.services.pcm_mixer import PcmMixer  # noqa: E402
+from getpatter.audio.pcm_mixer import PcmMixer  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

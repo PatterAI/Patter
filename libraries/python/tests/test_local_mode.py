@@ -230,7 +230,7 @@ def test_twilio_webhook_handler_url():
     # Patch TwilioAdapter so we don't need twilio installed
     with _patch("getpatter.providers.twilio_adapter.TwilioAdapter") as MockAdapter:
         MockAdapter.generate_stream_twiml.return_value = "<Response/>"
-        from getpatter.handlers.twilio_handler import twilio_webhook_handler
+        from getpatter.telephony.twilio import twilio_webhook_handler
 
         result = twilio_webhook_handler(
             call_sid="CA123",
@@ -253,7 +253,7 @@ def test_twilio_webhook_handler_url():
 
 
 def test_telnyx_webhook_handler_structure():
-    from getpatter.handlers.telnyx_handler import telnyx_webhook_handler
+    from getpatter.telephony.telnyx import telnyx_webhook_handler
 
     result = telnyx_webhook_handler(
         call_id="ctrl_123",
@@ -309,7 +309,7 @@ def test_elevenlabs_tts_init():
 async def test_twilio_stream_bridge_pipeline_sends_audio_to_stt():
     """twilio_stream_bridge in pipeline mode forwards mulaw audio to DeepgramSTT."""
     from getpatter.models import Agent
-    from getpatter.handlers.twilio_handler import twilio_stream_bridge
+    from getpatter.telephony.twilio import twilio_stream_bridge
 
     agent = Agent(system_prompt="test", provider="pipeline")
 
@@ -351,7 +351,7 @@ async def test_twilio_stream_bridge_pipeline_sends_audio_to_stt():
     fake_ws = FakeWS()
 
     # Patch DeepgramSTT and ElevenLabsTTS so no real connections are made
-    import getpatter.handlers.twilio_handler as twilio_mod
+    import getpatter.telephony.twilio as twilio_mod
 
     mock_stt = AsyncMock()
     mock_stt.connect = AsyncMock()
@@ -458,7 +458,7 @@ def test_agent_stt_tts_none_by_default():
 def test_twilio_pipeline_uses_stt_config():
     """_create_stt_from_config creates DeepgramSTT from STTConfig."""
     from getpatter.models import STTConfig
-    from getpatter.handlers.twilio_handler import _create_stt_from_config
+    from getpatter.telephony.twilio import _create_stt_from_config
 
     cfg = STTConfig(provider="deepgram", api_key="dg_key", language="fr")
     with __import__("unittest.mock", fromlist=["patch"]).patch(
@@ -473,7 +473,7 @@ def test_twilio_pipeline_uses_stt_config():
 def test_twilio_pipeline_uses_tts_config():
     """_create_tts_from_config creates ElevenLabsTTS from TTSConfig."""
     from getpatter.models import TTSConfig
-    from getpatter.handlers.twilio_handler import _create_tts_from_config
+    from getpatter.telephony.twilio import _create_tts_from_config
 
     cfg = TTSConfig(provider="elevenlabs", api_key="el_key", voice="aria")
     with __import__("unittest.mock", fromlist=["patch"]).patch(
@@ -488,7 +488,7 @@ def test_twilio_pipeline_uses_tts_config():
 def test_create_stt_whisper():
     """_create_stt_from_config creates WhisperSTT from STTConfig(provider='whisper')."""
     from getpatter.models import STTConfig
-    from getpatter.handlers.twilio_handler import _create_stt_from_config
+    from getpatter.telephony.twilio import _create_stt_from_config
 
     cfg = STTConfig(provider="whisper", api_key="sk_key", language="de")
     with __import__("unittest.mock", fromlist=["patch"]).patch(
@@ -504,7 +504,7 @@ def test_create_stt_raises_for_unknown():
     """_create_stt_from_config fails fast on unknown providers so users see a
     clear error instead of a silently voiceless agent."""
     from getpatter.models import STTConfig
-    from getpatter.handlers.twilio_handler import _create_stt_from_config
+    from getpatter.telephony.twilio import _create_stt_from_config
 
     cfg = STTConfig(provider="unknown_provider", api_key="x")
     with pytest.raises(ValueError, match="Unknown STT provider"):
@@ -514,7 +514,7 @@ def test_create_stt_raises_for_unknown():
 def test_create_tts_raises_for_unknown():
     """_create_tts_from_config fails fast on unknown providers."""
     from getpatter.models import TTSConfig
-    from getpatter.handlers.twilio_handler import _create_tts_from_config
+    from getpatter.telephony.twilio import _create_tts_from_config
 
     cfg = TTSConfig(provider="unknown_provider", api_key="x")
     with pytest.raises(ValueError, match="Unknown TTS provider"):
@@ -530,7 +530,7 @@ def test_create_tts_raises_for_unknown():
 async def test_dtmf_event_fires_transcript_callback():
     """DTMF events produce a [DTMF: X] entry via the on_transcript callback."""
     from getpatter.models import Agent
-    from getpatter.handlers.twilio_handler import twilio_stream_bridge
+    from getpatter.telephony.twilio import twilio_stream_bridge
 
     agent = Agent(system_prompt="test", provider="pipeline")
 
@@ -633,7 +633,7 @@ def test_mark_event_format():
 async def test_mark_events_sent_after_audio():
     """Forward loop sends a mark event after each audio chunk."""
     from getpatter.models import Agent
-    from getpatter.handlers.twilio_handler import twilio_stream_bridge
+    from getpatter.telephony.twilio import twilio_stream_bridge
 
     agent = Agent(system_prompt="test", provider="openai_realtime")
 
@@ -714,7 +714,7 @@ async def test_mark_events_sent_after_audio():
 async def test_custom_params_passed_to_on_call_start():
     """Custom parameters from TwiML start event are forwarded to on_call_start."""
     from getpatter.models import Agent
-    from getpatter.handlers.twilio_handler import twilio_stream_bridge
+    from getpatter.telephony.twilio import twilio_stream_bridge
 
     agent = Agent(system_prompt="test", provider="pipeline")
 

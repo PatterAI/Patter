@@ -116,7 +116,7 @@ class DeepFilterNetFilter(AudioFilter):
         sufficient here and avoids a hard dependency on ``scipy``/``librosa``.
 
         Known limitation: this is a stateless per-chunk resampler. A stateful
-        approach (StatefulResampler in ``getpatter.services.transcoding``) would
+        approach (StatefulResampler in ``getpatter.audio.transcoding``) would
         eliminate the per-chunk boundary discontinuities, but the artefact is
         inaudible in practice for DeepFilterNet input.
         """
@@ -161,9 +161,7 @@ class DeepFilterNetFilter(AudioFilter):
                     atten_lim_db=self._atten_lim_db,
                 )
             else:
-                enhanced = self._enhance(
-                    self._model, self._df_state, audio_tensor
-                )
+                enhanced = self._enhance(self._model, self._df_state, audio_tensor)
         except Exception as e:
             logger.error("DeepFilterNet enhance failed: %s", e)
             return pcm_chunk

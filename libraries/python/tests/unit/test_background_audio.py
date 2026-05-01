@@ -1,4 +1,4 @@
-"""Unit tests for :mod:`getpatter.services.background_audio`.
+"""Unit tests for :mod:`getpatter.audio.background_audio`.
 
 Covers:
 * Bundled-asset presence + ``OggS`` magic byte verification.
@@ -29,7 +29,7 @@ pytest.importorskip("soundfile", reason="background_audio requires soundfile")
 
 import numpy as np  # noqa: E402
 
-from getpatter.services.background_audio import (  # noqa: E402
+from getpatter.audio.background_audio import (  # noqa: E402
     AudioConfig,
     BackgroundAudioPlayer,
     BuiltinAudioClip,
@@ -306,7 +306,7 @@ async def test_invalid_volume_rejected():
 async def test_audioconfig_list_silence_selection(monkeypatch):
     """When probability selection picks silence, mix is a no-op."""
     # Force random selection to return > total_probability so silence wins.
-    import getpatter.services.background_audio as mod
+    import getpatter.audio.background_audio as mod
 
     monkeypatch.setattr(mod.random, "random", lambda: 0.99)
 

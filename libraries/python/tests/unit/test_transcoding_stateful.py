@@ -23,7 +23,7 @@ import pytest
 # does not bubble up as an error during collection.
 with warnings.catch_warnings():
     warnings.simplefilter("ignore", DeprecationWarning)
-    from getpatter.services.transcoding import (
+    from getpatter.audio.transcoding import (
         PcmCarry,
         StatefulResampler,
         create_resampler_8k_to_16k,
@@ -300,7 +300,7 @@ class TestStatelessWrappersWithDeprecation:
         """
         import importlib
         import sys
-        import getpatter.services.transcoding as _t_mod
+        import getpatter.audio.transcoding as _t_mod
 
         # Reset the once-per-process flag so we can observe the warning again.
         _t_mod._warned_resample_8k_16k = False
@@ -308,7 +308,7 @@ class TestStatelessWrappersWithDeprecation:
         pcm = bytes(160)  # 160 bytes of silent PCM16 @ 8 kHz
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            from getpatter.services.transcoding import resample_8k_to_16k
+            from getpatter.audio.transcoding import resample_8k_to_16k
             resample_8k_to_16k(pcm)
         dep_warnings = [w for w in caught if issubclass(w.category, DeprecationWarning)]
         assert dep_warnings, "Expected at least one DeprecationWarning on first call"

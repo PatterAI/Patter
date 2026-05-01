@@ -5,7 +5,7 @@ re-exported from :mod:`getpatter` without cluttering the historical module
 layout. The Phase 1a goals are:
 
 * Expose a dedicated ``Tool`` dataclass (distinct from the legacy
-  ``ToolDefinition`` dict produced by :func:`getpatter.services.tool_decorator.tool`).
+  ``ToolDefinition`` dict produced by :func:`getpatter.tools.tool_decorator.tool`).
 * Provide a unified ``tool(...)`` factory that works both as a decorator on a
   typed Python function and as a kwargs constructor.
 * Re-export :class:`getpatter.models.Guardrail` and a ``guardrail(...)`` factory
@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from getpatter.models import Guardrail
-from getpatter.services.tool_decorator import tool as _legacy_tool_decorator
+from getpatter.tools.tool_decorator import tool as _legacy_tool_decorator
 
 __all__ = ["Tool", "Guardrail", "tool", "guardrail"]
 
@@ -82,7 +82,7 @@ def tool(
 
     * **Decorator** — apply to a typed Python function. The function's name,
       docstring, and type hints are introspected via the legacy
-      :func:`getpatter.services.tool_decorator.tool` to build the JSON Schema::
+      :func:`getpatter.tools.tool_decorator.tool` to build the JSON Schema::
 
           @tool
           async def get_weather(location: str) -> str:

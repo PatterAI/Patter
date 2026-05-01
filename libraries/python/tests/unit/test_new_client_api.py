@@ -158,7 +158,7 @@ class TestSTTTTSDispatch:
 
     def test_stt_provider_bypasses_config_resolution(self) -> None:
         """An STTProvider instance must flow through untouched to downstream dispatch."""
-        from getpatter.handlers.common import _create_stt_from_config, _create_tts_from_config
+        from getpatter.telephony.common import _create_stt_from_config, _create_tts_from_config
 
         stt = deepgram_stt.STT(api_key="dg_bypass")
         tts = elevenlabs_tts.TTS(api_key="el_bypass")

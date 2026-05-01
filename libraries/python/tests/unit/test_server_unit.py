@@ -1020,37 +1020,37 @@ class TestBanner:
 
 
 class TestCommonHandlers:
-    """Tests for getpatter.handlers.common functions."""
+    """Tests for getpatter.telephony.common functions."""
 
     def test_validate_e164_valid(self) -> None:
-        from getpatter.handlers.common import _validate_e164
+        from getpatter.telephony.common import _validate_e164
 
         assert _validate_e164("+15551234567") is True
 
     def test_validate_e164_invalid_no_plus(self) -> None:
-        from getpatter.handlers.common import _validate_e164
+        from getpatter.telephony.common import _validate_e164
 
         assert _validate_e164("15551234567") is False
 
     def test_validate_e164_invalid_too_short(self) -> None:
-        from getpatter.handlers.common import _validate_e164
+        from getpatter.telephony.common import _validate_e164
 
         assert _validate_e164("+123") is False
 
     def test_sanitize_variable_value_strips_control_chars(self) -> None:
-        from getpatter.handlers.common import _sanitize_variable_value
+        from getpatter.telephony.common import _sanitize_variable_value
 
         result = _sanitize_variable_value("hello\x00world\x0a")
         assert "\x00" not in result
 
     def test_sanitize_variable_value_truncates_at_500(self) -> None:
-        from getpatter.handlers.common import _sanitize_variable_value
+        from getpatter.telephony.common import _sanitize_variable_value
 
         result = _sanitize_variable_value("x" * 1000)
         assert len(result) == 500
 
     def test_resolve_variables_replaces_placeholders(self) -> None:
-        from getpatter.handlers.common import _resolve_variables
+        from getpatter.telephony.common import _resolve_variables
 
         result = _resolve_variables(
             "Hello {name}, age {age}", {"name": "Alice", "age": "30"}
@@ -1058,18 +1058,18 @@ class TestCommonHandlers:
         assert result == "Hello Alice, age 30"
 
     def test_resolve_variables_no_match_unchanged(self) -> None:
-        from getpatter.handlers.common import _resolve_variables
+        from getpatter.telephony.common import _resolve_variables
 
         result = _resolve_variables("Hello {name}", {"other": "value"})
         assert result == "Hello {name}"
 
     def test_create_stt_from_config_none(self) -> None:
-        from getpatter.handlers.common import _create_stt_from_config
+        from getpatter.telephony.common import _create_stt_from_config
 
         assert _create_stt_from_config(None) is None
 
     def test_create_tts_from_config_none(self) -> None:
-        from getpatter.handlers.common import _create_tts_from_config
+        from getpatter.telephony.common import _create_tts_from_config
 
         assert _create_tts_from_config(None) is None
 

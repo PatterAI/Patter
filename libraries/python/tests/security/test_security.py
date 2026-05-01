@@ -10,8 +10,8 @@ import re
 
 import pytest
 
-from getpatter.handlers.common import _sanitize_variable_value, _validate_e164
-from getpatter.handlers.twilio_handler import _xml_escape, _validate_twilio_sid
+from getpatter.telephony.common import _sanitize_variable_value, _validate_e164
+from getpatter.telephony.twilio import _xml_escape, _validate_twilio_sid
 from getpatter.local_config import LocalConfig
 from getpatter.models import Agent
 

@@ -24,7 +24,7 @@ def _local_phone(webhook_url="abc.ngrok.io"):
 def _local_agent(phone: Patter) -> Agent:
     """Build an OpenAI Realtime agent for the tests below."""
     return phone.agent(engine=OpenAIRealtime(api_key="sk_test"), system_prompt="Test")
-from getpatter.handlers.twilio_handler import _TRANSFER_CALL_TOOL, _END_CALL_TOOL
+from getpatter.telephony.twilio import _TRANSFER_CALL_TOOL, _END_CALL_TOOL
 
 
 # ---------------------------------------------------------------------------
@@ -383,7 +383,7 @@ def test_serve_passes_voicemail_message_to_server():
 @pytest.mark.asyncio
 async def test_tool_executor_retries_on_failure():
     """ToolExecutor retries on failure up to MAX_RETRIES times."""
-    from getpatter.services.tool_executor import ToolExecutor
+    from getpatter.tools.tool_executor import ToolExecutor
 
     call_count = 0
 
@@ -419,7 +419,7 @@ async def test_tool_executor_retries_on_failure():
 @pytest.mark.asyncio
 async def test_tool_executor_returns_error_after_max_retries():
     """ToolExecutor returns error JSON with fallback=True after all retries fail."""
-    from getpatter.services.tool_executor import ToolExecutor
+    from getpatter.tools.tool_executor import ToolExecutor
 
     mock_client = AsyncMock()
     mock_client.post = AsyncMock(side_effect=Exception("persistent error"))
@@ -443,7 +443,7 @@ async def test_tool_executor_returns_error_after_max_retries():
 @pytest.mark.asyncio
 async def test_tool_executor_includes_attempt_number():
     """ToolExecutor includes attempt number in webhook payload."""
-    from getpatter.services.tool_executor import ToolExecutor
+    from getpatter.tools.tool_executor import ToolExecutor
 
     payloads: list[dict] = []
 
@@ -478,7 +478,7 @@ async def test_tool_executor_includes_attempt_number():
 
 def test_resolve_variables_replaces_placeholders():
     """_resolve_variables substitutes {key} with corresponding values."""
-    from getpatter.handlers.twilio_handler import _resolve_variables
+    from getpatter.telephony.twilio import _resolve_variables
 
     result = _resolve_variables("Hello {name}, order #{order_id}!", {"name": "Mario", "order_id": "42"})
     assert result == "Hello Mario, order #42!"
@@ -486,7 +486,7 @@ def test_resolve_variables_replaces_placeholders():
 
 def test_resolve_variables_ignores_missing_keys():
     """_resolve_variables leaves unmatched placeholders intact."""
-    from getpatter.handlers.twilio_handler import _resolve_variables
+    from getpatter.telephony.twilio import _resolve_variables
 
     result = _resolve_variables("Hello {name}, {unknown}!", {"name": "Mario"})
     assert result == "Hello Mario, {unknown}!"
@@ -494,7 +494,7 @@ def test_resolve_variables_ignores_missing_keys():
 
 def test_resolve_variables_empty_variables():
     """_resolve_variables returns template unchanged when variables is empty."""
-    from getpatter.handlers.twilio_handler import _resolve_variables
+    from getpatter.telephony.twilio import _resolve_variables
 
     template = "Hello {name}!"
     result = _resolve_variables(template, {})
@@ -503,7 +503,7 @@ def test_resolve_variables_empty_variables():
 
 def test_resolve_variables_numeric_values():
     """_resolve_variables coerces non-string values to strings."""
-    from getpatter.handlers.twilio_handler import _resolve_variables
+    from getpatter.telephony.twilio import _resolve_variables
 
     result = _resolve_variables("Balance: {amount}", {"amount": 99.50})
     assert result == "Balance: 99.5"
@@ -555,9 +555,9 @@ async def test_conversation_history_pipeline_tracks_user_messages():
 
     mock_stt.receive_transcripts = fake_receive
 
-    with patch("getpatter.handlers.twilio_handler._create_stt_from_config", return_value=None), \
-         patch("getpatter.handlers.twilio_handler._create_tts_from_config", return_value=None):
-        from getpatter.handlers.twilio_handler import twilio_stream_bridge
+    with patch("getpatter.telephony.twilio._create_stt_from_config", return_value=None), \
+         patch("getpatter.telephony.twilio._create_tts_from_config", return_value=None):
+        from getpatter.telephony.twilio import twilio_stream_bridge
         try:
             await asyncio.wait_for(
                 twilio_stream_bridge(
@@ -621,7 +621,7 @@ async def test_conversation_history_passed_to_on_call_end():
     mock_adapter.receive_events = fake_receive_events
 
     with patch("getpatter.providers.openai_realtime.OpenAIRealtimeAdapter", return_value=mock_adapter):
-        from getpatter.handlers.twilio_handler import twilio_stream_bridge
+        from getpatter.telephony.twilio import twilio_stream_bridge
         try:
             await asyncio.wait_for(
                 twilio_stream_bridge(
@@ -660,7 +660,7 @@ def test_agent_variables_defaults_to_none():
 
 def test_dynamic_variables_replaced_via_resolve():
     """_resolve_variables applies agent.variables to the system prompt."""
-    from getpatter.handlers.twilio_handler import _resolve_variables
+    from getpatter.telephony.twilio import _resolve_variables
 
     agent = Agent(
         system_prompt="You are calling {customer_name} about order #{order_id}.",
@@ -672,7 +672,7 @@ def test_dynamic_variables_replaced_via_resolve():
 
 def test_custom_params_override_agent_variables():
     """custom_params from TwiML take precedence over agent.variables when keys clash."""
-    from getpatter.handlers.twilio_handler import _resolve_variables
+    from getpatter.telephony.twilio import _resolve_variables
 
     agent_vars = {"name": "Default Name", "greeting": "Hello"}
     custom_params = {"name": "Override Name"}  # same key — should win
@@ -683,7 +683,7 @@ def test_custom_params_override_agent_variables():
 
 def test_dynamic_variables_no_op_when_no_placeholders():
     """_resolve_variables returns the template unchanged when no placeholders match."""
-    from getpatter.handlers.twilio_handler import _resolve_variables
+    from getpatter.telephony.twilio import _resolve_variables
 
     template = "You are a helpful assistant."
     result = _resolve_variables(template, {"unused": "value"})
@@ -692,7 +692,7 @@ def test_dynamic_variables_no_op_when_no_placeholders():
 
 def test_dynamic_variables_multiple_occurrences():
     """_resolve_variables replaces all occurrences of the same placeholder."""
-    from getpatter.handlers.twilio_handler import _resolve_variables
+    from getpatter.telephony.twilio import _resolve_variables
 
     result = _resolve_variables("{name} is {name}", {"name": "Mario"})
     assert result == "Mario is Mario"

@@ -29,7 +29,7 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
-from getpatter.handlers.stream_handler import PipelineStreamHandler
+from getpatter.stream_handler import PipelineStreamHandler
 from getpatter.models import Agent, Guardrail, HookContext, PipelineHooks
 from getpatter.services.sentence_chunker import SentenceChunker
 
@@ -996,7 +996,7 @@ class TestLLMErrorMidStream:
                 super().reset()
 
         with patch(
-            "getpatter.handlers.stream_handler.SentenceChunker",
+            "getpatter.stream_handler.SentenceChunker",
             TrackingChunker,
         ):
             await handler._process_streaming_response(
@@ -1035,7 +1035,7 @@ class TestLLMErrorMidStream:
             raise RuntimeError("died mid-third-sentence")
 
         with patch(
-            "getpatter.handlers.stream_handler.SentenceChunker",
+            "getpatter.stream_handler.SentenceChunker",
             SentenceChunker,
         ):
             await handler._process_streaming_response(

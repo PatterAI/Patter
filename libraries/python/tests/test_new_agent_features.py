@@ -15,7 +15,7 @@ from getpatter import (
     tool,
 )
 from getpatter.models import Agent, CallControl, STTConfig, TTSConfig
-from getpatter.services.tool_executor import ToolExecutor
+from getpatter.tools.tool_executor import ToolExecutor
 
 
 def _local_phone():

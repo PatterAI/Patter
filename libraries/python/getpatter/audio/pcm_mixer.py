@@ -1,5 +1,5 @@
 """
-Lightweight PCM mixer used by :mod:`getpatter.services.background_audio`.
+Lightweight PCM mixer used by :mod:`getpatter.audio.background_audio`.
 
 Patter streams raw 16-bit little-endian PCM frames directly through its
 ``PipelineStreamHandler``, so a full buffered mixer with its own capture /
@@ -40,7 +40,7 @@ _BYTES_PER_SAMPLE: Final[int] = 2
 def _require_numpy() -> None:
     if not _NUMPY_AVAILABLE:
         raise ImportError(
-            "getpatter.services.pcm_mixer requires numpy. Install the "
+            "getpatter.audio.pcm_mixer requires numpy. Install the "
             "'background-audio' extra: pip install 'getpatter[background-audio]'."
         )
 

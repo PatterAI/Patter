@@ -56,7 +56,7 @@ from getpatter.services.text_transforms import (
 # New v0.5.0 public API (Phase 1a). ``tool`` here is the unified factory that
 # supports both decorator use (``@tool`` on a typed function) and keyword
 # construction (``tool(name=..., handler=...)``). It supersedes the historical
-# :func:`getpatter.services.tool_decorator.tool` at the top level, but that module
+# :func:`getpatter.tools.tool_decorator.tool` at the top level, but that module
 # remains importable for users that already depend on the legacy dict shape.
 from getpatter._public_api import Tool, tool, guardrail
 
@@ -196,7 +196,7 @@ from getpatter.test_mode import TestSession
 # Background-audio primitives — parity with TypeScript
 # ``BackgroundAudioPlayer`` / ``BuiltinAudioClip`` / ``mixPcm`` /
 # ``selectSoundFromList`` / ``builtinClipPath``.
-from getpatter.services.background_audio import (
+from getpatter.audio.background_audio import (
     BackgroundAudioPlayer,
     BuiltinAudioClip,
 )
@@ -207,7 +207,7 @@ from getpatter.services.background_audio import (
 # Audio transcoding helpers — parity with the TypeScript ``transcoding``
 # module. Python ships ``create_resampler_24k_to_16k`` only (no eager
 # ``resample_24k_to_16k`` one-shot helper exists yet).
-from getpatter.services.transcoding import (
+from getpatter.audio.transcoding import (
     PcmCarry,
     StatefulResampler,
     create_resampler_8k_to_16k,
@@ -242,7 +242,7 @@ from getpatter.services.metrics import CallMetricsAccumulator
 # Import is lazy — `mix_pcm` triggers numpy import only on first call.
 def mix_pcm(agent: bytes, bg: bytes, ratio: float) -> bytes:
     """Standalone PCM mixer — parity with TypeScript ``mixPcm(agent, bg, ratio)``."""
-    from getpatter.services.pcm_mixer import mix_pcm as _mix_pcm
+    from getpatter.audio.pcm_mixer import mix_pcm as _mix_pcm
 
     return _mix_pcm(agent, bg, ratio)
 

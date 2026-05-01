@@ -66,12 +66,14 @@ class TestSession:
 
         # Fire on_call_start
         if on_call_start:
-            result = await on_call_start({
-                "call_id": call_id,
-                "caller": caller,
-                "callee": callee,
-                "direction": "test",
-            })
+            result = await on_call_start(
+                {
+                    "call_id": call_id,
+                    "caller": caller,
+                    "callee": callee,
+                    "direction": "test",
+                }
+            )
             if isinstance(result, dict):
                 logger.info("on_call_start returned overrides: %s", list(result.keys()))
 
@@ -79,17 +81,19 @@ class TestSession:
         if agent.first_message:
             print(f"  Agent: {agent.first_message}")
             print()
-            conversation_history.append({
-                "role": "assistant",
-                "text": agent.first_message,
-                "timestamp": time.time(),
-            })
+            conversation_history.append(
+                {
+                    "role": "assistant",
+                    "text": agent.first_message,
+                    "timestamp": time.time(),
+                }
+            )
 
         # Set up LLM loop if no on_message and openai_key is available
         llm_loop = None
         if on_message is None and openai_key:
             from getpatter.services.llm_loop import LLMLoop
-            from getpatter.services.tool_executor import ToolExecutor
+            from getpatter.tools.tool_executor import ToolExecutor
 
             tool_executor = ToolExecutor() if agent.tools else None
             llm_model = agent.model
@@ -108,9 +112,7 @@ class TestSession:
                 system_prompt=resolved_prompt,
                 tools=agent.tools,
                 tool_executor=tool_executor,
-                disable_phone_preamble=getattr(
-                    agent, "disable_phone_preamble", False
-                ),
+                disable_phone_preamble=getattr(agent, "disable_phone_preamble", False),
             )
 
         # Set up CallControl
@@ -177,11 +179,13 @@ class TestSession:
                     print(f"    {role}: {entry['text']}")
                 continue
 
-            conversation_history.append({
-                "role": "user",
-                "text": user_input,
-                "timestamp": time.time(),
-            })
+            conversation_history.append(
+                {
+                    "role": "user",
+                    "text": user_input,
+                    "timestamp": time.time(),
+                }
+            )
 
             # Get response
             if on_message is not None and callable(on_message):
@@ -216,7 +220,9 @@ class TestSession:
                 }
                 parts = []
                 print("  Agent: ", end="", flush=True)
-                async for token in llm_loop.run(user_input, conversation_history, call_ctx):
+                async for token in llm_loop.run(
+                    user_input, conversation_history, call_ctx
+                ):
                     parts.append(token)
                     print(token, end="", flush=True)
                 print()
@@ -231,19 +237,23 @@ class TestSession:
             if response_text:
                 if on_message is not None and callable(on_message):
                     print(f"  Agent: {response_text}")
-                conversation_history.append({
-                    "role": "assistant",
-                    "text": response_text,
-                    "timestamp": time.time(),
-                })
+                conversation_history.append(
+                    {
+                        "role": "assistant",
+                        "text": response_text,
+                        "timestamp": time.time(),
+                    }
+                )
                 print()
 
         # Fire on_call_end
         if on_call_end:
-            await on_call_end({
-                "call_id": call_id,
-                "caller": caller,
-                "callee": callee,
-                "direction": "test",
-                "transcript": conversation_history,
-            })
+            await on_call_end(
+                {
+                    "call_id": call_id,
+                    "caller": caller,
+                    "callee": callee,
+                    "direction": "test",
+                    "transcript": conversation_history,
+                }
+            )

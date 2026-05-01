@@ -11,9 +11,9 @@ import time
 from collections import deque
 from urllib.parse import quote
 
-from getpatter.handlers.common import _validate_e164
+from getpatter.telephony.common import _validate_e164
 from getpatter.utils.log_sanitize import mask_phone_number
-from getpatter.handlers.stream_handler import (
+from getpatter.stream_handler import (
     AudioSender,
     ElevenLabsConvAIStreamHandler,
     OpenAIRealtimeStreamHandler,
@@ -72,6 +72,7 @@ async def handle_amd_result(
     if result not in ("machine", "machine_detected"):
         return
     import httpx as _httpx
+
     encoded_id = quote(call_control_id, safe="")
     # Heuristic playback-duration estimate — ~150 ms per character, capped at
     # 30 s. Avoids cutting the voicemail mid-sentence on hangup. The proper
@@ -113,6 +114,7 @@ def _is_valid_transfer_target(target: str) -> bool:
     if _validate_e164(target):
         return True
     return bool(_SIP_URI_RE.match(target))
+
 
 logger = logging.getLogger("getpatter")
 
@@ -168,6 +170,7 @@ def telnyx_webhook_handler(
 # Telnyx AudioSender — no transcoding needed (16 kHz PCM native)
 # ---------------------------------------------------------------------------
 
+
 class TelnyxAudioSender(AudioSender):
     """Sends audio to a Telnyx media-stream WebSocket.
 
@@ -191,10 +194,11 @@ class TelnyxAudioSender(AudioSender):
         # artefact that occurs when the per-chunk stateless path restarts the
         # IIR filter every 20 ms frame.
         if not input_is_mulaw_8k:
-            from getpatter.services.transcoding import (  # type: ignore[import]
+            from getpatter.audio.transcoding import (  # type: ignore[import]
                 create_resampler_16k_to_8k,
                 pcm16_to_mulaw,
             )
+
             self._pcm16_to_mulaw = pcm16_to_mulaw
             self._resampler = create_resampler_16k_to_8k()
         else:
@@ -285,7 +289,12 @@ async def telnyx_stream_bridge(
     transcript_entries: deque[dict] = deque(maxlen=200)
     stream_started = False
 
-    handler: OpenAIRealtimeStreamHandler | ElevenLabsConvAIStreamHandler | PipelineStreamHandler | None = None
+    handler: (
+        OpenAIRealtimeStreamHandler
+        | ElevenLabsConvAIStreamHandler
+        | PipelineStreamHandler
+        | None
+    ) = None
     audio_sender: TelnyxAudioSender | None = None
     metrics = None
 
@@ -317,14 +326,20 @@ async def telnyx_stream_bridge(
                 # Single INFO line per call-start — full context in one place.
                 _mode = (
                     f"engine={getattr(agent.engine, 'kind', 'unknown')}"
-                    if getattr(agent, 'engine', None) is not None
+                    if getattr(agent, "engine", None) is not None
                     else "pipeline"
-                    if (getattr(agent, 'stt', None) is not None and getattr(agent, 'tts', None) is not None)
+                    if (
+                        getattr(agent, "stt", None) is not None
+                        and getattr(agent, "tts", None) is not None
+                    )
                     else f"engine={getattr(agent, 'provider', 'unknown')}"
                 )
                 logger.info(
                     "Call started: %s (Telnyx, %s, %s → %s)",
-                    call_id_actual, _mode, caller or '?', callee or '?',
+                    call_id_actual,
+                    _mode,
+                    caller or "?",
+                    callee or "?",
                 )
 
                 # Fire on_call_start callback — may return per-call config overrides
@@ -368,8 +383,12 @@ async def telnyx_stream_bridge(
                 # 8 kHz to match the `streaming_start` PCMU bidirectional
                 # stream — forward bytes as-is. Pipeline and ConvAI still
                 # produce PCM16 that Telnyx accepts when L16 is negotiated.
-                _input_is_mulaw = getattr(agent, "provider", "openai_realtime") == "openai_realtime"
-                audio_sender = TelnyxAudioSender(websocket, input_is_mulaw_8k=_input_is_mulaw)
+                _input_is_mulaw = (
+                    getattr(agent, "provider", "openai_realtime") == "openai_realtime"
+                )
+                audio_sender = TelnyxAudioSender(
+                    websocket, input_is_mulaw_8k=_input_is_mulaw
+                )
 
                 # --- Telnyx-specific call control helpers ---
                 async def _telnyx_transfer(number, *, client_state: str | None = None):
@@ -390,9 +409,11 @@ async def telnyx_stream_bridge(
                         return
                     if telnyx_key and call_id_actual:
                         import httpx as _httpx
+
                         body: dict = {"to": number}
                         if client_state:
                             import base64 as _b64
+
                             body["client_state"] = _b64.b64encode(
                                 client_state.encode("utf-8")
                             ).decode("ascii")
@@ -410,6 +431,7 @@ async def telnyx_stream_bridge(
                 async def _telnyx_hangup():
                     if telnyx_key and call_id_actual:
                         import httpx as _httpx
+
                         async with _httpx.AsyncClient() as _http:
                             await _http.post(
                                 f"https://api.telnyx.com/v2/calls/{quote(call_id_actual, safe='')}/actions/hangup",
@@ -681,7 +703,9 @@ async def telnyx_stream_bridge(
                         total_cost = cost.get("amount")
                         if total_cost is not None:
                             metrics.set_actual_telephony_cost(abs(float(total_cost)))
-                            logger.debug("Telnyx actual cost: $%s", abs(float(total_cost)))
+                            logger.debug(
+                                "Telnyx actual cost: $%s", abs(float(total_cost))
+                            )
             except Exception as exc:
                 logger.debug("Could not fetch Telnyx call cost: %s", exc)
 
@@ -713,13 +737,19 @@ async def telnyx_stream_bridge(
 
         # Single INFO line per call-end — duration, turns, cost, latency.
         if call_metrics is not None:
-            _dur = getattr(call_metrics, 'duration_seconds', 0) or 0
-            _turns = len(getattr(call_metrics, 'turns', []) or [])
-            _cost = getattr(getattr(call_metrics, 'cost', None), 'total', 0) or 0
-            _p95 = getattr(getattr(call_metrics, 'latency_p95', None), 'total_ms', 0) or 0
+            _dur = getattr(call_metrics, "duration_seconds", 0) or 0
+            _turns = len(getattr(call_metrics, "turns", []) or [])
+            _cost = getattr(getattr(call_metrics, "cost", None), "total", 0) or 0
+            _p95 = (
+                getattr(getattr(call_metrics, "latency_p95", None), "total_ms", 0) or 0
+            )
             logger.info(
                 "Call ended: %s (%.1fs, %d turns, cost=$%.4f, p95=%dms)",
-                call_id_actual, _dur, _turns, _cost, round(_p95),
+                call_id_actual,
+                _dur,
+                _turns,
+                _cost,
+                round(_p95),
             )
         else:
             logger.info("Call ended: %s", call_id_actual)

@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from getpatter.handlers.stream_handler import ElevenLabsConvAIStreamHandler
+from getpatter.stream_handler import ElevenLabsConvAIStreamHandler
 from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
 from tests.conftest import fake_mulaw_frame, make_agent

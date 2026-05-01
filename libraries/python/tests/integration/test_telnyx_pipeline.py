@@ -12,11 +12,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from getpatter.handlers.telnyx_handler import telnyx_stream_bridge, TelnyxAudioSender
+from getpatter.telephony.telnyx import telnyx_stream_bridge, TelnyxAudioSender
 
 from tests.conftest import fake_pcm_frame, make_agent
 
-_PATCH_PIPELINE = "getpatter.handlers.telnyx_handler.PipelineStreamHandler"
+_PATCH_PIPELINE = "getpatter.telephony.telnyx.PipelineStreamHandler"
 
 
 # ---------------------------------------------------------------------------

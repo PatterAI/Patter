@@ -1146,46 +1146,46 @@ class TestTranscoding:
     """Test transcoding functions."""
 
     def test_mulaw_to_pcm16(self) -> None:
-        from getpatter.services.transcoding import mulaw_to_pcm16
+        from getpatter.audio.transcoding import mulaw_to_pcm16
 
         pcm = mulaw_to_pcm16(b"\xff" * 160)
         assert len(pcm) > 0
 
     def test_pcm16_to_mulaw(self) -> None:
-        from getpatter.services.transcoding import pcm16_to_mulaw
+        from getpatter.audio.transcoding import pcm16_to_mulaw
 
         pcm = struct.pack("<4h", 0, 1000, -1000, 500)
         mulaw = pcm16_to_mulaw(pcm)
         assert len(mulaw) > 0
 
     def test_mulaw_pcm_roundtrip(self) -> None:
-        from getpatter.services.transcoding import mulaw_to_pcm16, pcm16_to_mulaw
+        from getpatter.audio.transcoding import mulaw_to_pcm16, pcm16_to_mulaw
 
         pcm = struct.pack("<4h", 0, 1000, -1000, 500)
         pcm_back = mulaw_to_pcm16(pcm16_to_mulaw(pcm))
         assert len(pcm_back) > 0
 
     def test_resample_8k_to_16k(self) -> None:
-        from getpatter.services.transcoding import resample_8k_to_16k
+        from getpatter.audio.transcoding import resample_8k_to_16k
 
         pcm = struct.pack("<4h", 100, 200, 300, 400)
         result = resample_8k_to_16k(pcm)
         assert len(result) >= len(pcm)
 
     def test_resample_8k_to_16k_empty(self) -> None:
-        from getpatter.services.transcoding import resample_8k_to_16k
+        from getpatter.audio.transcoding import resample_8k_to_16k
 
         assert resample_8k_to_16k(b"") == b""
 
     def test_resample_16k_to_8k(self) -> None:
-        from getpatter.services.transcoding import resample_16k_to_8k
+        from getpatter.audio.transcoding import resample_16k_to_8k
 
         pcm = struct.pack("<8h", 100, 200, 300, 400, 500, 600, 700, 800)
         result = resample_16k_to_8k(pcm)
         assert len(result) <= len(pcm)
 
     def test_resample_16k_to_8k_empty(self) -> None:
-        from getpatter.services.transcoding import resample_16k_to_8k
+        from getpatter.audio.transcoding import resample_16k_to_8k
 
         assert resample_16k_to_8k(b"") == b""
 
@@ -1200,7 +1200,7 @@ class TestCreateSTTFromConfig:
     """_create_stt_from_config creates the right adapter."""
 
     def test_deepgram_default(self) -> None:
-        from getpatter.handlers.common import _create_stt_from_config
+        from getpatter.telephony.common import _create_stt_from_config
         from getpatter.models import STTConfig
 
         config = STTConfig(provider="deepgram", api_key="dg-key", language="en")
@@ -1210,7 +1210,7 @@ class TestCreateSTTFromConfig:
         assert stt.encoding == "linear16"
 
     def test_deepgram_for_twilio(self) -> None:
-        from getpatter.handlers.common import _create_stt_from_config
+        from getpatter.telephony.common import _create_stt_from_config
         from getpatter.models import STTConfig
 
         config = STTConfig(provider="deepgram", api_key="dg-key", language="es")
@@ -1220,7 +1220,7 @@ class TestCreateSTTFromConfig:
         assert stt.sample_rate == 8000
 
     def test_whisper(self) -> None:
-        from getpatter.handlers.common import _create_stt_from_config
+        from getpatter.telephony.common import _create_stt_from_config
         from getpatter.models import STTConfig
 
         config = STTConfig(provider="whisper", api_key="sk-key", language="fr")
@@ -1229,7 +1229,7 @@ class TestCreateSTTFromConfig:
         assert stt.__class__.__name__ == "WhisperSTT"
 
     def test_unknown_provider(self) -> None:
-        from getpatter.handlers.common import _create_stt_from_config
+        from getpatter.telephony.common import _create_stt_from_config
         from getpatter.models import STTConfig
 
         config = STTConfig(provider="unknown", api_key="x")
@@ -1242,7 +1242,7 @@ class TestCreateTTSFromConfig:
     """_create_tts_from_config creates the right adapter."""
 
     def test_elevenlabs(self) -> None:
-        from getpatter.handlers.common import _create_tts_from_config
+        from getpatter.telephony.common import _create_tts_from_config
         from getpatter.models import TTSConfig
 
         config = TTSConfig(provider="elevenlabs", api_key="el-key", voice="v1")
@@ -1251,7 +1251,7 @@ class TestCreateTTSFromConfig:
         assert tts.__class__.__name__ == "ElevenLabsTTS"
 
     def test_openai(self) -> None:
-        from getpatter.handlers.common import _create_tts_from_config
+        from getpatter.telephony.common import _create_tts_from_config
         from getpatter.models import TTSConfig
 
         config = TTSConfig(provider="openai", api_key="sk-key", voice="alloy")
@@ -1260,7 +1260,7 @@ class TestCreateTTSFromConfig:
         assert tts.__class__.__name__ == "OpenAITTS"
 
     def test_unknown_provider(self) -> None:
-        from getpatter.handlers.common import _create_tts_from_config
+        from getpatter.telephony.common import _create_tts_from_config
         from getpatter.models import TTSConfig
 
         config = TTSConfig(provider="unknown", api_key="x")

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from getpatter.services.tool_executor import _validate_webhook_url
+from getpatter.tools.tool_executor import _validate_webhook_url
 
 
 class TestValidateWebhookUrl:
