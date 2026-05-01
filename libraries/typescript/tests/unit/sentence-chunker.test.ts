@@ -1,5 +1,16 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { SentenceChunker, DEFAULT_MIN_SENTENCE_LEN } from '../../src/sentence-chunker';
+import {
+  DEFAULT_MIN_SENTENCE_LEN,
+  HONORIFICS_ALL,
+  HONORIFICS_BY_LANGUAGE,
+  HONORIFICS_DE,
+  HONORIFICS_EN,
+  HONORIFICS_ES,
+  HONORIFICS_FR,
+  HONORIFICS_IT,
+  HONORIFICS_PT,
+  SentenceChunker,
+} from '../../src/sentence-chunker';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -69,9 +80,9 @@ describe('SentenceChunker', () => {
 
   describe('constructor', () => {
     it('uses DEFAULT_MIN_SENTENCE_LEN when no options provided', () => {
-      // Verify via behaviour: a short push that would only emit if min were 0
+      // Buffer with no terminator must not flush regardless of min length.
       const c = new SentenceChunker();
-      expect(c.push('Hi!')).toEqual([]);
+      expect(c.push('Hi there')).toEqual([]);
     });
 
     it('accepts a custom minSentenceLen', () => {
@@ -463,18 +474,17 @@ describe('SentenceChunker', () => {
     });
 
     it('produces the expected sentences when fed token-by-token', () => {
-      // The short-flush path (added for low TTS TTFB on short greetings)
-      // may emit small complete sentences early, so token-by-token streaming
-      // can produce up to ~30% more sentences than the bulk reference. We
-      // therefore validate content equivalence (after whitespace
-      // normalisation) rather than the exact split.
+      // With Bug #49's single-word short-flush default, char-by-char
+      // streaming may emit many more sentences than the bulk reference
+      // (every short greeting "Hi!", "Hey!", "Hello!" flushes individually).
+      // We validate content equivalence (after whitespace normalisation)
+      // rather than the exact count.
       const c = new SentenceChunker(); // default minSentenceLen = 20
       const pushed = streamText(c, REFERENCE_TEXT);
       const flushed = c.flush();
       const all = [...pushed, ...flushed];
 
       expect(all.length).toBeGreaterThanOrEqual(EXPECTED_MIN_20.length);
-      expect(all.length).toBeLessThanOrEqual(EXPECTED_MIN_20.length + 4);
 
       const normalise = (s: string) => s.replace(/\s+/g, ' ').trim();
       expect(normalise(all.join(' '))).toBe(normalise(EXPECTED_MIN_20.join(' ')));
@@ -501,16 +511,25 @@ describe('SentenceChunker', () => {
       expect(c.push('Are you?')).toEqual(['Are you?']);
     });
 
-    it('does NOT emit single-word "Sì." standalone', () => {
+    it('emits single-word "Sì." on terminator (Bug #49)', () => {
+      // Bug #49 — for phone calls a one-word reply must reach TTS without
+      // waiting for `flush()`. Acronym/honorific guards still block the
+      // dangerous cases ("U.S.", "Mr.").
       const c = new SentenceChunker();
-      expect(c.push('Sì.')).toEqual([]);
-      // Survives a flush though.
-      expect(c.flush()).toEqual(['Sì.']);
+      expect(c.push('Sì.')).toEqual(['Sì.']);
+      expect(c.flush()).toEqual([]);
     });
 
-    it('does NOT emit single-word "Yes."', () => {
+    it('emits single-word "Yes." on terminator (Bug #49)', () => {
       const c = new SentenceChunker();
-      expect(c.push('Yes.')).toEqual([]);
+      expect(c.push('Yes.')).toEqual(['Yes.']);
+    });
+
+    it('legacy: minWordsForShortFlush=2 keeps single words buffered', () => {
+      // Bumping the threshold restores the pre-Bug-#49 behaviour.
+      const c = new SentenceChunker({ minWordsForShortFlush: 2 });
+      expect(c.push('Sì.')).toEqual([]);
+      expect(c.flush()).toEqual(['Sì.']);
     });
 
     it('does NOT flush a buffer with no terminator', () => {
@@ -715,5 +734,240 @@ describe('SentenceChunker — aggressive first-clause flush', () => {
     const out = [...c.push('Hi, '), ...c.push('hello there.')];
     out.push(...c.flush());
     expect(out).toEqual(['Hi, hello there.']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bug #48 — per-language honorifics / abbreviations
+// ---------------------------------------------------------------------------
+
+describe('SentenceChunker — per-language honorifics (Bug #48)', () => {
+  // Helper: pushes a full text, then flushes, and returns all emitted sentences.
+  const split = (text: string, minSentenceLen = 1): string[] => {
+    const c = new SentenceChunker({ minSentenceLen });
+    return [...c.push(text), ...c.flush()];
+  };
+
+  // ---------------------------- English ---------------------------- //
+
+  it('English: "Mr. Smith joined us." stays as one sentence', () => {
+    const out = split('Mr. Smith joined us.');
+    expect(out).toHaveLength(1);
+    expect(out[0]).toContain('Mr. Smith');
+  });
+
+  it('English negative: "Map. Then we left." splits (Map is not an honorific)', () => {
+    const out = split('Map. Then we left.');
+    expect(out).toHaveLength(2);
+  });
+
+  // ---------------------------- Spanish ---------------------------- //
+
+  it('Spanish: "Sra. García" stays as one sentence', () => {
+    const out = split('Buenos días Sra. García.');
+    expect(out).toHaveLength(1);
+    expect(out[0]).toContain('Sra. García');
+  });
+
+  it('Spanish: "Dra. Fernández" stays as one sentence', () => {
+    const out = split('La Dra. Fernández llegó temprano.');
+    expect(out).toHaveLength(1);
+  });
+
+  it('Spanish: "Lic. Ramírez" stays as one sentence', () => {
+    const out = split('El Lic. Ramírez firmó.');
+    expect(out).toHaveLength(1);
+  });
+
+  it('Spanish negative: "Pan. Comemos a las dos." splits', () => {
+    const out = split('Pan. Comemos a las dos.');
+    expect(out).toHaveLength(2);
+  });
+
+  // ---------------------------- German ---------------------------- //
+
+  it('German: "Hr. Müller" stays as one sentence', () => {
+    const out = split('Guten Tag Hr. Müller.');
+    expect(out).toHaveLength(1);
+    expect(out[0]).toContain('Hr. Müller');
+  });
+
+  it('German: "Fr. Schmidt" stays as one sentence', () => {
+    const out = split('Hallo Fr. Schmidt.');
+    expect(out).toHaveLength(1);
+  });
+
+  it('German: "z.B." inline stays as one sentence', () => {
+    const out = split('Es gibt viele Optionen, z.B. rote oder blaue.');
+    expect(out).toHaveLength(1);
+    expect(out[0]).toContain('z.B.');
+  });
+
+  it('German negative: "Tag. Wir gehen jetzt." splits', () => {
+    const out = split('Tag. Wir gehen jetzt.');
+    expect(out).toHaveLength(2);
+  });
+
+  // ---------------------------- Italian ---------------------------- //
+
+  it('Italian: "Dott. Rossi" stays as one sentence', () => {
+    const out = split('Buongiorno Dott. Rossi.');
+    expect(out).toHaveLength(1);
+    expect(out[0]).toContain('Dott. Rossi');
+  });
+
+  it('Italian: "Sig.ra Bianchi" stays as one sentence', () => {
+    const out = split('Buongiorno Sig.ra Bianchi, come va?');
+    expect(out).toHaveLength(1);
+    expect(out[0]).toContain('Sig.ra Bianchi');
+  });
+
+  it('Italian negative: "Pane. Mangiamo alle due." splits', () => {
+    const out = split('Pane. Mangiamo alle due.');
+    expect(out).toHaveLength(2);
+  });
+
+  // ---------------------------- French ---------------------------- //
+
+  it('French: "Mme. Dupont" stays as one sentence', () => {
+    const out = split('Bonjour Mme. Dupont.');
+    expect(out).toHaveLength(1);
+    expect(out[0]).toContain('Mme. Dupont');
+  });
+
+  it('French: "Pr. Martin" stays as one sentence', () => {
+    const out = split('Le Pr. Martin enseigne ici.');
+    expect(out).toHaveLength(1);
+  });
+
+  it('French: "Mlle. Leroy" stays as one sentence', () => {
+    const out = split('Mlle. Leroy est arrivée hier.');
+    expect(out).toHaveLength(1);
+  });
+
+  it('French negative: "Pain. Nous mangeons à deux." splits', () => {
+    const out = split('Pain. Nous mangeons à deux.');
+    expect(out).toHaveLength(2);
+  });
+
+  // ---------------------------- Portuguese ---------------------------- //
+
+  it('Portuguese: "Sr. Silva" stays as one sentence', () => {
+    const out = split('Bom dia Sr. Silva.');
+    expect(out).toHaveLength(1);
+    expect(out[0]).toContain('Sr. Silva');
+  });
+
+  it('Portuguese: "Eng. Costa" stays as one sentence', () => {
+    const out = split('O Eng. Costa aprovou o projeto.');
+    expect(out).toHaveLength(1);
+  });
+
+  it('Portuguese negative: "Pão. Comemos às duas." splits', () => {
+    const out = split('Pão. Comemos às duas.');
+    expect(out).toHaveLength(2);
+  });
+
+  // -------------------- Aggregation invariants -------------------- //
+
+  it('HONORIFICS_ALL is the union of every per-language list', () => {
+    const union = new Set<string>();
+    for (const prefixes of Object.values(HONORIFICS_BY_LANGUAGE)) {
+      for (const p of prefixes) union.add(p);
+    }
+    expect(new Set(HONORIFICS_ALL)).toEqual(union);
+  });
+
+  it('HONORIFICS_ALL is sorted longest-first', () => {
+    for (let i = 1; i < HONORIFICS_ALL.length; i++) {
+      expect(HONORIFICS_ALL[i - 1].length).toBeGreaterThanOrEqual(
+        HONORIFICS_ALL[i].length,
+      );
+    }
+  });
+
+  it('per-language constants are non-empty', () => {
+    expect(HONORIFICS_EN.length).toBeGreaterThan(0);
+    expect(HONORIFICS_IT.length).toBeGreaterThan(0);
+    expect(HONORIFICS_ES.length).toBeGreaterThan(0);
+    expect(HONORIFICS_DE.length).toBeGreaterThan(0);
+    expect(HONORIFICS_FR.length).toBeGreaterThan(0);
+    expect(HONORIFICS_PT.length).toBeGreaterThan(0);
+  });
+
+  it('chunker accepts every supported language tag', () => {
+    for (const lang of ['en', 'it', 'es', 'de', 'fr', 'pt', 'multi']) {
+      const c = new SentenceChunker({ language: lang });
+      expect(c.push('Hello world.')).toEqual(['Hello world.']);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bug #49 — single-word "Yes." flushes during stream
+// ---------------------------------------------------------------------------
+
+describe('SentenceChunker — single-word flush (Bug #49)', () => {
+  it('flushes "Yes." on push — TTS does not have to wait for flush()', () => {
+    const c = new SentenceChunker();
+    expect(c.push('Yes.')).toEqual(['Yes.']);
+  });
+
+  it('flushes "Done!" on push', () => {
+    const c = new SentenceChunker();
+    expect(c.push('Done!')).toEqual(['Done!']);
+  });
+
+  it('flushes "Really?" on push', () => {
+    const c = new SentenceChunker();
+    expect(c.push('Really?')).toEqual(['Really?']);
+  });
+
+  it('flushes diacritic single-word "Sì."', () => {
+    const c = new SentenceChunker();
+    expect(c.push('Sì.')).toEqual(['Sì.']);
+  });
+
+  it('flushes Japanese "はい。" with fullwidth period', () => {
+    const c = new SentenceChunker();
+    expect(c.push('はい。')).toEqual(['はい。']);
+  });
+
+  it('flushes word-then-period split across two pushes', () => {
+    const c = new SentenceChunker();
+    expect(c.push('Yes')).toEqual([]);
+    expect(c.push('.')).toEqual(['Yes.']);
+  });
+
+  // Regression guards — dangerous cases must still NOT flush.
+
+  it('does not flush acronym "U.S."', () => {
+    const c = new SentenceChunker();
+    expect(c.push('U.S.')).toEqual([]);
+  });
+
+  it('does not flush "f(x) = 2." (digit before terminator)', () => {
+    const c = new SentenceChunker();
+    expect(c.push('f(x) = 2.')).toEqual([]);
+  });
+
+  it('does not flush honorific-only "Mr."', () => {
+    const c = new SentenceChunker();
+    expect(c.push('Mr.')).toEqual([]);
+  });
+
+  it('does not flush honorific-only "Sr." (Spanish)', () => {
+    const c = new SentenceChunker();
+    expect(c.push('Sr.')).toEqual([]);
+  });
+
+  it('does not flush honorific-only "Hr." (German)', () => {
+    const c = new SentenceChunker();
+    expect(c.push('Hr.')).toEqual([]);
+  });
+
+  it('does not flush honorific-only "Mme." (French)', () => {
+    const c = new SentenceChunker();
+    expect(c.push('Mme.')).toEqual([]);
   });
 });

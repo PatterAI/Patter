@@ -12,11 +12,87 @@ export const DEFAULT_MIN_SENTENCE_LEN = 20;
 
 /**
  * Minimum word count for emitting a "short" sentence (one whose total length
- * is below `minSentenceLen`) as soon as a terminator is seen. Avoids emitting
- * standalone single-word utterances ("Sì.", "Yes.") while still letting short
- * greetings ("Hi there!") flush immediately for low TTS TTFB.
+ * is below `minSentenceLen`) as soon as a terminator is seen. Default is 1:
+ * a single-word reply ("Yes.", "Done.") flushes immediately on the
+ * terminator so TTS can speak it without waiting for `flush()`. Acronym
+ * and decimal guards in `maybeShortFlush` still block dangerous cases
+ * ("U.S.", "f(x) = 2."). Bumping this to 2+ keeps single-word utterances
+ * buffered until `flush()` is called by the caller.
  */
-export const DEFAULT_MIN_WORDS_FOR_SHORT_FLUSH = 2;
+export const DEFAULT_MIN_WORDS_FOR_SHORT_FLUSH = 1;
+
+// ---------------------------------------------------------------------------
+// Per-language honorific / abbreviation prefixes.
+//
+// Each entry is the ALPHA prefix (no trailing period) — the regex framework
+// in `splitSentences` appends the `[.]` itself. We merge all language lists
+// into a single regex alternation so the chunker handles mixed-language text
+// correctly out of the box (this is the behaviour shipped since the SDK
+// introduced sentence chunking; per-language constants are an organisational
+// refactor that also lets callers verify per-language coverage in tests).
+//
+// Single-letter honorifics (French "M.", "A.") are deliberately omitted —
+// they are handled by the existing `\\s + alphabets + [.] ` rule which
+// preserves any single-letter-period sequence.
+// ---------------------------------------------------------------------------
+
+/** English honorifics (NLTK Punkt training set + common military/civic). */
+export const HONORIFICS_EN: readonly string[] = [
+  'Mr', 'St', 'Mrs', 'Ms', 'Dr', 'Prof',
+  'Gen', 'Sen', 'Rep', 'Lt', 'Cpt', 'Capt', 'Col', 'Cmdr', 'Adm',
+];
+
+/**
+ * Italian honorifics. Compound abbreviations like "Sig.ra" / "Dott.ssa" /
+ * "Prof.ssa" are handled implicitly: the prefix regex matches the leading
+ * word ("Sig", "Dott", "Prof") and the trailing letters after the period
+ * are preserved as part of the same token by the marker-replacement pass.
+ */
+export const HONORIFICS_IT: readonly string[] = [
+  'Sig', 'Sgr', 'Dott', 'Prof', 'Avv', 'Ing', 'Geom', 'Rag',
+  'Arch', 'On', 'Egr', 'Spett', 'Gent', 'Ill',
+];
+
+/** Spanish honorifics. */
+export const HONORIFICS_ES: readonly string[] = [
+  'Sr', 'Sra', 'Sres', 'Sras', 'Srta', 'Srtas',
+  'Dr', 'Dra', 'Dres', 'Lic', 'Licda', 'Ing', 'Prof', 'Profa',
+  'Arq', 'Mtro', 'Mtra',
+];
+
+/** German honorifics. */
+export const HONORIFICS_DE: readonly string[] = [
+  'Hr', 'Fr', 'Frl', 'Dr', 'Prof', 'Dipl', 'Mag',
+];
+
+/** French honorifics. */
+export const HONORIFICS_FR: readonly string[] = [
+  'Mme', 'Mmes', 'Mlle', 'Mlles', 'MM', 'Dr', 'Pr', 'Mgr', 'Me',
+];
+
+/** Portuguese honorifics (European + Brazilian). */
+export const HONORIFICS_PT: readonly string[] = [
+  'Sr', 'Sra', 'Srs', 'Sras', 'Srta', 'Srtas',
+  'Dr', 'Dra', 'Eng', 'Enga', 'Prof', 'Profa',
+];
+
+/** Mapping for callers who want to know which language ships which list. */
+export const HONORIFICS_BY_LANGUAGE: Readonly<Record<string, readonly string[]>> = {
+  en: HONORIFICS_EN,
+  it: HONORIFICS_IT,
+  es: HONORIFICS_ES,
+  de: HONORIFICS_DE,
+  fr: HONORIFICS_FR,
+  pt: HONORIFICS_PT,
+};
+
+/**
+ * Union of every language list, sorted longest-first so regex alternation
+ * prefers the most specific match (e.g. "Sras" before "Sr").
+ */
+export const HONORIFICS_ALL: readonly string[] = Array.from(
+  new Set(Object.values(HONORIFICS_BY_LANGUAGE).flat()),
+).sort((a, b) => b.length - a.length || a.localeCompare(b));
 
 /**
  * Sentence-terminating characters. Includes Latin (`. ! ?`), full-width CJK
@@ -64,6 +140,17 @@ export const DEFAULT_AGGRESSIVE_FIRST_MIN_LEN = 40;
 const CURRENCY_SYMBOLS = '$€£¥₹₩';
 
 /**
+ * Pre-built regex alternation for honorific prefixes (longest-first so that
+ * "Sras" matches before "Sr"). Built once at module load.
+ */
+const HONORIFICS_REGEX_ALT = HONORIFICS_ALL.map((p) =>
+  p.replace(/[\\^$.|?*+()[\]{}]/g, '\\$&'),
+).join('|');
+
+/** Honorifics as a Set for O(1) word-membership tests in the short-flush path. */
+const HONORIFICS_SET = new Set<string>(HONORIFICS_ALL);
+
+/**
  * Split text into sentences using regex marker replacement.
  *
  * Returns an array of [sentence, startPos, endPos] tuples.
@@ -74,13 +161,11 @@ function splitSentences(
   minSentenceLen: number = DEFAULT_MIN_SENTENCE_LEN,
 ): Array<[string, number, number]> {
   const alphabets = '([A-Za-z])';
-  // Title/honorific prefixes that take a trailing period (English + Italian).
-  // Italian: Sig, Sgr, Dott, Prof, Avv, Ing, Geom, Rag, Arch, On, Egr, Spett,
-  // Gent, Ill. English additions from NLTK Punkt: Gen, Sen, Rep, Lt,
-  // Cpt, Capt, Col, Cmdr, Adm.
-  const prefixes =
-    '(Mr|St|Mrs|Ms|Dr|Sig|Sgr|Dott|Prof|Avv|Ing|Geom|Rag|Arch|On|Egr|' +
-    'Spett|Gent|Ill|Gen|Sen|Rep|Lt|Cpt|Capt|Col|Cmdr|Adm)[.]';
+  // Title/honorific prefixes that take a trailing period. Sourced from the
+  // union of every language list in `HONORIFICS_BY_LANGUAGE` (en / it / es /
+  // de / fr / pt). The period after these is preserved (treated as part of
+  // the word, not as sentence end).
+  const prefixes = `(${HONORIFICS_REGEX_ALT})[.]`;
   // Suffix-style abbreviations. EN additions from NLTK Punkt:
   // vs, etc, No, Vol, pp, cf, ca, op, plus address-style abbrevs Mt, Hwy,
   // Rt, Pl, Ave, Blvd, Sq.
@@ -228,10 +313,11 @@ export class SentenceChunker {
    *   sentence, all but the last (potentially incomplete) are emitted.
    * - **Short-flush path** — when the buffer is shorter than `minSentenceLen`
    *   but ends with a sentence terminator AND has at least
-   *   `minWordsForShortFlush` whitespace-separated words, emit it
-   *   immediately. This drops TTS TTFB on short greetings like `"Hi there!"`
-   *   while keeping single-word utterances (`"Sì."`) buffered until
-   *   `flush()`.
+   *   `minWordsForShortFlush` whitespace-separated words (default 1 — a
+   *   single-word reply like `"Yes."` flushes immediately for low TTS
+   *   TTFB). Acronym ("U.S.") and decimal ("f(x) = 2.") guards still block
+   *   dangerous cases. Bump `minWordsForShortFlush` to 2+ to keep
+   *   single-word utterances buffered until `flush()`.
    */
   push(token: string): string[] {
     this.buffer += token;
@@ -277,16 +363,19 @@ export class SentenceChunker {
    *
    * A buffer qualifies when **all** of these hold:
    * 1. Last non-whitespace char is a sentence terminator.
-   * 2. Word count is at least `minWordsForShortFlush` (default 2 — keeps
-   *    single-word "Sì." / "Yes." buffered until `flush()`).
+   * 2. Word count is at least `minWordsForShortFlush` (default 1 —
+   *    single-word replies like `"Yes."` flush immediately).
    * 3. The buffer contains exactly one terminator (the trailing one).
    *    Multiple terminators mean we may be mid-stream of a longer merged
    *    utterance like `"Hey! Hi! Hello! This is a sentence."` — let the
    *    standard path keep merging.
    * 4. The char immediately before the terminator is NOT a digit (avoids
    *    decimal mid-stream like `"f(x) = x * 2."` flushing before `54`).
-   * 5. The char immediately before the terminator is NOT an uppercase
-   *    ASCII letter (avoids acronym patterns like `"U.S."` / `"U."`).
+   * 5. The trailing word is NOT a short ASCII all-caps acronym of 1-3 chars
+   *    (`"U."` / `"U.S."` / `"USA."`).
+   * 6. The trailing word is NOT a known honorific from any of the
+   *    per-language `HONORIFICS_*` constants (`"Mr."`, `"Sr."`, `"Dr."`,
+   *    `"Hr."`, `"Mme."`, ...).
    */
   private maybeShortFlush(): string[] {
     const stripped = this.buffer.replace(/\s+$/, '');
@@ -322,6 +411,9 @@ export class SentenceChunker {
         const tokens = stripTerm.split(/\s+/).filter((w) => w.length > 0);
         const lastWord = tokens.length > 0 ? tokens[tokens.length - 1] : '';
         if (/^[A-Z]{1,3}$/.test(lastWord)) return [];
+        // Don't flush when trailing word is a known honorific — name almost
+        // certainly follows ("Mr. Theo", "Sr. García", "Hr. Müller").
+        if (HONORIFICS_SET.has(lastWord)) return [];
       }
     }
 

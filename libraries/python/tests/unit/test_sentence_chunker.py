@@ -6,6 +6,14 @@ import pytest
 
 from getpatter.services.sentence_chunker import (
     DEFAULT_MIN_SENTENCE_LEN,
+    HONORIFICS_ALL,
+    HONORIFICS_BY_LANGUAGE,
+    HONORIFICS_DE,
+    HONORIFICS_EN,
+    HONORIFICS_ES,
+    HONORIFICS_FR,
+    HONORIFICS_IT,
+    HONORIFICS_PT,
     SentenceChunker,
     _split_sentences,
 )
@@ -481,17 +489,41 @@ class TestSentenceChunkerShortFlush:
         result = chunker.push("Are you?")
         assert result == ["Are you?"]
 
-    def test_single_word_does_not_flush(self) -> None:
-        """Single-word utterances stay buffered until ``flush()``."""
+    def test_single_word_flushes_on_terminator(self) -> None:
+        """Single-word utterances flush immediately on the terminator
+        (Bug #49 — see DEFAULT_MIN_WORDS_FOR_SHORT_FLUSH=1).
+
+        For phone calls a one-word LLM reply ("Sì.", "Yes.", "Done.") must
+        reach TTS without waiting for the caller to invoke ``flush()``.
+        """
         chunker = SentenceChunker()
+        assert chunker.push("Sì.") == ["Sì."]
+        assert chunker._buffer == ""
+
+    def test_yes_alone_flushes_on_terminator(self) -> None:
+        """Bug #49 — ``"Yes."`` is the entire reply and must flush now."""
+        chunker = SentenceChunker()
+        assert chunker.push("Yes.") == ["Yes."]
+        assert chunker._buffer == ""
+
+    def test_done_alone_flushes_on_terminator(self) -> None:
+        """Bug #49 — ``"Done!"`` is the entire reply and must flush now."""
+        chunker = SentenceChunker()
+        assert chunker.push("Done!") == ["Done!"]
+
+    def test_question_single_word_flushes(self) -> None:
+        """Bug #49 — single-word question still flushes on ``?``."""
+        chunker = SentenceChunker()
+        assert chunker.push("Really?") == ["Really?"]
+
+    def test_legacy_min_words_two_keeps_single_words_buffered(self) -> None:
+        """Setting ``min_words_for_short_flush=2`` restores the pre-Bug-#49
+        behaviour where single-word utterances stay buffered until ``flush()``.
+        """
+        chunker = SentenceChunker(min_words_for_short_flush=2)
         assert chunker.push("Sì.") == []
         assert chunker._buffer == "Sì."
-        # Survives a flush.
         assert chunker.flush() == ["Sì."]
-
-    def test_yes_alone_does_not_flush(self) -> None:
-        chunker = SentenceChunker()
-        assert chunker.push("Yes.") == []
 
     def test_no_terminator_does_not_flush(self) -> None:
         chunker = SentenceChunker()
@@ -560,20 +592,20 @@ class TestFullReferenceText:
         boundary artefact of the regex-marker algorithm when operating on
         short partial buffers.
 
-        With the short-flush path (added for low TTS TTFB on short greetings),
-        streaming may emit short multi-word sentences (e.g. "This is a test.")
-        as soon as their terminator arrives instead of merging them with the
-        next sentence.  We therefore allow up to ~30% more sentences than the
-        bulk reference and still validate every major content element.
+        With the short-flush path defaulting to ``min_words=1`` (Bug #49),
+        streaming may emit single-word and short multi-word sentences ("Hi!",
+        "Hey!", "This is a test.") as soon as their terminator arrives. Count
+        may diverge significantly from the bulk reference; content equivalence
+        is the strict check via ``content_markers``.
         """
         import re as _re
 
         normalised = _re.sub(r"\s+", " ", TEXT).strip()
         tokens = [w + " " for w in normalised.split(" ") if w]
         result = _chunker_all(tokens, min_sentence_len=20)
-        # Streaming may split fragments slightly more aggressively than bulk
-        # because the short-flush path emits genuine short sentences early.
-        assert len(EXPECTED_MIN_20) <= len(result) <= len(EXPECTED_MIN_20) + 4
+        # Streaming with single-word short-flush emits more sentences; the
+        # important invariants are content preservation and no-loss.
+        assert len(result) >= len(EXPECTED_MIN_20)
         joined = " ".join(result)
         # Content that must be present (spacing-independent checks)
         content_markers = [
@@ -593,13 +625,12 @@ class TestFullReferenceText:
     def test_full_text_char_by_char(self) -> None:
         """Feed TEXT one character at a time — most demanding streaming scenario.
 
-        Streaming permits the short-flush path to emit small complete
-        sentences early, so the count may exceed ``EXPECTED_MIN_20``. We
-        validate content equivalence (after whitespace normalisation) rather
-        than the exact split.
+        With Bug #49's single-word short-flush default, the count may exceed
+        ``EXPECTED_MIN_20`` significantly. We validate content equivalence
+        (after whitespace normalisation) rather than the exact split.
         """
         result = _chunker_all(list(TEXT), min_sentence_len=20)
-        assert len(EXPECTED_MIN_20) <= len(result) <= len(EXPECTED_MIN_20) + 4
+        assert len(result) >= len(EXPECTED_MIN_20)
         # Content must be equivalent to the bulk reference
         import re as _re
 
@@ -797,3 +828,243 @@ class TestAggressiveFirstFlush:
         out += c.flush()
         # "Hi, hello there." is 16 chars, well below 40 → no aggressive flush.
         assert out == ["Hi, hello there."]
+
+
+# ===========================================================================
+# Bug #48 — per-language honorifics / abbreviations
+# ===========================================================================
+
+
+@pytest.mark.unit
+class TestPerLanguageHonorifics:
+    """Honorifics from every supported language must NOT cause sentence
+    splits when they appear mid-clause.
+
+    The chunker merges every per-language list into a single regex (see
+    ``HONORIFICS_ALL``), so language detection is not required at runtime —
+    Spanish "Sr. García", German "Hr. Müller", and French "Mme. Dupont" all
+    work regardless of the ``language`` constructor argument.
+
+    Each language gets one positive case (honorific should NOT split) plus
+    one negative case (a same-shape but unrelated word SHOULD split).
+    """
+
+    # ------------------------- English ------------------------- #
+
+    def test_english_mr_does_not_split(self) -> None:
+        result = _sentences_only("Mr. Smith joined us.", min_sentence_len=1)
+        assert len(result) == 1
+        assert "Mr. Smith" in result[0]
+
+    def test_english_negative_unrelated_word_splits(self) -> None:
+        # "Map. Then" — "Map" is not in the honorific list → should split.
+        result = _sentences_only("Map. Then we left.", min_sentence_len=1)
+        assert len(result) == 2
+
+    # ------------------------- Spanish ------------------------- #
+
+    def test_spanish_sra_does_not_split(self) -> None:
+        result = _sentences_only("Buenos días Sra. García.", min_sentence_len=1)
+        assert len(result) == 1
+        assert "Sra. García" in result[0]
+
+    def test_spanish_dra_does_not_split(self) -> None:
+        result = _sentences_only(
+            "La Dra. Fernández llegó temprano.", min_sentence_len=1
+        )
+        assert len(result) == 1
+
+    def test_spanish_lic_does_not_split(self) -> None:
+        result = _sentences_only("El Lic. Ramírez firmó.", min_sentence_len=1)
+        assert len(result) == 1
+
+    def test_spanish_negative_unrelated_word_splits(self) -> None:
+        # "Pan." then "Comemos" — "Pan" not in honorific list → split.
+        result = _sentences_only("Pan. Comemos a las dos.", min_sentence_len=1)
+        assert len(result) == 2
+
+    # ------------------------- German ------------------------- #
+
+    def test_german_hr_does_not_split(self) -> None:
+        result = _sentences_only("Guten Tag Hr. Müller.", min_sentence_len=1)
+        assert len(result) == 1
+        assert "Hr. Müller" in result[0]
+
+    def test_german_fr_does_not_split(self) -> None:
+        result = _sentences_only("Hallo Fr. Schmidt.", min_sentence_len=1)
+        assert len(result) == 1
+
+    def test_german_zb_inline_does_not_split(self) -> None:
+        # "z.B." (zum Beispiel) — internal periods handled by the existing
+        # multi-letter-period pattern.
+        result = _sentences_only(
+            "Es gibt viele Optionen, z.B. rote oder blaue.", min_sentence_len=1
+        )
+        assert len(result) == 1
+        assert "z.B." in result[0]
+
+    def test_german_negative_unrelated_word_splits(self) -> None:
+        # "Tag." standalone is a sentence end.
+        result = _sentences_only("Tag. Wir gehen jetzt.", min_sentence_len=1)
+        assert len(result) == 2
+
+    # ------------------------- Italian ------------------------- #
+
+    def test_italian_dott_does_not_split(self) -> None:
+        result = _sentences_only("Buongiorno Dott. Rossi.", min_sentence_len=1)
+        assert len(result) == 1
+        assert "Dott. Rossi" in result[0]
+
+    def test_italian_sigra_does_not_split(self) -> None:
+        # Compound "Sig.ra" — internal period handled by Sig prefix rule.
+        result = _sentences_only(
+            "Buongiorno Sig.ra Bianchi, come va?", min_sentence_len=1
+        )
+        assert len(result) == 1
+        assert "Sig.ra Bianchi" in result[0]
+
+    def test_italian_negative_unrelated_word_splits(self) -> None:
+        result = _sentences_only("Pane. Mangiamo alle due.", min_sentence_len=1)
+        assert len(result) == 2
+
+    # ------------------------- French ------------------------- #
+
+    def test_french_mme_does_not_split(self) -> None:
+        result = _sentences_only("Bonjour Mme. Dupont.", min_sentence_len=1)
+        assert len(result) == 1
+        assert "Mme. Dupont" in result[0]
+
+    def test_french_pr_does_not_split(self) -> None:
+        result = _sentences_only("Le Pr. Martin enseigne ici.", min_sentence_len=1)
+        assert len(result) == 1
+
+    def test_french_mlle_does_not_split(self) -> None:
+        result = _sentences_only("Mlle. Leroy est arrivée hier.", min_sentence_len=1)
+        assert len(result) == 1
+
+    def test_french_negative_unrelated_word_splits(self) -> None:
+        result = _sentences_only("Pain. Nous mangeons à deux.", min_sentence_len=1)
+        assert len(result) == 2
+
+    # ------------------------- Portuguese ------------------------- #
+
+    def test_portuguese_sr_does_not_split(self) -> None:
+        result = _sentences_only("Bom dia Sr. Silva.", min_sentence_len=1)
+        assert len(result) == 1
+        assert "Sr. Silva" in result[0]
+
+    def test_portuguese_eng_does_not_split(self) -> None:
+        result = _sentences_only("O Eng. Costa aprovou o projeto.", min_sentence_len=1)
+        assert len(result) == 1
+
+    def test_portuguese_negative_unrelated_word_splits(self) -> None:
+        result = _sentences_only("Pão. Comemos às duas.", min_sentence_len=1)
+        assert len(result) == 2
+
+    # ------------------------- Aggregation invariants ------------------------- #
+
+    def test_honorifics_all_is_union_of_per_language_lists(self) -> None:
+        union = set()
+        for prefixes in HONORIFICS_BY_LANGUAGE.values():
+            union.update(prefixes)
+        assert set(HONORIFICS_ALL) == union
+
+    def test_honorifics_all_sorted_longest_first(self) -> None:
+        # Critical: longer entries must come first so regex alternation
+        # prefers "Sras" over "Sr".
+        for i in range(1, len(HONORIFICS_ALL)):
+            assert len(HONORIFICS_ALL[i - 1]) >= len(HONORIFICS_ALL[i])
+
+    def test_per_language_constants_are_tuples(self) -> None:
+        # Public constants must be immutable per the project's immutability rule.
+        for name, value in [
+            ("HONORIFICS_EN", HONORIFICS_EN),
+            ("HONORIFICS_IT", HONORIFICS_IT),
+            ("HONORIFICS_ES", HONORIFICS_ES),
+            ("HONORIFICS_DE", HONORIFICS_DE),
+            ("HONORIFICS_FR", HONORIFICS_FR),
+            ("HONORIFICS_PT", HONORIFICS_PT),
+        ]:
+            assert isinstance(value, tuple), f"{name} must be a tuple"
+
+    def test_chunker_accepts_each_language_arg(self) -> None:
+        # The ``language`` parameter is opt-in with a safe default; passing
+        # any of the supported codes must not raise.
+        for lang in ("en", "it", "es", "de", "fr", "pt", "multi"):
+            chunker = SentenceChunker(language=lang)
+            # Sanity: same default behaviour regardless of language.
+            assert chunker.push("Hello world.") == ["Hello world."]
+
+
+# ===========================================================================
+# Bug #49 — single-word "Yes." flushes during stream
+# ===========================================================================
+
+
+@pytest.mark.unit
+class TestSingleWordFlushBug49:
+    """A one-word LLM reply ending in ``.``, ``!`` or ``?`` must reach TTS
+    on the terminator without the caller having to invoke ``flush()`` first.
+
+    The protective gates (digit-before-terminator, short-acronym, known
+    honorific) still block the dangerous cases.
+    """
+
+    def test_yes_period_flushes_on_push(self) -> None:
+        chunker = SentenceChunker()
+        assert chunker.push("Yes.") == ["Yes."]
+
+    def test_done_exclamation_flushes_on_push(self) -> None:
+        chunker = SentenceChunker()
+        assert chunker.push("Done!") == ["Done!"]
+
+    def test_really_question_flushes_on_push(self) -> None:
+        chunker = SentenceChunker()
+        assert chunker.push("Really?") == ["Really?"]
+
+    def test_si_with_diacritic_flushes(self) -> None:
+        chunker = SentenceChunker()
+        assert chunker.push("Sì.") == ["Sì."]
+
+    def test_japanese_single_word_flushes(self) -> None:
+        chunker = SentenceChunker()
+        # "はい。" is two-char Japanese for "yes" + fullwidth period.
+        assert chunker.push("はい。") == ["はい。"]
+
+    def test_single_word_split_across_two_pushes(self) -> None:
+        """Realistic streaming: word arrives in one token, period in next."""
+        chunker = SentenceChunker()
+        assert chunker.push("Yes") == []
+        assert chunker.push(".") == ["Yes."]
+
+    # --- still-blocked cases (regression guards) --- #
+
+    def test_blocked_acronym_us(self) -> None:
+        """``"U.S."`` is an acronym, not a sentence end — must not flush."""
+        chunker = SentenceChunker()
+        assert chunker.push("U.S.") == []
+
+    def test_blocked_decimal_mid_stream(self) -> None:
+        """``"f(x) = 2."`` is decimal-like — must not flush."""
+        chunker = SentenceChunker()
+        assert chunker.push("f(x) = 2.") == []
+
+    def test_blocked_honorific_mr(self) -> None:
+        """``"Mr."`` alone must not flush — name almost certainly follows."""
+        chunker = SentenceChunker()
+        assert chunker.push("Mr.") == []
+
+    def test_blocked_honorific_sr_spanish(self) -> None:
+        """Spanish ``"Sr."`` alone must not flush — name almost certainly follows."""
+        chunker = SentenceChunker()
+        assert chunker.push("Sr.") == []
+
+    def test_blocked_honorific_hr_german(self) -> None:
+        """German ``"Hr."`` alone must not flush."""
+        chunker = SentenceChunker()
+        assert chunker.push("Hr.") == []
+
+    def test_blocked_honorific_mme_french(self) -> None:
+        """French ``"Mme."`` alone must not flush."""
+        chunker = SentenceChunker()
+        assert chunker.push("Mme.") == []

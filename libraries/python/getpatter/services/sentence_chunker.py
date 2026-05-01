@@ -16,10 +16,149 @@ import re
 DEFAULT_MIN_SENTENCE_LEN = 20
 
 # Minimum word count for emitting a "short" sentence (one whose total length
-# is below ``min_sentence_len``) as soon as a terminator is seen. This avoids
-# emitting standalone single-word utterances ("Sì.", "Yes.") while still
-# letting short greetings ("Hi there!") flush immediately for low TTS TTFB.
-DEFAULT_MIN_WORDS_FOR_SHORT_FLUSH = 2
+# is below ``min_sentence_len``) as soon as a terminator is seen. Default is
+# 1: a single-word reply ("Yes.", "Done.") flushes immediately on the
+# terminator so TTS can speak it without waiting for ``flush()``. Acronym
+# and decimal guards in ``_maybe_short_flush`` still block dangerous cases
+# ("U.S.", "f(x) = 2."). Bumping this to 2+ keeps single-word utterances
+# buffered until ``flush()`` is called by the caller.
+DEFAULT_MIN_WORDS_FOR_SHORT_FLUSH = 1
+
+# ---------------------------------------------------------------------------
+# Per-language honorific / abbreviation prefixes.
+#
+# Each entry is the ALPHA prefix (no trailing period) — the regex framework
+# in ``_split_sentences`` appends the ``[.]`` itself. We merge all language
+# lists into a single regex alternation so the chunker handles mixed-language
+# text correctly out of the box (this is the behaviour shipped since the
+# SDK introduced sentence chunking; per-language constants are an
+# organisational refactor that also lets callers verify per-language
+# coverage in tests).
+#
+# Single-letter honorifics (French "M.", "A.") are deliberately omitted —
+# they are handled by the existing ``\\s + alphabets + [.] `` rule which
+# preserves any single-letter-period sequence.
+# ---------------------------------------------------------------------------
+
+# English (NLTK Punkt training set + common military/civic).
+HONORIFICS_EN = (
+    "Mr",
+    "St",
+    "Mrs",
+    "Ms",
+    "Dr",
+    "Prof",
+    "Gen",
+    "Sen",
+    "Rep",
+    "Lt",
+    "Cpt",
+    "Capt",
+    "Col",
+    "Cmdr",
+    "Adm",
+)
+
+# Italian. Compound abbreviations like "Sig.ra" / "Dott.ssa" / "Prof.ssa"
+# are handled implicitly: the prefix regex matches the leading word
+# ("Sig", "Dott", "Prof") and the trailing letters after the period are
+# preserved as part of the same token by the marker-replacement pass.
+HONORIFICS_IT = (
+    "Sig",
+    "Sgr",
+    "Dott",
+    "Prof",
+    "Avv",
+    "Ing",
+    "Geom",
+    "Rag",
+    "Arch",
+    "On",
+    "Egr",
+    "Spett",
+    "Gent",
+    "Ill",
+)
+
+# Spanish.
+HONORIFICS_ES = (
+    "Sr",
+    "Sra",
+    "Sres",
+    "Sras",
+    "Srta",
+    "Srtas",
+    "Dr",
+    "Dra",
+    "Dres",
+    "Lic",
+    "Licda",
+    "Ing",
+    "Prof",
+    "Profa",
+    "Arq",
+    "Mtro",
+    "Mtra",
+)
+
+# German.
+HONORIFICS_DE = (
+    "Hr",
+    "Fr",
+    "Frl",
+    "Dr",
+    "Prof",
+    "Dipl",
+    "Mag",
+)
+
+# French.
+HONORIFICS_FR = (
+    "Mme",
+    "Mmes",
+    "Mlle",
+    "Mlles",
+    "MM",
+    "Dr",
+    "Pr",
+    "Mgr",
+    "Me",
+)
+
+# Portuguese (European + Brazilian).
+HONORIFICS_PT = (
+    "Sr",
+    "Sra",
+    "Srs",
+    "Sras",
+    "Srta",
+    "Srtas",
+    "Dr",
+    "Dra",
+    "Eng",
+    "Enga",
+    "Prof",
+    "Profa",
+)
+
+# Mapping for callers who want to know which language ships which list.
+HONORIFICS_BY_LANGUAGE: dict[str, tuple[str, ...]] = {
+    "en": HONORIFICS_EN,
+    "it": HONORIFICS_IT,
+    "es": HONORIFICS_ES,
+    "de": HONORIFICS_DE,
+    "fr": HONORIFICS_FR,
+    "pt": HONORIFICS_PT,
+}
+
+# Union of every language list, sorted longest-first so regex alternation
+# prefers the most specific match (e.g. "Sras" before "Sr").
+HONORIFICS_ALL: tuple[str, ...] = tuple(
+    sorted(
+        {p for prefixes in HONORIFICS_BY_LANGUAGE.values() for p in prefixes},
+        key=lambda s: (-len(s), s),
+    )
+)
 
 # Sentence-terminating characters. Includes Latin (`. ! ?`), full-width CJK
 # (`。 ！ ？`), Japanese half-width (`｡`), full-width semicolon (`；`), full-
@@ -59,6 +198,11 @@ DEFAULT_AGGRESSIVE_FIRST_MIN_LEN = 40
 # decimal/thousands separator and must not be treated as a clause boundary.
 _CURRENCY_SYMBOLS = "$€£¥₹₩"
 
+# Pre-built regex alternation for honorific prefixes (longest-first so that
+# "Sras" matches before "Sra"). Kept at module scope so we build it once
+# rather than every call to ``_split_sentences``.
+_HONORIFICS_REGEX = "|".join(re.escape(p) for p in HONORIFICS_ALL)
+
 
 def _split_sentences(
     text: str,
@@ -71,15 +215,11 @@ def _split_sentences(
     The text must not contain literal ``<prd>`` or ``<stop>`` substrings.
     """
     alphabets = r"([A-Za-z])"
-    # Title/honorific prefixes that take a trailing period (English + Italian).
-    # The period after these is preserved (treated as part of the word, not as
-    # sentence end). Italian additions: Sig, Sgr, Dott, Prof, Avv, Ing, Geom,
-    # Rag, Arch, On, Egr, Spett, Gent, Ill. English additions from the NLTK
-    # Punkt training set: Gen, Sen, Rep, Lt, Cpt, Capt, Col, Cmdr, Adm.
-    prefixes = (
-        r"(Mr|St|Mrs|Ms|Dr|Sig|Sgr|Dott|Prof|Avv|Ing|Geom|Rag|Arch|On|Egr|"
-        r"Spett|Gent|Ill|Gen|Sen|Rep|Lt|Cpt|Capt|Col|Cmdr|Adm)[.]"
-    )
+    # Title/honorific prefixes that take a trailing period. Sourced from the
+    # union of every language list in ``HONORIFICS_BY_LANGUAGE`` (en / it /
+    # es / de / fr / pt). The period after these is preserved (treated as
+    # part of the word, not as sentence end).
+    prefixes = rf"({_HONORIFICS_REGEX})[.]"
     # Suffix-style abbreviations: typically lowercase Italian ones (ecc, art,
     # pag, …) plus the existing English company-suffix list. English additions
     # from the NLTK Punkt training set: vs, etc, e.g., i.e., No, Vol, pp, cf, ca, op.
@@ -202,9 +342,12 @@ class SentenceChunker:
         * **Short-flush path** — when the buffer is shorter than
           ``min_sentence_len`` but ends with a sentence terminator AND the
           preceding text has at least ``min_words_for_short_flush`` words
-          (default 2), emit it immediately. This drops TTS TTFB on short
-          greetings like ``"Hi there!"`` while keeping single-word
-          utterances (``"Sì."``) buffered until ``flush()``.
+          (default 1 — single-word replies like ``"Yes."`` flush immediately
+          for low TTS TTFB). Acronym ("U.S.") and decimal ("f(x) = 2.")
+          guards still block dangerous cases. Bump
+          ``min_words_for_short_flush`` to 2+ if you want the legacy
+          behaviour where single-word utterances stay buffered until
+          ``flush()``.
         """
         self._buffer += token
 
@@ -247,8 +390,8 @@ class SentenceChunker:
         A buffer qualifies when **all** of these hold:
 
         1. Last non-whitespace char is a sentence terminator.
-        2. Word count is at least ``min_words_for_short_flush`` (default 2 —
-           keeps single-word "Sì." / "Yes." buffered until ``flush()``).
+        2. Word count is at least ``min_words_for_short_flush`` (default 1 —
+           single-word replies like ``"Yes."`` flush immediately).
         3. The buffer contains exactly one terminator (the trailing one).
            Multiple terminators mean we may be mid-stream of a longer merged
            utterance like ``"Hey! Hi! Hello! This is a sentence."`` — let
@@ -256,9 +399,13 @@ class SentenceChunker:
         4. The char immediately before the terminator is **not** a digit
            (avoids decimal mid-stream like ``"f(x) = x * 2."`` flushing
            before the ``54`` arrives).
-        5. The char immediately before the terminator is **not** an
-           uppercase letter (avoids acronym patterns like ``"U.S."`` /
-           ``"U."`` flushing prematurely).
+        5. The trailing word is **not** a short ASCII all-caps acronym of
+           1-3 chars (``"U."`` / ``"U.S."`` / ``"USA."``) — those are
+           likely abbreviation periods, not sentence ends.
+        6. The trailing word is **not** a known honorific from any of the
+           per-language ``HONORIFICS_*`` constants (``"Mr."``, ``"Sr."``,
+           ``"Dr."``, ``"Hr."``, ``"Mme."``, ...) — those signal a name
+           continuation, not a sentence end.
 
         Together these gates preserve the merging behaviour of the standard
         path while letting genuine short greetings flush immediately for low
@@ -300,6 +447,12 @@ class SentenceChunker:
                 and last_word.isupper()
                 and len(last_word) <= 3
             ):
+                return []
+            # Don't flush when the trailing token is a known honorific — the
+            # next token will be a name (e.g. "Mr. Theo" / "Sr. García" /
+            # "Hr. Müller"). Only applies to "." since "Hi!" / "Yes?" never
+            # name-continue.
+            if terminator == "." and last_word in HONORIFICS_ALL:
                 return []
 
         self._buffer = ""
