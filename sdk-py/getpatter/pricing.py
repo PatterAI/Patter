@@ -17,38 +17,54 @@ bills.
 
 from __future__ import annotations
 
+from enum import StrEnum
+
 PRICING_VERSION: str = "2026.2"
 PRICING_LAST_UPDATED: str = "2026-04-24"
+
+
+class PricingUnit(StrEnum):
+    """Billing units used by ``DEFAULT_PRICING`` entries.
+
+    Subclassing :class:`str` keeps the values JSON-serialisable and
+    backwards-compatible with consumers that still compare against the
+    raw strings (``config.get("unit") == "minute"``).
+    """
+
+    MINUTE = "minute"
+    THOUSAND_CHARS = "1k_chars"
+    TOKEN = "token"
+
 
 DEFAULT_PRICING: dict[str, dict] = {
     # STT — per minute of audio processed.
     # Deepgram Nova-3 streaming (monolingual) — $0.0077/min. The previous
     # $0.0043 was the batch rate; streaming is ~80% more expensive.
     # Multilingual Nova-3 is $0.0092/min — override when needed.
-    "deepgram": {"unit": "minute", "price": 0.0077},
-    "whisper": {"unit": "minute", "price": 0.006},
+    "deepgram": {"unit": PricingUnit.MINUTE, "price": 0.0077},
+    "whisper": {"unit": PricingUnit.MINUTE, "price": 0.006},
     # AssemblyAI Universal-Streaming: $0.15/hr = $0.0025/min
-    "assemblyai": {"unit": "minute", "price": 0.0025},
+    "assemblyai": {"unit": PricingUnit.MINUTE, "price": 0.0025},
     # Cartesia ink-whisper streaming STT: ~$0.15/hr on usage plans
-    "cartesia_stt": {"unit": "minute", "price": 0.0025},
+    "cartesia_stt": {"unit": PricingUnit.MINUTE, "price": 0.0025},
     # Soniox real-time STT: $0.12/hr = $0.002/min
-    "soniox": {"unit": "minute", "price": 0.002},
+    "soniox": {"unit": PricingUnit.MINUTE, "price": 0.002},
     # Speechmatics Pro tier: $0.24/hr = $0.0040/min (new users land here).
     # Previous $0.0173 reflected a retired Standard tier; users were
     # being over-billed ~4.3x.
-    "speechmatics": {"unit": "minute", "price": 0.004},
+    "speechmatics": {"unit": PricingUnit.MINUTE, "price": 0.004},
     # TTS — per 1,000 characters synthesized.
     # ElevenLabs default model is eleven_flash_v2_5 at $0.06/1k via direct API.
     # The previous $0.18 matched only the Creator plan overage rate.
-    "elevenlabs": {"unit": "1k_chars", "price": 0.06},
-    "openai_tts": {"unit": "1k_chars", "price": 0.015},
-    "openai_tts_hd": {"unit": "1k_chars", "price": 0.030},
+    "elevenlabs": {"unit": PricingUnit.THOUSAND_CHARS, "price": 0.06},
+    "openai_tts": {"unit": PricingUnit.THOUSAND_CHARS, "price": 0.015},
+    "openai_tts_hd": {"unit": PricingUnit.THOUSAND_CHARS, "price": 0.030},
     # Cartesia Sonic TTS: ~$0.030/1k chars on usage plans
-    "cartesia_tts": {"unit": "1k_chars", "price": 0.030},
+    "cartesia_tts": {"unit": PricingUnit.THOUSAND_CHARS, "price": 0.030},
     # Rime mist v2: $0.030/1k chars pay-as-you-go
-    "rime": {"unit": "1k_chars", "price": 0.030},
+    "rime": {"unit": PricingUnit.THOUSAND_CHARS, "price": 0.030},
     # LMNT aurora/blizzard: $0.050/1k chars Indie overage
-    "lmnt": {"unit": "1k_chars", "price": 0.050},
+    "lmnt": {"unit": PricingUnit.THOUSAND_CHARS, "price": 0.050},
     # OpenAI Realtime — per token (actual tokens from response.done usage).
     # Calibrated for gpt-4o-mini-realtime-preview (the Patter default):
     #   audio  input  $10  / M  ->  0.00001    per token
@@ -57,7 +73,7 @@ DEFAULT_PRICING: dict[str, dict] = {
     #   text   output $2.40/ M  ->  0.0000024  per token
     # For gpt-4o-realtime-preview multiply by ~10, for gpt-realtime by ~3.
     "openai_realtime": {
-        "unit": "token",
+        "unit": PricingUnit.TOKEN,
         "audio_input_per_token": 0.00001,
         "audio_output_per_token": 0.00002,
         "text_input_per_token": 0.0000006,
@@ -72,8 +88,8 @@ DEFAULT_PRICING: dict[str, dict] = {
     # twilio default = US inbound local (the 99% case for voice agents
     # receiving calls on a local number). For US toll-free inbound ($0.022/min)
     # or US outbound local ($0.0140/min), override via Patter(pricing={...}).
-    "twilio": {"unit": "minute", "price": 0.0085},
-    "telnyx": {"unit": "minute", "price": 0.007},
+    "twilio": {"unit": PricingUnit.MINUTE, "price": 0.0085},
+    "telnyx": {"unit": PricingUnit.MINUTE, "price": 0.007},
 }
 
 
@@ -164,8 +180,12 @@ def calculate_realtime_cost(usage: dict, pricing: dict) -> float:
     cost += cached_audio_in * cached_audio_rate
     cost += (total_text_in - cached_text_in) * config.get("text_input_per_token", 0)
     cost += cached_text_in * cached_text_rate
-    cost += output_details.get("audio_tokens", 0) * config.get("audio_output_per_token", 0)
-    cost += output_details.get("text_tokens", 0) * config.get("text_output_per_token", 0)
+    cost += output_details.get("audio_tokens", 0) * config.get(
+        "audio_output_per_token", 0
+    )
+    cost += output_details.get("text_tokens", 0) * config.get(
+        "text_output_per_token", 0
+    )
     # Clamp ≥0 — mis-configured cached rates can never produce negative bill.
     return max(0.0, cost)
 
@@ -193,10 +213,9 @@ def calculate_realtime_cached_savings(usage: dict, pricing: dict) -> float:
     cached_audio = min(cached.get("audio_tokens", 0), total_audio)
     cached_text = min(cached.get("text_tokens", 0), total_text)
 
-    full_cost = (
-        cached_audio * config.get("audio_input_per_token", 0)
-        + cached_text * config.get("text_input_per_token", 0)
-    )
+    full_cost = cached_audio * config.get(
+        "audio_input_per_token", 0
+    ) + cached_text * config.get("text_input_per_token", 0)
     discounted_cost = cached_audio * cached_audio_rate + cached_text * cached_text_rate
     # Clamp >= 0. If a user overrides cached_*_input_per_token to a rate HIGHER
     # than full, the diff becomes negative -- meaningless as a savings figure,
@@ -217,12 +236,12 @@ LLM_PRICING: dict[str, dict[str, dict[str, float]]] = {
     "openai": {
         # Chat Completions LLM pricing (not Realtime — see DEFAULT_PRICING["openai_realtime"]).
         # Rates: per 1M tokens as of 2026-04-24.
-        "gpt-4o":      {"input": 2.50,  "output": 10.00, "cache_read": 1.25},
-        "gpt-4o-mini": {"input": 0.15,  "output":  0.60, "cache_read": 0.075},
-        "gpt-4.1":     {"input": 3.00,  "output": 12.00, "cache_read": 0.75},
-        "gpt-4.1-mini":{"input": 0.80,  "output":  3.20, "cache_read": 0.20},
-        "o3":          {"input": 2.00,  "output":  8.00, "cache_read": 0.50},
-        "o4-mini":     {"input": 1.10,  "output":  4.40, "cache_read": 0.275},
+        "gpt-4o": {"input": 2.50, "output": 10.00, "cache_read": 1.25},
+        "gpt-4o-mini": {"input": 0.15, "output": 0.60, "cache_read": 0.075},
+        "gpt-4.1": {"input": 3.00, "output": 12.00, "cache_read": 0.75},
+        "gpt-4.1-mini": {"input": 0.80, "output": 3.20, "cache_read": 0.20},
+        "o3": {"input": 2.00, "output": 8.00, "cache_read": 0.50},
+        "o4-mini": {"input": 1.10, "output": 4.40, "cache_read": 0.275},
     },
     "anthropic": {
         "claude-opus-4-7": {
