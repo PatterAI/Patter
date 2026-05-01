@@ -18,16 +18,37 @@ from __future__ import annotations
 import json
 import logging
 import os
+from enum import StrEnum
 from typing import AsyncIterator
 
 logger = logging.getLogger("getpatter")
 
-__all__ = ["AnthropicLLMProvider"]
+__all__ = ["AnthropicLLMProvider", "AnthropicModel"]
+
+
+class AnthropicModel(StrEnum):
+    """Canonical Anthropic Claude model identifiers and aliases.
+
+    The ``*_ALIAS`` members route to Anthropic's latest snapshot for the named
+    model line; the dated members pin a specific snapshot.
+    """
+
+    # Aliases — Anthropic resolves to the latest snapshot.
+    CLAUDE_HAIKU_4_5_ALIAS = "claude-haiku-4-5"
+    CLAUDE_SONNET_4_6_ALIAS = "claude-sonnet-4-6"
+    CLAUDE_OPUS_4_7_ALIAS = "claude-opus-4-7"
+    CLAUDE_3_5_SONNET_ALIAS = "claude-3-5-sonnet-latest"
+    CLAUDE_3_5_HAIKU_ALIAS = "claude-3-5-haiku-latest"
+
+    # Pinned snapshots.
+    CLAUDE_HAIKU_4_5_20251001 = "claude-haiku-4-5-20251001"
+    CLAUDE_3_5_SONNET_20241022 = "claude-3-5-sonnet-20241022"
+    CLAUDE_3_5_HAIKU_20241022 = "claude-3-5-haiku-20241022"
 
 
 # Default model. Anthropic requires an explicit max_tokens for every request;
 # we use a default of 1024 when the caller doesn't provide one.
-_DEFAULT_MODEL = "claude-haiku-4-5-20251001"
+_DEFAULT_MODEL = AnthropicModel.CLAUDE_HAIKU_4_5_20251001.value
 _DEFAULT_MAX_TOKENS = 1024
 
 # Anthropic prompt-caching beta header. Caching is now generally available,
@@ -36,11 +57,10 @@ _DEFAULT_MAX_TOKENS = 1024
 # See: https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
 _PROMPT_CACHING_BETA = "prompt-caching-2024-07-31"
 
-# Canonical model aliases (Anthropic routes these to the latest snapshot).
-# Re-exported by ``getpatter.llm.anthropic`` for documentation / DX.
-CLAUDE_HAIKU_45_ALIAS = "claude-haiku-4-5"
-CLAUDE_SONNET_46_ALIAS = "claude-sonnet-4-6"
-CLAUDE_OPUS_47_ALIAS = "claude-opus-4-7"
+# Backwards-compat module-level aliases (kept so existing imports keep working).
+CLAUDE_HAIKU_45_ALIAS = AnthropicModel.CLAUDE_HAIKU_4_5_ALIAS.value
+CLAUDE_SONNET_46_ALIAS = AnthropicModel.CLAUDE_SONNET_4_6_ALIAS.value
+CLAUDE_OPUS_47_ALIAS = AnthropicModel.CLAUDE_OPUS_4_7_ALIAS.value
 
 
 class AnthropicLLMProvider:
@@ -76,7 +96,7 @@ class AnthropicLLMProvider:
     def __init__(
         self,
         api_key: str | None = None,
-        model: str = _DEFAULT_MODEL,
+        model: Union[AnthropicModel, str] = _DEFAULT_MODEL,
         max_tokens: int = _DEFAULT_MAX_TOKENS,
         temperature: float | None = None,
         base_url: str | None = None,

@@ -32,7 +32,17 @@ const CEREBRAS_BASE_URL = 'https://api.cerebras.ai/v1';
 // ``qwen-3-235b-a22b-instruct-2507`` and ``zai-glm-4.7`` are reachable via
 // the ``model`` option. If your account tier returns 404 for the default,
 // the provider's stream() logs a recovery hint listing override candidates.
-const DEFAULT_MODEL = 'gpt-oss-120b';
+/** Known Cerebras Inference API models. Account tier gates availability. */
+export const CerebrasModel = {
+  GPT_OSS_120B: 'gpt-oss-120b',
+  LLAMA_3_1_8B: 'llama3.1-8b',
+  LLAMA_3_3_70B: 'llama-3.3-70b',
+  QWEN_3_235B_INSTRUCT: 'qwen-3-235b-a22b-instruct-2507',
+  ZAI_GLM_4_7: 'zai-glm-4.7',
+} as const;
+export type CerebrasModel = (typeof CerebrasModel)[keyof typeof CerebrasModel];
+
+const DEFAULT_MODEL: string = CerebrasModel.GPT_OSS_120B;
 const RETRY_BACKOFF_BASE_MS = 500;
 
 export interface CerebrasLLMOptions {

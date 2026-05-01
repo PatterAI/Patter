@@ -12,7 +12,20 @@ import { getLogger } from '../logger';
 import { VERSION } from '../version';
 
 const GROQ_BASE_URL = 'https://api.groq.com/openai/v1';
-const DEFAULT_MODEL = 'llama-3.3-70b-versatile';
+
+/** Known Groq Chat Completions models. Availability depends on account tier. */
+export const GroqModel = {
+  LLAMA_3_3_70B_VERSATILE: 'llama-3.3-70b-versatile',
+  LLAMA_3_1_8B_INSTANT: 'llama-3.1-8b-instant',
+  LLAMA_3_3_70B_SPECDEC: 'llama-3.3-70b-specdec',
+  LLAMA_3_70B: 'llama3-70b-8192',
+  LLAMA_3_8B: 'llama3-8b-8192',
+  MIXTRAL_8X7B: 'mixtral-8x7b-32768',
+  GEMMA2_9B: 'gemma2-9b-it',
+} as const;
+export type GroqModel = (typeof GroqModel)[keyof typeof GroqModel];
+
+const DEFAULT_MODEL: string = GroqModel.LLAMA_3_3_70B_VERSATILE;
 
 export interface GroqLLMOptions {
   apiKey: string;

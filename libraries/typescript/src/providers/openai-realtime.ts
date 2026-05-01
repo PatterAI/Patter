@@ -4,11 +4,60 @@ import { getLogger } from '../logger';
 /**
  * Supported OpenAI Realtime wire audio formats. See
  * https://platform.openai.com/docs/guides/realtime for the full list.
- * ``g711_ulaw`` matches what Twilio/Telnyx emit natively on the phone leg,
- * so no transcoding is needed. ``pcm16`` is used in the terminal test-mode
- * path and when the telephony provider negotiates L16/16000.
+ * `G711_ULAW` matches what Twilio/Telnyx emit natively on the phone leg, so
+ * no transcoding is needed. `PCM16` is used in the terminal test-mode path
+ * and when the telephony provider negotiates L16/16000.
  */
-export type OpenAIRealtimeAudioFormat = 'g711_ulaw' | 'g711_alaw' | 'pcm16';
+export const OpenAIRealtimeAudioFormat = {
+  G711_ULAW: 'g711_ulaw',
+  G711_ALAW: 'g711_alaw',
+  PCM16: 'pcm16',
+} as const;
+export type OpenAIRealtimeAudioFormat =
+  (typeof OpenAIRealtimeAudioFormat)[keyof typeof OpenAIRealtimeAudioFormat];
+
+/** Known OpenAI Realtime API model identifiers. */
+export const OpenAIRealtimeModel = {
+  GPT_REALTIME: 'gpt-realtime',
+  GPT_REALTIME_MINI: 'gpt-realtime-mini',
+  GPT_4O_REALTIME_PREVIEW: 'gpt-4o-realtime-preview',
+  GPT_4O_MINI_REALTIME_PREVIEW: 'gpt-4o-mini-realtime-preview',
+} as const;
+export type OpenAIRealtimeModel =
+  (typeof OpenAIRealtimeModel)[keyof typeof OpenAIRealtimeModel];
+
+/** OpenAI Realtime / TTS voice identifiers. */
+export const OpenAIVoice = {
+  ALLOY: 'alloy',
+  ASH: 'ash',
+  BALLAD: 'ballad',
+  CORAL: 'coral',
+  ECHO: 'echo',
+  FABLE: 'fable',
+  NOVA: 'nova',
+  ONYX: 'onyx',
+  SAGE: 'sage',
+  SHIMMER: 'shimmer',
+  VERSE: 'verse',
+} as const;
+export type OpenAIVoice = (typeof OpenAIVoice)[keyof typeof OpenAIVoice];
+
+/** Models accepted by `input_audio_transcription` on Realtime sessions. */
+export const OpenAITranscriptionModel = {
+  WHISPER_1: 'whisper-1',
+  GPT_4O_TRANSCRIBE: 'gpt-4o-transcribe',
+  GPT_4O_MINI_TRANSCRIBE: 'gpt-4o-mini-transcribe',
+} as const;
+export type OpenAITranscriptionModel =
+  (typeof OpenAITranscriptionModel)[keyof typeof OpenAITranscriptionModel];
+
+/** Server-side voice-activity-detection modes. */
+export const OpenAIRealtimeVADType = {
+  SERVER_VAD: 'server_vad',
+  SEMANTIC_VAD: 'semantic_vad',
+} as const;
+export type OpenAIRealtimeVADType =
+  (typeof OpenAIRealtimeVADType)[keyof typeof OpenAIRealtimeVADType];
 
 export type RealtimeEventCallback = (type: string, data: unknown) => void | Promise<void>;
 
@@ -41,14 +90,14 @@ export class OpenAIRealtimeAdapter {
 
   constructor(
     private readonly apiKey: string,
-    private readonly model: string = 'gpt-realtime-mini',
-    private readonly voice: string = 'alloy',
+    private readonly model: string = OpenAIRealtimeModel.GPT_REALTIME_MINI,
+    private readonly voice: string = OpenAIVoice.ALLOY,
     private readonly instructions: string = '',
     private readonly tools?: Array<{ name: string; description: string; parameters: Record<string, unknown> }>,
     // Audio wire format negotiated with OpenAI Realtime. Mirrors the Python
     // ``audio_format`` kwarg. Default ``g711_ulaw`` matches the Twilio/Telnyx
     // inbound codec so audio flows through without transcoding.
-    private readonly audioFormat: OpenAIRealtimeAudioFormat = 'g711_ulaw',
+    private readonly audioFormat: OpenAIRealtimeAudioFormat = OpenAIRealtimeAudioFormat.G711_ULAW,
     options: OpenAIRealtimeOptions = {},
   ) {
     this.options = options;
@@ -84,12 +133,14 @@ export class OpenAIRealtimeAdapter {
             voice: this.voice,
             instructions: this.instructions || 'You are a helpful voice assistant. Be concise.',
             turn_detection: {
-              type: this.options.vadType ?? 'server_vad',
+              type: this.options.vadType ?? OpenAIRealtimeVADType.SERVER_VAD,
               threshold: 0.5,
               prefix_padding_ms: 300,
               silence_duration_ms: this.options.silenceDurationMs ?? 300,
             },
-            input_audio_transcription: { model: this.options.inputAudioTranscriptionModel ?? 'whisper-1' },
+            input_audio_transcription: {
+              model: this.options.inputAudioTranscriptionModel ?? OpenAITranscriptionModel.WHISPER_1,
+            },
           };
           if (this.options.temperature !== undefined) config.temperature = this.options.temperature;
           if (this.options.maxResponseOutputTokens !== undefined) {
@@ -301,8 +352,12 @@ export class OpenAIRealtimeAdapter {
 function estimateAudioMs(chunk: Buffer, format: OpenAIRealtimeAudioFormat): number {
   if (chunk.length === 0) return 0;
   // G.711 u-law / a-law: 8 kHz, 1 byte/sample → 8 bytes/ms
-  if (format === 'g711_ulaw' || format === 'g711_alaw') return Math.floor(chunk.length / 8);
-  if (format === 'pcm16') {
+  if (
+    format === OpenAIRealtimeAudioFormat.G711_ULAW ||
+    format === OpenAIRealtimeAudioFormat.G711_ALAW
+  )
+    return Math.floor(chunk.length / 8);
+  if (format === OpenAIRealtimeAudioFormat.PCM16) {
     // PCM16 at 24 kHz (OpenAI Realtime default): 2 bytes/sample, 24 samples/ms
     // → 48 bytes/ms. The previous divisor of 32 assumed 16 kHz which under-
     // estimated duration by 33% and inflated the apparent audio-send rate.

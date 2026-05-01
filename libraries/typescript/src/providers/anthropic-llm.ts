@@ -23,7 +23,21 @@ import { getLogger } from '../logger';
 
 const DEFAULT_ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 const DEFAULT_ANTHROPIC_VERSION = '2023-06-01';
-const DEFAULT_MODEL = 'claude-haiku-4-5-20251001';
+
+/** Canonical Anthropic Claude model identifiers and aliases. */
+export const AnthropicModel = {
+  CLAUDE_HAIKU_4_5_ALIAS: 'claude-haiku-4-5',
+  CLAUDE_SONNET_4_6_ALIAS: 'claude-sonnet-4-6',
+  CLAUDE_OPUS_4_7_ALIAS: 'claude-opus-4-7',
+  CLAUDE_3_5_SONNET_ALIAS: 'claude-3-5-sonnet-latest',
+  CLAUDE_3_5_HAIKU_ALIAS: 'claude-3-5-haiku-latest',
+  CLAUDE_HAIKU_4_5_20251001: 'claude-haiku-4-5-20251001',
+  CLAUDE_3_5_SONNET_20241022: 'claude-3-5-sonnet-20241022',
+  CLAUDE_3_5_HAIKU_20241022: 'claude-3-5-haiku-20241022',
+} as const;
+export type AnthropicModel = (typeof AnthropicModel)[keyof typeof AnthropicModel];
+
+const DEFAULT_MODEL: string = AnthropicModel.CLAUDE_HAIKU_4_5_20251001;
 const DEFAULT_MAX_TOKENS = 1024;
 
 /**

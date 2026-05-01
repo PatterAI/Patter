@@ -12,14 +12,27 @@ forwarded to ``chat.completions.create`` automatically.
 from __future__ import annotations
 
 import os
+from enum import StrEnum
 
 from getpatter.services.llm_loop import OpenAILLMProvider
 
-__all__ = ["GroqLLMProvider"]
+__all__ = ["GroqLLMProvider", "GroqModel"]
+
+
+class GroqModel(StrEnum):
+    """Known Groq Chat Completions models. Availability depends on account tier."""
+
+    LLAMA_3_3_70B_VERSATILE = "llama-3.3-70b-versatile"
+    LLAMA_3_1_8B_INSTANT = "llama-3.1-8b-instant"
+    LLAMA_3_3_70B_SPECDEC = "llama-3.3-70b-specdec"
+    LLAMA_3_70B = "llama3-70b-8192"
+    LLAMA_3_8B = "llama3-8b-8192"
+    MIXTRAL_8X7B = "mixtral-8x7b-32768"
+    GEMMA2_9B = "gemma2-9b-it"
 
 
 _GROQ_BASE_URL = "https://api.groq.com/openai/v1"
-_DEFAULT_MODEL = "llama-3.3-70b-versatile"
+_DEFAULT_MODEL = GroqModel.LLAMA_3_3_70B_VERSATILE.value
 
 
 class GroqLLMProvider(OpenAILLMProvider):
@@ -44,7 +57,7 @@ class GroqLLMProvider(OpenAILLMProvider):
     def __init__(
         self,
         api_key: str | None = None,
-        model: str = _DEFAULT_MODEL,
+        model: Union[GroqModel, str] = _DEFAULT_MODEL,
         base_url: str = _GROQ_BASE_URL,
         **kwargs,
     ) -> None:

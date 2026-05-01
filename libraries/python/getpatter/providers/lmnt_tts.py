@@ -8,7 +8,8 @@ integrates with Patter's telephony pipeline without transcoding.
 from __future__ import annotations
 
 import os
-from typing import Any, AsyncIterator, Literal, Optional
+from enum import IntEnum, StrEnum
+from typing import Any, AsyncIterator, Optional
 
 from getpatter.providers.base import TTSProvider
 
@@ -19,9 +20,35 @@ except ImportError:  # pragma: no cover
 
 LMNT_BASE_URL = "https://api.lmnt.com/v1/ai/speech/bytes"
 
-LMNTAudioFormats = Literal["aac", "mp3", "mulaw", "raw", "wav"]
-LMNTModels = Literal["blizzard", "aurora"]
-LMNTSampleRate = Literal[8000, 16000, 24000]
+
+class LMNTAudioFormat(StrEnum):
+    """Supported LMNT audio output formats. ``RAW`` is PCM_S16LE."""
+
+    AAC = "aac"
+    MP3 = "mp3"
+    MULAW = "mulaw"
+    RAW = "raw"
+    WAV = "wav"
+
+
+class LMNTModel(StrEnum):
+    """LMNT TTS model families."""
+
+    BLIZZARD = "blizzard"
+    AURORA = "aurora"
+
+
+class LMNTSampleRate(IntEnum):
+    """Supported PCM sample rates for LMNT raw output."""
+
+    HZ_8000 = 8000
+    HZ_16000 = 16000
+    HZ_24000 = 24000
+
+
+# Backwards-compat aliases (existing imports keep working).
+LMNTAudioFormats = LMNTAudioFormat
+LMNTModels = LMNTModel
 
 
 class LMNTTTS(TTSProvider):
@@ -35,11 +62,11 @@ class LMNTTTS(TTSProvider):
         self,
         api_key: Optional[str] = None,
         *,
-        model: LMNTModels = "blizzard",
+        model: Union[LMNTModel, str] = LMNTModel.BLIZZARD,
         voice: str = "leah",
         language: Optional[str] = None,
-        format: LMNTAudioFormats = "raw",
-        sample_rate: LMNTSampleRate = 16000,
+        format: Union[LMNTAudioFormat, str] = LMNTAudioFormat.RAW,
+        sample_rate: Union[LMNTSampleRate, int] = LMNTSampleRate.HZ_16000,
         temperature: float = 1.0,
         top_p: float = 0.8,
         base_url: str = LMNT_BASE_URL,
@@ -60,7 +87,7 @@ class LMNTTTS(TTSProvider):
 
         # Per-model language defaults.
         if language is None:
-            language = "auto" if model == "blizzard" else "en"
+            language = "auto" if model == LMNTModel.BLIZZARD.value else "en"
 
         self.api_key = resolved_key
         self.model = model

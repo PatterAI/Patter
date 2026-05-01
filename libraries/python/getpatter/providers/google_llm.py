@@ -15,14 +15,40 @@ from __future__ import annotations
 import json
 import logging
 import os
+from enum import StrEnum
 from typing import Any, AsyncIterator
 
 logger = logging.getLogger("getpatter")
 
-__all__ = ["GoogleLLMProvider"]
+__all__ = ["GoogleLLMProvider", "GoogleModel", "GoogleVertexLocation"]
 
 
-_DEFAULT_MODEL = "gemini-2.5-flash"
+class GoogleModel(StrEnum):
+    """Known Google Gemini chat models."""
+
+    GEMINI_2_5_FLASH = "gemini-2.5-flash"
+    GEMINI_2_5_PRO = "gemini-2.5-pro"
+    GEMINI_2_0_FLASH = "gemini-2.0-flash"
+    GEMINI_2_0_FLASH_LITE = "gemini-2.0-flash-lite"
+    GEMINI_1_5_FLASH = "gemini-1.5-flash"
+    GEMINI_1_5_PRO = "gemini-1.5-pro"
+
+
+class GoogleVertexLocation(StrEnum):
+    """Common Vertex AI region codes accepted via the ``location`` arg."""
+
+    US_CENTRAL1 = "us-central1"
+    US_EAST1 = "us-east1"
+    US_EAST4 = "us-east4"
+    US_WEST1 = "us-west1"
+    EUROPE_WEST1 = "europe-west1"
+    EUROPE_WEST4 = "europe-west4"
+    ASIA_NORTHEAST1 = "asia-northeast1"
+    ASIA_SOUTHEAST1 = "asia-southeast1"
+
+
+_DEFAULT_MODEL = GoogleModel.GEMINI_2_5_FLASH.value
+_DEFAULT_VERTEX_LOCATION = GoogleVertexLocation.US_CENTRAL1.value
 
 
 class GoogleLLMProvider:
@@ -48,7 +74,7 @@ class GoogleLLMProvider:
     def __init__(
         self,
         api_key: str | None = None,
-        model: str = _DEFAULT_MODEL,
+        model: Union[GoogleModel, str] = _DEFAULT_MODEL,
         vertexai: bool = False,
         project: str | None = None,
         location: str | None = None,
@@ -73,7 +99,9 @@ class GoogleLLMProvider:
         resolved_key: str | None = None
         gcp_project = project or os.environ.get("GOOGLE_CLOUD_PROJECT")
         gcp_location = (
-            location or os.environ.get("GOOGLE_CLOUD_LOCATION") or "us-central1"
+            location
+            or os.environ.get("GOOGLE_CLOUD_LOCATION")
+            or _DEFAULT_VERTEX_LOCATION
         )
 
         if use_vertexai:

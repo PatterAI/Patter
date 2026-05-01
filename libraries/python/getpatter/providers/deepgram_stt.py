@@ -1,15 +1,56 @@
 import asyncio
 import json
-from typing import AsyncIterator
+from enum import IntEnum, StrEnum
+from typing import AsyncIterator, Union
 from urllib.parse import urlencode
 
 import websockets
 from websockets.exceptions import InvalidStatus
 
-from getpatter.exceptions import AuthenticationError, PatterConnectionError, RateLimitError
+from getpatter.exceptions import (
+    AuthenticationError,
+    PatterConnectionError,
+    RateLimitError,
+)
 from getpatter.providers.base import STTProvider, Transcript
 
 DEEPGRAM_WS_URL = "wss://api.deepgram.com/v1/listen"
+
+
+class DeepgramModel(StrEnum):
+    """Known Deepgram STT models."""
+
+    NOVA_3 = "nova-3"
+    NOVA_2 = "nova-2"
+    NOVA_2_PHONECALL = "nova-2-phonecall"
+    NOVA_2_GENERAL = "nova-2-general"
+    NOVA_2_MEETING = "nova-2-meeting"
+    NOVA = "nova"
+    ENHANCED = "enhanced"
+    BASE = "base"
+
+
+class DeepgramEncoding(StrEnum):
+    """Audio encodings accepted by Deepgram's streaming endpoint."""
+
+    LINEAR16 = "linear16"
+    MULAW = "mulaw"
+    ALAW = "alaw"
+    OPUS = "opus"
+    FLAC = "flac"
+    AMR_NB = "amr-nb"
+    AMR_WB = "amr-wb"
+
+
+class DeepgramSampleRate(IntEnum):
+    """Common PCM sample rates for Deepgram streaming input."""
+
+    HZ_8000 = 8000
+    HZ_16000 = 16000
+    HZ_24000 = 24000
+    HZ_44100 = 44100
+    HZ_48000 = 48000
+
 
 # Deepgram closes idle sockets after 10 s with no audio. Send a KeepAlive
 # text frame every 4 s — well inside the 3–5 s window recommended by
@@ -27,9 +68,9 @@ class DeepgramSTT(STTProvider):
         self,
         api_key: str,
         language: str = "en",
-        model: str = "nova-3",
-        encoding: str = "linear16",
-        sample_rate: int = 16000,
+        model: Union[DeepgramModel, str] = DeepgramModel.NOVA_3,
+        encoding: Union[DeepgramEncoding, str] = DeepgramEncoding.LINEAR16,
+        sample_rate: Union[DeepgramSampleRate, int] = DeepgramSampleRate.HZ_16000,
         *,
         endpointing_ms: int = 150,
         utterance_end_ms: int | None = 1000,
@@ -65,7 +106,7 @@ class DeepgramSTT(STTProvider):
         cls,
         api_key: str,
         language: str = "en",
-        model: str = "nova-3",
+        model: Union[DeepgramModel, str] = DeepgramModel.NOVA_3,
         **kwargs,
     ):
         """Create a Deepgram adapter configured for Twilio mulaw 8kHz."""
@@ -73,8 +114,8 @@ class DeepgramSTT(STTProvider):
             api_key=api_key,
             language=language,
             model=model,
-            encoding="mulaw",
-            sample_rate=8000,
+            encoding=DeepgramEncoding.MULAW,
+            sample_rate=DeepgramSampleRate.HZ_8000,
             **kwargs,
         )
 

@@ -8,6 +8,7 @@ use in Patter's pipeline.
 from __future__ import annotations
 
 import os
+from enum import StrEnum
 from typing import Any, AsyncIterator, Optional
 
 from getpatter.providers.base import TTSProvider
@@ -19,6 +20,25 @@ except ImportError:  # pragma: no cover
 
 RIME_BASE_URL = "https://users.rime.ai/v1/rime-tts"
 
+
+class RimeModel(StrEnum):
+    """Rime TTS model families. Arcana is higher-quality / latency-tolerant,
+    Mist variants prioritise low latency."""
+
+    ARCANA = "arcana"
+    MIST = "mist"
+    MIST_V2 = "mistv2"
+
+
+class RimeAudioFormat(StrEnum):
+    """Supported response Content-Type accept headers for Rime TTS."""
+
+    PCM = "audio/pcm"
+    MP3 = "audio/mp3"
+    WAV = "audio/wav"
+    MULAW = "audio/mulaw"
+
+
 # Model-specific timeouts — Arcana can take up to ~80% of the audio duration
 # it is synthesizing.
 ARCANA_MODEL_TIMEOUT = 60 * 4
@@ -29,11 +49,11 @@ def _is_mist_model(model: str) -> bool:
     # Rime Mist-family model ids are ``mist``, ``mistv2``, etc. — always
     # prefixed with ``mist``. Use ``startswith`` so unrelated model ids that
     # happen to contain the substring don't accidentally match.
-    return model.startswith("mist")
+    return model.startswith(RimeModel.MIST.value)
 
 
 def _timeout_for_model(model: str) -> int:
-    if model == "arcana":
+    if model == RimeModel.ARCANA.value:
         return ARCANA_MODEL_TIMEOUT
     return MIST_MODEL_TIMEOUT
 
@@ -49,7 +69,7 @@ class RimeTTS(TTSProvider):
         self,
         api_key: Optional[str] = None,
         *,
-        model: str = "arcana",
+        model: Union[RimeModel, str] = RimeModel.ARCANA,
         speaker: Optional[str] = None,
         lang: str = "eng",
         sample_rate: int = 16000,
@@ -121,7 +141,7 @@ class RimeTTS(TTSProvider):
             "modelId": self.model,
         }
 
-        if self.model == "arcana":
+        if self.model == RimeModel.ARCANA.value:
             if self.repetition_penalty is not None:
                 payload["repetition_penalty"] = self.repetition_penalty
             if self.temperature is not None:
@@ -137,7 +157,10 @@ class RimeTTS(TTSProvider):
             payload["samplingRate"] = self.sample_rate
             if self.speed_alpha is not None:
                 payload["speedAlpha"] = self.speed_alpha
-            if self.model == "mistv2" and self.reduce_latency is not None:
+            if (
+                self.model == RimeModel.MIST_V2.value
+                and self.reduce_latency is not None
+            ):
                 payload["reduceLatency"] = self.reduce_latency
             if self.pause_between_brackets is not None:
                 payload["pauseBetweenBrackets"] = self.pause_between_brackets
@@ -149,10 +172,9 @@ class RimeTTS(TTSProvider):
     async def synthesize(self, text: str) -> AsyncIterator[bytes]:
         """Stream raw PCM_S16LE bytes for ``text`` over HTTP."""
         session = self._ensure_session()
-        accept = "audio/pcm"
 
         headers = {
-            "accept": accept,
+            "accept": RimeAudioFormat.PCM.value,
             "Authorization": f"Bearer {self.api_key}",
             "content-type": "application/json",
         }

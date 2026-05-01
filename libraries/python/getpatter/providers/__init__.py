@@ -7,7 +7,7 @@ def deepgram(
     api_key: str,
     language: str = "en",
     *,
-    model: str = "nova-3",
+    model: str = "nova-3",  # accepts DeepgramModel or any string for forward-compat
     endpointing_ms: int = 150,
     utterance_end_ms: int | None = 1000,
     smart_format: bool = True,
@@ -24,7 +24,9 @@ def deepgram(
     }
     if vad_events is not None:
         options["vad_events"] = vad_events
-    return STTConfig(provider="deepgram", api_key=api_key, language=language, options=options)
+    return STTConfig(
+        provider="deepgram", api_key=api_key, language=language, options=options
+    )
 
 
 def whisper(api_key: str, language: str = "en") -> STTConfig:
@@ -49,7 +51,9 @@ def openai_tts(api_key: str, voice: str = "alloy") -> TTSConfig:
     return TTSConfig(provider="openai", api_key=api_key, voice=voice)
 
 
-def cartesia(api_key: str, voice: str = "f786b574-daa5-4673-aa0c-cbe3e8534c02") -> TTSConfig:
+def cartesia(
+    api_key: str, voice: str = "f786b574-daa5-4673-aa0c-cbe3e8534c02"
+) -> TTSConfig:
     """Config helper for Cartesia TTS."""
     return TTSConfig(provider="cartesia", api_key=api_key, voice=voice)
 
@@ -66,21 +70,25 @@ def lmnt(api_key: str, voice: str = "leah") -> TTSConfig:
 
 def _load_anthropic_llm():
     from getpatter.providers.anthropic_llm import AnthropicLLMProvider
+
     return AnthropicLLMProvider
 
 
 def _load_groq_llm():
     from getpatter.providers.groq_llm import GroqLLMProvider
+
     return GroqLLMProvider
 
 
 def _load_cerebras_llm():
     from getpatter.providers.cerebras_llm import CerebrasLLMProvider
+
     return CerebrasLLMProvider
 
 
 def _load_google_llm():
     from getpatter.providers.google_llm import GoogleLLMProvider
+
     return GoogleLLMProvider
 
 

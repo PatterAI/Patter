@@ -8,16 +8,33 @@
 
 const RIME_BASE_URL = 'https://users.rime.ai/v1/rime-tts';
 
+/** Rime TTS model families. */
+export const RimeModel = {
+  ARCANA: 'arcana',
+  MIST: 'mist',
+  MIST_V2: 'mistv2',
+} as const;
+export type RimeModel = (typeof RimeModel)[keyof typeof RimeModel];
+
+/** Supported response Content-Type accept headers for Rime TTS. */
+export const RimeAudioFormat = {
+  PCM: 'audio/pcm',
+  MP3: 'audio/mp3',
+  WAV: 'audio/wav',
+  MULAW: 'audio/mulaw',
+} as const;
+export type RimeAudioFormat = (typeof RimeAudioFormat)[keyof typeof RimeAudioFormat];
+
 // Model-specific timeouts in milliseconds.
 const ARCANA_MODEL_TIMEOUT_MS = 60 * 4 * 1000;
 const MIST_MODEL_TIMEOUT_MS = 30 * 1000;
 
 function isMistModel(model: string): boolean {
-  return model.includes('mist');
+  return model.includes(RimeModel.MIST);
 }
 
 function timeoutForModel(model: string): number {
-  if (model === 'arcana') return ARCANA_MODEL_TIMEOUT_MS;
+  if (model === RimeModel.ARCANA) return ARCANA_MODEL_TIMEOUT_MS;
   return MIST_MODEL_TIMEOUT_MS;
 }
 
@@ -58,7 +75,7 @@ export class RimeTTS {
 
   constructor(apiKey: string, opts: RimeTTSOptions = {}) {
     this.apiKey = apiKey;
-    this.model = opts.model ?? 'arcana';
+    this.model = opts.model ?? RimeModel.ARCANA;
 
     // Defaults: "cove" for Mist, "astra" for Arcana.
     const defaultSpeaker = isMistModel(this.model) ? 'cove' : 'astra';
@@ -85,7 +102,7 @@ export class RimeTTS {
       modelId: this.model,
     };
 
-    if (this.model === 'arcana') {
+    if (this.model === RimeModel.ARCANA) {
       if (this.repetitionPenalty !== undefined)
         payload.repetition_penalty = this.repetitionPenalty;
       if (this.temperature !== undefined) payload.temperature = this.temperature;
@@ -97,7 +114,7 @@ export class RimeTTS {
       payload.lang = this.lang;
       payload.samplingRate = this.sampleRate;
       if (this.speedAlpha !== undefined) payload.speedAlpha = this.speedAlpha;
-      if (this.model === 'mistv2' && this.reduceLatency !== undefined) {
+      if (this.model === RimeModel.MIST_V2 && this.reduceLatency !== undefined) {
         payload.reduceLatency = this.reduceLatency;
       }
       if (this.pauseBetweenBrackets !== undefined) {
@@ -127,7 +144,7 @@ export class RimeTTS {
     const response = await fetch(this.baseUrl, {
       method: 'POST',
       headers: {
-        accept: 'audio/pcm',
+        accept: RimeAudioFormat.PCM,
         Authorization: `Bearer ${this.apiKey}`,
         'content-type': 'application/json',
       },

@@ -21,13 +21,24 @@ import gzip
 import json
 import logging
 import os
+from enum import StrEnum
 from typing import Any, AsyncIterator
 
 from getpatter.services.llm_loop import OpenAILLMProvider
 
-__all__ = ["CerebrasLLMProvider"]
+__all__ = ["CerebrasLLMProvider", "CerebrasModel"]
 
 logger = logging.getLogger("getpatter.providers.cerebras_llm")
+
+
+class CerebrasModel(StrEnum):
+    """Known Cerebras Inference API models. Account tier gates availability."""
+
+    GPT_OSS_120B = "gpt-oss-120b"
+    LLAMA_3_1_8B = "llama3.1-8b"
+    LLAMA_3_3_70B = "llama-3.3-70b"
+    QWEN_3_235B_INSTRUCT = "qwen-3-235b-a22b-instruct-2507"
+    ZAI_GLM_4_7 = "zai-glm-4.7"
 
 
 _CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1"
@@ -42,7 +53,7 @@ _CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1"
 # ``qwen-3-235b-a22b-instruct-2507`` and ``zai-glm-4.7`` are reachable via
 # ``model="..."``. If your account tier returns 404 for ``gpt-oss-120b``
 # the provider's stream() logs a recovery hint listing override candidates.
-_DEFAULT_MODEL = "gpt-oss-120b"
+_DEFAULT_MODEL = CerebrasModel.GPT_OSS_120B.value
 
 
 def _build_cerebras_client(
@@ -166,7 +177,7 @@ class CerebrasLLMProvider(OpenAILLMProvider):
     def __init__(
         self,
         api_key: str | None = None,
-        model: str = _DEFAULT_MODEL,
+        model: Union[CerebrasModel, str] = _DEFAULT_MODEL,
         base_url: str = _CEREBRAS_BASE_URL,
         gzip_compression: bool = True,
         msgpack_encoding: bool = True,

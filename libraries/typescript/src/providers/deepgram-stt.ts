@@ -35,6 +35,42 @@ type ErrorCallback = (error: Error) => void;
 
 const DEEPGRAM_WS_URL = 'wss://api.deepgram.com/v1/listen';
 
+/** Known Deepgram STT models. */
+export const DeepgramModel = {
+  NOVA_3: 'nova-3',
+  NOVA_2: 'nova-2',
+  NOVA_2_PHONECALL: 'nova-2-phonecall',
+  NOVA_2_GENERAL: 'nova-2-general',
+  NOVA_2_MEETING: 'nova-2-meeting',
+  NOVA: 'nova',
+  ENHANCED: 'enhanced',
+  BASE: 'base',
+} as const;
+export type DeepgramModel = (typeof DeepgramModel)[keyof typeof DeepgramModel];
+
+/** Audio encodings accepted by Deepgram's streaming endpoint. */
+export const DeepgramEncoding = {
+  LINEAR16: 'linear16',
+  MULAW: 'mulaw',
+  ALAW: 'alaw',
+  OPUS: 'opus',
+  FLAC: 'flac',
+  AMR_NB: 'amr-nb',
+  AMR_WB: 'amr-wb',
+} as const;
+export type DeepgramEncoding = (typeof DeepgramEncoding)[keyof typeof DeepgramEncoding];
+
+/** Common PCM sample rates for Deepgram streaming input. */
+export const DeepgramSampleRate = {
+  HZ_8000: 8000,
+  HZ_16000: 16000,
+  HZ_24000: 24000,
+  HZ_44100: 44100,
+  HZ_48000: 48000,
+} as const;
+export type DeepgramSampleRate =
+  (typeof DeepgramSampleRate)[keyof typeof DeepgramSampleRate];
+
 // Deepgram closes idle sockets after ~10 s of silence. Send a KeepAlive
 // text frame every 4 s — well inside the 3–5 s window recommended by
 // Deepgram's docs.
@@ -155,9 +191,9 @@ export class DeepgramSTT {
         : options ?? {};
 
     this.language = (typeof languageOrOptions === 'string' ? languageOrOptions : opts.language) ?? 'en';
-    this.model = model ?? opts.model ?? 'nova-3';
-    this.encoding = encoding ?? opts.encoding ?? 'linear16';
-    this.sampleRate = sampleRate ?? opts.sampleRate ?? 16000;
+    this.model = model ?? opts.model ?? DeepgramModel.NOVA_3;
+    this.encoding = encoding ?? opts.encoding ?? DeepgramEncoding.LINEAR16;
+    this.sampleRate = sampleRate ?? opts.sampleRate ?? DeepgramSampleRate.HZ_16000;
     this.endpointingMs = opts.endpointingMs ?? 150;
     this.utteranceEndMs = opts.utteranceEndMs === null ? null : opts.utteranceEndMs ?? 1000;
     this.smartFormat = opts.smartFormat ?? false;
@@ -169,10 +205,17 @@ export class DeepgramSTT {
   static forTwilio(
     apiKey: string,
     language: string = 'en',
-    model: string = 'nova-3',
+    model: string = DeepgramModel.NOVA_3,
     options: DeepgramSTTOptions = {},
   ): DeepgramSTT {
-    return new DeepgramSTT(apiKey, language, model, 'mulaw', 8000, options);
+    return new DeepgramSTT(
+      apiKey,
+      language,
+      model,
+      DeepgramEncoding.MULAW,
+      DeepgramSampleRate.HZ_8000,
+      options,
+    );
   }
 
   private buildUrl(): string {

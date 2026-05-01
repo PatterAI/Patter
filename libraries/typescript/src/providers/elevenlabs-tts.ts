@@ -71,38 +71,44 @@ export function resolveVoiceId(voice: string): string {
 
 /**
  * Known stable ElevenLabs voice models (from the official ElevenLabs API
- * reference). Provided as a string-literal union for autocomplete + type
- * narrowing; the public ``modelId`` option also accepts ``string`` so
- * users can pass forward-compat IDs we haven't enumerated yet.
+ * reference). Exposed as a typed `as const` object so callers can pass
+ * `ElevenLabsModel.FLASH_V2_5` and get autocomplete / static checking; the
+ * public `modelId` option also accepts an arbitrary `string` so users can
+ * pass forward-compat IDs we haven't enumerated yet.
  *
- * - ``eleven_v3`` — newest, highest quality (slower TTFT than Flash).
- * - ``eleven_flash_v2_5`` — current default, fastest (~75 ms TTFT).
- * - ``eleven_turbo_v2_5`` — balanced quality/speed.
- * - ``eleven_multilingual_v2`` — best multilingual support.
- * - ``eleven_monolingual_v1`` — legacy English-only.
+ * - `V3` — newest, highest quality (slower TTFT than Flash).
+ * - `FLASH_V2_5` — current default, fastest (~75 ms TTFT).
+ * - `TURBO_V2_5` — balanced quality/speed.
+ * - `MULTILINGUAL_V2` — best multilingual support.
+ * - `MONOLINGUAL_V1` — legacy English-only.
  */
-export type ElevenLabsModel =
-  | 'eleven_v3'
-  | 'eleven_flash_v2_5'
-  | 'eleven_turbo_v2_5'
-  | 'eleven_multilingual_v2'
-  | 'eleven_monolingual_v1';
+export const ElevenLabsModel = {
+  V3: 'eleven_v3',
+  FLASH_V2_5: 'eleven_flash_v2_5',
+  TURBO_V2_5: 'eleven_turbo_v2_5',
+  MULTILINGUAL_V2: 'eleven_multilingual_v2',
+  MONOLINGUAL_V1: 'eleven_monolingual_v1',
+} as const;
+export type ElevenLabsModel = (typeof ElevenLabsModel)[keyof typeof ElevenLabsModel];
 
 // Supported `output_format` values for the TTS stream endpoint.
-// `ulaw_8000` is the telephony-ready option for Twilio/Telnyx.
+// `ULAW_8000` is the telephony-ready option for Twilio/Telnyx.
+export const ElevenLabsOutputFormat = {
+  MP3_22050_32: 'mp3_22050_32',
+  MP3_44100_32: 'mp3_44100_32',
+  MP3_44100_64: 'mp3_44100_64',
+  MP3_44100_96: 'mp3_44100_96',
+  MP3_44100_128: 'mp3_44100_128',
+  MP3_44100_192: 'mp3_44100_192',
+  PCM_8000: 'pcm_8000',
+  PCM_16000: 'pcm_16000',
+  PCM_22050: 'pcm_22050',
+  PCM_24000: 'pcm_24000',
+  PCM_44100: 'pcm_44100',
+  ULAW_8000: 'ulaw_8000',
+} as const;
 export type ElevenLabsOutputFormat =
-  | 'mp3_22050_32'
-  | 'mp3_44100_32'
-  | 'mp3_44100_64'
-  | 'mp3_44100_96'
-  | 'mp3_44100_128'
-  | 'mp3_44100_192'
-  | 'pcm_8000'
-  | 'pcm_16000'
-  | 'pcm_22050'
-  | 'pcm_24000'
-  | 'pcm_44100'
-  | 'ulaw_8000';
+  (typeof ElevenLabsOutputFormat)[keyof typeof ElevenLabsOutputFormat];
 
 export interface ElevenLabsVoiceSettings {
   stability?: number;
@@ -171,15 +177,15 @@ export class ElevenLabsTTS {
   constructor(
     apiKey: string,
     voiceIdOrOptions: string | ElevenLabsTTSOptions = '21m00Tcm4TlvDq8ikWAM',
-    modelId: string = 'eleven_flash_v2_5',
-    outputFormat: ElevenLabsOutputFormat | string = 'pcm_16000',
+    modelId: string = ElevenLabsModel.FLASH_V2_5,
+    outputFormat: ElevenLabsOutputFormat | string = ElevenLabsOutputFormat.PCM_16000,
   ) {
     this.apiKey = apiKey;
     if (typeof voiceIdOrOptions === 'object') {
       const o = voiceIdOrOptions;
       this.voiceId = resolveVoiceId(o.voiceId ?? '21m00Tcm4TlvDq8ikWAM');
-      this.modelId = o.modelId ?? 'eleven_flash_v2_5';
-      this.outputFormat = o.outputFormat ?? 'pcm_16000';
+      this.modelId = o.modelId ?? ElevenLabsModel.FLASH_V2_5;
+      this.outputFormat = o.outputFormat ?? ElevenLabsOutputFormat.PCM_16000;
       this.voiceSettings = o.voiceSettings;
       this.languageCode = o.languageCode;
       this.chunkSize = o.chunkSize ?? 4096;
@@ -221,7 +227,7 @@ export class ElevenLabsTTS {
     return new ElevenLabsTTS(apiKey, {
       ...options,
       voiceSettings,
-      outputFormat: 'ulaw_8000',
+      outputFormat: ElevenLabsOutputFormat.ULAW_8000,
     });
   }
 
@@ -242,7 +248,7 @@ export class ElevenLabsTTS {
   ): ElevenLabsTTS {
     return new ElevenLabsTTS(apiKey, {
       ...options,
-      outputFormat: 'pcm_16000',
+      outputFormat: ElevenLabsOutputFormat.PCM_16000,
     });
   }
 

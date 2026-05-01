@@ -11,6 +11,7 @@ the dependency surface minimal.
 from __future__ import annotations
 
 import os
+from enum import IntEnum, StrEnum
 from typing import Any, AsyncIterator, Literal, Optional
 
 from getpatter.providers.base import TTSProvider
@@ -30,6 +31,54 @@ CARTESIA_API_VERSION = "2025-04-16"
 # is stable across the sonic-2 / sonic-3 model bump.
 CARTESIA_DEFAULT_VOICE_ID = "f786b574-daa5-4673-aa0c-cbe3e8534c02"
 
+
+class CartesiaTTSModel(StrEnum):
+    """Cartesia TTS model identifiers."""
+
+    SONIC_3 = "sonic-3"
+    SONIC_2 = "sonic-2"
+    SONIC = "sonic"
+    SONIC_PREVIEW = "sonic-preview"
+
+
+class CartesiaTTSEncoding(StrEnum):
+    """Audio encodings accepted by Cartesia TTS output_format."""
+
+    PCM_S16LE = "pcm_s16le"
+    PCM_F32LE = "pcm_f32le"
+    PCM_MULAW = "pcm_mulaw"
+    PCM_ALAW = "pcm_alaw"
+
+
+class CartesiaTTSContainer(StrEnum):
+    """Cartesia TTS output container formats."""
+
+    RAW = "raw"
+    WAV = "wav"
+    MP3 = "mp3"
+
+
+class CartesiaSampleRate(IntEnum):
+    """Common PCM sample rates for Cartesia TTS output."""
+
+    HZ_8000 = 8000
+    HZ_16000 = 16000
+    HZ_22050 = 22050
+    HZ_24000 = 24000
+    HZ_44100 = 44100
+
+
+class CartesiaVoiceSpeed(StrEnum):
+    """Cartesia speed presets accepted via ``generation_config.speed``."""
+
+    FASTEST = "fastest"
+    FAST = "fast"
+    NORMAL = "normal"
+    SLOW = "slow"
+    SLOWEST = "slowest"
+
+
+# Backwards-compat aliases for existing imports.
 TTSEncoding = Literal["pcm_s16le"]
 TTSVoiceSpeed = Literal["fastest", "fast", "normal", "slow", "slowest"]
 

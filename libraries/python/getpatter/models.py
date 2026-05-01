@@ -3,13 +3,19 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, Literal
 
 if TYPE_CHECKING:
     from getpatter.providers.base import AudioFilter, BackgroundAudioPlayer, VADProvider
     from getpatter.services.llm_loop import LLMProvider
 
 logger = logging.getLogger("getpatter")
+
+# Closed set of provider modes the SDK dispatches on. Matches the TypeScript
+# string union ``'openai_realtime' | 'elevenlabs_convai' | 'pipeline'`` in
+# ``types.ts``. Tightened from a free ``str`` so editors autocomplete and
+# typos surface at type-check time instead of at call time.
+ProviderMode = Literal["openai_realtime", "elevenlabs_convai", "pipeline"]
 
 
 @dataclass(frozen=True)
@@ -76,7 +82,24 @@ class PipelineHooks:
 
 @dataclass(frozen=True)
 class Agent:
-    """Configuration for a local-mode voice AI agent."""
+    """Configuration for a local-mode voice AI agent.
+
+    Several fields are also carried by engine markers
+    (``engines.openai.Realtime``, ``engines.elevenlabs.ConvAI``) and by the
+    server-instantiated adapters (``providers.openai_realtime.OpenAIRealtimeAdapter``,
+    ``providers.elevenlabs_convai.ElevenLabsConvAIAdapter``). When the same
+    setting is set in two places, precedence is:
+
+    1. **Explicit kwarg on** ``Patter.agent(voice=..., model=..., language=...)``
+       always wins.
+    2. Otherwise, when an ``engine=`` is passed, the engine's value populates
+       the Agent (see ``Patter._unpack_engine``).
+    3. Otherwise, the Agent default is used.
+
+    The server passes the resolved Agent down to the adapter at call time, so
+    the adapter's own ``voice``/``model``/``language`` arguments mirror the
+    Agent's — they are not independent overrides at runtime.
+    """
 
     system_prompt: str
     voice: str = "alloy"
@@ -84,9 +107,7 @@ class Agent:
     language: str = "en"
     first_message: str = ""
     tools: list[dict] | None = None
-    provider: str = (
-        "openai_realtime"  # "openai_realtime" | "elevenlabs_convai" | "pipeline"
-    )
+    provider: ProviderMode = "openai_realtime"
     stt: STTConfig | None = None  # which STT provider to use in pipeline mode
     tts: TTSConfig | None = None  # which TTS provider to use in pipeline mode
     variables: dict | None = (

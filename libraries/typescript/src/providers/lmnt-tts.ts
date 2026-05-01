@@ -7,9 +7,30 @@
 
 const LMNT_BASE_URL = 'https://api.lmnt.com/v1/ai/speech/bytes';
 
-export type LMNTAudioFormat = 'aac' | 'mp3' | 'mulaw' | 'raw' | 'wav';
-export type LMNTModel = 'blizzard' | 'aurora';
-export type LMNTSampleRate = 8000 | 16000 | 24000;
+/** Supported LMNT audio output formats. `RAW` is PCM_S16LE. */
+export const LMNTAudioFormat = {
+  AAC: 'aac',
+  MP3: 'mp3',
+  MULAW: 'mulaw',
+  RAW: 'raw',
+  WAV: 'wav',
+} as const;
+export type LMNTAudioFormat = (typeof LMNTAudioFormat)[keyof typeof LMNTAudioFormat];
+
+/** LMNT TTS model families. */
+export const LMNTModel = {
+  BLIZZARD: 'blizzard',
+  AURORA: 'aurora',
+} as const;
+export type LMNTModel = (typeof LMNTModel)[keyof typeof LMNTModel];
+
+/** Supported PCM sample rates for LMNT raw output. */
+export const LMNTSampleRate = {
+  HZ_8000: 8000,
+  HZ_16000: 16000,
+  HZ_24000: 24000,
+} as const;
+export type LMNTSampleRate = (typeof LMNTSampleRate)[keyof typeof LMNTSampleRate];
 
 export interface LMNTTTSOptions {
   model?: LMNTModel;
@@ -35,13 +56,13 @@ export class LMNTTTS {
 
   constructor(apiKey: string, opts: LMNTTTSOptions = {}) {
     this.apiKey = apiKey;
-    this.model = opts.model ?? 'blizzard';
+    this.model = opts.model ?? LMNTModel.BLIZZARD;
     this.voice = opts.voice ?? 'leah';
     // Language defaults: blizzard => auto, else => en.
     this.language =
-      opts.language ?? (this.model === 'blizzard' ? 'auto' : 'en');
-    this.format = opts.format ?? 'raw';
-    this.sampleRate = opts.sampleRate ?? 16000;
+      opts.language ?? (this.model === LMNTModel.BLIZZARD ? 'auto' : 'en');
+    this.format = opts.format ?? LMNTAudioFormat.RAW;
+    this.sampleRate = opts.sampleRate ?? LMNTSampleRate.HZ_16000;
     this.temperature = opts.temperature ?? 1.0;
     this.topP = opts.topP ?? 0.8;
     this.baseUrl = opts.baseUrl ?? LMNT_BASE_URL;

@@ -3,11 +3,60 @@ import base64
 import json
 import logging
 from collections import deque
-from typing import Any, Literal
+from enum import StrEnum
+from typing import Any, Literal, Union
 
 import websockets
 
 logger = logging.getLogger("getpatter.openai_realtime")
+
+
+class OpenAIRealtimeModel(StrEnum):
+    """Known OpenAI Realtime API model identifiers."""
+
+    GPT_REALTIME = "gpt-realtime"
+    GPT_REALTIME_MINI = "gpt-realtime-mini"
+    GPT_4O_REALTIME_PREVIEW = "gpt-4o-realtime-preview"
+    GPT_4O_MINI_REALTIME_PREVIEW = "gpt-4o-mini-realtime-preview"
+
+
+class OpenAIVoice(StrEnum):
+    """OpenAI Realtime / TTS voice identifiers."""
+
+    ALLOY = "alloy"
+    ASH = "ash"
+    BALLAD = "ballad"
+    CORAL = "coral"
+    ECHO = "echo"
+    FABLE = "fable"
+    NOVA = "nova"
+    ONYX = "onyx"
+    SAGE = "sage"
+    SHIMMER = "shimmer"
+    VERSE = "verse"
+
+
+class OpenAIRealtimeAudioFormat(StrEnum):
+    """Supported audio formats on the OpenAI Realtime API."""
+
+    PCM16 = "pcm16"
+    G711_ULAW = "g711_ulaw"
+    G711_ALAW = "g711_alaw"
+
+
+class OpenAITranscriptionModel(StrEnum):
+    """Models accepted by ``input_audio_transcription`` on Realtime sessions."""
+
+    WHISPER_1 = "whisper-1"
+    GPT_4O_TRANSCRIBE = "gpt-4o-transcribe"
+    GPT_4O_MINI_TRANSCRIBE = "gpt-4o-mini-transcribe"
+
+
+class OpenAIRealtimeVADType(StrEnum):
+    """Server-side voice-activity-detection modes."""
+
+    SERVER_VAD = "server_vad"
+    SEMANTIC_VAD = "semantic_vad"
 
 
 class OpenAIRealtimeAdapter:
@@ -23,19 +72,25 @@ class OpenAIRealtimeAdapter:
     def __init__(
         self,
         api_key: str,
-        model: str = "gpt-realtime-mini",
-        voice: str = "alloy",
+        model: Union[OpenAIRealtimeModel, str] = OpenAIRealtimeModel.GPT_REALTIME_MINI,
+        voice: Union[OpenAIVoice, str] = OpenAIVoice.ALLOY,
         instructions: str = "",
         language: str = "en",
         tools: list[dict] | None = None,
-        audio_format: str = "g711_ulaw",
+        audio_format: Union[
+            OpenAIRealtimeAudioFormat, str
+        ] = OpenAIRealtimeAudioFormat.G711_ULAW,
         *,
         temperature: float | None = None,
         max_response_output_tokens: int | str | None = None,
         modalities: list[str] | None = None,
         tool_choice: str | dict | None = None,
-        input_audio_transcription_model: str = "whisper-1",
-        vad_type: Literal["server_vad", "semantic_vad"] = "server_vad",
+        input_audio_transcription_model: Union[
+            OpenAITranscriptionModel, str
+        ] = OpenAITranscriptionModel.WHISPER_1,
+        vad_type: Literal[
+            "server_vad", "semantic_vad"
+        ] = OpenAIRealtimeVADType.SERVER_VAD.value,
         # OpenAI's documented sweet-spot for snappier turns. Lowering from the
         # previous 500 ms saves ~200 ms per turn end. Override via constructor
         # if a use case (e.g. dictation) needs more trailing silence.
@@ -98,7 +153,8 @@ class OpenAIRealtimeAdapter:
                 "input_audio_format": self.audio_format,
                 "output_audio_format": self.audio_format,
                 "voice": self.voice,
-                "instructions": self.instructions or f"You are a helpful voice assistant. Respond in {self.language}. Be concise and natural.",
+                "instructions": self.instructions
+                or f"You are a helpful voice assistant. Respond in {self.language}. Be concise and natural.",
                 "turn_detection": {
                     "type": self.vad_type,
                     "threshold": 0.5,
@@ -112,7 +168,9 @@ class OpenAIRealtimeAdapter:
             if self.temperature is not None:
                 session_config["temperature"] = self.temperature
             if self.max_response_output_tokens is not None:
-                session_config["max_response_output_tokens"] = self.max_response_output_tokens
+                session_config["max_response_output_tokens"] = (
+                    self.max_response_output_tokens
+                )
             if self.modalities is not None:
                 session_config["modalities"] = self.modalities
             if self.tool_choice is not None:
@@ -127,10 +185,14 @@ class OpenAIRealtimeAdapter:
                     }
                     for t in self.tools
                 ]
-            await self._ws.send(json.dumps({
-                "type": "session.update",
-                "session": session_config,
-            }))
+            await self._ws.send(
+                json.dumps(
+                    {
+                        "type": "session.update",
+                        "session": session_config,
+                    }
+                )
+            )
 
             # Wait for ``session.updated`` ack before allowing any audio /
             # text traffic. Without this the first turn races the config
@@ -176,10 +238,14 @@ class OpenAIRealtimeAdapter:
         if self._ws is None:
             return
         encoded = base64.b64encode(audio).decode("ascii")
-        await self._ws.send(json.dumps({
-            "type": "input_audio_buffer.append",
-            "audio": encoded,
-        }))
+        await self._ws.send(
+            json.dumps(
+                {
+                    "type": "input_audio_buffer.append",
+                    "audio": encoded,
+                }
+            )
+        )
 
     async def receive_events(self):
         """Yield events from OpenAI Realtime API.
@@ -222,7 +288,8 @@ class OpenAIRealtimeAdapter:
                     # passed to ``conversation.item.truncate`` so a coarse
                     # estimate is good enough — the server clamps it.
                     self._current_response_audio_ms += _estimate_audio_ms(
-                        audio_bytes, self.audio_format,
+                        audio_bytes,
+                        self.audio_format,
                     )
                     yield ("audio", audio_bytes)
 
@@ -230,7 +297,10 @@ class OpenAIRealtimeAdapter:
                     # What the AI is saying (text)
                     yield ("transcript_output", data.get("delta", ""))
 
-                elif event_type in ("response.content_part.added", "response.output_item.added"):
+                elif event_type in (
+                    "response.content_part.added",
+                    "response.output_item.added",
+                ):
                     # Capture the in-flight assistant item id so we can
                     # truncate it precisely on barge-in.
                     item = data.get("item") or {}
@@ -246,16 +316,22 @@ class OpenAIRealtimeAdapter:
                 elif event_type == "input_audio_buffer.speech_stopped":
                     yield ("speech_stopped", None)
 
-                elif event_type == "conversation.item.input_audio_transcription.completed":
+                elif (
+                    event_type
+                    == "conversation.item.input_audio_transcription.completed"
+                ):
                     # What the user said
                     yield ("transcript_input", data.get("transcript", ""))
 
                 elif event_type == "response.function_call_arguments.done":
-                    yield ("function_call", {
-                        "call_id": data.get("call_id", ""),
-                        "name": data.get("name", ""),
-                        "arguments": data.get("arguments", "{}"),
-                    })
+                    yield (
+                        "function_call",
+                        {
+                            "call_id": data.get("call_id", ""),
+                            "name": data.get("name", ""),
+                            "arguments": data.get("arguments", "{}"),
+                        },
+                    )
 
                 elif event_type == "response.done":
                     # End of response — clear tracking state so the next
@@ -274,11 +350,14 @@ class OpenAIRealtimeAdapter:
                 # Surface unexpected closes so the caller can decide whether
                 # to reconnect. We intentionally don't reconnect here —
                 # telephony carriers handle session lifecycle.
-                yield ("error", {
-                    "type": "connection_closed",
-                    "code": getattr(exc, "code", None),
-                    "reason": getattr(exc, "reason", ""),
-                })
+                yield (
+                    "error",
+                    {
+                        "type": "connection_closed",
+                        "code": getattr(exc, "code", None),
+                        "reason": getattr(exc, "reason", ""),
+                    },
+                )
         finally:
             self._running = False
 
@@ -293,12 +372,16 @@ class OpenAIRealtimeAdapter:
             return
         if self._current_response_item_id:
             try:
-                await self._ws.send(json.dumps({
-                    "type": "conversation.item.truncate",
-                    "item_id": self._current_response_item_id,
-                    "content_index": 0,
-                    "audio_end_ms": self._current_response_audio_ms,
-                }))
+                await self._ws.send(
+                    json.dumps(
+                        {
+                            "type": "conversation.item.truncate",
+                            "item_id": self._current_response_item_id,
+                            "content_index": 0,
+                            "audio_end_ms": self._current_response_audio_ms,
+                        }
+                    )
+                )
             except Exception as exc:  # pragma: no cover
                 logger.debug("conversation.item.truncate failed: %s", exc)
         await self._ws.send(json.dumps({"type": "response.cancel"}))
@@ -307,28 +390,36 @@ class OpenAIRealtimeAdapter:
         """Send a text message to the AI (triggers a spoken response)."""
         if self._ws is None:
             return
-        await self._ws.send(json.dumps({
-            "type": "conversation.item.create",
-            "item": {
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_text", "text": text}],
-            },
-        }))
+        await self._ws.send(
+            json.dumps(
+                {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": text}],
+                    },
+                }
+            )
+        )
         await self._ws.send(json.dumps({"type": "response.create"}))
 
     async def send_function_result(self, call_id: str, result: str) -> None:
         """Send a function call result back to OpenAI and trigger a new response."""
         if self._ws is None:
             return
-        await self._ws.send(json.dumps({
-            "type": "conversation.item.create",
-            "item": {
-                "type": "function_call_output",
-                "call_id": call_id,
-                "output": result,
-            },
-        }))
+        await self._ws.send(
+            json.dumps(
+                {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": result,
+                    },
+                }
+            )
+        )
         await self._ws.send(json.dumps({"type": "response.create"}))
 
     async def close(self) -> None:
@@ -357,9 +448,12 @@ def _estimate_audio_ms(chunk: bytes, audio_format: str) -> int:
     """
     if not chunk:
         return 0
-    if audio_format in ("g711_ulaw", "g711_alaw"):
+    if audio_format in (
+        OpenAIRealtimeAudioFormat.G711_ULAW.value,
+        OpenAIRealtimeAudioFormat.G711_ALAW.value,
+    ):
         return len(chunk) // 8
-    if audio_format == "pcm16":
+    if audio_format == OpenAIRealtimeAudioFormat.PCM16.value:
         # 24 kHz × 2 bytes/sample = 48 bytes per millisecond
         return len(chunk) // 48
     return 0

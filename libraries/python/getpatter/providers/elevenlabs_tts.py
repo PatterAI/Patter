@@ -1,37 +1,38 @@
-from typing import AsyncIterator, Literal, Optional, Union
+from enum import StrEnum
+from typing import AsyncIterator, Optional, Union
 import re
 import httpx
 from getpatter.providers.base import TTSProvider
 
-# Known stable ElevenLabs voice models (from
-# https://elevenlabs.io/docs/api-reference/text-to-speech). Listed as a
-# ``Literal`` for autocomplete + static checking; the public ``model_id``
-# argument also accepts ``str`` so users can pass forward-compat IDs we
-# haven't enumerated yet.
-ElevenLabsModel = Literal[
-    "eleven_v3",
-    "eleven_flash_v2_5",
-    "eleven_turbo_v2_5",
-    "eleven_multilingual_v2",
-    "eleven_monolingual_v1",
-]
 
-# Supported `output_format` values for the `/text-to-speech/{id}/stream`
-# endpoint. `ulaw_8000` is the telephony-ready option for Twilio/Telnyx.
-ElevenLabsOutputFormat = Literal[
-    "mp3_22050_32",
-    "mp3_44100_32",
-    "mp3_44100_64",
-    "mp3_44100_96",
-    "mp3_44100_128",
-    "mp3_44100_192",
-    "pcm_8000",
-    "pcm_16000",
-    "pcm_22050",
-    "pcm_24000",
-    "pcm_44100",
-    "ulaw_8000",
-]
+# Known stable ElevenLabs voice models (from
+# https://elevenlabs.io/docs/api-reference/text-to-speech). ``StrEnum`` keeps
+# enum members usable as plain strings, so existing callers passing literal
+# string model IDs continue to work unchanged.
+class ElevenLabsModel(StrEnum):
+    V3 = "eleven_v3"
+    FLASH_V2_5 = "eleven_flash_v2_5"
+    TURBO_V2_5 = "eleven_turbo_v2_5"
+    MULTILINGUAL_V2 = "eleven_multilingual_v2"
+    MONOLINGUAL_V1 = "eleven_monolingual_v1"
+
+
+# Supported ``output_format`` values for the ``/text-to-speech/{id}/stream``
+# endpoint. ``ULAW_8000`` is the telephony-ready option for Twilio/Telnyx.
+class ElevenLabsOutputFormat(StrEnum):
+    MP3_22050_32 = "mp3_22050_32"
+    MP3_44100_32 = "mp3_44100_32"
+    MP3_44100_64 = "mp3_44100_64"
+    MP3_44100_96 = "mp3_44100_96"
+    MP3_44100_128 = "mp3_44100_128"
+    MP3_44100_192 = "mp3_44100_192"
+    PCM_8000 = "pcm_8000"
+    PCM_16000 = "pcm_16000"
+    PCM_22050 = "pcm_22050"
+    PCM_24000 = "pcm_24000"
+    PCM_44100 = "pcm_44100"
+    ULAW_8000 = "ulaw_8000"
+
 
 # Curated map of common ElevenLabs voice display names to their voice IDs. The
 # public API only accepts voice IDs (opaque 20-char strings), so callers that
@@ -144,8 +145,10 @@ class ElevenLabsTTS(TTSProvider):
         self,
         api_key: str,
         voice_id: str = "21m00Tcm4TlvDq8ikWAM",
-        model_id: Union[ElevenLabsModel, str] = "eleven_flash_v2_5",
-        output_format: ElevenLabsOutputFormat = "pcm_16000",
+        model_id: Union[ElevenLabsModel, str] = ElevenLabsModel.FLASH_V2_5,
+        output_format: Union[
+            ElevenLabsOutputFormat, str
+        ] = ElevenLabsOutputFormat.PCM_16000,
         voice_settings: Optional[dict] = None,
         language_code: Optional[str] = None,
         chunk_size: int = 4096,
@@ -176,7 +179,7 @@ class ElevenLabsTTS(TTSProvider):
         api_key: str,
         *,
         voice_id: str = "21m00Tcm4TlvDq8ikWAM",
-        model_id: Union[ElevenLabsModel, str] = "eleven_flash_v2_5",
+        model_id: Union[ElevenLabsModel, str] = ElevenLabsModel.FLASH_V2_5,
         voice_settings: Optional[dict] = None,
         language_code: Optional[str] = None,
         chunk_size: int = 4096,
@@ -206,7 +209,7 @@ class ElevenLabsTTS(TTSProvider):
             api_key=api_key,
             voice_id=voice_id,
             model_id=model_id,
-            output_format="ulaw_8000",
+            output_format=ElevenLabsOutputFormat.ULAW_8000,
             voice_settings=voice_settings,
             language_code=language_code,
             chunk_size=chunk_size,
@@ -218,7 +221,7 @@ class ElevenLabsTTS(TTSProvider):
         api_key: str,
         *,
         voice_id: str = "21m00Tcm4TlvDq8ikWAM",
-        model_id: Union[ElevenLabsModel, str] = "eleven_flash_v2_5",
+        model_id: Union[ElevenLabsModel, str] = ElevenLabsModel.FLASH_V2_5,
         voice_settings: Optional[dict] = None,
         language_code: Optional[str] = None,
         chunk_size: int = 4096,
@@ -237,7 +240,7 @@ class ElevenLabsTTS(TTSProvider):
             api_key=api_key,
             voice_id=voice_id,
             model_id=model_id,
-            output_format="pcm_16000",
+            output_format=ElevenLabsOutputFormat.PCM_16000,
             voice_settings=voice_settings,
             language_code=language_code,
             chunk_size=chunk_size,

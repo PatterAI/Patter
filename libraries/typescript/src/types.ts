@@ -181,11 +181,26 @@ export interface BackgroundAudioPlayer {
   stop(): Promise<void>;
 }
 
+/**
+ * Configuration for a local-mode voice AI agent.
+ *
+ * Several fields (``voice``, ``model``, ``language``) are also carried by
+ * engine markers (``OpenAIRealtime``, ``ElevenLabsConvAI``) and by the
+ * server-instantiated adapters. When the same setting is set in two places,
+ * precedence is:
+ *
+ * 1. **Explicit field on** ``phone.agent({ voice, model, language })`` always wins.
+ * 2. Otherwise, when an ``engine`` is passed, the engine's value is used
+ *    (see ``Patter.agent()`` for the resolution).
+ * 3. Otherwise, the AgentOptions default is used.
+ */
 export interface AgentOptions {
   systemPrompt: string;
   /**
    * Voice preset. When ``engine`` is provided, its ``voice`` is used unless
-   * explicitly overridden here.
+   * explicitly overridden here. Format depends on the engine:
+   * OpenAI Realtime accepts a name (``'alloy'``, ``'echo'``, ...);
+   * ElevenLabs ConvAI accepts a voice ID.
    */
   voice?: string;
   /**
@@ -193,6 +208,12 @@ export interface AgentOptions {
    * unless explicitly overridden here.
    */
   model?: string;
+  /**
+   * BCP-47 language code (e.g. ``'en'``, ``'it'``). Forwarded to STT (in
+   * pipeline mode) and to the engine adapter at call time. STTConfig has its
+   * own ``language`` field for the rare case where STT must use a different
+   * language than the rest of the pipeline.
+   */
   language?: string;
   firstMessage?: string;
   /** Tool definitions — ``Tool`` class instances from ``getpatter``. */
