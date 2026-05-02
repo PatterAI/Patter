@@ -179,11 +179,15 @@ make_auth_middleware = make_auth_dependency
 from getpatter.dashboard.export import calls_to_csv, calls_to_json
 
 # LLM loop primitives — parity with TypeScript ``LLMLoop``,
-# ``OpenAILLMProvider`` and the ``LLMProvider`` protocol. Python has no
-# ``DefaultToolExecutor`` or standalone ``LLMChunk`` yet — see TODOs below.
-from getpatter.services.llm_loop import LLMLoop, LLMProvider, OpenAILLMProvider
-# TODO(parity): port DefaultToolExecutor from TS (libraries/typescript/src/llm-loop.ts).
-# TODO(parity): port LLMChunk from TS (libraries/typescript/src/llm-loop.ts).
+# ``OpenAILLMProvider``, the ``LLMProvider`` protocol, ``DefaultToolExecutor``,
+# and the ``LLMChunk`` streaming-output type.
+from getpatter.services.llm_loop import (
+    DefaultToolExecutor,
+    LLMChunk,
+    LLMLoop,
+    LLMProvider,
+    OpenAILLMProvider,
+)
 
 # Remote-message + test session helpers.
 from getpatter.services.remote_message import (
@@ -199,10 +203,9 @@ from getpatter.test_mode import TestSession
 from getpatter.audio.background_audio import (
     BackgroundAudioPlayer,
     BuiltinAudioClip,
+    builtin_clip_path,
+    select_sound_from_list,
 )
-# TODO(parity): port builtin_clip_path from TS (libraries/typescript/src/services/background-audio.ts).
-# TODO(parity): port select_sound_from_list public helper from TS (currently a
-# private method on the Python ``BackgroundAudioPlayer``).
 
 # Audio transcoding helpers — parity with the TypeScript ``transcoding``
 # module. Python ships ``create_resampler_24k_to_16k`` only (no eager
@@ -218,9 +221,8 @@ from getpatter.audio.transcoding import (
     pcm16_to_mulaw,
     resample_8k_to_16k,
     resample_16k_to_8k,
+    resample_24k_to_16k,
 )
-# TODO(parity): port resample_24k_to_16k one-shot helper from TS
-# (the Python SDK currently exposes only the stateful create_resampler_24k_to_16k factory).
 
 # Pricing helpers — parity with TypeScript ``DEFAULT_PRICING``,
 # ``mergePricing``, ``calculateSttCost``, ``calculateTtsCost``,
@@ -435,6 +437,8 @@ __all__ = [
     "LLMLoop",
     "LLMProvider",
     "OpenAILLMProvider",
+    "LLMChunk",
+    "DefaultToolExecutor",
     # Remote message + test session.
     "RemoteMessageHandler",
     "is_remote_url",
@@ -443,6 +447,8 @@ __all__ = [
     # Background audio.
     "BackgroundAudioPlayer",
     "BuiltinAudioClip",
+    "builtin_clip_path",
+    "select_sound_from_list",
     # Transcoding.
     "PcmCarry",
     "StatefulResampler",
@@ -454,6 +460,7 @@ __all__ = [
     "pcm16_to_mulaw",
     "resample_8k_to_16k",
     "resample_16k_to_8k",
+    "resample_24k_to_16k",
     # Pricing.
     "DEFAULT_PRICING",
     "merge_pricing",

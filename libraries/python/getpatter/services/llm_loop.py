@@ -7,15 +7,294 @@ Anthropic, Gemini, or any custom provider.  The default provider is
 
 from __future__ import annotations
 
-__all__ = ["LLMLoop", "LLMProvider", "OpenAILLMProvider"]
+__all__ = [
+    "LLMLoop",
+    "LLMProvider",
+    "OpenAILLMProvider",
+    "LLMChunk",
+    "DefaultToolExecutor",
+]
 
+import asyncio
 import json
 import logging
-from typing import Any, AsyncGenerator, AsyncIterator, Protocol, runtime_checkable
+from dataclasses import dataclass
+from typing import (
+    Any,
+    AsyncGenerator,
+    AsyncIterator,
+    Literal,
+    Protocol,
+    runtime_checkable,
+)
 
-from getpatter.observability.tracing import SPAN_LLM, start_span
+from getpatter.observability.tracing import SPAN_LLM, SPAN_TOOL, start_span
 
 logger = logging.getLogger("getpatter")
+
+
+# ---------------------------------------------------------------------------
+# Streaming chunk type — public mirror of TypeScript ``LLMChunk``
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class LLMChunk:
+    """A single streaming chunk emitted by an :class:`LLMProvider`.
+
+    Mirrors the TypeScript ``LLMChunk`` interface in
+    ``libraries/typescript/src/llm-loop.ts``. The Python ``LLMProvider``
+    historically yields plain ``dict`` chunks for backward compatibility;
+    this dataclass is a typed wrapper that callers may use when they want
+    type-checker support. ``LLMLoop`` itself accepts both dicts and
+    :class:`LLMChunk` instances.
+
+    Attributes
+    ----------
+    type:
+        ``"text"`` (token), ``"tool_call"`` (partial tool invocation),
+        ``"done"`` (end-of-stream sentinel), or ``"usage"`` (final token
+        accounting chunk emitted by providers that expose token counts).
+    content:
+        Text payload — set when ``type == "text"``.
+    index:
+        Tool-call index (chunks with the same index concatenate).
+    id:
+        Tool-call id — set on the first chunk for a given index.
+    name:
+        Tool name — set on the first chunk for a given index.
+    arguments:
+        Partial JSON-encoded tool arguments — concatenated across chunks.
+    input_tokens:
+        Uncached prompt tokens (only set on ``"usage"`` chunks).
+    output_tokens:
+        Completion tokens (only set on ``"usage"`` chunks).
+    cache_read_tokens:
+        Cached prompt tokens read from the provider's prompt cache.
+    cache_write_tokens:
+        Cached prompt tokens newly written to the provider's prompt cache.
+    """
+
+    type: Literal["text", "tool_call", "done", "usage"]
+    content: str | None = None
+    index: int | None = None
+    id: str | None = None
+    name: str | None = None
+    arguments: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the equivalent dict representation used by ``LLMProvider.stream``.
+
+        Only fields that are not ``None`` are emitted, matching the shape
+        produced by :class:`OpenAILLMProvider`.
+        """
+        out: dict[str, Any] = {"type": self.type}
+        if self.content is not None:
+            out["content"] = self.content
+        if self.index is not None:
+            out["index"] = self.index
+        if self.id is not None:
+            out["id"] = self.id
+        if self.name is not None:
+            out["name"] = self.name
+        if self.arguments is not None:
+            out["arguments"] = self.arguments
+        if self.input_tokens is not None:
+            out["input_tokens"] = self.input_tokens
+        if self.output_tokens is not None:
+            out["output_tokens"] = self.output_tokens
+        if self.cache_read_tokens is not None:
+            out["cache_read_tokens"] = self.cache_read_tokens
+        if self.cache_write_tokens is not None:
+            out["cache_write_tokens"] = self.cache_write_tokens
+        return out
+
+
+# ---------------------------------------------------------------------------
+# DefaultToolExecutor — public, async, retry/fallback aware
+# ---------------------------------------------------------------------------
+
+
+_DEFAULT_TOOL_MAX_RETRIES = 2
+_DEFAULT_TOOL_RETRY_DELAY_S = 0.5
+_DEFAULT_TOOL_TIMEOUT_S = 10.0
+_TOOL_MAX_RESPONSE_BYTES = 1 * 1024 * 1024
+
+
+class DefaultToolExecutor:
+    """Default async tool executor — webhook with retry/fallback.
+
+    Mirrors the TypeScript ``DefaultToolExecutor`` in
+    ``libraries/typescript/src/llm-loop.ts``. Resolves a tool dispatch by:
+
+    1. Calling ``tool_def["handler"]`` directly when present (sync or
+       async). Handler exceptions are caught and returned as a JSON error
+       payload with ``fallback=True``.
+    2. Falling back to ``tool_def["webhook_url"]`` with SSRF validation,
+       per-attempt timeout, retry/backoff, and a 1 MB response cap.
+    3. Returning a structured JSON error when neither path is available.
+
+    The executor exposes the same shape as :class:`getpatter.tools.tool_executor.ToolExecutor`
+    so it is a drop-in replacement at the :class:`LLMLoop` boundary.
+
+    Parameters
+    ----------
+    max_retries:
+        Total attempts = ``max_retries + 1``. Defaults to 2 (i.e. 3 attempts).
+    retry_delay_s:
+        Delay between attempts, in seconds.
+    request_timeout_s:
+        Per-request timeout for webhook calls, in seconds.
+    """
+
+    def __init__(
+        self,
+        *,
+        max_retries: int = _DEFAULT_TOOL_MAX_RETRIES,
+        retry_delay_s: float = _DEFAULT_TOOL_RETRY_DELAY_S,
+        request_timeout_s: float = _DEFAULT_TOOL_TIMEOUT_S,
+    ) -> None:
+        self._max_retries = max_retries
+        self._retry_delay_s = retry_delay_s
+        self._request_timeout_s = request_timeout_s
+
+    async def execute(
+        self,
+        *,
+        tool_name: str,
+        arguments: dict,
+        call_context: dict,
+        webhook_url: str = "",
+        handler: Any = None,
+    ) -> str:
+        """Dispatch a tool call and return a JSON-stringifiable result.
+
+        Errors are returned as JSON like
+        ``{"error": "...", "fallback": True}`` rather than raised, so the
+        LLM loop can surface them to the model and continue.
+        """
+        if handler is not None:
+            try:
+                result = handler(arguments, call_context)
+                if asyncio.iscoroutine(result) or asyncio.isfuture(result):
+                    result = await result
+                if isinstance(result, str):
+                    return result
+                return json.dumps(result)
+            except Exception as exc:  # noqa: BLE001 — surface every error
+                logger.error("Tool handler '%s' raised: %s", tool_name, exc)
+                return json.dumps(
+                    {
+                        "error": f"Tool handler error: {exc}",
+                        "fallback": True,
+                    }
+                )
+
+        if webhook_url:
+            return await self._dispatch_webhook(
+                tool_name, arguments, call_context, webhook_url
+            )
+
+        return json.dumps(
+            {
+                "error": f"No handler or webhook_url for tool '{tool_name}'",
+                "fallback": True,
+            }
+        )
+
+    async def _dispatch_webhook(
+        self,
+        tool_name: str,
+        arguments: dict,
+        call_context: dict,
+        webhook_url: str,
+    ) -> str:
+        # Validate the URL up-front. Local import avoids a circular
+        # dependency between ``services.llm_loop`` and ``server``.
+        from getpatter.server import validate_webhook_url
+
+        if not validate_webhook_url(webhook_url):
+            return json.dumps(
+                {
+                    "error": f"Tool webhook URL rejected: {webhook_url!r}",
+                    "fallback": True,
+                }
+            )
+
+        import httpx  # local — keep top-level import-time light
+
+        total_attempts = self._max_retries + 1
+        with start_span(
+            SPAN_TOOL,
+            {
+                "patter.tool.name": tool_name,
+                "patter.tool.transport": "webhook",
+                "patter.call.id": call_context.get("call_id", ""),
+            },
+        ):
+            async with httpx.AsyncClient(timeout=self._request_timeout_s) as client:
+                for attempt in range(total_attempts):
+                    try:
+                        response = await client.post(
+                            webhook_url,
+                            json={
+                                "tool": tool_name,
+                                "arguments": arguments,
+                                "call_id": call_context.get("call_id", ""),
+                                "caller": call_context.get("caller", ""),
+                                "callee": call_context.get("callee", ""),
+                                "attempt": attempt + 1,
+                            },
+                        )
+                        response.raise_for_status()
+                        if len(response.content) > _TOOL_MAX_RESPONSE_BYTES:
+                            return json.dumps(
+                                {
+                                    "error": (
+                                        f"Webhook response too large: "
+                                        f"{len(response.content)} bytes "
+                                        f"(max {_TOOL_MAX_RESPONSE_BYTES})"
+                                    ),
+                                    "fallback": True,
+                                }
+                            )
+                        return json.dumps(response.json())
+                    except Exception as exc:  # noqa: BLE001
+                        if attempt < total_attempts - 1:
+                            logger.warning(
+                                "Tool webhook '%s' failed (attempt %d), retrying: %s",
+                                tool_name,
+                                attempt + 1,
+                                exc,
+                            )
+                            await asyncio.sleep(self._retry_delay_s)
+                        else:
+                            logger.error(
+                                "Tool webhook '%s' failed after %d attempts: %s",
+                                tool_name,
+                                total_attempts,
+                                exc,
+                            )
+                            return json.dumps(
+                                {
+                                    "error": (
+                                        f"Tool failed after {total_attempts} "
+                                        f"attempts: {exc}"
+                                    ),
+                                    "fallback": True,
+                                }
+                            )
+        # Unreachable — the loop above always returns.
+        return json.dumps(
+            {
+                "error": f"Tool '{tool_name}' exited retry loop unexpectedly",
+                "fallback": True,
+            }
+        )
 
 
 # ---------------------------------------------------------------------------

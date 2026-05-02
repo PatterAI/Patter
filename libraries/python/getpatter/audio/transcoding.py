@@ -30,6 +30,7 @@ __all__ = [
     "pcm16_to_mulaw",
     "resample_8k_to_16k",
     "resample_16k_to_8k",
+    "resample_24k_to_16k",
     "PcmCarry",
     "StatefulResampler",
     "create_resampler_8k_to_16k",
@@ -294,6 +295,7 @@ def create_resampler_24k_to_8k() -> StatefulResampler:
 # rather than on every call — avoids spam in hot audio paths.
 _warned_resample_8k_16k: bool = False
 _warned_resample_16k_8k: bool = False
+_warned_resample_24k_16k: bool = False
 
 
 def resample_8k_to_16k(audio_data: bytes) -> bytes:
@@ -343,4 +345,33 @@ def resample_16k_to_8k(audio_data: bytes) -> bytes:
     if not audio_data:
         return audio_data
     resampler = StatefulResampler(16000, 8000)
+    return resampler.process(audio_data) + resampler.flush()
+
+
+def resample_24k_to_16k(audio_data: bytes) -> bytes:
+    """Resample 24kHz PCM16 to 16kHz using audioop.ratecv (3:2 ratio).
+
+    Parity with TypeScript ``resample24kTo16k`` in
+    ``libraries/typescript/src/audio/transcoding.ts``.
+
+    .. deprecated::
+        Stateless: filter state is discarded between calls. Use
+        :class:`StatefulResampler` or :func:`create_resampler_24k_to_16k`
+        for streaming pipelines where chunk-boundary continuity matters.
+    """
+    global _warned_resample_24k_16k
+    if not _warned_resample_24k_16k:
+        warnings.warn(
+            "resample_24k_to_16k() is a deprecated stateless helper that loses "
+            "audioop.ratecv filter state across chunks. Use StatefulResampler or "
+            "create_resampler_24k_to_16k() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        _warned_resample_24k_16k = True
+    if audioop is None:
+        raise ImportError(_AUDIOOP_MISSING_MSG)
+    if not audio_data:
+        return audio_data
+    resampler = StatefulResampler(24000, 16000)
     return resampler.process(audio_data) + resampler.flush()

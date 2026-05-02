@@ -74,12 +74,27 @@ class BuiltinAudioClip(enum.Enum):
         whether the package is installed as a wheel, editable install, or
         zipapp.  For zipapps the file is extracted into a cache directory.
         """
-        ref = resources.files("getpatter.resources.audio") / self.value
-        # ``as_file`` returns a context manager that may extract a file from
-        # a zipapp.  Enter it immediately — callers only need the filesystem
-        # path during the single synchronous decode step below.
-        with resources.as_file(ref) as p:
-            return str(p)
+        return builtin_clip_path(self)
+
+
+def builtin_clip_path(clip: BuiltinAudioClip | str) -> str:
+    """Resolve a bundled clip name to its absolute path on disk.
+
+    Parity with TypeScript ``builtinClipPath`` in
+    ``libraries/typescript/src/audio/background-audio.ts``.
+
+    Accepts either a :class:`BuiltinAudioClip` enum value or the raw
+    filename string (``"hold_music.ogg"``). The returned path lives inside
+    ``getpatter.resources.audio`` and is suitable for passing to
+    ``soundfile.read``.
+    """
+    filename = clip.value if isinstance(clip, BuiltinAudioClip) else clip
+    ref = resources.files("getpatter.resources.audio") / filename
+    # ``as_file`` returns a context manager that may extract a file from
+    # a zipapp. Enter it immediately — callers only need the filesystem
+    # path during the synchronous decode step downstream.
+    with resources.as_file(ref) as p:
+        return str(p)
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +103,35 @@ class BuiltinAudioClip(enum.Enum):
 
 
 AudioSource = Union[str, BuiltinAudioClip]
+
+
+def select_sound_from_list(sounds: list["AudioConfig"]) -> "AudioConfig | None":
+    """Probability-weighted random pick from a list of :class:`AudioConfig`.
+
+    Parity with TypeScript ``selectSoundFromList`` in
+    ``libraries/typescript/src/audio/background-audio.ts``. Returns
+    ``None`` when the cumulative probability is below 1.0 and the random
+    roll falls in the implicit "silence" band, or when the list is empty
+    (or contains only zero/negative probabilities).
+    """
+    total = sum(s.probability for s in sounds)
+    if total <= 0:
+        return None
+
+    if total < 1.0 and random.random() > total:
+        return None
+
+    normalize_factor = 1.0 if total <= 1.0 else total
+    r = random.random() * min(total, 1.0)
+    cumulative = 0.0
+    for sound in sounds:
+        if sound.probability <= 0:
+            continue
+        cumulative += sound.probability / normalize_factor
+        if r <= cumulative:
+            return sound
+
+    return sounds[-1]
 
 
 class AudioConfig(NamedTuple):
@@ -213,27 +257,11 @@ class BackgroundAudioPlayer(_BaseBackgroundAudioPlayer):
     def _select_sound_from_list(sounds: list[AudioConfig]) -> AudioConfig | None:
         """Pick one ``AudioConfig`` from *sounds* using its probabilities.
 
-        Returns ``None`` when the sum of probabilities is below 1.0 and the
-        roll falls in the "silence" band.
+        Backward-compatible delegator to :func:`select_sound_from_list`. The
+        public, top-level function is the canonical surface and matches
+        TypeScript ``selectSoundFromList``.
         """
-        total = sum(s.probability for s in sounds)
-        if total <= 0:
-            return None
-
-        if total < 1.0 and random.random() > total:
-            return None
-
-        normalize_factor = 1.0 if total <= 1.0 else total
-        r = random.random() * min(total, 1.0)
-        cumulative = 0.0
-        for sound in sounds:
-            if sound.probability <= 0:
-                continue
-            cumulative += sound.probability / normalize_factor
-            if r <= cumulative:
-                return sound
-
-        return sounds[-1]
+        return select_sound_from_list(sounds)
 
     def _resolve_source(
         self,
@@ -419,4 +447,6 @@ __all__ = [
     "BackgroundAudioPlayer",
     "BuiltinAudioClip",
     "PlayHandle",
+    "builtin_clip_path",
+    "select_sound_from_list",
 ]
