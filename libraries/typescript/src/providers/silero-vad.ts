@@ -131,6 +131,7 @@ async function loadOnnxRuntime(): Promise<OnnxRuntime> {
   try {
     // onnxruntime-node is an optional peer dep; resolved dynamically so the
     // SDK keeps installing on systems that don't need server-side VAD.
+    // @ts-ignore — types may be absent when the optional dep is not installed
     const mod = await import('onnxruntime-node');
     return mod as unknown as OnnxRuntime;
   } catch (e) {
