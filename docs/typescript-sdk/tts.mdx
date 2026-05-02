@@ -83,10 +83,24 @@ const tts2 = ElevenLabsTTS.forTelnyx({ voiceId: "rachel" });
 import { OpenAITTS } from "getpatter";
 
 const tts = new OpenAITTS();                                      // reads OPENAI_API_KEY
-const tts = new OpenAITTS({ voice: "nova" });
+const tts2 = new OpenAITTS({ voice: "nova" });
+
+// Twilio: skip the intermediate 16 kHz step — resample 24k → 8k directly.
+const tts3 = new OpenAITTS({ targetSampleRate: 8000 });
 ```
 
-<Note>OpenAI TTS returns audio at 24 kHz — Patter automatically resamples to 16 kHz for telephony.</Note>
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `apiKey` | `string` | — | API key — reads from `OPENAI_API_KEY` if omitted. |
+| `voice` | `OpenAITTSVoice \| string` | `"alloy"` | One of `alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`. |
+| `model` | `OpenAITTSModel \| string` | `"gpt-4o-mini-tts"` | OpenAI TTS model ID. |
+| `instructions` | `string` | — | Voice direction (only honored by `gpt-4o-mini-tts` and newer). |
+| `speed` | `number` | — | Playback speed multiplier in `[0.25, 4.0]`. |
+| `targetSampleRate` | `8000 \| 16000` | `16000` | Output sample rate. Set to `8000` for Twilio carriers to collapse the 24 k→16 k→8 k chain into a single resample. |
+
+`OpenAITTSVoice` and `OpenAITTSModel` are exported alongside the provider class.
+
+<Note>OpenAI TTS returns audio at 24 kHz — Patter automatically resamples to `targetSampleRate` (16 kHz by default; pass `targetSampleRate: 8000` to deliver μ-law-ready PCM directly to Twilio).</Note>
 
 ## Cartesia
 

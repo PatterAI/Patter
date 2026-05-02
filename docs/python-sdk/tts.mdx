@@ -110,15 +110,27 @@ from getpatter import OpenAITTS
 
 tts = OpenAITTS()                            # reads OPENAI_API_KEY
 tts = OpenAITTS(voice="nova")
+
+# Twilio: skip the intermediate 16 kHz step — resample 24k → 8k directly.
+tts = OpenAITTS(target_sample_rate=8000)
 ```
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `api_key` | `str \| None` | `None` | API key — reads from `OPENAI_API_KEY` if omitted. |
-| `voice` | `str` | `"alloy"` | One of `"alloy"`, `"echo"`, `"fable"`, `"onyx"`, `"nova"`, `"shimmer"`. |
-| `model` | `str` | `"tts-1"` | OpenAI TTS model ID. |
+| `voice` | `OpenAITTSVoice \| str` | `OpenAITTSVoice.ALLOY` | One of `alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`. |
+| `model` | `OpenAITTSModel \| str` | `OpenAITTSModel.GPT_4O_MINI_TTS` | OpenAI TTS model ID. Older `tts-1` / `tts-1-hd` are accepted as raw strings. |
+| `instructions` | `str \| None` | `None` | Voice direction (only honored by `gpt-4o-mini-tts` and newer). |
+| `speed` | `float \| None` | `None` | Playback speed multiplier in `[0.25, 4.0]`. |
+| `target_sample_rate` | `int` | `16000` | Output sample rate. Must be `8000` or `16000`. Set to `8000` for Twilio carriers to collapse the 24 k→16 k→8 k chain into a single resample (~1 ms saved per chunk). |
 
-<Note>OpenAI TTS returns audio at 24 kHz — Patter automatically resamples to 16 kHz for telephony.</Note>
+`OpenAITTSVoice` and `OpenAITTSModel` are exported alongside the provider class:
+
+```python
+from getpatter.providers.openai_tts import OpenAITTSVoice, OpenAITTSModel
+```
+
+<Note>OpenAI TTS returns audio at 24 kHz — Patter automatically resamples to `target_sample_rate` (16 kHz by default; pass `target_sample_rate=8000` to deliver μ-law-ready PCM directly to Twilio).</Note>
 
 ## Cartesia
 

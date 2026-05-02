@@ -89,6 +89,20 @@ phone = Patter(
 )
 ```
 
+### PricingUnit
+
+The pricing tables expose a `PricingUnit` `StrEnum` so overrides don't depend on raw strings:
+
+```python
+from getpatter.pricing import PricingUnit
+
+PricingUnit.MINUTE          # "minute" — per minute of audio (STT, telephony)
+PricingUnit.THOUSAND_CHARS  # "1k_chars" — per thousand characters synthesised (TTS)
+PricingUnit.TOKEN           # "token" — per token (LLM / Realtime)
+```
+
+Subclassing `str` keeps the values JSON-serialisable and backward-compatible with code that compares against the literal strings (`config.get("unit") == "minute"`).
+
 ### Default Pricing (2026)
 
 | Provider | Unit | Default Price |

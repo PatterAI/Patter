@@ -151,6 +151,21 @@ await phone.serve({
 `onMessage` and `llm` cannot be used together. Combining them raises a clear error at `serve()` time — pick one.
 </Warning>
 
+## Advanced: building a custom LLM provider
+
+Three primitives are exported from the package barrel for users who need to plug in a custom LLM or tool dispatcher:
+
+```typescript
+import { LLMChunk, DefaultToolExecutor, LLMLoop, OpenAILLMProvider } from "getpatter";
+```
+
+- `LLMChunk` — the streaming-output type yielded by every `LLMProvider.stream(...)` implementation. Carries either a partial text delta, a tool-call delta, or a stream-end marker.
+- `DefaultToolExecutor` — the default tool dispatcher used by `LLMLoop`. Constructs from a `tools` array and resolves both inline `handler` callables and `webhookUrl` HTTP tools. Override its hooks to swap in custom error handling, telemetry, or authentication.
+- `OpenAILLMProvider` — the parent class shared by `OpenAILLM`, `GroqLLM`, `CerebrasLLM`. Sampling options (`temperature`, `topP`, `seed`, `toolChoice`, `responseFormat`, …) live here and are forwarded by every subclass.
+- `LLMLoop` — the orchestration loop wiring an `LLMProvider`, a `DefaultToolExecutor`, and the streaming output back to TTS.
+
+These are stable public symbols mirrored byte-for-byte by the Python SDK.
+
 ## What's next
 
 <CardGroup cols={2}>

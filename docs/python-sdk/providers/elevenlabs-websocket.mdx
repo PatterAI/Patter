@@ -99,6 +99,18 @@ tts = ElevenLabsWebSocketTTS.for_twilio(api_key="...")
 tts = ElevenLabsWebSocketTTS.for_telnyx(api_key="...")
 ```
 
+### Carrier auto-detect — `set_telephony_carrier`
+
+When you don't know the carrier at construction time, `StreamHandler` calls `set_telephony_carrier(carrier)` at call start to advise the provider of the wire format:
+
+```python
+tts = ElevenLabsWebSocketTTS()        # output_format defaults to pcm_16000
+tts.set_telephony_carrier("twilio")    # auto-flips to ulaw_8000
+tts.set_telephony_carrier("telnyx")    # keeps pcm_16000 (Telnyx default)
+```
+
+When `output_format` was passed explicitly to the constructor (or via `for_twilio` / `for_telnyx`), `set_telephony_carrier` is a no-op — the user's choice always wins. Calling with an unknown carrier (`""` / `"custom"`) is also a no-op.
+
 ## Limitations
 
 - **`eleven_v3` family is rejected at construction time.** The stream-input WebSocket does not support v3 models. Use the HTTP [`ElevenLabsTTS`](/python-sdk/tts#elevenlabs) instead.

@@ -100,6 +100,20 @@ await phone.serve({
 });
 ```
 
+### PricingUnit
+
+The pricing tables expose a `PricingUnit` constant so overrides don't depend on raw strings:
+
+```typescript
+import { PricingUnit } from "getpatter";
+
+PricingUnit.MINUTE;          // "minute" — per minute of audio (STT, telephony)
+PricingUnit.THOUSAND_CHARS;  // "1k_chars" — per thousand characters synthesised (TTS)
+PricingUnit.TOKEN;           // "token" — per token (LLM / Realtime)
+```
+
+Shipped as a `const` object plus value-union type so it is tree-shakeable. Mirrored byte-for-byte by the Python `PricingUnit` `StrEnum`.
+
 ### Default Pricing (2026)
 
 | Provider | Unit | Default Price |
