@@ -54,6 +54,20 @@ agent = phone.agent(
 | `RimeTTS` | `getpatter.tts.rime.TTS` | `RIME_API_KEY` | `getpatter[rime]` |
 | `LMNTTTS` | `getpatter.tts.lmnt.TTS` | `LMNT_API_KEY` | `getpatter[lmnt]` |
 
+### Model / voice / format enums
+
+Each provider exports typed `StrEnum`s for valid model IDs, voice presets, and output formats alongside the provider class. They keep `model=` / `voice=` / `output_format=` arguments tab-completable and reject typos at construction time, while still accepting raw strings for forward compatibility:
+
+```python
+from getpatter.providers.openai_tts import OpenAITTSModel, OpenAITTSVoice
+from getpatter.providers.elevenlabs_tts import ElevenLabsModel, ElevenLabsOutputFormat
+from getpatter.providers.cartesia_tts import CartesiaTTSModel, CartesiaVoiceSpeed
+from getpatter.providers.rime_tts import RimeModel, RimeAudioFormat
+from getpatter.providers.lmnt_tts import LMNTModel, LMNTAudioFormat
+
+tts = OpenAITTS(voice=OpenAITTSVoice.NOVA, model=OpenAITTSModel.GPT_4O_MINI_TTS)
+```
+
 ## ElevenLabs
 
 Streaming HTTP TTS via ElevenLabs. Default model `"eleven_flash_v2_5"` (~75 ms TTFB, drop-in replacement for `eleven_turbo_v2_5`). Other valid `model_id` literals: `"eleven_v3"`, `"eleven_turbo_v2_5"`, `"eleven_multilingual_v2"`, `"eleven_monolingual_v1"`.

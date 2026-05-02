@@ -56,6 +56,19 @@ agent = phone.agent(
 | `SonioxSTT` | `getpatter.stt.soniox.STT` | `SONIOX_API_KEY` | `getpatter[soniox]` |
 | `SpeechmaticsSTT` | `getpatter.stt.speechmatics.STT` | `SPEECHMATICS_API_KEY` | `getpatter[speechmatics]` |
 
+### Model enums
+
+Each provider exports a typed `StrEnum` of valid model IDs alongside the provider class. They keep `model=` arguments tab-completable and reject typos at construction time, while still accepting raw strings for forward compatibility:
+
+```python
+from getpatter.providers.deepgram_stt import DeepgramModel
+from getpatter.providers.assemblyai_stt import AssemblyAIModel
+from getpatter.providers.cartesia_stt import CartesiaSTTModel
+from getpatter.providers.soniox_stt import SonioxModel
+
+stt = DeepgramSTT(model=DeepgramModel.NOVA_3)
+```
+
 ## Deepgram
 
 Streaming STT backed by Deepgram's `nova-3` model.

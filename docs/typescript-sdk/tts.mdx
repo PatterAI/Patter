@@ -38,6 +38,22 @@ await phone.serve({ agent });
 | `RimeTTS` | `RIME_API_KEY` |
 | `LMNTTTS` | `LMNT_API_KEY` |
 
+### Model / voice / format enums
+
+Each provider exports typed const-objects for valid model IDs, voice presets, and output formats alongside the provider class. They keep `model` / `voice` / `outputFormat` options tab-completable and reject typos at construction time, while still accepting raw strings for forward compatibility:
+
+```typescript
+import {
+  OpenAITTS, OpenAITTSModel, OpenAITTSVoice,
+  ElevenLabsTTS, ElevenLabsModel, ElevenLabsOutputFormat,
+  CartesiaTTS, CartesiaTTSModel,
+  RimeTTS, RimeModel,
+  LMNTTTS, LMNTModel,
+} from "getpatter";
+
+const tts = new OpenAITTS({ voice: OpenAITTSVoice.NOVA, model: OpenAITTSModel.GPT_4O_MINI_TTS });
+```
+
 ## ElevenLabs
 
 Streaming HTTP TTS via ElevenLabs. Default model `"eleven_flash_v2_5"` (~75 ms TTFB, drop-in replacement for `eleven_turbo_v2_5`). Other valid `modelId` literals: `"eleven_v3"`, `"eleven_turbo_v2_5"`, `"eleven_multilingual_v2"`, `"eleven_monolingual_v1"`.

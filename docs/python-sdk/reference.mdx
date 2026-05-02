@@ -436,6 +436,20 @@ except PatterError as exc:
 
 ---
 
+## Audio helpers
+
+```python
+from getpatter import builtin_clip_path, select_sound_from_list, resample_24k_to_16k
+```
+
+| Helper | Purpose |
+|--------|---------|
+| `builtin_clip_path(name: str) -> Path` | Resolve the on-disk path for a built-in `BuiltinAudioClip` (hold music, dial tones, hangup chimes) so callers can preload or copy them. |
+| `select_sound_from_list(sounds, *, rng=None) -> str` | Pick one entry from a list of sound paths/IDs deterministically (or randomly when `rng` is provided). Useful for randomised hold music. |
+| `resample_24k_to_16k(pcm: bytes) -> bytes` | One-shot 24 kHz → 16 kHz PCM resampler. Mirrors the helper Patter uses internally for OpenAI TTS chunks; exported for callers who need to do the same conversion outside the streaming loop. |
+
+---
+
 ## Top-level exports
 
 ```python
@@ -488,10 +502,14 @@ from getpatter import (
     IVRActivity, TfidfLoopDetector, DtmfEvent, format_dtmf,
     ScheduleHandle, schedule_cron, schedule_once, schedule_interval,
     BackgroundAudioPlayer, BuiltinAudioClip, mix_pcm,
+    builtin_clip_path, select_sound_from_list, resample_24k_to_16k,
+
+    # LLM primitives (see python-sdk/llm)
+    LLMChunk, DefaultToolExecutor,
 
     # Errors
     PatterError, PatterConnectionError, AuthenticationError,
-    ProvisionError, RateLimitError,
+    ProvisionError, RateLimitError, ErrorCode,
 )
 
 from getpatter.carriers import twilio, telnyx

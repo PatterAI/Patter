@@ -43,6 +43,18 @@ await phone.serve({ agent });
 Speechmatics is supported by the Python SDK but not yet by the TypeScript SDK — use the Python SDK if you need Speechmatics.
 </Info>
 
+### Model enums
+
+Each provider exports a typed const-object of valid model IDs alongside the provider class. They keep `model` options tab-completable and reject typos at construction time, while still accepting raw strings for forward compatibility:
+
+```typescript
+import { DeepgramSTT, DeepgramModel } from "getpatter";
+
+const stt = new DeepgramSTT({ model: DeepgramModel.NOVA_3 });
+```
+
+The same pattern applies to `AssemblyAIModel`, `CartesiaSTTModel`, and `SonioxModel`.
+
 ## Deepgram
 
 Streaming STT backed by Deepgram's `nova-3` model.
