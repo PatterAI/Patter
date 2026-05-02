@@ -88,6 +88,7 @@ agent = phone.agent(
 | `background_audio` | `BackgroundAudioPlayer \| None` | `None` | Hold music / ambient-cue mixer. Pipeline mode only. |
 | `barge_in_threshold_ms` | `int` | `300` | Sustained-voice window (ms) before treating caller audio as barge-in. Set to `0` to disable. |
 | `aggressive_first_flush` | `bool` | `False` | Opt-in low-latency mode: emits the first clause on a soft punctuation boundary (`,`, em-dash, en-dash) once the buffer reaches ~40 chars. Saves 200–500 ms TTFA on the first sentence at the cost of slightly clipped prosody. **Hard-disabled when `language` starts with `"it"`** (Italian decimal commas would split mid-number). Pipeline mode only. |
+| `disable_phone_preamble` | `bool` | `False` | When `False` (default), Patter prepends a phone-friendly preamble to `system_prompt` that instructs the LLM to avoid markdown, emojis, bullet lists, and code blocks; spell out numbers and dates; and keep replies short. Set to `True` to ship `system_prompt` verbatim. |
 
 ## Agent Dataclass
 

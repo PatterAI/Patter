@@ -202,8 +202,12 @@ interface AgentOptions {
   backgroundAudio?: BackgroundAudioPlayer;
   bargeInThresholdMs?: number;
   aggressiveFirstFlush?: boolean;
+  disablePhonePreamble?: boolean;
+  provider?: 'openai_realtime' | 'elevenlabs_convai' | 'pipeline';
 }
 ```
+
+`provider` is a closed string literal — only `'openai_realtime'`, `'elevenlabs_convai'`, or `'pipeline'` are valid. It is normally derived from `engine` / `stt` + `tts` and rarely set by hand.
 
 ### ServeOptions
 
@@ -288,6 +292,7 @@ All errors extend `PatterError`, which extends the native `Error` class.
 | `PatterConnectionError` | WebSocket connection failures or disconnection errors. |
 | `AuthenticationError` | Invalid or missing API key. |
 | `ProvisionError` | Failures when provisioning resources (numbers, agents, calls). |
+| `RateLimitError` | Provider returned HTTP 429 on connect/upgrade. Extends `PatterConnectionError`. |
 
 ```typescript
 import {
@@ -295,16 +300,41 @@ import {
   PatterConnectionError,
   AuthenticationError,
   ProvisionError,
+  RateLimitError,
+  ErrorCode,
 } from "getpatter";
 
 try {
-  await phone.call({ to: "+15559876543", agent });
+  await phone.call({ to: "+15551234567", agent });
 } catch (error) {
-  if (error instanceof PatterConnectionError) {
-    console.error("Connection issue:", error.message);
+  if (error instanceof PatterError && error.code === ErrorCode.RATE_LIMIT) {
+    // back off and retry
+  } else if (error instanceof PatterConnectionError) {
+    // network / WS failure
   }
 }
 ```
+
+### ErrorCode
+
+Every Patter exception carries a stable, machine-readable `code` property. Branch on the code instead of class-name strings:
+
+```typescript
+import { ErrorCode } from "getpatter";
+
+ErrorCode.CONFIG;                // "CONFIG"
+ErrorCode.CONNECTION;            // "CONNECTION"
+ErrorCode.AUTH;                  // "AUTH"
+ErrorCode.TIMEOUT;               // "TIMEOUT"
+ErrorCode.RATE_LIMIT;            // "RATE_LIMIT"
+ErrorCode.WEBHOOK_VERIFICATION;  // "WEBHOOK_VERIFICATION"
+ErrorCode.INPUT_VALIDATION;      // "INPUT_VALIDATION"
+ErrorCode.PROVIDER_ERROR;        // "PROVIDER_ERROR"
+ErrorCode.PROVISION;             // "PROVISION"
+ErrorCode.INTERNAL;              // "INTERNAL"
+```
+
+Shipped as a `const` object plus value-union type (not a TS `enum`) so it is tree-shakeable and compatible with `verbatimModuleSyntax`. Mirrored byte-for-byte by the Python `ErrorCode` `StrEnum`.
 
 ## Top-level exports
 
@@ -336,6 +366,7 @@ export {
 
   // Errors
   PatterError, PatterConnectionError, AuthenticationError, ProvisionError,
+  RateLimitError, ErrorCode,
 } from "getpatter";
 ```
 
