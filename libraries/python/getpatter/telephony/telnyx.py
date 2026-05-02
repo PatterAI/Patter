@@ -30,7 +30,7 @@ from getpatter.stream_handler import (
 # ``w`` / ``W`` are Telnyx-specific pause characters (each inserts a 500 ms
 # wait before the next digit). They are sent as-is in the ``digits`` payload
 # — Telnyx interprets them server-side. Matches the Python handler with the
-# TS equivalent at ``sdk-ts/src/server.ts::TELNYX_DTMF_ALLOWED`` (Team 8).
+# TS equivalent at ``libraries/typescript/src/server.ts::TELNYX_DTMF_ALLOWED`` (Team 8).
 _DTMF_ALLOWED = frozenset("0123456789*#ABCDabcdwW")
 _DTMF_DEFAULT_DURATION_MS = 250
 
@@ -41,7 +41,7 @@ _SIP_URI_RE = re.compile(r"^sips?:[^\s@]+(@[^\s]+)?$", re.IGNORECASE)
 
 
 # TODO: TS equivalent — mirror the pause-digit set (``w``/``W``) in
-# ``sdk-ts/src/server.ts`` ``TELNYX_DTMF_ALLOWED`` (Team 8).
+# ``libraries/typescript/src/server.ts`` ``TELNYX_DTMF_ALLOWED`` (Team 8).
 # Telnyx ``send_dtmf`` accepts ``w`` / ``W`` as a pause character (500 ms
 # wait per Telnyx docs) alongside DTMF digits and A-D letters.
 

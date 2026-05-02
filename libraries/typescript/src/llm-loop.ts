@@ -40,7 +40,7 @@ const TOOL_MAX_RESPONSE_BYTES = 1 * 1024 * 1024;
 
 /**
  * Pluggable tool executor — mirrors the Python ``ToolExecutor`` in
- * ``sdk-py/getpatter/services/tool_executor.py``.
+ * ``libraries/python/getpatter/services/tool_executor.py``.
  *
  * Implementors receive a fully-resolved ``ToolDefinition`` (handler +/ webhook
  * URL already validated by the SDK) and MUST return a JSON-stringifiable

@@ -66,7 +66,7 @@ from getpatter.carriers.telnyx import Carrier as Telnyx
 from getpatter.engines.openai import Realtime as OpenAIRealtime
 from getpatter.engines.elevenlabs import ConvAI as ElevenLabsConvAI
 
-# STT flat aliases — parity with sdk-ts/src/index.ts.
+# STT flat aliases — parity with libraries/typescript/src/index.ts.
 from getpatter.stt.deepgram import STT as DeepgramSTT
 from getpatter.stt.whisper import STT as WhisperSTT
 from getpatter.stt.openai_transcribe import STT as OpenAITranscribeSTT
@@ -83,7 +83,7 @@ from getpatter.tts.cartesia import TTS as CartesiaTTS
 from getpatter.tts.rime import TTS as RimeTTS
 from getpatter.tts.lmnt import TTS as LMNTTTS
 
-# LLM flat aliases — parity with sdk-ts/src/index.ts and mirror of STT/TTS layout.
+# LLM flat aliases — parity with libraries/typescript/src/index.ts and mirror of STT/TTS layout.
 from getpatter.llm.openai import LLM as OpenAILLM
 from getpatter.llm.anthropic import LLM as AnthropicLLM
 from getpatter.llm.groq import LLM as GroqLLM
@@ -182,8 +182,8 @@ from getpatter.dashboard.export import calls_to_csv, calls_to_json
 # ``OpenAILLMProvider`` and the ``LLMProvider`` protocol. Python has no
 # ``DefaultToolExecutor`` or standalone ``LLMChunk`` yet — see TODOs below.
 from getpatter.services.llm_loop import LLMLoop, LLMProvider, OpenAILLMProvider
-# TODO(parity): port DefaultToolExecutor from TS (sdk-ts/src/llm-loop.ts).
-# TODO(parity): port LLMChunk from TS (sdk-ts/src/llm-loop.ts).
+# TODO(parity): port DefaultToolExecutor from TS (libraries/typescript/src/llm-loop.ts).
+# TODO(parity): port LLMChunk from TS (libraries/typescript/src/llm-loop.ts).
 
 # Remote-message + test session helpers.
 from getpatter.services.remote_message import (
@@ -200,7 +200,7 @@ from getpatter.audio.background_audio import (
     BackgroundAudioPlayer,
     BuiltinAudioClip,
 )
-# TODO(parity): port builtin_clip_path from TS (sdk-ts/src/services/background-audio.ts).
+# TODO(parity): port builtin_clip_path from TS (libraries/typescript/src/services/background-audio.ts).
 # TODO(parity): port select_sound_from_list public helper from TS (currently a
 # private method on the Python ``BackgroundAudioPlayer``).
 
@@ -220,7 +220,7 @@ from getpatter.audio.transcoding import (
     resample_16k_to_8k,
 )
 # TODO(parity): port resample_24k_to_16k one-shot helper from TS
-# (sdk-py currently exposes only the stateful create_resampler_24k_to_16k factory).
+# (the Python SDK currently exposes only the stateful create_resampler_24k_to_16k factory).
 
 # Pricing helpers — parity with TypeScript ``DEFAULT_PRICING``,
 # ``mergePricing``, ``calculateSttCost``, ``calculateTtsCost``,

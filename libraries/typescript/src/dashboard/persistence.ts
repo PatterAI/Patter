@@ -6,7 +6,7 @@
  * nothing is written to disk.
  *
  * TODO(parity): Python's `notify_dashboard` is now an async fire-and-forget
- * coroutine (see sdk-py/getpatter/dashboard/persistence.py). This TS version
+ * coroutine (see libraries/python/getpatter/dashboard/persistence.py). This TS version
  * uses `http.request` which is already non-blocking, but for parity consider
  * exposing this as `async function notifyDashboard(...): Promise<void>` so
  * call sites can `await` or `void` it explicitly, matching the Python API.

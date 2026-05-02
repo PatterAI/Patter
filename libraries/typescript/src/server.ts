@@ -454,7 +454,7 @@ function isValidTelnyxTransferTarget(target: string): boolean {
  * ``w`` / ``W`` are Telnyx-specific pause characters (each inserts a 500 ms
  * wait before the next digit). They are sent as-is in the ``digits`` payload
  * — Telnyx interprets them server-side. Mirrors the Python ``_DTMF_ALLOWED``
- * set in ``sdk-py/getpatter/handlers/telnyx_handler.py``.
+ * set in ``libraries/python/getpatter/handlers/telnyx_handler.py``.
  */
 const TELNYX_DTMF_ALLOWED = new Set('0123456789*#ABCDabcdwW');
 const TELNYX_DTMF_DURATION_MS = 250;
@@ -968,7 +968,7 @@ export class EmbeddedServer {
       // voicemail-drop flow. When Telnyx classifies the call as answered
       // by machine we speak the configured ``voicemailMessage`` via
       // ``actions/speak`` and then hang up via ``actions/hangup``.
-      // Matches ``sdk-py/getpatter/handlers/telnyx_handler.py::handle_amd_result``.
+      // Matches ``libraries/python/getpatter/handlers/telnyx_handler.py::handle_amd_result``.
       if (eventType === 'call.machine.detection.ended') {
         const amdCallId = payload.call_control_id ?? '';
         const amdResult = String(payload.result ?? '');
@@ -1159,7 +1159,7 @@ export class EmbeddedServer {
     // proper fix is to subscribe to Telnyx ``call.speak.ended`` and hang
     // up there; kept as a heuristic since the webhook plumbing change
     // is broader than this handler. Mirrors
-    // ``sdk-py/getpatter/handlers/telnyx_handler.py::handle_amd_result``.
+    // ``libraries/python/getpatter/handlers/telnyx_handler.py::handle_amd_result``.
     const estimatedMs = Math.min(
       30_000,
       Math.ceil((this.voicemailMessage.length / 14) * 1000) + 1500,

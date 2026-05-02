@@ -2,7 +2,7 @@
 agent frameworks (OpenAI Assistants, Anthropic Claude tool-use, LangChain,
 Hermes Agent, MCP, generic OpenAI-compatible endpoints).
 
-See ``sdk-ts/src/integrations/patter-tool.ts`` for the matching TS module —
+See ``libraries/typescript/src/integrations/patter-tool.ts`` for the matching TS module —
 the wire contracts (parameter schema, result envelope, ``hermes_handler``
 return shape) are kept identical so a customer can swap SDKs at any time.
 

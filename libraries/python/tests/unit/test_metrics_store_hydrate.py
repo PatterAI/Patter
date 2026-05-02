@@ -1,6 +1,6 @@
 """Regression tests for MetricsStore.hydrate.
 
-Mirrors `sdk-ts/tests/dashboard-store.test.ts` (`MetricsStore.hydrate`
+Mirrors `libraries/typescript/tests/dashboard-store.test.ts` (`MetricsStore.hydrate`
 suite) so the cross-SDK behaviour stays in lockstep.
 """
 

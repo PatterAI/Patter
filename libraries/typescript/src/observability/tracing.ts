@@ -1,6 +1,6 @@
 /**
  * OpenTelemetry tracing helpers for Patter — TypeScript mirror of
- * ``sdk-py/getpatter/observability/tracing.py``.
+ * ``libraries/python/getpatter/observability/tracing.py``.
  *
  * Design goals:
  *   - Zero cost when disabled. ``startSpan`` falls back to a cheap no-op span

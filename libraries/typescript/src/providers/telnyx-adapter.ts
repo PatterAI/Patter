@@ -12,7 +12,7 @@
  *     number we intend to buy.
  *   - Fully URL-encode ``callControlId`` in every path interpolation.
  *
- * See: ``sdk-py/getpatter/providers/telnyx_adapter.py``.
+ * See: ``libraries/python/getpatter/providers/telnyx_adapter.py``.
  */
 import { randomUUID } from 'node:crypto';
 import { getLogger } from '../logger';

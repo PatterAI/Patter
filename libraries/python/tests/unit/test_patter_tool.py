@@ -1,6 +1,6 @@
 """Tests for the PatterTool integration adapter.
 
-Mirrors `sdk-ts/tests/patter-tool.test.ts` so the cross-SDK contract stays
+Mirrors `libraries/typescript/tests/patter-tool.test.ts` so the cross-SDK contract stays
 in lockstep. The full call flow needs a live carrier+webhook, so these tests
 focus on the deterministic surface: schema shape, option validation, the
 call_id dispatcher / future lifecycle (using a fake Patter), and the Hermes

@@ -10,7 +10,7 @@
  * matches what OpenAI actually bills.
  */
 
-/** Pricing table version identifier, updated in lockstep with sdk-py. */
+/** Pricing table version identifier, updated in lockstep with the Python SDK. */
 export const PRICING_VERSION = '2026.2';
 /** ISO date the pricing table was last refreshed against public provider rates. */
 export const PRICING_LAST_UPDATED = '2026-04-24';
@@ -121,7 +121,7 @@ export function mergePricing(
     } else {
       // Fail-closed: when the user registers a brand-new provider without a
       // ``unit`` field, leave it missing so ``calculate_*_cost`` returns 0
-      // instead of silently billing as minutes. Matches sdk-py behaviour.
+      // instead of silently billing as minutes. Matches the Python SDK behaviour.
       merged[provider] = { ...values } as ProviderPricing;
     }
   }
@@ -305,7 +305,7 @@ export const llmPricing: Record<string, Record<string, LlmModelPricing>> = {
     'llama-3.3-70b': { input: 0.85, output: 1.20 },
     'qwen-3-32b': { input: 0.40, output: 0.80 },
   },
-  // OpenAI Chat Completions (non-Realtime) — mirrors sdk-py pricing table.
+  // OpenAI Chat Completions (non-Realtime) — mirrors the Python SDK pricing table.
   // Rates are per 1M tokens (USD), cache_read = cached input rate.
   openai: {
     'gpt-4o': { input: 2.50, output: 10.00, cache_read: 1.25 },

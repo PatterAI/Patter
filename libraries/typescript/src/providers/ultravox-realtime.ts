@@ -82,7 +82,7 @@ export class UltravoxRealtimeAdapter {
     // Ultravox API: setting both causes the server to reject the call.
     // Prefer ``initialMessages`` when a ``firstMessage`` is configured;
     // otherwise default to FIRST_SPEAKER_USER (user speaks first). Matches
-    // the Python port in ``sdk-py/getpatter/providers/ultravox_realtime.py``.
+    // the Python port in ``libraries/python/getpatter/providers/ultravox_realtime.py``.
     if (this.firstMessage) {
       body.initialOutputMedium = 'MESSAGE_MEDIUM_VOICE';
       body.initialMessages = [

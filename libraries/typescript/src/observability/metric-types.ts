@@ -2,7 +2,7 @@
  * Typed metric payload shapes for Patter observability events.
  *
  * These interfaces mirror the Python dataclasses in
- * ``sdk-py/getpatter/observability/metric_types.py`` and are emitted via
+ * ``libraries/python/getpatter/observability/metric_types.py`` and are emitted via
  * ``EventBus`` from ``CallMetricsAccumulator``.
  */
 

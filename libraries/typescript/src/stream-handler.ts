@@ -737,7 +737,7 @@ export class StreamHandler {
    * (server.ts) requests ``stream_bidirectional_codec=PCMU`` at 8 kHz. So
    * the wire format for both providers is mulaw 8 kHz; we resample 16 kHz
    * PCM16 → 8 kHz then encode to mulaw. Mirrors the Python pipeline path
-   * (sdk-py/getpatter/handlers/telnyx_handler.py::TelnyxAudioSender).
+   * (libraries/python/getpatter/handlers/telnyx_handler.py::TelnyxAudioSender).
    *
    * Maintains a 1-byte carry across calls so unaligned HTTP chunks from
    * streaming TTS providers never byte-swap the PCM16 samples downstream.

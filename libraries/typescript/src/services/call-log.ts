@@ -18,7 +18,7 @@
  * precision. Phone numbers in ``metadata.json`` are masked by default via
  * ``maskPhoneNumber``.
  *
- * Schema matches ``sdk-py/getpatter/services/call_log.py`` for cross-SDK
+ * Schema matches ``libraries/python/getpatter/services/call_log.py`` for cross-SDK
  * compatibility; fields map to OpenTelemetry ``gen_ai.*`` semantic
  * conventions.
  *

@@ -5,7 +5,7 @@
  * It intentionally avoids any dependency on the official ``twilio`` Node SDK so
  * the Patter SDK stays small.
  *
- * See also: ``sdk-py/getpatter/providers/twilio_adapter.py``.
+ * See also: ``libraries/python/getpatter/providers/twilio_adapter.py``.
  */
 import { getLogger } from '../logger';
 

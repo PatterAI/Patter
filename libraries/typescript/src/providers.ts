@@ -115,7 +115,7 @@ export function soniox(opts: { apiKey: string; language?: string }): STTConfig {
 export function speechmatics(_opts: { apiKey: string; language?: string }): STTConfig {
   throw new Error(
     "speechmatics() is Python-only right now — the TS Speechmatics adapter " +
-      "has not shipped yet. Use the Python SDK (sdk-py) or pick another STT " +
+      "has not shipped yet. Use the Python SDK or pick another STT " +
       "provider such as deepgram() / assemblyai() / soniox().",
   );
 }

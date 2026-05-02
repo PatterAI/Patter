@@ -224,7 +224,7 @@ class OpenAILLMProvider:
             # OpenAI's prompt_tokens is the TOTAL input (uncached + cached).
             # Subtract cached so input_tokens represents only the uncached
             # portion and calculate_llm_cost doesn't bill cached tokens at
-            # the full input rate (mirrors sdk-ts/llm-loop.ts:296-305).
+            # the full input rate (mirrors libraries/typescript/src/llm-loop.ts:296-305).
             prompt_tokens = getattr(last_usage, "prompt_tokens", 0) or 0
             uncached_input = max(0, prompt_tokens - cache_read)
             yield {

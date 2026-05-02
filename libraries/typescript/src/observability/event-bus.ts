@@ -1,7 +1,7 @@
 /**
  * Lightweight in-process event bus for Patter call lifecycle events.
  *
- * Mirrors the Python ``PatterEventBus`` (sdk-py/getpatter/observability/event_bus.py).
+ * Mirrors the Python ``PatterEventBus`` (libraries/python/getpatter/observability/event_bus.py).
  * Consumers subscribe with ``on()`` and receive typed payloads.  ``emit()`` is
  * synchronous but handles async listeners: rejections are surfaced via the
  * Patter logger rather than being swallowed or crashing the call.

@@ -229,7 +229,7 @@ export class Patter {
       !working.provider &&
       (working.stt !== undefined || working.tts !== undefined || working.llm !== undefined)
     ) {
-      // Parity with sdk-py: when the caller supplies any pipeline-mode piece
+      // Parity with Python: when the caller supplies any pipeline-mode piece
       // (stt / tts / llm) without an explicit engine or provider, derive
       // ``provider = "pipeline"`` so metrics, logs, and the ``Call started``
       // mode-label are accurate.
@@ -457,7 +457,7 @@ export class Patter {
       // Note: ``stream_url``/``stream_track`` are NOT accepted on
       // ``POST /v2/calls`` — Telnyx ignores them at dial time. Streaming is
       // started later via ``actions/streaming_start`` once the call is
-      // answered. Mirrors ``sdk-py/getpatter/providers/telnyx_adapter.py``.
+      // answered. Mirrors ``libraries/python/getpatter/providers/telnyx_adapter.py``.
       const telnyxKey = carrier.apiKey;
       const connectionId = carrier.connectionId;
 
@@ -506,7 +506,7 @@ export class Patter {
     const url = `https://api.twilio.com/2010-04-01/Accounts/${twilioSid}/Calls.json`;
     // Inline TwiML avoids the extra Twilio→webhook round-trip (~100-200ms)
     // that the ``Url:`` parameter would trigger. Mirrors the Python adapter
-    // (``sdk-py/getpatter/providers/twilio_adapter.py``) which uses
+    // (``libraries/python/getpatter/providers/twilio_adapter.py``) which uses
     // ``twiml=...`` for outbound calls.
     const streamUrl = `wss://${webhookUrl}/ws/stream/outbound`;
     const inlineTwiml = `<?xml version="1.0" encoding="UTF-8"?><Response><Connect><Stream url="${streamUrl}"/></Connect></Response>`;
