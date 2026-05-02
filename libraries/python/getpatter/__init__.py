@@ -114,6 +114,10 @@ def __getattr__(name):
         from getpatter.providers import krisp_instance as _krisp_instance
 
         return getattr(_krisp_instance, name)
+    if name in {"OnnxExecutionProvider", "SileroOnnxSampleRate"}:
+        from getpatter.providers import silero_onnx as _silero_onnx
+
+        return getattr(_silero_onnx, name)
     raise AttributeError(f"module 'getpatter' has no attribute {name!r}")
 
 
@@ -338,10 +342,8 @@ from getpatter.providers.ultravox_realtime import (  # noqa: E402
     UltravoxServerEvent,
     UltravoxState,
 )
-from getpatter.providers.silero_onnx import (  # noqa: E402
-    OnnxExecutionProvider,
-    SileroOnnxSampleRate,
-)
+# OnnxExecutionProvider, SileroOnnxSampleRate exposed lazily via __getattr__
+# above (requires the optional ``silero`` extra: numpy + onnxruntime).
 
 __all__ = [
     "Patter",

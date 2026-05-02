@@ -99,29 +99,9 @@ jobs:
           cd libraries/typescript
           npm run build
 
-  e2e:
-    name: E2E Tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - name: Set up Node.js 20
-        uses: actions/setup-node@v6
-        with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: libraries/typescript/package-lock.json
-      - name: Install dependencies
-        run: |
-          cd libraries/typescript
-          npm ci
-      - name: Install Playwright
-        run: |
-          cd libraries/typescript
-          npx playwright install --with-deps
-      - name: Run E2E tests
-        run: |
-          cd libraries/typescript
-          npx playwright test
+  # E2E tests live in a downstream test repo (require real Twilio/Telnyx
+  # credentials and place actual phone calls). They are not part of the
+  # in-repo CI matrix.
 
   security:
     name: Security Tests
