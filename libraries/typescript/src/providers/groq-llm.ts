@@ -8,6 +8,7 @@
  */
 
 import type { LLMChunk, LLMProvider, LLMStreamOptions } from "../llm-loop";
+import { mergeAbortSignals } from "../llm-loop";
 import { getLogger } from '../logger';
 import { VERSION } from '../version';
 
@@ -128,9 +129,7 @@ export class GroqLLMProvider implements LLMProvider {
         'User-Agent': `getpatter/${VERSION}`,
       },
       body: JSON.stringify(body),
-      signal: opts?.signal
-        ? AbortSignal.any([opts.signal, AbortSignal.timeout(30_000)])
-        : AbortSignal.timeout(30_000),
+      signal: mergeAbortSignals(opts?.signal, AbortSignal.timeout(30_000)),
     });
 
     if (!response.ok) {

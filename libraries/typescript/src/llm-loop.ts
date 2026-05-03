@@ -212,6 +212,41 @@ export interface LLMStreamOptions {
   signal?: AbortSignal;
 }
 
+/**
+ * Combine multiple AbortSignals into one. Aborts as soon as ANY input
+ * fires (or if any input was already aborted). Defined here because
+ * ``AbortSignal.any`` only landed in Node 20.3 — Patter's ``engines.node``
+ * is ``>=18.0.0`` and we cannot break Node 18 users on the first LLM
+ * call. Falls through to ``AbortSignal.any`` when available so the polyfill
+ * cost is paid only on older runtimes.
+ */
+export function mergeAbortSignals(
+  ...signals: ReadonlyArray<AbortSignal | undefined | null>
+): AbortSignal {
+  const filtered = signals.filter(
+    (s): s is AbortSignal => s != null,
+  );
+  if (filtered.length === 1) return filtered[0];
+  if (typeof (AbortSignal as { any?: unknown }).any === 'function') {
+    return (AbortSignal as { any: (xs: AbortSignal[]) => AbortSignal }).any(
+      filtered,
+    );
+  }
+  const controller = new AbortController();
+  for (const sig of filtered) {
+    if (sig.aborted) {
+      controller.abort((sig as { reason?: unknown }).reason);
+      return controller.signal;
+    }
+    sig.addEventListener(
+      'abort',
+      () => controller.abort((sig as { reason?: unknown }).reason),
+      { once: true },
+    );
+  }
+  return controller.signal;
+}
+
 export interface LLMProvider {
   stream(
     messages: Array<Record<string, unknown>>,
@@ -314,9 +349,7 @@ export class OpenAILLMProvider implements LLMProvider {
     // 30 s ceiling. ``AbortSignal.any`` aborts as soon as ANY input
     // signal fires, so a barge-in that arrives mid-fetch tears the
     // connection down immediately instead of waiting for the timeout.
-    const signal = opts?.signal
-      ? AbortSignal.any([opts.signal, AbortSignal.timeout(30_000)])
-      : AbortSignal.timeout(30_000);
+    const signal = mergeAbortSignals(opts?.signal, AbortSignal.timeout(30_000));
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {

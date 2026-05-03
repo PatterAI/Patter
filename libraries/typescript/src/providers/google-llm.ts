@@ -17,6 +17,7 @@
  */
 
 import type { LLMChunk, LLMProvider, LLMStreamOptions } from "../llm-loop";
+import { mergeAbortSignals } from "../llm-loop";
 import { getLogger } from '../logger';
 
 /** Known Google Gemini chat models. */
@@ -120,9 +121,7 @@ export class GoogleLLMProvider implements LLMProvider {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-      signal: opts?.signal
-        ? AbortSignal.any([opts.signal, AbortSignal.timeout(30_000)])
-        : AbortSignal.timeout(30_000),
+      signal: mergeAbortSignals(opts?.signal, AbortSignal.timeout(30_000)),
     });
 
     if (!response.ok) {

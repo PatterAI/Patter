@@ -19,6 +19,7 @@
  */
 
 import type { LLMChunk, LLMProvider, LLMStreamOptions } from "../llm-loop";
+import { mergeAbortSignals } from "../llm-loop";
 import { getLogger } from '../logger';
 
 const DEFAULT_ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
@@ -191,9 +192,7 @@ export class AnthropicLLMProvider implements LLMProvider {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
-      signal: opts?.signal
-        ? AbortSignal.any([opts.signal, AbortSignal.timeout(30_000)])
-        : AbortSignal.timeout(30_000),
+      signal: mergeAbortSignals(opts?.signal, AbortSignal.timeout(30_000)),
     });
 
     if (!response.ok) {
