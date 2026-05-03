@@ -13,10 +13,13 @@ venv/
 *.db
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
 .coverage
 htmlcov/
 .claude/
 CLAUDE.md
+# Per-library CLAUDE.md files MUST be tracked (quickstarts for AI agents).
+!libraries/*/CLAUDE.md
 node_modules/
 *.sqlite
 *.log
@@ -24,3 +27,8 @@ node_modules/
 settings.json
 .worktrees/
 docs/internal/
+# Legacy build dir from pre-rename Python SDK (sdk/ -> sdk-py/ in 0.4.2)
+sdk/
+# AI agent local state
+.agents/
+skills-lock.json

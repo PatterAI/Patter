@@ -72,6 +72,18 @@ ElevenLabsWebSocketTTS.forTelnyx(opts?: ElevenLabsWebSocketTTSOptions)  // outpu
 | `chunkLengthSchedule` | `number[]` | — | Server-side chunking schedule for streamed text. |
 | `chunkSize` | `number` | — | Audio chunk size hint for the receive side. |
 
+### Carrier auto-detect — `setTelephonyCarrier`
+
+When you don't know the carrier at construction time, `StreamHandler` calls `setTelephonyCarrier(carrier)` at call start to advise the provider of the wire format:
+
+```typescript
+const tts = new ElevenLabsWebSocketTTS();   // outputFormat defaults to pcm_16000
+tts.setTelephonyCarrier("twilio");           // auto-flips to ulaw_8000
+tts.setTelephonyCarrier("telnyx");           // keeps pcm_16000
+```
+
+When `outputFormat` was passed explicitly to the constructor (or via `forTwilio` / `forTelnyx`), `setTelephonyCarrier` is a no-op — the user's choice always wins. Calling with an unknown carrier (`""` / `"custom"`) is also a no-op.
+
 ## Limitations
 
 - **`eleven_v3*` is not supported.** The v3 model family does not work over the WebSocket transport — fall back to the HTTP [`ElevenLabsTTS`](/typescript-sdk/tts#elevenlabs) for those models.

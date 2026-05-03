@@ -6,7 +6,7 @@ Thank you for your interest in contributing to Patter!
 
 ### Python SDK
 ```bash
-cd sdk-py
+cd libraries/python
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
@@ -17,7 +17,7 @@ pytest tests/ -v
 
 ### TypeScript SDK
 ```bash
-cd sdk-ts
+cd libraries/typescript
 npm install
 npm test
 npm run build
@@ -84,10 +84,10 @@ CI always runs the full unaltered suite, so these only affect local runs.
 Patter uses an **instance-based class pattern** (post-0.5.0). To add a new STT, TTS, or LLM provider:
 
 1. Create the provider class:
-   - Python: `sdk-py/getpatter/stt/<name>.py`, `sdk-py/getpatter/tts/<name>.py`, or `sdk-py/getpatter/llm/<name>.py` exporting a class named `STT`, `TTS`, or `LLM`.
-   - TypeScript: `sdk-ts/src/stt/<name>.ts`, `sdk-ts/src/tts/<name>.ts`, or `sdk-ts/src/llm/<name>.ts` exporting `STT`, `TTS`, or `LLM`.
+   - Python: `libraries/python/getpatter/stt/<name>.py`, `libraries/python/getpatter/tts/<name>.py`, or `libraries/python/getpatter/llm/<name>.py` exporting a class named `STT`, `TTS`, or `LLM`.
+   - TypeScript: `libraries/typescript/src/stt/<name>.ts`, `libraries/typescript/src/tts/<name>.ts`, or `libraries/typescript/src/llm/<name>.ts` exporting `STT`, `TTS`, or `LLM`.
 2. Read credentials from the standard env var (e.g. `<NAME>_API_KEY`) when no `api_key` / `apiKey` is passed; throw a clear error when both are missing.
-3. Re-export a flat alias from the package barrel (`getpatter/__init__.py` for Python, `sdk-ts/src/index.ts` for TypeScript) — for example `STT as DeepgramSTT`.
+3. Re-export a flat alias from the package barrel (`getpatter/__init__.py` for Python, `libraries/typescript/src/index.ts` for TypeScript) — for example `STT as DeepgramSTT`.
 4. Wire the new class into the pipeline dispatch (stream handler) for end-to-end audio flow.
 5. Add a default pricing entry under `DEFAULT_PRICING` so users see real cost numbers in the dashboard.
 6. Add unit + integration tests; aim for 80%+ coverage on the new module.

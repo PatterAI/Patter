@@ -334,7 +334,7 @@
       "name": "phase7_ramesh_all_caps_name",
       "tokens": ["I was speaking with RAMESH about the project."],
       "expected_sentences": ["I was speaking with RAMESH about the project."],
-      "notes": "Phase 7 fix: gate-5 previously blocked any uppercase-preceded period — fixed by Pipecat issue #1692 pattern. RAMESH is a real sentence end."
+      "notes": "Phase 7 fix: gate-5 previously blocked any uppercase-preceded period; an all-caps name immediately before the terminator must still register as a real sentence end."
     },
     {
       "name": "phase7_us_two_letter_acronym_preserved",

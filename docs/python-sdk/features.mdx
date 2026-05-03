@@ -174,9 +174,15 @@ The chunker does not split on common abbreviations (no spurious sentence breaks 
 
 - **English:** `Mr`, `Mrs`, `Ms`, `Dr`, `St`, `Jr`, `Sr`, `Prof`, `Hon`, `Rev`, `vs`, `etc`, `Gen`, `Sen`, plus the standard month/measurement set.
 - **Italian:** `Sig`, `Sig.ra`, `Sgr`, `Dott`, `Dott.ssa`, `Prof`, `Avv`, `Ing`, `Geom`, `Rag`, `Arch`, `On`, `Egr`, `Spett`, `Gent`, `Ill`, plus business/legal abbreviations like `S.p.A.`, `S.r.l.`, `S.a.s.`, `ecc`.
-- **Multilingual sentence terminators:** Latin (`. ! ?`), Western ellipsis (`…`), CJK (`。 ！ ？ ｡ ． ；`), Hindi/Devanagari (`। ॥`), Arabic (`؟ ؛ ۔ ؏`), Armenian (`։ ՜ ՞`), Ethiopic (`። ፧`), Khmer (`។ ៕`), Burmese (`။`), Tibetan (`༎ ༏`).
+- **Multilingual sentence terminators:** Latin (`. ! ?`), Western ellipsis (`…`), CJK (`。 ！ ？ ｡ ． ；`), Hindi/Devanagari (`। ॥`), Arabic (`؟ ؛ ۔ ؏`), Armenian (`։ ՜ ՞`), Ethiopic (`։ ፧`), Khmer (`។ ៕`), Burmese (`။`), Tibetan (`༎ ༏`).
 
-This means the chunker streams cleanly on multilingual responses without hand-tuning.
+This means the chunker streams cleanly on multilingual responses without hand-tuning. The `SentenceChunker` constructor accepts an optional `language=` argument (BCP-47 code) — Patter forwards `agent.language` automatically, but you can construct one directly with the language you want when wiring the chunker manually:
+
+```python
+from getpatter import SentenceChunker
+
+chunker = SentenceChunker(language="it")    # uses Italian honorifics + terminators
+```
 
 ---
 

@@ -8,7 +8,7 @@ icon: "phone-arrow-up-right"
 
 `PatterTool` exposes a live `Patter` instance as a single **`make_phone_call`** tool that any text-based agent framework can register and dispatch. The agent picks up the phone, Patter runs a short conversation against the caller, and the tool returns a JSON envelope with the call ID, status, transcript, cost, and metrics.
 
-This complements the **bring-your-own-agent** pattern (`serve({ onMessage: 'https://...' })`) with the **inverse pattern** — phone-as-tool — covering the two realistic migration paths from LiveKit / ElevenLabs ConvAI / Pipecat customers.
+This complements the **bring-your-own-agent** pattern (`serve({ onMessage: 'https://...' })`) with the **inverse pattern** — phone-as-tool — exposing any Patter-built voice agent as an MCP-compatible tool that other agent frameworks can call as if it were a local function.
 
 | Pattern | Where the brain lives | Where Patter sits | Use this when… |
 |---|---|---|---|
@@ -98,11 +98,13 @@ For local development, use `tunnel: true` on the `Patter` constructor and let it
 
 ## Examples
 
-See [`examples/integrations/`](https://github.com/PatterAI/Patter/tree/main/examples/integrations) in the repo:
+Runnable integration examples live in their own repo (see the [Patter examples organization](https://github.com/PatterAI)):
 
 - `hermes_phone_tool.py` — drop-in `tools/patter.py` for Hermes Agent.
 - `openai_assistant_phone_tool.ts` — minimal OpenAI Assistants run dispatching the tool.
-- `README.md` — Pattern A vs Pattern B decision matrix.
+- Pattern A vs Pattern B decision matrix in the example repo's README.
+
+{/* TODO: replace with the canonical URL once the integrations example repo is published (e.g. https://github.com/PatterAI/patter-integrations). */}
 
 ## What's next
 

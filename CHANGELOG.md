@@ -4,6 +4,117 @@
 
 _(no entries yet — next version will land here)_
 
+## 0.6.0 (2026-05-03)
+
+Repository cleanup + bug-fix + parity wave.
+
+### Improved — SileroVAD usability
+
+- **Auto-VAD in pipeline mode**. When the user does not pass `agent.vad`, the pipeline stream handler now auto-loads `SileroVAD` with telephony-tuned defaults (1.0 s `min_silence_duration`, 16 kHz sample rate). Falls back silently to the legacy STT-endpoint heuristic when `onnxruntime-node` (TS) / `getpatter[silero]` (Py) is not installed. No opt-out flag — auto-VAD is a strict upgrade over the heuristic when available.
+- **`SileroVAD.forPhoneCall(opts?)` / `SileroVAD.for_phone_call(**overrides)`** factory. Convenience wrapper around `load(...)` that pre-applies the telephony preset; pass overrides for noisy-environment tuning (e.g. `minSilenceDuration: 1.5` for tunnel + speakerphone echo).
+- **Defaults aligned with upstream Silero** (`snakers4/silero-vad`): `min_speech_duration` 0.05 → 0.25 s, `min_silence_duration` 0.55 → 0.10 s, `prefix_padding` 0.5 → 0.03 s. Existing callers can restore the old telephony-tuned values explicitly. The new `for_phone_call` factory handles the common phone-call override.
+- **Robust ONNX model resolution (TS)**. `silero-vad.ts` now probes 4 anchor candidates (`__dirname`, `import.meta.url`, `createRequire(import.meta.url).resolve("getpatter/package.json")`, `createRequire(cwd).resolve(...)`) crossed with 3 path shapes (`<dir>/resources/`, `<dir>/../resources/`, `<dir>/dist/resources/`). Eliminates the workaround `createRequire(import.meta.url).resolve("getpatter")` that callers had to add manually under bundlers that break `import.meta.url`. Most changes are internal hardening; the breaking changes are the package-tree reorganisation and the `Agent.provider` field type tightening.
+
+### Breaking — package-tree reorganisation
+
+- **SDK roots moved** from `sdk-py/` and `sdk-ts/` to `libraries/python/` and `libraries/typescript/` (mcp-use-style layout). Top-level imports for end users are unchanged (`pip install getpatter`, `npm install getpatter`, `import { Patter } from "getpatter"`). Repo-relative paths in CI scripts, contributing docs, and integrators that pull from the source tree must update.
+- **Per-SDK tests live in `libraries/<lang>/tests/`** instead of inside the package directory. Cross-SDK integration tests at the repo root were removed; integration coverage now lives next to each SDK.
+- **In-repo `examples/` directory removed.** Examples are maintained in separate downstream repos and pulled into the docs as needed.
+
+### Breaking — internal SDK layout reorganised
+
+Internal layout reorganised for both SDKs; **PUBLIC API surface unchanged** (every `from getpatter import ...` / `import { ... } from "getpatter"` keeps resolving). Affects only callers that import internal modules directly (e.g. `from getpatter.handlers.twilio_handler import ...` — that path no longer exists).
+
+- **Python (`libraries/python/getpatter/`)**
+  - `handlers/twilio_handler.py` → `telephony/twilio.py`
+  - `handlers/telnyx_handler.py` → `telephony/telnyx.py`
+  - `handlers/common.py` → `telephony/common.py`
+  - `handlers/stream_handler.py` → `stream_handler.py` (top-level — it's the per-call orchestrator, not a telephony adapter; `handlers/` folder removed)
+  - `services/transcoding.py`, `services/pcm_mixer.py`, `services/background_audio.py` → `audio/*.py`
+  - `services/tool_decorator.py`, `services/tool_executor.py` → `tools/*.py`
+  - All other `services/*.py` (llm_loop, metrics, sentence_chunker, text_transforms, ivr, fallback_provider, pipeline_hooks, chat_context, call_log, remote_message) stay where they are.
+
+- **TypeScript (`libraries/typescript/src/`)**
+  - `carriers/twilio.ts` → `telephony/twilio.ts`
+  - `carriers/telnyx.ts` → `telephony/telnyx.ts`
+  - top-level `transcoding.ts` → `audio/transcoding.ts`
+  - `services/background-audio.ts` → `audio/background-audio.ts`
+  - top-level `tool-decorator.ts` → `tools/tool-decorator.ts`
+
+The `tts/` and `stt/` namespaces are unchanged — they expose `getpatter.{tts,stt}.<provider>.{TTS,STT}` with env-var auto-resolve and are real public API.
+
+Migration: if your code did `from getpatter.handlers.twilio_handler import ...` change it to `from getpatter.telephony.twilio import ...`. Public exports from the package root (e.g. `from getpatter import Patter`) are unaffected.
+
+### Breaking — `Agent.provider` is a closed enum
+
+- `Agent.provider` (Python) is now typed `ProviderMode = Literal["openai_realtime", "elevenlabs_convai", "pipeline"]`; previously it was a free-form `str`. TypeScript `AgentOptions.provider` mirrors with the same union.
+- Callers passing arbitrary strings (e.g. typo `"openai-realtime"`) get a static type error in TS and a run-time `PatterConfigError` in Py.
+
+### Added — phone preamble (opt-in by default for phone mode)
+
+- `Agent` gets an automatic preamble prepended to `system_prompt` for phone-call deployments: instructs the model to respond concisely, drop markdown/bullets/emojis, and spell out numbers/currencies/dates in spoken form. Set `disable_phone_preamble=True` (Py) / `disablePhonePreamble: true` (TS) to opt out.
+
+### Added — per-SDK `.env.example`
+
+- `libraries/python/.env.example` and `libraries/typescript/.env.example` ship a curated, role-grouped list of provider env vars (telephony, LLM, STT, TTS). Replaces the obsolete cloud-mode env file.
+
+### Added — `PricingUnit` enum
+
+- `pricing.py` / `pricing.ts` introduce a `PricingUnit` enum (`MINUTE`, `THOUSAND_CHARS`, `TOKEN`) replacing free-form unit strings on every `ProviderPricing` row. The TS server backward-compat shim still accepts plain strings on the wire.
+
+### Added — provider enum constants
+
+- Every provider that historically accepted hard-coded model / voice / format strings now exposes a typed enum (`StrEnum` / `IntEnum` in Py, const-object + value union in TS). Covered providers: assemblyai_stt, cartesia_stt, cartesia_tts, cerebras_llm, deepgram_stt, elevenlabs_tts, elevenlabs_ws_tts, gemini_live, google_llm, groq_llm, lmnt_tts, openai_realtime, openai_tts, rime_tts, silero_vad, silero_onnx, soniox_stt, speechmatics_stt, telnyx_stt, telnyx_tts, ultravox_realtime, whisper_stt, anthropic_llm, krisp_*. The string form is still accepted on each constructor (back-compat).
+
+### Fixed — barge-in cancels in-flight LLM stream (HIGH IMPACT)
+
+- The stream handler used to leak partial LLM completions during barge-in: even after the user interrupted, the LLM stream kept pulling tokens to completion (and racking up tokens/cost). Now Python uses an `asyncio.Event` checked between tokens; TypeScript uses an `AbortController` forwarded to the LLM stream `fetch`. Cancellation is observed inside one token cycle.
+
+### Fixed — webhook + outbound URL hardening
+
+- Python `server.py` adds a `validate_webhook_url()` SSRF guard on every outbound webhook (refuses `127.0.0.1` / `169.254.169.254` / private CIDR by default), matching the TypeScript validator that already existed.
+- Python WS endpoint enforces `MAX_WS_PER_IP=10` connection cap (parity with TS).
+- Python voicemail POST now has an explicit 10 s timeout (was unbounded).
+
+### Fixed — observability & metrics
+
+- Python `event_bus.py` now logs listener exceptions instead of swallowing them.
+- Python `metrics.py` accepts a legitimate `0.0 ms` `agent_response_ms` value (was treated as "missing" via truthy check).
+- TypeScript `metrics.ts` now emits `llm_ttfb_ms` / `stt_ttfb_ms` / `tts_ttfb_ms` events on the EventBus (Py parity).
+- TypeScript `server.ts` `queryTelephonyCost` catch logs the failure instead of returning silently.
+- TypeScript `llm-loop.ts` HTTP errors now `throw new PatterConnectionError(...)` (was: silent return masking provider 5xx).
+- LLM loop cache token attribution: emit key is now `cache_read_tokens` (was `cache_read_input_tokens`, which didn't match what OpenAI / Google emit — Anthropic-style key was being read but never populated).
+
+### Performance
+
+- `text_transforms.py` precompiles all 14 markdown regex patterns + 2 emoji helpers as module-level constants (was: recompiled per call). Hot-path text transforms drop CPU by ~30% on long responses.
+- `ElevenLabsWebSocketTTS` auto-flips `output_format` to `ulaw_8000` when paired with a Twilio carrier — eliminates the SDK-side mulaw transcode hop. New `set_telephony_carrier()` / `setTelephonyCarrier()` hook is duck-typed by the stream handler at call setup; explicit `output_format` always wins.
+- `OpenAITTS` gains an opt-in `target_sample_rate=8000` (Py) / `targetSampleRate: 8000` (TS) constructor arg that collapses the 24k→16k + 16k→8k chain into a single 3:1 decimation with a tighter LPF (Nyquist ≈ 4 kHz). New `create_resampler_24k_to_8k()` / `createResampler24kTo8k()` factory exported from `transcoding`. Default stays at 16 kHz for backward compatibility.
+
+### Improved — sentence chunker (Bugs #48 + #49)
+
+- **Per-language honorifics**: new `HONORIFICS_{EN,IT,ES,DE,FR,PT}` constants merge into a union regex that prevents premature splits on `Mr.`, `Sig.`, `Sr.`, `Hr.`, `M.`, `Sra.`, `Dr.`, `Dott.`, `Prof.`, `Mme.`, etc. Aggregation is union-of-all regardless of caller `language` — mixed-language deployments are common, safer default.
+- **Single-word flush**: `DEFAULT_MIN_WORDS_FOR_SHORT_FLUSH` lowered `2 → 1`; single-word replies like `"Yes."`, `"Done!"`, `"Sì."`, `"はい。"` now flush on the terminator. New gate #6 in `maybeShortFlush` blocks flushing when the trailing word is a known honorific (so `"Mr."` doesn't escape as a sentence). Pass `minWordsForShortFlush=2` to opt back into the previous behaviour.
+- 22 Python + 21 TypeScript new honorific cases; 12 + 12 single-word flush cases.
+
+### Added — `ErrorCode` enum on the exception taxonomy
+
+- New `ErrorCode` enum (10 stable values: `CONFIG`, `CONNECTION`, `AUTH`, `TIMEOUT`, `RATE_LIMIT`, `WEBHOOK_VERIFICATION`, `INPUT_VALIDATION`, `PROVIDER_ERROR`, `PROVISION`, `INTERNAL`) attached to every Patter exception via a default `.code` class attribute. Catchers can branch on `exc.code is ErrorCode.AUTH` instead of class-name matching.
+- Python: `StrEnum` on `exceptions.py`, optional `code=` kwarg on `PatterError.__init__` for per-instance override.
+- TypeScript: const-object + value-union, optional `{ code }` constructor option on every subclass. Class→code mapping matches Python byte-for-byte (asserted in test parity).
+- Backward-compatible: every existing `Foo("msg")` / `new Foo("msg")` call site keeps working.
+
+### Documentation
+
+- **Docstring / JSDoc sweep across both SDKs.** Every public module, class, function, method, interface, and exported type now has a description. Pre-existing docstrings were left untouched; the pass added ~75 Python docstrings and ~290 TypeScript JSDoc blocks across 100+ files. No behaviour changes.
+
+### Cleanup
+
+- All competitor license headers (LiveKit, Pipecat, Apache, etc.) removed from source files. New rule `.claude/rules/no-competitor-references.md` codifies the policy.
+- Root `LICENSE` updated to `Copyright (c) 2026 Patter Contributors`.
+- `Dockerfile` + `docker-compose.yml` simplified; non-public-repo scripts removed.
+- `playwright.config.ts` + `@playwright/test` devDep dropped (E2E lives in downstream test repo).
+
 ## 0.5.5 (2026-04-28)
 
 Latency-pass 1: TTFA optimisations grounded in the ElevenLabs latency posts and a head-to-head review of competing production voice-AI stacks. All changes are additive or opt-in — existing call sites keep their current behaviour unchanged.

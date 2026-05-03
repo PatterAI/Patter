@@ -59,6 +59,7 @@ def agent(
     background_audio: BackgroundAudioPlayer | None = None,
     barge_in_threshold_ms: int = 300,
     aggressive_first_flush: bool = False,
+    disable_phone_preamble: bool = False,
 ) -> Agent
 ```
 
@@ -85,6 +86,7 @@ Pass `engine=OpenAIRealtime(...)` or `engine=ElevenLabsConvAI(...)` for end-to-e
 | `background_audio` | `BackgroundAudioPlayer \| None` | `None` | Background audio player (pipeline mode). |
 | `barge_in_threshold_ms` | `int` | `300` | Barge-in hang-over window (ms). Set to `0` to disable. |
 | `aggressive_first_flush` | `bool` | `False` | Emit the first clause on a soft punctuation boundary (`,`, em/en-dash) once buffer ≥40 chars. Saves 200–500 ms TTFA. Hard-disabled when `language` starts with `"it"`. Pipeline mode only. |
+| `disable_phone_preamble` | `bool` | `False` | Disable the phone-friendly preamble Patter prepends to `system_prompt` (no markdown / emojis / lists, numbers spelled out, replies kept short). Default `False` keeps the preamble on. |
 
 **Raises:** `ValueError` if required credentials are missing or conflicting options are passed (e.g. both `engine` and `stt`/`tts`).
 
@@ -329,7 +331,10 @@ class Agent:
     background_audio: BackgroundAudioPlayer | None = None
     barge_in_threshold_ms: int = 300
     aggressive_first_flush: bool = False
+    disable_phone_preamble: bool = False
 ```
+
+`provider` is a closed string literal — only `"openai_realtime"`, `"elevenlabs_convai"`, or `"pipeline"` are valid. It is normally derived from `engine` / `stt`+`tts` and rarely set by hand.
 
 ### CallEvent
 
@@ -382,13 +387,66 @@ See [Metrics & Cost Tracking](/python-sdk/metrics).
 ```
 PatterError
 ├── PatterConnectionError
+│   └── RateLimitError
 ├── AuthenticationError
 └── ProvisionError
 ```
 
 ```python
-from getpatter import PatterError, PatterConnectionError, AuthenticationError, ProvisionError
+from getpatter import (
+    PatterError,
+    PatterConnectionError,
+    AuthenticationError,
+    ProvisionError,
+    RateLimitError,
+    ErrorCode,
+)
 ```
+
+Every Patter exception carries a stable, machine-readable `ErrorCode` on its `code` attribute. Branch on the code instead of class-name strings:
+
+```python
+from getpatter import ErrorCode, PatterError
+
+try:
+    await phone.serve(agent)
+except PatterError as exc:
+    if exc.code is ErrorCode.AUTH:
+        ...
+    elif exc.code is ErrorCode.RATE_LIMIT:
+        ...
+```
+
+### ErrorCode values
+
+| Code | Raised when |
+|------|-------------|
+| `CONFIG` | Invalid constructor args, missing required env var, frozen-config violation. |
+| `CONNECTION` | WebSocket connect failure, HTTP 5xx from a provider, network error. |
+| `AUTH` | Provider rejected our credentials (HTTP 401/403, invalid signature). |
+| `TIMEOUT` | Provider response, voicemail post, or other awaited operation timed out. |
+| `RATE_LIMIT` | Provider returned HTTP 429. |
+| `WEBHOOK_VERIFICATION` | Twilio / Telnyx webhook signature verification failed. |
+| `INPUT_VALIDATION` | Caller passed a malformed phone number, tool arg, etc. |
+| `PROVIDER_ERROR` | Generic catch-all for unexpected upstream provider failures. |
+| `PROVISION` | Phone number provisioning, webhook configuration, or carrier setup failed. |
+| `INTERNAL` | Assertion failed / unexpected internal state. Likely a Patter bug. |
+
+`ErrorCode` is a `StrEnum` — values compare equal to their string form, so `exc.code == "AUTH"` also works for backward-compatible callers.
+
+---
+
+## Audio helpers
+
+```python
+from getpatter import builtin_clip_path, select_sound_from_list, resample_24k_to_16k
+```
+
+| Helper | Purpose |
+|--------|---------|
+| `builtin_clip_path(name: str) -> Path` | Resolve the on-disk path for a built-in `BuiltinAudioClip` (hold music, dial tones, hangup chimes) so callers can preload or copy them. |
+| `select_sound_from_list(sounds, *, rng=None) -> str` | Pick one entry from a list of sound paths/IDs deterministically (or randomly when `rng` is provided). Useful for randomised hold music. |
+| `resample_24k_to_16k(pcm: bytes) -> bytes` | One-shot 24 kHz → 16 kHz PCM resampler. Mirrors the helper Patter uses internally for OpenAI TTS chunks; exported for callers who need to do the same conversion outside the streaming loop. |
 
 ---
 
@@ -444,10 +502,14 @@ from getpatter import (
     IVRActivity, TfidfLoopDetector, DtmfEvent, format_dtmf,
     ScheduleHandle, schedule_cron, schedule_once, schedule_interval,
     BackgroundAudioPlayer, BuiltinAudioClip, mix_pcm,
+    builtin_clip_path, select_sound_from_list, resample_24k_to_16k,
+
+    # LLM primitives (see python-sdk/llm)
+    LLMChunk, DefaultToolExecutor,
 
     # Errors
     PatterError, PatterConnectionError, AuthenticationError,
-    ProvisionError, RateLimitError,
+    ProvisionError, RateLimitError, ErrorCode,
 )
 
 from getpatter.carriers import twilio, telnyx

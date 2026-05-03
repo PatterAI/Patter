@@ -172,6 +172,20 @@ asyncio.run(main())
 `on_message` and `llm=` cannot be used together. Combining them raises a clear error at `serve()` time — pick one.
 </Warning>
 
+## Advanced: building a custom LLM provider
+
+Three primitives are exported from the package barrel for users who need to plug in a custom LLM or tool dispatcher:
+
+```python
+from getpatter import LLMChunk, DefaultToolExecutor
+```
+
+- `LLMChunk` — the streaming-output type yielded by every `LLMProvider.stream(...)` implementation. Carries either a partial text delta, a tool-call delta, or a stream-end marker.
+- `DefaultToolExecutor` — the default tool dispatcher used by `LLMLoop`. Constructs from a `tools=` list and resolves both Python `handler=` callables and `webhook_url=` HTTP tools. Override its hooks to swap in custom error handling, telemetry, or authentication.
+- `OpenAILLMProvider` — the parent class shared by `OpenAILLM`, `GroqLLM`, `CerebrasLLM`. Sampling kwargs (`temperature`, `top_p`, `seed`, `tool_choice`, `response_format`, …) live here and are forwarded by every subclass.
+
+These are stable public symbols mirrored byte-for-byte by the TypeScript SDK.
+
 ## What's next
 
 <CardGroup cols={2}>

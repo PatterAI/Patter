@@ -1,0 +1,174 @@
+[project]
+name = "getpatter"
+version = "0.6.0"
+description = "Open-source voice AI SDK — connect any AI agent to real phone calls in 4 lines of code"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "PatterAI", email = "hello@getpatter.com" },
+]
+keywords = ["voice", "ai", "voice-ai", "phone", "telephony", "speech", "tts", "stt", "twilio", "telnyx", "openai", "elevenlabs", "llm", "agent", "ai-agent", "conversational-ai", "realtime", "call", "ivr", "chatbot"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications :: Telephony",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Framework :: AsyncIO",
+    "Operating System :: OS Independent",
+    "Typing :: Typed",
+]
+requires-python = ">=3.11"
+dependencies = [
+    "websockets>=14.0,<16",
+    "httpx>=0.27.0",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "python-multipart>=0.0.20",
+    "twilio>=9.0.0",
+    "audioop-lts>=0.2.1; python_version>='3.13'",
+    "openai>=1.0.0",
+    "cryptography>=42.0.0",
+]
+
+[project.scripts]
+getpatter = "getpatter.cli:main"
+
+[project.urls]
+Homepage = "https://www.getpatter.com"
+Documentation = "https://docs.getpatter.com"
+Repository = "https://github.com/PatterAI/Patter"
+"Bug Tracker" = "https://github.com/PatterAI/Patter/issues"
+
+[project.optional-dependencies]
+# Kept as an empty alias for backwards compatibility: older guides and
+# templates documented `pip install getpatter[local]`. Those dependencies
+# are now part of the base install, so `getpatter[local]` is equivalent
+# to `getpatter`.
+local = []
+soniox = [
+    "aiohttp>=3.10",
+]
+speechmatics = [
+    "speechmatics-voice[smart]>=0.2.8",
+]
+# AssemblyAI Universal Streaming STT provider (pure-aiohttp, no vendor SDK).
+assemblyai = [
+    "aiohttp>=3.10",
+]
+# Cartesia ink-whisper STT provider (pure-aiohttp, no vendor SDK).
+cartesia = [
+    "aiohttp>=3.10",
+]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=5.0.0",
+    "psutil>=5.9.0",
+    "aiohttp>=3.10",
+]
+silero = [
+    "onnxruntime>=1.18",
+    "numpy>=1.26",
+]
+# Krisp VIVA is a proprietary SDK (krisp-audio). Users must install it
+# separately and provide KRISP_VIVA_SDK_LICENSE_KEY + KRISP_VIVA_FILTER_MODEL_PATH.
+krisp = [
+    "krisp-audio>=2.0",
+    "numpy>=1.26",
+]
+# DeepFilterNet OSS fallback (MIT). Heavy deps (torch ~2 GB, model ~60 MB)
+# are opt-in.
+deepfilternet = [
+    "deep-filter>=0.5",
+    "torch>=2.0",
+    "numpy>=1.26",
+]
+ivr = [
+    "scikit-learn>=1.3",
+    "numpy>=1.26",
+]
+# Telnyx STT and TTS WebSocket providers. Note: the `telnyx` telephony
+# package (Call Control REST API) is unrelated and does not require this
+# extra — only the in-call STT/TTS providers do.
+telnyx-ai = [
+    "aiohttp>=3.10",
+]
+# Anthropic Claude LLM provider (pipeline mode).
+anthropic = [
+    "anthropic>=0.41",
+    "httpx>=0.27",
+]
+# Groq LLM provider (OpenAI-compatible).
+groq = [
+    "openai>=1.0",
+]
+# Cerebras LLM provider (OpenAI-compatible with optional msgpack/gzip payload compression).
+cerebras = [
+    "openai>=1.0",
+    "msgpack>=1.0",
+]
+# Google Gemini LLM provider.
+google = [
+    "google-genai>=1.55",
+]
+# Background audio player (hold music + ambient cues). Mixes bundled .ogg
+# clips with the outbound PCM stream. Requires numpy for PCM math and
+# soundfile for .ogg decoding.
+background-audio = [
+    "numpy>=1.26",
+    "soundfile>=0.12",
+]
+rime = ["aiohttp>=3.10"]
+lmnt = ["aiohttp>=3.10"]
+gemini-live = [
+    "google-genai>=1.55",
+]
+ultravox = [
+    "aiohttp>=3.10",
+]
+evals = [
+    "pyyaml>=6.0",
+    "openai>=1.0",
+]
+tracing = [
+    "opentelemetry-api>=1.27",
+    "opentelemetry-sdk>=1.27",
+    "opentelemetry-exporter-otlp>=1.27",
+]
+scheduling = [
+    "apscheduler>=3.10",
+]
+# Built-in Cloudflare Quick Tunnel for local dev (``Patter(tunnel=True)``).
+# The ``cloudflared`` binary must be installed on PATH (brew / apt / manual).
+# There is no Python wrapper package — the SDK shells out to the binary.
+# Kept as an empty extra for parity with guides; no-op if invoked.
+tunnel = []
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["getpatter*"]
+
+[tool.setuptools.package-data]
+"getpatter.resources" = ["*.onnx"]
+"getpatter.resources.audio" = ["*.ogg", "NOTICE"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "--ignore=tests/soak"
+markers = [
+    "unit: Unit tests",
+    "integration: Integration tests",
+    "soak: Soak/stress tests (slow)",
+    "security: Security tests",
+]
