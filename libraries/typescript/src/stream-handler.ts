@@ -18,7 +18,7 @@ import { mulawToPcm16, pcm16ToMulaw, StatefulResampler, createResampler8kTo16k, 
 import { LLMLoop } from './llm-loop';
 import { RemoteMessageHandler, isRemoteUrl, isWebSocketUrl } from './remote-message';
 import { createHistoryManager, executeToolWebhook } from './handler-utils';
-import type { AgentOptions, Guardrail, HookContext, PipelineMessageHandler, ToolDefinition } from './types';
+import type { AgentOptions, Guardrail, HookContext, PipelineMessageHandler, ToolDefinition, VADProvider } from './types';
 import type { MetricsStore } from './dashboard/store';
 import { getLogger } from './logger';
 import { validateTwilioSid } from './server';
@@ -179,6 +179,13 @@ export class StreamHandler {
   private isSpeaking = false;
   /** Set to true after a VAD error to suppress log spam for the rest of the call. */
   private vadDisabled = false;
+  /**
+   * Auto-loaded SileroVAD when ``agent.vad`` is undefined. Populated by
+   * ``initPipeline`` and queried alongside ``agent.vad`` on every audio frame.
+   * Stays null when ``onnxruntime-node`` is not installed — the pipeline
+   * then falls back to the STT-endpoint heuristic (legacy behaviour).
+   */
+  private autoVad: VADProvider | null = null;
   /**
    * Monotonic counter incremented on every TTS-start. The grace timer
    * scheduled by ``endSpeakingWithGrace`` only flips ``isSpeaking=false``
@@ -566,11 +573,12 @@ export class StreamHandler {
       //    interruption (no waiting for STT to emit a transcript).
       //  - Endpointing-free STT: no need to wait for Deepgram's silence
       //    timeout — we already know when the user is talking.
-      if (this.deps.agent.vad && !this.vadDisabled) {
+      const activeVad = this.deps.agent.vad ?? this.autoVad;
+      if (activeVad && !this.vadDisabled) {
         try {
           // H4: protect hot path against slow ONNX inference — if VAD takes
           // longer than 25 ms, treat the frame as silent and continue.
-          const vadPromise = this.deps.agent.vad.processFrame(pcm16k, 16000);
+          const vadPromise = activeVad.processFrame(pcm16k, 16000);
           const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 25));
           const evt = await Promise.race([vadPromise, timeoutPromise]);
           if (evt) {
@@ -622,7 +630,7 @@ export class StreamHandler {
       // "always forward + bargeInThresholdMs" path so users without a VAD
       // adapter aren't regressed.
       if (this.isSpeaking) {
-        if (this.deps.agent.vad) return;
+        if (this.deps.agent.vad ?? this.autoVad) return;
         if ((this.deps.agent.bargeInThresholdMs ?? 300) === 0) return;
       }
 
@@ -800,6 +808,32 @@ export class StreamHandler {
     }
     if (!this.tts) {
       getLogger().debug(`Pipeline mode (${label}): no TTS configured`);
+    }
+
+    // Auto-VAD: load SileroVAD with telephony-tuned defaults if the user
+    // didn't pass one. Falls back silently to the STT-endpoint heuristic
+    // when onnxruntime-node is missing — same behaviour as before for
+    // users who have not installed the optional dep.
+    if (!this.deps.agent.vad) {
+      try {
+        const { SileroVAD } = await import('./providers/silero-vad');
+        this.autoVad = await SileroVAD.forPhoneCall();
+        getLogger().info(
+          `auto-VAD enabled (SileroVAD, phone preset). Pass agent.vad=… to override.`,
+        );
+      } catch (e) {
+        const msg = (e as Error)?.message ?? String(e);
+        if (/Cannot find module|onnxruntime-node/i.test(msg)) {
+          getLogger().info(
+            'auto-VAD unavailable: onnxruntime-node not installed. ' +
+              'Run `npm install onnxruntime-node@~1.18.0` for fast barge-in.',
+          );
+        } else {
+          getLogger().warn(
+            `auto-VAD load failed (${msg}); falling back to STT-endpoint heuristic`,
+          );
+        }
+      }
     }
 
     try {

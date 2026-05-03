@@ -171,6 +171,30 @@ class SileroVAD(VADProvider):
         )
         return cls(session=session, opts=opts)
 
+    @classmethod
+    def for_phone_call(cls, **overrides) -> "SileroVAD":
+        """Convenience factory tuned for telephony pipelines.
+
+        Same as :meth:`load` but raises ``min_silence_duration`` to 1.0 s so
+        natural pauses on speakerphone don't truncate the user's last words,
+        and pins ``sample_rate`` to 16000 Hz which matches Patter's
+        pipeline-mode audio bus. Override any field via keyword arguments.
+
+        Example::
+
+            vad = await asyncio.to_thread(SileroVAD.for_phone_call)
+            # or, for very noisy speakerphone / tunnel echo:
+            vad = await asyncio.to_thread(
+                SileroVAD.for_phone_call, min_silence_duration=1.5
+            )
+        """
+        defaults: dict = {
+            "sample_rate": SileroSampleRate.HZ_16000,
+            "min_silence_duration": 1.0,
+        }
+        defaults.update(overrides)
+        return cls.load(**defaults)
+
     def __init__(
         self,
         *,

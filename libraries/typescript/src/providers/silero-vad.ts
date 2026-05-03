@@ -26,36 +26,72 @@ export type SileroSampleRate = (typeof SUPPORTED_SAMPLE_RATES)[number];
 // Resolve __dirname in a way that works for both the CJS (dist/index.js)
 // and the ESM (dist/index.mjs) bundles tsup emits. Top-level ``__dirname``
 // is undefined in ESM, and ``import.meta`` is undefined in CJS — pick one.
-function resolveModuleDir(): string {
+//
+// Returns an array of candidate directory roots, ordered most-specific first.
+// resolveDefaultModelPath then probes each candidate for the model file.
+function resolveModuleDirs(): readonly string[] {
+  const candidates: string[] = [];
+
   // CJS path: __dirname is a per-module binding, not a global. Detect via
   // typeof inside a function that is only evaluated at runtime; bundlers
   // preserve the reference in CJS output.
   try {
     // eslint-disable-next-line no-new-func
     const cjsDir = new Function("return typeof __dirname !== 'undefined' ? __dirname : null")();
-    if (typeof cjsDir === 'string') return cjsDir;
-  } catch { /* fall through */ }
+    if (typeof cjsDir === 'string') candidates.push(cjsDir);
+  } catch { /* ignore */ }
+
   // ESM path
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const url = (import.meta as { url?: string }).url;
-    if (url) return path.dirname(fileURLToPath(url));
-  } catch { /* fall through */ }
-  return process.cwd();
+    if (url) candidates.push(path.dirname(fileURLToPath(url)));
+  } catch { /* ignore */ }
+
+  // createRequire-anchored package resolution. Mirrors the user-side
+  // workaround `createRequire(import.meta.url).resolve("getpatter")` so the
+  // SDK keeps locating its own resources even when bundlers rewrite
+  // `import.meta.url` in ways that break the candidates above (Vite SSR,
+  // Next.js webpack, some Bun configurations, etc.).
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const url = (import.meta as { url?: string }).url;
+    if (url) {
+      const req = createRequire(url);
+      candidates.push(path.dirname(req.resolve('getpatter/package.json')));
+    }
+  } catch { /* ignore */ }
+
+  // Last resort: anchor on the user's cwd. Only useful when the SDK is
+  // installed under the caller's node_modules (the common case).
+  try {
+    const req = createRequire(path.join(process.cwd(), 'package.json'));
+    candidates.push(path.dirname(req.resolve('getpatter/package.json')));
+  } catch { /* ignore */ }
+
+  candidates.push(process.cwd());
+  return candidates;
 }
 
-const MODULE_DIR = resolveModuleDir();
+const MODULE_DIRS = resolveModuleDirs();
 function resolveDefaultModelPath(): string {
   // tsup ships resources/ alongside the bundled dist/index.{js,mjs}, so the
-  // ONNX model lives at MODULE_DIR/resources/silero_vad.onnx in published
-  // builds. When developing from source (src/providers/...), the model
-  // lives one level up in src/resources/ instead. Try both.
-  const candidates = [
-    path.join(MODULE_DIR, 'resources', 'silero_vad.onnx'),
-    path.join(MODULE_DIR, '..', 'resources', 'silero_vad.onnx'),
-  ];
-  for (const c of candidates) if (fs.existsSync(c)) return c;
-  return candidates[0];
+  // ONNX model lives at <dir>/resources/silero_vad.onnx in published builds.
+  // When developing from source (src/providers/...), the model lives one
+  // level up in src/resources/. When the candidate is a package root (from
+  // createRequire), the model is at <pkgRoot>/dist/resources/. Probe each
+  // shape under each candidate.
+  for (const dir of MODULE_DIRS) {
+    const candidates = [
+      path.join(dir, 'resources', 'silero_vad.onnx'),
+      path.join(dir, '..', 'resources', 'silero_vad.onnx'),
+      path.join(dir, 'dist', 'resources', 'silero_vad.onnx'),
+    ];
+    for (const c of candidates) if (fs.existsSync(c)) return c;
+  }
+  // Nothing matched — return the first guess so SileroVAD.load surfaces a
+  // clear "model file not found" error instead of failing silently.
+  return path.join(MODULE_DIRS[0] ?? process.cwd(), 'resources', 'silero_vad.onnx');
 }
 const DEFAULT_MODEL_PATH = resolveDefaultModelPath();
 
@@ -334,6 +370,29 @@ export class SileroVAD implements VADProvider {
       activationThreshold,
       deactivationThreshold,
       sampleRate,
+    });
+  }
+
+  /**
+   * Convenience factory tuned for telephony pipelines.
+   *
+   * Same as {@link SileroVAD.load} but raises `minSilenceDuration` to 1.0 s
+   * so natural pauses on speakerphone don't truncate the user's last words,
+   * and pins `sampleRate` to 16000 Hz which matches Patter's pipeline-mode
+   * audio bus. Override any field by passing `options`.
+   *
+   * @example
+   * ```ts
+   * const vad = await SileroVAD.forPhoneCall();
+   * // or, for very noisy speakerphone / tunnel echo:
+   * const vad = await SileroVAD.forPhoneCall({ minSilenceDuration: 1.5 });
+   * ```
+   */
+  static forPhoneCall(options: SileroVADOptions = {}): Promise<SileroVAD> {
+    return SileroVAD.load({
+      sampleRate: 16000,
+      minSilenceDuration: 1.0,
+      ...options,
     });
   }
 

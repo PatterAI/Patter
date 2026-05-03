@@ -6,7 +6,14 @@ _(no entries yet — next version will land here)_
 
 ## 0.6.0 (2026-05-03)
 
-Repository cleanup + bug-fix + parity wave. Most changes are internal hardening; the breaking changes are the package-tree reorganisation and the `Agent.provider` field type tightening.
+Repository cleanup + bug-fix + parity wave.
+
+### Improved — SileroVAD usability
+
+- **Auto-VAD in pipeline mode**. When the user does not pass `agent.vad`, the pipeline stream handler now auto-loads `SileroVAD` with telephony-tuned defaults (1.0 s `min_silence_duration`, 16 kHz sample rate). Falls back silently to the legacy STT-endpoint heuristic when `onnxruntime-node` (TS) / `getpatter[silero]` (Py) is not installed. No opt-out flag — auto-VAD is a strict upgrade over the heuristic when available.
+- **`SileroVAD.forPhoneCall(opts?)` / `SileroVAD.for_phone_call(**overrides)`** factory. Convenience wrapper around `load(...)` that pre-applies the telephony preset; pass overrides for noisy-environment tuning (e.g. `minSilenceDuration: 1.5` for tunnel + speakerphone echo).
+- **Defaults aligned with upstream Silero** (`snakers4/silero-vad`): `min_speech_duration` 0.05 → 0.25 s, `min_silence_duration` 0.55 → 0.10 s, `prefix_padding` 0.5 → 0.03 s. Existing callers can restore the old telephony-tuned values explicitly. The new `for_phone_call` factory handles the common phone-call override.
+- **Robust ONNX model resolution (TS)**. `silero-vad.ts` now probes 4 anchor candidates (`__dirname`, `import.meta.url`, `createRequire(import.meta.url).resolve("getpatter/package.json")`, `createRequire(cwd).resolve(...)`) crossed with 3 path shapes (`<dir>/resources/`, `<dir>/../resources/`, `<dir>/dist/resources/`). Eliminates the workaround `createRequire(import.meta.url).resolve("getpatter")` that callers had to add manually under bundlers that break `import.meta.url`. Most changes are internal hardening; the breaking changes are the package-tree reorganisation and the `Agent.provider` field type tightening.
 
 ### Breaking — package-tree reorganisation
 

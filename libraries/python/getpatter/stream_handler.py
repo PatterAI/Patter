@@ -1113,6 +1113,10 @@ class PipelineStreamHandler(StreamHandler):
         self._send_dtmf_fn = send_dtmf_fn
         self._stt = None
         self._tts = None
+        # Auto-VAD: if ``agent.vad`` is None we attempt to load SileroVAD
+        # with phone-friendly defaults during ``start()``. Stored separately
+        # because ``agent`` is a frozen dataclass.
+        self._auto_vad = None
         self._stt_task: asyncio.Task | None = None
         self._is_speaking = False
         # Monotonic counter incremented at every TTS-start. ``_end_speaking_with_grace``
@@ -1187,6 +1191,30 @@ class PipelineStreamHandler(StreamHandler):
             logger.warning("Pipeline mode: no STT configured")
         if self._tts is None:
             logger.warning("Pipeline mode: no TTS configured")
+
+        # Auto-VAD: load SileroVAD with telephony-tuned defaults if the user
+        # didn't pass one. Falls back silently to the STT-endpoint heuristic
+        # when the ``silero`` extra is missing — same behaviour as before for
+        # users who have not installed onnxruntime.
+        if getattr(self.agent, "vad", None) is None:
+            try:
+                from getpatter.providers.silero_vad import SileroVAD
+
+                self._auto_vad = await asyncio.to_thread(SileroVAD.for_phone_call)
+                logger.info(
+                    "auto-VAD enabled (SileroVAD, phone preset). "
+                    "Pass agent.vad=... to override."
+                )
+            except ImportError:
+                logger.info(
+                    "auto-VAD unavailable: onnxruntime/numpy not installed. "
+                    "Install with `pip install getpatter[silero]` for fast barge-in."
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "auto-VAD load failed (%s); falling back to STT-endpoint heuristic",
+                    exc,
+                )
 
         if self._stt is not None:
             await self._stt.connect()
@@ -1894,10 +1922,11 @@ class PipelineStreamHandler(StreamHandler):
             pcm = audio_bytes
 
         # ---- VAD wiring (Fix 8) ----
-        # Optional ``agent.vad`` runs *before* STT so we can react to
-        # speech_start with immediate barge-in (clearing the carrier audio
-        # buffer) rather than waiting for the STT engine's slower endpoint.
-        vad = getattr(self.agent, "vad", None)
+        # Optional ``agent.vad`` (or auto-loaded SileroVAD when the user
+        # didn't pass one) runs *before* STT so we can react to speech_start
+        # with immediate barge-in (clearing the carrier audio buffer) rather
+        # than waiting for the STT engine's slower endpoint.
+        vad = getattr(self.agent, "vad", None) or self._auto_vad
         if vad is not None:
             try:
                 vad_event = await vad.process_frame(pcm, 16000)
