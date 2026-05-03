@@ -14,7 +14,7 @@
  *     ``gzipCompression: true`` (default).
  */
 
-import type { LLMChunk, LLMProvider } from '../llm-loop';
+import type { LLMChunk, LLMProvider, LLMStreamOptions } from "../llm-loop";
 import { getLogger } from '../logger';
 import { PatterError } from '../errors';
 import { VERSION } from '../version';
@@ -146,6 +146,7 @@ export class CerebrasLLMProvider implements LLMProvider {
   async *stream(
     messages: Array<Record<string, unknown>>,
     tools?: Array<Record<string, unknown>> | null,
+    opts?: LLMStreamOptions,
   ): AsyncGenerator<LLMChunk, void, unknown> {
     const body: Record<string, unknown> = {
       model: this.model,
@@ -199,7 +200,9 @@ export class CerebrasLLMProvider implements LLMProvider {
         method: 'POST',
         headers,
         body: payload,
-        signal: AbortSignal.timeout(30_000),
+        signal: opts?.signal
+          ? AbortSignal.any([opts.signal, AbortSignal.timeout(30_000)])
+          : AbortSignal.timeout(30_000),
       });
 
       if (response.ok) {

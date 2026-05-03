@@ -1263,6 +1263,7 @@ export class StreamHandler {
           this.metricsAcc,
           hookExecutor,
           hookCtx,
+          { signal: llmSignal },
         )) {
           if (llmSignal.aborted) break;
           // Fix 5: record first token for TTFT metric.

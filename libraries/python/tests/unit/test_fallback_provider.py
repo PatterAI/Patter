@@ -27,7 +27,7 @@ class SucceedingProvider:
         self._chunks = list(chunks)
 
     async def stream(
-        self, messages: list[dict], tools: list[dict] | None = None
+        self, messages: list[dict], tools: list[dict] | None = None, **_kwargs
     ) -> AsyncIterator[dict]:
         for chunk in self._chunks:
             yield chunk
@@ -40,7 +40,7 @@ class FailingProvider:
         self._error = error or RuntimeError("provider failed")
 
     async def stream(
-        self, messages: list[dict], tools: list[dict] | None = None
+        self, messages: list[dict], tools: list[dict] | None = None, **_kwargs
     ) -> AsyncIterator[dict]:
         raise self._error
         # Make it an async generator
@@ -57,7 +57,7 @@ class PartialThenFailProvider:
         self._error = error or RuntimeError("mid-stream failure")
 
     async def stream(
-        self, messages: list[dict], tools: list[dict] | None = None
+        self, messages: list[dict], tools: list[dict] | None = None, **_kwargs
     ) -> AsyncIterator[dict]:
         for chunk in self._chunks:
             yield chunk
@@ -73,7 +73,7 @@ class FailNTimesThenSucceed:
         self._calls = 0
 
     async def stream(
-        self, messages: list[dict], tools: list[dict] | None = None
+        self, messages: list[dict], tools: list[dict] | None = None, **_kwargs
     ) -> AsyncIterator[dict]:
         self._calls += 1
         if self._calls <= self._fail_count:
@@ -89,7 +89,7 @@ class CallCountingFailingProvider:
         self.call_count = 0
 
     async def stream(
-        self, messages: list[dict], tools: list[dict] | None = None
+        self, messages: list[dict], tools: list[dict] | None = None, **_kwargs
     ) -> AsyncIterator[dict]:
         self.call_count += 1
         raise RuntimeError("always fails")
@@ -241,7 +241,7 @@ class TestFallbackLLMProvider:
 
         class RecoverOnRetry:
             async def stream(
-                self, messages: list[dict], tools: list[dict] | None = None
+                self, messages: list[dict], tools: list[dict] | None = None, **_kwargs
             ) -> AsyncIterator[dict]:
                 nonlocal primary_calls
                 primary_calls += 1
@@ -288,7 +288,7 @@ class TestFallbackLLMProvider:
 
         class SpyProvider:
             async def stream(
-                self, messages: list[dict], tools: list[dict] | None = None
+                self, messages: list[dict], tools: list[dict] | None = None, **_kwargs
             ) -> AsyncIterator[dict]:
                 nonlocal received_messages, received_tools
                 received_messages = messages

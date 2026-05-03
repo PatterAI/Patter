@@ -160,7 +160,7 @@ class TestProviderWrappers:
 class _DummyLLM:
     """Minimal LLMProvider implementation for wiring tests (no network)."""
 
-    async def stream(self, messages, tools=None):
+    async def stream(self, messages, tools=None, **_kwargs):
         # Satisfy the Protocol; never actually invoked in these tests.
         if False:  # pragma: no cover
             yield {"type": "done"}

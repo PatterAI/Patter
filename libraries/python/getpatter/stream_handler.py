@@ -1806,6 +1806,7 @@ class PipelineStreamHandler(StreamHandler):
                         call_ctx,
                         hook_executor=hook_executor,
                         hook_ctx=hook_ctx,
+                        cancel_event=self._llm_cancel_event,
                     )
                     response_text = await self._process_streaming_response(
                         result, self.call_id

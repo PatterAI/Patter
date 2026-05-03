@@ -198,10 +198,25 @@ export interface LLMChunk {
  *   invocation.  Chunks with the same ``index`` are concatenated.
  * - ``{ type: "done" }`` — signals the end of the stream (optional).
  */
+/**
+ * Optional knobs passed by the LLM loop into ``provider.stream``. Today the
+ * only field is ``signal``: a per-turn AbortSignal that the stream handler
+ * trips on barge-in so the underlying ``fetch`` / SDK call is cancelled
+ * IMMEDIATELY instead of waiting for the next token. Without this, a
+ * barge-in fired while the upstream LLM is still composing its first
+ * sentence leaves the fetch open until the provider's own timeout (often
+ * 30 s) elapses, blocking the next user transcript and producing the
+ * "agent stays silent after interruption" symptom.
+ */
+export interface LLMStreamOptions {
+  signal?: AbortSignal;
+}
+
 export interface LLMProvider {
   stream(
     messages: Array<Record<string, unknown>>,
     tools?: Array<Record<string, unknown>> | null,
+    opts?: LLMStreamOptions,
   ): AsyncGenerator<LLMChunk, void, unknown>;
 }
 
@@ -267,6 +282,7 @@ export class OpenAILLMProvider implements LLMProvider {
   async *stream(
     messages: Array<Record<string, unknown>>,
     tools?: Array<Record<string, unknown>> | null,
+    opts?: LLMStreamOptions,
   ): AsyncGenerator<LLMChunk, void, unknown> {
     const body: Record<string, unknown> = {
       model: this.model,
@@ -294,6 +310,13 @@ export class OpenAILLMProvider implements LLMProvider {
       body.tools = tools;
     }
 
+    // Combine the caller's per-turn cancel signal (barge-in) with our
+    // 30 s ceiling. ``AbortSignal.any`` aborts as soon as ANY input
+    // signal fires, so a barge-in that arrives mid-fetch tears the
+    // connection down immediately instead of waiting for the timeout.
+    const signal = opts?.signal
+      ? AbortSignal.any([opts.signal, AbortSignal.timeout(30_000)])
+      : AbortSignal.timeout(30_000);
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -301,7 +324,7 @@ export class OpenAILLMProvider implements LLMProvider {
         'Authorization': `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(30_000),
+      signal,
     });
 
     if (!response.ok) {
@@ -534,6 +557,7 @@ export class LLMLoop {
     metrics?: LlmUsageRecorder,
     hookExecutor?: PipelineHookExecutor,
     hookCtx?: HookContext,
+    opts?: LLMStreamOptions,
   ): AsyncGenerator<string, void, unknown> {
     let messages = this.buildMessages(history, userText);
     const maxIterations = 10;
@@ -565,7 +589,7 @@ export class LLMLoop {
       const textParts: string[] = [];
       let hasToolCalls = false;
 
-      for await (const chunk of this.provider.stream(messages, this.openaiTools)) {
+      for await (const chunk of this.provider.stream(messages, this.openaiTools, opts)) {
         if (chunk.type === 'text' && chunk.content) {
           // Tier 1 — per-token sync transform. Cheap, no buffering.
           const content = hasAfterLlmChunk && hookExecutor

@@ -17,6 +17,7 @@ All OpenAI-spec sampling kwargs accepted by the parent
 
 from __future__ import annotations
 
+import asyncio
 import gzip
 import json
 import logging
@@ -227,6 +228,8 @@ class CerebrasLLMProvider(OpenAILLMProvider):
         self,
         messages: list[dict],
         tools: list[dict] | None = None,
+        *,
+        cancel_event: asyncio.Event | None = None,
     ) -> AsyncIterator[dict]:
         """Stream from Cerebras, delegating SSE consumption to the parent.
 
@@ -238,7 +241,9 @@ class CerebrasLLMProvider(OpenAILLMProvider):
         LLM response), so raising would be a behavioural change.
         """
         try:
-            async for chunk in super().stream(messages, tools):
+            async for chunk in super().stream(
+                messages, tools, cancel_event=cancel_event
+            ):
                 yield chunk
         except Exception as exc:
             text = str(exc)

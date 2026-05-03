@@ -52,7 +52,7 @@ def _failing_parent_stream(exc: Exception):
     wrapper's exception path is what the test exercises.
     """
 
-    async def _raises(self, messages, tools=None):  # type: ignore[no-untyped-def]
+    async def _raises(self, messages, tools=None, **_kwargs):  # type: ignore[no-untyped-def]
         raise exc
         yield  # pragma: no cover — make the function an async generator
 
@@ -132,7 +132,7 @@ async def test_stream_delegates_to_parent_for_chunks() -> None:
         {"type": "text", "content": " world"},
     ]
 
-    async def _yields(self, messages, tools=None) -> AsyncIterator[dict]:  # type: ignore[no-untyped-def]
+    async def _yields(self, messages, tools=None, **_kwargs) -> AsyncIterator[dict]:  # type: ignore[no-untyped-def]
         for c in parent_chunks:
             yield c
 

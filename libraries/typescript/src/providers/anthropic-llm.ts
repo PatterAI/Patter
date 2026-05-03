@@ -18,7 +18,7 @@
  *     chunk protocol.
  */
 
-import type { LLMChunk, LLMProvider } from '../llm-loop';
+import type { LLMChunk, LLMProvider, LLMStreamOptions } from "../llm-loop";
 import { getLogger } from '../logger';
 
 const DEFAULT_ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
@@ -132,6 +132,7 @@ export class AnthropicLLMProvider implements LLMProvider {
   async *stream(
     messages: Array<Record<string, unknown>>,
     tools?: Array<Record<string, unknown>> | null,
+    opts?: LLMStreamOptions,
   ): AsyncGenerator<LLMChunk, void, unknown> {
     const { system, messages: anthropicMessages } = toAnthropicMessages(messages);
     const anthropicTools = tools ? toAnthropicTools(tools as OpenAIToolDef[]) : null;
@@ -190,7 +191,9 @@ export class AnthropicLLMProvider implements LLMProvider {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(30_000),
+      signal: opts?.signal
+        ? AbortSignal.any([opts.signal, AbortSignal.timeout(30_000)])
+        : AbortSignal.timeout(30_000),
     });
 
     if (!response.ok) {

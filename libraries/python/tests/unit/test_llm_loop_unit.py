@@ -23,7 +23,7 @@ class MockLLMProvider:
         self._chunks = chunks
 
     async def stream(
-        self, messages: list[dict], tools: list[dict] | None = None
+        self, messages: list[dict], tools: list[dict] | None = None, **_kwargs
     ) -> AsyncIterator[dict]:
         for chunk in self._chunks:
             yield chunk
@@ -36,7 +36,7 @@ class MockToolCallProvider:
         self._call_count = 0
 
     async def stream(
-        self, messages: list[dict], tools: list[dict] | None = None
+        self, messages: list[dict], tools: list[dict] | None = None, **_kwargs
     ) -> AsyncIterator[dict]:
         self._call_count += 1
         if self._call_count == 1:
@@ -215,7 +215,7 @@ class TestLLMLoopToolCalls:
         """Partial argument strings are concatenated across chunks."""
 
         class _PartialArgProvider:
-            async def stream(self, messages, tools=None):
+            async def stream(self, messages, tools=None, **_kwargs):
                 yield {"type": "tool_call", "index": 0, "id": "tc_1", "name": "fn", "arguments": None}
                 yield {"type": "tool_call", "index": 0, "id": None, "name": None, "arguments": '{"a"'}
                 yield {"type": "tool_call", "index": 0, "id": None, "name": None, "arguments": ': 1}'}
@@ -227,7 +227,7 @@ class TestLLMLoopToolCalls:
         call_count = 0
         original_stream = _PartialArgProvider.stream
 
-        async def counting_stream(self, messages, tools=None):
+        async def counting_stream(self, messages, tools=None, **_kwargs):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -271,7 +271,7 @@ class TestLLMLoopMaxIterations:
         """After 10 iterations of tool calls, the loop stops."""
 
         class _InfiniteToolProvider:
-            async def stream(self, messages, tools=None):
+            async def stream(self, messages, tools=None, **_kwargs):
                 yield {"type": "tool_call", "index": 0, "id": "tc_x", "name": "fn", "arguments": "{}"}
 
         tool_executor = AsyncMock()

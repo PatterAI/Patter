@@ -320,8 +320,22 @@ class LLMProvider(Protocol):
         self,
         messages: list[dict],
         tools: list[dict] | None = None,
+        *,
+        cancel_event: asyncio.Event | None = None,
     ) -> AsyncIterator[dict]:
-        """Yield streaming chunks for the given messages and tools."""
+        """Yield streaming chunks for the given messages and tools.
+
+        ``cancel_event`` is a per-turn signal that the stream handler trips
+        on barge-in. Implementors should check ``cancel_event.is_set()``
+        between iterations of their inner ``async for`` over the upstream
+        SDK / WS / HTTP stream and break out as soon as it fires —
+        otherwise a barge-in mid-fetch leaves the network call open until
+        its own timeout (often 30 s) elapses, which blocks the next user
+        transcript and produces the "agent stays silent after
+        interruption" symptom. Optional for backward compatibility;
+        providers that don't honour it are still usable but the user-facing
+        interrupt-then-respond loop will be slower.
+        """
         ...  # pragma: no cover
 
 
@@ -455,6 +469,8 @@ class OpenAILLMProvider:
         self,
         messages: list[dict],
         tools: list[dict] | None = None,
+        *,
+        cancel_event: asyncio.Event | None = None,
     ) -> AsyncIterator[dict]:
         """Yield normalised chunks from OpenAI Chat Completions.
 
@@ -467,12 +483,27 @@ class OpenAILLMProvider:
         All sampling kwargs configured on the instance (``temperature``,
         ``response_format``, ``seed``, ...) are forwarded conditionally —
         unset values are omitted so upstream defaults apply.
+
+        ``cancel_event`` (optional, set on barge-in by the stream handler)
+        is checked between upstream chunks and short-circuits the stream
+        immediately so the next user transcript is not blocked behind a
+        long-running fetch.
         """
         kwargs = self._build_completion_kwargs(messages, tools)
         response = await self._client.chat.completions.create(**kwargs)
 
         last_usage = None
         async for chunk in response:
+            if cancel_event is not None and cancel_event.is_set():
+                # Best-effort cancel of the upstream stream so the underlying
+                # HTTP connection is freed instead of waiting for the server
+                # to close. ``response.close()`` is sync on AsyncOpenAI and
+                # may raise if the stream already ended — best-effort.
+                try:
+                    await response.close()
+                except Exception:  # noqa: BLE001 - best-effort cleanup
+                    pass
+                return
             # Usage chunks have empty ``choices`` and a populated ``usage``.
             usage = getattr(chunk, "usage", None)
             if usage is not None:
@@ -619,6 +650,8 @@ class LLMLoop:
         call_context: dict,
         hook_executor=None,
         hook_ctx=None,
+        *,
+        cancel_event: asyncio.Event | None = None,
     ) -> AsyncGenerator[str, None]:
         """Stream LLM response tokens, handling tool calls automatically.
 
@@ -686,7 +719,9 @@ class LLMLoop:
             )
             _span_cm.__enter__()
             try:
-                async for chunk in self._provider.stream(messages, self._openai_tools):
+                async for chunk in self._provider.stream(
+                    messages, self._openai_tools, cancel_event=cancel_event
+                ):
                     chunk_type = chunk.get("type")
 
                     if chunk_type == "text":

@@ -24,7 +24,7 @@ class FakeLLMProvider:
         self._call_results = list(call_results)
         self._call_index = 0
 
-    async def stream(self, messages, tools=None):
+    async def stream(self, messages, tools=None, **_kwargs):
         idx = min(self._call_index, len(self._call_results) - 1)
         self._call_index += 1
         for chunk in self._call_results[idx]:

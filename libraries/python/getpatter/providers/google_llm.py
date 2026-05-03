@@ -12,6 +12,7 @@ both the Gemini Developer API and Vertex AI. The provider:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -134,8 +135,16 @@ class GoogleLLMProvider:
         self,
         messages: list[dict],
         tools: list[dict] | None = None,
+        *,
+        cancel_event: asyncio.Event | None = None,
     ) -> AsyncIterator[dict]:
-        """Stream chunks from Gemini's ``generate_content_stream``."""
+        """Stream chunks from Gemini's ``generate_content_stream``.
+
+        ``cancel_event`` (set on barge-in by the stream handler) is checked
+        between chunks and short-circuits the stream so the underlying
+        request is freed immediately instead of blocking the next user
+        transcript behind a long-running fetch.
+        """
         from google.genai import types
 
         system_instruction, contents = _to_gemini_contents(messages)
@@ -166,6 +175,8 @@ class GoogleLLMProvider:
 
         last_usage = None
         async for response in stream:
+            if cancel_event is not None and cancel_event.is_set():
+                return
             # Gemini emits ``usage_metadata`` cumulatively on each chunk.
             # Capture only the most recent value so we yield ONE usage
             # event with the final totals (avoids double-counting).

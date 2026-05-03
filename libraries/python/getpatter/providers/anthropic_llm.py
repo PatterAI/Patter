@@ -15,6 +15,7 @@ top of Anthropic's Messages API with streaming. The provider:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -130,12 +131,17 @@ class AnthropicLLMProvider:
         self,
         messages: list[dict],
         tools: list[dict] | None = None,
+        *,
+        cancel_event: asyncio.Event | None = None,
     ) -> AsyncIterator[dict]:
         """Stream chunks from Anthropic's Messages API.
 
         Translates OpenAI-style ``messages``/``tools`` to Anthropic's
         shape, then normalises the event stream back into the Patter
-        chunk protocol.
+        chunk protocol. ``cancel_event`` (set on barge-in by the stream
+        handler) is checked between events and short-circuits the stream
+        immediately so a follow-up user transcript is not blocked behind
+        a long-running fetch.
         """
         system_prompt, anthropic_messages = _to_anthropic_messages(messages)
         anthropic_tools = _to_anthropic_tools(tools) if tools else None
@@ -183,6 +189,8 @@ class AnthropicLLMProvider:
 
         async with self._client.messages.stream(**kwargs) as stream:
             async for event in stream:
+                if cancel_event is not None and cancel_event.is_set():
+                    return  # exiting the ``async with`` closes the upstream stream
                 event_type = getattr(event, "type", None)
 
                 if event_type == "content_block_start":

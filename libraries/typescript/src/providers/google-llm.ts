@@ -16,7 +16,7 @@
  *     by a follow-up PR once credential plumbing is in place.
  */
 
-import type { LLMChunk, LLMProvider } from '../llm-loop';
+import type { LLMChunk, LLMProvider, LLMStreamOptions } from "../llm-loop";
 import { getLogger } from '../logger';
 
 /** Known Google Gemini chat models. */
@@ -95,6 +95,7 @@ export class GoogleLLMProvider implements LLMProvider {
   async *stream(
     messages: Array<Record<string, unknown>>,
     tools?: Array<Record<string, unknown>> | null,
+    opts?: LLMStreamOptions,
   ): AsyncGenerator<LLMChunk, void, unknown> {
     const { systemInstruction, contents } = toGeminiContents(messages);
     const geminiTools = tools ? toGeminiTools(tools as OpenAIToolDef[]) : null;
@@ -119,7 +120,9 @@ export class GoogleLLMProvider implements LLMProvider {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(30_000),
+      signal: opts?.signal
+        ? AbortSignal.any([opts.signal, AbortSignal.timeout(30_000)])
+        : AbortSignal.timeout(30_000),
     });
 
     if (!response.ok) {
