@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -27,7 +27,9 @@ from getpatter.models import Agent
 def _local_phone(**kwargs) -> Patter:
     """Build a default local-mode Patter instance for tests."""
     defaults = dict(
-        carrier=Twilio(account_sid="ACtest000000000000000000000000000", auth_token="tok"),
+        carrier=Twilio(
+            account_sid="ACtest000000000000000000000000000", auth_token="tok"
+        ),
         phone_number="+15550001234",
         webhook_url="abc.ngrok.io",
     )
@@ -46,24 +48,36 @@ class TestPatterInit:
 
     def test_api_key_raises_not_implemented(self) -> None:
         """Cloud mode is not yet implemented — api_key= must raise."""
-        with pytest.raises(NotImplementedError, match="Patter Cloud is not yet available"):
+        with pytest.raises(
+            NotImplementedError, match="Patter Cloud is not yet available"
+        ):
             Patter(api_key="pt_xxx")
 
     def test_backend_url_raises_not_implemented(self) -> None:
-        with pytest.raises(NotImplementedError, match="Patter Cloud is not yet available"):
+        with pytest.raises(
+            NotImplementedError, match="Patter Cloud is not yet available"
+        ):
             Patter(backend_url="wss://custom.host")
 
     def test_rest_url_raises_not_implemented(self) -> None:
-        with pytest.raises(NotImplementedError, match="Patter Cloud is not yet available"):
+        with pytest.raises(
+            NotImplementedError, match="Patter Cloud is not yet available"
+        ):
             Patter(rest_url="https://custom.host")
 
     def test_unknown_mode_raises_not_implemented(self) -> None:
-        with pytest.raises(NotImplementedError, match="Patter Cloud is not yet available"):
+        with pytest.raises(
+            NotImplementedError, match="Patter Cloud is not yet available"
+        ):
             Patter(mode="cloud")
 
     def test_unexpected_kwarg_raises_typeerror(self) -> None:
         with pytest.raises(TypeError, match="unexpected keyword"):
-            Patter(carrier=Twilio(account_sid="AC1", auth_token="t"), phone_number="+1", bogus="x")
+            Patter(
+                carrier=Twilio(account_sid="AC1", auth_token="t"),
+                phone_number="+1",
+                bogus="x",
+            )
 
     def test_local_mode_explicit(self) -> None:
         client = Patter(
@@ -274,6 +288,51 @@ class TestDisconnect:
 
         await client.disconnect()
         mock_server.stop.assert_awaited_once()
+        # Server reference should be cleared so a follow-up serve() builds a
+        # fresh one rather than reusing the stopped instance.
+        assert client._server is None
+
+    async def test_disconnect_clears_tunnel_owned_webhook_url(self) -> None:
+        """An auto-tunnel webhook URL must be cleared on disconnect.
+
+        Plugins call ``ensureServing`` as ``disconnect() → serve()`` whenever
+        the agent identity changes. Without this clear the second ``serve()``
+        sees ``localConfig.webhookUrl`` already populated and trips the
+        ``Cannot use both tunnel=True and webhook_url`` guard.
+        """
+        from dataclasses import replace
+
+        client = _local_phone(webhook_url="")
+        # Simulate what serve() does after starting a cloudflared tunnel.
+        client._local_config = replace(
+            client._local_config, webhook_url="auto.trycloudflare.com"
+        )
+        client._tunnel_owns_webhook_url = True
+
+        await client.disconnect()
+
+        assert client._local_config.webhook_url == ""
+        assert client._tunnel_owns_webhook_url is False
+        # Deferreds dropped so a follow-up serve() recreates them.
+        assert client._ready is None
+        assert client._tunnel_ready is None
+
+    async def test_disconnect_preserves_explicit_webhook_url(self) -> None:
+        """An explicit webhook URL passed at construction must NOT be cleared."""
+        client = _local_phone(webhook_url="static.example.com")
+        # No tunnel — the URL belongs to the caller.
+        assert client._tunnel_owns_webhook_url is False
+
+        await client.disconnect()
+
+        assert client._local_config.webhook_url == "static.example.com"
+        assert client._tunnel_owns_webhook_url is False
+
+    async def test_disconnect_is_idempotent(self) -> None:
+        """Calling disconnect() twice in a row must not raise."""
+        client = _local_phone()
+        await client.disconnect()
+        await client.disconnect()  # should not raise
 
 
 # ---------------------------------------------------------------------------
@@ -309,5 +368,7 @@ class TestFactories:
         assert t.webhook_url == "https://example.com/hook"
 
     def test_tool_factory_requires_handler_or_webhook(self) -> None:
-        with pytest.raises(ValueError, match="handler.*webhook_url|webhook_url.*handler"):
+        with pytest.raises(
+            ValueError, match="handler.*webhook_url|webhook_url.*handler"
+        ):
             tool(name="my_tool")

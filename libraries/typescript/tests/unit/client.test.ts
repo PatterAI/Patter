@@ -345,4 +345,66 @@ describe('Patter (local mode)', () => {
       ).rejects.toThrow(ProvisionError);
     });
   });
+
+  // -------------------------------------------------------------------------
+  // disconnect() — lifecycle reset for serve→disconnect→serve cycles
+  // -------------------------------------------------------------------------
+  describe('disconnect() lifecycle', () => {
+    function makeClient(opts: Partial<{ webhookUrl: string }> = {}) {
+      return new Patter({
+        carrier: makeTwilioCarrier(),
+        phoneNumber: '+15550001234',
+        webhookUrl: opts.webhookUrl,
+      });
+    }
+
+    it('clears tunnel-owned webhookUrl so a follow-up serve() does not throw', async () => {
+      const client = makeClient();
+      // Simulate what serve() does after starting a cloudflared tunnel.
+      (client as unknown as {
+        localConfig: { webhookUrl?: string };
+        tunnelOwnsWebhookUrl: boolean;
+      }).localConfig.webhookUrl = 'auto.trycloudflare.com';
+      (client as unknown as {
+        tunnelOwnsWebhookUrl: boolean;
+      }).tunnelOwnsWebhookUrl = true;
+
+      await client.disconnect();
+
+      const internals = client as unknown as {
+        localConfig: { webhookUrl?: string };
+        tunnelOwnsWebhookUrl: boolean;
+      };
+      expect(internals.localConfig.webhookUrl).toBeUndefined();
+      expect(internals.tunnelOwnsWebhookUrl).toBe(false);
+    });
+
+    it('preserves an explicit webhookUrl passed at construction', async () => {
+      const client = makeClient({ webhookUrl: 'static.example.com' });
+      expect(
+        (client as unknown as { tunnelOwnsWebhookUrl: boolean }).tunnelOwnsWebhookUrl,
+      ).toBe(false);
+
+      await client.disconnect();
+
+      expect(
+        (client as unknown as { localConfig: { webhookUrl?: string } }).localConfig
+          .webhookUrl,
+      ).toBe('static.example.com');
+    });
+
+    it('is idempotent — calling disconnect() twice does not throw', async () => {
+      const client = makeClient();
+      await client.disconnect();
+      await expect(client.disconnect()).resolves.toBeUndefined();
+    });
+
+    it('recreates ready / tunnelReady so a follow-up serve() can resolve them', async () => {
+      const client = makeClient();
+      const before = client.ready;
+      await client.disconnect();
+      const after = client.ready;
+      expect(after).not.toBe(before);
+    });
+  });
 });

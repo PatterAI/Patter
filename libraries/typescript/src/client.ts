@@ -63,6 +63,16 @@ export class Patter {
   private _readyResolve!: (host: string) => void;
   private _readyReject!: (err: Error) => void;
   private _ready: Promise<string>;
+  /**
+   * True iff ``localConfig.webhookUrl`` was populated by ``serve()`` from a
+   * freshly-started cloudflared tunnel (rather than by the constructor from
+   * an explicit ``webhookUrl`` / ``StaticTunnel`` config). ``disconnect()``
+   * uses this flag to clear ONLY the auto-assigned hostname so a subsequent
+   * ``serve()`` call (e.g. from a plugin's ``ensureServing`` cycle that
+   * disposes + restarts on agent-identity changes) does not throw
+   * ``Cannot use both tunnel: true and webhookUrl``.
+   */
+  private tunnelOwnsWebhookUrl = false;
 
   /**
    * Live `MetricsStore` for the embedded server. Returns `null` before
@@ -349,8 +359,10 @@ export class Patter {
         webhookUrl = this.tunnelHandle.hostname;
         // Propagate the freshly-resolved webhook host into localConfig so a
         // subsequent call() in the same process reads the same hostname instead
-        // of the original undefined value.
+        // of the original undefined value. Mark as tunnel-owned so
+        // ``disconnect()`` can clear it back out on the way down.
         this.localConfig = { ...this.localConfig, webhookUrl };
+        this.tunnelOwnsWebhookUrl = true;
         // Resolve the public deferred so callers awaiting `phone.tunnelReady`
         // can proceed with `phone.call(...)` without race-prone setTimeouts.
         this._tunnelReadyResolve(webhookUrl);
@@ -602,7 +614,11 @@ export class Patter {
     }
   }
 
-  /** Stop the embedded server and any running tunnel; safe to call multiple times. */
+  /**
+   * Stop the embedded server and any running tunnel. Safe to call multiple
+   * times. Leaves the instance reusable: a subsequent ``serve()`` works as
+   * if the previous lifecycle never happened.
+   */
   async disconnect(): Promise<void> {
     if (this.tunnelHandle) {
       this.tunnelHandle.stop();
@@ -612,6 +628,29 @@ export class Patter {
       await this.embeddedServer.stop();
       this.embeddedServer = null;
     }
+    // Clear tunnel-owned hostname so the next ``serve()`` does not trip the
+    // ``Cannot use both tunnel: true and webhookUrl`` guard. Static / explicit
+    // ``webhookUrl`` values stay in place — they were not ours to drop.
+    if (this.tunnelOwnsWebhookUrl) {
+      this.localConfig = { ...this.localConfig, webhookUrl: undefined };
+      this.tunnelOwnsWebhookUrl = false;
+    }
+    // Recreate the deferred handles so a follow-up ``serve()`` can resolve
+    // them again. Without this, the next ``await phone.ready`` returns the
+    // stale hostname from the previous lifecycle.
+    this._tunnelReady = new Promise<string>((resolve, reject) => {
+      this._tunnelReadyResolve = resolve;
+      this._tunnelReadyReject = reject;
+    });
+    this._tunnelReady.catch(() => {});
+    if (this.localConfig.webhookUrl) {
+      this._tunnelReadyResolve(this.localConfig.webhookUrl);
+    }
+    this._ready = new Promise<string>((resolve, reject) => {
+      this._readyResolve = resolve;
+      this._readyReject = reject;
+    });
+    this._ready.catch(() => {});
   }
 }
 

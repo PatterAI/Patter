@@ -151,6 +151,14 @@ class Patter:
         # state. Never pre-resolved at construction even when webhook_url
         # is static, because the WS routes only register inside ``serve()``.
         self._ready: "asyncio.Future[str] | None" = None
+        # True iff ``_local_config.webhook_url`` was populated by ``serve()``
+        # from a freshly-started cloudflared tunnel (rather than by the
+        # constructor from an explicit ``webhook_url`` value). ``disconnect()``
+        # uses this flag to clear ONLY the auto-assigned hostname so a
+        # subsequent ``serve()`` call (e.g. from an integration that disposes
+        # + restarts on agent-identity changes) does not throw
+        # ``Cannot use both tunnel=True and webhook_url``.
+        self._tunnel_owns_webhook_url: bool = False
 
     @staticmethod
     def _unpack_carrier(carrier: Any) -> tuple[str | None, dict]:
@@ -779,11 +787,15 @@ class Patter:
             try:
                 handle = await start_tunnel(port)
                 self._tunnel_handle = handle
-                # Replace config with the tunnel hostname (frozen dataclass)
+                # Replace config with the tunnel hostname (frozen dataclass).
+                # Mark the assignment as tunnel-owned so ``disconnect()`` can
+                # clear it back out without touching explicit ``webhook_url``
+                # values that the caller passed at construction time.
                 from dataclasses import replace
 
                 config = replace(config, webhook_url=handle.hostname)
                 self._local_config = config
+                self._tunnel_owns_webhook_url = True
                 # Resolve the tunnel-ready future for callers awaiting the
                 # public hostname before placing outbound calls.
                 self._resolve_tunnel_ready(handle.hostname)
@@ -898,12 +910,37 @@ class Patter:
         )
 
     async def disconnect(self) -> None:
-        """Stop the embedded server and any auto-started tunnel."""
+        """Stop the embedded server and any auto-started tunnel.
+
+        Safe to call multiple times. Leaves the instance reusable: a
+        subsequent ``serve()`` works as if the previous lifecycle never
+        happened (clears tunnel-owned ``webhook_url`` and recreates the
+        ``ready`` / ``tunnel_ready`` Futures).
+        """
         if self._server:
             await self._server.stop()
+            self._server = None
         if self._tunnel_handle:
             self._tunnel_handle.stop()
             self._tunnel_handle = None
+        # Clear tunnel-owned hostname so the next ``serve()`` does not trip
+        # the ``Cannot use both tunnel=True and webhook_url`` guard. Static /
+        # explicit ``webhook_url`` values stay in place — they were not ours
+        # to drop.
+        if self._tunnel_owns_webhook_url:
+            from dataclasses import replace
+
+            self._local_config = replace(self._local_config, webhook_url="")
+            self._tunnel_owns_webhook_url = False
+        # Drop the deferred handles so a follow-up ``serve()`` recreates them
+        # fresh. Without this, the next ``await phone.ready`` would resolve
+        # immediately with the stale hostname from the previous lifecycle.
+        self._ready = None
+        self._tunnel_ready = None
+        if self._local_config.webhook_url:
+            self._tunnel_ready_pre_resolved = self._local_config.webhook_url
+        else:
+            self._tunnel_ready_pre_resolved = None
 
 
 async def _wait_for_tunnel_publicly_reachable(
