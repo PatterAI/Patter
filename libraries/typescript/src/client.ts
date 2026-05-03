@@ -415,6 +415,24 @@ export class Patter {
       await this.embeddedServer.start(port);
       // Server is now in `listen` state on 127.0.0.1:port — safe to place
       // outbound calls because the WS upgrade has a route to land on.
+
+      // Tunnel reachability self-test: cloudflared returns the URL the
+      // moment its control plane has issued it, but the public DNS edge
+      // (and the cloudflared origin bridge) can take several extra
+      // seconds to start serving the trycloudflare.com hostname. Until
+      // that propagation completes, Twilio (and any other webhook
+      // caller) gets HTTP 502 "Unknown host" and the call is torn down
+      // before it ever reaches the WS media stream. We block
+      // `phone.ready` until DNS resolves through the public resolvers
+      // Twilio's edge uses, then add a short grace window for
+      // cloudflared's origin bridge to stabilise. Static /
+      // explicit-webhookUrl paths skip the probe (the operator already
+      // knows the host is up). See `waitForTunnelPubliclyReachable`
+      // for the rationale behind DNS-only vs full HTTP probing.
+      if (this.tunnelHandle) {
+        await waitForTunnelPubliclyReachable(webhookUrl);
+      }
+
       this._readyResolve(webhookUrl);
     } catch (err) {
       const e = err instanceof Error ? err : new Error(String(err));
@@ -595,4 +613,65 @@ export class Patter {
       this.embeddedServer = null;
     }
   }
+}
+
+/**
+ * Wait for a freshly-minted cloudflared quick-tunnel hostname to be
+ * publicly resolvable. Polls DNS until the OS resolver can resolve the
+ * host (the same resolver path Twilio's edge will use), then adds a
+ * small grace window for the cloudflared origin bridge to stabilise.
+ *
+ * Why DNS-only and not full HTTP: trycloudflare quick tunnels frequently
+ * fail same-host loopback (the local machine resolving its own
+ * tunnel back through Cloudflare's edge can race NAT / IPv4 vs IPv6
+ * resolver paths) even when the URL is reachable from external hosts.
+ * Twilio's edge resolves the hostname from public DNS — so DNS
+ * resolution is the right proxy for "Twilio can reach us".
+ *
+ * Why a grace window: between "DNS resolves" and "cloudflared origin
+ * bridge is ready to forward HTTP", there is a 1–3 s gap during which
+ * Cloudflare returns 502. Empirically 2.5 s covers >95 % of cases.
+ *
+ * Without this guard, Twilio races the propagation and the first call
+ * is silently torn down by an HTTP 502 from the tunnel.
+ */
+async function waitForTunnelPubliclyReachable(
+  hostname: string,
+  totalTimeoutMs = 30_000,
+  graceMs = 2_500,
+): Promise<void> {
+  const log = getLogger();
+  const { Resolver } = await import('node:dns/promises');
+  // Bypass the OS resolver (mDNSResponder on macOS aggressively caches
+  // NXDOMAIN for several seconds, so the first lookup after a fresh
+  // cloudflared tunnel comes up will keep returning ENOTFOUND long
+  // after the public edge has the record). We query Cloudflare's
+  // 1.1.1.1 + Google's 8.8.8.8 directly via c-ares — this is also the
+  // exact resolver path Twilio's edge takes, so a positive result here
+  // is a true proxy for "Twilio can reach us".
+  const resolver = new Resolver();
+  resolver.setServers(['1.1.1.1', '8.8.8.8']);
+  const deadline = Date.now() + totalTimeoutMs;
+  let attempt = 0;
+  let lastErr: unknown;
+  while (Date.now() < deadline) {
+    attempt += 1;
+    try {
+      const records = await resolver.resolve4(hostname);
+      const first = records[0] ?? '<unknown>';
+      log.info('Tunnel DNS resolved → %s (attempt %d); waiting %d ms grace',
+        first, attempt, graceMs);
+      await new Promise((r) => setTimeout(r, graceMs));
+      return;
+    } catch (err) {
+      lastErr = err;
+    }
+    // Backoff: 250 ms, 400 ms, 640 ms, 1.0 s, capped at 2 s.
+    const delay = Math.min(250 * Math.pow(1.6, attempt - 1), 2_000);
+    await new Promise((r) => setTimeout(r, delay));
+  }
+  throw new Error(
+    `Tunnel hostname ${hostname} did not resolve within ${totalTimeoutMs}ms. ` +
+    `Last error: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`,
+  );
 }

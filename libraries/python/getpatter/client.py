@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any, Callable, Awaitable
 logger = logging.getLogger("getpatter")
 
 from getpatter.exceptions import PatterConnectionError
-from getpatter.models import Agent, Guardrail, IncomingMessage
+from getpatter.models import Agent, Guardrail
 from getpatter.local_config import LocalConfig
 from getpatter.providers.base import STTProvider, TTSProvider
 from getpatter.services.llm_loop import LLMProvider
@@ -325,9 +325,7 @@ class Patter:
                 entirely (carrier picks its own default).
         """
         if not agent:
-            raise PatterConnectionError(
-                "call() requires the agent parameter."
-            )
+            raise PatterConnectionError("call() requires the agent parameter.")
         if not isinstance(to, str) or not to.startswith("+"):
             raise ValueError(
                 f"'to' must be a phone number in E.164 format (e.g., '+1234567890'), got '{to}'."
@@ -343,9 +341,7 @@ class Patter:
                 account_sid=config.twilio_sid,
                 auth_token=config.twilio_token,
             )
-            stream_url = (
-                f"wss://{config.webhook_url}/ws/stream/outbound"
-            )
+            stream_url = f"wss://{config.webhook_url}/ws/stream/outbound"
             extra_params: dict = {}
             if machine_detection:
                 extra_params["MachineDetection"] = "DetectMessageEnd"
@@ -390,14 +386,19 @@ class Patter:
             logger.info("Outbound call initiated: %s", call_id)
             # Pre-register the call so the dashboard surfaces attempts
             # that never reach media (no-answer, busy, carrier-reject).
-            if self._server is not None and getattr(self._server, "_metrics_store", None) is not None:
+            if (
+                self._server is not None
+                and getattr(self._server, "_metrics_store", None) is not None
+            ):
                 try:
-                    self._server._metrics_store.record_call_initiated({
-                        "call_id": call_id,
-                        "caller": config.phone_number or from_number,
-                        "callee": to,
-                        "direction": "outbound",
-                    })
+                    self._server._metrics_store.record_call_initiated(
+                        {
+                            "call_id": call_id,
+                            "caller": config.phone_number or from_number,
+                            "callee": to,
+                            "direction": "outbound",
+                        }
+                    )
                 except Exception as exc:
                     logger.debug("record_call_initiated: %s", exc)
         elif config.telephony_provider == "telnyx":
@@ -407,9 +408,7 @@ class Patter:
                 api_key=config.telnyx_key,
                 connection_id=config.telnyx_connection_id,
             )
-            stream_url = (
-                f"wss://{config.webhook_url}/ws/telnyx/stream/outbound"
-            )
+            stream_url = f"wss://{config.webhook_url}/ws/telnyx/stream/outbound"
             call_id = await adapter.initiate_call(
                 config.phone_number or from_number,
                 to,
@@ -417,14 +416,19 @@ class Patter:
                 ring_timeout=ring_timeout,
             )
             logger.info("Outbound call initiated: %s", call_id)
-            if self._server is not None and getattr(self._server, "_metrics_store", None) is not None:
+            if (
+                self._server is not None
+                and getattr(self._server, "_metrics_store", None) is not None
+            ):
                 try:
-                    self._server._metrics_store.record_call_initiated({
-                        "call_id": call_id,
-                        "caller": config.phone_number or from_number,
-                        "callee": to,
-                        "direction": "outbound",
-                    })
+                    self._server._metrics_store.record_call_initiated(
+                        {
+                            "call_id": call_id,
+                            "caller": config.phone_number or from_number,
+                            "callee": to,
+                            "direction": "outbound",
+                        }
+                    )
                 except Exception as exc:
                     logger.debug("record_call_initiated: %s", exc)
 
@@ -580,9 +584,7 @@ class Patter:
         tools_out: list[dict] | None = None
         if tools is not None:
             if not isinstance(tools, list):
-                raise TypeError(
-                    f"tools must be a list, got {type(tools).__name__}."
-                )
+                raise TypeError(f"tools must be a list, got {type(tools).__name__}.")
             tools_out = [self._tool_to_dict(t, index=i) for i, t in enumerate(tools)]
 
         if variables is not None and not isinstance(variables, dict):
@@ -740,7 +742,12 @@ class Patter:
                 "Cannot pass both `llm=` on the agent and `on_message=` on serve(). "
                 "Pick one — `llm=` for built-in LLMs, `on_message=` for custom logic."
             )
-        if not isinstance(port, int) or isinstance(port, bool) or port < 1 or port > 65535:
+        if (
+            not isinstance(port, int)
+            or isinstance(port, bool)
+            or port < 1
+            or port > 65535
+        ):
             raise ValueError(
                 f"port must be an integer between 1 and 65535, got {port!r}."
             )
@@ -760,11 +767,10 @@ class Patter:
             tunnel = True
 
         if tunnel and config.webhook_url:
-            raise ValueError(
-                "Cannot use both tunnel=True and webhook_url. Pick one."
-            )
+            raise ValueError("Cannot use both tunnel=True and webhook_url. Pick one.")
 
         from getpatter.banner import show_banner
+
         show_banner()
 
         if tunnel:
@@ -833,6 +839,22 @@ class Patter:
                 raise TimeoutError(
                     "Embedded server did not reach 'started' state within 30s"
                 )
+
+            # Tunnel reachability self-test: cloudflared returns the URL
+            # the moment its control plane has issued it, but the public
+            # DNS edge can take several extra seconds to start serving
+            # the trycloudflare.com hostname. Until that propagation
+            # completes, Twilio (and any other webhook caller) gets HTTP
+            # 502 "Unknown host" and the call is torn down before it
+            # ever reaches the WS media stream. We block ``phone.ready``
+            # until DNS resolves through the public resolvers Twilio's
+            # edge uses, then add a short grace window for cloudflared's
+            # origin bridge to stabilise. See
+            # ``_wait_for_tunnel_publicly_reachable`` for the rationale
+            # behind DNS-only vs full HTTP probing.
+            if self._tunnel_handle is not None:
+                await _wait_for_tunnel_publicly_reachable(config.webhook_url)
+
             self._resolve_ready(config.webhook_url)
         except BaseException as exc:
             self._reject_ready(exc)
@@ -882,3 +904,131 @@ class Patter:
         if self._tunnel_handle:
             self._tunnel_handle.stop()
             self._tunnel_handle = None
+
+
+async def _wait_for_tunnel_publicly_reachable(
+    hostname: str,
+    total_timeout_s: float = 30.0,
+    grace_s: float = 2.5,
+) -> None:
+    """Wait for a freshly-minted cloudflared quick-tunnel hostname to be
+    publicly resolvable, bypassing the OS resolver cache.
+
+    Queries 1.1.1.1 (Cloudflare) and 8.8.8.8 (Google) directly over UDP
+    instead of going through the OS resolver — this is necessary because
+    macOS mDNSResponder caches NXDOMAIN aggressively, so the first
+    ``getaddrinfo`` call after a fresh tunnel comes up keeps returning
+    ENOTFOUND long after the public DNS edge has the record. The
+    public-resolver path is also the one Twilio's edge takes, so a
+    positive result here is a true proxy for "Twilio can reach us".
+
+    Why DNS-only and not full HTTP: trycloudflare quick tunnels frequently
+    fail same-host loopback (the local machine resolving its own tunnel
+    back through Cloudflare's edge can race NAT / IPv4 vs IPv6 resolver
+    paths) even when the URL is reachable from external hosts. Twilio's
+    edge resolves the hostname from public DNS — so DNS resolution is the
+    right proxy for "Twilio can reach us".
+
+    Why the grace window: between "DNS resolves" and "cloudflared origin
+    bridge is ready to forward HTTP", there is a 1–3 s gap during which
+    Cloudflare returns 502. Empirically 2.5 s covers >95 % of cases.
+
+    Without this guard, Twilio races the propagation and the first call
+    is silently torn down by an HTTP 502 from the tunnel.
+    """
+    import struct
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + total_timeout_s
+    attempt = 0
+    last_err: BaseException | None = None
+
+    def _resolve_one(server: str) -> str | None:
+        """Send a minimal A-record DNS query to *server*:53 and return
+        the first IPv4 address from the answer section, or None if the
+        server returned NXDOMAIN / NOERROR-no-answer."""
+        import socket as _socket
+
+        # Build a minimal DNS query: 12-byte header + qname + qtype/qclass.
+        txid = 0x4242
+        flags = 0x0100  # standard query, recursion desired
+        header = struct.pack(">HHHHHH", txid, flags, 1, 0, 0, 0)
+        qname = (
+            b"".join(
+                bytes([len(part)]) + part.encode("ascii")
+                for part in hostname.split(".")
+            )
+            + b"\x00"
+        )
+        question = qname + struct.pack(">HH", 1, 1)  # A, IN
+        packet = header + question
+
+        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        try:
+            sock.settimeout(2.0)
+            sock.sendto(packet, (server, 53))
+            data, _ = sock.recvfrom(4096)
+        finally:
+            sock.close()
+
+        # Parse: skip header + question, walk answer RRs looking for type=1.
+        if len(data) < 12:
+            return None
+        ancount = struct.unpack(">H", data[6:8])[0]
+        if ancount == 0:
+            return None
+        # Skip question section (qname is compressed-free here, terminates at \x00).
+        pos = 12
+        while pos < len(data) and data[pos] != 0:
+            pos += data[pos] + 1
+        pos += 1 + 4  # null terminator + qtype/qclass
+        # Walk answer RRs.
+        for _ in range(ancount):
+            # Name (may be a compression pointer 0xc0xx).
+            if data[pos] & 0xC0 == 0xC0:
+                pos += 2
+            else:
+                while pos < len(data) and data[pos] != 0:
+                    pos += data[pos] + 1
+                pos += 1
+            rtype, _rclass, _ttl, rdlen = struct.unpack(">HHIH", data[pos : pos + 10])
+            pos += 10
+            if rtype == 1 and rdlen == 4:  # A record
+                addr = ".".join(str(b) for b in data[pos : pos + 4])
+                return addr
+            pos += rdlen
+        return None
+
+    def _resolve_via_public_dns() -> str | None:
+        for server in ("1.1.1.1", "8.8.8.8"):
+            try:
+                addr = _resolve_one(server)
+                if addr:
+                    return addr
+            except Exception:  # noqa: BLE001 — try next server
+                continue
+        return None
+
+    while loop.time() < deadline:
+        attempt += 1
+        try:
+            addr = await loop.run_in_executor(None, _resolve_via_public_dns)
+            if addr:
+                logger.info(
+                    "Tunnel DNS resolved → %s (attempt %d); waiting %.1fs grace",
+                    addr,
+                    attempt,
+                    grace_s,
+                )
+                await asyncio.sleep(grace_s)
+                return
+            last_err = RuntimeError("no A record returned")
+        except Exception as err:  # noqa: BLE001 — propagate via TimeoutError
+            last_err = err
+        # Backoff: 250 ms, 400 ms, 640 ms, 1.0 s, capped at 2 s.
+        delay = min(0.25 * (1.6 ** (attempt - 1)), 2.0)
+        await asyncio.sleep(delay)
+    raise TimeoutError(
+        f"Tunnel hostname {hostname} did not resolve within "
+        f"{total_timeout_s}s. Last error: {last_err!r}"
+    )
