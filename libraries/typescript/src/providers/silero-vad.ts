@@ -328,9 +328,9 @@ export class SileroVAD implements VADProvider {
 
     const model = new OnnxModel(runtime, session, sampleRate);
     return new SileroVAD(model, {
-      minSpeechDuration: options.minSpeechDuration ?? 0.05,
-      minSilenceDuration: options.minSilenceDuration ?? 0.55,
-      prefixPaddingDuration: options.prefixPaddingDuration ?? 0.5,
+      minSpeechDuration: options.minSpeechDuration ?? 0.25,
+      minSilenceDuration: options.minSilenceDuration ?? 0.1,
+      prefixPaddingDuration: options.prefixPaddingDuration ?? 0.03,
       activationThreshold,
       deactivationThreshold,
       sampleRate,

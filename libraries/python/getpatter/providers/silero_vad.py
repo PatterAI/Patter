@@ -121,9 +121,9 @@ class SileroVAD(VADProvider):
     def load(
         cls,
         *,
-        min_speech_duration: float = 0.05,
-        min_silence_duration: float = 0.55,
-        prefix_padding_duration: float = 0.5,
+        min_speech_duration: float = 0.25,
+        min_silence_duration: float = 0.1,
+        prefix_padding_duration: float = 0.03,
         activation_threshold: float = 0.5,
         sample_rate: Union[
             SileroSampleRate, Literal[8000, 16000]
