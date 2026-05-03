@@ -1,6 +1,6 @@
 [project]
 name = "getpatter"
-version = "0.5.5"
+version = "0.6.0"
 description = "Open-source voice AI SDK — connect any AI agent to real phone calls in 4 lines of code"
 readme = "README.md"
 license = { text = "MIT" }

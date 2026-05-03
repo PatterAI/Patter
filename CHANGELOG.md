@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+_(no entries yet — next version will land here)_
+
+## 0.6.0 (2026-05-03)
+
 Repository cleanup + bug-fix + parity wave. Most changes are internal hardening; the breaking changes are the package-tree reorganisation and the `Agent.provider` field type tightening.
 
 ### Breaking — package-tree reorganisation
