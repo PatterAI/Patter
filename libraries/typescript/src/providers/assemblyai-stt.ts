@@ -148,6 +148,22 @@ export class AssemblyAISTT {
   private closing = false;
   private reconnectAttempts = 0;
   private terminationResolve: (() => void) | null = null;
+  /**
+   * Coalescing buffer for inbound audio frames. AssemblyAI's v3
+   * streaming endpoint requires each ws frame to carry 50–1000 ms of
+   * audio (server emits error 3007 below 50 ms — observed in the
+   * field as a fully-billed call with zero transcripts). Twilio sends
+   * 20 ms frames, so the SDK must batch ~3 frames before forwarding.
+   *
+   * We accumulate raw bytes here until the cumulative duration crosses
+   * the configured target (default 60 ms — comfortably above the 50 ms
+   * floor with one frame of headroom against jitter), then flush in a
+   * single `ws.send()`.
+   */
+  private chunkBuffer: Buffer[] = [];
+  private chunkBufferBytes = 0;
+  /** Target send size in bytes — recomputed lazily once encoding/sample-rate is known. */
+  private chunkBufferTargetBytes = 0;
 
   /** AssemblyAI session id — set when the `Begin` message arrives. */
   public sessionId: string | null = null;
@@ -384,13 +400,35 @@ export class AssemblyAISTT {
 
   /** Send a binary PCM/mu-law audio chunk to AssemblyAI for transcription. */
   sendAudio(audio: Buffer): void {
+    // Mirror Deepgram / other streaming STTs: silently drop audio while
+    // the WebSocket is not yet OPEN. Twilio starts streaming media frames
+    // immediately on call connect, but our STT WS handshake takes
+    // 200–500 ms to complete — throwing here propagates an unhandled
+    // exception out of `handleAudio` and kills the call. Losing the
+    // first ~10 frames (~200 ms) is preferable to a hard crash; the
+    // connect path already retries on close.
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      throw new AssemblyAISTTNotConnectedError(
-        'AssemblyAISTT.sendAudio: WebSocket is not open',
-      );
+      return;
     }
 
-    const durationMs = this.estimateChunkDurationMs(audio.length);
+    // Coalesce small frames before forwarding. Twilio's 20 ms frames are
+    // below AssemblyAI's 50 ms floor, so without batching the server
+    // accepts the WS bytes silently but emits no transcripts and bills
+    // the call. See `chunkBufferTargetBytes` doc for the math.
+    if (this.chunkBufferTargetBytes === 0) {
+      this.chunkBufferTargetBytes = this.computeTargetChunkBytes();
+    }
+    this.chunkBuffer.push(audio);
+    this.chunkBufferBytes += audio.length;
+    if (this.chunkBufferBytes < this.chunkBufferTargetBytes) {
+      return; // need more frames before we can flush
+    }
+
+    const merged = Buffer.concat(this.chunkBuffer, this.chunkBufferBytes);
+    this.chunkBuffer = [];
+    this.chunkBufferBytes = 0;
+
+    const durationMs = this.estimateChunkDurationMs(merged.length);
     if (
       durationMs !== null &&
       (durationMs < MIN_CHUNK_DURATION_MS || durationMs > MAX_CHUNK_DURATION_MS)
@@ -400,7 +438,24 @@ export class AssemblyAISTT {
       );
     }
 
-    this.ws.send(audio);
+    this.ws.send(merged);
+  }
+
+  /**
+   * Compute the byte count corresponding to ~60 ms of audio for the
+   * configured encoding / sample rate. Sits one Twilio frame (20 ms)
+   * above AssemblyAI's 50 ms floor so jitter never dips below.
+   */
+  private computeTargetChunkBytes(): number {
+    const targetMs = 60;
+    const encoding = this.options.encoding ?? AssemblyAIEncoding.PCM_S16LE;
+    const sampleRate = this.options.sampleRate ?? AssemblyAISampleRate.HZ_16000;
+    if (encoding === AssemblyAIEncoding.PCM_MULAW) {
+      // 1 byte per sample.
+      return Math.ceil((sampleRate * targetMs) / 1000);
+    }
+    // PCM_S16LE: 2 bytes per sample.
+    return Math.ceil((sampleRate * targetMs) / 1000) * 2;
   }
 
   private estimateChunkDurationMs(byteLength: number): number | null {

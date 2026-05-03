@@ -637,7 +637,7 @@ export class Patter {
  */
 async function waitForTunnelPubliclyReachable(
   hostname: string,
-  totalTimeoutMs = 30_000,
+  totalTimeoutMs = 60_000,
   graceMs = 2_500,
 ): Promise<void> {
   const log = getLogger();
@@ -649,7 +649,13 @@ async function waitForTunnelPubliclyReachable(
   // 1.1.1.1 + Google's 8.8.8.8 directly via c-ares — this is also the
   // exact resolver path Twilio's edge takes, so a positive result here
   // is a true proxy for "Twilio can reach us".
-  const resolver = new Resolver();
+  //
+  // ``timeout: 1500`` + ``tries: 1`` overrides c-ares's default of
+  // 5000 ms × 4 attempts (= up to 20 s per resolve4 call) so the
+  // outer retry loop actually retries — without this each NXDOMAIN
+  // burns 5–20 s of wall-clock and the budget runs out after 1–2
+  // attempts.
+  const resolver = new Resolver({ timeout: 1500, tries: 1 });
   resolver.setServers(['1.1.1.1', '8.8.8.8']);
   const deadline = Date.now() + totalTimeoutMs;
   let attempt = 0;

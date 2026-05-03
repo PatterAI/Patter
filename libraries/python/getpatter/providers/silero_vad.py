@@ -173,24 +173,40 @@ class SileroVAD(VADProvider):
 
     @classmethod
     def for_phone_call(cls, **overrides) -> "SileroVAD":
-        """Convenience factory tuned for telephony pipelines.
+        """Convenience factory for telephony pipelines.
 
-        Same as :meth:`load` but raises ``min_silence_duration`` to 1.0 s so
-        natural pauses on speakerphone don't truncate the user's last words,
-        and pins ``sample_rate`` to 16000 Hz which matches Patter's
-        pipeline-mode audio bus. Override any field via keyword arguments.
+        Identical to :meth:`load` but pins ``sample_rate`` to 16000 Hz
+        — the only sample rate Patter's pipeline-mode audio bus uses
+        (8 kHz mulaw from Twilio is upsampled to 16 kHz PCM before
+        reaching the VAD). Every other parameter mirrors the upstream
+        Silero VAD defaults from ``snakers4/silero-vad``
+        (``get_speech_timestamps`` / ``VADIterator``):
+
+          - ``activation_threshold = 0.5`` — upstream ``threshold``
+          - ``deactivation_threshold = 0.35`` — upstream
+            ``neg_threshold = threshold - 0.15``
+          - ``min_speech_duration = 0.25`` — upstream
+            ``min_speech_duration_ms = 250``
+          - ``min_silence_duration = 0.1`` — upstream
+            ``min_silence_duration_ms = 100``
+          - ``prefix_padding_duration = 0.03`` — upstream
+            ``speech_pad_ms = 30``
+
+        Override any field via keyword arguments. Deployments that
+        experience truncation on natural pauses can raise
+        ``min_silence_duration`` (e.g. 0.5–1.0 s) per call site rather
+        than as a global default.
 
         Example::
 
             vad = await asyncio.to_thread(SileroVAD.for_phone_call)
-            # or, for very noisy speakerphone / tunnel echo:
+            # or, if natural-pause truncation is observed:
             vad = await asyncio.to_thread(
-                SileroVAD.for_phone_call, min_silence_duration=1.5
+                SileroVAD.for_phone_call, min_silence_duration=0.5
             )
         """
         defaults: dict = {
             "sample_rate": SileroSampleRate.HZ_16000,
-            "min_silence_duration": 1.0,
         }
         defaults.update(overrides)
         return cls.load(**defaults)

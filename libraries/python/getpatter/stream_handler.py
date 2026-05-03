@@ -1375,12 +1375,22 @@ class PipelineStreamHandler(StreamHandler):
                 if not self._is_speaking:
                     return False  # caller handles interrupted metrics
 
-                # afterSynthesize hook (per-chunk)
+                # afterSynthesize hook (per-chunk). The await may yield
+                # control to the event loop long enough for VAD to fire
+                # ``speech_start during TTS → BARGE-IN``, which calls
+                # ``_cancel_speaking()`` and flips ``_is_speaking`` to
+                # False. Re-check below before pushing the resulting
+                # audio to the carrier — without this re-check, exactly
+                # one trailing chunk (~20–100 ms of audio) would race
+                # past the cancel and prolong the perceived "agent
+                # didn't stop" window.
                 processed_audio = await hook_executor.run_after_synthesize(
                     audio_chunk, processed, hook_ctx
                 )
                 if processed_audio is None:
                     continue  # hook discarded this chunk
+                if not self._is_speaking:
+                    return False  # barge-in fired during the hook await
 
                 if first_tts_chunk[0] and self.metrics is not None:
                     self.metrics.record_tts_first_byte()

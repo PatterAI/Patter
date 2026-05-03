@@ -949,9 +949,16 @@ export class StreamHandler {
       for await (const chunk of this.tts.synthesizeStream(processedText)) {
         if (!this.isSpeaking) break;
 
-        // afterSynthesize hook (per-chunk)
+        // afterSynthesize hook (per-chunk). The await may yield control to
+        // the event loop long enough for VAD to fire `speech_start during
+        // TTS → BARGE-IN`, which calls cancelSpeaking() and flips
+        // ``isSpeaking`` to false. Re-check below before pushing the
+        // resulting audio to the carrier — without this re-check, exactly
+        // one trailing chunk (~20–100 ms of audio) would race past the
+        // cancel and prolong the perceived "agent didn't stop" window.
         const processedAudio = await hookExecutor.runAfterSynthesize(chunk, processedText, hookCtx);
         if (processedAudio === null) continue;
+        if (!this.isSpeaking) break;
 
         if (!ttsFirstByteSent.value) {
           ttsFirstByteSent.value = true;

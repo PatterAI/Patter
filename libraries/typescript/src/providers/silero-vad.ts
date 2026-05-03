@@ -374,24 +374,35 @@ export class SileroVAD implements VADProvider {
   }
 
   /**
-   * Convenience factory tuned for telephony pipelines.
+   * Convenience factory for telephony pipelines.
    *
-   * Same as {@link SileroVAD.load} but raises `minSilenceDuration` to 1.0 s
-   * so natural pauses on speakerphone don't truncate the user's last words,
-   * and pins `sampleRate` to 16000 Hz which matches Patter's pipeline-mode
-   * audio bus. Override any field by passing `options`.
+   * Identical to {@link SileroVAD.load} but pins `sampleRate` to 16000 Hz
+   * — the only sample rate Patter's pipeline-mode audio bus uses (8 kHz
+   * mulaw from Twilio is upsampled to 16 kHz PCM before reaching the
+   * VAD). Every other parameter mirrors the upstream Silero VAD
+   * defaults from `snakers4/silero-vad` (`get_speech_timestamps` /
+   * `VADIterator`):
+   *
+   *   - `activationThreshold = 0.5` — upstream `threshold`
+   *   - `deactivationThreshold = 0.35` — upstream `neg_threshold = threshold - 0.15`
+   *   - `minSpeechDuration = 0.25` — upstream `min_speech_duration_ms = 250`
+   *   - `minSilenceDuration = 0.1` — upstream `min_silence_duration_ms = 100`
+   *   - `prefixPaddingDuration = 0.03` — upstream `speech_pad_ms = 30`
+   *
+   * Override any field by passing `options`. Deployments that experience
+   * truncation on natural pauses can raise `minSilenceDuration` (e.g.
+   * 0.5–1.0 s) per call site rather than as a global default.
    *
    * @example
    * ```ts
    * const vad = await SileroVAD.forPhoneCall();
-   * // or, for very noisy speakerphone / tunnel echo:
-   * const vad = await SileroVAD.forPhoneCall({ minSilenceDuration: 1.5 });
+   * // or, if natural-pause truncation is observed:
+   * const vad = await SileroVAD.forPhoneCall({ minSilenceDuration: 0.5 });
    * ```
    */
   static forPhoneCall(options: SileroVADOptions = {}): Promise<SileroVAD> {
     return SileroVAD.load({
       sampleRate: 16000,
-      minSilenceDuration: 1.0,
       ...options,
     });
   }

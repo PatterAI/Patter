@@ -864,29 +864,15 @@ class EmbeddedServer:
                     "— webhooks will 503. Set require_signature=False for local dev."
                 )
 
-        # Pipeline-mode barge-in fragility warning: without an external VAD
-        # adapter (Silero, Krisp, custom), the SDK falls back to the legacy
-        # "always forward + barge_in_threshold_ms" path which is fragile on
-        # tunnel + speakerphone setups — the agent's own TTS leaks into the
-        # inbound mic feed, STT transcribes it, and the heuristic gets
-        # confused so the cancel never fires. Only relevant in pipeline mode
-        # (no engine) with barge-in enabled.
-        provider_mode = getattr(self.agent, "provider", "")
-        is_pipeline = provider_mode == "pipeline" or (
-            getattr(self.agent, "stt", None) is not None
-            and getattr(self.agent, "tts", None) is not None
-        )
-        bargein_ms = getattr(self.agent, "barge_in_threshold_ms", 300)
-        if is_pipeline and getattr(self.agent, "vad", None) is None and bargein_ms > 0:
-            logger.warning(
-                "Pipeline mode without VAD: barge-in falls back to a fragile "
-                "heuristic (barge_in_threshold_ms=%d) that misfires on tunnel/"
-                "speakerphone setups when the agent's own TTS leaks into the "
-                "mic feed. Recommended: pass `vad=SileroVAD(sample_rate=16000)` "
-                "on the Agent, or set barge_in_threshold_ms=0 to disable "
-                "barge-in entirely.",
-                bargein_ms,
-            )
+        # (Earlier versions of this file emitted a "Pipeline mode without
+        # VAD" warning here when neither ``agent.engine`` nor ``agent.vad``
+        # was set. The warning is now stale: since the auto-VAD work
+        # landed in stream_handler.py (``self.auto_vad =
+        # await SileroVAD.for_phone_call()`` when ``onnxruntime`` is
+        # installed), the SDK silently provides a working VAD per call.
+        # The stream handler still logs a single, accurate message in
+        # the rare case the auto-load fails — emitting both warnings
+        # created false-positive alarm fatigue for operators.)
 
         # Warn if the agent runs a non-default Realtime model — DEFAULT_PRICING
         # is calibrated for gpt-4o-mini-realtime-preview. Other models differ
