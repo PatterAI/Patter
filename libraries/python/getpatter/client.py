@@ -484,6 +484,9 @@ class Patter:
         audio_filter: "AudioFilter | None" = None,
         background_audio: "BackgroundAudioPlayer | None" = None,
         barge_in_threshold_ms: int = 300,
+        aggressive_first_flush: bool = False,
+        disable_phone_preamble: bool = False,
+        echo_cancellation: bool = False,
         engine: Any = None,
         llm: "LLMProvider | None" = None,
     ) -> Agent:
@@ -629,6 +632,9 @@ class Patter:
             audio_filter=audio_filter,
             background_audio=background_audio,
             barge_in_threshold_ms=barge_in_threshold_ms,
+            aggressive_first_flush=aggressive_first_flush,
+            disable_phone_preamble=disable_phone_preamble,
+            echo_cancellation=echo_cancellation,
             llm=llm,
         )
 

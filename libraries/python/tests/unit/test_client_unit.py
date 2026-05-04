@@ -182,6 +182,36 @@ class TestAgentFactory:
         assert agent.voice == "alloy"
         assert agent.provider == "openai_realtime"
 
+    def test_agent_default_flags_off(self) -> None:
+        """Builder defaults match the Agent dataclass defaults."""
+        client = _local_phone()
+        agent = client.agent(
+            engine=OpenAIRealtime(api_key="sk-test"),
+            system_prompt="Hi",
+        )
+        assert agent.aggressive_first_flush is False
+        assert agent.disable_phone_preamble is False
+        assert agent.echo_cancellation is False
+
+    def test_agent_builder_passes_through_pipeline_flags(self) -> None:
+        """The 3 boolean flags reach the Agent dataclass via the builder.
+
+        Pre-fix the builder enumerated kwargs explicitly and silently
+        dropped any flag it didn't list — TS parity was broken because
+        the TS side spreads the whole options object.
+        """
+        client = _local_phone()
+        agent = client.agent(
+            engine=OpenAIRealtime(api_key="sk-test"),
+            system_prompt="Hi",
+            aggressive_first_flush=True,
+            disable_phone_preamble=True,
+            echo_cancellation=True,
+        )
+        assert agent.aggressive_first_flush is True
+        assert agent.disable_phone_preamble is True
+        assert agent.echo_cancellation is True
+
     def test_agent_openai_realtime_requires_key(self) -> None:
         client = _local_phone()
         # No engine and no openai key anywhere → should raise.
