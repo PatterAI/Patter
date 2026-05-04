@@ -268,6 +268,16 @@ export class StreamHandler {
    */
   private endSpeakingWithGrace(): void {
     const grace = Number(process.env.PATTER_TTS_TAIL_GRACE_MS ?? 1500);
+    // NOTE: we DO NOT flush ``inboundAudioRing`` here — the ring is only
+    // drained on a real barge-in (where VAD confirmed user speech). Flushing
+    // on every natural turn end was tried in an earlier iteration and
+    // caused garbled out-of-order responses: the ring captured during the
+    // agent's TTS contains audio with partially-cancelled echo and possibly
+    // over-cancelled user voice (Geigel rho=0.6 misses quiet double-talk).
+    // Replaying that to STT on every turn produced phantom transcripts that
+    // raced live STT input and confused the LLM. Audio captured during the
+    // agent's turn that VAD did NOT classify as speech is intentionally
+    // dropped at the next ``beginSpeaking()``.
     if (grace > 0) {
       const gen = this.speakingGeneration;
       this.clearGraceTimer();
@@ -278,6 +288,31 @@ export class StreamHandler {
     } else {
       this.isSpeaking = false;
     }
+  }
+
+  /**
+   * Replay the audio captured by the self-hearing guard right before a
+   * confirmed barge-in. VAD's ``minSpeechDuration`` window (default
+   * 250 ms) means ``speech_start`` fires only AFTER the user has been
+   * talking for that long; without this replay STT sees only the tail
+   * of the user's interruption and produces "the line is breaking up"
+   * partial transcripts. We deliberately do NOT call this on natural
+   * turn end — see the comment in ``endSpeakingWithGrace`` for why.
+   */
+  private flushInboundAudioRing(): void {
+    if (!this.stt || this.inboundAudioRing.length === 0) return;
+    const replayed = this.inboundAudioRing.length;
+    for (const buf of this.inboundAudioRing) {
+      try {
+        this.stt.sendAudio(buf);
+      } catch (err) {
+        getLogger().debug(`sendAudio replay failed: ${String(err)}`);
+      }
+    }
+    this.inboundAudioRing = [];
+    getLogger().debug(
+      `Flushed ${replayed} pre-turn-end frame(s) (~${replayed * 20} ms) to STT`,
+    );
   }
   private llmLoop: LLMLoop | null = null;
   private chunkCount = 0;
@@ -639,20 +674,7 @@ export class StreamHandler {
                 // tail of the user's utterance), which is why short
                 // interruptions like "stop" produced no transcript and
                 // the agent kept talking.
-                if (this.stt && this.inboundAudioRing.length > 0) {
-                  const replayed = this.inboundAudioRing.length;
-                  for (const buf of this.inboundAudioRing) {
-                    try {
-                      this.stt.sendAudio(buf);
-                    } catch (err) {
-                      getLogger().debug(`sendAudio replay failed: ${String(err)}`);
-                    }
-                  }
-                  this.inboundAudioRing = [];
-                  getLogger().debug(
-                    `Flushed ${replayed} pre-barge-in frame(s) (~${replayed * 20} ms) to STT`,
-                  );
-                }
+                this.flushInboundAudioRing();
                 this.metricsAcc.recordTtsStopped();
                 this.metricsAcc.recordTurnInterrupted();
                 this.metricsAcc.recordOverlapEnd(true);
@@ -912,8 +934,8 @@ export class StreamHandler {
         const { NlmsEchoCanceller } = await import('./audio/aec');
         this.aec = new NlmsEchoCanceller({ sampleRate: 16000 });
         getLogger().info(
-          'echo cancellation enabled (NLMS, 2048 taps); ' +
-            'filter converges within 0.5–2 s of TTS playback.',
+          'echo cancellation enabled (NLMS, 512 taps + 0.5 s warmup μ=0.5); ' +
+            'filter converges within ~250 ms of TTS playback.',
         );
       } catch (e) {
         getLogger().warn(
@@ -934,11 +956,28 @@ export class StreamHandler {
 
     if (this.deps.agent.firstMessage && !this.deps.onMessage && this.tts) {
       this.metricsAcc.startTurn();
+      // Mark the agent as speaking for the duration of the first
+      // message — without this, the self-hearing guard never engages,
+      // the user's audio (mixed with TTS bleed) is forwarded to STT
+      // and produces garbage transcripts, and the ring buffer for
+      // pre-barge-in audio is never populated. Mirrors the per-turn
+      // behaviour in `runPipelineLlm` / `runRegularLlm`.
+      this.beginSpeaking();
       let firstChunkSent = false;
       this.resetTtsCarry();
       try {
         for await (const chunk of this.tts.synthesizeStream(this.deps.agent.firstMessage)) {
+          if (!this.isSpeaking) break;  // barge-in or test-hangup
           if (!firstChunkSent) { firstChunkSent = true; this.metricsAcc.recordTtsFirstByte(); }
+          // Far-end tap for the echo canceller — push the exact PCM the
+          // carrier-side encoder will transmit. Without this the AEC
+          // adapt loop has no reference signal during the intro,
+          // resulting in unmitigated bleed-through and a "first turn
+          // unresponsive" UX where the user's voice is masked by the
+          // agent's TTS in the inbound channel.
+          if (this.aec) {
+            this.aec.pushFarEnd(chunk);
+          }
           const encoded = this.encodePipelineAudio(chunk);
           this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
         }
@@ -948,6 +987,10 @@ export class StreamHandler {
         // Drop any partial int16 byte to prevent cross-turn corruption
         // if the stream threw before a complete sample was delivered.
         this.resetTtsCarry();
+        // Flip back to not-speaking with grace so the ring buffer
+        // accumulated during the intro is flushed and the next user
+        // utterance is recognised cleanly.
+        this.endSpeakingWithGrace();
       }
       if (firstChunkSent) {
         await this.emitTurnMetrics(this.metricsAcc.recordTurnComplete(this.deps.agent.firstMessage));

@@ -1262,21 +1262,44 @@ class PipelineStreamHandler(StreamHandler):
         ):
             if self.metrics is not None:
                 self.metrics.start_turn()
+            # Mark the agent as speaking for the duration of the first
+            # message — without this, the self-hearing guard never
+            # engages, the user's audio (mixed with TTS bleed) is
+            # forwarded to STT and produces garbage transcripts, and
+            # the ring buffer for pre-barge-in audio is never
+            # populated. Mirrors the per-turn behaviour in
+            # `_process_streaming_response` / `_process_regular_response`.
+            self._begin_speaking()
             first_chunk_sent = False
             # Drop any stale PCM16 carry byte from a prior synth (none at call
             # start, but defensive for parity with TS ``ttsByteCarry = null``).
             self.audio_sender.reset_pcm_carry()
             try:
                 async for audio_chunk in self._tts.synthesize(self.agent.first_message):
+                    if not self._is_speaking:
+                        break  # barge-in or test-hangup
                     if not first_chunk_sent:
                         first_chunk_sent = True
                         if self.metrics is not None:
                             self.metrics.record_tts_first_byte()
+                    # Far-end tap for the echo canceller — push the
+                    # exact PCM the carrier-side encoder will transmit.
+                    # Without this the AEC adapt loop has no reference
+                    # signal during the intro, resulting in unmitigated
+                    # bleed-through and a "first turn unresponsive" UX
+                    # where the user's voice is masked by the agent's
+                    # TTS in the inbound channel.
+                    if self._aec is not None:
+                        self._aec.push_far_end(audio_chunk)
                     await self.audio_sender.send_audio(audio_chunk)
             finally:
                 # Drop any partial int16 byte to prevent cross-turn corruption
                 # if the stream threw before a complete sample was delivered.
                 self.audio_sender.reset_pcm_carry()
+                # Flip back to not-speaking with grace so the ring
+                # buffer accumulated during the intro is flushed and
+                # the next user utterance is recognised cleanly.
+                await self._end_speaking_with_grace()
             if first_chunk_sent and self.metrics is not None:
                 turn = self.metrics.record_turn_complete(self.agent.first_message)
                 self.conversation_history.append(
@@ -2007,29 +2030,10 @@ class PipelineStreamHandler(StreamHandler):
                                     "send_clear during VAD barge-in failed: %s", exc
                                 )
                             # Replay the ring buffer of inbound frames
-                            # captured while the agent was speaking — those
-                            # carry the user's first ~600 ms of speech that
-                            # the self-hearing guard had been dropping on
-                            # the floor. Without this flush, Deepgram only
-                            # sees audio AFTER ``speech_start`` fires (i.e.
-                            # the tail of the user's utterance), which is
-                            # why short interruptions like "stop" produced
-                            # no transcript and the agent kept talking.
-                            if self._stt is not None and self._inbound_audio_ring:
-                                replayed = len(self._inbound_audio_ring)
-                                for buf in self._inbound_audio_ring:
-                                    try:
-                                        await self._stt.send_audio(buf)
-                                    except Exception as exc:
-                                        logger.debug(
-                                            "send_audio replay failed: %s", exc
-                                        )
-                                self._inbound_audio_ring = []
-                                logger.debug(
-                                    "Flushed %d pre-barge-in frame(s) (~%d ms) to STT",
-                                    replayed,
-                                    replayed * 20,
-                                )
+                            # captured while the agent was speaking —
+                            # see ``_flush_inbound_audio_ring`` for the
+                            # full rationale.
+                            await self._flush_inbound_audio_ring()
                             if self.metrics is not None:
                                 self.metrics.record_tts_stopped()
                                 self.metrics.record_turn_interrupted()
@@ -2118,6 +2122,17 @@ class PipelineStreamHandler(StreamHandler):
             grace_ms = int(os.environ.get("PATTER_TTS_TAIL_GRACE_MS", "1500"))
         except ValueError:
             grace_ms = 1500
+        # NOTE: we do NOT flush ``_inbound_audio_ring`` here — the ring is
+        # only drained on a real barge-in (where VAD confirmed user speech).
+        # Flushing on every natural turn end was tried in an earlier
+        # iteration and caused garbled out-of-order responses: the ring
+        # captured during the agent's TTS contains audio with partially
+        # cancelled echo and possibly over-cancelled user voice (Geigel
+        # rho=0.6 misses quiet double-talk). Replaying that to STT on every
+        # turn produced phantom transcripts that raced live STT input and
+        # confused the LLM. Audio captured during the agent's turn that VAD
+        # did NOT classify as speech is intentionally dropped at the next
+        # ``_begin_speaking()``.
         if grace_ms <= 0:
             self._is_speaking = False
             return
@@ -2137,6 +2152,33 @@ class PipelineStreamHandler(StreamHandler):
                 logger.debug("tts grace flip failed: %s", exc)
 
         asyncio.create_task(_flip_after_grace())
+
+    async def _flush_inbound_audio_ring(self) -> None:
+        """Replay the audio captured by the self-hearing guard right
+        before a confirmed barge-in.
+
+        VAD's ``min_speech_duration`` window (default 250 ms) means
+        ``speech_start`` fires only AFTER the user has been talking
+        for that long; without this replay STT sees only the tail of
+        the user's interruption and produces "the line is breaking up"
+        partial transcripts. We deliberately do NOT call this on
+        natural turn end — see the comment in
+        ``_end_speaking_with_grace`` for why.
+        """
+        if self._stt is None or not self._inbound_audio_ring:
+            return
+        replayed = len(self._inbound_audio_ring)
+        for buf in self._inbound_audio_ring:
+            try:
+                await self._stt.send_audio(buf)
+            except Exception as exc:
+                logger.debug("send_audio replay failed: %s", exc)
+        self._inbound_audio_ring = []
+        logger.debug(
+            "Flushed %d pre-turn-end frame(s) (~%d ms) to STT",
+            replayed,
+            replayed * 20,
+        )
 
     async def cleanup(self) -> None:
         """Cancel the STT loop and close STT/TTS/remote-message adapters."""
