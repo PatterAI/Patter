@@ -33,15 +33,33 @@ import numpy as np
 logger = logging.getLogger("getpatter")
 
 
-_DEFAULT_FILTER_TAPS: Final[int] = 2048
-"""Length of the adaptive filter in samples. 2048 taps @ 16 kHz = 128 ms,
-which covers the typical end-to-end loop latency on telephony links
-(carrier + cloudflare tunnel + speakerphone path)."""
+_DEFAULT_FILTER_TAPS: Final[int] = 512
+"""Length of the adaptive filter in samples. 512 taps @ 16 kHz = 32 ms,
+which covers the typical cellular / VoIP echo path (RT60 < 50 ms after
+the carrier's own echo suppression has trimmed the bulk of it). 2048
+taps were tested first but produced 8–12 s convergence on real cellular
+calls — long enough that the user's first turn was lost. 512 taps
+converge ~4× faster with no measurable cancellation loss on the paths
+the SDK targets. Pass ``filter_taps=2048`` explicitly for landline
+hairpin loops where the tail extends beyond 32 ms."""
 
 _DEFAULT_STEP_SIZE: Final[float] = 0.1
-"""NLMS step size. Larger = faster convergence but less stable; lower =
-more stable but slower to track changes. 0.1 is the standard textbook
-value for narrowband voice."""
+"""NLMS step size during the steady-state phase (post-warmup). Larger =
+faster tracking of channel drift but less stable; lower = more stable
+but slower. 0.1 is the standard textbook value for narrowband voice."""
+
+_DEFAULT_WARMUP_STEP_SIZE: Final[float] = 0.5
+"""NLMS step size during the warm-up phase (first ``warmup_seconds`` of
+TTS playback). Aggressive 5× ramp pulls the filter towards a usable echo
+estimate within ~0.5 s instead of the 5–10 s required at the steady-state
+step. The Geigel double-talk detector still gates updates so the larger
+step does not drag the user's voice into the echo model."""
+
+_DEFAULT_WARMUP_SECONDS: Final[float] = 0.5
+"""Duration of the warmup phase. After this many seconds of frames have
+been processed the step size decays from ``warmup_step_size`` to
+``step_size``. Tuned so that the warmup window fully overlaps with the
+agent's typical first-message TTFA + first sentence."""
 
 _DEFAULT_LEAKAGE: Final[float] = 0.9999
 """Per-iteration leakage on the filter weights. Slightly less than 1 so
@@ -80,6 +98,8 @@ class NlmsEchoCanceller:
         *,
         filter_taps: int = _DEFAULT_FILTER_TAPS,
         step_size: float = _DEFAULT_STEP_SIZE,
+        warmup_step_size: float = _DEFAULT_WARMUP_STEP_SIZE,
+        warmup_seconds: float = _DEFAULT_WARMUP_SECONDS,
         leakage: float = _DEFAULT_LEAKAGE,
         double_talk_rho: float = _DOUBLE_TALK_RHO,
     ) -> None:
@@ -94,14 +114,28 @@ class NlmsEchoCanceller:
             )
         if not 0 < step_size <= 1:
             raise ValueError(f"step_size must be in (0, 1]; got {step_size}.")
+        if not 0 < warmup_step_size <= 1:
+            raise ValueError(
+                f"warmup_step_size must be in (0, 1]; got {warmup_step_size}."
+            )
+        if warmup_seconds < 0:
+            raise ValueError(f"warmup_seconds must be >= 0; got {warmup_seconds}.")
         if not 0 < leakage <= 1:
             raise ValueError(f"leakage must be in (0, 1]; got {leakage}.")
 
         self._sample_rate = sample_rate
         self._taps = filter_taps
         self._step = float(step_size)
+        self._warmup_step = float(warmup_step_size)
+        self._warmup_samples = int(warmup_seconds * sample_rate)
         self._leakage = float(leakage)
         self._rho = float(double_talk_rho)
+        # Sample counter used to taper the step from ``warmup_step`` to
+        # ``step`` over the first ``warmup_samples`` of processed near-end
+        # audio. Counted from the first ``process_near_end`` call (not
+        # construction time) so the warmup window aligns with the actual
+        # start of TTS playback rather than agent setup.
+        self._processed_samples: int = 0
 
         # Filter coefficients (init to zeros — the filter will adapt to
         # match the channel impulse response within 0.5–2 s of TTS).
@@ -190,6 +224,7 @@ class NlmsEchoCanceller:
         self._far_buf.fill(0)
         self._far_write_idx = 0
         self._far_filled = 0
+        self._processed_samples = 0
         self.frames_processed = 0
         self.double_talk_frames = 0
 
@@ -242,7 +277,16 @@ class NlmsEchoCanceller:
         out = np.empty_like(near)
         w = self._w
         leakage = self._leakage
-        step = self._step
+        # Per-frame step. During the warmup window we use the aggressive
+        # ``warmup_step`` so the filter pulls towards a usable echo
+        # estimate within ~0.5 s; after the window we taper to the
+        # textbook ``step`` for stable steady-state tracking. Using a
+        # frame-resolution step (constant within the frame) keeps the
+        # inner loop branch-free.
+        if self._processed_samples < self._warmup_samples:
+            step = self._warmup_step
+        else:
+            step = self._step
         # Iterate sample-by-sample. ``x`` is the most recent ``taps`` samples
         # ending at the current sample's emission time (slid one position
         # per output sample).
@@ -257,4 +301,5 @@ class NlmsEchoCanceller:
                 norm = float(np.dot(x, x)) + 1e-6
                 w *= leakage
                 w += (step * e / norm) * x
+        self._processed_samples += near.shape[0]
         return out

@@ -177,4 +177,50 @@ describe('[unit] NlmsEchoCanceller', () => {
     const out = aec.processNearEnd(Buffer.alloc(0));
     expect(out.length).toBe(0);
   });
+
+  it('default warmup converges to ≥10 dB ERLE within the first 250 ms', () => {
+    // Regression guard for the cellular-call slow-convergence bug
+    // observed on 0.6.0 with 2048 taps + constant step: a real call
+    // showed 8–12 s convergence and the user's first turn was lost.
+    // The default config (512 taps + 5× warmup step for 0.5 s) must
+    // hit ≥10 dB ERLE in the first 250 ms output window.
+    const r = rng(42);
+    const far = new Float32Array(SR);
+    for (let i = 0; i < SR; i++) {
+      const t = i / SR;
+      far[i] =
+        0.4 * Math.sin(2 * Math.PI * 220 * t) +
+        0.3 * Math.sin(2 * Math.PI * 440 * t) +
+        0.2 * Math.sin(2 * Math.PI * 880 * t) +
+        0.15 * (r() * 2 - 1);
+    }
+    const echo = makeEcho(far, Math.floor(0.05 * SR));
+
+    const aec = new NlmsEchoCanceller(); // defaults
+    const frame = 320;
+    const outChunks: Float32Array[] = [];
+    for (let i = 0; i < far.length - frame; i += frame) {
+      aec.pushFarEnd(toInt16Buf(far.subarray(i, i + frame)));
+      outChunks.push(
+        fromInt16Buf(aec.processNearEnd(toInt16Buf(echo.subarray(i, i + frame)))),
+      );
+    }
+    const totalLen = outChunks.reduce((s, c) => s + c.length, 0);
+    const out = new Float32Array(totalLen);
+    let off = 0;
+    for (const c of outChunks) {
+      out.set(c, off);
+      off += c.length;
+    }
+
+    const first = (250 * SR) / 1000;
+    let inPwr = 0;
+    let outPwr = 0;
+    for (let i = 0; i < first; i++) {
+      inPwr += echo[i] * echo[i];
+      outPwr += out[i] * out[i];
+    }
+    const erle = 10 * Math.log10(inPwr / Math.max(outPwr, 1e-10));
+    expect(erle).toBeGreaterThanOrEqual(10.0);
+  });
 });

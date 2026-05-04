@@ -150,3 +150,45 @@ class TestNlmsEchoCanceller:
         aec.push_far_end(b"")  # must not raise
         out = aec.process_near_end(b"")
         assert out == b""
+
+    def test_warmup_converges_within_first_second(self) -> None:
+        """The default warmup (5× step for 0.5 s) must deliver ≥10 dB ERLE
+        within the FIRST 250 ms window when fed broadband audio in
+        realistic 20 ms frames.
+
+        This is the regression-guard for the cellular-call slow-convergence
+        bug observed on 0.6.0 with 2048 taps + constant step: a real call
+        showed 8–12 s convergence and the user's first turn was lost.
+        """
+        # Broadband signal — sinusoidal-only inputs are rank-deficient and
+        # converge slowly under NLMS regardless of step / taps.
+        rng = np.random.default_rng(seed=42)
+        t = np.arange(SR).astype(np.float32) / SR
+        far = (
+            0.4 * np.sin(2 * np.pi * 220 * t)
+            + 0.3 * np.sin(2 * np.pi * 440 * t)
+            + 0.2 * np.sin(2 * np.pi * 880 * t)
+            + 0.15 * rng.standard_normal(SR).astype(np.float32)
+        ).astype(np.float32)
+        echo = _make_echo(far, delay_samples=int(0.05 * SR))
+
+        aec = NlmsEchoCanceller()  # default 512 taps + warmup
+        # Process in realistic 20 ms frames (320 samples) to mimic the SDK.
+        frame = 320
+        out_chunks: list[np.ndarray] = []
+        for i in range(0, far.size - frame, frame):
+            aec.push_far_end(_to_int16(far[i : i + frame]))
+            out_chunks.append(
+                _from_int16(aec.process_near_end(_to_int16(echo[i : i + frame])))
+            )
+        out = np.concatenate(out_chunks)
+
+        # First 250 ms of OUTPUT — this is when the user's first turn lives.
+        first = 250 * SR // 1000
+        in_pwr = float(np.mean(echo[:first] ** 2))
+        out_pwr = float(np.mean(out[:first] ** 2))
+        erle = 10 * np.log10(in_pwr / max(out_pwr, 1e-10))
+        assert erle >= 10.0, (
+            f"Warmup did not converge fast enough: ERLE only {erle:.1f} dB "
+            f"in the first 250 ms (target >= 10 dB)."
+        )
