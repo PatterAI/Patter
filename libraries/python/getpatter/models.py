@@ -157,6 +157,16 @@ class Agent:
     # bullet lists, code blocks; numbers and dates spelled out; replies kept
     # short). Set to ``True`` to disable and ship ``system_prompt`` verbatim.
     disable_phone_preamble: bool = False
+    # Acoustic echo cancellation. When ``True`` (pipeline mode only) the
+    # SDK instantiates an :class:`getpatter.audio.aec.NlmsEchoCanceller`
+    # that subtracts the agent's own TTS bleed from the inbound mic
+    # stream before VAD/STT see it. Strongly recommended for speakerphone
+    # / tunnel deployments where the bleed otherwise keeps VAD
+    # permanently in "speaking" state and barge-in only fires during
+    # natural TTS pauses. Off by default — handset / headset deployments
+    # don't have the bleed, and the 0.5–2 s convergence period would
+    # briefly attenuate caller speech if they spoke before any TTS played.
+    echo_cancellation: bool = False
 
 
 @dataclass(frozen=True)

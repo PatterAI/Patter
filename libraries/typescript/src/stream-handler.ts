@@ -177,6 +177,18 @@ export class StreamHandler {
   private stt: STTAdapter | null = null;
   private tts: TTSAdapter | null = null;
   private isSpeaking = false;
+  /**
+   * Ring buffer of inbound PCM16 16 kHz frames captured while the agent
+   * is speaking and the self-hearing guard is dropping audio. On
+   * barge-in we flush this buffer to STT so Deepgram (or any other
+   * streaming STT) receives the user's first ~500 ms of speech — which
+   * would otherwise be lost while the VAD's `minSpeechDuration` window
+   * accumulated and fired `speech_start`. Each frame is 20 ms × 32 bytes
+   * (16 kHz × 16-bit mono) ≈ 640 bytes; capped to 30 frames ≈ 600 ms ≈
+   * ~19 KB per concurrent call.
+   */
+  private inboundAudioRing: Buffer[] = [];
+  private static readonly INBOUND_AUDIO_RING_FRAMES = 30;
   /** Set to true after a VAD error to suppress log spam for the rest of the call. */
   private vadDisabled = false;
   /**
@@ -186,6 +198,13 @@ export class StreamHandler {
    * then falls back to the STT-endpoint heuristic (legacy behaviour).
    */
   private autoVad: VADProvider | null = null;
+  /**
+   * Acoustic echo canceller (NLMS adaptive filter). Lazily instantiated in
+   * ``initPipeline`` when ``agent.echoCancellation`` is true. ``null``
+   * otherwise — the mic path stays a pure pass-through for handset /
+   * headset deployments that don't have TTS bleed.
+   */
+  private aec: import('./audio/aec').NlmsEchoCanceller | null = null;
   /**
    * Monotonic counter incremented on every TTS-start. The grace timer
    * scheduled by ``endSpeakingWithGrace`` only flips ``isSpeaking=false``
@@ -208,6 +227,9 @@ export class StreamHandler {
   private beginSpeaking(): void {
     this.speakingGeneration++;
     this.isSpeaking = true;
+    // Fresh turn — drop any stale pre-barge-in buffer from a previous turn
+    // so we never replay yesterday's audio to STT.
+    this.inboundAudioRing = [];
   }
 
   /**
@@ -563,7 +585,15 @@ export class StreamHandler {
       // Both Twilio and Telnyx (with default streaming_start PCMU bidirectional)
       // deliver mulaw 8 kHz — always transcode to PCM16 16 kHz before STT.
       const pcm8k = mulawToPcm16(audioBuffer);
-      const pcm16k = this.inboundResampler.process(pcm8k);
+      let pcm16k = this.inboundResampler.process(pcm8k);
+
+      // Acoustic echo cancellation — subtract estimated TTS bleed from the
+      // mic stream before VAD/STT see it. Pass-through until the canceller
+      // has enough far-end history to fill its filter window (~128 ms),
+      // then converges over the next 0.5–2 s of TTS-only frames.
+      if (this.aec) {
+        pcm16k = this.aec.processNearEnd(pcm16k);
+      }
 
       // External VAD (e.g. Silero) when configured. Drives:
       //  - Self-hearing avoidance: while the agent is speaking we DO NOT pipe
@@ -601,6 +631,28 @@ export class StreamHandler {
                 } catch (err) {
                   getLogger().debug(`sendClear during VAD barge-in failed: ${String(err)}`);
                 }
+                // Replay the ring buffer of inbound frames captured while
+                // the agent was speaking — those carry the user's first
+                // ~500 ms of speech that the self-hearing guard had been
+                // dropping on the floor. Without this flush, Deepgram
+                // only sees audio AFTER `speech_start` fires (i.e. the
+                // tail of the user's utterance), which is why short
+                // interruptions like "stop" produced no transcript and
+                // the agent kept talking.
+                if (this.stt && this.inboundAudioRing.length > 0) {
+                  const replayed = this.inboundAudioRing.length;
+                  for (const buf of this.inboundAudioRing) {
+                    try {
+                      this.stt.sendAudio(buf);
+                    } catch (err) {
+                      getLogger().debug(`sendAudio replay failed: ${String(err)}`);
+                    }
+                  }
+                  this.inboundAudioRing = [];
+                  getLogger().debug(
+                    `Flushed ${replayed} pre-barge-in frame(s) (~${replayed * 20} ms) to STT`,
+                  );
+                }
                 this.metricsAcc.recordTtsStopped();
                 this.metricsAcc.recordTurnInterrupted();
                 this.metricsAcc.recordOverlapEnd(true);
@@ -629,8 +681,25 @@ export class StreamHandler {
       // detected barge-in above; without VAD we fall back to the legacy
       // "always forward + bargeInThresholdMs" path so users without a VAD
       // adapter aren't regressed.
+      //
+      // Pre-barge-in buffer: instead of dropping the frame on the floor,
+      // we push it into a small ring (last ~600 ms). On a future
+      // BARGE-IN this ring is flushed to STT so the user's first words
+      // — captured BEFORE the VAD's `minSpeechDuration` window let it
+      // emit `speech_start` — actually reach Deepgram. Without this
+      // buffer, short interruptions ("stop") never produced a
+      // transcript and the agent kept talking; long ones produced
+      // truncated transcripts and the agent answered to fragments.
       if (this.isSpeaking) {
-        if (this.deps.agent.vad ?? this.autoVad) return;
+        if (this.deps.agent.vad ?? this.autoVad) {
+          this.inboundAudioRing.push(pcm16k);
+          if (
+            this.inboundAudioRing.length > StreamHandler.INBOUND_AUDIO_RING_FRAMES
+          ) {
+            this.inboundAudioRing.shift();
+          }
+          return;
+        }
         if ((this.deps.agent.bargeInThresholdMs ?? 300) === 0) return;
       }
 
@@ -836,6 +905,24 @@ export class StreamHandler {
       }
     }
 
+    // Acoustic echo cancellation: opt-in. Pipeline is fixed at 16 kHz
+    // PCM after transcoding so no caller-side conversion needed.
+    if (this.deps.agent.echoCancellation) {
+      try {
+        const { NlmsEchoCanceller } = await import('./audio/aec');
+        this.aec = new NlmsEchoCanceller({ sampleRate: 16000 });
+        getLogger().info(
+          'echo cancellation enabled (NLMS, 2048 taps); ' +
+            'filter converges within 0.5–2 s of TTS playback.',
+        );
+      } catch (e) {
+        getLogger().warn(
+          `echo cancellation requested but failed to load: ${String(e)}; ` +
+            `falling back to pass-through.`,
+        );
+      }
+    }
+
     try {
       if (this.stt) await this.stt.connect();
       getLogger().debug(`Pipeline mode (${label}): STT + TTS connected`);
@@ -963,6 +1050,14 @@ export class StreamHandler {
         if (!ttsFirstByteSent.value) {
           ttsFirstByteSent.value = true;
           this.metricsAcc.recordTtsFirstByte();
+        }
+        // Far-end tap for the echo canceller. ``processedAudio`` is the
+        // exact PCM 16 kHz Buffer that the carrier-side encoder is about
+        // to transcode + send — i.e. the cleanest reference of "what the
+        // speaker is about to play". Push BEFORE ``sendAudio`` so a very
+        // fast carrier echo is still seen by the next mic frame.
+        if (this.aec) {
+          this.aec.pushFarEnd(processedAudio);
         }
         const encoded = this.encodePipelineAudio(processedAudio);
         this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);

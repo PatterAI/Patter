@@ -8,6 +8,14 @@ _(no entries yet — next version will land here)_
 
 Repository cleanup + bug-fix + parity wave.
 
+### Added — Acoustic echo cancellation (opt-in)
+
+- New `getpatter.audio.aec.NlmsEchoCanceller` (Py) / `src/audio/aec.ts → NlmsEchoCanceller` (TS) — time-domain NLMS adaptive filter with Geigel double-talk detection. Subtracts the agent's TTS bleed from the inbound mic stream before VAD/STT see it, fixing the speakerphone barge-in fragility where VAD stays in "speaking" state because of the bleed and only fires during natural TTS pauses.
+- New `Agent.echo_cancellation: bool` (Py) / `AgentOptions.echoCancellation?: boolean` (TS). **Default false** — handset / headset deployments don't have bleed, and the 0.5–2 s convergence period would briefly attenuate caller speech if they spoke before any TTS played. Set to `true` for speakerphone / tunnel-loop deployments.
+- Algorithm: 2048-tap NLMS at 16 kHz (≈128 ms history covers typical telephony loop latency), step size 0.1 with 0.9999 leakage, Geigel rho 0.6 for double-talk freeze. ~24 dB ERLE on synthetic narrowband signals; near-end speech preserved within 0 dB during double-talk. NOT a drop-in replacement for production-grade AEC3 — wrap a binding to `webrtc-audio-processing-2` externally if you need that quality.
+- Wired into `PipelineStreamHandler.start()` (Py) / `StreamHandler.initPipeline` (TS). Far-end tap fires on every TTS chunk before the carrier transcode; near-end runs in `on_audio_received` / inbound `media` path before VAD.
+- 8 unit tests per SDK covering: convergence (≥10 dB ERLE), double-talk preservation (≥50% near-speech power), construction validation, pass-through before priming, reset, empty buffers.
+
 ### Improved — SileroVAD usability
 
 - **Auto-VAD in pipeline mode**. When the user does not pass `agent.vad`, the pipeline stream handler now auto-loads `SileroVAD` with telephony-tuned defaults (1.0 s `min_silence_duration`, 16 kHz sample rate). Falls back silently to the legacy STT-endpoint heuristic when `onnxruntime-node` (TS) / `getpatter[silero]` (Py) is not installed. No opt-out flag — auto-VAD is a strict upgrade over the heuristic when available.

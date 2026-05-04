@@ -1124,6 +1124,21 @@ class PipelineStreamHandler(StreamHandler):
         # False if no new turn started in the meantime. Prevents an in-flight grace
         # task from clobbering the speaking flag of the *next* turn (mirrors TS).
         self._speaking_generation: int = 0
+        # Ring buffer of inbound PCM16 16 kHz frames captured while the
+        # agent is speaking and the self-hearing guard is dropping audio.
+        # On barge-in we flush this buffer to STT so Deepgram (or any
+        # other streaming STT) receives the user's first ~600 ms of
+        # speech — which would otherwise be lost while the VAD's
+        # ``min_speech_duration`` window accumulated and fired
+        # ``speech_start``. Each frame is 20 ms × 32 bytes (16 kHz ×
+        # 16-bit mono) ≈ 640 bytes; capped to 30 frames ≈ 600 ms ≈
+        # ~19 KB per concurrent call.
+        self._inbound_audio_ring: list[bytes] = []
+        # Acoustic echo canceller, lazily instantiated in ``start()`` when
+        # ``agent.echo_cancellation`` is set. ``None`` otherwise — the mic
+        # path stays a pure pass-through for handset/headset deployments
+        # that don't need it.
+        self._aec = None
         # Task reference for the in-flight LLM-consumption loop.  Set by
         # ``_process_streaming_response`` and cancelled on barge-in so the
         # provider stops streaming tokens we will never speak — saves API
@@ -1214,6 +1229,23 @@ class PipelineStreamHandler(StreamHandler):
                 logger.warning(
                     "auto-VAD load failed (%s); falling back to STT-endpoint heuristic",
                     exc,
+                )
+
+        # Acoustic echo cancellation: opt-in. Pipeline is fixed at 16 kHz
+        # PCM after transcoding so no caller-side conversion needed.
+        if getattr(self.agent, "echo_cancellation", False):
+            try:
+                from getpatter.audio.aec import NlmsEchoCanceller
+
+                self._aec = NlmsEchoCanceller(sample_rate=16000)
+                logger.info(
+                    "echo cancellation enabled (NLMS, 2048 taps); "
+                    "filter converges within 0.5–2 s of TTS playback."
+                )
+            except ImportError:
+                logger.warning(
+                    "echo_cancellation=True but numpy is not installed; "
+                    "install with `pip install getpatter[silero]` (numpy is part of that extra)."
                 )
 
         if self._stt is not None:
@@ -1400,6 +1432,13 @@ class PipelineStreamHandler(StreamHandler):
                         "tts_chunk",
                         {"bytes": len(processed_audio)},
                     )
+                # Far-end tap for the echo canceller. ``processed_audio`` is
+                # the exact PCM 16 kHz bytes that get transcoded + sent to
+                # the carrier — i.e. the cleanest reference of "what the
+                # speaker is about to play". Push BEFORE ``send_audio`` so a
+                # very fast carrier echo is still seen by the next mic frame.
+                if self._aec is not None:
+                    self._aec.push_far_end(processed_audio)
                 await self.audio_sender.send_audio(processed_audio)
         finally:
             await gen.aclose()
@@ -1932,6 +1971,13 @@ class PipelineStreamHandler(StreamHandler):
         else:
             pcm = audio_bytes
 
+        # ---- AEC ---- subtract estimated TTS bleed before VAD/STT see it.
+        # Pass-through until the canceller has enough far-end history to
+        # fill its filter window (~128 ms), then converges over the next
+        # 0.5–2 s of TTS-only frames.
+        if self._aec is not None:
+            pcm = self._aec.process_near_end(pcm)
+
         # ---- VAD wiring (Fix 8) ----
         # Optional ``agent.vad`` (or auto-loaded SileroVAD when the user
         # didn't pass one) runs *before* STT so we can react to speech_start
@@ -1960,6 +2006,30 @@ class PipelineStreamHandler(StreamHandler):
                                 logger.debug(
                                     "send_clear during VAD barge-in failed: %s", exc
                                 )
+                            # Replay the ring buffer of inbound frames
+                            # captured while the agent was speaking — those
+                            # carry the user's first ~600 ms of speech that
+                            # the self-hearing guard had been dropping on
+                            # the floor. Without this flush, Deepgram only
+                            # sees audio AFTER ``speech_start`` fires (i.e.
+                            # the tail of the user's utterance), which is
+                            # why short interruptions like "stop" produced
+                            # no transcript and the agent kept talking.
+                            if self._stt is not None and self._inbound_audio_ring:
+                                replayed = len(self._inbound_audio_ring)
+                                for buf in self._inbound_audio_ring:
+                                    try:
+                                        await self._stt.send_audio(buf)
+                                    except Exception as exc:
+                                        logger.debug(
+                                            "send_audio replay failed: %s", exc
+                                        )
+                                self._inbound_audio_ring = []
+                                logger.debug(
+                                    "Flushed %d pre-barge-in frame(s) (~%d ms) to STT",
+                                    replayed,
+                                    replayed * 20,
+                                )
                             if self.metrics is not None:
                                 self.metrics.record_tts_stopped()
                                 self.metrics.record_turn_interrupted()
@@ -1977,7 +2047,20 @@ class PipelineStreamHandler(StreamHandler):
             # caller audio to STT — VAD already gave us authoritative
             # barge-in detection above, so any STT audio sent here would
             # just be the agent's own TTS echoing back.
+            #
+            # Pre-barge-in buffer: instead of dropping the frame on the
+            # floor, push it into a small ring (last ~600 ms). On a
+            # future BARGE-IN this ring is flushed to STT so the user's
+            # first words — captured BEFORE the VAD's
+            # ``min_speech_duration`` window let it emit ``speech_start``
+            # — actually reach Deepgram. Without this buffer, short
+            # interruptions ("stop") never produced a transcript and the
+            # agent kept talking; long ones produced truncated
+            # transcripts and the agent answered to fragments.
             if self._is_speaking:
+                self._inbound_audio_ring.append(pcm)
+                if len(self._inbound_audio_ring) > 30:  # ~600ms at 20ms/frame
+                    self._inbound_audio_ring.pop(0)
                 return
 
         # before_send_to_stt hook — gate/transform the audio chunk before it
@@ -2016,6 +2099,9 @@ class PipelineStreamHandler(StreamHandler):
         """
         self._speaking_generation += 1
         self._is_speaking = True
+        # Fresh turn — drop any stale pre-barge-in buffer from a previous
+        # turn so we never replay yesterday's audio to STT.
+        self._inbound_audio_ring = []
 
     async def _end_speaking_with_grace(self) -> None:
         """Flip ``_is_speaking`` to False after a configurable grace period.

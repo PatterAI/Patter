@@ -242,6 +242,18 @@ export interface AgentOptions {
    */
   disablePhonePreamble?: boolean;
   /**
+   * Acoustic echo cancellation. When `true` (pipeline mode only) the SDK
+   * instantiates an `NlmsEchoCanceller` that subtracts the agent's own
+   * TTS bleed from the inbound mic stream before VAD/STT see it.
+   * Strongly recommended for speakerphone / tunnel deployments where the
+   * bleed otherwise keeps VAD permanently in "speaking" state and
+   * barge-in only fires during natural TTS pauses. Off by default —
+   * handset / headset deployments don't have the bleed, and the 0.5–2 s
+   * convergence period would briefly attenuate caller speech if they
+   * spoke before any TTS played.
+   */
+  echoCancellation?: boolean;
+  /**
    * Realtime / ConvAI engine instance. When present, the agent runs in the
    * matching mode (``openai_realtime`` or ``elevenlabs_convai``). When absent,
    * pipeline mode is selected if ``stt`` and ``tts`` are provided.
