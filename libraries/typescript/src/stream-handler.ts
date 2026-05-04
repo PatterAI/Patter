@@ -974,15 +974,38 @@ export class StreamHandler {
       }
     }
 
-    // Acoustic echo cancellation: opt-in. Pipeline is fixed at 16 kHz
-    // PCM after transcoding so no caller-side conversion needed.
+    // Acoustic echo cancellation: opt-in.
+    //
+    // Per the industry consensus (LiveKit, Pipecat, Vapi, Retell, Bland)
+    // and Twilio's own guidance, time-domain NLMS server-side AEC is the
+    // RIGHT tool only when the SDK has near-direct access to the mic and
+    // speaker (browser WebRTC, mobile native). PSTN paths route through
+    // a 250–1500 ms Twilio jitter buffer + carrier loop — far outside
+    // the 32 ms window of a 512-tap NLMS filter at 16 kHz, so the filter
+    // cannot model the echo and silently degenerates into pass-through.
+    // Emit a warning so the operator knows to either rely on the
+    // self-hearing guard alone (handset / earpiece — minimal bleed) or
+    // keep AEC off (default) and tune the VAD ``min_speech_duration`` if
+    // bleed-driven false positives appear during firstMessage.
     if (this.deps.agent.echoCancellation) {
+      const carrier = this.deps.bridge.telephonyProvider;
+      if (carrier === 'twilio' || carrier === 'telnyx') {
+        getLogger().warn(
+          `echoCancellation: true on ${carrier} (PSTN). Server-side NLMS ` +
+            `cannot model PSTN's ~250–1500 ms round-trip echo with a ` +
+            `32 ms filter window — it will silently no-op. Best practice: ` +
+            `keep echoCancellation: false; rely on the carrier + caller ` +
+            `device's built-in echo suppression and Patter's self-hearing ` +
+            `guard. Enable AEC only for browser/native deployments where ` +
+            `the SDK owns the audio path end-to-end.`,
+        );
+      }
       try {
         const { NlmsEchoCanceller } = await import('./audio/aec');
         this.aec = new NlmsEchoCanceller({ sampleRate: 16000 });
         getLogger().info(
           'echo cancellation enabled (NLMS, 512 taps + 0.5 s warmup μ=0.5); ' +
-            'filter converges within ~250 ms of TTS playback.',
+            'filter converges within ~250 ms of TTS playback in low-latency loops.',
         );
       } catch (e) {
         getLogger().warn(
