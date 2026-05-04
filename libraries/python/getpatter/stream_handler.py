@@ -47,6 +47,15 @@ from getpatter.utils.log_sanitize import mask_phone_number, sanitize_log_value
 logger = logging.getLogger("getpatter")
 
 
+# Minimum wall-clock duration (seconds) the agent must have been speaking
+# before VAD or transcript-based barge-in is allowed to fire. Covers the
+# AEC warmup window (~500 ms) plus a safety margin so residual bleed
+# during the convergence period does not self-trigger barge-in. Real
+# users almost never start interrupting within the first second of an
+# agent turn anyway.
+MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN = 1.0
+
+
 # ---------------------------------------------------------------------------
 # Shared tool definitions injected into every agent
 # ---------------------------------------------------------------------------
@@ -1119,6 +1128,12 @@ class PipelineStreamHandler(StreamHandler):
         self._auto_vad = None
         self._stt_task: asyncio.Task | None = None
         self._is_speaking = False
+        # Wall-clock timestamp (``time.time()`` units) of the last
+        # ``_begin_speaking`` call. Cleared by the grace flip. Used by
+        # ``_can_barge_in`` to suppress early self-cancellation while
+        # the AEC filter is still converging (~500 ms warmup + safety
+        # margin).
+        self._speaking_started_at: float | None = None
         # Monotonic counter incremented at every TTS-start. ``_end_speaking_with_grace``
         # captures the value at scheduling time and only flips ``_is_speaking`` to
         # False if no new turn started in the meantime. Prevents an in-flight grace
@@ -1666,6 +1681,15 @@ class PipelineStreamHandler(StreamHandler):
         """
         if not (transcript.text and self._is_speaking):
             return
+        if not self._can_barge_in():
+            # Same rationale as the VAD-path gate in ``on_audio_received``:
+            # during AEC warmup, a transcript can come from residual TTS
+            # bleed leaking through to STT. Don't self-cancel.
+            logger.debug(
+                "Barge-in transcript suppressed (agent speaking < %.1fs — AEC warming up)",
+                MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN,
+            )
+            return
         if self.metrics is not None:
             self.metrics.record_overlap_start()
             self.metrics.record_bargein_detected()
@@ -1678,6 +1702,7 @@ class PipelineStreamHandler(StreamHandler):
             {"patter.call.id": self.call_id},
         ):
             self._is_speaking = False
+            self._speaking_started_at = None
             # Signal the in-flight LLM-consumption loop to stop fetching
             # tokens. The consume loop checks ``_llm_cancel_event`` between
             # iterations and ``aclose()``s the generator on exit, freeing
@@ -2015,7 +2040,17 @@ class PipelineStreamHandler(StreamHandler):
                 vad_event = None
             if vad_event is not None:
                 if vad_event.type == "speech_start":
-                    if self._is_speaking:
+                    if self._is_speaking and not self._can_barge_in():
+                        # AEC is still converging on this turn. Residual
+                        # bleed in the mic stream still looks like user
+                        # speech to VAD; if we honoured this event we
+                        # would self-cancel the agent's first sentence
+                        # before it finished playing.
+                        logger.debug(
+                            "VAD speech_start suppressed (agent speaking < %.1fs — AEC warming up)",
+                            MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN,
+                        )
+                    elif self._is_speaking:
                         # Caller spoke over in-flight TTS — preempt now.
                         if self.metrics is not None:
                             self.metrics.record_bargein_detected()
@@ -2040,6 +2075,7 @@ class PipelineStreamHandler(StreamHandler):
                             # Force-flip immediately and bump the generation so a
                             # pending grace-flip from the prior turn can't fight us.
                             self._is_speaking = False
+                            self._speaking_started_at = None
                             self._speaking_generation += 1
                     if self.metrics is not None:
                         self.metrics.start_turn_if_idle()
@@ -2103,9 +2139,30 @@ class PipelineStreamHandler(StreamHandler):
         """
         self._speaking_generation += 1
         self._is_speaking = True
+        self._speaking_started_at = time.time()
         # Fresh turn — drop any stale pre-barge-in buffer from a previous
         # turn so we never replay yesterday's audio to STT.
         self._inbound_audio_ring = []
+
+    def _can_barge_in(self) -> bool:
+        """Whether barge-in is allowed to fire right now.
+
+        True when the agent has been speaking for at least
+        ``MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN``. Suppresses early
+        self-cancellation from residual AEC bleed while the filter is
+        still converging (~500 ms warmup + safety margin). Real users
+        almost never start interrupting within the first second of an
+        agent turn anyway.
+
+        ``getattr`` is used so test fixtures that flip ``_is_speaking``
+        directly (without going through ``_begin_speaking``) still
+        permit barge-in to fire.
+        """
+        started_at = getattr(self, "_speaking_started_at", None)
+        if started_at is None:
+            return True
+        elapsed = time.time() - started_at
+        return elapsed >= MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN
 
     async def _end_speaking_with_grace(self) -> None:
         """Flip ``_is_speaking`` to False after a configurable grace period.
@@ -2135,6 +2192,7 @@ class PipelineStreamHandler(StreamHandler):
         # ``_begin_speaking()``.
         if grace_ms <= 0:
             self._is_speaking = False
+            self._speaking_started_at = None
             return
 
         gen = self._speaking_generation
@@ -2146,6 +2204,7 @@ class PipelineStreamHandler(StreamHandler):
                 # newer turn would have bumped ``_speaking_generation``.
                 if self._speaking_generation == gen:
                     self._is_speaking = False
+                    self._speaking_started_at = None
             except asyncio.CancelledError:  # pragma: no cover
                 raise
             except Exception as exc:  # pragma: no cover - defensive

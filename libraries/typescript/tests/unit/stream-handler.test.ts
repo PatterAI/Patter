@@ -395,4 +395,64 @@ describe('StreamHandler', () => {
       expect(consumed.length).toBeLessThanOrEqual(4);
     });
   });
+
+  // -------------------------------------------------------------------------
+  // canBargeIn() — gate on minimum speaking duration so residual AEC bleed
+  // during the filter's warmup window does not self-trigger barge-in.
+  // -------------------------------------------------------------------------
+  describe('barge-in gate during AEC warmup', () => {
+    function priv(h: StreamHandler) {
+      return h as unknown as {
+        isSpeaking: boolean;
+        speakingStartedAt: number | null;
+        canBargeIn: () => boolean;
+        handleBargeIn: (t: { text?: string }) => boolean;
+        llmAbort: AbortController | null;
+        cancelSpeaking: () => void;
+      };
+    }
+
+    it('canBargeIn() returns true when no turn is active', () => {
+      const h = new StreamHandler(makeDeps(), makeMockWs(), '+15551111111', '+15552222222');
+      const p = priv(h);
+      p.speakingStartedAt = null;
+      expect(p.canBargeIn()).toBe(true);
+    });
+
+    it('canBargeIn() returns false within the gate window', () => {
+      const h = new StreamHandler(makeDeps(), makeMockWs(), '+15551111111', '+15552222222');
+      const p = priv(h);
+      p.speakingStartedAt = Date.now() - 100; // started 100 ms ago
+      expect(p.canBargeIn()).toBe(false);
+    });
+
+    it('canBargeIn() returns true past the gate window', () => {
+      const h = new StreamHandler(makeDeps(), makeMockWs(), '+15551111111', '+15552222222');
+      const p = priv(h);
+      p.speakingStartedAt = Date.now() - 1500; // 1.5 s ago — past 1 s gate
+      expect(p.canBargeIn()).toBe(true);
+    });
+
+    it('handleBargeIn returns false when transcript arrives during warmup', () => {
+      const h = new StreamHandler(makeDeps(), makeMockWs(), '+15551111111', '+15552222222');
+      const p = priv(h);
+      p.isSpeaking = true;
+      p.speakingStartedAt = Date.now() - 200; // mid-warmup
+      const result = p.handleBargeIn({ text: 'hold on' });
+      expect(result).toBe(false);
+      // The agent must still be flagged as speaking — a suppressed
+      // barge-in should not flip the flag.
+      expect(p.isSpeaking).toBe(true);
+    });
+
+    it('handleBargeIn fires normally past the gate window', () => {
+      const h = new StreamHandler(makeDeps(), makeMockWs(), '+15551111111', '+15552222222');
+      const p = priv(h);
+      p.isSpeaking = true;
+      p.speakingStartedAt = Date.now() - 1500;
+      const result = p.handleBargeIn({ text: 'hold on' });
+      expect(result).toBe(true);
+      expect(p.isSpeaking).toBe(false);
+    });
+  });
 });

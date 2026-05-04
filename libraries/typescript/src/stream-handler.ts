@@ -213,6 +213,26 @@ export class StreamHandler {
    * own ``isSpeaking=true``.
    */
   private speakingGeneration = 0;
+  /**
+   * Wall-clock timestamp (ms since epoch) when the current TTS turn
+   * started — captured by ``beginSpeaking`` and cleared by
+   * ``cancelSpeaking`` / the grace flip. Used to gate barge-in: we
+   * suppress the cancel for the first
+   * ``MIN_AGENT_SPEAKING_MS_BEFORE_BARGE_IN`` of every turn so the AEC
+   * filter has time to converge (otherwise residual TTS bleed in the
+   * mic stream looks like user speech to VAD and triggers an immediate
+   * self-cancellation of the agent's first sentence).
+   */
+  private speakingStartedAt: number | null = null;
+  /**
+   * Minimum wall-clock duration (ms) the agent must have been speaking
+   * before VAD or transcript-based barge-in is allowed to fire. Covers
+   * the AEC warmup window (~500 ms) plus a safety margin so residual
+   * bleed during the convergence period does not self-trigger barge-in.
+   * Real users almost never start interrupting within the first second
+   * of an agent turn anyway.
+   */
+  private static readonly MIN_AGENT_SPEAKING_MS_BEFORE_BARGE_IN = 1000;
   /** Handle for the pending grace-period timer, so it can be cleared on cleanup. */
   private graceTimer: ReturnType<typeof setTimeout> | null = null;
   /**
@@ -227,6 +247,7 @@ export class StreamHandler {
   private beginSpeaking(): void {
     this.speakingGeneration++;
     this.isSpeaking = true;
+    this.speakingStartedAt = Date.now();
     // Fresh turn — drop any stale pre-barge-in buffer from a previous turn
     // so we never replay yesterday's audio to STT.
     this.inboundAudioRing = [];
@@ -242,6 +263,7 @@ export class StreamHandler {
   private cancelSpeaking(): void {
     this.speakingGeneration++; // invalidates pending grace timers
     this.isSpeaking = false;
+    this.speakingStartedAt = null;
     if (this.llmAbort !== null) {
       try {
         this.llmAbort.abort();
@@ -283,11 +305,28 @@ export class StreamHandler {
       this.clearGraceTimer();
       this.graceTimer = setTimeout(() => {
         this.graceTimer = null;
-        if (this.speakingGeneration === gen) this.isSpeaking = false;
+        if (this.speakingGeneration === gen) {
+          this.isSpeaking = false;
+          this.speakingStartedAt = null;
+        }
       }, grace);
     } else {
       this.isSpeaking = false;
+      this.speakingStartedAt = null;
     }
+  }
+
+  /**
+   * Whether barge-in is allowed to fire right now — true when the agent
+   * has been speaking for at least
+   * ``MIN_AGENT_SPEAKING_MS_BEFORE_BARGE_IN``. Suppresses early
+   * self-cancellation from residual AEC bleed while the filter is still
+   * converging (~500 ms warmup + safety margin).
+   */
+  private canBargeIn(): boolean {
+    if (this.speakingStartedAt === null) return true;
+    const elapsed = Date.now() - this.speakingStartedAt;
+    return elapsed >= StreamHandler.MIN_AGENT_SPEAKING_MS_BEFORE_BARGE_IN;
   }
 
   /**
@@ -654,7 +693,15 @@ export class StreamHandler {
             );
           }
           if (evt?.type === 'speech_start') {
-            if (this.isSpeaking) {
+            if (this.isSpeaking && !this.canBargeIn()) {
+              // AEC is still converging on this turn. Residual bleed in
+              // the mic stream still looks like user speech to VAD; if we
+              // honoured this event we would self-cancel the agent's
+              // first sentence before it finished playing.
+              getLogger().debug(
+                '[VAD] speech_start suppressed (agent speaking < 1 s — AEC warming up)',
+              );
+            } else if (this.isSpeaking) {
               getLogger().info('[VAD] speech_start during TTS → BARGE-IN');
               this.metricsAcc.recordOverlapStart();
               this.metricsAcc.recordBargeinDetected();
@@ -1281,6 +1328,15 @@ export class StreamHandler {
    */
   private handleBargeIn(transcript: { text?: string }): boolean {
     if (!transcript.text || !this.isSpeaking) return false;
+    if (!this.canBargeIn()) {
+      // Same rationale as the VAD-path gate in handleAudio: during AEC
+      // warmup, a transcript can come from residual TTS bleed leaking
+      // through to STT. Don't self-cancel.
+      getLogger().debug(
+        'Barge-in transcript suppressed (agent speaking < 1 s — AEC warming up)',
+      );
+      return false;
+    }
     getLogger().debug(
       `Barge-in: caller spoke over agent (${sanitizeLogValue(transcript.text.slice(0, 40))})`,
     );
