@@ -48,12 +48,14 @@ logger = logging.getLogger("getpatter")
 
 
 # Minimum wall-clock duration (seconds) the agent must have been speaking
-# before VAD or transcript-based barge-in is allowed to fire. Covers the
-# AEC warmup window (~500 ms) plus a safety margin so residual bleed
-# during the convergence period does not self-trigger barge-in. Real
-# users almost never start interrupting within the first second of an
-# agent turn anyway.
-MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN = 1.0
+# before barge-in is allowed to fire. AEC variant (1.0 s) covers the
+# filter convergence window. NO_AEC variant (0.25 s) is anti-flicker
+# only — used on PSTN where AEC is a no-op so there is no warmup to
+# protect, and a long gate just suppresses real-user barge-in.
+MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN_AEC = 1.0
+MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN_NO_AEC = 0.25
+# Backwards-compat alias used by tests; matches AEC variant.
+MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN = MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN_AEC
 
 
 # ---------------------------------------------------------------------------
@@ -1149,6 +1151,13 @@ class PipelineStreamHandler(StreamHandler):
         # 16-bit mono) ≈ 640 bytes; capped to 30 frames ≈ 600 ms ≈
         # ~19 KB per concurrent call.
         self._inbound_audio_ring: list[bytes] = []
+        # Wall-clock timestamp of the most recent barge-in cancel, used by
+        # ``_begin_speaking`` to enforce a short drain window so the remote
+        # PSTN player finishes flushing the cancelled turn's tail before
+        # the next TTS chunk lands on top of it. Without this, the first
+        # sentence of a post-barge-in turn audibly overlaps with the tail
+        # of the cancelled turn (~50-200 ms of doubled audio).
+        self._last_cancel_at: float | None = None
         # Acoustic echo canceller, lazily instantiated in ``start()`` when
         # ``agent.echo_cancellation`` is set. ``None`` otherwise — the mic
         # path stays a pure pass-through for handset/headset deployments
@@ -1309,7 +1318,7 @@ class PipelineStreamHandler(StreamHandler):
             # the ring buffer for pre-barge-in audio is never
             # populated. Mirrors the per-turn behaviour in
             # `_process_streaming_response` / `_process_regular_response`.
-            self._begin_speaking()
+            await self._begin_speaking()
             first_chunk_sent = False
             # Drop any stale PCM16 carry byte from a prior synth (none at call
             # start, but defensive for parity with TS ``ttsByteCarry = null``).
@@ -1518,7 +1527,7 @@ class PipelineStreamHandler(StreamHandler):
             language=getattr(self.agent, "language", "en"),
         )
         full_response_parts: list[str] = []
-        self._begin_speaking()
+        await self._begin_speaking()
         first_tts_chunk = [True]
         llm_first_token_sent = [True]  # Fix 5: track LLM TTFT
 
@@ -1677,7 +1686,7 @@ class PipelineStreamHandler(StreamHandler):
         if not sentences:
             sentences = [response_text] if response_text else []
 
-        self._begin_speaking()
+        await self._begin_speaking()
         first_tts_chunk = [True]
         interrupted = False
         try:
@@ -1708,11 +1717,13 @@ class PipelineStreamHandler(StreamHandler):
             return
         if not self._can_barge_in():
             # Same rationale as the VAD-path gate in ``on_audio_received``:
-            # during AEC warmup, a transcript can come from residual TTS
-            # bleed leaking through to STT. Don't self-cancel.
-            logger.debug(
-                "Barge-in transcript suppressed (agent speaking < %.1fs — AEC warming up)",
-                MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN,
+            # gate is 1.0 s with AEC (filter warmup) or 0.25 s without
+            # (anti-flicker only). INFO so unexpected suppressions are
+            # visible without enabling debug logs.
+            aec_state = "on" if getattr(self, "_aec", None) is not None else "off"
+            logger.info(
+                "Barge-in transcript suppressed (agent speaking < gate, aec=%s)",
+                aec_state,
             )
             return
         if self.metrics is not None:
@@ -1728,6 +1739,13 @@ class PipelineStreamHandler(StreamHandler):
         ):
             self._is_speaking = False
             self._speaking_started_at = None
+            # Record cancel timestamp so ``_begin_speaking`` can enforce
+            # a short drain window before the next TTS chunk lands on
+            # top of the cancelled turn's tail (avoids audible "doubled
+            # audio" on the first sentence post-barge-in). Mirrors the
+            # VAD-path cancel branch — both barge-in paths must set the
+            # timestamp for the drain to be effective.
+            self._last_cancel_at = time.time()
             # Signal the in-flight LLM-consumption loop to stop fetching
             # tokens. The consume loop checks ``_llm_cancel_event`` between
             # iterations and ``aclose()``s the generator on exit, freeing
@@ -2066,14 +2084,17 @@ class PipelineStreamHandler(StreamHandler):
             if vad_event is not None:
                 if vad_event.type == "speech_start":
                     if self._is_speaking and not self._can_barge_in():
-                        # AEC is still converging on this turn. Residual
-                        # bleed in the mic stream still looks like user
-                        # speech to VAD; if we honoured this event we
-                        # would self-cancel the agent's first sentence
-                        # before it finished playing.
-                        logger.debug(
-                            "VAD speech_start suppressed (agent speaking < %.1fs — AEC warming up)",
-                            MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN,
+                        # Within the per-turn warmup gate. With AEC on
+                        # this is the ~1 s filter convergence window;
+                        # without AEC it is just a 0.25 s anti-flicker
+                        # margin. INFO so unexpected suppressions are
+                        # visible without enabling debug logs.
+                        aec_state = (
+                            "on" if getattr(self, "_aec", None) is not None else "off"
+                        )
+                        logger.info(
+                            "VAD speech_start suppressed (agent speaking < gate, aec=%s)",
+                            aec_state,
                         )
                     elif self._is_speaking:
                         # Caller spoke over in-flight TTS — preempt now.
@@ -2102,11 +2123,34 @@ class PipelineStreamHandler(StreamHandler):
                             self._is_speaking = False
                             self._speaking_started_at = None
                             self._speaking_generation += 1
+                            # Record cancel timestamp so ``_begin_speaking``
+                            # can enforce a short drain window before the
+                            # next TTS chunk lands on top of the cancelled
+                            # turn's tail (avoids audible "doubled audio"
+                            # on the first sentence post-barge-in).
+                            self._last_cancel_at = time.time()
                     if self.metrics is not None:
                         self.metrics.start_turn_if_idle()
                 elif vad_event.type == "speech_end":
                     if self.metrics is not None:
                         self.metrics.record_vad_stop()
+                    # The SDK's VAD has detected end-of-speech earlier
+                    # and more reliably than the provider's own
+                    # endpointing on PSTN (Deepgram natural-pause
+                    # endpointing can run 1-6 s before it emits a
+                    # final). Ask the provider to finalise the
+                    # in-flight utterance NOW so the next turn can
+                    # dispatch immediately. ``getattr`` so STT
+                    # adapters that don't implement it (Whisper-class
+                    # one-shot transcribers) simply skip.
+                    finalize = getattr(self._stt, "finalize", None)
+                    if callable(finalize):
+                        try:
+                            ret = finalize()
+                            if asyncio.iscoroutine(ret):
+                                await ret
+                        except Exception as exc:  # pragma: no cover - defensive
+                            logger.debug("STT finalize threw: %s", exc)
 
             # Self-hearing guard: while the agent is speaking, don't pass
             # caller audio to STT — VAD already gave us authoritative
@@ -2124,7 +2168,15 @@ class PipelineStreamHandler(StreamHandler):
             # transcripts and the agent answered to fragments.
             if self._is_speaking:
                 self._inbound_audio_ring.append(pcm)
-                if len(self._inbound_audio_ring) > 30:  # ~600ms at 20ms/frame
+                # Cap to ~250 ms (matching SileroVAD ``min_speech_duration``)
+                # so the post-barge-in replay only recovers the VAD-missed
+                # leading edge of the user's speech, not ~350 ms of
+                # pre-speech silence/agent-bleed. On PSTN (where AEC is a
+                # no-op) Deepgram trained on English transcribes that
+                # bleed as English garbage and commits it to the LLM as
+                # a phantom user transcript. See BUGS.md 2026-05-05
+                # post-barge-in bleed-transcription entry.
+                if len(self._inbound_audio_ring) > 13:  # ~260 ms at 20 ms/frame
                     self._inbound_audio_ring.pop(0)
                 return
 
@@ -2155,13 +2207,29 @@ class PipelineStreamHandler(StreamHandler):
     # TTS speaking state helpers (Fix 9)
     # ---------------------------------------------------------------
 
-    def _begin_speaking(self) -> None:
+    # Minimum drain window (seconds) between a barge-in cancel and the
+    # next ``_begin_speaking``. 0.15 s covers a typical PSTN jitter
+    # buffer drain + Twilio Media Stream clear propagation. Lower values
+    # risk audio overlap on the first chunk; higher values increase the
+    # perceived "agent ack" latency after a barge-in. Mirrors TS
+    # ``StreamHandler.POST_CANCEL_DRAIN_MS``.
+    _POST_CANCEL_DRAIN_S: float = 0.15
+
+    async def _begin_speaking(self) -> None:
         """Mark TTS playback as in-progress and bump the generation counter.
+
+        Awaits the post-cancel drain window before flipping state so the
+        remote PSTN player has time to flush the cancelled turn's tail.
 
         The generation counter is consulted by ``_end_speaking_with_grace``
         so a delayed flip-to-idle from a previous turn cannot cancel the
         speaking flag of the *current* turn.
         """
+        if self._last_cancel_at is not None:
+            elapsed = time.time() - self._last_cancel_at
+            remaining = self._POST_CANCEL_DRAIN_S - elapsed
+            if remaining > 0:
+                await asyncio.sleep(remaining)
         self._speaking_generation += 1
         self._is_speaking = True
         self._speaking_started_at = time.time()
@@ -2172,12 +2240,10 @@ class PipelineStreamHandler(StreamHandler):
     def _can_barge_in(self) -> bool:
         """Whether barge-in is allowed to fire right now.
 
-        True when the agent has been speaking for at least
-        ``MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN``. Suppresses early
-        self-cancellation from residual AEC bleed while the filter is
-        still converging (~500 ms warmup + safety margin). Real users
-        almost never start interrupting within the first second of an
-        agent turn anyway.
+        Gate length depends on whether AEC is active: 1 s with AEC
+        (covers filter warmup), 0.25 s without (anti-flicker only —
+        keeps PSTN barge-in responsive, since on PSTN AEC is a no-op
+        and there is no warmup to protect).
 
         ``getattr`` is used so test fixtures that flip ``_is_speaking``
         directly (without going through ``_begin_speaking``) still
@@ -2187,7 +2253,12 @@ class PipelineStreamHandler(StreamHandler):
         if started_at is None:
             return True
         elapsed = time.time() - started_at
-        return elapsed >= MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN
+        gate = (
+            MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN_AEC
+            if getattr(self, "_aec", None) is not None
+            else MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN_NO_AEC
+        )
+        return elapsed >= gate
 
     async def _end_speaking_with_grace(self) -> None:
         """Flip ``_is_speaking`` to False after a configurable grace period.

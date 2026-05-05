@@ -19,7 +19,7 @@ import { RemoteMessageHandler } from './remote-message';
 import { StreamHandler, sanitizeLogValue } from './stream-handler';
 import { getLogger } from './logger';
 import type { TelephonyBridge } from './stream-handler';
-import type { AgentOptions, PipelineMessageHandler } from './types';
+import type { AgentOptions, PipelineMessageHandler, MachineDetectionResult } from './types';
 import { CallLogger, resolveLogRoot } from './services/call-log';
 
 /** Resolved configuration consumed by `EmbeddedServer` (carrier credentials, webhook URL, etc.). */
@@ -90,6 +90,32 @@ function xmlEscape(s: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&apos;');
+}
+
+/**
+ * Map a Twilio ``AnsweredBy`` value to the carrier-agnostic
+ * {@link MachineDetectionResult.classification}. Anything unrecognised
+ * collapses to ``unknown`` rather than throwing — Twilio occasionally
+ * adds new AMD outcomes (e.g. fax variants) and we don't want a webhook
+ * to 500 because of an unknown enum value.
+ */
+function classifyTwilioAmd(answeredBy: string): MachineDetectionResult['classification'] {
+  if (answeredBy === 'human') return 'human';
+  if (answeredBy.startsWith('machine_')) return 'machine';
+  if (answeredBy === 'fax') return 'fax';
+  return 'unknown';
+}
+
+/**
+ * Map a Telnyx ``call.machine.detection.ended.result`` value to the
+ * carrier-agnostic classification. Telnyx uses ``human`` / ``machine``
+ * (and historically ``machine_detected``) / ``not_sure`` / ``fax``.
+ */
+function classifyTelnyxAmd(result: string): MachineDetectionResult['classification'] {
+  if (result === 'human') return 'human';
+  if (result === 'machine' || result === 'machine_detected') return 'machine';
+  if (result === 'fax') return 'fax';
+  return 'unknown';
 }
 
 /**
@@ -642,6 +668,14 @@ export class EmbeddedServer {
   private readonly activeConnections = new Set<WSWebSocket>();
   private readonly activeCallIds = new Map<WSWebSocket, string>();
 
+  /**
+   * Per-call AMD result callback set by ``Patter.call()`` for the most
+   * recent outbound call. Public so ``client.ts`` can populate it after
+   * server start. Cleared after firing once per call to avoid leaking
+   * across calls.
+   */
+  public onMachineDetection?: (result: MachineDetectionResult) => void | Promise<void>;
+
   constructor(
     private readonly config: LocalConfig,
     private readonly agent: AgentOptions,
@@ -818,6 +852,25 @@ export class EmbeddedServer {
       const callSid = body['CallSid'] ?? '';
       getLogger().info(`AMD result for ${sanitizeLogValue(callSid)}: ${sanitizeLogValue(answeredBy)}`);
 
+      // Fire the per-call onMachineDetection callback (if set by Patter.call())
+      // BEFORE the voicemail-drop logic so callers see the result regardless
+      // of whether a voicemail message was configured. Errors in user code
+      // must not break webhook delivery — Twilio retries on non-2xx.
+      const cb = this.onMachineDetection;
+      if (cb && callSid) {
+        try {
+          await cb({
+            call_id: callSid,
+            carrier: 'twilio',
+            classification: classifyTwilioAmd(answeredBy),
+            raw: answeredBy,
+            detected_at: Date.now() / 1000,
+          });
+        } catch (err) {
+          getLogger().warn(`onMachineDetection callback threw: ${sanitizeLogValue(String(err))}`);
+        }
+      }
+
       if (
         (answeredBy === 'machine_end_beep' || answeredBy === 'machine_end_silence') &&
         this.voicemailMessage &&
@@ -962,6 +1015,24 @@ export class EmbeddedServer {
         getLogger().info(
           `Telnyx AMD result for ${sanitizeLogValue(amdCallId)}: ${sanitizeLogValue(amdResult)}`,
         );
+        // Fire the per-call onMachineDetection callback. Same rationale as
+        // the Twilio path above — caller sees the result even when no
+        // voicemailMessage is configured, and errors in user code don't
+        // break webhook delivery.
+        const cbTx = this.onMachineDetection;
+        if (cbTx && amdCallId) {
+          try {
+            await cbTx({
+              call_id: amdCallId,
+              carrier: 'telnyx',
+              classification: classifyTelnyxAmd(amdResult),
+              raw: amdResult,
+              detected_at: Date.now() / 1000,
+            });
+          } catch (err) {
+            getLogger().warn(`onMachineDetection callback threw: ${sanitizeLogValue(String(err))}`);
+          }
+        }
         if (amdCallId && (amdResult === 'machine' || amdResult === 'machine_detected')) {
           await this.handleTelnyxAmdVoicemail(amdCallId);
         }

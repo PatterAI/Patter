@@ -346,12 +346,53 @@ export interface ServeOptions {
   dashboardPersist?: boolean;
 }
 
+/**
+ * Normalised AMD (answering-machine detection) result emitted to
+ * ``LocalCallOptions.onMachineDetection`` once the carrier reports back.
+ * The ``raw`` field preserves the provider value verbatim so callers can
+ * apply provider-specific logic; ``classification`` is the SDK's
+ * carrier-agnostic projection that test/acceptance code should check.
+ */
+export interface MachineDetectionResult {
+  readonly call_id: string;
+  readonly carrier: 'twilio' | 'telnyx';
+  /** Carrier-agnostic projection. Use this in app code unless you really need the raw provider value. */
+  readonly classification: 'human' | 'machine' | 'fax' | 'unknown';
+  /**
+   * Raw provider value:
+   * - Twilio: ``human``, ``machine_start``, ``machine_end_beep``,
+   *   ``machine_end_silence``, ``machine_end_other``, ``fax``, ``unknown``.
+   * - Telnyx: ``human``, ``machine``, ``not_sure``.
+   */
+  readonly raw: string;
+  /** Unix epoch seconds at which the result was received from the carrier. */
+  readonly detected_at: number;
+}
+
 /** Options for `Patter.call({...})` to place an outbound call. */
 export interface LocalCallOptions {
   to: string;
   agent: AgentOptions;
+  /**
+   * Enable answering-machine detection. **Defaults to ``true``** — the SDK
+   * asks Twilio (``MachineDetection=DetectMessageEnd`` + Async AMD) or
+   * Telnyx (``answering_machine_detection=greeting_end``) to classify
+   * whoever picks up. Async AMD on Twilio adds ~0 answer-latency on human
+   * pickups (the call connects immediately and the result arrives via
+   * webhook 2-5 s later), so ON-by-default is safe. Pass ``false`` to
+   * disable when you want to skip per-call AMD billing or you already
+   * know the destination is a human.
+   */
   machineDetection?: boolean;
-  /** If set, spoken as a voicemail message when AMD detects a machine. Requires machineDetection=true. */
+  /**
+   * Called once when the carrier finishes the AMD check. Fires for both
+   * ``human`` and ``machine`` outcomes. Combine with ``voicemailMessage``
+   * to get both the legacy voicemail-drop AND a result callback (the SDK
+   * fires the callback after the drop is queued). Acceptance tests use
+   * this to mark a run INVALID when ``classification !== 'human'``.
+   */
+  onMachineDetection?: (result: MachineDetectionResult) => void | Promise<void>;
+  /** If set, spoken as a voicemail message when AMD detects a machine. Implicitly enables ``machineDetection``. */
   voicemailMessage?: string;
   /** Dynamic variables merged into agent.variables before call. Override agent-level variables. */
   variables?: Record<string, string>;

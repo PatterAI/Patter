@@ -15,6 +15,17 @@ export interface AssemblyAISTTOptions {
   sampleRate?: number;
   baseUrl?: string;
   languageDetection?: boolean;
+  /**
+   * BCP-47 language hint (e.g. ``"it"``, ``"en"``). AssemblyAI does NOT
+   * expose a per-call language override — the language is determined by
+   * the chosen ``model`` (English-only models reject non-English audio,
+   * multilingual models auto-detect). This field is accepted for
+   * cross-provider parity with ``DeepgramSTT``/``WhisperSTT``/
+   * ``OpenAITranscribeSTT``/``CartesiaSTT`` but is currently a no-op:
+   * pick a multilingual ``model`` (e.g. ``universal-streaming-pro``)
+   * and the provider will detect Italian automatically.
+   */
+  language?: string;
   endOfTurnConfidenceThreshold?: number;
   minTurnSilence?: number;
   maxTurnSilence?: number;
@@ -47,8 +58,12 @@ export class STT extends _AssemblyAISTT {
           "set ASSEMBLYAI_API_KEY in the environment.",
       );
     }
-    const { apiKey: _ignored, ...rest } = opts;
+    // ``language`` is a parity-only option — not forwarded to the
+    // provider (see field docs above). Strip it before passing the rest
+    // through to the underlying constructor.
+    const { apiKey: _ignored, language: _lang, ...rest } = opts;
     void _ignored;
+    void _lang;
     super(key, rest);
   }
 }

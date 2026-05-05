@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any, Callable, Awaitable
 logger = logging.getLogger("getpatter")
 
 from getpatter.exceptions import PatterConnectionError
-from getpatter.models import Agent, Guardrail
+from getpatter.models import Agent, Guardrail, MachineDetectionResult
 from getpatter.local_config import LocalConfig
 from getpatter.providers.base import STTProvider, TTSProvider
 from getpatter.services.llm_loop import LLMProvider
@@ -312,8 +312,10 @@ class Patter:
         agent: Agent | None = None,
         first_message: str = "",
         from_number: str = "",
-        machine_detection: bool = False,
-        on_machine: Callable[[dict], Awaitable[None]] | None = None,
+        machine_detection: bool = True,
+        on_machine_detection: (
+            Callable[["MachineDetectionResult"], Awaitable[None] | None] | None
+        ) = None,
         voicemail_message: str = "",
         ring_timeout: int | None = 25,
     ) -> None:
@@ -324,8 +326,18 @@ class Patter:
             agent: ``Agent`` instance to use (required).
             first_message: What the AI says when the callee answers.
             from_number: Number to call from. If empty, uses configured number.
+            machine_detection: **Defaults to ``True``** — the SDK asks Twilio
+                (``MachineDetection=DetectMessageEnd`` + Async AMD) or Telnyx
+                (``answering_machine_detection=greeting_end``) to classify the
+                callee. Async AMD on Twilio adds ~0 answer-latency on human
+                pickups, so ON-by-default is safe. Pass ``False`` to skip
+                per-call AMD billing when the destination is known.
+            on_machine_detection: Called once when the carrier reports the AMD
+                outcome. Fires for both ``human`` and ``machine`` results so
+                acceptance tests can mark a run INVALID when classification
+                is not ``human``.
             voicemail_message: If set and AMD detects a machine, speak this
-                message and hang up (requires machine_detection=True).
+                message and hang up. Implicitly enables ``machine_detection``.
             ring_timeout: Ring timeout in seconds before treating the call as
                 no-answer. Defaults to 25 s — the production-recommended value
                 that limits phantom calls. Pass ``ring_timeout=60`` for legacy
@@ -341,6 +353,16 @@ class Patter:
         # Store voicemail message on embedded server so AMD webhook can use it
         if voicemail_message and self._server is not None:
             self._server.voicemail_message = voicemail_message
+        # Wire the per-call AMD callback into the embedded server BEFORE
+        # dispatching the call so a fast Twilio Async AMD result (typically
+        # 2-5 s after answer) cannot arrive before the callback is in place.
+        # Cleared on the next ``call()`` so a previous-call result cannot
+        # leak into a new caller's callback. AMD is **on by default**;
+        # pass ``machine_detection=False`` to explicitly skip it. A
+        # non-empty ``voicemail_message`` also implicitly requires AMD.
+        wants_amd = bool(machine_detection) or bool(voicemail_message)
+        if self._server is not None:
+            self._server.on_machine_detection = on_machine_detection  # type: ignore[attr-defined]
         config = self._local_config
         if config.telephony_provider == "twilio":
             from getpatter.providers.twilio_adapter import TwilioAdapter  # type: ignore[import]
@@ -351,7 +373,14 @@ class Patter:
             )
             stream_url = f"wss://{config.webhook_url}/ws/stream/outbound"
             extra_params: dict = {}
-            if machine_detection:
+            if wants_amd:
+                # DetectMessageEnd waits for the greeting to finish before
+                # reporting ``machine_end_*`` so a follow-up voicemail-drop
+                # lands after the beep (~100% accuracy in US, slightly lower
+                # internationally). AsyncAmd avoids the 3-5 s answer-latency
+                # penalty on human pickups — the call connects immediately
+                # and the result arrives via the ``/webhooks/twilio/amd``
+                # callback. Twilio best-practice default.
                 extra_params["MachineDetection"] = "DetectMessageEnd"
                 extra_params["AsyncAmd"] = "true"
                 extra_params["AsyncAmdStatusCallback"] = (
@@ -422,6 +451,7 @@ class Patter:
                 to,
                 stream_url,
                 ring_timeout=ring_timeout,
+                machine_detection=wants_amd,
             )
             logger.info("Outbound call initiated: %s", call_id)
             if (

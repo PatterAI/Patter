@@ -49,6 +49,18 @@ export interface STTAdapter {
   sendAudio(pcm: Buffer): void | Promise<void>;
   onTranscript(cb: STTTranscriptCallback): void;
   close(): void | Promise<void>;
+  /**
+   * Optional: ask the provider to immediately finalise the in-flight
+   * utterance (rather than waiting for its own endpoint timer). Called by
+   * ``StreamHandler`` whenever the SDK's VAD signals ``speech_end``, and
+   * after a barge-in cancel — both moments where waiting for the
+   * provider's endpoint heuristic stalls the next turn.
+   *
+   * Implementations that do not support utterance-level finalisation
+   * (e.g. one-shot transcribers like Whisper) should omit this method
+   * entirely; the stream handler does an optional-chained call.
+   */
+  finalize?(): void | Promise<void>;
 }
 
 /** Shape shared by every TTS adapter in the SDK. */

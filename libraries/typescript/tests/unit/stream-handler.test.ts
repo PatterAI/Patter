@@ -397,14 +397,16 @@ describe('StreamHandler', () => {
   });
 
   // -------------------------------------------------------------------------
-  // canBargeIn() — gate on minimum speaking duration so residual AEC bleed
-  // during the filter's warmup window does not self-trigger barge-in.
+  // canBargeIn() — adaptive gate on minimum speaking duration. With AEC on
+  // it covers the filter's ~1 s warmup window; with AEC off it is just a
+  // 250 ms anti-flicker margin so PSTN barge-in stays responsive.
   // -------------------------------------------------------------------------
-  describe('barge-in gate during AEC warmup', () => {
+  describe('barge-in gate (adaptive: AEC on vs off)', () => {
     function priv(h: StreamHandler) {
       return h as unknown as {
         isSpeaking: boolean;
         speakingStartedAt: number | null;
+        aec: unknown;
         canBargeIn: () => boolean;
         handleBargeIn: (t: { text?: string }) => boolean;
         llmAbort: AbortController | null;
@@ -419,40 +421,84 @@ describe('StreamHandler', () => {
       expect(p.canBargeIn()).toBe(true);
     });
 
-    it('canBargeIn() returns false within the gate window', () => {
-      const h = new StreamHandler(makeDeps(), makeMockWs(), '+15551111111', '+15552222222');
-      const p = priv(h);
-      p.speakingStartedAt = Date.now() - 100; // started 100 ms ago
-      expect(p.canBargeIn()).toBe(false);
+    // -----------------------------------------------------------------------
+    // AEC OFF (default — PSTN deployments). Gate is 250 ms.
+    // -----------------------------------------------------------------------
+    describe('AEC off (PSTN default)', () => {
+      it('canBargeIn() false within 250 ms anti-flicker window', () => {
+        const h = new StreamHandler(makeDeps(), makeMockWs(), '+15551111111', '+15552222222');
+        const p = priv(h);
+        p.aec = null;
+        p.speakingStartedAt = Date.now() - 100;
+        expect(p.canBargeIn()).toBe(false);
+      });
+
+      it('canBargeIn() true past 250 ms (well below the 1 s AEC gate)', () => {
+        const h = new StreamHandler(makeDeps(), makeMockWs(), '+15551111111', '+15552222222');
+        const p = priv(h);
+        p.aec = null;
+        p.speakingStartedAt = Date.now() - 400; // 400 ms — past 250 ms, under 1 s
+        expect(p.canBargeIn()).toBe(true);
+      });
+
+      it('handleBargeIn fires after 400 ms with AEC off (the bug fix)', () => {
+        // Pre-fix this would have been suppressed by the hardcoded 1 s gate.
+        const h = new StreamHandler(makeDeps(), makeMockWs(), '+15551111111', '+15552222222');
+        const p = priv(h);
+        p.aec = null;
+        p.isSpeaking = true;
+        p.speakingStartedAt = Date.now() - 400;
+        const result = p.handleBargeIn({ text: 'stop' });
+        expect(result).toBe(true);
+        expect(p.isSpeaking).toBe(false);
+      });
     });
 
-    it('canBargeIn() returns true past the gate window', () => {
-      const h = new StreamHandler(makeDeps(), makeMockWs(), '+15551111111', '+15552222222');
-      const p = priv(h);
-      p.speakingStartedAt = Date.now() - 1500; // 1.5 s ago — past 1 s gate
-      expect(p.canBargeIn()).toBe(true);
-    });
+    // -----------------------------------------------------------------------
+    // AEC ON (browser / native). Gate is 1000 ms — covers filter warmup.
+    // -----------------------------------------------------------------------
+    describe('AEC on (browser/native)', () => {
+      // Sentinel object — canBargeIn only checks ``aec !== null``,
+      // so any non-null value selects the AEC gate.
+      const aecSentinel = { tag: 'aec' } as unknown;
 
-    it('handleBargeIn returns false when transcript arrives during warmup', () => {
-      const h = new StreamHandler(makeDeps(), makeMockWs(), '+15551111111', '+15552222222');
-      const p = priv(h);
-      p.isSpeaking = true;
-      p.speakingStartedAt = Date.now() - 200; // mid-warmup
-      const result = p.handleBargeIn({ text: 'hold on' });
-      expect(result).toBe(false);
-      // The agent must still be flagged as speaking — a suppressed
-      // barge-in should not flip the flag.
-      expect(p.isSpeaking).toBe(true);
-    });
+      it('canBargeIn() false within the 1 s warmup window', () => {
+        const h = new StreamHandler(makeDeps(), makeMockWs(), '+15551111111', '+15552222222');
+        const p = priv(h);
+        p.aec = aecSentinel;
+        p.speakingStartedAt = Date.now() - 400; // would PASS with AEC off
+        expect(p.canBargeIn()).toBe(false);
+      });
 
-    it('handleBargeIn fires normally past the gate window', () => {
-      const h = new StreamHandler(makeDeps(), makeMockWs(), '+15551111111', '+15552222222');
-      const p = priv(h);
-      p.isSpeaking = true;
-      p.speakingStartedAt = Date.now() - 1500;
-      const result = p.handleBargeIn({ text: 'hold on' });
-      expect(result).toBe(true);
-      expect(p.isSpeaking).toBe(false);
+      it('canBargeIn() true past 1 s', () => {
+        const h = new StreamHandler(makeDeps(), makeMockWs(), '+15551111111', '+15552222222');
+        const p = priv(h);
+        p.aec = aecSentinel;
+        p.speakingStartedAt = Date.now() - 1200;
+        expect(p.canBargeIn()).toBe(true);
+      });
+
+      it('handleBargeIn suppressed at 400 ms with AEC on', () => {
+        const h = new StreamHandler(makeDeps(), makeMockWs(), '+15551111111', '+15552222222');
+        const p = priv(h);
+        p.aec = aecSentinel;
+        p.isSpeaking = true;
+        p.speakingStartedAt = Date.now() - 400;
+        const result = p.handleBargeIn({ text: 'stop' });
+        expect(result).toBe(false);
+        expect(p.isSpeaking).toBe(true);
+      });
+
+      it('handleBargeIn fires past 1 s with AEC on', () => {
+        const h = new StreamHandler(makeDeps(), makeMockWs(), '+15551111111', '+15552222222');
+        const p = priv(h);
+        p.aec = aecSentinel;
+        p.isSpeaking = true;
+        p.speakingStartedAt = Date.now() - 1500;
+        const result = p.handleBargeIn({ text: 'stop' });
+        expect(result).toBe(true);
+        expect(p.isSpeaking).toBe(false);
+      });
     });
   });
 });

@@ -326,6 +326,21 @@ export class DeepgramSTT {
     } catch {
       return;
     }
+    // [DIAG-2026-05-05] Log every Deepgram message type so we can see
+    // whether finalize triggers a Results frame, whether UtteranceEnd
+    // arrives, and whether the socket is still being fed.
+    const dataType = String((data as unknown as Record<string, unknown>).type ?? 'unknown');
+    if (dataType === 'Results') {
+      const transcript = (data.channel?.alternatives?.[0]?.transcript ?? '').trim();
+      const isFinal = Boolean(data.is_final);
+      const speechFinal = Boolean(data.speech_final);
+      const fromFinalize = Boolean((data as unknown as Record<string, unknown>).from_finalize);
+      getLogger().info(
+        `[DIAG] DG Results text=${JSON.stringify(transcript.slice(0, 60))} isFinal=${isFinal} speechFinal=${speechFinal} fromFinalize=${fromFinalize}`,
+      );
+    } else if (dataType !== 'Metadata') {
+      getLogger().info(`[DIAG] DG event type=${dataType}`);
+    }
 
     if (data.type === 'Metadata' && data.request_id) {
       this.requestId = data.request_id;
@@ -434,13 +449,29 @@ export class DeepgramSTT {
 
   /** Send a binary audio chunk to Deepgram for transcription. */
   sendAudio(audio: Buffer): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      this.audioDroppedCount++;
+      if (this.audioDroppedCount === 1 || this.audioDroppedCount % 50 === 0) {
+        getLogger().info(
+          `[DIAG] DeepgramSTT.sendAudio dropped (ws state=${this.ws?.readyState ?? 'null'}) — total dropped=${this.audioDroppedCount}`,
+        );
+      }
+      return;
+    }
     // Deepgram treats a zero-length binary frame as CloseStream — drop
     // empty buffers so a silent VAD gate cannot accidentally tear down
     // the session.
     if (audio.length === 0) return;
+    this.audioSentCount++;
+    if (this.audioSentCount === 1 || this.audioSentCount % 100 === 0) {
+      getLogger().info(
+        `[DIAG] DeepgramSTT.sendAudio: total chunks sent=${this.audioSentCount} (last=${audio.length} bytes)`,
+      );
+    }
     this.ws.send(audio);
   }
+  private audioSentCount = 0;
+  private audioDroppedCount = 0;
 
   /** Register a transcript listener. */
   onTranscript(callback: TranscriptCallback): void {
@@ -460,6 +491,33 @@ export class DeepgramSTT {
   /** Remove a previously registered error listener. */
   offError(callback: ErrorCallback): void {
     this.errorCallbacks.delete(callback);
+  }
+
+  /**
+   * Force Deepgram to immediately emit a final ``Results`` frame for the
+   * in-flight utterance, rather than waiting for its own endpoint
+   * heuristic (utterance_end_ms ~1 s + natural-pause endpointing).
+   * Called by the SDK on VAD ``speech_end`` and after barge-in cancel —
+   * both moments where the SDK already knows the user has stopped
+   * speaking and waiting for Deepgram's own endpointing only adds
+   * dead air.
+   *
+   * Idempotent: safe to call when the socket is closed/closing.
+   */
+  finalize(): void {
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      getLogger().info(
+        `[DIAG] DeepgramSTT.finalize SKIPPED (ws state=${ws?.readyState ?? 'null'})`,
+      );
+      return;
+    }
+    try {
+      ws.send(JSON.stringify({ type: 'Finalize' }));
+      getLogger().info('[DIAG] DeepgramSTT.finalize sent {type:Finalize}');
+    } catch (err) {
+      getLogger().info(`[DIAG] DeepgramSTT.finalize send failed: ${String(err)}`);
+    }
   }
 
   /** Send Finalize, briefly drain trailing transcripts, then close the socket. */

@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 from fastapi import FastAPI, Request, Response, WebSocket
 
 from getpatter.local_config import LocalConfig
-from getpatter.models import Agent
+from getpatter.models import Agent, MachineDetectionResult
 from getpatter.services.call_log import (
     CallLogger,
     alog_call_end,
@@ -98,6 +98,39 @@ def _client_ip_for_ws(websocket: WebSocket) -> str:
         return "unknown"
     raw = client.host or "unknown"
     return re.sub(r"^::ffff:", "", raw)
+
+
+def _classify_twilio_amd(answered_by: str) -> str:
+    """Map a Twilio ``AnsweredBy`` value to the carrier-agnostic
+    classification (``human`` / ``machine`` / ``fax`` / ``unknown``).
+
+    Anything unrecognised collapses to ``unknown`` rather than raising —
+    Twilio occasionally adds new AMD outcomes and we don't want a webhook
+    to 500 because of an unknown enum value. Mirrors the TS helper in
+    ``libraries/typescript/src/server.ts``.
+    """
+    if answered_by == "human":
+        return "human"
+    if answered_by.startswith("machine_"):
+        return "machine"
+    if answered_by == "fax":
+        return "fax"
+    return "unknown"
+
+
+def _classify_telnyx_amd(result: str) -> str:
+    """Map a Telnyx ``call.machine.detection.ended.result`` value to the
+    carrier-agnostic classification. Telnyx uses ``human`` / ``machine``
+    (and historically ``machine_detected``) / ``not_sure`` / ``fax``.
+    Mirrors the TS helper in ``libraries/typescript/src/server.ts``.
+    """
+    if result == "human":
+        return "human"
+    if result in ("machine", "machine_detected"):
+        return "machine"
+    if result == "fax":
+        return "fax"
+    return "unknown"
 
 
 def _validate_telnyx_signature(
@@ -199,6 +232,10 @@ class EmbeddedServer:
         self.on_transcript = None
         self.on_message = None
         self.on_metrics = None
+        # Per-call AMD result callback set by ``Patter.call()`` for the most
+        # recent outbound call. Cleared after firing once per call so a result
+        # for a previous call cannot leak into a new caller's callback.
+        self.on_machine_detection = None
         self._telnyx_sig_warning_logged = False
         self._metrics_store = None
         # Opt-in per-call filesystem logging (controlled by PATTER_LOG_DIR).
@@ -519,6 +556,25 @@ class EmbeddedServer:
             call_sid = form.get("CallSid", "")
             logger.info("AMD result for %s: %s", call_sid, answered_by)
 
+            # Fire the per-call on_machine_detection callback (if any) BEFORE
+            # the voicemail-drop logic so callers see the result regardless
+            # of whether a voicemail message was configured. Errors in user
+            # code must not break webhook delivery — Twilio retries on non-2xx.
+            if self.on_machine_detection is not None and call_sid:
+                try:
+                    result = MachineDetectionResult(
+                        call_id=call_sid,
+                        carrier="twilio",
+                        classification=_classify_twilio_amd(answered_by),
+                        raw=answered_by,
+                        detected_at=time.time(),
+                    )
+                    cb_ret = self.on_machine_detection(result)
+                    if asyncio.iscoroutine(cb_ret):
+                        await cb_ret
+                except Exception as exc:
+                    logger.warning("on_machine_detection callback threw: %s", exc)
+
             if (
                 answered_by in ("machine_end_beep", "machine_end_silence")
                 and self.voicemail_message
@@ -740,6 +796,26 @@ class EmbeddedServer:
                         sanitize_log_value(call_control_id),
                         sanitize_log_value(amd_result),
                     )
+                    # Fire the per-call on_machine_detection callback. Same
+                    # rationale as the Twilio path above — caller sees the
+                    # result even when no voicemail_message is configured,
+                    # and errors in user code don't break webhook delivery.
+                    if self.on_machine_detection is not None and call_control_id:
+                        try:
+                            result = MachineDetectionResult(
+                                call_id=call_control_id,
+                                carrier="telnyx",
+                                classification=_classify_telnyx_amd(amd_result),
+                                raw=amd_result,
+                                detected_at=time.time(),
+                            )
+                            cb_ret = self.on_machine_detection(result)
+                            if asyncio.iscoroutine(cb_ret):
+                                await cb_ret
+                        except Exception as exc:
+                            logger.warning(
+                                "on_machine_detection callback threw: %s", exc
+                            )
                     if self.voicemail_message:
                         from getpatter.telephony.telnyx import handle_amd_result
 

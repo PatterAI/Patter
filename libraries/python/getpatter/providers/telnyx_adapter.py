@@ -94,6 +94,7 @@ class TelnyxAdapter(TelephonyProvider):
         *,
         ring_timeout: int | None = None,
         client_state: str | None = None,
+        machine_detection: bool = False,
     ) -> str:
         """Place an outbound Call Control dial.
 
@@ -122,6 +123,14 @@ class TelnyxAdapter(TelephonyProvider):
         }
         if ring_timeout is not None:
             payload["timeout_secs"] = int(ring_timeout)
+        if machine_detection:
+            # ``greeting_end`` is the production-recommended mode: Telnyx
+            # returns the human/machine classification on
+            # ``call.machine.detection.ended`` AND emits a follow-up
+            # ``call.machine.greeting.ended`` once the answering-machine
+            # greeting reaches the beep, so a downstream voicemail-drop
+            # can speak immediately after the prompt.
+            payload["answering_machine_detection"] = "greeting_end"
         if client_state:
             # Telnyx expects client_state as base64-encoded opaque string.
             import base64 as _b64

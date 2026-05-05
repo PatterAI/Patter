@@ -189,6 +189,23 @@ class IncomingMessage:
 
 
 @dataclass(frozen=True)
+class MachineDetectionResult:
+    """Normalised AMD (answering-machine detection) result emitted to the
+    ``on_machine_detection`` callback once the carrier reports back.
+
+    The ``raw`` field preserves the provider value verbatim; ``classification``
+    is the carrier-agnostic projection that test/acceptance code should check.
+    Mirrors ``MachineDetectionResult`` in ``libraries/typescript/src/types.ts``.
+    """
+
+    call_id: str
+    carrier: str  # "twilio" | "telnyx"
+    classification: str  # "human" | "machine" | "fax" | "unknown"
+    raw: str
+    detected_at: float  # unix epoch seconds
+
+
+@dataclass(frozen=True)
 class STTConfig:
     """Pipeline-mode STT provider selection (provider key + credentials + options)."""
 

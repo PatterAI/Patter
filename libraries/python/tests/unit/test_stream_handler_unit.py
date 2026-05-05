@@ -446,15 +446,15 @@ class TestBargeInCancelsLlmStream:
         )
 
     async def test_barge_in_suppressed_during_aec_warmup(self) -> None:
-        """A transcript that arrives within
-        ``MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN`` of the agent starting to
-        speak must NOT cancel the agent — it almost certainly comes from
-        residual TTS bleed leaking into STT while the AEC filter is still
-        converging.
+        """With AEC active, a transcript that arrives within
+        ``MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN_AEC`` of the agent
+        starting to speak must NOT cancel the agent — it almost
+        certainly comes from residual TTS bleed leaking into STT while
+        the filter is still converging.
         """
         from getpatter.stream_handler import (
             PipelineStreamHandler,
-            MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN,
+            MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN_AEC,
         )
         from getpatter.providers.base import Transcript
         import time
@@ -466,10 +466,12 @@ class TestBargeInCancelsLlmStream:
         handler.audio_sender = MagicMock()
         handler.audio_sender.send_clear = AsyncMock()
         handler._llm_cancel_event = asyncio.Event()
+        # AEC active — selects the 1.0 s gate.
+        handler._aec = object()
         # Emulate ``_begin_speaking`` having just run — agent has been
         # speaking for less than the gate.
         handler._speaking_started_at = time.time() - (
-            MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN / 2
+            MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN_AEC / 2
         )
 
         await handler._handle_barge_in(
@@ -484,11 +486,11 @@ class TestBargeInCancelsLlmStream:
         )
 
     async def test_barge_in_fires_after_warmup_window(self) -> None:
-        """After the agent has been speaking longer than the gate, the
-        barge-in path runs as before."""
+        """With AEC active, after the agent has been speaking longer
+        than the AEC gate the barge-in path runs as before."""
         from getpatter.stream_handler import (
             PipelineStreamHandler,
-            MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN,
+            MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN_AEC,
         )
         from getpatter.providers.base import Transcript
         import time
@@ -500,8 +502,9 @@ class TestBargeInCancelsLlmStream:
         handler.audio_sender = MagicMock()
         handler.audio_sender.send_clear = AsyncMock()
         handler._llm_cancel_event = asyncio.Event()
+        handler._aec = object()
         handler._speaking_started_at = time.time() - (
-            MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN + 0.1
+            MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN_AEC + 0.1
         )
 
         await handler._handle_barge_in(
@@ -511,6 +514,64 @@ class TestBargeInCancelsLlmStream:
         assert handler._llm_cancel_event.is_set(), (
             "barge-in must fire normally after the AEC warmup gate elapses"
         )
+
+    async def test_barge_in_fires_at_400ms_when_aec_off(self) -> None:
+        """The bug fix: on PSTN deployments AEC is OFF and the gate
+        collapses to 0.25 s anti-flicker. A user saying "stop" 400 ms
+        into the agent's turn must cancel the agent — pre-fix this was
+        silently suppressed by the hardcoded 1.0 s gate.
+        """
+        from getpatter.stream_handler import PipelineStreamHandler
+        from getpatter.providers.base import Transcript
+        import time
+
+        handler = object.__new__(PipelineStreamHandler)
+        handler._is_speaking = True
+        handler.metrics = None
+        handler.call_id = "test-call"
+        handler.audio_sender = MagicMock()
+        handler.audio_sender.send_clear = AsyncMock()
+        handler._llm_cancel_event = asyncio.Event()
+        # AEC OFF (PSTN default) — gate is 0.25 s.
+        handler._aec = None
+        handler._speaking_started_at = time.time() - 0.4
+
+        await handler._handle_barge_in(
+            Transcript(text="stop", is_final=True, speech_final=True)
+        )
+
+        assert handler._llm_cancel_event.is_set(), (
+            "barge-in must fire on PSTN at 400 ms — past the 0.25 s anti-flicker gate"
+        )
+
+    async def test_barge_in_suppressed_within_anti_flicker_when_aec_off(
+        self,
+    ) -> None:
+        """Anti-flicker side: even with AEC off, sub-100 ms blips
+        (cough, click, line noise) are still suppressed — the 0.25 s
+        gate stays in place."""
+        from getpatter.stream_handler import PipelineStreamHandler
+        from getpatter.providers.base import Transcript
+        import time
+
+        handler = object.__new__(PipelineStreamHandler)
+        handler._is_speaking = True
+        handler.metrics = None
+        handler.call_id = "test-call"
+        handler.audio_sender = MagicMock()
+        handler.audio_sender.send_clear = AsyncMock()
+        handler._llm_cancel_event = asyncio.Event()
+        handler._aec = None
+        handler._speaking_started_at = time.time() - 0.1
+
+        await handler._handle_barge_in(
+            Transcript(text="stop", is_final=True, speech_final=True)
+        )
+
+        assert not handler._llm_cancel_event.is_set(), (
+            "barge-in must be suppressed within the 0.25 s anti-flicker window"
+        )
+        assert handler._is_speaking is True
 
     async def test_consume_loop_breaks_when_cancel_event_set_mid_stream(
         self,

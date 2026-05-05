@@ -184,11 +184,20 @@ export class StreamHandler {
    * streaming STT) receives the user's first ~500 ms of speech — which
    * would otherwise be lost while the VAD's `minSpeechDuration` window
    * accumulated and fired `speech_start`. Each frame is 20 ms × 32 bytes
-   * (16 kHz × 16-bit mono) ≈ 640 bytes; capped to 30 frames ≈ 600 ms ≈
-   * ~19 KB per concurrent call.
+   * (16 kHz × 16-bit mono) ≈ 640 bytes.
+   *
+   * Capped to ``INBOUND_AUDIO_RING_FRAMES`` to recover only the
+   * VAD-missed leading edge of the user's speech (default 250 ms,
+   * matching SileroVAD ``minSpeechDuration``). Earlier values up to
+   * 600 ms were including ~350 ms of pre-speech silence/agent-bleed in
+   * the replay; on PSTN (where AEC is a no-op) Deepgram trained on
+   * English happily transcribes that bleed as English garbage
+   * (``"The same as Edgar,"``, ``"Permadees."``) and commits it to
+   * the LLM as a phantom user transcript. See BUGS.md 2026-05-05
+   * post-barge-in bleed-transcription entry.
    */
   private inboundAudioRing: Buffer[] = [];
-  private static readonly INBOUND_AUDIO_RING_FRAMES = 30;
+  private static readonly INBOUND_AUDIO_RING_FRAMES = 13;
   /** Set to true after a VAD error to suppress log spam for the rest of the call. */
   private vadDisabled = false;
   /**
@@ -218,21 +227,28 @@ export class StreamHandler {
    * started — captured by ``beginSpeaking`` and cleared by
    * ``cancelSpeaking`` / the grace flip. Used to gate barge-in: we
    * suppress the cancel for the first
-   * ``MIN_AGENT_SPEAKING_MS_BEFORE_BARGE_IN`` of every turn so the AEC
-   * filter has time to converge (otherwise residual TTS bleed in the
-   * mic stream looks like user speech to VAD and triggers an immediate
-   * self-cancellation of the agent's first sentence).
+   * ``MIN_AGENT_SPEAKING_MS_BEFORE_BARGE_IN_AEC`` of every turn (when AEC
+   * is on) so the AEC filter has time to converge — otherwise residual
+   * TTS bleed in the mic stream looks like user speech to VAD and
+   * triggers an immediate self-cancellation of the agent's first
+   * sentence.
    */
   private speakingStartedAt: number | null = null;
   /**
    * Minimum wall-clock duration (ms) the agent must have been speaking
-   * before VAD or transcript-based barge-in is allowed to fire. Covers
-   * the AEC warmup window (~500 ms) plus a safety margin so residual
-   * bleed during the convergence period does not self-trigger barge-in.
-   * Real users almost never start interrupting within the first second
-   * of an agent turn anyway.
+   * before barge-in is allowed to fire when AEC is active. Covers the
+   * AEC warmup window (~500 ms) plus a safety margin so residual bleed
+   * during the convergence period does not self-trigger barge-in.
    */
-  private static readonly MIN_AGENT_SPEAKING_MS_BEFORE_BARGE_IN = 1000;
+  private static readonly MIN_AGENT_SPEAKING_MS_BEFORE_BARGE_IN_AEC = 1000;
+  /**
+   * Same as the AEC variant but for deployments where AEC is OFF
+   * (default on PSTN — Twilio/Telnyx). Without an adaptive filter to
+   * converge, the only justification for a gate is anti-flicker on
+   * micro-events (cough, click). A short 250 ms window keeps real-user
+   * barge-in responsive while still filtering tiny noise spikes.
+   */
+  private static readonly MIN_AGENT_SPEAKING_MS_BEFORE_BARGE_IN_NO_AEC = 250;
   /** Handle for the pending grace-period timer, so it can be cleared on cleanup. */
   private graceTimer: ReturnType<typeof setTimeout> | null = null;
   /**
@@ -243,8 +259,39 @@ export class StreamHandler {
    */
   private llmAbort: AbortController | null = null;
 
-  /** Mark the start of a TTS span. Use instead of setting isSpeaking directly. */
-  private beginSpeaking(): void {
+  /**
+   * Wall-clock timestamp of the most recent ``cancelSpeaking`` call, or
+   * ``null`` if no cancel has fired since the call started. Used by
+   * ``beginSpeaking`` to enforce a short post-cancel drain window so the
+   * remote PSTN player finishes flushing the previous turn's in-flight
+   * audio before the next TTS chunk lands on top of it. Without this,
+   * the first sentence of a post-barge-in turn audibly overlaps with
+   * the tail of the cancelled turn (~50-200 ms of doubled audio).
+   */
+  private lastCancelAt: number | null = null;
+  /**
+   * Minimum drain window (ms) between a ``cancelSpeaking`` and the next
+   * ``beginSpeaking``. 150 ms covers a typical PSTN jitter buffer drain
+   * + Twilio Media Stream clear propagation. Lower values risk audio
+   * overlap on the first chunk; higher values increase the perceived
+   * "agent ack" latency after a barge-in. 150 ms is the smallest value
+   * that consistently eliminated the overlap during 0.6.0 acceptance.
+   */
+  private static readonly POST_CANCEL_DRAIN_MS = 150;
+
+  /**
+   * Mark the start of a TTS span. Use instead of setting isSpeaking
+   * directly. Awaits the post-cancel drain window before flipping state
+   * so the remote player has time to flush the cancelled turn's tail.
+   */
+  private async beginSpeaking(): Promise<void> {
+    if (this.lastCancelAt !== null) {
+      const elapsed = Date.now() - this.lastCancelAt;
+      const remaining = StreamHandler.POST_CANCEL_DRAIN_MS - elapsed;
+      if (remaining > 0) {
+        await new Promise<void>((r) => setTimeout(r, remaining));
+      }
+    }
     this.speakingGeneration++;
     this.isSpeaking = true;
     this.speakingStartedAt = Date.now();
@@ -264,6 +311,7 @@ export class StreamHandler {
     this.speakingGeneration++; // invalidates pending grace timers
     this.isSpeaking = false;
     this.speakingStartedAt = null;
+    this.lastCancelAt = Date.now();
     if (this.llmAbort !== null) {
       try {
         this.llmAbort.abort();
@@ -317,16 +365,17 @@ export class StreamHandler {
   }
 
   /**
-   * Whether barge-in is allowed to fire right now — true when the agent
-   * has been speaking for at least
-   * ``MIN_AGENT_SPEAKING_MS_BEFORE_BARGE_IN``. Suppresses early
-   * self-cancellation from residual AEC bleed while the filter is still
-   * converging (~500 ms warmup + safety margin).
+   * Whether barge-in is allowed to fire right now. Gate length depends
+   * on whether AEC is active: 1 s with AEC (covers filter warmup),
+   * 250 ms without (anti-flicker only — keeps PSTN barge-in responsive).
    */
   private canBargeIn(): boolean {
     if (this.speakingStartedAt === null) return true;
     const elapsed = Date.now() - this.speakingStartedAt;
-    return elapsed >= StreamHandler.MIN_AGENT_SPEAKING_MS_BEFORE_BARGE_IN;
+    const gate = this.aec
+      ? StreamHandler.MIN_AGENT_SPEAKING_MS_BEFORE_BARGE_IN_AEC
+      : StreamHandler.MIN_AGENT_SPEAKING_MS_BEFORE_BARGE_IN_NO_AEC;
+    return elapsed >= gate;
   }
 
   /**
@@ -349,8 +398,10 @@ export class StreamHandler {
       }
     }
     this.inboundAudioRing = [];
-    getLogger().debug(
-      `Flushed ${replayed} pre-turn-end frame(s) (~${replayed * 20} ms) to STT`,
+    // [DIAG-2026-05-05] INFO so we can see in stdout whether the ring flush
+    // is feeding STT bleed-only audio that produces phantom transcripts.
+    getLogger().info(
+      `[DIAG] Flushed ${replayed} pre-barge-in frame(s) (~${replayed * 20} ms) to STT`,
     );
   }
   private llmLoop: LLMLoop | null = null;
@@ -694,12 +745,12 @@ export class StreamHandler {
           }
           if (evt?.type === 'speech_start') {
             if (this.isSpeaking && !this.canBargeIn()) {
-              // AEC is still converging on this turn. Residual bleed in
-              // the mic stream still looks like user speech to VAD; if we
-              // honoured this event we would self-cancel the agent's
-              // first sentence before it finished playing.
-              getLogger().debug(
-                '[VAD] speech_start suppressed (agent speaking < 1 s — AEC warming up)',
+              // Within the per-turn warmup gate. With AEC on this is the
+              // ~1 s filter convergence window; without AEC it is just a
+              // 250 ms anti-flicker margin. INFO so unexpected
+              // suppressions are visible without enabling debug logs.
+              getLogger().info(
+                `[VAD] speech_start suppressed (agent speaking < gate, aec=${this.aec ? 'on' : 'off'})`,
               );
             } else if (this.isSpeaking) {
               getLogger().info('[VAD] speech_start during TTS → BARGE-IN');
@@ -736,6 +787,23 @@ export class StreamHandler {
             this.metricsAcc.startTurnIfIdle();
           } else if (evt?.type === 'speech_end') {
             this.metricsAcc.recordVadStop();
+            // The SDK's VAD has detected end-of-speech earlier and more
+            // reliably than the provider's own endpointing on PSTN
+            // (Deepgram's natural-pause endpointing can run 1-6 s before
+            // it emits a final). Ask the provider to finalise the
+            // in-flight utterance NOW so the next turn can dispatch
+            // immediately. Optional chained — Whisper-class adapters
+            // that don't support per-utterance finalisation simply skip.
+            try {
+              const ret = this.stt?.finalize?.();
+              if (ret instanceof Promise) {
+                ret.catch((err) =>
+                  getLogger().debug(`STT finalize threw: ${String(err)}`),
+                );
+              }
+            } catch (err) {
+              getLogger().debug(`STT finalize threw: ${String(err)}`);
+            }
           }
         } catch (err) {
           // Disable VAD for the rest of the call to avoid log spam on repeated failures.
@@ -1032,7 +1100,7 @@ export class StreamHandler {
       // and produces garbage transcripts, and the ring buffer for
       // pre-barge-in audio is never populated. Mirrors the per-turn
       // behaviour in `runPipelineLlm` / `runRegularLlm`.
-      this.beginSpeaking();
+      await this.beginSpeaking();
       let firstChunkSent = false;
       this.resetTtsCarry();
       try {
@@ -1198,6 +1266,11 @@ export class StreamHandler {
   }
 
   private async processTranscript(transcript: STTTranscript): Promise<void> {
+    // [DIAG-2026-05-05] Temporary INFO logging to diagnose post-barge-in
+    // empty/phantom transcripts. Remove once root cause is understood.
+    getLogger().info(
+      `[DIAG] processTranscript text=${JSON.stringify((transcript.text ?? '').slice(0, 60))} isFinal=${transcript.isFinal} speechFinal=${transcript.speechFinal} isSpeaking=${this.isSpeaking}`,
+    );
     // Function-scope barge-in flag — set either by the upfront barge-in
     // check, or by the TTS loops downstream when ``isSpeaking`` flips mid-
     // synthesis. Prevents recordTurnComplete double-counting a half-spoken
@@ -1220,6 +1293,10 @@ export class StreamHandler {
     if (!this.commitTranscript(transcript.text)) return;
 
     const label = this.deps.bridge.label;
+    // [DIAG-2026-05-05] Temporary INFO. Remove once root cause known.
+    getLogger().info(
+      `[DIAG] processTranscript COMMITTED → LLM (${label} pipeline): ${sanitizeLogValue(transcript.text.slice(0, 80))}`,
+    );
     getLogger().debug(`User (${label} pipeline): ${sanitizeLogValue(transcript.text)}`);
 
     // Safety net: startTurnIfIdle() was already called above on first partial
@@ -1352,11 +1429,10 @@ export class StreamHandler {
   private handleBargeIn(transcript: { text?: string }): boolean {
     if (!transcript.text || !this.isSpeaking) return false;
     if (!this.canBargeIn()) {
-      // Same rationale as the VAD-path gate in handleAudio: during AEC
-      // warmup, a transcript can come from residual TTS bleed leaking
-      // through to STT. Don't self-cancel.
-      getLogger().debug(
-        'Barge-in transcript suppressed (agent speaking < 1 s — AEC warming up)',
+      // Same rationale as the VAD-path gate in handleAudio: gate is
+      // 1 s with AEC (filter warmup) or 250 ms without (anti-flicker).
+      getLogger().info(
+        `Barge-in transcript suppressed (agent speaking < gate, aec=${this.aec ? 'on' : 'off'})`,
       );
       return false;
     }
@@ -1438,7 +1514,7 @@ export class StreamHandler {
     });
     const allParts: string[] = [];
     const ttsFirstByteSent = { value: false };
-    this.beginSpeaking();
+    await this.beginSpeaking();
     // Fresh AbortController per turn so a stale abort from a previous
     // barge-in cannot terminate this stream.  ``cancelSpeaking`` aborts
     // it; the consumption loop checks ``signal.aborted`` between tokens
@@ -1554,7 +1630,7 @@ export class StreamHandler {
     const chunker = new SentenceChunker();
     const sentences = [...chunker.push(text), ...chunker.flush()];
     const ttsFirstByteSent = { value: false };
-    this.beginSpeaking();
+    await this.beginSpeaking();
     let interrupted = false;
 
     try {
@@ -1583,7 +1659,7 @@ export class StreamHandler {
     const onMessage = this.deps.onMessage as string;
     const parts: string[] = [];
     this.metricsAcc.recordLlmComplete();
-    this.beginSpeaking();
+    await this.beginSpeaking();
     let wsTtsStarted = false;
     try {
       for await (const chunk of this.deps.remoteHandler.callWebSocket(onMessage, msgData)) {

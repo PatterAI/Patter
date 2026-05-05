@@ -203,6 +203,28 @@ class DeepgramSTT(STTProvider):
             return
         await self._ws.send(audio_chunk)
 
+    async def finalize(self) -> None:
+        """Force Deepgram to immediately emit a final ``Results`` frame for
+        the in-flight utterance, rather than waiting for its own endpoint
+        heuristic (utterance_end_ms ~1 s + natural-pause endpointing).
+        Called by the SDK on VAD ``speech_end`` and after barge-in
+        cancel — both moments where the SDK already knows the user has
+        stopped speaking and waiting for Deepgram's own endpointing only
+        adds dead air.
+
+        Idempotent: safe to call when the socket is closed/closing.
+        """
+        ws = self._ws
+        if ws is None:
+            return
+        try:
+            await ws.send(json.dumps({"type": "Finalize"}))
+        except Exception:
+            # Socket changed state between the readyState check and send —
+            # safe to ignore; the next audio chunk will trigger another
+            # utterance and another Finalize opportunity.
+            pass
+
     def _parse_message(self, raw_message: str) -> Transcript | None:
         data = json.loads(raw_message)
         msg_type = data.get("type", "")

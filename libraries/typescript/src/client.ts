@@ -482,6 +482,20 @@ export class Patter {
     const effectiveRingTimeout: number | null =
       options.ringTimeout === undefined ? 25 : options.ringTimeout;
 
+    // Wire the per-call onMachineDetection callback into the embedded
+    // server BEFORE dispatching the call so a fast AMD result (Twilio
+    // async AMD typically lands within 2-5 s of answer) can never arrive
+    // before the callback is in place. Cleared on the next call() so a
+    // result for a previous call cannot leak into a new caller's callback.
+    // AMD is **on by default**; pass ``machineDetection: false`` to
+    // explicitly skip it (e.g. to save per-call AMD billing when the
+    // destination is known to be a human). A non-empty voicemailMessage
+    // also implicitly requires AMD regardless of the flag.
+    const wantsAmd = options.machineDetection !== false || Boolean(options.voicemailMessage);
+    if (this.embeddedServer) {
+      this.embeddedServer.onMachineDetection = options.onMachineDetection;
+    }
+
     if (carrier.kind === 'telnyx') {
       // Telnyx outbound call via Call Control API.
       // Note: ``stream_url``/``stream_track`` are NOT accepted on
@@ -496,6 +510,15 @@ export class Patter {
         from: phoneNumber,
         to: options.to,
       };
+      if (wantsAmd) {
+        // ``greeting_end`` is the production-recommended mode: Telnyx
+        // returns the human/machine classification on
+        // ``call.machine.detection.ended`` AND emits a follow-up
+        // ``call.machine.greeting.ended`` once the answering-machine
+        // greeting reaches the beep, so a downstream voicemail-drop
+        // can speak immediately after the prompt.
+        telnyxPayload.answering_machine_detection = 'greeting_end';
+      }
       if (effectiveRingTimeout !== null && effectiveRingTimeout !== undefined) {
         telnyxPayload.timeout_secs = Math.max(1, Math.floor(effectiveRingTimeout));
       }
@@ -557,7 +580,13 @@ export class Patter {
     for (const evt of ['initiated', 'ringing', 'answered', 'completed']) {
       params.append('StatusCallbackEvent', evt);
     }
-    if (options.machineDetection) {
+    if (wantsAmd) {
+      // DetectMessageEnd waits for the greeting to finish before reporting
+      // ``machine_end_*`` so a follow-up voicemail-drop lands after the
+      // beep (~100% accuracy in US, slightly lower internationally).
+      // AsyncAmd avoids the 3-5 s answer-latency penalty on human pickups
+      // — the call connects immediately and AMD result arrives via the
+      // ``/webhooks/twilio/amd`` callback. Twilio best-practice default.
       params.append('MachineDetection', 'DetectMessageEnd');
       params.append('AsyncAmd', 'true');
       params.append('AsyncAmdStatusCallback', `https://${webhookUrl}/webhooks/twilio/amd`);
