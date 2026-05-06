@@ -17,6 +17,11 @@ export default defineConfig({
   entry: ["src/index.ts"],
   format: ["cjs", "esm"],
   dts: true,
+  // Shim ``__dirname`` / ``__filename`` in the ESM bundle so the dashboard
+  // module can locate the bundled ``ui.html`` asset at runtime via
+  // ``readFileSync(__dirname + '/dashboard/ui.html')`` regardless of
+  // module format.
+  shims: true,
   external: [
     // Optional tunnel adapters — loaded via ``await import(...)`` in
     // src/tunnel.ts. Must stay as runtime imports so the consumer's

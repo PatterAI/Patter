@@ -55,10 +55,11 @@
   "files": [
     "dist",
     "src/resources/audio/NOTICE",
-    "src/resources/audio/*.ogg"
+    "src/resources/audio/*.ogg",
+    "src/dashboard/ui.html"
   ],
   "scripts": {
-    "build": "tsup src/index.ts --format cjs,esm --dts && tsup src/cli.ts --format cjs --no-dts && node -e \"const fs=require('fs');fs.cpSync('src/resources','dist/resources',{recursive:true,filter:p=>!p.endsWith('.ts')})\"",
+    "build": "tsup src/index.ts --format cjs,esm --dts && tsup src/cli.ts --format cjs --no-dts && node -e \"const fs=require('fs');fs.cpSync('src/resources','dist/resources',{recursive:true,filter:p=>!p.endsWith('.ts')});fs.mkdirSync('dist/dashboard',{recursive:true});fs.copyFileSync('src/dashboard/ui.html','dist/dashboard/ui.html')\"",
     "prepublishOnly": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest",

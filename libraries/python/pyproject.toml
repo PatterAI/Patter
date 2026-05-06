@@ -161,6 +161,7 @@ include = ["getpatter*"]
 [tool.setuptools.package-data]
 "getpatter.resources" = ["*.onnx"]
 "getpatter.resources.audio" = ["*.ogg", "NOTICE"]
+"getpatter.dashboard" = ["ui.html"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

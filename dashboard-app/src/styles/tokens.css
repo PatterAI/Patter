@@ -1,0 +1,296 @@
+/* =========================================================================
+   Patter Design System — tokens
+   Single typeface (Instrument Sans), near-monochrome palette,
+   one peach accent, hard borders, dot-grid texture.
+   ========================================================================= */
+
+:root {
+  /* --- color: ink + surfaces --- */
+  --ink:           #000000;
+  --ink-2:         #1a1a1a;
+  --ink-muted:     #aaaaaa;     /* secondary text, captions */
+  --ink-faint:     #cbcbcb;     /* disabled text, dividers */
+  --line:          #eeeeee;     /* hairline borders */
+  --line-2:        #e3e3e6;     /* slightly cooler border */
+
+  --bg:            #ffffff;
+  --bg-cream:      #f6f6f4;     /* logo backplate, hero panel */
+  --bg-warm:       #fff8ef;     /* peachy callout surface */
+  --bg-cool:       #ebf0f5;     /* cool surface (illustrative tile) */
+  --bg-fog:        #f4f7fb;     /* faint blue-grey */
+
+  /* --- color: dot-grid + texture --- */
+  --dot:           #dad8de;     /* the dot-grid color, ~9500 occurrences in figma */
+  --dot-soft:      #e8e6ec;
+
+  /* --- color: accent (peach) --- */
+  --peach:         #df9367;     /* the one brand color */
+  --peach-light:   #efc5ac;
+  --peach-cream:   #fff8ef;
+  --peach-deep:    #c97a4c;
+
+  /* --- color: illustrative blues (Patter Stack only) --- */
+  --blue-1:        #278eff;
+  --blue-2:        #93c5fd;
+  --blue-3:        #5a96f0;
+  --blue-cool:     #3b82f6;
+
+  /* --- decorative halo glows (logo composition) --- */
+  --halo-yellow:   rgba(237, 241, 188, 0.5);
+  --halo-blue:     rgba(90, 150, 240, 0.7);
+
+  /* --- semantic --- */
+  --fg-primary:    var(--ink);
+  --fg-secondary:  #4a4a4a;
+  --fg-tertiary:   var(--ink-muted);
+  --fg-on-accent:  var(--ink);
+
+  --surface:           var(--bg);
+  --surface-secondary: var(--bg-cream);
+  --surface-accent:    var(--peach);
+  --surface-warm:      var(--bg-warm);
+
+  --border:        var(--ink);            /* hard black border is the brand */
+  --border-soft:   var(--line);
+  --border-hair:   var(--line-2);
+
+  --code-bg:       #fafaf8;
+  --code-fg:       #1a1a1a;
+  --code-border:   var(--line);
+
+  /* --- type families --- */
+  --font-sans:     "Instrument Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono:     "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --font-display:  var(--font-sans);
+
+  /* --- type scale (px-based, generous) --- */
+  --fs-12:  12px;
+  --fs-13:  13px;
+  --fs-14:  14px;
+  --fs-15:  15px;
+  --fs-16:  16px;
+  --fs-18:  18px;
+  --fs-20:  20px;
+  --fs-24:  24px;
+  --fs-28:  28px;
+  --fs-32:  32px;
+  --fs-40:  40px;
+  --fs-48:  48px;
+  --fs-56:  56px;
+  --fs-72:  72px;
+  --fs-96:  96px;
+  --fs-128: 128px;
+
+  /* --- weights --- */
+  --fw-regular: 400;
+  --fw-medium:  500;
+  --fw-semi:    600;
+  --fw-bold:    700;
+
+  /* --- line-heights --- */
+  --lh-tight:   1.0;
+  --lh-snug:    1.15;
+  --lh-normal:  1.4;
+  --lh-relaxed: 1.55;
+
+  /* --- spacing scale (4px base) --- */
+  --s-0:   0;
+  --s-1:   4px;
+  --s-2:   8px;
+  --s-3:   12px;
+  --s-4:   16px;
+  --s-5:   24px;
+  --s-6:   32px;
+  --s-7:   48px;
+  --s-8:   64px;
+  --s-9:   96px;
+  --s-10: 128px;
+
+  /* --- radii --- */
+  --r-0:    0;
+  --r-1:    4px;
+  --r-2:    8px;
+  --r-3:    12px;
+  --r-4:    16px;
+  --r-5:    24px;          /* stack tile */
+  --r-pill: 999px;
+
+  /* --- borders --- */
+  --bw-hair: 1px;
+  --bw-1:    1.5px;        /* default UI border */
+  --bw-2:    2px;          /* emphasized border */
+  --bw-3:    3px;          /* illustration border */
+  --bw-stack: 5px;         /* literal stack-tile stroke */
+
+  /* --- shadows (used sparingly) --- */
+  --shadow-none:    none;
+  --shadow-subtle:  0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-card:    0 8px 32px rgba(0, 0, 0, 0.08);
+  --shadow-overlay: 0 24px 64px rgba(0, 0, 0, 0.18);
+  --shadow-stack:   0 8px 0 -1px var(--bg-cream), 0 8px 0 0 var(--ink);
+
+  /* --- motion --- */
+  --motion-fast: 150ms;
+  --motion:      220ms;
+  --motion-slow: 320ms;
+  --easing:      cubic-bezier(0.2, 0.0, 0.0, 1);
+
+  /* --- dot grid background image --- */
+  --dot-grid: radial-gradient(circle at 1px 1px, var(--dot) 1px, transparent 0);
+  --dot-grid-size: 16px 16px;
+}
+
+/* =========================================================================
+   Semantic typographic styles
+   ========================================================================= */
+
+.h-display {
+  font-family: var(--font-display);
+  font-weight: var(--fw-bold);
+  font-size: var(--fs-128);
+  line-height: var(--lh-tight);
+  letter-spacing: -0.01em;
+  color: var(--fg-primary);
+}
+
+.h1 {
+  font-family: var(--font-display);
+  font-weight: var(--fw-bold);
+  font-size: var(--fs-72);
+  line-height: var(--lh-tight);
+  letter-spacing: -0.01em;
+  color: var(--fg-primary);
+}
+
+.h2 {
+  font-family: var(--font-display);
+  font-weight: var(--fw-bold);
+  font-size: var(--fs-48);
+  line-height: var(--lh-snug);
+  letter-spacing: -0.01em;
+  color: var(--fg-primary);
+}
+
+.h3 {
+  font-family: var(--font-sans);
+  font-weight: var(--fw-bold);
+  font-size: var(--fs-32);
+  line-height: var(--lh-snug);
+  color: var(--fg-primary);
+}
+
+.h4 {
+  font-family: var(--font-sans);
+  font-weight: var(--fw-semi);
+  font-size: var(--fs-24);
+  line-height: var(--lh-snug);
+  color: var(--fg-primary);
+}
+
+.h5 {
+  font-family: var(--font-sans);
+  font-weight: var(--fw-semi);
+  font-size: var(--fs-18);
+  line-height: var(--lh-snug);
+  color: var(--fg-primary);
+}
+
+.eyebrow {
+  font-family: var(--font-mono);
+  font-weight: var(--fw-medium);
+  font-size: var(--fs-12);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-tertiary);
+}
+
+.p, p {
+  font-family: var(--font-sans);
+  font-weight: var(--fw-regular);
+  font-size: var(--fs-16);
+  line-height: var(--lh-relaxed);
+  color: var(--fg-secondary);
+}
+
+.lead {
+  font-family: var(--font-sans);
+  font-weight: var(--fw-regular);
+  font-size: var(--fs-20);
+  line-height: var(--lh-relaxed);
+  color: var(--fg-secondary);
+}
+
+.small {
+  font-family: var(--font-sans);
+  font-weight: var(--fw-regular);
+  font-size: var(--fs-14);
+  line-height: var(--lh-normal);
+  color: var(--fg-tertiary);
+}
+
+.caption {
+  font-family: var(--font-sans);
+  font-weight: var(--fw-medium);
+  font-size: var(--fs-13);
+  line-height: var(--lh-normal);
+  color: var(--fg-tertiary);
+}
+
+.code, code, kbd, samp {
+  font-family: var(--font-mono);
+  font-weight: var(--fw-regular);
+  font-size: 0.92em;
+  letter-spacing: 0;
+  color: var(--code-fg);
+}
+
+.code-block {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: var(--fs-14);
+  line-height: 1.6;
+  color: var(--code-fg);
+  background: var(--code-bg);
+  border: var(--bw-hair) solid var(--code-border);
+  border-radius: var(--r-2);
+  padding: var(--s-4) var(--s-5);
+  overflow-x: auto;
+}
+
+/* =========================================================================
+   Reusable surface patterns
+   ========================================================================= */
+
+.dot-grid {
+  background-image: var(--dot-grid);
+  background-size: var(--dot-grid-size);
+  background-color: var(--bg);
+}
+
+.dot-grid-cream {
+  background-image: var(--dot-grid);
+  background-size: var(--dot-grid-size);
+  background-color: var(--bg-cream);
+}
+
+.card {
+  background: var(--surface);
+  border: var(--bw-1) solid var(--border);
+  border-radius: var(--r-5);
+  padding: var(--s-5);
+}
+
+.card-flat {
+  background: var(--surface);
+  border: var(--bw-hair) solid var(--border-soft);
+  border-radius: var(--r-3);
+  padding: var(--s-5);
+}
+
+.card-accent {
+  background: var(--peach);
+  color: var(--ink);
+  border: var(--bw-1) solid var(--ink);
+  border-radius: var(--r-5);
+  padding: var(--s-5);
+}
