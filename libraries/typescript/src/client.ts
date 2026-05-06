@@ -45,6 +45,11 @@ import { resolveLogRoot } from "./services/call-log";
 import { validateAllToolSchemas } from "./tools/schema-validation";
 import type { ToolDefinition } from "./types";
 import { getLogger } from "./logger";
+import { SpeechEvents } from "./_speech-events";
+import type {
+  ConversationStateSnapshot,
+  SpeechEventCallback,
+} from "./_speech-events";
 
 /** Internal local-mode state — holds carrier + resolved runtime settings. */
 export interface ResolvedLocalConfig {
@@ -101,6 +106,80 @@ export class Patter {
    * ``Cannot use both tunnel: true and webhookUrl``.
    */
   private tunnelOwnsWebhookUrl = false;
+
+  /**
+   * Speech-edge events for turn-taking instrumentation. Public surface: the
+   * seven `on*` proxy accessors below plus the `conversationState` snapshot.
+   * Defaults are no-ops — existing users who never set a callback see exactly
+   * the previous behaviour.
+   *
+   * See `src/_speech-events.ts` for the full event taxonomy and the
+   * industry-alignment table (LiveKit / Pipecat / OpenAI Realtime).
+   */
+  public readonly speechEvents: SpeechEvents = new SpeechEvents();
+
+  // ---- Speech-edge event callback proxies ------------------------------
+  // The seven `on*` properties below mirror the public APIs of LiveKit
+  // Agents, Pipecat and OpenAI Realtime. They proxy to `speechEvents` so
+  // the dispatcher remains the single source of truth (state + OTel).
+
+  get onUserSpeechStarted(): SpeechEventCallback | null {
+    return this.speechEvents.onUserSpeechStarted;
+  }
+  set onUserSpeechStarted(cb: SpeechEventCallback | null) {
+    this.speechEvents.onUserSpeechStarted = cb;
+  }
+
+  get onUserSpeechEnded(): SpeechEventCallback | null {
+    return this.speechEvents.onUserSpeechEnded;
+  }
+  set onUserSpeechEnded(cb: SpeechEventCallback | null) {
+    this.speechEvents.onUserSpeechEnded = cb;
+  }
+
+  get onUserSpeechEos(): SpeechEventCallback | null {
+    return this.speechEvents.onUserSpeechEos;
+  }
+  set onUserSpeechEos(cb: SpeechEventCallback | null) {
+    this.speechEvents.onUserSpeechEos = cb;
+  }
+
+  get onAgentSpeechStarted(): SpeechEventCallback | null {
+    return this.speechEvents.onAgentSpeechStarted;
+  }
+  set onAgentSpeechStarted(cb: SpeechEventCallback | null) {
+    this.speechEvents.onAgentSpeechStarted = cb;
+  }
+
+  get onAgentSpeechEnded(): SpeechEventCallback | null {
+    return this.speechEvents.onAgentSpeechEnded;
+  }
+  set onAgentSpeechEnded(cb: SpeechEventCallback | null) {
+    this.speechEvents.onAgentSpeechEnded = cb;
+  }
+
+  get onLlmToken(): SpeechEventCallback | null {
+    return this.speechEvents.onLlmToken;
+  }
+  set onLlmToken(cb: SpeechEventCallback | null) {
+    this.speechEvents.onLlmToken = cb;
+  }
+
+  get onAudioOut(): SpeechEventCallback | null {
+    return this.speechEvents.onAudioOut;
+  }
+  set onAudioOut(cb: SpeechEventCallback | null) {
+    this.speechEvents.onAudioOut = cb;
+  }
+
+  /**
+   * Snapshot of the current per-side state of the call.
+   * Mirrors LiveKit's `user_state_changed` / `agent_state_changed`
+   * payloads. Read-only and safe to call at any time.
+   */
+  get conversationState(): ConversationStateSnapshot {
+    return this.speechEvents.conversationState;
+  }
 
   /**
    * Live `MetricsStore` for the embedded server. Returns `null` before

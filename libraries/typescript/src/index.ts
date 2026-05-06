@@ -1,4 +1,12 @@
 export { Patter } from "./client";
+export { SpeechEvents } from "./_speech-events";
+export type {
+  SpeechEventCallback,
+  ConversationStateSnapshot,
+  UserState,
+  AgentState,
+  EouTrigger,
+} from "./_speech-events";
 export { defineTool } from "./tools/tool-decorator";
 export type { DefineToolInput, ParamSpec } from "./tools/tool-decorator";
 export type { Logger } from "./logger";

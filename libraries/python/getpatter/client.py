@@ -24,13 +24,14 @@ from typing import TYPE_CHECKING, Any, Callable, Awaitable
 logger = logging.getLogger("getpatter")
 
 from getpatter.exceptions import PatterConnectionError
-from getpatter.models import Agent, Guardrail, MachineDetectionResult
 from getpatter.local_config import LocalConfig
+from getpatter.models import Agent, Guardrail, MachineDetectionResult
 from getpatter.providers.base import STTProvider, TTSProvider
 from getpatter.services.llm_loop import LLMProvider
 
 if TYPE_CHECKING:  # pragma: no cover — typing only
     from getpatter._public_api import Tool
+    from getpatter._speech_events import SpeechEventCallback
 
 
 _CLOUD_NOT_IMPLEMENTED_MSG = (
@@ -186,6 +187,90 @@ class Patter:
         # + restarts on agent-identity changes) does not throw
         # ``Cannot use both tunnel=True and webhook_url``.
         self._tunnel_owns_webhook_url: bool = False
+
+        # Speech-edge events for turn-taking instrumentation. Public surface:
+        # the seven ``on_*`` proxy attributes below plus the
+        # ``conversation_state`` snapshot. Defaults are no-ops — existing
+        # users who never set a callback see exactly the previous behaviour.
+        # See ``getpatter._speech_events`` for the full event taxonomy and
+        # the industry-alignment table (LiveKit / Pipecat / OpenAI Realtime).
+        # Imported inline to keep client.py's top-level import graph minimal.
+        from getpatter._speech_events import SpeechEvents as _SpeechEvents
+
+        self.speech_events = _SpeechEvents()
+
+    # ------------------------------------------------------------------
+    # Speech-edge event callback proxies
+    # ------------------------------------------------------------------
+    # The seven ``on_*`` attributes below mirror the public APIs of LiveKit
+    # Agents, Pipecat and OpenAI Realtime. They proxy to ``self.speech_events``
+    # so the dispatcher remains the single source of truth (state + OTel).
+
+    @property
+    def on_user_speech_started(self) -> SpeechEventCallback | None:
+        return self.speech_events.on_user_speech_started
+
+    @on_user_speech_started.setter
+    def on_user_speech_started(self, cb: SpeechEventCallback | None) -> None:
+        self.speech_events.on_user_speech_started = cb
+
+    @property
+    def on_user_speech_ended(self) -> SpeechEventCallback | None:
+        return self.speech_events.on_user_speech_ended
+
+    @on_user_speech_ended.setter
+    def on_user_speech_ended(self, cb: SpeechEventCallback | None) -> None:
+        self.speech_events.on_user_speech_ended = cb
+
+    @property
+    def on_user_speech_eos(self) -> SpeechEventCallback | None:
+        return self.speech_events.on_user_speech_eos
+
+    @on_user_speech_eos.setter
+    def on_user_speech_eos(self, cb: SpeechEventCallback | None) -> None:
+        self.speech_events.on_user_speech_eos = cb
+
+    @property
+    def on_agent_speech_started(self) -> SpeechEventCallback | None:
+        return self.speech_events.on_agent_speech_started
+
+    @on_agent_speech_started.setter
+    def on_agent_speech_started(self, cb: SpeechEventCallback | None) -> None:
+        self.speech_events.on_agent_speech_started = cb
+
+    @property
+    def on_agent_speech_ended(self) -> SpeechEventCallback | None:
+        return self.speech_events.on_agent_speech_ended
+
+    @on_agent_speech_ended.setter
+    def on_agent_speech_ended(self, cb: SpeechEventCallback | None) -> None:
+        self.speech_events.on_agent_speech_ended = cb
+
+    @property
+    def on_llm_token(self) -> SpeechEventCallback | None:
+        return self.speech_events.on_llm_token
+
+    @on_llm_token.setter
+    def on_llm_token(self, cb: SpeechEventCallback | None) -> None:
+        self.speech_events.on_llm_token = cb
+
+    @property
+    def on_audio_out(self) -> SpeechEventCallback | None:
+        return self.speech_events.on_audio_out
+
+    @on_audio_out.setter
+    def on_audio_out(self, cb: SpeechEventCallback | None) -> None:
+        self.speech_events.on_audio_out = cb
+
+    @property
+    def conversation_state(self) -> dict[str, str]:
+        """Snapshot of the current per-side state of the call.
+
+        Returns ``{"user": <state>, "agent": <state>}``. Mirrors LiveKit's
+        ``user_state_changed`` / ``agent_state_changed`` payloads. Read-only
+        and safe to call at any time.
+        """
+        return self.speech_events.conversation_state
 
     @staticmethod
     def _unpack_carrier(carrier: Any) -> tuple[str | None, dict]:

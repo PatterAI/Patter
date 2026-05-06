@@ -21,6 +21,7 @@ See ``pyproject.toml`` and the top-level README for the full matrix.
 
 __version__ = "0.6.0"
 
+from getpatter._speech_events import SpeechEventCallback, SpeechEvents
 from getpatter.client import Patter
 from getpatter.models import (
     Agent,
@@ -349,6 +350,8 @@ from getpatter.providers.ultravox_realtime import (  # noqa: E402
 
 __all__ = [
     "Patter",
+    "SpeechEvents",
+    "SpeechEventCallback",
     "Agent",
     "CallControl",
     "CallEvent",

@@ -153,6 +153,13 @@ export interface StreamHandlerDeps {
   readonly recording: boolean;
   /** When true, only the first TTFB per call is forwarded to the event bus. Default false. */
   readonly reportOnlyInitialTtfb?: boolean;
+  /**
+   * Optional speech-edge events dispatcher. When provided, the handler emits
+   * turn-taking edges (VAD start/stop, EOU commit, agent first/last wire
+   * chunk) as the call progresses. ``undefined`` means no events are fired
+   * — exact prior behaviour. See ``src/_speech-events.ts``.
+   */
+  readonly speechEvents?: import("./_speech-events").SpeechEvents;
   /** Build an AI adapter (OpenAI Realtime or ElevenLabs ConvAI). Injected to avoid circular imports. */
   readonly buildAIAdapter: (resolvedPrompt: string) => AIAdapter;
   /** Sanitize untrusted key-value variables map. */
@@ -1828,6 +1835,60 @@ export class StreamHandler {
     },
   };
 
+  // ---- Speech-event helpers ------------------------------------------
+  // No-op when the deps don't include a SpeechEvents dispatcher. Tracks
+  // wall-clock for `speech_duration_ms` payloads.
+  private userSpeechStartMs: number | null = null;
+  private agentTurnStartMs: number | null = null;
+
+  private async emitUserSpeechStarted(): Promise<void> {
+    if (!this.deps.speechEvents) return;
+    this.userSpeechStartMs = Date.now();
+    await this.deps.speechEvents.fireUserSpeechStarted();
+  }
+
+  private async emitUserSpeechEnded(): Promise<void> {
+    if (!this.deps.speechEvents) return;
+    const duration =
+      this.userSpeechStartMs !== null
+        ? Math.max(0, Date.now() - this.userSpeechStartMs)
+        : 0;
+    this.userSpeechStartMs = null;
+    await this.deps.speechEvents.fireUserSpeechEnded({
+      speechDurationMs: duration,
+    });
+  }
+
+  private async emitUserSpeechEos(transcriptSoFar?: string): Promise<void> {
+    if (!this.deps.speechEvents) return;
+    await this.deps.speechEvents.fireUserSpeechEos({
+      trigger: "vad_silence",
+      transcriptSoFar,
+    });
+  }
+
+  private async emitAgentSpeechStarted(): Promise<void> {
+    if (!this.deps.speechEvents) return;
+    this.agentTurnStartMs = Date.now();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ttsKey = (this.deps.agent.tts?.constructor as any)?.providerKey;
+    await this.deps.speechEvents.fireAgentSpeechStarted({
+      ttsProvider: ttsKey,
+      engine: this.deps.agent.provider ?? "openai_realtime",
+    });
+  }
+
+  private async emitAgentSpeechEnded(interrupted: boolean): Promise<void> {
+    if (!this.deps.speechEvents) return;
+    if (this.agentTurnStartMs === null) return;
+    const duration = Math.max(0, Date.now() - this.agentTurnStartMs);
+    this.agentTurnStartMs = null;
+    await this.deps.speechEvents.fireAgentSpeechEnded({
+      speechDurationMs: duration,
+      interrupted,
+    });
+  }
+
   private async onAdapterAudio(eventData: Buffer): Promise<void> {
     // Record time-to-first-audio-byte as latency (Realtime mode). If no
     // startTurn() was called yet (e.g. agent responding again without user
@@ -1836,6 +1897,8 @@ export class StreamHandler {
       this.responseAudioStarted = true;
       if (this.metricsAcc.turnActive === false) this.metricsAcc.startTurn();
       this.metricsAcc.recordTtsFirstByte();
+      // Speech-event: first wire-time chunk of this agent turn.
+      await this.emitAgentSpeechStarted();
     }
     // OpenAI Realtime outputs g711_ulaw 8 kHz (PCMU). Both Twilio and Telnyx
     // are configured for PCMU/mulaw 8 kHz (Telnyx uses stream_bidirectional_codec=PCMU)
@@ -1849,7 +1912,7 @@ export class StreamHandler {
     this.deps.bridge.sendMark(this.ws, `audio_${this.chunkCount}`, this.streamSid);
   }
 
-  private onAdapterSpeechStopped(): void {
+  private async onAdapterSpeechStopped(): Promise<void> {
     // Server VAD end-of-speech is the earliest reliable moment to start
     // measuring turn latency in Realtime mode — ``transcript_input``
     // (transcription.completed) arrives noticeably later and understates
@@ -1861,6 +1924,10 @@ export class StreamHandler {
     // forthcoming `response.done` event waits for it before being
     // pushed into history. See `userTranscriptPending` doc comment.
     this.userTranscriptPending = true;
+    // Speech-event: raw VAD trailing edge. EOU commit happens later on
+    // ``transcript_input`` (Realtime emits it after
+    // input_audio_buffer.committed).
+    await this.emitUserSpeechEnded();
   }
 
   private async onAdapterTranscriptInput(inputText: string): Promise<void> {
@@ -1873,6 +1940,10 @@ export class StreamHandler {
       this.currentAgentText = '';
       this.responseAudioStarted = false;
     }
+    // Speech-event: end-of-utterance committed (Realtime mode emits this
+    // on ``input_audio_buffer.committed``, the canonical "user finished"
+    // signal). Advances `turnIdx` and arms first-token / first-audio.
+    await this.emitUserSpeechEos(inputText);
     // Marks ASR as complete — exposes a stt_ms bucket in Realtime mode
     // distinct from the llm+tts portion. Parity with Python handler.
     this.metricsAcc.recordSttComplete(inputText);
@@ -1944,8 +2015,12 @@ export class StreamHandler {
       // Empty response — discard the orphaned turn so it doesn't leak.
       this.metricsAcc.recordTurnInterrupted();
       this.responseAudioStarted = false;
+      // Speech-event: agent turn ended without text (cancelled).
+      await this.emitAgentSpeechEnded(true);
       return;
     }
+    // Speech-event: clean agent turn completion (text emitted).
+    await this.emitAgentSpeechEnded(false);
     const text = this.currentAgentText;
     this.currentAgentText = '';
     if (this.userTranscriptPending) {
@@ -1970,10 +2045,18 @@ export class StreamHandler {
     await this.flushAssistantTurn(text);
   }
 
-  private onAdapterSpeechInterrupt(): void {
+  private async onAdapterSpeechInterrupt(): Promise<void> {
     this.deps.bridge.sendClear(this.ws, this.streamSid);
     if (this.adapter instanceof OpenAIRealtimeAdapter) this.adapter.cancelResponse();
     this.metricsAcc.recordTurnInterrupted();
+    // Speech-event: user started speaking. If the agent was mid-turn this
+    // is a barge-in — close the agent turn as interrupted before flagging
+    // the new user-speech edge so consumers see ``agent_ended(true)`` →
+    // ``user_started`` in causal order.
+    if (this.responseAudioStarted) {
+      await this.emitAgentSpeechEnded(true);
+    }
+    await this.emitUserSpeechStarted();
     this.currentAgentText = '';
     this.responseAudioStarted = false;
     // A barge-in invalidates any buffered assistant turn — the user

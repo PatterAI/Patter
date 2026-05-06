@@ -371,6 +371,7 @@ class StreamHandler(ABC):
         on_metrics=None,
         conversation_history: deque | None = None,
         transcript_entries: deque | None = None,
+        speech_events: Any = None,
     ) -> None:
         self.agent = agent
         self.audio_sender = audio_sender
@@ -384,6 +385,16 @@ class StreamHandler(ABC):
         self.on_metrics = on_metrics
         self.conversation_history: deque = conversation_history or deque(maxlen=200)
         self.transcript_entries: deque = transcript_entries or deque(maxlen=200)
+        # Optional `SpeechEvents` dispatcher. When set, the handler emits
+        # turn-taking edges (VAD start/stop, EOU commit, agent first/last
+        # wire chunk) as the call progresses. None == prior behaviour.
+        self.speech_events = speech_events
+        # Tracks the wall-clock when the user's current speaking segment
+        # began, so `fire_user_speech_ended` can include `speech_duration_ms`.
+        self._user_speech_start_ms: float | None = None
+        # Tracks the wall-clock when the agent's current turn began
+        # speaking on the wire, for `fire_agent_speech_ended.speech_duration_ms`.
+        self._agent_turn_start_ms: float | None = None
         self._background_task: asyncio.Task | None = None
         # MCP server connection manager — populated lazily in
         # ``_init_mcp_tools`` when the agent declares ``mcp_servers``.
@@ -455,6 +466,85 @@ class StreamHandler(ABC):
                 async (async callables are scheduled via asyncio.create_task).
         """
         self._event_bus.on("metrics_collected", fn)
+
+    # ------------------------------------------------------------------
+    # Speech-event helpers — no-op when no SpeechEvents dispatcher is set.
+    # ------------------------------------------------------------------
+
+    async def _emit_user_speech_started(self) -> None:
+        if self.speech_events is None:
+            return
+        self._user_speech_start_ms = time.time() * 1000
+        await self.speech_events.fire_user_speech_started()
+
+    async def _emit_user_speech_ended(self) -> None:
+        if self.speech_events is None:
+            return
+        now_ms = time.time() * 1000
+        duration_ms = (
+            int(now_ms - self._user_speech_start_ms)
+            if self._user_speech_start_ms is not None
+            else 0
+        )
+        self._user_speech_start_ms = None
+        await self.speech_events.fire_user_speech_ended(
+            speech_duration_ms=max(0, duration_ms)
+        )
+
+    async def _emit_user_speech_eos(
+        self, *, trigger: str, transcript_so_far: str | None = None
+    ) -> None:
+        if self.speech_events is None:
+            return
+        await self.speech_events.fire_user_speech_eos(
+            trigger=trigger, transcript_so_far=transcript_so_far
+        )
+
+    async def _emit_agent_speech_started(self, *, engine: str | None = None) -> None:
+        if self.speech_events is None:
+            return
+        self._agent_turn_start_ms = time.time() * 1000
+        tts_provider = self._infer_tts_provider()
+        await self.speech_events.fire_agent_speech_started(
+            tts_provider=tts_provider, engine=engine
+        )
+
+    async def _emit_agent_speech_ended(self, *, interrupted: bool = False) -> None:
+        if self.speech_events is None:
+            return
+        now_ms = time.time() * 1000
+        duration_ms = (
+            int(now_ms - self._agent_turn_start_ms)
+            if self._agent_turn_start_ms is not None
+            else 0
+        )
+        self._agent_turn_start_ms = None
+        await self.speech_events.fire_agent_speech_ended(
+            speech_duration_ms=max(0, duration_ms), interrupted=interrupted
+        )
+
+    def _infer_tts_provider(self) -> str | None:
+        """Best-effort TTS provider name for event payloads. Returns None
+        when the handler has no TTS (Realtime / ConvAI engines) or the
+        provider can't be classified."""
+        tts = getattr(self, "tts_provider", None) or getattr(self, "_tts", None)
+        if tts is None:
+            return None
+        cls_name = type(tts).__name__.lower()
+        # Heuristic: provider classes are named like ``ElevenLabsTTS``,
+        # ``OpenAITTS``, ``CartesiaTTS`` etc.
+        for known in (
+            "elevenlabs",
+            "openai",
+            "cartesia",
+            "rime",
+            "lmnt",
+            "inworld",
+            "telnyx",
+        ):
+            if known in cls_name:
+                return known
+        return cls_name.replace("tts", "") or None
 
     @abstractmethod
     async def start(self) -> None:
@@ -749,8 +839,11 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                     # now so latency is still measured. Parity with TS.
                     if self.metrics is not None and not self.metrics.turn_active:
                         self.metrics.start_turn()
-                    if waiting_first_audio and self.metrics is not None:
-                        self.metrics.record_tts_first_byte()
+                    if waiting_first_audio:
+                        if self.metrics is not None:
+                            self.metrics.record_tts_first_byte()
+                        # Speech-event: first wire-time chunk of this agent turn.
+                        await self._emit_agent_speech_started(engine="openai_realtime")
                         waiting_first_audio = False
                     await self.audio_sender.send_audio(ev_data)
                     await self.audio_sender.send_mark(f"audio_{id(ev_data)}")
@@ -767,6 +860,10 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                     # Mark a user transcript is expected so response_done
                     # waits for it before pushing the assistant turn.
                     self._user_transcript_pending = True
+                    # Speech-event: raw VAD trailing edge. EOU is committed
+                    # later on `transcript_input` (Realtime emits it after
+                    # input_audio_buffer.committed).
+                    await self._emit_user_speech_ended()
 
                 elif ev_type == "transcript_input":
                     logger.debug("User: %s", sanitize_log_value(ev_data))
@@ -778,6 +875,12 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                         self.metrics.record_stt_complete(ev_data)
                     waiting_first_audio = True
                     current_agent_text = ""
+                    # Speech-event: end-of-utterance committed (Realtime mode
+                    # emits this on `input_audio_buffer.committed`, which is
+                    # the canonical "user finished" signal).
+                    await self._emit_user_speech_eos(
+                        trigger="vad_silence", transcript_so_far=ev_data
+                    )
 
                     self.conversation_history.append(
                         {"role": "user", "text": ev_data, "timestamp": time.time()}
@@ -825,6 +928,14 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                     await self._adapter.cancel_response()
                     if self.metrics is not None:
                         self.metrics.record_turn_interrupted()
+                    # Speech-event: user started speaking. If the agent was
+                    # mid-turn this is a barge-in — close out the agent turn
+                    # as interrupted before flagging the new user-speech edge,
+                    # so consumers see ``agent_ended(interrupted=true)`` →
+                    # ``user_started`` in causal order.
+                    if not waiting_first_audio:
+                        await self._emit_agent_speech_ended(interrupted=True)
+                    await self._emit_user_speech_started()
                     waiting_first_audio = False
                     current_agent_text = ""
                     # Barge-in invalidates any buffered assistant turn —
@@ -841,6 +952,11 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                         usage = ev_data.get("usage", {})
                         if usage:
                             self.metrics.record_realtime_usage(usage)
+                    response_was_cancelled = (
+                        not current_agent_text
+                        and self.metrics is not None
+                        and self.metrics.turn_active
+                    )
                     if current_agent_text:
                         text_to_flush = current_agent_text
                         current_agent_text = ""
@@ -862,6 +978,15 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                         # next speech_stopped can start a fresh turn cleanly.
                         # Parity with TS handleAdapterEvent response_done path.
                         self.metrics.record_turn_interrupted()
+                    # Speech-event: agent finished its turn. ``interrupted``
+                    # tracks whether the response was cut by barge-in (no
+                    # text emitted) versus a clean completion. We only fire
+                    # when an agent turn was actually in flight (start_ms is
+                    # set), to avoid spurious events on engine warmup.
+                    if self._agent_turn_start_ms is not None:
+                        await self._emit_agent_speech_ended(
+                            interrupted=response_was_cancelled
+                        )
                     waiting_first_audio = True
 
                 elif ev_type == "function_call":
