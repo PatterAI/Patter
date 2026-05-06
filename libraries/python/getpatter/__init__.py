@@ -83,6 +83,7 @@ from getpatter.tts.openai import TTS as OpenAITTS
 from getpatter.tts.cartesia import TTS as CartesiaTTS
 from getpatter.tts.rime import TTS as RimeTTS
 from getpatter.tts.lmnt import TTS as LMNTTTS
+from getpatter.tts.inworld import TTS as InworldTTS
 
 # LLM flat aliases — parity with libraries/typescript/src/index.ts and mirror of STT/TTS layout.
 from getpatter.llm.openai import LLM as OpenAILLM
@@ -393,6 +394,7 @@ __all__ = [
     "CartesiaTTS",
     "RimeTTS",
     "LMNTTTS",
+    "InworldTTS",
     "OpenAILLM",
     "AnthropicLLM",
     "GroqLLM",

@@ -65,6 +65,8 @@ DEFAULT_PRICING: dict[str, dict] = {
     "rime": {"unit": PricingUnit.THOUSAND_CHARS, "price": 0.030},
     # LMNT aurora/blizzard: $0.050/1k chars Indie overage
     "lmnt": {"unit": PricingUnit.THOUSAND_CHARS, "price": 0.050},
+    # Inworld TTS-2: placeholder, verify against current platform pricing.
+    "inworld": {"unit": PricingUnit.THOUSAND_CHARS, "price": 0.020},
     # OpenAI Realtime — per token (actual tokens from response.done usage).
     # Calibrated for gpt-4o-mini-realtime-preview (the Patter default):
     #   audio  input  $10  / M  ->  0.00001    per token

@@ -117,6 +117,8 @@ export { TTS as RimeTTS } from "./tts/rime";
 export type { RimeTTSOptions } from "./tts/rime";
 export { TTS as LMNTTTS } from "./tts/lmnt";
 export type { LMNTTTSOptions } from "./tts/lmnt";
+export { TTS as InworldTTS } from "./tts/inworld";
+export type { InworldTTSOptions } from "./tts/inworld";
 
 // New namespaced LLM classes (Phase 2 of the v0.5.x API refactor).
 export { LLM as OpenAILLM } from "./llm/openai";

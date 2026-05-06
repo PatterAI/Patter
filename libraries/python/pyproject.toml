@@ -126,6 +126,7 @@ background-audio = [
 ]
 rime = ["aiohttp>=3.10"]
 lmnt = ["aiohttp>=3.10"]
+inworld = ["aiohttp>=3.10"]
 gemini-live = [
     "google-genai>=1.55",
 ]
