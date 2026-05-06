@@ -12,7 +12,8 @@ button{font-family:inherit;color:inherit}
 .brand .tag{font-family:var(--font-mono);font-size:11px;font-weight:500;background:#f6f6f4;border:1px solid var(--line);padding:2px 8px;border-radius:999px;color:#4a4a4a}
 .top-r{display:flex;align-items:center;gap:14px;font-size:13px}
 .live-chip{display:flex;align-items:center;gap:6px;font-family:var(--font-mono);font-size:12px;color:#000;font-weight:500}
-.pulse{width:8px;height:8px;background:#3b6f3b;border-radius:999px;box-shadow:0 0 0 0 rgba(59,111,59,.6);animation:pulse 1.5s infinite}
+.pulse{width:8px;height:8px;background:var(--peach-deep);border-radius:999px}
+.pulse.active{background:#3b6f3b;box-shadow:0 0 0 0 rgba(59,111,59,.6);animation:pulse 1.5s infinite}
 @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(59,111,59,.6)}70%{box-shadow:0 0 0 8px rgba(59,111,59,0)}100%{box-shadow:0 0 0 0 rgba(59,111,59,0)}}
 .num-chip{font-family:var(--font-mono);font-size:13px;background:#fff;border:1px solid var(--line);padding:5px 12px;border-radius:8px;color:#000;font-weight:500}
 .icon-btn{width:32px;height:32px;border-radius:8px;border:1px solid var(--line);background:#fff;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;color:#1a1a1a;transition:background var(--motion-fast) var(--easing)}
@@ -38,7 +39,7 @@ button{font-family:inherit;color:inherit}
 
 /* metric grid */
 .metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:20px}
-.metric{background:#fff;border:1px solid var(--line);border-radius:14px;padding:18px;position:relative;overflow:hidden;transition:border-color var(--motion-fast) var(--easing)}
+.metric{background:#fff;border:1px solid var(--line);border-radius:14px;padding:18px 18px 14px;position:relative;display:flex;flex-direction:column;transition:border-color var(--motion-fast) var(--easing)}
 .metric:hover{border-color:#cfcfcf}
 .metric.peach{background:#FFF8EF;border-color:#EFC5AC}
 .metric .lbl{font-family:var(--font-mono);font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--fg-tertiary);font-weight:500;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between}
@@ -47,9 +48,29 @@ button{font-family:inherit;color:inherit}
 .metric .delta{font-family:var(--font-mono);font-size:12px;margin-top:6px;color:#4a4a4a}
 .metric .delta.up{color:#3b6f3b}
 .metric .delta.dn{color:#c97a4c}
-.metric .spark{display:flex;align-items:flex-end;gap:2px;height:28px;margin-top:12px}
-.metric .spark span{flex:1;background:#000;border-radius:1px;opacity:.85;transition:height 600ms var(--easing)}
-.metric.peach .spark span{background:#000}
+.metric .spark{display:flex;align-items:flex-end;gap:3px;height:32px;margin-top:auto;padding-top:14px}
+.metric .spark .spark-bar-static,.metric .spark .spark-bar-wrap{flex:1;display:flex;align-items:flex-end;position:relative;height:100%}
+.metric .spark .spark-bar-static{background:var(--ink);border-radius:2px;opacity:.92;width:100%;align-self:flex-end}
+.metric.peach .spark .spark-bar-static{background:var(--ink)}
+.metric .spark .spark-bar{flex:1;width:100%;border:0;padding:0;background:var(--ink);border-radius:2px;opacity:.92;cursor:pointer;font:inherit;color:inherit;align-self:flex-end;transition:opacity var(--motion-fast) var(--easing),background var(--motion-fast) var(--easing)}
+.metric .spark .spark-bar.empty{background:transparent;cursor:default;pointer-events:none;opacity:0}
+.metric .spark .spark-bar:not(.empty):hover{opacity:1;background:var(--peach-deep)}
+.metric.peach .spark .spark-bar:not(.empty):hover{background:#000}
+.metric .spark .spark-bar:focus-visible{outline:2px solid var(--peach);outline-offset:2px}
+
+/* Sparkline tooltip — Patter style: dark surface, mono numerics. */
+.spark-tooltip{position:absolute;left:50%;bottom:calc(100% + 8px);transform:translateX(-50%);background:var(--ink);color:#fff;border-radius:8px;padding:10px 12px;font-family:var(--font-sans);font-size:12px;line-height:1.4;min-width:220px;max-width:280px;z-index:50;box-shadow:0 8px 24px rgba(0,0,0,.18);pointer-events:none;animation:spark-tooltip-in 80ms var(--easing) both}
+.spark-tooltip::after{content:"";position:absolute;top:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-top-color:var(--ink)}
+@keyframes spark-tooltip-in{from{opacity:0;transform:translateX(-50%) translateY(-2px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
+.spark-tooltip-range{font-family:var(--font-mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:#aaa;margin-bottom:4px}
+.spark-tooltip-count{font-weight:600;font-size:13px;margin-bottom:6px}
+.spark-tooltip-empty{color:#aaa;font-style:italic;font-size:12px}
+.spark-tooltip-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:3px}
+.spark-tooltip-list li{display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:baseline;font-family:var(--font-mono);font-size:11px}
+.spark-tooltip-list .num{color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.spark-tooltip-list .status{color:#aaa;font-size:10px;text-transform:uppercase;letter-spacing:.04em}
+.spark-tooltip-list .cost{color:var(--peach-light);font-variant-numeric:tabular-nums}
+.spark-tooltip-more{margin-top:6px;font-family:var(--font-mono);font-size:10px;color:#aaa;letter-spacing:.04em}
 .metric .badge-now{font-family:var(--font-mono);font-size:10px;font-weight:600;background:#000;color:#fff;padding:2px 6px;border-radius:4px;letter-spacing:.04em}
 
 /* main split */
@@ -99,8 +120,14 @@ tbody tr.new-row{animation:slideIn 400ms var(--easing)}
 .dir.out{color:#4a4a4a}
 
 /* right rail: live call */
-.rr{display:flex;flex-direction:column;gap:14px;position:sticky;top:84px;max-height:calc(100vh - 100px);overflow:hidden}
+.rr{display:flex;flex-direction:column;gap:14px}
 .rr-card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:18px}
+.metrics-panel-h{margin-bottom:14px}
+.metrics-panel-h .seg{display:inline-flex;background:#fafaf8;border:1px solid var(--line);border-radius:8px;padding:2px}
+.metrics-panel-h .seg button{font-family:var(--font-mono);font-size:11px;border:0;background:transparent;padding:5px 14px;border-radius:6px;cursor:pointer;color:#4a4a4a;font-weight:500;transition:all var(--motion-fast) var(--easing);text-transform:uppercase;letter-spacing:.06em}
+.metrics-panel-h .seg button.on{background:#000;color:#fff}
+.metrics-panel-h .seg button:not(.on):not(:disabled):hover{color:#000}
+.metrics-panel-h .seg button:disabled{opacity:.35;cursor:not-allowed}
 .rr-card.peach{background:#FFF8EF;border-color:#EFC5AC}
 .rr-card h3{margin:0 0 4px;font-size:15px;font-weight:700;display:flex;justify-content:space-between;align-items:center}
 .rr-card .meta{font-family:var(--font-mono);font-size:12px;color:var(--fg-tertiary);font-weight:500;margin-bottom:14px}

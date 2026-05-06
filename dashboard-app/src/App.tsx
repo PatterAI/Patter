@@ -1,22 +1,33 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Topbar } from './components/Topbar';
 import { PageHeader } from './components/PageHeader';
-import { Metric } from './components/Metric';
+import { Metric, type MetricBucket } from './components/Metric';
 import { CallTable, type Call } from './components/CallTable';
 import { LiveCallPanel } from './components/LiveCallPanel';
-import { LatencyPanel } from './components/LatencyPanel';
-import { CostPanel } from './components/CostPanel';
+import { MetricsPanel } from './components/MetricsPanel';
 import { useDashboardData } from './hooks/useDashboardData';
 import { useTranscript } from './hooks/useTranscript';
-import { bucketSparkline } from './lib/mappers';
+import {
+  bucketStrategyForRange,
+  computeSparkline,
+  filterCallsInWindow,
+  type RangeKey,
+  type SparklineResult,
+} from './lib/mappers';
 
 const SDK_VERSION = '0.6.0';
+const RANGE_LABEL: Record<RangeKey, string> = {
+  '1h': '1h',
+  '24h': '24h',
+  '7d': '7d',
+  All: 'all-time',
+};
 
-function avgLiveP95(calls: readonly Call[]): number {
-  const live = calls.filter((c) => c.status === 'live' && typeof c.latencyP95 === 'number');
-  if (live.length === 0) return 0;
-  const total = live.reduce((s, c) => s + (c.latencyP95 ?? 0), 0);
-  return Math.round(total / live.length);
+function avgP95(calls: readonly Call[]): number {
+  const withLat = calls.filter((c) => typeof c.latencyP95 === 'number');
+  if (withLat.length === 0) return 0;
+  const total = withLat.reduce((s, c) => s + (c.latencyP95 ?? 0), 0);
+  return Math.round(total / withLat.length);
 }
 
 function totalSpend(calls: readonly Call[]): number {
@@ -27,32 +38,55 @@ function totalSpend(calls: readonly Call[]): number {
   }, 0);
 }
 
+/**
+ * Patter-side number for the topbar pill — derived from the most recent call
+ * (live preferred, otherwise newest ended). Inbound calls expose ``to``,
+ * outbound calls expose ``from``. Falls back to an empty string when no
+ * call data is available.
+ */
 function pickPhoneNumber(calls: readonly Call[]): string {
   const live = calls.find((c) => c.status === 'live');
-  if (!live) return '—';
-  return live.direction === 'inbound' ? live.to : live.from;
+  const ref = live ?? calls[0];
+  if (!ref) return '';
+  const num = ref.direction === 'inbound' ? ref.to : ref.from;
+  return num && num !== '—' ? num : '';
 }
 
 export function App() {
   const { calls, aggregates, isStreaming, error, refresh } = useDashboardData();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [search, setSearch] = useState('');
-  const [range, setRange] = useState('24h');
+  const [range, setRange] = useState<RangeKey>('24h');
   const [recording, setRecording] = useState(true);
   const [muted, setMuted] = useState(false);
+
+  // Resolve bucket strategy + window for the active range. Bucket counts
+  // and sizes are aligned to natural boundaries so tooltip ranges read as
+  // "11:00 → 12:00" rather than "11:39 → 12:33".
+  const strategy = useMemo(() => bucketStrategyForRange(range), [range]);
+  const timeWindow = strategy.window;
+
+  // Calls that fall inside the selected range. Live calls are always
+  // included regardless of the range filter — the user always wants to see
+  // what's happening right now.
+  const filteredCalls = useMemo(() => {
+    if (range === 'All') return calls;
+    const inWindow = new Set(filterCallsInWindow(calls, timeWindow).map((c) => c.id));
+    return calls.filter((c) => c.status === 'live' || inWindow.has(c.id));
+  }, [calls, range, timeWindow]);
 
   // Auto-select first live call when none is selected
   useEffect(() => {
     if (selectedId !== null) return;
-    const liveCall = calls.find((c) => c.status === 'live') ?? calls[0];
+    const liveCall = filteredCalls.find((c) => c.status === 'live') ?? filteredCalls[0];
     if (liveCall) setSelectedId(liveCall.id);
-  }, [calls, selectedId]);
+  }, [filteredCalls, selectedId]);
 
-  // Drop selection if the selected call disappeared from the list
+  // Drop selection if the selected call disappeared from the visible list
   useEffect(() => {
     if (selectedId === null) return;
-    if (!calls.some((c) => c.id === selectedId)) setSelectedId(null);
-  }, [calls, selectedId]);
+    if (!filteredCalls.some((c) => c.id === selectedId)) setSelectedId(null);
+  }, [filteredCalls, selectedId]);
 
   // ⇧K / ⌘K focuses the search input
   useEffect(() => {
@@ -70,8 +104,8 @@ export function App() {
   }, []);
 
   const selected = useMemo(
-    () => calls.find((c) => c.id === selectedId) ?? null,
-    [calls, selectedId],
+    () => filteredCalls.find((c) => c.id === selectedId) ?? null,
+    [filteredCalls, selectedId],
   );
   const isSelectedLive = selected?.status === 'live';
   const transcript = useTranscript(selected?.id ?? null, isSelectedLive);
@@ -83,23 +117,37 @@ export function App() {
   );
   const outbound = liveCount - inbound;
 
-  const todayCount = aggregates?.total_calls ?? calls.length;
-  const avgP95 = avgLiveP95(calls) || aggregates?.avg_latency_ms || 0;
-  const spend = totalSpend(calls) || aggregates?.total_cost || 0;
+  // Headline counters reflect the active range (Total / Latency / Spend),
+  // except "Active now" which is always the current live count.
+  const totalCount = filteredCalls.length;
+  const rangeAvgP95 = avgP95(filteredCalls) || aggregates?.avg_latency_ms || 0;
+  const rangeSpend = totalSpend(filteredCalls) || aggregates?.total_cost || 0;
   const phoneNumber = pickPhoneNumber(calls);
 
-  const sparkTotalCalls = useMemo(() => bucketSparkline(calls, 'totalCalls'), [calls]);
-  const sparkLatency = useMemo(() => bucketSparkline(calls, 'latency'), [calls]);
-  const sparkSpend = useMemo(() => bucketSparkline(calls, 'spend'), [calls]);
+  const sparkTotalCalls = useMemo(
+    () => computeSparkline(filteredCalls, 'totalCalls', strategy),
+    [filteredCalls, strategy],
+  );
+  const sparkLatency = useMemo(
+    () => computeSparkline(filteredCalls, 'latency', strategy),
+    [filteredCalls, strategy],
+  );
+  const sparkSpend = useMemo(
+    () => computeSparkline(filteredCalls, 'spend', strategy),
+    [filteredCalls, strategy],
+  );
   const sparkLive = useMemo(() => {
     const liveCalls = calls.filter((c) => c.status === 'live');
-    return bucketSparkline(liveCalls, 'totalCalls');
-  }, [calls]);
+    return computeSparkline(liveCalls, 'totalCalls', strategy);
+  }, [calls, strategy]);
 
-  const handlePlace = () => {
-    // TODO: wire to outbound POST /api/v1/calls when the dashboard supports it.
-    window.alert('Place call: outbound dialer not yet wired in the dashboard.');
-  };
+  const toBuckets = (s: SparklineResult): MetricBucket[] =>
+    s.heights.map((h, i) => ({
+      height: h,
+      calls: s.buckets[i],
+      fromMs: s.window.fromMs + i * s.bucketSizeMs,
+      toMs: s.window.fromMs + (i + 1) * s.bucketSizeMs,
+    }));
 
   const handleEnd = () => {
     if (!selected) return;
@@ -112,29 +160,35 @@ export function App() {
     <>
       <Topbar
         liveCount={liveCount}
-        todayCount={todayCount}
+        todayCount={totalCount}
         phoneNumber={phoneNumber}
         sdkVersion={SDK_VERSION}
       />
       <div className="page">
-        <PageHeader range={range} setRange={setRange} onPlace={handlePlace} />
+        <PageHeader range={range} setRange={(r) => setRange(r as RangeKey)} />
 
         <div className="metrics">
           <Metric
-            label="Total calls"
-            value={todayCount}
-            spark={sparkTotalCalls}
+            label={`Calls · ${RANGE_LABEL[range]}`}
+            value={totalCount}
+            spark={sparkTotalCalls.heights}
+            buckets={toBuckets(sparkTotalCalls)}
+            onSelectCall={setSelectedId}
           />
           <Metric
             label="Avg latency p95"
-            value={avgP95 || 0}
+            value={rangeAvgP95 || 0}
             unit="ms"
-            spark={sparkLatency}
+            spark={sparkLatency.heights}
+            buckets={toBuckets(sparkLatency)}
+            onSelectCall={setSelectedId}
           />
           <Metric
-            label="Spend"
-            value={`$${spend.toFixed(2)}`}
-            spark={sparkSpend}
+            label={`Spend · ${RANGE_LABEL[range]}`}
+            value={`$${rangeSpend.toFixed(2)}`}
+            spark={sparkSpend.heights}
+            buckets={toBuckets(sparkSpend)}
+            onSelectCall={setSelectedId}
           />
           <Metric
             label="Active now"
@@ -142,13 +196,15 @@ export function App() {
             peach
             badge
             footer={`${inbound} inbound · ${outbound} outbound`}
-            spark={sparkLive}
+            spark={sparkLive.heights}
+            buckets={toBuckets(sparkLive)}
+            onSelectCall={setSelectedId}
           />
         </div>
 
         <div className="split">
           <CallTable
-            calls={calls}
+            calls={filteredCalls}
             selectedId={selectedId}
             onSelect={setSelectedId}
             newId={null}
@@ -165,8 +221,7 @@ export function App() {
               muted={muted}
               setMuted={setMuted}
             />
-            <LatencyPanel call={selected} />
-            <CostPanel call={selected} />
+            <MetricsPanel call={selected} />
           </div>
         </div>
 
@@ -178,10 +233,13 @@ export function App() {
             <span>SDK · {SDK_VERSION}</span>
           </div>
           <div className="group">
-            <span>{liveCount} live · {todayCount} today</span>
+            <span>
+              {liveCount} live · {totalCount} {RANGE_LABEL[range]}
+            </span>
           </div>
         </div>
       </div>
     </>
   );
 }
+

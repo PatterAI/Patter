@@ -1,4 +1,4 @@
-import { IconBell, IconBrandMark, IconSettings } from './icons';
+import { PatterLogo } from './PatterLogo';
 
 export interface TopbarProps {
   liveCount: number;
@@ -11,23 +11,15 @@ export function Topbar({ liveCount, todayCount, phoneNumber, sdkVersion }: Topba
   return (
     <header className="top">
       <div className="brand">
-        <IconBrandMark aria-hidden="true" />
-        <span>Patter</span>
+        <PatterLogo />
         <span className="tag">dashboard · v{sdkVersion}</span>
       </div>
       <div className="top-r">
         <span className="live-chip">
-          <span className="pulse"></span>
+          <span className={'pulse' + (liveCount > 0 ? ' active' : '')}></span>
           {liveCount} live · {todayCount} today
         </span>
-        <span className="num-chip">{phoneNumber}</span>
-        <button className="icon-btn" title="Notifications" type="button">
-          <IconBell />
-        </button>
-        <button className="icon-btn" title="Settings" type="button">
-          <IconSettings />
-        </button>
-        <div className="avatar">MD</div>
+        {phoneNumber !== '—' && <span className="num-chip">{phoneNumber}</span>}
       </div>
     </header>
   );

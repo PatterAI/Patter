@@ -10,6 +10,8 @@ export interface CallCost {
   total?: number;
 }
 
+export type CallMode = 'realtime' | 'pipeline' | 'convai' | 'unknown';
+
 export interface Call {
   id: string;
   status: 'live' | 'ended' | 'no-answer' | 'queued' | 'fail';
@@ -17,6 +19,8 @@ export interface Call {
   from: string;
   to: string;
   carrier: 'twilio' | 'telnyx';
+  /** ms epoch — set for any call we know started, live or ended. */
+  startedAtMs?: number;
   durationStart?: number;
   duration?: number;
   latencyP95?: number;
@@ -26,6 +30,7 @@ export interface Call {
   cost: CallCost;
   agent?: string;
   model?: string;
+  mode?: CallMode;
   transcriptKey?: string;
   endedAgo?: number;
 }

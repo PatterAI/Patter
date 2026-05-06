@@ -1,14 +1,28 @@
-import { IconArrowDown, IconPlus } from './icons';
+import { IconArrowDown } from './icons';
 
 const RANGES = ['1h', '24h', '7d', 'All'] as const;
 
 export interface PageHeaderProps {
   range: string;
   setRange: (r: string) => void;
-  onPlace: () => void;
 }
 
-export function PageHeader({ range, setRange, onPlace }: PageHeaderProps) {
+/**
+ * Trigger a CSV download from the SDK's export endpoint. The endpoint
+ * already handles streaming the file and setting Content-Disposition, so
+ * we just navigate the browser to it via a transient anchor element.
+ */
+function downloadCsv(): void {
+  const a = document.createElement('a');
+  a.href = '/api/dashboard/export/calls?format=csv';
+  a.download = 'patter_calls.csv';
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+export function PageHeader({ range, setRange }: PageHeaderProps) {
   return (
     <div className="ph">
       <div>
@@ -31,11 +45,8 @@ export function PageHeader({ range, setRange, onPlace }: PageHeaderProps) {
             </button>
           ))}
         </div>
-        <button className="btn" type="button">
+        <button className="btn" type="button" onClick={downloadCsv}>
           <IconArrowDown /> Export CSV
-        </button>
-        <button className="btn primary" type="button" onClick={onPlace}>
-          <IconPlus /> Place call
         </button>
       </div>
     </div>

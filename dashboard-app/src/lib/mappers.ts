@@ -13,6 +13,7 @@ import type { CallRecord } from './api';
 export type CallStatus = 'live' | 'ended' | 'no-answer' | 'queued' | 'fail';
 export type CallDirection = 'inbound' | 'outbound';
 export type CallCarrier = 'twilio' | 'telnyx';
+export type CallMode = 'realtime' | 'pipeline' | 'convai' | 'unknown';
 
 export interface CallCostUi {
   readonly telco?: number;
@@ -29,6 +30,7 @@ export interface Call {
   readonly from: string;
   readonly to: string;
   readonly carrier: CallCarrier;
+  readonly startedAtMs?: number;
   readonly durationStart?: number;
   readonly duration?: number;
   readonly latencyP95?: number;
@@ -38,6 +40,7 @@ export interface Call {
   readonly cost: CallCostUi;
   readonly agent?: string;
   readonly model?: string;
+  readonly mode?: CallMode;
   readonly transcriptKey?: string;
   readonly endedAgo?: number;
 }
@@ -88,6 +91,15 @@ function mapCarrier(provider: string | undefined): CallCarrier {
     return 'telnyx';
   }
   return 'twilio';
+}
+
+function mapMode(providerMode: string | undefined): CallMode {
+  if (typeof providerMode !== 'string') return 'unknown';
+  const m = providerMode.toLowerCase();
+  if (m.includes('realtime')) return 'realtime';
+  if (m.includes('convai')) return 'convai';
+  if (m.includes('pipeline')) return 'pipeline';
+  return 'unknown';
 }
 
 function emptyToDash(value: string): string {
@@ -163,6 +175,7 @@ export function toUiCall(record: CallRecord): Call {
     from: emptyToDash(record.caller),
     to: emptyToDash(record.callee),
     carrier: mapCarrier(record.metrics?.telephony_provider),
+    startedAtMs: typeof record.started_at === 'number' ? record.started_at * 1000 : undefined,
     durationStart: isLive ? record.started_at * 1000 : undefined,
     duration: computeDuration(record, isLive),
     latencyP95: latencyP95?.total_ms ?? latencyAvg?.total_ms,
@@ -172,6 +185,7 @@ export function toUiCall(record: CallRecord): Call {
     cost: computeCost(record),
     agent: buildAgentLabel(record),
     model: record.metrics?.llm_provider,
+    mode: mapMode(record.metrics?.provider_mode),
     transcriptKey: record.call_id,
     endedAgo: computeEndedAgo(record),
   };
@@ -204,13 +218,95 @@ export function toUiTranscript(record: CallRecord): TranscriptTurn[] {
 
 export type SparklineField = 'totalCalls' | 'latency' | 'spend';
 
-function callTimestampSeconds(call: Call): number | undefined {
-  if (typeof call.durationStart === 'number') {
-    return Math.floor(call.durationStart / 1000);
+export type RangeKey = '1h' | '24h' | '7d' | 'All';
+
+/**
+ * A bucket strategy says: "bucket N slots of size S, ending at T, starting
+ * at F = T - N*S". Sizes are aligned to natural boundaries (5-minute
+ * marks for 1h, hour marks for 24h, local-midnight for 7d) so the tooltip
+ * ranges read as expected (``11:00 → 12:00`` rather than ``11:39 →
+ * 12:33``).
+ */
+export interface BucketStrategy {
+  readonly count: number;
+  readonly bucketSizeMs: number;
+  readonly window: TimeWindow;
+}
+
+const MIN = 60 * 1000;
+const HOUR = 60 * MIN;
+const DAY = 24 * HOUR;
+
+export function bucketStrategyForRange(
+  range: RangeKey,
+  now: number = Date.now(),
+): BucketStrategy {
+  switch (range) {
+    case '1h': {
+      // 12 × 5-min buckets, aligned to the next 5-min mark so the bar
+      // boundaries read as 11:35 → 11:40 instead of 11:37 → 11:42.
+      const size = 5 * MIN;
+      const toMs = Math.ceil(now / size) * size;
+      const fromMs = toMs - 12 * size;
+      return { count: 12, bucketSizeMs: size, window: { fromMs, toMs } };
+    }
+    case '24h': {
+      // 24 × 1-hour buckets aligned to the top of the hour.
+      const size = HOUR;
+      const toMs = Math.ceil(now / size) * size;
+      const fromMs = toMs - 24 * size;
+      return { count: 24, bucketSizeMs: size, window: { fromMs, toMs } };
+    }
+    case '7d': {
+      // 7 × 1-day buckets aligned to local midnight. ``toMs`` is the
+      // upcoming midnight so today's calls fall into the last bucket.
+      const today = new Date(now);
+      today.setHours(0, 0, 0, 0);
+      const tomorrowMidnight = today.getTime() + DAY;
+      const fromMs = tomorrowMidnight - 7 * DAY;
+      return {
+        count: 7,
+        bucketSizeMs: DAY,
+        window: { fromMs, toMs: tomorrowMidnight },
+      };
+    }
+    case 'All':
+    default:
+      return {
+        count: 9,
+        bucketSizeMs: 0, // computeSparkline will derive from data extents
+        window: { fromMs: 0, toMs: now },
+      };
   }
-  if (typeof call.endedAgo === 'number') {
-    return Math.floor(Date.now() / 1000 - call.endedAgo);
-  }
+}
+
+/**
+ * Backwards-compatible wrapper — returns just the time window. Prefer
+ * ``bucketStrategyForRange`` when you also need the bucket count/size.
+ */
+export function rangeToWindow(range: RangeKey, now: number = Date.now()): TimeWindow {
+  return bucketStrategyForRange(range, now).window;
+}
+
+export function filterCallsInWindow(calls: readonly Call[], window: TimeWindow): Call[] {
+  const { fromMs, toMs } = window;
+  return calls.filter((call) => {
+    const ts = callTimestampMs(call);
+    if (typeof ts !== 'number') return false;
+    return ts >= fromMs && ts <= toMs;
+  });
+}
+
+/** Time window in milliseconds — open intervals coerce both ends to "now". */
+export interface TimeWindow {
+  readonly fromMs: number;
+  readonly toMs: number;
+}
+
+function callTimestampMs(call: Call): number | undefined {
+  if (typeof call.startedAtMs === 'number') return call.startedAtMs;
+  if (typeof call.durationStart === 'number') return call.durationStart;
+  if (typeof call.endedAgo === 'number') return Date.now() - call.endedAgo * 1000;
   return undefined;
 }
 
@@ -227,59 +323,150 @@ function normalize(values: readonly number[]): number[] {
   return values.map((v) => Math.round((v / max) * 100));
 }
 
+export interface SparklineResult {
+  /** Per-bucket bar heights, normalized 0-100 (tallest bar = 100). */
+  readonly heights: number[];
+  /** Calls assigned to each bucket — same length as ``heights``. */
+  readonly buckets: ReadonlyArray<readonly Call[]>;
+  /** Resolved window the buckets were computed against. */
+  readonly window: TimeWindow;
+  /** Width of one bucket in milliseconds. */
+  readonly bucketSizeMs: number;
+}
+
+/**
+ * Bucket calls into N equal time slots and report both bar heights AND
+ * the calls that fell into each bucket — callers use the latter to drive
+ * tooltips and click-to-select interactions on the sparkline.
+ *
+ * Pass a fully-resolved ``strategy`` from ``bucketStrategyForRange`` to
+ * get bucket boundaries aligned to natural marks (5 min / 1 h / 1 day).
+ * Falling back to the legacy signature (count + optional window) bucket
+ * sizes are derived from the window span and sit on arbitrary boundaries.
+ */
+export function computeSparkline(
+  calls: readonly Call[],
+  field: SparklineField,
+  strategyOrCount: BucketStrategy | number = 9,
+  windowParam?: TimeWindow,
+): SparklineResult {
+  const isStrategy = typeof strategyOrCount === 'object';
+  const requestedCount = isStrategy ? strategyOrCount.count : strategyOrCount;
+  const safeBuckets = Math.max(1, Math.floor(requestedCount));
+  const strategyWindow = isStrategy ? strategyOrCount.window : windowParam;
+  const strategySize = isStrategy ? strategyOrCount.bucketSizeMs : 0;
+
+  let fromMs: number;
+  let toMs: number;
+  if (strategyWindow) {
+    fromMs = strategyWindow.fromMs;
+    toMs = strategyWindow.toMs;
+  } else {
+    const stamps: number[] = [];
+    for (const call of calls) {
+      const ts = callTimestampMs(call);
+      if (typeof ts === 'number') stamps.push(ts);
+    }
+    if (stamps.length === 0) {
+      const now = Date.now();
+      return {
+        heights: new Array<number>(safeBuckets).fill(0),
+        buckets: new Array(safeBuckets).fill(null).map(() => []),
+        window: { fromMs: now, toMs: now },
+        bucketSizeMs: 0,
+      };
+    }
+    fromMs = Math.min(...stamps);
+    toMs = Math.max(...stamps);
+  }
+
+  const span = Math.max(1, toMs - fromMs);
+  const bucketSizeMs = strategySize > 0 ? strategySize : span / safeBuckets;
+  const buckets: Call[][] = new Array(safeBuckets).fill(null).map(() => []);
+
+  const sums = new Array<number>(safeBuckets).fill(0);
+  const counts = new Array<number>(safeBuckets).fill(0);
+
+  for (const call of calls) {
+    const ts = callTimestampMs(call);
+    if (typeof ts !== 'number') continue;
+    if (ts < fromMs || ts > toMs) continue;
+    let idx = Math.floor((ts - fromMs) / bucketSizeMs);
+    if (idx >= safeBuckets) idx = safeBuckets - 1;
+    if (idx < 0) idx = 0;
+
+    buckets[idx].push(call);
+
+    if (field === 'totalCalls') {
+      sums[idx] += 1;
+    } else if (field === 'latency') {
+      if (typeof call.latencyP95 === 'number') {
+        sums[idx] += call.latencyP95;
+        counts[idx] += 1;
+      }
+    } else {
+      sums[idx] += callSpend(call);
+    }
+  }
+
+  const rawValues =
+    field === 'latency'
+      ? sums.map((s, i) => (counts[i] > 0 ? s / counts[i] : 0))
+      : sums;
+
+  return {
+    heights: normalize(rawValues),
+    buckets,
+    window: { fromMs, toMs },
+    bucketSizeMs,
+  };
+}
+
+/**
+ * Bucket calls across an explicit time window into N=9 equal slots, then
+ * normalize so the tallest bar is 100. When ``window`` is omitted the
+ * function falls back to the data's own min/max — useful for "All" range.
+ *
+ * Preserved for backwards-compatible callers that only need bar heights.
+ * Prefer ``computeSparkline`` for anything that drives interactivity.
+ */
 export function bucketSparkline(
   calls: readonly Call[],
   field: SparklineField,
   buckets: number = 9,
+  window?: TimeWindow,
 ): number[] {
   const safeBuckets = Math.max(1, Math.floor(buckets));
   const empty = new Array<number>(safeBuckets).fill(0);
-  if (calls.length === 0) return empty;
 
-  const stamps: number[] = [];
-  for (const call of calls) {
-    const ts = callTimestampSeconds(call);
-    if (typeof ts === 'number') stamps.push(ts);
-  }
-  if (stamps.length === 0) return empty;
-
-  const min = Math.min(...stamps);
-  const max = Math.max(...stamps);
-  const range = max - min;
-
-  // Single-instant series: pile everything into the last bucket so the user
-  // still sees a non-empty bar.
-  if (range <= 0) {
-    const sums = empty.slice();
-    const counts = empty.slice();
+  let fromMs: number;
+  let toMs: number;
+  if (window) {
+    fromMs = window.fromMs;
+    toMs = window.toMs;
+  } else {
+    if (calls.length === 0) return empty;
+    const stamps: number[] = [];
     for (const call of calls) {
-      const idx = safeBuckets - 1;
-      if (field === 'totalCalls') {
-        sums[idx] += 1;
-      } else if (field === 'latency') {
-        if (typeof call.latencyP95 === 'number') {
-          sums[idx] += call.latencyP95;
-          counts[idx] += 1;
-        }
-      } else {
-        sums[idx] += callSpend(call);
-      }
+      const ts = callTimestampMs(call);
+      if (typeof ts === 'number') stamps.push(ts);
     }
-    if (field === 'latency') {
-      const avgs = sums.map((s, i) => (counts[i] > 0 ? s / counts[i] : 0));
-      return normalize(avgs);
-    }
-    return normalize(sums);
+    if (stamps.length === 0) return empty;
+    fromMs = Math.min(...stamps);
+    toMs = Math.max(...stamps);
   }
+
+  const span = Math.max(1, toMs - fromMs);
+  const bucketSize = span / safeBuckets;
 
   const sums = empty.slice();
   const counts = empty.slice();
-  const bucketSize = range / safeBuckets;
 
   for (const call of calls) {
-    const ts = callTimestampSeconds(call);
+    const ts = callTimestampMs(call);
     if (typeof ts !== 'number') continue;
-    let idx = Math.floor((ts - min) / bucketSize);
+    if (ts < fromMs || ts > toMs) continue;
+    let idx = Math.floor((ts - fromMs) / bucketSize);
     if (idx >= safeBuckets) idx = safeBuckets - 1;
     if (idx < 0) idx = 0;
 
