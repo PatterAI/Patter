@@ -1,6 +1,5 @@
 """Tests for the local dashboard store, routes, and integration."""
 
-import time
 
 import pytest
 
@@ -10,12 +9,15 @@ from getpatter.models import CallMetrics, CostBreakdown, LatencyBreakdown, TurnM
 _has_fastapi = False
 try:
     import fastapi  # noqa: F401
+
     _has_fastapi = True
 except ImportError:
     pass
 
 
-def _make_metrics(call_id="call-1", duration=30.0, cost_total=0.05, latency_avg_ms=200.0):
+def _make_metrics(
+    call_id="call-1", duration=30.0, cost_total=0.05, latency_avg_ms=200.0
+):
     return CallMetrics(
         call_id=call_id,
         duration_seconds=duration,
@@ -24,11 +26,17 @@ def _make_metrics(call_id="call-1", duration=30.0, cost_total=0.05, latency_avg_
                 turn_index=0,
                 user_text="hello",
                 agent_text="hi there",
-                latency=LatencyBreakdown(stt_ms=50, llm_ms=100, tts_ms=50, total_ms=200),
+                latency=LatencyBreakdown(
+                    stt_ms=50, llm_ms=100, tts_ms=50, total_ms=200
+                ),
             ),
         ),
-        cost=CostBreakdown(stt=0.01, tts=0.01, llm=0.02, telephony=0.01, total=cost_total),
-        latency_avg=LatencyBreakdown(stt_ms=50, llm_ms=100, tts_ms=50, total_ms=latency_avg_ms),
+        cost=CostBreakdown(
+            stt=0.01, tts=0.01, llm=0.02, telephony=0.01, total=cost_total
+        ),
+        latency_avg=LatencyBreakdown(
+            stt_ms=50, llm_ms=100, tts_ms=50, total_ms=latency_avg_ms
+        ),
         latency_p95=LatencyBreakdown(stt_ms=60, llm_ms=120, tts_ms=55, total_ms=235),
         provider_mode="pipeline",
         stt_provider="deepgram",
@@ -47,9 +55,14 @@ class TestMetricsStore:
 
     def test_record_call_start(self):
         store = MetricsStore()
-        store.record_call_start({
-            "call_id": "c1", "caller": "+1234", "callee": "+5678", "direction": "inbound"
-        })
+        store.record_call_start(
+            {
+                "call_id": "c1",
+                "caller": "+1234",
+                "callee": "+5678",
+                "direction": "inbound",
+            }
+        )
         active = store.get_active_calls()
         assert len(active) == 1
         assert active[0]["call_id"] == "c1"
@@ -59,7 +72,9 @@ class TestMetricsStore:
         store = MetricsStore()
         store.record_call_start({"call_id": "c1", "caller": "+1", "callee": "+2"})
         metrics = _make_metrics("c1")
-        store.record_call_end({"call_id": "c1", "transcript": [], "metrics": metrics}, metrics=metrics)
+        store.record_call_end(
+            {"call_id": "c1", "transcript": [], "metrics": metrics}, metrics=metrics
+        )
 
         assert store.call_count == 1
         assert store.get_active_calls() == []  # No longer active
@@ -104,7 +119,9 @@ class TestMetricsStore:
         store = MetricsStore()
         store.record_call_start({"call_id": "c1"})
         turn = TurnMetrics(
-            turn_index=0, user_text="hi", agent_text="hello",
+            turn_index=0,
+            user_text="hi",
+            agent_text="hello",
             latency=LatencyBreakdown(total_ms=100),
         )
         store.record_turn({"call_id": "c1", "turn": turn})
@@ -175,15 +192,20 @@ class TestDashboardHTML:
     """Test that the dashboard HTML template is valid."""
 
     def test_html_contains_key_elements(self):
+        # The dashboard is now a Vite-bundled React SPA; the server-served
+        # HTML is the SPA shell (title + #root mount point + inlined JS/CSS).
+        # The /api/dashboard/* calls and the literal labels (Total Calls, ...)
+        # are emitted by React at runtime, not present in the static HTML.
         from getpatter.dashboard.ui import DASHBOARD_HTML
 
         assert "Patter" in DASHBOARD_HTML
-        assert "Dashboard" in DASHBOARD_HTML
-        assert "/api/dashboard/calls" in DASHBOARD_HTML
-        assert "/api/dashboard/aggregates" in DASHBOARD_HTML
-        assert "Total Calls" in DASHBOARD_HTML
-        assert "Total Cost" in DASHBOARD_HTML
-        assert "Avg Latency" in DASHBOARD_HTML
+        assert "Live calls dashboard" in DASHBOARD_HTML
+        assert '<div id="root">' in DASHBOARD_HTML
+        # Confirms the bundled SPA loaded (not the fallback HTML stub).
+        assert len(DASHBOARD_HTML) > 10_000
+        # The SPA's compiled JS references the dashboard API endpoints — they
+        # live inside the inlined bundle even if not in the visible markup.
+        assert "/api/dashboard/" in DASHBOARD_HTML
 
 
 class TestServerDashboardIntegration:
@@ -218,10 +240,13 @@ class TestServerDashboardIntegration:
             phone_number="+15550001234",
             webhook_url="test.ngrok.io",
         )
-        agent = Agent(system_prompt="Test", voice="alloy", model="gpt-4o-mini-realtime-preview")
+        agent = Agent(
+            system_prompt="Test", voice="alloy", model="gpt-4o-mini-realtime-preview"
+        )
         server = EmbeddedServer(config=config, agent=agent, dashboard=True)
         # Force store creation
         from getpatter.dashboard.store import MetricsStore
+
         server._metrics_store = MetricsStore()
 
         start_cb, end_cb, metrics_cb = server._wrap_callbacks()
