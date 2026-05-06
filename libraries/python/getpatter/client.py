@@ -40,6 +40,31 @@ _CLOUD_NOT_IMPLEMENTED_MSG = (
 )
 
 
+def _resolve_persist_root(persist: bool | str | None) -> str | None:
+    """Resolve the user-supplied ``persist`` option into a concrete
+    filesystem path or ``None``. Layered precedence:
+
+    - ``persist is False`` → ``None`` (force off, even if env var is set)
+    - ``persist is True`` → platform default (``resolve_log_root("auto")``)
+    - ``persist`` is a string → exactly that path (after ``~`` expansion)
+    - ``persist is None`` → fall back to ``PATTER_LOG_DIR`` env var, or
+      ``None`` if the env is also unset (preserves the prior opt-in
+      behaviour where persistence required setting the env explicitly)
+    """
+    from getpatter.services.call_log import resolve_log_root
+
+    if persist is False:
+        return None
+    if persist is True:
+        result = resolve_log_root("auto")
+        return str(result) if result is not None else None
+    if isinstance(persist, str):
+        result = resolve_log_root(persist)
+        return str(result) if result is not None else None
+    result = resolve_log_root()
+    return str(result) if result is not None else None
+
+
 class Patter:
     """Main Patter SDK client (local mode only).
 
@@ -70,6 +95,7 @@ class Patter:
         webhook_url: str = "",
         tunnel: Any = None,
         pricing: dict | None = None,
+        persist: bool | str | None = None,
         **kwargs: Any,
     ) -> None:
         # --- Reject cloud-mode kwargs explicitly ---
@@ -132,6 +158,7 @@ class Patter:
             telnyx_public_key=telnyx_public_key,
             phone_number=phone_number,
             webhook_url=webhook_url,
+            persist_root=_resolve_persist_root(persist),
         )
         self._server = None
         self._tunnel_handle = None
@@ -519,6 +546,7 @@ class Patter:
         echo_cancellation: bool = False,
         engine: Any = None,
         llm: "LLMProvider | None" = None,
+        mcp_servers: list | None = None,
     ) -> Agent:
         """Create an ``Agent`` configuration.
 
@@ -627,6 +655,14 @@ class Patter:
             if not isinstance(tools, list):
                 raise TypeError(f"tools must be a list, got {type(tools).__name__}.")
             tools_out = [self._tool_to_dict(t, index=i) for i, t in enumerate(tools)]
+            # Structural sanity + strict-mode validation for tool JSON schemas.
+            # Surfaces typos / missing required fields at agent() build time so
+            # they don't blow up mid-call. Built-in tools (transfer_call,
+            # end_call) are injected later in the Realtime adapter. Parity
+            # with TS ``validateAllToolSchemas``.
+            from getpatter.tools.schema_validation import validate_all_tool_schemas
+
+            validate_all_tool_schemas(tools_out)
 
         if variables is not None and not isinstance(variables, dict):
             raise TypeError(
@@ -666,6 +702,7 @@ class Patter:
             disable_phone_preamble=disable_phone_preamble,
             echo_cancellation=echo_cancellation,
             llm=llm,
+            mcp_servers=mcp_servers,
         )
 
     @staticmethod
@@ -716,6 +753,17 @@ class Patter:
             out["handler"] = tool.handler
         if tool.webhook_url:
             out["webhook_url"] = tool.webhook_url
+        # Propagate strict mode opt-in so downstream Realtime/Pipeline
+        # adapters can pass ``strict: true`` to OpenAI. Default False on
+        # the Tool dataclass — present in the dict only when explicitly set.
+        if getattr(tool, "strict", False):
+            out["strict"] = True
+        # Propagate reassurance config (string shorthand or dict) so the
+        # Realtime stream handler can schedule a filler message during
+        # slow tool calls.
+        reassurance = getattr(tool, "reassurance", None)
+        if reassurance:
+            out["reassurance"] = reassurance
         return out
 
     @staticmethod
@@ -982,7 +1030,7 @@ class Patter:
 async def _wait_for_tunnel_publicly_reachable(
     hostname: str,
     total_timeout_s: float = 30.0,
-    grace_s: float = 2.5,
+    grace_s: float = 5.0,
 ) -> None:
     """Wait for a freshly-minted cloudflared quick-tunnel hostname to be
     publicly resolvable, bypassing the OS resolver cache.
@@ -1003,11 +1051,18 @@ async def _wait_for_tunnel_publicly_reachable(
     right proxy for "Twilio can reach us".
 
     Why the grace window: between "DNS resolves" and "cloudflared origin
-    bridge is ready to forward HTTP", there is a 1–3 s gap during which
-    Cloudflare returns 502. Empirically 2.5 s covers >95 % of cases.
+    bridge is ready to forward HTTP/WSS", there is a 1–4 s gap during
+    which Cloudflare returns 502 on HTTP and silently drops WSS upgrades.
+    The HTTP path is usually ready first; the WSS upgrade path takes
+    longer because it goes through a different cloudflared edge route.
+    Empirically 5 s covers >99 % of cases (was 2.5 s, dropped failure
+    rate from ~5 % to <1 % — see BUGS.md 2026-05-06 cartesia-openai-openai
+    attempt 1 entry).
 
     Without this guard, Twilio races the propagation and the first call
-    is silently torn down by an HTTP 502 from the tunnel.
+    is silently torn down: HTTP webhooks succeed (`/voice` TwiML, AMD
+    callback) but Twilio's WSS upgrade for the media stream fails, the
+    call drops at pickup with no audio.
     """
     import struct
 

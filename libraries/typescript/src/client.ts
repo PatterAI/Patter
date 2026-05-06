@@ -41,6 +41,9 @@ import { Carrier as TelnyxCarrier } from "./telephony/telnyx";
 import { Realtime as OpenAIRealtime } from "./engines/openai";
 import { ConvAI as ElevenLabsConvAI } from "./engines/elevenlabs";
 import { CloudflareTunnel, Static as StaticTunnel } from "./tunnels";
+import { resolveLogRoot } from "./services/call-log";
+import { validateAllToolSchemas } from "./tools/schema-validation";
+import type { ToolDefinition } from "./types";
 import { getLogger } from "./logger";
 
 /** Internal local-mode state — holds carrier + resolved runtime settings. */
@@ -50,6 +53,31 @@ export interface ResolvedLocalConfig {
   webhookUrl?: string;
   tunnel?: CloudflareTunnel | StaticTunnel | boolean;
   openaiKey?: string;
+  /**
+   * Resolved on-disk persistence root for the dashboard's call history.
+   * ``null`` means persistence is disabled. Computed once at constructor
+   * time from the ``persist`` option + ``PATTER_LOG_DIR`` env var. See
+   * ``LocalOptions.persist`` for the resolution rules.
+   */
+  persistRoot: string | null;
+}
+
+/**
+ * Resolve the user-supplied ``persist`` option into a concrete
+ * filesystem path or ``null``. Layered precedence:
+ *
+ *  - ``persist === false`` → ``null`` (force off, even if env var is set)
+ *  - ``persist === true`` → platform default (``resolveLogRoot('auto')``)
+ *  - ``persist`` is a string → exactly that path (after ``~`` expansion)
+ *  - ``persist === undefined`` → fall back to ``PATTER_LOG_DIR`` env var,
+ *    or ``null`` if the env is also unset (preserves the prior opt-in
+ *    behaviour where persistence required setting the env explicitly)
+ */
+function resolvePersistRoot(persist: boolean | string | undefined): string | null {
+  if (persist === false) return null;
+  if (persist === true) return resolveLogRoot('auto');
+  if (typeof persist === 'string') return resolveLogRoot(persist);
+  return resolveLogRoot();
 }
 
 /** Top-level SDK entry point — wraps a carrier + embedded server + agent loop. */
@@ -172,6 +200,7 @@ export class Patter {
       webhookUrl: normalizedWebhook,
       tunnel: options.tunnel,
       openaiKey: options.openaiKey,
+      persistRoot: resolvePersistRoot(options.persist),
     };
 
     // Initialise the tunnel-ready deferred. If the caller already has a
@@ -293,6 +322,14 @@ export class Patter {
       throw new TypeError('variables must be an object');
     }
 
+    // Structural sanity + strict-mode validation for tool JSON schemas.
+    // Surfaces typos / missing required fields at agent() build time so
+    // they don't blow up mid-call. Built-in tools (transfer_call, end_call)
+    // are injected later in buildAIAdapter and validated there.
+    if (working.tools) {
+      validateAllToolSchemas(working.tools as ToolDefinition[]);
+    }
+
     return working;
   }
 
@@ -410,6 +447,7 @@ export class Patter {
         telnyxKey: carrier.kind === 'telnyx' ? carrier.apiKey : undefined,
         telnyxConnectionId: carrier.kind === 'telnyx' ? carrier.connectionId : undefined,
         telnyxPublicKey: carrier.kind === 'telnyx' ? carrier.publicKey : undefined,
+        persistRoot: this.localConfig.persistRoot,
       },
       opts.agent,
       opts.onCallStart,
@@ -697,16 +735,23 @@ export class Patter {
  * resolution is the right proxy for "Twilio can reach us".
  *
  * Why a grace window: between "DNS resolves" and "cloudflared origin
- * bridge is ready to forward HTTP", there is a 1–3 s gap during which
- * Cloudflare returns 502. Empirically 2.5 s covers >95 % of cases.
+ * bridge is ready to forward HTTP/WSS", there is a 1–4 s gap during
+ * which Cloudflare returns 502 on HTTP and silently drops WSS upgrades.
+ * The HTTP path is usually ready first; the WSS upgrade path takes
+ * longer because it goes through a different cloudflared edge route.
+ * Empirically 5 s covers >99 % of cases (was 2.5 s, dropped failure
+ * rate from ~5 % to <1 % — see BUGS.md 2026-05-06 cartesia-openai-openai
+ * attempt 1 entry).
  *
  * Without this guard, Twilio races the propagation and the first call
- * is silently torn down by an HTTP 502 from the tunnel.
+ * is silently torn down: HTTP webhooks succeed (`/voice` TwiML, AMD
+ * callback) but Twilio's WSS upgrade for the media stream fails, the
+ * call drops at pickup with no audio.
  */
 async function waitForTunnelPubliclyReachable(
   hostname: string,
   totalTimeoutMs = 60_000,
-  graceMs = 2_500,
+  graceMs = 5_000,
 ): Promise<void> {
   const log = getLogger();
   const { Resolver } = await import('node:dns/promises');

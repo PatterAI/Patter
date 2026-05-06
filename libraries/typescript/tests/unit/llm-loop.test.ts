@@ -334,7 +334,11 @@ describe('LLMLoop', () => {
         tokens.push(token);
       }
 
-      expect(handler).toHaveBeenCalledOnce();
+      // Tool handler errors now retry with exponential backoff (default
+      // maxRetries=2 → 3 total attempts) before returning a fallback JSON.
+      // Previously a single failure became a hard fault; the retry path
+      // gives transient handler errors a chance to recover.
+      expect(handler).toHaveBeenCalledTimes(3);
       expect(tokens).toEqual(['Recovered']);
     });
   });

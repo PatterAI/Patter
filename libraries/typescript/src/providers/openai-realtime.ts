@@ -110,7 +110,7 @@ export class OpenAIRealtimeAdapter {
     private readonly model: string = OpenAIRealtimeModel.GPT_REALTIME_MINI,
     private readonly voice: string = OpenAIVoice.ALLOY,
     private readonly instructions: string = '',
-    private readonly tools?: Array<{ name: string; description: string; parameters: Record<string, unknown> }>,
+    private readonly tools?: Array<{ name: string; description: string; parameters: Record<string, unknown>; strict?: boolean }>,
     // Audio wire format negotiated with OpenAI Realtime. Mirrors the Python
     // ``audio_format`` kwarg. Default ``g711_ulaw`` matches the Twilio/Telnyx
     // inbound codec so audio flows through without transcoding.
@@ -167,12 +167,21 @@ export class OpenAIRealtimeAdapter {
           if (this.options.modalities !== undefined) config.modalities = this.options.modalities;
           if (this.options.toolChoice !== undefined) config.tool_choice = this.options.toolChoice;
           if (this.tools?.length) {
-            config.tools = this.tools.map(t => ({
-              type: 'function',
-              name: t.name,
-              description: t.description,
-              parameters: t.parameters,
-            }));
+            config.tools = this.tools.map(t => {
+              const def: Record<string, unknown> = {
+                type: 'function',
+                name: t.name,
+                description: t.description,
+                parameters: t.parameters,
+              };
+              // Propagate strict mode when the user opted in. OpenAI's strict
+              // mode constrains the model to emit arguments that exactly match
+              // the schema (no missing required fields, no extra properties).
+              if ((t as { strict?: boolean }).strict === true) {
+                def.strict = true;
+              }
+              return def;
+            });
           }
           ws.send(JSON.stringify({ type: 'session.update', session: config }));
         } else if (msg.type === 'session.updated') {

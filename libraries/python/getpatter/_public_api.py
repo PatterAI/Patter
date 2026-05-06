@@ -45,6 +45,12 @@ class Tool:
             with ``webhook_url``.
         webhook_url: HTTPS URL POSTed to when the tool is invoked. Mutually
             exclusive with ``handler``.
+        strict: Enable OpenAI strict mode for this tool's function schema.
+            When ``True`` the model is constrained to emit arguments that
+            exactly match the declared schema. Strict mode requires every
+            nested object to have ``additionalProperties: False`` and every
+            property listed in ``properties`` to also be in ``required``.
+            Defaults to ``False`` for backward compatibility.
     """
 
     name: str
@@ -52,6 +58,14 @@ class Tool:
     parameters: dict | None = None
     handler: Callable[..., Any] | None = None
     webhook_url: str = ""
+    strict: bool = False
+    #: Optional reassurance filler the agent speaks while a slow tool
+    #: call runs. Two forms:
+    #:   - ``str``: shorthand for ``{"message": <str>, "after_ms": 1500}``.
+    #:   - ``dict``: ``{"message": str, "after_ms": int}``.
+    #: Currently honoured only in Realtime mode (``adapter.send_text``);
+    #: pipeline mode silently ignores it. Off by default.
+    reassurance: str | dict | None = None
 
     def __post_init__(self) -> None:
         if not self.name:

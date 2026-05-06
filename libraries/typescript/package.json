@@ -69,6 +69,7 @@
     "ws": "^8.18.0"
   },
   "optionalDependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
     "cloudflared": "^0.7.1",
     "node-cron": "^4.0.0",
     "onnxruntime-node": "~1.18.0"

@@ -385,6 +385,11 @@ class StreamHandler(ABC):
         self.conversation_history: deque = conversation_history or deque(maxlen=200)
         self.transcript_entries: deque = transcript_entries or deque(maxlen=200)
         self._background_task: asyncio.Task | None = None
+        # MCP server connection manager — populated lazily in
+        # ``_init_mcp_tools`` when the agent declares ``mcp_servers``.
+        # Closed in ``cleanup``/``fire_call_end`` to free open MCP
+        # WebSocket / HTTP connections. Parity with TS field.
+        self._mcp_manager: Any = None
 
         # Create one EventBus per handler instance and wire it to metrics.
         from getpatter.observability.event_bus import EventBus as _EventBus
@@ -392,6 +397,48 @@ class StreamHandler(ABC):
         self._event_bus: _EventBus = _EventBus()
         if self.metrics is not None and hasattr(self.metrics, "attach_event_bus"):
             self.metrics.attach_event_bus(self._event_bus)
+
+    async def _init_mcp_tools(self) -> None:
+        """Connect to every configured MCP server, discover their tools
+        via ``tools/list``, and merge them into ``agent.tools`` before
+        the adapter is built. The synthetic handlers dispatch back
+        through the MCP client so ``ToolExecutor`` can invoke them like
+        any other handler-tool. No-op when ``agent.mcp_servers`` is
+        empty or the optional ``mcp`` package is not installed."""
+        servers = getattr(self.agent, "mcp_servers", None)
+        if not servers:
+            return
+        from getpatter.tools.mcp_client import MCPManager
+
+        manager = MCPManager(servers)
+        try:
+            discovered = await manager.connect()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("MCP connect failed (continuing without MCP tools): %s", exc)
+            return
+        if not discovered:
+            return
+        existing = list(self.agent.tools or [])
+        MCPManager.assert_no_conflicts(existing, discovered)
+        # ``Agent`` is a frozen dataclass — replace it with a copy that
+        # has the merged tool list so the adapter and ToolExecutor see
+        # the discovered tools alongside user-defined ones.
+        import dataclasses
+
+        self.agent = dataclasses.replace(self.agent, tools=existing + discovered)
+        self._mcp_manager = manager
+        logger.info("MCP: merged %d tool(s) into agent", len(discovered))
+
+    async def _close_mcp(self) -> None:
+        """Close MCP connections opened by :meth:`_init_mcp_tools`."""
+        manager = self._mcp_manager
+        self._mcp_manager = None
+        if manager is None:
+            return
+        try:
+            await manager.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("MCP close error (ignored): %s", exc)
 
     def add_observer(self, fn) -> None:
         """Register *fn* as an observer for all ``metrics_collected`` events.
@@ -453,6 +500,14 @@ class StreamHandler(ABC):
 # ---------------------------------------------------------------------------
 
 
+#: Hard cap on how long the Realtime path waits for the user transcript to
+#: arrive before flushing the buffered assistant turn alone. 3 s covers
+#: OpenAI Whisper's typical 200-800 ms post-response delay with substantial
+#: headroom; beyond this we accept the order will look "assistant-only"
+#: rather than block the dashboard transcript display indefinitely.
+_REALTIME_USER_TRANSCRIPT_WAIT_S = 3.0
+
+
 class OpenAIRealtimeStreamHandler(StreamHandler):
     """Handles the openai_realtime provider mode."""
 
@@ -508,19 +563,151 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         self._adapter = None
         # Per-handler StatefulResampler for pcm16_16k_to_g711_ulaw transcoding.
         self._resampler_16k_to_8k = None
+        # Realtime turn ordering buffer. OpenAI Realtime emits the
+        # user-transcript-completion event AFTER response_done, because
+        # Whisper transcription runs in parallel with — and slower than —
+        # the model response. Without this buffer the conversation_history
+        # push order is [assistant, user, ...] which renders out-of-order
+        # in the dashboard. See TS parity in stream-handler.ts.
+        self._user_transcript_pending = False
+        self._pending_assistant_turn: str | None = None
+        self._pending_assistant_timer: asyncio.Task | None = None
+
+    async def _flush_assistant_turn(self, text: str) -> None:
+        """Push an assistant turn into history, fire ``on_transcript``, and
+        emit turn-complete metrics. Shared between the immediate path (no
+        user transcript pending) and the buffered path (flushed after the
+        user transcript arrives or the fallback timer fires)."""
+        self.conversation_history.append(
+            {"role": "assistant", "text": text, "timestamp": time.time()}
+        )
+        self.transcript_entries.append({"role": "assistant", "text": text})
+        if self.on_transcript:
+            await self.on_transcript(
+                {
+                    "role": "assistant",
+                    "text": text,
+                    "call_id": self.call_id,
+                    "history": list(self.conversation_history),
+                }
+            )
+        if self.metrics is not None:
+            turn = self.metrics.record_turn_complete(text)
+            await self._emit_turn_metrics(turn)
+
+    async def _assistant_buffer_timeout(self) -> None:
+        """Fallback flush: if the user transcript never arrives, surface
+        the assistant turn alone after the wait window."""
+        try:
+            await asyncio.sleep(_REALTIME_USER_TRANSCRIPT_WAIT_S)
+        except asyncio.CancelledError:
+            return
+        buffered = self._pending_assistant_turn
+        self._pending_assistant_turn = None
+        self._pending_assistant_timer = None
+        self._user_transcript_pending = False
+        if buffered is not None:
+            try:
+                await self._flush_assistant_turn(buffered)
+            except Exception:
+                logger.exception("Assistant buffer flush (timeout) failed")
+
+    def _schedule_reassurance(
+        self, tool_def: dict, tool_name: str
+    ) -> asyncio.Task | None:
+        """Schedule a reassurance filler message if the tool has one
+        configured. Bridges the silence when a slow tool call would
+        otherwise leave the caller hanging. Returns the task so the
+        caller can cancel it on tool completion. Parity with TS
+        ``handleFunctionCall`` reassurance scheduling."""
+        config = tool_def.get("reassurance")
+        if not config:
+            return None
+        if isinstance(config, str):
+            message = config
+            after_ms = 1500
+        elif isinstance(config, dict):
+            message = config.get("message", "")
+            after_ms = int(config.get("after_ms", 1500))
+        else:
+            return None
+        if not message:
+            return None
+
+        adapter = self._adapter
+        if adapter is None or not hasattr(adapter, "send_text"):
+            return None
+
+        async def _fire() -> None:
+            try:
+                await asyncio.sleep(after_ms / 1000.0)
+                await adapter.send_text(message)
+            except asyncio.CancelledError:
+                # Tool returned before the grace window — nothing to do.
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Reassurance message failed for tool '%s': %s", tool_name, exc
+                )
+
+        return asyncio.create_task(_fire())
+
+    async def _emit_tool_event(
+        self,
+        name: str,
+        args: dict | None,
+        result: str | None,
+    ) -> None:
+        """Surface a tool invocation into the transcript timeline. Pushes
+        ``role="tool"`` into history (for the dashboard) and fires
+        ``on_transcript`` so the host application can log / persist /
+        render it. Result is truncated for log readability — the full
+        payload is in history."""
+        args_text = json.dumps(args or {})
+        if result is None:
+            text = f"{name}({args_text})"
+        else:
+            displayed = result if len(result) <= 200 else result[:200] + "…"
+            text = f"{name}({args_text}) → {displayed}"
+        self.conversation_history.append(
+            {"role": "tool", "text": text, "timestamp": time.time()}
+        )
+        self.transcript_entries.append({"role": "tool", "text": text})
+        if self.on_transcript:
+            await self.on_transcript(
+                {
+                    "role": "tool",
+                    "text": text,
+                    "call_id": self.call_id,
+                    "tool_name": name,
+                    "tool_args": args or {},
+                    "tool_result": result,
+                }
+            )
 
     async def start(self) -> None:
         """Connect to OpenAI Realtime, register tools, and begin event forwarding."""
         from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter  # type: ignore[import]
 
-        agent_tools: list[dict] = [
-            {
+        # Resolve MCP servers BEFORE the adapter is built so the
+        # discovered tools are visible in the first ``session.update``.
+        # Failures are logged but not fatal — a dead MCP server should
+        # not kill the entire call. Parity with TS ``initMcpTools``.
+        await self._init_mcp_tools()
+
+        agent_tools: list[dict] = []
+        for t in self.agent.tools or []:
+            entry: dict = {
                 "name": t["name"],
                 "description": t.get("description", ""),
                 "parameters": t.get("parameters", {}),
             }
-            for t in (self.agent.tools or [])
-        ]
+            # Propagate strict-mode opt-in to the OpenAI session.update
+            # wire format. Schema is already validated at agent() build
+            # time so we can pass it through without re-checking.
+            if t.get("strict") is True:
+                entry["strict"] = True
+            agent_tools.append(entry)
         openai_tools: list[dict] = agent_tools + [TRANSFER_CALL_TOOL, END_CALL_TOOL]
 
         self._adapter = OpenAIRealtimeAdapter(
@@ -577,6 +764,9 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                         self.metrics.start_turn()
                     waiting_first_audio = True
                     current_agent_text = ""
+                    # Mark a user transcript is expected so response_done
+                    # waits for it before pushing the assistant turn.
+                    self._user_transcript_pending = True
 
                 elif ev_type == "transcript_input":
                     logger.debug("User: %s", sanitize_log_value(ev_data))
@@ -602,6 +792,16 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                                 "history": list(self.conversation_history),
                             }
                         )
+                    # User transcript landed — flush any assistant turn
+                    # that was buffered waiting for it.
+                    self._user_transcript_pending = False
+                    if self._pending_assistant_turn is not None:
+                        buffered = self._pending_assistant_turn
+                        self._pending_assistant_turn = None
+                        if self._pending_assistant_timer is not None:
+                            self._pending_assistant_timer.cancel()
+                            self._pending_assistant_timer = None
+                        await self._flush_assistant_turn(buffered)
 
                 elif ev_type == "transcript_output":
                     if ev_data:
@@ -627,6 +827,14 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                         self.metrics.record_turn_interrupted()
                     waiting_first_audio = False
                     current_agent_text = ""
+                    # Barge-in invalidates any buffered assistant turn —
+                    # the user interrupted before the response was
+                    # committed; do not surface it as if completed.
+                    self._pending_assistant_turn = None
+                    if self._pending_assistant_timer is not None:
+                        self._pending_assistant_timer.cancel()
+                        self._pending_assistant_timer = None
+                    self._user_transcript_pending = False
 
                 elif ev_type == "response_done":
                     if self.metrics is not None and isinstance(ev_data, dict):
@@ -634,21 +842,20 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                         if usage:
                             self.metrics.record_realtime_usage(usage)
                     if current_agent_text:
-                        # Push complete response as single history entry
-                        self.conversation_history.append(
-                            {
-                                "role": "assistant",
-                                "text": current_agent_text,
-                                "timestamp": time.time(),
-                            }
-                        )
-                        self.transcript_entries.append(
-                            {"role": "assistant", "text": current_agent_text}
-                        )
-                        if self.metrics is not None:
-                            turn = self.metrics.record_turn_complete(current_agent_text)
-                            await self._emit_turn_metrics(turn)
+                        text_to_flush = current_agent_text
                         current_agent_text = ""
+                        if self._user_transcript_pending:
+                            # Buffer until the user transcript arrives so
+                            # the rendered order is [user, assistant, ...]
+                            # rather than [assistant, user, ...].
+                            self._pending_assistant_turn = text_to_flush
+                            if self._pending_assistant_timer is not None:
+                                self._pending_assistant_timer.cancel()
+                            self._pending_assistant_timer = asyncio.create_task(
+                                self._assistant_buffer_timeout()
+                            )
+                        else:
+                            await self._flush_assistant_turn(text_to_flush)
                     elif self.metrics is not None and self.metrics.turn_active:
                         # response_done without agent text = cancelled / empty
                         # response. Close the active turn as interrupted so the
@@ -672,26 +879,30 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                                 "transfer_call rejected: invalid number %s",
                                 mask_phone_number(transfer_number),
                             )
+                            rejection = json.dumps(
+                                {
+                                    "error": "Invalid phone number format",
+                                    "status": "rejected",
+                                }
+                            )
                             await self._adapter.send_function_result(
-                                func_data["call_id"],
-                                json.dumps(
-                                    {
-                                        "error": "Invalid phone number format",
-                                        "status": "rejected",
-                                    }
-                                ),
+                                func_data["call_id"], rejection
+                            )
+                            await self._emit_tool_event(
+                                "transfer_call", args, rejection
                             )
                             continue
                         logger.debug(
                             "Transferring call to %s",
                             mask_phone_number(transfer_number),
                         )
-                        await self._adapter.send_function_result(
-                            func_data["call_id"],
-                            json.dumps(
-                                {"status": "transferring", "to": transfer_number}
-                            ),
+                        result = json.dumps(
+                            {"status": "transferring", "to": transfer_number}
                         )
+                        await self._adapter.send_function_result(
+                            func_data["call_id"], result
+                        )
+                        await self._emit_tool_event("transfer_call", args, result)
                         if self._transfer_fn:
                             await self._transfer_fn(transfer_number)
                         if self.on_transcript:
@@ -713,10 +924,11 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                         )
                         reason = args.get("reason", "conversation_complete")
                         logger.debug("Ending call: %s", reason)
+                        result = json.dumps({"status": "ending", "reason": reason})
                         await self._adapter.send_function_result(
-                            func_data["call_id"],
-                            json.dumps({"status": "ending", "reason": reason}),
+                            func_data["call_id"], result
                         )
+                        await self._emit_tool_event("end_call", args, result)
                         if self._hangup_fn:
                             await self._hangup_fn()
                         if self.on_transcript:
@@ -744,20 +956,54 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                             args = func_data.get("arguments", "{}")
                             if isinstance(args, str):
                                 args = json.loads(args)
-                            result = await tool_executor.execute(
-                                tool_name=func_data["name"],
-                                arguments=args,
-                                call_context={
-                                    "call_id": self.call_id,
-                                    "caller": self.caller,
-                                    "callee": self.callee,
-                                },
-                                webhook_url=tool_def.get("webhook_url", ""),
-                                handler=tool_def.get("handler"),
+                            # Surface the invocation BEFORE execution so the
+                            # dashboard timeline shows it at the right point
+                            # even if the handler throws or hangs.
+                            await self._emit_tool_event(func_data["name"], args, None)
+                            # Schedule reassurance filler if configured —
+                            # bridges silence on slow tool calls. Cleared
+                            # in finally below. Parity with TS handler.
+                            reassurance_task = self._schedule_reassurance(
+                                tool_def, func_data["name"]
                             )
+                            # Progress sink: when the handler is an async
+                            # generator that yields ``{"progress": "..."}``,
+                            # forward each progress message via the Realtime
+                            # adapter so the agent speaks the update inline.
+                            adapter_for_progress = self._adapter
+
+                            async def _on_progress(text: str) -> None:
+                                if hasattr(adapter_for_progress, "send_text"):
+                                    try:
+                                        await adapter_for_progress.send_text(text)
+                                    except Exception as exc:  # noqa: BLE001
+                                        logger.warning(
+                                            "Tool progress message failed: %s",
+                                            exc,
+                                        )
+
+                            try:
+                                result = await tool_executor.execute(
+                                    tool_name=func_data["name"],
+                                    arguments=args,
+                                    call_context={
+                                        "call_id": self.call_id,
+                                        "caller": self.caller,
+                                        "callee": self.callee,
+                                    },
+                                    webhook_url=tool_def.get("webhook_url", ""),
+                                    handler=tool_def.get("handler"),
+                                    on_progress=_on_progress,
+                                )
+                            finally:
+                                if reassurance_task is not None:
+                                    reassurance_task.cancel()
                             await self._adapter.send_function_result(
                                 func_data["call_id"], result
                             )
+                            # Emit follow-up event with result so timeline
+                            # shows full call/return semantics.
+                            await self._emit_tool_event(func_data["name"], args, result)
         except Exception as exc:
             logger.exception("OpenAI Realtime forward error: %s", exc)
 
@@ -794,6 +1040,9 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                 pass
         if self._adapter:
             await self._adapter.close()
+        # Close MCP server connections. Best effort: a flaky MCP server
+        # must not derail call-end teardown.
+        await self._close_mcp()
         # Flush and discard the resampler tail on cleanup.
         if self._resampler_16k_to_8k is not None:
             self._resampler_16k_to_8k.flush()

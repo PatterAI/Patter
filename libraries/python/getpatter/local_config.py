@@ -30,3 +30,9 @@ class LocalConfig:
     # EventBus. Default is False to preserve current per-segment emission
     # behaviour.
     report_only_initial_ttfb: bool = False
+    # Resolved on-disk persistence root for the dashboard's call history,
+    # or ``None`` to disable. Computed by ``client.py`` from the public
+    # ``Patter(persist=...)`` option (with ``PATTER_LOG_DIR`` env-var
+    # fallback). When ``None``, ``CallLogger`` is a no-op and the dashboard
+    # is in-memory-only — restarts wipe history.
+    persist_root: str | None = None

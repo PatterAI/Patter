@@ -159,7 +159,11 @@ describe('Answering Machine Detection', () => {
     vi.unstubAllGlobals();
   });
 
-  it('Patter.call without machineDetection does not add AMD params', async () => {
+  it('Patter.call enables AMD by default (commit 2078ba8 — AMD on-by-default)', async () => {
+    // AMD is enabled by default in 0.6.0 because acceptance runs proved
+    // most missed calls were voicemail / call-waiting / cross-talk that
+    // looked like a normal call to the SDK without it. To explicitly opt
+    // out, pass `machineDetection: false` to phone.call.
     const phone = new Patter({
       carrier: new Twilio({ accountSid: 'AC_test', authToken: 'tok_test' }),
       openaiKey: 'sk_test',
@@ -177,8 +181,8 @@ describe('Answering Machine Detection', () => {
 
     const [, fetchInit] = mockFetch.mock.calls[0] as [string, RequestInit];
     const body = fetchInit.body as string;
-    expect(body).not.toContain('MachineDetection');
-    expect(body).not.toContain('AsyncAmd');
+    expect(body).toContain('MachineDetection=DetectMessageEnd');
+    expect(body).toContain('AsyncAmd=true');
 
     vi.unstubAllGlobals();
   });

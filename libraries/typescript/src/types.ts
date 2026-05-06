@@ -52,6 +52,22 @@ export type MessageHandler = (msg: IncomingMessage) => Promise<string>;
 /** Generic call-lifecycle callback (start/end/transcript/metrics). */
 export type CallEventHandler = (data: Record<string, unknown>) => Promise<void>;
 
+/**
+ * Public MCP server configuration. ``string`` is shorthand for
+ * ``{ url: <string>, transport: 'streamable-http' }``. Re-exported from
+ * ``tools/mcp-client`` to keep a single source of truth.
+ */
+export type MCPServerConfig =
+  | string
+  | {
+      readonly url: string;
+      readonly transport?: 'streamable-http';
+      /** Headers attached to every transport request — typically auth. */
+      readonly headers?: Record<string, string>;
+      /** Optional logical name for telemetry / log lines. */
+      readonly name?: string;
+    };
+
 /** Internal shape of a tool definition (matches `Tool` from `public-api.ts`). */
 export interface ToolDefinition {
   name: string;
@@ -59,8 +75,67 @@ export interface ToolDefinition {
   parameters: Record<string, unknown>;
   /** Webhook URL — called when the LLM invokes this tool. Mutually exclusive with handler. */
   webhookUrl?: string;
-  /** Local handler function — when provided, called instead of webhookUrl. */
-  handler?: (args: Record<string, unknown>, context: Record<string, unknown>) => Promise<string>;
+  /**
+   * Local handler — called instead of ``webhookUrl`` when present.
+   *
+   * Two forms:
+   *
+   *  - **Async function**: returns the final result as a JSON string.
+   *    The model receives only the final return value.
+   *
+   *  - **Async generator**: yields zero or more progress updates before
+   *    returning. Each ``yield`` of ``{ progress: string }`` is spoken
+   *    inline by the agent (Realtime: via ``adapter.sendText``) so the
+   *    caller hears live status during long-running tools. The final
+   *    ``return`` value (or last ``yield`` if no return) is the
+   *    function-call result sent to the model. Pipeline mode currently
+   *    ignores the progress yields — the final value is still used as
+   *    the tool result.
+   */
+  handler?:
+    | ((args: Record<string, unknown>, context: Record<string, unknown>) => Promise<string>)
+    | ((
+        args: Record<string, unknown>,
+        context: Record<string, unknown>,
+      ) => AsyncGenerator<{ progress?: string; result?: string }, string | void, unknown>);
+  /**
+   * "Reassurance" filler the agent speaks while a slow tool call runs.
+   * Bridges the silence when a handler or webhook takes longer than
+   * humans naturally tolerate (~1.5 s) without sounding dead.
+   *
+   * Two forms:
+   *  - string: shorthand for ``{ message: <string>, afterMs: 1500 }``.
+   *  - object: explicit ``{ message, afterMs? }``. ``afterMs`` is the
+   *    grace window before the reassurance fires; if the tool returns
+   *    earlier, no message is spoken.
+   *
+   * Currently honoured only in **Realtime mode** — the SDK enqueues the
+   * message via ``OpenAIRealtimeAdapter.sendText`` so the model
+   * synthesises it inline. Pipeline mode has no clean injection point
+   * mid-turn yet; the option is silently ignored there. Off by default.
+   */
+  reassurance?: string | { message: string; afterMs?: number };
+  /**
+   * Enable OpenAI strict mode for this tool's function schema. When ``true``
+   * the model is constrained to emit arguments that exactly match the
+   * declared schema — no missing required fields, no extra properties, no
+   * type coercion. Defaults to ``false`` for backward compatibility.
+   *
+   * Strict mode requires the schema to satisfy OpenAI's structural rules:
+   * - root must be ``type: "object"``
+   * - every nested object must have ``additionalProperties: false``
+   * - every property listed in ``properties`` must also be in ``required``
+   *
+   * Patter validates these requirements at ``agent()`` build time when
+   * ``strict: true`` is set; an invalid schema raises immediately rather
+   * than failing silently mid-call. Use ``null`` in a union (``["string",
+   * "null"]``) to express "optional" — strict mode does not allow truly
+   * optional fields.
+   *
+   * Recommended for any tool whose handler/webhook can't safely tolerate
+   * malformed arguments (DB writes, payment, transfers).
+   */
+  strict?: boolean;
 }
 
 // === Local mode ===
@@ -84,6 +159,34 @@ export interface LocalOptions {
   tunnel?: CloudflareTunnel | StaticTunnel | boolean;
   phoneNumber: string;
   webhookUrl?: string;
+  /**
+   * On-disk persistence for the dashboard's call history. The dashboard
+   * itself is in-memory, but enabling ``persist`` writes per-call records
+   * (metadata.json, transcript.jsonl, events.jsonl) to disk and rebuilds
+   * the in-memory cache on startup so the dashboard survives process
+   * restarts without an external database.
+   *
+   * Accepted values:
+   * - omitted / ``false`` (default): no disk writes; the dashboard resets
+   *   on every restart. Backward-compatible with prior behaviour.
+   * - ``true``: write under the platform default location
+   *   (``~/Library/Application Support/patter`` on macOS,
+   *   ``%LOCALAPPDATA%\\patter`` on Windows,
+   *   ``$XDG_DATA_HOME/patter`` on Linux). Equivalent to setting
+   *   ``PATTER_LOG_DIR=auto``.
+   * - string: write under the supplied absolute path. Equivalent to
+   *   setting ``PATTER_LOG_DIR=<path>``.
+   *
+   * The ``PATTER_LOG_DIR`` env var still works as a deployment-time
+   * override and takes precedence over an unset ``persist``. When
+   * ``persist`` is set explicitly the env var is ignored.
+   *
+   * Retention: defaults to 30 days, controlled by
+   * ``PATTER_LOG_RETENTION_DAYS`` (set to ``0`` to keep forever).
+   * Phone numbers are masked by default; control via
+   * ``PATTER_LOG_REDACT_PHONE``.
+   */
+  persist?: boolean | string;
   /**
    * @internal — allows ``StreamHandler`` to build the default OpenAI
    * ``LLMLoop`` when no ``onMessage`` handler is supplied. The
@@ -234,6 +337,27 @@ export interface AgentOptions {
   firstMessage?: string;
   /** Tool definitions — ``Tool`` class instances from ``getpatter``. */
   tools?: Array<ToolInstance>;
+  /**
+   * Model Context Protocol (MCP) servers to plug into this agent. Each
+   * server is queried at call start via ``tools/list`` and its tools
+   * are merged into ``tools`` with synthetic handlers that dispatch
+   * back through the MCP client. Lets you connect to existing MCP
+   * servers (Google Workspace, PayPal, GitHub, Postgres, …) without
+   * writing a wrapper handler.
+   *
+   * Each entry is either a URL string (shorthand for
+   * ``{ url, transport: 'streamable-http' }``) or an explicit object
+   * with optional ``headers`` for auth and a ``name`` for telemetry.
+   *
+   * Requires the optional dependency ``@modelcontextprotocol/sdk``.
+   * When unset, MCP is fully disabled and the SDK ships without the
+   * dependency installed.
+   *
+   * Cost: one HTTP handshake + ``tools/list`` round-trip per server at
+   * call start (~50-200 ms × N servers). Future iterations may cache
+   * the discovered list process-wide.
+   */
+  mcpServers?: ReadonlyArray<MCPServerConfig>;
   /**
    * When ``true``, ship ``systemPrompt`` to the LLM verbatim. Default
    * (``false``) prepends a phone-friendly preamble that instructs the

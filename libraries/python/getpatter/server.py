@@ -238,8 +238,19 @@ class EmbeddedServer:
         self.on_machine_detection = None
         self._telnyx_sig_warning_logged = False
         self._metrics_store = None
-        # Opt-in per-call filesystem logging (controlled by PATTER_LOG_DIR).
-        self._call_logger = CallLogger(resolve_log_root())
+        # Opt-in per-call filesystem logging. Path is resolved by
+        # ``client.py`` from the public ``Patter(persist=...)`` option
+        # (with the legacy ``PATTER_LOG_DIR`` env var as fallback). When
+        # ``config.persist_root`` is ``None`` the logger is a no-op.
+        # Callers that bypass ``client.py`` and instantiate the server
+        # directly fall back to the env-var resolver.
+        log_root = (
+            config.persist_root
+            if getattr(config, "persist_root", None) is not None
+            else resolve_log_root()
+        )
+        self._persist_root = log_root  # remember for hydrate() in serve()
+        self._call_logger = CallLogger(log_root)
         # Per-client-IP active WebSocket counter for DoS protection.
         # Mirrors TS server.ts:1042 (wsConnectionsByIp).
         self._ws_conn_counts: defaultdict[str, int] = defaultdict(int)
@@ -394,9 +405,9 @@ class EmbeddedServer:
 
             # Hydrate the dashboard from disk so /api/dashboard/calls survives
             # a process restart. CallLogger persists call metadata as JSONL/JSON
-            # under PATTER_LOG_DIR; if it's set, replay those files into the
-            # store. No-op when logging is disabled.
-            log_root = resolve_log_root()
+            # under the resolved log root; replay those files into the store.
+            # No-op when logging is disabled (``persist_root`` is ``None``).
+            log_root = self._persist_root
             if log_root is not None:
                 try:
                     restored = self._metrics_store.hydrate(str(log_root))

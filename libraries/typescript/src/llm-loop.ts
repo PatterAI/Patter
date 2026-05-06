@@ -13,6 +13,10 @@ import { getLogger } from './logger';
 import { validateWebhookUrl } from './server';
 import { SPAN_TOOL, withSpan } from './observability/tracing';
 import { PatterConnectionError } from './errors';
+import {
+  CircuitBreakerRegistry,
+  type CircuitBreakerOptions,
+} from './tools/circuit-breaker';
 
 // ---------------------------------------------------------------------------
 // Tool execution — pluggable policy
@@ -52,6 +56,7 @@ export interface ToolExecutor {
     toolDef: ToolDefinition,
     args: Record<string, unknown>,
     callContext: Record<string, unknown>,
+    onProgress?: (text: string) => void | Promise<void>,
   ): Promise<string>;
 }
 
@@ -59,44 +64,163 @@ export interface ToolExecutor {
 export interface DefaultToolExecutorOptions {
   /** Total attempts = maxRetries + 1. Default: 2 (i.e. 3 attempts). */
   maxRetries?: number;
-  /** Delay between attempts, in ms. */
+  /** Delay between attempts, in ms. Each retry waits this × ``2^attempt``. */
   retryDelayMs?: number;
   /** Per-request timeout for webhook calls, in ms. */
   requestTimeoutMs?: number;
+  /**
+   * Circuit-breaker tunables. Default trips OPEN after 5 consecutive
+   * failures and stays OPEN for 30 s. Pass ``{ failureThreshold: 0 }`` to
+   * disable entirely (legacy behaviour).
+   */
+  circuitBreaker?: CircuitBreakerOptions;
 }
 
 /**
- * Default executor — webhook with retry/fallback and local handler preference.
+ * Invoke a tool handler that may be either an ``async`` function (returns
+ * a JSON string) or an ``async function*`` generator (yields progress
+ * updates, returns / final-yields the result).
  *
- * This is the out-of-the-box behavior and is 1:1 equivalent to the previous
- * inline logic in ``LLMLoop.executeTool``.
+ * Generator yields are inspected for shape:
+ *  - ``{ progress: string }`` → forwarded to ``onProgress`` (the stream
+ *    handler speaks it inline via ``adapter.sendText``).
+ *  - ``{ result: string }`` → captured as the final result; subsequent
+ *    yields are ignored. The generator's ``return`` value (if any)
+ *    overrides this.
+ *  - any other shape → JSON-stringified and treated as ``progress``
+ *    (best-effort fallback — exotic shapes still surface to the caller).
+ */
+async function invokeHandler(
+  handler: NonNullable<ToolDefinition['handler']>,
+  args: Record<string, unknown>,
+  callContext: Record<string, unknown>,
+  onProgress?: (text: string) => void | Promise<void>,
+): Promise<string> {
+  // Call once and inspect what we got back. ``async function`` returns a
+  // Promise<string>; ``async function*`` returns an AsyncGenerator. The
+  // generator has both ``Symbol.asyncIterator`` AND a ``next`` method,
+  // which a Promise does not.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const invoked: any = (handler as any)(args, callContext);
+  if (invoked && typeof invoked === 'object' && typeof invoked[Symbol.asyncIterator] === 'function' && typeof invoked.next === 'function') {
+    let lastResult = '';
+    while (true) {
+      const step = await invoked.next();
+      if (step.done) {
+        const ret = typeof step.value === 'string' ? step.value : '';
+        return ret || lastResult || '{}';
+      }
+      const yielded = step.value;
+      if (yielded && typeof yielded === 'object') {
+        if (typeof yielded.progress === 'string') {
+          if (onProgress) await onProgress(yielded.progress);
+          continue;
+        }
+        if (typeof yielded.result === 'string') {
+          lastResult = yielded.result;
+          continue;
+        }
+      }
+      // Unknown shape → treat as best-effort progress so the caller at
+      // least sees something rather than a silent drop.
+      if (onProgress && yielded != null) {
+        const text = typeof yielded === 'string' ? yielded : JSON.stringify(yielded);
+        await onProgress(text);
+      }
+    }
+  }
+  // Plain async function — await the Promise.
+  return await (invoked as Promise<string>);
+}
+
+function backoffDelayMs(baseMs: number, attempt: number): number {
+  // Exponential: base × 2^attempt. Capped at 5 s so a slow vendor doesn't
+  // hold a real-time voice turn open for tens of seconds. Adds tiny
+  // jitter (0–60 ms) to avoid thundering herd on synchronized retries.
+  const cap = 5_000;
+  const exp = Math.min(cap, baseMs * Math.pow(2, attempt));
+  return Math.round(exp + Math.random() * 60);
+}
+
+/**
+ * Default executor — webhook + handler with retry/exponential-backoff
+ * and a per-tool circuit breaker.
+ *
+ * Failure modes return a structured ``{ error, fallback: true }`` JSON
+ * so the model can recover gracefully (e.g. respond "I couldn't reach
+ * the booking system, can I take your number to call you back?")
+ * instead of hanging on an exception that never surfaces.
  */
 export class DefaultToolExecutor implements ToolExecutor {
   private readonly maxRetries: number;
   private readonly retryDelayMs: number;
   private readonly requestTimeoutMs: number;
+  private readonly breaker: CircuitBreakerRegistry;
 
   constructor(opts: DefaultToolExecutorOptions = {}) {
     this.maxRetries = opts.maxRetries ?? DEFAULT_TOOL_MAX_RETRIES;
     this.retryDelayMs = opts.retryDelayMs ?? DEFAULT_TOOL_RETRY_DELAY_MS;
     this.requestTimeoutMs = opts.requestTimeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS;
+    this.breaker = new CircuitBreakerRegistry(opts.circuitBreaker ?? {});
+  }
+
+  /** Expose the breaker for tests + dashboard observability. */
+  get circuitBreaker(): CircuitBreakerRegistry {
+    return this.breaker;
   }
 
   async execute(
     toolDef: ToolDefinition,
     args: Record<string, unknown>,
     callContext: Record<string, unknown>,
+    /**
+     * Optional progress sink — invoked with each ``{ progress: string }``
+     * value yielded by an async-generator handler. Wired by the stream
+     * handler to ``OpenAIRealtimeAdapter.sendText`` so the agent speaks
+     * the progress message inline. ``null``/``undefined`` discards
+     * progress (function handlers always discard since they have no
+     * progress channel).
+     */
+    onProgress?: (text: string) => void | Promise<void>,
   ): Promise<string> {
-    // Prefer local handler.
+    // Reject early when the breaker is OPEN. Returns a structured
+    // fallback JSON so the model can recover instead of waiting.
+    if (!this.breaker.allow(toolDef.name)) {
+      const cooldown = this.breaker.timeUntilHalfOpen(toolDef.name);
+      return JSON.stringify({
+        error: `Tool '${toolDef.name}' is temporarily unavailable (circuit open).`,
+        fallback: true,
+        circuit_state: 'open',
+        retry_after_ms: cooldown,
+      });
+    }
+
+    // Local handler — now retried with exponential backoff (parity with
+    // the webhook path). Previously a single failure became a hard fault;
+    // a transient DB blip would silently kill the turn.
     if (toolDef.handler) {
-      try {
-        return await toolDef.handler(args, callContext);
-      } catch (e) {
-        return JSON.stringify({
-          error: `Tool handler error: ${String(e)}`,
-          fallback: true,
-        });
+      const totalAttempts = this.maxRetries + 1;
+      let lastErr: unknown = null;
+      for (let attempt = 0; attempt < totalAttempts; attempt++) {
+        try {
+          const result = await invokeHandler(toolDef.handler, args, callContext, onProgress);
+          this.breaker.recordSuccess(toolDef.name);
+          return result;
+        } catch (e) {
+          lastErr = e;
+          if (attempt < totalAttempts - 1) {
+            getLogger().warn(
+              `Tool handler '${toolDef.name}' failed (attempt ${attempt + 1}/${totalAttempts}), retrying: ${String(e)}`,
+            );
+            await new Promise<void>((r) => setTimeout(r, backoffDelayMs(this.retryDelayMs, attempt)));
+          }
+        }
       }
+      this.breaker.recordFailure(toolDef.name);
+      return JSON.stringify({
+        error: `Tool handler error after ${totalAttempts} attempts: ${String(lastErr)}`,
+        fallback: true,
+      });
     }
 
     // Fall back to webhook with retry/backoff.
@@ -133,20 +257,23 @@ export class DefaultToolExecutor implements ToolExecutor {
               if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
               const result = JSON.stringify(await resp.json());
               if (result.length > TOOL_MAX_RESPONSE_BYTES) {
+                this.breaker.recordFailure(toolDef.name);
                 return JSON.stringify({
                   error: `Webhook response too large: ${result.length} bytes (max ${TOOL_MAX_RESPONSE_BYTES})`,
                   fallback: true,
                 });
               }
+              this.breaker.recordSuccess(toolDef.name);
               return result;
             } catch (e) {
               if (attempt < totalAttempts - 1) {
                 getLogger().warn(
-                  `Tool webhook '${toolDef.name}' failed (attempt ${attempt + 1}), retrying: ${String(e)}`,
+                  `Tool webhook '${toolDef.name}' failed (attempt ${attempt + 1}/${totalAttempts}), retrying: ${String(e)}`,
                 );
-                await new Promise<void>((r) => setTimeout(r, this.retryDelayMs));
+                await new Promise<void>((r) => setTimeout(r, backoffDelayMs(this.retryDelayMs, attempt)));
               } else {
                 span.recordException(e);
+                this.breaker.recordFailure(toolDef.name);
                 return JSON.stringify({
                   error: `Tool failed after ${totalAttempts} attempts: ${String(e)}`,
                   fallback: true,

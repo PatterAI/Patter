@@ -17,7 +17,9 @@ import { CallMetricsAccumulator } from './metrics';
 import { mulawToPcm16, pcm16ToMulaw, StatefulResampler, createResampler8kTo16k, createResampler16kTo8k } from './audio/transcoding';
 import { LLMLoop } from './llm-loop';
 import { RemoteMessageHandler, isRemoteUrl, isWebSocketUrl } from './remote-message';
-import { createHistoryManager, executeToolWebhook } from './handler-utils';
+import { createHistoryManager } from './handler-utils';
+import { DefaultToolExecutor } from './llm-loop';
+import { MCPManager } from './tools/mcp-client';
 import type { AgentOptions, Guardrail, HookContext, PipelineMessageHandler, ToolDefinition, VADProvider } from './types';
 import type { MetricsStore } from './dashboard/store';
 import { getLogger } from './logger';
@@ -405,11 +407,56 @@ export class StreamHandler {
     );
   }
   private llmLoop: LLMLoop | null = null;
+  /**
+   * Per-call tool executor — provides retry-with-exponential-backoff and a
+   * per-tool circuit breaker for Realtime function calls. Pipeline mode
+   * uses its own executor inside ``LLMLoop``; this one is dedicated to
+   * the Realtime path so a flaky downstream (DB outage, vendor rate
+   * limit) returns a structured ``{ error, fallback: true }`` instead of
+   * hanging the model on retries that will keep failing.
+   */
+  private readonly toolExecutor = new DefaultToolExecutor();
+  /**
+   * MCP server connection manager — populated lazily in
+   * ``initMcpTools()`` when the agent declares ``mcpServers``. Holds
+   * the open MCP client connections for the lifetime of the call so
+   * we can dispatch ``tools/call`` without re-handshaking on every
+   * function invocation. Cleared in ``fireCallEnd``.
+   */
+  private mcpManager: MCPManager | null = null;
   private chunkCount = 0;
   private callEndFired = false;
   private sttClosed = false;
   private currentAgentText = '';
   private responseAudioStarted = false;
+  /**
+   * Realtime turn ordering buffer. OpenAI Realtime emits
+   * `input_audio_transcription.completed` (user transcript) AFTER
+   * `response.done` (assistant complete) because Whisper transcription
+   * runs in parallel with — and slower than — model response. Without
+   * this buffer the pushed `history` order is [assistant, user, ...]
+   * which renders out-of-order in the dashboard.
+   *
+   * Behaviour:
+   *  - `onAdapterSpeechStopped` flips `userTranscriptPending = true`
+   *  - `onAdapterResponseDone` checks the flag; if set, stashes the
+   *    assistant text + a fallback timer
+   *  - `onAdapterTranscriptInput` clears the flag, pushes user, then
+   *    flushes any pending assistant turn
+   *  - The fallback timer flushes the assistant alone if the user
+   *    transcript never arrives (silence misclassified as speech, etc.)
+   */
+  private userTranscriptPending = false;
+  private pendingAssistantTurn: string | null = null;
+  private pendingAssistantTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Hard cap on how long we wait for the user transcript before flushing
+   * the buffered assistant turn alone. 3 s covers OpenAI Whisper's typical
+   * 200-800 ms post-response delay with substantial headroom for slow
+   * cellular audio uploads. Beyond this we accept the order will look
+   * "assistant-only" rather than block the call's transcript display.
+   */
+  private static readonly REALTIME_USER_TRANSCRIPT_WAIT_MS = 3000;
   private maxDurationTimer: ReturnType<typeof setTimeout> | null = null;
   private transcriptProcessing = false;
   private transcriptQueue: STTTranscript[] = [];
@@ -689,11 +736,49 @@ export class StreamHandler {
 
     const provider = this.deps.agent.provider ?? 'openai_realtime';
 
+    // Resolve MCP servers BEFORE the adapter is built so the discovered
+    // tools are visible to the model in its first session.update (Realtime)
+    // or first LLM call (pipeline). One handshake + ``tools/list`` per
+    // server, ~50-200 ms total. Failures are logged but not fatal — a
+    // dead MCP server should not kill the entire call.
+    await this.initMcpTools();
+
     if (provider === 'pipeline') {
       await this.initPipeline(resolvedPrompt);
     } else {
       await this.initRealtimeAdapter(resolvedPrompt);
     }
+  }
+
+  /**
+   * Connect to every configured MCP server, discover their tools via
+   * ``tools/list``, and merge them into ``agent.tools`` before the
+   * adapter is built. The synthetic handlers dispatch back through the
+   * MCP client so ``DefaultToolExecutor`` can invoke them like any
+   * other handler-tool. No-op when ``agent.mcpServers`` is empty or the
+   * optional ``@modelcontextprotocol/sdk`` is not installed.
+   */
+  private async initMcpTools(): Promise<void> {
+    const servers = this.deps.agent.mcpServers;
+    if (!servers || servers.length === 0) return;
+    this.mcpManager = new MCPManager(servers);
+    let discovered: ToolDefinition[];
+    try {
+      discovered = await this.mcpManager.connect();
+    } catch (e) {
+      getLogger().error(`MCP connect failed (continuing without MCP tools): ${String(e)}`);
+      this.mcpManager = null;
+      return;
+    }
+    if (discovered.length === 0) return;
+    MCPManager.assertNoConflicts(this.deps.agent.tools as ToolDefinition[] | undefined, discovered);
+    // Merge into agent.tools. The interface is readonly at compile time
+    // but the underlying array is owned by the SDK at runtime — we cast
+    // to mutate in place so ``buildAIAdapter`` and the LLM loop see
+    // the discovered tools without a parallel plumbing parameter.
+    const mutableAgent = this.deps.agent as { tools?: ToolDefinition[] };
+    mutableAgent.tools = [...(mutableAgent.tools ?? []), ...discovered];
+    getLogger().info(`MCP: merged ${discovered.length} tool(s) into agent`);
   }
 
   /** Set the stream SID (Twilio only, called after parsing 'start' event). */
@@ -1772,6 +1857,10 @@ export class StreamHandler {
     if (!this.metricsAcc.turnActive) this.metricsAcc.startTurn();
     this.currentAgentText = '';
     this.responseAudioStarted = false;
+    // Mark that a user transcript is expected so the assistant's
+    // forthcoming `response.done` event waits for it before being
+    // pushed into history. See `userTranscriptPending` doc comment.
+    this.userTranscriptPending = true;
   }
 
   private async onAdapterTranscriptInput(inputText: string): Promise<void> {
@@ -1795,6 +1884,38 @@ export class StreamHandler {
         history: [...this.history.entries],
       });
     }
+    // User transcript is in — clear the pending flag and flush any
+    // assistant turn that was buffered waiting for this.
+    this.userTranscriptPending = false;
+    if (this.pendingAssistantTurn !== null) {
+      const buffered = this.pendingAssistantTurn;
+      this.pendingAssistantTurn = null;
+      if (this.pendingAssistantTimer) {
+        clearTimeout(this.pendingAssistantTimer);
+        this.pendingAssistantTimer = null;
+      }
+      await this.flushAssistantTurn(buffered);
+    }
+  }
+
+  /**
+   * Push an assistant turn into history, fire `onTranscript`, and emit
+   * turn-complete metrics. Shared between the immediate path (no user
+   * transcript pending) and the buffered path (flushed after user
+   * transcript arrives or fallback timer fires).
+   */
+  private async flushAssistantTurn(text: string): Promise<void> {
+    this.history.push({ role: 'assistant', text, timestamp: Date.now() });
+    if (this.deps.onTranscript) {
+      await this.deps.onTranscript({
+        role: 'assistant',
+        text,
+        call_id: this.callId,
+        history: [...this.history.entries],
+      });
+    }
+    this.responseAudioStarted = false;
+    await this.emitTurnMetrics(this.metricsAcc.recordTurnComplete(text));
   }
 
   private async onAdapterTranscriptOutput(outputText: string): Promise<void> {
@@ -1819,16 +1940,34 @@ export class StreamHandler {
       } | undefined;
       if (usage) this.metricsAcc.recordRealtimeUsage(usage);
     }
-    if (this.currentAgentText) {
-      this.history.push({ role: 'assistant', text: this.currentAgentText, timestamp: Date.now() });
-      this.responseAudioStarted = false;
-      await this.emitTurnMetrics(this.metricsAcc.recordTurnComplete(this.currentAgentText));
-      this.currentAgentText = '';
-    } else {
+    if (!this.currentAgentText) {
       // Empty response — discard the orphaned turn so it doesn't leak.
       this.metricsAcc.recordTurnInterrupted();
       this.responseAudioStarted = false;
+      return;
     }
+    const text = this.currentAgentText;
+    this.currentAgentText = '';
+    if (this.userTranscriptPending) {
+      // Buffer until the user transcript arrives so the rendered order
+      // is [user, assistant, user, assistant, ...] rather than the
+      // OpenAI Realtime native order [assistant, user, assistant, ...].
+      this.pendingAssistantTurn = text;
+      if (this.pendingAssistantTimer) clearTimeout(this.pendingAssistantTimer);
+      this.pendingAssistantTimer = setTimeout(() => {
+        const buffered = this.pendingAssistantTurn;
+        this.pendingAssistantTurn = null;
+        this.pendingAssistantTimer = null;
+        this.userTranscriptPending = false;
+        if (buffered !== null) {
+          // Fire-and-forget — caller is a setTimeout, can't await.
+          void this.flushAssistantTurn(buffered);
+        }
+      }, StreamHandler.REALTIME_USER_TRANSCRIPT_WAIT_MS);
+      this.responseAudioStarted = false;
+      return;
+    }
+    await this.flushAssistantTurn(text);
   }
 
   private onAdapterSpeechInterrupt(): void {
@@ -1837,6 +1976,44 @@ export class StreamHandler {
     this.metricsAcc.recordTurnInterrupted();
     this.currentAgentText = '';
     this.responseAudioStarted = false;
+    // A barge-in invalidates any buffered assistant turn — the user
+    // interrupted before the response was committed, so we should not
+    // surface it as if the agent had finished speaking.
+    this.pendingAssistantTurn = null;
+    if (this.pendingAssistantTimer) {
+      clearTimeout(this.pendingAssistantTimer);
+      this.pendingAssistantTimer = null;
+    }
+    this.userTranscriptPending = false;
+  }
+
+  /**
+   * Emit a tool-invocation event into the transcript timeline. Pushes a
+   * `role=tool` entry into `history` (so it appears in the dashboard
+   * transcript next to user/assistant turns) AND fires `onTranscript` so
+   * the host application can log / persist / render it. `result` is
+   * truncated for log readability — the full payload is in history.
+   */
+  private async emitToolEvent(
+    name: string,
+    args: unknown,
+    result: string | null,
+  ): Promise<void> {
+    const argsText = JSON.stringify(args);
+    const text = result === null
+      ? `${name}(${argsText})`
+      : `${name}(${argsText}) → ${result.length > 200 ? result.slice(0, 200) + '…' : result}`;
+    this.history.push({ role: 'tool', text, timestamp: Date.now() });
+    if (this.deps.onTranscript) {
+      await this.deps.onTranscript({
+        role: 'tool',
+        text,
+        call_id: this.callId,
+        tool_name: name,
+        tool_args: args,
+        tool_result: result,
+      });
+    }
   }
 
   private async handleFunctionCall(fc: { call_id: string; name: string; arguments: string }): Promise<void> {
@@ -1852,11 +2029,15 @@ export class StreamHandler {
       const transferTo = transferArgs.number ?? '';
       if (!isValidE164(transferTo)) {
         getLogger().warn(`transfer_call rejected (${this.deps.bridge.label}): invalid number ${JSON.stringify(transferTo)}`);
-        await adapter.sendFunctionResult(fc.call_id, JSON.stringify({ error: 'Invalid phone number format', status: 'rejected' }));
+        const rejection = JSON.stringify({ error: 'Invalid phone number format', status: 'rejected' });
+        await adapter.sendFunctionResult(fc.call_id, rejection);
+        await this.emitToolEvent('transfer_call', transferArgs, rejection);
         return;
       }
       getLogger().debug(`Transferring call to ${transferTo}`);
-      await adapter.sendFunctionResult(fc.call_id, JSON.stringify({ status: 'transferring', to: transferTo }));
+      const result = JSON.stringify({ status: 'transferring', to: transferTo });
+      await adapter.sendFunctionResult(fc.call_id, result);
+      await this.emitToolEvent('transfer_call', transferArgs, result);
       await this.deps.bridge.transferCall(this.callId, transferTo);
       if (this.deps.onTranscript) {
         await this.deps.onTranscript({ role: 'system', text: `Call transferred to ${transferTo}`, call_id: this.callId });
@@ -1873,7 +2054,9 @@ export class StreamHandler {
       }
       const reason = endArgs.reason ?? 'conversation_complete';
       getLogger().debug(`Ending call (${this.deps.bridge.label}): ${reason}`);
-      await adapter.sendFunctionResult(fc.call_id, JSON.stringify({ status: 'ending', reason }));
+      const result = JSON.stringify({ status: 'ending', reason });
+      await adapter.sendFunctionResult(fc.call_id, result);
+      await this.emitToolEvent('end_call', endArgs, result);
       await this.deps.bridge.endCall(this.callId, this.ws);
       if (this.deps.onTranscript) {
         await this.deps.onTranscript({ role: 'system', text: `Call ended: ${reason}`, call_id: this.callId });
@@ -1881,24 +2064,86 @@ export class StreamHandler {
       return;
     }
 
-    // User-defined tool
+    // User-defined tool — supports either `handler` (in-process function)
+    // or `webhookUrl` (HTTP POST). Dispatched through ``DefaultToolExecutor``
+    // so both paths get retry-with-exponential-backoff and a per-tool
+    // circuit breaker. Previously only `webhookUrl` worked in Realtime
+    // mode (handler tools fell through and hung the model); now both are
+    // routed through the same robust executor used by pipeline mode.
     const toolDef = this.deps.agent.tools?.find((t) => t.name === fc.name);
-    if (toolDef?.webhookUrl) {
-      let parsedArgs: unknown;
-      try {
-        parsedArgs = JSON.parse(fc.arguments || '{}');
-      } catch {
-        parsedArgs = {};
-      }
-      const result = await executeToolWebhook(
-        toolDef.webhookUrl,
-        fc.name,
-        parsedArgs,
-        { callId: this.callId, caller: this.caller },
-        this.deps.bridge.label === 'Twilio' ? '' : this.deps.bridge.label,
-      );
+    if (!toolDef) {
+      getLogger().warn(`Realtime tool '${fc.name}' not found in agent.tools — skipping`);
+      const result = JSON.stringify({ error: `Tool '${fc.name}' not registered`, fallback: true });
       await adapter.sendFunctionResult(fc.call_id, result);
+      await this.emitToolEvent(fc.name, {}, result);
+      return;
     }
+    let parsedArgs: Record<string, unknown>;
+    try {
+      parsedArgs = JSON.parse(fc.arguments || '{}') as Record<string, unknown>;
+    } catch {
+      parsedArgs = {};
+    }
+    // Surface the invocation into the transcript before execution so it
+    // appears in the dashboard timeline at the right point even if the
+    // handler throws or hangs.
+    await this.emitToolEvent(fc.name, parsedArgs, null);
+
+    // Schedule a "reassurance" filler if this tool has one configured —
+    // bridges the silence when a slow tool call would otherwise leave
+    // the caller hanging. Cleared on tool completion below. Currently
+    // Realtime-only (sendText path); pipeline mode silently skips.
+    const reassurance = (toolDef as { reassurance?: string | { message: string; afterMs?: number } })
+      .reassurance;
+    let reassuranceTimer: ReturnType<typeof setTimeout> | null = null;
+    if (reassurance) {
+      const msg = typeof reassurance === 'string' ? reassurance : reassurance.message;
+      const afterMs = typeof reassurance === 'string' ? 1500 : (reassurance.afterMs ?? 1500);
+      if (msg && this.adapter instanceof OpenAIRealtimeAdapter) {
+        const realtimeAdapter = this.adapter;
+        reassuranceTimer = setTimeout(() => {
+          // Fire-and-forget — caller is a setTimeout, can't await. Errors
+          // are non-fatal: a missed reassurance is just a longer silence.
+          realtimeAdapter.sendText(msg).catch((e: unknown) => {
+            getLogger().warn(`Reassurance message failed for tool '${fc.name}': ${String(e)}`);
+          });
+        }, afterMs);
+      }
+    }
+
+    // Progress sink: when the handler is an async generator that yields
+    // ``{ progress: "..." }``, forward each progress message to the
+    // OpenAI Realtime adapter so the agent speaks the update inline.
+    // Pipeline mode and non-Realtime adapters silently drop progress
+    // (no clean injection point yet — follow-up).
+    const onProgress = this.adapter instanceof OpenAIRealtimeAdapter
+      ? async (text: string): Promise<void> => {
+          try {
+            await (this.adapter as OpenAIRealtimeAdapter).sendText(text);
+          } catch (e) {
+            getLogger().warn(`Tool progress message failed for '${fc.name}': ${String(e)}`);
+          }
+        }
+      : undefined;
+
+    let result: string;
+    try {
+      result = await this.toolExecutor.execute(
+        toolDef as ToolDefinition,
+        parsedArgs,
+        {
+          call_id: this.callId,
+          caller: this.caller,
+        },
+        onProgress,
+      );
+    } finally {
+      if (reassuranceTimer) clearTimeout(reassuranceTimer);
+    }
+    await adapter.sendFunctionResult(fc.call_id, result);
+    // Emit a follow-up event with the result so the dashboard timeline
+    // shows both invocation and outcome.
+    await this.emitToolEvent(fc.name, parsedArgs, result);
   }
 
   // ---------------------------------------------------------------------------
@@ -1909,6 +2154,23 @@ export class StreamHandler {
     if (this.callEndFired) return;
     this.callEndFired = true;
     if (this.maxDurationTimer) { clearTimeout(this.maxDurationTimer); this.maxDurationTimer = null; }
+    // Flush any buffered assistant turn whose user transcript never
+    // arrived — better to surface it (out of strict order) than lose it.
+    if (this.pendingAssistantTimer) {
+      clearTimeout(this.pendingAssistantTimer);
+      this.pendingAssistantTimer = null;
+    }
+    if (this.pendingAssistantTurn !== null) {
+      const buffered = this.pendingAssistantTurn;
+      this.pendingAssistantTurn = null;
+      try { await this.flushAssistantTurn(buffered); } catch { /* best effort */ }
+    }
+    // Close MCP connections — best effort, swallow errors so a flaky
+    // MCP server can't derail call-end teardown.
+    if (this.mcpManager) {
+      try { await this.mcpManager.close(); } catch { /* ignore */ }
+      this.mcpManager = null;
+    }
 
     await this.deps.bridge.queryTelephonyCost(this.metricsAcc, this.callId);
 

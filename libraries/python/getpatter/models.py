@@ -141,6 +141,14 @@ class Agent:
     llm: "LLMProvider | None" = (
         None  # Optional built-in LLM provider for pipeline mode (e.g., AnthropicLLM())
     )
+    # Model Context Protocol (MCP) servers to plug into this agent. Each
+    # entry is either a ``str`` URL (shorthand) or a dict with at least
+    # ``url`` and optional ``headers`` / ``name``. At call start, the SDK
+    # queries each server's ``tools/list`` and merges the discovered
+    # tools into ``tools`` with synthetic handlers that dispatch to
+    # ``tools/call``. Requires the optional ``mcp`` package — install
+    # via ``pip install getpatter[mcp]``. ``None`` (default) disables MCP.
+    mcp_servers: list | None = None
     # Minimum sustained voice (ms) before treating caller audio as a barge-in
     # and interrupting TTS. ``0`` disables barge-in entirely — useful on noisy
     # links (ngrok tunnels, speakerphone) where the agent can hear itself.

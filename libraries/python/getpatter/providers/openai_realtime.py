@@ -131,6 +131,25 @@ class OpenAIRealtimeAdapter:
     def __repr__(self) -> str:
         return f"OpenAIRealtimeAdapter(model={self.model!r}, voice={self.voice!r}, audio_format={self.audio_format!r})"
 
+    @staticmethod
+    def _build_tool_wire_format(tool: dict) -> dict:
+        """Build the OpenAI Realtime function-tool envelope. Propagates
+        ``strict: true`` only when the user opted in — Patter does not flip
+        it on by default because OpenAI strict mode requires every property
+        in ``required`` and ``additionalProperties: false`` everywhere,
+        which would break tools with optional fields. Schema validation
+        runs at ``Patter.agent(...)`` build time so any strict-mode
+        violation is surfaced before this wire format is sent."""
+        wire: dict = {
+            "type": "function",
+            "name": tool["name"],
+            "description": tool["description"],
+            "parameters": tool["parameters"],
+        }
+        if tool.get("strict") is True:
+            wire["strict"] = True
+        return wire
+
     async def connect(self) -> None:
         """Connect to OpenAI Realtime API and wait for ``session.updated`` ack."""
         url = f"{self.OPENAI_REALTIME_URL}?model={self.model}"
@@ -184,13 +203,7 @@ class OpenAIRealtimeAdapter:
                 session_config["tool_choice"] = self.tool_choice
             if self.tools:
                 session_config["tools"] = [
-                    {
-                        "type": "function",
-                        "name": t["name"],
-                        "description": t["description"],
-                        "parameters": t["parameters"],
-                    }
-                    for t in self.tools
+                    self._build_tool_wire_format(t) for t in self.tools
                 ]
             await self._ws.send(
                 json.dumps(

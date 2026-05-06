@@ -47,6 +47,14 @@ export interface LocalConfig {
    * Set to false only for local development against mock providers.
    */
   requireSignature?: boolean;
+  /**
+   * Resolved on-disk persistence root for the dashboard's call history,
+   * or ``null`` to disable. Computed by ``client.ts`` from the public
+   * ``LocalOptions.persist`` option (with ``PATTER_LOG_DIR`` env-var
+   * fallback). When ``null``, `CallLogger` is a no-op and the dashboard
+   * is in-memory-only — restarts wipe history.
+   */
+  persistRoot?: string | null;
 }
 
 type AIAdapter = OpenAIRealtimeAdapter | ElevenLabsConvAIAdapter;
@@ -350,11 +358,17 @@ export function buildAIAdapter(config: LocalConfig, agent: AgentOptions, resolve
       agent.firstMessage ?? '',
     );
   }
-  // Always inject transfer_call and end_call system tools alongside agent-defined tools
+  // Always inject transfer_call and end_call system tools alongside agent-defined tools.
+  // ``strict`` is propagated when the user opts in — Patter does not flip it on
+  // by default because OpenAI strict mode requires every property in ``required``
+  // and ``additionalProperties: false`` everywhere, which would break tools with
+  // optional fields. The user's tool schemas are validated at agent() build time
+  // (see tools/schema-validation.ts) so any strict-mode violation surfaces early.
   const agentTools = agent.tools?.map((t) => ({
     name: t.name,
     description: t.description,
     parameters: t.parameters,
+    strict: (t as { strict?: boolean }).strict,
   })) ?? [];
   const tools = [...agentTools, TRANSFER_CALL_TOOL, END_CALL_TOOL];
   const openaiKey = engine && engine.kind === 'openai_realtime' ? engine.apiKey : (config.openaiKey ?? '');
@@ -661,8 +675,14 @@ export class EmbeddedServer {
   readonly metricsStore: MetricsStore;
   private readonly pricing: ReturnType<typeof mergePricing>;
   private readonly remoteHandler = new RemoteMessageHandler();
-  /** Opt-in per-call filesystem logger (set via PATTER_LOG_DIR). */
-  private readonly callLogger: CallLogger = new CallLogger(resolveLogRoot());
+  /**
+   * Opt-in per-call filesystem logger. Path is resolved by ``client.ts``
+   * from the public ``LocalOptions.persist`` option (with the legacy
+   * ``PATTER_LOG_DIR`` env var as fallback). Initialised in the ctor
+   * because ``resolveLogRoot`` cannot see ``this.config`` from a field
+   * default expression.
+   */
+  private readonly callLogger: CallLogger;
 
   /** Active WebSocket connections tracked for graceful shutdown. */
   private readonly activeConnections = new Set<WSWebSocket>();
@@ -693,11 +713,21 @@ export class EmbeddedServer {
     this.metricsStore = new MetricsStore();
     this.pricing = mergePricing(pricingOverrides as Record<string, { unit?: string; price?: number }> | undefined);
 
+    // Resolve the persistence root. Prefer the explicit value passed by
+    // ``client.ts`` (already resolved from the public ``persist`` option +
+    // env-var fallback). When ``persistRoot`` is ``undefined`` (callers
+    // that bypass ``client.ts`` and instantiate ``EmbeddedServer``
+    // directly, e.g. tests) fall back to the env var. ``null`` is the
+    // explicit "off" signal — keep it as null.
+    const logRoot = config.persistRoot === undefined
+      ? resolveLogRoot()
+      : config.persistRoot;
+    this.callLogger = new CallLogger(logRoot);
+
     // Hydrate the dashboard from disk so /api/dashboard/calls survives a
     // restart. CallLogger persists call metadata as JSONL/JSON under
-    // PATTER_LOG_DIR; if it's set, replay those files into the store.
-    // No-op when logging is disabled (PATTER_LOG_DIR unset).
-    const logRoot = resolveLogRoot();
+    // ``logRoot``; replay those files into the in-memory ring buffer.
+    // No-op when logging is disabled (``logRoot`` is ``null``).
     if (logRoot) {
       try {
         const restored = this.metricsStore.hydrate(logRoot);
