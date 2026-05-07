@@ -360,6 +360,30 @@ export class OpenAIRealtimeAdapter {
     this.ws?.send(JSON.stringify({ type: 'response.create' }));
   }
 
+  /**
+   * Make the AI speak ``text`` as its opening line.
+   *
+   * Triggers ``response.create`` with explicit ``instructions`` that force
+   * the model to render ``text`` verbatim as its first audio utterance.
+   * This is the correct semantics for ``Agent.firstMessage`` per its
+   * docstring ("What the AI says when the callee answers").
+   *
+   * Without this, ``sendText(firstMessage)`` would inject ``text`` as
+   * ``role: user`` and the AI would *reply* to its own greeting, producing
+   * role-confused openings (e.g. a receptionist agent responding "I'd like
+   * to schedule a haircut" because it took its own first_message as a
+   * customer cue).
+   */
+  async sendFirstMessage(text: string): Promise<void> {
+    this.ws?.send(JSON.stringify({
+      type: 'response.create',
+      response: {
+        modalities: ['audio', 'text'],
+        instructions: `Say exactly the following sentence as your first turn and nothing else: "${text}"`,
+      },
+    }));
+  }
+
   /** Submit a tool/function-call result and request the next response. */
   async sendFunctionResult(callId: string, result: string): Promise<void> {
     this.ws?.send(JSON.stringify({

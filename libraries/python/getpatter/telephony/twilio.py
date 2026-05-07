@@ -10,14 +10,6 @@ import time
 from collections import deque
 from urllib.parse import quote
 
-from getpatter.telephony.common import (
-    _create_stt_from_config,  # noqa: F401 — re-exported for tests and external callers
-    _create_tts_from_config,  # noqa: F401 — re-exported for tests and external callers
-    _resolve_variables,  # noqa: F401 — re-exported for tests and external callers
-    _sanitize_variable_value,  # noqa: F401 — re-exported for tests and external callers
-    _validate_e164,
-)
-from getpatter.utils.log_sanitize import mask_phone_number
 from getpatter.stream_handler import (
     END_CALL_TOOL,
     TRANSFER_CALL_TOOL,
@@ -30,6 +22,14 @@ from getpatter.stream_handler import (
     fetch_deepgram_cost,
     resolve_agent_prompt,
 )
+from getpatter.telephony.common import (
+    _create_stt_from_config,  # noqa: F401 — re-exported for tests and external callers
+    _create_tts_from_config,  # noqa: F401 — re-exported for tests and external callers
+    _resolve_variables,  # noqa: F401 — re-exported for tests and external callers
+    _sanitize_variable_value,  # noqa: F401 — re-exported for tests and external callers
+    _validate_e164,
+)
+from getpatter.utils.log_sanitize import mask_phone_number
 
 # Backward-compatible aliases for tests and external code
 _TRANSFER_CALL_TOOL = TRANSFER_CALL_TOOL
@@ -236,6 +236,7 @@ async def twilio_stream_bridge(
     on_metrics=None,
     pricing: dict | None = None,
     report_only_initial_ttfb: bool = False,
+    speech_events=None,
 ) -> None:
     """Bridge a Twilio WebSocket media stream to the configured AI provider.
 
@@ -489,6 +490,7 @@ async def twilio_stream_bridge(
                         # 16 kHz → 8 kHz resample chain that otherwise
                         # produces a deep, slurred voice.
                         audio_format="g711_ulaw",
+                        speech_events=speech_events,
                     )
 
                 await handler.start()

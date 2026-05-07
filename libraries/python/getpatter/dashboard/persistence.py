@@ -48,13 +48,20 @@ async def notify_dashboard(call_data: dict[str, Any], port: int = 8000) -> None:
     to respond.
 
     Silently ignores connection errors — the dashboard may not be running.
+
+    Skip entirely when ``PATTER_DASHBOARD_NOTIFY`` is set to ``0``/``false``
+    (case-insensitive). This avoids 404 spam in the receiver's access log
+    when callers embed Patter alongside their own FastAPI server on port
+    8000 (e.g. agent-to-agent test runners).
     """
+    import os
+
+    flag = os.environ.get("PATTER_DASHBOARD_NOTIFY", "").strip().lower()
+    if flag in ("0", "false", "no", "off"):
+        return
     try:
         import httpx
 
-        # Defensive flatten of nested dataclasses. The previous implementation
-        # round-tripped through ``json.dumps``/``json.loads``; ``httpx`` does
-        # JSON encoding itself, so we only need plain Python types.
         payload = _to_jsonable(call_data)
 
         async with httpx.AsyncClient(timeout=1.0) as client:

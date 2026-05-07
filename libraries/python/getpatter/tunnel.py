@@ -14,8 +14,8 @@ import atexit
 import logging
 import re
 import shutil
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 logger = logging.getLogger("getpatter")
 
@@ -108,11 +108,17 @@ async def start_tunnel(port: int, timeout: float = _STARTUP_TIMEOUT) -> TunnelHa
             task.cancel()
 
     except Exception:
-        proc.terminate()
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            pass  # cloudflared already exited (e.g. transient quick-tunnel failure)
         raise
 
     if hostname is None:
-        proc.terminate()
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            pass  # cloudflared already exited
         raise TimeoutError(
             f"Tunnel failed to start within {timeout}s. "
             "Check your internet connection or provide webhook_url manually."

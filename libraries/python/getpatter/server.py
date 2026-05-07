@@ -6,6 +6,7 @@ import asyncio
 import base64
 import ipaddress
 import logging
+import os
 import re
 import signal
 import time
@@ -162,8 +163,8 @@ def _validate_telnyx_signature(
     if age_ms < 0 or age_ms > tolerance_sec * 1000:
         return False
     try:
-        from cryptography.hazmat.primitives.serialization import load_der_public_key
         from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives.serialization import load_der_public_key
     except ImportError:
         logger.warning(
             "cryptography package not installed — cannot verify Telnyx signature. "
@@ -333,11 +334,7 @@ class EmbeddedServer:
                 from dataclasses import asdict, is_dataclass
 
                 metrics_obj = data.get("metrics")
-                duration = (
-                    getattr(metrics_obj, "duration_seconds", None)
-                    if metrics_obj
-                    else None
-                )
+                duration = getattr(metrics_obj, "duration_seconds", None) if metrics_obj else None
                 cost_obj = getattr(metrics_obj, "cost", None) if metrics_obj else None
                 cost_dict = asdict(cost_obj) if is_dataclass(cost_obj) else None
                 latency_dict = None
@@ -350,11 +347,7 @@ class EmbeddedServer:
                         "p95_ms": getattr(p95, "total_ms", None) if p95 else None,
                         "p99_ms": getattr(p99, "total_ms", None) if p99 else None,
                     }
-                turns_count = (
-                    len(getattr(metrics_obj, "turns", []) or [])
-                    if metrics_obj
-                    else None
-                )
+                turns_count = len(getattr(metrics_obj, "turns", []) or []) if metrics_obj else None
                 await alog_call_end(
                     call_logger,
                     data.get("call_id", ""),
@@ -387,18 +380,17 @@ class EmbeddedServer:
 
     def _create_app(self):
         """Build the FastAPI application with webhook + stream routes."""
-        from getpatter.telephony.twilio import (
-            twilio_webhook_handler,
-            twilio_stream_bridge,
-        )
         from getpatter.telephony.telnyx import telnyx_stream_bridge
+        from getpatter.telephony.twilio import (
+            twilio_stream_bridge,
+            twilio_webhook_handler,
+        )
 
         app = FastAPI(title="Patter Local Server")
 
         # --- Dashboard ---
         if self.dashboard:
             from getpatter.dashboard.routes import mount_dashboard
-
             from getpatter.dashboard.store import MetricsStore
 
             self._metrics_store = MetricsStore()
@@ -445,9 +437,7 @@ class EmbeddedServer:
             returns a 503 Response — safety-first posture requires an
             explicit opt-out to accept unsigned webhooks.
             """
-            if not self.config.twilio_token and getattr(
-                self.config, "require_signature", True
-            ):
+            if not self.config.twilio_token and getattr(self.config, "require_signature", True):
                 logger.error(
                     "Twilio webhook rejected: twilio_token not configured and "
                     "require_signature=True. Set twilio_token, or explicitly "
@@ -468,9 +458,7 @@ class EmbeddedServer:
                         "Install with: pip install 'getpatter[local]' or "
                         "`pip install twilio`."
                     )
-                    return Response(
-                        status_code=503, content="Signature validator unavailable"
-                    )
+                    return Response(status_code=503, content="Signature validator unavailable")
                 form_data = await request.form()
                 validator = RequestValidator(self.config.twilio_token)
                 # Use request.url verbatim when it carries .path / .query
@@ -505,9 +493,7 @@ class EmbeddedServer:
             # masked. Same for `To` / `Called`.
             caller = form_data.get("From", "") or form_data.get("Caller", "")
             callee = form_data.get("To", "") or form_data.get("Called", "")
-            twiml = twilio_webhook_handler(
-                call_sid, caller, callee, self.config.webhook_url
-            )
+            twiml = twilio_webhook_handler(call_sid, caller, callee, self.config.webhook_url)
             return Response(content=twiml, media_type="text/xml")
 
         # Twilio posts here for every status transition of a call
@@ -593,14 +579,12 @@ class EmbeddedServer:
                 and self.config.twilio_token
             ):
                 from getpatter.telephony.twilio import (
-                    _xml_escape,
                     _validate_twilio_sid,
+                    _xml_escape,
                 )
 
                 if not _validate_twilio_sid(call_sid, "CA"):
-                    logger.warning(
-                        "AMD callback: invalid CallSid format %r, ignoring", call_sid
-                    )
+                    logger.warning("AMD callback: invalid CallSid format %r, ignoring", call_sid)
                     return Response(content="", status_code=204)
 
                 import httpx as _httpx
@@ -659,6 +643,7 @@ class EmbeddedServer:
                     on_metrics=_metrics,
                     pricing=self.pricing,
                     report_only_initial_ttfb=self.config.report_only_initial_ttfb,
+                    speech_events=getattr(self, "speech_events", None),
                 )
             finally:
                 self._active_connections.discard(websocket)
@@ -681,9 +666,7 @@ class EmbeddedServer:
                 if not _validate_telnyx_signature(
                     raw_body, signature, timestamp, telnyx_public_key
                 ):
-                    logger.warning(
-                        "Telnyx webhook rejected: invalid or missing Ed25519 signature"
-                    )
+                    logger.warning("Telnyx webhook rejected: invalid or missing Ed25519 signature")
                     return Response(status_code=403, content="Invalid signature")
             elif require_sig:
                 logger.error(
@@ -707,9 +690,7 @@ class EmbeddedServer:
             if not isinstance(body.get("data"), dict) or not isinstance(
                 body.get("data", {}).get("payload"), dict
             ):
-                logger.warning(
-                    "Telnyx webhook rejected: missing data.payload structure."
-                )
+                logger.warning("Telnyx webhook rejected: missing data.payload structure.")
                 return Response(status_code=400, content="Invalid webhook structure")
             data = body["data"]
             event_type = data.get("event_type", "")
@@ -824,9 +805,7 @@ class EmbeddedServer:
                             if asyncio.iscoroutine(cb_ret):
                                 await cb_ret
                         except Exception as exc:
-                            logger.warning(
-                                "on_machine_detection callback threw: %s", exc
-                            )
+                            logger.warning("on_machine_detection callback threw: %s", exc)
                     if self.voicemail_message:
                         from getpatter.telephony.telnyx import handle_amd_result
 
@@ -943,9 +922,7 @@ class EmbeddedServer:
                     "Twilio webhook enforcement ACTIVE but twilio_token is empty "
                     "— webhooks will 503. Set require_signature=False for local dev."
                 )
-            if provider == "telnyx" and not getattr(
-                self.config, "telnyx_public_key", ""
-            ):
+            if provider == "telnyx" and not getattr(self.config, "telnyx_public_key", ""):
                 logger.warning(
                     "Telnyx webhook enforcement ACTIVE but telnyx_public_key is empty "
                     "— webhooks will 503. Set require_signature=False for local dev."
@@ -995,7 +972,14 @@ class EmbeddedServer:
         # but keep request logs (INFO level) visible
         logging.getLogger("uvicorn.error").setLevel(logging.WARNING)
 
-        config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="info")
+        # Default bind = 127.0.0.1 (loopback, safest). Set
+        # ``PATTER_BIND_HOST=0.0.0.0`` when the SDK runs inside a container
+        # whose port must be reachable from the host (e.g. ``docker run -p
+        # 8000:8000`` with a tunnel pointing at the host port — Docker's
+        # port-mapping cannot forward to a 127.0.0.1 listener inside the
+        # container because that's the container's own loopback).
+        bind_host = os.environ.get("PATTER_BIND_HOST", "127.0.0.1")
+        config = uvicorn.Config(app, host=bind_host, port=port, log_level="info")
         self._server = uvicorn.Server(config)
 
         # Register signal handlers for graceful shutdown

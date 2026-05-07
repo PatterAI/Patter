@@ -19,7 +19,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any, Callable, Awaitable
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any
 
 logger = logging.getLogger("getpatter")
 
@@ -109,9 +110,7 @@ class Patter:
             raise NotImplementedError(_CLOUD_NOT_IMPLEMENTED_MSG)
         if kwargs:
             unexpected = ", ".join(sorted(kwargs))
-            raise TypeError(
-                f"Patter() got unexpected keyword argument(s): {unexpected}"
-            )
+            raise TypeError(f"Patter() got unexpected keyword argument(s): {unexpected}")
 
         self._pricing = pricing
 
@@ -167,18 +166,16 @@ class Patter:
         # webhook hostname (either statically configured or freshly minted by
         # the tunnel). Initialised lazily below to avoid pulling asyncio
         # imports into module-init.
-        self._tunnel_ready: "asyncio.Future[str] | None" = None
+        self._tunnel_ready: asyncio.Future[str] | None = None
         # Pre-resolve when webhook_url is static — no tunnel cold-start to
         # wait on. We can't create the Future here (no running loop yet) so
         # stash the value and create+resolve on first ``tunnel_ready`` access.
-        self._tunnel_ready_pre_resolved: str | None = (
-            webhook_url if webhook_url else None
-        )
+        self._tunnel_ready_pre_resolved: str | None = webhook_url if webhook_url else None
         # ``ready`` is the safe signal for outbound calls — resolves only
         # after ``serve()`` brings the embedded server up to ``listen``
         # state. Never pre-resolved at construction even when webhook_url
         # is static, because the WS routes only register inside ``serve()``.
-        self._ready: "asyncio.Future[str] | None" = None
+        self._ready: asyncio.Future[str] | None = None
         # True iff ``_local_config.webhook_url`` was populated by ``serve()``
         # from a freshly-started cloudflared tunnel (rather than by the
         # constructor from an explicit ``webhook_url`` value). ``disconnect()``
@@ -298,8 +295,7 @@ class Patter:
                 "public_key": carrier.public_key,
             }
         raise TypeError(
-            "carrier= must be a Twilio(...) or Telnyx(...) instance, got "
-            f"{type(carrier).__name__}"
+            f"carrier= must be a Twilio(...) or Telnyx(...) instance, got {type(carrier).__name__}"
         )
 
     @staticmethod
@@ -355,7 +351,7 @@ class Patter:
         return getattr(server, "_metrics_store", None)
 
     @property
-    def tunnel_ready(self) -> "asyncio.Future[str]":
+    def tunnel_ready(self) -> asyncio.Future[str]:
         """Future that resolves as soon as the public webhook hostname is known.
 
         **Prefer ``ready`` for outbound calls.** ``tunnel_ready`` resolves
@@ -374,7 +370,7 @@ class Patter:
         return self._tunnel_ready
 
     @property
-    def ready(self) -> "asyncio.Future[str]":
+    def ready(self) -> asyncio.Future[str]:
         """Future that resolves once the SDK is fully ready for callbacks.
 
         Resolves after tunnel + carrier auto-config + embedded server
@@ -426,7 +422,7 @@ class Patter:
         from_number: str = "",
         machine_detection: bool = True,
         on_machine_detection: (
-            Callable[["MachineDetectionResult"], Awaitable[None] | None] | None
+            Callable[[MachineDetectionResult], Awaitable[None] | None] | None
         ) = None,
         voicemail_message: str = "",
         ring_timeout: int | None = 25,
@@ -615,22 +611,22 @@ class Patter:
         model: str = "gpt-4o-mini-realtime-preview",
         language: str = "en",
         first_message: str = "",
-        tools: "list[Tool] | None" = None,
+        tools: list[Tool] | None = None,
         stt: STTProvider | None = None,
         tts: TTSProvider | None = None,
         variables: dict | None = None,
-        guardrails: "list[Guardrail] | None" = None,
-        hooks: "PipelineHooks | None" = None,
-        text_transforms: "list[Callable] | None" = None,
-        vad: "VADProvider | None" = None,
-        audio_filter: "AudioFilter | None" = None,
-        background_audio: "BackgroundAudioPlayer | None" = None,
+        guardrails: list[Guardrail] | None = None,
+        hooks: PipelineHooks | None = None,
+        text_transforms: list[Callable] | None = None,
+        vad: VADProvider | None = None,
+        audio_filter: AudioFilter | None = None,
+        background_audio: BackgroundAudioPlayer | None = None,
         barge_in_threshold_ms: int = 300,
         aggressive_first_flush: bool = False,
         disable_phone_preamble: bool = False,
         echo_cancellation: bool = False,
         engine: Any = None,
-        llm: "LLMProvider | None" = None,
+        llm: LLMProvider | None = None,
         mcp_servers: list | None = None,
     ) -> Agent:
         """Create an ``Agent`` configuration.
@@ -676,8 +672,7 @@ class Patter:
             # Emit a one-time warning so the user knows.
             if llm is not None:
                 logger.warning(
-                    "llm= ignored when engine= is set (the engine handles the "
-                    "LLM internally)."
+                    "llm= ignored when engine= is set (the engine handles the LLM internally)."
                 )
             engine_kind, engine_fields = self._unpack_engine(engine)
             provider = engine_kind
@@ -707,13 +702,9 @@ class Patter:
         from dataclasses import replace
 
         if openai_engine_key and not self._local_config.openai_key:
-            self._local_config = replace(
-                self._local_config, openai_key=openai_engine_key
-            )
+            self._local_config = replace(self._local_config, openai_key=openai_engine_key)
         if elevenlabs_engine_key and not self._local_config.elevenlabs_key:
-            self._local_config = replace(
-                self._local_config, elevenlabs_key=elevenlabs_engine_key
-            )
+            self._local_config = replace(self._local_config, elevenlabs_key=elevenlabs_engine_key)
 
         if provider == "openai_realtime" and not self._local_config.openai_key:
             raise ValueError(
@@ -750,20 +741,14 @@ class Patter:
             validate_all_tool_schemas(tools_out)
 
         if variables is not None and not isinstance(variables, dict):
-            raise TypeError(
-                f"variables must be a dict, got {type(variables).__name__}."
-            )
+            raise TypeError(f"variables must be a dict, got {type(variables).__name__}.")
 
         # --- Normalise guardrails ---
         guardrails_out: list[dict] | None = None
         if guardrails is not None:
             if not isinstance(guardrails, list):
-                raise TypeError(
-                    f"guardrails must be a list, got {type(guardrails).__name__}."
-                )
-            guardrails_out = [
-                self._guardrail_to_dict(g, index=i) for i, g in enumerate(guardrails)
-            ]
+                raise TypeError(f"guardrails must be a list, got {type(guardrails).__name__}.")
+            guardrails_out = [self._guardrail_to_dict(g, index=i) for i, g in enumerate(guardrails)]
 
         return Agent(
             system_prompt=system_prompt,
@@ -919,19 +904,10 @@ class Patter:
                 "Cannot pass both `llm=` on the agent and `on_message=` on serve(). "
                 "Pick one — `llm=` for built-in LLMs, `on_message=` for custom logic."
             )
-        if (
-            not isinstance(port, int)
-            or isinstance(port, bool)
-            or port < 1
-            or port > 65535
-        ):
-            raise ValueError(
-                f"port must be an integer between 1 and 65535, got {port!r}."
-            )
+        if not isinstance(port, int) or isinstance(port, bool) or port < 1 or port > 65535:
+            raise ValueError(f"port must be an integer between 1 and 65535, got {port!r}.")
         if not isinstance(recording, bool):
-            raise TypeError(
-                f"recording must be a bool, got {type(recording).__name__}."
-            )
+            raise TypeError(f"recording must be a bool, got {type(recording).__name__}.")
 
         # Resolve webhook_url: tunnel or explicit
         config = self._local_config
@@ -997,6 +973,12 @@ class Patter:
         self._server.on_transcript = on_transcript
         self._server.on_message = on_message
         self._server.on_metrics = on_metrics
+        # Forward the Patter-level SpeechEvents dispatcher so the per-call
+        # StreamHandler can fire turn-taking edges into observers attached
+        # via ``phone.on_user_speech_started`` etc. Without this the SDK's
+        # ``_emit_*_speech_*`` paths short-circuit on ``self.speech_events
+        # is None`` and zero events ever reach the runner's tap.
+        self._server.speech_events = self.speech_events
 
         # Run uvicorn in a task so we can resolve ``phone.ready`` once it
         # finishes its startup phase. ``server.start()`` itself awaits
@@ -1017,9 +999,7 @@ class Patter:
                     break
                 await asyncio.sleep(0.05)
             else:
-                raise TimeoutError(
-                    "Embedded server did not reach 'started' state within 30s"
-                )
+                raise TimeoutError("Embedded server did not reach 'started' state within 30s")
 
             # Tunnel reachability self-test: cloudflared returns the URL
             # the moment its control plane has issued it, but the public
@@ -1063,9 +1043,7 @@ class Patter:
             on_call_end: Optional call end callback.
         """
         if not isinstance(agent, Agent):
-            raise TypeError(
-                f"agent must be an Agent instance, got {type(agent).__name__}."
-            )
+            raise TypeError(f"agent must be an Agent instance, got {type(agent).__name__}.")
 
         from getpatter.test_mode import TestSession
 
@@ -1110,6 +1088,53 @@ class Patter:
             self._tunnel_ready_pre_resolved = self._local_config.webhook_url
         else:
             self._tunnel_ready_pre_resolved = None
+
+    async def end_call(self, call_sid: str) -> None:
+        """Terminate an active call on the configured carrier.
+
+        Posts a hangup to the carrier (Twilio
+        ``Calls(call_sid).update(status='completed')`` or Telnyx
+        ``/v2/calls/{call_control_id}/actions/hangup``) so the bridge tears
+        down gracefully — the SDK's WebSocket handler then fires
+        ``on_call_end`` with the final ``CallMetrics`` before the WS closes.
+
+        Use this when the host application needs to end a call programmatically
+        without going through the LLM tool-call path (e.g. an admin override,
+        a watchdog, or an integration test runner).
+
+        Args:
+            call_sid: Carrier-issued call identifier (Twilio Call SID or
+                Telnyx call_control_id) returned from a previous
+                ``Patter.call(...)`` or captured in the ``on_call_start``
+                callback's payload.
+
+        Raises:
+            ValueError: ``call_sid`` is empty or no carrier is configured.
+        """
+        if not call_sid:
+            raise ValueError("call_sid must be a non-empty string")
+        cfg = self._local_config
+        telephony = cfg.telephony_provider
+        if telephony == "twilio":
+            if not cfg.twilio_sid or not cfg.twilio_token:
+                raise ValueError("Twilio credentials not configured on this Patter instance")
+            from twilio.rest import Client  # type: ignore[import-not-found]
+
+            client = Client(cfg.twilio_sid, cfg.twilio_token)
+            await asyncio.to_thread(lambda: client.calls(call_sid).update(status="completed"))
+        elif telephony == "telnyx":
+            if not cfg.telnyx_key:
+                raise ValueError("Telnyx credentials not configured on this Patter instance")
+            import telnyx  # type: ignore[import-not-found]
+
+            api = telnyx.api_requestor.APIRequestor(api_key=cfg.telnyx_key)
+            await asyncio.to_thread(
+                lambda: api.request("post", f"/v2/calls/{call_sid}/actions/hangup")
+            )
+        else:
+            raise ValueError(
+                f"end_call() requires a configured carrier; got telephony_provider={telephony!r}"
+            )
 
 
 async def _wait_for_tunnel_publicly_reachable(
@@ -1167,10 +1192,7 @@ async def _wait_for_tunnel_publicly_reachable(
         flags = 0x0100  # standard query, recursion desired
         header = struct.pack(">HHHHHH", txid, flags, 1, 0, 0, 0)
         qname = (
-            b"".join(
-                bytes([len(part)]) + part.encode("ascii")
-                for part in hostname.split(".")
-            )
+            b"".join(bytes([len(part)]) + part.encode("ascii") for part in hostname.split("."))
             + b"\x00"
         )
         question = qname + struct.pack(">HH", 1, 1)  # A, IN
@@ -1218,7 +1240,7 @@ async def _wait_for_tunnel_publicly_reachable(
                 addr = _resolve_one(server)
                 if addr:
                     return addr
-            except Exception:  # noqa: BLE001 — try next server
+            except Exception:
                 continue
         return None
 
@@ -1236,7 +1258,7 @@ async def _wait_for_tunnel_publicly_reachable(
                 await asyncio.sleep(grace_s)
                 return
             last_err = RuntimeError("no A record returned")
-        except Exception as err:  # noqa: BLE001 — propagate via TimeoutError
+        except Exception as err:
             last_err = err
         # Backoff: 250 ms, 400 ms, 640 ms, 1.0 s, capped at 2 s.
         delay = min(0.25 * (1.6 ** (attempt - 1)), 2.0)

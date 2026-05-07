@@ -1188,9 +1188,14 @@ export class EmbeddedServer {
     });
 
     await new Promise<void>((resolve) => {
-      // Bind to loopback only. Public exposure should go through a reverse
-      // proxy or tunnel so the Node process is never directly reachable.
-      this.server!.listen(port, '127.0.0.1', () => {
+      // Default bind = 127.0.0.1 (loopback, safest). Set
+      // ``PATTER_BIND_HOST=0.0.0.0`` when the SDK runs inside a container
+      // whose port must be reachable from the host (e.g. ``docker run -p
+      // 8000:8000`` with a tunnel pointing at the host port — Docker's
+      // port-mapping cannot forward to a 127.0.0.1 listener inside the
+      // container because that's the container's own loopback).
+      const bindHost = process.env.PATTER_BIND_HOST ?? '127.0.0.1';
+      this.server!.listen(port, bindHost, () => {
         getLogger().info(`Server on port ${port}`);
         getLogger().info(`Webhook: https://${this.config.webhookUrl}`);
         getLogger().info(`Phone:   ${this.config.phoneNumber}`);

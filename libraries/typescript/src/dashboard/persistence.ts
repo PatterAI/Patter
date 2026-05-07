@@ -14,11 +14,22 @@
 
 import http from 'node:http';
 
-/** Fire-and-forget POST a completed call payload into a locally-running dashboard, if any. */
+/**
+ * Fire-and-forget POST a completed call payload into a locally-running dashboard, if any.
+ *
+ * Skip entirely when ``PATTER_DASHBOARD_NOTIFY`` is set to ``0``/``false``
+ * (case-insensitive). This avoids 404 spam in the receiver's access log
+ * when callers embed Patter alongside their own HTTP server on port
+ * 8000 (e.g. agent-to-agent test runners).
+ */
 export function notifyDashboard(
   callData: Record<string, unknown>,
   port = 8000,
 ): void {
+  const flag = (process.env.PATTER_DASHBOARD_NOTIFY ?? '').trim().toLowerCase();
+  if (flag === '0' || flag === 'false' || flag === 'no' || flag === 'off') {
+    return;
+  }
   try {
     const body = JSON.stringify(callData);
     const req = http.request(

@@ -11,7 +11,7 @@ import json
 import logging
 from collections import deque
 from enum import StrEnum
-from typing import Any, Literal, Union
+from typing import Any, Literal
 
 import websockets
 
@@ -79,25 +79,20 @@ class OpenAIRealtimeAdapter:
     def __init__(
         self,
         api_key: str,
-        model: Union[OpenAIRealtimeModel, str] = OpenAIRealtimeModel.GPT_REALTIME_MINI,
-        voice: Union[OpenAIVoice, str] = OpenAIVoice.ALLOY,
+        model: OpenAIRealtimeModel | str = OpenAIRealtimeModel.GPT_REALTIME_MINI,
+        voice: OpenAIVoice | str = OpenAIVoice.ALLOY,
         instructions: str = "",
         language: str = "en",
         tools: list[dict] | None = None,
-        audio_format: Union[
-            OpenAIRealtimeAudioFormat, str
-        ] = OpenAIRealtimeAudioFormat.G711_ULAW,
+        audio_format: OpenAIRealtimeAudioFormat | str = OpenAIRealtimeAudioFormat.G711_ULAW,
         *,
         temperature: float | None = None,
         max_response_output_tokens: int | str | None = None,
         modalities: list[str] | None = None,
         tool_choice: str | dict | None = None,
-        input_audio_transcription_model: Union[
-            OpenAITranscriptionModel, str
-        ] = OpenAITranscriptionModel.WHISPER_1,
-        vad_type: Literal[
-            "server_vad", "semantic_vad"
-        ] = OpenAIRealtimeVADType.SERVER_VAD.value,
+        input_audio_transcription_model: OpenAITranscriptionModel
+        | str = OpenAITranscriptionModel.WHISPER_1,
+        vad_type: Literal["server_vad", "semantic_vad"] = OpenAIRealtimeVADType.SERVER_VAD.value,
         # OpenAI's documented sweet-spot for snappier turns. Lowering from the
         # previous 500 ms saves ~200 ms per turn end. Override via constructor
         # if a use case (e.g. dictation) needs more trailing silence.
@@ -194,17 +189,13 @@ class OpenAIRealtimeAdapter:
             if self.temperature is not None:
                 session_config["temperature"] = self.temperature
             if self.max_response_output_tokens is not None:
-                session_config["max_response_output_tokens"] = (
-                    self.max_response_output_tokens
-                )
+                session_config["max_response_output_tokens"] = self.max_response_output_tokens
             if self.modalities is not None:
                 session_config["modalities"] = self.modalities
             if self.tool_choice is not None:
                 session_config["tool_choice"] = self.tool_choice
             if self.tools:
-                session_config["tools"] = [
-                    self._build_tool_wire_format(t) for t in self.tools
-                ]
+                session_config["tools"] = [self._build_tool_wire_format(t) for t in self.tools]
             await self._ws.send(
                 json.dumps(
                     {
@@ -235,10 +226,8 @@ class OpenAIRealtimeAdapter:
         edge cases, which the outer timeout handler used to paper over.
         """
         try:
-            raw = await asyncio.wait_for(
-                self._ws.recv(), timeout=self._SESSION_UPDATE_TIMEOUT
-            )
-        except asyncio.TimeoutError:
+            raw = await asyncio.wait_for(self._ws.recv(), timeout=self._SESSION_UPDATE_TIMEOUT)
+        except TimeoutError:
             logger.warning(
                 "OpenAI Realtime: no message received after %.1fs while "
                 "waiting for session.updated; continuing anyway",
@@ -336,10 +325,7 @@ class OpenAIRealtimeAdapter:
                 elif event_type == "input_audio_buffer.speech_stopped":
                     yield ("speech_stopped", None)
 
-                elif (
-                    event_type
-                    == "conversation.item.input_audio_transcription.completed"
-                ):
+                elif event_type == "conversation.item.input_audio_transcription.completed":
                     # What the user said
                     yield ("transcript_input", data.get("transcript", ""))
 
@@ -423,6 +409,37 @@ class OpenAIRealtimeAdapter:
             )
         )
         await self._ws.send(json.dumps({"type": "response.create"}))
+
+    async def send_first_message(self, text: str) -> None:
+        """Make the AI speak ``text`` as its opening line.
+
+        Triggers ``response.create`` with explicit ``instructions`` that
+        force the model to render ``text`` verbatim as its first audio
+        utterance. This is the correct semantics for ``Agent.first_message``
+        per its docstring ("What the AI says when the callee answers").
+
+        Without this, ``send_text(first_message)`` would inject ``text`` as
+        ``role: user`` and the AI would *reply* to its own greeting,
+        producing role-confused openings (e.g. a receptionist agent
+        responding "I'd like to schedule a haircut" because it took its own
+        first_message as a customer cue).
+        """
+        if self._ws is None:
+            return
+        await self._ws.send(
+            json.dumps(
+                {
+                    "type": "response.create",
+                    "response": {
+                        "modalities": ["audio", "text"],
+                        "instructions": (
+                            f"Say exactly the following sentence as your first turn "
+                            f'and nothing else: "{text}"'
+                        ),
+                    },
+                }
+            )
+        )
 
     async def send_function_result(self, call_id: str, result: str) -> None:
         """Send a function call result back to OpenAI and trigger a new response."""

@@ -1800,7 +1800,15 @@ export class StreamHandler {
       // Start measuring latency for the first turn (firstMessage → first audio byte)
       this.metricsAcc.startTurn();
       if (this.adapter instanceof OpenAIRealtimeAdapter) {
-        await this.adapter.sendText(this.deps.agent.firstMessage);
+        // Use ``sendFirstMessage`` (role=assistant) so the AI treats
+        // ``firstMessage`` as its OWN opening line, not a user prompt to
+        // respond to. Older adapter builds without the method fall back to
+        // ``sendText`` (legacy role=user behaviour).
+        const sender =
+          typeof (this.adapter as unknown as { sendFirstMessage?: (t: string) => Promise<void> }).sendFirstMessage === 'function'
+            ? (this.adapter as unknown as { sendFirstMessage: (t: string) => Promise<void> }).sendFirstMessage.bind(this.adapter)
+            : this.adapter.sendText.bind(this.adapter);
+        await sender(this.deps.agent.firstMessage);
       }
       // ElevenLabs ConvAI sends firstMessage via connection config (handled in adapter.connect())
     }

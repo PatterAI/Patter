@@ -798,6 +798,62 @@ export class Patter {
     });
     this._ready.catch(() => {});
   }
+
+  /**
+   * Terminate an active call on the configured carrier.
+   *
+   * Posts a hangup to the carrier (Twilio
+   * ``Calls(callSid).update({status:'completed'})`` or Telnyx
+   * ``/v2/calls/{callControlId}/actions/hangup``) so the bridge tears down
+   * gracefully — the SDK's WebSocket handler then fires ``onCallEnd`` with
+   * the final ``CallMetrics`` before the WS closes.
+   *
+   * Use this when the host application needs to end a call programmatically
+   * without going through the LLM tool-call path (e.g. an admin override,
+   * a watchdog, or an integration test runner).
+   *
+   * @param callSid - Carrier-issued call identifier (Twilio Call SID or
+   *   Telnyx call_control_id) returned from a previous ``call(...)`` or
+   *   captured in the ``onCallStart`` callback's payload.
+   * @throws Error when ``callSid`` is empty or no carrier is configured.
+   */
+  async endCall(callSid: string): Promise<void> {
+    if (!callSid) {
+      throw new Error('callSid must be a non-empty string');
+    }
+    const carrier = this.localConfig.carrier;
+    if (carrier.kind === 'twilio') {
+      const auth = Buffer.from(`${carrier.accountSid}:${carrier.authToken}`).toString('base64');
+      const url = `https://api.twilio.com/2010-04-01/Accounts/${carrier.accountSid}/Calls/${callSid}.json`;
+      const body = new URLSearchParams({ Status: 'completed' });
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Basic ${auth}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body,
+      });
+      if (!res.ok) {
+        throw new Error(`Twilio hangup failed: ${res.status} ${await res.text()}`);
+      }
+      return;
+    }
+    if (carrier.kind === 'telnyx') {
+      const res = await fetch(`https://api.telnyx.com/v2/calls/${callSid}/actions/hangup`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${carrier.apiKey}`,
+          'Content-Type': 'application/json',
+        },
+      });
+      if (!res.ok) {
+        throw new Error(`Telnyx hangup failed: ${res.status} ${await res.text()}`);
+      }
+      return;
+    }
+    throw new Error(`endCall() requires a configured carrier; got kind=${(carrier as { kind: string }).kind}`);
+  }
 }
 
 /**
