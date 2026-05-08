@@ -46,12 +46,18 @@ class TTS(_ElevenLabsTTS):
         voice_id: str = "EXAVITQu4vr4xnSDxMaL",
         model_id: str = "eleven_flash_v2_5",
         output_format: str = "pcm_16000",
+        language_code: str | None = None,
+        voice_settings: dict | None = None,
+        chunk_size: int = 4096,
     ) -> None:
         super().__init__(
             api_key=_resolve_api_key(api_key),
             voice_id=voice_id,
             model_id=model_id,
             output_format=output_format,
+            voice_settings=voice_settings,
+            language_code=language_code,
+            chunk_size=chunk_size,
         )
 
     @classmethod

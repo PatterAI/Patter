@@ -1,19 +1,31 @@
 /** ElevenLabs TTS for Patter pipeline mode. */
-import { ElevenLabsTTS as _ElevenLabsTTS, type ElevenLabsModel } from "../providers/elevenlabs-tts";
+import {
+  ElevenLabsTTS as _ElevenLabsTTS,
+  type ElevenLabsModel,
+  type ElevenLabsOutputFormat,
+} from "../providers/elevenlabs-tts";
 
 export type { ElevenLabsModel };
 
 /** Constructor options for the ElevenLabs `TTS` adapter. */
 export interface ElevenLabsTTSOptions {
   /** API key. Falls back to ELEVENLABS_API_KEY env var when omitted. */
-  apiKey?: string;
-  voiceId?: string;
+  readonly apiKey?: string;
+  readonly voiceId?: string;
   /**
    * ElevenLabs voice model ID. Default is ``eleven_flash_v2_5`` (lowest TTFT).
    * Pass ``eleven_v3`` for highest quality, or any string for forward-compat.
    */
-  modelId?: ElevenLabsModel | string;
-  outputFormat?: string;
+  readonly modelId?: ElevenLabsModel | string;
+  readonly outputFormat?: string;
+  /**
+   * BCP-47 language code (e.g. `"it"`, `"es"`). Forwarded to ElevenLabs as
+   * the `language_code` request body field — required for multilingual /
+   * Flash v2.5 voices to render the right accent.
+   */
+  readonly languageCode?: string;
+  /** ElevenLabs `voice_settings` object (stability, similarity_boost, …). */
+  readonly voiceSettings?: Record<string, unknown>;
 }
 
 /** Options for the carrier-specific factories — same as the constructor minus `outputFormat`. */
@@ -48,12 +60,16 @@ function resolveApiKey(apiKey: string | undefined): string {
 export class TTS extends _ElevenLabsTTS {
   static readonly providerKey = "elevenlabs";
   constructor(opts: ElevenLabsTTSOptions = {}) {
-    super(
-      resolveApiKey(opts.apiKey),
-      opts.voiceId ?? "EXAVITQu4vr4xnSDxMaL",
-      opts.modelId ?? "eleven_flash_v2_5",
-      opts.outputFormat ?? "pcm_16000",
-    );
+    // Use the parent's options-object overload so optional fields
+    // (languageCode, voiceSettings) reach the underlying provider —
+    // the legacy positional signature drops them silently.
+    super(resolveApiKey(opts.apiKey), {
+      voiceId: opts.voiceId ?? "EXAVITQu4vr4xnSDxMaL",
+      modelId: opts.modelId ?? "eleven_flash_v2_5",
+      outputFormat: (opts.outputFormat ?? "pcm_16000") as ElevenLabsOutputFormat,
+      languageCode: opts.languageCode,
+      voiceSettings: opts.voiceSettings as never,
+    });
   }
 
   /** Pipeline TTS pre-configured for Twilio Media Streams (`ulaw_8000`). */
