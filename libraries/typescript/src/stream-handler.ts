@@ -207,6 +207,13 @@ export class StreamHandler {
    */
   private inboundAudioRing: Buffer[] = [];
   private static readonly INBOUND_AUDIO_RING_FRAMES = 13;
+  /**
+   * Cached LLM provider tag used by speech-event payloads. Mirrors the
+   * value passed to the metrics accumulator at construction time so the
+   * speech-edge events report the same provider classification as
+   * dashboard / pricing rows.
+   */
+  private llmProviderTag: string = "openai";
   /** Set to true after a VAD error to suppress log spam for the rest of the call. */
   private vadDisabled = false;
   /**
@@ -504,12 +511,27 @@ export class StreamHandler {
     const sttProviderName = deps.agent.stt
       ? (sttKey ?? deps.agent.stt.constructor?.name ?? 'custom')
       : undefined;
+    // Adapter ``model`` field powers per-model rate resolution in
+    // pricing.calculateSttCost. Empty string → provider default.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const sttModelName = String(((deps.agent.stt as any)?.model ?? '') || '');
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const ttsKey = (deps.agent.tts?.constructor as any)?.providerKey;
     const ttsProviderName = deps.agent.tts
       ? (ttsKey ?? deps.agent.tts.constructor?.name ?? 'custom')
       : undefined;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ttsModelName = String(((deps.agent.tts as any)?.model ?? '') || '');
     const providerMode = deps.agent.provider ?? 'openai_realtime';
+    // Realtime collapses STT+LLM+TTS into one model — capture it so the
+    // token-based cost calc picks the right per-model rate (e.g. gpt-
+    // realtime-2 vs gpt-realtime-mini). Use the agent's declared model
+    // when set; fall back to the adapter default.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const realtimeModelName =
+      providerMode === 'openai_realtime'
+        ? String(((deps.agent as any).model ?? '') || '') || 'gpt-realtime-mini'
+        : '';
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const llmKey = (deps.agent.llm?.constructor as any)?.providerKey;
     let llmProviderName: string;
@@ -527,6 +549,7 @@ export class StreamHandler {
     } else {
       llmProviderName = providerMode === 'openai_realtime' ? 'openai_realtime' : 'openai';
     }
+    this.llmProviderTag = llmProviderName;
 
     this._eventBus = new EventBus();
     this.metricsAcc = new CallMetricsAccumulator({
@@ -536,6 +559,9 @@ export class StreamHandler {
       sttProvider: sttProviderName,
       ttsProvider: ttsProviderName,
       llmProvider: llmProviderName,
+      sttModel: sttModelName,
+      ttsModel: ttsModelName,
+      realtimeModel: realtimeModelName,
       pricing: deps.pricing,
       eventBus: this._eventBus,
       reportOnlyInitialTtfb: deps.reportOnlyInitialTtfb ?? false,
@@ -1198,7 +1224,7 @@ export class StreamHandler {
       try {
         for await (const chunk of this.tts.synthesizeStream(this.deps.agent.firstMessage)) {
           if (!this.isSpeaking) break;  // barge-in or test-hangup
-          if (!firstChunkSent) { firstChunkSent = true; this.metricsAcc.recordTtsFirstByte(); }
+          if (!firstChunkSent) { firstChunkSent = true; this.metricsAcc.recordTtsFirstByte(); await this.emitAudioOut(); }
           // Far-end tap for the echo canceller — push the exact PCM the
           // carrier-side encoder will transmit. Without this the AEC
           // adapt loop has no reference signal during the intro,
@@ -1248,6 +1274,7 @@ export class StreamHandler {
         this.deps.agent.disablePhonePreamble ?? false,
       );
       this.llmLoop.setEventBus(this._eventBus);
+      this.llmLoop.setOnToolCall((n, a, r) => this.recordToolCall(n, a, r));
       const llmLabel = this.deps.agent.llm.constructor?.name ?? 'custom';
       getLogger().debug(`Built-in LLM loop active (pipeline, ${label}, llm=${llmLabel})`);
     } else if (!this.deps.onMessage && this.deps.config.openaiKey) {
@@ -1262,6 +1289,7 @@ export class StreamHandler {
         this.deps.agent.disablePhonePreamble ?? false,
       );
       this.llmLoop.setEventBus(this._eventBus);
+      this.llmLoop.setOnToolCall((n, a, r) => this.recordToolCall(n, a, r));
       getLogger().debug(`Built-in LLM loop active (pipeline, ${label})`);
     }
 
@@ -1323,6 +1351,8 @@ export class StreamHandler {
         if (!ttsFirstByteSent.value) {
           ttsFirstByteSent.value = true;
           this.metricsAcc.recordTtsFirstByte();
+          // Speech-event: per-turn first TTS audio chunk.
+          await this.emitAudioOut();
         }
         // Far-end tap for the echo canceller. ``processedAudio`` is the
         // exact PCM 16 kHz Buffer that the carrier-side encoder is about
@@ -1494,7 +1524,7 @@ export class StreamHandler {
     if (!responseText) return;
 
     if (this.llmLoop) {
-      this.history.push({ role: 'assistant', text: responseText, timestamp: Date.now() });
+      await this.emitAssistantTranscript(responseText);
       this.metricsAcc.recordTtsComplete(responseText);
     } else {
       interrupted = await this.runRegularLlm(responseText, hookExecutor, hookCtx) || interrupted;
@@ -1653,6 +1683,9 @@ export class StreamHandler {
           if (llmSignal.aborted) break;
           // Fix 5: record first token for TTFT metric.
           this.metricsAcc.recordLlmFirstToken();
+          // Speech-event: per-turn TTFT marker for SDK callback consumers.
+          // Idempotent in the dispatcher.
+          await this.emitLlmFirstToken();
           allParts.push(token);
           for (const sentence of chunker.push(token)) {
             if (!this.isSpeaking) break;
@@ -1717,7 +1750,7 @@ export class StreamHandler {
     }
 
     this.metricsAcc.recordLlmComplete();
-    this.history.push({ role: 'assistant', text, timestamp: Date.now() });
+    await this.emitAssistantTranscript(text);
 
     const chunker = new SentenceChunker();
     const sentences = [...chunker.push(text), ...chunker.flush()];
@@ -1760,7 +1793,7 @@ export class StreamHandler {
           this.resetTtsCarry();
           for await (const audioChunk of this.tts.synthesizeStream(chunk)) {
             if (!this.isSpeaking) break;
-            if (!wsTtsStarted) { wsTtsStarted = true; this.metricsAcc.recordTtsFirstByte(); }
+            if (!wsTtsStarted) { wsTtsStarted = true; this.metricsAcc.recordTtsFirstByte(); await this.emitAudioOut(); }
             const encoded = this.encodePipelineAudio(audioChunk);
             this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
           }
@@ -1775,7 +1808,7 @@ export class StreamHandler {
     const responseText = parts.join('');
     this.metricsAcc.recordTtsComplete(responseText);
     await this.emitTurnMetrics(this.metricsAcc.recordTurnComplete(responseText));
-    if (responseText) this.history.push({ role: 'assistant', text: responseText, timestamp: Date.now() });
+    if (responseText) await this.emitAssistantTranscript(responseText);
   }
 
   // ---------------------------------------------------------------------------
@@ -1897,6 +1930,28 @@ export class StreamHandler {
     });
   }
 
+  /** Fire the per-turn LLM TTFT marker. Idempotent in the dispatcher
+   * — guarded by `firstTokenForTurn` on the SpeechEvents instance. */
+  private async emitLlmFirstToken(): Promise<void> {
+    if (!this.deps.speechEvents) return;
+    await this.deps.speechEvents.fireLlmFirstToken({
+      llmProvider: this.llmProviderTag,
+      model: this.deps.agent.model ?? "",
+    });
+  }
+
+  /** Fire the per-turn first-TTS-audio marker. Idempotent in the
+   * dispatcher — guarded by `firstAudioForTurn`. The provider tag falls
+   * back to the engine name for Realtime / ConvAI (no separate TTS). */
+  private async emitAudioOut(): Promise<void> {
+    if (!this.deps.speechEvents) return;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ttsKey = (this.deps.agent.tts?.constructor as any)?.providerKey;
+    const provider =
+      ttsKey ?? this.deps.agent.provider ?? "openai_realtime";
+    await this.deps.speechEvents.fireAudioOut({ ttsProvider: provider });
+  }
+
   private async onAdapterAudio(eventData: Buffer): Promise<void> {
     // Record time-to-first-audio-byte as latency (Realtime mode). If no
     // startTurn() was called yet (e.g. agent responding again without user
@@ -1907,6 +1962,11 @@ export class StreamHandler {
       this.metricsAcc.recordTtsFirstByte();
       // Speech-event: first wire-time chunk of this agent turn.
       await this.emitAgentSpeechStarted();
+      // Speech-event: in Realtime / ConvAI modes the model output IS the
+      // TTS audio, so the same edge satisfies the per-turn
+      // ``tts_first_audio`` marker for SDK callback consumers. The
+      // dispatcher's idempotency guard prevents double-fires.
+      await this.emitAudioOut();
     }
     // OpenAI Realtime outputs g711_ulaw 8 kHz (PCMU). Both Twilio and Telnyx
     // are configured for PCMU/mulaw 8 kHz (Telnyx uses stream_bidirectional_codec=PCMU)
@@ -1997,8 +2057,78 @@ export class StreamHandler {
     await this.emitTurnMetrics(this.metricsAcc.recordTurnComplete(text));
   }
 
+  /**
+   * Push an assistant turn into history and fire `onTranscript` so host
+   * applications observe pipeline-mode replies the same way they observe
+   * realtime-mode replies. Mirrors `_emit_assistant_transcript` in the
+   * Python SDK and parallels `flushAssistantTurn` (realtime path).
+   * Caller is responsible for filtering empty strings.
+   */
+  private async emitAssistantTranscript(text: string): Promise<void> {
+    this.history.push({ role: 'assistant', text, timestamp: Date.now() });
+    if (this.deps.onTranscript) {
+      await this.deps.onTranscript({
+        role: 'assistant',
+        text,
+        call_id: this.callId,
+        history: [...this.history.entries],
+      });
+    }
+  }
+
+  /**
+   * Surface a tool invocation from pipeline mode into the transcript
+   * timeline. Emits TWO events: one for the call (`name(argsJson)`) and
+   * one for the result (`name(...) → result`, truncated to 200 chars).
+   * Mirrors realtime mode's two `emitToolEvent` calls in
+   * `handleFunctionCall`. Wired as the `LLMLoop` `onToolCall` observer.
+   */
+  private async recordToolCall(
+    name: string,
+    args: Record<string, unknown>,
+    result: string,
+  ): Promise<void> {
+    let argsText: string;
+    try {
+      argsText = JSON.stringify(args ?? {});
+    } catch {
+      argsText = '{}';
+    }
+    // 1) Call event
+    const callText = `${name}(${argsText})`;
+    this.history.push({ role: 'tool', text: callText, timestamp: Date.now() });
+    if (this.deps.onTranscript) {
+      await this.deps.onTranscript({
+        role: 'tool',
+        text: callText,
+        call_id: this.callId,
+        tool_name: name,
+        tool_args: args ?? {},
+        tool_result: null,
+      });
+    }
+    // 2) Result event (truncated for display, full payload in messages)
+    const displayed = result.length > 200 ? result.slice(0, 200) + '…' : result;
+    const resText = `${name}(...) → ${displayed}`;
+    this.history.push({ role: 'tool', text: resText, timestamp: Date.now() });
+    if (this.deps.onTranscript) {
+      await this.deps.onTranscript({
+        role: 'tool',
+        text: resText,
+        call_id: this.callId,
+        tool_name: name,
+        tool_args: args ?? {},
+        tool_result: result,
+      });
+    }
+  }
+
   private async onAdapterTranscriptOutput(outputText: string): Promise<void> {
     if (!outputText) return;
+    // Speech-event: per-turn TTFT marker. Idempotent in the dispatcher
+    // — guarded by `firstTokenForTurn`. The provider tag matches the
+    // engine that produced the transcript (Realtime or ConvAI).
+    await this.emitLlmFirstToken();
     const triggered = checkGuardrails(outputText, this.deps.agent.guardrails);
     if (triggered) {
       getLogger().debug(`Guardrail '${triggered.name}' triggered`);
@@ -2017,7 +2147,15 @@ export class StreamHandler {
         input_token_details?: { audio_tokens?: number; text_tokens?: number };
         output_token_details?: { audio_tokens?: number; text_tokens?: number };
       } | undefined;
-      if (usage) this.metricsAcc.recordRealtimeUsage(usage);
+      if (usage) {
+        // ``response.done`` carries the model used for this turn (e.g.
+        // ``gpt-realtime-2``); pass it so the cost calc auto-resolves the
+        // per-model rate. Falls back to ``this.realtimeModel`` set at call
+        // start when the field is absent on the payload.
+        const turnModel =
+          typeof responseData.model === 'string' ? (responseData.model as string) : null;
+        this.metricsAcc.recordRealtimeUsage(usage, turnModel);
+      }
     }
     if (!this.currentAgentText) {
       // Empty response — discard the orphaned turn so it doesn't leak.

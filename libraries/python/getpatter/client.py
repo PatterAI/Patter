@@ -110,7 +110,9 @@ class Patter:
             raise NotImplementedError(_CLOUD_NOT_IMPLEMENTED_MSG)
         if kwargs:
             unexpected = ", ".join(sorted(kwargs))
-            raise TypeError(f"Patter() got unexpected keyword argument(s): {unexpected}")
+            raise TypeError(
+                f"Patter() got unexpected keyword argument(s): {unexpected}"
+            )
 
         self._pricing = pricing
 
@@ -170,7 +172,9 @@ class Patter:
         # Pre-resolve when webhook_url is static — no tunnel cold-start to
         # wait on. We can't create the Future here (no running loop yet) so
         # stash the value and create+resolve on first ``tunnel_ready`` access.
-        self._tunnel_ready_pre_resolved: str | None = webhook_url if webhook_url else None
+        self._tunnel_ready_pre_resolved: str | None = (
+            webhook_url if webhook_url else None
+        )
         # ``ready`` is the safe signal for outbound calls — resolves only
         # after ``serve()`` brings the embedded server up to ``listen``
         # state. Never pre-resolved at construction even when webhook_url
@@ -667,6 +671,10 @@ class Patter:
         # --- Engine dispatch ---
         openai_engine_key: str = ""
         elevenlabs_engine_key: str = ""
+        # Engine-supplied OpenAI Realtime extras propagated to Agent so the
+        # stream-handler can forward them to ``OpenAIRealtimeAdapter``.
+        openai_realtime_reasoning_effort: str | None = None
+        openai_realtime_input_audio_transcription_model: str | None = None
         if engine is not None:
             # Engine mode handles the LLM internally — `llm=` is ignored.
             # Emit a one-time warning so the user knows.
@@ -685,6 +693,10 @@ class Patter:
                 model = engine_fields["model"]
             if engine_kind == "openai_realtime":
                 openai_engine_key = engine_fields.get("api_key", "")
+                openai_realtime_reasoning_effort = engine_fields.get("reasoning_effort")
+                openai_realtime_input_audio_transcription_model = engine_fields.get(
+                    "input_audio_transcription_model"
+                )
             elif engine_kind == "elevenlabs_convai":
                 elevenlabs_engine_key = engine_fields.get("api_key", "")
         elif stt is not None or tts is not None or llm is not None:
@@ -702,9 +714,13 @@ class Patter:
         from dataclasses import replace
 
         if openai_engine_key and not self._local_config.openai_key:
-            self._local_config = replace(self._local_config, openai_key=openai_engine_key)
+            self._local_config = replace(
+                self._local_config, openai_key=openai_engine_key
+            )
         if elevenlabs_engine_key and not self._local_config.elevenlabs_key:
-            self._local_config = replace(self._local_config, elevenlabs_key=elevenlabs_engine_key)
+            self._local_config = replace(
+                self._local_config, elevenlabs_key=elevenlabs_engine_key
+            )
 
         if provider == "openai_realtime" and not self._local_config.openai_key:
             raise ValueError(
@@ -741,14 +757,20 @@ class Patter:
             validate_all_tool_schemas(tools_out)
 
         if variables is not None and not isinstance(variables, dict):
-            raise TypeError(f"variables must be a dict, got {type(variables).__name__}.")
+            raise TypeError(
+                f"variables must be a dict, got {type(variables).__name__}."
+            )
 
         # --- Normalise guardrails ---
         guardrails_out: list[dict] | None = None
         if guardrails is not None:
             if not isinstance(guardrails, list):
-                raise TypeError(f"guardrails must be a list, got {type(guardrails).__name__}.")
-            guardrails_out = [self._guardrail_to_dict(g, index=i) for i, g in enumerate(guardrails)]
+                raise TypeError(
+                    f"guardrails must be a list, got {type(guardrails).__name__}."
+                )
+            guardrails_out = [
+                self._guardrail_to_dict(g, index=i) for i, g in enumerate(guardrails)
+            ]
 
         return Agent(
             system_prompt=system_prompt,
@@ -773,6 +795,8 @@ class Patter:
             echo_cancellation=echo_cancellation,
             llm=llm,
             mcp_servers=mcp_servers,
+            openai_realtime_reasoning_effort=openai_realtime_reasoning_effort,
+            openai_realtime_input_audio_transcription_model=openai_realtime_input_audio_transcription_model,
         )
 
     @staticmethod
@@ -786,6 +810,8 @@ class Patter:
                 "api_key": engine.api_key,
                 "voice": engine.voice,
                 "model": engine.model,
+                "reasoning_effort": engine.reasoning_effort,
+                "input_audio_transcription_model": engine.input_audio_transcription_model,
             }
         if isinstance(engine, _ConvAI):
             return "elevenlabs_convai", {
@@ -904,10 +930,19 @@ class Patter:
                 "Cannot pass both `llm=` on the agent and `on_message=` on serve(). "
                 "Pick one — `llm=` for built-in LLMs, `on_message=` for custom logic."
             )
-        if not isinstance(port, int) or isinstance(port, bool) or port < 1 or port > 65535:
-            raise ValueError(f"port must be an integer between 1 and 65535, got {port!r}.")
+        if (
+            not isinstance(port, int)
+            or isinstance(port, bool)
+            or port < 1
+            or port > 65535
+        ):
+            raise ValueError(
+                f"port must be an integer between 1 and 65535, got {port!r}."
+            )
         if not isinstance(recording, bool):
-            raise TypeError(f"recording must be a bool, got {type(recording).__name__}.")
+            raise TypeError(
+                f"recording must be a bool, got {type(recording).__name__}."
+            )
 
         # Resolve webhook_url: tunnel or explicit
         config = self._local_config
@@ -999,7 +1034,9 @@ class Patter:
                     break
                 await asyncio.sleep(0.05)
             else:
-                raise TimeoutError("Embedded server did not reach 'started' state within 30s")
+                raise TimeoutError(
+                    "Embedded server did not reach 'started' state within 30s"
+                )
 
             # Tunnel reachability self-test: cloudflared returns the URL
             # the moment its control plane has issued it, but the public
@@ -1043,7 +1080,9 @@ class Patter:
             on_call_end: Optional call end callback.
         """
         if not isinstance(agent, Agent):
-            raise TypeError(f"agent must be an Agent instance, got {type(agent).__name__}.")
+            raise TypeError(
+                f"agent must be an Agent instance, got {type(agent).__name__}."
+            )
 
         from getpatter.test_mode import TestSession
 
@@ -1117,14 +1156,20 @@ class Patter:
         telephony = cfg.telephony_provider
         if telephony == "twilio":
             if not cfg.twilio_sid or not cfg.twilio_token:
-                raise ValueError("Twilio credentials not configured on this Patter instance")
+                raise ValueError(
+                    "Twilio credentials not configured on this Patter instance"
+                )
             from twilio.rest import Client  # type: ignore[import-not-found]
 
             client = Client(cfg.twilio_sid, cfg.twilio_token)
-            await asyncio.to_thread(lambda: client.calls(call_sid).update(status="completed"))
+            await asyncio.to_thread(
+                lambda: client.calls(call_sid).update(status="completed")
+            )
         elif telephony == "telnyx":
             if not cfg.telnyx_key:
-                raise ValueError("Telnyx credentials not configured on this Patter instance")
+                raise ValueError(
+                    "Telnyx credentials not configured on this Patter instance"
+                )
             import telnyx  # type: ignore[import-not-found]
 
             api = telnyx.api_requestor.APIRequestor(api_key=cfg.telnyx_key)
@@ -1192,7 +1237,10 @@ async def _wait_for_tunnel_publicly_reachable(
         flags = 0x0100  # standard query, recursion desired
         header = struct.pack(">HHHHHH", txid, flags, 1, 0, 0, 0)
         qname = (
-            b"".join(bytes([len(part)]) + part.encode("ascii") for part in hostname.split("."))
+            b"".join(
+                bytes([len(part)]) + part.encode("ascii")
+                for part in hostname.split(".")
+            )
             + b"\x00"
         )
         question = qname + struct.pack(">HH", 1, 1)  # A, IN

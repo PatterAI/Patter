@@ -26,9 +26,21 @@ export const OpenAIRealtimeAudioFormat = {
 export type OpenAIRealtimeAudioFormat =
   (typeof OpenAIRealtimeAudioFormat)[keyof typeof OpenAIRealtimeAudioFormat];
 
-/** Known OpenAI Realtime API model identifiers. */
+/**
+ * Known OpenAI Realtime API model identifiers.
+ *
+ * `GPT_REALTIME_2` is OpenAI's most-capable realtime voice model
+ * (speech-to-speech with configurable reasoning effort, stronger
+ * instruction following, 128K context). It accepts the same session
+ * update wire format as the v1 `gpt-realtime` family but supports an
+ * additional `reasoning.effort` field — see `reasoningEffort` on
+ * {@link OpenAIRealtimeOptions}. Pricing differs from the mini default;
+ * override `DEFAULT_PRICING.openai_realtime` with the values in
+ * `DEFAULT_PRICING.openai_realtime_2` when selecting it.
+ */
 export const OpenAIRealtimeModel = {
   GPT_REALTIME: 'gpt-realtime',
+  GPT_REALTIME_2: 'gpt-realtime-2',
   GPT_REALTIME_MINI: 'gpt-realtime-mini',
   GPT_4O_REALTIME_PREVIEW: 'gpt-4o-realtime-preview',
   GPT_4O_MINI_REALTIME_PREVIEW: 'gpt-4o-mini-realtime-preview',
@@ -54,11 +66,20 @@ export const OpenAIVoice = {
 /** Union of {@link OpenAIVoice} string values. */
 export type OpenAIVoice = (typeof OpenAIVoice)[keyof typeof OpenAIVoice];
 
-/** Models accepted by `input_audio_transcription` on Realtime sessions. */
+/**
+ * Models accepted by `input_audio_transcription` on Realtime sessions.
+ *
+ * `GPT_REALTIME_WHISPER` is OpenAI's streaming-optimised Whisper variant
+ * designed for low-latency transcript deltas inside a Realtime session.
+ * Billed per minute of audio (separate from the conversational model
+ * tokens). Use it when you want faster partial transcripts than
+ * `whisper-1` at lower cost than `gpt-4o-transcribe`.
+ */
 export const OpenAITranscriptionModel = {
   WHISPER_1: 'whisper-1',
   GPT_4O_TRANSCRIBE: 'gpt-4o-transcribe',
   GPT_4O_MINI_TRANSCRIBE: 'gpt-4o-mini-transcribe',
+  GPT_REALTIME_WHISPER: 'gpt-realtime-whisper',
 } as const;
 /** Union of {@link OpenAITranscriptionModel} string values. */
 export type OpenAITranscriptionModel =
@@ -91,6 +112,13 @@ export interface OpenAIRealtimeOptions {
    * Increase for dictation-style flows where the user pauses mid-sentence.
    */
   silenceDurationMs?: number;
+  /**
+   * Reasoning-effort tier for `gpt-realtime-2`. When omitted the field is
+   * not sent and the server default applies. OpenAI recommends `"low"` for
+   * production voice flows — higher tiers add measurable per-turn latency.
+   * Has no effect on models that don't support the `reasoning` field.
+   */
+  reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high';
 }
 
 /** Realtime WebSocket adapter for OpenAI's `gpt-realtime` family. */
@@ -103,6 +131,15 @@ export class OpenAIRealtimeAdapter {
   // barge-in (see ``cancelResponse``) — matches the Python adapter.
   private currentResponseItemId: string | null = null;
   private currentResponseAudioMs = 0;
+  // Wall-clock timestamp (Date.now()) of the first ``response.audio.delta``
+  // received since the current response item started. ``cancelResponse``
+  // uses this to bound ``audio_end_ms`` to what the caller could plausibly
+  // have heard — generated audio frequently arrives 5-10x real-time, so
+  // ``audio_end_ms`` driven purely by the per-chunk byte counter overshoots
+  // reality and leaves phantom assistant text on the conversation. The
+  // wall-clock cap corresponds to the maximum playback that real-time TTS
+  // could have produced, which is what the user actually heard.
+  private currentResponseFirstAudioAt: number | null = null;
   private readonly options: OpenAIRealtimeOptions;
 
   constructor(
@@ -166,6 +203,9 @@ export class OpenAIRealtimeAdapter {
           }
           if (this.options.modalities !== undefined) config.modalities = this.options.modalities;
           if (this.options.toolChoice !== undefined) config.tool_choice = this.options.toolChoice;
+          if (this.options.reasoningEffort !== undefined) {
+            config.reasoning = { effort: this.options.reasoningEffort };
+          }
           if (this.tools?.length) {
             config.tools = this.tools.map(t => {
               const def: Record<string, unknown> = {
@@ -287,6 +327,12 @@ export class OpenAIRealtimeAdapter {
       if (t === 'response.audio.delta') {
         const buf = Buffer.from(data.delta ?? '', 'base64');
         this.currentResponseAudioMs += estimateAudioMs(buf, this.audioFormat);
+        // Record wall-clock arrival of the first chunk for this response so
+        // ``cancelResponse`` can bound truncate to what could plausibly have
+        // been played in real time.
+        if (this.currentResponseFirstAudioAt === null) {
+          this.currentResponseFirstAudioAt = Date.now();
+        }
         dispatch('audio', buf);
       } else if (t === 'response.audio_transcript.delta') {
         dispatch('transcript_output', data.delta);
@@ -295,6 +341,7 @@ export class OpenAIRealtimeAdapter {
         if (itemId) {
           this.currentResponseItemId = itemId;
           this.currentResponseAudioMs = 0;
+          this.currentResponseFirstAudioAt = null;
         }
       } else if (t === 'input_audio_buffer.speech_started') {
         dispatch('speech_started', null);
@@ -307,6 +354,7 @@ export class OpenAIRealtimeAdapter {
       } else if (t === 'response.done') {
         this.currentResponseItemId = null;
         this.currentResponseAudioMs = 0;
+        this.currentResponseFirstAudioAt = null;
         dispatch('response_done', data.response ?? null);
       } else if (t === 'error') {
         dispatch('error', data.error);
@@ -330,25 +378,44 @@ export class OpenAIRealtimeAdapter {
     });
   }
 
-  /** Truncate the in-flight assistant turn and cancel the active response. */
+  /** Truncate the in-flight assistant turn and cancel the active response.
+   *
+   * ``audio_end_ms`` MUST reflect what the caller actually heard, not what
+   * the server generated. OpenAI streams audio at 5-10x real-time, so the
+   * byte-derived counter overstates playback whenever the consumer cleared
+   * its playout buffer (e.g. ``send_clear``) before the audio reached the
+   * speaker. We bound the truncate point by wall-clock time since the first
+   * chunk of this response — that's the physical maximum a 1x real-time
+   * playback could have produced. Without this cap, OpenAI keeps the full
+   * generated assistant text on the transcript, and the model replays /
+   * resumes from it on the next turn — manifesting as re-greetings and
+   * mid-sentence fragments after a barge-in storm.
+   */
   cancelResponse(): void {
     if (!this.ws) return;
-    // Truncate the in-flight assistant item first so the transcript stays
-    // consistent with the audio the caller actually heard. Without this,
-    // ``response.cancel`` alone can leave ghost text on the next turn.
     if (this.currentResponseItemId) {
+      let audioEndMs = this.currentResponseAudioMs;
+      if (this.currentResponseFirstAudioAt !== null) {
+        const elapsedMs = Date.now() - this.currentResponseFirstAudioAt;
+        audioEndMs = Math.min(audioEndMs, Math.max(elapsedMs, 0));
+      }
       try {
         this.ws.send(JSON.stringify({
           type: 'conversation.item.truncate',
           item_id: this.currentResponseItemId,
           content_index: 0,
-          audio_end_ms: this.currentResponseAudioMs,
+          audio_end_ms: audioEndMs,
         }));
       } catch (err) {
         getLogger().debug?.(`conversation.item.truncate failed: ${String(err)}`);
       }
     }
     this.ws.send(JSON.stringify({ type: 'response.cancel' }));
+    // Reset per-response tracking so any post-cancel late frames and the
+    // next response.create start clean.
+    this.currentResponseItemId = null;
+    this.currentResponseAudioMs = 0;
+    this.currentResponseFirstAudioAt = null;
   }
 
   /** Inject a user text turn and request a new response. */

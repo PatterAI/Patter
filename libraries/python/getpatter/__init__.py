@@ -21,7 +21,14 @@ See ``pyproject.toml`` and the top-level README for the full matrix.
 
 __version__ = "0.6.0"
 
-from getpatter._speech_events import SpeechEventCallback, SpeechEvents
+from getpatter._speech_events import (
+    AgentState,
+    ConversationStateSnapshot,
+    EouTrigger,
+    SpeechEventCallback,
+    SpeechEvents,
+    UserState,
+)
 from getpatter.client import Patter
 from getpatter.models import (
     Agent,
@@ -308,6 +315,7 @@ from getpatter.providers.cartesia_stt import (  # noqa: E402
     CartesiaSTTServerEvent,
 )
 from getpatter.providers.telnyx_stt import (  # noqa: E402
+    TelnyxSTT,
     TelnyxSTTInputFormat,
     TelnyxSTTSampleRate,
     TelnyxTranscriptionEngine,
@@ -322,6 +330,7 @@ from getpatter.providers.openai_tts import (  # noqa: E402
     OpenAITTSVoice,
 )
 from getpatter.providers.telnyx_tts import (  # noqa: E402
+    TelnyxTTS,
     TelnyxTTSSampleRate,
     TelnyxTTSVoice,
 )
@@ -352,6 +361,10 @@ __all__ = [
     "Patter",
     "SpeechEvents",
     "SpeechEventCallback",
+    "ConversationStateSnapshot",
+    "UserState",
+    "AgentState",
+    "EouTrigger",
     "Agent",
     "CallControl",
     "CallEvent",
@@ -405,6 +418,8 @@ __all__ = [
     "GoogleLLM",
     "TwilioAdapter",
     "TelnyxAdapter",
+    "TelnyxSTT",
+    "TelnyxTTS",
     "SileroVAD",
     "init_tracing",
     "start_span",

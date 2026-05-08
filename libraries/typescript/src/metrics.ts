@@ -190,6 +190,14 @@ export class CallMetricsAccumulator {
   readonly sttProvider: string;
   readonly ttsProvider: string;
   readonly llmProvider: string;
+  /**
+   * Model identifiers for per-model rate resolution (see pricing.ts). Empty
+   * string means "not known" → cost calc falls back to provider defaults,
+   * matching pre-2026.3 behaviour.
+   */
+  readonly sttModel: string;
+  readonly ttsModel: string;
+  readonly realtimeModel: string;
 
   private readonly _pricing: Record<string, ProviderPricing>;
   private readonly _callStart: number;
@@ -259,6 +267,12 @@ export class CallMetricsAccumulator {
     sttProvider?: string;
     ttsProvider?: string;
     llmProvider?: string;
+    /** Model identifier for the STT adapter (e.g. ``"nova-3-multilingual"``). */
+    sttModel?: string;
+    /** Model identifier for the TTS adapter (e.g. ``"eleven_multilingual_v2"``). */
+    ttsModel?: string;
+    /** Model identifier for the realtime adapter (e.g. ``"gpt-realtime-2"``). */
+    realtimeModel?: string;
     pricing?: Record<string, Partial<ProviderPricing>> | null;
     eventBus?: EventBus;
     /** When true, only the first TTFB emission per call is forwarded to the event bus. */
@@ -270,6 +284,9 @@ export class CallMetricsAccumulator {
     this.sttProvider = opts.sttProvider ?? '';
     this.ttsProvider = opts.ttsProvider ?? '';
     this.llmProvider = opts.llmProvider ?? '';
+    this.sttModel = opts.sttModel ?? '';
+    this.ttsModel = opts.ttsModel ?? '';
+    this.realtimeModel = opts.realtimeModel ?? '';
     this._pricing = mergePricing(opts.pricing);
     this._callStart = hrTimeMs();
     this._eventBus = opts.eventBus;
@@ -630,17 +647,32 @@ export class CallMetricsAccumulator {
     this._sttByteCount += byteCount;
   }
 
-  /** Record an OpenAI Realtime usage payload and roll up its cost + cached-savings. */
-  recordRealtimeUsage(usage: {
-    input_token_details?: {
-      audio_tokens?: number;
-      text_tokens?: number;
-      cached_tokens_details?: { audio_tokens?: number; text_tokens?: number };
-    };
-    output_token_details?: { audio_tokens?: number; text_tokens?: number };
-  }): void {
-    this._totalRealtimeCost += calculateRealtimeCost(usage, this._pricing);
-    this._totalRealtimeCachedSavings += calculateRealtimeCachedSavings(usage, this._pricing);
+  /**
+   * Record an OpenAI Realtime usage payload and roll up its cost + cached-savings.
+   *
+   * `model` allows the cost calc to pick the per-model rate (e.g.
+   * `gpt-realtime-2`). Defaults to whatever was supplied at construction
+   * time (`this.realtimeModel`); pass an explicit value to override per-call
+   * (the `response.done` payload carries the model used).
+   */
+  recordRealtimeUsage(
+    usage: {
+      input_token_details?: {
+        audio_tokens?: number;
+        text_tokens?: number;
+        cached_tokens_details?: { audio_tokens?: number; text_tokens?: number };
+      };
+      output_token_details?: { audio_tokens?: number; text_tokens?: number };
+    },
+    model?: string | null,
+  ): void {
+    const resolvedModel = model || this.realtimeModel || null;
+    this._totalRealtimeCost += calculateRealtimeCost(usage, this._pricing, resolvedModel);
+    this._totalRealtimeCachedSavings += calculateRealtimeCachedSavings(
+      usage,
+      this._pricing,
+      resolvedModel,
+    );
   }
 
   /** Override the carrier-billed telephony cost (e.g. exact value reported via Twilio API). */
@@ -874,8 +906,18 @@ export class CallMetricsAccumulator {
       stt =
         this._actualSttCost !== null
           ? this._actualSttCost
-          : calculateSttCost(this.sttProvider, this._totalSttAudioSeconds, this._pricing);
-      tts = calculateTtsCost(this.ttsProvider, this._totalTtsCharacters, this._pricing);
+          : calculateSttCost(
+              this.sttProvider,
+              this._totalSttAudioSeconds,
+              this._pricing,
+              this.sttModel || null,
+            );
+      tts = calculateTtsCost(
+        this.ttsProvider,
+        this._totalTtsCharacters,
+        this._pricing,
+        this.ttsModel || null,
+      );
       // Fix 10: include accumulated LLM token cost (from recordLlmUsage).
       llm = this._totalLlmCost;
     }

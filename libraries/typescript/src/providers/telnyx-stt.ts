@@ -22,8 +22,26 @@ type TranscriptCallback = (transcript: Transcript) => void;
 /** Backing transcription engine accepted by Telnyx STT. */
 export type TelnyxTranscriptionEngine = 'telnyx' | 'google' | 'deepgram' | 'azure';
 
+/** Common PCM sample rates accepted by Telnyx STT. */
+export const TelnyxSTTSampleRate = {
+  HZ_8000: 8000,
+  HZ_16000: 16000,
+  HZ_24000: 24000,
+} as const;
+/** Union of {@link TelnyxSTTSampleRate} integer values. */
+export type TelnyxSTTSampleRate =
+  (typeof TelnyxSTTSampleRate)[keyof typeof TelnyxSTTSampleRate];
+
+/** Input audio formats accepted by Telnyx STT. */
+export const TelnyxSTTInputFormat = {
+  WAV: 'wav',
+} as const;
+/** Union of {@link TelnyxSTTInputFormat} string values. */
+export type TelnyxSTTInputFormat =
+  (typeof TelnyxSTTInputFormat)[keyof typeof TelnyxSTTInputFormat];
+
 const TELNYX_STT_WS_URL = 'wss://api.telnyx.com/v2/speech-to-text/transcription';
-const DEFAULT_SAMPLE_RATE = 16000;
+const DEFAULT_SAMPLE_RATE: TelnyxSTTSampleRate = TelnyxSTTSampleRate.HZ_16000;
 const NUM_CHANNELS = 1;
 
 /** Build a streaming WAV header with maximum possible data size. */

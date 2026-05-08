@@ -175,6 +175,16 @@ class Agent:
     # don't have the bleed, and the 0.5–2 s convergence period would
     # briefly attenuate caller speech if they spoke before any TTS played.
     echo_cancellation: bool = False
+    # OpenAI Realtime — reasoning-effort tier (``gpt-realtime-2`` only).
+    # Threaded through from ``engines.openai.Realtime(reasoning_effort=...)``
+    # so the high-level engine wrapper has the same expressivity as the
+    # underlying ``OpenAIRealtimeAdapter``. ``None`` (default) leaves the
+    # ``session.reasoning`` field unset and the server default applies.
+    openai_realtime_reasoning_effort: str | None = None
+    # OpenAI Realtime — override for ``input_audio_transcription.model``.
+    # ``None`` (default) keeps the adapter default (``whisper-1``). Set to
+    # e.g. ``"gpt-realtime-whisper"`` for low-latency transcript partials.
+    openai_realtime_input_audio_transcription_model: str | None = None
 
 
 @dataclass(frozen=True)

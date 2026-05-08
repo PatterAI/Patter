@@ -626,6 +626,15 @@ export class LLMLoop {
   // Fix 10: track provider/model so usage chunks can be attributed for billing.
   private readonly _providerName: string;
   private readonly _modelName: string;
+  // Optional async observer fired after a successful tool execution so
+  // the host SDK (StreamHandler in pipeline mode) can surface tool calls
+  // into the transcript timeline / `onTranscript` callback. Mirrors the
+  // Python `on_tool_call` parameter on `LLMLoop.__init__`.
+  private onToolCall?: (
+    name: string,
+    args: Record<string, unknown>,
+    result: string,
+  ) => Promise<void>;
 
   constructor(
     apiKey: string,
@@ -700,6 +709,21 @@ export class LLMLoop {
    */
   setEventBus(bus: EventBus | undefined): void {
     this.eventBus = bus;
+  }
+
+  /**
+   * Set or replace the post-tool-execution observer. The callback is
+   * awaited after every successful tool execution with
+   * `(name, args, result)`. Pass `undefined` to disable. Mirrors the
+   * Python `LLMLoop.set_on_tool_call` setter so callers (e.g. the
+   * pipeline `StreamHandler`) can wire the loop after construction.
+   */
+  setOnToolCall(
+    callback:
+      | ((name: string, args: Record<string, unknown>, result: string) => Promise<void>)
+      | undefined,
+  ): void {
+    this.onToolCall = callback;
   }
 
   /**
@@ -833,6 +857,19 @@ export class LLMLoop {
           tool_call_id: tcData.id,
           content: result,
         });
+        // Surface successful tool execution to the host SDK
+        // (StreamHandler in pipeline mode). Failures in the observer must
+        // NOT abort the LLM loop — log and continue. Mirrors the Python
+        // `_on_tool_call` invocation in `llm_loop.py`.
+        if (this.onToolCall) {
+          try {
+            await this.onToolCall(toolName, args, result);
+          } catch (err) {
+            getLogger().error(
+              `onToolCall observer failed for tool '${toolName}': ${String(err)}`,
+            );
+          }
+        }
       }
     }
 

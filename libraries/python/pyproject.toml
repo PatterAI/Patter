@@ -173,4 +173,5 @@ markers = [
     "integration: Integration tests",
     "soak: Soak/stress tests (slow)",
     "security: Security tests",
+    "mocked: Tests that mock paid/external boundaries (OpenAI WS, Twilio, etc.)",
 ]

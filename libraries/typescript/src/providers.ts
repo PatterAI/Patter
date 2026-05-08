@@ -105,19 +105,9 @@ export function soniox(opts: { apiKey: string; language?: string }): STTConfig {
   return new STTConfigImpl("soniox", opts.apiKey, opts.language ?? "en");
 }
 
-/**
- * Speechmatics STT config helper.
- *
- * NOTE: the Speechmatics adapter is currently Python-only. Calling this helper
- * throws a clear error so callers can switch providers or use the Python SDK
- * until the TS adapter ships.
- */
-export function speechmatics(_opts: { apiKey: string; language?: string }): STTConfig {
-  throw new Error(
-    "speechmatics() is Python-only right now — the TS Speechmatics adapter " +
-      "has not shipped yet. Use the Python SDK or pick another STT " +
-      "provider such as deepgram() / assemblyai() / soniox().",
-  );
+/** Speechmatics real-time STT config helper. */
+export function speechmatics(opts: { apiKey: string; language?: string }): STTConfig {
+  return new STTConfigImpl("speechmatics", opts.apiKey, opts.language ?? "en");
 }
 
 /** AssemblyAI real-time STT config helper. */

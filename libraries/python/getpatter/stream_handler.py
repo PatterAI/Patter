@@ -228,6 +228,9 @@ def create_metrics_accumulator(
 
     stt_name = ""
     tts_name = ""
+    stt_model = ""
+    tts_model = ""
+    realtime_model = ""
     if provider == "pipeline":
         # Prefer the explicit ``provider_key`` ClassVar declared by
         # wrapper classes (stable, matches ``pricing.py`` keys); fall
@@ -236,17 +239,26 @@ def create_metrics_accumulator(
             stt_name = getattr(type(agent.stt), "provider_key", None) or getattr(
                 agent.stt, "provider", ""
             )
+            # Adapter ``model`` attribute powers per-model rate resolution
+            # in pricing.calculate_stt_cost. Empty string → provider default.
+            stt_model = str(getattr(agent.stt, "model", "") or "")
         else:
             stt_name = "deepgram" if deepgram_key else ""
         if agent.tts is not None:
             tts_name = getattr(type(agent.tts), "provider_key", None) or getattr(
                 agent.tts, "provider", ""
             )
+            tts_model = str(getattr(agent.tts, "model", "") or "")
         else:
             tts_name = "elevenlabs" if elevenlabs_key else ""
     elif provider == "openai_realtime":
         stt_name = "openai"
         tts_name = "openai"
+        # Realtime collapses STT+LLM+TTS into one model — capture it so the
+        # token-based cost calc picks the right per-model rate (e.g. gpt-
+        # realtime-2 vs gpt-realtime-mini). Use the agent's declared model
+        # when set; fall back to the adapter default.
+        realtime_model = str(getattr(agent, "model", "") or "") or "gpt-realtime-mini"
     elif provider == "elevenlabs_convai":
         stt_name = "elevenlabs"
         tts_name = "elevenlabs"
@@ -280,6 +292,9 @@ def create_metrics_accumulator(
         llm_provider=llm_name,
         pricing=pricing,
         report_only_initial_ttfb=report_only_initial_ttfb,
+        stt_model=stt_model,
+        tts_model=tts_model,
+        realtime_model=realtime_model,
     )
 
 
@@ -297,19 +312,29 @@ def evaluate_guardrails(agent, response_text: str) -> tuple[bool, str]:
             if isinstance(guard, dict)
             else getattr(guard, "blocked_terms", None)
         )
-        check_fn = guard.get("check") if isinstance(guard, dict) else getattr(guard, "check", None)
+        check_fn = (
+            guard.get("check")
+            if isinstance(guard, dict)
+            else getattr(guard, "check", None)
+        )
         guard_name = (
-            guard.get("name") if isinstance(guard, dict) else getattr(guard, "name", "unnamed")
+            guard.get("name")
+            if isinstance(guard, dict)
+            else getattr(guard, "name", "unnamed")
         )
         if blocked_terms:
-            blocked = any(term.lower() in response_text.lower() for term in blocked_terms)
+            blocked = any(
+                term.lower() in response_text.lower() for term in blocked_terms
+            )
         if check_fn and not blocked:
             try:
                 blocked = bool(check_fn(response_text))
             except Exception as exc:
                 logger.warning("Guardrail '%s' check error: %s", guard_name, exc)
         if blocked:
-            logger.warning("Guardrail '%s' triggered on: %.50s", guard_name, response_text)
+            logger.warning(
+                "Guardrail '%s' triggered on: %.50s", guard_name, response_text
+            )
             return True, guard_name
     return False, ""
 
@@ -322,7 +347,11 @@ def get_guardrail_replacement(agent, guard_name: str) -> str:
     """
     guardrails = getattr(agent, "guardrails", None) or []
     for guard in guardrails:
-        name = guard.get("name") if isinstance(guard, dict) else getattr(guard, "name", "unnamed")
+        name = (
+            guard.get("name")
+            if isinstance(guard, dict)
+            else getattr(guard, "name", "unnamed")
+        )
         if name == guard_name:
             r = (
                 guard.get("replacement")
@@ -478,7 +507,9 @@ class StreamHandler(ABC):
             else 0
         )
         self._user_speech_start_ms = None
-        await self.speech_events.fire_user_speech_ended(speech_duration_ms=max(0, duration_ms))
+        await self.speech_events.fire_user_speech_ended(
+            speech_duration_ms=max(0, duration_ms)
+        )
 
     async def _emit_user_speech_eos(
         self, *, trigger: str, transcript_so_far: str | None = None
@@ -494,19 +525,46 @@ class StreamHandler(ABC):
             return
         self._agent_turn_start_ms = time.time() * 1000
         tts_provider = self._infer_tts_provider()
-        await self.speech_events.fire_agent_speech_started(tts_provider=tts_provider, engine=engine)
+        await self.speech_events.fire_agent_speech_started(
+            tts_provider=tts_provider, engine=engine
+        )
 
     async def _emit_agent_speech_ended(self, *, interrupted: bool = False) -> None:
         if self.speech_events is None:
             return
         now_ms = time.time() * 1000
         duration_ms = (
-            int(now_ms - self._agent_turn_start_ms) if self._agent_turn_start_ms is not None else 0
+            int(now_ms - self._agent_turn_start_ms)
+            if self._agent_turn_start_ms is not None
+            else 0
         )
         self._agent_turn_start_ms = None
         await self.speech_events.fire_agent_speech_ended(
             speech_duration_ms=max(0, duration_ms), interrupted=interrupted
         )
+
+    async def _emit_llm_first_token(
+        self, *, llm_provider: str, model: str | None = None
+    ) -> None:
+        """Fire the per-turn TTFT marker. Idempotent within a turn —
+        :class:`SpeechEvents` guards on ``_first_token_for_turn``.
+        """
+        if self.speech_events is None:
+            return
+        await self.speech_events.fire_llm_first_token(
+            llm_provider=llm_provider, model=model or ""
+        )
+
+    async def _emit_audio_out(self, *, tts_provider: str | None = None) -> None:
+        """Fire the per-turn first-TTS-chunk marker. Idempotent within a
+        turn — :class:`SpeechEvents` guards on ``_first_audio_for_turn``.
+        ``tts_provider`` defaults to the inferred TTS class name (Pipeline
+        mode) or the engine name (Realtime / ConvAI).
+        """
+        if self.speech_events is None:
+            return
+        provider = tts_provider or self._infer_tts_provider() or "unknown"
+        await self.speech_events.fire_audio_out(tts_provider=provider)
 
     def _infer_tts_provider(self) -> str | None:
         """Best-effort TTS provider name for event payloads. Returns None
@@ -530,6 +588,29 @@ class StreamHandler(ABC):
             if known in cls_name:
                 return known
         return cls_name.replace("tts", "") or None
+
+    def _infer_llm_provider(self) -> str:
+        """Best-effort LLM provider name for event payloads. Returns the
+        agent's configured LLM provider class name lower-cased, or
+        ``"openai"`` when only the OpenAI key path is in use."""
+        llm = getattr(self.agent, "llm", None)
+        if llm is None:
+            return "openai"
+        cls_name = type(llm).__name__.lower()
+        for known in (
+            "anthropic",
+            "cerebras",
+            "groq",
+            "google",
+            "gemini",
+            "openai",
+            "azure",
+            "mistral",
+            "deepseek",
+        ):
+            if known in cls_name:
+                return known
+        return cls_name.replace("llmprovider", "").replace("llm", "") or "custom"
 
     @abstractmethod
     async def start(self) -> None:
@@ -689,7 +770,9 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
             except Exception:
                 logger.exception("Assistant buffer flush (timeout) failed")
 
-    def _schedule_reassurance(self, tool_def: dict, tool_name: str) -> asyncio.Task | None:
+    def _schedule_reassurance(
+        self, tool_def: dict, tool_name: str
+    ) -> asyncio.Task | None:
         """Schedule a reassurance filler message if the tool has one
         configured. Bridges the silence when a slow tool call would
         otherwise leave the caller hanging. Returns the task so the
@@ -721,7 +804,9 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                 # Tool returned before the grace window — nothing to do.
                 raise
             except Exception as exc:
-                logger.warning("Reassurance message failed for tool '%s': %s", tool_name, exc)
+                logger.warning(
+                    "Reassurance message failed for tool '%s': %s", tool_name, exc
+                )
 
         return asyncio.create_task(_fire())
 
@@ -742,7 +827,9 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         else:
             displayed = result if len(result) <= 200 else result[:200] + "…"
             text = f"{name}({args_text}) → {displayed}"
-        self.conversation_history.append({"role": "tool", "text": text, "timestamp": time.time()})
+        self.conversation_history.append(
+            {"role": "tool", "text": text, "timestamp": time.time()}
+        )
         self.transcript_entries.append({"role": "tool", "text": text})
         if self.on_transcript:
             await self.on_transcript(
@@ -783,15 +870,27 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
             agent_tools.append(entry)
         openai_tools: list[dict] = agent_tools + [TRANSFER_CALL_TOOL, END_CALL_TOOL]
 
-        self._adapter = OpenAIRealtimeAdapter(
-            api_key=self._openai_key,
-            model=self.agent.model,
-            voice=self.agent.voice,
-            instructions=self.resolved_prompt,
-            language=self.agent.language,
-            tools=openai_tools,
-            audio_format=self._audio_format,
+        # Forward optional engine-level Realtime knobs (carried on the Agent
+        # by ``Patter._unpack_engine``) only when set, so the adapter's own
+        # defaults remain authoritative for users that don't pass them.
+        adapter_kwargs: dict = {
+            "api_key": self._openai_key,
+            "model": self.agent.model,
+            "voice": self.agent.voice,
+            "instructions": self.resolved_prompt,
+            "language": self.agent.language,
+            "tools": openai_tools,
+            "audio_format": self._audio_format,
+        }
+        reasoning_effort = getattr(self.agent, "openai_realtime_reasoning_effort", None)
+        if reasoning_effort is not None:
+            adapter_kwargs["reasoning_effort"] = reasoning_effort
+        transcription_model = getattr(
+            self.agent, "openai_realtime_input_audio_transcription_model", None
         )
+        if transcription_model is not None:
+            adapter_kwargs["input_audio_transcription_model"] = transcription_model
+        self._adapter = OpenAIRealtimeAdapter(**adapter_kwargs)
         await self._adapter.connect()
         logger.debug("OpenAI Realtime connected")
 
@@ -804,7 +903,9 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
             # ``first_message`` as its OWN opening line, not a user prompt
             # to respond to. Older adapters that don't expose the new method
             # fall back to ``send_text``.
-            sender = getattr(self._adapter, "send_first_message", self._adapter.send_text)
+            sender = getattr(
+                self._adapter, "send_first_message", self._adapter.send_text
+            )
             await sender(self.agent.first_message)
 
         self._background_task = asyncio.create_task(self._forward_events())
@@ -832,6 +933,13 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                             self.metrics.record_tts_first_byte()
                         # Speech-event: first wire-time chunk of this agent turn.
                         await self._emit_agent_speech_started(engine="openai_realtime")
+                        # Speech-event: first TTS audio chunk of this turn.
+                        # In Realtime mode the LLM and TTS are the same model
+                        # (audio-out IS the model output), so the same edge
+                        # marks both ``llm_first_token`` and ``tts_first_audio``
+                        # for the SDK callback consumers. The dispatcher
+                        # idempotency guards stop double-firing within a turn.
+                        await self._emit_audio_out(tts_provider="openai_realtime")
                         waiting_first_audio = False
                     await self.audio_sender.send_audio(ev_data)
                     await self.audio_sender.send_mark(f"audio_{id(ev_data)}")
@@ -897,10 +1005,21 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                 elif ev_type == "transcript_output":
                     if ev_data:
                         response_text: str = ev_data
-                        blocked, guard_name = evaluate_guardrails(self.agent, response_text)
+                        # Speech-event: first LLM token (TTFT) for this turn.
+                        # Idempotent — dispatcher guards on
+                        # ``_first_token_for_turn``.
+                        await self._emit_llm_first_token(
+                            llm_provider="openai_realtime",
+                            model=self.agent.model,
+                        )
+                        blocked, guard_name = evaluate_guardrails(
+                            self.agent, response_text
+                        )
                         if blocked:
                             await self._adapter.cancel_response()
-                            replacement = get_guardrail_replacement(self.agent, guard_name)
+                            replacement = get_guardrail_replacement(
+                                self.agent, guard_name
+                            )
                             await self._adapter.send_text(replacement)
                             current_agent_text = ""
                         else:
@@ -935,7 +1054,14 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                     if self.metrics is not None and isinstance(ev_data, dict):
                         usage = ev_data.get("usage", {})
                         if usage:
-                            self.metrics.record_realtime_usage(usage)
+                            # ``response.done`` carries the model used for
+                            # this turn (e.g. ``gpt-realtime-2``); pass it
+                            # so the cost calc auto-resolves the per-model
+                            # rate. Falls back to ``self.realtime_model`` set
+                            # at call start when absent.
+                            self.metrics.record_realtime_usage(
+                                usage, model=ev_data.get("model")
+                            )
                     response_was_cancelled = (
                         not current_agent_text
                         and self.metrics is not None
@@ -968,14 +1094,20 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                     # when an agent turn was actually in flight (start_ms is
                     # set), to avoid spurious events on engine warmup.
                     if self._agent_turn_start_ms is not None:
-                        await self._emit_agent_speech_ended(interrupted=response_was_cancelled)
+                        await self._emit_agent_speech_ended(
+                            interrupted=response_was_cancelled
+                        )
                     waiting_first_audio = True
 
                 elif ev_type == "function_call":
                     func_data = ev_data
                     if func_data["name"] == "transfer_call":
                         raw_args = func_data.get("arguments", "{}")
-                        args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                        args = (
+                            json.loads(raw_args)
+                            if isinstance(raw_args, str)
+                            else raw_args
+                        )
                         transfer_number = args.get("number", "")
                         if not _validate_e164(transfer_number):
                             logger.warning(
@@ -991,14 +1123,20 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                             await self._adapter.send_function_result(
                                 func_data["call_id"], rejection
                             )
-                            await self._emit_tool_event("transfer_call", args, rejection)
+                            await self._emit_tool_event(
+                                "transfer_call", args, rejection
+                            )
                             continue
                         logger.debug(
                             "Transferring call to %s",
                             mask_phone_number(transfer_number),
                         )
-                        result = json.dumps({"status": "transferring", "to": transfer_number})
-                        await self._adapter.send_function_result(func_data["call_id"], result)
+                        result = json.dumps(
+                            {"status": "transferring", "to": transfer_number}
+                        )
+                        await self._adapter.send_function_result(
+                            func_data["call_id"], result
+                        )
                         await self._emit_tool_event("transfer_call", args, result)
                         if self._transfer_fn:
                             await self._transfer_fn(transfer_number)
@@ -1014,11 +1152,17 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
 
                     elif func_data["name"] == "end_call":
                         raw_args = func_data.get("arguments", "{}")
-                        args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                        args = (
+                            json.loads(raw_args)
+                            if isinstance(raw_args, str)
+                            else raw_args
+                        )
                         reason = args.get("reason", "conversation_complete")
                         logger.debug("Ending call: %s", reason)
                         result = json.dumps({"status": "ending", "reason": reason})
-                        await self._adapter.send_function_result(func_data["call_id"], result)
+                        await self._adapter.send_function_result(
+                            func_data["call_id"], result
+                        )
                         await self._emit_tool_event("end_call", args, result)
                         if self._hangup_fn:
                             await self._hangup_fn()
@@ -1034,10 +1178,16 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
 
                     else:
                         tool_def = next(
-                            (t for t in (self.agent.tools or []) if t["name"] == func_data["name"]),
+                            (
+                                t
+                                for t in (self.agent.tools or [])
+                                if t["name"] == func_data["name"]
+                            ),
                             None,
                         )
-                        if tool_def and (tool_def.get("webhook_url") or tool_def.get("handler")):
+                        if tool_def and (
+                            tool_def.get("webhook_url") or tool_def.get("handler")
+                        ):
                             args = func_data.get("arguments", "{}")
                             if isinstance(args, str):
                                 args = json.loads(args)
@@ -1083,7 +1233,9 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                             finally:
                                 if reassurance_task is not None:
                                     reassurance_task.cancel()
-                            await self._adapter.send_function_result(func_data["call_id"], result)
+                            await self._adapter.send_function_result(
+                                func_data["call_id"], result
+                            )
                             # Emit follow-up event with result so timeline
                             # shows full call/return semantics.
                             await self._emit_tool_event(func_data["name"], args, result)
@@ -1109,7 +1261,9 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
     async def on_dtmf(self, digit: str) -> None:
         """Forward a DTMF keypress to the model as a synthetic user message."""
         if self._adapter is not None:
-            await self._adapter.send_text(f"The user pressed key {digit} on their phone keypad.")
+            await self._adapter.send_text(
+                f"The user pressed key {digit} on their phone keypad."
+            )
 
     async def cleanup(self) -> None:
         """Cancel the event-forward task and close the OpenAI Realtime adapter."""
@@ -1194,7 +1348,9 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
             ElevenLabsConvAIAdapter,  # type: ignore[import]
         )
 
-        voice = self.agent.voice if self.agent.voice != "alloy" else "EXAVITQu4vr4xnSDxMaL"
+        voice = (
+            self.agent.voice if self.agent.voice != "alloy" else "EXAVITQu4vr4xnSDxMaL"
+        )
         agent_id = ""
         el_config = getattr(self.agent, "elevenlabs_convai", None) or {}
         if isinstance(el_config, dict):
@@ -1211,8 +1367,14 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
         #   1. Explicit handler kwargs (output_audio_format / input_audio_format)
         #   2. agent.elevenlabs_convai dict ("output_audio_format", "input_audio_format")
         #   3. None — let ConvAI pick its server default (PCM16 16 kHz)
-        cfg_output = el_config.get("output_audio_format") if isinstance(el_config, dict) else None
-        cfg_input = el_config.get("input_audio_format") if isinstance(el_config, dict) else None
+        cfg_output = (
+            el_config.get("output_audio_format")
+            if isinstance(el_config, dict)
+            else None
+        )
+        cfg_input = (
+            el_config.get("input_audio_format") if isinstance(el_config, dict) else None
+        )
         output_audio_format = self._output_audio_format_override or cfg_output
         input_audio_format = self._input_audio_format_override or cfg_input
 
@@ -1267,6 +1429,11 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
                     if waiting_first_audio and self.metrics is not None:
                         self.metrics.record_tts_first_byte()
                         waiting_first_audio = False
+                        # Speech-event: first TTS audio chunk for this turn.
+                        # ConvAI is a fully-baked agent so the SDK doesn't see
+                        # token-level LLM deltas; the audio edge is the only
+                        # observable per-turn signal.
+                        await self._emit_audio_out(tts_provider="elevenlabs_convai")
                     await self.audio_sender.send_audio(ev_data)
 
                 elif ev_type == "speech_stopped":
@@ -1302,6 +1469,14 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
                 elif ev_type == "transcript_output":
                     if ev_data:
                         response_text: str = ev_data
+                        # Speech-event: per-turn TTFT (LLM first token).
+                        # ConvAI's WS streams the assistant transcript text
+                        # alongside audio; the first delta is the earliest
+                        # observable proxy for an LLM token.
+                        await self._emit_llm_first_token(
+                            llm_provider="elevenlabs_convai",
+                            model=self.agent.model,
+                        )
                         blocked, _ = evaluate_guardrails(self.agent, response_text)
                         if blocked:
                             current_agent_text = ""
@@ -1437,8 +1612,12 @@ class PipelineStreamHandler(StreamHandler):
         # mulaw 8 kHz; Telnyx is mulaw 8 kHz when ``streaming_start``
         # negotiates PCMU bidirectional (our default). Callers pass the
         # flags explicitly when they differ from `for_twilio`.
-        self._input_is_mulaw_8k = for_twilio if input_is_mulaw_8k is None else input_is_mulaw_8k
-        self._output_is_mulaw_8k = for_twilio if output_is_mulaw_8k is None else output_is_mulaw_8k
+        self._input_is_mulaw_8k = (
+            for_twilio if input_is_mulaw_8k is None else input_is_mulaw_8k
+        )
+        self._output_is_mulaw_8k = (
+            for_twilio if output_is_mulaw_8k is None else output_is_mulaw_8k
+        )
         self._transfer_fn = transfer_fn
         self._hangup_fn = hangup_fn
         self._send_dtmf_fn = send_dtmf_fn
@@ -1531,7 +1710,9 @@ class PipelineStreamHandler(StreamHandler):
         elif self._elevenlabs_key:
             from getpatter.providers.elevenlabs_tts import ElevenLabsTTS  # type: ignore[import]
 
-            self._tts = ElevenLabsTTS(api_key=self._elevenlabs_key, voice_id=self.agent.voice)
+            self._tts = ElevenLabsTTS(
+                api_key=self._elevenlabs_key, voice_id=self.agent.voice
+            )
 
         # Advise the TTS adapter of the telephony carrier so it can pick a
         # wire-native ``output_format`` (e.g. ``ulaw_8000`` on Twilio) and
@@ -1541,7 +1722,9 @@ class PipelineStreamHandler(StreamHandler):
         # only auto-flip when the user did NOT explicitly pass output_format.
         if self._tts is not None and hasattr(self._tts, "set_telephony_carrier"):
             try:
-                self._tts.set_telephony_carrier("twilio" if self._for_twilio else "telnyx")
+                self._tts.set_telephony_carrier(
+                    "twilio" if self._for_twilio else "telnyx"
+                )
             except Exception:  # pragma: no cover - defensive; adapter bug
                 logger.debug(
                     "TTS set_telephony_carrier failed; using construction-time format",
@@ -1625,7 +1808,11 @@ class PipelineStreamHandler(StreamHandler):
 
         # Play first_message if configured and no on_message handler.
         # Measure TTS-first-byte latency for parity with TS (`stream-handler.ts`).
-        if self.agent.first_message and self.on_message is None and self._tts is not None:
+        if (
+            self.agent.first_message
+            and self.on_message is None
+            and self._tts is not None
+        ):
             if self.metrics is not None:
                 self.metrics.start_turn()
             # Mark the agent as speaking for the duration of the first
@@ -1727,7 +1914,10 @@ class PipelineStreamHandler(StreamHandler):
                 llm_provider=agent_llm,
                 metrics=self.metrics,
                 event_bus=self._event_bus,
-                disable_phone_preamble=getattr(self.agent, "disable_phone_preamble", False),
+                disable_phone_preamble=getattr(
+                    self.agent, "disable_phone_preamble", False
+                ),
+                on_tool_call=self._record_tool_call,
             )
 
         # Create remote message handler once if on_message is a remote URL
@@ -1751,6 +1941,92 @@ class PipelineStreamHandler(StreamHandler):
             callee=self.callee,
             history=tuple(self.conversation_history),
         )
+
+    async def _emit_assistant_transcript(self, text: str) -> None:
+        """Push an assistant turn into history+transcript_entries and fire
+        ``on_transcript`` so host applications observe pipeline-mode
+        replies the same way they observe realtime-mode replies (mirrors
+        :meth:`OpenAIRealtimeStreamHandler._flush_assistant_turn`).
+        Caller is responsible for filtering empty strings.
+        """
+        self.conversation_history.append(
+            {"role": "assistant", "text": text, "timestamp": time.time()}
+        )
+        self.transcript_entries.append({"role": "assistant", "text": text})
+        if self.on_transcript is not None:
+            await self.on_transcript(
+                {
+                    "role": "assistant",
+                    "text": text,
+                    "call_id": self.call_id,
+                    "history": list(self.conversation_history),
+                }
+            )
+
+    async def _record_tool_call(self, name: str, arguments: dict, result: Any) -> None:
+        """Surface a tool invocation into the transcript timeline. Emits
+        TWO events: one ``role=tool`` entry for the call and a second one
+        for the result (mirrors realtime-mode's two ``_emit_tool_event``
+        calls in :meth:`OpenAIRealtimeStreamHandler._forward_events`).
+        Wired as the :class:`LLMLoop` ``on_tool_call`` observer for
+        pipeline mode.
+        """
+        try:
+            args_text = json.dumps(arguments or {})
+        except (TypeError, ValueError):
+            args_text = "{}"
+        # Coerce non-string results (e.g. providers that return a dict) to
+        # JSON for the transcript display; the LLM has already received
+        # the executor's raw return value via the messages array.
+        if result is None:
+            result_text: str | None = None
+        elif isinstance(result, str):
+            result_text = result
+        else:
+            try:
+                result_text = json.dumps(result)
+            except (TypeError, ValueError):
+                result_text = str(result)
+
+        # 1) Call event — transcript shows ``name(args_json)``
+        call_text = f"{name}({args_text})"
+        self.conversation_history.append(
+            {"role": "tool", "text": call_text, "timestamp": time.time()}
+        )
+        self.transcript_entries.append({"role": "tool", "text": call_text})
+        if self.on_transcript is not None:
+            await self.on_transcript(
+                {
+                    "role": "tool",
+                    "text": call_text,
+                    "call_id": self.call_id,
+                    "tool_name": name,
+                    "tool_args": arguments or {},
+                    "tool_result": None,
+                }
+            )
+
+        # 2) Result event — transcript shows ``name(...) → result`` (truncated)
+        if result_text is not None:
+            displayed = (
+                result_text if len(result_text) <= 200 else result_text[:200] + "…"
+            )
+            res_text = f"{name}(...) → {displayed}"
+            self.conversation_history.append(
+                {"role": "tool", "text": res_text, "timestamp": time.time()}
+            )
+            self.transcript_entries.append({"role": "tool", "text": res_text})
+            if self.on_transcript is not None:
+                await self.on_transcript(
+                    {
+                        "role": "tool",
+                        "text": res_text,
+                        "call_id": self.call_id,
+                        "tool_name": name,
+                        "tool_args": arguments or {},
+                        "tool_result": result_text,
+                    }
+                )
 
     async def _synthesize_sentence(
         self,
@@ -1814,6 +2090,10 @@ class PipelineStreamHandler(StreamHandler):
                 if first_tts_chunk[0] and self.metrics is not None:
                     self.metrics.record_tts_first_byte()
                     first_tts_chunk[0] = False
+                    # Speech-event: per-turn first TTS audio chunk. Idempotent
+                    # in the dispatcher; fires for the first sentence's first
+                    # synthesized chunk per turn.
+                    await self._emit_audio_out()
                 if self._event_bus is not None:
                     self._event_bus.emit(
                         "tts_chunk",
@@ -1875,6 +2155,12 @@ class PipelineStreamHandler(StreamHandler):
                     if llm_first_token_sent[0] and self.metrics is not None:
                         self.metrics.record_llm_first_token()
                         llm_first_token_sent[0] = False
+                        # Speech-event: fire per-turn TTFT marker for SDK
+                        # callback consumers. Idempotent in the dispatcher.
+                        await self._emit_llm_first_token(
+                            llm_provider=self._infer_llm_provider(),
+                            model=self.agent.model,
+                        )
 
                     sentences = chunker.push(token)
                     # Fix 3: mark first-sentence boundary for accurate tts_ms.
@@ -1934,7 +2220,9 @@ class PipelineStreamHandler(StreamHandler):
                         sentence = get_guardrail_replacement(self.agent, guard_name)
 
                     if hook_executor.has_after_llm_sentence():
-                        transformed = await hook_executor.run_after_llm_sentence(sentence, hook_ctx)
+                        transformed = await hook_executor.run_after_llm_sentence(
+                            sentence, hook_ctx
+                        )
                         if transformed is None:
                             continue
                         sentence = transformed
@@ -1985,10 +2273,7 @@ class PipelineStreamHandler(StreamHandler):
         if blocked:
             response_text = get_guardrail_replacement(self.agent, guard_name)
 
-        self.conversation_history.append(
-            {"role": "assistant", "text": response_text, "timestamp": time.time()}
-        )
-        self.transcript_entries.append({"role": "assistant", "text": response_text})
+        await self._emit_assistant_transcript(response_text)
         # Use sentence chunking + hooks for consistent behavior with streaming path
         hooks = getattr(self.agent, "hooks", None)
         hook_executor = PipelineHookExecutor(hooks)
@@ -2123,7 +2408,9 @@ class PipelineStreamHandler(StreamHandler):
                 # ``on_transcript`` callback path is unchanged).
                 if transcript.text and self._event_bus is not None:
                     self._event_bus.emit(
-                        "transcript_partial" if not transcript.is_final else "transcript_final",
+                        "transcript_partial"
+                        if not transcript.is_final
+                        else "transcript_final",
                         {
                             "text": transcript.text,
                             "is_final": bool(transcript.is_final),
@@ -2135,7 +2422,9 @@ class PipelineStreamHandler(StreamHandler):
                 # that fires before ``is_final`` on each turn — accepting it
                 # here removes ~300–700 ms of per-turn latency at parity with
                 # the TS handler.
-                if not ((transcript.is_final or transcript.speech_final) and transcript.text):
+                if not (
+                    (transcript.is_final or transcript.speech_final) and transcript.text
+                ):
                     continue
                 if not self._commit_transcript(transcript.text):
                     continue
@@ -2187,7 +2476,9 @@ class PipelineStreamHandler(StreamHandler):
                         pass
 
                 # Raw transcript always goes to dashboard/transcript log
-                self.transcript_entries.append({"role": "user", "text": transcript.text})
+                self.transcript_entries.append(
+                    {"role": "user", "text": transcript.text}
+                )
 
                 if self.on_transcript:
                     await self.on_transcript(
@@ -2203,7 +2494,9 @@ class PipelineStreamHandler(StreamHandler):
                 hooks = getattr(self.agent, "hooks", None)
                 hook_executor = PipelineHookExecutor(hooks)
                 hook_ctx = self._build_hook_context()
-                filtered_text = await hook_executor.run_after_transcribe(transcript.text, hook_ctx)
+                filtered_text = await hook_executor.run_after_transcribe(
+                    transcript.text, hook_ctx
+                )
                 if filtered_text is None:
                     logger.debug("afterTranscribe hook vetoed turn")
                     if self.metrics is not None:
@@ -2243,16 +2536,11 @@ class PipelineStreamHandler(StreamHandler):
                         hook_ctx=hook_ctx,
                         cancel_event=self._llm_cancel_event,
                     )
-                    response_text = await self._process_streaming_response(result, self.call_id)
+                    response_text = await self._process_streaming_response(
+                        result, self.call_id
+                    )
                     if response_text:
-                        self.conversation_history.append(
-                            {
-                                "role": "assistant",
-                                "text": response_text,
-                                "timestamp": time.time(),
-                            }
-                        )
-                        self.transcript_entries.append({"role": "assistant", "text": response_text})
+                        await self._emit_assistant_transcript(response_text)
                     continue
 
                 # on_message handler path
@@ -2281,7 +2569,9 @@ class PipelineStreamHandler(StreamHandler):
                         result = remote.call_websocket(self.on_message, msg_data)
                         streaming = True
                     else:
-                        response_text = await remote.call_webhook(self.on_message, msg_data)
+                        response_text = await remote.call_webhook(
+                            self.on_message, msg_data
+                        )
                         streaming = False
                 elif self._msg_accepts_call:
                     result = self.on_message(msg_data, self._call_control)
@@ -2303,16 +2593,11 @@ class PipelineStreamHandler(StreamHandler):
                     return
 
                 if streaming:
-                    response_text = await self._process_streaming_response(result, self.call_id)
+                    response_text = await self._process_streaming_response(
+                        result, self.call_id
+                    )
                     if response_text:
-                        self.conversation_history.append(
-                            {
-                                "role": "assistant",
-                                "text": response_text,
-                                "timestamp": time.time(),
-                            }
-                        )
-                        self.transcript_entries.append({"role": "assistant", "text": response_text})
+                        await self._emit_assistant_transcript(response_text)
                 else:
                     if not response_text:
                         # Common misuse: on_message was provided as an observer
@@ -2384,7 +2669,9 @@ class PipelineStreamHandler(StreamHandler):
                         # without AEC it is just a 0.25 s anti-flicker
                         # margin. INFO so unexpected suppressions are
                         # visible without enabling debug logs.
-                        aec_state = "on" if getattr(self, "_aec", None) is not None else "off"
+                        aec_state = (
+                            "on" if getattr(self, "_aec", None) is not None else "off"
+                        )
                         logger.info(
                             "VAD speech_start suppressed (agent speaking < gate, aec=%s)",
                             aec_state,
@@ -2400,7 +2687,9 @@ class PipelineStreamHandler(StreamHandler):
                             try:
                                 await self.audio_sender.send_clear()
                             except Exception as exc:
-                                logger.debug("send_clear during VAD barge-in failed: %s", exc)
+                                logger.debug(
+                                    "send_clear during VAD barge-in failed: %s", exc
+                                )
                             # Replay the ring buffer of inbound frames
                             # captured while the agent was speaking —
                             # see ``_flush_inbound_audio_ring`` for the

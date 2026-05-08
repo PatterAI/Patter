@@ -18,14 +18,18 @@ matter).
 from __future__ import annotations
 
 import time
+import warnings
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable
+from typing import Any, Callable
 
 #: Default consecutive-failure threshold that flips CLOSED → OPEN.
 DEFAULT_FAILURE_THRESHOLD = 5
-#: Default time (seconds) the breaker stays OPEN before allowing a probe.
-DEFAULT_COOLDOWN_S = 30.0
+#: Default time (milliseconds) the breaker stays OPEN before allowing a
+#: probe. Matches the TypeScript ``DEFAULT_COOLDOWN_MS`` constant —
+#: aligning the unit prevents the "30 vs 30000" copy-paste foot-gun
+#: between SDKs.
+DEFAULT_COOLDOWN_MS = 30_000
 
 
 class CircuitBreakerState(str, Enum):
@@ -43,16 +47,84 @@ class _PerToolState:
     opened_at: float = 0.0
 
 
+# Once-per-process flag so the deprecation warning fires once instead of
+# on every call — keeps logs readable when callers wire the breaker into
+# hot paths.
+_warned_cooldown_s: bool = False
+
+
 @dataclass
 class CircuitBreakerOptions:
-    """Tunables for a single per-tool breaker."""
+    """Tunables for a single per-tool breaker.
+
+    Field naming is millisecond-based to match the TypeScript SDK
+    (``cooldownMs``) and the broader Patter convention for time fields
+    (``silence_duration_ms``, ``prefix_padding_ms``, ...).
+
+    .. deprecated::
+        Passing ``cooldown_s`` (seconds) as a constructor kwarg is
+        accepted with a ``DeprecationWarning`` for backward compatibility
+        and converted internally to ``cooldown_ms``. Scheduled for
+        removal in v0.7.0.
+    """
 
     failure_threshold: int = DEFAULT_FAILURE_THRESHOLD
-    cooldown_s: float = DEFAULT_COOLDOWN_S
+    cooldown_ms: int = DEFAULT_COOLDOWN_MS
+
+
+# Capture the dataclass-generated __init__ so we can wrap it to accept
+# the legacy ``cooldown_s`` kwarg without polluting the public field set.
+_CBO_DC_INIT = CircuitBreakerOptions.__init__
+
+
+def _cbo_init(
+    self: CircuitBreakerOptions,
+    failure_threshold: int = DEFAULT_FAILURE_THRESHOLD,
+    cooldown_ms: int | None = None,
+    *,
+    cooldown_s: float | None = None,
+    **_kwargs: Any,
+) -> None:
+    """Wrap the dataclass __init__ so legacy ``cooldown_s=`` keeps
+    working with a one-shot ``DeprecationWarning``. An explicit
+    ``cooldown_ms`` always wins; ``cooldown_s`` is converted only when
+    ``cooldown_ms`` is unset."""
+    if cooldown_s is not None:
+        global _warned_cooldown_s
+        if not _warned_cooldown_s:
+            warnings.warn(
+                "CircuitBreakerOptions(cooldown_s=...) is deprecated and "
+                "will be removed in v0.7.0. Use cooldown_ms (milliseconds) "
+                "to match the TypeScript SDK and the rest of the Patter "
+                "time-field convention.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            _warned_cooldown_s = True
+        if cooldown_ms is None:
+            cooldown_ms = int(cooldown_s * 1000)
+    if cooldown_ms is None:
+        cooldown_ms = DEFAULT_COOLDOWN_MS
+    _CBO_DC_INIT(
+        self,
+        failure_threshold=failure_threshold,
+        cooldown_ms=cooldown_ms,
+    )
+
+
+CircuitBreakerOptions.__init__ = _cbo_init  # type: ignore[method-assign]
 
 
 class CircuitBreakerRegistry:
-    """Per-name registry tracking circuit state for a fleet of tools."""
+    """Per-name registry tracking circuit state for a fleet of tools.
+
+    Internal time accounting is in **seconds** (``time.monotonic``)
+    because the injected ``clock`` callable is expected to return
+    seconds — both for backward compatibility with existing test
+    fixtures and because Python time APIs are seconds-based by
+    convention. The public ``cooldown_ms`` field is converted to
+    seconds once at construction.
+    """
 
     def __init__(
         self,
@@ -61,7 +133,10 @@ class CircuitBreakerRegistry:
     ) -> None:
         opts = opts or CircuitBreakerOptions()
         self._threshold = opts.failure_threshold
-        self._cooldown_s = opts.cooldown_s
+        # Convert public ms field → internal seconds at the boundary so
+        # the rest of the code (and the user-injected clock) keep using
+        # seconds.
+        self._cooldown_s: float = opts.cooldown_ms / 1000.0
         self._state: dict[str, _PerToolState] = {}
         # Inject for deterministic tests; defaults to ``time.monotonic``.
         self._clock = clock or time.monotonic
@@ -108,13 +183,24 @@ class CircuitBreakerRegistry:
             s.opened_at = self._clock()
 
     def time_until_half_open(self, tool_name: str) -> float:
-        """Time until OPEN → HALF_OPEN, in seconds. Returns ``0`` when
-        the breaker is currently allowing calls."""
+        """Time until OPEN → HALF_OPEN, in **seconds**. Returns ``0``
+        when the breaker is currently allowing calls.
+
+        Kept seconds-based for backward compatibility — the executor
+        multiplies by 1000 to populate the ``retry_after_ms`` field on
+        the rejection JSON. New callers that want a TypeScript-parity
+        millisecond return value should use :meth:`time_until_half_open_ms`.
+        """
         s = self._state.get(tool_name)
         if s is None or s.state != CircuitBreakerState.OPEN:
             return 0.0
         elapsed = self._clock() - s.opened_at
         return max(0.0, self._cooldown_s - elapsed)
+
+    def time_until_half_open_ms(self, tool_name: str) -> float:
+        """Millisecond-returning variant of :meth:`time_until_half_open`,
+        matching the TypeScript ``timeUntilHalfOpen`` signature."""
+        return self.time_until_half_open(tool_name) * 1000.0
 
     def snapshot(self, tool_name: str) -> _PerToolState | None:
         """Snapshot for debugging / metrics."""

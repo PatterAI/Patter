@@ -48,6 +48,10 @@ class CallMetricsAccumulator:
         llm_provider: str = "",
         pricing: dict | None = None,
         report_only_initial_ttfb: bool = False,
+        *,
+        stt_model: str = "",
+        tts_model: str = "",
+        realtime_model: str = "",
     ) -> None:
         self.call_id = call_id
         self.provider_mode = provider_mode
@@ -55,6 +59,12 @@ class CallMetricsAccumulator:
         self.stt_provider = stt_provider
         self.tts_provider = tts_provider
         self.llm_provider = llm_provider
+        # Model identifiers for per-model rate resolution (see pricing.py).
+        # Empty string means "not known" → cost calc falls back to provider
+        # defaults, matching pre-2026.3 behaviour.
+        self.stt_model = stt_model
+        self.tts_model = tts_model
+        self.realtime_model = realtime_model
         self._pricing = merge_pricing(pricing)
         self._report_only_initial_ttfb = report_only_initial_ttfb
 
@@ -487,11 +497,20 @@ class CallMetricsAccumulator:
         """Accumulate raw audio bytes sent to STT (used for cost calculation)."""
         self._stt_byte_count += byte_count
 
-    def record_realtime_usage(self, usage: dict) -> None:
-        """Record OpenAI Realtime token usage from a ``response.done`` event."""
-        self._total_realtime_cost += calculate_realtime_cost(usage, self._pricing)
+    def record_realtime_usage(self, usage: dict, model: str | None = None) -> None:
+        """Record OpenAI Realtime token usage from a ``response.done`` event.
+
+        ``model`` allows the cost calc to pick the per-model rate (e.g.
+        ``gpt-realtime-2``). Defaults to whatever was supplied at construction
+        time (``self.realtime_model``); pass an explicit value to override
+        per-call (the ``response.done`` payload carries the model used).
+        """
+        resolved_model = model or self.realtime_model or None
+        self._total_realtime_cost += calculate_realtime_cost(
+            usage, self._pricing, model=resolved_model
+        )
         self._total_realtime_cached_savings += calculate_realtime_cached_savings(
-            usage, self._pricing
+            usage, self._pricing, model=resolved_model
         )
 
     def record_llm_usage(
@@ -746,10 +765,16 @@ class CallMetricsAccumulator:
                 stt_cost = self._actual_stt_cost
             else:
                 stt_cost = calculate_stt_cost(
-                    self.stt_provider, self._total_stt_audio_seconds, self._pricing
+                    self.stt_provider,
+                    self._total_stt_audio_seconds,
+                    self._pricing,
+                    model=self.stt_model or None,
                 )
             tts_cost = calculate_tts_cost(
-                self.tts_provider, self._total_tts_characters, self._pricing
+                self.tts_provider,
+                self._total_tts_characters,
+                self._pricing,
+                model=self.tts_model or None,
             )
             # Pipeline LLM cost: calculated from accumulated token usage when
             # record_llm_usage() was called; otherwise 0 (custom on_message).

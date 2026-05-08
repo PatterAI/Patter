@@ -12,7 +12,29 @@ import WebSocket from 'ws';
 import { getLogger } from '../logger';
 
 const TELNYX_TTS_WS_URL = 'wss://api.telnyx.com/v2/text-to-speech/speech';
-const DEFAULT_VOICE = 'Telnyx.NaturalHD.astra';
+
+/** Common Telnyx NaturalHD voices accepted by the TTS endpoint. */
+export const TelnyxTTSVoice = {
+  NATURAL_HD_ASTRA: 'Telnyx.NaturalHD.astra',
+  NATURAL_HD_LUNA: 'Telnyx.NaturalHD.luna',
+  NATURAL_HD_ATLAS: 'Telnyx.NaturalHD.atlas',
+  NATURAL_HD_HERA: 'Telnyx.NaturalHD.hera',
+  NATURAL_HD_ZEUS: 'Telnyx.NaturalHD.zeus',
+} as const;
+/** Union of {@link TelnyxTTSVoice} string values. */
+export type TelnyxTTSVoice = (typeof TelnyxTTSVoice)[keyof typeof TelnyxTTSVoice];
+
+/** Sample rates supported by the Telnyx TTS WebSocket endpoint. */
+export const TelnyxTTSSampleRate = {
+  HZ_8000: 8000,
+  HZ_16000: 16000,
+  HZ_24000: 24000,
+} as const;
+/** Union of {@link TelnyxTTSSampleRate} integer values. */
+export type TelnyxTTSSampleRate =
+  (typeof TelnyxTTSSampleRate)[keyof typeof TelnyxTTSSampleRate];
+
+const DEFAULT_VOICE: TelnyxTTSVoice = TelnyxTTSVoice.NATURAL_HD_ASTRA;
 
 /** Streaming TTS adapter for Telnyx's `/v2/text-to-speech/speech` WebSocket. */
 export class TelnyxTTS {

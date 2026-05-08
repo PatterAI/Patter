@@ -372,12 +372,27 @@ export function buildAIAdapter(config: LocalConfig, agent: AgentOptions, resolve
   })) ?? [];
   const tools = [...agentTools, TRANSFER_CALL_TOOL, END_CALL_TOOL];
   const openaiKey = engine && engine.kind === 'openai_realtime' ? engine.apiKey : (config.openaiKey ?? '');
+  // Forward optional engine-level Realtime knobs so the high-level
+  // ``OpenAIRealtime`` engine wrapper has the same expressivity as the
+  // underlying ``OpenAIRealtimeAdapter``. Omitting the option keeps the
+  // adapter's own defaults — backward compat with users on the prior shape.
+  const adapterOptions: import('./providers/openai-realtime').OpenAIRealtimeOptions = {};
+  if (engine && engine.kind === 'openai_realtime') {
+    if (engine.reasoningEffort !== undefined) {
+      adapterOptions.reasoningEffort = engine.reasoningEffort;
+    }
+    if (engine.inputAudioTranscriptionModel !== undefined) {
+      adapterOptions.inputAudioTranscriptionModel = engine.inputAudioTranscriptionModel;
+    }
+  }
   return new OpenAIRealtimeAdapter(
     openaiKey,
     agent.model,
     agent.voice,
     resolvedPrompt ?? agent.systemPrompt,
     tools,
+    undefined,
+    adapterOptions,
   );
 }
 

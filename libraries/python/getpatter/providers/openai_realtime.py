@@ -9,6 +9,7 @@ import asyncio
 import base64
 import json
 import logging
+import time
 from collections import deque
 from enum import StrEnum
 from typing import Any, Literal
@@ -19,9 +20,20 @@ logger = logging.getLogger("getpatter.openai_realtime")
 
 
 class OpenAIRealtimeModel(StrEnum):
-    """Known OpenAI Realtime API model identifiers."""
+    """Known OpenAI Realtime API model identifiers.
+
+    ``GPT_REALTIME_2`` is OpenAI's most-capable realtime voice model
+    (speech-to-speech with configurable reasoning effort, stronger
+    instruction following, 128K context). It accepts the same session
+    update wire format as the v1 ``gpt-realtime`` family but supports an
+    additional ``reasoning.effort`` field — see ``reasoning_effort`` on
+    :class:`OpenAIRealtimeAdapter`. Pricing differs from the mini default;
+    override ``DEFAULT_PRICING["openai_realtime"]`` with the values in
+    ``DEFAULT_PRICING["openai_realtime_2"]`` when selecting it.
+    """
 
     GPT_REALTIME = "gpt-realtime"
+    GPT_REALTIME_2 = "gpt-realtime-2"
     GPT_REALTIME_MINI = "gpt-realtime-mini"
     GPT_4O_REALTIME_PREVIEW = "gpt-4o-realtime-preview"
     GPT_4O_MINI_REALTIME_PREVIEW = "gpt-4o-mini-realtime-preview"
@@ -52,11 +64,19 @@ class OpenAIRealtimeAudioFormat(StrEnum):
 
 
 class OpenAITranscriptionModel(StrEnum):
-    """Models accepted by ``input_audio_transcription`` on Realtime sessions."""
+    """Models accepted by ``input_audio_transcription`` on Realtime sessions.
+
+    ``GPT_REALTIME_WHISPER`` is OpenAI's streaming-optimised Whisper variant
+    designed for low-latency transcript deltas inside a Realtime session.
+    Billed per minute of audio (separate from the conversational model
+    tokens). Use it when you want faster partial transcripts than
+    ``whisper-1`` at lower cost than ``gpt-4o-transcribe``.
+    """
 
     WHISPER_1 = "whisper-1"
     GPT_4O_TRANSCRIBE = "gpt-4o-transcribe"
     GPT_4O_MINI_TRANSCRIBE = "gpt-4o-mini-transcribe"
+    GPT_REALTIME_WHISPER = "gpt-realtime-whisper"
 
 
 class OpenAIRealtimeVADType(StrEnum):
@@ -84,7 +104,8 @@ class OpenAIRealtimeAdapter:
         instructions: str = "",
         language: str = "en",
         tools: list[dict] | None = None,
-        audio_format: OpenAIRealtimeAudioFormat | str = OpenAIRealtimeAudioFormat.G711_ULAW,
+        audio_format: OpenAIRealtimeAudioFormat
+        | str = OpenAIRealtimeAudioFormat.G711_ULAW,
         *,
         temperature: float | None = None,
         max_response_output_tokens: int | str | None = None,
@@ -92,11 +113,17 @@ class OpenAIRealtimeAdapter:
         tool_choice: str | dict | None = None,
         input_audio_transcription_model: OpenAITranscriptionModel
         | str = OpenAITranscriptionModel.WHISPER_1,
-        vad_type: Literal["server_vad", "semantic_vad"] = OpenAIRealtimeVADType.SERVER_VAD.value,
+        vad_type: Literal[
+            "server_vad", "semantic_vad"
+        ] = OpenAIRealtimeVADType.SERVER_VAD.value,
         # OpenAI's documented sweet-spot for snappier turns. Lowering from the
         # previous 500 ms saves ~200 ms per turn end. Override via constructor
         # if a use case (e.g. dictation) needs more trailing silence.
         silence_duration_ms: int = 300,
+        # Reasoning-effort tier for ``gpt-realtime-2``. None leaves the field
+        # unset (server default). OpenAI recommends ``"low"`` for production
+        # voice flows — higher tiers add measurable per-turn latency.
+        reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = None,
     ):
         self.api_key = api_key
         self.model = model
@@ -112,12 +139,23 @@ class OpenAIRealtimeAdapter:
         self.input_audio_transcription_model = input_audio_transcription_model
         self.vad_type = vad_type
         self.silence_duration_ms = silence_duration_ms
+        self.reasoning_effort = reasoning_effort
         self._ws: Any = None
         self._running = False
         # Track the assistant message currently being generated so we can
         # truncate it cleanly on barge-in (see ``input_audio_buffer.speech_started``).
         self._current_response_item_id: str | None = None
         self._current_response_audio_ms: int = 0
+        # Wall-clock timestamp (``time.monotonic()``) of the first
+        # ``response.audio.delta`` received since the current response item
+        # started. Used by ``cancel_response`` to bound ``audio_end_ms`` to
+        # what the caller could plausibly have heard — generated audio
+        # frequently arrives at 5-10x real-time, so ``audio_end_ms`` driven
+        # purely by the per-chunk byte counter overshoots reality and leaves
+        # phantom assistant text on the conversation. The wall-clock cap
+        # corresponds to the maximum playback that real-time TTS could have
+        # produced, which is what the user actually heard.
+        self._current_response_first_audio_at: float | None = None
         # Messages read during the ``session.updated`` ack wait get buffered
         # here and drained by ``receive_events`` before reading the socket.
         self._pending_events: deque[str] = deque()
@@ -189,13 +227,19 @@ class OpenAIRealtimeAdapter:
             if self.temperature is not None:
                 session_config["temperature"] = self.temperature
             if self.max_response_output_tokens is not None:
-                session_config["max_response_output_tokens"] = self.max_response_output_tokens
+                session_config["max_response_output_tokens"] = (
+                    self.max_response_output_tokens
+                )
             if self.modalities is not None:
                 session_config["modalities"] = self.modalities
             if self.tool_choice is not None:
                 session_config["tool_choice"] = self.tool_choice
             if self.tools:
-                session_config["tools"] = [self._build_tool_wire_format(t) for t in self.tools]
+                session_config["tools"] = [
+                    self._build_tool_wire_format(t) for t in self.tools
+                ]
+            if self.reasoning_effort is not None:
+                session_config["reasoning"] = {"effort": self.reasoning_effort}
             await self._ws.send(
                 json.dumps(
                     {
@@ -226,7 +270,9 @@ class OpenAIRealtimeAdapter:
         edge cases, which the outer timeout handler used to paper over.
         """
         try:
-            raw = await asyncio.wait_for(self._ws.recv(), timeout=self._SESSION_UPDATE_TIMEOUT)
+            raw = await asyncio.wait_for(
+                self._ws.recv(), timeout=self._SESSION_UPDATE_TIMEOUT
+            )
         except TimeoutError:
             logger.warning(
                 "OpenAI Realtime: no message received after %.1fs while "
@@ -300,6 +346,11 @@ class OpenAIRealtimeAdapter:
                         audio_bytes,
                         self.audio_format,
                     )
+                    # Record wall-clock arrival of the first chunk for this
+                    # response so ``cancel_response`` can bound truncate to
+                    # what could plausibly have been played in real time.
+                    if self._current_response_first_audio_at is None:
+                        self._current_response_first_audio_at = time.monotonic()
                     yield ("audio", audio_bytes)
 
                 elif event_type == "response.audio_transcript.delta":
@@ -317,6 +368,7 @@ class OpenAIRealtimeAdapter:
                     if item_id:
                         self._current_response_item_id = item_id
                         self._current_response_audio_ms = 0
+                        self._current_response_first_audio_at = None
 
                 elif event_type == "input_audio_buffer.speech_started":
                     # User started speaking — barge-in.
@@ -325,7 +377,10 @@ class OpenAIRealtimeAdapter:
                 elif event_type == "input_audio_buffer.speech_stopped":
                     yield ("speech_stopped", None)
 
-                elif event_type == "conversation.item.input_audio_transcription.completed":
+                elif (
+                    event_type
+                    == "conversation.item.input_audio_transcription.completed"
+                ):
                     # What the user said
                     yield ("transcript_input", data.get("transcript", ""))
 
@@ -344,6 +399,7 @@ class OpenAIRealtimeAdapter:
                     # turn starts with a fresh item id.
                     self._current_response_item_id = None
                     self._current_response_audio_ms = 0
+                    self._current_response_first_audio_at = None
                     yield ("response_done", data.get("response", {}))
 
                 elif event_type == "error":
@@ -372,11 +428,28 @@ class OpenAIRealtimeAdapter:
 
         Required for clean barge-in: ``response.cancel`` alone leaves the
         partially-generated assistant message on the transcript, which the
-        model sometimes replays on the next turn ("ghost text").
+        model replays on the next turn ("ghost text") — manifesting as
+        re-greetings and mid-sentence fragments after a barge-in storm.
+
+        ``audio_end_ms`` MUST reflect what the caller actually heard, not
+        what the server generated. OpenAI streams audio at 5-10x real-time,
+        so the byte-derived counter overstates playback whenever the
+        consumer cleared its playout buffer (e.g. ``send_clear``) before
+        the audio reached the speaker. We bound the truncate point by
+        wall-clock time since the first chunk of this response — that's the
+        physical maximum a 1x real-time playback could have produced.
         """
         if self._ws is None:
             return
         if self._current_response_item_id:
+            audio_end_ms = self._current_response_audio_ms
+            if self._current_response_first_audio_at is not None:
+                # Cap by wall-clock playback time. Subtracting from the
+                # generated total keeps audio_end_ms ≥ 0 and ≤ generated_ms.
+                elapsed_ms = int(
+                    (time.monotonic() - self._current_response_first_audio_at) * 1000
+                )
+                audio_end_ms = min(audio_end_ms, max(elapsed_ms, 0))
             try:
                 await self._ws.send(
                     json.dumps(
@@ -384,13 +457,18 @@ class OpenAIRealtimeAdapter:
                             "type": "conversation.item.truncate",
                             "item_id": self._current_response_item_id,
                             "content_index": 0,
-                            "audio_end_ms": self._current_response_audio_ms,
+                            "audio_end_ms": audio_end_ms,
                         }
                     )
                 )
             except Exception as exc:  # pragma: no cover
                 logger.debug("conversation.item.truncate failed: %s", exc)
         await self._ws.send(json.dumps({"type": "response.cancel"}))
+        # Reset per-response tracking so subsequent audio chunks (post-cancel
+        # late frames) and the next response.create start clean.
+        self._current_response_item_id = None
+        self._current_response_audio_ms = 0
+        self._current_response_first_audio_at = None
 
     async def send_text(self, text: str) -> None:
         """Send a text message to the AI (triggers a spoken response)."""

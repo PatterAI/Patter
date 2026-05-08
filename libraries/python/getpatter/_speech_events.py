@@ -35,6 +35,8 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any, Awaitable, Callable, Optional
 
 logger = logging.getLogger("getpatter.events")
@@ -44,9 +46,72 @@ logger = logging.getLogger("getpatter.events")
 SpeechEventCallback = Callable[[dict], Awaitable[None] | None]
 
 
+class UserState(StrEnum):
+    """Per-side user speech state — mirror of the TypeScript ``UserState``
+    string-literal union.
+
+    Values match LiveKit Agents' ``user_state_changed`` vocabulary so
+    downstream observability dashboards (Hamming AI / Coval / Cekura) can
+    map Patter events onto the canonical voice-agent metric set without
+    translation.
+    """
+
+    LISTENING = "listening"
+    SPEAKING = "speaking"
+    THINKING = "thinking"
+    AWAY = "away"
+
+
+class AgentState(StrEnum):
+    """Per-side agent speech state — mirror of the TypeScript ``AgentState``
+    string-literal union.
+
+    Values match LiveKit Agents' ``agent_state_changed`` vocabulary; see
+    :class:`UserState` for the rationale.
+    """
+
+    INITIALIZING = "initializing"
+    IDLE = "idle"
+    LISTENING = "listening"
+    THINKING = "thinking"
+    SPEAKING = "speaking"
+
+
+class EouTrigger(StrEnum):
+    """Reason the dispatcher fired :meth:`SpeechEvents.fire_user_speech_eos`.
+
+    Mirror of the TypeScript ``EouTrigger`` string-literal union. The
+    runner inspects this value to decide whether the EOU was committed by
+    a raw VAD silence interval, a semantic turn-detector model, or an
+    explicit caller-driven commit (e.g. dialler "user pressed #").
+    """
+
+    VAD_SILENCE = "vad_silence"
+    SEMANTIC_TURN_DETECTOR = "semantic_turn_detector"
+    MANUAL_COMMIT = "manual_commit"
+
+
+@dataclass(frozen=True)
+class ConversationStateSnapshot:
+    """Read-only snapshot of the per-side conversation state.
+
+    Mirror of the TypeScript ``ConversationStateSnapshot`` interface.
+    Returned by :meth:`SpeechEvents.conversation_state_snapshot` for
+    callers that prefer a typed value over the legacy ``dict[str, str]``
+    that :attr:`SpeechEvents.conversation_state` continues to return for
+    backwards compatibility.
+    """
+
+    user: UserState
+    agent: AgentState
+
+
 # State-machine values mirror LiveKit's user/agent state vocabulary.
-USER_STATES = ("listening", "speaking", "thinking", "away")
-AGENT_STATES = ("initializing", "idle", "listening", "thinking", "speaking")
+# Kept as plain tuples for backwards compatibility with callers that
+# imported the constants directly. New code should prefer :class:`UserState`
+# / :class:`AgentState`.
+USER_STATES = tuple(s.value for s in UserState)
+AGENT_STATES = tuple(s.value for s in AgentState)
 
 
 class SpeechEvents:
@@ -116,6 +181,22 @@ class SpeechEvents:
         and is safe to call at any time (read-only, no I/O).
         """
         return {"user": self._user_state, "agent": self._agent_state}
+
+    @property
+    def conversation_state_snapshot(self) -> ConversationStateSnapshot:
+        """Typed, immutable parity-mirror of the TypeScript
+        ``conversationState`` getter (returns ``ConversationStateSnapshot``).
+
+        Prefer this over :attr:`conversation_state` in new code — the
+        typed snapshot lets type-checkers catch state-name typos and gives
+        IDEs autocomplete on ``snapshot.user`` / ``snapshot.agent``. The
+        legacy ``dict[str, str]`` accessor stays for backwards
+        compatibility.
+        """
+        return ConversationStateSnapshot(
+            user=UserState(self._user_state),
+            agent=AgentState(self._agent_state),
+        )
 
     @property
     def turn_idx(self) -> int:

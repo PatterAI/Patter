@@ -41,7 +41,6 @@ export type MCPServerConfig =
   | string
   | {
       readonly url: string;
-      readonly transport?: 'streamable-http';
       /** Headers attached to every transport request — typically auth. */
       readonly headers?: Record<string, string>;
       /** Optional logical name for telemetry / log lines. */

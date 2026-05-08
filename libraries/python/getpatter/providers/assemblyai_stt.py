@@ -26,6 +26,10 @@ DEFAULT_MIN_TURN_SILENCE_MS = 400
 TERMINATION_WAIT_TIMEOUT_S = 0.5
 MIN_CHUNK_DURATION_MS = 50
 MAX_CHUNK_DURATION_MS = 1000
+# Target send size in milliseconds for the coalescing buffer. Sits one
+# Twilio frame (20 ms) above AssemblyAI's 50 ms floor so jitter never
+# dips below the protocol minimum (server emits error 3007 below 50 ms).
+DEFAULT_TARGET_CHUNK_MS = 60
 RECONNECT_ERROR_CODES = {3005, 3008}
 
 
@@ -202,6 +206,15 @@ class AssemblyAISTT(STTProvider):
         self._reconnect_attempts = 0
         self.session_id: str | None = None
         self.expires_at: int | None = None
+        # Coalescing buffer for inbound audio frames. AssemblyAI's v3
+        # streaming endpoint requires each ws frame to carry 50–1000 ms
+        # of audio (server emits error 3007 below 50 ms — observed in the
+        # field as a fully-billed call with zero transcripts). Twilio sends
+        # 20 ms frames, so the SDK must batch ~3 frames before forwarding.
+        self._audio_buffer: bytearray = bytearray()
+        # Target send size in bytes — recomputed lazily once encoding /
+        # sample_rate are known.
+        self._audio_buffer_target_bytes: int = 0
 
     def __repr__(self) -> str:
         return (
@@ -312,16 +325,36 @@ class AssemblyAISTT(STTProvider):
         self._recv_task = asyncio.create_task(self._recv_loop())
 
     async def send_audio(self, audio_chunk: bytes) -> None:
-        """Forward a PCM/mulaw audio chunk to AssemblyAI.
+        """Forward a PCM/mulaw audio chunk to AssemblyAI, buffered.
 
-        Validates chunk duration falls within 50–1000 ms (best-effort, derived
-        from byte length and configured sample rate/encoding). Out-of-bounds
-        chunks still send but emit a warning.
+        Twilio's media stream emits 20 ms frames (160 bytes mulaw 8 kHz),
+        which is below AssemblyAI's 50 ms minimum frame size (server emits
+        error 3007 and closes the stream). We coalesce frames into the
+        internal :attr:`_audio_buffer` until ~60 ms is accumulated, then
+        flush in a single ``send_bytes`` call. Trailing bytes are flushed
+        on :meth:`flush_audio` / :meth:`close`.
+
+        Pre-connect / closed-socket calls are silently dropped (mirrors the
+        TS adapter): the WS handshake takes 200–500 ms but Twilio starts
+        streaming immediately on ``connect`` — losing the first ~10 frames
+        is preferable to a hard crash on every call.
         """
         if self._ws is None or self._ws.closed:
-            raise RuntimeError("Not connected. Call connect() first.")
+            return
+        if not audio_chunk:
+            return
 
-        duration_ms = self._estimate_chunk_duration_ms(len(audio_chunk))
+        if self._audio_buffer_target_bytes == 0:
+            self._audio_buffer_target_bytes = self._compute_target_chunk_bytes()
+
+        self._audio_buffer.extend(audio_chunk)
+        if len(self._audio_buffer) < self._audio_buffer_target_bytes:
+            return
+
+        merged = bytes(self._audio_buffer)
+        self._audio_buffer.clear()
+
+        duration_ms = self._estimate_chunk_duration_ms(len(merged))
         if duration_ms is not None and (
             duration_ms < MIN_CHUNK_DURATION_MS or duration_ms > MAX_CHUNK_DURATION_MS
         ):
@@ -331,7 +364,41 @@ class AssemblyAISTT(STTProvider):
                 duration_ms,
             )
 
-        await self._ws.send_bytes(audio_chunk)
+        await self._ws.send_bytes(merged)
+
+    async def flush_audio(self) -> None:
+        """Flush any buffered audio to AssemblyAI.
+
+        Called automatically by :meth:`close` so the trailing <60 ms tail
+        is not silently dropped at end-of-call. Safe to call repeatedly.
+        """
+        if self._ws is None or self._ws.closed:
+            self._audio_buffer.clear()
+            return
+        if not self._audio_buffer:
+            return
+        merged = bytes(self._audio_buffer)
+        self._audio_buffer.clear()
+        try:
+            await self._ws.send_bytes(merged)
+        except Exception:  # noqa: BLE001
+            # Flush is best-effort during shutdown — never raise.
+            logger.debug("AssemblyAISTT: flush_audio failed (socket closing)")
+
+    def _compute_target_chunk_bytes(self) -> int:
+        """Bytes corresponding to ``DEFAULT_TARGET_CHUNK_MS`` of audio.
+
+        For mulaw 8 kHz that's 480 bytes (3× Twilio's 20 ms frames); for
+        PCM s16le 16 kHz it's 1920 bytes (~60 ms).
+        """
+        sample_rate = int(self._opts.sample_rate or 0)
+        if sample_rate <= 0:
+            # Fallback: assume 16 kHz s16le.
+            sample_rate = AssemblyAISampleRate.HZ_16000
+        if self._opts.encoding == AssemblyAIEncoding.PCM_MULAW:
+            return -(-(sample_rate * DEFAULT_TARGET_CHUNK_MS) // 1000)
+        # PCM_S16LE: 2 bytes/sample.
+        return -(-(sample_rate * DEFAULT_TARGET_CHUNK_MS) // 1000) * 2
 
     def _estimate_chunk_duration_ms(self, byte_length: int) -> float | None:
         """Estimate chunk duration in ms from byte length and PCM settings."""
@@ -523,6 +590,11 @@ class AssemblyAISTT(STTProvider):
         self._running = False
 
         if self._ws is not None and not self._ws.closed:
+            # Flush any buffered audio so the trailing <60 ms tail isn't dropped.
+            try:
+                await self.flush_audio()
+            except Exception:  # noqa: BLE001
+                pass
             try:
                 await self._ws.send_str(
                     json.dumps({"type": AssemblyAIClientFrame.TERMINATE.value})

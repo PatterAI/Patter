@@ -209,13 +209,13 @@ class ToolExecutor:
         # Reject early when the breaker is OPEN — returns a structured
         # fallback JSON so the model can recover instead of waiting.
         if not self._breaker.allow(tool_name):
-            cooldown_s = self._breaker.time_until_half_open(tool_name)
+            retry_after_ms = self._breaker.time_until_half_open_ms(tool_name)
             return json.dumps(
                 {
                     "error": f"Tool '{tool_name}' is temporarily unavailable (circuit open).",
                     "fallback": True,
                     "circuit_state": "open",
-                    "retry_after_ms": int(cooldown_s * 1000),
+                    "retry_after_ms": int(retry_after_ms),
                 }
             )
 

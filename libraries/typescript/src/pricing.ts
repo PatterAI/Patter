@@ -1,19 +1,25 @@
 /**
  * Default provider pricing and merge utilities.
  *
- * Pricing reflects public provider rates as of 2026. These defaults
- * are calibrated for the default models Patter ships with — notably
- * ``gpt-4o-mini-realtime-preview`` for OpenAI Realtime. If you pick
- * a different model (e.g. ``gpt-4o-realtime-preview`` or
- * ``gpt-realtime``), override the ``openai_realtime`` entry via the
- * ``pricing`` option on ``Patter()`` so the dashboard cost display
- * matches what OpenAI actually bills.
+ * Pricing reflects public provider rates as of 2026. Each provider entry
+ * carries provider-level defaults (the model Patter ships with by default)
+ * plus an optional ``models`` map keyed by model identifier with per-model
+ * overrides. Cost-calc functions take an optional ``model`` arg and
+ * auto-resolve the rate via {@link resolveProviderRates} (longest-prefix
+ * match for versioned model IDs). When the agent's adapter exposes
+ * ``model`` and the metrics layer threads it through, the dashboard bills
+ * with model accuracy out of the box — no manual override needed.
+ *
+ * User overrides via ``new Patter({ pricing: {...} })`` keep working as
+ * before. To register a new model rate without touching the SDK source:
+ *
+ *     new Patter({ pricing: { elevenlabs: { models: { my_custom: { price: 0.075 } } } } })
  */
 
 /** Pricing table version identifier, updated in lockstep with the Python SDK. */
-export const PRICING_VERSION = '2026.2';
+export const PRICING_VERSION = '2026.3';
 /** ISO date the pricing table was last refreshed against public provider rates. */
-export const PRICING_LAST_UPDATED = '2026-04-24';
+export const PRICING_LAST_UPDATED = '2026-05-08';
 
 /**
  * Billing units used by ``DEFAULT_PRICING`` entries. String values keep the
@@ -27,6 +33,11 @@ export const PricingUnit = {
 } as const;
 /** String value for one of the entries in `PricingUnit`. */
 export type PricingUnitValue = (typeof PricingUnit)[keyof typeof PricingUnit];
+
+/** Per-model rate overrides — same shape as `ProviderPricing` minus the unit. */
+export type ModelPricing = Omit<ProviderPricing, 'unit' | 'models'> & {
+  unit?: PricingUnitValue | string;
+};
 
 /** Single provider's pricing entry inside `DEFAULT_PRICING` or a user override map. */
 export interface ProviderPricing {
@@ -44,16 +55,93 @@ export interface ProviderPricing {
   text_output_per_token?: number;
   cached_audio_input_per_token?: number;
   cached_text_input_per_token?: number;
+  /**
+   * Per-model rate overrides keyed by model identifier. When the cost-calc
+   * function receives a ``model`` arg, the matching entry overlays the
+   * provider defaults; missing models fall back to the surrounding rates
+   * (legacy behaviour). Longest-prefix match handles versioned IDs like
+   * ``gpt-realtime-2-2026-05`` against ``gpt-realtime-2``. See
+   * :func:`resolveProviderRates`.
+   */
+  models?: Record<string, ModelPricing>;
 }
 
-/** Built-in pricing table — overridable via `Patter({ pricing: {...} })`. */
+/**
+ * Merge model-specific overrides on top of provider-level defaults. Returns a
+ * fresh object — callers can index it like the legacy flat config without
+ * worrying about mutating ``DEFAULT_PRICING``. Falls back to provider defaults
+ * when the model is unknown or omitted.
+ */
+export function resolveProviderRates(
+  providerConfig: ProviderPricing | undefined,
+  model?: string | null,
+): ProviderPricing {
+  if (!providerConfig) return { unit: '' };
+  const { models, ...base } = providerConfig;
+  if (!model || !models) return { ...base } as ProviderPricing;
+  let override = models[model];
+  if (!override) {
+    let bestKey = '';
+    for (const key of Object.keys(models)) {
+      if (model.startsWith(key) && key.length > bestKey.length) {
+        bestKey = key;
+      }
+    }
+    if (bestKey) override = models[bestKey];
+  }
+  if (override) {
+    return { ...base, ...override } as ProviderPricing;
+  }
+  return { ...base } as ProviderPricing;
+}
+
+/**
+ * Built-in pricing table — overridable via `Patter({ pricing: {...} })`.
+ *
+ * Each provider entry carries provider-level defaults plus an optional
+ * `models` map for per-model overrides. When the cost-calc function gets a
+ * model arg it auto-resolves via {@link resolveProviderRates} (longest-prefix
+ * fallback for versioned model IDs). Empty/unknown model → provider defaults.
+ */
 export const DEFAULT_PRICING: Record<string, ProviderPricing> = {
-  // STT — per minute of audio processed
-  // Deepgram Nova-3 streaming (monolingual) — the default model Patter ships.
-  // The previous $0.0043/min was the batch rate; streaming is $0.0077/min per
-  // deepgram.com/pricing. For multilingual Nova-3 ($0.0092/min) override.
-  deepgram: { unit: PricingUnit.MINUTE, price: 0.0077 },
-  whisper: { unit: PricingUnit.MINUTE, price: 0.006 },
+  // STT — per minute of audio processed.
+  deepgram: {
+    unit: PricingUnit.MINUTE,
+    // Default = Nova-3 streaming monolingual ($0.0077/min). Previous $0.0043
+    // was the batch rate; streaming is ~80% more expensive.
+    price: 0.0077,
+    models: {
+      'nova-3': { price: 0.0077 },
+      'nova-3-multilingual': { price: 0.0092 },
+      'nova-2': { price: 0.0058 },
+      nova: { price: 0.0043 },
+      'whisper-large': { price: 0.0048 },
+      'whisper-medium': { price: 0.0048 },
+    },
+  },
+  whisper: {
+    unit: PricingUnit.MINUTE,
+    // Default = whisper-1 REST ($0.006/min).
+    price: 0.006,
+    models: {
+      'whisper-1': { price: 0.006 },
+      'gpt-4o-transcribe': { price: 0.006 },
+      'gpt-4o-mini-transcribe': { price: 0.003 },
+      // Streaming Whisper variant for Realtime sessions.
+      'gpt-realtime-whisper': { price: 0.017 },
+    },
+  },
+  // OpenAI standalone transcription endpoint (separate provider_key from
+  // ``whisper`` so the dashboard can distinguish them).
+  openai_transcribe: {
+    unit: PricingUnit.MINUTE,
+    price: 0.006,
+    models: {
+      'gpt-4o-transcribe': { price: 0.006 },
+      'gpt-4o-mini-transcribe': { price: 0.003 },
+      'whisper-1': { price: 0.006 },
+    },
+  },
   // AssemblyAI Universal-Streaming — $0.15/hr = $0.0025/min
   assemblyai: { unit: PricingUnit.MINUTE, price: 0.0025 },
   // Cartesia ink-whisper streaming STT — ~$0.15/hr on usage plans
@@ -65,28 +153,91 @@ export const DEFAULT_PRICING: Record<string, ProviderPricing> = {
   // retired; users were being over-billed ~4.3x.
   speechmatics: { unit: PricingUnit.MINUTE, price: 0.004 },
   // TTS — per 1,000 characters synthesized.
-  // ElevenLabs default model is eleven_flash_v2_5 billed at $0.06/1k via the
-  // direct API. The previous $0.18 matched only the Creator plan overage.
-  elevenlabs: { unit: PricingUnit.THOUSAND_CHARS, price: 0.06 },
-  openai_tts: { unit: PricingUnit.THOUSAND_CHARS, price: 0.015 },
+  elevenlabs: {
+    unit: PricingUnit.THOUSAND_CHARS,
+    // Default = eleven_flash_v2_5 (Patter's default model) at $0.06/1k.
+    price: 0.06,
+    models: {
+      eleven_flash_v2_5: { price: 0.06 },
+      eleven_turbo_v2_5: { price: 0.05 },
+      eleven_multilingual_v2: { price: 0.18 },
+      eleven_monolingual_v1: { price: 0.18 },
+      eleven_v3: { price: 0.30 },
+    },
+  },
+  // ElevenLabs WebSocket streaming TTS shares pricing with REST.
+  elevenlabs_ws: {
+    unit: PricingUnit.THOUSAND_CHARS,
+    price: 0.06,
+    models: {
+      eleven_flash_v2_5: { price: 0.06 },
+      eleven_turbo_v2_5: { price: 0.05 },
+      eleven_multilingual_v2: { price: 0.18 },
+      eleven_v3: { price: 0.30 },
+    },
+  },
+  openai_tts: {
+    unit: PricingUnit.THOUSAND_CHARS,
+    // Default = tts-1 ($0.015/1k chars).
+    price: 0.015,
+    models: {
+      'tts-1': { price: 0.015 },
+      'tts-1-hd': { price: 0.030 },
+      // gpt-4o-mini-tts is billed by tokens upstream but published per
+      // 1k chars equivalent here for parity with the rest of the table.
+      'gpt-4o-mini-tts': { price: 0.012 },
+    },
+  },
+  // Legacy alias preserved for backward compat with users who set
+  // provider_key="openai_tts_hd" in their own adapters.
   openai_tts_hd: { unit: PricingUnit.THOUSAND_CHARS, price: 0.030 },
-  // Cartesia Sonic TTS — ~1 credit/char, effective $0.030/1k chars on usage plans
-  cartesia_tts: { unit: PricingUnit.THOUSAND_CHARS, price: 0.030 },
-  // Rime mist v2 — $0.030/1k chars pay-as-you-go
-  rime: { unit: PricingUnit.THOUSAND_CHARS, price: 0.030 },
-  // LMNT aurora/blizzard — $0.050/1k chars Indie overage
-  lmnt: { unit: PricingUnit.THOUSAND_CHARS, price: 0.050 },
-  // Inworld TTS-2 — placeholder, verify against current platform pricing.
-  inworld: { unit: PricingUnit.THOUSAND_CHARS, price: 0.020 },
-  // OpenAI Realtime — per token.
-  // Calibrated for gpt-4o-mini-realtime-preview (the Patter default):
-  //   audio  input  $10 / M  ->  0.00001 per token
-  //   audio  output $20 / M  ->  0.00002 per token
-  //   text   input  $0.60/ M ->  0.0000006 per token
-  //   text   output $2.40/ M ->  0.0000024 per token
-  // For gpt-4o-realtime-preview multiply by ~10, for gpt-realtime by ~3.
+  cartesia_tts: {
+    unit: PricingUnit.THOUSAND_CHARS,
+    // Default = Sonic-2 (current Cartesia flagship) at ~$0.030/1k chars.
+    price: 0.030,
+    models: {
+      'sonic-2': { price: 0.030 },
+      'sonic-1': { price: 0.030 },
+      'sonic-english': { price: 0.030 },
+      'sonic-multilingual': { price: 0.030 },
+    },
+  },
+  rime: {
+    unit: PricingUnit.THOUSAND_CHARS,
+    // Default = mistv2 ($0.030/1k chars).
+    price: 0.030,
+    models: {
+      mistv2: { price: 0.030 },
+      mist: { price: 0.030 },
+      arcana: { price: 0.040 },
+    },
+  },
+  lmnt: {
+    unit: PricingUnit.THOUSAND_CHARS,
+    // Default = aurora ($0.050/1k chars).
+    price: 0.050,
+    models: {
+      aurora: { price: 0.050 },
+      blizzard: { price: 0.050 },
+    },
+  },
+  inworld: {
+    unit: PricingUnit.THOUSAND_CHARS,
+    // Default = inworld-tts-2 (placeholder rate — verify against tier).
+    price: 0.020,
+    models: {
+      'inworld-tts-2': { price: 0.020 },
+      'inworld-tts-1.5-max': { price: 0.025 },
+      'inworld-tts-1.5': { price: 0.025 },
+    },
+  },
+  // OpenAI Realtime — per token. Provider defaults match
+  // gpt-realtime-mini / gpt-4o-mini-realtime-preview (Patter's default).
+  // Per-model overrides under ``models`` are auto-resolved when the
+  // realtime adapter's model is threaded through ``calculateRealtimeCost``.
   openai_realtime: {
     unit: PricingUnit.TOKEN,
+    // Default rates: gpt-realtime-mini / gpt-4o-mini-realtime-preview
     audio_input_per_token: 0.00001,
     audio_output_per_token: 0.00002,
     text_input_per_token: 0.0000006,
@@ -96,6 +247,56 @@ export const DEFAULT_PRICING: Record<string, ProviderPricing> = {
     // input_token_details.audio_tokens / text_tokens at these reduced rates.
     cached_audio_input_per_token: 0.0000003,
     cached_text_input_per_token: 0.00000006,
+    models: {
+      // gpt-realtime (GA, August 2025): audio in $32/M, audio out $64/M,
+      // text in $4/M, text out $16/M, cached $0.40/M (audio + text).
+      'gpt-realtime': {
+        audio_input_per_token: 0.000032,
+        audio_output_per_token: 0.000064,
+        text_input_per_token: 0.000004,
+        text_output_per_token: 0.000016,
+        cached_audio_input_per_token: 0.0000004,
+        cached_text_input_per_token: 0.0000004,
+      },
+      // gpt-realtime-2 (most-capable): audio in $32/M, audio out $64/M,
+      // text in $4/M, text out $24/M, cached $0.40/M (audio + text).
+      'gpt-realtime-2': {
+        audio_input_per_token: 0.000032,
+        audio_output_per_token: 0.000064,
+        text_input_per_token: 0.000004,
+        text_output_per_token: 0.000024,
+        cached_audio_input_per_token: 0.0000004,
+        cached_text_input_per_token: 0.0000004,
+      },
+      // gpt-realtime-mini and gpt-4o-mini-realtime-preview share the
+      // provider defaults. Listed explicitly so tooling can introspect.
+      'gpt-realtime-mini': {
+        audio_input_per_token: 0.00001,
+        audio_output_per_token: 0.00002,
+        text_input_per_token: 0.0000006,
+        text_output_per_token: 0.0000024,
+        cached_audio_input_per_token: 0.0000003,
+        cached_text_input_per_token: 0.00000006,
+      },
+      'gpt-4o-mini-realtime-preview': {
+        audio_input_per_token: 0.00001,
+        audio_output_per_token: 0.00002,
+        text_input_per_token: 0.0000006,
+        text_output_per_token: 0.0000024,
+        cached_audio_input_per_token: 0.0000003,
+        cached_text_input_per_token: 0.00000006,
+      },
+      // gpt-4o-realtime-preview (legacy preview, ~10x mini for audio):
+      // audio in $100/M, audio out $200/M, text in $5/M, text out $20/M.
+      'gpt-4o-realtime-preview': {
+        audio_input_per_token: 0.0001,
+        audio_output_per_token: 0.0002,
+        text_input_per_token: 0.000005,
+        text_output_per_token: 0.000020,
+        cached_audio_input_per_token: 0.0000020,
+        cached_text_input_per_token: 0.0000025,
+      },
+    },
   },
   // Telephony — per minute of call duration.
   // twilio default = US inbound local (the 99% case for voice agents receiving
@@ -105,51 +306,101 @@ export const DEFAULT_PRICING: Record<string, ProviderPricing> = {
   telnyx: { unit: PricingUnit.MINUTE, price: 0.007 },
 };
 
+function cloneProviderEntry(entry: ProviderPricing): ProviderPricing {
+  const out: ProviderPricing = { ...entry };
+  if (entry.models) {
+    const models: Record<string, ModelPricing> = {};
+    for (const [mk, mv] of Object.entries(entry.models)) {
+      models[mk] = { ...mv };
+    }
+    out.models = models;
+  }
+  return out;
+}
+
 /**
  * Merge user overrides into a copy of DEFAULT_PRICING.
- * Performs a shallow per-provider merge.
+ *
+ * Performs a per-provider shallow merge with one exception: the nested
+ * ``models`` dict is itself merged shallowly (per-model entries replace
+ * the default entry but unmentioned models keep their built-in rates).
+ * A user override of ``{ deepgram: { models: { 'nova-2': { price: 0.01 } } } }``
+ * keeps every other Deepgram model rate intact.
  */
 export function mergePricing(
   overrides?: Record<string, Partial<ProviderPricing>> | null,
 ): Record<string, ProviderPricing> {
   const merged: Record<string, ProviderPricing> = {};
   for (const [k, v] of Object.entries(DEFAULT_PRICING)) {
-    merged[k] = { ...v };
+    merged[k] = cloneProviderEntry(v);
   }
   if (!overrides) return merged;
   for (const [provider, values] of Object.entries(overrides)) {
-    if (merged[provider]) {
-      merged[provider] = { ...merged[provider], ...values };
-    } else {
+    if (!merged[provider]) {
       // Fail-closed: when the user registers a brand-new provider without a
       // ``unit`` field, leave it missing so ``calculate_*_cost`` returns 0
       // instead of silently billing as minutes. Matches the Python SDK behaviour.
-      merged[provider] = { ...values } as ProviderPricing;
+      merged[provider] = cloneProviderEntry(values as ProviderPricing);
+      continue;
+    }
+    const target = merged[provider];
+    for (const [k, v] of Object.entries(values)) {
+      if (
+        k === 'models' &&
+        v &&
+        typeof v === 'object' &&
+        target.models &&
+        typeof target.models === 'object'
+      ) {
+        // Per-model overlay — keep models the user did NOT mention.
+        const mergedModels: Record<string, ModelPricing> = { ...target.models };
+        for (const [mk, mv] of Object.entries(v as Record<string, ModelPricing>)) {
+          mergedModels[mk] = { ...mv };
+        }
+        target.models = mergedModels;
+      } else {
+        // Direct copy for top-level keys (price, unit, per-token rates, ...).
+        (target as unknown as Record<string, unknown>)[k] = v as unknown;
+      }
     }
   }
   return merged;
 }
 
-/** Calculate STT cost from audio duration. */
+/**
+ * Calculate STT cost from audio duration.
+ *
+ * When ``model`` is supplied and the provider entry has a matching
+ * ``models`` override, the per-model rate is used; otherwise falls back
+ * to the provider-level rate (legacy behaviour, model omitted).
+ */
 export function calculateSttCost(
   provider: string,
   audioSeconds: number,
   pricing: Record<string, ProviderPricing>,
+  model?: string | null,
 ): number {
-  const config = pricing[provider];
-  if (!config || config.unit !== 'minute') return 0;
-  return (audioSeconds / 60) * (config.price ?? 0);
+  const rates = resolveProviderRates(pricing[provider], model);
+  if (rates.unit !== 'minute') return 0;
+  return (audioSeconds / 60) * (rates.price ?? 0);
 }
 
-/** Calculate TTS cost from character count. */
+/**
+ * Calculate TTS cost from character count.
+ *
+ * When ``model`` is supplied and the provider entry has a matching
+ * ``models`` override, the per-model rate is used; otherwise falls back
+ * to the provider-level rate (legacy behaviour, model omitted).
+ */
 export function calculateTtsCost(
   provider: string,
   characterCount: number,
   pricing: Record<string, ProviderPricing>,
+  model?: string | null,
 ): number {
-  const config = pricing[provider];
-  if (!config || config.unit !== '1k_chars') return 0;
-  return (characterCount / 1000) * (config.price ?? 0);
+  const rates = resolveProviderRates(pricing[provider], model);
+  if (rates.unit !== '1k_chars') return 0;
+  return (characterCount / 1000) * (rates.price ?? 0);
 }
 
 /**
@@ -172,9 +423,10 @@ export function calculateRealtimeCost(
     output_token_details?: { audio_tokens?: number; text_tokens?: number };
   },
   pricing: Record<string, ProviderPricing>,
+  model?: string | null,
 ): number {
-  const config = pricing.openai_realtime;
-  if (!config || config.unit !== 'token') return 0;
+  const rates = resolveProviderRates(pricing.openai_realtime, model);
+  if (rates.unit !== 'token') return 0;
 
   const input = (usage.input_token_details ?? {}) as {
     audio_tokens?: number;
@@ -184,8 +436,8 @@ export function calculateRealtimeCost(
   };
   const output = usage.output_token_details ?? {};
 
-  const cachedAudioRate = config.cached_audio_input_per_token ?? config.audio_input_per_token ?? 0;
-  const cachedTextRate = config.cached_text_input_per_token ?? config.text_input_per_token ?? 0;
+  const cachedAudioRate = rates.cached_audio_input_per_token ?? rates.audio_input_per_token ?? 0;
+  const cachedTextRate = rates.cached_text_input_per_token ?? rates.text_input_per_token ?? 0;
 
   const totalAudioIn = input.audio_tokens ?? 0;
   const totalTextIn = input.text_tokens ?? 0;
@@ -210,12 +462,12 @@ export function calculateRealtimeCost(
   }
 
   let cost = 0;
-  cost += (totalAudioIn - cachedAudioIn) * (config.audio_input_per_token ?? 0);
+  cost += (totalAudioIn - cachedAudioIn) * (rates.audio_input_per_token ?? 0);
   cost += cachedAudioIn * cachedAudioRate;
-  cost += (totalTextIn - cachedTextIn) * (config.text_input_per_token ?? 0);
+  cost += (totalTextIn - cachedTextIn) * (rates.text_input_per_token ?? 0);
   cost += cachedTextIn * cachedTextRate;
-  cost += (output.audio_tokens ?? 0) * (config.audio_output_per_token ?? 0);
-  cost += (output.text_tokens ?? 0) * (config.text_output_per_token ?? 0);
+  cost += (output.audio_tokens ?? 0) * (rates.audio_output_per_token ?? 0);
+  cost += (output.text_tokens ?? 0) * (rates.text_output_per_token ?? 0);
   // Clamp ≥0 so mis-configured cached rates (higher than full) can never
   // produce negative billing on the dashboard.
   return Math.max(0, cost);
@@ -235,17 +487,18 @@ export function calculateRealtimeCachedSavings(
     };
   },
   pricing: Record<string, ProviderPricing>,
+  model?: string | null,
 ): number {
-  const config = pricing.openai_realtime;
-  if (!config || config.unit !== 'token') return 0;
+  const rates = resolveProviderRates(pricing.openai_realtime, model);
+  if (rates.unit !== 'token') return 0;
   const input = usage.input_token_details ?? {};
   const cached = input.cached_tokens_details ?? {};
-  const cachedAudioRate = config.cached_audio_input_per_token ?? config.audio_input_per_token ?? 0;
-  const cachedTextRate = config.cached_text_input_per_token ?? config.text_input_per_token ?? 0;
+  const cachedAudioRate = rates.cached_audio_input_per_token ?? rates.audio_input_per_token ?? 0;
+  const cachedTextRate = rates.cached_text_input_per_token ?? rates.text_input_per_token ?? 0;
   const cachedAudio = Math.min(cached.audio_tokens ?? 0, input.audio_tokens ?? 0);
   const cachedText = Math.min(cached.text_tokens ?? 0, input.text_tokens ?? 0);
-  const fullAudio = cachedAudio * (config.audio_input_per_token ?? 0);
-  const fullText = cachedText * (config.text_input_per_token ?? 0);
+  const fullAudio = cachedAudio * (rates.audio_input_per_token ?? 0);
+  const fullText = cachedText * (rates.text_input_per_token ?? 0);
   const discountedAudio = cachedAudio * cachedAudioRate;
   const discountedText = cachedText * cachedTextRate;
   // Clamp ≥0. If a user overrides cached_*_input_per_token to a rate
@@ -300,12 +553,30 @@ export const llmPricing: Record<string, Record<string, LlmModelPricing>> = {
     'gemini-live-2.5-flash-native-audio': { input: 0.30, output: 2.50 },
   },
   groq: {
+    // Rates as of 2026-05-08; verify against groq.com/pricing.
+    // ``llama-3.3-70b-versatile`` is the Patter default for Groq. The
+    // remaining models are reachable via ``model: "..."`` and were silently
+    // billing $0 before this entry was added (silent under-billing).
     'llama-3.3-70b-versatile': { input: 0.59, output: 0.79 },
     'llama-3.1-8b-instant': { input: 0.05, output: 0.08 },
+    'llama-3.3-70b-specdec': { input: 0.59, output: 0.99 },
+    'llama3-70b-8192': { input: 0.59, output: 0.79 },
+    'llama3-8b-8192': { input: 0.05, output: 0.08 },
+    'mixtral-8x7b-32768': { input: 0.27, output: 0.27 },
+    'gemma2-9b-it': { input: 0.20, output: 0.20 },
   },
   cerebras: {
+    // Rates as of 2026-05-08; verify against cerebras.net/inference.
+    // ``gpt-oss-120b`` is the Patter default for Cerebras (set in 0.5.4).
+    // On WSE-3 hardware every model size saturates the downstream TTS
+    // consumption rate (~150-300 tok/sec), so the 120B price stays in line
+    // with the 70B tier rather than scaling with weight count.
+    'gpt-oss-120b': { input: 0.85, output: 1.20 },
+    'llama3.1-8b': { input: 0.10, output: 0.20 },
     'llama-3.3-70b': { input: 0.85, output: 1.20 },
     'qwen-3-32b': { input: 0.40, output: 0.80 },
+    'qwen-3-235b-a22b-instruct-2507': { input: 1.00, output: 1.50 },
+    'zai-glm-4.7': { input: 0.85, output: 1.20 },
   },
   // OpenAI Chat Completions (non-Realtime) — mirrors the Python SDK pricing table.
   // Rates are per 1M tokens (USD), cache_read = cached input rate.

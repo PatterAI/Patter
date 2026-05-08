@@ -4,12 +4,6 @@
  * Pure WebSocket client for the Soniox real-time STT API. Accumulates
  * `is_final` tokens and flushes them on `<end>`/`<fin>` endpoint tokens,
  * mirroring the Python `SonioxSTT` adapter.
- *
- * Speechmatics TypeScript adapter is **intentionally not implemented**: the
- * official Speechmatics Voice SDK (`speechmatics.voice`) is Python-only at
- * the time of writing. Python users should install the optional
- * `speechmatics` extra; TypeScript users need to wait for an official
- * upstream SDK before this adapter can land without a WS-handshake reimpl.
  */
 
 import WebSocket from 'ws';

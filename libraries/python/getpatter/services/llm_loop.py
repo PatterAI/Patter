@@ -587,6 +587,7 @@ class LLMLoop:
         metrics=None,
         event_bus=None,
         disable_phone_preamble: bool = False,
+        on_tool_call: (Callable[[str, dict, Any], Awaitable[None]] | None) = None,
     ) -> None:
         if llm_provider is not None:
             self._provider = llm_provider
@@ -606,6 +607,14 @@ class LLMLoop:
         self._metrics = metrics
         self._event_bus = event_bus
         self._model = model
+        # Optional async callback fired after a successful tool execution.
+        # When set, the StreamHandler can surface tool calls into the
+        # transcript timeline / ``on_transcript`` callback so pipeline mode
+        # achieves observability parity with realtime mode (which routes
+        # tool calls through ``_emit_tool_event`` directly on the handler).
+        self._on_tool_call: Callable[[str, dict, Any], Awaitable[None]] | None = (
+            on_tool_call
+        )
         # Resolve the provider key for cost attribution. Prefer the
         # ``provider_key`` ClassVar declared by wrapper classes (stable,
         # matches ``pricing.py``); fall back to the legacy ``__name__``
@@ -642,6 +651,20 @@ class LLMLoop:
         if tools:
             for t in tools:
                 self._tool_map[t["name"]] = t
+
+    def set_on_tool_call(
+        self,
+        callback: Callable[[str, dict, Any], Awaitable[None]] | None,
+    ) -> None:
+        """Set or replace the post-tool-execution observer.
+
+        The callback is awaited after every successful tool execution with
+        ``(tool_name, arguments, result)``. Set to ``None`` to disable.
+        Mirrors the TypeScript ``setOnToolCall`` setter so callers (e.g.
+        :class:`PipelineStreamHandler`) can wire the loop after
+        construction without touching private fields.
+        """
+        self._on_tool_call = callback
 
     async def run(
         self,
@@ -832,6 +855,21 @@ class LLMLoop:
                         "content": result,
                     }
                 )
+                # Surface successful tool execution to the host SDK
+                # (StreamHandler in pipeline mode) so it can emit a
+                # ``role=tool`` transcript entry mirroring realtime mode.
+                # Failures in the observer must NOT abort the LLM loop —
+                # log and continue. ``getattr`` with default keeps
+                # subclasses / test doubles that bypass ``__init__`` working.
+                on_tool_call = getattr(self, "_on_tool_call", None)
+                if on_tool_call is not None:
+                    try:
+                        await on_tool_call(tool_name, arguments, result)
+                    except Exception:  # pragma: no cover - defensive
+                        logger.exception(
+                            "on_tool_call observer failed for tool '%s'",
+                            tool_name,
+                        )
 
             # Re-submit to LLM with tool results — next iteration will
             # either produce text or more tool calls

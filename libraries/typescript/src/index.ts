@@ -111,6 +111,15 @@ export type { CartesiaSTTOptions } from "./stt/cartesia";
 export { STT as SonioxSTT } from "./stt/soniox";
 export { STT as AssemblyAISTT } from "./stt/assemblyai";
 export type { AssemblyAISTTOptions } from "./stt/assemblyai";
+export { STT as SpeechmaticsSTT } from "./stt/speechmatics";
+export type { SpeechmaticsSTTOptions } from "./stt/speechmatics";
+export {
+  TurnDetectionMode as SpeechmaticsTurnDetectionMode,
+  SpeechmaticsSampleRate,
+  SpeechmaticsAudioEncoding,
+  SpeechmaticsOperatingPoint,
+  SpeechmaticsServerMessage,
+} from "./providers/speechmatics-stt";
 
 // New namespaced TTS classes.
 export { TTS as ElevenLabsTTS } from "./tts/elevenlabs";
@@ -231,6 +240,23 @@ export type {
   InitiateCallResult as TelnyxInitiateCallResult,
   EndCallOptions as TelnyxEndCallOptions,
 } from "./providers/telnyx-adapter";
+
+// Telnyx STT / TTS public enums (parity with Python — these were
+// previously defined but never re-exported from the package root).
+export {
+  TelnyxSTT,
+  TelnyxSTTSampleRate,
+  TelnyxSTTInputFormat,
+} from "./providers/telnyx-stt";
+export type {
+  Transcript as TelnyxSTTTranscript,
+  TelnyxTranscriptionEngine,
+} from "./providers/telnyx-stt";
+export {
+  TelnyxTTS,
+  TelnyxTTSVoice,
+  TelnyxTTSSampleRate,
+} from "./providers/telnyx-tts";
 
 // Observability — OTel-compatible tracing (optional peer dep).
 export {
