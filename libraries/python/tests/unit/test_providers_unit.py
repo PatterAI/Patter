@@ -5,7 +5,7 @@ Tests provider adapters without making real network connections.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -122,9 +122,289 @@ class TestOpenAIRealtimeAdapter:
     def test_tools_stored(self) -> None:
         from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
-        tools = [{"name": "get_weather", "description": "Get weather", "parameters": {}}]
+        tools = [
+            {"name": "get_weather", "description": "Get weather", "parameters": {}}
+        ]
         adapter = OpenAIRealtimeAdapter(api_key="sk-test", tools=tools)
         assert adapter.tools == tools
+
+    def test_gpt_realtime_2_model_enum(self) -> None:
+        """gpt-realtime-2 is exposed as a model identifier."""
+        from getpatter.providers.openai_realtime import OpenAIRealtimeModel
+
+        assert OpenAIRealtimeModel.GPT_REALTIME_2.value == "gpt-realtime-2"
+        # And the adapter accepts it as the model arg.
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
+
+        adapter = OpenAIRealtimeAdapter(
+            api_key="sk-test",
+            model=OpenAIRealtimeModel.GPT_REALTIME_2,
+        )
+        assert adapter.model == "gpt-realtime-2"
+
+    def test_gpt_realtime_whisper_transcription_enum(self) -> None:
+        """gpt-realtime-whisper is exposed as a transcription model."""
+        from getpatter.providers.openai_realtime import OpenAITranscriptionModel
+
+        assert (
+            OpenAITranscriptionModel.GPT_REALTIME_WHISPER.value
+            == "gpt-realtime-whisper"
+        )
+
+    def test_reasoning_effort_default_unset(self) -> None:
+        """``reasoning_effort`` defaults to None so the wire field stays absent."""
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
+
+        adapter = OpenAIRealtimeAdapter(api_key="sk-test")
+        assert adapter.reasoning_effort is None
+
+    def test_reasoning_effort_stored(self) -> None:
+        """Constructor accepts ``reasoning_effort`` for gpt-realtime-2 sessions."""
+        from getpatter.providers.openai_realtime import (
+            OpenAIRealtimeAdapter,
+            OpenAIRealtimeModel,
+        )
+
+        adapter = OpenAIRealtimeAdapter(
+            api_key="sk-test",
+            model=OpenAIRealtimeModel.GPT_REALTIME_2,
+            reasoning_effort="low",
+        )
+        assert adapter.reasoning_effort == "low"
+
+    @pytest.mark.asyncio
+    async def test_reasoning_effort_injected_into_session_update(self) -> None:
+        """When set, ``reasoning.effort`` is sent in the ``session.update`` payload."""
+        import json
+
+        from getpatter.providers.openai_realtime import (
+            OpenAIRealtimeAdapter,
+            OpenAIRealtimeModel,
+        )
+
+        adapter = OpenAIRealtimeAdapter(
+            api_key="sk-test",
+            model=OpenAIRealtimeModel.GPT_REALTIME_2,
+            reasoning_effort="low",
+        )
+        sent_payloads: list[dict] = []
+
+        ws = AsyncMock()
+        # session.created → session.updated handshake
+        ws.recv = AsyncMock(
+            side_effect=[
+                json.dumps({"type": "session.created"}),
+                json.dumps({"type": "session.updated"}),
+            ]
+        )
+
+        async def _capture(payload: str) -> None:
+            sent_payloads.append(json.loads(payload))
+
+        ws.send = AsyncMock(side_effect=_capture)
+        ws.close = AsyncMock()
+
+        with patch(
+            "getpatter.providers.openai_realtime.websockets.connect",
+            new=AsyncMock(return_value=ws),
+        ):
+            await adapter.connect()
+
+        update = next(p for p in sent_payloads if p.get("type") == "session.update")
+        assert update["session"].get("reasoning") == {"effort": "low"}
+
+    @pytest.mark.asyncio
+    async def test_reasoning_effort_omitted_when_unset(self) -> None:
+        """When unset, the ``reasoning`` key is absent from the session payload."""
+        import json
+
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
+
+        adapter = OpenAIRealtimeAdapter(api_key="sk-test")
+        sent_payloads: list[dict] = []
+
+        ws = AsyncMock()
+        ws.recv = AsyncMock(
+            side_effect=[
+                json.dumps({"type": "session.created"}),
+                json.dumps({"type": "session.updated"}),
+            ]
+        )
+
+        async def _capture(payload: str) -> None:
+            sent_payloads.append(json.loads(payload))
+
+        ws.send = AsyncMock(side_effect=_capture)
+        ws.close = AsyncMock()
+
+        with patch(
+            "getpatter.providers.openai_realtime.websockets.connect",
+            new=AsyncMock(return_value=ws),
+        ):
+            await adapter.connect()
+
+        update = next(p for p in sent_payloads if p.get("type") == "session.update")
+        assert "reasoning" not in update["session"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.mocked
+    async def test_cancel_response_caps_audio_end_ms_to_wallclock(self) -> None:
+        """Regression: barge-in truncate must not credit unplayed audio.
+
+        When OpenAI streams audio at multiple-x real-time and the consumer
+        clears the playout buffer (e.g. ``audio_sender.send_clear`` on
+        barge-in), the user only ever heard ~wall-clock-ms of speech. If we
+        pass the byte-derived ``audio_end_ms`` to ``conversation.item.truncate``
+        OpenAI keeps the full generated transcript, and the model replays /
+        resumes from it on the next turn — re-greetings and mid-sentence
+        fragments. Cap by wall-clock instead.
+        """
+        import json
+
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
+
+        adapter = OpenAIRealtimeAdapter(api_key="sk-test", audio_format="g711_ulaw")
+
+        sent: list[dict] = []
+        ws = AsyncMock()
+
+        async def _capture(payload: str) -> None:
+            sent.append(json.loads(payload))
+
+        ws.send = AsyncMock(side_effect=_capture)
+        adapter._ws = ws
+        # Simulate state after first chunk arrived ~30 ms ago, but the byte
+        # counter says we generated 2 s of audio (5x real-time arrival).
+        adapter._current_response_item_id = "item-1"
+        adapter._current_response_audio_ms = 2000
+        import time as _time
+
+        adapter._current_response_first_audio_at = _time.monotonic() - 0.03
+
+        await adapter.cancel_response()
+
+        truncate = next(
+            p for p in sent if p.get("type") == "conversation.item.truncate"
+        )
+        # audio_end_ms must be bounded by wall-clock (~30 ms), not the raw
+        # 2000 ms generated counter. Allow generous slack for scheduler.
+        assert truncate["audio_end_ms"] <= 200, (
+            f"audio_end_ms should be bounded by wall-clock playback, "
+            f"got {truncate['audio_end_ms']} ms (generated counter was 2000 ms)"
+        )
+        assert truncate["item_id"] == "item-1"
+        # response.cancel is sent after truncate
+        kinds = [p.get("type") for p in sent]
+        assert kinds.index("conversation.item.truncate") < kinds.index(
+            "response.cancel"
+        )
+        # Per-response state is reset so the next response.create starts clean
+        assert adapter._current_response_item_id is None
+        assert adapter._current_response_audio_ms == 0
+        assert adapter._current_response_first_audio_at is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.mocked
+    async def test_cancel_response_falls_back_to_generated_when_no_first_audio(
+        self,
+    ) -> None:
+        """If no audio chunks arrived yet (cancel before any delta), fall back
+        to the byte-derived counter — the wall-clock cap kicks in only when a
+        chunk has actually been received."""
+        import json
+
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
+
+        adapter = OpenAIRealtimeAdapter(api_key="sk-test", audio_format="g711_ulaw")
+
+        sent: list[dict] = []
+        ws = AsyncMock()
+
+        async def _capture(payload: str) -> None:
+            sent.append(json.loads(payload))
+
+        ws.send = AsyncMock(side_effect=_capture)
+        adapter._ws = ws
+        adapter._current_response_item_id = "item-1"
+        adapter._current_response_audio_ms = 0  # no audio yet
+        adapter._current_response_first_audio_at = None
+
+        await adapter.cancel_response()
+        truncate = next(
+            p for p in sent if p.get("type") == "conversation.item.truncate"
+        )
+        assert truncate["audio_end_ms"] == 0
+
+    @pytest.mark.asyncio
+    async def test_realtime_engine_forwards_reasoning_and_transcription_to_adapter(
+        self,
+    ) -> None:
+        """Regression: ``engines.openai.Realtime(reasoning_effort=...,
+        input_audio_transcription_model=...)`` must reach
+        ``OpenAIRealtimeAdapter`` via the stream-handler. Previously these
+        only worked when constructing the adapter directly; the high-level
+        engine wrapper silently dropped them.
+        """
+        import os
+
+        from getpatter import Patter
+        from getpatter.engines import openai as eng_openai
+        from getpatter.stream_handler import OpenAIRealtimeStreamHandler
+
+        os.environ.setdefault("OPENAI_API_KEY", "sk-test-engine-forward")
+
+        phone = Patter()
+        agent = phone.agent(
+            system_prompt="You are helpful.",
+            engine=eng_openai.Realtime(
+                api_key="sk-test-engine-forward",
+                model="gpt-realtime-2",
+                reasoning_effort="low",
+                input_audio_transcription_model="gpt-realtime-whisper",
+            ),
+        )
+
+        # Engine fields are surfaced on the Agent so the handler can forward
+        # them — verifies the unpack path before the connect() forwarding.
+        assert agent.openai_realtime_reasoning_effort == "low"
+        assert (
+            agent.openai_realtime_input_audio_transcription_model
+            == "gpt-realtime-whisper"
+        )
+
+        handler = OpenAIRealtimeStreamHandler(
+            agent=agent,
+            audio_sender=AsyncMock(),
+            call_id="CA0000000000000000000000000000a042",
+            caller="+15555550100",
+            callee="+15555550101",
+            resolved_prompt="You are helpful.",
+            metrics=None,
+            openai_key="sk-test-engine-forward",
+            audio_format="g711_ulaw",
+        )
+
+        captured: dict = {}
+
+        class _FakeAdapter:
+            def __init__(self, **kwargs: object) -> None:
+                captured.update(kwargs)
+
+            async def connect(self) -> None:
+                return None
+
+        with patch(
+            "getpatter.providers.openai_realtime.OpenAIRealtimeAdapter",
+            _FakeAdapter,
+        ):
+            await handler.start()
+
+        assert captured["reasoning_effort"] == "low"
+        assert captured["input_audio_transcription_model"] == "gpt-realtime-whisper"
+        # And the existing fields keep flowing through.
+        assert captured["api_key"] == "sk-test-engine-forward"
+        assert captured["model"] == "gpt-realtime-2"
+        assert captured["audio_format"] == "g711_ulaw"
 
 
 @pytest.mark.unit

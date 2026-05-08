@@ -7,6 +7,8 @@ import {
   calculateRealtimeCost,
   calculateRealtimeCachedSavings,
   calculateTelephonyCost,
+  calculateLlmCost,
+  llmPricing,
 } from '../src/pricing';
 
 describe('DEFAULT_PRICING', () => {
@@ -201,5 +203,217 @@ describe('calculateTelephonyCost', () => {
     const pricing = mergePricing();
     const cost = calculateTelephonyCost('telnyx', 60, pricing);
     expect(cost).toBeCloseTo(0.007, 3);
+  });
+});
+
+describe('per-model rates under openai_realtime.models', () => {
+  it('exposes gpt-realtime, gpt-realtime-2, mini, and 4o-preview', () => {
+    const models = DEFAULT_PRICING.openai_realtime.models!;
+    expect(models['gpt-realtime']).toBeDefined();
+    expect(models['gpt-realtime-2']).toBeDefined();
+    expect(models['gpt-realtime-mini']).toBeDefined();
+    expect(models['gpt-4o-realtime-preview']).toBeDefined();
+  });
+
+  it('gpt-realtime-2 matches OpenAI published per-1M-token rates', () => {
+    const e = DEFAULT_PRICING.openai_realtime.models!['gpt-realtime-2'];
+    expect(e.text_input_per_token).toBeCloseTo(4 / 1_000_000, 12);
+    expect(e.text_output_per_token).toBeCloseTo(24 / 1_000_000, 12);
+    expect(e.audio_input_per_token).toBeCloseTo(32 / 1_000_000, 12);
+    expect(e.audio_output_per_token).toBeCloseTo(64 / 1_000_000, 12);
+    expect(e.cached_audio_input_per_token).toBeCloseTo(0.4 / 1_000_000, 12);
+    expect(e.cached_text_input_per_token).toBeCloseTo(0.4 / 1_000_000, 12);
+  });
+
+  it('calculateRealtimeCost auto-resolves the per-model rate when model is passed', () => {
+    const pricing = mergePricing();
+    // 1000 audio input tokens at $32/M = $0.032 (gpt-realtime-2)
+    const cost = calculateRealtimeCost(
+      {
+        input_token_details: { audio_tokens: 1000, text_tokens: 0 },
+        output_token_details: { audio_tokens: 0, text_tokens: 0 },
+      },
+      pricing,
+      'gpt-realtime-2',
+    );
+    expect(cost).toBeCloseTo(0.032, 6);
+  });
+
+  it('falls back to provider defaults (mini) when model is unknown or omitted', () => {
+    const pricing = mergePricing();
+    const usage = {
+      input_token_details: { audio_tokens: 1000, text_tokens: 0 },
+      output_token_details: { audio_tokens: 0, text_tokens: 0 },
+    };
+    // 1000 * $10/M = $0.01 (mini default rate)
+    const costNone = calculateRealtimeCost(usage, pricing);
+    const costUnknown = calculateRealtimeCost(usage, pricing, 'some-future-model');
+    expect(costNone).toBeCloseTo(0.01, 6);
+    expect(costUnknown).toBeCloseTo(0.01, 6);
+  });
+});
+
+describe('model-aware STT pricing', () => {
+  it('deepgram default is nova-3 streaming', () => {
+    const pricing = mergePricing();
+    // 60s at $0.0077/min = $0.0077
+    expect(calculateSttCost('deepgram', 60, pricing)).toBeCloseTo(0.0077, 6);
+  });
+
+  it('deepgram multilingual nested rate', () => {
+    const pricing = mergePricing();
+    expect(calculateSttCost('deepgram', 60, pricing, 'nova-3-multilingual')).toBeCloseTo(
+      0.0092,
+      6,
+    );
+  });
+
+  it('whisper provider exposes per-model rates including gpt-realtime-whisper', () => {
+    const pricing = mergePricing();
+    expect(calculateSttCost('whisper', 60, pricing, 'gpt-4o-mini-transcribe')).toBeCloseTo(
+      0.003,
+      6,
+    );
+    expect(calculateSttCost('whisper', 60, pricing, 'gpt-realtime-whisper')).toBeCloseTo(
+      0.017,
+      6,
+    );
+  });
+
+  it('unknown model falls back to provider default', () => {
+    const pricing = mergePricing();
+    expect(calculateSttCost('deepgram', 60, pricing, 'some-future-model')).toBeCloseTo(
+      0.0077,
+      6,
+    );
+  });
+});
+
+describe('model-aware TTS pricing', () => {
+  it('elevenlabs default is flash_v2_5', () => {
+    const pricing = mergePricing();
+    expect(calculateTtsCost('elevenlabs', 1000, pricing)).toBeCloseTo(0.06, 6);
+  });
+
+  it('elevenlabs multilingual_v2 nested rate', () => {
+    const pricing = mergePricing();
+    expect(calculateTtsCost('elevenlabs', 1000, pricing, 'eleven_multilingual_v2')).toBeCloseTo(
+      0.18,
+      6,
+    );
+  });
+
+  it('openai_tts splits tts-1 vs tts-1-hd via models map', () => {
+    const pricing = mergePricing();
+    expect(calculateTtsCost('openai_tts', 1000, pricing, 'tts-1')).toBeCloseTo(0.015, 6);
+    expect(calculateTtsCost('openai_tts', 1000, pricing, 'tts-1-hd')).toBeCloseTo(0.030, 6);
+  });
+});
+
+describe('per-model override merge semantics', () => {
+  it('overriding one model leaves the others intact', () => {
+    const pricing = mergePricing({
+      elevenlabs: { models: { eleven_flash_v2_5: { price: 0.04 } } },
+    });
+    // Overridden
+    expect(calculateTtsCost('elevenlabs', 1000, pricing, 'eleven_flash_v2_5')).toBeCloseTo(
+      0.04,
+      6,
+    );
+    // Untouched
+    expect(calculateTtsCost('elevenlabs', 1000, pricing, 'eleven_multilingual_v2')).toBeCloseTo(
+      0.18,
+      6,
+    );
+  });
+
+  it('user can register a brand-new model under a known provider', () => {
+    const pricing = mergePricing({
+      deepgram: { models: { 'my-private-model': { price: 0.012 } } },
+    });
+    expect(calculateSttCost('deepgram', 60, pricing, 'my-private-model')).toBeCloseTo(
+      0.012,
+      6,
+    );
+  });
+
+  it('versioned model IDs resolve via longest-prefix fallback', () => {
+    const pricing = mergePricing();
+    const cost = calculateRealtimeCost(
+      {
+        input_token_details: { audio_tokens: 1000, text_tokens: 0 },
+        output_token_details: { audio_tokens: 0, text_tokens: 0 },
+      },
+      pricing,
+      'gpt-realtime-2-2026-05-08',
+    );
+    // Should resolve to gpt-realtime-2 rate
+    expect(cost).toBeCloseTo(0.032, 6);
+  });
+});
+
+describe('LLM cost billing — Cerebras + Groq silent under-billing regression', () => {
+  // Before these entries were added, every Patter user running the Cerebras
+  // default model (``gpt-oss-120b``) or any Groq model outside the two
+  // versatile/instant ones billed exactly $0 for LLM tokens. ``calculateLlmCost``
+  // falls through to ``return 0`` when the model is missing from the rate
+  // table, so the dashboard charged nothing without surfacing a warning.
+
+  it('cerebras default model (gpt-oss-120b) is billed', () => {
+    const cost = calculateLlmCost('cerebras', 'gpt-oss-120b', 1000, 1000);
+    // Real rate-card math: 1000 in @ $0.85/M + 1000 out @ $1.20/M
+    expect(cost).toBeCloseTo((1000 / 1_000_000) * 0.85 + (1000 / 1_000_000) * 1.20, 9);
+    expect(cost).toBeGreaterThan(0);
+  });
+
+  it('cerebras llama3.1-8b is billed (still supported until 2026-05-27 retirement)', () => {
+    const cost = calculateLlmCost('cerebras', 'llama3.1-8b', 1000, 1000);
+    expect(cost).toBeCloseTo((1000 / 1_000_000) * 0.10 + (1000 / 1_000_000) * 0.20, 9);
+    expect(cost).toBeGreaterThan(0);
+  });
+
+  it('every CerebrasModel enum value has a pricing entry', () => {
+    // Mirrors libraries/typescript/src/providers/cerebras-llm.ts CerebrasModel.
+    const cerebrasModels = [
+      'gpt-oss-120b',
+      'llama3.1-8b',
+      'llama-3.3-70b',
+      'qwen-3-235b-a22b-instruct-2507',
+      'zai-glm-4.7',
+    ];
+    for (const model of cerebrasModels) {
+      const cost = calculateLlmCost('cerebras', model, 10_000, 10_000);
+      expect(cost, `cerebras model ${model} silently billed $0`).toBeGreaterThan(0);
+      expect(llmPricing.cerebras[model], `missing rate for ${model}`).toBeDefined();
+    }
+  });
+
+  it('every GroqModel enum value has a pricing entry (no $0 holes)', () => {
+    // Mirrors libraries/typescript/src/providers/groq-llm.ts GroqModel.
+    const groqModels = [
+      'llama-3.3-70b-versatile',
+      'llama-3.1-8b-instant',
+      'llama-3.3-70b-specdec',
+      'llama3-70b-8192',
+      'llama3-8b-8192',
+      'mixtral-8x7b-32768',
+      'gemma2-9b-it',
+    ];
+    for (const model of groqModels) {
+      const cost = calculateLlmCost('groq', model, 10_000, 10_000);
+      expect(cost, `groq model ${model} silently billed $0`).toBeGreaterThan(0);
+      expect(llmPricing.groq[model], `missing rate for ${model}`).toBeDefined();
+    }
+  });
+
+  it('groq specdec carries a higher output rate than versatile', () => {
+    // specdec has $0.99/M output (vs $0.79/M versatile) per Groq's published
+    // pricing for speculative-decoding endpoints — verify the rate isn't
+    // silently aliased to versatile's.
+    const specCost = calculateLlmCost('groq', 'llama-3.3-70b-specdec', 0, 1_000_000);
+    const verCost = calculateLlmCost('groq', 'llama-3.3-70b-versatile', 0, 1_000_000);
+    expect(specCost).toBeCloseTo(0.99, 6);
+    expect(verCost).toBeCloseTo(0.79, 6);
+    expect(specCost).toBeGreaterThan(verCost);
   });
 });

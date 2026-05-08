@@ -1,6 +1,5 @@
 """Tests for the local dashboard store, routes, and integration."""
 
-
 import pytest
 
 from getpatter.dashboard.store import MetricsStore
@@ -199,7 +198,7 @@ class TestDashboardHTML:
         from getpatter.dashboard.ui import DASHBOARD_HTML
 
         assert "Patter" in DASHBOARD_HTML
-        assert "Live calls dashboard" in DASHBOARD_HTML
+        assert "<title>Patter | Dashboard</title>" in DASHBOARD_HTML
         assert '<div id="root">' in DASHBOARD_HTML
         # Confirms the bundled SPA loaded (not the fallback HTML stub).
         assert len(DASHBOARD_HTML) > 10_000

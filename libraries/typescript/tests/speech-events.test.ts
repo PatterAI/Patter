@@ -267,3 +267,99 @@ describe("[unit] Patter — speech-event proxies", () => {
     expect(phone.conversationState.agent).toBe("thinking");
   });
 });
+
+/**
+ * StreamHandler wiring smoke tests — verify the handler's private
+ * ``emitLlmFirstToken`` / ``emitAudioOut`` helpers proxy to the
+ * dispatcher with the correct provider tags. The Realtime branch in
+ * ``onAdapterTranscriptOutput`` / ``onAdapterAudio`` calls these on
+ * every delta; the dispatcher's idempotency makes per-delta calls cheap
+ * (only the first per turn fires the user callback).
+ */
+describe("[unit] StreamHandler — speech-event wiring", () => {
+  it("realtime emitLlmFirstToken and emitAudioOut fire once per turn", async () => {
+    const { StreamHandler } = await import("../src/stream-handler");
+
+    const events = new SpeechEvents();
+    const rec = new Recorder();
+    events.onLlmToken = rec.make("llm");
+    events.onAudioOut = rec.make("audio");
+
+    // Arm the per-turn flags.
+    await events.fireUserSpeechEos({ trigger: "vad_silence" });
+
+    // Construct a handler shell — bypass the full constructor because
+    // the helpers we exercise only need the dispatcher and a tiny agent
+    // shape. Mirror Python's ``__new__`` pattern.
+    const handler = Object.create(StreamHandler.prototype) as Record<
+      string,
+      unknown
+    >;
+    handler.deps = {
+      speechEvents: events,
+      agent: {
+        model: "gpt-realtime",
+        provider: "openai_realtime",
+      },
+    };
+    handler.llmProviderTag = "openai_realtime";
+
+    // First delta of the turn — fires once.
+    await (handler as { emitLlmFirstToken: () => Promise<void> })
+      .emitLlmFirstToken();
+    await (handler as { emitAudioOut: () => Promise<void> }).emitAudioOut();
+    // Subsequent deltas inside the same turn — dispatcher swallows.
+    await (handler as { emitLlmFirstToken: () => Promise<void> })
+      .emitLlmFirstToken();
+    await (handler as { emitAudioOut: () => Promise<void> }).emitAudioOut();
+
+    const names = rec.calls.map((c) => c.name);
+    expect(names.filter((n) => n === "llm")).toHaveLength(1);
+    expect(names.filter((n) => n === "audio")).toHaveLength(1);
+    const llmCall = rec.calls.find((c) => c.name === "llm")!;
+    expect(llmCall.payload.llm_provider).toBe("openai_realtime");
+    expect(llmCall.payload.model).toBe("gpt-realtime");
+    const audioCall = rec.calls.find((c) => c.name === "audio")!;
+    expect(audioCall.payload.tts_provider).toBe("openai_realtime");
+  });
+
+  it("pipeline emitAudioOut tags the configured TTS provider", async () => {
+    const { StreamHandler } = await import("../src/stream-handler");
+
+    const events = new SpeechEvents();
+    const rec = new Recorder();
+    events.onAudioOut = rec.make("audio");
+    events.onLlmToken = rec.make("llm");
+    await events.fireUserSpeechEos({ trigger: "vad_silence" });
+
+    // Pipeline-mode handler shell with a TTS provider that exposes a
+    // ``providerKey`` static — same convention as ElevenLabsTTS /
+    // CartesiaTTS / OpenAITTS adapters in ``src/tts/``.
+    class FakeTTS {
+      static readonly providerKey = "elevenlabs";
+    }
+    const handler = Object.create(StreamHandler.prototype) as Record<
+      string,
+      unknown
+    >;
+    handler.deps = {
+      speechEvents: events,
+      agent: {
+        model: "gpt-4o-mini",
+        tts: new FakeTTS(),
+        provider: "pipeline",
+      },
+    };
+    handler.llmProviderTag = "anthropic";
+
+    await (handler as { emitLlmFirstToken: () => Promise<void> })
+      .emitLlmFirstToken();
+    await (handler as { emitAudioOut: () => Promise<void> }).emitAudioOut();
+
+    expect(rec.calls).toHaveLength(2);
+    const llmCall = rec.calls.find((c) => c.name === "llm")!;
+    expect(llmCall.payload.llm_provider).toBe("anthropic");
+    const audioCall = rec.calls.find((c) => c.name === "audio")!;
+    expect(audioCall.payload.tts_provider).toBe("elevenlabs");
+  });
+});

@@ -337,4 +337,170 @@ describe('LLMLoop', () => {
       expect(provider).toBeInstanceOf(OpenAILLMProvider);
     });
   });
+
+  describe('[mocked] onToolCall observer (pipeline parity with realtime emitToolEvent)', () => {
+    it('fires after a successful tool execution with (name, args, result)', async () => {
+      let callCount = 0;
+      const handler = vi.fn().mockResolvedValue('{"value": 42}');
+      const customProvider: LLMProvider = {
+        async *stream(_messages, _tools) {
+          callCount++;
+          if (callCount === 1) {
+            yield { type: 'tool_call', index: 0, id: 'tc_1', name: 'lookup', arguments: '{"q":"x"}' };
+          } else {
+            yield { type: 'text', content: 'Found 42.' };
+          }
+        },
+      };
+
+      const loop = new LLMLoop('', '', 'System.', [
+        {
+          name: 'lookup',
+          description: 'Test',
+          parameters: { type: 'object', properties: {} },
+          webhookUrl: '',
+          handler,
+        },
+      ], customProvider);
+
+      const observed: Array<[string, Record<string, unknown>, string]> = [];
+      loop.setOnToolCall(async (name, args, result) => {
+        observed.push([name, args, result]);
+      });
+
+      const tokens: string[] = [];
+      for await (const token of loop.run('Go', [], {})) tokens.push(token);
+
+      expect(tokens).toEqual(['Found 42.']);
+      expect(observed).toHaveLength(1);
+      expect(observed[0][0]).toBe('lookup');
+      expect(observed[0][1]).toEqual({ q: 'x' });
+      expect(observed[0][2]).toBe('{"value": 42}');
+    });
+
+    it('observer exceptions do not abort the loop', async () => {
+      let callCount = 0;
+      const handler = vi.fn().mockResolvedValue('"ok"');
+      const customProvider: LLMProvider = {
+        async *stream(_messages, _tools) {
+          callCount++;
+          if (callCount === 1) {
+            yield { type: 'tool_call', index: 0, id: 'tc_n', name: 'noisy', arguments: '{}' };
+          } else {
+            yield { type: 'text', content: 'done' };
+          }
+        },
+      };
+
+      const loop = new LLMLoop('', '', 'System.', [
+        {
+          name: 'noisy',
+          description: 'Test',
+          parameters: { type: 'object', properties: {} },
+          webhookUrl: '',
+          handler,
+        },
+      ], customProvider);
+
+      loop.setOnToolCall(async () => {
+        throw new Error('observer boom');
+      });
+
+      const tokens: string[] = [];
+      for await (const token of loop.run('Go', [], {})) tokens.push(token);
+
+      // Loop completed despite observer failure
+      expect(tokens).toEqual(['done']);
+    });
+
+    it('end-to-end pipeline: emits THREE transcript events for one tool turn (call + result + assistant)', async () => {
+      // Authentic-test: only the LLM provider stream is mocked (paid
+      // external boundary). The StreamHandler `recordToolCall` and
+      // `emitAssistantTranscript` helpers run real code paths.
+      const { StreamHandler } = await import('../src/stream-handler');
+      type TEvt = Record<string, unknown>;
+
+      let callCount = 0;
+      const handler = vi.fn().mockResolvedValue('{"value": 42}');
+      const customProvider: LLMProvider = {
+        async *stream(_messages, _tools) {
+          callCount++;
+          if (callCount === 1) {
+            yield { type: 'tool_call', index: 0, id: 'tc_l', name: 'lookup', arguments: '{"q":"x"}' };
+          } else {
+            yield { type: 'text', content: 'Found 42.' };
+          }
+        },
+      };
+
+      const loop = new LLMLoop('', '', 'System.', [
+        {
+          name: 'lookup',
+          description: 'Test',
+          parameters: { type: 'object', properties: {} },
+          webhookUrl: '',
+          handler,
+        },
+      ], customProvider);
+
+      // Build a StreamHandler shell — the helpers we exercise only need
+      // `history`, `callId`, and `deps.onTranscript`. No telephony bridge.
+      const transcript: TEvt[] = [];
+      const handlerShell = Object.create(StreamHandler.prototype) as {
+        callId: string;
+        history: { entries: TEvt[]; push: (e: TEvt) => void };
+        deps: { onTranscript: (e: TEvt) => Promise<void> };
+        recordToolCall: (n: string, a: Record<string, unknown>, r: string) => Promise<void>;
+        emitAssistantTranscript: (text: string) => Promise<void>;
+      };
+      handlerShell.callId = 'call-abc';
+      const entries: TEvt[] = [];
+      handlerShell.history = {
+        entries,
+        push(e: TEvt) { entries.push(e); },
+      };
+      handlerShell.deps = {
+        onTranscript: async (e: TEvt) => { transcript.push(e); },
+      };
+
+      // Wire the loop the same way StreamHandler.start does.
+      loop.setOnToolCall(async (name, args, result) =>
+        handlerShell.recordToolCall(name, args, result),
+      );
+
+      // Drive the loop and forward the final assistant text into
+      // `emitAssistantTranscript` (mirrors `runPipelineLlm`'s
+      // post-stream history push).
+      const parts: string[] = [];
+      for await (const token of loop.run('Go', [], { call_id: handlerShell.callId })) {
+        parts.push(token);
+      }
+      const finalText = parts.join('');
+      if (finalText) await handlerShell.emitAssistantTranscript(finalText);
+
+      // 3 events in order: tool call, tool result, assistant
+      expect(transcript).toHaveLength(3);
+      const [callEvt, resultEvt, assistantEvt] = transcript;
+
+      expect(callEvt.role).toBe('tool');
+      expect(callEvt.tool_name).toBe('lookup');
+      expect(callEvt.tool_args).toEqual({ q: 'x' });
+      expect(callEvt.tool_result).toBeNull();
+      expect(String(callEvt.text)).toMatch(/^lookup\(/);
+      expect(callEvt.call_id).toBe('call-abc');
+
+      expect(resultEvt.role).toBe('tool');
+      expect(resultEvt.tool_name).toBe('lookup');
+      expect(resultEvt.tool_result).toBe('{"value": 42}');
+      expect(String(resultEvt.text)).toContain('→');
+
+      expect(assistantEvt.role).toBe('assistant');
+      expect(assistantEvt.text).toBe('Found 42.');
+      expect(assistantEvt.call_id).toBe('call-abc');
+
+      // History contains tool-call, tool-result, assistant entries
+      const roles = entries.map((e) => e.role);
+      expect(roles).toEqual(['tool', 'tool', 'assistant']);
+    });
+  });
 });

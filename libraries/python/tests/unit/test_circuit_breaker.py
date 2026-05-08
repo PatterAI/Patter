@@ -5,6 +5,10 @@ Parity with libraries/typescript/tests/circuit-breaker.test.ts.
 
 from __future__ import annotations
 
+import warnings
+
+import pytest
+
 from getpatter.tools.circuit_breaker import (
     CircuitBreakerOptions,
     CircuitBreakerRegistry,
@@ -42,7 +46,7 @@ class TestCircuitBreaker:
     def test_opens_after_threshold_consecutive_failures(self) -> None:
         clock = _FakeClock()
         breaker = CircuitBreakerRegistry(
-            CircuitBreakerOptions(failure_threshold=3, cooldown_s=5.0),
+            CircuitBreakerOptions(failure_threshold=3, cooldown_ms=5_000),
             clock=clock.now,
         )
         breaker.record_failure("book")
@@ -66,7 +70,7 @@ class TestCircuitBreaker:
     def test_open_to_half_open_after_cooldown(self) -> None:
         clock = _FakeClock()
         breaker = CircuitBreakerRegistry(
-            CircuitBreakerOptions(failure_threshold=2, cooldown_s=10.0),
+            CircuitBreakerOptions(failure_threshold=2, cooldown_ms=10_000),
             clock=clock.now,
         )
         breaker.record_failure("book")
@@ -85,7 +89,7 @@ class TestCircuitBreaker:
     def test_half_open_to_closed_on_probe_success(self) -> None:
         clock = _FakeClock()
         breaker = CircuitBreakerRegistry(
-            CircuitBreakerOptions(failure_threshold=2, cooldown_s=1.0),
+            CircuitBreakerOptions(failure_threshold=2, cooldown_ms=1_000),
             clock=clock.now,
         )
         breaker.record_failure("book")
@@ -101,7 +105,7 @@ class TestCircuitBreaker:
     def test_half_open_to_open_on_probe_failure(self) -> None:
         clock = _FakeClock()
         breaker = CircuitBreakerRegistry(
-            CircuitBreakerOptions(failure_threshold=2, cooldown_s=1.0),
+            CircuitBreakerOptions(failure_threshold=2, cooldown_ms=1_000),
             clock=clock.now,
         )
         breaker.record_failure("book")
@@ -113,7 +117,7 @@ class TestCircuitBreaker:
 
     def test_threshold_zero_disables(self) -> None:
         breaker = CircuitBreakerRegistry(
-            CircuitBreakerOptions(failure_threshold=0, cooldown_s=1.0)
+            CircuitBreakerOptions(failure_threshold=0, cooldown_ms=1_000)
         )
         for _ in range(100):
             breaker.record_failure("book")
@@ -129,12 +133,93 @@ class TestCircuitBreaker:
     def test_time_until_half_open(self) -> None:
         clock = _FakeClock()
         breaker = CircuitBreakerRegistry(
-            CircuitBreakerOptions(failure_threshold=2, cooldown_s=5.0),
+            CircuitBreakerOptions(failure_threshold=2, cooldown_ms=5_000),
             clock=clock.now,
         )
+        # ``time_until_half_open`` keeps returning seconds for back-compat;
+        # ``time_until_half_open_ms`` is the TS-parity variant.
         assert breaker.time_until_half_open("book") == 0.0
+        assert breaker.time_until_half_open_ms("book") == 0.0
         breaker.record_failure("book")
         breaker.record_failure("book")
         assert breaker.time_until_half_open("book") == 5.0
+        assert breaker.time_until_half_open_ms("book") == 5_000.0
         clock.advance(2.0)
         assert breaker.time_until_half_open("book") == 3.0
+        assert breaker.time_until_half_open_ms("book") == 3_000.0
+
+
+class TestCooldownSDeprecation:
+    """Regression tests for the backward-compatible ``cooldown_s=`` shim."""
+
+    def test_legacy_cooldown_s_kwarg_still_works(self) -> None:
+        """``CircuitBreakerOptions(cooldown_s=30.0)`` is converted to
+        ``cooldown_ms=30_000`` so existing callers keep working through
+        v0.7.0 — the version where the seconds shim is scheduled to be
+        removed."""
+        # Reset the once-per-process flag so the warning fires for this test
+        # regardless of test execution order.
+        from getpatter.tools import circuit_breaker as cb_module
+
+        cb_module._warned_cooldown_s = False
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", DeprecationWarning)
+            opts = CircuitBreakerOptions(failure_threshold=3, cooldown_s=30.0)
+
+        assert opts.cooldown_ms == 30_000
+        # Warning must fire and mention the old name + the new name + the
+        # removal version so users have everything they need to migrate.
+        dep = [w for w in caught if issubclass(w.category, DeprecationWarning)]
+        assert len(dep) >= 1
+        msg = str(dep[0].message)
+        assert "cooldown_s" in msg
+        assert "cooldown_ms" in msg
+        assert "v0.7.0" in msg
+
+    def test_legacy_cooldown_s_drives_breaker_behaviour(self) -> None:
+        """The seconds-based shim must produce the same runtime behaviour
+        as the millisecond field — proves the conversion is correct, not
+        just stored."""
+        from getpatter.tools import circuit_breaker as cb_module
+
+        cb_module._warned_cooldown_s = False
+
+        clock = _FakeClock()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            breaker = CircuitBreakerRegistry(
+                CircuitBreakerOptions(failure_threshold=2, cooldown_s=10.0),
+                clock=clock.now,
+            )
+        breaker.record_failure("book")
+        breaker.record_failure("book")
+        assert breaker.allow("book") is False
+        clock.advance(9.999)
+        assert breaker.allow("book") is False
+        clock.advance(0.002)
+        assert breaker.allow("book") is True
+
+    def test_explicit_cooldown_ms_wins_over_legacy_cooldown_s(self) -> None:
+        """If both are passed, ``cooldown_ms`` wins — the explicit new
+        name is always authoritative."""
+        from getpatter.tools import circuit_breaker as cb_module
+
+        cb_module._warned_cooldown_s = False
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            opts = CircuitBreakerOptions(cooldown_ms=7_500, cooldown_s=42.0)
+        assert opts.cooldown_ms == 7_500
+
+
+@pytest.mark.parametrize(
+    "default_field, default_value",
+    [("cooldown_ms", 30_000), ("failure_threshold", 5)],
+)
+def test_defaults_match_typescript(default_field: str, default_value: int) -> None:
+    """Defaults must match the TypeScript SDK byte-for-byte —
+    ``DEFAULT_COOLDOWN_MS = 30_000`` and ``DEFAULT_FAILURE_THRESHOLD = 5``
+    in ``libraries/typescript/src/tools/circuit-breaker.ts``."""
+    opts = CircuitBreakerOptions()
+    assert getattr(opts, default_field) == default_value

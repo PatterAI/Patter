@@ -16,7 +16,14 @@ from unittest.mock import patch
 
 import pytest
 
-from getpatter import Patter, SpeechEvents
+from getpatter import (
+    AgentState,
+    ConversationStateSnapshot,
+    EouTrigger,
+    Patter,
+    SpeechEvents,
+    UserState,
+)
 
 
 # Helper: collect every payload the dispatcher fires.
@@ -366,3 +373,195 @@ class TestStreamHandlerWiring:
         assert "ended" in names
         assert "eos" in names
         assert "agent_started" in names
+
+    async def test_realtime_first_token_and_audio_fire_via_helpers(self) -> None:
+        """Verifies the wiring fix: ``_emit_llm_first_token`` and
+        ``_emit_audio_out`` on the base handler proxy to the dispatcher
+        with the correct provider tags. The Realtime branch in
+        ``_forward_events`` calls these on every ``transcript_output`` /
+        ``audio`` delta; the dispatcher's idempotency makes the per-delta
+        call cheap (only the first per turn fires the user callback).
+        """
+        from getpatter._speech_events import SpeechEvents
+        from getpatter.stream_handler import OpenAIRealtimeStreamHandler
+
+        events = SpeechEvents()
+        rec = _Recorder()
+        events.on_llm_token = rec.make("llm")
+        events.on_audio_out = rec.make("audio")
+
+        # Arm a fresh turn so the dispatcher's per-turn guards allow a fire.
+        await events.fire_user_speech_eos(trigger="vad_silence")
+
+        handler = OpenAIRealtimeStreamHandler.__new__(OpenAIRealtimeStreamHandler)
+        handler.speech_events = events
+        handler.agent = type(
+            "_A",
+            (),
+            {"model": "gpt-realtime", "llm": None, "tts": None},
+        )()
+        handler._user_speech_start_ms = None
+        handler._agent_turn_start_ms = None
+
+        # First delta of the turn — should fire each event exactly once.
+        await handler._emit_llm_first_token(
+            llm_provider="openai_realtime", model="gpt-realtime"
+        )
+        await handler._emit_audio_out(tts_provider="openai_realtime")
+        # Subsequent deltas inside the same turn must be no-ops because
+        # the dispatcher's per-turn flags are exhausted.
+        await handler._emit_llm_first_token(
+            llm_provider="openai_realtime", model="gpt-realtime"
+        )
+        await handler._emit_audio_out(tts_provider="openai_realtime")
+
+        names = [name for name, _ in rec.calls]
+        assert names.count("llm") == 1
+        assert names.count("audio") == 1
+        # Payload carries the provider tag the wiring passed in.
+        llm_payload = next(p for n, p in rec.calls if n == "llm")
+        assert llm_payload["llm_provider"] == "openai_realtime"
+        assert llm_payload["model"] == "gpt-realtime"
+        audio_payload = next(p for n, p in rec.calls if n == "audio")
+        assert audio_payload["tts_provider"] == "openai_realtime"
+
+    async def test_pipeline_handler_emits_first_token_and_audio(self) -> None:
+        """Pipeline mode: TTS first byte and LLM first token both surface
+        through the base handler helpers regardless of which subclass the
+        pipeline runs on. We exercise the helpers directly (the same path
+        ``_process_streaming_response`` and ``_synthesize_sentence`` use)
+        and assert payload provider classification falls back to the
+        agent's LLM class name."""
+        from getpatter._speech_events import SpeechEvents
+        from getpatter.stream_handler import StreamHandler
+
+        events = SpeechEvents()
+        rec = _Recorder()
+        events.on_llm_token = rec.make("llm")
+        events.on_audio_out = rec.make("audio")
+        await events.fire_user_speech_eos(trigger="vad_silence")
+
+        # Concrete-enough subclass: bypass the abstract methods by building
+        # an empty type, since the helpers don't need them.
+        class _Stub(StreamHandler):  # type: ignore[misc]
+            async def start(self) -> None:  # pragma: no cover
+                pass
+
+            async def on_audio_received(self, _: bytes) -> None:  # pragma: no cover
+                pass
+
+            async def cleanup(self) -> None:  # pragma: no cover
+                pass
+
+        handler = _Stub.__new__(_Stub)
+        handler.speech_events = events
+        handler.agent = type(
+            "_A",
+            (),
+            {
+                "model": "gpt-4o-mini",
+                "llm": type("AnthropicLLMProvider", (), {})(),
+            },
+        )()
+        # ``_infer_tts_provider`` reads ``self._tts`` — the slot the pipeline
+        # path uses to hold the active TTS provider instance.
+        handler._tts = type("ElevenLabsTTS", (), {})()
+        handler._user_speech_start_ms = None
+        handler._agent_turn_start_ms = None
+
+        await handler._emit_llm_first_token(
+            llm_provider=handler._infer_llm_provider(),
+            model=handler.agent.model,
+        )
+        await handler._emit_audio_out()
+
+        assert len(rec.calls) == 2
+        llm_payload = next(p for n, p in rec.calls if n == "llm")
+        assert llm_payload["llm_provider"] == "anthropic"
+        audio_payload = next(p for n, p in rec.calls if n == "audio")
+        assert audio_payload["tts_provider"] == "elevenlabs"
+
+
+@pytest.mark.unit
+class TestPublicTypeParity:
+    """Cover the four public types added for parity with the TypeScript SDK
+    (`UserState`, `AgentState`, `EouTrigger`, `ConversationStateSnapshot`).
+    Each type exists in TS as either a string-literal union or a readonly
+    interface; in Python we use ``StrEnum`` and a ``@dataclass(frozen=True)``
+    respectively. The values must match byte-for-byte.
+    """
+
+    def test_user_state_values_match_typescript_union(self) -> None:
+        # Mirror of TS ``type UserState = "listening" | "speaking" |
+        # "thinking" | "away"``.
+        assert {s.value for s in UserState} == {
+            "listening",
+            "speaking",
+            "thinking",
+            "away",
+        }
+        # StrEnum members are str — comparable to bare strings.
+        assert UserState.LISTENING == "listening"
+
+    def test_agent_state_values_match_typescript_union(self) -> None:
+        # Mirror of TS ``type AgentState = "initializing" | "idle" |
+        # "listening" | "thinking" | "speaking"``.
+        assert {s.value for s in AgentState} == {
+            "initializing",
+            "idle",
+            "listening",
+            "thinking",
+            "speaking",
+        }
+        assert AgentState.SPEAKING == "speaking"
+
+    def test_eou_trigger_values_match_typescript_union(self) -> None:
+        # Mirror of TS ``type EouTrigger = "vad_silence" |
+        # "semantic_turn_detector" | "manual_commit"``.
+        assert {s.value for s in EouTrigger} == {
+            "vad_silence",
+            "semantic_turn_detector",
+            "manual_commit",
+        }
+        # The dispatcher accepts either the StrEnum value OR the bare
+        # string — the existing ``trigger`` parameter is typed as ``str``.
+        assert EouTrigger.VAD_SILENCE == "vad_silence"
+
+    def test_conversation_state_snapshot_construction_and_immutability(
+        self,
+    ) -> None:
+        snap = ConversationStateSnapshot(
+            user=UserState.LISTENING, agent=AgentState.IDLE
+        )
+        # Field shape mirrors TS ``interface ConversationStateSnapshot {
+        # readonly user: UserState; readonly agent: AgentState; }``.
+        assert snap.user == UserState.LISTENING
+        assert snap.agent == AgentState.IDLE
+        # Frozen dataclass — mutation raises (parity with TS ``readonly``).
+        with pytest.raises(Exception):  # FrozenInstanceError
+            snap.user = UserState.SPEAKING  # type: ignore[misc]
+
+    def test_conversation_state_snapshot_property_reflects_dispatch(
+        self,
+    ) -> None:
+        events = SpeechEvents()
+        snap = events.conversation_state_snapshot
+        assert isinstance(snap, ConversationStateSnapshot)
+        assert snap.user == UserState.LISTENING
+        assert snap.agent == AgentState.INITIALIZING
+
+    def test_all_four_types_importable_from_package_root(self) -> None:
+        # Final guard against the parity gap that motivated this test:
+        # ``from getpatter import <Name>`` must succeed for every type
+        # the TypeScript SDK re-exports from its package root.
+        from getpatter import (  # noqa: F401
+            AgentState as _AgentState,
+            ConversationStateSnapshot as _ConversationStateSnapshot,
+            EouTrigger as _EouTrigger,
+            UserState as _UserState,
+        )
+
+        assert _UserState is UserState
+        assert _AgentState is AgentState
+        assert _EouTrigger is EouTrigger
+        assert _ConversationStateSnapshot is ConversationStateSnapshot

@@ -4,6 +4,8 @@ import pytest
 
 from getpatter.pricing import (
     DEFAULT_PRICING,
+    LLM_PRICING,
+    calculate_llm_cost,
     calculate_realtime_cached_savings,
     calculate_realtime_cost,
     calculate_stt_cost,
@@ -177,12 +179,14 @@ class TestCalculateRealtimeCachedSavings:
         """If a user overrides cached rate HIGHER than full, savings would go
         negative. Must clamp to 0 — matching TS parity."""
         # cached_audio_input_per_token HIGHER than audio_input_per_token
-        pricing = merge_pricing({
-            "openai_realtime": {
-                "cached_audio_input_per_token": 0.0001,  # 10x higher than full
-                "cached_text_input_per_token": 0.00001,
+        pricing = merge_pricing(
+            {
+                "openai_realtime": {
+                    "cached_audio_input_per_token": 0.0001,  # 10x higher than full
+                    "cached_text_input_per_token": 0.00001,
+                }
             }
-        })
+        )
         usage = {
             "input_token_details": {
                 "audio_tokens": 1000,
@@ -223,3 +227,232 @@ class TestCalculateTelephonyCost:
         pricing = merge_pricing(None)
         cost = calculate_telephony_cost("twilio", 0.0, pricing)
         assert cost == 0.0
+
+
+class TestRealtime2Pricing:
+    """Per-model rates for ``gpt-realtime-2`` live under ``openai_realtime.models``."""
+
+    def test_model_entry_present(self):
+        models = DEFAULT_PRICING["openai_realtime"]["models"]
+        assert "gpt-realtime-2" in models
+        assert "gpt-realtime" in models
+        assert "gpt-realtime-mini" in models
+        assert "gpt-4o-realtime-preview" in models
+
+    def test_rates_match_openai_published(self):
+        """Spot-check the published per-1M-token rates match $/token math."""
+        entry = DEFAULT_PRICING["openai_realtime"]["models"]["gpt-realtime-2"]
+        # $4/M input tokens text -> 0.000004 per token
+        assert entry["text_input_per_token"] == pytest.approx(4.0 / 1_000_000)
+        assert entry["text_output_per_token"] == pytest.approx(24.0 / 1_000_000)
+        # $32/M audio in, $64/M audio out
+        assert entry["audio_input_per_token"] == pytest.approx(32.0 / 1_000_000)
+        assert entry["audio_output_per_token"] == pytest.approx(64.0 / 1_000_000)
+        # Cached input tier: $0.40/M for both audio and text
+        assert entry["cached_audio_input_per_token"] == pytest.approx(0.4 / 1_000_000)
+        assert entry["cached_text_input_per_token"] == pytest.approx(0.4 / 1_000_000)
+
+    def test_realtime_cost_auto_resolves_per_model(self):
+        """``calculate_realtime_cost(model='gpt-realtime-2')`` auto-picks the
+        nested rate without any override.
+        """
+        pricing = merge_pricing(None)
+        usage = {
+            "input_token_details": {"audio_tokens": 1000, "text_tokens": 0},
+            "output_token_details": {"audio_tokens": 0, "text_tokens": 0},
+        }
+        # 1000 audio input tokens at $32/M = $0.032 — gpt-realtime-2 rate
+        cost = calculate_realtime_cost(usage, pricing, model="gpt-realtime-2")
+        assert cost == pytest.approx(0.032)
+
+    def test_realtime_cost_falls_back_to_default_when_model_absent(self):
+        """Unknown model → provider defaults (gpt-realtime-mini rates)."""
+        pricing = merge_pricing(None)
+        usage = {
+            "input_token_details": {"audio_tokens": 1000, "text_tokens": 0},
+            "output_token_details": {"audio_tokens": 0, "text_tokens": 0},
+        }
+        # 1000 * $10/M = $0.01 (mini rate)
+        cost_unknown = calculate_realtime_cost(
+            usage, pricing, model="some-future-model"
+        )
+        cost_none = calculate_realtime_cost(usage, pricing)
+        assert cost_unknown == pytest.approx(0.01)
+        assert cost_none == pytest.approx(0.01)
+
+
+class TestModelAwareSttPricing:
+    """STT cost calc honours per-model overrides under ``models``."""
+
+    def test_deepgram_default_is_nova3_streaming(self):
+        pricing = merge_pricing(None)
+        # 60 seconds at $0.0077/min = $0.0077 (nova-3 default)
+        assert calculate_stt_cost("deepgram", 60.0, pricing) == pytest.approx(0.0077)
+
+    def test_deepgram_multilingual_uses_nested_rate(self):
+        pricing = merge_pricing(None)
+        # nova-3-multilingual is $0.0092/min
+        cost = calculate_stt_cost(
+            "deepgram", 60.0, pricing, model="nova-3-multilingual"
+        )
+        assert cost == pytest.approx(0.0092)
+
+    def test_deepgram_unknown_model_falls_back_to_default(self):
+        pricing = merge_pricing(None)
+        cost = calculate_stt_cost("deepgram", 60.0, pricing, model="some-future-model")
+        assert cost == pytest.approx(0.0077)
+
+    def test_whisper_per_model_rates(self):
+        pricing = merge_pricing(None)
+        # gpt-4o-mini-transcribe at $0.003/min
+        cost = calculate_stt_cost(
+            "whisper", 60.0, pricing, model="gpt-4o-mini-transcribe"
+        )
+        assert cost == pytest.approx(0.003)
+        # gpt-realtime-whisper at $0.017/min
+        cost = calculate_stt_cost(
+            "whisper", 60.0, pricing, model="gpt-realtime-whisper"
+        )
+        assert cost == pytest.approx(0.017)
+
+
+class TestModelAwareTtsPricing:
+    """TTS cost calc honours per-model overrides under ``models``."""
+
+    def test_elevenlabs_default_is_flash_v2_5(self):
+        pricing = merge_pricing(None)
+        # 1000 chars at $0.06/1k = $0.06
+        assert calculate_tts_cost("elevenlabs", 1000, pricing) == pytest.approx(0.06)
+
+    def test_elevenlabs_multilingual_v2_per_model_rate(self):
+        pricing = merge_pricing(None)
+        cost = calculate_tts_cost(
+            "elevenlabs", 1000, pricing, model="eleven_multilingual_v2"
+        )
+        assert cost == pytest.approx(0.18)
+
+    def test_openai_tts_hd_per_model_rate(self):
+        pricing = merge_pricing(None)
+        # tts-1-hd is $0.030/1k under the nested entry
+        cost = calculate_tts_cost("openai_tts", 1000, pricing, model="tts-1-hd")
+        assert cost == pytest.approx(0.030)
+
+    def test_openai_tts_default_is_tts1(self):
+        pricing = merge_pricing(None)
+        cost = calculate_tts_cost("openai_tts", 1000, pricing)
+        assert cost == pytest.approx(0.015)
+
+    def test_inworld_tts_2_default(self):
+        pricing = merge_pricing(None)
+        cost = calculate_tts_cost("inworld", 1000, pricing, model="inworld-tts-2")
+        assert cost == pytest.approx(0.020)
+
+
+class TestPerModelOverrideMerge:
+    """User overrides at the ``models`` level overlay rather than replace."""
+
+    def test_models_dict_merges_shallowly(self):
+        """Overriding one model leaves the others intact."""
+        pricing = merge_pricing(
+            {"elevenlabs": {"models": {"eleven_flash_v2_5": {"price": 0.04}}}}
+        )
+        # Overridden
+        assert calculate_tts_cost(
+            "elevenlabs", 1000, pricing, model="eleven_flash_v2_5"
+        ) == pytest.approx(0.04)
+        # Untouched — still original $0.18
+        assert calculate_tts_cost(
+            "elevenlabs", 1000, pricing, model="eleven_multilingual_v2"
+        ) == pytest.approx(0.18)
+
+    def test_user_can_register_brand_new_model(self):
+        pricing = merge_pricing(
+            {"deepgram": {"models": {"my-private-model": {"price": 0.012}}}}
+        )
+        cost = calculate_stt_cost("deepgram", 60.0, pricing, model="my-private-model")
+        assert cost == pytest.approx(0.012)
+
+    def test_longest_prefix_match_for_versioned_model_id(self):
+        """Versioned IDs like ``gpt-realtime-2-2026-05-08`` resolve against
+        the canonical ``gpt-realtime-2`` rate."""
+        pricing = merge_pricing(None)
+        usage = {
+            "input_token_details": {"audio_tokens": 1000, "text_tokens": 0},
+            "output_token_details": {"audio_tokens": 0, "text_tokens": 0},
+        }
+        cost = calculate_realtime_cost(
+            usage, pricing, model="gpt-realtime-2-2026-05-08"
+        )
+        # Should resolve to gpt-realtime-2 rate ($32/M audio in)
+        assert cost == pytest.approx(0.032)
+
+
+class TestLLMCostBilling:
+    """Regressions for the silent under-billing class — Cerebras + Groq.
+
+    Before these entries were added, every Patter user running the Cerebras
+    default model (``gpt-oss-120b``) or any Groq model outside the two
+    versatile/instant ones billed exactly $0 for LLM tokens. ``calculate_llm_cost``
+    falls through to ``return 0.0`` when the model is missing from the rate
+    table, so the dashboard charged nothing without surfacing a warning.
+    """
+
+    def test_cerebras_default_model_is_billed(self):
+        """Cerebras default ``gpt-oss-120b`` must produce a non-zero bill."""
+        cost = calculate_llm_cost("cerebras", "gpt-oss-120b", 1000, 1000)
+        # Real rate-card math, no mock: 1000 in @ $0.85/M + 1000 out @ $1.20/M
+        assert cost == pytest.approx(
+            (1000 / 1_000_000) * 0.85 + (1000 / 1_000_000) * 1.20
+        )
+        assert cost > 0.0
+
+    def test_cerebras_llama_3_1_8b_is_billed(self):
+        """``llama3.1-8b`` (deprecating 2026-05-27 but still supported) must bill."""
+        cost = calculate_llm_cost("cerebras", "llama3.1-8b", 1000, 1000)
+        assert cost == pytest.approx(
+            (1000 / 1_000_000) * 0.10 + (1000 / 1_000_000) * 0.20
+        )
+        assert cost > 0.0
+
+    def test_cerebras_all_supported_models_billed(self):
+        """Every model in the CerebrasModel enum has a pricing entry."""
+        # Mirrors libraries/python/getpatter/providers/cerebras_llm.py CerebrasModel.
+        cerebras_models = (
+            "gpt-oss-120b",
+            "llama3.1-8b",
+            "llama-3.3-70b",
+            "qwen-3-235b-a22b-instruct-2507",
+            "zai-glm-4.7",
+        )
+        for model in cerebras_models:
+            cost = calculate_llm_cost("cerebras", model, 10_000, 10_000)
+            assert cost > 0.0, f"cerebras model {model!r} silently billed $0"
+            assert model in LLM_PRICING["cerebras"], f"missing rate for {model!r}"
+
+    def test_groq_all_models_billed(self):
+        """Every model in the GroqModel enum has a pricing entry (no $0 holes)."""
+        # Mirrors libraries/python/getpatter/providers/groq_llm.py GroqModel.
+        groq_models = (
+            "llama-3.3-70b-versatile",
+            "llama-3.1-8b-instant",
+            "llama-3.3-70b-specdec",
+            "llama3-70b-8192",
+            "llama3-8b-8192",
+            "mixtral-8x7b-32768",
+            "gemma2-9b-it",
+        )
+        for model in groq_models:
+            cost = calculate_llm_cost("groq", model, 10_000, 10_000)
+            assert cost > 0.0, f"groq model {model!r} silently billed $0"
+            assert model in LLM_PRICING["groq"], f"missing rate for {model!r}"
+
+    def test_groq_specdec_uses_higher_output_rate(self):
+        """``llama-3.3-70b-specdec`` carries a different output rate than versatile."""
+        # specdec has $0.99/M output (vs $0.79/M versatile) per Groq's published
+        # pricing for speculative-decoding endpoints — verify the rate isn't
+        # silently aliased to versatile's.
+        spec_cost = calculate_llm_cost("groq", "llama-3.3-70b-specdec", 0, 1_000_000)
+        ver_cost = calculate_llm_cost("groq", "llama-3.3-70b-versatile", 0, 1_000_000)
+        assert spec_cost == pytest.approx(0.99)
+        assert ver_cost == pytest.approx(0.79)
+        assert spec_cost > ver_cost
