@@ -1,0 +1,98 @@
+---
+title: "Soniox STT"
+description: "Soniox real-time streaming speech-to-text for Patter pipeline mode."
+icon: "waveform"
+---
+
+# Soniox STT
+
+`SonioxSTT` streams PCM audio to the [Soniox real-time transcribe WebSocket](https://soniox.com/docs/speech-to-text/real-time) (`wss://stt-rt.soniox.com/transcribe-websocket`). Uses the `ws` package — no vendor SDK required. The adapter accumulates `is_final` tokens into segments and flushes them when an `<end>` / `<fin>` endpoint token is received.
+
+## Install
+
+```bash
+npm install getpatter
+```
+
+## Usage
+
+<Note>
+  Use the namespaced import (`getpatter/stt/soniox`) or the flat re-export
+  (`SonioxSTT`). Both auto-resolve `SONIOX_API_KEY` from the environment
+  when `apiKey` is omitted.
+</Note>
+
+<CodeGroup>
+```typescript TypeScript
+// Namespaced import
+import * as soniox from "getpatter/stt/soniox";
+
+const stt = new soniox.STT();                                    // reads SONIOX_API_KEY
+const stt2 = new soniox.STT({ apiKey: "...", languageHints: ["en", "it"] });
+
+// Flat alias (equivalent)
+import { SonioxSTT } from "getpatter";
+
+const stt3 = new SonioxSTT();
+```
+
+```python Python
+# See python-sdk/providers/soniox for the Python twin.
+```
+</CodeGroup>
+
+Plug it into an agent:
+
+```typescript
+// npx tsx example.ts
+import { Patter, Twilio, SonioxSTT, ElevenLabsTTS } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  stt: new SonioxSTT({ languageHints: ["en"] }),      // SONIOX_API_KEY from env
+  tts: new ElevenLabsTTS({ voiceId: "rachel" }),
+  systemPrompt: "You are a helpful assistant.",
+});
+
+await phone.serve({ agent });
+```
+
+## Models and rates
+
+Soniox bills per minute of streamed audio. Default rate from `getpatter/pricing`:
+
+| Model | Rate / min |
+|---|---|
+| `stt-rt-v4` (default) | $0.002 |
+| `stt-rt-v3` | $0.002 |
+| `stt-rt-v2` | $0.002 |
+
+(`$0.12/hr = $0.002/min`. Override via `new Patter({ pricing: { soniox: { price: ... } } })`.)
+
+## Languages
+
+Soniox real-time uses **language hints** rather than a single language code — pass a list of BCP-47 codes that the engine considers when scoring tokens:
+
+```typescript
+const stt = new SonioxSTT({ languageHints: ["en", "es", "it"] });
+const strict = new SonioxSTT({ languageHints: ["en"], languageHintsStrict: true });
+```
+
+`enableLanguageIdentification: true` (default) attaches a language code to each token. Real-time STT v4 supports 60+ languages — see the [Soniox language matrix](https://soniox.com/docs/languages).
+
+## Options
+
+| Option | Default | Notes |
+|---|---|---|
+| `apiKey` | — | Reads from `SONIOX_API_KEY` when omitted. |
+| `model` | `"stt-rt-v4"` | `"stt-rt-v4"`, `"stt-rt-v3"`, `"stt-rt-v2"`. |
+| `languageHints` | — | BCP-47 code list. |
+| `languageHintsStrict` | `false` | Restrict to the supplied hints only. |
+| `sampleRate` | `16000` | 8000, 16000, 24000 Hz. |
+| `numChannels` | `1` | Mono only for telephony. |
+| `enableSpeakerDiarization` | `false` | Server-side speaker IDs. |
+| `enableLanguageIdentification` | `true` | Per-token language codes. |
+| `maxEndpointDelayMs` | `500` | Silence (ms) before endpoint, range `[500, 3000]`. |
+| `clientReferenceId` | — | Optional correlation ID surfaced in Soniox dashboards. |
+| `baseUrl` | Soniox WS endpoint | Override for proxying. |

@@ -1,0 +1,134 @@
+---
+title: "Ultravox Realtime"
+description: "Ultravox managed-agent realtime engine — pure WebSocket, no vendor SDK."
+icon: "wave-pulse"
+---
+
+# Ultravox Realtime
+
+`UltravoxRealtimeAdapter` bridges a bidirectional audio stream to an [Ultravox](https://www.ultravox.ai/) managed-agent call. The transport is plain WebSocket plus one REST call to create the session — no vendor SDK is required.
+
+It speaks the same `connect / send_audio / receive_events / close` surface as `OpenAIRealtimeAdapter`, so you can swap engines without touching the call handler.
+
+## Install
+
+<CodeGroup>
+```bash Python
+pip install "getpatter[ultravox]"
+```
+
+```bash TypeScript
+npm install getpatter
+```
+</CodeGroup>
+
+The TypeScript adapter has no extra peer dependency — it uses the bundled `ws` package.
+
+Set `ULTRAVOX_API_KEY` in your environment.
+
+## Constructor
+
+<CodeGroup>
+```python Python
+from getpatter.providers.ultravox_realtime import (
+    UltravoxRealtimeAdapter,
+    UltravoxModel,
+    UltravoxSampleRate,
+)
+
+adapter = UltravoxRealtimeAdapter(
+    api_key="",                                   # ULTRAVOX_API_KEY when wired
+    model=UltravoxModel.FIXIE_AI_ULTRAVOX,        # default
+    voice="",                                     # ultravox voice id (optional)
+    instructions="You are a helpful, concise voice assistant.",
+    language="en",
+    sample_rate=UltravoxSampleRate.HZ_16000,      # 8k / 16k / 24k / 48k
+    first_message="",                             # if set, agent speaks first
+)
+```
+
+```typescript TypeScript
+import { UltravoxRealtimeAdapter } from "getpatter";
+
+const adapter = new UltravoxRealtimeAdapter(process.env.ULTRAVOX_API_KEY!, {
+  model: "fixie-ai/ultravox",
+  voice: "",
+  instructions: "You are a helpful, concise voice assistant.",
+  language: "en",
+  sampleRate: 16000,
+  firstMessage: "",
+});
+```
+</CodeGroup>
+
+## Usage
+
+Pass the adapter as the `engine` on `phone.agent(...)`:
+
+<CodeGroup>
+```python Python
+import asyncio
+from getpatter import Patter, Twilio
+from getpatter.providers.ultravox_realtime import UltravoxRealtimeAdapter
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
+agent = phone.agent(
+    engine=UltravoxRealtimeAdapter(api_key=""),
+    system_prompt="You are a helpful assistant.",
+    first_message="Hi! How can I help today?",
+)
+
+asyncio.run(phone.serve(agent))
+```
+
+```typescript TypeScript
+import { Patter, Twilio, UltravoxRealtimeAdapter } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  engine: new UltravoxRealtimeAdapter(process.env.ULTRAVOX_API_KEY!),
+  systemPrompt: "You are a helpful assistant.",
+  firstMessage: "Hi! How can I help today?",
+});
+
+await phone.serve({ agent });
+```
+</CodeGroup>
+
+Tools work via `phone.agent(tools=[Tool(...)])` / `tools: [...]`. Patter translates the OpenAI-style JSON schema into Ultravox `dynamicParameters` automatically.
+
+## How it works
+
+1. The adapter `POST`s to `https://api.ultravox.ai/api/calls` to create a call. The response includes a single-use `joinUrl`.
+2. The adapter opens that URL as a WebSocket. From here:
+   - **Binary frames** are PCM16 mono audio (both directions).
+   - **Text frames** are JSON control events (transcripts, tool invocations, state).
+
+`firstSpeaker` and `initialMessages` are mutually exclusive on the Ultravox API. When `first_message` / `firstMessage` is set, Patter sends an `initialMessages` agent turn; otherwise the user speaks first.
+
+## Sample rates
+
+`UltravoxSampleRate` accepts 8000, 16000, 24000, or 48000 Hz. Default is 16000 — what Patter's pipeline-mode audio bus uses internally.
+
+## When to use Ultravox vs alternatives
+
+| Use Ultravox when… | Use [OpenAI Realtime](/python-sdk/providers/openai-realtime) when… | Use [Gemini Live](/python-sdk/providers/gemini-live) when… |
+|---|---|---|
+| You want a managed agent with its own voice library and no vendor SDK in your dependency tree. | You need the broadest tool-calling ecosystem and reasoning tiers. | You want native-audio Gemini voices and 1M+ context. |
+
+## Notes
+
+- The adapter implements `cancel_response()` / `cancelResponse()` by sending `playback_clear_buffer`, which interrupts the agent's current turn for clean barge-in.
+- The Python adapter uses `aiohttp`; the TS adapter uses `ws` plus the platform `fetch`.
+- The receive loop yields `("audio", bytes)` for agent audio, `("transcript_input", str)` / `("transcript_output", str)` for transcripts, and `("function_call", {...})` for tool calls.
+
+## What's Next
+
+<CardGroup cols={2}>
+  <Card title="Engines" icon="bolt" href="/python-sdk/engines">All engines side by side.</Card>
+  <Card title="OpenAI Realtime" icon="bolt" href="/python-sdk/providers/openai-realtime">The default engine.</Card>
+  <Card title="Gemini Live" icon="google" href="/python-sdk/providers/gemini-live">Google's native-audio realtime API.</Card>
+  <Card title="Tools" icon="screwdriver-wrench" href="/python-sdk/tools">Function calling inside a realtime session.</Card>
+</CardGroup>

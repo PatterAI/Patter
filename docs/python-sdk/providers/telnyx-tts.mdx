@@ -1,0 +1,134 @@
+---
+title: "Telnyx TTS"
+description: "Streaming text-to-speech bundled with your Telnyx telephony plan — single bill, on-network audio."
+icon: "volume"
+---
+
+# Telnyx TTS
+
+`TelnyxTTS` is a streaming text-to-speech provider that talks to Telnyx's `wss://api.telnyx.com/v2/text-to-speech/speech` endpoint. It implements Patter's pipeline-mode `TTSProvider` interface — drop it in anywhere [`ElevenLabsTTS`](/python-sdk/providers/elevenlabs-tts) or [`CartesiaTTS`](/python-sdk/providers/cartesia-tts) would go.
+
+## Why use it
+
+If you're already on Telnyx for telephony (see [Carrier — Telnyx](/python-sdk/carrier#telnyx)), keeping TTS on the same vendor avoids fanning out to a third-party voice cloud:
+
+- **One bill, one credential.** No extra ElevenLabs / Cartesia / Rime account to manage.
+- **On-network audio path.** Synthesised audio comes back through Telnyx's edge instead of egressing from a third-party TTS region.
+- **Telnyx NaturalHD voices.** Five high-quality voices are bundled (`astra`, `luna`, `atlas`, `hera`, `zeus`).
+
+<Note>
+Telnyx returns audio as base64-encoded MP3 frames. `TelnyxTTS.synthesize()` yields raw MP3 bytes, so downstream Patter code that expects PCM should pipe through an MP3 decoder (e.g. `ffmpeg` / `pydub`). For a fully PCM-native pipeline pair Telnyx with [`ElevenLabsTTS.for_telnyx()`](/python-sdk/providers/elevenlabs-websocket) or [`CartesiaTTS`](/python-sdk/providers/cartesia-tts) instead.
+</Note>
+
+## Install
+
+`TelnyxTTS` ships in the core `getpatter` package — no extras needed:
+
+```bash
+pip install getpatter
+```
+
+## Quickstart
+
+<CodeGroup>
+```python Python
+import asyncio
+from getpatter import Patter, Telnyx, DeepgramSTT
+from getpatter.providers.telnyx_tts import TelnyxTTS, TelnyxTTSVoice
+
+phone = Patter(carrier=Telnyx(), phone_number="+15550001234")    # TELNYX_API_KEY from env
+
+agent = phone.agent(
+    stt=DeepgramSTT(),                                           # DEEPGRAM_API_KEY from env
+    tts=TelnyxTTS(api_key="KEY...", voice=TelnyxTTSVoice.NATURAL_HD_ASTRA),
+    system_prompt="You are a helpful assistant.",
+)
+
+asyncio.run(phone.serve(agent))
+```
+
+```typescript TypeScript
+// npx tsx example.ts
+import { Patter, Telnyx, DeepgramSTT } from "getpatter";
+import { TelnyxTTS } from "getpatter/dist/providers/telnyx-tts";
+
+const phone = new Patter({ carrier: new Telnyx(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  stt: new DeepgramSTT(),
+  tts: new TelnyxTTS(process.env.TELNYX_API_KEY!, "Telnyx.NaturalHD.astra"),
+  systemPrompt: "You are a helpful assistant.",
+});
+
+await phone.serve({ agent });
+```
+</CodeGroup>
+
+## Constructor
+
+<CodeGroup>
+```python Python
+TelnyxTTS(
+    api_key: str,
+    voice: TelnyxTTSVoice | str = TelnyxTTSVoice.NATURAL_HD_ASTRA,
+    *,
+    base_url: str = TELNYX_TTS_WS_URL,
+    session: aiohttp.ClientSession | None = None,
+)
+```
+
+```typescript TypeScript
+new TelnyxTTS(
+  apiKey: string,
+  voice: string = "Telnyx.NaturalHD.astra",
+  baseUrl: string = "wss://api.telnyx.com/v2/text-to-speech/speech",
+)
+```
+</CodeGroup>
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `api_key` / `apiKey` | — required | Telnyx API v2 key (Bearer token). |
+| `voice` | `"Telnyx.NaturalHD.astra"` | Telnyx voice ID. See [supported voices](#voices). |
+| `base_url` / `baseUrl` | Telnyx prod URL | Override for testing. |
+
+## Voices
+
+Telnyx ships five NaturalHD voices, exposed as a `StrEnum` for autocomplete in Python:
+
+```python
+from getpatter import TelnyxTTSVoice
+
+TelnyxTTSVoice.NATURAL_HD_ASTRA   # "Telnyx.NaturalHD.astra" (default)
+TelnyxTTSVoice.NATURAL_HD_LUNA    # "Telnyx.NaturalHD.luna"
+TelnyxTTSVoice.NATURAL_HD_ATLAS   # "Telnyx.NaturalHD.atlas"
+TelnyxTTSVoice.NATURAL_HD_HERA    # "Telnyx.NaturalHD.hera"
+TelnyxTTSVoice.NATURAL_HD_ZEUS    # "Telnyx.NaturalHD.zeus"
+```
+
+Pass any other voice ID Telnyx publishes as a plain string — the type accepts both.
+
+## Sample rates
+
+`TelnyxTTSSampleRate` enum is exposed for use with the lower-level Telnyx API calls (`8000`, `16000`, `24000` Hz). The streaming TTS endpoint itself returns MP3 at the codec's native rate.
+
+## Pricing
+
+Telnyx TTS pricing is bundled with your Telnyx plan — see the [Telnyx TTS pricing page](https://telnyx.com/pricing/text-to-speech). Patter does not charge a TTS line item for `TelnyxTTS`; the cost shows up on your Telnyx invoice alongside the carrier minutes. See [Metrics](/python-sdk/metrics) for how to register a custom rate via `Patter(pricing={...})` if you want it surfaced in the dashboard.
+
+## Low-level usage
+
+```python
+from getpatter.providers.telnyx_tts import TelnyxTTS
+
+tts = TelnyxTTS(api_key="KEY...", voice="Telnyx.NaturalHD.luna")
+async for mp3_chunk in tts.synthesize("Hello from Telnyx!"):
+    handle(mp3_chunk)                  # raw MP3 bytes — decode before playback
+await tts.close()
+```
+
+## See also
+
+- [TTS overview](/python-sdk/tts) — provider table and shared concepts.
+- [Carrier — Telnyx](/python-sdk/carrier#telnyx) — picking Telnyx as your telephony provider.
+- [Telnyx STT](/python-sdk/providers/telnyx-stt) — pair this TTS with carrier-bundled STT.

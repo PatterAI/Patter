@@ -1,0 +1,175 @@
+---
+title: "Silero VAD"
+description: "ONNX-backed voice activity detection for fast, accurate barge-in in pipeline mode."
+icon: "wave-square"
+---
+
+# Silero VAD
+
+`SileroVAD` is Patter's bundled `VADProvider` — voice activity detection backed by the [Silero](https://github.com/snakers4/silero-vad) ONNX model. It buffers incoming PCM frames, runs inference on fixed-size windows (256 samples at 8 kHz, 512 at 16 kHz), applies an exponential probability filter, and emits `speech_start` / `speech_end` transitions.
+
+Patter uses it to detect when the caller has started speaking so the agent can stop talking immediately (clean barge-in) and to gate STT activity on real speech instead of background noise.
+
+## Install
+
+Silero VAD ships with `onnxruntime-node` as an optional peer dependency (~210 MB):
+
+<CodeGroup>
+```bash TypeScript
+npm install getpatter onnxruntime-node@~1.18.0
+```
+
+```bash Python
+pip install "getpatter[silero]"
+```
+</CodeGroup>
+
+The bundled `silero_vad.onnx` model file is included with the package.
+
+<Note>
+Patter is currently tested against `onnxruntime-node@~1.18.0`. Versions 1.24+ removed `listSupportedBackends` and break the SDK; pin the version above until the SDK migration lands.
+</Note>
+
+## Auto-loading
+
+When you build a pipeline-mode agent and leave `vad: undefined`, Patter auto-loads `SileroVAD.forPhoneCall()` for you on the first call.
+
+If `onnxruntime-node` is not installed, Patter logs a single warning and continues without VAD — barge-in latency is higher but the call still works.
+
+To pick your own VAD or override the defaults, pass `vad:` explicitly. See the [`vad` parameter on Agents](/typescript-sdk/agents) (pipeline mode only).
+
+## Constructor
+
+The recommended entrypoint is the `forPhoneCall` factory — it pins the sample rate to 16 kHz (what Patter's pipeline-mode audio bus uses) and applies the upstream Silero defaults.
+
+<CodeGroup>
+```typescript TypeScript
+import { SileroVAD } from "getpatter";
+
+// Recommended for telephony pipelines
+const vad = await SileroVAD.forPhoneCall();
+
+// Or, full control:
+const vad2 = await SileroVAD.load({
+  activationThreshold: 0.5,        // Silero `threshold`
+  deactivationThreshold: 0.35,     // `neg_threshold = threshold - 0.15`
+  minSpeechDuration: 0.25,         // seconds, `min_speech_duration_ms = 250`
+  minSilenceDuration: 0.1,         // seconds, `min_silence_duration_ms = 100`
+  prefixPaddingDuration: 0.03,     // seconds, `speech_pad_ms = 30`
+  sampleRate: 16000,               // 8000 or 16000 only
+  forceCpu: true,
+});
+```
+
+```python Python
+import asyncio
+from getpatter.providers.silero_vad import SileroVAD
+
+vad = await asyncio.to_thread(SileroVAD.for_phone_call)
+
+vad2 = SileroVAD.load(
+    activation_threshold=0.5,
+    deactivation_threshold=0.35,
+    min_speech_duration=0.25,
+    min_silence_duration=0.1,
+    prefix_padding_duration=0.03,
+    sample_rate=16000,
+    force_cpu=True,
+)
+```
+</CodeGroup>
+
+### Phone-call preset (`forPhoneCall`)
+
+Identical to `load()` but pins `sampleRate` to 16000 Hz — the only sample rate Patter's pipeline-mode audio bus uses (8 kHz mulaw from Twilio is upsampled to 16 kHz PCM before reaching the VAD). All other parameters mirror the upstream Silero defaults from `snakers4/silero-vad`:
+
+- `activationThreshold = 0.5` — upstream `threshold`
+- `deactivationThreshold = 0.35` — upstream `neg_threshold = threshold - 0.15`
+- `minSpeechDuration = 0.25` — upstream `min_speech_duration_ms = 250`
+- `minSilenceDuration = 0.1` — upstream `min_silence_duration_ms = 100`
+- `prefixPaddingDuration = 0.03` — upstream `speech_pad_ms = 30`
+
+Override any field via the options object. Deployments that experience truncation on natural pauses can raise `minSilenceDuration` (e.g. 0.5–1.0 s):
+
+<CodeGroup>
+```typescript TypeScript
+const vad = await SileroVAD.forPhoneCall({ minSilenceDuration: 0.5 });
+```
+
+```python Python
+vad = await asyncio.to_thread(
+    SileroVAD.for_phone_call,
+    min_silence_duration=0.5,
+)
+```
+</CodeGroup>
+
+## Usage in a pipeline agent
+
+<CodeGroup>
+```typescript TypeScript
+import {
+  Patter,
+  Twilio,
+  DeepgramSTT,
+  AnthropicLLM,
+  ElevenLabsTTS,
+  SileroVAD,
+} from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const vad = await SileroVAD.forPhoneCall();
+
+const agent = phone.agent({
+  stt: new DeepgramSTT(),
+  llm: new AnthropicLLM(),
+  tts: new ElevenLabsTTS({ voiceId: "rachel" }),
+  vad,                                      // explicit, or omit to auto-load
+  systemPrompt: "You are a helpful assistant.",
+});
+
+await phone.serve({ agent });
+```
+
+```python Python
+import asyncio
+from getpatter import Patter, Twilio, DeepgramSTT, AnthropicLLM, ElevenLabsTTS
+from getpatter.providers.silero_vad import SileroVAD
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
+vad = await asyncio.to_thread(SileroVAD.for_phone_call)
+
+agent = phone.agent(
+    stt=DeepgramSTT(),
+    llm=AnthropicLLM(),
+    tts=ElevenLabsTTS(voice_id="rachel"),
+    vad=vad,
+    system_prompt="You are a helpful assistant.",
+)
+
+await phone.serve(agent)
+```
+</CodeGroup>
+
+## When to use Silero VAD vs alternatives
+
+- **Use Silero VAD** for any pipeline-mode agent that needs sub-300 ms barge-in. It's the production default.
+- **Skip VAD** (omit `vad` and don't install the peer dep) only when you're prototyping locally on a system where the ONNX runtime is awkward to install. Barge-in falls back to a sustained-voice heuristic that is slower and noisier.
+- **Realtime engines** (`OpenAIRealtimeAdapter`, `GeminiLiveAdapter`, `UltravoxRealtimeAdapter`) run server-side VAD inside the provider — `agent.vad` is ignored in engine mode.
+
+## Notes
+
+- The model only supports 8000 or 16000 Hz inference. Other sample rates throw from `processFrame`.
+- The resolver probes multiple paths to find `silero_vad.onnx`, including under bundlers (Vite SSR, Next webpack, Bun). If you see `model file not found`, ensure `getpatter` is fully installed in your `node_modules`.
+- `numFramesRequired()` returns the int16 sample count needed per inference window (256 @ 8 kHz, 512 @ 16 kHz). Smaller chunks are buffered safely.
+
+## What's Next
+
+<CardGroup cols={2}>
+  <Card title="Agents" icon="user-gear" href="/typescript-sdk/agents">The `vad` parameter on `phone.agent({...})`.</Card>
+  <Card title="Krisp Filter" icon="filter" href="/typescript-sdk/providers/krisp-filter">Proprietary noise / echo suppression.</Card>
+  <Card title="DeepFilterNet" icon="filter" href="/typescript-sdk/providers/deepfilternet-filter">OSS noise suppression.</Card>
+  <Card title="Pipeline mode" icon="microphone" href="/typescript-sdk/stt">STT + LLM + TTS composition.</Card>
+</CardGroup>

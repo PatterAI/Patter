@@ -169,6 +169,48 @@ Voice is usually inferred from the engine or TTS instance — e.g. `OpenAIRealti
   </Tab>
 </Tabs>
 
+## Voice Activity Detection (VAD)
+
+Pipeline-mode agents can plug a VAD provider into the `vad=` parameter to gate STT around real speech and drive barge-in detection. The SDK ships **Silero VAD** (an ONNX model, ~1 MB) with a telephony-tuned factory:
+
+```python
+import asyncio
+from getpatter import SileroVAD
+
+# Recommended for any phone-call deployment.
+vad = await asyncio.to_thread(SileroVAD.for_phone_call)
+
+agent = phone.agent(
+    stt=DeepgramSTT(),
+    llm=AnthropicLLM(),
+    tts=ElevenLabsTTS(voice_id="rachel"),
+    system_prompt="You are a helpful assistant.",
+    vad=vad,
+)
+```
+
+`SileroVAD.for_phone_call(**overrides)` is identical to `SileroVAD.load(...)` but pins `sample_rate` to 16 000 Hz — the only sample rate Patter's pipeline-mode audio bus uses (8 kHz mulaw from Twilio is upsampled to 16 kHz PCM before reaching the VAD). All other parameters use the upstream `snakers4/silero-vad` defaults:
+
+| Field | Default | Upstream equivalent |
+|-------|---------|---------------------|
+| `activation_threshold` | `0.5` | `threshold` |
+| `deactivation_threshold` | `0.35` | `neg_threshold = threshold − 0.15` |
+| `min_speech_duration` | `0.25` s | `min_speech_duration_ms = 250` |
+| `min_silence_duration` | `0.1` s | `min_silence_duration_ms = 100` |
+| `prefix_padding_duration` | `0.03` s | `speech_pad_ms = 30` |
+
+Override per call site rather than as a global default. A common tweak: deployments that experience truncation on natural pauses raise `min_silence_duration` to 0.5–1.0 s:
+
+```python
+vad = await asyncio.to_thread(
+    SileroVAD.for_phone_call, min_silence_duration=0.5
+)
+```
+
+<Note>
+`SileroVAD.load(...)` and `SileroVAD.for_phone_call(...)` are synchronous (they load the ONNX model). Wrap them in `asyncio.to_thread(...)` so the event loop stays responsive during process startup.
+</Note>
+
 ## Engine vs Pipeline Mode
 
 ```python

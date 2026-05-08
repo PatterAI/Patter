@@ -6,7 +6,36 @@ icon: "folder-open"
 
 Patter can persist every call to a directory tree on disk so you can replay transcripts, audit tool calls, and track latency/cost trends without running a hosted dashboard. Logging is **opt-in and off by default** — nothing is written unless you ask for it.
 
+The same on-disk layout also backs the local dashboard's call history: when persistence is enabled, `phone.serve()` rebuilds the in-memory dashboard from disk on startup so call history survives process restarts without an external database.
+
 ## Enable
+
+You can turn persistence on either in code (recommended for application defaults) or via an environment variable (recommended for ops overrides). Both reach the same on-disk layout — see the [Configuration](/typescript-sdk/configuration#persistent-dashboard-history) reference for the full precedence rules.
+
+### In code
+
+```typescript
+import { Patter, Twilio } from "getpatter";
+
+// Platform default location
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15555550100", persist: true });
+
+// Explicit path
+const phone = new Patter({
+  carrier: new Twilio(),
+  phoneNumber: "+15555550100",
+  persist: "/var/log/patter",
+});
+```
+
+| `persist` value | Behaviour |
+|-----------------|-----------|
+| omitted / `undefined` (default) | Falls back to `PATTER_LOG_DIR`; off when env is also unset (backward-compatible). |
+| `false` | Force-off, even if `PATTER_LOG_DIR` is set. |
+| `true` | Platform default location (see below). |
+| `"<path>"` | Use the supplied path (`~` expanded). |
+
+### Via env var
 
 Set `PATTER_LOG_DIR` before starting the server:
 
@@ -18,13 +47,13 @@ export PATTER_LOG_DIR=/var/log/patter
 export PATTER_LOG_DIR=auto
 ```
 
-Platform defaults for `auto`:
+Platform defaults for `auto` (and for `persist: true`):
 
 - macOS: `~/Library/Application Support/patter`
 - Linux: `$XDG_DATA_HOME/patter` (falls back to `~/.local/share/patter`)
-- Windows: `%LOCALAPPDATA%/patter`
+- Windows: `%LOCALAPPDATA%\patter`
 
-When the variable is unset, the logger is a no-op — no directories are created, no files are written.
+When `persist` is unset and the env var is unset, the logger is a no-op — no directories are created, no files are written. When `persist` is set explicitly, the env var is ignored.
 
 ## Layout
 
@@ -89,6 +118,26 @@ export PATTER_LOG_RETENTION_DAYS=30
 export PATTER_LOG_RETENTION_DAYS=0
 ```
 
+<Warning>
+Retention defaults to 30 days. Set `PATTER_LOG_RETENTION_DAYS=0` if you need to keep call history indefinitely (the default is intentionally conservative to avoid runaway disk use). Phone redaction defaults to last-4 masking; review the [Phone redaction](#phone-redaction) section before storing customer numbers.
+</Warning>
+
+## Dashboard hydration
+
+When persistence is enabled, `phone.serve()` calls `MetricsStore.hydrate(logRoot)` once at startup so the local dashboard repopulates its 500-call ring buffer from the on-disk envelopes before the first new call lands. There's nothing to wire up — it just happens.
+
+If you instantiate the store yourself (custom dashboard host, separate process), call `hydrate()` directly:
+
+```typescript
+import { MetricsStore } from "getpatter/dashboard/store";
+
+const store = new MetricsStore();
+const restored = store.hydrate("/var/log/patter");
+console.log(`Restored ${restored} call(s) from disk`);
+```
+
+`hydrate()` is idempotent: `callId`s already in the store are skipped, and unparseable records are logged at debug level rather than aborting. The on-disk JSON/JSONL files are the source of truth — the in-memory store is a cache on top.
+
 ## Reading a call
 
 ```ts
@@ -110,7 +159,7 @@ for (const line of transcript.split('\n').filter(Boolean)) {
 ## Safety guarantees
 
 - File-write errors never raise into the call path — a full disk or a permissions hiccup logs a warning and the call continues uninterrupted.
-- When `PATTER_LOG_DIR` is unset, `CallLogger.enabled` is `false` and every method returns immediately.
+- When persistence is disabled (`persist: false`, or `persist` unset and `PATTER_LOG_DIR` unset), `CallLogger.enabled` is `false` and every method returns immediately.
 
 ## Interop
 

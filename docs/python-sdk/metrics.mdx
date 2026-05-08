@@ -75,7 +75,8 @@ async def on_call_end(event):
 
 Override default provider pricing estimates:
 
-```python
+<CodeGroup>
+```python Python
 from getpatter import Patter, Twilio
 
 phone = Patter(
@@ -88,6 +89,21 @@ phone = Patter(
     },
 )
 ```
+
+```typescript TypeScript
+import { Patter, Twilio } from "getpatter";
+
+const phone = new Patter({
+  carrier: new Twilio(),
+  phoneNumber: "+15550001234",
+  pricing: {
+    deepgram: { price: 0.005 },
+    elevenlabs: { price: 0.15 },
+    twilio: { price: 0.015 },
+  },
+});
+```
+</CodeGroup>
 
 ### PricingUnit
 
@@ -103,32 +119,192 @@ PricingUnit.TOKEN           # "token" — per token (LLM / Realtime)
 
 Subclassing `str` keeps the values JSON-serialisable and backward-compatible with code that compares against the literal strings (`config.get("unit") == "minute"`).
 
-### Default Pricing (2026)
+## Model-Aware Pricing
 
-| Provider | Unit | Default Price |
-|----------|------|---------------|
-| Deepgram (Nova-3 streaming) | per minute | $0.0077 |
-| Whisper | per minute | $0.006 |
+Patter's pricing tables are **model-aware**: every entry in `DEFAULT_PRICING` carries provider-level defaults plus an optional `models` map keyed by model identifier. When the agent's adapter exposes a `model` attribute, the metrics layer threads it through the cost-calc functions and the dashboard bills with model accuracy out of the box — no manual override required.
+
+```python
+PRICING_VERSION       # "2026.3"
+PRICING_LAST_UPDATED  # "2026-05-08"
+```
+
+### How resolution works
+
+The cost-calc helpers (`calculate_stt_cost`, `calculate_tts_cost`, `calculate_realtime_cost`, `calculate_realtime_cached_savings`) accept an optional trailing `model` arg. The internal `_resolve_provider_rates(config, model)` helper merges per-model overrides on top of provider defaults using:
+
+1. **Exact match** in the provider's `models` dict.
+2. **Longest-prefix match** — `gpt-realtime-2-2026-05-08` resolves against `gpt-realtime-2`.
+3. **Provider defaults** — fallback when the model is unknown or omitted.
+
+`CallMetricsAccumulator` auto-tracks `stt_model`, `tts_model`, and `realtime_model` from the agent's adapter `model` attribute (`agent.stt.model`, `agent.tts.model`, `agent.model` for Realtime). On every `record_realtime_usage(usage)` call the realtime model is also pulled from the `response.done` payload itself, overriding the call-level default — so mid-call model switches are billed correctly.
+
+<Note>
+The optional `model` argument defaults to `None`, which preserves the legacy provider-rate behaviour. Existing callers compile and run unchanged.
+</Note>
+
+### Example A — Just select a model
+
+The most common case: pick a model on your adapter, and Patter bills the right rate automatically.
+
+<CodeGroup>
+```python Python
+from getpatter import Patter, Twilio
+from getpatter.providers import OpenAIRealtimeAdapter, OpenAIRealtimeModel
+
+agent = Patter.agent(
+    system_prompt="You are a helpful assistant.",
+    realtime=OpenAIRealtimeAdapter(model=OpenAIRealtimeModel.GPT_REALTIME_2),
+)
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+# Billing auto-uses the gpt-realtime-2 rate ($32/M audio in, $64/M audio out).
+```
+
+```typescript TypeScript
+import { Patter, Twilio } from "getpatter";
+import { OpenAIRealtimeAdapter, OpenAIRealtimeModel } from "getpatter";
+
+const agent = Patter.agent({
+  systemPrompt: "You are a helpful assistant.",
+  realtime: new OpenAIRealtimeAdapter({ model: OpenAIRealtimeModel.GPT_REALTIME_2 }),
+});
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+// Billing auto-uses the gpt-realtime-2 rate.
+```
+</CodeGroup>
+
+### Example B — Override one model, keep siblings intact
+
+`merge_pricing` overlays the nested `models` dict shallowly. Overriding a single model leaves the other rates inside the same provider untouched.
+
+<CodeGroup>
+```python Python
+phone = Patter(
+    carrier=Twilio(),
+    phone_number="+15550001234",
+    pricing={
+        # Negotiated a discount on Nova-2 only — Nova-3 / Whisper rates stay default.
+        "deepgram": {"models": {"nova-2": {"price": 0.004}}},
+    },
+)
+```
+
+```typescript TypeScript
+const phone = new Patter({
+  carrier: new Twilio(),
+  phoneNumber: "+15550001234",
+  pricing: {
+    deepgram: { models: { "nova-2": { price: 0.004 } } },
+  },
+});
+```
+</CodeGroup>
+
+### Example C — Register a brand-new model rate
+
+Add a model that isn't in the built-in table without touching SDK source.
+
+<CodeGroup>
+```python Python
+phone = Patter(
+    carrier=Twilio(),
+    phone_number="+15550001234",
+    pricing={
+        "elevenlabs": {
+            "models": {"my_custom_voice": {"price": 0.075}},
+        },
+    },
+)
+# When agent.tts.model == "my_custom_voice", calculate_tts_cost picks up $0.075/1k.
+```
+
+```typescript TypeScript
+const phone = new Patter({
+  carrier: new Twilio(),
+  phoneNumber: "+15550001234",
+  pricing: {
+    elevenlabs: {
+      models: { my_custom_voice: { price: 0.075 } },
+    },
+  },
+});
+```
+</CodeGroup>
+
+### Default Pricing (2026.3)
+
+Provider-level defaults are listed below. Per-model rates live under `DEFAULT_PRICING[provider]["models"]` and are auto-resolved when the adapter exposes its model identifier.
+
+| Provider | Unit | Default Price (default model) |
+|----------|------|-------------------------------|
+| Deepgram (`nova-3` streaming mono) | per minute | $0.0077 |
+| OpenAI Whisper (`whisper-1`) | per minute | $0.006 |
+| OpenAI Transcribe (`gpt-4o-transcribe`) | per minute | $0.006 |
 | AssemblyAI | per minute | $0.0025 |
 | Cartesia STT (ink-whisper) | per minute | $0.0025 |
 | Soniox | per minute | $0.002 |
-| Speechmatics | per minute | $0.0173 |
-| ElevenLabs (Flash/Turbo v2.5 API) | per 1k chars | $0.06 |
-| OpenAI TTS | per 1k chars | $0.015 |
-| OpenAI TTS HD | per 1k chars | $0.030 |
-| Cartesia TTS (sonic-2) | per 1k chars | $0.030 |
-| Rime (Arcana / Mist) | per 1k chars | $0.030 |
-| LMNT (Blizzard / Aurora) | per 1k chars | $0.050 |
-| OpenAI Realtime (gpt-4o-mini-realtime-preview) | per million tokens | $10 audio in / $20 audio out / $0.60 text in / $2.40 text out (cached: $0.30 audio / $0.06 text) |
+| Speechmatics (Pro) | per minute | $0.004 |
+| ElevenLabs (`eleven_flash_v2_5`) | per 1k chars | $0.06 |
+| OpenAI TTS (`tts-1`) | per 1k chars | $0.015 |
+| Cartesia TTS (`sonic-2`) | per 1k chars | $0.030 |
+| Rime (`mistv2`) | per 1k chars | $0.030 |
+| LMNT (`aurora`) | per 1k chars | $0.050 |
+| Inworld (`inworld-tts-2`) | per 1k chars | $0.020 |
+| OpenAI Realtime (`gpt-realtime-mini` / `gpt-4o-mini-realtime-preview`) | per token | $10/M audio in · $20/M audio out · $0.60/M text in · $2.40/M text out (cached: $0.30/M audio · $0.06/M text) |
 | Twilio (US inbound local) | per minute | $0.0085 (rounded up to whole minute, per Twilio) |
 | Telnyx | per minute | $0.007 |
 
-<Note>
-Patter calibrates Realtime rates for `gpt-4o-mini-realtime-preview` (the default). If you set `agent.model` to `gpt-realtime` or `gpt-4o-realtime-preview`, override `pricing.openai_realtime` to avoid under-reporting. Twilio defaults match US **inbound** local; users on outbound or toll-free should override.
-</Note>
+#### STT — per-model rates
+
+| Provider | Model | Price |
+|----------|-------|-------|
+| Deepgram | `nova-3` *(default)* | $0.0077/min |
+| Deepgram | `nova-3-multilingual` | $0.0092/min |
+| Deepgram | `nova-2` | $0.0058/min |
+| Deepgram | `nova` | $0.0043/min |
+| Deepgram | `whisper-large` / `whisper-medium` | $0.0048/min |
+| OpenAI Whisper | `whisper-1` *(default)* | $0.006/min |
+| OpenAI Whisper | `gpt-4o-transcribe` | $0.006/min |
+| OpenAI Whisper | `gpt-4o-mini-transcribe` | $0.003/min |
+| OpenAI Whisper | `gpt-realtime-whisper` | $0.017/min |
+| OpenAI Transcribe (`openai_transcribe`) | `gpt-4o-transcribe` *(default)* | $0.006/min |
+| OpenAI Transcribe | `gpt-4o-mini-transcribe` | $0.003/min |
+| OpenAI Transcribe | `whisper-1` | $0.006/min |
+
+#### TTS — per-model rates
+
+| Provider | Model | Price |
+|----------|-------|-------|
+| ElevenLabs (REST + WebSocket) | `eleven_flash_v2_5` *(default)* | $0.06/1k |
+| ElevenLabs | `eleven_turbo_v2_5` | $0.05/1k |
+| ElevenLabs | `eleven_multilingual_v2` / `eleven_monolingual_v1` | $0.18/1k |
+| ElevenLabs | `eleven_v3` | $0.30/1k |
+| OpenAI TTS | `tts-1` *(default)* | $0.015/1k |
+| OpenAI TTS | `tts-1-hd` | $0.030/1k |
+| OpenAI TTS | `gpt-4o-mini-tts` | $0.012/1k |
+| Cartesia | `sonic-1` / `sonic-2` / `sonic-english` / `sonic-multilingual` | $0.030/1k |
+| Rime | `mistv2` *(default)* / `mist` | $0.030/1k |
+| Rime | `arcana` | $0.040/1k |
+| LMNT | `aurora` *(default)* / `blizzard` | $0.050/1k |
+| Inworld | `inworld-tts-2` *(default)* | $0.020/1k |
+| Inworld | `inworld-tts-1.5-max` / `inworld-tts-1.5` | $0.025/1k |
+
+#### OpenAI Realtime — per-model rates
+
+| Model | Audio in / out (per token) | Text in / out (per token) | Cached audio / text (per token) |
+|-------|----------------------------|---------------------------|---------------------------------|
+| `gpt-realtime-mini` *(default)* / `gpt-4o-mini-realtime-preview` | $0.00001 / $0.00002 | $0.0000006 / $0.0000024 | $0.0000003 / $0.00000006 |
+| `gpt-realtime` | $0.000032 / $0.000064 | $0.000004 / $0.000016 | $0.0000004 / $0.0000004 |
+| `gpt-realtime-2` | $0.000032 / $0.000064 | $0.000004 / $0.000024 | $0.0000004 / $0.0000004 |
+| `gpt-4o-realtime-preview` | $0.0001 / $0.0002 | $0.000005 / $0.000020 | $0.0000020 / $0.0000025 |
+
+<Warning>
+`gpt-4o-realtime-preview` is roughly **10x** the cost of `gpt-realtime-mini` for audio. Switching realtime models has direct billing impact — confirm the model on `agent.realtime.model` matches the rate you expect.
+</Warning>
 
 <Note>
-  Default pricing is based on publicly listed provider rates and may become stale. Pass your own overrides for accurate cost tracking, or check the provider's pricing page.
+Twilio defaults match US **inbound** local. Override `pricing.twilio.price` for US toll-free inbound (~$0.022/min) or US outbound local (~$0.014/min). Default pricing is based on publicly listed provider rates and may become stale — check the provider's pricing page or pass your own overrides for authoritative numbers.
 </Note>
 
 ## Real-Time Metrics

@@ -1,0 +1,143 @@
+---
+title: "Groq"
+description: "Groq LLM provider — hardware-accelerated Llama inference via OpenAI-compatible Chat Completions."
+icon: "bolt"
+---
+
+# Groq LLM
+
+`GroqLLM` plugs Groq's OpenAI-compatible Chat Completions API at `https://api.groq.com/openai/v1` into Patter's pipeline mode. Groq's LPU inference engine serves Llama models at very high throughput with low time-to-first-token, making it a strong pick when latency matters more than long-context reasoning.
+
+The provider is a thin wrapper around `OpenAILLMProvider` with a Groq-specific base URL — every OpenAI sampling kwarg (`response_format`, `parallel_tool_calls`, `tool_choice`, `seed`, `top_p`, `frequency_penalty`, `presence_penalty`, `stop`, `temperature`, `max_tokens`) is forwarded to `chat.completions.create` automatically.
+
+## Install
+
+```bash
+pip install "getpatter[groq]"
+```
+
+```bash
+npm install getpatter
+```
+
+## Usage
+
+<CodeGroup>
+
+```python Python
+# Namespaced import
+from getpatter.llm import groq
+
+llm = groq.LLM()                                            # reads GROQ_API_KEY
+llm = groq.LLM(api_key="gsk_...", model="llama-3.3-70b-versatile")
+llm = groq.LLM(
+    model="llama-3.3-70b-versatile",
+    response_format={"type": "json_object"},                # OpenAI-style structured outputs
+    seed=42,
+)
+
+# Flat alias (equivalent)
+from getpatter import GroqLLM
+
+llm = GroqLLM()
+```
+
+```ts TypeScript
+// Namespaced import
+import * as groq from "getpatter/llm/groq";
+
+const llm = new groq.LLM();                                 // reads GROQ_API_KEY
+const llm = new groq.LLM({ apiKey: "gsk_...", model: "llama-3.3-70b-versatile" });
+const llm = new groq.LLM({
+  model: "llama-3.3-70b-versatile",
+  responseFormat: { type: "json_object" },
+  seed: 42,
+});
+
+// Flat alias (equivalent)
+import { GroqLLM } from "getpatter";
+
+const llm2 = new GroqLLM();
+```
+
+</CodeGroup>
+
+<Note>
+The namespaced import (`from getpatter.llm import groq` / `import * as groq from "getpatter/llm/groq"`) auto-resolves the API key from `GROQ_API_KEY` and exposes a uniform `LLM` class — the same pattern Patter uses for STT and TTS namespaces.
+</Note>
+
+Plug it into an agent:
+
+<CodeGroup>
+
+```python Python
+import asyncio
+from getpatter import Patter, Twilio, DeepgramSTT, GroqLLM, ElevenLabsTTS
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
+agent = phone.agent(
+    stt=DeepgramSTT(),
+    llm=GroqLLM(),                                          # GROQ_API_KEY from env
+    tts=ElevenLabsTTS(voice_id="rachel"),
+    system_prompt="You are a helpful assistant.",
+    first_message="Hi, how can I help?",
+)
+
+asyncio.run(phone.serve(agent))
+```
+
+```ts TypeScript
+import { Patter, Twilio, DeepgramSTT, GroqLLM, ElevenLabsTTS } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  stt: new DeepgramSTT(),
+  llm: new GroqLLM(),                                       // GROQ_API_KEY from env
+  tts: new ElevenLabsTTS({ voiceId: "rachel" }),
+  systemPrompt: "You are a helpful assistant.",
+  firstMessage: "Hi, how can I help?",
+});
+
+await phone.serve(agent);
+```
+
+</CodeGroup>
+
+## Supported models
+
+Pricing in USD per 1M tokens. Availability depends on account tier — Groq's free tier rate-limits more aggressively than the paid plans.
+
+| Model | Input | Output | Notes |
+|---|---|---|---|
+| `llama-3.3-70b-versatile` (default) | $0.59 | $0.79 | General-purpose Llama 3.3, long context. |
+| `llama-3.1-8b-instant` | $0.05 | $0.08 | Cheapest fast option. |
+| `llama-3.3-70b-specdec` | n/a | n/a | Speculative decoding variant. |
+| `llama3-70b-8192` | n/a | n/a | Llama 3, 8K context. |
+| `llama3-8b-8192` | n/a | n/a | Llama 3, 8K context. |
+| `mixtral-8x7b-32768` | n/a | n/a | Mixtral MoE, 32K context. |
+| `gemma2-9b-it` | n/a | n/a | Google Gemma 2 instruct. |
+
+Models without listed rates are available on the API but aren't yet pinned to a `LLM_PRICING` entry — pass `pricing={...}` overrides if your dashboard needs cost figures for them.
+
+## Environment variables
+
+| Variable | Required | Notes |
+|---|---|---|
+| `GROQ_API_KEY` | yes | Auto-loaded when `api_key` / `apiKey` is omitted. |
+
+## Options
+
+| Option | Default | Notes |
+|---|---|---|
+| `api_key` / `apiKey` | `None` | Reads from `GROQ_API_KEY` when omitted. |
+| `model` | `"llama-3.3-70b-versatile"` | Any Groq chat model id. |
+| `base_url` / `baseUrl` | `https://api.groq.com/openai/v1` | Override the Groq endpoint (rarely needed). |
+| `temperature`, `max_tokens`, `top_p`, `seed`, `frequency_penalty`, `presence_penalty`, `stop`, `response_format`, `parallel_tool_calls`, `tool_choice` | unset | All forwarded to `chat.completions.create`. See the [Groq API docs](https://console.groq.com/docs/api-reference) for accepted values. |
+
+## Notes
+
+- Groq returns the standard OpenAI Chat Completions stream shape, so tool calls, JSON mode, and seeded sampling all work without provider-specific code.
+- Time-to-first-token on Groq's LPU is typically < 200 ms for the 70B model and < 100 ms for the 8B model — well below most TTS startup latency.
+- Long-context calls (32K+) use Mixtral; everything else fits comfortably in the Llama 3.3 context.

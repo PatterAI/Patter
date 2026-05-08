@@ -30,14 +30,19 @@ await phone.serve({ agent });
 
 ## Supported providers
 
-| Class | Env var |
-|-------|---------|
-| `DeepgramSTT` | `DEEPGRAM_API_KEY` |
-| `WhisperSTT` | `OPENAI_API_KEY` |
-| `OpenAITranscribeSTT` | `OPENAI_API_KEY` |
-| `CartesiaSTT` | `CARTESIA_API_KEY` |
-| `AssemblyAISTT` | `ASSEMBLYAI_API_KEY` |
-| `SonioxSTT` | `SONIOX_API_KEY` |
+| Flat import | Namespaced import | Env var |
+|-------------|-------------------|---------|
+| `DeepgramSTT` | `getpatter/stt/deepgram` | `DEEPGRAM_API_KEY` |
+| `WhisperSTT` | `getpatter/stt/whisper` | `OPENAI_API_KEY` |
+| `OpenAITranscribeSTT` | `getpatter/stt/openai-transcribe` | `OPENAI_API_KEY` |
+| `CartesiaSTT` | `getpatter/stt/cartesia` | `CARTESIA_API_KEY` |
+| `AssemblyAISTT` | `getpatter/stt/assemblyai` | `ASSEMBLYAI_API_KEY` |
+| `SonioxSTT` | `getpatter/stt/soniox` | `SONIOX_API_KEY` |
+| `SpeechmaticsSTT` | `getpatter/stt/speechmatics` | `SPEECHMATICS_API_KEY` |
+
+<Note>
+`SpeechmaticsSTT` is being ported to TypeScript in the upcoming release — see the `## Unreleased` section in `CHANGELOG.md`. Use Python or wait for the next minor version.
+</Note>
 
 <Info>
 Speechmatics is supported by the Python SDK but not yet by the TypeScript SDK — use the Python SDK if you need Speechmatics.

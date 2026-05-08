@@ -27,6 +27,7 @@ The carrier instance reads credentials from environment variables when you don't
 | `webhookUrl` | `string` | Conditional | — | Public hostname for webhooks (no protocol prefix, no path). Required unless using `tunnel: true` in `serve()`. |
 | `tunnel` | `CloudflareTunnel \| StaticTunnel \| boolean` | No | — | Tunnel directive. `true` is shorthand for `new CloudflareTunnel()`. See [Tunneling](/dev-tools/tunneling). |
 | `pricing` | `Record<string, Partial<ProviderPricing>>` | No | — | Override default provider pricing estimates. See [Metrics](/typescript-sdk/metrics). |
+| `persist` | `boolean \| string` | No | — | Persist the dashboard's call history to disk so it survives process restarts. See [Persistent dashboard history](#persistent-dashboard-history) below. |
 
 ## Webhook URL Format
 
@@ -63,6 +64,26 @@ Every credential resolves from an env var when the matching argument is omitted.
 | `LMNT_API_KEY` | `new LMNTTTS()` |
 | `SONIOX_API_KEY` | `new SonioxSTT()` |
 | `ASSEMBLYAI_API_KEY` | `new AssemblyAISTT()` |
+
+### Runtime env vars
+
+These tune SDK runtime behaviour (no credential lookup).
+
+| Env var | Default | Effect |
+|---------|---------|--------|
+| `PATTER_LOG_DIR` | unset | Persistent dashboard root (see [Persistent dashboard history](#persistent-dashboard-history) below). |
+| `PATTER_LOG_RETENTION_DAYS` | `30` | Days of disk history to retain. `0` disables cleanup. |
+| `PATTER_LOG_REDACT_PHONE` | `1` | Mask phone numbers in `metadata.json` (last 4 digits). Set to `0` to store full E.164. |
+| `PATTER_DASHBOARD_NOTIFY` | enabled | Set to `0`, `false`, `no`, or `off` (case-insensitive) to skip the fire-and-forget dashboard ingest POST. Use this when you embed Patter alongside your own Express server on port 8000 to avoid 404 spam in your access log. |
+| `PATTER_BIND_HOST` | `127.0.0.1` | Host the embedded server binds to. Set to `0.0.0.0` when running inside a container whose port must be reachable from the host (e.g. `docker run -p 8000:8000` — Docker's port-mapping cannot forward to a 127.0.0.1 listener inside the container). |
+
+<Note>
+`PATTER_BIND_HOST` defaults to loopback on purpose — exposing the embedded server on `0.0.0.0` outside a containerised deployment puts the dashboard and webhook routes on every interface. Pair `PATTER_BIND_HOST=0.0.0.0` with the `dashboardToken` option on `serve()` (or skip the dashboard) before going public.
+</Note>
+
+<Note>
+`PATTER_DASHBOARD_NOTIFY` only gates the standalone-dashboard ingest webhook. It does not disable the embedded dashboard you can serve from `phone.serve({ dashboard: true })` — that route runs in-process and is unaffected.
+</Note>
 
 ## Examples
 
@@ -106,6 +127,103 @@ const agent = phone.agent({
   systemPrompt: "You are a helpful assistant.",
 });
 ```
+
+## Persistent dashboard history
+
+By default the dashboard is an in-memory ring buffer — restart the process and the call list is empty. Pass `persist` to keep per-call records (`metadata.json`, `transcript.jsonl`, `events.jsonl`) on disk and rebuild the dashboard on the next startup. No external database required.
+
+| `persist` value | Behaviour |
+|-----------------|-----------|
+| omitted / `undefined` (default) | Falls back to the `PATTER_LOG_DIR` env var. If the env var is also unset, persistence is **off** — backward-compatible with prior releases. |
+| `false` | Force-off. Disk writes are skipped even when `PATTER_LOG_DIR` is set. |
+| `true` | Write under the platform default location (see below). Equivalent to `PATTER_LOG_DIR=auto`. |
+| `"<path>"` (string) | Write under the supplied path (`~` is expanded). Equivalent to `PATTER_LOG_DIR=<path>`. |
+
+When `persist` is set explicitly the env var is ignored. When `persist` is `undefined`, `PATTER_LOG_DIR` continues to work as a deployment-time override.
+
+### Platform default location
+
+| Platform | Default root |
+|----------|--------------|
+| macOS    | `~/Library/Application Support/patter` |
+| Linux    | `$XDG_DATA_HOME/patter` (falls back to `~/.local/share/patter`) |
+| Windows  | `%LOCALAPPDATA%\patter` |
+
+### Simplest opt-in
+
+```typescript
+import { Patter, Twilio, OpenAIRealtime } from "getpatter";
+
+const phone = new Patter({
+  carrier: new Twilio(),
+  phoneNumber: "+15555550100",
+  persist: true,                    // platform default location
+});
+
+const agent = phone.agent({
+  engine: new OpenAIRealtime(),
+  systemPrompt: "You are a friendly receptionist.",
+});
+```
+
+### Custom path
+
+```typescript
+const phone = new Patter({
+  carrier: new Twilio(),
+  phoneNumber: "+15555550100",
+  persist: "/var/log/patter",       // explicit path; ~ is expanded
+});
+```
+
+### Env-var override (deployment-time)
+
+Leave `persist` unset in code and let ops decide per environment:
+
+```bash
+# Production: keep history under a managed volume
+export PATTER_LOG_DIR=/var/log/patter
+
+# Dev: platform default
+export PATTER_LOG_DIR=auto
+
+# CI: leave unset → no disk writes
+```
+
+```typescript
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15555550100" });
+// `persist` defaults to undefined → reads PATTER_LOG_DIR
+```
+
+### Programmatic hydration on startup
+
+`phone.serve()` calls `MetricsStore.hydrate(logRoot)` automatically when persistence is enabled, so the dashboard repopulates from disk before the first call lands. You can call it directly if you build the store yourself:
+
+```typescript
+import { MetricsStore } from "getpatter/dashboard/store";
+
+const store = new MetricsStore();
+const restored = store.hydrate("/var/log/patter");
+console.log(`Restored ${restored} calls from disk`);
+```
+
+`hydrate()` is idempotent — `callId`s already in the store are skipped, and unparseable records are logged at debug level rather than aborting.
+
+### Retention
+
+```bash
+# Default: 30 days. Old day-directories are swept on ~2% of calls (no daemon).
+export PATTER_LOG_RETENTION_DAYS=30
+
+# Keep forever — opt out of automatic cleanup
+export PATTER_LOG_RETENTION_DAYS=0
+```
+
+<Warning>
+Retention defaults to **30 days** and phone numbers in `metadata.json` are **masked by default** (last 4 digits) via `PATTER_LOG_REDACT_PHONE`. If you need to keep call history indefinitely or store full E.164 numbers, set those env vars explicitly — and gate access to the log root, since `transcript.jsonl` is never redacted and may contain customer PII spoken during the call.
+</Warning>
+
+See [Call logging](/typescript-sdk/call-logging) for the full layout, schema, and reading patterns.
 
 ## Loading from .env
 

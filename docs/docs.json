@@ -94,25 +94,64 @@
                 "pages": [
                   "python-sdk/agents",
                   "python-sdk/carrier",
-                  "python-sdk/engines",
+                  {
+                    "group": "Engines",
+                    "icon": "bolt",
+                    "pages": [
+                      "python-sdk/engines",
+                      "python-sdk/providers/openai-realtime",
+                      "python-sdk/providers/gemini-live",
+                      "python-sdk/providers/ultravox-realtime",
+                      "python-sdk/providers/elevenlabs-convai"
+                    ]
+                  },
                   {
                     "group": "STT",
                     "icon": "microphone",
                     "pages": [
                       "python-sdk/stt",
                       "python-sdk/providers/assemblyai",
-                      "python-sdk/providers/cartesia"
+                      "python-sdk/providers/cartesia",
+                      "python-sdk/providers/deepgram",
+                      "python-sdk/providers/whisper",
+                      "python-sdk/providers/soniox",
+                      "python-sdk/providers/speechmatics",
+                      "python-sdk/providers/telnyx-stt"
                     ]
                   },
-                  "python-sdk/llm",
+                  {
+                    "group": "LLM",
+                    "icon": "brain",
+                    "pages": [
+                      "python-sdk/llm",
+                      "python-sdk/providers/anthropic",
+                      "python-sdk/providers/cerebras",
+                      "python-sdk/providers/google",
+                      "python-sdk/providers/groq"
+                    ]
+                  },
                   {
                     "group": "TTS",
                     "icon": "volume",
                     "pages": [
                       "python-sdk/tts",
+                      "python-sdk/providers/elevenlabs-tts",
                       "python-sdk/providers/elevenlabs-websocket",
                       "python-sdk/providers/rime",
-                      "python-sdk/providers/lmnt"
+                      "python-sdk/providers/lmnt",
+                      "python-sdk/providers/openai-tts",
+                      "python-sdk/providers/cartesia-tts",
+                      "python-sdk/providers/inworld",
+                      "python-sdk/providers/telnyx-tts"
+                    ]
+                  },
+                  {
+                    "group": "Audio Processing",
+                    "icon": "wave-square",
+                    "pages": [
+                      "python-sdk/providers/silero-vad",
+                      "python-sdk/providers/krisp-filter",
+                      "python-sdk/providers/deepfilternet-filter"
                     ]
                   },
                   "python-sdk/tools",
@@ -135,7 +174,8 @@
                 "group": "Integrations",
                 "icon": "plug",
                 "pages": [
-                  "python-sdk/patter-tool"
+                  "python-sdk/patter-tool",
+                  "python-sdk/mcp"
                 ]
               },
               {
@@ -185,25 +225,64 @@
                 "pages": [
                   "typescript-sdk/agents",
                   "typescript-sdk/carrier",
-                  "typescript-sdk/engines",
+                  {
+                    "group": "Engines",
+                    "icon": "bolt",
+                    "pages": [
+                      "typescript-sdk/engines",
+                      "typescript-sdk/providers/openai-realtime",
+                      "typescript-sdk/providers/gemini-live",
+                      "typescript-sdk/providers/ultravox-realtime",
+                      "typescript-sdk/providers/elevenlabs-convai"
+                    ]
+                  },
                   {
                     "group": "STT",
                     "icon": "microphone",
                     "pages": [
                       "typescript-sdk/stt",
                       "typescript-sdk/providers/assemblyai",
-                      "typescript-sdk/providers/cartesia"
+                      "typescript-sdk/providers/cartesia",
+                      "typescript-sdk/providers/deepgram",
+                      "typescript-sdk/providers/whisper",
+                      "typescript-sdk/providers/soniox",
+                      "typescript-sdk/providers/speechmatics",
+                      "typescript-sdk/providers/telnyx-stt"
                     ]
                   },
-                  "typescript-sdk/llm",
+                  {
+                    "group": "LLM",
+                    "icon": "brain",
+                    "pages": [
+                      "typescript-sdk/llm",
+                      "typescript-sdk/providers/anthropic",
+                      "typescript-sdk/providers/cerebras",
+                      "typescript-sdk/providers/google",
+                      "typescript-sdk/providers/groq"
+                    ]
+                  },
                   {
                     "group": "TTS",
                     "icon": "volume",
                     "pages": [
                       "typescript-sdk/tts",
+                      "typescript-sdk/providers/elevenlabs-tts",
                       "typescript-sdk/providers/elevenlabs-websocket",
                       "typescript-sdk/providers/rime",
-                      "typescript-sdk/providers/lmnt"
+                      "typescript-sdk/providers/lmnt",
+                      "typescript-sdk/providers/openai-tts",
+                      "typescript-sdk/providers/cartesia-tts",
+                      "typescript-sdk/providers/inworld",
+                      "typescript-sdk/providers/telnyx-tts"
+                    ]
+                  },
+                  {
+                    "group": "Audio Processing",
+                    "icon": "wave-square",
+                    "pages": [
+                      "typescript-sdk/providers/silero-vad",
+                      "typescript-sdk/providers/krisp-filter",
+                      "typescript-sdk/providers/deepfilternet-filter"
                     ]
                   },
                   "typescript-sdk/tools",
@@ -226,7 +305,8 @@
                 "group": "Integrations",
                 "icon": "plug",
                 "pages": [
-                  "typescript-sdk/patter-tool"
+                  "typescript-sdk/patter-tool",
+                  "typescript-sdk/mcp"
                 ]
               },
               {

@@ -1,0 +1,131 @@
+---
+title: "Krisp Filter"
+description: "Proprietary Krisp VIVA noise / echo suppression as a Patter AudioFilter."
+icon: "filter"
+---
+
+# Krisp VIVA Filter
+
+`KrispVivaFilter` is a Patter `AudioFilter` backed by the [Krisp VIVA](https://krisp.ai/) noise- and echo-suppression SDK. It runs as a pre-STT filter in pipeline mode: caller PCM enters the filter, cleaned PCM exits and is forwarded to the STT provider.
+
+Use it on noisy lines (call-centre, vehicle, café) where STT accuracy degrades because of background sound.
+
+<Warning>
+Krisp VIVA is a **proprietary SDK**. The Patter integration is open source and free, but you must obtain your own commercial licence from [krisp.ai](https://krisp.ai/) to use the underlying `krisp-audio` package and model files. Patter does not endorse, redistribute, or sublicense any Krisp software or models — it just calls the SDK on your behalf.
+
+For an MIT-licensed alternative, see [DeepFilterNet](/python-sdk/providers/deepfilternet-filter).
+</Warning>
+
+## Install
+
+The Krisp SDK ships outside PyPI's normal channels and requires a licence file:
+
+<CodeGroup>
+```bash Python
+pip install "getpatter[krisp]"      # installs krisp-audio>=2.0 + numpy
+
+# Then set:
+#   KRISP_VIVA_SDK_LICENSE_KEY    — provided by Krisp
+#   KRISP_VIVA_FILTER_MODEL_PATH  — absolute path to your .kef model
+```
+
+```bash TypeScript
+# Krisp does not currently ship a TypeScript twin in the Patter SDK.
+# Use DeepFilterNet for TS noise suppression in the meantime.
+```
+</CodeGroup>
+
+<Note>
+At time of writing the Patter TypeScript SDK does not include a Krisp filter — only Python. The TS pipeline can still use [`DeepFilterNetFilter`](/typescript-sdk/providers/deepfilternet-filter) for noise suppression.
+</Note>
+
+## Constructor
+
+<CodeGroup>
+```python Python
+from getpatter.providers.krisp_filter import KrispVivaFilter
+from getpatter.providers.krisp_instance import KrispFrameDuration, KrispSampleRate
+
+filt = KrispVivaFilter(
+    model_path=None,                          # falls back to KRISP_VIVA_FILTER_MODEL_PATH
+    noise_suppression_level=100,              # 0..100, default 100
+    frame_duration_ms=KrispFrameDuration.MS_10,  # 10 / 15 / 20 / 30 / 32
+    sample_rate=KrispSampleRate.HZ_16000,     # initial; resized lazily if it changes mid-call
+)
+```
+
+```typescript TypeScript
+// Not yet available in the TS SDK — see the warning above.
+```
+</CodeGroup>
+
+The filter raises:
+
+- `RuntimeError` if `krisp-audio` is not installed or the licence key is missing.
+- `ValueError` if `model_path` is missing or `frame_duration_ms` is unsupported.
+- `FileNotFoundError` if the `.kef` model file does not exist.
+
+## Usage in a pipeline agent
+
+Plug it into `phone.agent(audio_filter=...)`:
+
+<CodeGroup>
+```python Python
+import asyncio
+from getpatter import Patter, Twilio, DeepgramSTT, AnthropicLLM, ElevenLabsTTS
+from getpatter.providers.krisp_filter import KrispVivaFilter
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
+filt = KrispVivaFilter(noise_suppression_level=100)
+
+agent = phone.agent(
+    stt=DeepgramSTT(),
+    llm=AnthropicLLM(),
+    tts=ElevenLabsTTS(voice_id="rachel"),
+    audio_filter=filt,                        # pre-STT noise suppression
+    system_prompt="You are a helpful assistant.",
+)
+
+asyncio.run(phone.serve(agent))
+```
+
+```typescript TypeScript
+// Use DeepFilterNetFilter on TS for now.
+```
+</CodeGroup>
+
+See the [`audio_filter` parameter on Agents](/python-sdk/agents) (pipeline mode only).
+
+## Toggling at runtime
+
+`KrispVivaFilter` exposes `enable()` / `disable()` so you can A/B-test the filter on a single call (e.g. when an operator presses a "raw audio" key):
+
+```python
+filt.disable()    # passthrough
+filt.enable()     # noise suppression on
+filt.enabled = True
+```
+
+When disabled the filter returns the input PCM unchanged.
+
+## When to use Krisp vs alternatives
+
+| Use Krisp when… | Use [DeepFilterNet](/python-sdk/providers/deepfilternet-filter) when… | Skip filtering when… |
+|---|---|---|
+| You need best-in-class commercial-grade noise/echo suppression and you have a Krisp licence. | You want an MIT-licensed OSS alternative with no licence step. | The line is clean (typical broadband VoIP / mobile in quiet conditions) — the latency and CPU win is not worth it. |
+
+## Notes
+
+- The Krisp SDK is reference-counted via `KrispSDKManager`: multiple filter instances share one global init/destroy lifecycle, so you can hold one `KrispVivaFilter` per call without re-initialising the SDK each time.
+- The filter expects the exact frame size: `sample_rate * frame_duration_ms / 1000` int16 samples per `process()` call. Patter's pipeline-mode audio bus already aligns to this.
+- On any internal error the filter logs the failure and returns the **original** PCM unchanged so the call audio path is never broken — the VAD downstream will still receive audio even if Krisp temporarily fails.
+
+## What's Next
+
+<CardGroup cols={2}>
+  <Card title="Agents" icon="user-gear" href="/python-sdk/agents">The `audio_filter` parameter on `phone.agent(...)`.</Card>
+  <Card title="DeepFilterNet" icon="filter" href="/python-sdk/providers/deepfilternet-filter">OSS noise suppression alternative.</Card>
+  <Card title="Silero VAD" icon="wave-square" href="/python-sdk/providers/silero-vad">Voice activity detection downstream of the filter.</Card>
+  <Card title="Pipeline mode" icon="microphone" href="/python-sdk/stt">STT + LLM + TTS composition.</Card>
+</CardGroup>

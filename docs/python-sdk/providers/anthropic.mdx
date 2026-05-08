@@ -1,0 +1,137 @@
+---
+title: "Anthropic"
+description: "Anthropic Claude LLM provider — Messages API with streaming, tool use, and prompt caching."
+icon: "brain"
+---
+
+# Anthropic LLM
+
+`AnthropicLLM` plugs Anthropic's Claude models into Patter's pipeline mode. It speaks the Messages API natively (streaming + `tool_use` blocks) and normalises every event into Patter's unified `{type: "text" | "tool_call" | "done"}` chunk protocol, so tools defined once run across every LLM provider.
+
+Prompt caching is **enabled by default**. The system prompt and the last tool block are tagged with `cache_control: { type: "ephemeral" }`, which cuts time-to-first-token by ~100-400 ms and ~90% of input-token cost on every cached turn.
+
+## Install
+
+```bash
+pip install "getpatter[anthropic]"
+```
+
+```bash
+npm install getpatter
+```
+
+## Usage
+
+<CodeGroup>
+
+```python Python
+# Namespaced import
+from getpatter.llm import anthropic
+
+llm = anthropic.LLM()                                       # reads ANTHROPIC_API_KEY
+llm = anthropic.LLM(api_key="sk-ant-...", model="claude-haiku-4-5-20251001")
+llm = anthropic.LLM(prompt_caching=False)                   # opt out of caching
+
+# Flat alias (equivalent)
+from getpatter import AnthropicLLM
+
+llm = AnthropicLLM()
+```
+
+```ts TypeScript
+// Namespaced import
+import * as anthropic from "getpatter/llm/anthropic";
+
+const llm = new anthropic.LLM();                            // reads ANTHROPIC_API_KEY
+const llm = new anthropic.LLM({ apiKey: "sk-ant-...", model: "claude-haiku-4-5-20251001" });
+const llm = new anthropic.LLM({ promptCaching: false });    // opt out of caching
+
+// Flat alias (equivalent)
+import { AnthropicLLM } from "getpatter";
+
+const llm2 = new AnthropicLLM();
+```
+
+</CodeGroup>
+
+<Note>
+The namespaced import (`from getpatter.llm import anthropic` / `import * as anthropic from "getpatter/llm/anthropic"`) auto-resolves the API key from `ANTHROPIC_API_KEY` and exposes a uniform `LLM` class — the same pattern Patter uses for STT and TTS namespaces.
+</Note>
+
+Plug it into an agent:
+
+<CodeGroup>
+
+```python Python
+import asyncio
+from getpatter import Patter, Twilio, DeepgramSTT, AnthropicLLM, ElevenLabsTTS
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
+agent = phone.agent(
+    stt=DeepgramSTT(),
+    llm=AnthropicLLM(),                                     # ANTHROPIC_API_KEY from env
+    tts=ElevenLabsTTS(voice_id="rachel"),
+    system_prompt="You are a helpful assistant.",
+    first_message="Hi, how can I help?",
+)
+
+asyncio.run(phone.serve(agent))
+```
+
+```ts TypeScript
+import { Patter, Twilio, DeepgramSTT, AnthropicLLM, ElevenLabsTTS } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  stt: new DeepgramSTT(),
+  llm: new AnthropicLLM(),                                  // ANTHROPIC_API_KEY from env
+  tts: new ElevenLabsTTS({ voiceId: "rachel" }),
+  systemPrompt: "You are a helpful assistant.",
+  firstMessage: "Hi, how can I help?",
+});
+
+await phone.serve(agent);
+```
+
+</CodeGroup>
+
+## Supported models
+
+Pricing in USD per 1M tokens. `cache_read` is billed at ~10% of full input; `cache_write` at ~125%. Versioned snapshots (e.g. `claude-haiku-4-5-20251001`) resolve against the base entry via longest-prefix match in [`pricing.py`](https://github.com/PatterAI/Patter/blob/main/libraries/python/getpatter/pricing.py).
+
+| Model | Input | Output | Cache read | Cache write |
+|---|---|---|---|---|
+| `claude-opus-4-7` | $15.00 | $75.00 | $1.50 | $18.75 |
+| `claude-sonnet-4-6` | $3.00 | $15.00 | $0.30 | $3.75 |
+| `claude-haiku-4-5` (default) | $1.00 | $5.00 | $0.10 | $1.25 |
+
+Aliases that route to the latest snapshot: `claude-haiku-4-5`, `claude-sonnet-4-6`, `claude-opus-4-7`, `claude-3-5-sonnet-latest`, `claude-3-5-haiku-latest`. Pinned snapshots include `claude-haiku-4-5-20251001`, `claude-3-5-sonnet-20241022`, `claude-3-5-haiku-20241022`.
+
+## Environment variables
+
+| Variable | Required | Notes |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | yes | Auto-loaded when `api_key` / `apiKey` is omitted. |
+
+## Options
+
+| Option | Default | Notes |
+|---|---|---|
+| `api_key` / `apiKey` | `None` | Reads from `ANTHROPIC_API_KEY` when omitted. |
+| `model` | `"claude-haiku-4-5-20251001"` | Any Anthropic Claude model id or alias. |
+| `max_tokens` / `maxTokens` | `1024` | Required by the Messages API on every request. |
+| `temperature` | unset | Optional sampling temperature. |
+| `base_url` / `baseUrl` | unset | Override the Messages API endpoint (rarely needed). |
+| `prompt_caching` / `promptCaching` | `True` | Tags the system prompt and last tool block with `cache_control: ephemeral`. Disable when system prompt + tools are below Anthropic's minimum cacheable size (~1024 tokens for Sonnet/Opus, ~2048 for Haiku) — caching has no effect below that threshold. |
+
+## Prompt caching
+
+For voice agents with long instruction-dense system prompts and large tool catalogs, prompt caching is the single biggest TTFT win Anthropic ships. Patter applies the recommended pattern automatically:
+
+- The **system prompt** becomes a single `text` block tagged `cache_control: ephemeral`.
+- The **last tool definition** is tagged `cache_control: ephemeral`, which caches the entire tool array (Anthropic caches everything up to and including a marked block).
+- The `anthropic-beta: prompt-caching-2024-07-31` header is sent on every request for consistent behaviour across model snapshots.
+
+The cache lives ~5 minutes — the first request writes it, subsequent requests within that window hit it for ~90% input-token savings on the cached portion.

@@ -1,0 +1,133 @@
+---
+title: "DeepFilterNet"
+description: "Open-source DeepFilterNet3 noise suppression as a Patter AudioFilter."
+icon: "filter"
+---
+
+# DeepFilterNet Filter
+
+`DeepFilterNetFilter` is a Patter `AudioFilter` backed by the [DeepFilterNet3](https://github.com/Rikorose/DeepFilterNet) deep-learning noise suppressor. Like [Krisp](/typescript-sdk/providers/krisp-filter), it runs as a pre-STT filter in pipeline mode: caller PCM enters the filter, cleaned PCM exits and is forwarded to the STT provider.
+
+DeepFilterNet is **MIT-licensed and free**. Use it as the default OSS noise-suppression option, or where Krisp's commercial licence isn't a fit. In TypeScript, DeepFilterNet is currently the **only** noise-suppression filter available — Krisp parity is pending.
+
+## Install
+
+DeepFilterNet works natively at 48 kHz; the filter resamples around inference automatically.
+
+<CodeGroup>
+```bash TypeScript
+npm install getpatter onnxruntime-node@~1.18.0
+# Plus a DeepFilterNet ONNX model file you obtain separately.
+```
+
+```bash Python
+pip install "getpatter[deepfilternet]"   # installs deep-filter + torch + numpy
+```
+</CodeGroup>
+
+<Note>
+DeepFilterNet does not ship an official ONNX export for Node.js at time of writing. The TS filter targets `onnxruntime-node` and loads any user-supplied `deepfilternet.onnx` you point it at. If you don't pass a `modelPath`, the filter logs a one-time warning and passes audio through unchanged — Patter never fakes enhancement. Once a stable community ONNX export with a streaming-friendly graph is published, point `modelPath` at it.
+</Note>
+
+## Constructor
+
+<CodeGroup>
+```typescript TypeScript
+import { DeepFilterNetFilter } from "getpatter";
+
+const filt = new DeepFilterNetFilter({
+  modelPath: "/abs/path/to/deepfilternet.onnx",  // omit for pass-through
+  silenceWarnings: false,                        // true to suppress the no-model warning
+});
+```
+
+```python Python
+from getpatter.providers.deepfilternet_filter import DeepFilterNetFilter
+
+filt = DeepFilterNetFilter(
+    model_base_dir=None,        # None = use the bundled DeepFilterNet3 model
+    atten_lim_db=None,          # optional attenuation cap in dB
+)
+```
+</CodeGroup>
+
+## Usage in a pipeline agent
+
+Plug it into `phone.agent({ audioFilter })`:
+
+<CodeGroup>
+```typescript TypeScript
+import {
+  Patter,
+  Twilio,
+  DeepgramSTT,
+  AnthropicLLM,
+  ElevenLabsTTS,
+  DeepFilterNetFilter,
+} from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const filt = new DeepFilterNetFilter({ modelPath: "/abs/path/to/deepfilternet.onnx" });
+
+const agent = phone.agent({
+  stt: new DeepgramSTT(),
+  llm: new AnthropicLLM(),
+  tts: new ElevenLabsTTS({ voiceId: "rachel" }),
+  audioFilter: filt,
+  systemPrompt: "You are a helpful assistant.",
+});
+
+await phone.serve({ agent });
+```
+
+```python Python
+import asyncio
+from getpatter import Patter, Twilio, DeepgramSTT, AnthropicLLM, ElevenLabsTTS
+from getpatter.providers.deepfilternet_filter import DeepFilterNetFilter
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
+filt = DeepFilterNetFilter()
+
+agent = phone.agent(
+    stt=DeepgramSTT(),
+    llm=AnthropicLLM(),
+    tts=ElevenLabsTTS(voice_id="rachel"),
+    audio_filter=filt,
+    system_prompt="You are a helpful assistant.",
+)
+
+asyncio.run(phone.serve(agent))
+```
+</CodeGroup>
+
+See the [`audioFilter` parameter on Agents](/typescript-sdk/agents) (pipeline mode only).
+
+## Resampling
+
+DeepFilterNet operates at 48 kHz. Patter's pipeline-mode audio bus runs at 16 kHz. The filter resamples up before inference and back down after, so callers see a filter that preserves the input sample rate.
+
+- **TypeScript:** `StatefulResampler` from `audio/transcoding` so chunk-boundary samples are not silently discarded. Resamplers are flushed on `close()`.
+- **Python:** linear-interpolation resampler. Per-chunk; the boundary artefact is inaudible in practice.
+
+## When to use DeepFilterNet vs alternatives
+
+| Use DeepFilterNet when… | Use [Krisp](/typescript-sdk/providers/krisp-filter) when… | Skip filtering when… |
+|---|---|---|
+| You want OSS noise suppression with no licence step — and on TypeScript today, the only option. | You need best-in-class commercial-grade suppression and you have a Krisp licence (Python only at present). | The line is clean (typical broadband VoIP / mobile in quiet conditions). |
+
+## Notes
+
+- On any internal error the filter logs and returns the **original** PCM unchanged — the call audio path is never broken.
+- The TS filter is a faithful pass-through when no ONNX model is supplied — by design, so tests and audio-quality metrics stay truthful.
+- Install footprint matters on Python: the extra adds `torch` (~2 GB). For a smaller deploy use Krisp (proprietary, Python-only) or the `audioFilter: undefined` baseline.
+
+## What's Next
+
+<CardGroup cols={2}>
+  <Card title="Agents" icon="user-gear" href="/typescript-sdk/agents">The `audioFilter` parameter on `phone.agent({...})`.</Card>
+  <Card title="Krisp Filter" icon="filter" href="/typescript-sdk/providers/krisp-filter">Proprietary commercial noise suppression.</Card>
+  <Card title="Silero VAD" icon="wave-square" href="/typescript-sdk/providers/silero-vad">Voice activity detection downstream of the filter.</Card>
+  <Card title="Pipeline mode" icon="microphone" href="/typescript-sdk/stt">STT + LLM + TTS composition.</Card>
+</CardGroup>

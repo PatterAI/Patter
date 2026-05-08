@@ -1,0 +1,125 @@
+---
+title: "Speechmatics STT"
+description: "Speechmatics real-time speech-to-text via the official Voice Agent SDK."
+icon: "waveform"
+---
+
+# Speechmatics STT
+
+`SpeechmaticsSTT` adapts the official [`speechmatics-voice`](https://pypi.org/project/speechmatics-voice/) SDK to Patter's pipeline mode. It streams PCM audio to Speechmatics's real-time API and yields `Transcript` events for partial and final segments. The Voice SDK is imported lazily so consumers that do not install the `speechmatics` extra can still import the rest of `getpatter`.
+
+## Install
+
+```bash
+pip install "getpatter[speechmatics]"
+```
+
+## Usage
+
+<Note>
+  Use the namespaced import (`getpatter.stt.speechmatics`) or the flat
+  alias (`getpatter.SpeechmaticsSTT`). Both auto-resolve
+  `SPEECHMATICS_API_KEY` from the environment when `api_key=` is omitted.
+  Override the realtime URL via `SPEECHMATICS_RT_URL` for self-hosted
+  deployments.
+</Note>
+
+<CodeGroup>
+```python Python
+# Namespaced import
+from getpatter.stt import speechmatics
+
+stt = speechmatics.STT()                                  # reads SPEECHMATICS_API_KEY
+stt = speechmatics.STT(api_key="...", language="en")
+
+# Flat alias (equivalent)
+from getpatter import SpeechmaticsSTT
+
+stt = SpeechmaticsSTT()
+```
+
+```typescript TypeScript
+// Speechmatics is currently a Python-only provider.
+// See typescript-sdk/providers/speechmatics for the parity status.
+```
+</CodeGroup>
+
+Plug it into an agent:
+
+```python
+import asyncio
+from getpatter import Patter, Twilio, SpeechmaticsSTT, ElevenLabsTTS
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
+agent = phone.agent(
+    stt=SpeechmaticsSTT(language="en"),                   # SPEECHMATICS_API_KEY from env
+    tts=ElevenLabsTTS(voice_id="rachel"),
+    system_prompt="You are a helpful assistant.",
+)
+
+asyncio.run(phone.serve(agent))
+```
+
+## Models and rates
+
+Speechmatics bills per minute of streamed audio. Default rate from `getpatter.pricing`:
+
+| Tier | Rate / min |
+|---|---|
+| Pro (default) | $0.004 |
+
+(`$0.24/hr = $0.004/min`. Override per-call via `Patter(pricing={"speechmatics": {"price": ...}})`.)
+
+The `operating_point` option toggles `enhanced` (higher accuracy) vs `standard` (lower latency); both bill at the same Pro tier rate.
+
+## Languages
+
+`language="en"` by default. Speechmatics supports 50+ languages (`"es"`, `"fr"`, `"de"`, `"it"`, `"pt"`, `"nl"`, `"ja"`, `"zh"`, …). Pair with `output_locale="en-GB"` to bias the output spelling for a specific locale, and `domain="finance"` (or `"medical"`) to apply a domain language pack when available.
+
+## Turn detection
+
+Speechmatics supports four end-of-turn detection modes via `turn_detection_mode`:
+
+| Mode | When to use |
+|---|---|
+| `ADAPTIVE` (default) | Server-side adaptive detection — best general-purpose pick. |
+| `FIXED` | Hard timeout — predictable latency, may cut speech off. |
+| `EXTERNAL` | Disable server-side detection when pairing with an external VAD. |
+| `SMART_TURN` | Speechmatics's ML-based turn classifier (preview tier). |
+
+## Options
+
+| Option | Default | Notes |
+|---|---|---|
+| `api_key` | `None` | Reads from `SPEECHMATICS_API_KEY` when omitted. |
+| `base_url` | SDK default | Override via `SPEECHMATICS_RT_URL` for self-hosted deployments. |
+| `language` | `"en"` | BCP-47 code. |
+| `turn_detection_mode` | `ADAPTIVE` | See the table above. |
+| `sample_rate` | `16000` | 8000, 16000, 44100 Hz. |
+| `enable_diarization` | `False` | Server-side speaker IDs. |
+| `max_delay` | `None` | Max latency (s) before finals, range `[0.7, 4.0]`. |
+| `end_of_utterance_silence_trigger` | `None` | Silence (s) that triggers EOU, range `(0, 2)`. |
+| `end_of_utterance_max_delay` | `None` | Max EOU delay (s); must exceed the silence trigger. |
+| `include_partials` | `True` | Emit interim transcripts. |
+| `additional_vocab` | `None` | Custom vocabulary boost list (`AdditionalVocabEntry` from the SDK). |
+| `operating_point` | `None` | `ENHANCED` (accuracy) or `STANDARD` (latency). |
+| `domain` | `None` | Domain language pack (`"finance"`, `"medical"`, …). |
+| `output_locale` | `None` | Spelling locale (`"en-GB"`, `"en-US"`, …). |
+
+## Low-level usage
+
+```python
+from getpatter.providers.speechmatics_stt import SpeechmaticsSTT, TurnDetectionMode
+
+stt = SpeechmaticsSTT(
+    api_key="...",
+    language="en",
+    turn_detection_mode=TurnDetectionMode.ADAPTIVE,
+)
+await stt.connect()
+await stt.send_audio(pcm_chunk)                           # 16 kHz PCM s16le
+async for t in stt.receive_transcripts():
+    print(t.text, t.is_final, t.confidence)
+await stt.close()
+```

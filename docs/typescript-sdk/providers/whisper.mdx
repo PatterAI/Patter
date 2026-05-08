@@ -1,0 +1,94 @@
+---
+title: "Whisper STT (OpenAI)"
+description: "OpenAI Whisper REST and GPT-4o transcribe family for Patter pipeline mode."
+icon: "waveform"
+---
+
+# Whisper STT
+
+`WhisperSTT` is a buffered HTTP transcription adapter for OpenAI's [`POST /v1/audio/transcriptions`](https://platform.openai.com/docs/api-reference/audio/createTranscription) endpoint. It buffers ~1 s of incoming PCM audio (16 kHz, 16-bit mono), wraps it as a WAV blob, and submits it to Whisper for transcription. Drop-in compatible with the streaming `STTProvider` interface so it can be swapped for Deepgram / Soniox without changes to the calling code.
+
+For ~10x lower latency see the GPT-4o transcribe family below — it's a strict subclass that hits the same endpoint with `gpt-4o-transcribe` / `gpt-4o-mini-transcribe`.
+
+## Install
+
+`whisper` ships in the base install.
+
+```bash
+npm install getpatter
+```
+
+## Usage
+
+<Note>
+  `getpatter/stt/whisper` and `getpatter/stt/openai-transcribe` both
+  auto-resolve `OPENAI_API_KEY` from the environment when `apiKey` is
+  omitted.
+</Note>
+
+<CodeGroup>
+```typescript TypeScript
+// Whisper-1 (REST)
+import * as whisper from "getpatter/stt/whisper";
+
+const stt = new whisper.STT();                                    // reads OPENAI_API_KEY
+const stt2 = new whisper.STT({ apiKey: "sk-...", language: "it" });
+
+// GPT-4o transcribe family — ~10x faster than whisper-1
+import * as openaiTranscribe from "getpatter/stt/openai-transcribe";
+
+const fast = new openaiTranscribe.STT({ model: "gpt-4o-transcribe" });   // default
+const mini = new openaiTranscribe.STT({ model: "gpt-4o-mini-transcribe" });
+```
+
+```python Python
+# See python-sdk/providers/whisper for the Python twin.
+```
+</CodeGroup>
+
+Plug it into an agent:
+
+```typescript
+// npx tsx example.ts
+import { Patter, Twilio, ElevenLabsTTS } from "getpatter";
+import * as openaiTranscribe from "getpatter/stt/openai-transcribe";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  stt: new openaiTranscribe.STT(),                    // OPENAI_API_KEY from env
+  tts: new ElevenLabsTTS({ voiceId: "rachel" }),
+  systemPrompt: "You are a helpful assistant.",
+});
+
+await phone.serve({ agent });
+```
+
+## Models and rates
+
+Per minute of audio (defaults from `getpatter/pricing`):
+
+| Provider key | Model | Rate / min |
+|---|---|---|
+| `whisper` | `whisper-1` (default) | $0.006 |
+| `whisper` | `gpt-4o-transcribe` | $0.006 |
+| `whisper` | `gpt-4o-mini-transcribe` | $0.003 |
+| `openai_transcribe` | `gpt-4o-transcribe` (default) | $0.006 |
+| `openai_transcribe` | `gpt-4o-mini-transcribe` | $0.003 |
+| `openai_transcribe` | `whisper-1` | $0.006 |
+
+The two provider keys hit the same endpoint but are tracked separately in the dashboard so cost attribution stays clean.
+
+## Languages
+
+`language: "en"` by default. Whisper-1 and the GPT-4o transcribe family auto-detect the spoken language but accept an explicit BCP-47 hint (e.g. `"it"`, `"fr"`, `"es"`, `"de"`, `"pt"`, `"ja"`, `"zh"`) for higher accuracy on short utterances. See the [OpenAI language coverage list](https://platform.openai.com/docs/guides/speech-to-text/supported-languages).
+
+## Options
+
+| Option | Default | Notes |
+|---|---|---|
+| `apiKey` | — | Reads from `OPENAI_API_KEY` when omitted. |
+| `model` | `"whisper-1"` (Whisper) / `"gpt-4o-transcribe"` (Transcribe) | Restricted to the family's allowed model set; misconfigured calls throw. |
+| `language` | `"en"` | BCP-47 code. |
+| `bufferSize` | ~1 s of 16 kHz PCM | Bytes buffered before each transcription request. |
+| `responseFormat` | `"json"` | Pass `"verbose_json"` to surface per-segment confidence and timestamps. |

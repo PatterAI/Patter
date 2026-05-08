@@ -1,0 +1,189 @@
+---
+title: "ElevenLabs TTS (REST)"
+description: "Streaming HTTP/REST TTS adapter for ElevenLabs voices. Simpler and more network-tolerant than the WebSocket variant."
+icon: "volume"
+---
+
+# ElevenLabs TTS (REST)
+
+`ElevenLabsTTS` is the default ElevenLabs TTS adapter. It streams audio chunks over the HTTP `/v1/text-to-speech/{voiceId}/stream` endpoint and exposes the same `synthesize` / `synthesizeStream` shape as the rest of Patter's TTS providers.
+
+## REST vs WebSocket — when to use which
+
+ElevenLabs ships two streaming transports. Patter wraps both:
+
+| Transport | Class | Use when |
+|---|---|---|
+| **HTTP / REST** | `ElevenLabsTTS` (this page) | Default. Simpler, more forgiving on flaky networks, supports every model including `eleven_v3*`. |
+| **WebSocket** | [`ElevenLabsWebSocketTTS`](/typescript-sdk/providers/elevenlabs-websocket) | You're latency-bound on TTS time-to-first-byte and willing to give up `eleven_v3` support. Saves ~50 ms per utterance vs REST. |
+
+Pick REST unless you've measured a per-utterance latency problem and confirmed you don't need `eleven_v3`. The REST adapter is the canonical choice and gets every new ElevenLabs model on day one.
+
+## Install
+
+`ElevenLabsTTS` ships in the core `getpatter` package — no extras needed:
+
+```bash
+npm install getpatter
+```
+
+## Quickstart
+
+<CodeGroup>
+```typescript TypeScript
+// npx tsx example.ts
+import { Patter, Twilio, DeepgramSTT, ElevenLabsTTS } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  stt: new DeepgramSTT(),                              // DEEPGRAM_API_KEY from env
+  tts: new ElevenLabsTTS({ voiceId: "rachel" }),       // ELEVENLABS_API_KEY from env
+  systemPrompt: "You are a helpful assistant.",
+});
+
+await phone.serve({ agent });
+```
+
+```python Python
+import asyncio
+from getpatter import Patter, Twilio, DeepgramSTT, ElevenLabsTTS
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
+agent = phone.agent(
+    stt=DeepgramSTT(),
+    tts=ElevenLabsTTS(voice_id="rachel"),
+    system_prompt="You are a helpful assistant.",
+)
+
+asyncio.run(phone.serve(agent))
+```
+</CodeGroup>
+
+## Carrier-tuned factories
+
+For real phone calls always reach for the carrier-specific factories — they pre-set the right `outputFormat` so the SDK can skip resampling and PCM ↔ μ-law transcoding on the audio path:
+
+<CodeGroup>
+```typescript TypeScript
+import { ElevenLabsTTS } from "getpatter";
+
+// Twilio: ulaw_8000 + speaker_boost off, moderate stability for clean μ-law
+const ttsTwilio = ElevenLabsTTS.forTwilio({ voiceId: "rachel" });
+
+// Telnyx: pcm_16000 (matches L16/16000 default Telnyx codec)
+const ttsTelnyx = ElevenLabsTTS.forTelnyx({ voiceId: "rachel" });
+```
+
+```python Python
+from getpatter import ElevenLabsTTS
+
+tts_twilio = ElevenLabsTTS.for_twilio(voice_id="rachel")
+tts_telnyx = ElevenLabsTTS.for_telnyx(voice_id="rachel")
+```
+</CodeGroup>
+
+`forTwilio` saves ~30–80 ms first-byte plus per-frame CPU and removes a potential aliasing source. If your Telnyx profile is pinned to PCMU/8000 instead, construct directly with `outputFormat: "ulaw_8000"`.
+
+## Constructor
+
+```typescript
+new ElevenLabsTTS({
+  apiKey?: string;                   // ELEVENLABS_API_KEY from env when omitted
+  voiceId?: string;                  // default "21m00Tcm4TlvDq8ikWAM" (Rachel)
+  modelId?: ElevenLabsModel | string;     // default "eleven_flash_v2_5"
+  outputFormat?: ElevenLabsOutputFormat;  // default "pcm_16000"
+  voiceSettings?: ElevenLabsVoiceSettings;
+  languageCode?: string;
+  chunkSize?: number;                // default 4096
+})
+
+interface ElevenLabsVoiceSettings {
+  stability?: number;
+  similarity_boost?: number;
+  style?: number;
+  use_speaker_boost?: boolean;
+}
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `apiKey` | env | ElevenLabs API key. |
+| `voiceId` | `"21m00Tcm4TlvDq8ikWAM"` (Rachel) | Voice ID or curated display name (`"rachel"`, `"alloy"`, …). |
+| `modelId` | `"eleven_flash_v2_5"` | See [Models](#models). |
+| `outputFormat` | `"pcm_16000"` | See [Output formats](#output-formats). |
+| `voiceSettings` | — | `{ stability, similarity_boost, style, use_speaker_boost }`. |
+| `languageCode` | — | BCP-47 / ISO 639-1 language hint. |
+| `chunkSize` | `4096` | Stream chunk size in bytes. |
+
+## API surface
+
+```typescript
+// Buffer the full utterance
+const audio: Buffer = await tts.synthesize("Hello!");
+
+// Or stream chunks
+for await (const chunk of tts.synthesizeStream("Hello!")) {
+  forwardToCaller(chunk);
+}
+```
+
+`synthesizeStream` cancels the underlying HTTP stream when the consumer breaks out of the loop, so ElevenLabs stops billing for unconsumed characters.
+
+## Models
+
+| Model ID | Notes |
+|---|---|
+| `eleven_flash_v2_5` (default) | Fastest TTFT (~75 ms). Best for live phone calls. |
+| `eleven_turbo_v2_5` | Balanced quality / speed. |
+| `eleven_multilingual_v2` | Best multilingual support. |
+| `eleven_monolingual_v1` | Legacy English-only. |
+| `eleven_v3` | Newest, highest quality. Slower TTFT. **Not** supported by the WebSocket variant. |
+
+Exposed as a typed `as const` object for autocomplete:
+
+```typescript
+import { ElevenLabsModel } from "getpatter";
+
+ElevenLabsModel.FLASH_V2_5         // "eleven_flash_v2_5"
+ElevenLabsModel.V3                 // "eleven_v3"
+```
+
+## Output formats
+
+| Format | Use case |
+|---|---|
+| `pcm_16000` (default) | Web playback, dashboard previews, Telnyx L16/16000 carrier path. |
+| `ulaw_8000` | Twilio Media Streams (μ-law @ 8 kHz native). |
+| `pcm_8000` / `pcm_22050` / `pcm_24000` / `pcm_44100` | Other PCM rates. |
+| `mp3_22050_32` … `mp3_44100_192` | MP3 at various bitrates. |
+
+```typescript
+import { ElevenLabsOutputFormat } from "getpatter";
+
+ElevenLabsOutputFormat.ULAW_8000   // "ulaw_8000"
+ElevenLabsOutputFormat.PCM_16000   // "pcm_16000"
+```
+
+## Voice ID resolution
+
+Pass either an opaque 20-char ElevenLabs voice ID (`"21m00Tcm4TlvDq8ikWAM"`) or a curated display name. The SDK ships a built-in name → ID map for common voices (`"rachel"`, `"bella"`, `"matilda"`, etc.) plus an `"alloy"` alias for cross-provider portability with OpenAI naming. Unknown strings are passed through unchanged so custom voices keep working.
+
+## Pricing
+
+| Model | $/1k chars |
+|---|---|
+| `eleven_flash_v2_5` (default) | 0.06 |
+| `eleven_turbo_v2_5` | 0.05 |
+| `eleven_multilingual_v2` | 0.18 |
+| `eleven_monolingual_v1` | 0.18 |
+| `eleven_v3` | 0.30 |
+
+Pricing is auto-resolved from `DEFAULT_PRICING` per model — no override needed unless you're on a custom ElevenLabs plan. See [Metrics](/typescript-sdk/metrics) for how to register custom rates.
+
+## See also
+
+- [TTS overview](/typescript-sdk/tts) — provider table and shared concepts.
+- [`ElevenLabsWebSocketTTS`](/typescript-sdk/providers/elevenlabs-websocket) — opt-in low-latency WebSocket variant.
+- [`ElevenLabsConvAI`](/typescript-sdk/providers/elevenlabs-convai) — managed-agent engine using ElevenLabs end-to-end.

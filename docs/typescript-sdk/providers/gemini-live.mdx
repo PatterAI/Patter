@@ -1,0 +1,137 @@
+---
+title: "Gemini Live"
+description: "Google Gemini Live native-audio realtime engine — alternative to OpenAI Realtime."
+icon: "google"
+---
+
+# Gemini Live
+
+`GeminiLiveAdapter` bridges a bidirectional audio stream to Google's [Gemini Live](https://ai.google.dev/gemini-api/docs/live) native-audio API. It speaks the same `connect / sendAudio / onEvent / close` surface as `OpenAIRealtimeAdapter`, so you can swap engines without touching the call handler.
+
+Use it as an alternative to OpenAI Realtime when you want native-audio Gemini voices, longer context, or lower per-minute pricing.
+
+## Install
+
+Native-audio Gemini Live is a `v1alpha`-only API. Install the optional peer dependency:
+
+<CodeGroup>
+```bash TypeScript
+npm install getpatter @google/genai
+```
+
+```bash Python
+pip install "getpatter[gemini-live]"
+```
+</CodeGroup>
+
+Set `GEMINI_API_KEY` in your environment.
+
+## Constructor
+
+<CodeGroup>
+```typescript TypeScript
+import { GeminiLiveAdapter } from "getpatter";
+
+const adapter = new GeminiLiveAdapter(process.env.GEMINI_API_KEY!, {
+  model: "gemini-2.5-flash-native-audio-preview-09-2025",    // default
+  voice: "Puck",                                             // Puck | Charon | Kore | Fenrir | Aoede
+  instructions: "You are a helpful, concise voice assistant.",
+  language: "en-US",
+  inputSampleRate: 16000,                                    // PCM16 mono in
+  outputSampleRate: 24000,                                   // PCM16 mono out
+  temperature: 0.8,
+});
+```
+
+```python Python
+from getpatter.providers.gemini_live import (
+    GeminiLiveAdapter,
+    GeminiLiveModel,
+    GeminiLiveVoice,
+)
+
+adapter = GeminiLiveAdapter(
+    api_key="",
+    model=GeminiLiveModel.NATIVE_AUDIO_PREVIEW_09_2025,
+    voice=GeminiLiveVoice.PUCK,
+    instructions="You are a helpful, concise voice assistant.",
+    language="en-US",
+    input_sample_rate=16000,
+    output_sample_rate=24000,
+    temperature=0.8,
+)
+```
+</CodeGroup>
+
+## Usage
+
+Pass the adapter as the `engine` on `phone.agent({...})`:
+
+<CodeGroup>
+```typescript TypeScript
+import { Patter, Twilio, GeminiLiveAdapter } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  engine: new GeminiLiveAdapter(process.env.GEMINI_API_KEY!, { voice: "Puck" }),
+  systemPrompt: "You are a helpful assistant.",
+  firstMessage: "Hi! How can I help today?",
+});
+
+await phone.serve({ agent });
+```
+
+```python Python
+import asyncio
+from getpatter import Patter, Twilio
+from getpatter.providers.gemini_live import GeminiLiveAdapter
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
+agent = phone.agent(
+    engine=GeminiLiveAdapter(api_key="", voice="Puck"),
+    system_prompt="You are a helpful assistant.",
+    first_message="Hi! How can I help today?",
+)
+
+asyncio.run(phone.serve(agent))
+```
+</CodeGroup>
+
+Tools work the same way as on OpenAI Realtime — pass `tools: [...]` on `phone.agent({...})` and Patter forwards function calls to Gemini's `functionDeclarations` shape.
+
+## Models
+
+| Model | Notes |
+|-------|-------|
+| `"gemini-2.5-flash-native-audio-preview-09-2025"` (default) | Native-audio preview, `v1alpha` only. Current production target. |
+| `"gemini-live-2.5-flash-preview"` | Earlier preview, shut down on 2025-12-09. |
+| `"gemini-2.0-flash-exp"` | Experimental preview, retired Dec 2024. |
+
+The defaults change as Google promotes native audio to GA.
+
+## Voices
+
+`Puck`, `Charon`, `Kore`, `Fenrir`, `Aoede` — Gemini's built-in `PrebuiltVoiceConfig` set. Pass any one as `voice`.
+
+## When to use Gemini Live vs alternatives
+
+| Use Gemini Live when… | Use [OpenAI Realtime](/typescript-sdk/providers/openai-realtime) when… | Use [Pipeline mode](/typescript-sdk/agents) when… |
+|---|---|---|
+| You want native-audio Gemini voices and 1M+ context. | You need the broadest tool-calling ecosystem and `gpt-realtime-2` reasoning tiers. | You need provider-by-provider control (e.g. `DeepgramSTT` + `AnthropicLLM` + `ElevenLabsTTS`). |
+
+## Notes
+
+- Barge-in is implicit: Gemini Live runs server-side VAD and interrupts on user speech. `cancelResponse()` is a no-op for compatibility.
+- The adapter resamples nothing — pass PCM16 mono at `inputSampleRate` Hz. Patter's telephony layer resamples 8 kHz mulaw up to 16 kHz before this point.
+- `@google/genai` is imported lazily, so default installs of `getpatter` do not pay the load cost.
+
+## What's Next
+
+<CardGroup cols={2}>
+  <Card title="Engines" icon="bolt" href="/typescript-sdk/engines">All engines side by side.</Card>
+  <Card title="OpenAI Realtime" icon="bolt" href="/typescript-sdk/providers/openai-realtime">The default engine.</Card>
+  <Card title="Agents" icon="user-gear" href="/typescript-sdk/agents">System prompts, tools, first messages.</Card>
+  <Card title="Tools" icon="screwdriver-wrench" href="/typescript-sdk/tools">Function calling inside a realtime session.</Card>
+</CardGroup>

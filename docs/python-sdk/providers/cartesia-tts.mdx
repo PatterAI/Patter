@@ -1,0 +1,121 @@
+---
+title: "Cartesia TTS"
+description: "Sonic-1, Sonic-2, and Sonic-3 voice synthesis via Cartesia's HTTP bytes endpoint."
+icon: "volume"
+---
+
+# Cartesia TTS
+
+`CartesiaTTS` is a Patter `TTSProvider` backed by Cartesia's [`/tts/bytes` HTTP endpoint](https://docs.cartesia.ai/api-reference/tts/bytes). It streams raw PCM_S16LE chunks that drop directly into Patter's pipeline with no transcoding. Pure `aiohttp` transport, no vendor SDK required. The default model is `sonic-3` (current GA snapshot, ~90 ms TTFB target).
+
+<Note>
+  This page covers Cartesia **TTS**. For Cartesia's `ink-whisper` STT see
+  [the Cartesia STT page](/python-sdk/providers/cartesia).
+</Note>
+
+## Install
+
+```bash
+pip install "getpatter[cartesia]"
+```
+
+## Usage
+
+<Note>
+  Use the namespaced import (`getpatter.tts.cartesia`) or the flat alias
+  (`getpatter.CartesiaTTS`). Both auto-resolve `CARTESIA_API_KEY` from the
+  environment when `api_key=` is omitted.
+</Note>
+
+<CodeGroup>
+```python Python
+# Namespaced import
+from getpatter.tts import cartesia
+
+tts = cartesia.TTS()                                      # reads CARTESIA_API_KEY
+tts = cartesia.TTS(voice="f786b574-daa5-4673-aa0c-cbe3e8534c02")  # Katie
+
+# Flat alias (equivalent)
+from getpatter import CartesiaTTS
+
+tts = CartesiaTTS(voice="f786b574-daa5-4673-aa0c-cbe3e8534c02")
+```
+
+```typescript TypeScript
+// See typescript-sdk/providers/cartesia-tts for the TS twin.
+```
+</CodeGroup>
+
+In an agent:
+
+```python
+import asyncio
+from getpatter import Patter, Twilio, DeepgramSTT, CartesiaTTS
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
+agent = phone.agent(
+    stt=DeepgramSTT(),                                    # DEEPGRAM_API_KEY from env
+    tts=CartesiaTTS(voice="f786b574-daa5-4673-aa0c-cbe3e8534c02"),
+    system_prompt="You are a helpful assistant.",
+)
+
+asyncio.run(phone.serve(agent))
+```
+
+## Models and rates
+
+Cartesia TTS bills per 1,000 characters synthesized. Per-model rates (defaults from `getpatter.pricing`):
+
+| Model | Rate / 1k chars | Notes |
+|---|---|---|
+| `sonic-3` (default) | $0.030 | GA, ~90 ms TTFB. Drop-in compatible with sonic-2 voice IDs. |
+| `sonic-2` | $0.030 | Previous flagship. |
+| `sonic-1` / `sonic-english` | $0.030 | Legacy English. |
+| `sonic-multilingual` | $0.030 | Multilingual variant. |
+
+Override per-call via `Patter(pricing={"cartesia_tts": {"models": {"sonic-3": {"price": ...}}}})`.
+
+## Languages
+
+`language="en"` by default. Sonic-3 supports 30+ languages — pass any [Cartesia-supported BCP-47 code](https://docs.cartesia.ai/api-reference/tts/text-to-speech) (`"es"`, `"fr"`, `"de"`, `"it"`, `"pt"`, `"ja"`, `"zh"`, …). Voice cloning works across all of them — the same voice ID will speak whichever language you target.
+
+## Telephony optimization
+
+Use the carrier-aware factories so audio reaches Patter's telephony adapter at the carrier's native sample rate, skipping a resample step:
+
+```python
+from getpatter.tts import cartesia
+
+# Twilio: PCM @ 8 kHz directly (skips the 16k→8k resample before mulaw transcode).
+tts = cartesia.TTS.for_twilio()
+
+# Telnyx: PCM @ 16 kHz (matches Telnyx's L16/16000 default — zero transcoding).
+tts = cartesia.TTS.for_telnyx()
+```
+
+## Options
+
+| Option | Default | Notes |
+|---|---|---|
+| `api_key` | `None` | Reads from `CARTESIA_API_KEY` when omitted. |
+| `model` | `"sonic-3"` | Any Cartesia TTS model id. |
+| `voice` | `"f786b574-..."` (Katie) | Cartesia voice id. |
+| `language` | `"en"` | BCP-47 code. |
+| `sample_rate` | `16000` | 8000, 16000, 22050, 24000, 44100 Hz. |
+| `speed` | `None` | `"fastest" ... "slowest"` or float in `[0.6, 2.0]`. |
+| `emotion` | `None` | Cartesia emotion preset. |
+| `volume` | `None` | Float in `[0.5, 2.0]` (sonic-3 only). |
+| `base_url` | Cartesia API | Override for proxying. |
+| `api_version` | `"2025-04-16"` | Cartesia API version pin. |
+
+## Low-level usage
+
+```python
+from getpatter.providers.cartesia_tts import CartesiaTTS
+
+tts = CartesiaTTS(api_key="...", voice="f786b574-...", language="en")
+async for chunk in tts.synthesize("Hello from the Patter pipeline."):
+    ...
+await tts.close()
+```

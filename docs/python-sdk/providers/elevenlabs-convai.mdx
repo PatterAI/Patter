@@ -1,0 +1,174 @@
+---
+title: "ElevenLabs ConvAI"
+description: "End-to-end speech-to-speech engine backed by an ElevenLabs-hosted Conversational AI agent."
+icon: "robot"
+---
+
+# ElevenLabs ConvAI
+
+`ElevenLabsConvAI` is a Patter **engine** — an end-to-end speech-to-speech runtime that handles STT, LLM, and TTS in a single managed WebSocket. Instead of wiring `stt=`, `llm=`, and `tts=` separately (pipeline mode), you point Patter at an agent you already configured in the [ElevenLabs Conversational AI dashboard](https://elevenlabs.io/app/conversational-ai) and Patter bridges the carrier media stream straight to it.
+
+This is a different mental model from the [pipeline-mode TTS providers](/python-sdk/providers/elevenlabs-tts) — even though both use ElevenLabs:
+
+| Mode | When to use | Config surface |
+|---|---|---|
+| **Pipeline** with [`ElevenLabsTTS`](/python-sdk/providers/elevenlabs-tts) | You want to keep STT, LLM, prompts, and tools in your code; ElevenLabs is just the voice. | `stt=`, `llm=`, `tts=`, `system_prompt=`, `tools=` |
+| **Engine** with `ElevenLabsConvAI` | You want a managed agent (prompt, tools, voice, knowledge base) authored in ElevenLabs's UI. | `engine=`, `agent_id=` |
+
+If you don't yet know which mode fits, start with pipeline mode — it gives you Patter's full feature set (custom tools, guardrails, dashboard, metrics). ConvAI is the right pick when your team treats the agent as a deployable artifact configured outside code.
+
+## Install
+
+`ElevenLabsConvAI` ships in the core `getpatter` package — no extras needed:
+
+```bash
+pip install getpatter
+```
+
+## Quickstart
+
+<CodeGroup>
+```python Python
+import asyncio
+from getpatter import Patter, Twilio, ElevenLabsConvAI
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")    # TWILIO_* from env
+
+agent = phone.agent(
+    engine=ElevenLabsConvAI(agent_id="agent_abc123"),            # ELEVENLABS_API_KEY from env
+    system_prompt="You are a warm and friendly concierge.",      # used as override
+)
+
+asyncio.run(phone.serve(agent))
+```
+
+```typescript TypeScript
+// npx tsx example.ts
+import { Patter, Twilio, ElevenLabsConvAI } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  engine: new ElevenLabsConvAI({ agentId: "agent_abc123" }),
+  systemPrompt: "You are a warm and friendly concierge.",
+});
+
+await phone.serve({ agent });
+```
+</CodeGroup>
+
+The agent is created in the [ElevenLabs ConvAI dashboard](https://elevenlabs.io/app/conversational-ai). Patter only needs the `agent_id` (and an API key) to connect to it.
+
+## Engine constructor
+
+The engine config object is intentionally tiny — most settings live on the ElevenLabs side:
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `api_key` | `str` | `""` | ElevenLabs API key. Reads from `ELEVENLABS_API_KEY` when empty. |
+| `agent_id` | `str` | `""` | ElevenLabs agent ID. Reads from `ELEVENLABS_AGENT_ID` when empty. |
+| `voice` | `str` | `""` | Optional override for the agent's default voice ID. |
+
+```python
+from getpatter.engines import elevenlabs as elevenlabs_engine
+
+engine = elevenlabs_engine.ConvAI()                                # reads env
+engine = elevenlabs_engine.ConvAI(agent_id="agent_abc123",
+                                  voice="EXAVITQu4vr4xnSDxMaL")
+```
+
+## Lower-level adapter
+
+When you need the full ConvAI feature set — first-message overrides, language pinning, signed-URL auth, audio-format negotiation — drop down to `ElevenLabsConvAIAdapter`:
+
+<CodeGroup>
+```python Python
+from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
+
+# Twilio-native μ-law @ 8 kHz — skips every transcoding hop.
+adapter = ElevenLabsConvAIAdapter.for_twilio(
+    api_key="...",
+    agent_id="agent_abc123",
+    voice_id="EXAVITQu4vr4xnSDxMaL",
+    model_id="eleven_flash_v2_5",
+    language="it",
+    first_message="Ciao!",
+)
+
+# Telnyx — same μ-law optimisation when streaming_bidirectional_codec=PCMU.
+adapter = ElevenLabsConvAIAdapter.for_telnyx(api_key="...", agent_id="agent_abc123")
+
+# Or the bare constructor (defaults to PCM16 16 kHz — best for non-telephony).
+adapter = ElevenLabsConvAIAdapter(api_key="...", agent_id="agent_abc123")
+```
+
+```typescript TypeScript
+import { ElevenLabsConvAIAdapter } from "getpatter";
+
+const adapter = ElevenLabsConvAIAdapter.forTwilio("API_KEY", "agent_abc123", {
+  voiceId: "EXAVITQu4vr4xnSDxMaL",
+  modelId: "eleven_flash_v2_5",
+  language: "it",
+  firstMessage: "Ciao!",
+});
+
+const adapterTelnyx = ElevenLabsConvAIAdapter.forTelnyx("API_KEY", "agent_abc123");
+
+// Bare constructor — defaults to PCM16 16 kHz.
+const adapterBare = new ElevenLabsConvAIAdapter({
+  apiKey: "API_KEY",
+  agentId: "agent_abc123",
+});
+```
+</CodeGroup>
+
+### Telephony optimisation
+
+Both `for_twilio` / `forTwilio` and `for_telnyx` / `forTelnyx` negotiate `ulaw_8000` for both `output_audio_format` and `input_audio_format`. This matches Twilio's μ-law @ 8 kHz wire format and Telnyx's PCMU bidirectional default — the SDK detects this and skips the 8 kHz ↔ 16 kHz resamples and the PCM ↔ μ-law transcodes. Saves ~30–80 ms first-byte plus per-frame CPU on every turn.
+
+If your Telnyx profile is pinned to L16/16000 instead, use the bare constructor (defaults to PCM16).
+
+### Signed-URL auth
+
+When you cannot ship the API key to the WebSocket layer (browser bridges, untrusted runners), pass `use_signed_url=True` and Patter will fetch a short-lived signed URL from `/v1/convai/conversation/get-signed-url` instead:
+
+```python
+adapter = ElevenLabsConvAIAdapter(
+    api_key="API_KEY",
+    agent_id="agent_abc123",
+    use_signed_url=True,
+)
+```
+
+## Events
+
+The adapter normalises ConvAI server messages into a unified event stream so the rest of Patter (metrics, dashboard, hooks) treats it like any other engine:
+
+| Event | Payload | Meaning |
+|---|---|---|
+| `audio` | `bytes` | Agent audio chunk to forward to the caller. |
+| `transcript_input` | `str` | What the user said. |
+| `transcript_output` | `str` | What the agent said (full turn text). |
+| `response_start` | `{"text": str}` | Agent began speaking (turn start). |
+| `response_done` | `{}` | Agent turn finished — emitted on silence (~500 ms) or interruption. |
+| `interruption` | `None` | User interrupted the agent. |
+| `error` | `str` | Server-side error text. |
+
+`response_done` is emitted by a silence watcher because ConvAI does not send an explicit "turn complete" frame.
+
+## Limitations
+
+- **No client-side `system_prompt` injection.** The agent's prompt is owned by the ElevenLabs dashboard. Patter passes `system_prompt` to the adapter as a `first_message` override only — to change behaviour, edit the agent in the ConvAI UI.
+- **No client-side tools.** ConvAI tools are configured in the ElevenLabs dashboard. Patter's `tools=[...]` is ignored when an `engine=` is set.
+- **`model_id` override is informational.** The Python and TypeScript SDKs preserve the `model_id` field for introspection, but ConvAI does not currently honour a client-side model override — the model is whatever the agent was configured with.
+
+## Pricing
+
+ElevenLabs ConvAI is billed by ElevenLabs per-minute (premium tiers add features like RAG and analytics). Patter does not currently meter ConvAI minutes — the engine cost shows up on your ElevenLabs invoice. Carrier minutes (Twilio / Telnyx) are still tracked as normal in `CallMetrics`.
+
+## See also
+
+- [Engines overview](/python-sdk/engines) — engine vs pipeline modes.
+- [`ElevenLabsTTS`](/python-sdk/providers/elevenlabs-tts) — pipeline-mode TTS using ElevenLabs voices (without a managed agent).
+- [`ElevenLabsWebSocketTTS`](/python-sdk/providers/elevenlabs-websocket) — opt-in low-latency WebSocket variant of `ElevenLabsTTS`.
+- [`OpenAIRealtime`](/python-sdk/providers/openai-realtime) — the other end-to-end engine.

@@ -1,0 +1,95 @@
+---
+title: "Deepgram STT"
+description: "Streaming speech-to-text via Deepgram's v1 /listen WebSocket API."
+icon: "waveform"
+---
+
+# Deepgram STT
+
+`DeepgramSTT` streams PCM (or mulaw / opus / flac) audio to Deepgram's [v1 `/listen` WebSocket](https://developers.deepgram.com/docs/lower-level-websockets) endpoint. Uses the `ws` package — no vendor SDK required. Handles `KeepAlive` pings, `Finalize` / `CloseStream` graceful shutdown, and surfaces both `Results` transcripts and `SpeechStarted` / `UtteranceEnd` VAD events.
+
+## Install
+
+`deepgram` ships in the base install.
+
+```bash
+npm install getpatter
+```
+
+## Usage
+
+<Note>
+  Use the namespaced import (`getpatter/stt/deepgram`) or the flat re-export
+  (`DeepgramSTT`). Both auto-resolve `DEEPGRAM_API_KEY` from the environment
+  when `apiKey` is omitted.
+</Note>
+
+<CodeGroup>
+```typescript TypeScript
+// Namespaced import
+import * as deepgram from "getpatter/stt/deepgram";
+
+const stt = new deepgram.STT();                                    // reads DEEPGRAM_API_KEY
+const stt2 = new deepgram.STT({ apiKey: "dg_...", model: "nova-3", language: "en" });
+
+// Flat alias (equivalent)
+import { DeepgramSTT } from "getpatter";
+
+const stt3 = new DeepgramSTT();
+```
+
+```python Python
+# See python-sdk/providers/deepgram for the Python twin.
+```
+</CodeGroup>
+
+Plug it into an agent:
+
+```typescript
+// npx tsx example.ts
+import { Patter, Twilio, DeepgramSTT, ElevenLabsTTS } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  stt: new DeepgramSTT(),                             // DEEPGRAM_API_KEY from env
+  tts: new ElevenLabsTTS({ voiceId: "rachel" }),
+  systemPrompt: "You are a helpful assistant.",
+});
+
+await phone.serve({ agent });
+```
+
+## Models and rates
+
+Deepgram bills per minute of streamed audio. Per-model rates (defaults from `getpatter/pricing`):
+
+| Model | Rate / min |
+|---|---|
+| `nova-3` (default) | $0.0077 |
+| `nova-3-multilingual` | $0.0092 |
+| `nova-2` | $0.0058 |
+| `nova` | $0.0043 |
+| `whisper-large` | $0.0048 |
+| `whisper-medium` | $0.0048 |
+
+Override via `new Patter({ pricing: { deepgram: { models: { "nova-2": { price: ... } } } } })`.
+
+## Languages
+
+`language: "en"` by default. Pass any [Deepgram-supported BCP-47 code](https://developers.deepgram.com/docs/models-languages-overview) (e.g. `"es"`, `"fr"`, `"de"`, `"it"`). For mixed-language calls use `nova-3-multilingual`.
+
+## Options
+
+| Option | Default | Notes |
+|---|---|---|
+| `apiKey` | — | Reads from `DEEPGRAM_API_KEY` when omitted. |
+| `model` | `"nova-3"` | Any Deepgram model id. |
+| `language` | `"en"` | BCP-47 code. |
+| `encoding` | `"linear16"` | `"linear16"`, `"mulaw"`, `"alaw"`, `"opus"`, `"flac"`. |
+| `sampleRate` | `16000` | 8000, 16000, 24000, 44100, 48000 Hz. |
+| `endpointingMs` | `150` | Silence (ms) before Deepgram closes a turn. |
+| `utteranceEndMs` | `1000` | Server-side endpoint detection (min 1000). |
+| `smartFormat` | `true` | Punctuation + numerals. |
+| `interimResults` | `true` | Stream partial transcripts. |
+| `vadEvents` | `true` | Emit `SpeechStarted` / `UtteranceEnd`. |

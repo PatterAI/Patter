@@ -1,0 +1,133 @@
+---
+title: "OpenAI Realtime"
+description: "Models, voices, transcription, and reasoning effort for the OpenAI Realtime engine."
+icon: "bolt"
+---
+
+# OpenAI Realtime
+
+`OpenAIRealtime` is the engine wrapper for OpenAI's Realtime API — a single WebSocket session that handles speech-in, reasoning, and speech-out, with sub-500 ms typical turn latency.
+
+For the basic `engine=OpenAIRealtime(...)` quickstart, see [Engines](/python-sdk/engines#openairealtime). This page documents the full configuration surface: every supported model, the streaming transcription options, and the new `reasoning_effort` tier.
+
+## Models {#models}
+
+Pass any of these to `model=` on `OpenAIRealtime(...)`. Pricing is auto-resolved per model from `DEFAULT_PRICING` — no manual override is required (see [Metrics](/python-sdk/metrics)).
+
+| Model | Audio in / out (per M tokens) | Notes |
+|-------|-------------------------------|-------|
+| `"gpt-realtime-mini"` (default) | $10 / $20 | Fastest + cheapest. Production default for most voice flows. |
+| `"gpt-realtime"` | $32 / $64 | GA realtime model (Aug 2025). |
+| `"gpt-realtime-2"` | $32 / $64 | Most-capable. Stronger instruction following, 128K context, supports `reasoning_effort`. |
+| `"gpt-4o-realtime-preview"` | $100 / $200 | Earlier preview, retained for compatibility. |
+| `"gpt-4o-mini-realtime-preview"` | $10 / $20 | Earlier preview, retained for compatibility. |
+
+The same identifiers are exposed as a `StrEnum` for editor autocomplete:
+
+```python
+from getpatter.providers.openai_realtime import OpenAIRealtimeModel
+
+OpenAIRealtimeModel.GPT_REALTIME_2  # "gpt-realtime-2"
+```
+
+<Note>
+`gpt-realtime-translate` is intentionally **not** supported by Patter's Realtime engine. It lives on a different OpenAI endpoint (`/v1/realtime/translations`), does not accept tool calls or `response.create`, and would invalidate the `Agent` contract Patter exposes. Real-time translation, if added, will land as a dedicated feature — not as a Realtime model variant.
+</Note>
+
+## Reasoning effort
+
+`gpt-realtime-2` accepts a configurable reasoning tier. Patter exposes it as the `reasoning_effort` constructor argument on the lower-level `OpenAIRealtimeAdapter`:
+
+| Value | When to use |
+|-------|-------------|
+| `"minimal"` | Snappy turn-taking. Skips most reasoning. |
+| `"low"` | **Recommended for production voice.** Good instruction following without measurable per-turn latency. |
+| `"medium"` | Multi-step tool flows where the model should plan. Adds latency. |
+| `"high"` | Complex reasoning. Not recommended for live phone calls. |
+
+When set, Patter injects `session.reasoning = { effort: ... }` into the `session.update` payload. When omitted, the field is not sent and OpenAI's server default applies. The field is a no-op on models that ignore it (for example `gpt-realtime-mini`), so it's safe to leave configured across model swaps.
+
+<Tip>
+Higher reasoning tiers add measurable latency to every turn. Stick to `"low"` unless you've profiled the call and confirmed the model needs more.
+</Tip>
+
+## Streaming transcription
+
+The Realtime session can run an inline Whisper-family model on inbound audio so you get text deltas alongside the conversation. The model is set via `input_audio_transcription_model`:
+
+| Model | Cost | Notes |
+|-------|------|-------|
+| `"whisper-1"` (default) | $0.006/min | Established Whisper. Slower partials. |
+| `"gpt-4o-mini-transcribe"` | $0.003/min | Cheapest. |
+| `"gpt-4o-transcribe"` | $0.006/min | Higher accuracy. |
+| `"gpt-realtime-whisper"` | $0.017/min | Streaming-optimised. Lowest-latency partials. Use when you need fast deltas in the dashboard or for live captioning. |
+
+Same enum form:
+
+```python
+from getpatter.providers.openai_realtime import OpenAITranscriptionModel
+
+OpenAITranscriptionModel.GPT_REALTIME_WHISPER  # "gpt-realtime-whisper"
+```
+
+## Worked example — `gpt-realtime-2` with low reasoning + streaming whisper
+
+Constructing the lower-level `OpenAIRealtimeAdapter` directly gives access to every field. This is what `OpenAIRealtime(engine=...)` builds under the hood; reach for it when you need `reasoning_effort` or a non-default transcription model.
+
+<CodeGroup>
+```python Python
+import asyncio
+
+from getpatter import Patter, Twilio
+from getpatter.providers.openai_realtime import (
+    OpenAIRealtimeAdapter,
+    OpenAIRealtimeModel,
+    OpenAITranscriptionModel,
+)
+
+phone = Patter(carrier=Twilio(), phone_number="+15555550100")  # TWILIO_* from env
+
+adapter = OpenAIRealtimeAdapter(
+    api_key="",                                            # reads OPENAI_API_KEY
+    model=OpenAIRealtimeModel.GPT_REALTIME_2,
+    voice="nova",
+    instructions="You are a helpful, concise voice assistant.",
+    input_audio_transcription_model=OpenAITranscriptionModel.GPT_REALTIME_WHISPER,
+    reasoning_effort="low",                                # OpenAI's recommended production tier
+)
+
+agent = phone.agent(
+    engine=adapter,                                        # adapter passed as engine
+    system_prompt="You are a helpful assistant.",
+    first_message="Hi, how can I help today?",
+)
+
+async def main() -> None:
+    await phone.serve(agent)
+
+asyncio.run(main())
+```
+
+```typescript TypeScript
+// See /typescript-sdk/providers/openai-realtime
+```
+</CodeGroup>
+
+<Warning>
+The `reasoning_effort` and `input_audio_transcription_model` arguments live on `OpenAIRealtimeAdapter`. The shorthand `OpenAIRealtime(model=...)` engine wrapper currently exposes only `api_key`, `voice`, and `model` — use the adapter directly when you need the new fields.
+</Warning>
+
+## Backward compatibility
+
+- Defaults are unchanged: `model="gpt-realtime-mini"`, `input_audio_transcription_model="whisper-1"`, `reasoning_effort=None`.
+- All existing `OpenAIRealtime(...)` constructions keep working without code changes.
+- Pricing for new models is added under `DEFAULT_PRICING["openai_realtime"].models[...]`. The earlier `Patter(pricing={"openai_realtime": DEFAULT_PRICING["openai_realtime_2"]})` workaround is no longer needed — just construct with `model="gpt-realtime-2"`.
+
+## What's Next
+
+<CardGroup cols={2}>
+  <Card title="Engines" icon="bolt" href="/python-sdk/engines">All engine classes side by side.</Card>
+  <Card title="Metrics" icon="chart-line" href="/python-sdk/metrics">Per-call cost breakdown and the model-aware pricing table.</Card>
+  <Card title="Agents" icon="user-gear" href="/python-sdk/agents">Configure system prompts, tools, and first messages.</Card>
+  <Card title="Tools" icon="screwdriver-wrench" href="/python-sdk/tools">Function calling inside a Realtime session.</Card>
+</CardGroup>

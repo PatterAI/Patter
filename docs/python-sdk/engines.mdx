@@ -43,7 +43,21 @@ asyncio.run(main())
 |-----------|------|---------|-------------|
 | `api_key` | `str` | `""` | OpenAI API key. Reads from `OPENAI_API_KEY` when empty. |
 | `voice` | `str` | `"alloy"` | One of `"alloy"`, `"echo"`, `"fable"`, `"onyx"`, `"nova"`, `"shimmer"`. |
-| `model` | `str` | `"gpt-4o-mini-realtime-preview"` | OpenAI Realtime model ID. |
+| `model` | `str` | `"gpt-4o-mini-realtime-preview"` | OpenAI Realtime model ID. See [supported models](/python-sdk/providers/openai-realtime#models). |
+
+### Supported model identifiers
+
+The `model` argument accepts any OpenAI Realtime model ID. Common values:
+
+| Model | Notes |
+|-------|-------|
+| `"gpt-realtime-mini"` | Default. Lowest latency / lowest cost. |
+| `"gpt-realtime"` | GA realtime model (Aug 2025). |
+| `"gpt-realtime-2"` | Most-capable: stronger instruction following, configurable `reasoning_effort`, 128K context. |
+| `"gpt-4o-realtime-preview"` | Earlier preview line; ~10x the per-token cost of mini. |
+| `"gpt-4o-mini-realtime-preview"` | Earlier preview line. |
+
+Pricing is auto-resolved per model — see [Metrics](/python-sdk/metrics). For `reasoning_effort`, transcription model, and the full configuration surface, see [OpenAI Realtime — full reference](/python-sdk/providers/openai-realtime).
 
 Namespaced form:
 
@@ -51,7 +65,7 @@ Namespaced form:
 from getpatter.engines import openai as openai_engine
 
 engine = openai_engine.Realtime()                     # reads OPENAI_API_KEY
-engine = openai_engine.Realtime(voice="nova", model="gpt-4o-mini-realtime-preview")
+engine = openai_engine.Realtime(voice="nova", model="gpt-realtime-2")
 ```
 
 ## ElevenLabsConvAI

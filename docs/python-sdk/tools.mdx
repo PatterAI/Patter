@@ -123,11 +123,7 @@ Your webhook must return valid JSON. The response is passed back to the AI as th
 
 ### Retry Behavior
 
-If your webhook fails (non-2xx status code or network error), Patter retries automatically:
-
-- **Max retries:** 2 (3 total attempts)
-- **Retry delay:** 0.5 seconds between attempts
-- **Final failure:** If all 3 attempts fail, the AI receives an error message and continues the conversation gracefully.
+If your webhook fails (non-2xx status code or network error), Patter retries automatically. Same exponential-backoff policy applies to in-process handlers — see [Retries & circuit breaker](#retries--circuit-breaker) below.
 
 ---
 
@@ -247,6 +243,247 @@ Parameter names and descriptions help the AI extract the right values from the c
 <Accordion title="Keep responses concise">
 The AI processes the full JSON response. Large responses add latency. Return only what the AI needs to continue the conversation.
 </Accordion>
+
+---
+
+## Schema validation at build time
+
+Patter structurally validates every tool's `parameters` schema the moment you call `phone.agent(tools=[...])`. Typos that previously failed silently mid-call (`required: "name"` instead of `required: ["name"]`) now raise `ToolSchemaError` immediately, naming the offending tool.
+
+The validator checks:
+
+- The root must be `type: "object"`.
+- `properties` must be a dict mapping field name to JSON Schema.
+- `required` must be a list of strings.
+- Every entry in `required` must exist in `properties`.
+
+```python
+from getpatter import Patter, Tool
+from getpatter.tools.schema_validation import ToolSchemaError
+
+try:
+    agent = phone.agent(
+        system_prompt="...",
+        tools=[
+            Tool(
+                name="lookup_order",
+                description="Find an order.",
+                parameters={
+                    "type": "object",
+                    "properties": {"order_id": {"type": "string"}},
+                    "required": "order_id",  # bug: should be a list
+                },
+                webhook_url="https://api.example.com/orders",
+            ),
+        ],
+    )
+except ToolSchemaError as e:
+    print(e)
+    # tool 'lookup_order': `parameters['required']` must be a list of field names.
+```
+
+<Note>
+  Validation lives in `getpatter.tools.schema_validation` and runs once per tool at agent build time. There is no runtime overhead per call.
+</Note>
+
+---
+
+## Streaming progress from long-running tools
+
+Realtime mode only. When a tool takes more than a moment to run -- a database query, a multi-step API workflow, a file generation -- you can write the handler as an `async` generator and `yield` `{"progress": "..."}` updates while it works. Each progress message is spoken inline by the agent so the caller hears live status instead of dead air.
+
+The generator's final `{"result": "..."}` yield becomes the function-call result the model sees.
+
+```python
+from getpatter import Patter, Tool
+
+async def search_database(arguments, context):
+    yield {"progress": "Searching the database..."}
+    rows = await db.search(arguments["query"])
+
+    yield {"progress": f"Found {len(rows)} matches, ranking now..."}
+    ranked = await rank(rows)
+
+    yield {"result": json.dumps({"top_results": ranked[:5]})}
+
+agent = phone.agent(
+    system_prompt="You help customers find products.",
+    tools=[
+        Tool(
+            name="search_products",
+            description="Search the product catalogue.",
+            parameters={
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+            handler=search_database,
+        ),
+    ],
+)
+```
+
+<Note>
+  Plain `async def` handlers continue to work unchanged -- streaming is purely opt-in by switching to a generator. Pipeline mode silently discards `progress` yields for now and uses only the final result; Realtime mode is fully supported.
+</Note>
+
+<Warning>
+  Async generators in Python don't surface `return` values cleanly across the iterator boundary. The agreed protocol is to `yield {"result": "..."}` as the **final** yield. Anything yielded after a `result` is ignored.
+</Warning>
+
+---
+
+## Reassurance during long tool calls
+
+Realtime mode only. Even with progress streaming, some tools take a beat before they have anything useful to say. The `reassurance` field on `Tool` lets you set a single filler line the agent will speak if the tool hasn't returned within a grace window (default 1.5 s). If the tool returns earlier, the timer is cancelled and the line is never spoken.
+
+```python
+from getpatter import Patter, Tool
+
+agent = phone.agent(
+    system_prompt="You are a booking assistant.",
+    tools=[
+        # String shorthand — fires after the default 1500 ms.
+        Tool(
+            name="check_availability",
+            description="Check open appointment slots.",
+            parameters={
+                "type": "object",
+                "properties": {"date": {"type": "string"}},
+                "required": ["date"],
+            },
+            webhook_url="https://api.example.com/availability",
+            reassurance="Let me check the calendar for you...",
+        ),
+
+        # Dict form — explicit grace window.
+        Tool(
+            name="run_credit_check",
+            description="Run a credit check.",
+            parameters={
+                "type": "object",
+                "properties": {"ssn": {"type": "string"}},
+                "required": ["ssn"],
+            },
+            handler=credit_check_handler,
+            reassurance={
+                "message": "One moment while I pull that up — this can take a few seconds.",
+                "after_ms": 800,
+            },
+        ),
+    ],
+)
+```
+
+<Note>
+  Pipeline mode silently skips reassurance for now -- there is no clean injection point mid-turn. If you need it for a Pipeline agent, prefer an async-generator handler with a first `{"progress": ...}` yield.
+</Note>
+
+---
+
+## Retries & circuit breaker
+
+Both handler and webhook tool calls go through the same execution policy:
+
+- **Retries**: up to 3 total attempts (default `MAX_RETRIES = 2`).
+- **Backoff**: exponential -- `500 ms × 2^attempt`, jittered up to ~60 ms, capped at 5 s.
+- **Failure response**: after the last attempt the executor returns a structured JSON error so the model can recover gracefully.
+
+  ```json
+  {"error": "Tool failed after 3 attempts: ...", "fallback": true}
+  ```
+
+In addition, `ToolExecutor` keeps a per-tool **circuit breaker** so a flaky downstream doesn't burn LLM tokens on calls that will keep failing.
+
+### State machine
+
+| State | When | Behaviour |
+|-------|------|-----------|
+| `CLOSED` | Default. | Calls run normally; failures count toward the threshold. |
+| `OPEN` | After 5 consecutive failures (default). | Calls short-circuit immediately for 30 s. The model receives `{"error": ..., "fallback": true, "circuit_state": "open", "retry_after_ms": ...}`. |
+| `HALF_OPEN` | First call after the cooldown elapses. | One probe call is allowed. Success transitions to `CLOSED`; failure trips back to `OPEN` for another cooldown. |
+
+When the breaker is `OPEN` the model can recover with a graceful response such as: *"I couldn't reach the booking system right now -- can I take your number and call you back?"*
+
+### Tunables
+
+```python
+from getpatter.tools.circuit_breaker import CircuitBreakerOptions
+from getpatter.tools.tool_executor import ToolExecutor
+
+# Disable the breaker entirely (legacy behaviour).
+executor = ToolExecutor(
+    circuit_breaker=CircuitBreakerOptions(failure_threshold=0),
+)
+
+# Tighter -- trip after 3 failures, cool down for 60 s.
+executor = ToolExecutor(
+    circuit_breaker=CircuitBreakerOptions(
+        failure_threshold=3,
+        cooldown_s=60.0,
+    ),
+)
+```
+
+Defaults match the TypeScript SDK byte-for-byte.
+
+---
+
+## OpenAI strict mode (opt-in)
+
+Set `strict=True` on a tool to constrain the model to emit arguments that exactly match the declared schema -- no missing required fields, no extra properties, no type coercion. Recommended for any tool whose handler can't tolerate malformed arguments (DB writes, payments, transfers).
+
+```python
+from getpatter import Patter, Tool
+
+agent = phone.agent(
+    system_prompt="You are a payment assistant.",
+    tools=[
+        Tool(
+            name="charge_card",
+            description="Charge the customer's saved card.",
+            parameters={
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "amount_cents": {"type": "integer"},
+                    "currency": {"type": "string"},
+                    "memo": {"type": ["string", "null"]},  # nullable, NOT optional
+                },
+                "required": ["amount_cents", "currency", "memo"],
+            },
+            handler=charge_card_handler,
+            strict=True,
+        ),
+    ],
+)
+```
+
+When `strict=True`, Patter:
+
+1. Validates the schema satisfies OpenAI's strict-mode requirements at agent build time -- raising `ToolSchemaError` with the offending path on any violation.
+2. Propagates `strict: true` in the OpenAI Realtime `session.update` wire payload so the model honours it.
+
+### Strict-mode schema rules
+
+<Warning>
+  Strict mode does not allow truly optional fields. Every property in `properties` must also appear in `required`. To express "this field may be absent," use a nullable union type: `{"type": ["string", "null"]}`. The model can then pass `null` instead of omitting the field.
+</Warning>
+
+| Rule | Why |
+|------|-----|
+| Root must be `type: "object"`. | OpenAI function tools require object roots. |
+| Every nested object must set `additionalProperties: False`. | Prevents the model from inventing extra keys. |
+| Every property in `properties` must also be in `required`. | Strict mode has no concept of "optional" -- use nullable types instead. |
+| Arrays' `items` schema is recursively validated under the same rules. | Same guarantees inside lists. |
+
+Default is `strict=False` -- existing tools keep working with no changes.
+
+---
+
+## Adding third-party tools via MCP
+
+If you need to plug in tools from external services -- Google Workspace, GitHub, Postgres, PayPal, and so on -- Patter ships an MCP (Model Context Protocol) client that auto-discovers and wires up remote tool servers without writing wrapper handlers per tool. See [MCP integration](/python-sdk/mcp) for the full guide.
 
 ---
 

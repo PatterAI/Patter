@@ -1,0 +1,117 @@
+---
+title: "Telnyx TTS"
+description: "Streaming text-to-speech bundled with your Telnyx telephony plan — single bill, on-network audio."
+icon: "volume"
+---
+
+# Telnyx TTS
+
+`TelnyxTTS` is a streaming text-to-speech provider that talks to Telnyx's `wss://api.telnyx.com/v2/text-to-speech/speech` endpoint. It exposes the same `synthesize` / `synthesizeStream` shape as Patter's other TTS adapters ([`ElevenLabsTTS`](/typescript-sdk/providers/elevenlabs-tts), [`CartesiaTTS`](/typescript-sdk/providers/cartesia-tts)).
+
+## Why use it
+
+If you're already on Telnyx for telephony (see [Carrier — Telnyx](/typescript-sdk/carrier#telnyx)), keeping TTS on the same vendor avoids fanning out to a third-party voice cloud:
+
+- **One bill, one credential.** No extra ElevenLabs / Cartesia / Rime account to manage.
+- **On-network audio path.** Synthesised audio comes back through Telnyx's edge instead of egressing from a third-party TTS region.
+- **Telnyx NaturalHD voices.** Five high-quality voices are bundled (`astra`, `luna`, `atlas`, `hera`, `zeus`).
+
+<Note>
+Telnyx returns audio as base64-encoded MP3 frames. `TelnyxTTS.synthesize()` returns raw MP3 bytes, so downstream code that expects PCM should pipe through an MP3 decoder (e.g. `ffmpeg`). For a fully PCM-native pipeline pair Telnyx with [`ElevenLabsTTS.forTelnyx()`](/typescript-sdk/providers/elevenlabs-tts) or [`CartesiaTTS`](/typescript-sdk/providers/cartesia-tts) instead.
+</Note>
+
+## Install
+
+`TelnyxTTS` ships in the core `getpatter` package — no extras needed:
+
+```bash
+npm install getpatter
+```
+
+## Quickstart
+
+<CodeGroup>
+```typescript TypeScript
+// npx tsx example.ts
+import { Patter, Telnyx, DeepgramSTT } from "getpatter";
+import { TelnyxTTS } from "getpatter/dist/providers/telnyx-tts";
+
+const phone = new Patter({ carrier: new Telnyx(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  stt: new DeepgramSTT(),                                // DEEPGRAM_API_KEY from env
+  tts: new TelnyxTTS(process.env.TELNYX_API_KEY!, "Telnyx.NaturalHD.astra"),
+  systemPrompt: "You are a helpful assistant.",
+});
+
+await phone.serve({ agent });
+```
+
+```python Python
+import asyncio
+from getpatter import Patter, Telnyx, DeepgramSTT
+from getpatter.providers.telnyx_tts import TelnyxTTS
+
+phone = Patter(carrier=Telnyx(), phone_number="+15550001234")
+
+agent = phone.agent(
+    stt=DeepgramSTT(),
+    tts=TelnyxTTS(api_key="KEY...", voice="Telnyx.NaturalHD.astra"),
+    system_prompt="You are a helpful assistant.",
+)
+
+asyncio.run(phone.serve(agent))
+```
+</CodeGroup>
+
+## Constructor
+
+```typescript
+new TelnyxTTS(
+  apiKey: string,
+  voice: string = "Telnyx.NaturalHD.astra",
+  baseUrl: string = "wss://api.telnyx.com/v2/text-to-speech/speech",
+)
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `apiKey` | — required | Telnyx API v2 key (Bearer token). |
+| `voice` | `"Telnyx.NaturalHD.astra"` | Telnyx voice ID. See [supported voices](#voices). |
+| `baseUrl` | Telnyx prod URL | Override for testing. |
+
+## Voices
+
+| Voice ID | Description |
+|---|---|
+| `Telnyx.NaturalHD.astra` (default) | Neutral female. |
+| `Telnyx.NaturalHD.luna` | Soft female. |
+| `Telnyx.NaturalHD.atlas` | Authoritative male. |
+| `Telnyx.NaturalHD.hera` | Warm female. |
+| `Telnyx.NaturalHD.zeus` | Deep male. |
+
+Pass any other voice ID Telnyx publishes as a plain string.
+
+## API surface
+
+`TelnyxTTS` exposes two methods, matching the rest of Patter's TTS adapters:
+
+```typescript
+// Buffer the full utterance
+const audio: Buffer = await tts.synthesize("Hello from Telnyx!");
+
+// Or stream MP3 chunks as they arrive
+for await (const chunk of tts.synthesizeStream("Hello from Telnyx!")) {
+  handle(chunk);              // raw MP3 bytes — decode before playback
+}
+```
+
+## Pricing
+
+Telnyx TTS pricing is bundled with your Telnyx plan — see the [Telnyx TTS pricing page](https://telnyx.com/pricing/text-to-speech). Patter does not charge a TTS line item for `TelnyxTTS`; the cost shows up on your Telnyx invoice alongside the carrier minutes. See [Metrics](/typescript-sdk/metrics) for how to register a custom rate via the `pricing` option on `new Patter({...})` if you want it surfaced in the dashboard.
+
+## See also
+
+- [TTS overview](/typescript-sdk/tts) — provider table and shared concepts.
+- [Carrier — Telnyx](/typescript-sdk/carrier#telnyx) — picking Telnyx as your telephony provider.
+- [Telnyx STT](/typescript-sdk/providers/telnyx-stt) — pair this TTS with carrier-bundled STT.

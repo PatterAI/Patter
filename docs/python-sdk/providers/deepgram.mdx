@@ -1,0 +1,118 @@
+---
+title: "Deepgram STT"
+description: "Streaming speech-to-text via Deepgram's v1 /listen WebSocket API."
+icon: "waveform"
+---
+
+# Deepgram STT
+
+`DeepgramSTT` streams PCM (or mulaw / opus / flac) audio to Deepgram's [v1 `/listen` WebSocket](https://developers.deepgram.com/docs/lower-level-websockets) endpoint. Pure `websockets` transport, no vendor SDK required. Handles `KeepAlive` pings, `Finalize` / `CloseStream` graceful shutdown, and surfaces both `Results` transcripts and `SpeechStarted` / `UtteranceEnd` VAD events.
+
+## Install
+
+`deepgram` ships in the base install — no extra needed.
+
+```bash
+pip install getpatter
+```
+
+## Usage
+
+<Note>
+  Use the namespaced import (`getpatter.stt.deepgram`) or the flat alias
+  (`getpatter.DeepgramSTT`). Both auto-resolve `DEEPGRAM_API_KEY` from the
+  environment when `api_key=` is omitted.
+</Note>
+
+<CodeGroup>
+```python Python
+# Namespaced import
+from getpatter.stt import deepgram
+
+stt = deepgram.STT()                                      # reads DEEPGRAM_API_KEY
+stt = deepgram.STT(api_key="dg_...", model="nova-3", language="en")
+
+# Flat alias (equivalent)
+from getpatter import DeepgramSTT
+
+stt = DeepgramSTT()
+```
+
+```typescript TypeScript
+// See typescript-sdk/providers/deepgram for the TS twin.
+```
+</CodeGroup>
+
+Plug it into an agent:
+
+```python
+import asyncio
+from getpatter import Patter, Twilio, DeepgramSTT, ElevenLabsTTS
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
+agent = phone.agent(
+    stt=DeepgramSTT(),                                    # DEEPGRAM_API_KEY from env
+    tts=ElevenLabsTTS(voice_id="rachel"),
+    system_prompt="You are a helpful assistant.",
+)
+
+asyncio.run(phone.serve(agent))
+```
+
+## Models and rates
+
+Deepgram bills per minute of streamed audio. Per-model rates (defaults from `getpatter.pricing`):
+
+| Model | Rate / min |
+|---|---|
+| `nova-3` (default) | $0.0077 |
+| `nova-3-multilingual` | $0.0092 |
+| `nova-2` | $0.0058 |
+| `nova` | $0.0043 |
+| `whisper-large` | $0.0048 |
+| `whisper-medium` | $0.0048 |
+
+Override per-call via `Patter(pricing={"deepgram": {"models": {"nova-2": {"price": ...}}}})`.
+
+## Languages
+
+`language="en"` by default. Pass any [Deepgram-supported BCP-47 code](https://developers.deepgram.com/docs/models-languages-overview) (e.g. `"es"`, `"fr"`, `"de"`, `"it"`). For mixed-language calls use `nova-3-multilingual`.
+
+## Telephony optimization
+
+For Twilio (mulaw 8 kHz) use the carrier-aware factory so audio reaches Deepgram natively without an extra resample step:
+
+```python
+from getpatter.providers.deepgram_stt import DeepgramSTT as _LowLevelSTT
+
+stt = _LowLevelSTT.for_twilio(api_key="dg_...")           # mulaw, 8 kHz
+```
+
+## Options
+
+| Option | Default | Notes |
+|---|---|---|
+| `api_key` | `None` | Reads from `DEEPGRAM_API_KEY` when omitted. |
+| `model` | `"nova-3"` | Any Deepgram model id. |
+| `language` | `"en"` | BCP-47 code. |
+| `encoding` | `"linear16"` | `"linear16"`, `"mulaw"`, `"alaw"`, `"opus"`, `"flac"`. |
+| `sample_rate` | `16000` | 8000, 16000, 24000, 44100, 48000 Hz. |
+| `endpointing_ms` | `150` | Silence (ms) before Deepgram closes a turn. |
+| `utterance_end_ms` | `1000` | Server-side endpoint detection (min 1000). |
+| `smart_format` | `True` | Punctuation + numerals. |
+| `interim_results` | `True` | Stream partial transcripts. |
+| `vad_events` | `True` | Emit `SpeechStarted` / `UtteranceEnd`. |
+
+## Low-level usage
+
+```python
+from getpatter.providers.deepgram_stt import DeepgramSTT
+
+stt = DeepgramSTT(api_key="dg_...", model="nova-3", language="en")
+await stt.connect()
+await stt.send_audio(pcm_chunk)                           # 16 kHz PCM s16le
+async for t in stt.receive_transcripts():
+    print(t.text, t.is_final, t.confidence)
+await stt.close()
+```

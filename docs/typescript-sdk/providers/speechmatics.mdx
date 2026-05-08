@@ -1,0 +1,52 @@
+---
+title: "Speechmatics STT"
+description: "Speechmatics real-time speech-to-text — Python-only today; TypeScript port pending."
+icon: "waveform"
+---
+
+# Speechmatics STT
+
+<Note>
+  **Parity status**: Speechmatics STT currently ships in the Python SDK
+  only. The Patter project's [SDK parity rule](https://github.com/getpatter/patter/blob/main/.claude/rules/sdk-parity.md)
+  expects every public provider to land in both SDKs. The TypeScript port is
+  tracked in the SDK feature inventory and will follow once the official
+  `@speechmatics/voice` Node SDK reaches feature parity with the Python
+  Voice SDK that backs the Python adapter.
+</Note>
+
+## Today
+
+Use the Python SDK if you need Speechmatics in production:
+
+```bash
+pip install "getpatter[speechmatics]"
+```
+
+```python
+from getpatter.stt import speechmatics
+
+stt = speechmatics.STT(language="en")                    # reads SPEECHMATICS_API_KEY
+```
+
+See the [Python Speechmatics page](/python-sdk/providers/speechmatics) for the full reference.
+
+## Pipeline alternatives in TypeScript
+
+While the TypeScript port is in flight, the closest equivalents in the TypeScript SDK are:
+
+| Need | Recommendation (TS) |
+|---|---|
+| Multilingual streaming with high accuracy | [`DeepgramSTT`](/typescript-sdk/providers/deepgram) with `model: "nova-3-multilingual"` |
+| Lowest cost per minute | [`SonioxSTT`](/typescript-sdk/providers/soniox) (`$0.002/min`) |
+| OpenAI ecosystem | [`OpenAITranscribeSTT`](/typescript-sdk/providers/whisper) with `gpt-4o-mini-transcribe` |
+
+All of these read their API keys from the environment via the same `getpatter/stt/<provider>` namespace pattern.
+
+## Models and rates (Python)
+
+| Tier | Rate / min |
+|---|---|
+| Pro (default) | $0.004 |
+
+See `getpatter/pricing` for the canonical rate table.

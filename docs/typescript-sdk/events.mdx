@@ -360,3 +360,285 @@ await phone.serve({
   },
 });
 ```
+
+---
+
+## Speech-Edge Events (Turn-Taking)
+
+The callbacks above describe the *transcript-level* lifecycle of a call. For **turn-taking instrumentation** — barge-in, end-of-utterance, time-to-first-token, TTS warmup vs. wire-time — Patter exposes seven additional async callbacks plus a read-only `conversationState` snapshot directly on the `Patter` instance.
+
+These events mirror the public APIs of [LiveKit Agents](https://docs.livekit.io/agents/) (`user_state_changed`, `agent_state_changed`, `user_turn_completed`, `user_interruption_detected`), [Pipecat](https://docs.pipecat.ai/) (`VADUserStartedSpeakingFrame`, `BotStartedSpeakingFrame`, `LLMFullResponseStartFrame`, `OutputAudioRawFrame`, `InterruptionFrame`) and [OpenAI Realtime](https://platform.openai.com/docs/guides/realtime) (`input_audio_buffer.speech_started/_stopped/_committed`) so downstream metrics map onto the canonical voice-agent metric set without translation.
+
+<Note>
+  Every callback defaults to `null`. Existing code that does not register any speech-edge callback sees exactly the previous behaviour and zero overhead. The state machine is updated regardless of whether callbacks are registered, so `conversationState` is always usable.
+</Note>
+
+### The seven events
+
+| Event | Fires on | Signal |
+|---|---|---|
+| `onUserSpeechStarted` | VAD positive edge of inbound audio | Raw VAD start — *not* end-of-utterance. Use for cross-talk detection. |
+| `onUserSpeechEnded` | VAD trailing edge | Raw VAD stop — *not* committed EOU. Use for talk-ratio. |
+| `onUserSpeechEos` | Committed end-of-utterance | Canonical "user finished" signal. Anchor `eos_to_first_token_ms` here. |
+| `onAgentSpeechStarted` | First wire-time chunk of the agent turn | What the user actually hears (distinct from TTS warmup). Anchor barge-in latency here. |
+| `onAgentSpeechEnded` | Last wire chunk of the agent turn | Payload includes `interrupted: boolean`. `true` = barge-in cancelled the turn. |
+| `onLlmToken` | First LLM token of the turn | TTFT marker. Idempotent — fires once per turn. |
+| `onAudioOut` | First TTS audio chunk produced | TTS warmup arrival (distinct from wire-time). Idempotent — fires once per turn. |
+
+### Payload signature matrix
+
+Payload field names use `snake_case` for parity with the Python SDK. Cast at the call site as needed.
+
+<CodeGroup>
+```typescript TypeScript
+phone.onUserSpeechStarted = async (event) => {
+  // event = {
+  //   timestamp_ms: number,
+  //   vad_confidence?: number,
+  //   audio_offset_ms?: number,
+  // }
+};
+
+phone.onUserSpeechEnded = async (event) => {
+  // event = {
+  //   timestamp_ms: number,
+  //   speech_duration_ms: number,
+  //   vad_confidence?: number,
+  //   audio_offset_ms?: number,
+  // }
+};
+
+phone.onUserSpeechEos = async (event) => {
+  // event = {
+  //   timestamp_ms: number,
+  //   trigger: "vad_silence" | "semantic_turn_detector" | "manual_commit",
+  //   trailing_silence_ms?: number,
+  //   transcript_so_far?: string,
+  // }
+};
+
+phone.onAgentSpeechStarted = async (event) => {
+  // event = {
+  //   timestamp_ms: number,
+  //   turn_idx: number,
+  //   tts_provider?: string,
+  //   engine?: string,
+  // }
+};
+
+phone.onAgentSpeechEnded = async (event) => {
+  // event = {
+  //   timestamp_ms: number,
+  //   turn_idx: number,
+  //   speech_duration_ms: number,
+  //   interrupted: boolean,
+  // }
+};
+
+phone.onLlmToken = async (event) => {
+  // event = {
+  //   timestamp_ms: number,
+  //   turn_idx: number,
+  //   llm_provider: string,
+  //   model: string,
+  // }
+};
+
+phone.onAudioOut = async (event) => {
+  // event = {
+  //   timestamp_ms: number,
+  //   turn_idx: number,
+  //   tts_provider: string,
+  // }
+};
+```
+</CodeGroup>
+
+<Tip>
+  **Compute end-to-end latency by anchoring `eos_to_first_token_ms` to `onUserSpeechEos`.** It marks the moment the SDK has *committed* that the user is done speaking — VAD trailing edge plus trailing silence (and optionally a semantic turn-detector agreement). Anchoring to `onUserSpeechEnded` instead would over-count by the silence window and double-fire on mid-utterance VAD blips. Hamming AI thresholds: `<800 ms` good, `>1500 ms` critical.
+</Tip>
+
+### State machine
+
+`conversationState` returns a snapshot `{ user, agent }` you can read at any time:
+
+| Side | States | Initial | Set by |
+|---|---|---|---|
+| `user` | `listening` · `speaking` · `thinking` · `away` | `listening` | `onUserSpeechStarted` → `speaking`, `onUserSpeechEnded` / `onUserSpeechEos` → `listening` |
+| `agent` | `initializing` · `idle` · `listening` · `thinking` · `speaking` | `initializing` | call accepted → `idle`, EOU committed → `thinking`, `onAgentSpeechStarted` → `speaking`, `onAgentSpeechEnded` → `idle` |
+
+A monotonic `turnIdx` counter (also exposed on the dispatcher) increments on every committed EOU. The `agentSpeech*`, `llmToken`, and `audioOut` payloads all carry the current `turn_idx` so a per-turn metric can correlate them.
+
+#### Sequence for a normal turn
+
+```
+user audio in       → onUserSpeechStarted        (user → speaking)
+silence detected    → onUserSpeechEnded          (user → listening)
+silence + commit    → onUserSpeechEos            (turn_idx += 1, agent → thinking)
+LLM streams         → onLlmToken   (once)        (TTFT)
+TTS produces audio  → onAudioOut   (once)        (TTS warmup)
+audio hits wire     → onAgentSpeechStarted       (agent → speaking)
+last chunk          → onAgentSpeechEnded         (agent → idle, interrupted=false)
+```
+
+#### Sequence for a barged-in turn
+
+```
+onAgentSpeechStarted                              (agent → speaking)
+... user starts talking over the agent ...
+onUserSpeechStarted                               (user → speaking)
+onAgentSpeechEnded { interrupted: true }          (agent → idle)
+onUserSpeechEos                                   (turn_idx += 1, new turn begins)
+```
+
+### Full example — wire all seven callbacks
+
+```typescript
+import { Patter, Twilio, OpenAIRealtime } from "getpatter";
+
+const phone = new Patter({
+  carrier: new Twilio(),
+  phoneNumber: "+15555550100",
+});
+
+const agent = phone.agent({
+  engine: new OpenAIRealtime(),
+  systemPrompt: "You are a helpful assistant.",
+});
+
+// --- raw VAD edges -------------------------------------------------------
+phone.onUserSpeechStarted = async (ev) => {
+  // Raw VAD positive edge — user might still be mid-utterance.
+  console.log(`[vad+] t=${ev.timestamp_ms} state=${JSON.stringify(phone.conversationState)}`);
+};
+
+phone.onUserSpeechEnded = async (ev) => {
+  // Raw VAD trailing edge — NOT committed EOU. User may resume in 100ms.
+  console.log(`[vad-] dur=${ev.speech_duration_ms}ms`);
+};
+
+// --- canonical 'user finished' signal ------------------------------------
+let lastEosMs = 0;
+
+phone.onUserSpeechEos = async (ev) => {
+  // Committed EOU. This is the timestamp to anchor TTFT against.
+  console.log(`[eos]  trigger=${ev.trigger} silence=${ev.trailing_silence_ms ?? "?"}ms`);
+  lastEosMs = ev.timestamp_ms as number;
+};
+
+// --- model + audio first-fire markers ------------------------------------
+phone.onLlmToken = async (ev) => {
+  const ttft = (ev.timestamp_ms as number) - lastEosMs;
+  console.log(`[ttft] ${ttft}ms  model=${ev.model}  provider=${ev.llm_provider}`);
+};
+
+phone.onAudioOut = async (ev) => {
+  // TTS warmup — bytes produced, not yet on the wire.
+  console.log(`[tts ] turn=${ev.turn_idx} provider=${ev.tts_provider}`);
+};
+
+// --- what the user hears + barge-in detection ----------------------------
+phone.onAgentSpeechStarted = async (ev) => {
+  console.log(`[wire] turn=${ev.turn_idx} engine=${ev.engine ?? "?"}`);
+};
+
+phone.onAgentSpeechEnded = async (ev) => {
+  if (ev.interrupted) {
+    console.log(`[barge] turn=${ev.turn_idx} cut at ${ev.speech_duration_ms}ms`);
+  } else {
+    console.log(`[done] turn=${ev.turn_idx} spoke ${ev.speech_duration_ms}ms`);
+  }
+};
+
+await phone.serve({ agent, port: 8000 });
+```
+
+### Barge-in detection
+
+The cleanest way to detect a barge-in is to inspect `onAgentSpeechEnded.interrupted`:
+
+```typescript
+const bargeIns: Array<{ turnIdx: number; spokeForMs: number; atMs: number }> = [];
+
+phone.onAgentSpeechEnded = async (ev) => {
+  if (ev.interrupted) {
+    bargeIns.push({
+      turnIdx: ev.turn_idx as number,
+      spokeForMs: ev.speech_duration_ms as number,
+      atMs: ev.timestamp_ms as number,
+    });
+  }
+};
+```
+
+For barge-in *latency* (how fast the agent stopped after the user started talking), pair `onUserSpeechStarted` with the next `onAgentSpeechEnded({ interrupted: true })`:
+
+```typescript
+let lastUserStartMs: number | null = null;
+
+phone.onUserSpeechStarted = async (ev) => {
+  lastUserStartMs = ev.timestamp_ms as number;
+};
+
+phone.onAgentSpeechEnded = async (ev) => {
+  if (ev.interrupted && lastUserStartMs !== null) {
+    const latencyMs = (ev.timestamp_ms as number) - lastUserStartMs;
+    console.log(`barge-in latency: ${latencyMs}ms (target: <250ms)`);
+  }
+};
+```
+
+### Wiring
+
+The realtime stream handler fires `userSpeechStarted/Ended/Eos` and `agentSpeechStarted/Ended` automatically on the OpenAI Realtime + Twilio/Telnyx path — no extra setup required.
+
+`onLlmToken` and `onAudioOut` are exposed on the dispatcher (`phone.speechEvents`) so custom adapters and pipeline-mode integrations can call them. If you are building a custom provider, call `phone.speechEvents.fireLlmFirstToken({...})` on your first streamed chunk and `phone.speechEvents.fireAudioOut({...})` on your first synthesized audio buffer; both are idempotent within a turn.
+
+### Public exports
+
+| Export | Type | Use |
+|---|---|---|
+| `SpeechEvents` | class | The dispatcher. One instance per `Patter` (auto-created). |
+| `SpeechEventCallback` | type | `(payload: Readonly<Record<string, unknown>>) => void \| Promise<void>`. |
+| `ConversationStateSnapshot` | interface | `{ readonly user: UserState; readonly agent: AgentState }`. |
+| `UserState` | type | `"listening" \| "speaking" \| "thinking" \| "away"`. |
+| `AgentState` | type | `"initializing" \| "idle" \| "listening" \| "thinking" \| "speaking"`. |
+| `EouTrigger` | type | `"vad_silence" \| "semantic_turn_detector" \| "manual_commit"`. |
+
+```typescript
+import {
+  SpeechEvents,
+  type SpeechEventCallback,
+  type ConversationStateSnapshot,
+  type UserState,
+  type AgentState,
+  type EouTrigger,
+} from "getpatter";
+```
+
+### OpenTelemetry attach contract
+
+Every speech-edge event also records a span event on the active call span when `PATTER_OTEL_ENABLED=1` and the optional `@opentelemetry/api` peer dep is installed. When OTel is missing or disabled, the OTel branch is a **zero-cost no-op** — there is no overhead and no failure.
+
+| Callback | Span event name | Selected attributes |
+|---|---|---|
+| `onUserSpeechStarted` | `patter.event.user_speech_started` | `patter.audio.offset_ms`, `patter.vad.confidence` |
+| `onUserSpeechEnded` | `patter.event.user_speech_ended` | `patter.speech.duration_ms` |
+| `onUserSpeechEos` | `patter.event.user_speech_eos` | `patter.eos.trigger`, `patter.eos.trailing_silence_ms` |
+| `onAgentSpeechStarted` | `patter.event.agent_speech_started` | `patter.turn.idx`, `patter.tts.provider`, `patter.engine` |
+| `onAgentSpeechEnded` | `patter.event.agent_speech_ended` | `patter.turn.idx`, `patter.speech.duration_ms`, `patter.turn.interrupted` |
+| `onLlmToken` | `patter.event.llm_first_token` | `gen_ai.request.model`, `gen_ai.provider.name` (per [OTel GenAI semconv](https://opentelemetry.io/docs/specs/semconv/gen-ai/)), `patter.turn.idx` |
+| `onAudioOut` | `patter.event.tts_first_audio` | `patter.turn.idx`, `patter.tts.provider` |
+
+See [Tracing](/typescript-sdk/tracing) for the OTel installation and exporter setup.
+
+### Callback safety
+
+Observer exceptions are **caught and logged**, never propagated to the live call. A misbehaving callback cannot crash the call or break audio. Errors are logged at WARN level via the SDK logger with the offending span event name for easy correlation.
+
+### Design notes
+
+- **`onUserSpeechEnded` vs. `onUserSpeechEos`**: surfaced as separate events because they are two different signals. `silence_gap_ms_max` wants the EOU; `cross_talk_pct` wants the raw VAD edge.
+- **`onAgentSpeechStarted` vs. `onAudioOut`**: `onAudioOut` is when TTS bytes arrive in the buffer (warmup metric). `onAgentSpeechStarted` is when those bytes hit the carrier wire — what the user actually hears. Subtract the two to measure carrier-side jitter.
+- **Idempotency**: `onLlmToken` and `onAudioOut` fire **at most once per turn**. The guard is reset on `onUserSpeechEos` so the next turn re-arms cleanly.
+

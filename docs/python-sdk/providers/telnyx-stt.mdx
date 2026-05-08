@@ -1,0 +1,136 @@
+---
+title: "Telnyx STT"
+description: "Streaming speech-to-text bundled with your Telnyx telephony plan — single bill, on-network audio."
+icon: "microphone"
+---
+
+# Telnyx STT
+
+`TelnyxSTT` is a streaming speech-to-text provider that talks to Telnyx's `wss://api.telnyx.com/v2/speech-to-text/transcription` endpoint. It implements Patter's pipeline-mode `STTProvider` interface — drop it in anywhere [`DeepgramSTT`](/python-sdk/providers/deepgram) or [`AssemblyAISTT`](/python-sdk/providers/assemblyai) would go.
+
+## Why use it
+
+If you're already on Telnyx for telephony (see [Carrier — Telnyx](/python-sdk/carrier#telnyx)), you can keep STT on the same vendor:
+
+- **One bill, one credential.** No extra Deepgram / AssemblyAI / Speechmatics account to manage.
+- **On-network audio path.** Caller audio arrives at Telnyx's edge for the carrier hop; routing it to Telnyx STT from the same edge keeps the audio inside their backbone instead of egressing to a third-party STT.
+- **Pluggable backend.** Telnyx fronts four transcription engines (`telnyx`, `google`, `deepgram`, `azure`) behind a single API — pick whichever quality / language profile suits the call without changing wire protocol.
+
+## Install
+
+`TelnyxSTT` ships in the core `getpatter` package — no extras needed:
+
+```bash
+pip install getpatter
+```
+
+## Quickstart
+
+<CodeGroup>
+```python Python
+import asyncio
+from getpatter import Patter, Telnyx, ElevenLabsTTS
+from getpatter.providers.telnyx_stt import TelnyxSTT, TelnyxTranscriptionEngine
+
+phone = Patter(carrier=Telnyx(), phone_number="+15550001234")   # TELNYX_API_KEY from env
+
+agent = phone.agent(
+    stt=TelnyxSTT(api_key="KEY...", language="en"),             # or transcription_engine="deepgram"
+    tts=ElevenLabsTTS.for_telnyx(),                             # ELEVENLABS_API_KEY from env
+    system_prompt="You are a helpful assistant.",
+)
+
+asyncio.run(phone.serve(agent))
+```
+
+```typescript TypeScript
+// npx tsx example.ts
+import { Patter, Telnyx, ElevenLabsTTS } from "getpatter";
+import { TelnyxSTT } from "getpatter/dist/providers/telnyx-stt";
+
+const phone = new Patter({ carrier: new Telnyx(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  stt: new TelnyxSTT(process.env.TELNYX_API_KEY!, "en"),
+  tts: ElevenLabsTTS.forTelnyx({}),
+  systemPrompt: "You are a helpful assistant.",
+});
+
+await phone.serve({ agent });
+```
+</CodeGroup>
+
+## Constructor
+
+<CodeGroup>
+```python Python
+TelnyxSTT(
+    api_key: str,
+    language: str = "en",
+    *,
+    transcription_engine: TelnyxTranscriptionEngine | str = TelnyxTranscriptionEngine.TELNYX,
+    sample_rate: TelnyxSTTSampleRate | int = TelnyxSTTSampleRate.HZ_16000,
+    base_url: str = TELNYX_STT_WS_URL,
+    session: aiohttp.ClientSession | None = None,
+)
+```
+
+```typescript TypeScript
+new TelnyxSTT(
+  apiKey: string,
+  language: string = "en",
+  transcriptionEngine: TelnyxTranscriptionEngine = "telnyx",
+  sampleRate: number = 16000,
+  baseUrl: string = "wss://api.telnyx.com/v2/speech-to-text/transcription",
+)
+```
+</CodeGroup>
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `api_key` / `apiKey` | — required | Telnyx API v2 key (Bearer token). |
+| `language` | `"en"` | ISO 639-1 language code (e.g. `"en"`, `"es"`, `"fr"`). |
+| `transcription_engine` / `transcriptionEngine` | `"telnyx"` | Backend engine. One of `"telnyx"`, `"google"`, `"deepgram"`, `"azure"`. |
+| `sample_rate` / `sampleRate` | `16000` | PCM input sample rate in Hz. Patter sends a streaming WAV header on the first chunk. |
+| `base_url` / `baseUrl` | Telnyx prod URL | Override for testing. |
+
+## Engines and sample rates
+
+The Python SDK exposes the supported values as enums for editor autocomplete:
+
+```python
+from getpatter import (
+    TelnyxTranscriptionEngine,    # "telnyx" | "google" | "deepgram" | "azure"
+    TelnyxSTTSampleRate,          # 8000 | 16000 | 24000
+    TelnyxSTTInputFormat,         # "wav"
+)
+```
+
+| Sample rate | Use case |
+|---|---|
+| `8000` | Match Twilio Media Streams μ-law without resampling. |
+| `16000` (default) | Telnyx default media-streaming format (L16 PCM). |
+| `24000` | Higher-fidelity inputs (e.g. browser RTC). |
+
+## Pricing
+
+Telnyx STT pricing varies by transcription engine and is bundled with your Telnyx plan — see the [Telnyx STT pricing page](https://telnyx.com/pricing/speech-to-text). Patter does not charge an STT line item for `TelnyxSTT`; the cost shows up on your Telnyx invoice alongside the carrier minutes. See [Metrics](/python-sdk/metrics) for how to register a custom rate via `Patter(pricing={...})` if you want it surfaced in the dashboard.
+
+## Low-level usage
+
+```python
+from getpatter.providers.telnyx_stt import TelnyxSTT
+
+stt = TelnyxSTT(api_key="KEY...", language="en", transcription_engine="deepgram")
+await stt.connect()
+await stt.send_audio(pcm16_chunk)                 # 16 kHz PCM s16le mono
+async for t in stt.receive_transcripts():
+    print(t.text, t.is_final, t.confidence)
+await stt.close()
+```
+
+## See also
+
+- [STT overview](/python-sdk/stt) — provider table and shared concepts.
+- [Carrier — Telnyx](/python-sdk/carrier#telnyx) — picking Telnyx as your telephony provider.
+- [Telnyx TTS](/python-sdk/providers/telnyx-tts) — pair this STT with carrier-bundled TTS.

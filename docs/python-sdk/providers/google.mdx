@@ -1,0 +1,163 @@
+---
+title: "Google"
+description: "Google Gemini LLM provider — Developer API or Vertex AI, streaming with function calling."
+icon: "google"
+---
+
+# Google Gemini LLM
+
+`GoogleLLM` plugs Google Gemini chat models into Patter's pipeline mode via the `google-genai` SDK. It supports both the Gemini Developer API (with an API key) and Vertex AI (with GCP project + location). Streams normalise to Patter's unified `{type: "text" | "tool_call" | "done"}` chunk protocol, and Gemini `function_call` parts map directly onto Patter tools.
+
+<Note>
+This page covers Google Gemini in **chat-completions** mode for the pipeline (STT → LLM → TTS). For Gemini's bidirectional speech-to-speech engine, see the separate `gemini-live` adapter under [Engines](/python-sdk/engines).
+</Note>
+
+## Install
+
+```bash
+pip install "getpatter[google]"
+```
+
+```bash
+npm install getpatter
+```
+
+## Usage
+
+<CodeGroup>
+
+```python Python
+# Namespaced import
+from getpatter.llm import google
+
+llm = google.LLM()                                          # reads GEMINI_API_KEY (or GOOGLE_API_KEY)
+llm = google.LLM(api_key="AIza...", model="gemini-2.5-flash")
+
+# Vertex AI
+llm = google.LLM(
+    vertexai=True,
+    project="my-gcp-project",
+    location="us-central1",
+)
+
+# Flat alias (equivalent)
+from getpatter import GoogleLLM
+
+llm = GoogleLLM()
+```
+
+```ts TypeScript
+// Namespaced import
+import * as google from "getpatter/llm/google";
+
+const llm = new google.LLM();                               // reads GEMINI_API_KEY or GOOGLE_API_KEY
+const llm = new google.LLM({ apiKey: "AIza...", model: "gemini-2.5-flash" });
+
+// Flat alias (equivalent)
+import { GoogleLLM } from "getpatter";
+
+const llm2 = new GoogleLLM();
+```
+
+</CodeGroup>
+
+<Note>
+The namespaced import (`from getpatter.llm import google` / `import * as google from "getpatter/llm/google"`) auto-resolves the API key from `GEMINI_API_KEY` first, then `GOOGLE_API_KEY` for parity with other SDKs, and exposes a uniform `LLM` class.
+</Note>
+
+Plug it into an agent:
+
+<CodeGroup>
+
+```python Python
+import asyncio
+from getpatter import Patter, Twilio, DeepgramSTT, GoogleLLM, ElevenLabsTTS
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
+agent = phone.agent(
+    stt=DeepgramSTT(),
+    llm=GoogleLLM(),                                        # GEMINI_API_KEY from env
+    tts=ElevenLabsTTS(voice_id="rachel"),
+    system_prompt="You are a helpful assistant.",
+    first_message="Hi, how can I help?",
+)
+
+asyncio.run(phone.serve(agent))
+```
+
+```ts TypeScript
+import { Patter, Twilio, DeepgramSTT, GoogleLLM, ElevenLabsTTS } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  stt: new DeepgramSTT(),
+  llm: new GoogleLLM(),                                     // GEMINI_API_KEY from env
+  tts: new ElevenLabsTTS({ voiceId: "rachel" }),
+  systemPrompt: "You are a helpful assistant.",
+  firstMessage: "Hi, how can I help?",
+});
+
+await phone.serve(agent);
+```
+
+</CodeGroup>
+
+## Supported models
+
+Pricing in USD per 1M tokens.
+
+| Model | Input | Output | Notes |
+|---|---|---|---|
+| `gemini-2.5-flash` (default) | $0.30 | $2.50 | Best price/perf for voice. |
+| `gemini-2.5-pro` | $1.25 | $10.00 | Highest quality. |
+| `gemini-2.0-flash` | n/a | n/a | Older fast model. |
+| `gemini-2.0-flash-lite` | n/a | n/a | Lightweight 2.0. |
+| `gemini-1.5-flash` | n/a | n/a | Legacy fast model. |
+| `gemini-1.5-pro` | n/a | n/a | Legacy pro model. |
+
+For the speech-to-speech variant `gemini-live-2.5-flash-native-audio` (input $0.30 / output $2.50), see the [Engines](/python-sdk/engines) page — it is a separate Realtime adapter, not a chat-completions model.
+
+## Environment variables
+
+| Variable | Required | Notes |
+|---|---|---|
+| `GEMINI_API_KEY` | one of these | Preferred — Google's CLI tooling uses this name. |
+| `GOOGLE_API_KEY` | one of these | Legacy/alt name accepted for parity. |
+| `GOOGLE_GENAI_USE_VERTEXAI` | optional | Set to `1` / `true` to default `vertexai=True`. |
+| `GOOGLE_CLOUD_PROJECT` | Vertex AI | GCP project ID when `vertexai=True`. |
+| `GOOGLE_CLOUD_LOCATION` | Vertex AI | GCP region (defaults to `us-central1`). |
+
+## Options
+
+| Option | Default | Notes |
+|---|---|---|
+| `api_key` / `apiKey` | `None` | Reads `GEMINI_API_KEY`, then `GOOGLE_API_KEY`. Ignored when `vertexai=True`. |
+| `model` | `"gemini-2.5-flash"` | Any Gemini chat model id. |
+| `vertexai` | `False` | Use Vertex AI instead of the Developer API. |
+| `project` | `None` | GCP project (Vertex AI). |
+| `location` | `"us-central1"` | GCP region (Vertex AI). |
+| `temperature` | unset | Optional sampling temperature. |
+| `max_output_tokens` / `maxOutputTokens` | unset | Output token cap. |
+
+## Vertex AI
+
+Switch to Vertex AI when you need GCP-native auth (service accounts), VPC Service Controls, regional residency, or per-project billing isolation.
+
+```python
+from getpatter.llm import google
+
+llm = google.LLM(
+    vertexai=True,
+    project="my-gcp-project",
+    location="europe-west4",                               # GoogleVertexLocation enum
+    model="gemini-2.5-pro",
+)
+```
+
+The `google-genai` SDK picks up Application Default Credentials automatically — set `GOOGLE_APPLICATION_CREDENTIALS` to a service-account key path or run `gcloud auth application-default login` for local dev.
+
+## Function calling
+
+Gemini's `function_call` parts map directly onto Patter tools — define a tool once and it works on every LLM provider. Patter assigns a monotonically increasing index per `function_call` part since Gemini does not provide a stable per-call index across stream chunks. Token usage is collected from `usage_metadata` (cumulative on each chunk; only the last value is yielded as a `usage` event to avoid double-counting).

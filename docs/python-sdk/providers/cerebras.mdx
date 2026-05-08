@@ -1,0 +1,155 @@
+---
+title: "Cerebras"
+description: "Cerebras LLM provider — OpenAI-compatible Inference API with WSE-3 throughput."
+icon: "microchip"
+---
+
+# Cerebras LLM
+
+`CerebrasLLM` plugs Cerebras's OpenAI-compatible Inference API at `https://api.cerebras.ai/v1` into Patter's pipeline mode. It is a thin wrapper around `OpenAILLMProvider` with a Cerebras-specific base URL and optional msgpack + gzip payload compression (both enabled by default) for faster TTFT on large prompts.
+
+## Why Cerebras for voice
+
+Cerebras runs inference on the WSE-3 wafer-scale chip, which serves the default model `gpt-oss-120b` at **~3000 tok/sec**. Patter's downstream TTS consumption rate is ~150-300 tok/sec, so any model on Cerebras saturates the pipeline regardless of weight size — meaning you can ship a 120B model with no realtime latency penalty over an 8B model. Picking the larger one buys higher answer quality for free.
+
+## Install
+
+```bash
+pip install "getpatter[cerebras]"
+```
+
+```bash
+npm install getpatter
+```
+
+## Usage
+
+<CodeGroup>
+
+```python Python
+# Namespaced import
+from getpatter.llm import cerebras
+
+llm = cerebras.LLM()                                        # reads CEREBRAS_API_KEY
+llm = cerebras.LLM(api_key="csk-...", model="gpt-oss-120b")
+llm = cerebras.LLM(
+    model="gpt-oss-120b",
+    gzip_compression=True,                                  # defaults to True
+    msgpack_encoding=True,                                  # defaults to True
+    response_format={"type": "json_object"},                # OpenAI-style structured outputs
+)
+
+# Flat alias (equivalent)
+from getpatter import CerebrasLLM
+
+llm = CerebrasLLM()
+```
+
+```ts TypeScript
+// Namespaced import
+import * as cerebras from "getpatter/llm/cerebras";
+
+const llm = new cerebras.LLM();                             // reads CEREBRAS_API_KEY
+const llm = new cerebras.LLM({ apiKey: "csk-...", model: "gpt-oss-120b" });
+const llm = new cerebras.LLM({
+  model: "gpt-oss-120b",
+  gzipCompression: true,                                    // default
+  responseFormat: { type: "json_object" },
+});
+
+// Flat alias (equivalent)
+import { CerebrasLLM } from "getpatter";
+
+const llm2 = new CerebrasLLM();
+```
+
+</CodeGroup>
+
+<Note>
+The namespaced import (`from getpatter.llm import cerebras` / `import * as cerebras from "getpatter/llm/cerebras"`) auto-resolves the API key from `CEREBRAS_API_KEY` and exposes a uniform `LLM` class — the same pattern Patter uses for STT and TTS namespaces.
+</Note>
+
+Plug it into an agent:
+
+<CodeGroup>
+
+```python Python
+import asyncio
+from getpatter import Patter, Twilio, DeepgramSTT, CerebrasLLM, ElevenLabsTTS
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
+agent = phone.agent(
+    stt=DeepgramSTT(),
+    llm=CerebrasLLM(),                                      # CEREBRAS_API_KEY from env
+    tts=ElevenLabsTTS(voice_id="rachel"),
+    system_prompt="You are a helpful assistant.",
+    first_message="Hi, how can I help?",
+)
+
+asyncio.run(phone.serve(agent))
+```
+
+```ts TypeScript
+import { Patter, Twilio, DeepgramSTT, CerebrasLLM, ElevenLabsTTS } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  stt: new DeepgramSTT(),
+  llm: new CerebrasLLM(),                                   // CEREBRAS_API_KEY from env
+  tts: new ElevenLabsTTS({ voiceId: "rachel" }),
+  systemPrompt: "You are a helpful assistant.",
+  firstMessage: "Hi, how can I help?",
+});
+
+await phone.serve(agent);
+```
+
+</CodeGroup>
+
+## Supported models
+
+Pricing in USD per 1M tokens. Availability is gated per-tier — when a 404 `model_not_found` lands, the provider logs a recovery hint with override candidates and lets the call continue (voice pipelines treat LLM failures as recoverable).
+
+| Model | Tier | Input | Output | Notes |
+|---|---|---|---|---|
+| `gpt-oss-120b` (default) | production | n/a | n/a | Highest throughput on WSE-3 (~3000 tok/sec). No deprecation date. |
+| `llama3.1-8b` | production | n/a | n/a | Smaller-context alternative. **Deprecating 2026-05-27.** |
+| `llama-3.3-70b` | paid | $0.85 | $1.20 | Listed in `LLM_PRICING`. |
+| `qwen-3-32b` | paid | $0.40 | $0.80 | Listed in `LLM_PRICING`. |
+| `qwen-3-235b-a22b-instruct-2507` | preview | n/a | n/a | Multilingual, strong on European languages. |
+| `zai-glm-4.7` | preview | n/a | n/a | Preview model, opt-in. |
+
+<Note>
+`gpt-oss-120b` and `llama3.1-8b` are billed under Cerebras's tier plans rather than per-token rate cards, so they are not present in `LLM_PRICING` — pass `pricing={...}` overrides if your dashboard needs cost figures for them.
+</Note>
+
+<Warning>
+**`llama3.1-8b` is deprecating 2026-05-27.** Switch to `gpt-oss-120b` (the default), `llama-3.3-70b` (paid tier), or `qwen-3-235b-a22b-instruct-2507` (preview) before that date.
+</Warning>
+
+## Environment variables
+
+| Variable | Required | Notes |
+|---|---|---|
+| `CEREBRAS_API_KEY` | yes | Auto-loaded when `api_key` / `apiKey` is omitted. |
+
+## Options
+
+| Option | Default | Notes |
+|---|---|---|
+| `api_key` / `apiKey` | `None` | Reads from `CEREBRAS_API_KEY` when omitted. |
+| `model` | `"gpt-oss-120b"` | Any Cerebras chat model id. Use `GET /v1/models` to discover tier-available IDs. |
+| `base_url` / `baseUrl` | `https://api.cerebras.ai/v1` | Override the Cerebras endpoint (rarely needed). |
+| `gzip_compression` / `gzipCompression` | `True` | Gzip request payloads for faster TTFT on large prompts. |
+| `msgpack_encoding` | `True` | Encode request payloads with msgpack for smaller wire size (Python only — TS uses gzip alone). |
+| `temperature`, `max_tokens`, `top_p`, `seed`, `frequency_penalty`, `presence_penalty`, `stop`, `response_format`, `parallel_tool_calls`, `tool_choice` | unset | All forwarded to `chat.completions.create`. See [Cerebras docs](https://inference-docs.cerebras.ai/) for accepted values. |
+
+## Payload compression
+
+Cerebras supports **msgpack + gzip** request bodies — see [Cerebras payload optimization](https://inference-docs.cerebras.ai/payload-optimization). Patter enables both by default for Python (msgpack + gzip) and gzip for TypeScript, which reduces wire size on large prompts and shaves time-to-first-token. Disable per-request by passing `gzip_compression=False` / `msgpack_encoding=False`.
+
+## Error handling
+
+When `chat.completions.create` returns a 404 `model_not_found`, the provider logs an `ERROR`-level recovery hint including the upstream message and lists override candidates (`llama3.1-8b`, `qwen-3-235b-a22b-instruct-2507`, `llama-3.3-70b` on paid tier) — then returns silently. Voice pipelines treat LLM failures as recoverable so the call continues and the user simply hears no LLM response for that turn. All other errors raise `PatterError` after one retry with exponential backoff and honour `x-ratelimit-reset-*` advisory headers.

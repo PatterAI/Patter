@@ -1,0 +1,125 @@
+---
+title: "OpenAI TTS"
+description: "tts-1, tts-1-hd, and gpt-4o-mini-tts via OpenAI's HTTP TTS endpoint."
+icon: "volume"
+---
+
+# OpenAI TTS
+
+`OpenAITTS` is a Patter `TTSProvider` backed by OpenAI's [`POST /v1/audio/speech`](https://platform.openai.com/docs/api-reference/audio/createSpeech) endpoint. It streams 24 kHz PCM from OpenAI and resamples it to 16 kHz or 8 kHz on the fly so the telephony output path can forward bytes without an additional resample stage. No vendor SDK required.
+
+## Install
+
+`openai-tts` ships in the base install — no extra needed.
+
+```bash
+pip install getpatter
+```
+
+<Note>
+  On Python 3.13+ install `audioop-lts` for the in-process 24 kHz → 16 kHz
+  (or 8 kHz) resampler. It's pinned in `getpatter`'s base dependencies.
+</Note>
+
+## Usage
+
+<Note>
+  Use the namespaced import (`getpatter.tts.openai`) or the flat alias
+  (`getpatter.OpenAITTS`). Both auto-resolve `OPENAI_API_KEY` from the
+  environment when `api_key=` is omitted.
+</Note>
+
+<CodeGroup>
+```python Python
+# Namespaced import
+from getpatter.tts import openai
+
+tts = openai.TTS()                                        # reads OPENAI_API_KEY
+tts = openai.TTS(api_key="sk-...", voice="nova", model="tts-1-hd")
+
+# Flat alias (equivalent)
+from getpatter import OpenAITTS
+
+tts = OpenAITTS()
+```
+
+```typescript TypeScript
+// See typescript-sdk/providers/openai-tts for the TS twin.
+```
+</CodeGroup>
+
+In an agent:
+
+```python
+import asyncio
+from getpatter import Patter, Twilio, DeepgramSTT, OpenAITTS
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
+agent = phone.agent(
+    stt=DeepgramSTT(),                                    # DEEPGRAM_API_KEY from env
+    tts=OpenAITTS(voice="nova"),                          # OPENAI_API_KEY from env
+    system_prompt="You are a helpful assistant.",
+)
+
+asyncio.run(phone.serve(agent))
+```
+
+## Models and rates
+
+OpenAI TTS bills per 1,000 characters synthesized. Per-model rates (defaults from `getpatter.pricing`):
+
+| Model | Rate / 1k chars | Notes |
+|---|---|---|
+| `tts-1` (default) | $0.015 | Fast, telephony-friendly. |
+| `tts-1-hd` | $0.030 | Higher fidelity — heavier. |
+| `gpt-4o-mini-tts` | $0.012 | Accepts `instructions` for voice direction. |
+
+(`gpt-4o-mini-tts` is billed by tokens upstream; published per 1k chars equivalent for parity with the rest of the table. Override per-call via `Patter(pricing={"openai_tts": {"models": {"tts-1": {"price": ...}}}})`.)
+
+## Voices
+
+Built-in voices accepted by all three models:
+
+`alloy` (default), `ash`, `ballad`, `coral`, `echo`, `fable`, `nova`, `onyx`, `sage`, `shimmer`, `verse`.
+
+## Languages
+
+OpenAI TTS automatically follows the language of the input text — no `language` parameter exists. The same voice can synthesize across most of OpenAI's supported languages (English, Spanish, French, German, Italian, Portuguese, Japanese, Chinese, …) — see the [OpenAI voice guide](https://platform.openai.com/docs/guides/text-to-speech/voice-options) for the full coverage matrix.
+
+## Voice direction (`gpt-4o-mini-tts` only)
+
+Pass `instructions=` to steer tone, pacing, and accent:
+
+```python
+tts = OpenAITTS(
+    api_key="sk-...",
+    model="gpt-4o-mini-tts",
+    voice="sage",
+    instructions="Speak in a warm, empathetic tone, like a customer support specialist.",
+)
+```
+
+`tts-1` and `tts-1-hd` reject `instructions` with a 400 — the SDK silently drops the field for those models so you can swap freely.
+
+## Options
+
+| Option | Default | Notes |
+|---|---|---|
+| `api_key` | `None` | Reads from `OPENAI_API_KEY` when omitted. |
+| `model` | `"tts-1"` | `"tts-1"`, `"tts-1-hd"`, `"gpt-4o-mini-tts"`. |
+| `voice` | `"alloy"` | Any of the 11 built-in voices above. |
+| `instructions` | `None` | Voice-direction prompt (ignored for legacy models). |
+| `speed` | `None` | Float in `[0.25, 4.0]`. |
+| `target_sample_rate` | `16000` | `8000` or `16000` Hz — chooses the resampler chain. |
+
+## Low-level usage
+
+```python
+from getpatter.providers.openai_tts import OpenAITTS
+
+tts = OpenAITTS(api_key="sk-...", voice="nova", model="tts-1")
+async for chunk in tts.synthesize("Hello from the Patter pipeline."):
+    ...
+await tts.close()
+```

@@ -1,0 +1,254 @@
+---
+title: "MCP — Model Context Protocol"
+description: "Plug a Patter agent into MCP servers (Google Workspace, PayPal, Postgres, GitHub, …) without writing wrapper handlers. Tools are discovered at call start and dispatched through the MCP client transparently."
+icon: "plug"
+---
+
+# MCP (Model Context Protocol)
+
+The Model Context Protocol is an open spec that lets servers expose tools, resources, and prompts to any compatible client. Patter speaks MCP as a client: point your agent at one or more MCP server URLs and the SDK queries each server's `tools/list` at call start, wraps the discovered tools with synthetic handlers that dispatch back through `tools/call`, and merges them into `agent.tools` before the model sees the function-tool list.
+
+The result: any MCP-exposed capability — Google Workspace, PayPal, GitHub, Postgres, internal services — becomes a tool your phone agent can call, with zero wrapper code.
+
+## When to use this
+
+| Scenario | Use this |
+|---|---|
+| You already run an MCP server (or the vendor does) and want the phone agent to use it. | `mcpServers: [...]` |
+| You want to expose a single bespoke action and you control the implementation. | A regular `tool(...)` with a `handler` or `webhookUrl` (see [Tools](/typescript-sdk/tools)). |
+| You need both. | Mix freely — MCP tools and user-defined tools coexist; a name collision raises at startup. |
+
+## Installation
+
+MCP support is an **optional dependency**. If you do not configure `mcpServers`, you never pay the install cost.
+
+```bash
+npm install @modelcontextprotocol/sdk
+```
+
+This pulls in the official [`@modelcontextprotocol/sdk`](https://www.npmjs.com/package/@modelcontextprotocol/sdk) package. Configuring `mcpServers` without it installed raises a clear error at call start.
+
+## Quickstart — URL string (shorthand)
+
+The simplest form: pass a list of URL strings. Each is treated as `{ url, transport: 'streamable-http' }` with no auth headers.
+
+```typescript
+import { Patter, Twilio, OpenAIRealtime } from "getpatter";
+
+const phone = new Patter({
+  carrier: new Twilio(),
+  phoneNumber: "+15550001234",
+  webhookUrl: "api.example.com",
+});
+
+const agent = phone.agent({
+  engine: new OpenAIRealtime(),
+  systemPrompt:
+    "You are a database assistant. When the caller asks about an order, " +
+    "use the Postgres MCP server to query the orders table.",
+  mcpServers: [
+    "https://mcp.example-postgres.com/mcp",
+  ],
+});
+
+await phone.serve(agent, { port: 8000 });
+```
+
+At call start you'll see a log line:
+
+```
+MCP server 'mcp[0]' registered 7 tool(s)
+MCP: merged 7 tool(s) into agent
+```
+
+## Full options form — auth headers + telemetry name
+
+When you need authentication or want a friendly name in logs, use the object form. Headers are attached to every transport request — typically a bearer token.
+
+<CodeGroup>
+```typescript TypeScript
+const agent = phone.agent({
+  engine: new OpenAIRealtime(),
+  systemPrompt: "You are a workspace assistant. Use the available tools to help the caller.",
+  mcpServers: [
+    {
+      url: "https://mcp.googleworkspace.example/mcp",
+      headers: { Authorization: `Bearer ${process.env.GWS_MCP_TOKEN}` },
+      name: "google-workspace",
+    },
+    {
+      url: "https://mcp.paypal.example/mcp",
+      headers: { Authorization: `Bearer ${process.env.PAYPAL_MCP_TOKEN}` },
+      name: "paypal",
+    },
+    // Mix shorthand and full form freely:
+    "https://mcp.public-weather.example/mcp",
+  ],
+});
+```
+
+```python Python
+agent = phone.agent(
+    engine=OpenAIRealtime(),
+    system_prompt="You are a workspace assistant. Use the available tools to help the caller.",
+    mcp_servers=[
+        {
+            "url": "https://mcp.googleworkspace.example/mcp",
+            "headers": {"Authorization": f"Bearer {os.environ['GWS_MCP_TOKEN']}"},
+            "name": "google-workspace",
+        },
+        {
+            "url": "https://mcp.paypal.example/mcp",
+            "headers": {"Authorization": f"Bearer {os.environ['PAYPAL_MCP_TOKEN']}"},
+            "name": "paypal",
+        },
+        "https://mcp.public-weather.example/mcp",
+    ],
+)
+```
+</CodeGroup>
+
+## Configuration reference
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `url` | `string` | Yes | The MCP server's streamable-HTTP endpoint. |
+| `transport` | `"streamable-http"` | — | Currently the only supported transport. May be omitted. |
+| `headers` | `Record<string, string>` | — | Headers attached to every transport request. Use for `Authorization` and similar. Defaults to `{}`. |
+| `name` | `string` | — | Logical name for log lines and telemetry. Defaults to `mcp[<index>]`. |
+
+A bare string is shorthand for `{ url: <string> }`.
+
+## Real-world example — Postgres MCP server
+
+Connect a phone agent to a Postgres MCP server so the caller can query an orders table by phone number.
+
+<CodeGroup>
+```typescript TypeScript
+import {
+  Patter, Twilio, DeepgramSTT, AnthropicLLM, ElevenLabsTTS,
+} from "getpatter";
+
+const phone = new Patter({
+  carrier: new Twilio(),
+  phoneNumber: process.env.PHONE_NUMBER!,
+  webhookUrl: process.env.WEBHOOK_URL!,
+});
+
+const agent = phone.agent({
+  stt: new DeepgramSTT(),
+  llm: new AnthropicLLM(),
+  tts: new ElevenLabsTTS({ voiceId: "rachel" }),
+  systemPrompt:
+    "You are a customer-service agent for an e-commerce store. " +
+    "When asked about an order, use the Postgres tools to query the " +
+    "orders table by order ID. Always confirm details with the caller " +
+    "before performing any write.",
+  firstMessage: "Hi! What can I help you with today?",
+  mcpServers: [
+    {
+      url: "https://mcp.internal.example/postgres/mcp",
+      headers: { Authorization: `Bearer ${process.env.PG_MCP_TOKEN}` },
+      name: "orders-db",
+    },
+  ],
+});
+
+await phone.serve(agent, { port: 8000 });
+```
+
+```python Python
+import asyncio
+import os
+
+from getpatter import (
+    Patter, Twilio, DeepgramSTT, AnthropicLLM, ElevenLabsTTS,
+)
+
+phone = Patter(
+    carrier=Twilio(),
+    phone_number=os.environ["PHONE_NUMBER"],
+    webhook_url=os.environ["WEBHOOK_URL"],
+)
+
+agent = phone.agent(
+    stt=DeepgramSTT(),
+    llm=AnthropicLLM(),
+    tts=ElevenLabsTTS(voice_id="rachel"),
+    system_prompt=(
+        "You are a customer-service agent for an e-commerce store. "
+        "When asked about an order, use the Postgres tools to query the "
+        "orders table by order ID. Always confirm details with the caller "
+        "before performing any write."
+    ),
+    first_message="Hi! What can I help you with today?",
+    mcp_servers=[
+        {
+            "url": "https://mcp.internal.example/postgres/mcp",
+            "headers": {"Authorization": f"Bearer {os.environ['PG_MCP_TOKEN']}"},
+            "name": "orders-db",
+        },
+    ],
+)
+
+async def main():
+    await phone.serve(agent, port=8000)
+
+asyncio.run(main())
+```
+</CodeGroup>
+
+## How it works
+
+1. **Agent build time.** `mcpServers` is stored on the `Agent` immutably. No connections are opened.
+2. **Call start.** The stream handler instantiates an `MCPManager`, opens one streamable-HTTP connection per server, and calls `tools/list` on each. Discovered tools are wrapped with a synthetic handler that, when invoked by the model, dispatches `tools/call` back over the same connection.
+3. **Conflict check.** `MCPManager.assertNoConflicts(...)` (TS) / `MCPManager.assert_no_conflicts(...)` (Py) compares MCP-discovered tool names against your `agent.tools`. A duplicate raises before the call connects.
+4. **During the call.** MCP tools are indistinguishable from local handler tools — `DefaultToolExecutor` invokes the synthetic handler, which round-trips through MCP and returns the result text to the model.
+5. **Call end.** Every MCP connection is closed. Cleanup is best-effort and never blocks call teardown.
+
+## Tool-name collisions
+
+If an MCP-discovered tool has the same name as a tool you defined in `agent.tools`, the SDK refuses to start the call:
+
+```
+Error: MCP tool 'send_email' collides with a user-supplied tool of the
+same name. Rename one of them or remove the duplicate from agent.tools.
+```
+
+Patter does **not** silently shadow either side — that would be a footgun. Rename one or drop the duplicate.
+
+## Failure handling
+
+A dead MCP server should never kill the call:
+
+- **Connect failure** (server unreachable, TLS error, bad auth): logged at `error`, the server is skipped, the call proceeds with the remaining MCP servers and your local tools.
+- **`tools/list` failure**: logged, server is skipped, call proceeds.
+- **Per-call invocation failure**: the synthetic handler returns the same `{ error: "...", fallback: true }` envelope that local tools use, so the model can recover gracefully and apologise to the caller.
+- **Close failure on call end**: logged at `debug`, swallowed. Teardown always completes.
+
+## Cost & latency
+
+Each configured server adds **one HTTP handshake plus one `tools/list` round-trip at call start** — roughly 50–200 ms × N servers added to the time-to-first-token of the call.
+
+If your call setup latency budget is tight, configure fewer servers, or split your fleet so latency-critical agents only see the MCP servers they actually need. Process-wide caching of `tools/list` results is on the roadmap.
+
+<Warning>
+**MVP transport limitation.** The current release supports **streamable-HTTP** transport only. The legacy SSE transport and `stdio` (subprocess) transport are not exposed yet. If your MCP server only speaks `stdio`, run it behind a streamable-HTTP shim, or wait for a future release.
+</Warning>
+
+## Compared to writing a tool by hand
+
+A tool that wraps an HTTP API by hand needs: a JSON schema for the parameters, a handler or webhook to call the API, error envelope shaping, and an entry in `agent.tools`. With MCP, the server already exposes a typed schema for every tool it offers, and Patter wires the dispatch automatically. You write zero per-tool code on the Patter side.
+
+For one-off or in-process tools, a regular [`tool(...)`](/typescript-sdk/tools) is simpler. For sets of tools that someone else already maintains as an MCP server, MCP wins.
+
+## What's next
+
+<CardGroup cols={2}>
+  <Card title="Tools & Function Calling" icon="wrench" href="/typescript-sdk/tools">
+    Define your own tools with webhooks or in-process handlers.
+  </Card>
+  <Card title="PatterTool" icon="phone-arrow-up-right" href="/typescript-sdk/patter-tool">
+    The inverse pattern — expose a Patter agent **as** an MCP-compatible tool.
+  </Card>
+</CardGroup>

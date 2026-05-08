@@ -1,0 +1,109 @@
+---
+title: "OpenAI TTS"
+description: "tts-1, tts-1-hd, and gpt-4o-mini-tts via OpenAI's HTTP TTS endpoint."
+icon: "volume"
+---
+
+# OpenAI TTS
+
+`OpenAITTS` is a Patter `TTSProvider` backed by OpenAI's [`POST /v1/audio/speech`](https://platform.openai.com/docs/api-reference/audio/createSpeech) endpoint. It streams 24 kHz PCM from OpenAI and resamples it to 16 kHz or 8 kHz on the fly so the telephony output path can forward bytes without an additional resample stage. Uses the platform `fetch` — no vendor SDK required, works on Node 18+.
+
+## Install
+
+`openai-tts` ships in the base install.
+
+```bash
+npm install getpatter
+```
+
+## Usage
+
+<Note>
+  Use the namespaced import (`getpatter/tts/openai`) or the flat re-export
+  (`OpenAITTS`). Both auto-resolve `OPENAI_API_KEY` from the environment
+  when `apiKey` is omitted.
+</Note>
+
+<CodeGroup>
+```typescript TypeScript
+// Namespaced import
+import * as openai from "getpatter/tts/openai";
+
+const tts = new openai.TTS();                                    // reads OPENAI_API_KEY
+const tts2 = new openai.TTS({ apiKey: "sk-...", voice: "nova", model: "tts-1-hd" });
+
+// Flat alias (equivalent)
+import { OpenAITTS } from "getpatter";
+
+const tts3 = new OpenAITTS();
+```
+
+```python Python
+# See python-sdk/providers/openai-tts for the Python twin.
+```
+</CodeGroup>
+
+In an agent:
+
+```typescript
+// npx tsx example.ts
+import { Patter, Twilio, DeepgramSTT, OpenAITTS } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  stt: new DeepgramSTT(),                             // DEEPGRAM_API_KEY from env
+  tts: new OpenAITTS({ voice: "nova" }),              // OPENAI_API_KEY from env
+  systemPrompt: "You are a helpful assistant.",
+});
+
+await phone.serve({ agent });
+```
+
+## Models and rates
+
+OpenAI TTS bills per 1,000 characters synthesized. Per-model rates (defaults from `getpatter/pricing`):
+
+| Model | Rate / 1k chars | Notes |
+|---|---|---|
+| `tts-1` | $0.015 | Fast, telephony-friendly. |
+| `tts-1-hd` | $0.030 | Higher fidelity — heavier. |
+| `gpt-4o-mini-tts` (default) | $0.012 | Accepts `instructions` for voice direction. |
+
+(`gpt-4o-mini-tts` is billed by tokens upstream; published per 1k chars equivalent for parity with the rest of the table. Override via `new Patter({ pricing: { openai_tts: { models: { "tts-1": { price: ... } } } } })`.)
+
+## Voices
+
+Built-in voices accepted by all three models:
+
+`alloy` (default), `ash`, `ballad`, `coral`, `echo`, `fable`, `nova`, `onyx`, `sage`, `shimmer`, `verse`.
+
+## Languages
+
+OpenAI TTS automatically follows the language of the input text — no `language` parameter exists. The same voice can synthesize across most of OpenAI's supported languages (English, Spanish, French, German, Italian, Portuguese, Japanese, Chinese, …) — see the [OpenAI voice guide](https://platform.openai.com/docs/guides/text-to-speech/voice-options) for the full coverage matrix.
+
+## Voice direction (`gpt-4o-mini-tts` only)
+
+Pass `instructions` to steer tone, pacing, and accent:
+
+```typescript
+const tts = new OpenAITTS({
+  apiKey: "sk-...",
+  model: "gpt-4o-mini-tts",
+  voice: "sage",
+  instructions: "Speak in a warm, empathetic tone, like a customer support specialist.",
+});
+```
+
+`tts-1` and `tts-1-hd` reject `instructions` with a 400 — the SDK silently drops the field for those models so you can swap freely.
+
+## Options
+
+| Option | Default | Notes |
+|---|---|---|
+| `apiKey` | — | Reads from `OPENAI_API_KEY` when omitted. |
+| `model` | `"gpt-4o-mini-tts"` | `"tts-1"`, `"tts-1-hd"`, `"gpt-4o-mini-tts"`. |
+| `voice` | `"alloy"` | Any of the 11 built-in voices above. |
+| `instructions` | — | Voice-direction prompt (ignored for legacy models). |
+| `speed` | — | Float in `[0.25, 4.0]`. |
+| `antiAlias` | `false` | Enable an anti-aliasing LPF ahead of the 3:2 decimation — cleaner audio on sibilants / fricatives. |

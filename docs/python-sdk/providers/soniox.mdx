@@ -1,0 +1,118 @@
+---
+title: "Soniox STT"
+description: "Soniox real-time streaming speech-to-text for Patter pipeline mode."
+icon: "waveform"
+---
+
+# Soniox STT
+
+`SonioxSTT` streams PCM audio to the [Soniox real-time transcribe WebSocket](https://soniox.com/docs/speech-to-text/real-time) (`wss://stt-rt.soniox.com/transcribe-websocket`). Pure `aiohttp` transport, no vendor SDK required. The adapter accumulates `is_final` tokens into segments and flushes them when an `<end>` / `<fin>` endpoint token is received.
+
+## Install
+
+```bash
+pip install "getpatter[soniox]"
+```
+
+## Usage
+
+<Note>
+  Use the namespaced import (`getpatter.stt.soniox`) or the flat alias
+  (`getpatter.SonioxSTT`). Both auto-resolve `SONIOX_API_KEY` from the
+  environment when `api_key=` is omitted.
+</Note>
+
+<CodeGroup>
+```python Python
+# Namespaced import
+from getpatter.stt import soniox
+
+stt = soniox.STT()                                        # reads SONIOX_API_KEY
+stt = soniox.STT(api_key="...", language_hints=["en", "it"])
+
+# Flat alias (equivalent)
+from getpatter import SonioxSTT
+
+stt = SonioxSTT()
+```
+
+```typescript TypeScript
+// See typescript-sdk/providers/soniox for the TS twin.
+```
+</CodeGroup>
+
+Plug it into an agent:
+
+```python
+import asyncio
+from getpatter import Patter, Twilio, SonioxSTT, ElevenLabsTTS
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
+agent = phone.agent(
+    stt=SonioxSTT(language_hints=["en"]),                 # SONIOX_API_KEY from env
+    tts=ElevenLabsTTS(voice_id="rachel"),
+    system_prompt="You are a helpful assistant.",
+)
+
+asyncio.run(phone.serve(agent))
+```
+
+## Models and rates
+
+Soniox bills per minute of streamed audio. Default rate from `getpatter.pricing`:
+
+| Model | Rate / min |
+|---|---|
+| `stt-rt-v4` (default) | $0.002 |
+| `stt-rt-v3` | $0.002 |
+| `stt-rt-v2` | $0.002 |
+
+(`$0.12/hr = $0.002/min`. Override per-call via `Patter(pricing={"soniox": {"price": ...}})`.)
+
+## Languages
+
+Soniox real-time uses **language hints** rather than a single language code — pass a list of BCP-47 codes that the engine considers when scoring tokens:
+
+```python
+stt = soniox.STT(language_hints=["en", "es", "it"])
+stt = soniox.STT(language_hints=["en"], language_hints_strict=True)  # reject other langs
+```
+
+`enable_language_identification=True` (default) attaches a language code to each token. Real-time STT v4 supports 60+ languages — see the [Soniox language matrix](https://soniox.com/docs/languages).
+
+## Telephony optimization
+
+For Twilio (mulaw 8 kHz upstream — Patter converts to PCM s16le before STT):
+
+```python
+from getpatter.providers.soniox_stt import SonioxSTT
+
+stt = SonioxSTT.for_twilio(api_key="...", language_hints=["en"])  # 8 kHz native
+```
+
+## Options
+
+| Option | Default | Notes |
+|---|---|---|
+| `api_key` | `None` | Reads from `SONIOX_API_KEY` when omitted. |
+| `model` | `"stt-rt-v4"` | `"stt-rt-v4"`, `"stt-rt-v3"`, `"stt-rt-v2"`. |
+| `language_hints` | `None` | BCP-47 code list. |
+| `language_hints_strict` | `False` | Restrict to the supplied hints only. |
+| `sample_rate` | `16000` | 8000, 16000, 24000 Hz. |
+| `enable_speaker_diarization` | `False` | Server-side speaker IDs. |
+| `enable_language_identification` | `True` | Per-token language codes. |
+| `max_endpoint_delay_ms` | `500` | Silence (ms) before endpoint, range `[500, 3000]`. |
+
+## Low-level usage
+
+```python
+from getpatter.providers.soniox_stt import SonioxSTT
+
+stt = SonioxSTT(api_key="...", language_hints=["en", "it"])
+await stt.connect()
+await stt.send_audio(pcm_chunk)                           # 16 kHz PCM s16le
+async for t in stt.receive_transcripts():
+    print(t.text, t.is_final, t.confidence)
+await stt.close()
+```

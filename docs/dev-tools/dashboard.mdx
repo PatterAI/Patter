@@ -1,30 +1,90 @@
 ---
 title: "Dashboard"
-description: "Real-time call monitoring dashboard with cost and latency tracking."
+description: "Real-time call monitoring dashboard — Vite + React SPA bundled into a single HTML file embedded by both SDKs."
 icon: "gauge"
 ---
 
 # Dashboard
 
-Patter includes a built-in web dashboard for monitoring calls in real time.
+Patter ships a built-in web dashboard for monitoring calls in real time. It tracks live calls, latency waterfalls, and per-component cost breakdowns, and is embedded in both the Python and TypeScript SDKs from a single source of truth.
 
-## Embedded Dashboard
+## Architecture
+
+The dashboard UI is a Vite + React 18 + TypeScript single-page app living at the repo root in `dashboard-app/`. It is bundled by [`vite-plugin-singlefile`](https://github.com/richardtallent/vite-plugin-singlefile) into one self-contained `dist/index.html` (~190 KB, JS + CSS inlined) and copied into both SDKs as `ui.html`.
+
+```
+dashboard-app/                ← single source of truth (dev-only, never published)
+├── src/
+│   ├── App.tsx               # composes the dashboard
+│   ├── components/           # Topbar, MetricsPanel, CallTable, LiveCallPanel,
+│   │                         # LatencyPanel, CostPanel, PageHeader, ...
+│   ├── hooks/                # useDashboardData, useTranscript (SSE-backed)
+│   └── styles/               # tokens.css + dashboard.css
+├── vite.config.ts            # singlefile plugin config
+└── scripts/sync.mjs          # post-build copy to both SDKs
+
+libraries/python/getpatter/dashboard/ui.html   ← synced artefact (committed)
+libraries/typescript/src/dashboard/ui.html      ← synced artefact (committed)
+```
+
+At runtime each SDK loads the file as a string:
+
+- **Python**: `importlib.resources.files("getpatter.dashboard").joinpath("ui.html").read_text()` — see `libraries/python/getpatter/dashboard/ui.py`.
+- **TypeScript**: `readFileSync(join(__dirname, "ui.html"), "utf8")` — see `libraries/typescript/src/dashboard/ui.ts`.
+
+The string is served from `GET /` by the embedded FastAPI / Express app. End users never touch Node — `ui.html` is checked into both packages so `pip install getpatter` and `npm install getpatter` work out of the box.
+
+## Local development
+
+The dashboard talks to a running SDK server over the existing `/api/dashboard/*` REST + SSE API. The Vite dev server proxies `/api` to `127.0.0.1:8000` so you can iterate on the UI against a real backend.
+
+```bash
+# Terminal 1 — start any Patter agent on :8000
+cd libraries/python
+python examples/your_agent.py        # or any TS example
+
+# Terminal 2 — Vite dev server with hot reload
+cd dashboard-app
+npm install
+npm run dev                          # opens http://127.0.0.1:5173
+```
+
+`npm run dev` proxies `/api/*` and `/sse/*` to `http://127.0.0.1:8000`, so the SPA renders against whatever the running SDK reports.
+
+## Build and sync into the SDKs
+
+`npm run build && npm run sync` is the canonical pre-publish step:
+
+```bash
+cd dashboard-app
+npm run build      # tsc --noEmit && vite build → dist/index.html (~190 KB single file)
+npm run sync       # copy dist/index.html into both SDKs as ui.html
+```
+
+`scripts/sync.mjs` copies the bundled file to:
+
+- `libraries/python/getpatter/dashboard/ui.html` (shipped via `[tool.setuptools.package-data]`)
+- `libraries/typescript/src/dashboard/ui.html` (copied to `dist/dashboard/ui.html` by `tsup`)
+
+Both files are committed to the repo. CI rebuilds and re-syncs on every release tag, so a hand-edited `ui.html` will be overwritten — always edit `dashboard-app/src/`.
+
+## Embedded dashboard
 
 When running `serve()`, the dashboard is enabled by default at the root URL:
 
 <CodeGroup>
 ```python Python
 await phone.serve(agent=agent, port=8000, dashboard=True)
-# Dashboard: http://localhost:8000/
+# Dashboard: http://127.0.0.1:8000/
 ```
 
 ```typescript TypeScript
-await phone.serve({ agent, port: 8000, dashboard: true });
-// Dashboard: http://localhost:8000/
+await phone.serve(agent, { port: 8000, dashboard: true });
+// Dashboard: http://127.0.0.1:8000/
 ```
 </CodeGroup>
 
-## Standalone Dashboard
+## Standalone dashboard
 
 Run the dashboard as a separate process — useful when using the SDK as a tool (e.g. from LangGraph or Claude Code).
 
@@ -39,27 +99,27 @@ npx getpatter dashboard --port 8000
 ```
 </CodeGroup>
 
-The standalone dashboard receives call data automatically from the SDK via HTTP.
+The standalone dashboard receives call data automatically from the SDK over HTTP.
 
 ## Features
 
-- **Total Calls** — count of all calls in the session
-- **Total Cost** — aggregate cost breakdown (STT, LLM, TTS, telephony)
-- **Avg Duration** — average call duration
-- **Avg Latency** — end-to-end response latency
-- **Call List** — all completed calls with cost, latency, turns
-- **Active Calls** — currently in-progress calls
-- **Call Detail** — click a call to see transcript, latency bars, cost breakdown
-- **Real-time Updates** — live via Server-Sent Events (SSE)
+- **Top metrics row** — Total Calls, Total Cost, Avg Duration, Avg Latency. Numerics in JetBrains Mono so columns align.
+- **Call table** — every completed call with cost, latency, turn count, provider, voice mode.
+- **Live-call right rail** — caller/callee, streaming transcript, **per-call latency waterfall** (STT, LLM first-token, TTS first-byte, total turn), and **cost breakdown** updating as the call progresses.
+- **Call detail** — click any historical call for the full transcript, averaged + P95 latency waterfall, and cost breakdown.
+- **Real-time updates** — Server-Sent Events on `/api/dashboard/events`; no polling.
+- **Design system** — peach accent, dot-grid surfaces, JetBrains Mono numerics, matching the rest of the Patter brand.
 
-## API Endpoints
+## API endpoints
+
+The SPA is a thin client over a stable REST + SSE API — useful for direct integrations.
 
 | Endpoint | Description |
 |---|---|
-| `GET /` | Dashboard web UI |
-| `GET /api/dashboard/calls` | List calls (paginated) |
-| `GET /api/dashboard/calls/:id` | Single call detail |
-| `GET /api/dashboard/active` | Active calls |
-| `GET /api/dashboard/aggregates` | Aggregate stats |
-| `GET /api/dashboard/events` | SSE event stream |
-| `GET /api/dashboard/export/calls` | Export as CSV or JSON |
+| `GET /` | Dashboard web UI (the bundled `ui.html`). |
+| `GET /api/dashboard/calls` | List calls (paginated). |
+| `GET /api/dashboard/calls/:id` | Single call detail. |
+| `GET /api/dashboard/active` | Active calls. |
+| `GET /api/dashboard/aggregates` | Aggregate stats. |
+| `GET /api/dashboard/events` | SSE event stream. |
+| `GET /api/dashboard/export/calls` | Export as CSV (`?format=csv`) or JSON. |

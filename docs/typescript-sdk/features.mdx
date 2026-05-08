@@ -106,6 +106,104 @@ const agent = phone.agent({
 
 A hang-over window of 300 ms prevents false positives from background noise while remaining responsive to genuine interruptions.
 
+## Echo Cancellation (NLMS AEC)
+
+On **speakerphone** or **dev-tunnel** deployments the agent's outbound TTS bleeds back into the inbound mic feed. The pipeline-mode VAD then sees continuous voice-like energy and never registers silence — barge-in only fires during natural pauses in the TTS, producing the intermittent "interrupt sometimes works, other times the agent keeps talking" symptom. **Acoustic echo cancellation (AEC)** subtracts the estimated echo from the mic stream before VAD/STT see it.
+
+Patter ships a built-in NLMS (normalised least-mean-squares) adaptive filter with Geigel double-talk detection. Enable it with one flag — pipeline mode only:
+
+```typescript
+import { DeepgramSTT, AnthropicLLM, ElevenLabsTTS } from "getpatter";
+
+const agent = phone.agent({
+  stt: new DeepgramSTT(),
+  llm: new AnthropicLLM(),
+  tts: new ElevenLabsTTS({ voiceId: "rachel" }),
+  systemPrompt: "You are a helpful assistant.",
+  echoCancellation: true,
+});
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `echoCancellation` | `boolean` | `false` | When `true` (pipeline mode only), instantiates an `NlmsEchoCanceller` per call that subtracts the agent's own TTS bleed from the inbound mic stream before VAD/STT see it. |
+
+### When to enable
+
+- **Enable** for speakerphone callers, ngrok / Cloudflare tunnel demos, laptop-mic test harnesses, and any deployment where the agent can hear itself.
+- **Leave off** for handset / headset callers — there is no bleed to cancel, and the 0.5–2 s convergence period would briefly attenuate caller speech if they spoke before any TTS played.
+- See [Barge-In](#barge-in) above — AEC is the fix when barge-in only fires intermittently because of self-bleed.
+
+### Tuning
+
+The default `NlmsEchoCanceller` is tuned for narrowband mono 16 kHz PCM (the format Patter's pipeline pushes between transcoding and STT). For lower-level control — custom tap counts, step size, warmup behaviour — instantiate one directly:
+
+```typescript
+import { NlmsEchoCanceller } from "getpatter/audio/aec";
+
+// 8 kHz callers benefit from a longer filter window
+const aec = new NlmsEchoCanceller({ sampleRate: 8000, filterTaps: 1024 });
+```
+
+| Constructor option | Default | Notes |
+|------|---------|-------|
+| `sampleRate` | `16000` | `8000` or `16000` only. |
+| `filterTaps` | `512` | 32 ms @ 16 kHz — covers typical cellular / VoIP echo paths. |
+| `stepSize` | `0.1` | NLMS step in `(0, 1]` post-warmup. |
+| `warmupStepSize` | `0.5` | Aggressive 5× ramp during the first ~0.5 s for fast convergence. |
+| `warmupSeconds` | `0.5` | Duration of the warmup phase. |
+| `leakage` | `0.9999` | Slow forgetting of stale tap estimates. |
+| `doubleTalkRho` | `0.6` | Geigel threshold — freezes adaptation when caller speaks over agent. |
+
+<Note>
+NLMS AEC adds CPU work proportional to `filterTaps × frameSamples` per inbound frame (~0.5–1 ms per 20 ms frame at the defaults). On commodity CPUs this is well under the per-frame budget, but profile if you stack AEC with heavy VAD + STT in the same event loop.
+</Note>
+
+<Warning>
+This is a lightweight time-domain AEC, not a drop-in replacement for production-grade DSP (WebRTC's AEC3, Speex AEC). For tight integration with battle-tested DSP, wrap a binding externally and feed it via `audioFilter` instead.
+</Warning>
+
+## Aggressive First-Flush (Low-Latency)
+
+In **pipeline mode**, the sentence chunker normally waits for a hard sentence terminator (`.`, `!`, `?`, etc.) before emitting a chunk to TTS. With `aggressiveFirstFlush: true` on `phone.agent({ ... })`, the chunker emits the **first clause** of each response on a soft punctuation boundary (`,`, em-dash `—`, en-dash `–`) once the buffer reaches ~40 characters.
+
+```typescript
+const agent = phone.agent({
+  stt: new DeepgramSTT(),
+  llm: new AnthropicLLM(),
+  tts: new ElevenLabsTTS({ voiceId: "rachel" }),
+  systemPrompt: "You are a helpful assistant.",
+  aggressiveFirstFlush: true,
+});
+```
+
+**Trade-off:** Saves **200–500 ms** of time-to-first-audio (TTFA) on the first sentence of each turn, at the cost of slightly clipped prosody on the very first chunk.
+
+<Warning>
+`aggressiveFirstFlush` is **hard-disabled when `language` starts with `"it"`** (Italian). Italian uses the comma as a decimal separator (`12,5`), so an aggressive flush would split mid-number. The flag silently has no effect for Italian agents.
+</Warning>
+
+## Phone Preamble (System Prompt Wrapper)
+
+By default, Patter prepends a phone-friendly preamble to every agent's `systemPrompt` before sending it to the LLM. The preamble instructs the model to:
+
+- Avoid markdown, emojis, bullet lists, and code blocks.
+- Spell out numbers and dates (e.g., "two thousand twenty-six", not `2026`).
+- Keep replies short — phone calls reward brevity over completeness.
+
+Most callers benefit from this. If you ship a custom prompt that already encodes phone conventions — or you want to drive a non-voice LLM channel through the same agent — opt out:
+
+```typescript
+const agent = phone.agent({
+  systemPrompt: "...",  // shipped to the LLM verbatim
+  disablePhonePreamble: true,
+});
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `disablePhonePreamble` | `boolean` | `false` | When `true`, ship `systemPrompt` verbatim to the LLM. When `false` (default), prepend the phone-friendly preamble. |
+
 ## Dynamic Variables
 
 Use `{placeholder}` syntax in system prompts for per-call customization:

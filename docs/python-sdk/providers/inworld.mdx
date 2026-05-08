@@ -1,0 +1,227 @@
+---
+title: "Inworld TTS"
+description: "TTS-2 (sub-200 ms TTFA, 100+ languages, natural-language voice steering) and the TTS-1.5 family via Inworld's HTTP NDJSON streaming endpoint."
+icon: "waveform"
+---
+
+# Inworld TTS
+
+`InworldTTS` targets the [Inworld TTS HTTP endpoint](https://docs.inworld.ai/) (`POST https://api.inworld.ai/tts/v1/voice:stream`). The response is NDJSON — one JSON object per line of the form `{"result": {"audioContent": "<base64>", "timestampInfo": ...}}` — and the provider yields the base64-decoded audio chunks as they arrive.
+
+The default model is **`inworld-tts-2`** (sub-200 ms time-to-first-audio, 100+ languages with mid-utterance switching, natural-language voice steering). Pass `model="inworld-tts-1.5-max"` to fall back to the prior generation when you need `temperature` control.
+
+The default audio output is **PCM_S16LE @ 16 kHz** so chunks drop straight into the Patter pipeline without transcoding.
+
+## Install
+
+<CodeGroup>
+
+```bash Python
+pip install "getpatter[inworld]"
+```
+
+```bash TypeScript
+npm install getpatter
+```
+
+</CodeGroup>
+
+The `getpatter[inworld]` extra adds `aiohttp>=3.10` for streaming the NDJSON body. (TypeScript uses native `fetch` and needs no extra dependency.)
+
+## Authentication
+
+<Note>
+The Inworld dashboard issues a **Base64 token** that is already in the form
+expected by the `Authorization: Basic <token>` header — paste it into
+`INWORLD_API_KEY` as-is. **Do not** re-encode it.
+
+If you only have the raw API key string, base64-encode `"<api_key>:"`
+(note the trailing colon) yourself before passing it in.
+</Note>
+
+```bash
+export INWORLD_API_KEY="<base64-token-from-inworld-dashboard>"
+```
+
+## Usage
+
+<CodeGroup>
+
+```python Python
+# Namespaced import (pipeline mode)
+from getpatter.tts import inworld
+
+tts = inworld.TTS()                                       # reads INWORLD_API_KEY
+tts = inworld.TTS(api_key="...", voice="Olivia", language="en")
+
+# Flat alias (equivalent)
+from getpatter import InworldTTS
+
+tts = InworldTTS()
+```
+
+```typescript TypeScript
+// Namespaced import (pipeline mode)
+import * as inworld from "getpatter/tts/inworld";
+
+const tts = new inworld.TTS();                            // reads INWORLD_API_KEY
+const tts2 = new inworld.TTS({ apiKey: "...", voice: "Olivia", language: "en" });
+
+// Flat alias (equivalent)
+import { InworldTTS } from "getpatter";
+
+const tts3 = new InworldTTS();
+```
+
+</CodeGroup>
+
+Plug it into an agent:
+
+<CodeGroup>
+
+```python Python
+import asyncio
+from getpatter import Patter, Twilio, DeepgramSTT, InworldTTS
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
+agent = phone.agent(
+    stt=DeepgramSTT(),                                    # DEEPGRAM_API_KEY from env
+    tts=InworldTTS(voice="Ashley"),                       # INWORLD_API_KEY from env
+    system_prompt="You are a helpful assistant.",
+)
+
+asyncio.run(phone.serve(agent))
+```
+
+```typescript TypeScript
+// npx tsx example.ts
+import { Patter, Twilio, DeepgramSTT, InworldTTS } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  stt: new DeepgramSTT(),                                 // DEEPGRAM_API_KEY from env
+  tts: new InworldTTS({ voice: "Ashley" }),               // INWORLD_API_KEY from env
+  systemPrompt: "You are a helpful assistant.",
+});
+
+await phone.serve({ agent });
+```
+
+</CodeGroup>
+
+## Customising delivery mode (TTS-2)
+
+`deliveryMode` controls how expressive the TTS-2 voice is. Use `EXPRESSIVE` for warm conversational agents, `STABLE` when you want consistent, predictable prosody (e.g. for IVR-style read-backs), and `BALANCED` for the middle ground.
+
+<CodeGroup>
+
+```python Python
+from getpatter import InworldTTS
+
+tts = InworldTTS(
+    voice="Ashley",
+    delivery_mode="EXPRESSIVE",                           # EXPRESSIVE | BALANCED | STABLE
+    speaking_rate=1.05,                                   # 0.5–1.5
+    language="en",                                        # BCP-47
+)
+```
+
+```typescript TypeScript
+import { InworldTTS } from "getpatter";
+
+const tts = new InworldTTS({
+  voice: "Ashley",
+  deliveryMode: "EXPRESSIVE",                             // EXPRESSIVE | BALANCED | STABLE
+  speakingRate: 1.05,                                     // 0.5–1.5
+  language: "en",                                         // BCP-47
+});
+```
+
+</CodeGroup>
+
+<Warning>
+`deliveryMode` is **TTS-2 only** — it is silently ignored by the TTS-1.5
+family. Conversely `temperature` is **TTS-1.5 only** and ignored by TTS-2.
+</Warning>
+
+## Switching to TTS-1.5 for `temperature` control
+
+When you need sampling-temperature control (e.g. for more variation across multi-turn conversations), drop down to `inworld-tts-1.5-max`:
+
+<CodeGroup>
+
+```python Python
+from getpatter import InworldTTS
+
+tts = InworldTTS(
+    model="inworld-tts-1.5-max",
+    voice="Olivia",
+    temperature=0.7,                                      # TTS-1.5 only
+    language="it",
+)
+```
+
+```typescript TypeScript
+import { InworldTTS } from "getpatter";
+
+const tts = new InworldTTS({
+  model: "inworld-tts-1.5-max",
+  voice: "Olivia",
+  temperature: 0.7,                                       // TTS-1.5 only
+  language: "it",
+});
+```
+
+</CodeGroup>
+
+## Models
+
+| Model id | Family | Notes |
+|---|---|---|
+| `inworld-tts-2` | TTS-2 (default) | Sub-200 ms TTFA, 100+ languages, natural-language voice steering, `deliveryMode` support. |
+| `inworld-tts-1.5-max` | TTS-1.5 | Higher fidelity legacy model, `temperature` support. |
+| `inworld-tts-1.5-mini` | TTS-1.5 | Lower latency legacy model. |
+| `inworld-tts-1-max` | TTS-1 | Original generation. |
+| `inworld-tts-1` | TTS-1 | Original generation. |
+
+## Options
+
+| Python | TypeScript | Default | Notes |
+|---|---|---|---|
+| `api_key` | `apiKey` | — | Reads `INWORLD_API_KEY` when omitted. Base64 token from the Inworld dashboard. |
+| `model` | `model` | `"inworld-tts-2"` | One of the model ids above. |
+| `voice` | `voice` | `"Ashley"` | Inworld voice name (e.g. `"Ashley"`, `"Olivia"`, `"Craig"`, `"Remy"`). |
+| `language` | `language` | — | BCP-47 tag (`"en"`, `"it"`, `"es"`, …). |
+| `audio_encoding` | `audioEncoding` | `"PCM"` | `PCM` / `LINEAR16` / `OGG_OPUS` / `MP3`. |
+| `sample_rate` | `sampleRate` | `16000` | Hz. Pipeline default; carrier transcoding handles 8 kHz mulaw automatically. |
+| `bitrate` | `bitrate` | `64000` | Used for `OGG_OPUS` / `MP3` encodings. |
+| `temperature` | `temperature` | — | TTS-1.5 only. Sampling temperature. |
+| `speaking_rate` | `speakingRate` | `1.0` | Multiplier in `[0.5, 1.5]`. |
+| `delivery_mode` | `deliveryMode` | — | TTS-2 only. `"EXPRESSIVE"` / `"BALANCED"` / `"STABLE"`. |
+| `base_url` | `baseUrl` | Inworld `/tts/v1/voice:stream` | Override for proxying or on-prem deployments. |
+
+## Low-level usage
+
+If you want the streaming generator without going through the pipeline-mode wrapper:
+
+```python
+from getpatter.providers.inworld_tts import InworldTTS as _LowLevelTTS
+
+tts = _LowLevelTTS(
+    auth_token="...",                                     # or INWORLD_API_KEY env var
+    model="inworld-tts-2",
+    voice="Ashley",
+    sample_rate=16000,
+)
+
+async for pcm_chunk in tts.synthesize("Hello from the Patter pipeline."):
+    ...                                                   # raw PCM_S16LE @ 16 kHz
+
+await tts.close()
+```
+
+## Pricing
+
+The default rate in `pricing.py` is `$0.020 / 1k characters` for `inworld-tts-2`, with `$0.025 / 1k` for the TTS-1.5 family. These are placeholder defaults — verify against your current Inworld platform tier and override per-project via `Patter(pricing={...})` if needed.

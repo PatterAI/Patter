@@ -1,0 +1,110 @@
+---
+title: "Cartesia TTS"
+description: "Sonic-1, Sonic-2, and Sonic-3 voice synthesis via Cartesia's HTTP bytes endpoint."
+icon: "volume"
+---
+
+# Cartesia TTS
+
+`CartesiaTTS` is a Patter `TTSProvider` backed by Cartesia's [`/tts/bytes` HTTP endpoint](https://docs.cartesia.ai/api-reference/tts/bytes). It streams raw PCM_S16LE chunks that drop directly into Patter's pipeline with no transcoding. Uses the platform `fetch` — no vendor SDK required, works on Node 18+. The default model is `sonic-3` (current GA snapshot, ~90 ms TTFB target).
+
+<Note>
+  This page covers Cartesia **TTS**. For Cartesia's `ink-whisper` STT see
+  [the Cartesia STT page](/typescript-sdk/providers/cartesia).
+</Note>
+
+## Install
+
+```bash
+npm install getpatter
+```
+
+## Usage
+
+<Note>
+  Use the namespaced import (`getpatter/tts/cartesia`) or the flat
+  re-export (`CartesiaTTS`). Both auto-resolve `CARTESIA_API_KEY` from the
+  environment when `apiKey` is omitted.
+</Note>
+
+<CodeGroup>
+```typescript TypeScript
+// Namespaced import
+import * as cartesia from "getpatter/tts/cartesia";
+
+const tts = new cartesia.TTS();                                  // reads CARTESIA_API_KEY
+const tts2 = new cartesia.TTS({ voice: "f786b574-daa5-4673-aa0c-cbe3e8534c02" });
+
+// Flat alias (equivalent)
+import { CartesiaTTS } from "getpatter";
+
+const tts3 = new CartesiaTTS({ voice: "f786b574-daa5-4673-aa0c-cbe3e8534c02" });
+```
+
+```python Python
+# See python-sdk/providers/cartesia-tts for the Python twin.
+```
+</CodeGroup>
+
+In an agent:
+
+```typescript
+// npx tsx example.ts
+import { Patter, Twilio, DeepgramSTT, CartesiaTTS } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  stt: new DeepgramSTT(),                             // DEEPGRAM_API_KEY from env
+  tts: new CartesiaTTS({ voice: "f786b574-daa5-4673-aa0c-cbe3e8534c02" }),
+  systemPrompt: "You are a helpful assistant.",
+});
+
+await phone.serve({ agent });
+```
+
+## Models and rates
+
+Cartesia TTS bills per 1,000 characters synthesized. Per-model rates (defaults from `getpatter/pricing`):
+
+| Model | Rate / 1k chars | Notes |
+|---|---|---|
+| `sonic-3` (default) | $0.030 | GA, ~90 ms TTFB. Drop-in compatible with sonic-2 voice IDs. |
+| `sonic-2` | $0.030 | Previous flagship. |
+| `sonic-1` / `sonic-english` | $0.030 | Legacy English. |
+| `sonic-multilingual` | $0.030 | Multilingual variant. |
+
+Override via `new Patter({ pricing: { cartesia_tts: { models: { "sonic-3": { price: ... } } } } })`.
+
+## Languages
+
+`language: "en"` by default. Sonic-3 supports 30+ languages — pass any [Cartesia-supported BCP-47 code](https://docs.cartesia.ai/api-reference/tts/text-to-speech) (`"es"`, `"fr"`, `"de"`, `"it"`, `"pt"`, `"ja"`, `"zh"`, …). Voice cloning works across all of them — the same voice ID will speak whichever language you target.
+
+## Telephony optimization
+
+Use the carrier-aware factories so audio reaches Patter's telephony adapter at the carrier's native sample rate, skipping a resample step:
+
+```typescript
+import { CartesiaTTS } from "getpatter";
+
+// Twilio: PCM @ 8 kHz directly (skips the 16k→8k resample before mulaw transcode).
+const twilioTts = CartesiaTTS.forTwilio();
+
+// Telnyx: PCM @ 16 kHz (matches Telnyx's L16/16000 default — zero transcoding).
+const telnyxTts = CartesiaTTS.forTelnyx();
+```
+
+## Options
+
+| Option | Default | Notes |
+|---|---|---|
+| `apiKey` | — | Reads from `CARTESIA_API_KEY` when omitted. |
+| `model` | `"sonic-3"` | Any Cartesia TTS model id. |
+| `voice` | `"f786b574-..."` (Katie) | Cartesia voice id. |
+| `language` | `"en"` | BCP-47 code. |
+| `sampleRate` | `16000` | 8000, 16000, 22050, 24000, 44100 Hz. |
+| `speed` | — | `"fastest" ... "slowest"` or float in `[0.6, 2.0]`. |
+| `emotion` | — | Cartesia emotion preset. |
+| `volume` | — | Float in `[0.5, 2.0]` (sonic-3 only). |
+| `baseUrl` | Cartesia API | Override for proxying. |
+| `apiVersion` | `"2025-04-16"` | Cartesia API version pin. |
