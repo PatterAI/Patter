@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.0 (2026-05-08)
+
 ### Fixed
 
 - **`getpatter.tts.elevenlabs.TTS` facade now forwards `language_code`, `voice_settings`, and `chunk_size`** (Python + TypeScript parity, fully backward-compatible). The HTTP-streaming ElevenLabs facade had a narrower `__init__` signature than the underlying `providers.elevenlabs_tts.ElevenLabsTTS` provider — accepting only `api_key/voice_id/model_id/output_format` — so users who built a TTS via the public facade silently lost language-aware synthesis and could not pass `voice_settings`. Multilingual scenarios (`feat_italian_language_live` in the agent-to-agent acceptance suite) crashed downstream with `TypeError: TTS.__init__() got an unexpected keyword argument 'language_code'` once the runner started passing the kwarg. Files: `libraries/python/getpatter/tts/elevenlabs.py`, `libraries/typescript/src/tts/elevenlabs.ts`. New regressions: `libraries/python/tests/unit/test_tts_facade_language.py` (7 tests covering language_code forwarding, voice_settings forwarding, defaults preservation, env-key resolution, missing-key error) and `libraries/typescript/tests/tts-facade-language.test.ts` (7 parity tests). The TS facade also tightened its `ElevenLabsTTSOptions` interface fields with `readonly` to match the project-wide immutability rule.
