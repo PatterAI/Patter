@@ -373,16 +373,27 @@ export class Patter {
 
     // Auto-configure the carrier so inbound calls hit this server without
     // manual Console setup. Mirrors Python's server.py start() flow.
-    const { autoConfigureCarrier } = await import('./carrier-config');
-    await autoConfigureCarrier({
-      telephonyProvider,
-      twilioSid: carrier.kind === 'twilio' ? carrier.accountSid : undefined,
-      twilioToken: carrier.kind === 'twilio' ? carrier.authToken : undefined,
-      telnyxKey: carrier.kind === 'telnyx' ? carrier.apiKey : undefined,
-      telnyxConnectionId: carrier.kind === 'telnyx' ? carrier.connectionId : undefined,
-      phoneNumber: this.localConfig.phoneNumber,
-      webhookHost: webhookUrl,
-    });
+    //
+    // Two opt-outs:
+    //   1. `manageWebhook: false` — for users running behind a router/gateway
+    //      whose Twilio voice_url is managed externally (Terraform, infra-as-code,
+    //      a voice-router function in front of the agent). Without this opt-out,
+    //      every boot silently overwrites the externally-managed value.
+    //   2. `tunnel: true` overrides any opt-out — the dynamic tunnel hostname is
+    //      only known at runtime, so the carrier MUST be reconfigured.
+    const wantsCarrierManagement = opts.manageWebhook !== false || wantsCloudflared;
+    if (wantsCarrierManagement) {
+      const { autoConfigureCarrier } = await import('./carrier-config');
+      await autoConfigureCarrier({
+        telephonyProvider,
+        twilioSid: carrier.kind === 'twilio' ? carrier.accountSid : undefined,
+        twilioToken: carrier.kind === 'twilio' ? carrier.authToken : undefined,
+        telnyxKey: carrier.kind === 'telnyx' ? carrier.apiKey : undefined,
+        telnyxConnectionId: carrier.kind === 'telnyx' ? carrier.connectionId : undefined,
+        phoneNumber: this.localConfig.phoneNumber,
+        webhookHost: webhookUrl,
+      });
+    }
 
     this.embeddedServer = new EmbeddedServer(
       {

@@ -286,6 +286,26 @@ export interface ServeOptions {
   dashboardDb?: string;
   /** When true (default), persist dashboard data. */
   dashboardPersist?: boolean;
+  /**
+   * When true (default), `serve()` calls the carrier's API on startup to
+   * point the configured phone number's webhook URL at this server. Set
+   * to `false` when the webhook is managed externally (Terraform, an edge
+   * gateway / voice-router, or any infra-as-code system) — otherwise every
+   * boot will silently overwrite the externally-managed value.
+   *
+   * Required `false` when:
+   *   - Twilio's voice_url should point at a router/gateway in front of
+   *     this server rather than directly at it.
+   *   - Multiple replicas share the same Twilio number; only one should
+   *     write the webhook.
+   *   - Compliance forbids the runtime from holding write credentials
+   *     against the carrier console.
+   *
+   * Ignored (treated as true) when `tunnel: true`, because the tunnel
+   * hostname is dynamic and only known at runtime — the carrier MUST be
+   * reconfigured for inbound calls to land.
+   */
+  manageWebhook?: boolean;
 }
 
 export interface LocalCallOptions {

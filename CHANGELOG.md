@@ -2,7 +2,12 @@
 
 ## Unreleased
 
-_(no entries yet — next version will land here)_
+### Added — `manageWebhook` opt-out for `serve()` (TS)
+
+- New `manageWebhook?: boolean` option on `ServeOptions`. **Default: `true`** (preserves existing behaviour — backward compatible).
+- When set to `false`, `serve()` skips the call to `autoConfigureCarrier` so the carrier's webhook URL (`voice_url` for Twilio) is left untouched. Use this when the webhook is managed externally — Terraform, an edge gateway, or a router function in front of the agent — so every boot doesn't silently overwrite the externally-managed value.
+- `tunnel: true` overrides `manageWebhook: false`: the tunnel hostname is dynamic and only known at runtime, so the carrier MUST be reconfigured for inbound calls to land.
+- Parity note: the Python SDK has never auto-configured carriers, so this brings the TS `manageWebhook: false` mode in line with default Python behaviour.
 
 ## 0.5.5 (2026-04-28)
 

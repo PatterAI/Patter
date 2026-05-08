@@ -220,6 +220,68 @@ describe('Patter (local mode)', () => {
       await client.serve({ agent: { systemPrompt: 'Hello' } });
       // No throw means success — EmbeddedServer is mocked
     });
+
+    describe('manageWebhook opt-out', () => {
+      // Auth requests carry Basic auth + Twilio's API host — assert by URL.
+      const isTwilioCarrierApi = (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        return url.startsWith('https://api.twilio.com/2010-04-01/');
+      };
+
+      let originalFetch: typeof globalThis.fetch;
+      let fetchCalls: string[];
+
+      beforeEach(() => {
+        originalFetch = globalThis.fetch;
+        fetchCalls = [];
+        globalThis.fetch = (async (input: RequestInfo | URL) => {
+          if (isTwilioCarrierApi(input)) {
+            fetchCalls.push(typeof input === 'string' ? input : input.toString());
+            return new Response(
+              JSON.stringify({
+                incoming_phone_numbers: [{ sid: 'PN123', phone_number: '+15551234567' }],
+              }),
+              { status: 200, headers: { 'Content-Type': 'application/json' } },
+            );
+          }
+          return new Response('not found', { status: 404 });
+        }) as typeof fetch;
+      });
+
+      afterEach(() => {
+        globalThis.fetch = originalFetch;
+      });
+
+      it('calls Twilio IncomingPhoneNumbers API by default (manageWebhook unset)', async () => {
+        const client = new Patter({
+          carrier: makeTwilioCarrier(),
+          phoneNumber: '+15551234567',
+          webhookUrl: 'example.com/wh',
+        });
+        await client.serve({ agent: { systemPrompt: 'Hello' } });
+        expect(fetchCalls.length).toBeGreaterThan(0);
+      });
+
+      it('calls Twilio IncomingPhoneNumbers API when manageWebhook is true', async () => {
+        const client = new Patter({
+          carrier: makeTwilioCarrier(),
+          phoneNumber: '+15551234567',
+          webhookUrl: 'example.com/wh',
+        });
+        await client.serve({ agent: { systemPrompt: 'Hello' }, manageWebhook: true });
+        expect(fetchCalls.length).toBeGreaterThan(0);
+      });
+
+      it('does NOT call Twilio IncomingPhoneNumbers API when manageWebhook is false', async () => {
+        const client = new Patter({
+          carrier: makeTwilioCarrier(),
+          phoneNumber: '+15551234567',
+          webhookUrl: 'example.com/wh',
+        });
+        await client.serve({ agent: { systemPrompt: 'Hello' }, manageWebhook: false });
+        expect(fetchCalls).toEqual([]);
+      });
+    });
   });
 
   // --- test() ---
