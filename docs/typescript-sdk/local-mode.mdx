@@ -45,6 +45,7 @@ await phone.serve({ agent, port: 8000 });
 | `pricing` | `Record<string, Record<string, unknown>>` | No | — | Custom pricing overrides for cost calculation. |
 | `dashboard` | `boolean` | No | `true` | When `true`, serve a dashboard UI at `/dashboard`. |
 | `dashboardToken` | `string` | No | — | Bearer token for dashboard/API authentication. |
+| `manageWebhook` | `boolean` | No | `true` | When `true`, `serve()` updates the carrier's webhook URL (Twilio `voice_url`) on startup. Set to `false` if the webhook is managed externally (Terraform, an edge gateway, or a router function in front of the agent) — otherwise every boot will silently overwrite the externally-managed value. Ignored when `tunnel: true`, because the tunnel hostname is dynamic and only known at runtime. |
 
 ## Webhook Endpoints
 
