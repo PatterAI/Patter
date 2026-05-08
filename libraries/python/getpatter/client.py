@@ -164,6 +164,8 @@ class Patter:
         )
         self._server = None
         self._tunnel_handle = None
+        # Observability — set by _attach_span_exporter, default safe.
+        self._patter_side: str = "uut"
         # tunnel_ready future — resolved once ``serve()`` knows the public
         # webhook hostname (either statically configured or freshly minted by
         # the tunnel). Initialised lazily below to avoid pulling asyncio
@@ -1094,6 +1096,23 @@ class Patter:
             on_call_start=on_call_start,
             on_call_end=on_call_end,
         )
+
+    def _attach_span_exporter(self, exporter: Any, *, side: str = "uut") -> None:
+        """Wire an OTel span exporter into the SDK's tracer provider.
+
+        Public-but-underscore: consumed by ``patter-agent-runner`` via
+        ``getattr(phone, "_attach_span_exporter")``. The leading underscore
+        signals it is not part of the customer-facing API surface.
+
+        Args:
+            exporter: Any OTel ``SpanExporter`` (e.g. ``InMemorySpanExporter``,
+                ``OTLPSpanExporter``, or the runner's ``PatterSpanExporter``).
+            side: ``"driver"`` or ``"uut"``. Stamped on every cost/latency
+                span emitted during this Patter instance's call lifecycle.
+        """
+        from getpatter.observability.attributes import attach_span_exporter
+
+        attach_span_exporter(self, exporter, side=side)
 
     async def disconnect(self) -> None:
         """Stop the embedded server and any auto-started tunnel.

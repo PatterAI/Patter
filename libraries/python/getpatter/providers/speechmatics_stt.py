@@ -172,6 +172,29 @@ class SpeechmaticsSTT(STTProvider):
 
         self._client: Any | None = None
         self._queue: asyncio.Queue[Any] = asyncio.Queue()
+        # Speechmatics always streams pcm_s16le (see ``_build_config``);
+        # expose encoding for observability cost computation.
+        self.encoding: str = "linear16"
+        self._audio_bytes_sent: int = 0
+
+    def _record_transcript_cost(self) -> None:
+        """Emit ``patter.cost.stt_seconds`` for buffered audio."""
+        try:
+            from getpatter.observability.attributes import record_patter_attrs
+
+            bytes_per_sample = 1 if self.encoding == "mulaw" else 2
+            seconds = self._audio_bytes_sent / float(
+                self.sample_rate * bytes_per_sample
+            )
+            record_patter_attrs(
+                {
+                    "patter.cost.stt_seconds": seconds,
+                    "patter.stt.provider": "speechmatics",
+                }
+            )
+            self._audio_bytes_sent = 0
+        except Exception:  # pragma: no cover — defense in depth
+            logger.debug("_record_transcript_cost failed", exc_info=True)
 
     def __repr__(self) -> str:
         return (
@@ -254,6 +277,7 @@ class SpeechmaticsSTT(STTProvider):
             )
         if not audio_chunk:
             return
+        self._audio_bytes_sent += len(audio_chunk)
         await self._client.send_audio(audio_chunk)
 
     # ------------------------------------------------------------------
@@ -317,6 +341,8 @@ class SpeechmaticsSTT(STTProvider):
                 logger.exception("SpeechmaticsSTT handler error: %s", exc)
                 continue
             if transcript is not None:
+                if transcript.is_final:
+                    self._record_transcript_cost()
                 yield transcript
 
     # ------------------------------------------------------------------

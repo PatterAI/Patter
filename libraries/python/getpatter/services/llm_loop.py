@@ -537,12 +537,40 @@ class OpenAILLMProvider:
             # the full input rate (mirrors libraries/typescript/src/llm-loop.ts:296-305).
             prompt_tokens = getattr(last_usage, "prompt_tokens", 0) or 0
             uncached_input = max(0, prompt_tokens - cache_read)
+            completion_tokens = getattr(last_usage, "completion_tokens", 0) or 0
+            self._record_completion_cost(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
             yield {
                 "type": "usage",
                 "input_tokens": uncached_input,
-                "output_tokens": getattr(last_usage, "completion_tokens", 0) or 0,
+                "output_tokens": completion_tokens,
                 "cache_read_tokens": cache_read,
             }
+
+    def _record_completion_cost(
+        self, *, prompt_tokens: int, completion_tokens: int
+    ) -> None:
+        """Stamp ``patter.cost.llm_*_tokens`` on the current span.
+
+        Subclasses (Groq, Cerebras) inherit this — the ``patter.llm.provider``
+        tag is overridden in the subclass to identify the upstream vendor.
+        Provider-specific subclasses with a different response shape (Anthropic,
+        Google) override this directly.
+        """
+        try:
+            from getpatter.observability.attributes import record_patter_attrs
+
+            record_patter_attrs(
+                {
+                    "patter.cost.llm_input_tokens": prompt_tokens,
+                    "patter.cost.llm_output_tokens": completion_tokens,
+                    "patter.llm.provider": "openai",
+                }
+            )
+        except Exception:  # pragma: no cover — defense in depth
+            logger.debug("_record_completion_cost failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------

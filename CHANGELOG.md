@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.6.1 (2026-05-09)
+
+### Added — OTel `patter.*` span attributes (Python only; TS parity follow-up)
+
+⚠️ Parity gap: this lands in the Python SDK only. TypeScript follow-up is tracked separately and will land in a subsequent release. Per `.claude/rules/sdk-parity.md` every public feature must reach both SDKs; this is a known time-boxed exception.
+
+- **`getpatter.observability.attributes`** — three new helpers added: `record_patter_attrs(attrs)`, `patter_call_scope(call_id, side)` (context manager), and `attach_span_exporter(patter, exporter, side)`. Lazy-OTel-guarded; no-op when the `[tracing]` extra is not installed. Two ContextVars (`patter.call_id`, `patter.side`) propagate through the asyncio task tree so spans emitted by deeply nested provider code inherit the active call's identity automatically. File: `libraries/python/getpatter/observability/attributes.py`. The three symbols are re-exported from `getpatter.observability` for direct import.
+- **`Patter._attach_span_exporter(exporter, *, side="uut")`** — public-but-underscore hook for tools that observe Patter from outside (e.g. an out-of-process agent runner). Default `side="uut"` preserves all existing behaviour. The leading underscore signals it is not part of the customer-facing API surface. File: `libraries/python/getpatter/client.py`.
+- **Per-provider cost emission (19 surfaces)** — `patter.cost.{telephony_minutes, stt_seconds, tts_chars, llm_input_tokens, llm_output_tokens, realtime_minutes}` are now stamped on the active span across the provider lineup (Twilio + Telnyx telephony adapters; Deepgram, AssemblyAI, Whisper, OpenAI Transcribe, Soniox, Speechmatics, Cartesia STT; ElevenLabs, OpenAI, Cartesia, LMNT, Rime TTS; OpenAI/Anthropic/Google/Groq/Cerebras LLM; OpenAI Realtime + ElevenLabs ConvAI realtime). Provider tag emitted alongside as `patter.{telephony,stt,tts,llm,realtime}.provider`. All call sites are wrapped in defensive `try/except` so observability cannot kill a live call.
+- **Per-turn latency** — `patter.latency.{ttfb_ms, turn_ms}` stamped from `StreamHandler._emit_turn_metrics` via a new `PipelineHookExecutor.record_turn_latency(*, ttfb_ms, turn_ms)` method. `ttfb_ms` maps to `total_ms` (turn-start → first TTS audio byte, the user-perceptible TTFB); `turn_ms` maps to `tts_total_ms` and falls back to `total_ms` when null. Files: `libraries/python/getpatter/services/pipeline_hooks.py`, `libraries/python/getpatter/stream_handler.py`.
+- **`patter_call_scope` enters at the bridge level** so the entire WebSocket bridge lifetime — including hangup / cleanup — is bound to `patter.call_id` and `patter.side`. The scope is opened on the Twilio `start` / Telnyx `streaming.started` event (when the call_id is known) and closed in the `finally:` block via `contextlib.ExitStack`, so cleanup-emitted spans (handler.cleanup, telephony cost queries, on_call_end) inherit the call identity. Files: `libraries/python/getpatter/telephony/twilio.py`, `libraries/python/getpatter/telephony/telnyx.py`.
+- **`TwilioAdapter.record_call_end_cost` / `TelnyxAdapter.record_call_end_cost`** — adapter-level helpers used by the bridge to emit `patter.cost.telephony_minutes` once the call's wall-clock duration is known. Files: `libraries/python/getpatter/providers/twilio_adapter.py`, `libraries/python/getpatter/providers/telnyx_adapter.py`.
+- **Docs**: `docs/python-sdk/tracing.mdx` updated with a new "Cost and latency attributes (`patter.*`)" section and an "Attach a custom exporter" example showing how to wire `Patter._attach_span_exporter` to an `InMemorySpanExporter` for tests or to an `OTLPSpanExporter` in production.
+
 ## 0.6.0 (2026-05-08)
 
 ### Fixed

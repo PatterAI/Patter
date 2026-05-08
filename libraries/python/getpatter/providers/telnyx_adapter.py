@@ -5,8 +5,13 @@ to provision numbers, place outbound calls and hang up. Media streaming is
 attached separately from ``call.answered`` (see :mod:`telephony.telnyx`).
 """
 
+import logging
+
 import httpx
+
 from getpatter.providers.base import TelephonyProvider
+
+logger = logging.getLogger("getpatter.providers.telnyx_adapter")
 
 TELNYX_API_BASE = "https://api.telnyx.com/v2"
 
@@ -156,6 +161,25 @@ class TelnyxAdapter(TelephonyProvider):
         await self._client.post(
             f"/calls/{_quote(call_id, safe='')}/actions/hangup", json=body
         )
+
+    def record_call_end_cost(self, *, duration_seconds: float, direction: str) -> None:
+        """Emit ``patter.cost.telephony_minutes`` on the active span.
+
+        Called by the embedded server's bridge cleanup once the call's
+        wall-clock duration is known.
+        """
+        try:
+            from getpatter.observability.attributes import record_patter_attrs
+
+            record_patter_attrs(
+                {
+                    "patter.cost.telephony_minutes": duration_seconds / 60.0,
+                    "patter.telephony": "telnyx",
+                    "patter.direction": direction,
+                }
+            )
+        except Exception:  # pragma: no cover — defense in depth
+            logger.debug("record_call_end_cost failed", exc_info=True)
 
     async def close(self) -> None:
         """Close the underlying HTTP client."""

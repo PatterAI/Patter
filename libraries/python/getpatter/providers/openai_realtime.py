@@ -160,6 +160,27 @@ class OpenAIRealtimeAdapter:
         # here and drained by ``receive_events`` before reading the socket.
         self._pending_events: deque[str] = deque()
         self._receive_task: asyncio.Task | None = None
+        # Session start time for ``patter.cost.realtime_minutes`` emission on close.
+        import time as _time
+
+        self._session_start_monotonic: float = _time.monotonic()
+
+    def record_session_end(self) -> None:
+        """Emit ``patter.cost.realtime_minutes`` for the elapsed session duration."""
+        try:
+            import time as _time
+
+            from getpatter.observability.attributes import record_patter_attrs
+
+            elapsed = _time.monotonic() - self._session_start_monotonic
+            record_patter_attrs(
+                {
+                    "patter.cost.realtime_minutes": elapsed / 60.0,
+                    "patter.realtime.provider": "openai_realtime",
+                }
+            )
+        except Exception:  # pragma: no cover — defense in depth
+            logger.debug("record_session_end failed", exc_info=True)
 
     def __repr__(self) -> str:
         return f"OpenAIRealtimeAdapter(model={self.model!r}, voice={self.voice!r}, audio_format={self.audio_format!r})"
@@ -539,6 +560,7 @@ class OpenAIRealtimeAdapter:
 
     async def close(self) -> None:
         """Close the connection and cancel any in-flight receive task."""
+        self.record_session_end()
         self._running = False
         task = self._receive_task
         if task is not None and not task.done():

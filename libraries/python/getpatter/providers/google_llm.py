@@ -214,10 +214,16 @@ class GoogleLLMProvider:
                     yield {"type": "text", "content": text}
 
         if last_usage is not None:
+            prompt_tokens = getattr(last_usage, "prompt_token_count", 0) or 0
+            completion_tokens = getattr(last_usage, "candidates_token_count", 0) or 0
+            self._record_completion_cost(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
             yield {
                 "type": "usage",
-                "input_tokens": getattr(last_usage, "prompt_token_count", 0) or 0,
-                "output_tokens": getattr(last_usage, "candidates_token_count", 0) or 0,
+                "input_tokens": prompt_tokens,
+                "output_tokens": completion_tokens,
                 "cache_read_tokens": getattr(
                     last_usage, "cached_content_token_count", 0
                 )
@@ -225,6 +231,23 @@ class GoogleLLMProvider:
             }
 
         yield {"type": "done"}
+
+    def _record_completion_cost(
+        self, *, prompt_tokens: int, completion_tokens: int
+    ) -> None:
+        """Stamp ``patter.cost.llm_*_tokens`` on the current span."""
+        try:
+            from getpatter.observability.attributes import record_patter_attrs
+
+            record_patter_attrs(
+                {
+                    "patter.cost.llm_input_tokens": prompt_tokens,
+                    "patter.cost.llm_output_tokens": completion_tokens,
+                    "patter.llm.provider": "google",
+                }
+            )
+        except Exception:  # pragma: no cover — defense in depth
+            logger.debug("_record_completion_cost failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------

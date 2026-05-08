@@ -8,6 +8,7 @@ v1 ``/listen`` WebSocket endpoint. Handles KeepAlive pings, ``Finalize`` /
 
 import asyncio
 import json
+import logging
 from enum import IntEnum, StrEnum
 from typing import AsyncIterator, Union
 from urllib.parse import urlencode
@@ -21,6 +22,8 @@ from getpatter.exceptions import (
     RateLimitError,
 )
 from getpatter.providers.base import STTProvider, Transcript
+
+logger = logging.getLogger("getpatter.providers.deepgram_stt")
 
 DEEPGRAM_WS_URL = "wss://api.deepgram.com/v1/listen"
 
@@ -107,6 +110,29 @@ class DeepgramSTT(STTProvider):
         self._ws = None
         self._keepalive_task: asyncio.Task[None] | None = None
         self.request_id: str | None = None
+        # Bytes of audio forwarded to Deepgram since the last cost emission.
+        # Used by ``_record_transcript_cost`` to compute ``patter.cost.stt_seconds``.
+        self._audio_bytes_sent: int = 0
+
+    def _record_transcript_cost(self) -> None:
+        """Emit ``patter.cost.stt_seconds`` for audio buffered since the last
+        final transcript. No-op when OTel is missing / no scope active."""
+        try:
+            from getpatter.observability.attributes import record_patter_attrs
+
+            bytes_per_sample = 1 if self.encoding == "mulaw" else 2
+            seconds = self._audio_bytes_sent / float(
+                self.sample_rate * bytes_per_sample
+            )
+            record_patter_attrs(
+                {
+                    "patter.cost.stt_seconds": seconds,
+                    "patter.stt.provider": "deepgram",
+                }
+            )
+            self._audio_bytes_sent = 0
+        except Exception:  # pragma: no cover — defense in depth
+            logger.debug("_record_transcript_cost failed", exc_info=True)
 
     def __repr__(self) -> str:
         return f"DeepgramSTT(model={self.model!r}, language={self.language!r}, encoding={self.encoding!r})"
@@ -201,6 +227,7 @@ class DeepgramSTT(STTProvider):
         # the session (e.g. when a VAD gate emits an empty buffer).
         if len(audio_chunk) == 0:
             return
+        self._audio_bytes_sent += len(audio_chunk)
         await self._ws.send(audio_chunk)
 
     async def finalize(self) -> None:
@@ -291,6 +318,8 @@ class DeepgramSTT(STTProvider):
                 continue  # Skip binary frames
             transcript = self._parse_message(raw_message)
             if transcript is not None:
+                if transcript.is_final:
+                    self._record_transcript_cost()
                 yield transcript
 
     async def close(self) -> None:

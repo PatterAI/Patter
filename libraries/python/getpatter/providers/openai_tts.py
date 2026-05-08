@@ -5,10 +5,13 @@ from OpenAI and resamples to 16 kHz or 8 kHz so the telephony output path can
 forward bytes without an additional resample stage.
 """
 
+import logging
 from enum import StrEnum
 from typing import AsyncIterator, Union
 
 import httpx
+
+logger = logging.getLogger("getpatter.providers.openai_tts")
 
 try:
     # Python ≤ 3.12 ships ``audioop``; on 3.13+ the ``audioop-lts`` PyPI
@@ -95,8 +98,23 @@ class OpenAITTS(TTSProvider):
     def __repr__(self) -> str:
         return f"OpenAITTS(model={self.model!r}, voice={self.voice!r})"
 
+    def _record_synthesis_cost(self, text: str) -> None:
+        """Emit ``patter.cost.tts_chars`` for the synthesised text."""
+        try:
+            from getpatter.observability.attributes import record_patter_attrs
+
+            record_patter_attrs(
+                {
+                    "patter.cost.tts_chars": len(text),
+                    "patter.tts.provider": "openai_tts",
+                }
+            )
+        except Exception:  # pragma: no cover — defense in depth
+            logger.debug("_record_synthesis_cost failed", exc_info=True)
+
     async def synthesize(self, text: str) -> AsyncIterator[bytes]:
         """Stream PCM audio for *text* resampled to ``target_sample_rate``."""
+        self._record_synthesis_cost(text)
         if audioop is None:
             # Without ``audioop`` / ``audioop-lts`` we would emit 24 kHz
             # audio that the telephony pipeline transcodes as 16 kHz —

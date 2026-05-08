@@ -5,10 +5,13 @@ dispatched to a thread executor so the event loop is never blocked.
 """
 
 import asyncio
+import logging
 from functools import partial
 from twilio.rest import Client as TwilioClient
 from twilio.twiml.voice_response import VoiceResponse, Connect
 from getpatter.providers.base import TelephonyProvider
+
+logger = logging.getLogger("getpatter.providers.twilio_adapter")
 
 
 class TwilioAdapter(TelephonyProvider):
@@ -74,6 +77,25 @@ class TwilioAdapter(TelephonyProvider):
         await self._run_sync(
             self._twilio_client.calls(call_id).update, status="completed"
         )
+
+    def record_call_end_cost(self, *, duration_seconds: float, direction: str) -> None:
+        """Emit ``patter.cost.telephony_minutes`` on the active span.
+
+        Called by the embedded server's bridge cleanup once the call's
+        wall-clock duration is known.
+        """
+        try:
+            from getpatter.observability.attributes import record_patter_attrs
+
+            record_patter_attrs(
+                {
+                    "patter.cost.telephony_minutes": duration_seconds / 60.0,
+                    "patter.telephony": "twilio",
+                    "patter.direction": direction,
+                }
+            )
+        except Exception:  # pragma: no cover — defense in depth
+            logger.debug("record_call_end_cost failed", exc_info=True)
 
     @staticmethod
     def generate_stream_twiml(stream_url: str) -> str:

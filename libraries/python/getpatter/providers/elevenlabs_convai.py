@@ -89,6 +89,27 @@ class ElevenLabsConvAIAdapter:
         # Silence-tracking for synthetic `response_done` emission.
         self._silence_task: asyncio.Task | None = None
         self._agent_speaking = False
+        # Session start time for ``patter.cost.realtime_minutes`` emission on close.
+        import time as _time
+
+        self._session_start_monotonic: float = _time.monotonic()
+
+    def record_session_end(self) -> None:
+        """Emit ``patter.cost.realtime_minutes`` for the elapsed session duration."""
+        try:
+            import time as _time
+
+            from getpatter.observability.attributes import record_patter_attrs
+
+            elapsed = _time.monotonic() - self._session_start_monotonic
+            record_patter_attrs(
+                {
+                    "patter.cost.realtime_minutes": elapsed / 60.0,
+                    "patter.realtime.provider": "elevenlabs_convai",
+                }
+            )
+        except Exception:  # pragma: no cover — defense in depth
+            logger.debug("record_session_end failed", exc_info=True)
 
     def __repr__(self) -> str:
         return f"ElevenLabsConvAIAdapter(agent_id={self.agent_id!r}, model_id={self.model_id!r})"
@@ -400,6 +421,7 @@ class ElevenLabsConvAIAdapter:
 
     async def close(self) -> None:
         """Close the connection and cancel the background reader."""
+        self.record_session_end()
         self._running = False
         self._reset_silence_timer()
         if self._reader_task and not self._reader_task.done():

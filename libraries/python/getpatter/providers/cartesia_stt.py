@@ -136,6 +136,36 @@ class CartesiaSTT(STTProvider):
         self._transcript_queue: asyncio.Queue[Transcript] = asyncio.Queue()
         self._running = False
         self.request_id: str | None = None
+        self._audio_bytes_sent: int = 0
+
+    @property
+    def sample_rate(self) -> int:
+        return self._opts.sample_rate
+
+    @property
+    def encoding(self) -> str:
+        # Cartesia STT only accepts pcm_s16le today; surface a stable
+        # observability label that maps to "linear16" semantics.
+        return "linear16" if self._opts.encoding == "pcm_s16le" else self._opts.encoding
+
+    def _record_transcript_cost(self) -> None:
+        """Emit ``patter.cost.stt_seconds`` for buffered audio."""
+        try:
+            from getpatter.observability.attributes import record_patter_attrs
+
+            bytes_per_sample = 1 if self.encoding == "mulaw" else 2
+            seconds = self._audio_bytes_sent / float(
+                self.sample_rate * bytes_per_sample
+            )
+            record_patter_attrs(
+                {
+                    "patter.cost.stt_seconds": seconds,
+                    "patter.stt.provider": "cartesia",
+                }
+            )
+            self._audio_bytes_sent = 0
+        except Exception:  # pragma: no cover — defense in depth
+            logger.debug("_record_transcript_cost failed", exc_info=True)
 
     def __repr__(self) -> str:
         return (
@@ -184,6 +214,7 @@ class CartesiaSTT(STTProvider):
         """Forward a PCM s16le audio chunk to Cartesia."""
         if self._ws is None or self._ws.closed:
             raise RuntimeError("Not connected. Call connect() first.")
+        self._audio_bytes_sent += len(audio_chunk)
         await self._ws.send_bytes(audio_chunk)
 
     async def receive_transcripts(self) -> AsyncIterator[Transcript]:
@@ -195,6 +226,8 @@ class CartesiaSTT(STTProvider):
                 )
             except asyncio.TimeoutError:
                 continue
+            if transcript.is_final:
+                self._record_transcript_cost()
             yield transcript
 
     async def _keepalive_loop(self) -> None:

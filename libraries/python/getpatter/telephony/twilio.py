@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import logging
 import re
@@ -10,6 +11,7 @@ import time
 from collections import deque
 from urllib.parse import quote
 
+from getpatter.observability.attributes import patter_call_scope
 from getpatter.stream_handler import (
     END_CALL_TOOL,
     TRANSFER_CALL_TOOL,
@@ -237,6 +239,7 @@ async def twilio_stream_bridge(
     pricing: dict | None = None,
     report_only_initial_ttfb: bool = False,
     speech_events=None,
+    patter_side: str = "uut",
 ) -> None:
     """Bridge a Twilio WebSocket media stream to the configured AI provider.
 
@@ -282,6 +285,19 @@ async def twilio_stream_bridge(
     audio_sender: TwilioAudioSender | None = None
     metrics = None
 
+    # Wall-clock duration tracking for patter.cost.telephony_minutes. Set on
+    # the ``start`` event so we measure only the bridged audio period, not
+    # the time spent waiting for the first frame.
+    _call_start_monotonic: float | None = None
+
+    # ExitStack lets us enter ``patter_call_scope`` *after* the start frame
+    # arrives (when call_id is known) while still keeping the scope active
+    # for the entire WebSocket loop AND the finally cleanup block. All spans
+    # emitted by provider plumbing during the call lifetime — including from
+    # ``handler.cleanup()``, telephony cost queries, and ``on_call_end`` —
+    # inherit ``patter.call_id`` and ``patter.side``.
+    _scope_stack = contextlib.ExitStack()
+
     try:
         while True:
             raw = await websocket.receive_text()
@@ -294,6 +310,7 @@ async def twilio_stream_bridge(
             event = data.get("event", "")
 
             if event == "start":
+                _call_start_monotonic = time.monotonic()
                 stream_sid = data.get("streamSid", "")
                 start_data = data.get("start", {})
                 call_sid_actual = start_data.get("callSid", "")
@@ -493,6 +510,26 @@ async def twilio_stream_bridge(
                         speech_events=speech_events,
                     )
 
+                # Inherit patter.side from the parent Patter instance so all
+                # spans emitted during the call lifetime carry the right side.
+                try:
+                    handler._patter_side = patter_side
+                except Exception:  # pragma: no cover — defense in depth
+                    logger.debug("Failed to set handler._patter_side", exc_info=True)
+
+                # Enter patter_call_scope NOW that call_id is known. The
+                # ExitStack keeps the scope active until the finally cleanup
+                # block runs. Cleanup paths (handler cleanup, telephony cost
+                # queries, on_call_end) therefore run inside the scope and
+                # emit spans bound to call_id.
+                try:
+                    if call_sid_actual:
+                        _scope_stack.enter_context(
+                            patter_call_scope(call_id=call_sid_actual, side=patter_side)
+                        )
+                except Exception:  # pragma: no cover — defense in depth
+                    logger.debug("patter_call_scope entry failed", exc_info=True)
+
                 await handler.start()
 
             elif event == "media":
@@ -540,6 +577,21 @@ async def twilio_stream_bridge(
 
         if handler is not None:
             await handler.cleanup()
+
+        # --- Observability: emit patter.cost.telephony_minutes ---
+        # Wired here so the span inherits patter.call_id / patter.side
+        # from the active patter_call_scope. Bridge is the inbound
+        # webhook endpoint, so direction is always "inbound" today.
+        if _call_start_monotonic is not None and twilio_sid and twilio_token:
+            try:
+                from getpatter.providers.twilio_adapter import TwilioAdapter
+
+                _duration = time.monotonic() - _call_start_monotonic
+                TwilioAdapter(
+                    account_sid=twilio_sid, auth_token=twilio_token
+                ).record_call_end_cost(duration_seconds=_duration, direction="inbound")
+            except Exception as exc:
+                logger.debug("record_call_end_cost failed: %s", exc)
 
         # --- Metrics: query actual telephony cost from Twilio ---
         if (
@@ -612,3 +664,10 @@ async def twilio_stream_bridge(
             )
         else:
             logger.info("Call ended: %s", call_sid_actual)
+
+        # Close the patter_call_scope (if entered) — done last so all
+        # cleanup-emitted spans inherit patter.call_id / patter.side.
+        try:
+            _scope_stack.close()
+        except Exception:  # pragma: no cover — defense in depth
+            logger.debug("ExitStack close failed", exc_info=True)

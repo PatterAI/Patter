@@ -422,6 +422,11 @@ class StreamHandler(ABC):
         # WebSocket / HTTP connections. Parity with TS field.
         self._mcp_manager: Any = None
 
+        # Set by Patter._attach_span_exporter via attach_span_exporter; "uut" by default.
+        # Read once at handler start; later changes via the same Patter instance
+        # will not retroactively affect this handler's spans.
+        self._patter_side: str = getattr(self, "_patter_side", "uut")
+
         # Create one EventBus per handler instance and wire it to metrics.
         from getpatter.observability.event_bus import EventBus as _EventBus
 
@@ -638,6 +643,27 @@ class StreamHandler(ABC):
         appending transcript entries / storing the turn; only the user-facing
         callback is centralised here for parity with TS ``emitTurnMetrics``.
         """
+        # Stamp patter.latency.{ttfb_ms,turn_ms} on the active span before the
+        # user callback runs. ``ttfb_ms`` maps to ``total_ms`` (turn_start →
+        # first TTS audio byte — the user-perceptible "time to first byte"
+        # for the response). ``turn_ms`` maps to ``tts_total_ms`` when set
+        # (LLM-first-token → last TTS byte) and falls back to ``total_ms``.
+        if turn is not None and getattr(turn, "latency", None) is not None:
+            try:
+                from getpatter.services.pipeline_hooks import PipelineHookExecutor
+
+                ttfb_ms = float(turn.latency.total_ms or 0.0)
+                turn_ms = float(
+                    turn.latency.tts_total_ms
+                    if turn.latency.tts_total_ms is not None
+                    else (turn.latency.total_ms or 0.0)
+                )
+                PipelineHookExecutor(hooks=None).record_turn_latency(
+                    ttfb_ms=ttfb_ms, turn_ms=turn_ms
+                )
+            except Exception:  # pragma: no cover — observability must never break calls
+                logger.debug("record_turn_latency failed", exc_info=True)
+
         if not self.on_metrics or turn is None or self.metrics is None:
             return
         await self.on_metrics(

@@ -10,6 +10,11 @@ Enable OTel tracing with::
 Then call :func:`getpatter.observability.init_tracing` once at process start.
 """
 
+from getpatter.observability.attributes import (
+    attach_span_exporter,
+    patter_call_scope,
+    record_patter_attrs,
+)
 from getpatter.observability.event_bus import EventBus, PatterEventType
 from getpatter.observability.metric_types import (
     CachedTokenDetails,
@@ -52,6 +57,10 @@ __all__ = [
     "SPAN_TOOL",
     "SPAN_ENDPOINT",
     "SPAN_BARGEIN",
+    # Patter.* attribute helpers
+    "attach_span_exporter",
+    "patter_call_scope",
+    "record_patter_attrs",
     # Event bus
     "EventBus",
     "PatterEventType",

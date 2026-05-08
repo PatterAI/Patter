@@ -7,11 +7,14 @@ use in Patter's pipeline.
 
 from __future__ import annotations
 
+import logging
 import os
 from enum import StrEnum
 from typing import Any, AsyncIterator, Optional
 
 from getpatter.providers.base import TTSProvider
+
+logger = logging.getLogger("getpatter.providers.rime_tts")
 
 try:  # pragma: no cover - trivial import guard
     import aiohttp
@@ -169,8 +172,23 @@ class RimeTTS(TTSProvider):
 
         return payload
 
+    def _record_synthesis_cost(self, text: str) -> None:
+        """Emit ``patter.cost.tts_chars`` for the synthesised text."""
+        try:
+            from getpatter.observability.attributes import record_patter_attrs
+
+            record_patter_attrs(
+                {
+                    "patter.cost.tts_chars": len(text),
+                    "patter.tts.provider": "rime",
+                }
+            )
+        except Exception:  # pragma: no cover — defense in depth
+            logger.debug("_record_synthesis_cost failed", exc_info=True)
+
     async def synthesize(self, text: str) -> AsyncIterator[bytes]:
         """Stream raw PCM_S16LE bytes for ``text`` over HTTP."""
+        self._record_synthesis_cost(text)
         session = self._ensure_session()
 
         headers = {

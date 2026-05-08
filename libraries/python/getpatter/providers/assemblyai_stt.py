@@ -206,6 +206,8 @@ class AssemblyAISTT(STTProvider):
         self._reconnect_attempts = 0
         self.session_id: str | None = None
         self.expires_at: int | None = None
+        # Bytes of audio forwarded to AssemblyAI since the last cost emission.
+        self._audio_bytes_sent: int = 0
         # Coalescing buffer for inbound audio frames. AssemblyAI's v3
         # streaming endpoint requires each ws frame to carry 50–1000 ms
         # of audio (server emits error 3007 below 50 ms — observed in the
@@ -221,6 +223,26 @@ class AssemblyAISTT(STTProvider):
             f"AssemblyAISTT(model={self._opts.model!r}, "
             f"encoding={self._opts.encoding!r}, sample_rate={self._opts.sample_rate})"
         )
+
+    def _record_transcript_cost(self) -> None:
+        """Emit ``patter.cost.stt_seconds`` for buffered audio."""
+        try:
+            from getpatter.observability.attributes import record_patter_attrs
+
+            sample_rate = int(self._opts.sample_rate or 0) or 1
+            bytes_per_sample = (
+                1 if self._opts.encoding == AssemblyAIEncoding.PCM_MULAW else 2
+            )
+            seconds = self._audio_bytes_sent / float(sample_rate * bytes_per_sample)
+            record_patter_attrs(
+                {
+                    "patter.cost.stt_seconds": seconds,
+                    "patter.stt.provider": "assemblyai",
+                }
+            )
+            self._audio_bytes_sent = 0
+        except Exception:  # pragma: no cover — defense in depth
+            logger.debug("_record_transcript_cost failed", exc_info=True)
 
     @classmethod
     def for_twilio(
@@ -364,6 +386,7 @@ class AssemblyAISTT(STTProvider):
                 duration_ms,
             )
 
+        self._audio_bytes_sent += len(merged)
         await self._ws.send_bytes(merged)
 
     async def flush_audio(self) -> None:
@@ -380,6 +403,7 @@ class AssemblyAISTT(STTProvider):
         merged = bytes(self._audio_buffer)
         self._audio_buffer.clear()
         try:
+            self._audio_bytes_sent += len(merged)
             await self._ws.send_bytes(merged)
         except Exception:  # noqa: BLE001
             # Flush is best-effort during shutdown — never raise.
@@ -462,6 +486,8 @@ class AssemblyAISTT(STTProvider):
                 )
             except asyncio.TimeoutError:
                 continue
+            if transcript.is_final:
+                self._record_transcript_cost()
             yield transcript
 
     async def _recv_loop(self) -> None:

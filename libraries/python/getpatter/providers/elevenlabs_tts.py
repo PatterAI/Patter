@@ -5,11 +5,14 @@ Implements :class:`getpatter.providers.base.TTSProvider` against the
 sensitive use cases prefer :mod:`elevenlabs_ws_tts` (WebSocket).
 """
 
+import logging
 from enum import StrEnum
 from typing import AsyncIterator, Optional, Union
 import re
 import httpx
 from getpatter.providers.base import TTSProvider
+
+logger = logging.getLogger("getpatter.providers.elevenlabs_tts")
 
 
 # Known stable ElevenLabs voice models (from
@@ -257,8 +260,23 @@ class ElevenLabsTTS(TTSProvider):
             chunk_size=chunk_size,
         )
 
+    def _record_synthesis_cost(self, text: str) -> None:
+        """Emit ``patter.cost.tts_chars`` for the synthesised text."""
+        try:
+            from getpatter.observability.attributes import record_patter_attrs
+
+            record_patter_attrs(
+                {
+                    "patter.cost.tts_chars": len(text),
+                    "patter.tts.provider": "elevenlabs",
+                }
+            )
+        except Exception:  # pragma: no cover — defense in depth
+            logger.debug("_record_synthesis_cost failed", exc_info=True)
+
     async def synthesize(self, text: str) -> AsyncIterator[bytes]:
         """Stream TTS audio for *text* one chunk at a time."""
+        self._record_synthesis_cost(text)
         body: dict = {"text": text, "model_id": self.model_id}
         if self.voice_settings:
             body["voice_settings"] = self.voice_settings
