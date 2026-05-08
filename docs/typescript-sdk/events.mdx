@@ -641,4 +641,3 @@ Observer exceptions are **caught and logged**, never propagated to the live call
 - **`onUserSpeechEnded` vs. `onUserSpeechEos`**: surfaced as separate events because they are two different signals. `silence_gap_ms_max` wants the EOU; `cross_talk_pct` wants the raw VAD edge.
 - **`onAgentSpeechStarted` vs. `onAudioOut`**: `onAudioOut` is when TTS bytes arrive in the buffer (warmup metric). `onAgentSpeechStarted` is when those bytes hit the carrier wire — what the user actually hears. Subtract the two to measure carrier-side jitter.
 - **Idempotency**: `onLlmToken` and `onAudioOut` fire **at most once per turn**. The guard is reset on `onUserSpeechEos` so the next turn re-arms cleanly.
-

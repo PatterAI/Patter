@@ -571,4 +571,3 @@ Observer exceptions are **caught and logged**, never propagated to the live call
 - **`on_user_speech_ended` vs. `on_user_speech_eos`**: surfaced as separate events because they are two different signals. `silence_gap_ms_max` wants the EOU; `cross_talk_pct` wants the raw VAD edge.
 - **`on_agent_speech_started` vs. `on_audio_out`**: `on_audio_out` is when TTS bytes arrive in the buffer (warmup metric). `on_agent_speech_started` is when those bytes hit the carrier wire — what the user actually hears. Subtract the two to measure carrier-side jitter.
 - **Idempotency**: `on_llm_token` and `on_audio_out` fire **at most once per turn**. The guard is reset on `on_user_speech_eos` so the next turn re-arms cleanly.
-

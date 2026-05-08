@@ -7,10 +7,11 @@ acoustic environment.
 
 from __future__ import annotations
 
-import numpy as np
 import pytest
 
-from getpatter.audio.aec import NlmsEchoCanceller
+np = pytest.importorskip("numpy")
+
+from getpatter.audio.aec import NlmsEchoCanceller  # noqa: E402
 
 
 SR = 16000
