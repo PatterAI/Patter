@@ -11,6 +11,7 @@ import type { CloudflareTunnel, Static as StaticTunnel } from "./tunnels";
 import type { Tool as ToolInstance } from "./public-api";
 import type { STTAdapter, TTSAdapter } from "./provider-factory";
 import type { LLMProvider } from "./llm-loop";
+import type { BargeInStrategy } from "./services/barge-in-strategies";
 
 /** Inbound message handed to a `MessageHandler` per turn (legacy single-turn API). */
 export interface IncomingMessage {
@@ -423,6 +424,30 @@ export interface AgentOptions {
    * Default: 300.
    */
   bargeInThresholdMs?: number;
+  /**
+   * Opt-in barge-in confirmation strategies (pipeline mode). With the
+   * default empty array the SDK falls back to the legacy
+   * "interrupt immediately on VAD speech_start" behaviour. When at
+   * least one strategy is provided, a VAD speech_start during TTS
+   * marks the barge-in as *pending* — the agent's TTS is paused but
+   * its in-flight LLM stream is preserved — and the strategies are
+   * consulted on every STT transcript. The first strategy that
+   * returns ``true`` confirms the barge-in (cancels TTS, flushes the
+   * inbound ring buffer); if none confirm within
+   * ``bargeInConfirmMs`` the pending state is dropped and TTS resumes.
+   *
+   * See ``getpatter`` exports ``BargeInStrategy`` /
+   * ``MinWordsStrategy`` for the protocol and a reference
+   * implementation.
+   */
+  bargeInStrategies?: readonly BargeInStrategy[];
+  /**
+   * Maximum time (ms) to wait for at least one strategy to confirm a
+   * pending barge-in before discarding the pending state and resuming
+   * TTS. Only consulted when ``bargeInStrategies`` is non-empty.
+   * Default: 1500.
+   */
+  bargeInConfirmMs?: number;
   /**
    * When true, the sentence chunker emits the first clause of each response
    * on a soft punctuation boundary (",", em-dash, en-dash) once ~40 chars

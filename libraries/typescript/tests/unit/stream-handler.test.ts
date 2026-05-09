@@ -406,6 +406,7 @@ describe('StreamHandler', () => {
       return h as unknown as {
         isSpeaking: boolean;
         speakingStartedAt: number | null;
+        firstAudioSentAt: number | null;
         aec: unknown;
         canBargeIn: () => boolean;
         handleBargeIn: (t: { text?: string }) => boolean;
@@ -421,6 +422,20 @@ describe('StreamHandler', () => {
       expect(p.canBargeIn()).toBe(true);
     });
 
+    it('canBargeIn() false before the first TTS chunk has hit the wire', () => {
+      // 0.6.2 fix: ElevenLabs first-byte latency is hundreds of ms. Pre-fix
+      // a 250 ms gate measured from beginSpeaking expired before any audio
+      // went out, letting background noise self-cancel the agent's first
+      // turn. Post-fix the gate is anchored on firstAudioSentAt — if that's
+      // null we are still waiting for the TTS provider's first byte.
+      const h = new StreamHandler(makeDeps(), makeMockWs(), '+15551111111', '+15552222222');
+      const p = priv(h);
+      p.aec = null;
+      p.speakingStartedAt = Date.now() - 5000; // long past the 250 ms gate
+      p.firstAudioSentAt = null; // but no audio has gone out yet
+      expect(p.canBargeIn()).toBe(false);
+    });
+
     // -----------------------------------------------------------------------
     // AEC OFF (default — PSTN deployments). Gate is 250 ms.
     // -----------------------------------------------------------------------
@@ -430,6 +445,7 @@ describe('StreamHandler', () => {
         const p = priv(h);
         p.aec = null;
         p.speakingStartedAt = Date.now() - 100;
+        p.firstAudioSentAt = Date.now() - 100;
         expect(p.canBargeIn()).toBe(false);
       });
 
@@ -437,7 +453,8 @@ describe('StreamHandler', () => {
         const h = new StreamHandler(makeDeps(), makeMockWs(), '+15551111111', '+15552222222');
         const p = priv(h);
         p.aec = null;
-        p.speakingStartedAt = Date.now() - 400; // 400 ms — past 250 ms, under 1 s
+        p.speakingStartedAt = Date.now() - 400;
+        p.firstAudioSentAt = Date.now() - 400; // 400 ms — past 250 ms, under 1 s
         expect(p.canBargeIn()).toBe(true);
       });
 
@@ -448,6 +465,7 @@ describe('StreamHandler', () => {
         p.aec = null;
         p.isSpeaking = true;
         p.speakingStartedAt = Date.now() - 400;
+        p.firstAudioSentAt = Date.now() - 400;
         const result = p.handleBargeIn({ text: 'stop' });
         expect(result).toBe(true);
         expect(p.isSpeaking).toBe(false);
@@ -467,6 +485,7 @@ describe('StreamHandler', () => {
         const p = priv(h);
         p.aec = aecSentinel;
         p.speakingStartedAt = Date.now() - 400; // would PASS with AEC off
+        p.firstAudioSentAt = Date.now() - 400;
         expect(p.canBargeIn()).toBe(false);
       });
 
@@ -475,6 +494,7 @@ describe('StreamHandler', () => {
         const p = priv(h);
         p.aec = aecSentinel;
         p.speakingStartedAt = Date.now() - 1200;
+        p.firstAudioSentAt = Date.now() - 1200;
         expect(p.canBargeIn()).toBe(true);
       });
 
@@ -484,6 +504,7 @@ describe('StreamHandler', () => {
         p.aec = aecSentinel;
         p.isSpeaking = true;
         p.speakingStartedAt = Date.now() - 400;
+        p.firstAudioSentAt = Date.now() - 400;
         const result = p.handleBargeIn({ text: 'stop' });
         expect(result).toBe(false);
         expect(p.isSpeaking).toBe(true);
@@ -495,6 +516,7 @@ describe('StreamHandler', () => {
         p.aec = aecSentinel;
         p.isSpeaking = true;
         p.speakingStartedAt = Date.now() - 1500;
+        p.firstAudioSentAt = Date.now() - 1500;
         const result = p.handleBargeIn({ text: 'stop' });
         expect(result).toBe(true);
         expect(p.isSpeaking).toBe(false);

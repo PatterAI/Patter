@@ -251,6 +251,35 @@ export class StreamHandler {
    */
   private speakingStartedAt: number | null = null;
   /**
+   * Wall-clock (ms) when the FIRST TTS audio chunk actually reached the
+   * carrier wire — set in ``markFirstAudioSent`` after ``bridge.sendAudio``
+   * succeeds, cleared by ``beginSpeaking`` / ``cancelSpeaking``. The barge-in
+   * gate measures elapsed from this instant, NOT from ``speakingStartedAt``,
+   * because ElevenLabs (and other cloud TTS) take 200-700 ms to emit the
+   * first byte. A gate anchored to ``beginSpeaking`` would expire on
+   * background noise before any audio went out, exit the TTS loop on
+   * ``isSpeaking=false``, and silently cut the agent's first turn.
+   */
+  private firstAudioSentAt: number | null = null;
+  /**
+   * Optional barge-in confirmation strategies. With an empty array the
+   * SDK falls back to the legacy "cancel on first VAD speech_start"
+   * behaviour. With one or more strategies, a VAD speech_start during
+   * TTS marks the barge-in as *pending* — TTS keeps streaming naturally
+   * — and the strategies are consulted on every STT transcript via
+   * ``handleBargeIn``. The first strategy that returns ``true`` cancels
+   * the agent; if none confirm within ``bargeInConfirmMs`` the pending
+   * state is dropped and the agent finishes its sentence.
+   */
+  private readonly bargeInStrategies: readonly import('./services/barge-in-strategies').BargeInStrategy[];
+  /** Pending-barge-in confirmation timeout in milliseconds. */
+  private readonly bargeInConfirmMs: number;
+  /** Wall-clock (ms) when the current pending barge-in started, or
+   * ``null`` if no barge-in is pending. */
+  private bargeInPendingSince: number | null = null;
+  /** Timer that fires the pending-barge-in timeout. */
+  private bargeInPendingTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
    * Minimum wall-clock duration (ms) the agent must have been speaking
    * before barge-in is allowed to fire when AEC is active. Covers the
    * AEC warmup window (~500 ms) plus a safety margin so residual bleed
@@ -311,9 +340,23 @@ export class StreamHandler {
     this.speakingGeneration++;
     this.isSpeaking = true;
     this.speakingStartedAt = Date.now();
+    this.firstAudioSentAt = null;
     // Fresh turn — drop any stale pre-barge-in buffer from a previous turn
     // so we never replay yesterday's audio to STT.
     this.inboundAudioRing = [];
+  }
+
+  /**
+   * Record that the first TTS audio chunk of the current turn has hit the
+   * carrier wire. Idempotent within a turn — only the first call sets the
+   * timestamp; later chunks are no-ops. Must be invoked AFTER the underlying
+   * ``bridge.sendAudio`` resolves so the gate is anchored to "audio actually
+   * went out", not "we asked the carrier to send it".
+   */
+  private markFirstAudioSent(): void {
+    if (this.firstAudioSentAt === null) {
+      this.firstAudioSentAt = Date.now();
+    }
   }
 
   /**
@@ -327,6 +370,7 @@ export class StreamHandler {
     this.speakingGeneration++; // invalidates pending grace timers
     this.isSpeaking = false;
     this.speakingStartedAt = null;
+    this.firstAudioSentAt = null;
     this.lastCancelAt = Date.now();
     if (this.llmAbort !== null) {
       try {
@@ -372,12 +416,24 @@ export class StreamHandler {
         if (this.speakingGeneration === gen) {
           this.isSpeaking = false;
           this.speakingStartedAt = null;
+          this.firstAudioSentAt = null;
+          this.clearPendingBargeIn();
+          void this.resetBargeInStrategies();
         }
       }, grace);
     } else {
       this.isSpeaking = false;
       this.speakingStartedAt = null;
+      this.firstAudioSentAt = null;
+      this.clearPendingBargeIn();
+      void this.resetBargeInStrategies();
     }
+  }
+
+  private async resetBargeInStrategies(): Promise<void> {
+    if (this.bargeInStrategies.length === 0) return;
+    const { resetStrategies } = await import('./services/barge-in-strategies.js');
+    await resetStrategies(this.bargeInStrategies);
   }
 
   /**
@@ -387,7 +443,14 @@ export class StreamHandler {
    */
   private canBargeIn(): boolean {
     if (this.speakingStartedAt === null) return true;
-    const elapsed = Date.now() - this.speakingStartedAt;
+    // Anchor the gate on "first audio actually emitted", not on
+    // ``beginSpeaking`` (which fires before the TTS provider's first-byte
+    // latency has elapsed). Without this guard, background noise picked up
+    // by VAD ~250 ms after ``beginSpeaking`` triggers a self-cancel BEFORE
+    // any TTS chunk has reached the wire — the agent's first turn becomes
+    // silence even though the SDK believes it spoke.
+    if (this.firstAudioSentAt === null) return false;
+    const elapsed = Date.now() - this.firstAudioSentAt;
     const gate = this.aec
       ? StreamHandler.MIN_AGENT_SPEAKING_MS_BEFORE_BARGE_IN_AEC
       : StreamHandler.MIN_AGENT_SPEAKING_MS_BEFORE_BARGE_IN_NO_AEC;
@@ -498,6 +561,13 @@ export class StreamHandler {
     this.ws = ws;
     this.caller = caller;
     this.callee = callee;
+
+    this.bargeInStrategies = (deps.agent.bargeInStrategies ?? []).slice();
+    const confirmMs = deps.agent.bargeInConfirmMs;
+    this.bargeInConfirmMs =
+      typeof confirmMs === 'number' && Number.isFinite(confirmMs) && confirmMs > 0
+        ? confirmMs
+        : 1500;
 
     this.history = createHistoryManager(200);
 
@@ -871,6 +941,11 @@ export class StreamHandler {
                 `[VAD] speech_start suppressed (agent speaking < gate, aec=${this.aec ? 'on' : 'off'})`,
               );
             } else if (this.isSpeaking) {
+              if (this.bargeInStrategies.length > 0) {
+                this.startPendingBargeIn();
+                this.metricsAcc.startTurnIfIdle();
+                return;
+              }
               getLogger().info('[VAD] speech_start during TTS → BARGE-IN');
               this.metricsAcc.recordOverlapStart();
               this.metricsAcc.recordBargeinDetected();
@@ -1236,6 +1311,7 @@ export class StreamHandler {
           }
           const encoded = this.encodePipelineAudio(chunk);
           this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
+          this.markFirstAudioSent();
         }
       } catch (e) {
         getLogger().error(`First message TTS error (${label}):`, e);
@@ -1364,6 +1440,7 @@ export class StreamHandler {
         }
         const encoded = this.encodePipelineAudio(processedAudio);
         this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
+        this.markFirstAudioSent();
       }
     } catch (e) {
       getLogger().error(`TTS streaming error (${this.deps.bridge.label}):`, e);
@@ -1548,18 +1625,82 @@ export class StreamHandler {
    * record the interruption, and return ``true`` so the caller skips the
    * turn-complete record.
    */
-  private handleBargeIn(transcript: { text?: string }): boolean {
+  private async handleBargeInAsync(transcript: {
+    text?: string;
+    isFinal?: boolean;
+  }): Promise<boolean> {
     if (!transcript.text || !this.isSpeaking) return false;
     if (!this.canBargeIn()) {
-      // Same rationale as the VAD-path gate in handleAudio: gate is
-      // 1 s with AEC (filter warmup) or 250 ms without (anti-flicker).
       getLogger().info(
         `Barge-in transcript suppressed (agent speaking < gate, aec=${this.aec ? 'on' : 'off'})`,
       );
       return false;
     }
+    if (this.bargeInStrategies.length > 0) {
+      const { evaluateStrategies } = await import(
+        './services/barge-in-strategies.js'
+      );
+      const confirmed = await evaluateStrategies(this.bargeInStrategies, {
+        transcript: transcript.text,
+        isInterim: transcript.isFinal === false,
+        agentSpeaking: this.isSpeaking,
+      });
+      if (!confirmed) {
+        getLogger().debug(
+          `Barge-in NOT confirmed by any strategy (${sanitizeLogValue(
+            transcript.text.slice(0, 40),
+          )}); agent continues talking`,
+        );
+        return false;
+      }
+      getLogger().info(
+        `Barge-in confirmed by strategy on transcript ${sanitizeLogValue(
+          transcript.text.slice(0, 40),
+        )}`,
+      );
+    }
+    this.runBargeInCancel(transcript.text);
+    return true;
+  }
+
+  /**
+   * Synchronous wrapper that callers in legacy code paths can keep using.
+   * When ``bargeInStrategies`` is empty the work is fully synchronous and
+   * the result is correct. With strategies the call is dispatched as a
+   * floating promise — non-confirmed transcripts simply skip the cancel
+   * and the legacy boolean return is meaningless under that opt-in path.
+   */
+  private handleBargeIn(transcript: { text?: string; isFinal?: boolean }): boolean {
+    if (!transcript.text || !this.isSpeaking) return false;
+    if (this.bargeInStrategies.length === 0) {
+      // Legacy synchronous path — preserve exact byte-for-byte behaviour
+      // for users who haven't opted into the confirm pipeline.
+      if (!this.canBargeIn()) {
+        getLogger().info(
+          `Barge-in transcript suppressed (agent speaking < gate, aec=${this.aec ? 'on' : 'off'})`,
+        );
+        return false;
+      }
+      this.runBargeInCancel(transcript.text);
+      return true;
+    }
+    // Opt-in confirm path is async; fire-and-forget. The cancel inside
+    // ``runBargeInCancel`` flips ``isSpeaking`` synchronously once it
+    // resolves, which is what downstream loops actually observe.
+    void this.handleBargeInAsync(transcript).catch((err) =>
+      getLogger().debug(`handleBargeInAsync threw: ${String(err)}`),
+    );
+    return false;
+  }
+
+  /**
+   * Run the cancel/flush sequence for a confirmed barge-in. Shared by
+   * the legacy synchronous path and the strategy-confirmed async path.
+   */
+  private runBargeInCancel(transcriptText: string): void {
+    this.clearPendingBargeIn();
     getLogger().debug(
-      `Barge-in: caller spoke over agent (${sanitizeLogValue(transcript.text.slice(0, 40))})`,
+      `Barge-in: caller spoke over agent (${sanitizeLogValue(transcriptText.slice(0, 40))})`,
     );
     this.metricsAcc.recordOverlapStart();
     this.metricsAcc.recordBargeinDetected();
@@ -1581,7 +1722,35 @@ export class StreamHandler {
         // Swallow.
       }
     }
-    return true;
+  }
+
+  /** Mark a VAD-detected barge-in as pending (no cancel yet). */
+  private startPendingBargeIn(): void {
+    if (this.bargeInPendingSince !== null) return;
+    this.bargeInPendingSince = Date.now();
+    this.metricsAcc.recordOverlapStart();
+    getLogger().info(
+      'Barge-in PENDING (VAD speech_start during TTS); awaiting strategy confirmation',
+    );
+    this.bargeInPendingTimer = setTimeout(() => {
+      if (this.bargeInPendingSince === null) return;
+      getLogger().info(
+        `Pending barge-in timed out after ${this.bargeInConfirmMs}ms; agent resumes (no strategy confirmed)`,
+      );
+      this.metricsAcc.recordOverlapEnd(false);
+      this.bargeInPendingSince = null;
+      this.bargeInPendingTimer = null;
+    }, this.bargeInConfirmMs);
+  }
+
+  /** Drop pending state without cancelling — used on confirm and on
+   * agent stop. Idempotent. */
+  private clearPendingBargeIn(): void {
+    if (this.bargeInPendingTimer !== null) {
+      clearTimeout(this.bargeInPendingTimer);
+      this.bargeInPendingTimer = null;
+    }
+    this.bargeInPendingSince = null;
   }
 
   /**
@@ -1796,6 +1965,7 @@ export class StreamHandler {
             if (!wsTtsStarted) { wsTtsStarted = true; this.metricsAcc.recordTtsFirstByte(); await this.emitAudioOut(); }
             const encoded = this.encodePipelineAudio(audioChunk);
             this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
+            this.markFirstAudioSent();
           }
         }
       }
@@ -1975,6 +2145,7 @@ export class StreamHandler {
     // reusing it on the outbound path corrupts both directions.
     const outAudio = eventData;
     this.deps.bridge.sendAudio(this.ws, outAudio.toString('base64'), this.streamSid);
+    this.markFirstAudioSent();
     // Send mark for barge-in accuracy.
     this.chunkCount++;
     this.deps.bridge.sendMark(this.ws, `audio_${this.chunkCount}`, this.streamSid);

@@ -185,6 +185,24 @@ class Agent:
     # ``None`` (default) keeps the adapter default (``whisper-1``). Set to
     # e.g. ``"gpt-realtime-whisper"`` for low-latency transcript partials.
     openai_realtime_input_audio_transcription_model: str | None = None
+    # Opt-in barge-in confirmation strategies (pipeline mode). With the
+    # default empty tuple the SDK falls back to the legacy "interrupt
+    # immediately on VAD speech_start" behaviour. When at least one
+    # strategy is provided, a VAD speech_start during TTS marks the
+    # barge-in as *pending* — the agent's TTS is paused but its in-flight
+    # LLM stream is preserved — and the strategies are consulted on every
+    # STT transcript. The first strategy that returns ``True`` confirms
+    # the barge-in (cancels TTS, flushes the inbound ring buffer); if
+    # none confirm within ``barge_in_confirm_ms`` the pending state is
+    # dropped and TTS resumes. See
+    # ``getpatter.services.barge_in_strategies`` for the
+    # :class:`BargeInStrategy` protocol and the
+    # :class:`MinWordsStrategy` reference implementation.
+    barge_in_strategies: tuple["BargeInStrategy", ...] = ()
+    # Maximum time (ms) to wait for at least one strategy to confirm a
+    # pending barge-in before discarding the pending state and resuming
+    # TTS. Only consulted when ``barge_in_strategies`` is non-empty.
+    barge_in_confirm_ms: int = 1500
 
 
 @dataclass(frozen=True)

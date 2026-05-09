@@ -326,4 +326,74 @@ describe('MetricsStore.hydrate', () => {
       fs.rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it('lifts top-level cost/latency/duration into metrics (CallLogger schema)', () => {
+    // CallLogger.logCallEnd writes cost/latency/duration_ms/telephony_provider
+    // at the top of metadata.json — without this fallback hydrated calls show
+    // $0.00 / "—" in the dashboard because the UI reads from metrics.cost etc.
+    const root = fs.mkdtempSync(`${os.tmpdir()}/patter-store-test-`);
+    try {
+      const callDir = `${root}/calls/2026/05/08/CA-real-shape`;
+      fs.mkdirSync(callDir, { recursive: true });
+      fs.writeFileSync(
+        `${callDir}/metadata.json`,
+        JSON.stringify({
+          schema_version: '1.0',
+          call_id: 'CA-real-shape',
+          started_at: '2026-05-08T23:33:00.000Z',
+          ended_at: '2026-05-08T23:33:57.000Z',
+          duration_ms: 57400,
+          status: 'completed',
+          telephony_provider: 'twilio',
+          provider_mode: 'pipeline',
+          turns: 9,
+          cost: {
+            stt: 0.001526,
+            tts: 0.02988,
+            llm: 0.000406,
+            telephony: 0.0085,
+            total: 0.040312,
+          },
+          latency: { p50_ms: 2127.7, p95_ms: 3461.7, p99_ms: 3640.1 },
+        }),
+      );
+      const store = new MetricsStore();
+      expect(store.hydrate(root)).toBe(1);
+      const rec = store.getCalls()[0];
+      expect(rec.metrics).not.toBeNull();
+      const m = rec.metrics as Record<string, unknown>;
+      expect((m.cost as Record<string, number>).total).toBeCloseTo(0.040312, 6);
+      expect((m.latency as Record<string, number>).p95_ms).toBeCloseTo(3461.7);
+      expect((m.latency_avg as Record<string, number>).total_ms).toBeCloseTo(3461.7);
+      expect(m.duration_seconds).toBeCloseTo(57.4);
+      expect(m.telephony_provider).toBe('twilio');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves explicit metrics when present (does not overwrite with top-level)', () => {
+    const root = fs.mkdtempSync(`${os.tmpdir()}/patter-store-test-`);
+    try {
+      const callDir = `${root}/calls/2026/05/08/CA-explicit`;
+      fs.mkdirSync(callDir, { recursive: true });
+      fs.writeFileSync(
+        `${callDir}/metadata.json`,
+        JSON.stringify({
+          call_id: 'CA-explicit',
+          started_at: '2026-05-08T10:00:00Z',
+          metrics: { cost: { total: 0.999 }, marker: 'kept' },
+          cost: { total: 0.001 },
+          latency: { p95_ms: 9999 },
+        }),
+      );
+      const store = new MetricsStore();
+      expect(store.hydrate(root)).toBe(1);
+      const m = store.getCalls()[0].metrics as Record<string, unknown>;
+      expect(m.marker).toBe('kept');
+      expect((m.cost as Record<string, number>).total).toBeCloseTo(0.999);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

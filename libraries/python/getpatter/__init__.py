@@ -46,6 +46,10 @@ from getpatter.models import (
     TTSConfig,
     TurnMetrics,
 )
+from getpatter.services.barge_in_strategies import (
+    BargeInStrategy,
+    MinWordsStrategy,
+)
 from getpatter.exceptions import (
     ErrorCode,
     PatterError,
@@ -379,6 +383,8 @@ __all__ = [
     "STTConfig",
     "TTSConfig",
     "TurnMetrics",
+    "BargeInStrategy",
+    "MinWordsStrategy",
     "ErrorCode",
     "PatterError",
     "PatterConnectionError",
