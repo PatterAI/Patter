@@ -507,6 +507,35 @@ def _numeric_subdirs(parent):
             yield entry
 
 
+def _metrics_from_top_level(meta: dict[str, Any]) -> dict[str, Any] | None:
+    """Build a ``metrics`` dict from top-level CallLogger fields.
+
+    ``CallLogger.log_call_end`` writes ``cost`` / ``latency`` / ``duration_ms`` /
+    ``telephony_provider`` as top-level keys in ``metadata.json``, but the
+    dashboard UI expects them under ``metrics``. Without this fallback every
+    hydrated call shows ``$0.00`` and ``—`` for cost and latency.
+    """
+    cost = meta.get("cost") if isinstance(meta.get("cost"), dict) else None
+    latency = meta.get("latency") if isinstance(meta.get("latency"), dict) else None
+    duration_ms = meta.get("duration_ms")
+    telephony = meta.get("telephony_provider")
+    if cost is None and latency is None and duration_ms is None and not telephony:
+        return None
+    out: dict[str, Any] = {}
+    if cost is not None:
+        out["cost"] = cost
+    if latency is not None:
+        out["latency_avg"] = {
+            "total_ms": latency.get("p95_ms") or latency.get("p50_ms") or 0
+        }
+        out["latency"] = latency
+    if isinstance(duration_ms, (int, float)) and duration_ms > 0:
+        out["duration_seconds"] = float(duration_ms) / 1000.0
+    if telephony:
+        out["telephony_provider"] = telephony
+    return out or None
+
+
 def _metadata_to_call_record(
     call_id: str, meta: dict[str, Any]
 ) -> dict[str, Any] | None:
@@ -533,6 +562,8 @@ def _metadata_to_call_record(
         return None
     ended = _to_seconds(meta.get("ended_at"))
     metrics = meta.get("metrics") if isinstance(meta.get("metrics"), dict) else None
+    if metrics is None:
+        metrics = _metrics_from_top_level(meta)
     transcript = (
         meta.get("transcript") if isinstance(meta.get("transcript"), list) else []
     )

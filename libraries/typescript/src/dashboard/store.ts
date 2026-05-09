@@ -405,6 +405,48 @@ export class MetricsStore extends EventEmitter {
 }
 
 /**
+ * Build a ``metrics`` object from top-level CallLogger fields. ``CallLogger``
+ * writes ``cost`` / ``latency`` / ``duration_ms`` / ``telephony_provider`` at
+ * the top of ``metadata.json``, but the dashboard UI reads them from
+ * ``metrics``. Without this fallback every hydrated call shows ``$0.00`` and
+ * ``—`` for cost and latency.
+ */
+function metricsFromTopLevel(
+  meta: Record<string, unknown>,
+): Record<string, unknown> | null {
+  const cost =
+    meta.cost && typeof meta.cost === 'object'
+      ? (meta.cost as Record<string, unknown>)
+      : null;
+  const latency =
+    meta.latency && typeof meta.latency === 'object'
+      ? (meta.latency as Record<string, unknown>)
+      : null;
+  const durationMs = meta.duration_ms;
+  const telephony = meta.telephony_provider;
+  if (cost === null && latency === null && durationMs == null && !telephony) {
+    return null;
+  }
+  const out: Record<string, unknown> = {};
+  if (cost !== null) out.cost = cost;
+  if (latency !== null) {
+    const totalMs =
+      (typeof latency.p95_ms === 'number' && latency.p95_ms) ||
+      (typeof latency.p50_ms === 'number' && latency.p50_ms) ||
+      0;
+    out.latency_avg = { total_ms: totalMs };
+    out.latency = latency;
+  }
+  if (typeof durationMs === 'number' && durationMs > 0) {
+    out.duration_seconds = durationMs / 1000;
+  }
+  if (typeof telephony === 'string' && telephony) {
+    out.telephony_provider = telephony;
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+/**
  * Translate a CallLogger ``metadata.json`` payload into a ``CallRecord``.
  * Returns ``null`` when ``started_at`` is missing or unparseable — the record
  * would otherwise be silently inserted with ``started_at = 0`` (Unix epoch),
@@ -421,7 +463,7 @@ function metadataToCallRecord(
   const metrics =
     meta.metrics && typeof meta.metrics === 'object'
       ? (meta.metrics as Record<string, unknown>)
-      : null;
+      : metricsFromTopLevel(meta);
   const transcript = Array.isArray(meta.transcript)
     ? (meta.transcript as CallRecord['transcript'])
     : [];

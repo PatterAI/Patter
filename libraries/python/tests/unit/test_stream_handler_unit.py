@@ -470,9 +470,13 @@ class TestBargeInCancelsLlmStream:
         handler._aec = object()
         # Emulate ``_begin_speaking`` having just run — agent has been
         # speaking for less than the gate.
-        handler._speaking_started_at = time.time() - (
-            MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN_AEC / 2
-        )
+        # First audio chunk reached the wire at ``half_gate`` ago — so the
+        # gate measured from ``_first_audio_sent_at`` is still inside the
+        # warmup window (post-fix anchor; was anchored on
+        # ``_speaking_started_at`` pre-0.6.2).
+        half_gate = MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN_AEC / 2
+        handler._speaking_started_at = time.time() - half_gate
+        handler._first_audio_sent_at = time.time() - half_gate
 
         await handler._handle_barge_in(
             Transcript(text="hold on", is_final=True, speech_final=True)
@@ -503,9 +507,9 @@ class TestBargeInCancelsLlmStream:
         handler.audio_sender.send_clear = AsyncMock()
         handler._llm_cancel_event = asyncio.Event()
         handler._aec = object()
-        handler._speaking_started_at = time.time() - (
-            MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN_AEC + 0.1
-        )
+        past_gate = MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN_AEC + 0.1
+        handler._speaking_started_at = time.time() - past_gate
+        handler._first_audio_sent_at = time.time() - past_gate
 
         await handler._handle_barge_in(
             Transcript(text="hold on", is_final=True, speech_final=True)
@@ -535,6 +539,7 @@ class TestBargeInCancelsLlmStream:
         # AEC OFF (PSTN default) — gate is 0.25 s.
         handler._aec = None
         handler._speaking_started_at = time.time() - 0.4
+        handler._first_audio_sent_at = time.time() - 0.4
 
         await handler._handle_barge_in(
             Transcript(text="stop", is_final=True, speech_final=True)
@@ -563,6 +568,7 @@ class TestBargeInCancelsLlmStream:
         handler._llm_cancel_event = asyncio.Event()
         handler._aec = None
         handler._speaking_started_at = time.time() - 0.1
+        handler._first_audio_sent_at = time.time() - 0.1
 
         await handler._handle_barge_in(
             Transcript(text="stop", is_final=True, speech_final=True)
@@ -570,6 +576,42 @@ class TestBargeInCancelsLlmStream:
 
         assert not handler._llm_cancel_event.is_set(), (
             "barge-in must be suppressed within the 0.25 s anti-flicker window"
+        )
+        assert handler._is_speaking is True
+
+    async def test_barge_in_suppressed_before_first_audio_emitted(self) -> None:
+        """0.6.2 fix: ElevenLabs (and other cloud TTS) take 200-700 ms to
+        emit the first byte. While ``_begin_speaking`` has fired but the
+        first chunk has NOT yet hit the wire, VAD picking up background
+        noise ("hello?", breath, room ambience) must NOT trigger a
+        self-cancel. Pre-fix, a 250 ms anti-flicker gate measured from
+        ``_begin_speaking`` expired BEFORE TTS emitted any audio,
+        cancelling the agent's first turn before a single byte left.
+        """
+        from getpatter.stream_handler import PipelineStreamHandler
+        from getpatter.providers.base import Transcript
+        import time
+
+        handler = object.__new__(PipelineStreamHandler)
+        handler._is_speaking = True
+        handler.metrics = None
+        handler.call_id = "test-call"
+        handler.audio_sender = MagicMock()
+        handler.audio_sender.send_clear = AsyncMock()
+        handler._llm_cancel_event = asyncio.Event()
+        handler._aec = None  # PSTN default, no AEC warmup gate
+        # ``_begin_speaking`` ran 500 ms ago — well past the 250 ms gate
+        # that pre-fix would let barge-in through. But TTS still hasn't
+        # emitted the first chunk (cloud provider first-byte latency).
+        handler._speaking_started_at = time.time() - 0.5
+        handler._first_audio_sent_at = None
+
+        await handler._handle_barge_in(
+            Transcript(text="hello?", is_final=True, speech_final=True)
+        )
+
+        assert not handler._llm_cancel_event.is_set(), (
+            "barge-in must be suppressed until at least one TTS chunk has hit the wire"
         )
         assert handler._is_speaking is True
 

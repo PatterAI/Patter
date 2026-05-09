@@ -1641,6 +1641,17 @@ class PipelineStreamHandler(StreamHandler):
         # the AEC filter is still converging (~500 ms warmup + safety
         # margin).
         self._speaking_started_at: float | None = None
+        # Wall-clock timestamp (``time.time()`` units) when the FIRST TTS
+        # audio chunk of the current turn actually reached the carrier wire
+        # — set by ``_mark_first_audio_sent`` after ``audio_sender.send_audio``
+        # succeeds, cleared by ``_begin_speaking`` / barge-in cancels. The
+        # barge-in gate is anchored to this timestamp instead of
+        # ``_speaking_started_at`` because cloud TTS providers (ElevenLabs,
+        # Cartesia, ...) take 200-700 ms to emit the first byte. A gate
+        # starting at ``_begin_speaking`` would expire on background noise
+        # before any audio went out, exit the TTS loop on
+        # ``_is_speaking=False``, and silently drop the agent's first turn.
+        self._first_audio_sent_at: float | None = None
         # Monotonic counter incremented at every TTS-start. ``_end_speaking_with_grace``
         # captures the value at scheduling time and only flips ``_is_speaking`` to
         # False if no new turn started in the meantime. Prevents an in-flight grace
@@ -1845,6 +1856,7 @@ class PipelineStreamHandler(StreamHandler):
                     if self._aec is not None:
                         self._aec.push_far_end(audio_chunk)
                     await self.audio_sender.send_audio(audio_chunk)
+                    self._mark_first_audio_sent()
             finally:
                 # Drop any partial int16 byte to prevent cross-turn corruption
                 # if the stream threw before a complete sample was delivered.
@@ -2107,6 +2119,7 @@ class PipelineStreamHandler(StreamHandler):
                 if self._aec is not None:
                     self._aec.push_far_end(processed_audio)
                 await self.audio_sender.send_audio(processed_audio)
+                self._mark_first_audio_sent()
         finally:
             await gen.aclose()
             _tts_span.__exit__(None, None, None)
@@ -2337,6 +2350,7 @@ class PipelineStreamHandler(StreamHandler):
         ):
             self._is_speaking = False
             self._speaking_started_at = None
+            self._first_audio_sent_at = None
             # Record cancel timestamp so ``_begin_speaking`` can enforce
             # a short drain window before the next TTS chunk lands on
             # top of the cancelled turn's tail (avoids audible "doubled
@@ -2702,6 +2716,7 @@ class PipelineStreamHandler(StreamHandler):
                             # pending grace-flip from the prior turn can't fight us.
                             self._is_speaking = False
                             self._speaking_started_at = None
+                            self._first_audio_sent_at = None
                             self._speaking_generation += 1
                             # Record cancel timestamp so ``_begin_speaking``
                             # can enforce a short drain window before the
@@ -2813,9 +2828,21 @@ class PipelineStreamHandler(StreamHandler):
         self._speaking_generation += 1
         self._is_speaking = True
         self._speaking_started_at = time.time()
+        self._first_audio_sent_at = None
         # Fresh turn — drop any stale pre-barge-in buffer from a previous
         # turn so we never replay yesterday's audio to STT.
         self._inbound_audio_ring = []
+
+    def _mark_first_audio_sent(self) -> None:
+        """Record that the first TTS chunk of the current turn hit the wire.
+
+        Idempotent within a turn: only the first call sets the timestamp.
+        Must be invoked AFTER the underlying ``audio_sender.send_audio`` so
+        the gate is anchored to "audio actually went out", not "we asked
+        the carrier to send it". Mirrors TS ``markFirstAudioSent``.
+        """
+        if self._first_audio_sent_at is None:
+            self._first_audio_sent_at = time.time()
 
     def _can_barge_in(self) -> bool:
         """Whether barge-in is allowed to fire right now.
@@ -2832,7 +2859,17 @@ class PipelineStreamHandler(StreamHandler):
         started_at = getattr(self, "_speaking_started_at", None)
         if started_at is None:
             return True
-        elapsed = time.time() - started_at
+        # Anchor the gate on "first audio actually emitted", not on
+        # ``_begin_speaking`` (which fires before the TTS provider's
+        # first-byte latency has elapsed). Without this guard, background
+        # noise picked up by VAD ~250 ms after ``_begin_speaking`` triggers
+        # a self-cancel BEFORE any TTS chunk has reached the wire — the
+        # agent's first turn becomes silence even though the SDK believes
+        # it spoke. Mirrors TS ``canBargeIn``.
+        first_audio_at = getattr(self, "_first_audio_sent_at", None)
+        if first_audio_at is None:
+            return False
+        elapsed = time.time() - first_audio_at
         gate = (
             MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN_AEC
             if getattr(self, "_aec", None) is not None
@@ -2869,6 +2906,7 @@ class PipelineStreamHandler(StreamHandler):
         if grace_ms <= 0:
             self._is_speaking = False
             self._speaking_started_at = None
+            self._first_audio_sent_at = None
             return
 
         gen = self._speaking_generation
@@ -2881,6 +2919,7 @@ class PipelineStreamHandler(StreamHandler):
                 if self._speaking_generation == gen:
                     self._is_speaking = False
                     self._speaking_started_at = None
+                    self._first_audio_sent_at = None
             except asyncio.CancelledError:  # pragma: no cover
                 raise
             except Exception as exc:  # pragma: no cover - defensive

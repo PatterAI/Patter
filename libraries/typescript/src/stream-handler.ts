@@ -251,6 +251,17 @@ export class StreamHandler {
    */
   private speakingStartedAt: number | null = null;
   /**
+   * Wall-clock (ms) when the FIRST TTS audio chunk actually reached the
+   * carrier wire — set in ``markFirstAudioSent`` after ``bridge.sendAudio``
+   * succeeds, cleared by ``beginSpeaking`` / ``cancelSpeaking``. The barge-in
+   * gate measures elapsed from this instant, NOT from ``speakingStartedAt``,
+   * because ElevenLabs (and other cloud TTS) take 200-700 ms to emit the
+   * first byte. A gate anchored to ``beginSpeaking`` would expire on
+   * background noise before any audio went out, exit the TTS loop on
+   * ``isSpeaking=false``, and silently cut the agent's first turn.
+   */
+  private firstAudioSentAt: number | null = null;
+  /**
    * Minimum wall-clock duration (ms) the agent must have been speaking
    * before barge-in is allowed to fire when AEC is active. Covers the
    * AEC warmup window (~500 ms) plus a safety margin so residual bleed
@@ -311,9 +322,23 @@ export class StreamHandler {
     this.speakingGeneration++;
     this.isSpeaking = true;
     this.speakingStartedAt = Date.now();
+    this.firstAudioSentAt = null;
     // Fresh turn — drop any stale pre-barge-in buffer from a previous turn
     // so we never replay yesterday's audio to STT.
     this.inboundAudioRing = [];
+  }
+
+  /**
+   * Record that the first TTS audio chunk of the current turn has hit the
+   * carrier wire. Idempotent within a turn — only the first call sets the
+   * timestamp; later chunks are no-ops. Must be invoked AFTER the underlying
+   * ``bridge.sendAudio`` resolves so the gate is anchored to "audio actually
+   * went out", not "we asked the carrier to send it".
+   */
+  private markFirstAudioSent(): void {
+    if (this.firstAudioSentAt === null) {
+      this.firstAudioSentAt = Date.now();
+    }
   }
 
   /**
@@ -327,6 +352,7 @@ export class StreamHandler {
     this.speakingGeneration++; // invalidates pending grace timers
     this.isSpeaking = false;
     this.speakingStartedAt = null;
+    this.firstAudioSentAt = null;
     this.lastCancelAt = Date.now();
     if (this.llmAbort !== null) {
       try {
@@ -372,11 +398,13 @@ export class StreamHandler {
         if (this.speakingGeneration === gen) {
           this.isSpeaking = false;
           this.speakingStartedAt = null;
+          this.firstAudioSentAt = null;
         }
       }, grace);
     } else {
       this.isSpeaking = false;
       this.speakingStartedAt = null;
+      this.firstAudioSentAt = null;
     }
   }
 
@@ -387,7 +415,14 @@ export class StreamHandler {
    */
   private canBargeIn(): boolean {
     if (this.speakingStartedAt === null) return true;
-    const elapsed = Date.now() - this.speakingStartedAt;
+    // Anchor the gate on "first audio actually emitted", not on
+    // ``beginSpeaking`` (which fires before the TTS provider's first-byte
+    // latency has elapsed). Without this guard, background noise picked up
+    // by VAD ~250 ms after ``beginSpeaking`` triggers a self-cancel BEFORE
+    // any TTS chunk has reached the wire — the agent's first turn becomes
+    // silence even though the SDK believes it spoke.
+    if (this.firstAudioSentAt === null) return false;
+    const elapsed = Date.now() - this.firstAudioSentAt;
     const gate = this.aec
       ? StreamHandler.MIN_AGENT_SPEAKING_MS_BEFORE_BARGE_IN_AEC
       : StreamHandler.MIN_AGENT_SPEAKING_MS_BEFORE_BARGE_IN_NO_AEC;
@@ -1236,6 +1271,7 @@ export class StreamHandler {
           }
           const encoded = this.encodePipelineAudio(chunk);
           this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
+          this.markFirstAudioSent();
         }
       } catch (e) {
         getLogger().error(`First message TTS error (${label}):`, e);
@@ -1364,6 +1400,7 @@ export class StreamHandler {
         }
         const encoded = this.encodePipelineAudio(processedAudio);
         this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
+        this.markFirstAudioSent();
       }
     } catch (e) {
       getLogger().error(`TTS streaming error (${this.deps.bridge.label}):`, e);
@@ -1796,6 +1833,7 @@ export class StreamHandler {
             if (!wsTtsStarted) { wsTtsStarted = true; this.metricsAcc.recordTtsFirstByte(); await this.emitAudioOut(); }
             const encoded = this.encodePipelineAudio(audioChunk);
             this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
+            this.markFirstAudioSent();
           }
         }
       }
@@ -1975,6 +2013,7 @@ export class StreamHandler {
     // reusing it on the outbound path corrupts both directions.
     const outAudio = eventData;
     this.deps.bridge.sendAudio(this.ws, outAudio.toString('base64'), this.streamSid);
+    this.markFirstAudioSent();
     // Send mark for barge-in accuracy.
     this.chunkCount++;
     this.deps.bridge.sendMark(this.ws, `audio_${this.chunkCount}`, this.streamSid);
