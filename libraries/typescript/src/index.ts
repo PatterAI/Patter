@@ -67,6 +67,16 @@ export { callsToCsv, callsToJson } from "./dashboard/export";
 export { mountDashboard, mountApi } from "./dashboard/routes";
 export { notifyDashboard } from "./dashboard/persistence";
 export { LLMLoop, OpenAILLMProvider, DefaultToolExecutor } from "./llm-loop";
+export {
+  MinWordsStrategy,
+  evaluateStrategies as evaluateBargeInStrategies,
+  resetStrategies as resetBargeInStrategies,
+} from "./services/barge-in-strategies";
+export type {
+  BargeInStrategy,
+  EvaluateContext as BargeInEvaluateContext,
+  MinWordsStrategyOptions,
+} from "./services/barge-in-strategies";
 export type {
   LLMProvider,
   LLMChunk,

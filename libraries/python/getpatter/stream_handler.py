@@ -1652,6 +1652,33 @@ class PipelineStreamHandler(StreamHandler):
         # before any audio went out, exit the TTS loop on
         # ``_is_speaking=False``, and silently drop the agent's first turn.
         self._first_audio_sent_at: float | None = None
+        # Optional barge-in confirmation strategies (see
+        # ``getpatter.services.barge_in_strategies``). With an empty tuple
+        # the SDK uses the legacy "cancel on first VAD speech_start"
+        # behaviour. With one or more strategies, a VAD speech_start during
+        # TTS marks the barge-in as *pending* — the agent's TTS keeps
+        # streaming naturally — and the strategies are consulted on every
+        # STT transcript. The first strategy that approves confirms the
+        # barge-in and the cancel/flush sequence runs; if none confirm
+        # within ``_barge_in_confirm_s`` the pending state is dropped and
+        # the agent finishes its sentence.
+        self._barge_in_strategies: tuple = tuple(
+            getattr(agent, "barge_in_strategies", ()) or ()
+        )
+        _confirm_ms = getattr(agent, "barge_in_confirm_ms", 1500)
+        try:
+            self._barge_in_confirm_s: float = max(0.1, float(_confirm_ms) / 1000.0)
+        except (TypeError, ValueError):
+            self._barge_in_confirm_s = 1.5
+        # Wall-clock timestamp of the most recent VAD-marked pending
+        # barge-in. ``None`` means "not pending"; a numeric value means
+        # the agent has already produced a turn worth of audio AND VAD
+        # has seen user speech, but no strategy has confirmed yet.
+        self._barge_in_pending_since: float | None = None
+        # Background task that fires the pending-timeout. Cancelled on
+        # confirmation, on agent stop, and on call shutdown so a stale
+        # pending never bleeds into the next turn.
+        self._barge_in_pending_task = None
         # Monotonic counter incremented at every TTS-start. ``_end_speaking_with_grace``
         # captures the value at scheduling time and only flips ``_is_speaking`` to
         # False if no new turn started in the meantime. Prevents an in-flight grace
@@ -2321,28 +2348,61 @@ class PipelineStreamHandler(StreamHandler):
                 await self._emit_turn_metrics(turn, call_id=call_id)
 
     async def _handle_barge_in(self, transcript) -> None:
-        """Caller spoke over in-flight TTS. Flip speaking flag, clear downstream
-        audio, record interruption. Mirrors TS ``handleBargeIn``.
+        """Decide whether ``transcript`` confirms a barge-in and run the
+        cancel/flush path if so. Mirrors TS ``handleBargeIn``.
+
+        The legacy contract — "any transcript while speaking cancels the
+        agent" — applies when ``agent.barge_in_strategies`` is empty.
+        With one or more strategies configured, the transcript is fed
+        to :func:`evaluate_strategies` and the cancel only runs when at
+        least one strategy approves; otherwise the agent keeps talking.
         """
         if not (transcript.text and self._is_speaking):
             return
         if not self._can_barge_in():
-            # Same rationale as the VAD-path gate in ``on_audio_received``:
-            # gate is 1.0 s with AEC (filter warmup) or 0.25 s without
-            # (anti-flicker only). INFO so unexpected suppressions are
-            # visible without enabling debug logs.
             aec_state = "on" if getattr(self, "_aec", None) is not None else "off"
             logger.info(
                 "Barge-in transcript suppressed (agent speaking < gate, aec=%s)",
                 aec_state,
             )
             return
+        strategies = getattr(self, "_barge_in_strategies", ()) or ()
+        if strategies:
+            from getpatter.services.barge_in_strategies import evaluate_strategies
+
+            confirmed = await evaluate_strategies(
+                strategies,
+                transcript=transcript.text,
+                is_interim=not getattr(transcript, "is_final", True),
+                agent_speaking=self._is_speaking,
+            )
+            if not confirmed:
+                logger.debug(
+                    "Barge-in NOT confirmed by any strategy (transcript=%r); "
+                    "agent continues talking",
+                    sanitize_log_value(transcript.text[:40]),
+                )
+                return
+            logger.info(
+                "Barge-in confirmed by strategy on transcript %r",
+                sanitize_log_value(transcript.text[:40]),
+            )
+        await self._do_cancel_for_barge_in(transcript.text)
+
+    async def _do_cancel_for_barge_in(self, transcript_text: str) -> None:
+        """Actually cancel the in-flight agent turn (TTS + LLM stream + ring).
+
+        Split out of :meth:`_handle_barge_in` so the same cancel logic can
+        run from the legacy "transcript = cancel" path AND the opt-in
+        "strategy confirmed = cancel" path without duplication.
+        """
+        self._clear_pending_barge_in()
         if self.metrics is not None:
             self.metrics.record_overlap_start()
             self.metrics.record_bargein_detected()
         logger.debug(
             "Barge-in: caller spoke over agent (%s)",
-            sanitize_log_value(transcript.text[:40]),
+            sanitize_log_value(transcript_text[:40]),
         )
         with start_span(
             SPAN_BARGEIN,
@@ -2351,17 +2411,7 @@ class PipelineStreamHandler(StreamHandler):
             self._is_speaking = False
             self._speaking_started_at = None
             self._first_audio_sent_at = None
-            # Record cancel timestamp so ``_begin_speaking`` can enforce
-            # a short drain window before the next TTS chunk lands on
-            # top of the cancelled turn's tail (avoids audible "doubled
-            # audio" on the first sentence post-barge-in). Mirrors the
-            # VAD-path cancel branch — both barge-in paths must set the
-            # timestamp for the drain to be effective.
             self._last_cancel_at = time.time()
-            # Signal the in-flight LLM-consumption loop to stop fetching
-            # tokens. The consume loop checks ``_llm_cancel_event`` between
-            # iterations and ``aclose()``s the generator on exit, freeing
-            # the upstream HTTP/WS slot and stopping further token billing.
             cancel_event = getattr(self, "_llm_cancel_event", None)
             if cancel_event is not None:
                 cancel_event.set()
@@ -2373,6 +2423,56 @@ class PipelineStreamHandler(StreamHandler):
                 self.metrics.record_tts_stopped()
                 self.metrics.record_turn_interrupted()
                 self.metrics.record_overlap_end(was_interruption=True)
+
+    async def _start_pending_barge_in(self) -> None:
+        """Mark a VAD-detected barge-in as pending (no cancel yet).
+
+        Only used when ``agent.barge_in_strategies`` is non-empty. The
+        agent's TTS keeps streaming naturally; an
+        :meth:`_pending_barge_in_timeout` task will drop the pending
+        state if no strategy confirms within ``_barge_in_confirm_s``.
+        """
+        if self._barge_in_pending_since is not None:
+            return
+        self._barge_in_pending_since = time.time()
+        if self.metrics is not None:
+            self.metrics.record_overlap_start()
+        logger.info(
+            "Barge-in PENDING (VAD speech_start during TTS); awaiting strategy confirmation"
+        )
+        try:
+            self._barge_in_pending_task = asyncio.create_task(
+                self._pending_barge_in_timeout()
+            )
+        except RuntimeError as exc:  # pragma: no cover - no running loop
+            logger.debug("could not schedule pending barge-in timeout: %s", exc)
+            self._barge_in_pending_task = None
+
+    async def _pending_barge_in_timeout(self) -> None:
+        try:
+            await asyncio.sleep(self._barge_in_confirm_s)
+        except asyncio.CancelledError:
+            return
+        if self._barge_in_pending_since is None:
+            return
+        logger.info(
+            "Pending barge-in timed out after %.2fs; agent resumes (no strategy confirmed)",
+            self._barge_in_confirm_s,
+        )
+        if self.metrics is not None:
+            self.metrics.record_overlap_end(was_interruption=False)
+        self._barge_in_pending_since = None
+        self._barge_in_pending_task = None
+
+    def _clear_pending_barge_in(self) -> None:
+        """Drop pending state without cancelling — used on confirm and on
+        agent stop. Idempotent and safe to call from test fixtures that
+        construct the handler via ``object.__new__`` (no __init__)."""
+        task = getattr(self, "_barge_in_pending_task", None)
+        if task is not None and not task.done():
+            task.cancel()
+        self._barge_in_pending_task = None
+        self._barge_in_pending_since = None
 
     def _commit_transcript(self, text: str) -> bool:
         """Dedup + throttle + hallucination filter for final STT transcripts.
@@ -2691,39 +2791,37 @@ class PipelineStreamHandler(StreamHandler):
                             aec_state,
                         )
                     elif self._is_speaking:
-                        # Caller spoke over in-flight TTS — preempt now.
-                        if self.metrics is not None:
-                            self.metrics.record_bargein_detected()
-                        with start_span(
-                            SPAN_BARGEIN,
-                            {"patter.call.id": self.call_id},
-                        ):
-                            try:
-                                await self.audio_sender.send_clear()
-                            except Exception as exc:
-                                logger.debug(
-                                    "send_clear during VAD barge-in failed: %s", exc
-                                )
-                            # Replay the ring buffer of inbound frames
-                            # captured while the agent was speaking —
-                            # see ``_flush_inbound_audio_ring`` for the
-                            # full rationale.
-                            await self._flush_inbound_audio_ring()
+                        # Caller spoke over in-flight TTS. With opt-in
+                        # confirmation strategies the cancel is deferred
+                        # until at least one strategy approves the user's
+                        # transcript; otherwise we keep the legacy
+                        # "cancel immediately" path so existing users
+                        # see no behaviour change.
+                        if self._barge_in_strategies:
+                            await self._start_pending_barge_in()
+                        else:
                             if self.metrics is not None:
-                                self.metrics.record_tts_stopped()
-                                self.metrics.record_turn_interrupted()
-                            # Force-flip immediately and bump the generation so a
-                            # pending grace-flip from the prior turn can't fight us.
-                            self._is_speaking = False
-                            self._speaking_started_at = None
-                            self._first_audio_sent_at = None
-                            self._speaking_generation += 1
-                            # Record cancel timestamp so ``_begin_speaking``
-                            # can enforce a short drain window before the
-                            # next TTS chunk lands on top of the cancelled
-                            # turn's tail (avoids audible "doubled audio"
-                            # on the first sentence post-barge-in).
-                            self._last_cancel_at = time.time()
+                                self.metrics.record_bargein_detected()
+                            with start_span(
+                                SPAN_BARGEIN,
+                                {"patter.call.id": self.call_id},
+                            ):
+                                try:
+                                    await self.audio_sender.send_clear()
+                                except Exception as exc:
+                                    logger.debug(
+                                        "send_clear during VAD barge-in failed: %s",
+                                        exc,
+                                    )
+                                await self._flush_inbound_audio_ring()
+                                if self.metrics is not None:
+                                    self.metrics.record_tts_stopped()
+                                    self.metrics.record_turn_interrupted()
+                                self._is_speaking = False
+                                self._speaking_started_at = None
+                                self._first_audio_sent_at = None
+                                self._speaking_generation += 1
+                                self._last_cancel_at = time.time()
                     if self.metrics is not None:
                         self.metrics.start_turn_if_idle()
                 elif vad_event.type == "speech_end":
@@ -2907,6 +3005,8 @@ class PipelineStreamHandler(StreamHandler):
             self._is_speaking = False
             self._speaking_started_at = None
             self._first_audio_sent_at = None
+            self._clear_pending_barge_in()
+            await self._reset_barge_in_strategies()
             return
 
         gen = self._speaking_generation
@@ -2920,12 +3020,21 @@ class PipelineStreamHandler(StreamHandler):
                     self._is_speaking = False
                     self._speaking_started_at = None
                     self._first_audio_sent_at = None
+                    self._clear_pending_barge_in()
+                    await self._reset_barge_in_strategies()
             except asyncio.CancelledError:  # pragma: no cover
                 raise
             except Exception as exc:  # pragma: no cover - defensive
                 logger.debug("tts grace flip failed: %s", exc)
 
         asyncio.create_task(_flip_after_grace())
+
+    async def _reset_barge_in_strategies(self) -> None:
+        if not self._barge_in_strategies:
+            return
+        from getpatter.services.barge_in_strategies import reset_strategies
+
+        await reset_strategies(self._barge_in_strategies)
 
     async def _flush_inbound_audio_ring(self) -> None:
         """Replay the audio captured by the self-hearing guard right
