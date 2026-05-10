@@ -12,6 +12,17 @@ export interface MetricBucket {
   readonly toMs: number;
 }
 
+/**
+ * Tooltip kind drives the headline aggregate shown above the per-call
+ * sample list:
+ *   - ``count``   →  "N CALLS"
+ *   - ``latency`` →  "AVG LATENCY <P95-mean> MS"
+ *   - ``spend``   →  "TOTAL COST $<sum>"
+ * The rendered list of recent calls in the bucket is shared across all
+ * three so the user can still drill down into a specific call.
+ */
+export type MetricKind = 'count' | 'latency' | 'spend';
+
 export interface MetricProps {
   label: string;
   value: string | number;
@@ -24,6 +35,12 @@ export interface MetricProps {
   buckets?: readonly MetricBucket[];
   /** Called when the user clicks a bar that contains at least one call. */
   onSelectCall?: (callId: string) => void;
+  /**
+   * Which aggregate the tooltip headline reports for this card. Defaults
+   * to ``count`` so existing callers (no kind passed) keep their previous
+   * "N calls" label.
+   */
+  kind?: MetricKind;
   peach?: boolean;
   footer?: string;
   badge?: boolean;
@@ -87,11 +104,43 @@ function newestCallId(bucket: MetricBucket): string | undefined {
   return sorted[0]?.id;
 }
 
-interface SparkTooltipProps {
-  bucket: MetricBucket;
+/**
+ * Compute the per-bucket headline for the sparkline tooltip. Returns the
+ * uppercase label (e.g. "AVG LATENCY") and the formatted value (e.g.
+ * "3048 ms") for the chosen ``kind``. Cleanly separated from the
+ * presentation so the same card-level numbers shown on the metric tile
+ * itself can be re-used by tests.
+ */
+export function bucketHeadline(
+  bucket: MetricBucket,
+  kind: MetricKind,
+): { label: string; value: string } {
+  const calls = bucket.calls;
+  const count = calls.length;
+  if (kind === 'spend') {
+    const sum = calls.reduce((acc, c) => acc + callCost(c), 0);
+    return { label: 'TOTAL COST', value: `$${sum.toFixed(3)}` };
+  }
+  if (kind === 'latency') {
+    const withLat = calls.filter((c) => typeof c.latencyP95 === 'number');
+    const avg =
+      withLat.length > 0
+        ? Math.round(
+            withLat.reduce((acc, c) => acc + (c.latencyP95 ?? 0), 0) /
+              withLat.length,
+          )
+        : 0;
+    return { label: 'AVG LATENCY', value: `${avg} ms` };
+  }
+  return { label: count === 1 ? 'CALL' : 'CALLS', value: `${count}` };
 }
 
-function SparkTooltip({ bucket }: SparkTooltipProps) {
+interface SparkTooltipProps {
+  bucket: MetricBucket;
+  kind: MetricKind;
+}
+
+function SparkTooltip({ bucket, kind }: SparkTooltipProps) {
   const range = bucketRange(bucket);
   const count = bucket.calls.length;
 
@@ -104,12 +153,14 @@ function SparkTooltip({ bucket }: SparkTooltipProps) {
     );
   }
 
+  const headline = bucketHeadline(bucket, kind);
   const sample = bucket.calls.slice(0, 4);
   return (
     <div className="spark-tooltip">
       <div className="spark-tooltip-range">{range}</div>
-      <div className="spark-tooltip-count">
-        {count} call{count === 1 ? '' : 's'}
+      <div className="spark-tooltip-headline">
+        <span className="spark-tooltip-headline-l">{headline.label}</span>
+        <span className="spark-tooltip-headline-v">{headline.value}</span>
       </div>
       <ul className="spark-tooltip-list">
         {sample.map((c) => {
@@ -134,10 +185,11 @@ interface SparkBarProps {
   bucket: MetricBucket | undefined;
   height: number;
   interactive: boolean;
+  kind: MetricKind;
   onSelect?: (id: string) => void;
 }
 
-function SparkBar({ bucket, height, interactive, onSelect }: SparkBarProps) {
+function SparkBar({ bucket, height, interactive, kind, onSelect }: SparkBarProps) {
   const [hovered, setHovered] = useState(false);
   const hasCalls = !!bucket && bucket.calls.length > 0;
 
@@ -165,7 +217,7 @@ function SparkBar({ bucket, height, interactive, onSelect }: SparkBarProps) {
         onBlur={() => setHovered(false)}
         aria-label={`${bucket.calls.length} calls in ${bucketRange(bucket)}`}
       />
-      {hovered && <SparkTooltip bucket={bucket} />}
+      {hovered && <SparkTooltip bucket={bucket} kind={kind} />}
     </div>
   );
 }
@@ -179,6 +231,7 @@ export function Metric({
   spark,
   buckets,
   onSelectCall,
+  kind = 'count',
   peach,
   footer,
   badge,
@@ -204,6 +257,7 @@ export function Metric({
             bucket={buckets?.[i]}
             height={h}
             interactive={interactive}
+            kind={kind}
             onSelect={onSelectCall}
           />
         ))}

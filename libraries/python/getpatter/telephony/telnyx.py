@@ -264,6 +264,7 @@ async def telnyx_stream_bridge(
     report_only_initial_ttfb: bool = False,
     patter_side: str = "uut",
     pop_prewarm_audio=None,
+    pop_prewarmed_connections=None,
 ) -> None:
     """Bridge a Telnyx WebSocket media stream to the configured AI provider.
 
@@ -584,6 +585,7 @@ async def telnyx_stream_bridge(
                         on_metrics=on_metrics,
                         transcript_entries=transcript_entries,
                         pop_prewarm_audio=pop_prewarm_audio,
+                        pop_prewarmed_connections=pop_prewarmed_connections,
                     )
                 elif provider == "elevenlabs_convai":
                     handler = ElevenLabsConvAIStreamHandler(

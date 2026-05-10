@@ -40,6 +40,7 @@ import asyncio
 import base64
 import json
 import logging
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import AsyncGenerator, Optional, Union
 from urllib.parse import quote, urlencode
@@ -139,6 +140,21 @@ def _sanitise_log_str(value: object, *, limit: int = 200) -> str:
     return text.replace("\r", " ").replace("\n", " ").replace("\x00", " ")[:limit]
 
 
+@dataclass
+class ElevenLabsParkedWS:
+    """Parked WS handle returned by :meth:`ElevenLabsWebSocketTTS.open_parked_connection`.
+
+    ``bos_sent`` records whether the BOS frame (``{"text": " ", ...}``)
+    has already been written to the wire. The prewarm pipeline sends
+    the BOS so the upstream worker is selected on the parked
+    connection; :meth:`synthesize` adopts the WS and SKIPS its own BOS
+    send to avoid a protocol error.
+    """
+
+    ws: "websockets.WebSocketClientProtocol"  # noqa: F821 - websockets type
+    bos_sent: bool = False
+
+
 class ElevenLabsWebSocketTTS(TTSProvider):
     """ElevenLabs streaming TTS via WebSocket (``/stream-input`` endpoint).
 
@@ -197,6 +213,12 @@ class ElevenLabsWebSocketTTS(TTSProvider):
         self.chunk_length_schedule = chunk_length_schedule
         self.open_timeout = open_timeout
         self.frame_timeout = frame_timeout
+        # Single-slot adoption queue. The prewarm pipeline parks one WS
+        # per outbound call here; the next :meth:`synthesize` call
+        # consumes it (skipping ``websockets.connect`` and the BOS
+        # send) instead of opening a fresh socket. The slot is
+        # consumed exactly once.
+        self._adopted_connection: Optional[ElevenLabsParkedWS] = None
 
     @property
     def api_key(self) -> str:
@@ -368,22 +390,43 @@ class ElevenLabsWebSocketTTS(TTSProvider):
         url = self._build_url()
         headers = {"xi-api-key": self._api_key}
 
-        ws = await asyncio.wait_for(
-            websockets.connect(
-                url,
-                additional_headers=headers,
-                open_timeout=self.open_timeout,
-                ping_interval=20,
-                ping_timeout=10,
-                close_timeout=2,
-            ),
-            timeout=self.open_timeout,
-        )
+        # Adopt a parked WS if one is queued AND it is still open. A WS
+        # that died between park and adopt is discarded silently and a
+        # fresh socket is opened — preserving the cold backward-compat
+        # path.
+        parked = self._adopted_connection
+        self._adopted_connection = None
+        bos_already_sent = False
+        ws = None
+        if parked is not None and not parked.ws.closed:
+            ws = parked.ws
+            bos_already_sent = parked.bos_sent
+        else:
+            if parked is not None:
+                # Parked WS was closed — drop it cleanly.
+                try:
+                    await parked.ws.close()
+                except Exception:
+                    pass
+            ws = await asyncio.wait_for(
+                websockets.connect(
+                    url,
+                    additional_headers=headers,
+                    open_timeout=self.open_timeout,
+                    ping_interval=20,
+                    ping_timeout=10,
+                    close_timeout=2,
+                ),
+                timeout=self.open_timeout,
+            )
         try:
             # Initial keep-alive packet establishes the session. Per the
             # ElevenLabs docs the first message must contain a single space
             # ``" "`` — sending ``""`` would close the socket immediately.
-            await ws.send(json.dumps(self._build_bos_frame()))
+            # Skipped on the adopt path when the prewarm pipeline already
+            # sent it (sending it twice is a protocol error).
+            if not bos_already_sent:
+                await ws.send(json.dumps(self._build_bos_frame()))
 
             # Send the actual text + flush so ElevenLabs commits the
             # synthesis without waiting for further chunks. EOS
@@ -526,7 +569,79 @@ class ElevenLabsWebSocketTTS(TTSProvider):
                 except Exception:
                     pass
 
+    async def open_parked_connection(self) -> ElevenLabsParkedWS:
+        """Open a fresh WS, send the EXACT BOS frame the live
+        :meth:`synthesize` sends, and return the OPEN socket without
+        closing it. Used by the prewarm pipeline to park a TTS
+        connection during the carrier ringing window so the next
+        :meth:`synthesize` call adopts it via :meth:`adopt_websocket`
+        and skips ~400-900 ms of TLS + BOS round-trip.
+
+        Billing safety: BOS is the documented session-establishment
+        frame (single-space ``text``, no ``flush: true``) and does not
+        generate synthesis. ElevenLabs bills on ``audio`` frames
+        received from the server, not on BOS bytes sent by the client.
+        """
+        url = self._build_url()
+        headers = {"xi-api-key": self._api_key}
+        ws = await asyncio.wait_for(
+            websockets.connect(
+                url,
+                additional_headers=headers,
+                open_timeout=self.open_timeout,
+                ping_interval=20,
+                ping_timeout=10,
+                close_timeout=2,
+            ),
+            timeout=self.open_timeout,
+        )
+        # Send the BOS frame so the upstream worker selection is
+        # committed BEFORE the live ``synthesize`` adopts this socket.
+        # Do NOT ``flush: true`` — that would commit synthesis and
+        # bill characters.
+        bos_sent = False
+        try:
+            await ws.send(json.dumps(self._build_bos_frame()))
+            bos_sent = True
+        except Exception:
+            # BOS send failed — let the consumer re-send.
+            pass
+        return ElevenLabsParkedWS(ws=ws, bos_sent=bos_sent)
+
+    def adopt_websocket(self, parked: ElevenLabsParkedWS) -> None:
+        """Stash a parked WS handle so the next :meth:`synthesize` call
+        adopts it instead of opening a fresh socket. Caller is
+        responsible for holding the handle alive until either the live
+        request consumes it or the call ends (in which case
+        :meth:`discard_adopted_connection` cleans it up).
+        """
+        prev = self._adopted_connection
+        self._adopted_connection = parked
+        if prev is not None and prev is not parked:
+            try:
+                asyncio.create_task(prev.ws.close())
+            except RuntimeError:
+                pass
+
+    async def discard_adopted_connection(self) -> None:
+        """Drop and close any pending parked WS without consuming it.
+
+        Used on call-failure paths so a never-started call does not
+        leak a TTS WS that ElevenLabs will close after its inactivity
+        timeout anyway.
+        """
+        parked = self._adopted_connection
+        self._adopted_connection = None
+        if parked is not None:
+            try:
+                await parked.ws.close()
+            except Exception:
+                pass
+
     async def close(self) -> None:
-        """No-op: connections are per-utterance and closed inline."""
-        # No persistent state to clean up — connections are per-utterance.
+        """No-op: connections are per-utterance and closed inline.
+
+        Drops any orphaned parked WS so we never leak past close.
+        """
+        await self.discard_adopted_connection()
         return None

@@ -174,6 +174,7 @@ export function App() {
             spark={sparkTotalCalls.heights}
             buckets={toBuckets(sparkTotalCalls)}
             onSelectCall={setSelectedId}
+            kind="count"
           />
           <Metric
             label="Avg latency p95"
@@ -182,6 +183,7 @@ export function App() {
             spark={sparkLatency.heights}
             buckets={toBuckets(sparkLatency)}
             onSelectCall={setSelectedId}
+            kind="latency"
           />
           <Metric
             label={`Spend · ${RANGE_LABEL[range]}`}
@@ -189,6 +191,7 @@ export function App() {
             spark={sparkSpend.heights}
             buckets={toBuckets(sparkSpend)}
             onSelectCall={setSelectedId}
+            kind="spend"
           />
           <Metric
             label="Active now"
@@ -199,6 +202,7 @@ export function App() {
             spark={sparkLive.heights}
             buckets={toBuckets(sparkLive)}
             onSelectCall={setSelectedId}
+            kind="count"
           />
         </div>
 

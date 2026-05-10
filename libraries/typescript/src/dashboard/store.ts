@@ -143,6 +143,12 @@ export class MetricsStore extends EventEmitter {
       active.status = status;
       Object.assign(active, extra);
       if (TERMINAL.has(status)) {
+        // Preserve the running transcript and per-turn metrics accumulated
+        // on the active record. Without this, a Twilio statusCallback that
+        // arrives before the WS ``stop`` frame (and before
+        // ``recordCallEnd``) would create a placeholder entry with no
+        // transcript and no turns — and any dashboard fetch in that race
+        // window would render the live-transcript pane blank. See BUG 2.
         const entry: CallRecord = {
           call_id: callId,
           caller: active.caller || '',
@@ -152,6 +158,12 @@ export class MetricsStore extends EventEmitter {
           ended_at: Date.now() / 1000,
           status,
           metrics: null,
+          ...(active.turns && active.turns.length > 0
+            ? { turns: active.turns }
+            : {}),
+          ...(active.transcript && active.transcript.length > 0
+            ? { transcript: active.transcript }
+            : {}),
           ...extra,
         };
         this.activeCalls.delete(callId);
@@ -182,6 +194,42 @@ export class MetricsStore extends EventEmitter {
     if (active) {
       if (!active.turns) active.turns = [];
       active.turns.push(turn);
+
+      // Mirror each completed round-trip into a flat ``transcript`` array on
+      // the active record so the live-transcript pane (``useTranscript`` in
+      // the SPA, primary mapper path) sees an accumulating ``user → assistant
+      // → user → assistant → …`` history without depending on the
+      // ``TurnMetrics`` shape. The previous implementation only populated
+      // ``active.turns`` (the metrics shape) and the SPA's fallback path
+      // re-derived a transcript from it — but any consumer that read
+      // ``record.transcript`` first (the canonical shape used by completed
+      // calls) saw an empty array, so the live pane could blank between
+      // round-trips. Mirroring keeps the two paths in sync. See dashboard
+      // BUG 1.
+      if (!active.transcript) active.transcript = [];
+      const turnRecord = turn as {
+        user_text?: unknown;
+        agent_text?: unknown;
+        timestamp?: unknown;
+      };
+      const userText =
+        typeof turnRecord.user_text === 'string' ? turnRecord.user_text : '';
+      const agentText =
+        typeof turnRecord.agent_text === 'string' ? turnRecord.agent_text : '';
+      const ts =
+        typeof turnRecord.timestamp === 'number'
+          ? turnRecord.timestamp
+          : Date.now() / 1000;
+      if (userText.length > 0) {
+        active.transcript.push({ role: 'user', text: userText, timestamp: ts });
+      }
+      if (agentText.length > 0 && agentText !== '[interrupted]') {
+        active.transcript.push({
+          role: 'assistant',
+          text: agentText,
+          timestamp: ts,
+        });
+      }
     }
 
     this.publish('turn_complete', { call_id: callId, turn: turn as Record<string, unknown> });
@@ -195,27 +243,89 @@ export class MetricsStore extends EventEmitter {
     const active = this.activeCalls.get(callId);
     this.activeCalls.delete(callId);
 
+    // The Twilio ``statusCallback`` for ``CallStatus=completed`` arrives
+    // shortly before the WS ``stop`` frame and runs ``updateCallStatus``,
+    // which already moved the row from ``activeCalls`` into ``calls[]``.
+    // By the time ``recordCallEnd`` runs the active record is gone and the
+    // completed entry already exists. Without this lookup we'd push a
+    // second row with ``started_at=0`` (no active to copy from) and empty
+    // caller/callee — which is then ranked first by ``getCalls`` (newest
+    // wins) and the older, well-formed row gets shadowed. End result: the
+    // call disappears from the dashboard's 24 h window. See dashboard
+    // BUG C.
+    let existingIdx = -1;
+    if (active === undefined) {
+      for (let i = this.calls.length - 1; i >= 0; i--) {
+        if (this.calls[i].call_id === callId) {
+          existingIdx = i;
+          break;
+        }
+      }
+    }
+    const existing = existingIdx >= 0 ? this.calls[existingIdx] : undefined;
+
     // Preserve explicit status set by a statusCallback during the call
     // (e.g. "no-answer" from Twilio) — fall back to "completed" when the
     // row was still showing the normal "in-progress" state at hang-up.
-    const activeStatus = active?.status;
+    const priorStatus = active?.status ?? existing?.status;
     const resolvedStatus =
-      activeStatus && activeStatus !== 'in-progress' ? activeStatus : 'completed';
+      priorStatus && priorStatus !== 'in-progress' ? priorStatus : 'completed';
+    // Resolve the final transcript and turns. ``data.transcript`` from the
+    // SDK is the authoritative ``history.entries`` snapshot at hang-up; when
+    // it's missing or empty (e.g. webhook-rejected inbound, or the active
+    // record was already moved to ``calls[]`` by an earlier statusCallback
+    // and the data payload doesn't carry one), fall back to the running
+    // transcript we accumulated on the active record via ``recordTurn``.
+    // This keeps the live-transcript pane stable across the call_status
+    // (``completed``) → call_end gap. See dashboard BUG 2.
+    const dataTranscript = data.transcript as CallRecord['transcript'];
+    const resolvedTranscript: CallRecord['transcript'] =
+      dataTranscript && dataTranscript.length > 0
+        ? dataTranscript
+        : active?.transcript && active.transcript.length > 0
+          ? active.transcript
+          : existing?.transcript && existing.transcript.length > 0
+            ? existing.transcript
+            : [];
+    const resolvedTurns: unknown[] | undefined =
+      active?.turns && active.turns.length > 0
+        ? active.turns
+        : existing?.turns && existing.turns.length > 0
+          ? existing.turns
+          : undefined;
     const entry: CallRecord = {
       call_id: callId,
-      caller: (data.caller as string) || active?.caller || '',
-      callee: (data.callee as string) || active?.callee || '',
-      direction: active?.direction || (data.direction as string) || 'inbound',
-      started_at: active?.started_at || 0,
+      caller:
+        (data.caller as string) ||
+        active?.caller ||
+        existing?.caller ||
+        '',
+      callee:
+        (data.callee as string) ||
+        active?.callee ||
+        existing?.callee ||
+        '',
+      direction:
+        active?.direction ||
+        existing?.direction ||
+        (data.direction as string) ||
+        'inbound',
+      started_at: active?.started_at || existing?.started_at || 0,
       ended_at: Date.now() / 1000,
-      transcript: (data.transcript as CallRecord['transcript']) || [],
+      transcript: resolvedTranscript,
+      ...(resolvedTurns ? { turns: resolvedTurns } : {}),
       status: resolvedStatus,
-      metrics: metrics ?? null,
+      metrics: metrics ?? existing?.metrics ?? null,
     };
 
-    this.calls.push(entry);
-    if (this.calls.length > this.maxCalls) {
-      this.calls = this.calls.slice(-this.maxCalls);
+    if (existingIdx >= 0) {
+      // Update in place so the buffer doesn't grow a duplicate row.
+      this.calls[existingIdx] = entry;
+    } else {
+      this.calls.push(entry);
+      if (this.calls.length > this.maxCalls) {
+        this.calls = this.calls.slice(-this.maxCalls);
+      }
     }
 
     this.publish('call_end', {

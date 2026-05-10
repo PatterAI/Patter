@@ -381,6 +381,25 @@ export class OpenAIRealtimeAdapter {
       ws.on('error', onSetupError);
     });
 
+    this.armHeartbeatAndListener();
+  }
+
+  /**
+   * Adopt a pre-opened, already-`session.updated` Realtime WebSocket
+   * produced by the prewarm pipeline (see `Patter.parkProviderConnections`).
+   * Skips the fresh `new WebSocket()` + `session.created` /
+   * `session.update` round-trip — saves ~250-450 ms on first turn.
+   *
+   * Caller MUST verify `ws.readyState === OPEN` before calling and MUST
+   * have already received `session.updated` on the parked socket. If
+   * the parked WS died between park and adopt, fall back to `connect()`.
+   */
+  adoptWebSocket(ws: WebSocket): void {
+    this.ws = ws;
+    this.armHeartbeatAndListener();
+  }
+
+  private armHeartbeatAndListener(): void {
     // Keep WS alive across long silent stretches. ws's server-side `pong`
     // handler satisfies this automatically; we just need to ping.
     this.heartbeat = setInterval(() => {
@@ -392,6 +411,73 @@ export class OpenAIRealtimeAdapter {
     // Attach the single persistent message/close/error listener now that
     // setup is done. All consumer callbacks route through `eventCallbacks`.
     this.ensureMessageListener();
+  }
+
+  /**
+   * Open a fresh Realtime WS, exchange `session.created` /
+   * `session.update` / `session.updated` (so the upstream session is
+   * fully primed), and return the OPEN socket WITHOUT arming the
+   * heartbeat / message listener. Used by the prewarm pipeline to park
+   * a Realtime connection during ringing; the live consumer adopts it
+   * via {@link adoptWebSocket}.
+   *
+   * Bounded by 8 s. Throws on timeout / handshake failure — callers
+   * (the prewarm pipeline) treat any error as a cache miss and the
+   * call falls through to the cold `connect()` path.
+   *
+   * Billing safety: `session.update` does not invoke the model. No
+   * tokens are billed.
+   */
+  async openParkedConnection(): Promise<WebSocket> {
+    const url = `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(this.model)}`;
+    const ws = new WebSocket(url, {
+      headers: {
+        Authorization: `Bearer ${this.apiKey}`,
+        'OpenAI-Beta': 'realtime=v1',
+      },
+    });
+    await new Promise<void>((resolve, reject) => {
+      let sessionCreated = false;
+      let settled = false;
+      const onMessage = (raw: Buffer | string): void => {
+        let msg: { type?: string };
+        try {
+          msg = JSON.parse(raw.toString()) as { type?: string };
+        } catch {
+          return;
+        }
+        if (msg.type === 'session.created' && !sessionCreated) {
+          sessionCreated = true;
+          try {
+            ws.send(JSON.stringify({ type: 'session.update', session: this.buildSessionConfig() }));
+          } catch (err) {
+            cleanup();
+            reject(err instanceof Error ? err : new Error(String(err)));
+          }
+        } else if (msg.type === 'session.updated') {
+          cleanup();
+          resolve();
+        }
+      };
+      const onError = (err: Error): void => {
+        cleanup();
+        reject(err);
+      };
+      const cleanup = (): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        ws.off('message', onMessage);
+        ws.off('error', onError);
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error('OpenAI Realtime park connect timeout'));
+      }, 8000);
+      ws.on('message', onMessage);
+      ws.on('error', onError);
+    });
+    return ws;
   }
 
   /** Append a base64-encoded audio chunk to the realtime input buffer. */

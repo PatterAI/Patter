@@ -71,6 +71,27 @@ export const PREWARM_CACHE_MAX = 200;
  */
 export const PREWARM_TTL_GRACE_MS = 5_000;
 
+/**
+ * Safety TTL (ms) after which a parked provider WebSocket whose
+ * carrier never fired ``start`` is force-closed. 30 s is a comfortable
+ * superset of typical ring + AMD windows (Twilio ~25 s, Telnyx ~25 s).
+ */
+const PARKED_CONN_TTL_MS = 30_000;
+
+/** Parked provider WebSockets ready for adoption by a per-call StreamHandler. */
+export interface ParkedProviderConnections {
+  /** Pre-opened STT WS (Cartesia today; other adapters may add support later). */
+  stt?: import('ws').WebSocket;
+  /**
+   * Pre-opened TTS WS handle (ElevenLabs WS today). The `bosSent` flag
+   * lets the live `synthesizeStream` skip its own BOS send when the
+   * prewarm pipeline already wrote it.
+   */
+  tts?: import('./providers/elevenlabs-ws-tts').ElevenLabsParkedWS;
+  /** Pre-opened OpenAI Realtime WS (already through `session.updated`). */
+  openaiRealtime?: import('ws').WebSocket;
+}
+
 /** Internal local-mode state — holds carrier + resolved runtime settings. */
 export interface ResolvedLocalConfig {
   carrier: TwilioCarrier | TelnyxCarrier;
@@ -103,6 +124,13 @@ function resolvePersistRoot(persist: boolean | string | undefined): string | nul
   if (persist === true) return resolveLogRoot('auto');
   if (typeof persist === 'string') return resolveLogRoot(persist);
   return resolveLogRoot();
+}
+
+/** Close every parked socket inside a ``ParkedProviderConnections`` slot. */
+function closeParkedConnections(slot: ParkedProviderConnections): void {
+  if (slot.stt) { try { slot.stt.close(); } catch { /* ignore */ } }
+  if (slot.tts) { try { slot.tts.ws.close(); } catch { /* ignore */ } }
+  if (slot.openaiRealtime) { try { slot.openaiRealtime.close(); } catch { /* ignore */ } }
 }
 
 /** Top-level SDK entry point — wraps a carrier + embedded server + agent loop. */
@@ -159,6 +187,33 @@ export class Patter {
    * would WARN spuriously after the cache was already emptied.
    */
   private prewarmTtlTimers: Map<string, NodeJS.Timeout> = new Map();
+  /**
+   * Pre-opened, fully-handshaked provider WebSockets keyed by
+   * carrier-issued call_id. Populated by ``parkProviderConnections``
+   * during the carrier ringing window; consumed by the per-call
+   * StreamHandler at ``start`` via ``adoptWebSocket(...)`` so STT / TTS
+   * / Realtime audio can flow on the first turn without paying the
+   * 150-900 ms TLS + WS-upgrade + protocol-handshake round-trip again.
+   *
+   * Distinct from ``prewarmAudio`` (which holds pre-rendered TTS bytes
+   * for the first message); the two features are complementary and
+   * orthogonal — both can be active for the same call.
+   *
+   * Each slot may hold up to three parked connections (STT, TTS,
+   * Realtime). Drained by:
+   *   - {@link popPrewarmedConnections} on the carrier ``start`` event
+   *     (consumed normally — the handles transfer to the StreamHandler)
+   *   - {@link recordPrewarmWaste} on call-termination paths (no-answer,
+   *     busy, failed, canceled, AMD voicemail). Closes parked sockets.
+   *   - {@link disconnect} on Patter teardown. Closes all parked sockets.
+   */
+  private prewarmedConnections: Map<string, ParkedProviderConnections> = new Map();
+  /**
+   * TTL eviction handles keyed by call_id for connections that are never
+   * adopted (e.g. a carrier that swallows ``start``). Closes the parked
+   * sockets so they don't leak past the safety window.
+   */
+  private prewarmedConnTimers: Map<string, NodeJS.Timeout> = new Map();
 
   /**
    * Speech-edge events for turn-taking instrumentation. Public surface: the
@@ -492,6 +547,21 @@ export class Patter {
       throw new Error('agent.systemPrompt is required');
     }
 
+    // Pre-import AEC at serve startup so the first call doesn't pay the
+    // 150-400 ms ESM dynamic-import compile / link cost on the hot path.
+    // ``echoCancellation`` is opt-in and rarely set on PSTN, but when it
+    // is the lazy ``await import('./audio/aec')`` inside StreamHandler
+    // serialises with first-message TTS startup and eats first-turn
+    // latency. Eagerly importing here costs nothing for users who never
+    // enable AEC (the module is pure data — no side effects).
+    if (opts.agent.echoCancellation) {
+      try {
+        await import('./audio/aec');
+      } catch (err) {
+        getLogger().debug(`AEC pre-import failed at serve(): ${String(err)}`);
+      }
+    }
+
     // Validate port
     if (opts.port !== undefined) {
       if (typeof opts.port !== 'number' || opts.port < 1 || opts.port > 65535) {
@@ -609,6 +679,10 @@ export class Patter {
     // Forward the prewarm-audio accessor so the per-call StreamHandler can
     // consume the pre-rendered first-message audio (if any) on ``start``.
     this.embeddedServer.popPrewarmAudio = this.popPrewarmAudio;
+    // Forward the parked-connections accessor so the per-call
+    // StreamHandler can adopt pre-opened STT / TTS / Realtime WSs at
+    // ``start`` instead of paying the cold-handshake on first turn.
+    this.embeddedServer.popPrewarmedConnections = this.popPrewarmedConnections;
     // Forward the waste-recorder so the carrier status / hangup webhook
     // handlers can evict the cache when a call terminates before the
     // media stream starts (no-answer, busy, failed, canceled, or AMD
@@ -700,6 +774,9 @@ export class Patter {
    * failed / canceled / AMD-machine paths. See FIX #91.
    */
   recordPrewarmWaste = (callId: string): void => {
+    // Always drain any parked provider WS — they're cheap to discard
+    // and we don't want to leak open sockets when the call dies.
+    this.closePrewarmedConnections(callId);
     if (this.prewarmConsumed.has(callId)) {
       this.prewarmAudio.delete(callId);
       return;
@@ -719,6 +796,138 @@ export class Patter {
       );
     }
   };
+
+  /**
+   * Pop and return the parked provider WebSockets for ``callId``, or
+   * ``undefined`` when no parked connections exist.
+   *
+   * Wired into ``EmbeddedServer.popPrewarmedConnections`` so the
+   * per-call ``StreamHandler`` can adopt the parked sockets at the
+   * carrier ``start`` event instead of opening fresh ones — saving
+   * ~150-900 ms of cold-start handshake on the first turn.
+   */
+  popPrewarmedConnections = (callId: string): ParkedProviderConnections | undefined => {
+    const slot = this.prewarmedConnections.get(callId);
+    if (slot === undefined) return undefined;
+    this.prewarmedConnections.delete(callId);
+    const ttl = this.prewarmedConnTimers.get(callId);
+    if (ttl !== undefined) {
+      clearTimeout(ttl);
+      this.prewarmedConnTimers.delete(callId);
+    }
+    return slot;
+  };
+
+  /**
+   * Close any parked provider WebSockets for ``callId``. Wired into
+   * ``EmbeddedServer.closePrewarmedConnections`` so call-termination
+   * paths (no-answer, busy, failed, canceled, AMD voicemail) drop the
+   * sockets cleanly instead of leaving them to the upstream timeout.
+   */
+  closePrewarmedConnections = (callId: string): void => {
+    const slot = this.prewarmedConnections.get(callId);
+    if (slot === undefined) return;
+    this.prewarmedConnections.delete(callId);
+    const ttl = this.prewarmedConnTimers.get(callId);
+    if (ttl !== undefined) {
+      clearTimeout(ttl);
+      this.prewarmedConnTimers.delete(callId);
+    }
+    closeParkedConnections(slot);
+  };
+
+  /**
+   * Open and park provider WebSockets in parallel with the carrier-side
+   * ``initiateCall``. Unlike :meth:`spawnProviderWarmup` (which closes
+   * the WS after a brief idle), the sockets opened here stay OPEN and
+   * are handed off to the per-call ``StreamHandler`` on ``start``.
+   *
+   * This is the structural fix for first-turn cold-start: on Node's
+   * ``ws`` package, opening + closing a WS does NOT warm TLS for the
+   * next open — every fresh ``new WebSocket()`` re-pays the full
+   * TCP + TLS + HTTP-101 round-trip. By keeping the WS open and
+   * adopting it directly, the live first turn skips the handshake
+   * entirely (saves ~150-900 ms depending on provider).
+   *
+   * Best-effort: each provider's parking task is wrapped in
+   * ``Promise.allSettled`` so a slow or failing endpoint cannot block
+   * the others. Providers without ``openParkedConnection`` contribute
+   * nothing — the call falls through to the cold ``connect()`` path
+   * for that provider.
+   */
+  private parkProviderConnections(agent: AgentOptions, callId: string): void {
+    const stt = agent.stt as { openParkedConnection?: () => Promise<import('ws').WebSocket> } | undefined;
+    const tts = agent.tts as { openParkedConnection?: () => Promise<import('./providers/elevenlabs-ws-tts').ElevenLabsParkedWS> } | undefined;
+    const sttOpen = typeof stt?.openParkedConnection === 'function' ? stt.openParkedConnection.bind(stt) : null;
+    const ttsOpen = typeof tts?.openParkedConnection === 'function' ? tts.openParkedConnection.bind(tts) : null;
+    if (!sttOpen && !ttsOpen) return;
+
+    const slot: ParkedProviderConnections = {};
+    this.prewarmedConnections.set(callId, slot);
+
+    const startedAt = Date.now();
+    const tasks: Array<Promise<void>> = [];
+    if (sttOpen) {
+      tasks.push((async () => {
+        try {
+          const ws = await sttOpen();
+          // Slot may have been drained while we were opening (call
+          // failed early, ``start`` already arrived and consumer
+          // already adopted nothing, etc.). Close cleanly in that case.
+          if (this.prewarmedConnections.get(callId) !== slot) {
+            try { ws.close(); } catch { /* ignore */ }
+            return;
+          }
+          slot.stt = ws;
+          getLogger().info(
+            `[PREWARM] callId=${callId} provider=stt ms=${Date.now() - startedAt}`,
+          );
+        } catch (err) {
+          getLogger().debug(`Park STT failed for ${callId}: ${String(err)}`);
+        }
+      })());
+    }
+    if (ttsOpen) {
+      tasks.push((async () => {
+        try {
+          const parked = await ttsOpen();
+          if (this.prewarmedConnections.get(callId) !== slot) {
+            try { parked.ws.close(); } catch { /* ignore */ }
+            return;
+          }
+          slot.tts = parked;
+          getLogger().info(
+            `[PREWARM] callId=${callId} provider=tts ms=${Date.now() - startedAt}`,
+          );
+        } catch (err) {
+          getLogger().debug(`Park TTS failed for ${callId}: ${String(err)}`);
+        }
+      })());
+    }
+
+    const task = (async () => {
+      await Promise.allSettled(tasks);
+    })();
+    this.prewarmTasks.add(task);
+    void task.finally(() => {
+      this.prewarmTasks.delete(task);
+      // Schedule TTL cleanup so a never-adopted slot is force-closed.
+      if (!this.prewarmedConnections.has(callId)) return;
+      const handle = setTimeout(() => {
+        this.prewarmedConnTimers.delete(callId);
+        const orphan = this.prewarmedConnections.get(callId);
+        if (orphan === undefined) return;
+        this.prewarmedConnections.delete(callId);
+        closeParkedConnections(orphan);
+        getLogger().warn(
+          `[PREWARM] parked connections evicted by TTL for ${callId} — ` +
+            `call never reached start (~${(PARKED_CONN_TTL_MS / 1000).toFixed(0)}s).`,
+        );
+      }, PARKED_CONN_TTL_MS);
+      handle.unref?.();
+      this.prewarmedConnTimers.set(callId, handle);
+    });
+  }
 
   /**
    * Spawn a fire-and-forget task that warms up STT / TTS / LLM in
@@ -985,6 +1194,13 @@ export class Patter {
       }
       if (telnyxCallId) {
         this.spawnPrewarmFirstMessage(options.agent, telnyxCallId, effectiveRingTimeout);
+        // Park provider WebSockets in parallel so the per-call
+        // StreamHandler can adopt them at ``start`` instead of paying
+        // the cold-handshake on first turn. Off when the user
+        // explicitly sets ``agent.prewarm: false``.
+        if (options.agent.prewarm !== false) {
+          this.parkProviderConnections(options.agent, telnyxCallId);
+        }
       }
       return;
     }
@@ -1080,6 +1296,13 @@ export class Patter {
     }
     if (twilioCallSid) {
       this.spawnPrewarmFirstMessage(options.agent, twilioCallSid, effectiveRingTimeout);
+      // Park provider WebSockets in parallel so the per-call
+      // StreamHandler can adopt them at ``start`` instead of paying
+      // the cold-handshake on first turn. Off when the user
+      // explicitly sets ``agent.prewarm: false``.
+      if (options.agent.prewarm !== false) {
+        this.parkProviderConnections(options.agent, twilioCallSid);
+      }
     }
   }
 
@@ -1116,6 +1339,16 @@ export class Patter {
     this.prewarmTasks.clear();
     this.prewarmAudio.clear();
     this.prewarmConsumed.clear();
+    // Close every parked provider WS so we don't leak sockets across
+    // ``serve`` / ``disconnect`` cycles (or process shutdown).
+    for (const handle of this.prewarmedConnTimers.values()) {
+      clearTimeout(handle);
+    }
+    this.prewarmedConnTimers.clear();
+    for (const slot of this.prewarmedConnections.values()) {
+      closeParkedConnections(slot);
+    }
+    this.prewarmedConnections.clear();
     if (this.tunnelHandle) {
       this.tunnelHandle.stop();
       this.tunnelHandle = null;

@@ -245,6 +245,13 @@ class EmbeddedServer:
         # callers that instantiate ``EmbeddedServer`` directly (tests) work
         # without further setup.
         self.pop_prewarm_audio = lambda _cid: None
+        # Pre-warmed provider WebSocket accessor wired by
+        # ``Patter.serve()``. The per-call StreamHandler invokes this
+        # with its ``call_id`` at pipeline init; a defined return hands
+        # off pre-opened STT / TTS / Realtime sockets so the live first
+        # turn skips the cold-handshake. ``None`` means "no parked
+        # sockets — fall back to fresh ``connect()``".
+        self.pop_prewarmed_connections = lambda _cid: None
         # Prewarm waste recorder wired by ``Patter.serve()``. Invoked from
         # the Twilio status callback (no-answer / busy / failed / canceled)
         # and the Telnyx call.hangup / AMD-machine handlers so the cache
@@ -320,11 +327,28 @@ class EmbeddedServer:
             except Exception:
                 pass
             if call_logger.enabled:
+                # For outbound calls the bridge has no caller/callee in the
+                # WS query string (TwiML for outbound is inline
+                # ``<Stream url=".../outbound"/>`` with no <Parameter> tags),
+                # so ``data["caller"]`` / ``data["callee"]`` are empty here.
+                # The active record in the store was populated by
+                # ``record_call_initiated`` at dial time and holds the correct
+                # numbers — pull them from there before persisting
+                # metadata.json. Without this fallback every outbound call's
+                # metadata.json on disk has ``caller=""`` / ``callee=""``.
+                call_id_str = data.get("call_id", "") or ""
+                data_caller = data.get("caller", "") or ""
+                data_callee = data.get("callee", "") or ""
+                active_record = (
+                    store.get_active(call_id_str) if (store and call_id_str) else None
+                ) or {}
+                resolved_caller = data_caller or active_record.get("caller", "") or ""
+                resolved_callee = data_callee or active_record.get("callee", "") or ""
                 await alog_call_start(
                     call_logger,
-                    data.get("call_id", ""),
-                    caller=data.get("caller", "") or "",
-                    callee=data.get("callee", "") or "",
+                    call_id_str,
+                    caller=resolved_caller,
+                    callee=resolved_callee,
                     telephony_provider=data.get("telephony_provider", "") or "",
                     provider_mode=getattr(agent, "provider", "") or "",
                     agent=_agent_snapshot(),
@@ -688,6 +712,7 @@ class EmbeddedServer:
                     websocket=websocket,
                     agent=self.agent,
                     pop_prewarm_audio=self.pop_prewarm_audio,
+                    pop_prewarmed_connections=self.pop_prewarmed_connections,
                     openai_key=self.config.openai_key,
                     on_call_start=_start,
                     on_call_end=_end,
@@ -936,6 +961,7 @@ class EmbeddedServer:
                     websocket=websocket,
                     agent=self.agent,
                     pop_prewarm_audio=self.pop_prewarm_audio,
+                    pop_prewarmed_connections=self.pop_prewarmed_connections,
                     openai_key=self.config.openai_key,
                     on_call_start=_start,
                     on_call_end=_end,

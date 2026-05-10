@@ -42,7 +42,12 @@ export function mountDashboard(app: Express, store: MetricsStore, token = ''): v
   });
 
   app.get('/api/dashboard/calls/:callId', auth, (req, res) => {
-    const call = store.getCall(String(req.params.callId));
+    // Fall back to the active record so the live-transcript polling path
+    // (``useTranscript`` in the dashboard SPA) sees turns as they accumulate
+    // during the call. Without this fallback the route 404s while the call
+    // is in flight and the live transcript pane stays empty.
+    const callId = String(req.params.callId);
+    const call = store.getCall(callId) ?? store.getActive(callId);
     if (!call) {
       res.status(404).json({ error: 'Not found' });
       return;
@@ -147,7 +152,11 @@ export function mountApi(app: Express, store: MetricsStore, token = ''): void {
   });
 
   app.get('/api/v1/calls/:callId', auth, (req, res) => {
-    const call = store.getCall(String(req.params.callId));
+    // Same fall-through as ``/api/dashboard/calls/:callId`` — return the
+    // active record while the call is in flight so external integrations
+    // can poll a single endpoint regardless of call state.
+    const callId = String(req.params.callId);
+    const call = store.getCall(callId) ?? store.getActive(callId);
     if (!call) {
       res.status(404).json({ error: 'Call not found' });
       return;

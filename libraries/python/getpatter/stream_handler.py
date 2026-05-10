@@ -363,6 +363,37 @@ def get_guardrail_replacement(agent, guard_name: str) -> str:
     return "I'm sorry, I can't respond to that."
 
 
+async def _safe_close_parked_handle(handle: object) -> None:
+    """Best-effort async close of a parked provider handle that the
+    StreamHandler chose NOT to adopt (cache miss, parked WS already
+    dead, unknown shape, etc.).
+
+    Handles all flavours used by the SDK:
+    - tuple ``(session, ws)`` from Cartesia STT.
+    - object with ``.ws`` attribute (e.g. ``ElevenLabsParkedWS``).
+    - bare WebSocket / ``WebSocketClientProtocol``.
+    """
+    try:
+        if isinstance(handle, tuple) and len(handle) == 2:
+            session, ws = handle
+            try:
+                await ws.close()
+            except Exception:
+                pass
+            try:
+                await session.close()
+            except Exception:
+                pass
+            return
+        ws = getattr(handle, "ws", None)
+        if ws is not None:
+            await ws.close()
+            return
+        await handle.close()  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Base StreamHandler
 # ---------------------------------------------------------------------------
@@ -1614,6 +1645,7 @@ class PipelineStreamHandler(StreamHandler):
         conversation_history: deque | None = None,
         transcript_entries: deque | None = None,
         pop_prewarm_audio=None,
+        pop_prewarmed_connections=None,
     ) -> None:
         super().__init__(
             agent=agent,
@@ -1634,6 +1666,11 @@ class PipelineStreamHandler(StreamHandler):
         # has ``agent.prewarm_first_message=True``. ``None`` (default) means
         # "no prewarm — always run live TTS".
         self._pop_prewarm_audio = pop_prewarm_audio
+        # Optional accessor returning pre-opened, fully-handshaked
+        # provider WebSockets for ``call_id``. Wired by ``Patter.serve()``.
+        # Returning ``None`` means "no parked sockets — fall back to
+        # fresh ``connect()``".
+        self._pop_prewarmed_connections = pop_prewarmed_connections
         self._openai_key = openai_key
         self._deepgram_key = deepgram_key
         self._elevenlabs_key = elevenlabs_key
@@ -1654,6 +1691,11 @@ class PipelineStreamHandler(StreamHandler):
         self._hangup_fn = hangup_fn
         self._send_dtmf_fn = send_dtmf_fn
         self._stt = None
+        # Optional deferred STT connect task — set when prewarm-handoff
+        # parallelises STT.connect with the firstMessage TTS synth.
+        # Awaited BEFORE the STT receive loop starts so the message
+        # pump never reads from a half-open WS.
+        self._stt_connect_task: asyncio.Task | None = None
         self._tts = None
         # Auto-VAD: if ``agent.vad`` is None we attempt to load SileroVAD
         # with phone-friendly defaults during ``start()``. Stored separately
@@ -1871,10 +1913,116 @@ class PipelineStreamHandler(StreamHandler):
                     "install with `pip install getpatter[silero]` (numpy is part of that extra)."
                 )
 
-        if self._stt is not None:
-            await self._stt.connect()
+        # Prewarm-handoff: try to adopt pre-opened provider WebSockets
+        # that the prewarm pipeline (see
+        # ``Patter._park_provider_connections``) parked during the
+        # carrier ringing window. When a parked WS is still OPEN we
+        # skip the cold ``connect()`` and the STT first-turn can flow
+        # audio without paying the 150-400 ms TLS handshake. Failures
+        # (cache miss, parked WS died) fall back transparently.
+        parked: dict | None = None
+        if self._pop_prewarmed_connections is not None:
+            try:
+                parked = self._pop_prewarmed_connections(self.call_id)
+            except Exception as exc:  # noqa: BLE001 - best-effort
+                logger.debug("pop_prewarmed_connections raised: %s", exc)
+                parked = None
 
-        logger.debug("Pipeline mode: STT + TTS connected")
+        # Adopt the TTS WS first — synchronous handoff (the live
+        # ``synthesize`` call below picks it up via the adapter's
+        # single-slot adoption queue).
+        parked_tts = (parked or {}).get("tts")
+        if parked_tts is not None and self._tts is not None:
+            adopt = getattr(self._tts, "adopt_websocket", None)
+            ws_alive = parked_tts.ws is not None and not parked_tts.ws.closed
+            if callable(adopt) and ws_alive:
+                try:
+                    adopt(parked_tts)
+                    logger.info(
+                        "[CONNECT] callId=%s provider=tts source=adopted ms=0",
+                        self.call_id,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("TTS adopt_websocket failed: %s; falling back", exc)
+                    try:
+                        await parked_tts.ws.close()
+                    except Exception:
+                        pass
+            else:
+                try:
+                    await parked_tts.ws.close()
+                except Exception:
+                    pass
+
+        # Kick off STT connect WITHOUT awaiting yet — we only need STT
+        # ready to receive incoming user audio, not to send the first
+        # agent message out. Parallelising STT.connect with the TTS
+        # firstMessage synth shaves 200-400 ms off the perceived
+        # first-turn latency.
+        stt_connect_task: asyncio.Task | None = None
+        if self._stt is not None:
+            parked_stt = (parked or {}).get("stt")
+            adopt_stt = getattr(self._stt, "adopt_websocket", None)
+            stt_started_at = time.monotonic()
+            stt_adopted = False
+            if (
+                parked_stt is not None
+                and callable(adopt_stt)
+                and isinstance(parked_stt, tuple)
+                and len(parked_stt) == 2
+            ):
+                session, ws = parked_stt
+                if not ws.closed:
+                    try:
+                        adopt_stt(session, ws)
+                        logger.info(
+                            "[CONNECT] callId=%s provider=stt source=adopted ms=%d",
+                            self.call_id,
+                            int((time.monotonic() - stt_started_at) * 1000),
+                        )
+                        stt_adopted = True
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug(
+                            "STT adopt_websocket failed: %s; falling back", exc
+                        )
+                        try:
+                            await ws.close()
+                        except Exception:
+                            pass
+                        try:
+                            await session.close()
+                        except Exception:
+                            pass
+                else:
+                    try:
+                        await ws.close()
+                    except Exception:
+                        pass
+                    try:
+                        await session.close()
+                    except Exception:
+                        pass
+            elif parked_stt is not None:
+                # Unknown handle shape — discard cleanly.
+                await _safe_close_parked_handle(parked_stt)
+
+            if not stt_adopted:
+
+                async def _connect_stt() -> None:
+                    await self._stt.connect()
+                    logger.info(
+                        "[CONNECT] callId=%s provider=stt source=fresh ms=%d",
+                        self.call_id,
+                        int((time.monotonic() - stt_started_at) * 1000),
+                    )
+
+                stt_connect_task = asyncio.create_task(_connect_stt())
+
+        # Stash the deferred connect task so the receive-loop launcher
+        # below awaits it before starting the message pump.
+        self._stt_connect_task = stt_connect_task
+
+        logger.debug("Pipeline mode: STT connect kicked off")
 
         # Play first_message if configured and no on_message handler.
         # Measure TTS-first-byte latency for parity with TS (`stream-handler.ts`).
@@ -2020,7 +2168,27 @@ class PipelineStreamHandler(StreamHandler):
         if is_remote_url(self.on_message):
             self._remote_handler = RemoteMessageHandler()
 
-        # Start STT receive loop
+        # Start STT receive loop. If we kicked off the WS connect in
+        # parallel with the firstMessage TTS, make sure that connect
+        # has completed before the receive loop starts polling — a
+        # half-open WS would surface "Not connected. Call connect()
+        # first." on the first audio frame.
+        if self._stt_connect_task is not None:
+            try:
+                await self._stt_connect_task
+            except Exception as exc:  # noqa: BLE001
+                logger.error("STT connect failed: %s", exc)
+                # Tear down the call cleanly — we can't proceed with
+                # transcription. The carrier-side pump will see the
+                # closed WS and end the call.
+                if self._hangup_fn is not None:
+                    try:
+                        await self._hangup_fn(self.call_id)
+                    except Exception:
+                        pass
+                return
+            finally:
+                self._stt_connect_task = None
         if self._stt is not None:
             self._stt_task = asyncio.create_task(self._stt_loop())
 

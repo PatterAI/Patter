@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
@@ -49,6 +50,11 @@ _PREWARM_CACHE_MAX = 200
 # on a never-completed dial that bypassed the status callback) would
 # leak the bytes for the lifetime of the Patter instance.
 _PREWARM_TTL_GRACE_S = 5.0
+
+# Safety TTL after which a parked provider WebSocket whose carrier never
+# fired ``start`` is force-closed. 30 s is a comfortable superset of
+# typical ring + AMD windows (Twilio ~25 s, Telnyx ~25 s).
+_PARKED_CONN_TTL_S = 30.0
 
 
 _CLOUD_NOT_IMPLEMENTED_MSG = (
@@ -81,6 +87,58 @@ def _resolve_persist_root(persist: bool | str | None) -> str | None:
         return str(result) if result is not None else None
     result = resolve_log_root()
     return str(result) if result is not None else None
+
+
+def _close_parked_slot(slot: dict[str, Any]) -> None:
+    """Close every parked socket inside a parked-connections slot.
+
+    Each slot may hold provider-specific handles:
+
+    - ``stt`` → ``(aiohttp.ClientSession, aiohttp.ClientWebSocketResponse)``
+      (Cartesia STT pattern).
+    - ``tts`` → :class:`ElevenLabsParkedWS` (or any object exposing ``.ws``).
+    - ``openai_realtime`` → :class:`websockets.WebSocketClientProtocol`.
+
+    Closes are scheduled fire-and-forget on the running loop because
+    this helper may be invoked synchronously from waste-record or
+    disconnect paths that do not own an awaitable scope.
+    """
+    for handle in slot.values():
+        try:
+            asyncio.create_task(_safe_close_handle(handle))
+        except RuntimeError:
+            # No running loop — best-effort sync close where supported.
+            pass
+
+
+async def _safe_close_handle(handle: Any) -> None:
+    """Best-effort async close of a parked handle.
+
+    Handles the three flavours used by the SDK:
+      - tuple ``(session, ws)`` from Cartesia STT.
+      - :class:`ElevenLabsParkedWS` (or any object with ``.ws``).
+      - bare WebSocket / WebSocketClientProtocol.
+    """
+    try:
+        if isinstance(handle, tuple) and len(handle) == 2:
+            session, ws = handle
+            try:
+                await ws.close()
+            except Exception:
+                pass
+            try:
+                await session.close()
+            except Exception:
+                pass
+            return
+        ws = getattr(handle, "ws", None)
+        if ws is not None:
+            await ws.close()
+            return
+        # Bare websocket
+        await handle.close()
+    except Exception:
+        pass
 
 
 class Patter:
@@ -242,6 +300,26 @@ class Patter:
         # a follow-up consume / waste-record path can also cancel the
         # timer when the slot drains naturally.
         self._prewarm_ttl_tasks: dict[str, asyncio.Task] = {}
+        # Pre-opened, fully-handshaked provider WebSockets keyed by
+        # carrier-issued call_id. Populated by
+        # :meth:`_park_provider_connections` during the carrier
+        # ringing window; consumed by the per-call StreamHandler at
+        # ``start`` via ``adopt_websocket(...)`` so STT / TTS /
+        # Realtime audio can flow on the first turn without paying
+        # the 150-900 ms TLS + WS-upgrade + protocol-handshake
+        # round-trip again.
+        #
+        # Each value is a ``dict`` with optional keys ``stt``, ``tts``,
+        # ``openai_realtime`` — provider-specific handles that the
+        # StreamHandler hands to the matching adapter's
+        # ``adopt_websocket`` method.
+        #
+        # Distinct from ``_prewarm_audio`` (pre-rendered TTS bytes for
+        # the first message); the two features are complementary and
+        # orthogonal — both can be active for the same call.
+        self._prewarmed_connections: dict[str, dict[str, Any]] = {}
+        # TTL eviction tasks for parked connections, keyed by call_id.
+        self._prewarmed_conn_tasks: dict[str, asyncio.Task] = {}
 
     # ------------------------------------------------------------------
     # Speech-edge event callback proxies
@@ -604,6 +682,12 @@ class Patter:
                 except Exception as exc:
                     logger.debug("record_call_initiated: %s", exc)
             self._spawn_prewarm_first_message(agent, call_id, ring_timeout=ring_timeout)
+            # Park provider WebSockets in parallel so the per-call
+            # StreamHandler can adopt them at ``start`` instead of
+            # paying the cold-handshake on first turn. Off when the
+            # user explicitly sets ``agent.prewarm=False``.
+            if getattr(agent, "prewarm", True) is not False:
+                self._park_provider_connections(agent, call_id)
         elif config.telephony_provider == "telnyx":
             from getpatter.providers.telnyx_adapter import TelnyxAdapter  # type: ignore[import]
 
@@ -636,6 +720,12 @@ class Patter:
                 except Exception as exc:
                     logger.debug("record_call_initiated: %s", exc)
             self._spawn_prewarm_first_message(agent, call_id, ring_timeout=ring_timeout)
+            # Park provider WebSockets in parallel so the per-call
+            # StreamHandler can adopt them at ``start`` instead of
+            # paying the cold-handshake on first turn. Off when the
+            # user explicitly sets ``agent.prewarm=False``.
+            if getattr(agent, "prewarm", True) is not False:
+                self._park_provider_connections(agent, call_id)
 
     # === Pre-warm helpers ===
 
@@ -683,6 +773,146 @@ class Patter:
         # call and never blocks the user.
         self._prewarm_tasks.add(task)
         task.add_done_callback(self._prewarm_tasks.discard)
+
+    def pop_prewarmed_connections(self, call_id: str) -> dict[str, Any] | None:
+        """Pop and return the parked provider WS handles for ``call_id``,
+        or ``None`` when no parked connections exist.
+
+        Wired into the per-call ``StreamHandler`` so it can adopt the
+        parked sockets at the carrier ``start`` event instead of paying
+        the cold handshake on first turn.
+        """
+        slot = self._prewarmed_connections.pop(call_id, None)
+        ttl_task = self._prewarmed_conn_tasks.pop(call_id, None)
+        if ttl_task is not None:
+            ttl_task.cancel()
+        return slot
+
+    def close_prewarmed_connections(self, call_id: str) -> None:
+        """Close any parked provider WSs for ``call_id`` cleanly.
+
+        Wired into call-termination paths (no-answer, busy, failed,
+        canceled, AMD voicemail) so the sockets drop instead of being
+        left to the upstream timeout.
+        """
+        slot = self._prewarmed_connections.pop(call_id, None)
+        ttl_task = self._prewarmed_conn_tasks.pop(call_id, None)
+        if ttl_task is not None:
+            ttl_task.cancel()
+        if slot is not None:
+            _close_parked_slot(slot)
+
+    def _park_provider_connections(self, agent: Agent, call_id: str) -> None:
+        """Open and park provider WebSockets in parallel with the
+        carrier-side ``initiate_call``. Unlike :meth:`_spawn_provider_warmup`
+        (which closes the WS after a brief idle), the sockets opened here
+        stay OPEN and are handed off to the per-call ``StreamHandler`` on
+        ``start``.
+
+        Structural fix for first-turn cold-start: opening + closing a WS
+        does NOT warm TLS for the next open — every fresh
+        ``websockets.connect`` re-pays the full TCP + TLS + HTTP-101
+        round-trip. Keeping the WS open and adopting it directly skips
+        the handshake entirely (saves ~150-900 ms depending on provider).
+
+        Best-effort: each provider's parking task is wrapped in
+        ``asyncio.gather(..., return_exceptions=True)`` so a slow or
+        failing endpoint cannot block the others. Providers without
+        ``open_parked_connection`` contribute nothing.
+        """
+        stt = getattr(agent, "stt", None)
+        tts = getattr(agent, "tts", None)
+        stt_open = getattr(stt, "open_parked_connection", None) if stt else None
+        tts_open = getattr(tts, "open_parked_connection", None) if tts else None
+        if stt_open is None and tts_open is None:
+            return
+
+        slot: dict[str, Any] = {}
+        self._prewarmed_connections[call_id] = slot
+
+        started_at = time.monotonic()
+
+        async def _park_stt() -> None:
+            if stt_open is None:
+                return
+            try:
+                handle = await stt_open()
+                # Slot may have been drained while we were opening.
+                if self._prewarmed_connections.get(call_id) is not slot:
+                    await _safe_close_handle(handle)
+                    return
+                slot["stt"] = handle
+                logger.info(
+                    "[PREWARM] callId=%s provider=stt ms=%d",
+                    call_id,
+                    int((time.monotonic() - started_at) * 1000),
+                )
+            except Exception as exc:  # noqa: BLE001 - best-effort
+                logger.debug("Park STT failed for %s: %s", call_id, exc)
+
+        async def _park_tts() -> None:
+            if tts_open is None:
+                return
+            try:
+                handle = await tts_open()
+                if self._prewarmed_connections.get(call_id) is not slot:
+                    await _safe_close_handle(handle)
+                    return
+                slot["tts"] = handle
+                logger.info(
+                    "[PREWARM] callId=%s provider=tts ms=%d",
+                    call_id,
+                    int((time.monotonic() - started_at) * 1000),
+                )
+            except Exception as exc:  # noqa: BLE001 - best-effort
+                logger.debug("Park TTS failed for %s: %s", call_id, exc)
+
+        async def _run_all() -> None:
+            await asyncio.gather(_park_stt(), _park_tts(), return_exceptions=True)
+
+        task = asyncio.create_task(_run_all())
+        self._prewarm_tasks.add(task)
+
+        def _on_park_done(_t: asyncio.Task) -> None:
+            self._prewarm_tasks.discard(_t)
+            # Schedule TTL cleanup so a never-adopted slot is force-closed.
+            if call_id not in self._prewarmed_connections:
+                return
+            try:
+                ttl_task = asyncio.create_task(
+                    self._evict_parked_after(call_id, _PARKED_CONN_TTL_S)
+                )
+            except RuntimeError:
+                # No running loop — drop synchronously.
+                orphan = self._prewarmed_connections.pop(call_id, None)
+                if orphan is not None:
+                    _close_parked_slot(orphan)
+                return
+            self._prewarmed_conn_tasks[call_id] = ttl_task
+            ttl_task.add_done_callback(
+                lambda _t, cid=call_id: self._prewarmed_conn_tasks.pop(cid, None)
+            )
+
+        task.add_done_callback(_on_park_done)
+
+    async def _evict_parked_after(self, call_id: str, ttl_s: float) -> None:
+        """Sleep ``ttl_s`` then force-close any parked sockets still
+        present for ``call_id``. No-op if the slot was already
+        consumed / closed.
+        """
+        try:
+            await asyncio.sleep(ttl_s)
+        except asyncio.CancelledError:
+            return
+        slot = self._prewarmed_connections.pop(call_id, None)
+        if slot is not None:
+            _close_parked_slot(slot)
+            logger.warning(
+                "[PREWARM] parked connections evicted by TTL for %s — "
+                "call never reached start (~%.0fs).",
+                call_id,
+                ttl_s,
+            )
 
     def _spawn_prewarm_first_message(
         self, agent: Agent, call_id: str, *, ring_timeout: int | None
@@ -1204,6 +1434,19 @@ class Patter:
                 f"recording must be a bool, got {type(recording).__name__}."
             )
 
+        # Pre-import AEC at serve startup so the first call doesn't pay
+        # the dynamic-import cost on the hot path. ``echo_cancellation``
+        # is opt-in and rarely set on PSTN, but when it is the lazy
+        # ``from getpatter.audio.aec import NlmsEchoCanceller`` inside
+        # the StreamHandler can serialise with first-message TTS startup
+        # and eat first-turn latency. Eagerly importing here costs
+        # nothing for users who never enable AEC.
+        if getattr(agent, "echo_cancellation", False):
+            try:
+                import getpatter.audio.aec  # noqa: F401
+            except Exception as exc:  # noqa: BLE001 - best-effort
+                logger.debug("AEC pre-import failed at serve(): %s", exc)
+
         # Resolve webhook_url: tunnel or explicit
         config = self._local_config
 
@@ -1279,6 +1522,10 @@ class Patter:
         # ``start``. The server stores a closure rather than a back-ref to
         # avoid a circular reference (Patter → server → Patter).
         self._server.pop_prewarm_audio = self.pop_prewarm_audio  # type: ignore[attr-defined]
+        # Forward the parked-connections accessor so the per-call
+        # StreamHandler can adopt pre-opened STT / TTS / Realtime WSs at
+        # ``start`` instead of paying the cold handshake on first turn.
+        self._server.pop_prewarmed_connections = self.pop_prewarmed_connections  # type: ignore[attr-defined]
         # Forward the waste-recorder so the carrier status / hangup
         # webhook handlers can evict the cache when a call terminates
         # before the media stream starts (no-answer, busy, failed,
@@ -1416,6 +1663,24 @@ class Patter:
         self._prewarm_ttl_tasks.clear()
         self._prewarm_audio.clear()
         self._prewarm_consumed.clear()
+        # Cancel parked-connection TTL tasks and force-close any
+        # remaining parked sockets so we don't leak across
+        # ``serve`` / ``disconnect`` cycles.
+        for t in list(self._prewarmed_conn_tasks.values()):
+            if not t.done():
+                t.cancel()
+        if self._prewarmed_conn_tasks:
+            await asyncio.gather(
+                *self._prewarmed_conn_tasks.values(), return_exceptions=True
+            )
+        self._prewarmed_conn_tasks.clear()
+        for slot in list(self._prewarmed_connections.values()):
+            for handle in slot.values():
+                try:
+                    await _safe_close_handle(handle)
+                except Exception:
+                    pass
+        self._prewarmed_connections.clear()
         if self._server:
             await self._server.stop()
             self._server = None
@@ -1479,6 +1744,9 @@ class Patter:
         so the status callback firing first and ``end_call`` running
         afterwards (or vice-versa) does not double-WARN.
         """
+        # Always drain any parked provider WS — they're cheap to discard
+        # and we don't want to leak open sockets when the call dies.
+        self.close_prewarmed_connections(call_id)
         # Idempotency guard — once consumed (cache hit, cache miss, or a
         # prior waste record) the slot is gone and there is nothing to
         # warn about a second time.

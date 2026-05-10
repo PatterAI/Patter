@@ -53,7 +53,14 @@ def mount_dashboard(app, store: MetricsStore, token: str = "") -> None:
 
     @app.get("/api/dashboard/calls/{call_id}")
     async def dashboard_call_detail(call_id: str, _=Depends(auth)):
+        # Fall back to the active record so the live-transcript polling
+        # path (``useTranscript`` in the dashboard SPA) sees turns as
+        # they accumulate during the call. Without this fallback the
+        # route 404s while the call is in flight and the live transcript
+        # pane stays empty.
         call = store.get_call(call_id)
+        if call is None:
+            call = store.get_active(call_id)
         if call is None:
             return JSONResponse(content={"error": "Not found"}, status_code=404)
         return JSONResponse(content=call)
@@ -78,7 +85,7 @@ def mount_dashboard(app, store: MetricsStore, token: str = "") -> None:
                     try:
                         event = await asyncio.wait_for(queue.get(), timeout=30.0)
                         event_type = event.get("type", "message")
-                        event_type = re.sub(r'[\r\n]', '', event_type)
+                        event_type = re.sub(r"[\r\n]", "", event_type)
                         data = json.dumps(event.get("data", {}), default=str)
                         yield f"event: {event_type}\ndata: {data}\n\n"
                     except asyncio.TimeoutError:
@@ -89,9 +96,7 @@ def mount_dashboard(app, store: MetricsStore, token: str = "") -> None:
             finally:
                 store.unsubscribe(queue)
 
-        return StreamingResponse(
-            event_generator(), media_type="text/event-stream"
-        )
+        return StreamingResponse(event_generator(), media_type="text/event-stream")
 
     # --- Export endpoint ---
 

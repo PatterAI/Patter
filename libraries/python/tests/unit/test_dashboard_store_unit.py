@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -32,8 +31,12 @@ def _make_call_metrics(call_id: str) -> CallMetrics:
         duration_seconds=30.0,
         turns=(),
         cost=CostBreakdown(stt=0.01, tts=0.02, llm=0.03, telephony=0.005, total=0.065),
-        latency_avg=LatencyBreakdown(stt_ms=50.0, llm_ms=100.0, tts_ms=30.0, total_ms=180.0),
-        latency_p95=LatencyBreakdown(stt_ms=60.0, llm_ms=120.0, tts_ms=40.0, total_ms=220.0),
+        latency_avg=LatencyBreakdown(
+            stt_ms=50.0, llm_ms=100.0, tts_ms=30.0, total_ms=180.0
+        ),
+        latency_p95=LatencyBreakdown(
+            stt_ms=60.0, llm_ms=120.0, tts_ms=40.0, total_ms=220.0
+        ),
         provider_mode="pipeline",
     )
 
@@ -375,3 +378,130 @@ class TestCallCount:
         store.record_call_end({"call_id": "c1"})
         store.record_call_end({"call_id": "c2"})
         assert store.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Bug C regression — record_call_end must not duplicate after
+# update_call_status already moved the row to completed.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestRecordCallEndDeduplication:
+    """Twilio's statusCallback for ``CallStatus=completed`` invokes
+    ``update_call_status`` (which moves the row from active to completed),
+    and shortly after the WS ``stop`` frame invokes ``record_call_end``
+    for the same call_id. Before the fix the second call appended a
+    duplicate row with ``started_at=0`` and empty caller/callee, masking
+    the original entry in ``get_calls`` (newest-first ordering, the
+    dashboard's mergeCalls de-dup keeps the first match).
+    """
+
+    def test_updates_existing_entry_instead_of_duplicating(self) -> None:
+        store = MetricsStore()
+        store.record_call_initiated(
+            {
+                "call_id": "CA-dup",
+                "caller": "+15551112222",
+                "callee": "+15553334444",
+                "direction": "outbound",
+            }
+        )
+        store.record_call_start({"call_id": "CA-dup"})
+        # Twilio statusCallback path moves the call to completed first.
+        store.update_call_status("CA-dup", "completed", duration_seconds=42.0)
+        assert len(store.get_active_calls()) == 0
+        assert store.call_count == 1
+        intermediate = store.get_calls()[0]
+        assert intermediate["caller"] == "+15551112222"
+        assert intermediate["callee"] == "+15553334444"
+        started_at_before = intermediate["started_at"]
+        assert started_at_before > 0
+
+        # Then the WS stop handler fires record_call_end. ``data["caller"]``
+        # is empty here because outbound TwiML carries no Stream
+        # parameters.
+        store.record_call_end(
+            {
+                "call_id": "CA-dup",
+                "caller": "",
+                "callee": "",
+                "transcript": [],
+            },
+            metrics=_make_call_metrics("CA-dup"),
+        )
+
+        # No duplicate row.
+        assert store.call_count == 1
+        final_entry = store.get_calls()[0]
+        assert final_entry["call_id"] == "CA-dup"
+        # caller/callee preserved from the original update_call_status path.
+        assert final_entry["caller"] == "+15551112222"
+        assert final_entry["callee"] == "+15553334444"
+        # started_at preserved (not re-zeroed).
+        assert final_entry["started_at"] == started_at_before
+        # Metrics are now populated by record_call_end.
+        assert final_entry["metrics"]["cost"]["total"] == pytest.approx(0.065)
+        assert final_entry["status"] == "completed"
+
+    def test_call_stays_in_24h_window_after_end(self) -> None:
+        # End-to-end check that mirrors the real bug: the dashboard SPA
+        # filters calls by [now - 24h, now] using ``startedAtMs``. With the
+        # duplicate bug ``started_at`` was 0 → call dropped off the slice.
+        store = MetricsStore()
+        store.record_call_initiated(
+            {
+                "call_id": "CA-window",
+                "caller": "+15551112222",
+                "callee": "+15553334444",
+                "direction": "outbound",
+            }
+        )
+        store.record_call_start({"call_id": "CA-window"})
+        store.update_call_status("CA-window", "completed", duration_seconds=5.0)
+        store.record_call_end(
+            {"call_id": "CA-window", "transcript": []},
+            metrics=_make_call_metrics("CA-window"),
+        )
+        now = time.time()
+        in_window = store.get_calls_in_range(from_ts=now - 86400, to_ts=now + 60)
+        assert any(c["call_id"] == "CA-window" for c in in_window)
+
+
+# ---------------------------------------------------------------------------
+# Bug A regression — call detail route returns active record for live calls
+# (the route lookup is in routes.py — these tests verify get_active is
+# wired and that a freshly-started call exposes its turns through the same
+# accessor the route now falls back to).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestActiveCallDetail:
+    """get_active exposes the live record so the dashboard route can fall
+    back to it while the call is in flight (otherwise the live transcript
+    pane stays empty until the call ends).
+    """
+
+    def test_get_active_returns_record_with_turns(self) -> None:
+        store = MetricsStore()
+        store.record_call_start(_make_call_data("CA-live"))
+        store.record_turn(
+            {
+                "call_id": "CA-live",
+                "turn": {
+                    "turn_index": 0,
+                    "user_text": "hello",
+                    "agent_text": "hi there",
+                },
+            }
+        )
+        active = store.get_active("CA-live")
+        assert active is not None
+        assert active["call_id"] == "CA-live"
+        assert len(active["turns"]) == 1
+        assert active["turns"][0]["user_text"] == "hello"
+
+    def test_get_active_returns_none_for_unknown_call(self) -> None:
+        store = MetricsStore()
+        assert store.get_active("missing") is None

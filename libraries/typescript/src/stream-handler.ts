@@ -173,6 +173,17 @@ export interface StreamHandlerDeps {
    * "no prewarm — always run live TTS".
    */
   readonly popPrewarmAudio?: (callId: string) => Buffer | undefined;
+  /**
+   * Optional accessor returning pre-opened, fully-handshaked provider
+   * WebSockets for ``callId`` so the per-call StreamHandler can
+   * adopt them at ``start`` instead of paying the cold handshake on
+   * the first turn. Wired by ``Patter.serve()``. Returning
+   * ``undefined`` (or any sub-field unset) means "no parked socket
+   * for this provider — fall back to fresh ``connect()``".
+   */
+  readonly popPrewarmedConnections?: (
+    callId: string,
+  ) => import('./client').ParkedProviderConnections | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -1332,14 +1343,81 @@ export class StreamHandler {
       }
     }
 
-    try {
-      if (this.stt) await this.stt.connect();
-      getLogger().debug(`Pipeline mode (${label}): STT + TTS connected`);
-    } catch (e) {
-      getLogger().error(`Pipeline connect FAILED (${label}):`, e);
-      try { await this.deps.bridge.endCall(this.callId, this.ws); } catch { /* best effort */ }
-      return;
+    // Prewarm-handoff: try to adopt pre-opened provider WebSockets that
+    // the prewarm pipeline (see ``Patter.parkProviderConnections``)
+    // parked during the carrier ringing window. When a parked WS is
+    // still OPEN we skip the cold ``connect()`` and the STT first-turn
+    // can flow audio without paying the 150-400 ms TLS handshake.
+    // Failures (cache miss, parked WS died) fall back transparently.
+    let parked: import('./client').ParkedProviderConnections | undefined;
+    if (this.deps.popPrewarmedConnections) {
+      try {
+        parked = this.deps.popPrewarmedConnections(this.callId);
+      } catch (err) {
+        getLogger().debug(`popPrewarmedConnections raised: ${String(err)}`);
+      }
     }
+    // Adopt the TTS WS first — it's a synchronous handoff (the live
+    // ``synthesizeStream`` call below picks it up via the adapter's
+    // single-slot adoption queue).
+    const parkedTts = parked?.tts;
+    if (parkedTts && this.tts) {
+      const ttsAny = this.tts as { adoptWebSocket?: (p: typeof parkedTts) => void };
+      if (typeof ttsAny.adoptWebSocket === 'function' && parkedTts.ws.readyState === 1 /* OPEN */) {
+        try {
+          ttsAny.adoptWebSocket(parkedTts);
+          getLogger().info(`[CONNECT] callId=${this.callId} provider=tts source=adopted ms=0`);
+        } catch (err) {
+          getLogger().debug(`TTS adoptWebSocket failed: ${String(err)}; falling back`);
+          try { parkedTts.ws.close(); } catch { /* ignore */ }
+        }
+      } else {
+        try { parkedTts.ws.close(); } catch { /* ignore */ }
+      }
+    }
+
+    // Kick off STT connect WITHOUT awaiting yet — we only need STT ready
+    // to receive incoming user audio, not to send the first agent
+    // message out. Parallelising STT.connect with the TTS firstMessage
+    // synth shaves 200-400 ms off the perceived first-turn latency.
+    let sttConnectPromise: Promise<void> | null = null;
+    if (this.stt) {
+      const sttAny = this.stt as { adoptWebSocket?: (ws: import('ws').WebSocket) => void };
+      const sttStarted = Date.now();
+      if (
+        parked?.stt &&
+        typeof sttAny.adoptWebSocket === 'function' &&
+        parked.stt.readyState === 1 /* OPEN */
+      ) {
+        try {
+          sttAny.adoptWebSocket(parked.stt);
+          getLogger().info(
+            `[CONNECT] callId=${this.callId} provider=stt source=adopted ms=${Date.now() - sttStarted}`,
+          );
+          sttConnectPromise = Promise.resolve();
+        } catch (err) {
+          getLogger().debug(`STT adoptWebSocket failed: ${String(err)}; falling back`);
+          try { parked.stt.close(); } catch { /* ignore */ }
+          sttConnectPromise = (async () => {
+            await this.stt!.connect();
+            getLogger().info(
+              `[CONNECT] callId=${this.callId} provider=stt source=fresh ms=${Date.now() - sttStarted}`,
+            );
+          })();
+        }
+      } else {
+        if (parked?.stt) {
+          try { parked.stt.close(); } catch { /* ignore */ }
+        }
+        sttConnectPromise = (async () => {
+          await this.stt!.connect();
+          getLogger().info(
+            `[CONNECT] callId=${this.callId} provider=stt source=fresh ms=${Date.now() - sttStarted}`,
+          );
+        })();
+      }
+    }
+    getLogger().debug(`Pipeline mode (${label}): STT connect kicked off`);
 
     if (this.deps.agent.firstMessage && !this.deps.onMessage && this.tts) {
       this.metricsAcc.startTurn();
@@ -1450,6 +1528,18 @@ export class StreamHandler {
     }
 
     if (this.stt) {
+      // Make sure the STT WebSocket is OPEN before we install the
+      // transcript handler — the parallel kickoff above may still be
+      // resolving when we get here. Failures abort the call.
+      if (sttConnectPromise) {
+        try {
+          await sttConnectPromise;
+        } catch (e) {
+          getLogger().error(`STT connect FAILED (${label}):`, e);
+          try { await this.deps.bridge.endCall(this.callId, this.ws); } catch { /* best effort */ }
+          return;
+        }
+      }
       this.stt.onTranscript(async (transcript) => {
         await this.handleTranscript(transcript);
       });

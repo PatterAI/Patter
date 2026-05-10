@@ -723,6 +723,17 @@ export class EmbeddedServer {
   public popPrewarmAudio: (callId: string) => Buffer | undefined = () => undefined;
 
   /**
+   * Pre-warmed provider WebSocket accessor wired by ``Patter.serve()``.
+   * The per-call StreamHandler invokes this with its ``callId`` at
+   * pipeline init; defined returns hand off pre-opened STT / TTS /
+   * Realtime sockets so the live first turn skips the cold-handshake.
+   * Default is a no-op for direct ``EmbeddedServer`` callers.
+   */
+  public popPrewarmedConnections: (
+    callId: string,
+  ) => import('./client').ParkedProviderConnections | undefined = () => undefined;
+
+  /**
    * Prewarm waste recorder wired by ``Patter.serve()``. Invoked from
    * the Twilio status callback (no-answer / busy / failed / canceled)
    * and the Telnyx call.hangup / AMD-machine handlers so the cache
@@ -1415,6 +1426,7 @@ export class EmbeddedServer {
       sanitizeVariables,
       resolveVariables,
       popPrewarmAudio: this.popPrewarmAudio,
+      popPrewarmedConnections: this.popPrewarmedConnections,
     };
   }
 
@@ -1450,14 +1462,28 @@ export class EmbeddedServer {
       return Object.fromEntries(Object.entries(snap).filter(([, v]) => v !== undefined));
     };
 
+    const store = this.metricsStore;
     const wrappedStart = async (data: Record<string, unknown>): Promise<void> => {
       if (logger.enabled) {
         const callId = typeof data.call_id === 'string' ? data.call_id : '';
+        // For outbound calls the bridge has no caller/callee in the WS query
+        // string (TwiML for outbound is inline ``<Stream url="…/outbound"/>``
+        // with no <Parameter> tags), so ``data.caller`` / ``data.callee`` are
+        // empty here. The active record in the store was populated by
+        // ``recordCallInitiated`` at dial time and holds the correct numbers
+        // — pull them from there before persisting metadata.json. Without
+        // this fallback every outbound call's metadata.json on disk has
+        // ``caller=""`` / ``callee=""``.
+        const dataCaller = typeof data.caller === 'string' ? data.caller : '';
+        const dataCallee = typeof data.callee === 'string' ? data.callee : '';
+        const active = callId ? store.getActive(callId) : undefined;
+        const resolvedCaller = dataCaller || active?.caller || '';
+        const resolvedCallee = dataCallee || active?.callee || '';
         // Fire-and-forget: call logging must never block the voice flow.
         void logger
           .logCallStart(callId, {
-            caller: typeof data.caller === 'string' ? data.caller : '',
-            callee: typeof data.callee === 'string' ? data.callee : '',
+            caller: resolvedCaller,
+            callee: resolvedCallee,
             telephonyProvider: bridge.telephonyProvider,
             providerMode: agent.provider ?? '',
             agent: agentSnapshot(),

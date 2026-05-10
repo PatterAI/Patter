@@ -208,26 +208,46 @@ export function toUiCall(record: CallRecord): Call {
 
 export function toUiTranscript(record: CallRecord): TranscriptTurn[] {
   const transcript = record.transcript;
-  if (!transcript) return [];
-  const turns: TranscriptTurn[] = [];
-  for (const entry of transcript) {
-    const text = entry.text;
-    switch (entry.role) {
-      case 'user':
-        turns.push({ who: 'user', txt: text });
-        break;
-      case 'assistant':
-        turns.push({ who: 'bot', txt: text });
-        break;
-      case 'tool':
-        turns.push({ who: 'tool', txt: text });
-        break;
-      default:
-        turns.push({ who: 'bot', txt: text });
-        break;
+  if (transcript && transcript.length > 0) {
+    const out: TranscriptTurn[] = [];
+    for (const entry of transcript) {
+      const text = entry.text;
+      switch (entry.role) {
+        case 'user':
+          out.push({ who: 'user', txt: text });
+          break;
+        case 'assistant':
+          out.push({ who: 'bot', txt: text });
+          break;
+        case 'tool':
+          out.push({ who: 'tool', txt: text });
+          break;
+        default:
+          out.push({ who: 'bot', txt: text });
+          break;
+      }
+    }
+    return out;
+  }
+  // Fallback for live calls: completed calls expose ``transcript`` (a flat
+  // array of {role,text}) but in-flight calls expose ``turns`` (the
+  // ``TurnMetrics`` shape — one entry per round-trip with both
+  // ``user_text`` and ``agent_text``). Without this branch the live
+  // transcript pane is empty until the call ends. See dashboard BUG A.
+  const turns = record.turns;
+  if (!turns || turns.length === 0) return [];
+  const out: TranscriptTurn[] = [];
+  for (const raw of turns) {
+    if (typeof raw !== 'object' || raw === null) continue;
+    const turn = raw as { user_text?: unknown; agent_text?: unknown };
+    const userText = typeof turn.user_text === 'string' ? turn.user_text : '';
+    const agentText = typeof turn.agent_text === 'string' ? turn.agent_text : '';
+    if (userText.length > 0) out.push({ who: 'user', txt: userText });
+    if (agentText.length > 0 && agentText !== '[interrupted]') {
+      out.push({ who: 'bot', txt: agentText });
     }
   }
-  return turns;
+  return out;
 }
 
 export type SparklineField = 'totalCalls' | 'latency' | 'spend';

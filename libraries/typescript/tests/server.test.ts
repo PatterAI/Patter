@@ -313,3 +313,84 @@ describe('sanitizeVariables', () => {
     expect(Object.keys(result)).toHaveLength(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Bug B regression — outbound calls persist caller/callee on disk
+// ---------------------------------------------------------------------------
+
+describe('EmbeddedServer wraps logging callbacks with active-record fallback', () => {
+  it('persists caller/callee from active record when on_call_start data is empty', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fs = require('node:fs') as typeof import('node:fs');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const os = require('node:os') as typeof import('node:os');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const path = require('node:path') as typeof import('node:path');
+
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'patter-bug-b-'));
+    try {
+      const server = new EmbeddedServer(
+        makeConfig({ persistRoot: tmp }),
+        makeAgent(),
+      );
+      // Pre-register the call as recordCallInitiated does for outbound.
+      const store = (server as unknown as {
+        metricsStore: {
+          recordCallInitiated: (d: Record<string, unknown>) => void;
+        };
+      }).metricsStore;
+      store.recordCallInitiated({
+        call_id: 'CA-outbound',
+        caller: '+15551112222',
+        callee: '+15553334444',
+        direction: 'outbound',
+      });
+
+      // Reach into the private wrapper. Tests for private methods are kept
+      // tight: they exist purely to lock in the fix for Bug B.
+      const wrapped = (server as unknown as {
+        wrapLoggingCallbacks: (b: { telephonyProvider: string }) => [
+          (d: Record<string, unknown>) => Promise<void>,
+          (d: Record<string, unknown>) => Promise<void>,
+          (d: Record<string, unknown>) => Promise<void>,
+        ];
+      }).wrapLoggingCallbacks({ telephonyProvider: 'twilio' });
+      const wrappedStart = wrapped[0];
+
+      // Simulate the bridge's on_call_start payload for an outbound call:
+      // the WS query string was empty, so caller/callee are blank in
+      // ``data``. The fix must look up the active record from the store
+      // and persist the real numbers.
+      await wrappedStart({
+        call_id: 'CA-outbound',
+        caller: '',
+        callee: '',
+        direction: 'outbound',
+        telephony_provider: 'twilio',
+      });
+
+      // Allow the fire-and-forget logCallStart promise to drain.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const metaPaths: string[] = [];
+      const walk = (d: string): void => {
+        for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
+          const full = path.join(d, entry.name);
+          if (entry.isDirectory()) walk(full);
+          else if (entry.name === 'metadata.json') metaPaths.push(full);
+        }
+      };
+      walk(tmp);
+      expect(metaPaths).toHaveLength(1);
+      const payload = JSON.parse(fs.readFileSync(metaPaths[0], 'utf8')) as {
+        caller: string;
+        callee: string;
+      };
+      // Default redact mode is "mask" — last-4 visible.
+      expect(payload.caller.endsWith('2222')).toBe(true);
+      expect(payload.callee.endsWith('4444')).toBe(true);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});

@@ -115,16 +115,19 @@ class MetricsStore:
             # If the call was pre-registered with ``record_call_initiated``
             # (e.g., outbound dial before media arrives), upgrade its status
             # to "in-progress" instead of overwriting the from/to metadata.
-            # Only overwrite ``direction`` when the caller explicitly passed
-            # one in ``data`` — otherwise we'd clobber the ``outbound`` set
-            # by ``record_call_initiated`` with the default ``inbound``.
+            # Only overwrite ``caller`` / ``callee`` / ``direction`` when the
+            # caller explicitly passed a non-empty value in ``data`` —
+            # otherwise we'd clobber the values set by
+            # ``record_call_initiated`` with the empty strings the bridge
+            # sees on the outbound WS path (``/ws/stream/outbound`` carries
+            # no caller/callee query parameters).
             if existing is not None:
-                update_payload = {
-                    "call_id": event_data["call_id"],
-                    "caller": event_data["caller"],
-                    "callee": event_data["callee"],
-                }
-                if "direction" in data:
+                update_payload: dict[str, Any] = {"call_id": event_data["call_id"]}
+                if event_data["caller"]:
+                    update_payload["caller"] = event_data["caller"]
+                if event_data["callee"]:
+                    update_payload["callee"] = event_data["callee"]
+                if "direction" in data and data["direction"]:
                     update_payload["direction"] = data["direction"]
                 existing.update(update_payload)
                 existing["status"] = "in-progress"
@@ -244,27 +247,55 @@ class MetricsStore:
             return
         with self._lock:
             active = self._active_calls.pop(call_id, None)
+            # The Twilio ``statusCallback`` for ``CallStatus=completed``
+            # arrives shortly before the WS ``stop`` frame and runs
+            # ``update_call_status``, which already moved the row from
+            # ``_active_calls`` into ``_calls``. By the time
+            # ``record_call_end`` runs the active record is gone and the
+            # completed entry already exists. Without this lookup we'd
+            # append a second row with ``started_at=0`` (no active to copy
+            # from) and empty caller/callee — which is then ranked first
+            # by ``get_calls`` (newest wins) and the older, well-formed
+            # row gets shadowed. End result: the call disappears from the
+            # dashboard's 24 h window. See dashboard BUG C.
+            existing_idx = -1
+            existing: dict[str, Any] | None = None
+            if active is None:
+                for idx in range(len(self._calls) - 1, -1, -1):
+                    if self._calls[idx].get("call_id") == call_id:
+                        existing_idx = idx
+                        existing = self._calls[idx]
+                        break
+
             entry: dict[str, Any] = {
                 "call_id": call_id,
                 "ended_at": time.time(),
                 "transcript": data.get("transcript", []),
             }
-            if active:
-                entry["caller"] = active.get("caller", "")
-                entry["callee"] = active.get("callee", "")
-                entry["direction"] = active.get("direction", "inbound")
-                entry["started_at"] = active.get("started_at", 0)
+            source = active or existing
+            if source:
+                entry["caller"] = source.get("caller", "")
+                entry["callee"] = source.get("callee", "")
+                entry["direction"] = source.get("direction", "inbound")
+                entry["started_at"] = source.get("started_at", 0)
                 # Preserve any explicit status (no-answer, busy, ...) set by
                 # a statusCallback during the call. Fall back to "completed".
+                prior_status = source.get("status")
                 entry["status"] = (
-                    active.get("status", "completed")
-                    if active.get("status") != "in-progress"
+                    prior_status
+                    if prior_status and prior_status != "in-progress"
                     else "completed"
                 )
             else:
                 entry.setdefault("status", "completed")
             if metrics is not None:
                 entry["metrics"] = asdict(metrics)
+            elif existing is not None and existing.get("metrics"):
+                # An earlier ``update_call_status`` may have written a
+                # placeholder metrics dict — keep it rather than dropping
+                # it on the floor when ``record_call_end`` is invoked
+                # without an explicit metrics payload.
+                entry["metrics"] = existing["metrics"]
             else:
                 # No metrics payload (e.g. webhook-rejected inbound, or
                 # outbound call that never hit media): synthesise a minimal
@@ -288,9 +319,13 @@ class MetricsStore:
                     "latency_p99": {"total_ms": 0.0},
                     "provider_mode": "",
                 }
-            self._calls.append(entry)
-            if len(self._calls) > self._max_calls:
-                self._calls = self._calls[-self._max_calls :]
+            if existing_idx >= 0:
+                # Update in place so the buffer doesn't grow a duplicate row.
+                self._calls[existing_idx] = entry
+            else:
+                self._calls.append(entry)
+                if len(self._calls) > self._max_calls:
+                    self._calls = self._calls[-self._max_calls :]
             event_metrics = entry.get("metrics")
         # Publish outside lock to avoid deadlock with subscribe/unsubscribe
         self._publish(

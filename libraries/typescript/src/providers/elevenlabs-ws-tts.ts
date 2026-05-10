@@ -120,6 +120,20 @@ const CARRIER_NATIVE_FORMAT: Readonly<Record<string, string>> = {
   telnyx: 'pcm_16000',
 };
 
+/**
+ * Parked WS handle returned by {@link ElevenLabsWebSocketTTS.openParkedConnection}.
+ *
+ * `bosSent` records whether the BOS frame (`{"text": " ", ...}`) has
+ * already been written to the wire. The prewarm pipeline always sends
+ * the BOS so the upstream worker is selected on the parked connection;
+ * `synthesizeStream` adopts the WS and SKIPS its own BOS send to avoid
+ * a protocol error.
+ */
+export interface ElevenLabsParkedWS {
+  ws: WebSocket;
+  bosSent: boolean;
+}
+
 /** WebSocket-based ElevenLabs TTS adapter — opt-in low-latency variant. */
 export class ElevenLabsWebSocketTTS implements TTSAdapter {
   static readonly providerKey = 'elevenlabs_ws';
@@ -132,6 +146,19 @@ export class ElevenLabsWebSocketTTS implements TTSAdapter {
   readonly inactivityTimeout: number;
   readonly chunkLengthSchedule?: number[];
   readonly chunkSize: number;
+  /**
+   * Single-slot adoption queue. The prewarm pipeline parks one WS per
+   * outbound call here; the next `synthesizeStream` call consumes it
+   * (skipping `new WebSocket()` and the BOS send) instead of opening
+   * a fresh socket. The slot is consumed exactly once: if a second
+   * `synthesizeStream` runs before the first, only the first benefits.
+   *
+   * We keep this on the adapter (not in a parameter) so the existing
+   * `for await (const chunk of agent.tts.synthesizeStream(...))` call
+   * site in `StreamHandler` continues to work without signature
+   * changes.
+   */
+  private adoptedConnection: ElevenLabsParkedWS | null = null;
 
   /**
    * The wire format requested over the ElevenLabs WS. Initially set from
@@ -262,9 +289,28 @@ export class ElevenLabsWebSocketTTS implements TTSAdapter {
    *   after flush — auto_mode could otherwise truncate the tail audio).
    */
   async *synthesizeStream(text: string): AsyncGenerator<Buffer> {
-    const ws = new WebSocket(this.buildUrl(), {
-      headers: { 'xi-api-key': this.apiKey },
-    });
+    // Adopt a parked WS if one is queued AND it is still OPEN. A WS that
+    // died between park and adopt (server timeout, network blip) is
+    // discarded silently and a fresh socket is opened — preserving the
+    // backward-compatible cold path.
+    let ws: WebSocket;
+    let bosAlreadySent = false;
+    let adopted = false;
+    const parked = this.adoptedConnection;
+    this.adoptedConnection = null;
+    if (parked && parked.ws.readyState === WebSocket.OPEN) {
+      ws = parked.ws;
+      bosAlreadySent = parked.bosSent;
+      adopted = true;
+    } else {
+      if (parked) {
+        // Parked WS was closed / closing — drop it cleanly.
+        try { parked.ws.close(); } catch { /* ignore */ }
+      }
+      ws = new WebSocket(this.buildUrl(), {
+        headers: { 'xi-api-key': this.apiKey },
+      });
+    }
 
     const queue: Buffer[] = [];
     let done = false;
@@ -348,28 +394,35 @@ export class ElevenLabsWebSocketTTS implements TTSAdapter {
     ws.on('error', onError);
 
     try {
-      // Wait for OPEN, with timeout.
-      await new Promise<void>((resolve, reject) => {
-        connectTimer = setTimeout(
-          () => reject(new Error('ElevenLabs WS connect timeout')),
-          CONNECT_TIMEOUT_MS,
-        );
-        ws.once('open', () => {
-          if (connectTimer) clearTimeout(connectTimer);
-          connectTimer = undefined;
-          resolve();
+      // Wait for OPEN, with timeout — skipped on the adopt path because
+      // the parked WS is already through the upgrade handshake.
+      if (!adopted) {
+        await new Promise<void>((resolve, reject) => {
+          connectTimer = setTimeout(
+            () => reject(new Error('ElevenLabs WS connect timeout')),
+            CONNECT_TIMEOUT_MS,
+          );
+          ws.once('open', () => {
+            if (connectTimer) clearTimeout(connectTimer);
+            connectTimer = undefined;
+            resolve();
+          });
+          ws.once('error', (err) => {
+            if (connectTimer) clearTimeout(connectTimer);
+            connectTimer = undefined;
+            reject(err);
+          });
         });
-        ws.once('error', (err) => {
-          if (connectTimer) clearTimeout(connectTimer);
-          connectTimer = undefined;
-          reject(err);
-        });
-      });
+      }
 
       // Initial keep-alive packet — required by the protocol. ``""`` would
       // close the socket immediately. Produced by ``buildBosFrame()`` so
-      // ``warmup()`` sends a byte-identical frame.
-      ws.send(JSON.stringify(this.buildBosFrame()));
+      // ``warmup()`` sends a byte-identical frame. Skipped when the parked
+      // WS has already had the BOS sent during the prewarm step (sending
+      // it twice would be a protocol error).
+      if (!bosAlreadySent) {
+        ws.send(JSON.stringify(this.buildBosFrame()));
+      }
 
       // Send actual text + flush. EOS is intentionally NOT sent here —
       // it is sent in finally as part of the close. Sending EOS
@@ -494,9 +547,88 @@ export class ElevenLabsWebSocketTTS implements TTSAdapter {
     }
   }
 
+  /**
+   * Open a fresh WS, send the EXACT BOS frame the live `synthesizeStream`
+   * sends, and return the OPEN socket without closing it. Used by the
+   * prewarm pipeline to park a TTS connection during the carrier ringing
+   * window so the next `synthesizeStream` call can adopt it via
+   * {@link adoptWebSocket} and skip ~400-900 ms of TLS + BOS round-trip.
+   *
+   * Returns a parked-handle the caller stashes; the next
+   * `synthesizeStream` will detect the adoption queue and skip its own
+   * `new WebSocket()` + BOS send.
+   *
+   * Billing safety: BOS is the documented session-establishment frame
+   * (single space `text`, no `flush: true`) and does not generate
+   * synthesis. ElevenLabs bills on `audio` frames received from the
+   * server, not on BOS bytes sent by the client.
+   */
+  async openParkedConnection(): Promise<ElevenLabsParkedWS> {
+    const ws = new WebSocket(this.buildUrl(), {
+      headers: { 'xi-api-key': this.apiKey },
+    });
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('ElevenLabs WS park connect timeout')),
+        CONNECT_TIMEOUT_MS,
+      );
+      ws.once('open', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      ws.once('error', (err: Error) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+    // Send the BOS frame so the upstream worker selection is committed
+    // BEFORE the live `synthesizeStream` adopts this socket. Do not
+    // `flush: true` — that would commit synthesis and hold the stream
+    // worker on a real generation (and bill characters).
+    let bosSent = false;
+    try {
+      ws.send(JSON.stringify(this.buildBosFrame()));
+      bosSent = true;
+    } catch {
+      // BOS send failed — fall back to having the consumer send it.
+    }
+    return { ws, bosSent };
+  }
+
+  /**
+   * Stash a parked WS handle so the next `synthesizeStream` call adopts
+   * it instead of opening a fresh socket. Caller is responsible for
+   * holding the handle alive until either the live request consumes it
+   * or the call ends (in which case `discardAdoptedConnection()`
+   * cleans it up).
+   */
+  adoptWebSocket(parked: ElevenLabsParkedWS): void {
+    // If a previous handle is still parked here (caller error / second
+    // park before adopt), close it so we don't leak the FD.
+    const prev = this.adoptedConnection;
+    this.adoptedConnection = parked;
+    if (prev && prev !== parked) {
+      try { prev.ws.close(); } catch { /* ignore */ }
+    }
+  }
+
+  /**
+   * Drop and close any pending parked WS without consuming it. Used on
+   * call-failure paths so a never-started call does not leak a TTS WS
+   * that ElevenLabs will close after its inactivity timeout anyway.
+   */
+  discardAdoptedConnection(): void {
+    const parked = this.adoptedConnection;
+    this.adoptedConnection = null;
+    if (parked) {
+      try { parked.ws.close(); } catch { /* ignore */ }
+    }
+  }
+
   /** No-op — connections are per-utterance and torn down inside synthesizeStream. */
   async close(): Promise<void> {
-    // Connections are per-utterance, no persistent state to clean up.
+    // Drop any orphaned parked WS so we never leak it past close.
+    this.discardAdoptedConnection();
   }
 }
 

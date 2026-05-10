@@ -261,6 +261,66 @@ class CartesiaSTT(STTProvider):
         ws_url = self._build_ws_url()
         headers = {"User-Agent": USER_AGENT}
         self._ws = await self._session.ws_connect(ws_url, headers=headers)
+        self._arm_recv_and_keepalive()
+
+    async def open_parked_connection(
+        self,
+    ) -> tuple[aiohttp.ClientSession, aiohttp.ClientWebSocketResponse]:
+        """Open a fresh WebSocket and return the session + WS without
+        arming any recv / keepalive task.
+
+        Used by :meth:`Patter._park_provider_connections` to park a
+        Cartesia STT WS during the carrier ringing window so the per-call
+        :class:`StreamHandler` can adopt it via :meth:`adopt_websocket`
+        and skip the cold TLS + WS-upgrade handshake on the first turn.
+
+        Billing safety: opening + parking the WS does not stream audio
+        (Cartesia STT bills on streamed audio seconds), so no charge is
+        incurred. Caller is responsible for closing both the WS and the
+        session if the parked handle is never adopted.
+        """
+        session = aiohttp.ClientSession()
+        try:
+            ws_url = self._build_ws_url()
+            headers = {"User-Agent": USER_AGENT}
+            ws = await asyncio.wait_for(
+                session.ws_connect(ws_url, headers=headers), timeout=10.0
+            )
+        except Exception:
+            await session.close()
+            raise
+        return session, ws
+
+    def adopt_websocket(
+        self,
+        session: aiohttp.ClientSession,
+        ws: aiohttp.ClientWebSocketResponse,
+    ) -> None:
+        """Adopt a pre-opened, already-OPEN WebSocket parked by
+        :meth:`open_parked_connection`. Skips the fresh WS handshake —
+        audio frames can flow on the first turn instead of paying the
+        ~150-400 ms TLS + WS-upgrade round-trip.
+
+        Caller MUST verify the WS is still alive (``not ws.closed``)
+        before calling. If the parked WS died between park and adopt,
+        fall back to :meth:`connect`.
+        """
+        if self._session is None:
+            self._session = session
+        else:
+            # Different session was already created (caller error /
+            # connect was raced) — close the parked session to avoid
+            # a leak.
+            asyncio.create_task(session.close())
+        self._ws = ws
+        self._arm_recv_and_keepalive()
+
+    def _arm_recv_and_keepalive(self) -> None:
+        """Start the receive + keepalive tasks against ``self._ws``.
+
+        Shared between :meth:`connect` and :meth:`adopt_websocket` so
+        the two paths produce byte-identical session state.
+        """
         self._running = True
         self._recv_task = asyncio.create_task(self._recv_loop())
         self._keepalive_task = asyncio.create_task(self._keepalive_loop())

@@ -107,6 +107,38 @@ export class CartesiaSTT {
     }
   }
 
+  /**
+   * Open a fresh WebSocket without arming any message / keepalive handlers
+   * and without taking ownership on `this.ws`. Returns the OPEN socket so
+   * the caller (the prewarm pipeline) can park it for later adoption via
+   * `adoptWebSocket`. Bounded by `CONNECT_TIMEOUT_MS`.
+   *
+   * Billing safety: opening + parking the WS does not stream audio
+   * (Cartesia STT bills on streamed audio seconds), so no charge is
+   * incurred. Close the returned WS yourself if it is never adopted.
+   */
+  async openParkedConnection(): Promise<WebSocket> {
+    const url = this.buildWsUrl();
+    const ws = new WebSocket(url, {
+      headers: { 'User-Agent': USER_AGENT },
+    });
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('Cartesia STT park connect timeout')),
+        CONNECT_TIMEOUT_MS,
+      );
+      ws.once('open', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      ws.once('error', (err: Error) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+    return ws;
+  }
+
   private buildWsUrl(): string {
     const opts = this.options;
     const rawBase = opts.baseUrl ?? DEFAULT_BASE_URL;
@@ -215,6 +247,26 @@ export class CartesiaSTT {
       });
     });
 
+    this.armMessageAndKeepalive();
+  }
+
+  /**
+   * Adopt a pre-opened, already-OPEN WebSocket produced by the prewarm
+   * pipeline (see `Patter.parkProviderConnections`). Skips the fresh
+   * `new WebSocket()` + handshake — the WS is already through DNS, TLS
+   * and HTTP-101 so audio frames can flow on this turn instead of
+   * paying ~150-400 ms of handshake.
+   *
+   * Caller MUST verify `ws.readyState === OPEN` before calling. If the
+   * parked WS died between park and adopt, fall back to `connect()`.
+   */
+  adoptWebSocket(ws: WebSocket): void {
+    this.ws = ws;
+    this.armMessageAndKeepalive();
+  }
+
+  private armMessageAndKeepalive(): void {
+    if (!this.ws) return;
     this.ws.on('message', (raw: WebSocket.RawData) => {
       let event: CartesiaEvent;
       try {

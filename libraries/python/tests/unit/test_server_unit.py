@@ -203,6 +203,57 @@ class TestWrapCallbacks:
 
         store.record_call_start.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_call_log_start_pulls_caller_from_active_record(
+        self, tmp_path
+    ) -> None:
+        """Bug B regression: outbound calls have empty caller/callee in the
+        on_call_start data (the inline TwiML for outbound has no Stream
+        ``<Parameter>`` entries, so the WS query string is empty). The
+        ``_on_call_start`` wrapper must pull the real numbers from the
+        in-memory store (populated at dial time by ``record_call_initiated``)
+        before persisting metadata.json. Otherwise every outbound call's
+        on-disk metadata has ``caller="" callee=""``.
+        """
+        import json
+
+        from getpatter.dashboard.store import MetricsStore
+        from getpatter.services.call_log import CallLogger
+
+        srv = _make_server()
+        srv._metrics_store = MetricsStore()
+        # Pre-register the call as record_call_initiated would.
+        srv._metrics_store.record_call_initiated(
+            {
+                "call_id": "CA-outbound",
+                "caller": "+15551112222",
+                "callee": "+15553334444",
+                "direction": "outbound",
+            }
+        )
+        # Real on-disk CallLogger so we can read back metadata.json.
+        srv._call_logger = CallLogger(tmp_path)
+
+        on_start, _, _ = srv._wrap_callbacks()
+        # Simulate the bridge's on_call_start payload for an outbound call:
+        # the WS query string was empty so caller/callee are blank.
+        await on_start(
+            {
+                "call_id": "CA-outbound",
+                "caller": "",
+                "callee": "",
+                "direction": "outbound",
+                "telephony_provider": "twilio",
+            }
+        )
+
+        meta_paths = list(tmp_path.glob("calls/*/*/*/CA-outbound/metadata.json"))
+        assert len(meta_paths) == 1
+        payload = json.loads(meta_paths[0].read_text("utf-8"))
+        # Phone redact mode default is "mask" — last-4 visible.
+        assert payload["caller"].endswith("2222")
+        assert payload["callee"].endswith("4444")
+
 
 # ---------------------------------------------------------------------------
 # _create_app — route registration
