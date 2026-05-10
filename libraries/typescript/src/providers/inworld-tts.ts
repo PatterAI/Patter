@@ -10,7 +10,15 @@
  * default model — pass `model: "inworld-tts-1.5-max"` for the prior generation.
  */
 
+import { getLogger } from "../logger";
+
 const INWORLD_BASE_URL = "https://api.inworld.ai/tts/v1/voice:stream";
+// Voice metadata endpoint used as a billing-safe warmup target. The
+// streaming endpoint above is POST-only so HEAD against it returns 405.
+// `GET /tts/v1/voices` is documented as a free metadata read that
+// returns the configured voice catalogue without invoking the synthesis
+// pipeline (per https://docs.inworld.ai/).
+const INWORLD_VOICES_URL = "https://api.inworld.ai/tts/v1/voices";
 
 /** Inworld TTS model families. */
 export const InworldModel = {
@@ -119,6 +127,46 @@ export class InworldTTS {
     if (this.temperature !== undefined) payload.temperature = this.temperature;
     if (this.deliveryMode !== undefined) payload.deliveryMode = this.deliveryMode;
     return payload;
+  }
+
+  /**
+   * Pre-call HTTP warmup for the Inworld TTS API.
+   *
+   * Issues a lightweight `GET /tts/v1/voices` against the API host so
+   * DNS + TLS + HTTP/2 connection are already up by the time the first
+   * `synthesizeStream()` POST lands. Best-effort: 5 s timeout, all
+   * exceptions swallowed at debug level.
+   *
+   * Earlier revisions issued `HEAD` against the streaming endpoint
+   * (`/tts/v1/voice:stream`). That endpoint is POST-only so HEAD
+   * returns `405 Method Not Allowed` — the warmup still completed the
+   * TLS handshake but spammed 405 errors into Inworld's audit logs and
+   * into our own logs. Switching to a documented `GET /tts/v1/voices`
+   * metadata read is a 2xx-clean equivalent.
+   *
+   * Billing safety: `GET /tts/v1/voices` is a free metadata endpoint
+   * (per https://docs.inworld.ai/). It returns the voice catalogue
+   * without invoking the synthesis pipeline. The actual synthesis is
+   * billed only when `POST /tts/v1/voice:stream` runs with a non-empty
+   * `text`.
+   *
+   * Note: Inworld TTS uses the HTTP NDJSON streaming path rather than
+   * a persistent WebSocket — connection warmup is therefore HTTP-based,
+   * not WebSocket pre-handshake. The latency win is smaller (~50-150 ms)
+   * than the WS-based prewarms but still real on cold-start calls.
+   */
+  async warmup(): Promise<void> {
+    try {
+      await fetch(INWORLD_VOICES_URL, {
+        method: "GET",
+        headers: {
+          Authorization: `Basic ${this.authToken}`,
+        },
+        signal: AbortSignal.timeout(5_000),
+      });
+    } catch (err) {
+      getLogger().debug(`Inworld TTS warmup failed (best-effort): ${String(err)}`);
+    }
   }
 
   /** Synthesize text and return the concatenated audio buffer. */

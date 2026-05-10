@@ -380,6 +380,22 @@ export interface LLMProvider {
     tools?: Array<Record<string, unknown>> | null,
     opts?: LLMStreamOptions,
   ): AsyncGenerator<LLMChunk, void, unknown>;
+  /**
+   * Optional best-effort pre-call DNS / TLS / HTTP-keepalive warmup.
+   *
+   * Called once per outbound call from ``Patter.call`` when the agent has
+   * ``prewarm: true`` (the default). Concrete providers (OpenAI,
+   * Anthropic, Google, Cerebras, Groq) override this to issue a
+   * lightweight HTTPS GET to their inference endpoint so by the time the
+   * first ``stream()`` call lands, the connection pool already has a
+   * warm socket. Failures are logged at debug level and never abort the
+   * call — pure latency optimisation.
+   *
+   * Optional on the interface (``warmup?: ...``) so providers without a
+   * warmup hook still satisfy the type. Detected via runtime
+   * ``typeof provider.warmup === 'function'`` in the client.
+   */
+  warmup?(): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -438,6 +454,37 @@ export class OpenAILLMProvider implements LLMProvider {
     this.frequencyPenalty = sampling.frequencyPenalty;
     this.presencePenalty = sampling.presencePenalty;
     this.stop = sampling.stop;
+  }
+
+  /** Subclasses (Cerebras, Groq) override this with their own host. */
+  protected get baseUrl(): string {
+    return 'https://api.openai.com/v1';
+  }
+
+  /**
+   * Pre-call DNS / TLS / HTTP-keepalive warmup.
+   *
+   * Issues a lightweight ``GET ${baseUrl}/models`` so DNS, TLS and HTTP/2
+   * are already up by the time the first ``chat.completions`` call lands.
+   * Best-effort: 5 s timeout, all exceptions swallowed at debug level.
+   *
+   * Note: an HTTPS GET warms DNS + TLS + connection pool but does NOT
+   * warm the inference path itself; for true inference warmup a real
+   * low-token request is needed, left as a follow-up. STT / TTS providers ship concrete
+   * WebSocket-based prewarms (Cartesia / Deepgram / AssemblyAI for STT;
+   * ElevenLabs WS for TTS) which save 200-500 ms each — those dominate
+   * the cold-start latency budget.
+   */
+  async warmup(): Promise<void> {
+    try {
+      await fetch(`${this.baseUrl}/models`, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${this.apiKey}` },
+        signal: AbortSignal.timeout(5_000),
+      });
+    } catch (err) {
+      getLogger().debug(`LLM warmup failed (best-effort): ${String(err)}`);
+    }
   }
 
   /** Stream OpenAI Chat Completions chunks for the given messages/tools. */

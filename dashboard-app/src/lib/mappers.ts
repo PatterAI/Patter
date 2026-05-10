@@ -18,6 +18,13 @@ export type CallMode = 'realtime' | 'pipeline' | 'convai' | 'unknown';
 export interface CallCostUi {
   readonly telco?: number;
   readonly llm?: number;
+  readonly stt?: number;
+  readonly tts?: number;
+  /**
+   * @deprecated Sum of stt+tts kept for legacy consumers. New code reads
+   * ``stt`` and ``tts`` separately so the dashboard can label each with the
+   * actual provider (e.g. "Cartesia STT" / "ElevenLabs TTS").
+   */
   readonly sttTts?: number;
   readonly cached?: number;
   readonly total?: number;
@@ -41,6 +48,8 @@ export interface Call {
   readonly agent?: string;
   readonly model?: string;
   readonly mode?: CallMode;
+  readonly sttProvider?: string;
+  readonly ttsProvider?: string;
   readonly transcriptKey?: string;
   readonly endedAgo?: number;
 }
@@ -122,6 +131,8 @@ function computeCost(record: CallRecord): CallCostUi {
   const result: {
     telco?: number;
     llm?: number;
+    stt?: number;
+    tts?: number;
     sttTts?: number;
     cached?: number;
     total?: number;
@@ -129,9 +140,10 @@ function computeCost(record: CallRecord): CallCostUi {
 
   if (typeof cost.telephony === 'number') result.telco = cost.telephony;
   if (typeof cost.llm === 'number') result.llm = cost.llm;
-
-  if (typeof cost.stt === 'number' || typeof cost.tts === 'number') {
-    result.sttTts = (cost.stt ?? 0) + (cost.tts ?? 0);
+  if (typeof cost.stt === 'number') result.stt = cost.stt;
+  if (typeof cost.tts === 'number') result.tts = cost.tts;
+  if (result.stt !== undefined || result.tts !== undefined) {
+    result.sttTts = (result.stt ?? 0) + (result.tts ?? 0);
   }
 
   // Only fall back to total when no granular breakdown is available.
@@ -186,6 +198,8 @@ export function toUiCall(record: CallRecord): Call {
     agent: buildAgentLabel(record),
     model: record.metrics?.llm_provider,
     mode: mapMode(record.metrics?.provider_mode),
+    sttProvider: record.metrics?.stt_provider,
+    ttsProvider: record.metrics?.tts_provider,
     transcriptKey: record.call_id,
     endedAgo: computeEndedAgo(record),
   };

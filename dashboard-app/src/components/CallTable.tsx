@@ -5,6 +5,9 @@ import { IconArrowDown, IconArrowUp, IconSearch } from './icons';
 export interface CallCost {
   telco?: number;
   llm?: number;
+  stt?: number;
+  tts?: number;
+  /** @deprecated Sum of stt+tts kept for legacy aggregate-spend callers. */
   sttTts?: number;
   cached?: number;
   total?: number;
@@ -31,6 +34,8 @@ export interface Call {
   agent?: string;
   model?: string;
   mode?: CallMode;
+  sttProvider?: string;
+  ttsProvider?: string;
   transcriptKey?: string;
   endedAgo?: number;
 }

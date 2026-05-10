@@ -429,9 +429,9 @@ export interface AgentOptions {
    * default empty array the SDK falls back to the legacy
    * "interrupt immediately on VAD speech_start" behaviour. When at
    * least one strategy is provided, a VAD speech_start during TTS
-   * marks the barge-in as *pending* — the agent's TTS is paused but
-   * its in-flight LLM stream is preserved — and the strategies are
-   * consulted on every STT transcript. The first strategy that
+   * marks the barge-in as *pending* — the agent's TTS continues
+   * streaming naturally and its in-flight LLM stream is preserved —
+   * and the strategies are consulted on every STT transcript. The first strategy that
    * returns ``true`` confirms the barge-in (cancels TTS, flushes the
    * inbound ring buffer); if none confirm within
    * ``bargeInConfirmMs`` the pending state is dropped and TTS resumes.
@@ -448,6 +448,35 @@ export interface AgentOptions {
    * Default: 1500.
    */
   bargeInConfirmMs?: number;
+  /**
+   * When ``true`` (default), ``Patter.call`` warms up the STT, TTS, and
+   * LLM provider connections in parallel with the carrier-side
+   * ``initiateCall`` request so DNS, TLS, and HTTP/2 handshakes are
+   * already complete by the time the callee answers. Adapters expose a
+   * ``warmup()`` method returning ``Promise<void>`` (default no-op) —
+   * providers can override to dial open a persistent connection ahead
+   * of the WebSocket bridge. Best-effort: warmup failures are logged
+   * at debug level and never abort the call. Default: ``true``.
+   */
+  prewarm?: boolean;
+  /**
+   * When ``true`` (default ``false``), ``Patter.call`` also pre-renders
+   * ``firstMessage`` to TTS audio bytes during the ringing window and
+   * streams the cached buffer immediately when the carrier emits
+   * ``start``. Eliminates the 200-700 ms TTS first-byte latency on the
+   * greeting at the cost of paying the TTS bill even if the call is
+   * never answered (silently logged at warn level when the call
+   * fails). Off by default to preserve the prior cost surface; opt-in
+   * for production outbound where every millisecond of greeting
+   * latency hurts conversion. Default: ``false``.
+   *
+   * **Pipeline mode only.** Realtime / ConvAI provider modes never
+   * consume the prewarm cache (the StreamHandler for those modes runs
+   * its first-message emit through the provider's own audio path), so
+   * ``Patter.call`` refuses to spawn the prewarm task and emits a warn
+   * when ``provider !== 'pipeline'``.
+   */
+  prewarmFirstMessage?: boolean;
   /**
    * When true, the sentence chunker emits the first clause of each response
    * on a soft punctuation boundary (",", em-dash, en-dash) once ~40 chars

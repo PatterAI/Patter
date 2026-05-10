@@ -237,6 +237,21 @@ class EmbeddedServer:
         # recent outbound call. Cleared after firing once per call so a result
         # for a previous call cannot leak into a new caller's callback.
         self.on_machine_detection = None
+        # Pre-warm first-message audio accessor wired by ``Patter.serve()``.
+        # The per-call StreamHandler invokes this with its ``call_id`` at the
+        # start of the firstMessage emit; a non-None return is sent verbatim
+        # in place of running TTS again. ``None`` means "no prewarm cache for
+        # this call — fall back to live synthesis". Default is a no-op so
+        # callers that instantiate ``EmbeddedServer`` directly (tests) work
+        # without further setup.
+        self.pop_prewarm_audio = lambda _cid: None
+        # Prewarm waste recorder wired by ``Patter.serve()``. Invoked from
+        # the Twilio status callback (no-answer / busy / failed / canceled)
+        # and the Telnyx call.hangup / AMD-machine handlers so the cache
+        # entry is evicted when the call terminates before the media stream
+        # starts. Default is a no-op so direct ``EmbeddedServer`` callers
+        # (tests) work without further setup. See FIX #91.
+        self.record_prewarm_waste = lambda _cid: None
         self._telnyx_sig_warning_logged = False
         self._metrics_store = None
         # Opt-in per-call filesystem logging. Path is resolved by
@@ -334,7 +349,11 @@ class EmbeddedServer:
                 from dataclasses import asdict, is_dataclass
 
                 metrics_obj = data.get("metrics")
-                duration = getattr(metrics_obj, "duration_seconds", None) if metrics_obj else None
+                duration = (
+                    getattr(metrics_obj, "duration_seconds", None)
+                    if metrics_obj
+                    else None
+                )
                 cost_obj = getattr(metrics_obj, "cost", None) if metrics_obj else None
                 cost_dict = asdict(cost_obj) if is_dataclass(cost_obj) else None
                 latency_dict = None
@@ -347,7 +366,11 @@ class EmbeddedServer:
                         "p95_ms": getattr(p95, "total_ms", None) if p95 else None,
                         "p99_ms": getattr(p99, "total_ms", None) if p99 else None,
                     }
-                turns_count = len(getattr(metrics_obj, "turns", []) or []) if metrics_obj else None
+                turns_count = (
+                    len(getattr(metrics_obj, "turns", []) or [])
+                    if metrics_obj
+                    else None
+                )
                 await alog_call_end(
                     call_logger,
                     data.get("call_id", ""),
@@ -437,7 +460,9 @@ class EmbeddedServer:
             returns a 503 Response — safety-first posture requires an
             explicit opt-out to accept unsigned webhooks.
             """
-            if not self.config.twilio_token and getattr(self.config, "require_signature", True):
+            if not self.config.twilio_token and getattr(
+                self.config, "require_signature", True
+            ):
                 logger.error(
                     "Twilio webhook rejected: twilio_token not configured and "
                     "require_signature=True. Set twilio_token, or explicitly "
@@ -458,7 +483,9 @@ class EmbeddedServer:
                         "Install with: pip install 'getpatter[local]' or "
                         "`pip install twilio`."
                     )
-                    return Response(status_code=503, content="Signature validator unavailable")
+                    return Response(
+                        status_code=503, content="Signature validator unavailable"
+                    )
                 form_data = await request.form()
                 validator = RequestValidator(self.config.twilio_token)
                 # Use request.url verbatim when it carries .path / .query
@@ -493,7 +520,9 @@ class EmbeddedServer:
             # masked. Same for `To` / `Called`.
             caller = form_data.get("From", "") or form_data.get("Caller", "")
             callee = form_data.get("To", "") or form_data.get("Called", "")
-            twiml = twilio_webhook_handler(call_sid, caller, callee, self.config.webhook_url)
+            twiml = twilio_webhook_handler(
+                call_sid, caller, callee, self.config.webhook_url
+            )
             return Response(content=twiml, media_type="text/xml")
 
         # Twilio posts here for every status transition of a call
@@ -524,6 +553,21 @@ class EmbeddedServer:
                     except ValueError:
                         pass
                 self._metrics_store.update_call_status(call_sid, call_status, **extra)
+            # FIX #91 — when the call terminates before the media stream
+            # starts (no-answer / busy / failed / canceled), the prewarm
+            # cache entry would otherwise leak until ``end_call`` runs.
+            # Evict it here so the WARN fires once and the bytes are
+            # released regardless of whether the user calls ``end_call``.
+            if call_sid and call_status in (
+                "no-answer",
+                "busy",
+                "failed",
+                "canceled",
+            ):
+                try:
+                    self.record_prewarm_waste(call_sid)
+                except Exception as exc:  # noqa: BLE001 - defensive
+                    logger.debug("record_prewarm_waste raised: %s", exc)
             return Response(content="", status_code=204)
 
         @app.post("/webhooks/twilio/recording")
@@ -572,6 +616,17 @@ class EmbeddedServer:
                 except Exception as exc:
                     logger.warning("on_machine_detection callback threw: %s", exc)
 
+            # FIX #91 — when AMD classifies as machine, the agent's first
+            # message will not be played (we drop voicemail or hang up), so
+            # the prewarmed greeting is never consumed. Evict the cache
+            # entry once so the WARN fires regardless of whether
+            # ``voicemail_message`` is configured.
+            if answered_by in ("machine_end_beep", "machine_end_silence") and call_sid:
+                try:
+                    self.record_prewarm_waste(call_sid)
+                except Exception as exc:  # noqa: BLE001 - defensive
+                    logger.debug("record_prewarm_waste raised: %s", exc)
+
             if (
                 answered_by in ("machine_end_beep", "machine_end_silence")
                 and self.voicemail_message
@@ -584,7 +639,9 @@ class EmbeddedServer:
                 )
 
                 if not _validate_twilio_sid(call_sid, "CA"):
-                    logger.warning("AMD callback: invalid CallSid format %r, ignoring", call_sid)
+                    logger.warning(
+                        "AMD callback: invalid CallSid format %r, ignoring", call_sid
+                    )
                     return Response(content="", status_code=204)
 
                 import httpx as _httpx
@@ -630,6 +687,7 @@ class EmbeddedServer:
                 await twilio_stream_bridge(
                     websocket=websocket,
                     agent=self.agent,
+                    pop_prewarm_audio=self.pop_prewarm_audio,
                     openai_key=self.config.openai_key,
                     on_call_start=_start,
                     on_call_end=_end,
@@ -666,7 +724,9 @@ class EmbeddedServer:
                 if not _validate_telnyx_signature(
                     raw_body, signature, timestamp, telnyx_public_key
                 ):
-                    logger.warning("Telnyx webhook rejected: invalid or missing Ed25519 signature")
+                    logger.warning(
+                        "Telnyx webhook rejected: invalid or missing Ed25519 signature"
+                    )
                     return Response(status_code=403, content="Invalid signature")
             elif require_sig:
                 logger.error(
@@ -690,7 +750,9 @@ class EmbeddedServer:
             if not isinstance(body.get("data"), dict) or not isinstance(
                 body.get("data", {}).get("payload"), dict
             ):
-                logger.warning("Telnyx webhook rejected: missing data.payload structure.")
+                logger.warning(
+                    "Telnyx webhook rejected: missing data.payload structure."
+                )
                 return Response(status_code=400, content="Invalid webhook structure")
             data = body["data"]
             event_type = data.get("event_type", "")
@@ -805,7 +867,9 @@ class EmbeddedServer:
                             if asyncio.iscoroutine(cb_ret):
                                 await cb_ret
                         except Exception as exc:
-                            logger.warning("on_machine_detection callback threw: %s", exc)
+                            logger.warning(
+                                "on_machine_detection callback threw: %s", exc
+                            )
                     if self.voicemail_message:
                         from getpatter.telephony.telnyx import handle_amd_result
 
@@ -815,6 +879,37 @@ class EmbeddedServer:
                             voicemail_message=self.voicemail_message,
                             telnyx_key=api_key,
                         )
+                    # FIX #91 — when AMD classifies as machine the agent's
+                    # first message is replaced by ``voicemail_message`` (or
+                    # the call simply ends), so the prewarmed greeting is
+                    # never consumed. Evict it so the WARN fires once.
+                    if call_control_id and amd_result in (
+                        "machine",
+                        "machine_detected",
+                    ):
+                        try:
+                            self.record_prewarm_waste(call_control_id)
+                        except Exception as exc:  # noqa: BLE001 - defensive
+                            logger.debug("record_prewarm_waste raised: %s", exc)
+                elif event_type == "call.hangup":
+                    # FIX #91 — Telnyx fires ``call.hangup`` as the final
+                    # status notification. ``hangup_cause`` distinguishes
+                    # carrier outcomes (``call_rejected`` / ``busy`` /
+                    # ``no_answer`` / ``timeout`` / ``normal_clearing`` /
+                    # ``user_busy`` / …). When the call never reached the
+                    # media stream the prewarm cache leaks unless we
+                    # evict it here.
+                    hangup_cause = str(payload.get("hangup_cause", ""))
+                    logger.info(
+                        "Telnyx call.hangup for %s (cause=%s)",
+                        sanitize_log_value(call_control_id),
+                        sanitize_log_value(hangup_cause),
+                    )
+                    if call_control_id:
+                        try:
+                            self.record_prewarm_waste(call_control_id)
+                        except Exception as exc:  # noqa: BLE001 - defensive
+                            logger.debug("record_prewarm_waste raised: %s", exc)
                 else:
                     logger.debug("Telnyx event ignored: %s", event_type)
             except Exception as exc:
@@ -840,6 +935,7 @@ class EmbeddedServer:
                 await telnyx_stream_bridge(
                     websocket=websocket,
                     agent=self.agent,
+                    pop_prewarm_audio=self.pop_prewarm_audio,
                     openai_key=self.config.openai_key,
                     on_call_start=_start,
                     on_call_end=_end,
@@ -922,7 +1018,9 @@ class EmbeddedServer:
                     "Twilio webhook enforcement ACTIVE but twilio_token is empty "
                     "— webhooks will 503. Set require_signature=False for local dev."
                 )
-            if provider == "telnyx" and not getattr(self.config, "telnyx_public_key", ""):
+            if provider == "telnyx" and not getattr(
+                self.config, "telnyx_public_key", ""
+            ):
                 logger.warning(
                     "Telnyx webhook enforcement ACTIVE but telnyx_public_key is empty "
                     "— webhooks will 503. Set require_signature=False for local dev."

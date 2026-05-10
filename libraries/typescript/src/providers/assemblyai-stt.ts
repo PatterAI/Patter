@@ -271,6 +271,72 @@ export class AssemblyAISTT {
     return headers;
   }
 
+  /**
+   * Pre-call WebSocket warmup for the AssemblyAI v3 `/v3/ws` endpoint.
+   *
+   * Opens the WS (DNS + TLS + auth handshake), idles ~250 ms so the
+   * AssemblyAI edge keeps the session state warm, then sends Terminate
+   * and closes. By the time `connect()` is invoked at call-pickup the
+   * resolver and TLS session are hot — net wire time saving of
+   * 200-500 ms.
+   *
+   * Billing safety: AssemblyAI Universal Streaming bills on streamed
+   * audio seconds (per https://www.assemblyai.com/pricing). Opening +
+   * closing the WebSocket without forwarding any audio frames does
+   * not consume billable seconds. Best-effort: failures logged at
+   * debug level.
+   */
+  async warmup(): Promise<void> {
+    const url = this.buildUrl();
+    const headers = this.buildHeaders();
+    let ws: WebSocket | null = null;
+    try {
+      ws = await new Promise<WebSocket>((resolve, reject) => {
+        const sock = new WebSocket(url, { headers });
+        const timer = setTimeout(() => {
+          try {
+            sock.close();
+          } catch {
+            // ignore
+          }
+          reject(new Error('AssemblyAI STT warmup connect timeout'));
+        }, 5000);
+        sock.once('open', () => {
+          clearTimeout(timer);
+          resolve(sock);
+        });
+        sock.once('error', (err: Error) => {
+          clearTimeout(timer);
+          reject(err);
+        });
+      });
+      // Idle briefly so the provider edge keeps session state warm.
+      await new Promise<void>((r) => setTimeout(r, 250));
+      try {
+        ws.send(JSON.stringify({ type: AssemblyAIClientFrame.TERMINATE }));
+      } catch {
+        // ignore
+      }
+    } catch (err) {
+      // IMPORTANT: ``String(err)`` for a `ws` handshake failure can
+      // include the request URL, which carries the API key as a
+      // ``?token=...`` query parameter when ``useQueryToken`` is set.
+      // Log only the HTTP status (when present) or the error class
+      // name — never the full URL or message.
+      getLogger().debug(
+        `AssemblyAI STT warmup failed (best-effort): ${describeWarmupError(err)}`,
+      );
+    } finally {
+      if (ws) {
+        try {
+          ws.close();
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+
   /** Open the streaming WebSocket and arm message handlers. */
   async connect(): Promise<void> {
     this.closing = false;
@@ -561,4 +627,25 @@ function averageConfidence(words: readonly AssemblyAIWord[]): number {
     total += Number(w.confidence ?? 0);
   }
   return total / words.length;
+}
+
+/**
+ * Render a warmup error for logging without leaking the request URL.
+ *
+ * `String(err)` on a `ws` handshake failure can include the upgrade
+ * URL, which for AssemblyAI carries the API key as a `?token=...`
+ * query parameter when `useQueryToken` is set. This helper extracts
+ * only the HTTP status (when present) or the error class name so the
+ * API key never lands in logs.
+ */
+function describeWarmupError(err: unknown): string {
+  if (typeof err === 'object' && err !== null) {
+    const e = err as { statusCode?: number; code?: number; name?: string; constructor?: { name?: string } };
+    if (typeof e.statusCode === 'number') return `HTTP ${e.statusCode}`;
+    if (typeof e.code === 'number' && e.code >= 100 && e.code < 600) return `HTTP ${e.code}`;
+    const ctor = e.constructor?.name;
+    if (typeof ctor === 'string' && ctor !== 'Object') return ctor;
+    if (typeof e.name === 'string') return e.name;
+  }
+  return typeof err;
 }

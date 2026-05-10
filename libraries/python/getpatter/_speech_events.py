@@ -2,9 +2,10 @@
 
 Defines :class:`SpeechEvents`, the per-call dispatcher that fires user-facing
 async callbacks and (when available) records OpenTelemetry span events on the
-current call span. The 7 events mirror the public APIs of LiveKit Agents,
-Pipecat and OpenAI Realtime so downstream metrics map onto the canonical
-Hamming AI / Coval / Cekura voice-agent metric set without translation.
+current call span. The 7 events expose the canonical voice-agent metric set
+(user/agent state transitions, turn boundaries, TTFT, first-audio) so
+downstream metrics work without translation, and align with OpenAI Realtime
+where applicable.
 
 This module is private (leading underscore). The public surface is the 7
 ``on_*`` attributes plus :meth:`conversation_state` exposed on the
@@ -12,19 +13,16 @@ This module is private (leading underscore). The public surface is the 7
 is re-exported at the package root for advanced users (custom adapters,
 test harnesses).
 
-Industry alignment table::
+Event mapping (with the OpenAI Realtime equivalent where one exists)::
 
-    User VAD start  : LiveKit ``user_state_changed -> speaking`` /
-                      Pipecat ``VADUserStartedSpeakingFrame`` /
-                      OpenAI Realtime ``input_audio_buffer.speech_started``
-    User VAD end    : ``..._stopped`` (raw VAD edge — *not* end-of-utterance)
-    User EOU        : LiveKit ``user_turn_completed`` / Pipecat
-                      ``UserStoppedSpeakingFrame`` / OpenAI Realtime
-                      ``input_audio_buffer.committed``
-    Agent first wire: Pipecat ``BotStartedSpeakingFrame``
-    Agent done      : Pipecat ``BotStoppedSpeakingFrame``
-    LLM first token : Pipecat ``LLMFullResponseStartFrame`` (per-turn TTFT)
-    TTS first audio : Pipecat ``OutputAudioRawFrame`` (first per turn)
+    User VAD start  : OpenAI Realtime ``input_audio_buffer.speech_started``
+    User VAD end    : OpenAI Realtime ``input_audio_buffer.speech_stopped``
+                      (raw VAD edge — *not* end-of-utterance)
+    User EOU        : OpenAI Realtime ``input_audio_buffer.committed``
+    Agent first wire: first audio chunk of the agent turn that crosses the wire
+    Agent done      : last audio chunk of the agent turn (or barge-in)
+    LLM first token : per-turn TTFT marker
+    TTS first audio : first TTS audio chunk per turn
 
 Both VAD edge and end-of-utterance are surfaced separately because they are
 two different signals (`silence_gap_ms_max` wants the EOU; `cross_talk_pct`
@@ -50,10 +48,10 @@ class UserState(StrEnum):
     """Per-side user speech state — mirror of the TypeScript ``UserState``
     string-literal union.
 
-    Values match LiveKit Agents' ``user_state_changed`` vocabulary so
-    downstream observability dashboards (Hamming AI / Coval / Cekura) can
-    map Patter events onto the canonical voice-agent metric set without
-    translation.
+    Values follow the standard user-state vocabulary (``listening`` /
+    ``speaking`` / ``thinking`` / ``away``) so downstream observability
+    dashboards can map Patter events onto the canonical voice-agent metric
+    set without translation.
     """
 
     LISTENING = "listening"
@@ -66,7 +64,8 @@ class AgentState(StrEnum):
     """Per-side agent speech state — mirror of the TypeScript ``AgentState``
     string-literal union.
 
-    Values match LiveKit Agents' ``agent_state_changed`` vocabulary; see
+    Values follow the standard agent-state vocabulary (``initializing`` /
+    ``idle`` / ``listening`` / ``thinking`` / ``speaking``); see
     :class:`UserState` for the rationale.
     """
 
@@ -106,7 +105,7 @@ class ConversationStateSnapshot:
     agent: AgentState
 
 
-# State-machine values mirror LiveKit's user/agent state vocabulary.
+# State-machine values follow the standard user/agent state vocabulary.
 # Kept as plain tuples for backwards compatibility with callers that
 # imported the constants directly. New code should prefer :class:`UserState`
 # / :class:`AgentState`.
@@ -176,9 +175,9 @@ class SpeechEvents:
     def conversation_state(self) -> dict[str, str]:
         """Snapshot of the current per-side state.
 
-        Returns ``{"user": <user_state>, "agent": <agent_state>}``. Mirrors
-        LiveKit's ``user_state_changed`` / ``agent_state_changed`` payloads
-        and is safe to call at any time (read-only, no I/O).
+        Returns ``{"user": <user_state>, "agent": <agent_state>}`` — the
+        user_state / agent_state payload shape, safe to call at any time
+        (read-only, no I/O).
         """
         return {"user": self._user_state, "agent": self._agent_state}
 

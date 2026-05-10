@@ -61,11 +61,23 @@ export interface STTAdapter {
    * entirely; the stream handler does an optional-chained call.
    */
   finalize?(): void | Promise<void>;
+  /**
+   * Optional best-effort pre-call DNS / TLS / HTTP-keepalive warmup.
+   * Default behaviour is a no-op — providers that benefit (e.g.
+   * provider WebSockets with a slow handshake) can override. Failures
+   * must never abort the call.
+   */
+  warmup?(): Promise<void>;
 }
 
 /** Shape shared by every TTS adapter in the SDK. */
 export interface TTSAdapter {
   synthesizeStream(text: string): AsyncIterable<Buffer>;
+  /**
+   * Optional best-effort pre-call DNS / TLS / HTTP-keepalive warmup.
+   * Default behaviour is a no-op. Failures must never abort the call.
+   */
+  warmup?(): Promise<void>;
 }
 
 /**

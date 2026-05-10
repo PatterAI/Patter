@@ -4,28 +4,26 @@
  *
  * Defines `SpeechEvents`, the per-call dispatcher that fires user-facing async
  * callbacks and (when available) records OpenTelemetry span events on the
- * current call span. The 7 events mirror the public APIs of LiveKit Agents,
- * Pipecat and OpenAI Realtime so downstream metrics map onto the canonical
- * Hamming AI / Coval / Cekura voice-agent metric set without translation.
+ * current call span. The 7 events expose the canonical voice-agent metric
+ * set (user/agent state transitions, turn boundaries, TTFT, first-audio) so
+ * downstream metrics work without translation, and align with OpenAI
+ * Realtime where applicable.
  *
  * This module is private (leading underscore in the file name). The public
  * surface is the 7 ``on*`` getters/setters plus `conversationState` exposed
  * on the `Patter` instance, and `SpeechEvents` is re-exported at the package
  * root for advanced users (custom adapters, test harnesses).
  *
- * Industry alignment:
+ * Event mapping (with the OpenAI Realtime equivalent where one exists):
  *
- *   User VAD start  : LiveKit user_state_changed -> speaking /
- *                     Pipecat VADUserStartedSpeakingFrame /
- *                     OpenAI Realtime input_audio_buffer.speech_started
- *   User VAD end    : ..._stopped  (raw VAD edge — *not* end-of-utterance)
- *   User EOU        : LiveKit user_turn_completed / Pipecat
- *                     UserStoppedSpeakingFrame / OpenAI Realtime
- *                     input_audio_buffer.committed
- *   Agent first wire: Pipecat BotStartedSpeakingFrame
- *   Agent done      : Pipecat BotStoppedSpeakingFrame
- *   LLM first token : Pipecat LLMFullResponseStartFrame  (per-turn TTFT)
- *   TTS first audio : Pipecat OutputAudioRawFrame  (first per turn)
+ *   User VAD start  : OpenAI Realtime input_audio_buffer.speech_started
+ *   User VAD end    : OpenAI Realtime input_audio_buffer.speech_stopped
+ *                     (raw VAD edge — *not* end-of-utterance)
+ *   User EOU        : OpenAI Realtime input_audio_buffer.committed
+ *   Agent first wire: first audio chunk of the agent turn that crosses the wire
+ *   Agent done      : last audio chunk of the agent turn (or barge-in)
+ *   LLM first token : per-turn TTFT marker
+ *   TTS first audio : first TTS audio chunk per turn
  */
 import { getLogger } from "./logger";
 

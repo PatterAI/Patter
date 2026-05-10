@@ -240,6 +240,7 @@ async def twilio_stream_bridge(
     report_only_initial_ttfb: bool = False,
     speech_events=None,
     patter_side: str = "uut",
+    pop_prewarm_audio=None,
 ) -> None:
     """Bridge a Twilio WebSocket media stream to the configured AI provider.
 
@@ -469,6 +470,7 @@ async def twilio_stream_bridge(
                         on_metrics=on_metrics,
                         conversation_history=conversation_history,
                         transcript_entries=transcript_entries,
+                        pop_prewarm_audio=pop_prewarm_audio,
                     )
                 elif provider == "elevenlabs_convai":
                     handler = ElevenLabsConvAIStreamHandler(

@@ -204,6 +204,134 @@ class OpenAIRealtimeAdapter:
             wire["strict"] = True
         return wire
 
+    async def warmup(self) -> None:
+        """Pre-call WebSocket warmup for the OpenAI Realtime endpoint.
+
+        The canonical session-only warm step on the Realtime API: open
+        the WS, wait for ``session.created``, send a single
+        ``session.update`` containing the same fields that the production
+        ``connect()`` path applies (``input_audio_format``,
+        ``output_audio_format``, ``voice``, ``instructions``,
+        ``turn_detection``, ``input_audio_transcription``, plus any
+        opt-in fields populated on the adapter), wait for the matching
+        ``session.updated`` ack, then close cleanly. This primes the
+        per-session state on the OpenAI side — DNS + TLS + auth handshake
+        + initial config exchange — without ever invoking the model.
+
+        Earlier revisions sent ``response.create`` with
+        ``{"response": {"generate": false}}`` to prime the inference path.
+        That field is NOT in the OpenAI Realtime API schema; the server
+        either ignores it (and bills tokens for a real model response) or
+        rejects the request with ``invalid_request_error``. Both
+        behaviours are billing-unsafe or a no-op beyond TLS warm. The
+        ``session.update`` flow is documented and side-effect-free.
+
+        Billing safety: ``session.update`` only mutates session
+        configuration. It does NOT invoke the model, does NOT consume
+        any audio buffer, and does NOT trigger token generation, so no
+        per-token cost is accrued. Best-effort: failures are logged at
+        DEBUG and never raised.
+        """
+        url = f"{self.OPENAI_REALTIME_URL}?model={self.model}"
+        ws = None
+        try:
+            ws = await asyncio.wait_for(
+                websockets.connect(
+                    url,
+                    additional_headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "OpenAI-Beta": "realtime=v1",
+                    },
+                    ping_interval=20,
+                    ping_timeout=20,
+                ),
+                timeout=5.0,
+            )
+            # Wait for session.created.
+            try:
+                raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+                data = json.loads(raw)
+                if data.get("type") != "session.created":
+                    # Anything else is unexpected but not fatal — we close.
+                    return
+            except Exception:
+                return
+            # Send session.update with the same fields the production
+            # ``connect()`` path applies, so the upstream session state is
+            # primed identically to a real call. Mirrors the body
+            # constructed in ``connect()``.
+            session_config: dict[str, Any] = {
+                "input_audio_format": self.audio_format,
+                "output_audio_format": self.audio_format,
+                "voice": self.voice,
+                "instructions": self.instructions
+                or f"You are a helpful voice assistant. Respond in {self.language}. Be concise and natural.",
+                "turn_detection": {
+                    "type": self.vad_type,
+                    "threshold": 0.5,
+                    "prefix_padding_ms": 300,
+                    "silence_duration_ms": self.silence_duration_ms,
+                },
+                "input_audio_transcription": {
+                    "model": self.input_audio_transcription_model,
+                },
+            }
+            if self.temperature is not None:
+                session_config["temperature"] = self.temperature
+            if self.max_response_output_tokens is not None:
+                session_config["max_response_output_tokens"] = (
+                    self.max_response_output_tokens
+                )
+            if self.modalities is not None:
+                session_config["modalities"] = self.modalities
+            if self.tool_choice is not None:
+                session_config["tool_choice"] = self.tool_choice
+            if self.tools:
+                session_config["tools"] = [
+                    self._build_tool_wire_format(t) for t in self.tools
+                ]
+            if self.reasoning_effort is not None:
+                session_config["reasoning"] = {"effort": self.reasoning_effort}
+            try:
+                await ws.send(
+                    json.dumps(
+                        {
+                            "type": "session.update",
+                            "session": session_config,
+                        }
+                    )
+                )
+            except Exception:
+                return
+            # Best-effort: drain frames until we see ``session.updated``
+            # (or time out). We don't strictly need the ack to keep the
+            # warmup correct — the TLS + session prime is already done by
+            # the time the server processes our update — but waiting for
+            # it lets us close after a clean handshake instead of mid-frame.
+            deadline = asyncio.get_event_loop().time() + 1.5
+            while True:
+                remaining = deadline - asyncio.get_event_loop().time()
+                if remaining <= 0:
+                    break
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+                except Exception:
+                    break
+                try:
+                    data = json.loads(raw)
+                except Exception:
+                    continue
+                if isinstance(data, dict) and data.get("type") == "session.updated":
+                    break
+        except Exception as exc:  # noqa: BLE001 - best-effort
+            logger.debug("OpenAI Realtime warmup failed (best-effort): %s", exc)
+        finally:
+            if ws is not None:
+                try:
+                    await ws.close()
+                except Exception:
+                    pass
+
     async def connect(self) -> None:
         """Connect to OpenAI Realtime API and wait for ``session.updated`` ack."""
         url = f"{self.OPENAI_REALTIME_URL}?model={self.model}"

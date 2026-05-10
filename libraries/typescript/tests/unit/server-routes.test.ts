@@ -633,4 +633,97 @@ describe('EmbeddedServer route behavior', () => {
       spy.mockRestore();
     }
   });
+
+  // -------------------------------------------------------------------------
+  // FIX #91 — twilio /status invokes recordPrewarmWaste on no-answer/busy/...
+  // -------------------------------------------------------------------------
+
+  it('twilio /status invokes recordPrewarmWaste on abnormal CallStatus', async () => {
+    const server = new EmbeddedServer(
+      makeConfig({ twilioToken: '' }),
+      makeAgent(),
+      undefined, undefined, undefined, undefined, false, '', undefined, undefined, false,
+    );
+
+    const wasteCalls: string[] = [];
+    server.recordPrewarmWaste = (callId: string) => {
+      wasteCalls.push(callId);
+    };
+
+    const port = 19000 + Math.floor(Math.random() * 1000);
+    await server.start(port);
+
+    try {
+      for (const status of ['no-answer', 'busy', 'failed', 'canceled']) {
+        const sid = `CA_${status.replace('-', '_')}_001`;
+        const resp = await fetch(`http://127.0.0.1:${port}/webhooks/twilio/status`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ CallSid: sid, CallStatus: status }).toString(),
+        });
+        expect(resp.status).toBe(204);
+      }
+      expect(wasteCalls).toEqual([
+        'CA_no_answer_001',
+        'CA_busy_001',
+        'CA_failed_001',
+        'CA_canceled_001',
+      ]);
+
+      // ``completed`` is normal — must NOT trigger eviction.
+      wasteCalls.length = 0;
+      const resp = await fetch(`http://127.0.0.1:${port}/webhooks/twilio/status`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ CallSid: 'CA_done_001', CallStatus: 'completed' }).toString(),
+      });
+      expect(resp.status).toBe(204);
+      expect(wasteCalls).toEqual([]);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // FIX #91 — telnyx /voice on call.hangup invokes recordPrewarmWaste
+  // -------------------------------------------------------------------------
+
+  it('telnyx call.hangup invokes recordPrewarmWaste', async () => {
+    const server = new EmbeddedServer(
+      makeConfig({
+        telephonyProvider: 'telnyx',
+        telnyxKey: 'KEY_test',
+        telnyxConnectionId: 'conn_test',
+      }),
+      makeAgent(),
+      undefined, undefined, undefined, undefined, false, '', undefined, undefined, false,
+    );
+    const wasteCalls: string[] = [];
+    server.recordPrewarmWaste = (callId: string) => {
+      wasteCalls.push(callId);
+    };
+
+    const port = 19000 + Math.floor(Math.random() * 1000);
+    await server.start(port);
+
+    try {
+      const resp = await fetch(`http://127.0.0.1:${port}/webhooks/telnyx/voice`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          data: {
+            event_type: 'call.hangup',
+            payload: {
+              call_control_id: 'ctrl-hung-up',
+              hangup_cause: 'no_answer',
+            },
+          },
+        }),
+      });
+      expect(resp.status).toBe(200);
+      expect(wasteCalls).toEqual(['ctrl-hung-up']);
+    } finally {
+      await server.stop();
+    }
+  });
 });

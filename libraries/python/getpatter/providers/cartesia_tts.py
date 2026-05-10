@@ -271,6 +271,41 @@ class CartesiaTTS(TTSProvider):
                 if chunk:
                     yield chunk
 
+    async def warmup(self) -> None:
+        """Pre-call HTTP warmup for the Cartesia ``/tts/bytes`` endpoint.
+
+        Issues a lightweight ``GET <base_url>/voices`` so DNS, TLS, and
+        HTTP/2 are already up by the time the first :meth:`synthesize`
+        POST lands. Best-effort: 5 s timeout, all exceptions swallowed
+        at DEBUG.
+
+        Billing safety: ``GET /voices`` is a free metadata read on
+        Cartesia's REST surface (per https://docs.cartesia.ai). It does
+        not consume any synthesis credits. The actual synthesis is billed
+        only when ``POST /tts/bytes`` runs with a non-empty ``transcript``.
+
+        Note: Cartesia TTS uses the HTTP path (vs the WebSocket variant
+        Cartesia also exposes) — connection warmup is therefore HTTP-GET
+        based, not WebSocket pre-handshake. The latency win is smaller
+        (~50-150 ms vs the ~200-500 ms of a WS prewarm) but still real.
+        """
+        try:
+            session = self._ensure_session()
+            headers = {
+                "X-API-Key": self.api_key,
+                "Cartesia-Version": self.api_version,
+            }
+            async with session.get(
+                f"{self.base_url}/voices",
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                # Drain the body so the underlying connection returns to
+                # the pool ready for the next request.
+                await resp.read()
+        except Exception as exc:  # noqa: BLE001 - best-effort
+            logger.debug("Cartesia TTS warmup failed (best-effort): %s", exc)
+
     async def close(self) -> None:
         """Close the underlying session (idempotent)."""
         if self._session is not None and self._owns_session:

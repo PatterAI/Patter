@@ -207,6 +207,136 @@ describe('StreamHandler — opt-in barge-in confirmation', () => {
   });
 });
 
+describe('StreamHandler — overlap window preserved across VAD → strategy confirm (FIX #88)', () => {
+  it('strategy-confirmed cancel does NOT restart the overlap window', async () => {
+    // Use real timers for this test — we need real time to elapse so
+    // detectionDelay reflects the VAD→confirm window.
+    vi.useRealTimers();
+    const deps = makeDeps([new MinWordsStrategy({ minWords: 3 })], 10_000);
+    const h = new StreamHandler(deps, makeMockWs(), '+1', '+2');
+    armSpeakingState(h);
+
+    // Stage 1: VAD fires speech_start → pending. Records overlap_start (T1).
+    priv(h).startPendingBargeIn();
+    expect(priv(h).bargeInPendingSince).not.toBeNull();
+
+    // Wait ~150ms so that if T1 is preserved, detectionDelay >= 150 ms;
+    // if T1 is overwritten by the cancel path, detectionDelay ≈ 0.
+    await new Promise((r) => setTimeout(r, 150));
+
+    // Subscribe to the metrics event bus on the handler to observe the
+    // emitted InterruptionMetrics payload.
+    interface PrivWithMetrics {
+      metricsAcc: { attachEventBus: (b: unknown) => void };
+    }
+    const { EventBus } = await import('../../src/observability/event-bus');
+    const bus = new EventBus();
+    const captured: { detectionDelay: number }[] = [];
+    bus.on('interruption', (p: unknown) => {
+      captured.push(p as { detectionDelay: number });
+    });
+    (h as unknown as PrivWithMetrics).metricsAcc.attachEventBus(bus);
+
+    // Stage 2: STT delivers a confirming transcript NOW (T2).
+    const confirmed = await priv(h).handleBargeInAsync({
+      text: 'please stop talking now',
+      isFinal: true,
+    });
+    expect(confirmed).toBe(true);
+    expect(priv(h).isSpeaking).toBe(false);
+
+    // Exactly one InterruptionMetrics emission. detectionDelay must
+    // reflect the VAD→confirm window (~150 ms), NOT ~0.
+    expect(captured.length).toBe(1);
+    expect(captured[0].detectionDelay).toBeGreaterThanOrEqual(100);
+    expect(captured[0].detectionDelay).toBeLessThanOrEqual(800);
+  });
+
+  it('legacy path (no strategies) records overlap_start once', () => {
+    const deps = makeDeps([]);
+    const h = new StreamHandler(deps, makeMockWs(), '+1', '+2');
+    armSpeakingState(h);
+
+    interface PrivMetrics {
+      metricsAcc: { recordOverlapStart: () => void; recordOverlapEnd: (b: boolean) => void };
+    }
+    const acc = (h as unknown as PrivMetrics).metricsAcc;
+    const startSpy = vi.spyOn(acc, 'recordOverlapStart');
+    const endSpy = vi.spyOn(acc, 'recordOverlapEnd');
+
+    const result = priv(h).handleBargeIn({ text: 'okay', isFinal: true });
+    expect(result).toBe(true);
+    // Without VAD pending, the cancel path is the SOLE caller of
+    // recordOverlapStart — exactly once.
+    expect(startSpy).toHaveBeenCalledTimes(1);
+    expect(endSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('StreamHandler — handleStop / handleWsClose drops pending barge-in timer (FIX #89)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it('handleStop cancels a pending barge-in timer so it cannot fire later', async () => {
+    const deps = makeDeps([new MinWordsStrategy({ minWords: 3 })], 1_500);
+    const h = new StreamHandler(deps, makeMockWs(), '+1', '+2');
+    armSpeakingState(h);
+
+    interface PrivMetrics {
+      metricsAcc: { recordOverlapEnd: (b: boolean) => void };
+    }
+    const acc = (h as unknown as PrivMetrics).metricsAcc;
+    const endSpy = vi.spyOn(acc, 'recordOverlapEnd');
+
+    priv(h).startPendingBargeIn();
+    expect(priv(h).bargeInPendingTimer).not.toBeNull();
+    expect(priv(h).bargeInPendingSince).not.toBeNull();
+    // Reset the spy after startPendingBargeIn (which doesn't call end,
+    // but be defensive).
+    endSpy.mockClear();
+
+    await h.handleStop();
+
+    // Pending state cleared; timer cancelled.
+    expect(priv(h).bargeInPendingSince).toBeNull();
+    expect(priv(h).bargeInPendingTimer).toBeNull();
+
+    // Advance past when the timeout would have fired. If the timer
+    // wasn't cancelled, recordOverlapEnd would fire here on a torn-down
+    // metrics object — that's the regression.
+    vi.advanceTimersByTime(2_000);
+    expect(endSpy).not.toHaveBeenCalled();
+  });
+
+  it('handleWsClose cancels a pending barge-in timer', async () => {
+    const deps = makeDeps([new MinWordsStrategy({ minWords: 3 })], 1_500);
+    const h = new StreamHandler(deps, makeMockWs(), '+1', '+2');
+    armSpeakingState(h);
+
+    interface PrivMetrics {
+      metricsAcc: { recordOverlapEnd: (b: boolean) => void };
+    }
+    const acc = (h as unknown as PrivMetrics).metricsAcc;
+    const endSpy = vi.spyOn(acc, 'recordOverlapEnd');
+
+    priv(h).startPendingBargeIn();
+    expect(priv(h).bargeInPendingTimer).not.toBeNull();
+    endSpy.mockClear();
+
+    await h.handleWsClose();
+
+    expect(priv(h).bargeInPendingSince).toBeNull();
+    expect(priv(h).bargeInPendingTimer).toBeNull();
+    vi.advanceTimersByTime(2_000);
+    expect(endSpy).not.toHaveBeenCalled();
+  });
+});
+
 describe('MinWordsStrategy threshold parity (TS↔Py)', () => {
   it.each([2, 3, 5])(
     'agent stays talking below threshold and cancels at threshold (minWords=%i)',

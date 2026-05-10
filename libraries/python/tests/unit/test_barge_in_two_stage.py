@@ -191,3 +191,164 @@ async def test_min_words_threshold_is_honoured_end_to_end(min_words: int) -> Non
         Transcript(text=at.strip(), is_final=True, speech_final=True)
     )
     assert h._is_speaking is False
+
+
+class TestBargeInOverlapStartPreserved:
+    """Regression tests: ``InterruptionMetrics.detection_delay_ms`` must
+    measure VAD-T1 → strategy-confirm-T2, not T2 → T2 (~0). When VAD has
+    already started the overlap window via ``_start_pending_barge_in``,
+    the strategy-confirm path MUST NOT overwrite T1 with another
+    ``record_overlap_start`` call.
+    """
+
+    async def test_strategy_confirm_does_not_restart_overlap_window(self) -> None:
+        """VAD speech_start stamps T1, strategy confirm preserves T1."""
+        h = _make_handler(strategies=[MinWordsStrategy(min_words=3)], confirm_s=10)
+
+        # Stage 1: VAD fires speech_start during TTS → pending.
+        await h._start_pending_barge_in()
+        assert h._barge_in_pending_since is not None
+        h.metrics.record_overlap_start.assert_called_once()
+
+        # Stage 2: STT delivers a confirming transcript ~200 ms later.
+        await h._handle_barge_in(
+            Transcript(
+                text="please stop talking now",
+                is_final=True,
+                speech_final=True,
+            )
+        )
+
+        # Cancel ran (agent stopped, sendClear fired) — but
+        # record_overlap_start MUST still have been called only once.
+        # If it were called twice, the second call would overwrite T1
+        # with T2 and ``record_overlap_end`` (called inside the cancel
+        # path) would compute detection_delay = T2 - T2 ≈ 0.
+        assert h._is_speaking is False
+        h.metrics.record_overlap_start.assert_called_once()
+        h.metrics.record_bargein_detected.assert_called_once()
+        h.metrics.record_overlap_end.assert_called_once()
+
+    async def test_legacy_path_still_records_overlap_start_once(self) -> None:
+        """Without strategies (no VAD pending phase), the legacy
+        cancel path is the SOLE caller of record_overlap_start —
+        confirms backward compat.
+        """
+        h = _make_handler(strategies=[])
+
+        await h._handle_barge_in(
+            Transcript(text="okay", is_final=True, speech_final=True)
+        )
+
+        assert h._is_speaking is False
+        h.metrics.record_overlap_start.assert_called_once()
+        h.metrics.record_bargein_detected.assert_called_once()
+        h.metrics.record_overlap_end.assert_called_once()
+
+    async def test_detection_delay_ms_via_real_metrics(self) -> None:
+        """End-to-end: drive a real CallMetricsAccumulator through the
+        VAD → strategy-confirm flow, time-shift T1 by 200 ms, and
+        assert the emitted InterruptionMetrics.detection_delay matches
+        ~200 ms — NOT ~0.
+
+        Catches the regression where ``_do_cancel_for_barge_in`` called
+        ``record_overlap_start()`` a second time, overwriting T1 and
+        producing detection_delay ≈ 0.
+        """
+        from getpatter.observability.event_bus import EventBus
+        from getpatter.observability.metric_types import InterruptionMetrics
+        from getpatter.services.metrics import CallMetricsAccumulator
+
+        h = _make_handler(strategies=[MinWordsStrategy(min_words=3)], confirm_s=10)
+        # Replace the MagicMock metrics with a real accumulator wired to
+        # an EventBus we can inspect.
+        bus = EventBus()
+        emitted: list[InterruptionMetrics] = []
+        bus.on("interruption", lambda m: emitted.append(m))
+        real_metrics = CallMetricsAccumulator(
+            call_id="test-call",
+            provider_mode="pipeline",
+            telephony_provider="twilio",
+            stt_provider="deepgram",
+            tts_provider="elevenlabs",
+            llm_provider="openai",
+            pricing=None,
+            report_only_initial_ttfb=False,
+        )
+        real_metrics.attach_event_bus(bus)
+        h.metrics = real_metrics
+
+        # Stage 1: VAD fires speech_start at T1.
+        t1 = time.time() - 0.200  # 200 ms ago
+        real_metrics.record_overlap_start(ts=t1)
+        h._barge_in_pending_since = t1
+        # Manually set pending state so _do_cancel_for_barge_in observes it.
+
+        # Stage 2: STT delivers the confirming transcript NOW.
+        await h._handle_barge_in(
+            Transcript(
+                text="please stop talking now",
+                is_final=True,
+                speech_final=True,
+            )
+        )
+
+        assert h._is_speaking is False
+        assert len(emitted) == 1, "exactly one interruption metric expected"
+        # detection_delay is in seconds; we expect ~0.2 s (200 ms),
+        # NOT ~0 s. Allow a generous upper bound for CI scheduling jitter.
+        delay = emitted[0].detection_delay
+        assert 0.150 <= delay <= 0.500, (
+            f"detection_delay must reflect VAD→confirm window (~200 ms), "
+            f"got {delay:.4f} s — likely the second record_overlap_start "
+            f"overwrote T1, regressing FIX #88"
+        )
+
+
+class TestCleanupClearsPendingBargeIn:
+    """Regression: ``PipelineStreamHandler.cleanup`` must drop any
+    pending barge-in timeout task before tearing down adapters. A leaked
+    task fires ``record_overlap_end`` on a finalised metrics object
+    ``barge_in_confirm_ms`` later — slow leak in long-running servers.
+    """
+
+    async def test_cleanup_cancels_pending_barge_in_task(self) -> None:
+        h = _make_handler(strategies=[MinWordsStrategy(min_words=3)], confirm_s=10)
+        # Stub the handler's cleanup-time fields so the rest of cleanup()
+        # is a no-op — only the pending-barge-in path matters here.
+        h._stt_task = None
+        h._stt = None
+        h._tts = None
+        h._remote_handler = None
+        h._resampler_8k_to_16k = None
+
+        await h._start_pending_barge_in()
+        task = h._barge_in_pending_task
+        assert task is not None and not task.done()
+        # Reset the mock so we can spot any spurious call after cleanup.
+        h.metrics.record_overlap_end.reset_mock()
+
+        await h.cleanup()
+
+        # Yield to let any leaked timeout task wake up — if the bug
+        # regresses, the task would NOT be cancelled and would call
+        # record_overlap_end after the handler is gone.
+        await asyncio.sleep(0)
+        assert h._barge_in_pending_since is None
+        assert h._barge_in_pending_task is None
+        assert task.cancelled() or task.done()
+        # No spurious overlap_end fired during/after cleanup.
+        h.metrics.record_overlap_end.assert_not_called()
+
+    async def test_cleanup_is_idempotent_without_pending_state(self) -> None:
+        """Backward-compat: legacy callers (no strategies, no pending
+        state) must observe identical cleanup behaviour."""
+        h = _make_handler(strategies=[])
+        h._stt_task = None
+        h._stt = None
+        h._tts = None
+        h._remote_handler = None
+        h._resampler_8k_to_16k = None
+
+        await h.cleanup()  # should not raise
+        h.metrics.record_overlap_end.assert_not_called()

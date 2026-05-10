@@ -305,7 +305,7 @@ asyncio.run(main())
 
 The callbacks above describe the *transcript-level* lifecycle of a call. For **turn-taking instrumentation** — barge-in, end-of-utterance, time-to-first-token, TTS warmup vs. wire-time — Patter exposes seven additional async callbacks plus a read-only `conversation_state` snapshot directly on the `Patter` instance.
 
-These events mirror the public APIs of [LiveKit Agents](https://docs.livekit.io/agents/) (`user_state_changed`, `agent_state_changed`, `user_turn_completed`, `user_interruption_detected`), [Pipecat](https://docs.pipecat.ai/) (`VADUserStartedSpeakingFrame`, `BotStartedSpeakingFrame`, `LLMFullResponseStartFrame`, `OutputAudioRawFrame`, `InterruptionFrame`) and [OpenAI Realtime](https://platform.openai.com/docs/guides/realtime) (`input_audio_buffer.speech_started/_stopped/_committed`) so downstream metrics map onto the canonical voice-agent metric set without translation.
+These events expose the canonical voice-agent metric set (user/agent state transitions, turn boundaries, TTFT, audio first-byte) and align with [OpenAI Realtime](https://platform.openai.com/docs/guides/realtime) (`input_audio_buffer.speech_started/_stopped/_committed`) so downstream metrics work without translation.
 
 <Note>
   Every callback defaults to `None`. Existing code that does not register any speech-edge callback sees exactly the previous behaviour and zero overhead. The state machine is updated regardless of whether callbacks are registered, so `conversation_state` is always usable.

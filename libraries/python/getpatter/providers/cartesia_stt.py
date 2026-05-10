@@ -198,6 +198,61 @@ class CartesiaSTT(STTProvider):
             params["language"] = self._opts.language
         return f"{base}/stt/websocket?{urlencode(params)}"
 
+    async def warmup(self) -> None:
+        """Pre-call WebSocket warmup for the Cartesia STT ``/stt/websocket`` endpoint.
+
+        Opens the WS (DNS + TLS + auth handshake), idles ~250 ms so the
+        Cartesia edge keeps session state warm, then closes. By the time
+        :meth:`connect` is invoked at call-pickup the resolver and TLS
+        session are hot — net wire time saving of 200-500 ms.
+
+        Billing safety: Cartesia STT bills on streamed audio seconds (per
+        https://docs.cartesia.ai/2025-04-16/api-reference/stt/stt). Opening
+        + closing the WebSocket without forwarding audio does not consume
+        billable seconds. Best-effort: failures are logged at DEBUG.
+        """
+        ws_url = self._build_ws_url()
+        headers = {"User-Agent": USER_AGENT}
+        session: aiohttp.ClientSession | None = None
+        ws: aiohttp.ClientWebSocketResponse | None = None
+        try:
+            session = aiohttp.ClientSession()
+            ws = await asyncio.wait_for(
+                session.ws_connect(ws_url, headers=headers),
+                timeout=5.0,
+            )
+            # Idle briefly so the provider edge keeps session state warm.
+            await asyncio.sleep(0.25)
+        except aiohttp.WSServerHandshakeError as exc:
+            # IMPORTANT: ``str(exc)`` includes the request URL, which
+            # carries the API key as a query-string parameter (Cartesia
+            # auth pattern). Log only the HTTP status so the API key
+            # never lands in logs.
+            logger.debug(
+                "Cartesia STT warmup failed (best-effort): HTTP %d", exc.status
+            )
+        except Exception as exc:  # noqa: BLE001 - best-effort
+            # The API key only travels in the URL, which only
+            # ``WSServerHandshakeError`` exposes in ``str(exc)``. For
+            # everything else (DNS, TCP, TLS, timeout) the exception
+            # type alone is informative enough — and crucially never
+            # leaks the URL.
+            logger.debug(
+                "Cartesia STT warmup failed (best-effort): %s",
+                type(exc).__name__,
+            )
+        finally:
+            if ws is not None:
+                try:
+                    await ws.close()
+                except Exception:
+                    pass
+            if session is not None:
+                try:
+                    await session.close()
+                except Exception:
+                    pass
+
     async def connect(self) -> None:
         """Open the WebSocket and start recv + keepalive tasks."""
         if self._session is None:

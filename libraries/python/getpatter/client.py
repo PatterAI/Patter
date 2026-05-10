@@ -35,6 +35,22 @@ if TYPE_CHECKING:  # pragma: no cover — typing only
     from getpatter._speech_events import SpeechEventCallback
 
 
+# Maximum concurrent entries in the prewarm-first-message cache. Bounds
+# memory consumption when an outbound flood (or attacker-controlled
+# ``Patter.call`` invocations) would otherwise pile up tens of MB of
+# orphan TTS bytes that never evict because the carrier never fires
+# ``start``. When the cap is reached, new prewarm spawns are refused
+# (logged at WARN, call still proceeds with live TTS). See FIX #96 in
+# the parity audit. Mirrors ``PREWARM_CACHE_MAX`` in TS client.
+_PREWARM_CACHE_MAX = 200
+# Extra grace window beyond ``ring_timeout`` after which a prewarmed
+# entry that was never consumed is forcibly evicted. The TTS bill was
+# paid; without TTL eviction a carrier that never fires ``start`` (e.g.
+# on a never-completed dial that bypassed the status callback) would
+# leak the bytes for the lifetime of the Patter instance.
+_PREWARM_TTL_GRACE_S = 5.0
+
+
 _CLOUD_NOT_IMPLEMENTED_MSG = (
     "Patter Cloud is not yet available in this SDK release. Use local mode "
     "with a `carrier=` and `phone_number=`. Cloud mode will return in a "
@@ -196,18 +212,45 @@ class Patter:
         # ``conversation_state`` snapshot. Defaults are no-ops — existing
         # users who never set a callback see exactly the previous behaviour.
         # See ``getpatter._speech_events`` for the full event taxonomy and
-        # the industry-alignment table (LiveKit / Pipecat / OpenAI Realtime).
+        # the OpenAI Realtime alignment table.
         # Imported inline to keep client.py's top-level import graph minimal.
         from getpatter._speech_events import SpeechEvents as _SpeechEvents
 
         self.speech_events = _SpeechEvents()
 
+        # Pre-rendered first-message TTS audio per outbound call_id.
+        # Populated by :meth:`call` when ``agent.prewarm_first_message`` is
+        # True; consumed by the StreamHandler firstMessage emit path so
+        # the greeting streams instantly on ``start`` instead of paying the
+        # 200-700 ms TTS first-byte latency. See ``Agent.prewarm_first_message``.
+        # Stores raw bytes in the TTS provider's native sample rate; the
+        # carrier-side AudioSender resamples on emit.
+        self._prewarm_audio: dict[str, bytes] = {}
+        # Call IDs whose prewarm cache slot has already been consumed —
+        # either by ``pop_prewarm_audio`` (cache hit OR miss on the
+        # firstMessage emit path) or by ``_record_prewarm_waste`` (call
+        # ended before pickup). The prewarm task checks this set BEFORE
+        # writing bytes so a slow synth that finishes after the consumer
+        # already polled doesn't orphan bytes in ``_prewarm_audio``. See
+        # FIX #92 in the parity audit.
+        self._prewarm_consumed: set[str] = set()
+        # Background tasks tracked so :meth:`disconnect` can cancel any
+        # still-running prewarm-first-message synth before tearing down.
+        self._prewarm_tasks: set[asyncio.Task] = set()
+        # TTL eviction tasks tracked so :meth:`disconnect` can cancel any
+        # pending eviction timer before tearing down. Keyed by call_id so
+        # a follow-up consume / waste-record path can also cancel the
+        # timer when the slot drains naturally.
+        self._prewarm_ttl_tasks: dict[str, asyncio.Task] = {}
+
     # ------------------------------------------------------------------
     # Speech-edge event callback proxies
     # ------------------------------------------------------------------
-    # The seven ``on_*`` attributes below mirror the public APIs of LiveKit
-    # Agents, Pipecat and OpenAI Realtime. They proxy to ``self.speech_events``
-    # so the dispatcher remains the single source of truth (state + OTel).
+    # The seven ``on_*`` attributes below follow the canonical voice-agent
+    # metric set (user/agent state transitions, turn boundaries, TTFT, audio
+    # first-byte) and align with OpenAI Realtime where applicable. They
+    # proxy to ``self.speech_events`` so the dispatcher remains the single
+    # source of truth (state + OTel).
 
     @property
     def on_user_speech_started(self) -> SpeechEventCallback | None:
@@ -269,9 +312,8 @@ class Patter:
     def conversation_state(self) -> dict[str, str]:
         """Snapshot of the current per-side state of the call.
 
-        Returns ``{"user": <state>, "agent": <state>}``. Mirrors LiveKit's
-        ``user_state_changed`` / ``agent_state_changed`` payloads. Read-only
-        and safe to call at any time.
+        Returns ``{"user": <state>, "agent": <state>}`` — the user_state /
+        agent_state snapshot. Read-only and safe to call at any time.
         """
         return self.speech_events.conversation_state
 
@@ -477,6 +519,15 @@ class Patter:
         wants_amd = bool(machine_detection) or bool(voicemail_message)
         if self._server is not None:
             self._server.on_machine_detection = on_machine_detection  # type: ignore[attr-defined]
+
+        # Pre-warm provider connections in parallel with the carrier-side
+        # ``initiate_call`` so DNS / TLS / HTTP/2 handshakes complete during
+        # the ringing window (3-15 s typically). Best-effort: warmup
+        # failures are logged at DEBUG and never abort the call. Off when
+        # the user explicitly sets ``Agent(prewarm=False)``.
+        if getattr(agent, "prewarm", True):
+            self._spawn_provider_warmup(agent)
+
         config = self._local_config
         if config.telephony_provider == "twilio":
             from getpatter.providers.twilio_adapter import TwilioAdapter  # type: ignore[import]
@@ -552,6 +603,7 @@ class Patter:
                     )
                 except Exception as exc:
                     logger.debug("record_call_initiated: %s", exc)
+            self._spawn_prewarm_first_message(agent, call_id, ring_timeout=ring_timeout)
         elif config.telephony_provider == "telnyx":
             from getpatter.providers.telnyx_adapter import TelnyxAdapter  # type: ignore[import]
 
@@ -583,6 +635,212 @@ class Patter:
                     )
                 except Exception as exc:
                     logger.debug("record_call_initiated: %s", exc)
+            self._spawn_prewarm_first_message(agent, call_id, ring_timeout=ring_timeout)
+
+    # === Pre-warm helpers ===
+
+    def _spawn_provider_warmup(self, agent: Agent) -> None:
+        """Spawn a fire-and-forget task that warms up STT / TTS / LLM in
+        parallel with the carrier-side ``initiate_call``.
+
+        Best-effort: each provider's ``warmup()`` is wrapped in
+        ``asyncio.gather(..., return_exceptions=True)`` so a slow or
+        failing endpoint cannot block the others. The default
+        ``warmup()`` on the abstract base classes is a no-op, so providers
+        that don't override it contribute nothing to call latency.
+        """
+        targets = []
+        for provider in (
+            getattr(agent, "stt", None),
+            getattr(agent, "tts", None),
+            getattr(agent, "llm", None),
+        ):
+            if provider is None:
+                continue
+            warmup = getattr(provider, "warmup", None)
+            if warmup is None or not callable(warmup):
+                continue
+            targets.append(provider)
+
+        if not targets:
+            return
+
+        async def _run_all() -> None:
+            results = await asyncio.gather(
+                *(p.warmup() for p in targets),
+                return_exceptions=True,
+            )
+            for provider, result in zip(targets, results):
+                if isinstance(result, BaseException):
+                    logger.debug(
+                        "Provider warmup failed (%s): %s",
+                        type(provider).__name__,
+                        result,
+                    )
+
+        task = asyncio.create_task(_run_all())
+        # Track but don't await — warmup runs in parallel with the carrier
+        # call and never blocks the user.
+        self._prewarm_tasks.add(task)
+        task.add_done_callback(self._prewarm_tasks.discard)
+
+    def _spawn_prewarm_first_message(
+        self, agent: Agent, call_id: str, *, ring_timeout: int | None
+    ) -> None:
+        """Pre-render ``agent.first_message`` to TTS bytes during the
+        ringing window and stash them in ``_prewarm_audio[call_id]``.
+
+        Skipped silently when ``agent.prewarm_first_message`` is False or
+        when ``agent.tts`` / ``agent.first_message`` is missing. The synth
+        is bounded by ``ring_timeout`` (default 25 s) so a never-answered
+        call doesn't tie up the TTS connection. On timeout / error the
+        cache is left empty and the StreamHandler falls back to live TTS.
+
+        **Pipeline mode only.** Realtime / ConvAI provider modes never
+        consume the prewarm cache (the StreamHandler for those modes runs
+        its first-message emit through the provider's own audio path).
+        Spawning the prewarm in those modes pays the TTS bill for nothing
+        — refused with a WARN.
+
+        **Capped at ``_PREWARM_CACHE_MAX`` concurrent entries.** Refused
+        with a WARN when the cap is reached (the call still proceeds —
+        StreamHandler falls back to live TTS).
+        """
+        if not getattr(agent, "prewarm_first_message", False):
+            return
+        # FIX #94 — Realtime / ConvAI never consume the cache. Refuse early
+        # so the user notices the silent TTS waste instead of paying for a
+        # synth no caller will ever hear.
+        provider_mode = getattr(agent, "provider", "openai_realtime")
+        if provider_mode != "pipeline":
+            logger.warning(
+                "agent.prewarm_first_message=True is only supported in pipeline "
+                "mode (provider=%s); skipping pre-synth to avoid wasted TTS spend.",
+                provider_mode,
+            )
+            return
+        first_message = getattr(agent, "first_message", "") or ""
+        tts = getattr(agent, "tts", None)
+        if not first_message or tts is None:
+            return
+        synthesize = getattr(tts, "synthesize", None)
+        if synthesize is None or not callable(synthesize):
+            return
+
+        # FIX #96 — refuse to spawn when the cache (live entries +
+        # in-flight synth tasks) would exceed the cap. Counting both
+        # active entries AND pending tasks keeps the bound honest under
+        # outbound-flood conditions where carrier ``start`` events lag.
+        in_flight = len(self._prewarm_audio) + len(self._prewarm_tasks)
+        if in_flight >= _PREWARM_CACHE_MAX:
+            logger.warning(
+                "Prewarm cache full (%d/%d in-flight) — skipping pre-synth for "
+                "call %s; falling back to live TTS at pickup.",
+                in_flight,
+                _PREWARM_CACHE_MAX,
+                call_id,
+            )
+            return
+
+        timeout_s = float(ring_timeout) if ring_timeout is not None else 25.0
+
+        async def _run() -> None:
+            try:
+                buf = bytearray()
+
+                async def _accumulate() -> None:
+                    async for chunk in synthesize(first_message):
+                        if isinstance(chunk, (bytes, bytearray)):
+                            buf.extend(chunk)
+
+                await asyncio.wait_for(_accumulate(), timeout=timeout_s)
+                if buf:
+                    # FIX #92 — race guard. If the consumer already polled
+                    # (cache hit or miss) before the synth finished, the
+                    # StreamHandler has already fallen back to live TTS;
+                    # writing bytes here would orphan them in
+                    # ``_prewarm_audio`` until ``end_call`` ever runs.
+                    if call_id in self._prewarm_consumed:
+                        logger.warning(
+                            "Prewarm orphaned for call %s — synth completed "
+                            "(~%d bytes) AFTER consumer polled; bytes dropped, "
+                            "TTS bill already paid.",
+                            call_id,
+                            len(buf),
+                        )
+                        return
+                    self._prewarm_audio[call_id] = bytes(buf)
+                    logger.debug(
+                        "Prewarm first-message ready for call %s (%d bytes)",
+                        call_id,
+                        len(buf),
+                    )
+            except asyncio.TimeoutError:
+                logger.debug(
+                    "Prewarm first-message timed out for call %s after %.1fs",
+                    call_id,
+                    timeout_s,
+                )
+            except Exception as exc:  # noqa: BLE001 - best-effort
+                logger.debug(
+                    "Prewarm first-message failed for call %s: %s", call_id, exc
+                )
+
+        task = asyncio.create_task(_run())
+        self._prewarm_tasks.add(task)
+
+        def _on_synth_done(_t: asyncio.Task) -> None:
+            self._prewarm_tasks.discard(_t)
+            # FIX #96 — schedule TTL eviction once the synth task has
+            # produced (or failed to produce) cache bytes. If the carrier
+            # never fires ``start`` AND the status / hangup callback
+            # never runs (e.g. cloud-side telephony quirk), the entry
+            # would otherwise leak. The eviction task itself is short
+            # (just an ``asyncio.sleep`` + pop) and is no-op when the
+            # slot has already been drained by ``pop_prewarm_audio`` /
+            # ``_record_prewarm_waste``.
+            if call_id not in self._prewarm_audio:
+                return
+            ttl_s = timeout_s + _PREWARM_TTL_GRACE_S
+            try:
+                evict_task = asyncio.create_task(
+                    self._evict_prewarm_after(call_id, ttl_s)
+                )
+            except RuntimeError:
+                # No running loop (process shutting down) — drop the
+                # entry synchronously to avoid leaking it.
+                self._prewarm_audio.pop(call_id, None)
+                return
+            self._prewarm_ttl_tasks[call_id] = evict_task
+            evict_task.add_done_callback(
+                lambda _t, cid=call_id: self._prewarm_ttl_tasks.pop(cid, None)
+            )
+
+        task.add_done_callback(_on_synth_done)
+
+    async def _evict_prewarm_after(self, call_id: str, ttl_s: float) -> None:
+        """Sleep ``ttl_s`` then drop ``call_id`` from the cache if still present.
+
+        The TTS bill was paid by the synth task; this WARN flags the
+        unconsumed entry so users notice never-answered calls that
+        slipped past the status / hangup callback. Cancelled by
+        :meth:`disconnect` and a no-op when the entry was already
+        consumed via ``pop_prewarm_audio`` / ``_record_prewarm_waste``.
+        """
+        try:
+            await asyncio.sleep(ttl_s)
+        except asyncio.CancelledError:
+            return
+        bytes_ = self._prewarm_audio.pop(call_id, None)
+        if bytes_ is not None:
+            self._prewarm_consumed.add(call_id)
+            logger.warning(
+                "Prewarm bytes evicted by TTL — call %s never consumed them "
+                "(~%d bytes synthesised, %.1fs after ring_timeout).",
+                call_id,
+                len(bytes_),
+                ttl_s,
+            )
 
     # === Local mode helpers ===
 
@@ -1016,6 +1274,19 @@ class Patter:
         # ``_emit_*_speech_*`` paths short-circuit on ``self.speech_events
         # is None`` and zero events ever reach the runner's tap.
         self._server.speech_events = self.speech_events
+        # Forward the prewarm-audio accessor so the per-call StreamHandler
+        # can consume the pre-rendered first-message audio (if any) on
+        # ``start``. The server stores a closure rather than a back-ref to
+        # avoid a circular reference (Patter → server → Patter).
+        self._server.pop_prewarm_audio = self.pop_prewarm_audio  # type: ignore[attr-defined]
+        # Forward the waste-recorder so the carrier status / hangup
+        # webhook handlers can evict the cache when a call terminates
+        # before the media stream starts (no-answer, busy, failed,
+        # canceled, or AMD voicemail). Without this, ``_record_prewarm_waste``
+        # is only invoked from ``end_call`` — and the server-side teardown
+        # path leaks the bytes for the lifetime of the Patter instance.
+        # See FIX #91.
+        self._server.record_prewarm_waste = self._record_prewarm_waste  # type: ignore[attr-defined]
 
         # Run uvicorn in a task so we can resolve ``phone.ready`` once it
         # finishes its startup phase. ``server.start()`` itself awaits
@@ -1121,7 +1392,30 @@ class Patter:
         subsequent ``serve()`` works as if the previous lifecycle never
         happened (clears tunnel-owned ``webhook_url`` and recreates the
         ``ready`` / ``tunnel_ready`` Futures).
+
+        Also cancels any in-flight prewarm-first-message synth tasks and
+        TTL eviction timers, then clears the prewarm cache. Without this
+        a still-running TTS WS keeps the user billed long after SDK
+        teardown, and stale entries leak across ``serve`` /
+        ``disconnect`` cycles. See FIX #93.
         """
+        # Cancel and drain any in-flight prewarm work BEFORE tearing the
+        # server down so the synth tasks see a clean cancellation point
+        # and don't end up writing bytes to a cache we're about to drop.
+        for t in list(self._prewarm_tasks):
+            t.cancel()
+        for t in list(self._prewarm_ttl_tasks.values()):
+            t.cancel()
+        if self._prewarm_tasks:
+            await asyncio.gather(*self._prewarm_tasks, return_exceptions=True)
+        if self._prewarm_ttl_tasks:
+            await asyncio.gather(
+                *self._prewarm_ttl_tasks.values(), return_exceptions=True
+            )
+        self._prewarm_tasks.clear()
+        self._prewarm_ttl_tasks.clear()
+        self._prewarm_audio.clear()
+        self._prewarm_consumed.clear()
         if self._server:
             await self._server.stop()
             self._server = None
@@ -1147,6 +1441,63 @@ class Patter:
         else:
             self._tunnel_ready_pre_resolved = None
 
+    def pop_prewarm_audio(self, call_id: str) -> bytes | None:
+        """Pop and return the pre-synthesised first-message audio for ``call_id``.
+
+        Returns ``None`` when ``agent.prewarm_first_message`` was not set
+        for the originating outbound call, or when the synth was still in
+        flight at the moment the carrier emitted ``start`` (treated as a
+        prewarm miss — the StreamHandler falls back to live TTS).
+
+        Called by the per-call StreamHandler at the start of the
+        firstMessage emit. Returning bytes here lets the handler skip the
+        live TTS synthesis and stream the cached buffer directly.
+
+        Marks ``call_id`` as consumed regardless of cache hit/miss so a
+        slow synth task that finishes after this call drops its bytes
+        instead of orphaning them in ``_prewarm_audio``. See FIX #92.
+        """
+        self._prewarm_consumed.add(call_id)
+        # Cancel any pending TTL eviction — the slot is being drained
+        # naturally now.
+        ttl = self._prewarm_ttl_tasks.pop(call_id, None)
+        if ttl is not None and not ttl.done():
+            ttl.cancel()
+        return self._prewarm_audio.pop(call_id, None)
+
+    def _record_prewarm_waste(self, call_id: str) -> None:
+        """Log a WARN if a prewarmed greeting was paid for but never used.
+
+        Called from :meth:`disconnect`, :meth:`end_call`, and from the
+        carrier status / hangup webhook handlers when a call terminates
+        before the media stream starts. The TTS bill for
+        ``agent.first_message`` has already been incurred by the
+        background synth task, so the user should know — opt-in feature
+        with a known cost surface.
+
+        Idempotent: the second call for the same ``call_id`` is a no-op,
+        so the status callback firing first and ``end_call`` running
+        afterwards (or vice-versa) does not double-WARN.
+        """
+        # Idempotency guard — once consumed (cache hit, cache miss, or a
+        # prior waste record) the slot is gone and there is nothing to
+        # warn about a second time.
+        if call_id in self._prewarm_consumed:
+            self._prewarm_audio.pop(call_id, None)
+            return
+        self._prewarm_consumed.add(call_id)
+        ttl = self._prewarm_ttl_tasks.pop(call_id, None)
+        if ttl is not None and not ttl.done():
+            ttl.cancel()
+        bytes_ = self._prewarm_audio.pop(call_id, None)
+        if bytes_:
+            logger.warning(
+                "Prewarm wasted for call %s — first-message TTS already paid "
+                "(~%d bytes synthesised) but call ended before pickup.",
+                call_id,
+                len(bytes_),
+            )
+
     async def end_call(self, call_sid: str) -> None:
         """Terminate an active call on the configured carrier.
 
@@ -1171,6 +1522,9 @@ class Patter:
         """
         if not call_sid:
             raise ValueError("call_sid must be a non-empty string")
+        # If the call had a prewarmed first-message that was never consumed
+        # (call ended before pickup), surface the wasted spend to the user.
+        self._record_prewarm_waste(call_sid)
         cfg = self._local_config
         telephony = cfg.telephony_provider
         if telephony == "twilio":

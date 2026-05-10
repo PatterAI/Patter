@@ -157,6 +157,174 @@ export class OpenAIRealtimeAdapter {
     this.options = options;
   }
 
+  /**
+   * Build the production session.update body. Mirrors the body sent
+   * inside `connect()` so warmup can apply identical configuration to
+   * the upstream session and prime it without billing.
+   */
+  private buildSessionConfig(): Record<string, unknown> {
+    const config: Record<string, unknown> = {
+      input_audio_format: this.audioFormat,
+      output_audio_format: this.audioFormat,
+      voice: this.voice,
+      instructions: this.instructions || 'You are a helpful voice assistant. Be concise.',
+      turn_detection: {
+        type: this.options.vadType ?? OpenAIRealtimeVADType.SERVER_VAD,
+        threshold: 0.5,
+        prefix_padding_ms: 300,
+        silence_duration_ms: this.options.silenceDurationMs ?? 300,
+      },
+      input_audio_transcription: {
+        model: this.options.inputAudioTranscriptionModel ?? OpenAITranscriptionModel.WHISPER_1,
+      },
+    };
+    if (this.options.temperature !== undefined) config.temperature = this.options.temperature;
+    if (this.options.maxResponseOutputTokens !== undefined) {
+      config.max_response_output_tokens = this.options.maxResponseOutputTokens;
+    }
+    if (this.options.modalities !== undefined) config.modalities = this.options.modalities;
+    if (this.options.toolChoice !== undefined) config.tool_choice = this.options.toolChoice;
+    if (this.options.reasoningEffort !== undefined) {
+      config.reasoning = { effort: this.options.reasoningEffort };
+    }
+    if (this.tools?.length) {
+      config.tools = this.tools.map((t) => {
+        const def: Record<string, unknown> = {
+          type: 'function',
+          name: t.name,
+          description: t.description,
+          parameters: t.parameters,
+        };
+        // Propagate strict mode when the user opted in. OpenAI's strict
+        // mode constrains the model to emit arguments that exactly match
+        // the schema (no missing required fields, no extra properties).
+        if ((t as { strict?: boolean }).strict === true) {
+          def.strict = true;
+        }
+        return def;
+      });
+    }
+    return config;
+  }
+
+  /**
+   * Pre-call WebSocket warmup for the OpenAI Realtime endpoint.
+   *
+   * The canonical session-only warm step on the Realtime API: open the
+   * WS, wait for `session.created`, send a single `session.update`
+   * containing the same fields that the production `connect()` path
+   * applies (`input_audio_format`, `output_audio_format`, `voice`,
+   * `instructions`, `turn_detection`, `input_audio_transcription`,
+   * plus any opt-in fields populated on the adapter), wait for the
+   * matching `session.updated` ack, then close cleanly. This primes
+   * the per-session state on the OpenAI side — DNS + TLS + auth
+   * handshake + initial config exchange — without ever invoking the
+   * model.
+   *
+   * Earlier revisions sent `response.create` with
+   * `{"response": {"generate": false}}` to prime the inference path.
+   * That field is NOT in the OpenAI Realtime API schema; the server
+   * either ignores it (and bills tokens for a real model response) or
+   * rejects the request with `invalid_request_error`. Both behaviours
+   * are billing-unsafe or a no-op beyond TLS warm. The
+   * `session.update` flow is documented and side-effect-free.
+   *
+   * Billing safety: `session.update` only mutates session
+   * configuration. It does NOT invoke the model, does NOT consume any
+   * audio buffer, and does NOT trigger token generation, so no
+   * per-token cost is accrued. Best-effort: failures are logged at
+   * debug level and never raised.
+   */
+  async warmup(): Promise<void> {
+    const url = `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(this.model)}`;
+    let ws: WebSocket | null = null;
+    try {
+      ws = await new Promise<WebSocket>((resolve, reject) => {
+        const sock = new WebSocket(url, {
+          headers: {
+            Authorization: `Bearer ${this.apiKey}`,
+            'OpenAI-Beta': 'realtime=v1',
+          },
+        });
+        const timer = setTimeout(() => {
+          try {
+            sock.close();
+          } catch {
+            // ignore
+          }
+          reject(new Error('OpenAI Realtime warmup connect timeout'));
+        }, 5000);
+        sock.once('open', () => {
+          clearTimeout(timer);
+          resolve(sock);
+        });
+        sock.once('error', (err: Error) => {
+          clearTimeout(timer);
+          reject(err);
+        });
+      });
+
+      // Wait for session.created (up to 2 s).
+      const sessionCreated = await new Promise<boolean>((resolve) => {
+        const timer = setTimeout(() => resolve(false), 2000);
+        const onMsg = (raw: Buffer | string): void => {
+          try {
+            const data = JSON.parse(raw.toString()) as { type?: string };
+            if (data.type === 'session.created') {
+              clearTimeout(timer);
+              ws!.off('message', onMsg);
+              resolve(true);
+            }
+          } catch {
+            // ignore parse errors
+          }
+        };
+        ws!.on('message', onMsg);
+      });
+      if (!sessionCreated) return;
+
+      // Send session.update with the same fields the production
+      // ``connect()`` path applies, so the upstream session state is
+      // primed identically to a real call.
+      try {
+        ws.send(JSON.stringify({ type: 'session.update', session: this.buildSessionConfig() }));
+      } catch {
+        return;
+      }
+
+      // Best-effort: drain frames until we see ``session.updated`` (or
+      // time out). Waiting for the ack lets us close after a clean
+      // handshake instead of mid-frame; the TLS + session prime is
+      // already done by the time the server processes our update.
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(() => resolve(), 1500);
+        const onMsg = (raw: Buffer | string): void => {
+          try {
+            const data = JSON.parse(raw.toString()) as { type?: string };
+            if (data.type === 'session.updated') {
+              clearTimeout(timer);
+              ws!.off('message', onMsg);
+              resolve();
+            }
+          } catch {
+            // ignore
+          }
+        };
+        ws!.on('message', onMsg);
+      });
+    } catch (err) {
+      getLogger().debug(`OpenAI Realtime warmup failed (best-effort): ${String(err)}`);
+    } finally {
+      if (ws) {
+        try {
+          ws.close();
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+
   /** Open the Realtime WebSocket and apply the session configuration. */
   async connect(): Promise<void> {
     const url = `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(this.model)}`;
@@ -182,48 +350,7 @@ export class OpenAIRealtimeAdapter {
         }
         if (msg.type === 'session.created' && !sessionCreated) {
           sessionCreated = true;
-          const config: Record<string, unknown> = {
-            input_audio_format: this.audioFormat,
-            output_audio_format: this.audioFormat,
-            voice: this.voice,
-            instructions: this.instructions || 'You are a helpful voice assistant. Be concise.',
-            turn_detection: {
-              type: this.options.vadType ?? OpenAIRealtimeVADType.SERVER_VAD,
-              threshold: 0.5,
-              prefix_padding_ms: 300,
-              silence_duration_ms: this.options.silenceDurationMs ?? 300,
-            },
-            input_audio_transcription: {
-              model: this.options.inputAudioTranscriptionModel ?? OpenAITranscriptionModel.WHISPER_1,
-            },
-          };
-          if (this.options.temperature !== undefined) config.temperature = this.options.temperature;
-          if (this.options.maxResponseOutputTokens !== undefined) {
-            config.max_response_output_tokens = this.options.maxResponseOutputTokens;
-          }
-          if (this.options.modalities !== undefined) config.modalities = this.options.modalities;
-          if (this.options.toolChoice !== undefined) config.tool_choice = this.options.toolChoice;
-          if (this.options.reasoningEffort !== undefined) {
-            config.reasoning = { effort: this.options.reasoningEffort };
-          }
-          if (this.tools?.length) {
-            config.tools = this.tools.map(t => {
-              const def: Record<string, unknown> = {
-                type: 'function',
-                name: t.name,
-                description: t.description,
-                parameters: t.parameters,
-              };
-              // Propagate strict mode when the user opted in. OpenAI's strict
-              // mode constrains the model to emit arguments that exactly match
-              // the schema (no missing required fields, no extra properties).
-              if ((t as { strict?: boolean }).strict === true) {
-                def.strict = true;
-              }
-              return def;
-            });
-          }
-          ws.send(JSON.stringify({ type: 'session.update', session: config }));
+          ws.send(JSON.stringify({ type: 'session.update', session: this.buildSessionConfig() }));
         } else if (msg.type === 'session.updated') {
           cleanup();
           resolve();

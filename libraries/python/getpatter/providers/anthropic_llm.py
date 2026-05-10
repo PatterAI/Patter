@@ -127,6 +127,35 @@ class AnthropicLLMProvider:
         self._temperature = temperature
         self._prompt_caching = prompt_caching
 
+    async def warmup(self) -> None:
+        """Pre-call DNS / TLS warmup for the Anthropic Messages API.
+
+        Issues a lightweight ``GET https://api.anthropic.com/v1/models``
+        so DNS, TLS, and HTTP/2 are already up by the time the first
+        ``messages.stream`` call lands. Best-effort: 5 s timeout, all
+        exceptions swallowed at DEBUG.
+        """
+        try:
+            base_url = str(
+                getattr(self._client, "base_url", "") or "https://api.anthropic.com"
+            ).rstrip("/")
+            if "/v1" not in base_url:
+                models_url = f"{base_url}/v1/models"
+            else:
+                models_url = f"{base_url}/models"
+            import httpx
+
+            async with httpx.AsyncClient(timeout=5.0) as http:
+                await http.get(
+                    models_url,
+                    headers={
+                        "x-api-key": self._client.api_key,
+                        "anthropic-version": "2023-06-01",
+                    },
+                )
+        except Exception as exc:  # noqa: BLE001 - best-effort
+            logger.debug("Anthropic LLM warmup failed (best-effort): %s", exc)
+
     async def stream(
         self,
         messages: list[dict],

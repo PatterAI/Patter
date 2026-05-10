@@ -92,6 +92,24 @@ export class GoogleLLMProvider implements LLMProvider {
     this.maxOutputTokens = options.maxOutputTokens;
   }
 
+  /**
+   * Pre-call DNS / TLS warmup for the Gemini API.
+   * Issues a lightweight ``GET ${baseUrl}/models?key=...`` so DNS, TLS
+   * and HTTP/2 are already up by the time the first
+   * ``streamGenerateContent`` call lands. Best-effort: 5 s timeout, all
+   * exceptions swallowed at debug level.
+   */
+  async warmup(): Promise<void> {
+    try {
+      await fetch(`${this.baseUrl}/models?key=${encodeURIComponent(this.apiKey)}`, {
+        method: 'GET',
+        signal: AbortSignal.timeout(5_000),
+      });
+    } catch (err) {
+      getLogger().debug(`Google LLM warmup failed (best-effort): ${String(err)}`);
+    }
+  }
+
   /** Stream Patter-format LLM chunks from the Gemini SSE endpoint. */
   async *stream(
     messages: Array<Record<string, unknown>>,

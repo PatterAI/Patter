@@ -13,11 +13,14 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 from enum import StrEnum
 from typing import Any, AsyncIterator, Optional, Union
 
 from getpatter.providers.base import TTSProvider
+
+logger = logging.getLogger("getpatter.providers.inworld_tts")
 
 try:  # pragma: no cover - trivial import guard
     import aiohttp
@@ -25,6 +28,12 @@ except ImportError:  # pragma: no cover
     aiohttp = None  # type: ignore
 
 INWORLD_BASE_URL = "https://api.inworld.ai/tts/v1/voice:stream"
+# Voice metadata endpoint used as a billing-safe warmup target. The
+# streaming endpoint above is POST-only so HEAD against it returns 405.
+# ``GET /tts/v1/voices`` is documented as a free metadata read that
+# returns the configured voice catalogue without invoking the synthesis
+# pipeline (per https://docs.inworld.ai/).
+INWORLD_VOICES_URL = "https://api.inworld.ai/tts/v1/voices"
 
 
 class InworldModel(StrEnum):
@@ -171,6 +180,48 @@ class InworldTTS(TTSProvider):
                 audio = _decode_ndjson_line(line)
                 if audio:
                     yield audio
+
+    async def warmup(self) -> None:
+        """Pre-call HTTP warmup for the Inworld TTS API.
+
+        Issues a lightweight ``GET /tts/v1/voices`` against the API host
+        so DNS + TLS + HTTP/2 connection are already up by the time the
+        first :meth:`synthesize` POST lands. Best-effort: 5 s timeout,
+        all exceptions swallowed at DEBUG.
+
+        Earlier revisions issued ``HEAD`` against the streaming endpoint
+        (``/tts/v1/voice:stream``). That endpoint is POST-only so HEAD
+        returns ``405 Method Not Allowed`` — the warmup still completed
+        the TLS handshake but spammed 405 errors into Inworld's audit
+        logs and into our own logs. Switching to a documented
+        ``GET /tts/v1/voices`` metadata read is a 2xx-clean equivalent.
+
+        Billing safety: ``GET /tts/v1/voices`` is a free metadata
+        endpoint (per https://docs.inworld.ai/). It returns the voice
+        catalogue without invoking the synthesis pipeline. The actual
+        synthesis is billed only when ``POST /tts/v1/voice:stream`` runs
+        with a non-empty ``text``.
+
+        Note: Inworld TTS uses the HTTP NDJSON streaming path rather than
+        a persistent WebSocket — connection warmup is therefore HTTP-based,
+        not WebSocket pre-handshake. The latency win is smaller (~50-150 ms)
+        than the WS-based prewarms but still real on cold-start calls.
+        """
+        try:
+            session = self._ensure_session()
+            headers = {"Authorization": f"Basic {self.auth_token}"}
+            # ``GET /tts/v1/voices`` is a billing-safe metadata read that
+            # returns 2xx (unlike HEAD against the POST-only streaming
+            # endpoint, which returns 405).
+            async with session.get(
+                INWORLD_VOICES_URL,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                # Drain so the underlying connection returns cleanly to the pool.
+                await resp.read()
+        except Exception as exc:  # noqa: BLE001 - best-effort
+            logger.debug("Inworld TTS warmup failed (best-effort): %s", exc)
 
     async def close(self) -> None:
         """Close the underlying session (idempotent)."""

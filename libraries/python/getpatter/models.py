@@ -189,9 +189,9 @@ class Agent:
     # default empty tuple the SDK falls back to the legacy "interrupt
     # immediately on VAD speech_start" behaviour. When at least one
     # strategy is provided, a VAD speech_start during TTS marks the
-    # barge-in as *pending* — the agent's TTS is paused but its in-flight
-    # LLM stream is preserved — and the strategies are consulted on every
-    # STT transcript. The first strategy that returns ``True`` confirms
+    # barge-in as *pending* — the agent's TTS continues streaming
+    # naturally and its in-flight LLM stream is preserved — and the
+    # strategies are consulted on every STT transcript. The first strategy that returns ``True`` confirms
     # the barge-in (cancels TTS, flushes the inbound ring buffer); if
     # none confirm within ``barge_in_confirm_ms`` the pending state is
     # dropped and TTS resumes. See
@@ -203,6 +203,32 @@ class Agent:
     # pending barge-in before discarding the pending state and resuming
     # TTS. Only consulted when ``barge_in_strategies`` is non-empty.
     barge_in_confirm_ms: int = 1500
+    # When ``True`` (default), ``Patter.call`` warms up the STT, TTS, and LLM
+    # provider connections in parallel with the carrier-side ``initiate_call``
+    # request so DNS, TLS, and HTTP/2 handshakes are already complete by the
+    # time the callee answers. Adapters expose ``warmup()`` returning ``None``
+    # by default — providers can override to dial open a persistent connection
+    # ahead of the WebSocket bridge. The window is bounded by ``ring_timeout``
+    # so a never-answered call doesn't tie up provider sockets indefinitely.
+    # Best-effort: warmup failures are logged at DEBUG and never abort the
+    # call. See ``docs/python-sdk/latency.mdx`` for the cold-start latency
+    # rationale.
+    prewarm: bool = True
+    # When ``True`` (default ``False``), ``Patter.call`` also pre-renders
+    # ``first_message`` to TTS audio bytes during the ringing window and
+    # streams the cached buffer immediately when the carrier emits ``start``.
+    # Eliminates the 200-700 ms TTS first-byte latency on the greeting at the
+    # cost of paying the TTS bill even if the call is never answered (silently
+    # logged at WARN level when the call fails). Off by default to preserve
+    # the prior cost surface; opt-in for production outbound where every
+    # millisecond of greeting latency hurts conversion.
+    #
+    # **Pipeline mode only.** Realtime / ConvAI provider modes never
+    # consume the prewarm cache (the StreamHandler for those modes runs
+    # its first-message emit through the provider's own audio path), so
+    # ``Patter.call`` refuses to spawn the prewarm task and emits a WARN
+    # when ``provider != "pipeline"``.
+    prewarm_first_message: bool = False
 
 
 @dataclass(frozen=True)
@@ -300,10 +326,21 @@ class CostBreakdown:
 class LatencyBreakdown:
     """Per-turn latency breakdown (milliseconds)."""
 
+    # STT finalization time: end-of-speech (VAD stop or STT speech_final)
+    # → final transcript delivery. This is the engineering metric — pure STT
+    # processing latency, independent of how long the user spoke. Industry
+    # benchmarks (Picovoice, Deepgram, Gladia, Speechmatics) all report this
+    # number as "STT latency". Falls back to turn_start when the endpoint
+    # signal is unavailable (degraded provider, batch STT, etc.).
     stt_ms: float = 0.0
     llm_ms: float = 0.0
     tts_ms: float = 0.0
     total_ms: float = 0.0
+    # Duration of the user's utterance (turn_start → end-of-speech). Useful
+    # to distinguish "user spoke for 4s" from "STT took 4s to finalize" —
+    # they used to be conflated in stt_ms before 0.6.1. ``None`` when the
+    # endpoint signal is unavailable.
+    user_speech_duration_ms: float | None = None
     # Time-to-first-token for the LLM (stt_complete → first streaming token).
     # ``None`` in Realtime / non-streaming paths where the LLM doesn't expose
     # TTFT separately. Populated by ``CallMetricsAccumulator`` from

@@ -226,6 +226,25 @@ export class ElevenLabsWebSocketTTS implements TTSAdapter {
   }
 
   /**
+   * Build the protocol-required BOS frame sent on every fresh WS.
+   *
+   * The single-space `{"text": " "}` keep-alive establishes the session
+   * without committing any synthesis (no `flush: true`, no real text).
+   * Production `synthesizeStream()` and `warmup()` share this exact
+   * construction so the upstream worker chooses the same per-session
+   * config in both cases — otherwise the warm session is on a different
+   * worker than the live request, which defeats the warmup goal.
+   */
+  private buildBosFrame(): Record<string, unknown> {
+    const init: Record<string, unknown> = { text: ' ' };
+    if (this.voiceSettings) init['voice_settings'] = this.voiceSettings;
+    if (!this.autoMode && this.chunkLengthSchedule) {
+      init['generation_config'] = { chunk_length_schedule: this.chunkLengthSchedule };
+    }
+    return init;
+  }
+
+  /**
    * Single-shot synthesis: open WS, send text, yield bytes, close.
    *
    * Resilience contract:
@@ -348,13 +367,9 @@ export class ElevenLabsWebSocketTTS implements TTSAdapter {
       });
 
       // Initial keep-alive packet — required by the protocol. ``""`` would
-      // close the socket immediately.
-      const init: Record<string, unknown> = { text: ' ' };
-      if (this.voiceSettings) init['voice_settings'] = this.voiceSettings;
-      if (!this.autoMode && this.chunkLengthSchedule) {
-        init['generation_config'] = { chunk_length_schedule: this.chunkLengthSchedule };
-      }
-      ws.send(JSON.stringify(init));
+      // close the socket immediately. Produced by ``buildBosFrame()`` so
+      // ``warmup()`` sends a byte-identical frame.
+      ws.send(JSON.stringify(this.buildBosFrame()));
 
       // Send actual text + flush. EOS is intentionally NOT sent here —
       // it is sent in finally as part of the close. Sending EOS
@@ -410,6 +425,71 @@ export class ElevenLabsWebSocketTTS implements TTSAdapter {
         /* best-effort close */
       }
       // Drop all listeners — prevents memory leaks from closure references.
+      ws.removeAllListeners();
+    }
+  }
+
+  /**
+   * Pre-call WebSocket warmup for the ElevenLabs `/stream-input` endpoint.
+   *
+   * Opens the WS (DNS + TLS + auth handshake), sends the EXACT same BOS
+   * frame the production `synthesizeStream()` path sends — including
+   * `voice_settings` and (when configured) `generation_config` — so
+   * ElevenLabs instantiates the same per-session worker for both
+   * warmup and the live request. If the BOS frames differ, the server
+   * may route warmup and the real call to two different workers, and
+   * the warmed worker is wasted. Idles ~250 ms, then closes. By the
+   * time the first `synthesizeStream()` call lands during the call,
+   * the connection pool has the upstream warm — net wire time saving
+   * of 200-500 ms.
+   *
+   * Billing safety: ElevenLabs bills on synthesised characters
+   * delivered via `audio` frames (per https://elevenlabs.io/pricing).
+   * The keepalive (single-space `text`, no `flush: true`, no real
+   * transcript) is documented as the session-establishment frame and
+   * does NOT generate synthesis. Closing without sending the actual
+   * transcript does not consume billable characters. Best-effort:
+   * failures logged at debug level.
+   */
+  async warmup(): Promise<void> {
+    const ws = new WebSocket(this.buildUrl(), {
+      headers: { 'xi-api-key': this.apiKey },
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error('ElevenLabs WS TTS warmup connect timeout')),
+          CONNECT_TIMEOUT_MS,
+        );
+        ws.once('open', () => {
+          clearTimeout(timer);
+          resolve();
+        });
+        ws.once('error', (err: Error) => {
+          clearTimeout(timer);
+          reject(err);
+        });
+      });
+      // Send the EXACT BOS frame the live synthesizeStream() path sends so
+      // the server-side worker selection is identical between warmup
+      // and the live call.
+      try {
+        ws.send(JSON.stringify(this.buildBosFrame()));
+      } catch {
+        // ignore
+      }
+      // Brief idle so the provider edge keeps session state warm.
+      await new Promise<void>((r) => setTimeout(r, 250));
+    } catch (err) {
+      getLogger().debug(`ElevenLabs WS TTS warmup failed (best-effort): ${String(err)}`);
+    } finally {
+      try {
+        if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+          ws.close();
+        }
+      } catch {
+        // ignore
+      }
       ws.removeAllListeners();
     }
   }

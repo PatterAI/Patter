@@ -338,6 +338,17 @@ class LLMProvider(Protocol):
         """
         ...  # pragma: no cover
 
+    # Optional: ``async def warmup(self) -> None`` — best-effort pre-call
+    # DNS / TLS / HTTP-keepalive warmup invoked by ``Patter.call`` when the
+    # agent has ``prewarm=True``. Concrete providers (OpenAI, Anthropic,
+    # Google, Cerebras, Groq) define this method to issue a lightweight
+    # HTTPS GET to their inference endpoint so by the time the first
+    # ``stream()`` call lands, the connection pool already has a warm
+    # socket. Detected via duck-typed ``getattr(provider, "warmup", None)``
+    # in the client so plain mocks / older providers without ``warmup``
+    # still satisfy this protocol — kept off the Protocol surface to
+    # preserve backward-compat with ``runtime_checkable.isinstance``.
+
 
 # ---------------------------------------------------------------------------
 # Built-in OpenAI provider
@@ -422,6 +433,44 @@ class OpenAILLMProvider:
         self._stop = stop
         self._temperature = temperature
         self._max_tokens = max_tokens
+
+    async def warmup(self) -> None:
+        """Pre-call DNS / TLS / HTTP-keepalive warmup.
+
+        Issues a lightweight ``GET <base_url>/models`` so the underlying
+        ``httpx.AsyncClient`` (owned by the OpenAI SDK) opens a socket and
+        completes the TLS handshake during the carrier ringing window.
+        By the time the first ``chat.completions.create`` call lands, the
+        connection pool has a warm socket and the first chunk arrives a
+        DNS+TLS round-trip earlier (~150-400 ms saved on cold start).
+
+        Note: an HTTPS GET warms DNS + TLS + connection pool but does NOT
+        warm the inference path itself; for true inference warmup a real
+        low-token request is needed, left as a follow-up. STT / TTS providers ship concrete
+        WebSocket-based prewarms (Cartesia / Deepgram / AssemblyAI for
+        STT; ElevenLabs WS for TTS) which save 200-500 ms each — those
+        dominate the cold-start latency budget.
+
+        Best-effort: timeouts and any other exception are swallowed at
+        DEBUG. Mirrors the warmup contract documented on the
+        :class:`LLMProvider` protocol.
+        """
+        try:
+            base_url = str(getattr(self._client, "base_url", "") or "").rstrip("/")
+            if not base_url:
+                return
+            import httpx
+
+            async with httpx.AsyncClient(timeout=5.0) as http:
+                await http.get(
+                    f"{base_url}/models",
+                    headers={
+                        "Authorization": f"Bearer {self._client.api_key}",
+                        "User-Agent": self._user_agent,
+                    },
+                )
+        except Exception as exc:  # noqa: BLE001 - best-effort
+            logger.debug("LLM warmup failed (best-effort): %s", exc)
 
     def _build_completion_kwargs(
         self,

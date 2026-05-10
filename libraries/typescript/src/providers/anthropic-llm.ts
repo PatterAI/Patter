@@ -129,6 +129,29 @@ export class AnthropicLLMProvider implements LLMProvider {
     this.promptCaching = options.promptCaching ?? true;
   }
 
+  /**
+   * Pre-call DNS / TLS warmup for the Anthropic Messages API.
+   * Issues a lightweight ``GET https://api.anthropic.com/v1/models`` so
+   * DNS, TLS and HTTP/2 are already up by the time the first ``messages``
+   * call lands. Best-effort: 5 s timeout, exceptions swallowed at debug.
+   */
+  async warmup(): Promise<void> {
+    try {
+      // ``url`` points at .../messages — derive the .../models sibling.
+      const modelsUrl = this.url.replace(/\/messages\/?$/, '/models');
+      await fetch(modelsUrl, {
+        method: 'GET',
+        headers: {
+          'x-api-key': this.apiKey,
+          'anthropic-version': this.anthropicVersion,
+        },
+        signal: AbortSignal.timeout(5_000),
+      });
+    } catch (err) {
+      getLogger().debug(`Anthropic LLM warmup failed (best-effort): ${String(err)}`);
+    }
+  }
+
   /** Stream Patter-format LLM chunks for the given OpenAI-style chat history. */
   async *stream(
     messages: Array<Record<string, unknown>>,

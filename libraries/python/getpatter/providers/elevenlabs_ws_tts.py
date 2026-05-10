@@ -325,6 +325,26 @@ class ElevenLabsWebSocketTTS(TTSProvider):
             params["language_code"] = self.language_code
         return f"{_WS_BASE}/{quote(self.voice_id)}/stream-input?{urlencode(params)}"
 
+    def _build_bos_frame(self) -> dict:
+        """Build the protocol-required BOS frame sent on every fresh WS.
+
+        The single-space ``{"text": " "}`` keep-alive establishes the
+        session without committing any synthesis (no ``flush: true``,
+        no real text). Production ``synthesize()`` and ``warmup()``
+        share this exact construction so the upstream worker chooses
+        the same per-session config in both cases — otherwise the
+        warm session is on a different worker than the live request,
+        which defeats the warmup goal.
+        """
+        init: dict = {"text": " "}
+        if self.voice_settings:
+            init["voice_settings"] = self.voice_settings
+        if self.chunk_length_schedule and not self.auto_mode:
+            init["generation_config"] = {
+                "chunk_length_schedule": self.chunk_length_schedule,
+            }
+        return init
+
     async def synthesize(self, text: str) -> AsyncGenerator[bytes, None]:
         """Open a WebSocket, stream ``text``, yield raw audio bytes, then close.
 
@@ -363,14 +383,7 @@ class ElevenLabsWebSocketTTS(TTSProvider):
             # Initial keep-alive packet establishes the session. Per the
             # ElevenLabs docs the first message must contain a single space
             # ``" "`` — sending ``""`` would close the socket immediately.
-            init: dict = {"text": " "}
-            if self.voice_settings:
-                init["voice_settings"] = self.voice_settings
-            if self.chunk_length_schedule and not self.auto_mode:
-                init["generation_config"] = {
-                    "chunk_length_schedule": self.chunk_length_schedule,
-                }
-            await ws.send(json.dumps(init))
+            await ws.send(json.dumps(self._build_bos_frame()))
 
             # Send the actual text + flush so ElevenLabs commits the
             # synthesis without waiting for further chunks. EOS
@@ -456,6 +469,62 @@ class ElevenLabsWebSocketTTS(TTSProvider):
                 await ws.close()
             except Exception:
                 pass
+
+    async def warmup(self) -> None:
+        """Pre-call WebSocket warmup for the ElevenLabs ``/stream-input`` endpoint.
+
+        Opens the WS (DNS + TLS + auth handshake), sends the EXACT same
+        BOS frame the production :meth:`synthesize` path sends — including
+        ``voice_settings`` and (when configured) ``generation_config`` —
+        so ElevenLabs instantiates the same per-session worker for both
+        warmup and the live request. If the BOS frames differ, the server
+        may route warmup and the real call to two different workers, and
+        the warmed worker is wasted. Idles ~250 ms, then closes. By the
+        time the first :meth:`synthesize` call lands during the call, the
+        connection pool has the upstream warm — net wire time saving of
+        200-500 ms.
+
+        Billing safety: ElevenLabs bills on synthesised characters delivered
+        via the ``audio`` frames in the response (per
+        https://elevenlabs.io/pricing). The keepalive (single-space
+        ``text``, no ``flush: true``, no real transcript) is documented
+        as the session-establishment frame and does NOT generate
+        synthesis. Closing without sending the actual transcript
+        therefore does not consume billable characters. Best-effort:
+        failures are logged at DEBUG.
+        """
+        url = self._build_url()
+        headers = {"xi-api-key": self._api_key}
+        ws = None
+        try:
+            ws = await asyncio.wait_for(
+                websockets.connect(
+                    url,
+                    additional_headers=headers,
+                    open_timeout=self.open_timeout,
+                    ping_interval=20,
+                    ping_timeout=10,
+                    close_timeout=2,
+                ),
+                timeout=self.open_timeout,
+            )
+            # Send the EXACT BOS frame the live synthesize() path sends so
+            # the server-side worker selection is identical between warmup
+            # and the live call.
+            try:
+                await ws.send(json.dumps(self._build_bos_frame()))
+            except Exception:
+                pass
+            # Brief idle so the provider edge keeps session state warm.
+            await asyncio.sleep(0.25)
+        except Exception as exc:  # noqa: BLE001 - best-effort
+            logger.debug("ElevenLabs WS TTS warmup failed (best-effort): %s", exc)
+        finally:
+            if ws is not None:
+                try:
+                    await ws.close()
+                except Exception:
+                    pass
 
     async def close(self) -> None:
         """No-op: connections are per-utterance and closed inline."""

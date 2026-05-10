@@ -636,9 +636,27 @@ class CallMetricsAccumulator:
         llm_ttft_ms = 0.0
         tts_ms = 0.0
         total_ms = 0.0
+        user_speech_duration_ms: float | None = None
 
-        if self._turn_start is not None and self._stt_complete is not None:
-            stt_ms = (self._stt_complete - self._turn_start) * 1000
+        # ``stt_ms`` measures pure STT finalization: end-of-speech (VAD stop
+        # or STT speech_final) → final transcript delivery. This is the
+        # engineering metric reported as "STT latency" by the industry. When
+        # the endpoint signal is unavailable (degraded provider, batch STT)
+        # fall back to the legacy turn_start anchor so the field is never
+        # spuriously zero.
+        if self._stt_complete is not None:
+            anchor = (
+                self._endpoint_signal_at
+                if self._endpoint_signal_at is not None
+                else self._turn_start
+            )
+            if anchor is not None:
+                stt_ms = max(0.0, (self._stt_complete - anchor) * 1000)
+
+        if self._turn_start is not None and self._endpoint_signal_at is not None:
+            user_speech_duration_ms = max(
+                0.0, (self._endpoint_signal_at - self._turn_start) * 1000
+            )
 
         if self._stt_complete is not None and self._llm_complete is not None:
             llm_ms = (self._llm_complete - self._stt_complete) * 1000
@@ -728,6 +746,11 @@ class CallMetricsAccumulator:
             llm_ms=round(llm_ms, 1),
             tts_ms=round(tts_ms, 1),
             total_ms=round(total_ms, 1),
+            user_speech_duration_ms=(
+                round(user_speech_duration_ms, 1)
+                if user_speech_duration_ms is not None
+                else None
+            ),
             llm_ttft_ms=round(llm_ttft_ms, 1) if llm_ttft_ms else None,
             llm_total_ms=round(llm_total_ms, 1) if llm_total_ms is not None else None,
             endpoint_ms=round(endpoint_ms, 1) if endpoint_ms is not None else None,

@@ -93,6 +93,22 @@ export class GroqLLMProvider implements LLMProvider {
     this.stop = options.stop;
   }
 
+  /**
+   * Pre-call DNS / TLS warmup for the Groq inference endpoint.
+   * Best-effort: 5 s timeout, all exceptions swallowed at debug level.
+   */
+  async warmup(): Promise<void> {
+    try {
+      await fetch(`${this.baseUrl}/models`, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${this.apiKey}` },
+        signal: AbortSignal.timeout(5_000),
+      });
+    } catch (err) {
+      getLogger().debug(`Groq LLM warmup failed (best-effort): ${String(err)}`);
+    }
+  }
+
   /** Stream Patter-format LLM chunks from the Groq chat completions API. */
   async *stream(
     messages: Array<Record<string, unknown>>,

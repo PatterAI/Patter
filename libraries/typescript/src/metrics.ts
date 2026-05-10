@@ -26,7 +26,22 @@ import type {
 
 /** Per-turn latency breakdown across the STT/LLM/TTS pipeline. */
 export interface LatencyBreakdown {
+  /**
+   * STT finalization time: end-of-speech (VAD stop or STT speech_final) →
+   * final transcript delivery. This is the engineering metric — pure STT
+   * processing latency, independent of how long the user spoke. Industry
+   * benchmarks (Picovoice, Deepgram, Gladia, Speechmatics) all report this
+   * number as "STT latency". Falls back to turn_start when the endpoint
+   * signal is unavailable (degraded provider, batch STT, etc.).
+   */
   stt_ms: number;
+  /**
+   * Duration of the user's utterance (turn_start → end-of-speech). Useful
+   * to distinguish "user spoke for 4s" from "STT took 4s to finalize" —
+   * they used to be conflated in stt_ms before 0.6.1. Optional — undefined
+   * when the endpoint signal is unavailable.
+   */
+  user_speech_duration_ms?: number;
   /**
    * Backwards-compatible LLM bucket. With the split below, this now reflects
    * the user-perceived first-token latency (TTFT) when streaming is available
@@ -793,22 +808,26 @@ export class CallMetricsAccumulator {
     let endpoint_ms: number | undefined;
     let bargein_ms: number | undefined;
     let tts_total_ms: number | undefined;
+    let user_speech_duration_ms: number | undefined;
 
-    // ``stt_ms`` is the wall-clock window from the first audio byte with
-    // detected speech to the final transcript. It includes the user's speech
-    // duration AND the provider's endpointing wait — both contribute to the
-    // time the agent is blocked waiting on STT, so this is what matters for
-    // UX. To isolate provider-only processing latency you'd need an external
-    // VAD signalling end-of-speech *before* the STT provider's own decision,
-    // which streaming providers like Deepgram do not expose separately
-    // (they emit speech_final and is_final in the same chunk).
-    if (this._turnStart !== null && this._sttComplete !== null) {
-      stt_ms = this._sttComplete - this._turnStart;
+    // ``stt_ms`` measures pure STT finalization: end-of-speech (VAD stop or
+    // STT speech_final) → final transcript delivery. This is the
+    // engineering metric reported as "STT latency" by the industry. When
+    // the endpoint signal is unavailable (degraded provider, batch STT)
+    // fall back to the legacy turn_start anchor so the field is never
+    // spuriously zero.
+    if (this._sttComplete !== null) {
+      const anchor = this._endpointSignalAt ?? this._turnStart;
+      if (anchor !== null) {
+        stt_ms = Math.max(0, this._sttComplete - anchor);
+      }
     }
-    // Note: an ``stt_endpointing_ms`` (post-speech wait) metric would be
-    // useful but Deepgram emits speech_final and final-transcript in the same
-    // chunk, so the gap collapses to ~0. To get a meaningful value we'd need
-    // an external VAD (Silero) signalling end-of-speech earlier. Deferred.
+    if (this._turnStart !== null && this._endpointSignalAt !== null) {
+      user_speech_duration_ms = Math.max(
+        0,
+        this._endpointSignalAt - this._turnStart,
+      );
+    }
     // ``llm_ms`` is the user-facing latency that maps to UX: time-to-first-token
     // from end-of-STT.  ``llm_total_ms`` captures the full generation duration
     // (stt_complete → llm_complete) so it can be tracked separately for
@@ -878,6 +897,9 @@ export class CallMetricsAccumulator {
     return {
       stt_ms: round(stt_ms, 1),
       llm_ms: round(llm_ms, 1),
+      ...(user_speech_duration_ms !== undefined
+        ? { user_speech_duration_ms: round(user_speech_duration_ms, 1) }
+        : {}),
       ...(llm_ttft_ms !== undefined ? { llm_ttft_ms: round(llm_ttft_ms, 1) } : {}),
       ...(llm_total_ms !== undefined ? { llm_total_ms: round(llm_total_ms, 1) } : {}),
       tts_ms: round(tts_ms, 1),

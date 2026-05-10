@@ -711,6 +711,27 @@ export class EmbeddedServer {
    */
   public onMachineDetection?: (result: MachineDetectionResult) => void | Promise<void>;
 
+  /**
+   * Pre-warm first-message audio accessor wired by ``Patter.serve()``.
+   * The per-call StreamHandler invokes this with its ``callId`` at the
+   * start of the firstMessage emit; a defined return is sent verbatim
+   * in place of running TTS again. ``undefined`` means "no prewarm
+   * cache for this call — fall back to live synthesis". Default is a
+   * no-op so callers that instantiate ``EmbeddedServer`` directly
+   * (tests) work without further setup.
+   */
+  public popPrewarmAudio: (callId: string) => Buffer | undefined = () => undefined;
+
+  /**
+   * Prewarm waste recorder wired by ``Patter.serve()``. Invoked from
+   * the Twilio status callback (no-answer / busy / failed / canceled)
+   * and the Telnyx call.hangup / AMD-machine handlers so the cache
+   * entry is evicted when the call terminates before the media stream
+   * starts. Default is a no-op so direct ``EmbeddedServer`` callers
+   * (tests) work without further setup. See FIX #91.
+   */
+  public recordPrewarmWaste: (callId: string) => void = () => undefined;
+
   constructor(
     private readonly config: LocalConfig,
     private readonly agent: AgentOptions,
@@ -853,6 +874,24 @@ export class EmbeddedServer {
         if (!Number.isNaN(parsed)) extra.duration_seconds = parsed;
         this.metricsStore.updateCallStatus(callSid, callStatus, extra);
       }
+      // FIX #91 — when the call terminates before the media stream
+      // starts (no-answer / busy / failed / canceled), the prewarm
+      // cache entry would otherwise leak until ``endCall`` runs. Evict
+      // it here so the WARN fires once and the bytes are released
+      // regardless of whether the user calls ``endCall``.
+      if (
+        callSid &&
+        (callStatus === 'no-answer' ||
+          callStatus === 'busy' ||
+          callStatus === 'failed' ||
+          callStatus === 'canceled')
+      ) {
+        try {
+          this.recordPrewarmWaste(callSid);
+        } catch (err) {
+          getLogger().debug(`recordPrewarmWaste threw: ${String(err)}`);
+        }
+      }
       res.status(204).send();
     });
 
@@ -913,6 +952,22 @@ export class EmbeddedServer {
           });
         } catch (err) {
           getLogger().warn(`onMachineDetection callback threw: ${sanitizeLogValue(String(err))}`);
+        }
+      }
+
+      // FIX #91 — when AMD classifies as machine, the agent's first
+      // message will not be played (we drop voicemail or hang up), so
+      // the prewarmed greeting is never consumed. Evict the cache entry
+      // once so the WARN fires regardless of whether ``voicemailMessage``
+      // is configured.
+      if (
+        (answeredBy === 'machine_end_beep' || answeredBy === 'machine_end_silence') &&
+        callSid
+      ) {
+        try {
+          this.recordPrewarmWaste(callSid);
+        } catch (err) {
+          getLogger().debug(`recordPrewarmWaste threw: ${String(err)}`);
         }
       }
 
@@ -1013,6 +1068,7 @@ export class EmbeddedServer {
             to?: string;
             digit?: string;
             result?: string;
+            hangup_cause?: string;
             recording_urls?: { mp3?: string; wav?: string };
             public_recording_urls?: { mp3?: string; wav?: string };
           };
@@ -1080,6 +1136,37 @@ export class EmbeddedServer {
         }
         if (amdCallId && (amdResult === 'machine' || amdResult === 'machine_detected')) {
           await this.handleTelnyxAmdVoicemail(amdCallId);
+          // FIX #91 — when AMD classifies as machine the agent's first
+          // message is replaced by ``voicemailMessage`` (or the call
+          // simply ends), so the prewarmed greeting is never consumed.
+          // Evict it so the WARN fires once.
+          try {
+            this.recordPrewarmWaste(amdCallId);
+          } catch (err) {
+            getLogger().debug(`recordPrewarmWaste threw: ${String(err)}`);
+          }
+        }
+        return res.status(200).send();
+      }
+
+      // FIX #91 — Telnyx fires ``call.hangup`` as the final status
+      // notification. ``hangup_cause`` distinguishes carrier outcomes
+      // (``call_rejected`` / ``busy`` / ``no_answer`` / ``timeout`` /
+      // ``normal_clearing`` / …). When the call never reached the
+      // media stream the prewarm cache leaks unless we evict it here.
+      if (eventType === 'call.hangup') {
+        const hangupCallId = payload.call_control_id ?? '';
+        const hangupCause = String(payload.hangup_cause ?? '');
+        getLogger().info(
+          `Telnyx call.hangup for ${sanitizeLogValue(hangupCallId)} ` +
+            `(cause=${sanitizeLogValue(hangupCause)})`,
+        );
+        if (hangupCallId) {
+          try {
+            this.recordPrewarmWaste(hangupCallId);
+          } catch (err) {
+            getLogger().debug(`recordPrewarmWaste threw: ${String(err)}`);
+          }
         }
         return res.status(200).send();
       }
@@ -1327,6 +1414,7 @@ export class EmbeddedServer {
       buildAIAdapter: (resolvedPrompt: string) => buildAIAdapter(this.config, this.agent, resolvedPrompt),
       sanitizeVariables,
       resolveVariables,
+      popPrewarmAudio: this.popPrewarmAudio,
     };
   }
 

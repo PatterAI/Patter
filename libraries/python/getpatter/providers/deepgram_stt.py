@@ -155,6 +155,51 @@ class DeepgramSTT(STTProvider):
             **kwargs,
         )
 
+    async def warmup(self) -> None:
+        """Pre-call WebSocket warmup for the Deepgram ``/v1/listen`` endpoint.
+
+        Opens the WS (full DNS + TLS + auth handshake), idles ~250 ms so the
+        provider edge has the session warm in its routing table, then closes
+        cleanly. By the time :meth:`connect` is invoked at call-pickup the
+        DNS resolver is hot, the TCP+TLS session is in the connection pool,
+        and recent WS auth is still warm at Deepgram's edge — net wire
+        time saving of 200-500 ms vs a cold WS open.
+
+        Billing safety: Deepgram bills on streamed audio seconds (per
+        https://deepgram.com/pricing). Opening + closing the WebSocket
+        without sending any audio frames does not consume billable seconds.
+        Best-effort: any failure is logged at DEBUG and never raised.
+        """
+        params = {
+            "model": self.model,
+            "language": self.language,
+            "encoding": self.encoding,
+            "sample_rate": str(self.sample_rate),
+            "channels": "1",
+        }
+        url = f"{DEEPGRAM_WS_URL}?{urlencode(params)}"
+        ws = None
+        try:
+            ws = await asyncio.wait_for(
+                websockets.connect(
+                    url,
+                    additional_headers={"Authorization": f"Token {self.api_key}"},
+                ),
+                timeout=5.0,
+            )
+            # Idle briefly so the server-side routing/state cache stays warm
+            # at Deepgram's edge. ~250 ms is the documented sweet-spot for
+            # provider edge cache retention.
+            await asyncio.sleep(0.25)
+        except Exception as exc:  # noqa: BLE001 - best-effort
+            logger.debug("Deepgram STT warmup failed (best-effort): %s", exc)
+        finally:
+            if ws is not None:
+                try:
+                    await ws.close()
+                except Exception:
+                    pass
+
     async def connect(self) -> None:
         """Open the Deepgram WebSocket and start the KeepAlive loop."""
         params = {

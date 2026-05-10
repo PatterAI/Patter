@@ -1613,6 +1613,7 @@ class PipelineStreamHandler(StreamHandler):
         on_metrics=None,
         conversation_history: deque | None = None,
         transcript_entries: deque | None = None,
+        pop_prewarm_audio=None,
     ) -> None:
         super().__init__(
             agent=agent,
@@ -1628,6 +1629,11 @@ class PipelineStreamHandler(StreamHandler):
             conversation_history=conversation_history,
             transcript_entries=transcript_entries,
         )
+        # Optional accessor returning pre-rendered first-message audio for
+        # ``call_id``. Wired by ``Patter.serve()`` when the parent client
+        # has ``agent.prewarm_first_message=True``. ``None`` (default) means
+        # "no prewarm — always run live TTS".
+        self._pop_prewarm_audio = pop_prewarm_audio
         self._openai_key = openai_key
         self._deepgram_key = deepgram_key
         self._elevenlabs_key = elevenlabs_key
@@ -1825,8 +1831,8 @@ class PipelineStreamHandler(StreamHandler):
 
         # Acoustic echo cancellation: opt-in.
         #
-        # Per the industry consensus (LiveKit, Pipecat, Vapi, Retell,
-        # Bland) and Twilio's own guidance, time-domain NLMS server-side
+        # Per the industry consensus on PSTN echo cancellation and
+        # Twilio's own guidance, time-domain NLMS server-side
         # AEC is the right tool only when the SDK has near-direct access
         # to the mic and speaker (browser WebRTC, mobile native). PSTN
         # paths route through a 250–1500 ms Twilio jitter buffer + carrier
@@ -1891,25 +1897,45 @@ class PipelineStreamHandler(StreamHandler):
             # Drop any stale PCM16 carry byte from a prior synth (none at call
             # start, but defensive for parity with TS ``ttsByteCarry = null``).
             self.audio_sender.reset_pcm_carry()
+            # Check the prewarm cache first. When ``Patter.call`` was made
+            # with ``agent.prewarm_first_message=True`` the firstMessage
+            # has already been synthesised during the ringing window — we
+            # stream the bytes directly through the carrier-side
+            # AudioSender (which handles native-rate → carrier-rate
+            # resampling) and skip the TTS round-trip entirely.
+            prewarm_bytes: bytes | None = None
+            if self._pop_prewarm_audio is not None:
+                try:
+                    prewarm_bytes = self._pop_prewarm_audio(self.call_id)
+                except Exception as exc:  # noqa: BLE001 - best-effort
+                    logger.debug("pop_prewarm_audio raised: %s", exc)
+                    prewarm_bytes = None
             try:
-                async for audio_chunk in self._tts.synthesize(self.agent.first_message):
-                    if not self._is_speaking:
-                        break  # barge-in or test-hangup
-                    if not first_chunk_sent:
-                        first_chunk_sent = True
-                        if self.metrics is not None:
-                            self.metrics.record_tts_first_byte()
-                    # Far-end tap for the echo canceller — push the
-                    # exact PCM the carrier-side encoder will transmit.
-                    # Without this the AEC adapt loop has no reference
-                    # signal during the intro, resulting in unmitigated
-                    # bleed-through and a "first turn unresponsive" UX
-                    # where the user's voice is masked by the agent's
-                    # TTS in the inbound channel.
-                    if self._aec is not None:
-                        self._aec.push_far_end(audio_chunk)
-                    await self.audio_sender.send_audio(audio_chunk)
-                    self._mark_first_audio_sent()
+                if prewarm_bytes:
+                    if self.metrics is not None:
+                        self.metrics.record_tts_first_byte()
+                    first_chunk_sent = await self._stream_prewarm_bytes(prewarm_bytes)
+                else:
+                    async for audio_chunk in self._tts.synthesize(
+                        self.agent.first_message
+                    ):
+                        if not self._is_speaking:
+                            break  # barge-in or test-hangup
+                        if not first_chunk_sent:
+                            first_chunk_sent = True
+                            if self.metrics is not None:
+                                self.metrics.record_tts_first_byte()
+                        # Far-end tap for the echo canceller — push the
+                        # exact PCM the carrier-side encoder will transmit.
+                        # Without this the AEC adapt loop has no reference
+                        # signal during the intro, resulting in unmitigated
+                        # bleed-through and a "first turn unresponsive" UX
+                        # where the user's voice is masked by the agent's
+                        # TTS in the inbound channel.
+                        if self._aec is not None:
+                            self._aec.push_far_end(audio_chunk)
+                        await self.audio_sender.send_audio(audio_chunk)
+                        self._mark_first_audio_sent()
             finally:
                 # Drop any partial int16 byte to prevent cross-turn corruption
                 # if the stream threw before a complete sample was delivered.
@@ -2422,9 +2448,20 @@ class PipelineStreamHandler(StreamHandler):
         run from the legacy "transcript = cancel" path AND the opt-in
         "strategy confirmed = cancel" path without duplication.
         """
+        # Capture pending state BEFORE _clear_pending_barge_in() drops it —
+        # if VAD already started the overlap window via
+        # ``_start_pending_barge_in`` we MUST NOT call ``record_overlap_start``
+        # again (that would overwrite T1 with T2 and produce a near-zero
+        # ``InterruptionMetrics.detection_delay_ms`` on the strategy path).
+        # ``getattr`` is defensive against test fixtures that build a
+        # handler shell via ``object.__new__`` and don't initialise the
+        # pending-barge-in state — the safe default is "no pending".
+        had_pending = getattr(self, "_barge_in_pending_since", None) is not None
         self._clear_pending_barge_in()
         if self.metrics is not None:
-            self.metrics.record_overlap_start()
+            if not had_pending:
+                # Legacy path or VAD never fired — start the overlap window now.
+                self.metrics.record_overlap_start()
             self.metrics.record_bargein_detected()
         logger.debug(
             "Barge-in: caller spoke over agent (%s)",
@@ -3089,8 +3126,51 @@ class PipelineStreamHandler(StreamHandler):
             replayed * 20,
         )
 
+    # 40 ms @ 16 kHz mono PCM16 = 1280 bytes. Sized to mirror the smallest
+    # live-TTS chunk boundary so cancel granularity (mark/clear bookkeeping)
+    # is identical regardless of whether the firstMessage came from the
+    # prewarm cache or a live ``tts.synthesize`` stream.
+    _PREWARM_CHUNK_BYTES: int = 1280
+
+    async def _stream_prewarm_bytes(self, prewarm_bytes: bytes) -> bool:
+        """Stream a cached firstMessage buffer in pacing-friendly chunks.
+
+        Splits ``prewarm_bytes`` into ``_PREWARM_CHUNK_BYTES`` slices and
+        forwards each through ``self.audio_sender.send_audio`` exactly
+        like the live TTS path does — preserving Twilio mark/clear
+        granularity. A single multi-second send_audio call would push
+        the whole intro into the carrier in one go and a ``send_clear``
+        issued mid-buffer would have nothing to clear ("agent keeps
+        talking after barge-in" UX bug on the very first turn).
+
+        Returns ``True`` when at least one chunk hit the wire — the
+        caller uses that to decide whether to record the
+        TTS-first-byte / turn-complete metrics.
+        """
+        first_chunk_sent = False
+        for i in range(0, len(prewarm_bytes), self._PREWARM_CHUNK_BYTES):
+            if not self._is_speaking:
+                break  # barge-in mid-prewarm — stop now
+            chunk = prewarm_bytes[i : i + self._PREWARM_CHUNK_BYTES]
+            if not first_chunk_sent:
+                first_chunk_sent = True
+            if self._aec is not None:
+                self._aec.push_far_end(chunk)
+            await self.audio_sender.send_audio(chunk)
+            self._mark_first_audio_sent()
+        return first_chunk_sent
+
     async def cleanup(self) -> None:
         """Cancel the STT loop and close STT/TTS/remote-message adapters."""
+        # Drop any pending barge-in timeout BEFORE we tear down metrics /
+        # adapters. Without this, a call that ends while a barge-in is
+        # pending leaves an asyncio.Task scheduled to fire
+        # ``_barge_in_confirm_s`` later and call
+        # ``metrics.record_overlap_end`` on a finalised metrics object —
+        # a slow leak in long-running servers and a race producing
+        # spurious overlap_end events. Idempotent: safe to call when no
+        # pending state exists.
+        self._clear_pending_barge_in()
         if self._stt_task:
             self._stt_task.cancel()
             try:

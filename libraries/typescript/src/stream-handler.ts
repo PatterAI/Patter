@@ -166,6 +166,13 @@ export interface StreamHandlerDeps {
   readonly sanitizeVariables: (raw: Record<string, unknown>) => Record<string, string>;
   /** Replace {key} placeholders in a template string. */
   readonly resolveVariables: (template: string, variables: Record<string, string>) => string;
+  /**
+   * Optional accessor returning pre-rendered first-message audio for
+   * ``callId``. Wired by ``Patter.serve()`` when the parent client has
+   * ``agent.prewarmFirstMessage: true``. Returning ``undefined`` means
+   * "no prewarm — always run live TTS".
+   */
+  readonly popPrewarmAudio?: (callId: string) => Buffer | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -1105,6 +1112,13 @@ export class StreamHandler {
   /** Handle call stop / stream end. */
   /** Handle a carrier-emitted `stop` event signalling the call has ended. */
   async handleStop(): Promise<void> {
+    // Drop any pending barge-in timer BEFORE we tear down metrics /
+    // adapters. Without this, a call that ends while a barge-in is
+    // pending leaves a setTimeout scheduled to fire ``bargeInConfirmMs``
+    // later and call ``metricsAcc.recordOverlapEnd`` on a finalised
+    // metrics object — a slow leak in long-running servers and a race
+    // producing spurious overlap_end events. Idempotent.
+    this.clearPendingBargeIn();
     this.clearGraceTimer();
     this.flushResamplers();
     await this.closeSttOnce();
@@ -1115,6 +1129,9 @@ export class StreamHandler {
   /** Handle WebSocket close event. */
   /** Tear down adapter, STT/TTS, and per-call state when the carrier WebSocket closes. */
   async handleWsClose(): Promise<void> {
+    // See handleStop — drop pending barge-in timer before cleanup so a
+    // dead handler can never fire a stale recordOverlapEnd callback.
+    this.clearPendingBargeIn();
     this.clearGraceTimer();
     this.flushResamplers();
     // Drain STT first so in-flight transcripts fire before onCallEnd.
@@ -1169,6 +1186,45 @@ export class StreamHandler {
     this.ttsByteCarry =
       alignedLen < combined.length ? combined.subarray(alignedLen) : null;
     return combined.subarray(0, alignedLen);
+  }
+
+  /**
+   * 40 ms @ 16 kHz mono PCM16 = 1280 bytes. Sized to mirror the smallest
+   * live-TTS chunk boundary so cancel granularity (mark/clear bookkeeping)
+   * is identical regardless of whether the firstMessage came from the
+   * prewarm cache or a live ``tts.synthesizeStream`` stream.
+   */
+  private static readonly PREWARM_CHUNK_BYTES = 1280;
+
+  /**
+   * Stream a cached firstMessage buffer in pacing-friendly chunks.
+   *
+   * Splits ``prewarmBytes`` into ``PREWARM_CHUNK_BYTES`` slices and
+   * forwards each through ``deps.bridge.sendAudio`` exactly like the
+   * live TTS path does — preserving Twilio mark/clear granularity. A
+   * single multi-second sendAudio call would push the whole intro into
+   * the carrier in one go and a ``sendClear`` issued mid-buffer would
+   * have nothing to clear ("agent keeps talking after barge-in" UX bug
+   * on the very first turn).
+   *
+   * Returns ``true`` when at least one chunk hit the wire — the caller
+   * uses that to decide whether to record TTS-first-byte / turn-complete
+   * metrics.
+   */
+  private async streamPrewarmBytes(prewarmBytes: Buffer): Promise<boolean> {
+    let firstChunkSent = false;
+    for (let i = 0; i < prewarmBytes.length; i += StreamHandler.PREWARM_CHUNK_BYTES) {
+      if (!this.isSpeaking) break; // barge-in mid-prewarm — stop now
+      const chunk = prewarmBytes.subarray(i, i + StreamHandler.PREWARM_CHUNK_BYTES);
+      if (!firstChunkSent) {
+        firstChunkSent = true;
+      }
+      if (this.aec) this.aec.pushFarEnd(chunk);
+      const encoded = this.encodePipelineAudio(chunk);
+      this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
+      this.markFirstAudioSent();
+    }
+    return firstChunkSent;
   }
 
   // ---------------------------------------------------------------------------
@@ -1237,8 +1293,8 @@ export class StreamHandler {
 
     // Acoustic echo cancellation: opt-in.
     //
-    // Per the industry consensus (LiveKit, Pipecat, Vapi, Retell, Bland)
-    // and Twilio's own guidance, time-domain NLMS server-side AEC is the
+    // Per the industry consensus on PSTN echo cancellation and Twilio's
+    // own guidance, time-domain NLMS server-side AEC is the
     // RIGHT tool only when the SDK has near-direct access to the mic and
     // speaker (browser WebRTC, mobile native). PSTN paths route through
     // a 250–1500 ms Twilio jitter buffer + carrier loop — far outside
@@ -1296,22 +1352,46 @@ export class StreamHandler {
       await this.beginSpeaking();
       let firstChunkSent = false;
       this.resetTtsCarry();
+      // Check the prewarm cache first. When ``Patter.call`` was made
+      // with ``agent.prewarmFirstMessage: true`` the firstMessage has
+      // already been synthesised during the ringing window — we send
+      // the bytes directly through the carrier-side encoder (which
+      // handles native-rate → carrier-rate resampling) and skip the
+      // TTS round-trip entirely.
+      let prewarmBytes: Buffer | undefined;
+      if (this.deps.popPrewarmAudio) {
+        try {
+          prewarmBytes = this.deps.popPrewarmAudio(this.callId);
+        } catch (err) {
+          getLogger().debug(`popPrewarmAudio raised: ${String(err)}`);
+        }
+      }
       try {
-        for await (const chunk of this.tts.synthesizeStream(this.deps.agent.firstMessage)) {
-          if (!this.isSpeaking) break;  // barge-in or test-hangup
-          if (!firstChunkSent) { firstChunkSent = true; this.metricsAcc.recordTtsFirstByte(); await this.emitAudioOut(); }
-          // Far-end tap for the echo canceller — push the exact PCM the
-          // carrier-side encoder will transmit. Without this the AEC
-          // adapt loop has no reference signal during the intro,
-          // resulting in unmitigated bleed-through and a "first turn
-          // unresponsive" UX where the user's voice is masked by the
-          // agent's TTS in the inbound channel.
-          if (this.aec) {
-            this.aec.pushFarEnd(chunk);
+        if (prewarmBytes) {
+          this.metricsAcc.recordTtsFirstByte();
+          await this.emitAudioOut();
+          firstChunkSent = await this.streamPrewarmBytes(prewarmBytes);
+        } else {
+          for await (const chunk of this.tts.synthesizeStream(this.deps.agent.firstMessage)) {
+            if (!this.isSpeaking) break; // barge-in or test-hangup
+            if (!firstChunkSent) {
+              firstChunkSent = true;
+              this.metricsAcc.recordTtsFirstByte();
+              await this.emitAudioOut();
+            }
+            // Far-end tap for the echo canceller — push the exact PCM the
+            // carrier-side encoder will transmit. Without this the AEC
+            // adapt loop has no reference signal during the intro,
+            // resulting in unmitigated bleed-through and a "first turn
+            // unresponsive" UX where the user's voice is masked by the
+            // agent's TTS in the inbound channel.
+            if (this.aec) {
+              this.aec.pushFarEnd(chunk);
+            }
+            const encoded = this.encodePipelineAudio(chunk);
+            this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
+            this.markFirstAudioSent();
           }
-          const encoded = this.encodePipelineAudio(chunk);
-          this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
-          this.markFirstAudioSent();
         }
       } catch (e) {
         getLogger().error(`First message TTS error (${label}):`, e);
@@ -1698,11 +1778,20 @@ export class StreamHandler {
    * the legacy synchronous path and the strategy-confirmed async path.
    */
   private runBargeInCancel(transcriptText: string): void {
+    // Capture pending state BEFORE clearPendingBargeIn() drops it — if VAD
+    // already started the overlap window via ``startPendingBargeIn`` we MUST
+    // NOT call ``recordOverlapStart`` again (that would overwrite T1 with
+    // T2 and produce a near-zero ``InterruptionMetrics.detection_delay_ms``
+    // on the strategy path).
+    const hadPending = this.bargeInPendingSince !== null;
     this.clearPendingBargeIn();
     getLogger().debug(
       `Barge-in: caller spoke over agent (${sanitizeLogValue(transcriptText.slice(0, 40))})`,
     );
-    this.metricsAcc.recordOverlapStart();
+    if (!hadPending) {
+      // Legacy path or VAD never fired — start the overlap window now.
+      this.metricsAcc.recordOverlapStart();
+    }
     this.metricsAcc.recordBargeinDetected();
     const bargeinSpan = startSpan(SPAN_BARGEIN, { 'patter.call.id': this.callId });
     try {

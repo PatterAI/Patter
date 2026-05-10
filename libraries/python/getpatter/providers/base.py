@@ -61,6 +61,24 @@ class STTProvider(ABC):
     async def close(self) -> None:
         """Close the provider connection and release resources."""
 
+    async def warmup(self) -> None:
+        """Best-effort pre-call connection / DNS / TLS warmup.
+
+        Default implementation is a no-op. Providers can override to dial
+        open a persistent connection, prime DNS, or kick off a TLS handshake
+        ahead of the actual ``connect()`` call placed by the stream handler
+        when the carrier reports ``answered``.
+
+        Called once per outbound call from :meth:`Patter.call` when the
+        agent has ``prewarm=True`` (the default). Failures are logged at
+        DEBUG and never abort the call — this is purely a latency win.
+
+        Mirrors ``warmup()`` on :class:`TTSProvider` and the
+        :class:`LLMProvider` protocol. See ``Agent.prewarm`` for the
+        feature rationale.
+        """
+        return None
+
 
 # === TTS ===
 
@@ -75,6 +93,22 @@ class TTSProvider(ABC):
     @abstractmethod
     async def close(self) -> None:
         """Close the TTS connection and release resources."""
+
+    async def warmup(self) -> None:
+        """Best-effort pre-call connection / DNS / TLS warmup.
+
+        Default implementation is a no-op. Providers can override to prime
+        DNS / TLS / HTTP/2 ahead of the first ``synthesize()`` call so the
+        TTS first-byte latency is dominated by inference time only.
+
+        Called once per outbound call from :meth:`Patter.call` when the
+        agent has ``prewarm=True`` (the default). Failures are logged at
+        DEBUG and never abort the call.
+
+        See ``Agent.prewarm`` for the feature rationale and
+        :class:`STTProvider.warmup` for the parallel STT method.
+        """
+        return None
 
 
 # === Telephony ===
