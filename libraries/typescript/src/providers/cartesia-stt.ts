@@ -89,6 +89,8 @@ interface CartesiaEvent {
 
 /** Streaming STT adapter for Cartesia's ink-whisper WebSocket API. */
 export class CartesiaSTT {
+  /** Stable pricing/dashboard key — read by stream-handler/metrics. */
+  static readonly providerKey = 'cartesia_stt';
   private ws: WebSocket | null = null;
   private callbacks: Set<TranscriptCallback> = new Set();
   private keepaliveTimer: ReturnType<typeof setInterval> | null = null;
@@ -320,6 +322,32 @@ export class CartesiaSTT {
   sendAudio(audio: Buffer): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     this.ws.send(audio);
+  }
+
+  /**
+   * Force Cartesia to finalise the in-flight utterance immediately.
+   *
+   * Sends a ``finalize`` text frame on the live WebSocket. Cartesia
+   * replies with the final transcript followed by ``flush_done``,
+   * bypassing its conservative internal silence heuristic (which can
+   * wait 2-7 s on PSTN audio before naturally finalising). Wired
+   * into ``StreamHandler`` on the VAD ``speech_end`` event so the
+   * SDK's authoritative end-of-speech detection forces an immediate
+   * STT finalisation — turning Cartesia's natural-pause endpointing
+   * into a deterministic VAD-driven one, parity with the Deepgram
+   * fast-path. No-op when the WS isn't open. Parity with Python
+   * ``CartesiaSTT.finalize``.
+   */
+  async finalize(): Promise<void> {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    await new Promise<void>((resolve) => {
+      this.ws!.send(CartesiaSTTClientFrame.FINALIZE, (err) => {
+        if (err) {
+          getLogger().debug(`Cartesia finalize send failed: ${String(err)}`);
+        }
+        resolve();
+      });
+    });
   }
 
   /** Register a transcript listener. */

@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import os
 from enum import StrEnum
-from typing import Any, AsyncIterator, Optional
+from typing import ClassVar, Any, AsyncIterator, Optional
 
 from getpatter.providers.base import TTSProvider
 
@@ -67,6 +67,9 @@ class RimeTTS(TTSProvider):
     Defaults to the ``arcana`` model with the ``astra`` voice. Output is
     PCM_S16LE at the configured ``sample_rate`` (default 16000 Hz).
     """
+
+    #: Stable pricing/dashboard key — read by stream-handler/metrics.
+    provider_key: ClassVar[str] = "rime"
 
     def __init__(
         self,

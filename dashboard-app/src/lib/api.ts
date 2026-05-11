@@ -16,6 +16,7 @@ export interface CallCost {
   readonly llm?: number;
   readonly telephony?: number;
   readonly total?: number;
+  readonly llm_cached_savings?: number;
 }
 
 export interface CallLatency {
@@ -23,6 +24,9 @@ export interface CallLatency {
   readonly llm_ms?: number;
   readonly tts_ms?: number;
   readonly total_ms?: number;
+  readonly agent_response_ms?: number;
+  readonly endpoint_ms?: number;
+  readonly user_speech_duration_ms?: number;
 }
 
 export interface CallMetrics {
@@ -32,9 +36,14 @@ export interface CallMetrics {
   readonly stt_provider?: string;
   readonly tts_provider?: string;
   readonly llm_provider?: string;
+  readonly stt_model?: string;
+  readonly tts_model?: string;
+  readonly llm_model?: string;
   readonly cost?: CallCost;
   readonly latency_avg?: CallLatency;
+  readonly latency_p50?: CallLatency;
   readonly latency_p95?: CallLatency;
+  readonly latency_p99?: CallLatency;
   readonly turns?: readonly unknown[];
 }
 
@@ -89,6 +98,9 @@ function parseLatency(raw: unknown): CallLatency | undefined {
     llm_ms: asOptionalNumber(raw.llm_ms),
     tts_ms: asOptionalNumber(raw.tts_ms),
     total_ms: asOptionalNumber(raw.total_ms),
+    agent_response_ms: asOptionalNumber(raw.agent_response_ms),
+    endpoint_ms: asOptionalNumber(raw.endpoint_ms),
+    user_speech_duration_ms: asOptionalNumber(raw.user_speech_duration_ms),
   };
 }
 
@@ -100,6 +112,7 @@ function parseCost(raw: unknown): CallCost | undefined {
     llm: asOptionalNumber(raw.llm),
     telephony: asOptionalNumber(raw.telephony),
     total: asOptionalNumber(raw.total),
+    llm_cached_savings: asOptionalNumber(raw.llm_cached_savings),
   };
 }
 
@@ -113,9 +126,14 @@ function parseMetrics(raw: unknown): CallMetrics | null {
     stt_provider: asOptionalString(raw.stt_provider),
     tts_provider: asOptionalString(raw.tts_provider),
     llm_provider: asOptionalString(raw.llm_provider),
+    stt_model: asOptionalString(raw.stt_model),
+    tts_model: asOptionalString(raw.tts_model),
+    llm_model: asOptionalString(raw.llm_model),
     cost: parseCost(raw.cost),
     latency_avg: parseLatency(raw.latency_avg),
+    latency_p50: parseLatency(raw.latency_p50),
     latency_p95: parseLatency(raw.latency_p95),
+    latency_p99: parseLatency(raw.latency_p99),
     turns: Array.isArray(turnsRaw) ? (turnsRaw as readonly unknown[]) : undefined,
   };
 }

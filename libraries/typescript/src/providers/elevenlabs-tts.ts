@@ -169,6 +169,13 @@ export interface ElevenLabsTTSOptions {
  *   in that case.
  */
 export class ElevenLabsTTS {
+  // Stable pricing/dashboard key — read by stream-handler / metrics via
+  // ``(agent.tts.constructor as any).providerKey``. Without this the cost
+  // calculator falls back to ``constructor.name`` ("ElevenLabsTTS") which
+  // does NOT match the pricing table key "elevenlabs", silently zeroing
+  // TTS cost for callers that construct the raw REST class directly
+  // (exposed at top level as ``ElevenLabsRestTTS``).
+  static readonly providerKey = 'elevenlabs';
   private readonly apiKey: string;
   private readonly voiceId: string;
   private readonly modelId: string;

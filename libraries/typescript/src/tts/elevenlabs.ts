@@ -1,9 +1,9 @@
 /** ElevenLabs TTS for Patter pipeline mode. */
 import {
-  ElevenLabsTTS as _ElevenLabsTTS,
-  type ElevenLabsModel,
-  type ElevenLabsOutputFormat,
-} from "../providers/elevenlabs-tts";
+  ElevenLabsWebSocketTTS as _ElevenLabsWebSocketTTS,
+  type ElevenLabsWebSocketTTSOptions,
+} from "../providers/elevenlabs-ws-tts";
+import type { ElevenLabsModel } from "../providers/elevenlabs-tts";
 
 export type { ElevenLabsModel };
 
@@ -15,6 +15,9 @@ export interface ElevenLabsTTSOptions {
   /**
    * ElevenLabs voice model ID. Default is ``eleven_flash_v2_5`` (lowest TTFT).
    * Pass ``eleven_v3`` for highest quality, or any string for forward-compat.
+   *
+   * Note: ``eleven_v3`` is HTTP-only — the default WebSocket transport
+   * rejects it. Use ``ElevenLabsRestTTS`` for ``eleven_v3``.
    */
   readonly modelId?: ElevenLabsModel | string;
   readonly outputFormat?: string;
@@ -42,8 +45,28 @@ function resolveApiKey(apiKey: string | undefined): string {
   return key;
 }
 
+function buildWsOpts(opts: ElevenLabsTTSOptions): ElevenLabsWebSocketTTSOptions {
+  const out: ElevenLabsWebSocketTTSOptions = {
+    apiKey: resolveApiKey(opts.apiKey),
+    // Preserve the REST-era default voice (Sarah / EXAVITQu4vr4xnSDxMaL) so
+    // the WS flip is transparent for callers that relied on it. The raw WS
+    // provider has its own default (21m00Tcm4TlvDq8ikWAM) which we override
+    // here for backward-compat.
+    voiceId: opts.voiceId ?? "EXAVITQu4vr4xnSDxMaL",
+    modelId: opts.modelId ?? "eleven_flash_v2_5",
+    outputFormat: opts.outputFormat ?? "pcm_16000",
+    autoMode: true,
+  };
+  if (opts.voiceSettings !== undefined) out.voiceSettings = opts.voiceSettings;
+  if (opts.languageCode !== undefined) out.languageCode = opts.languageCode;
+  return out;
+}
+
 /**
  * ElevenLabs TTS.
+ *
+ * Default = WebSocket streaming (added 0.6.1). For HTTP REST opt-out:
+ * use `new ElevenLabsRestTTS(...)` directly.
  *
  * @example
  * ```ts
@@ -57,19 +80,10 @@ function resolveApiKey(apiKey: string | undefined): string {
  * 16 kHz, native Telnyx default) on phone calls to skip the SDK-side
  * resampling / transcoding step.
  */
-export class TTS extends _ElevenLabsTTS {
-  static readonly providerKey = "elevenlabs";
+export class TTS extends _ElevenLabsWebSocketTTS {
+  static readonly providerKey = "elevenlabs_ws";
   constructor(opts: ElevenLabsTTSOptions = {}) {
-    // Use the parent's options-object overload so optional fields
-    // (languageCode, voiceSettings) reach the underlying provider —
-    // the legacy positional signature drops them silently.
-    super(resolveApiKey(opts.apiKey), {
-      voiceId: opts.voiceId ?? "EXAVITQu4vr4xnSDxMaL",
-      modelId: opts.modelId ?? "eleven_flash_v2_5",
-      outputFormat: (opts.outputFormat ?? "pcm_16000") as ElevenLabsOutputFormat,
-      languageCode: opts.languageCode,
-      voiceSettings: opts.voiceSettings as never,
-    });
+    super(buildWsOpts(opts));
   }
 
   /** Pipeline TTS pre-configured for Twilio Media Streams (`ulaw_8000`). */

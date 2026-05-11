@@ -385,6 +385,9 @@ class OpenAILLMProvider:
             ``f"getpatter/{__version__}"`` for upstream attribution.
     """
 
+    #: Stable pricing/dashboard key — read by stream-handler/metrics.
+    provider_key: ClassVar[str] = "openai"
+
     def __init__(
         self,
         api_key: str,
@@ -804,6 +807,7 @@ class LLMLoop:
             tool_calls_accumulated: dict[int, dict] = {}
             text_parts: list[str] = []
             has_tool_calls = False
+            usage_chunk_received = False
 
             # Open a span around the provider streaming call. Kept as an
             # explicit __enter__/__exit__ (rather than ``with``) because we
@@ -843,6 +847,7 @@ class LLMLoop:
                                 yield content
 
                     elif chunk_type == "usage":
+                        usage_chunk_received = True
                         if self._metrics is not None:
                             self._metrics.record_llm_usage(
                                 provider=self._provider_name,
@@ -884,6 +889,36 @@ class LLMLoop:
                             ]
             finally:
                 _span_cm.__exit__(None, None, None)
+
+            # Fallback billing: some providers (Cerebras streaming has been
+            # observed to do this on certain chunk-shape variants) don't
+            # emit a ``usage`` chunk even with ``stream_options={"include_usage":
+            # True}``. Without this fallback the LLM cost silently shows ~0
+            # for the whole call. char/4 is the canonical OpenAI-tokenizer
+            # rough estimate; conservative-upward is preferable to silent zero.
+            if not usage_chunk_received and self._metrics is not None:
+                input_chars = sum(
+                    len(m.get("content", "") or "")
+                    for m in messages
+                    if isinstance(m, dict)
+                )
+                output_chars = sum(len(p) for p in text_parts)
+                estimated_input = max(1, input_chars // 4)
+                estimated_output = max(1, output_chars // 4)
+                self._metrics.record_llm_usage(
+                    provider=self._provider_name,
+                    model=self._model,
+                    input_tokens=estimated_input,
+                    output_tokens=estimated_output,
+                )
+                logger.warning(
+                    "LLM usage chunk missing from %s/%s stream; "
+                    "estimating output_tokens=%d (input_tokens=%d) via char/4 fallback",
+                    self._provider_name,
+                    self._model,
+                    estimated_output,
+                    estimated_input,
+                )
 
             # If no tool calls, we're done
             if not has_tool_calls:

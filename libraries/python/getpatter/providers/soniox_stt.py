@@ -18,7 +18,7 @@ import asyncio
 import json
 import logging
 from enum import IntEnum, StrEnum
-from typing import Any, AsyncIterator
+from typing import ClassVar, Any, AsyncIterator
 
 import aiohttp
 
@@ -152,6 +152,9 @@ class SonioxSTT(STTProvider):
         client_reference_id: Optional correlation ID for Soniox dashboards.
         base_url: Override the Soniox WebSocket URL (used by tests).
     """
+
+    #: Stable pricing/dashboard key — read by stream-handler/metrics.
+    provider_key: ClassVar[str] = "soniox"
 
     def __init__(
         self,

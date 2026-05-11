@@ -12,7 +12,7 @@ import asyncio
 import json
 import struct
 from enum import IntEnum, StrEnum
-from typing import AsyncIterator, Literal
+from typing import ClassVar, AsyncIterator, Literal
 
 import aiohttp
 
@@ -91,6 +91,9 @@ class TelnyxSTT(STTProvider):
         session: Optional pre-built ``aiohttp.ClientSession``. If omitted, a new
             session is created and closed with :meth:`close`.
     """
+
+    #: Stable pricing/dashboard key — read by stream-handler/metrics.
+    provider_key: ClassVar[str] = "telnyx_stt"
 
     def __init__(
         self,

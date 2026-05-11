@@ -153,6 +153,8 @@ interface DeepgramResultsMessage {
 
 /** Streaming STT adapter for Deepgram's `/v1/listen` WebSocket API. */
 export class DeepgramSTT {
+  /** Stable pricing/dashboard key — read by stream-handler/metrics. */
+  static readonly providerKey = 'deepgram';
   private ws: WebSocket | null = null;
   private readonly transcriptCallbacks = new Set<TranscriptCallback>();
   private readonly errorCallbacks = new Set<ErrorCallback>();

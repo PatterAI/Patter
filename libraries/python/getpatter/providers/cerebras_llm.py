@@ -23,7 +23,7 @@ import json
 import logging
 import os
 from enum import StrEnum
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, ClassVar
 
 from getpatter.services.llm_loop import OpenAILLMProvider
 
@@ -175,10 +175,13 @@ class CerebrasLLMProvider(OpenAILLMProvider):
             ``stop``, ``temperature``, ``max_tokens``, ``user_agent``).
     """
 
+    #: Stable pricing/dashboard key — read by stream-handler/metrics.
+    provider_key: ClassVar[str] = "cerebras"
+
     def __init__(
         self,
         api_key: str | None = None,
-        model: Union[CerebrasModel, str] = _DEFAULT_MODEL,
+        model: CerebrasModel | str = _DEFAULT_MODEL,
         base_url: str = _CEREBRAS_BASE_URL,
         gzip_compression: bool = True,
         msgpack_encoding: bool = True,

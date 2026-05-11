@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { Call } from './CallTable';
+import { fmtCostUSD } from './format';
 
 export interface MetricsPanelProps {
   call: Call | null;
@@ -72,21 +73,22 @@ function LatencyView({ call }: { call: Call }) {
   // round-trip, so the SDK only knows the end-to-end latency. Breaking it
   // into stt/llm/tts is meaningless. Pipeline-mode calls expose all four.
   if (isRealtime) {
+    const showPctRt = (call.turnCount ?? 0) >= 2;
     return (
       <>
         <div className="lat-grid">
           <div className="latbox">
             <div className="l">end-to-end p50</div>
             <div className="v">
-              {p50 || '—'}
-              <span className="u">ms</span>
+              {showPctRt ? p50 || '—' : '—'}
+              {showPctRt && <span className="u">ms</span>}
             </div>
           </div>
-          <div className={'latbox' + (p95 > 600 ? ' warn' : '')}>
+          <div className={'latbox' + (showPctRt && p95 > 600 ? ' warn' : '')}>
             <div className="l">end-to-end p95</div>
             <div className="v">
-              {p95 || '—'}
-              <span className="u">ms</span>
+              {showPctRt ? p95 || '—' : '—'}
+              {showPctRt && <span className="u">ms</span>}
             </div>
           </div>
         </div>
@@ -115,10 +117,14 @@ function LatencyView({ call }: { call: Call }) {
   }
 
   const stt = call.sttAvg || 0;
-  const llm = call.latencyP50 || 0;
+  const llm = call.llmAvg || 0;
   const tts = call.ttsAvg || 0;
   const total = stt + llm + tts;
   const max = Math.max(total, 800);
+  // Percentile boxes are statistical noise on calls with too few turns
+  // (with n=4 samples, p95 is interpolation between sample[2] and sample[3]
+  // and doesn't correspond to any real turn). Show ``—`` until ≥5 turns.
+  const showPct = (call.turnCount ?? 0) >= 2;
 
   return (
     <>
@@ -126,15 +132,15 @@ function LatencyView({ call }: { call: Call }) {
         <div className="latbox">
           <div className="l">p50</div>
           <div className="v">
-            {call.latencyP50 ?? '—'}
-            <span className="u">ms</span>
+            {showPct ? call.latencyP50 ?? '—' : '—'}
+            {showPct && <span className="u">ms</span>}
           </div>
         </div>
-        <div className={'latbox' + (p95 > 600 ? ' warn' : '')}>
+        <div className={'latbox' + (showPct && p95 > 600 ? ' warn' : '')}>
           <div className="l">p95</div>
           <div className="v">
-            {p95}
-            <span className="u">ms</span>
+            {showPct ? p95 : '—'}
+            {showPct && <span className="u">ms</span>}
           </div>
         </div>
         <div className="latbox">
@@ -203,15 +209,42 @@ function LatencyView({ call }: { call: Call }) {
 
 // ---------- Cost ----------
 
+function titleCase(s: string): string {
+  if (s.length === 0) return s;
+  // Strip provider-key transport suffixes (_ws, _rest) and role suffixes
+  // (_stt, _tts, _llm). Repeated `+` handles compound suffixes like
+  // "cartesia_tts_ws" -> "cartesia". The SDK uses provider_key like
+  // "elevenlabs_ws" / "cartesia_stt" to disambiguate adapter classes;
+  // the suffix is internal noise in user-facing UI.
+  const cleaned = s.replace(/(?:_(?:ws|rest|stt|tts|llm))+$/i, '');
+  return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+}
+
 function CostView({ call }: { call: Call }) {
   const c = call.cost;
   const telco = c.telco ?? 0;
   const llm = c.llm ?? 0;
-  const sttTts = c.sttTts ?? 0;
+  // Always prefer the per-component split when present; fall back to the
+  // legacy combined ``sttTts`` field only when the SDK didn't emit the
+  // split. Greenfield calls (>=0.6.1) always emit stt + tts separately.
+  const stt = c.stt ?? 0;
+  const tts = c.tts ?? 0;
+  const sttTtsCombined = c.sttTts ?? 0;
+  const sttTtsLegacy = stt === 0 && tts === 0 ? sttTtsCombined : 0;
   const cached = c.cached ?? 0;
-  const subtotal = telco + llm + sttTts;
+  const subtotal = telco + llm + stt + tts + sttTtsLegacy;
   const total = c.total ?? subtotal - cached;
   const seg = (v: number) => (subtotal > 0 ? (v / subtotal) * 100 : 0);
+
+  const sttLabel = call.sttProvider
+    ? `${titleCase(call.sttProvider)} STT${call.sttModel ? ` · ${call.sttModel}` : ''}`
+    : 'STT';
+  const ttsLabel = call.ttsProvider
+    ? `${titleCase(call.ttsProvider)} TTS${call.ttsModel ? ` · ${call.ttsModel}` : ''}`
+    : 'TTS';
+  const llmLabel = call.llmModel
+    ? `${call.model ? titleCase(call.model) + ' · ' : ''}${call.llmModel}`
+    : call.model || 'LLM';
 
   return (
     <>
@@ -219,7 +252,8 @@ function CostView({ call }: { call: Call }) {
         <div className="cost-bar">
           <i style={{ background: '#cc0000', width: seg(telco) + '%' }} />
           <i style={{ background: '#DF9367', width: seg(llm) + '%' }} />
-          <i style={{ background: '#1a1a1a', width: seg(sttTts) + '%' }} />
+          <i style={{ background: '#1a1a1a', width: seg(stt + sttTtsLegacy) + '%' }} />
+          <i style={{ background: '#6c6c6c', width: seg(tts) + '%' }} />
         </div>
       )}
       {telco > 0 && (
@@ -228,26 +262,44 @@ function CostView({ call }: { call: Call }) {
             <span className="swatch" style={{ background: '#cc0000' }}></span>
             {call.carrier === 'twilio' ? 'Twilio' : 'Telnyx'}
           </span>
-          <span className="v">${telco.toFixed(3)}</span>
+          <span className="v">{fmtCostUSD(telco)}</span>
         </div>
       )}
       {llm > 0 && (
         <div className="stack-row">
           <span className="lbl">
             <span className="swatch" style={{ background: '#DF9367' }}></span>
-            {call.model || 'LLM'}
+            {llmLabel}
           </span>
-          <span className="v">${llm.toFixed(3)}</span>
-          {cached > 0 && <span className="saved">−${cached.toFixed(3)} cached</span>}
+          <span className="v">{fmtCostUSD(llm)}</span>
+          {cached > 0 && <span className="saved">−{fmtCostUSD(cached)} cached</span>}
         </div>
       )}
-      {sttTts > 0 && (
+      {stt > 0 && (
         <div className="stack-row">
           <span className="lbl">
             <span className="swatch" style={{ background: '#1a1a1a' }}></span>
-            STT / TTS
+            {sttLabel}
           </span>
-          <span className="v">${sttTts.toFixed(3)}</span>
+          <span className="v">{fmtCostUSD(stt)}</span>
+        </div>
+      )}
+      {tts > 0 && (
+        <div className="stack-row">
+          <span className="lbl">
+            <span className="swatch" style={{ background: '#6c6c6c' }}></span>
+            {ttsLabel}
+          </span>
+          <span className="v">{fmtCostUSD(tts)}</span>
+        </div>
+      )}
+      {sttTtsLegacy > 0 && (
+        <div className="stack-row">
+          <span className="lbl">
+            <span className="swatch" style={{ background: '#1a1a1a' }}></span>
+            STT / TTS (legacy)
+          </span>
+          <span className="v">{fmtCostUSD(sttTtsLegacy)}</span>
         </div>
       )}
       <div className="stack-row">
@@ -266,7 +318,7 @@ function CostView({ call }: { call: Call }) {
             </span>
           )}
         </span>
-        <span className="v">${total.toFixed(3)}</span>
+        <span className="v">{fmtCostUSD(total)}</span>
       </div>
     </>
   );

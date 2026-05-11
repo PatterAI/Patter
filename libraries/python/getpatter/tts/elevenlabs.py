@@ -1,11 +1,20 @@
-"""ElevenLabs TTS for Patter pipeline mode."""
+"""ElevenLabs TTS for Patter pipeline mode.
+
+Default transport is **WebSocket streaming** (``stream-input`` endpoint),
+which removes the per-utterance HTTP request setup time of the legacy
+REST variant. For callers that need the HTTP REST transport explicitly
+(simpler retries, no persistent socket), import
+:class:`getpatter.ElevenLabsRestTTS` instead.
+"""
 
 from __future__ import annotations
 
 import os
 from typing import ClassVar
 
-from getpatter.providers.elevenlabs_tts import ElevenLabsTTS as _ElevenLabsTTS
+from getpatter.providers.elevenlabs_ws_tts import (
+    ElevenLabsWebSocketTTS as _ElevenLabsWebSocketTTS,
+)
 
 __all__ = ["TTS"]
 
@@ -20,8 +29,11 @@ def _resolve_api_key(api_key: str | None) -> str:
     return key
 
 
-class TTS(_ElevenLabsTTS):
+class TTS(_ElevenLabsWebSocketTTS):
     """ElevenLabs streaming TTS.
+
+    Default = WebSocket streaming (added 0.6.1). For HTTP REST opt-out:
+    use ``ElevenLabsRestTTS(...)`` directly.
 
     Example::
 
@@ -37,7 +49,7 @@ class TTS(_ElevenLabsTTS):
     to skip the SDK-side resampling / transcoding step on phone calls.
     """
 
-    provider_key: ClassVar[str] = "elevenlabs"
+    provider_key: ClassVar[str] = "elevenlabs_ws"
 
     def __init__(
         self,
@@ -48,17 +60,30 @@ class TTS(_ElevenLabsTTS):
         output_format: str = "pcm_16000",
         language_code: str | None = None,
         voice_settings: dict | None = None,
-        chunk_size: int = 4096,
+        auto_mode: bool = True,
+        inactivity_timeout: int | None = None,
+        chunk_length_schedule: list[int] | None = None,
+        # ``chunk_size`` is accepted for backward compatibility with the
+        # historical REST-backed signature but ignored by the WS transport
+        # (chunking is driven by ``chunk_length_schedule`` on that path).
+        chunk_size: int | None = None,
     ) -> None:
-        super().__init__(
-            api_key=_resolve_api_key(api_key),
-            voice_id=voice_id,
-            model_id=model_id,
-            output_format=output_format,
-            voice_settings=voice_settings,
-            language_code=language_code,
-            chunk_size=chunk_size,
-        )
+        kwargs: dict = {
+            "api_key": _resolve_api_key(api_key),
+            "voice_id": voice_id,
+            "model_id": model_id,
+            "output_format": output_format,
+            "auto_mode": auto_mode,
+        }
+        if voice_settings is not None:
+            kwargs["voice_settings"] = voice_settings
+        if language_code is not None:
+            kwargs["language_code"] = language_code
+        if inactivity_timeout is not None:
+            kwargs["inactivity_timeout"] = inactivity_timeout
+        if chunk_length_schedule is not None:
+            kwargs["chunk_length_schedule"] = chunk_length_schedule
+        super().__init__(**kwargs)
 
     @classmethod
     def for_twilio(
@@ -71,8 +96,7 @@ class TTS(_ElevenLabsTTS):
         """Pipeline TTS pre-configured for Twilio Media Streams (``ulaw_8000``).
 
         Falls back to ``ELEVENLABS_API_KEY`` from the env when ``api_key``
-        is omitted. See :class:`getpatter.providers.elevenlabs_tts.ElevenLabsTTS.for_twilio`
-        for rationale.
+        is omitted.
         """
         return cls(
             api_key=_resolve_api_key(api_key),
@@ -92,8 +116,7 @@ class TTS(_ElevenLabsTTS):
         """Pipeline TTS pre-configured for Telnyx (``pcm_16000``).
 
         Falls back to ``ELEVENLABS_API_KEY`` from the env when ``api_key``
-        is omitted. See :class:`getpatter.providers.elevenlabs_tts.ElevenLabsTTS.for_telnyx`
-        for the trade-off vs. ``ulaw_8000``.
+        is omitted.
         """
         return cls(
             api_key=_resolve_api_key(api_key),

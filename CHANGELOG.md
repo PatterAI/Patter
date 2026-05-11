@@ -1,5 +1,235 @@
 ## 0.6.1 (2026-05-09)
 
+### Fixed — Barge-in bug bundle: 6.8s latency outliers, double-talk dispatch, stale anchors, firstMessage uninterruptible (Python + TypeScript parity)
+
+Real PSTN test (round 10f, 11 turns with user-initiated interruptions) surfaced four correlated bugs in the barge-in pipeline that the previous strategy work in 0.6.1 did not cover. Investigation report (`/private/tmp/.../a6fae04df253294f2.output`) traced all four to anchor mismanagement around the interrupt boundary plus an over-aggressive VAD threshold.
+
+**Bug 1 — endpoint_ms == stt_ms == 6818 ms (dishonest p95 outliers).** `recordSttComplete` was fabricating `_endpointSignalAt = _sttComplete` when no legitimate VAD `speech_end` had fired, producing a synthetic anchor that then made `endpoint_ms = _turnCommittedMono − _turnStart` (the entire turn duration). Fix: never fake the anchor; let `endpoint_ms` be `undefined` on the affected turn and increment a `_endpointSignalMissingCount` counter for observability. Added a 100 ms post-barge-in gate (`_lastBargeinAt`): the next turn's `endpoint_ms` / `stt_ms` are dropped from the percentile distribution since post-barge-in anchors are inherently noisy. Files: `libraries/typescript/src/metrics.ts:412-422,538-549,572-596,870-984`, `libraries/python/getpatter/services/metrics.py:289,362,395,696`.
+
+**Bug 2 — double-talk: agent answered the 1st sentence while user said the 2nd.** Deepgram emits `is_final` on any pause > a few ms; the SDK dispatched LLM immediately. Two fixes ship together:
+
+1. **Bumped Silero `minSilenceDuration` default `0.1` → `0.4` s**. The previous 100 ms threshold fired VAD `speech_end` on natural inter-sentence pauses (typically 200-400 ms), which then prematurely finalised the user turn at the STT layer. 0.4 s is the industry-standard default for telephony agents: bridges intra-utterance pauses without delaying single-sentence turns by more than the natural conversational gap. Files: `libraries/typescript/src/providers/silero-vad.ts:366-378`, `libraries/python/getpatter/providers/silero_vad.py:125`.
+2. **Synchronous STT-final → LLM dispatch (no debounce)**. An earlier 400 ms debounce attempt (`_scheduleTurnCommit` / `_runDeferredTurnCommit`) was prototyped and rolled back before release: the partial-transcript reschedule branch overwrote the dispatched FINAL text with the latest partial, silently dropping entire user turns during slow-LLM windows. Verified on real PSTN (round 10k, gpt-5-nano: 3 of 5 user turns dropped). The shipped behaviour dispatches on `is_final` immediately; when Deepgram emits two close-together finals like `"What's the"` then `"What's the best?"`, the SDK answers both (benign double-answer) instead of dropping the first (catastrophic). Tracked future improvements documented internally — options include raising Deepgram `endpointingMs` per-agent, queue-cancel semantics, and sentence-segment merge in `commitTranscript`. Files: `libraries/typescript/src/stream-handler.ts` (inline dispatch restored), `libraries/python/getpatter/stream_handler.py` (`_dispatch_turn` called inline from `_stt_loop`).
+
+**Bug 3 — anchors stale after strategy-confirmed barge-in.** `runBargeInCancel` cleared anchors via `_resetTurnState()` but never re-anchored to the next legitimate VAD `speech_start`; the next turn either inherited stale anchors or anchored to the first inbound audio byte (adding ~250 ms ring-buffer delay to every post-barge-in turn). Added `anchorUserSpeechStart()` calls in three places: after `recordTurnInterrupted` in `runBargeInCancel`, and on the pending-barge-in timeout path. Also `_resetTurnState` now resets `_initialTtfbEmitted` (TS) / `_initial_ttfb_emitted` + `_llm_ttfb_emitted` + `_tts_ttfb_emitted` (Py) so EventBus TTFB re-fires after barge-in when `reportOnlyInitialTtfb=true`. Files: `libraries/typescript/src/stream-handler.ts:2034-2058`, `libraries/typescript/src/metrics.ts:846-867`, Python mirrors.
+
+**Bug 4 — firstMessage was uninterruptible by VAD for 300-800 ms.** `canBargeIn()` gates on `firstAudioSentAt !== null`, but that field was only stamped when the first audio chunk arrived from the TTS provider — meaning the 250 ms anti-flicker timer didn't start until the user had already missed the TTFB window. Fix: `beginSpeaking(isFirstMessage=true)` now stamps `firstAudioSentAt = Date.now()` synchronously, so the gate timer runs in parallel with TTS TTFB. The firstMessage TTS loop already breaks on `!this.isSpeaking`, so user speech now propagates cancellation correctly. Files: `libraries/typescript/src/stream-handler.ts:357,1477`, `libraries/python/getpatter/stream_handler.py:3187,2043`.
+
+### Changed — Dashboard percentile threshold lowered 5 → 2 turns
+
+`LatencyPanel` and `MetricsPanel` displayed `—` for `p50` / `p95` until a call had ≥5 turns. On most PSTN calls (typically 4-7 turns) the detail pane showed dashes while the call-list `P95 LATENCY` column already showed a real number via `avg` fallback — confusing for users comparing the two surfaces. Lowered to 2 turns so the detail pane matches the list column. With n=2 the percentile is statistically thin but consistent with what the list shows.
+
+Files: `dashboard-app/src/components/LatencyPanel.tsx:12`, `dashboard-app/src/components/MetricsPanel.tsx:76,127`. Bundle synced to `libraries/{typescript,python}/.../dashboard/ui.html` via `dashboard-app/scripts/sync.mjs`.
+
+### Added — Krisp VIVA noise-suppression scaffold for TypeScript SDK
+
+Mirrors the Python `KrispVivaFilter` API at `libraries/typescript/src/providers/krisp-filter.ts` for cross-SDK parity. Class signature accepts the same options (`modelPath`, `noiseSuppressionLevel`, `frameDurationMs`, `sampleRate`) but throws at construction time with guidance — Krisp does not publish an official Node.js SDK as of 2026-05. Opt-in, proprietary, license required, no default-on. Patter ships only the interface; users supply SDK + `.kef` model.
+
+Available paths today:
+1. **Python SDK**: `from getpatter.providers.krisp_filter import KrispVivaFilter` — fully implemented (existed prior to this change, unmodified). Requires `pip install getpatter[krisp]` + `KRISP_VIVA_SDK_LICENSE_KEY` + `KRISP_VIVA_FILTER_MODEL_PATH`.
+2. **TypeScript today**: `new DeepFilterNetFilter({ modelPath })` from `getpatter` — community ONNX export, no license. `KrispVivaFilter` throws until a Node binding is available.
+
+New top-level exports from `getpatter`: `KrispVivaFilter`, `KrispVivaFilterOptions`, `KrispSampleRate`, `KrispFrameDuration`, `DeepFilterNetFilter`, `DeepFilterNetOptions`. The TS scaffold closes when an official Krisp Node SDK ships or a community NAPI/WASM binding becomes available.
+
+### Fixed — Dashboard live SSE update wiped transcripts + latency from prior calls
+
+When a new call started, the live SSE refresh in
+`dashboard-app/src/hooks/useDashboardData.ts:103` rebuilt the entire
+calls array from `mergeCalls(active, recent)` without consulting the
+previous state. If the new payload had any field as undefined — common
+when the server-side `MetricsStore.updateCallStatus` writes a synthetic
+"terminal" record with `metrics: undefined` ahead of the true
+`recordCallEnd` — the prior call lost its transcripts and latency p50/
+p95 in the UI. Added `mergeCallPreserving(prev, next)` that does
+`next.field ?? prev.field` per critical field, masking the lossy
+secondary records server-side. The SDK-side double-write race in
+`libraries/typescript/src/dashboard/store.ts:134-186` is flagged with a
+TODO for 0.6.2.
+
+### Changed — `elevenlabs.TTS` facade now defaults to WebSocket streaming (Python + TypeScript parity)
+
+Industry best practice for telephony agents is a long-lived WS connection — every other Patter STT adapter (Deepgram nova-3, Cartesia ink-whisper, Whisper streaming, AssemblyAI) already runs on persistent WS. ElevenLabs TTS was the outlier: the default `elevenlabs.TTS()` facade opened a fresh HTTP POST per sentence (TLS handshake, DNS, full request setup repeated on every turn), producing measured TTFB p50 ~265 ms on PSTN — vs ElevenLabs's published server-side TTFT of ~75 ms. The gap was almost entirely HTTP setup, not synthesis.
+
+Flipped both SDKs to extend the WebSocket class (`_ElevenLabsWebSocketTTS` / `_ElevenLabsTTSWebSocket`) by default. Expected TTFB p50 drop: ~265 ms → ~80-100 ms (after the first turn pays one handshake; turn 2+ reuses the open WS).
+
+- TS: `libraries/typescript/src/tts/elevenlabs.ts` — `class TTS extends _ElevenLabsWebSocketTTS`. Default `voiceId="EXAVITQu4vr4xnSDxMaL"`, `modelId="eleven_flash_v2_5"`, `outputFormat="pcm_16000"`, `autoMode=true`. `providerKey` flipped `"elevenlabs"` → `"elevenlabs_ws"`. `for_twilio`/`for_telnyx` signatures unchanged.
+- Py: `libraries/python/getpatter/tts/elevenlabs.py` — `class TTS(_ElevenLabsWebSocketTTS)` with matching defaults. `chunk_size` kept as tolerated-but-ignored kwarg (the WS path doesn't use it) to avoid breaking pinned callers.
+- Compatibility aliases preserved: `elevenlabs_ws.TTS` (TS + Py) now re-exports from `elevenlabs.TTS`. `ElevenLabsWebSocketTTS` top-level symbol unchanged.
+
+**REST opt-out** — new top-level export `ElevenLabsRestTTS` in both SDKs. Use when:
+- The free / starter tier (WS requires Pro plan; the WS class raises `PLAN_REQUIRED_MSG` directing callers to `ElevenLabsRestTTS`).
+- The `eleven_v3` model (HTTP-only — the WS class rejects it at construction with the same redirect).
+
+```ts
+// TS
+import { ElevenLabsRestTTS } from "getpatter";
+const tts = new ElevenLabsRestTTS(process.env.ELEVENLABS_API_KEY!);
+```
+```python
+# Python
+from getpatter import ElevenLabsRestTTS
+tts = ElevenLabsRestTTS(api_key=os.environ["ELEVENLABS_API_KEY"])
+```
+
+Dashboard label-prettifier extended in `dashboard-app/src/components/{CostPanel,MetricsPanel}.tsx` — `titleCase()` regex now strips `_ws` / `_rest` transport suffixes in addition to `_stt` / `_tts` / `_llm` role suffixes. `"elevenlabs_ws"` now renders as "Elevenlabs" without the suffix bleed into UI. Repeated `+` handles compound suffixes (`"cartesia_tts_ws"` → `"Cartesia"`).
+
+Provider error messages in `providers/elevenlabs-ws-tts.{ts,py}` updated: `payment_required` and `eleven_v3` rejections now direct users to `ElevenLabsRestTTS` (was `ElevenLabsTTS` — which is now the WS facade itself, making the previous text recursive).
+
+Tests: 173 Python (was 170) + 95 TS (was 93) pass. 1 REST-specific assertion in `test_tts_facade_language.py` migrated to `ElevenLabsRestTTS` (the `chunk_size == 4096` default). 2 new tests each side verify the flip semantics and the opt-out is not aliased.
+
+Acceptance matrix: 25 duplicate `outbound-*-elevenlabs-ws.ts` scenarios removed (now functionally identical to `outbound-*-elevenlabs.ts`). Added 1 explicit regression `outbound-deepgram-cerebras-elevenlabs-rest.ts` to keep the REST path exercised. `_manifest.json` updated (78 entries).
+
+Migration: **0 code changes** for callers using the default — they automatically benefit from the latency drop. **1-line import rename** for callers who deliberately want HTTP REST (`ElevenLabsTTS` → `ElevenLabsRestTTS`).
+
+### Fixed — Console "Call ended" summary log p95 used `total_ms`, not `agent_response_ms` (Python + TypeScript parity)
+
+The single-line `[PATTER] Call ended: ... p95=Xms` log emitted by `stream_handler.ts` (TS) and `telephony/{twilio,telnyx}.py` (Py) at the end of every call read `latency_p95.total_ms` — the round-trip duration that **includes** how long the user spoke (`user_speech_duration_ms`), not the system-controlled wait time. The metrics module itself flags this in `metrics.ts:85-89`: "Unlike `total_ms` (which spans the user's entire utterance and therefore grows with how long the user spoke), `agent_response_ms` isolates the system-controlled latency."
+
+The dashboard already shows the correct field — `agent_response_ms` — under the **"p95 wait"** tile (`LatencyPanel.tsx:48`, `mappers.ts:221`). The console log diverged: a 51.6 s, 7-turn call where the user spoke ~1.2 s/turn printed `p95=2577ms` while the dashboard showed `p95 wait=1361ms` for the same call. The 1361 ms is the genuine user-perceived wait; the 2577 ms confused users into thinking the SDK was slow.
+
+Switched both SDKs to read `latency_p95.agent_response_ms` (fallback `total_ms` for legacy short calls where the percentile isn't computed) and renamed the label to **`p95 wait=Xms`** to match the dashboard tile word-for-word. Files: `libraries/typescript/src/stream-handler.ts:2810-2820`, `libraries/python/getpatter/telephony/twilio.py:657-680`, `libraries/python/getpatter/telephony/telnyx.py:792-810`.
+
+### Fixed — Telnyx pricing direction-aware: inbound 2× over-bill resolved
+
+Audited against https://telnyx.com/pricing/elastic-sip (verified
+2026-05-11). The previous flat `"telnyx": $0.007/min` over-billed
+inbound calls by 2× ($0.0035 real) and approximately matched outbound
+($0.005-0.009 range). Split into two entries:
+- `telnyx_inbound`: $0.0035/min (US local termination)
+- `telnyx_outbound`: $0.007/min (Pay-As-You-Go mid-range)
+The legacy `telnyx` key is preserved at $0.007 for backward-compat with
+users who override `pricing={"telnyx": {...}}` and don't know direction.
+Billing granularity confirmed per-minute (not per-second as previous
+internal docs claimed). Files: `libraries/python/getpatter/pricing.py`,
+`libraries/typescript/src/pricing.ts`. Tests added at
+`libraries/python/tests/test_pricing.py`,
+`libraries/typescript/tests/pricing.test.ts`.
+
+### Fixed — Python Twilio STT cost 4× over-bill (sample rate / bytes-per-sample mismatch)
+
+`libraries/python/getpatter/telephony/twilio.py` configured the metrics
+STT format as `(sample_rate=8000, bytes_per_sample=1)` (mulaw 8 kHz),
+but `stream_handler.py` already decodes the inbound mulaw to PCM16
+@ 16 kHz before feeding bytes to `metrics.add_stt_audio_bytes()`. With
+the inverted format, every 60 s of real audio was reported as 240 s and
+billed 4× the true cost ($0.0192 instead of $0.0048 against Deepgram
+Nova-3 at $0.0048/min). TypeScript was unaffected (default 16000/2 was
+never overridden); Python Telnyx was unaffected (already configured 16000/2).
+Fix: `configure_stt_format(sample_rate=16000, bytes_per_sample=2)` in
+the Twilio adapter, plus a regression test asserting 1.92 MB of PCM16
+bytes = 60 s of audio. Customers were over-billed; refund window TBD.
+
+### Fixed — Dashboard "−$X cached" badge dead for Realtime prompt-caching savings
+
+The SDK emits `cost.llm_cached_savings` (Realtime / Anthropic prompt
+caching discount) but `dashboard-app/src/lib/mappers.ts:computeCost()`
+never read it, so `Call.cost.cached` was always undefined and the badge
+in `CostPanel.tsx:64` never rendered. Wired the field through
+`api.ts:CallCost` (added `llm_cached_savings?: number` + `parseCost`)
+and the mapper now populates `result.cached`. The "−$0.00X cached" line
+now appears next to the LLM cost row whenever a Realtime call has any
+cached-token savings.
+
+### Changed — LLM usage-chunk char/4 fallback log bumped DEBUG → WARN (Python + TypeScript)
+
+The 0.6.1 char/4 fallback (added when Cerebras was observed dropping
+the `usage` chunk on some streams) was logging at DEBUG, so silent-zero
+incidents only showed up in dev runs. Bumped to WARN in
+`libraries/python/getpatter/services/llm_loop.py` and
+`libraries/typescript/src/llm-loop.ts` so production observability
+surfaces it. Message: "LLM usage chunk missing from {provider}/{model};
+estimating output_tokens=N via char/4 fallback".
+
+### Fixed — Deepgram STT pricing reflected legacy standard rate, not the current PAYG promo (Python + TypeScript parity)
+
+Audited against https://deepgram.com/pricing (verified 2026-05-11). Deepgram is currently running a "Limited-time promotional rates on streaming" tier that customers actually pay today; the prior $0.0077/min Nova-3 figure was the launch-era standard rate that has been struck through on the public page.
+
+| Model | Old (USD / min) | New (USD / min) | Notes |
+|-------|-----------------|-----------------|-------|
+| `nova-3` (default) | $0.0077 | **$0.0048** | over 60% |
+| `nova-3-multilingual` | $0.0092 | **$0.0058** | over 58% |
+| `flux` (added) | — | **$0.0065** | Flux English; new event-driven STT (2026) |
+| `flux-english` (added) | — | **$0.0065** | alias of `flux` |
+| `flux-multilingual` (added) | — | **$0.0078** | new |
+| `nova-2`, `nova`, `whisper-*` | unchanged | unchanged | legacy / non-Nova-3 tiers |
+
+Dropped the `"deepgram"` provider-level default from $0.0077 to $0.0048 (Nova-3 monolingual is the Patter default model). A 25-minute call against the default would have reported $0.1925 in `cost.stt` instead of the actual $0.12 — over-reporting by ~60%. Customers were never undercharged; the dashboard line item was wrong. Files: `libraries/python/getpatter/pricing.py`, `libraries/typescript/src/pricing.ts`. Tests updated at `libraries/python/tests/test_pricing.py`, `libraries/typescript/tests/pricing.test.ts`, and the matching soak tests. Revisit when Deepgram removes the promo banner.
+
+### Fixed — ElevenLabs pricing table overcharged Flash 20% and Multilingual v2 / v3 by 80-200% (Python + TypeScript parity)
+
+Audited against the canonical public API pricing page at https://elevenlabs.io/pricing/api (verified 2026-05-11). The per-1K-character API/overage rate is flat across all plan tiers (Free → Business); only the included character bundle varies. Patter's 2026-05 table reflected legacy Creator-plan overage figures and a launch-era v3 quote that have since been consolidated.
+
+| Model | Old (USD / 1K chars) | New (USD / 1K chars) | Notes |
+|-------|----------------------|----------------------|-------|
+| `eleven_flash_v2_5` | $0.06 | **$0.05** | Patter default; was 20% over |
+| `eleven_turbo_v2_5` | $0.05 | $0.05 | unchanged ✓ |
+| `eleven_multilingual_v2` | $0.18 | **$0.10** | was 80% over |
+| `eleven_v3` | $0.30 | **$0.10** | grouped with multilingual v2 on the public page; was 200% over |
+| `eleven_monolingual_v1` (legacy) | $0.18 | **$0.10** | matches multilingual tier |
+
+Also dropped the `"elevenlabs"` / `"elevenlabs_ws"` provider-level default from $0.06 to $0.05 (flash_v2_5 is the Patter default model). A 5-turn call against the default would have reported $0.000060/char × N chars instead of the actual $0.000050/char — over-reporting LLM-bill-equivalent TTS cost by 20%. Customers were never undercharged, but the dashboard cost line was wrong. Files: `libraries/python/getpatter/pricing.py`, `libraries/typescript/src/pricing.ts`. Tests updated at `libraries/python/tests/test_pricing.py`, `libraries/typescript/tests/pricing.test.ts`, plus the matching soak tests.
+
+### Fixed — Dashboard cost labels leaked provider-key suffix (`Cartesia_stt STT` → `Cartesia STT`)
+
+The Cost panel's `titleCase()` helper rendered raw SDK `provider_key` literals (e.g. `cartesia_stt`, `elevenlabs_tts`) which the SDK uses to disambiguate provider-class lookups. The `_stt` / `_tts` / `_llm` suffix is internal noise: the panel already shows the role label next to the swatch ("STT", "TTS", "LLM"), so the suffix duplicated context and produced strings like "Cartesia_stt STT · ink-whisper". Stripped the suffix in both `dashboard-app/src/components/CostPanel.tsx` and `dashboard-app/src/components/MetricsPanel.tsx` `titleCase()` so labels render "Cartesia STT · ink-whisper" / "Elevenlabs TTS · eleven_flash_v2_5".
+
+### Fixed — Phantom `speech_start` during agent TTS contaminated turn anchors (Python + TypeScript parity)
+
+A real PSTN call surfaced `user_speech_duration_ms` of 5-7 seconds for utterances the caller actually spoke in ~1 second. Forensic timeline reconstruction (`releases/0.6.0/typescript/call-logs/.../CA6d7fc612...`) pinned the contamination to two bug classes uncovered by parallel-agent audit (forensic + architect + adversarial + provider-reviewer agreement):
+
+1. **Phantom-speech-start anchor contamination** — `StreamHandler` called `metrics.start_turn_if_idle()` on EVERY VAD `speech_start` event, including the ones suppressed during the per-turn warmup gate (`_can_barge_in() == False`). With AEC enabled this is a ~1 s window; without AEC it is the 250 ms anti-flicker margin. Background noise / echo / agent self-loopback during that window emitted a `speech_start` that was correctly suppressed for the barge-in path BUT silently stamped `_turn_start` at the bleed-through instant. The legitimate user `speech_start` that fired seconds later then no-op'd because `start_turn_if_idle` only acts when `_turn_start is None`. Result: `user_speech_duration_ms = (endpoint_signal_at − stale_turn_start) * 1000`, often 5-7 s.
+
+2. **Stale `_endpoint_signal_at` across dropped final transcripts** — when a final transcript arrived but `commitTranscript` / `_commit_transcript` returned False (dedup window / rejected barge-in / `afterTranscribe` veto, e.g. the "Okay." swallow on a strategy-pending barge-in), the previously-stamped VAD-end anchor was never cleared. The NEXT legitimate utterance inherited that stale anchor, so its `endpoint_ms` measured the silence gap between the dropped utterance and the real one.
+
+Both classes fixed with a single new metrics primitive and two call-site swaps:
+
+- **`anchor_user_speech_start()` (Python) / `anchorUserSpeechStart()` (TypeScript)** — Pipecat-style "every legitimate VAD `speech_start` re-anchors the turn pre-commit". Resets `_turn_start`, `_endpoint_signal_at`, `_vad_stopped_at`, `_stt_final_at`, `_stt_complete`, `_llm_first_token`, and the TTFB-emitted guard. No-ops once `_turn_committed_mono` is set (post-commit barge-ins follow the existing `record_turn_interrupted` path). Files: `libraries/python/getpatter/services/metrics.py`, `libraries/typescript/src/metrics.ts`.
+
+- **`stream_handler.py` / `stream-handler.ts` VAD `speech_start` handler** — explicit `phantom_suppressed` boolean gates ALL metrics state mutation: suppressed events log only, legitimate events call `anchor_user_speech_start()` instead of the old `start_turn_if_idle()`. The strategy-pending barge-in branch also switched from `start_turn_if_idle` to the new primitive so re-anchoring happens consistently on every legitimate `speech_start`.
+
+- **Dropped-final-transcript reset** — when `commitTranscript`/`_commit_transcript` returns False on an `is_final` / `speech_final` transcript, the same `anchor_user_speech_start()` is invoked so the discarded utterance's anchors don't leak into the next turn.
+
+### Fixed — Cartesia STT `finalize()` exposed so VAD `speech_end` can force-flush (Python + TypeScript parity)
+
+The 0.5.5 fast-path at `stream_handler.py:3070-3077` ("on VAD `speech_end`, call `stt.finalize()` so the provider doesn't wait for its natural-pause heuristic") was a no-op for Cartesia: `CartesiaSTT` only sent the `finalize` text frame from its private `close()` method on session shutdown, and `getattr(self._stt, "finalize", None)` returned None. The SDK's authoritative VAD silence detection (SileroVAD, 250 ms threshold) was being overridden by Cartesia's conservative internal endpointing (observed 2-7 s on PSTN audio with background hiss).
+
+Added `async finalize()` to both `CartesiaSTT` (Python) and `CartesiaSTT` (TypeScript) that sends the canonical `finalize` text frame on the live WebSocket. The wired-but-no-op fast-path now triggers a deterministic VAD-driven STT finalisation, parity with Deepgram. Files: `libraries/python/getpatter/providers/cartesia_stt.py`, `libraries/typescript/src/providers/cartesia-stt.ts`.
+
+### Fixed — Cerebras pricing table overcharged 1.5-2.4x across multiple models (Python + TypeScript parity)
+
+Audited against the canonical per-model docs pages at `https://inference-docs.cerebras.ai/models/<model>`. Patter's 2026-05-08 table conflated launch-blog quotes with the current "Exploration pricing" banner shown on each model docs page. Corrections:
+
+| Model | Old (in/out) | New (in/out) | Source |
+|-------|--------------|--------------|--------|
+| `gpt-oss-120b` | $0.85 / $1.20 | $0.35 / $0.75 | inference-docs.cerebras.ai/models/openai-oss |
+| `llama3.1-8b` | $0.10 / $0.20 | $0.10 / $0.10 | inference-docs.cerebras.ai/models/llama-31-8b |
+| `qwen-3-235b-a22b-instruct-2507` | $1.00 / $1.50 | $0.60 / $1.20 | inference-docs.cerebras.ai/models/qwen-3-235b-2507 |
+| `qwen-3-coder-480b` | (missing → $0) | $2.00 / $2.00 | cerebras.ai/blog/qwen3-coder-480b |
+
+Pre-fix a 5-turn pipeline call against the Patter-default `gpt-oss-120b` logged ~$0.000117 in `cost.llm` instead of the actual ~$0.000088 — over-reporting by a factor of ~1.3. Net: customers were never undercharged, but the dashboard line item was wrong (and 50% high for `gpt-oss-120b` specifically). Files: `libraries/python/getpatter/pricing.py`, `libraries/typescript/src/pricing.ts`. Tests updated at `libraries/python/tests/test_pricing.py`.
+
+### Fixed — Dashboard cost rendering flattened sub-cent values to `$0.00` (`fmtCostUSD` adaptive precision)
+
+The dashboard's per-row, per-stack, and aggregate spend tiles all used `toFixed(2)` or `toFixed(3)` for USD rendering. Cerebras `gpt-oss-120b` at $0.0001 / 5-turn-call rounds to `$0.00` under that rule, making the LLM cost line look as if billing was broken when in fact it was working end-to-end (token usage extracted from the streaming `usage` chunk, cost calculated, persisted to `metadata.json` at the correct precision).
+
+Added `fmtCostUSD(value)` helper (`dashboard-app/src/components/format.ts`) with magnitude-adaptive precision: ≥$0.01 → 2 decimals, ≥$0.001 → 3 decimals, ≥$0.0001 → 4 decimals, smaller values → 5 decimals. Applied across all 12 cost render sites (`App.tsx` spend tile, `CallTable.tsx` row total, `Metric.tsx` headline + per-call row, `CostPanel.tsx` × 5, `MetricsPanel.tsx` × 4). A 5-turn Cerebras pipeline call now shows `$0.00012` instead of `$0.00`.
+
+### Fixed — Dashboard latency metrics: real percentiles, correct waterfall, n<5 percentile gate
+
+The "Latency · this call" panel was showing three different numbers labelled wrong:
+1. **"p50" was the avg of total_ms**, not the median (`mappers.ts:194` read `latencyP50: latencyAvg.total_ms`).
+2. **The "llm" bar in the waterfall was the same fake p50**, double-counting non-LLM time (waterfall `llm = call.latencyP50` instead of `avg(llm_ms)`). The bar was off by ~5x on real PSTN data.
+3. **p50/p95 were rendered with as few as 1 turn**, where percentiles are statistical noise (linear interpolation between two samples).
+
+Round-trip `total_ms` also includes the user-utterance duration on the speech-to-speech metric, which over-states user-perceived latency. The dashboard now exposes `agent_response_ms` (wait time after the user stops speaking) as a separate primary metric.
+
+Fixes shipped:
+- **SDK serialization** (`libraries/python/getpatter/server.py`, `libraries/typescript/src/server.ts`) — `metadata.json` now persists the full `LatencyBreakdown` per percentile (`avg`, `p50`, `p95`, `p99`) with all components (`stt_ms`, `llm_ms`, `tts_ms`, `total_ms`, `agent_response_ms`, `endpoint_ms`, `user_speech_duration_ms`). The flat `p50_ms / p95_ms / p99_ms` totals are kept for backward-compat with consumers that read only summaries.
+- **Dashboard hydrate** (`libraries/python/getpatter/dashboard/store.py`, `libraries/typescript/src/dashboard/store.ts`) — `_metrics_from_top_level` reads the full breakdown when present; falls back to the synthetic single-`total_ms` shim only for legacy metadata that lacked the breakdown.
+- **Dashboard UI** (`dashboard-app/src/lib/api.ts`, `mappers.ts`, `components/CallTable.tsx`, `components/LatencyPanel.tsx`, `components/MetricsPanel.tsx`) — `Call` gains `llmAvg`, `turnCount`, `agentResponseP50/P95`. `latencyP50` now reads from `latency_p50.total_ms` (true median); the waterfall `llm` bar uses `llmAvg`. Percentile boxes render `—` and a "n turns — percentiles need ≥5" hint when `turnCount < 5`. The Latency panel adds a `p50 wait / p95 wait` pair sourced from `agent_response_ms`, the user-perceived "time waited after I stopped speaking" metric.
+
+Backward compat: legacy `metadata.json` (no `avg/p50/p95/p99` objects, only flat percentiles) still hydrates — those rows just lack the per-component breakdown in the panel and show `—` for `p50 wait / p95 wait`. No public API change.
+
 ### Changed — First-turn cold-start: keep prewarmed WebSockets OPEN and adopt them at call connect (Python + TypeScript parity)
 
 Investigation of live PSTN-pipeline first-turn p95 latency (~3 s observed in production acceptance) showed the existing prewarm pattern (open WS, idle ~250 ms, close) saves only ~50-250 ms — DNS cache + edge-worker pinning at best. The dominant first-turn cost on PSTN pipeline is the synchronous TLS + WS-upgrade + protocol-handshake against STT (~150-400 ms) and TTS (~400-900 ms) when the call starts. Opening + closing a WS does NOT thread `session: <previousTicket>` across `new WebSocket()` calls in Node's `ws` package (and Python's `websockets` library has the same property at the TCP / TLS level), so each fresh open re-pays the full handshake.

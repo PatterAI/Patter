@@ -394,8 +394,12 @@ async def twilio_stream_bridge(
                     pricing=pricing,
                     report_only_initial_ttfb=report_only_initial_ttfb,
                 )
-                # Twilio uses mulaw 8kHz (1 byte/sample)
-                metrics.configure_stt_format(sample_rate=8000, bytes_per_sample=1)
+                # PCM16 @ 16 kHz is the post-decode format that the stream
+                # handler passes to ``metrics.add_stt_audio_bytes`` — inbound
+                # mulaw 8 kHz is already decoded + resampled upstream before
+                # the byte count is recorded, so the metrics layer must see
+                # PCM16/16 kHz to convert bytes → seconds correctly.
+                metrics.configure_stt_format(sample_rate=16000, bytes_per_sample=2)
 
                 # Create audio sender. OpenAI Realtime on Twilio is configured
                 # to emit g711_ulaw @ 8 kHz directly (see below), so for that
@@ -651,15 +655,21 @@ async def twilio_stream_bridge(
                 logger.exception("on_call_end error: %s", exc)
 
         # Single INFO line per call-end — duration, turns, cost, latency.
+        # "p95 wait" = agent_response_ms (user-perceived wait after they stop
+        # speaking). Matches the dashboard "p95 wait" tile. Fallback to
+        # total_ms for legacy / short calls where agent_response_ms is unset.
         if call_metrics is not None:
             _dur = getattr(call_metrics, "duration_seconds", 0) or 0
             _turns = len(getattr(call_metrics, "turns", []) or [])
             _cost = getattr(getattr(call_metrics, "cost", None), "total", 0) or 0
+            _p95_obj = getattr(call_metrics, "latency_p95", None)
             _p95 = (
-                getattr(getattr(call_metrics, "latency_p95", None), "total_ms", 0) or 0
+                getattr(_p95_obj, "agent_response_ms", None)
+                or getattr(_p95_obj, "total_ms", 0)
+                or 0
             )
             logger.info(
-                "Call ended: %s (%.1fs, %d turns, cost=$%.4f, p95=%dms)",
+                "Call ended: %s (%.1fs, %d turns, cost=$%.4f, p95 wait=%dms)",
                 call_sid_actual,
                 _dur,
                 _turns,

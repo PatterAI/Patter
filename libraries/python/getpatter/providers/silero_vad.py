@@ -122,7 +122,12 @@ class SileroVAD(VADProvider):
         cls,
         *,
         min_speech_duration: float = 0.25,
-        min_silence_duration: float = 0.1,
+        # Bumped 0.1 → 0.4s after round 10f confirmed VAD speech_end fired on
+        # natural inter-sentence pauses < 250ms, causing double-talk dispatch.
+        # 0.4s is the industry-standard default for telephony agents — enough
+        # to bridge natural inter-sentence pauses without delaying single-
+        # sentence turns excessively.
+        min_silence_duration: float = 0.4,
         prefix_padding_duration: float = 0.03,
         activation_threshold: float = 0.5,
         sample_rate: Union[

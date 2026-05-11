@@ -88,9 +88,14 @@ from getpatter.stt.soniox import STT as SonioxSTT
 from getpatter.stt.speechmatics import STT as SpeechmaticsSTT
 from getpatter.stt.assemblyai import STT as AssemblyAISTT
 
-# TTS flat aliases.
+# TTS flat aliases. As of 0.6.1, ``ElevenLabsTTS`` (the canonical facade)
+# defaults to the WebSocket streaming transport. ``ElevenLabsWebSocketTTS``
+# is kept as a backward-compatible alias of the same class. For callers that
+# want to opt **out** of the WS default and use the legacy HTTP REST
+# transport explicitly, import ``ElevenLabsRestTTS``.
 from getpatter.tts.elevenlabs import TTS as ElevenLabsTTS
 from getpatter.tts.elevenlabs_ws import TTS as ElevenLabsWebSocketTTS
+from getpatter.providers.elevenlabs_tts import ElevenLabsTTS as ElevenLabsRestTTS
 from getpatter.tts.openai import TTS as OpenAITTS
 from getpatter.tts.cartesia import TTS as CartesiaTTS
 from getpatter.tts.rime import TTS as RimeTTS
@@ -412,6 +417,7 @@ __all__ = [
     "AssemblyAISTT",
     "ElevenLabsTTS",
     "ElevenLabsWebSocketTTS",
+    "ElevenLabsRestTTS",
     "OpenAITTS",
     "CartesiaTTS",
     "RimeTTS",

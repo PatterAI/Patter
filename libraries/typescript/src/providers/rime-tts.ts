@@ -59,6 +59,8 @@ export interface RimeTTSOptions {
 
 /** Rime TTS adapter for the `users.rime.ai/v1/rime-tts` HTTP streaming endpoint. */
 export class RimeTTS {
+  /** Stable pricing/dashboard key — read by stream-handler/metrics. */
+  static readonly providerKey = 'rime';
   private readonly apiKey: string;
   private readonly model: string;
   private readonly speaker: string;

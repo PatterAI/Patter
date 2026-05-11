@@ -134,6 +134,28 @@ class CallMetricsAccumulator:
         self._num_backchannels: int = 0
         self._overlap_started_at: float | None = None
 
+        # --- Barge-in anchor hygiene ---
+        # Monotonic timestamp of the most recent barge-in detection. Used by
+        # ``_compute_turn_latency`` to gate ``endpoint_ms`` / ``stt_ms``
+        # emission on turns that started within 100 ms of the last barge-in
+        # — those turns have unreliable VAD/STT anchors and would otherwise
+        # pollute the p95 distribution with synthetic 6+ second spikes.
+        self._last_bargein_at: float | None = None
+        # Counter of turns where ``record_stt_complete`` fired but no VAD
+        # ``speech_end`` had stamped ``_endpoint_signal_at`` first. Lets us
+        # detect environments where PSTN packet loss is dropping VAD stops
+        # (the common cause of missing endpoint signals).
+        self._endpoint_signal_missing_count: int = 0
+
+        # --- Initial-TTFB guard reset on barge-in / new turn ---
+        # When ``report_only_initial_ttfb=True`` is set, the EventBus TTFB
+        # emission is suppressed after the first event per call. After a
+        # barge-in we want the NEXT turn's TTFB to fire again so the
+        # dashboard can show post-barge-in recovery latency. Set by
+        # ``record_llm_first_token`` / ``record_tts_first_byte`` and reset
+        # by ``_reset_turn_state``.
+        self._initial_ttfb_emitted: bool = False
+
     # ---- EventBus attachment ----
 
     def attach_event_bus(self, bus: "EventBus") -> None:
@@ -203,6 +225,39 @@ class CallMetricsAccumulator:
         if self._turn_start is None:
             self.start_turn()
 
+    def anchor_user_speech_start(self) -> None:
+        """Anchor the current turn at a legitimate VAD ``speech_start``.
+
+        Industry-standard pattern: every VAD ``speech_start`` event that fires while the
+        agent is NOT in the suppressed warmup window is treated as the
+        canonical start of the user's utterance for the current turn. Reset
+        ``_turn_start`` and ``_endpoint_signal_at`` so that:
+
+        * If a phantom ``speech_start`` previously stamped ``_turn_start``
+          during agent TTS (e.g. echo / loopback / cough that was
+          ``_can_barge_in()``-suppressed but not phantom-suppressed at the
+          metrics layer in earlier 0.6.1 builds), the legitimate user-speech
+          start re-anchors the timer at the right wall-clock moment.
+        * The stale ``_endpoint_signal_at`` from any rejected barge-in /
+          dropped final transcript on the SAME turn (before LLM dispatch)
+          is cleared, so the next ``record_vad_stop`` stamps fresh.
+
+        No-ops once the turn is committed (``_turn_committed_mono`` set):
+        a new VAD ``speech_start`` after commit is the START of the next
+        turn's barge-in, handled by ``record_turn_interrupted`` instead.
+        """
+        if self._turn_committed_mono is not None:
+            return
+        self._turn_start = time.monotonic()
+        self._endpoint_signal_at = None
+        self._vad_stopped_at = None
+        self._stt_final_at = None
+        # Reset all the other "first signal of this turn" stamps too so a
+        # mid-turn re-anchor produces a clean per-turn breakdown.
+        self._stt_complete = None
+        self._llm_first_token = None
+        self._llm_ttfb_emitted = False
+
     def record_llm_first_token(self) -> None:
         """Mark when the first LLM output token arrives (TTFT).
 
@@ -244,6 +299,14 @@ class CallMetricsAccumulator:
     def record_stt_complete(self, text: str, audio_seconds: float = 0.0) -> None:
         """Mark STT as complete for the current turn."""
         self._stt_complete = time.monotonic()
+        # Don't fake _endpoint_signal_at from _stt_complete — that creates
+        # dishonest endpoint_ms == stt_ms outliers (6818 ms p95 spikes observed
+        # on PSTN when VAD speech_end is dropped). Honest None is better than a
+        # synthetic value for SLO/alerting. The counter lets us know if this
+        # happens often (PSTN packet loss dropping VAD stops is the common
+        # cause).
+        if self._endpoint_signal_at is None:
+            self._endpoint_signal_missing_count += 1
         self._turn_user_text = text
         self._turn_stt_audio_seconds = audio_seconds
         self._total_stt_audio_seconds += audio_seconds
@@ -319,7 +382,12 @@ class CallMetricsAccumulator:
 
         Pairs with :meth:`record_tts_stopped` to compute ``bargein_ms``.
         """
-        self._bargein_detected_at = ts if ts is not None else time.monotonic()
+        t = ts if ts is not None else time.monotonic()
+        self._bargein_detected_at = t
+        # Stamp _last_bargein_at on the same monotonic clock as _turn_start so
+        # the post-barge-in anchor-gating in _compute_turn_latency stays valid
+        # (see the comment there for rationale).
+        self._last_bargein_at = t
 
     def record_tts_stopped(self, ts: float | None = None) -> None:
         """Mark the moment TTS playback was actually halted after a barge-in.
@@ -374,7 +442,25 @@ class CallMetricsAccumulator:
             timestamp=time.time(),
         )
         self._turns.append(turn)
+        # Emit the turn record BEFORE reset so subscribers see the
+        # interrupted turn with its anchors still intact. Parity with
+        # record_turn_complete().
+        if self._event_bus is not None:
+            self._event_bus.emit(
+                "turn_ended",
+                {"call_id": self.call_id, "turn": turn},
+            )
+            self._event_bus.emit(
+                "metrics_collected",
+                {"call_id": self.call_id, "turn": turn},
+            )
         self._reset_turn_state()
+        # Extra paranoia: explicitly null out anchors that have caused leaks
+        # into subsequent turns when a barge-in is in flight. _reset_turn_state
+        # already clears them, but keep this belt-and-braces line so future
+        # refactors that touch _reset_turn_state don't silently regress us.
+        self._turn_committed_mono = None
+        self._endpoint_signal_at = None
         return turn
 
     # ---- EOUMetrics ----
@@ -599,6 +685,9 @@ class CallMetricsAccumulator:
             tts_provider=self.tts_provider,
             llm_provider=self.llm_provider,
             telephony_provider=self.telephony_provider,
+            stt_model=self.stt_model,
+            tts_model=self.tts_model,
+            llm_model=self._llm_model,
         )
 
         if self._event_bus is not None:
@@ -628,6 +717,12 @@ class CallMetricsAccumulator:
         self._bargein_stopped_at = None
         self._turn_user_text = ""
         self._turn_stt_audio_seconds = 0.0
+        # Reset initial-TTFB latch so EventBus TTFB emission re-fires on the
+        # new turn. Without this, with report_only_initial_ttfb=True we lose
+        # the TTFB metric on the first turn after a barge-in / new turn.
+        self._initial_ttfb_emitted = False
+        self._llm_ttfb_emitted = False
+        self._tts_ttfb_emitted = False
 
     def _compute_turn_latency(self) -> LatencyBreakdown:
         """Compute latency breakdown for the current turn."""
@@ -637,6 +732,17 @@ class CallMetricsAccumulator:
         tts_ms = 0.0
         total_ms = 0.0
         user_speech_duration_ms: float | None = None
+
+        # Post-barge-in turns have unreliable anchors. Drop endpoint_ms /
+        # stt_ms to avoid polluting the p95 distribution with synthetic
+        # spikes. The honest None makes the metric usable for SLO/alerting;
+        # without this gate, a single barge-in produces 6+ second p95
+        # outliers.
+        post_bargein = (
+            self._last_bargein_at is not None
+            and self._turn_start is not None
+            and abs(self._turn_start - self._last_bargein_at) <= 0.1  # 100 ms
+        )
 
         # ``stt_ms`` measures pure STT finalization: end-of-speech (VAD stop
         # or STT speech_final) → final transcript delivery. This is the
@@ -735,6 +841,15 @@ class CallMetricsAccumulator:
         agent_response_ms: float | None = None
         if endpoint_ms is not None and llm_ttft_ms is not None and tts_ms > 0:
             agent_response_ms = round(endpoint_ms + llm_ttft_ms + tts_ms, 1)
+
+        # Post-barge-in anchor hygiene: when the current turn began within
+        # 100 ms of the last detected barge-in, the VAD/STT anchors are
+        # unreliable. Drop the polluted endpoint_ms and stt_ms so percentile
+        # aggregations ignore them (stt_ms = 0 is excluded by the non-zero
+        # filter in _compute_percentile_latency).
+        if post_bargein:
+            stt_ms = 0.0
+            endpoint_ms = None
 
         # Note: in Realtime mode OpenAI handles STT+LLM+TTS as a single opaque
         # pipeline, so stt_ms / llm_ms / tts_ms stay 0 and only total_ms is
@@ -873,6 +988,8 @@ class CallMetricsAccumulator:
             endpoint_ms=_opt_avg("endpoint_ms"),
             bargein_ms=_opt_avg("bargein_ms"),
             tts_total_ms=_opt_avg("tts_total_ms"),
+            user_speech_duration_ms=_opt_avg("user_speech_duration_ms"),
+            agent_response_ms=_opt_avg("agent_response_ms"),
         )
 
     def _compute_percentile_latency(self, p: float) -> LatencyBreakdown:
@@ -949,4 +1066,6 @@ class CallMetricsAccumulator:
             endpoint_ms=_opt_pct("endpoint_ms"),
             bargein_ms=_opt_pct("bargein_ms"),
             tts_total_ms=_opt_pct("tts_total_ms"),
+            user_speech_duration_ms=_opt_pct("user_speech_duration_ms"),
+            agent_response_ms=_opt_pct("agent_response_ms"),
         )

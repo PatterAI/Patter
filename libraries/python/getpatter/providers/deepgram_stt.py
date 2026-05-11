@@ -10,7 +10,7 @@ import asyncio
 import json
 import logging
 from enum import IntEnum, StrEnum
-from typing import AsyncIterator, Union
+from typing import AsyncIterator, ClassVar, Union
 from urllib.parse import urlencode
 
 import websockets
@@ -76,6 +76,9 @@ _FINALIZE_DRAIN_SECONDS = 0.1
 
 class DeepgramSTT(STTProvider):
     """Streaming STT adapter for Deepgram's v1 ``/listen`` WebSocket API."""
+
+    #: Stable pricing/dashboard key — read by stream-handler/metrics.
+    provider_key: ClassVar[str] = "deepgram"
 
     def __init__(
         self,

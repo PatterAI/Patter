@@ -43,10 +43,12 @@ class TestMergePricing:
 class TestCalculateSTTCost:
     def test_deepgram_cost(self):
         pricing = merge_pricing(None)
-        # 60 seconds = 1 minute at $0.0077/min (Nova-3 streaming monolingual,
-        # the Patter default). Previous $0.0043/min was the batch rate.
+        # 60 seconds = 1 minute at $0.0048/min (Nova-3 streaming monolingual,
+        # the Patter default). Current Pay-As-You-Go promotional rate per
+        # deepgram.com/pricing (verified 2026-05-11). The legacy $0.0077/min
+        # was the launch-era standard rate.
         cost = calculate_stt_cost("deepgram", 60.0, pricing)
-        assert abs(cost - 0.0077) < 1e-6
+        assert abs(cost - 0.0048) < 1e-6
 
     def test_whisper_cost(self):
         pricing = merge_pricing(None)
@@ -68,10 +70,10 @@ class TestCalculateSTTCost:
 class TestCalculateTTSCost:
     def test_elevenlabs_cost(self):
         pricing = merge_pricing(None)
-        # 1000 characters at $0.06/1k = $0.06 (eleven_flash_v2_5 default;
-        # previous $0.18 was the Creator plan overage rate).
+        # 1000 characters at $0.05/1k = $0.05 (eleven_flash_v2_5 default).
+        # Source: https://elevenlabs.io/pricing/api (verified 2026-05-11).
         cost = calculate_tts_cost("elevenlabs", 1000, pricing)
-        assert abs(cost - 0.06) < 1e-6
+        assert abs(cost - 0.05) < 1e-6
 
     def test_openai_tts_cost(self):
         pricing = merge_pricing(None)
@@ -223,6 +225,33 @@ class TestCalculateTelephonyCost:
         cost = calculate_telephony_cost("telnyx", 600.0, pricing)
         assert abs(cost - 0.07) < 1e-6
 
+    def test_telnyx_inbound_rate(self):
+        """US inbound DID / local termination billed at $0.0035/min.
+
+        Verified against https://telnyx.com/pricing/elastic-sip (2026-05-11).
+        """
+        pricing = merge_pricing(None)
+        cost = calculate_telephony_cost("telnyx_inbound", 60.0, pricing)
+        assert abs(cost - 0.0035) < 1e-6
+
+    def test_telnyx_outbound_rate(self):
+        """US outbound Pay-As-You-Go billed at $0.007/min (mid-range)."""
+        pricing = merge_pricing(None)
+        cost = calculate_telephony_cost("telnyx_outbound", 60.0, pricing)
+        assert abs(cost - 0.007) < 1e-6
+
+    def test_telnyx_legacy_falls_back_to_outbound(self):
+        """Legacy flat ``telnyx`` key remains at $0.007/min (outbound-safe).
+
+        Users who override ``pricing={"telnyx": {...}}`` without a
+        direction-aware split keep the previous behaviour. Direction-aware
+        billing is opt-in via the new ``telnyx_inbound`` / ``telnyx_outbound``
+        keys.
+        """
+        pricing = merge_pricing(None)
+        cost = calculate_telephony_cost("telnyx", 60.0, pricing)
+        assert abs(cost - 0.007) < 1e-6
+
     def test_zero_duration(self):
         pricing = merge_pricing(None)
         cost = calculate_telephony_cost("twilio", 0.0, pricing)
@@ -286,21 +315,22 @@ class TestModelAwareSttPricing:
 
     def test_deepgram_default_is_nova3_streaming(self):
         pricing = merge_pricing(None)
-        # 60 seconds at $0.0077/min = $0.0077 (nova-3 default)
-        assert calculate_stt_cost("deepgram", 60.0, pricing) == pytest.approx(0.0077)
+        # 60 seconds at $0.0048/min = $0.0048 (nova-3 default, current PAYG
+        # promotional rate per deepgram.com/pricing, verified 2026-05-11).
+        assert calculate_stt_cost("deepgram", 60.0, pricing) == pytest.approx(0.0048)
 
     def test_deepgram_multilingual_uses_nested_rate(self):
         pricing = merge_pricing(None)
-        # nova-3-multilingual is $0.0092/min
+        # nova-3-multilingual is $0.0058/min (PAYG promo rate)
         cost = calculate_stt_cost(
             "deepgram", 60.0, pricing, model="nova-3-multilingual"
         )
-        assert cost == pytest.approx(0.0092)
+        assert cost == pytest.approx(0.0058)
 
     def test_deepgram_unknown_model_falls_back_to_default(self):
         pricing = merge_pricing(None)
         cost = calculate_stt_cost("deepgram", 60.0, pricing, model="some-future-model")
-        assert cost == pytest.approx(0.0077)
+        assert cost == pytest.approx(0.0048)
 
     def test_whisper_per_model_rates(self):
         pricing = merge_pricing(None)
@@ -321,15 +351,16 @@ class TestModelAwareTtsPricing:
 
     def test_elevenlabs_default_is_flash_v2_5(self):
         pricing = merge_pricing(None)
-        # 1000 chars at $0.06/1k = $0.06
-        assert calculate_tts_cost("elevenlabs", 1000, pricing) == pytest.approx(0.06)
+        # 1000 chars at $0.05/1k = $0.05 (verified vs elevenlabs.io/pricing/api)
+        assert calculate_tts_cost("elevenlabs", 1000, pricing) == pytest.approx(0.05)
 
     def test_elevenlabs_multilingual_v2_per_model_rate(self):
         pricing = merge_pricing(None)
         cost = calculate_tts_cost(
             "elevenlabs", 1000, pricing, model="eleven_multilingual_v2"
         )
-        assert cost == pytest.approx(0.18)
+        # Multilingual v2 / v3 share the $0.10/1k tier per the public API page.
+        assert cost == pytest.approx(0.10)
 
     def test_openai_tts_hd_per_model_rate(self):
         pricing = merge_pricing(None)
@@ -360,10 +391,10 @@ class TestPerModelOverrideMerge:
         assert calculate_tts_cost(
             "elevenlabs", 1000, pricing, model="eleven_flash_v2_5"
         ) == pytest.approx(0.04)
-        # Untouched — still original $0.18
+        # Untouched — still original $0.10
         assert calculate_tts_cost(
             "elevenlabs", 1000, pricing, model="eleven_multilingual_v2"
-        ) == pytest.approx(0.18)
+        ) == pytest.approx(0.10)
 
     def test_user_can_register_brand_new_model(self):
         pricing = merge_pricing(
@@ -400,17 +431,20 @@ class TestLLMCostBilling:
     def test_cerebras_default_model_is_billed(self):
         """Cerebras default ``gpt-oss-120b`` must produce a non-zero bill."""
         cost = calculate_llm_cost("cerebras", "gpt-oss-120b", 1000, 1000)
-        # Real rate-card math, no mock: 1000 in @ $0.85/M + 1000 out @ $1.20/M
+        # Real rate-card math (2026-05-11 docs): 1000 in @ $0.35/M + 1000 out @ $0.75/M.
+        # Updated from $0.85/$1.20 — see CHANGELOG 0.6.1 pricing correction.
         assert cost == pytest.approx(
-            (1000 / 1_000_000) * 0.85 + (1000 / 1_000_000) * 1.20
+            (1000 / 1_000_000) * 0.35 + (1000 / 1_000_000) * 0.75
         )
         assert cost > 0.0
 
     def test_cerebras_llama_3_1_8b_is_billed(self):
         """``llama3.1-8b`` (deprecating 2026-05-27 but still supported) must bill."""
         cost = calculate_llm_cost("cerebras", "llama3.1-8b", 1000, 1000)
+        # Real rate-card math (2026-05-11 docs): 1000 in @ $0.10/M + 1000 out @ $0.10/M.
+        # Output was $0.20/M previously — corrected to match Cerebras docs.
         assert cost == pytest.approx(
-            (1000 / 1_000_000) * 0.10 + (1000 / 1_000_000) * 0.20
+            (1000 / 1_000_000) * 0.10 + (1000 / 1_000_000) * 0.10
         )
         assert cost > 0.0
 

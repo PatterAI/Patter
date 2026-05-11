@@ -405,7 +405,10 @@ class MetricsStore:
                 cost_tel += cost.get("telephony", 0.0)
                 total_duration += m.get("duration_seconds", 0.0)
                 avg_lat = m.get("latency_avg", {})
-                t_ms = avg_lat.get("total_ms", 0.0)
+                # Prefer the user-perceived wait time (agent_response_ms);
+                # fall back to round-trip total_ms only when the SDK
+                # didn't record the breakdown (legacy hydrate path).
+                t_ms = avg_lat.get("agent_response_ms") or avg_lat.get("total_ms", 0.0)
                 if t_ms > 0:
                     total_latency += t_ms
                     latency_count += 1
@@ -560,9 +563,27 @@ def _metrics_from_top_level(meta: dict[str, Any]) -> dict[str, Any] | None:
     if cost is not None:
         out["cost"] = cost
     if latency is not None:
-        out["latency_avg"] = {
-            "total_ms": latency.get("p95_ms") or latency.get("p50_ms") or 0
-        }
+        # Prefer the full LatencyBreakdown objects (avg/p50/p95/p99) when
+        # the server persisted them. Old metadata.json files only carry
+        # flat ``p50_ms/p95_ms/p99_ms`` totals — synthesize a minimal
+        # latency_avg from those so the table still shows a number, but
+        # no breakdown is available for those historical rows.
+        full_avg = latency.get("avg") if isinstance(latency.get("avg"), dict) else None
+        full_p50 = latency.get("p50") if isinstance(latency.get("p50"), dict) else None
+        full_p95 = latency.get("p95") if isinstance(latency.get("p95"), dict) else None
+        full_p99 = latency.get("p99") if isinstance(latency.get("p99"), dict) else None
+        if full_avg:
+            out["latency_avg"] = full_avg
+        if full_p50:
+            out["latency_p50"] = full_p50
+        if full_p95:
+            out["latency_p95"] = full_p95
+        if full_p99:
+            out["latency_p99"] = full_p99
+        if not (full_avg or full_p50 or full_p95):
+            out["latency_avg"] = {
+                "total_ms": latency.get("p95_ms") or latency.get("p50_ms") or 0
+            }
         out["latency"] = latency
     if isinstance(duration_ms, (int, float)) and duration_ms > 0:
         out["duration_seconds"] = float(duration_ms) / 1000.0

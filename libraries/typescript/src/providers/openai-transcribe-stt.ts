@@ -22,6 +22,8 @@ const DEFAULT_BUFFER_SIZE = 16000 * 2;
 
 /** STT adapter restricted to OpenAI's GPT-4o Transcribe model family. */
 export class OpenAITranscribeSTT extends WhisperSTT {
+  /** Stable pricing/dashboard key — read by stream-handler/metrics. */
+  static override readonly providerKey: string = 'openai_transcribe';
   /**
    * @param apiKey OpenAI API key.
    * @param language ISO-639-1 language code (e.g. ``"en"``, ``"it"``). Optional.

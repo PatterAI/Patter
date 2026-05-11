@@ -77,7 +77,7 @@ export class ElevenLabsPlanError extends ElevenLabsTTSError {
 const PLAN_REQUIRED_MSG =
   'ElevenLabs WS streaming requires a Pro plan or higher (the WS endpoint ' +
   'returned `payment_required`). Either upgrade at https://elevenlabs.io/pricing, ' +
-  'or use the HTTP `ElevenLabsTTS` class which works on all plans (drop-in API).';
+  'or use `ElevenLabsRestTTS` for HTTP REST instead which works on all plans (drop-in API).';
 
 function sanitiseLogStr(value: unknown, limit = 200): string {
   return String(value).replace(/[\r\n\x00]/g, ' ').slice(0, limit);
@@ -178,7 +178,7 @@ export class ElevenLabsWebSocketTTS implements TTSAdapter {
     if (opts.modelId === 'eleven_v3') {
       throw new Error(
         'eleven_v3 is not supported by the WebSocket stream-input endpoint — ' +
-          'use the HTTP ElevenLabsTTS class instead.',
+          'use `ElevenLabsRestTTS` for HTTP REST instead.',
       );
     }
     this.apiKey = opts.apiKey;

@@ -94,6 +94,8 @@ export interface CartesiaTTSOptions {
 
 /** Cartesia TTS provider backed by the HTTP `/tts/bytes` streaming endpoint. */
 export class CartesiaTTS {
+  /** Stable pricing/dashboard key — read by stream-handler/metrics. */
+  static readonly providerKey = 'cartesia_tts';
   private readonly apiKey: string;
   private readonly model: string;
   private readonly voice: string;

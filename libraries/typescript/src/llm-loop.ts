@@ -428,6 +428,8 @@ export interface OpenAILLMSamplingOptions {
 
 /** LLM provider backed by OpenAI Chat Completions (streaming). */
 export class OpenAILLMProvider implements LLMProvider {
+  /** Stable pricing/dashboard key — read by stream-handler/metrics. */
+  static readonly providerKey = 'openai';
   private readonly apiKey: string;
   readonly model: string;
   private readonly temperature?: number;
@@ -819,6 +821,7 @@ export class LLMLoop {
       const toolCallsAccumulated = new Map<number, ToolCallAccumulator>();
       const textParts: string[] = [];
       let hasToolCalls = false;
+      let usageChunkReceived = false;
 
       for await (const chunk of this.provider.stream(messages, this.openaiTools, opts)) {
         if (chunk.type === 'text' && chunk.content) {
@@ -835,6 +838,7 @@ export class LLMLoop {
           }
         } else if (chunk.type === 'usage') {
           // Fix 10: forward token usage to the metrics accumulator for billing.
+          usageChunkReceived = true;
           metrics?.recordLlmUsage(
             this._providerName,
             this._modelName,
@@ -860,6 +864,35 @@ export class LLMLoop {
           if (chunk.name) acc.name = chunk.name;
           if (chunk.arguments) acc.arguments += chunk.arguments;
         }
+      }
+
+      // Fallback billing: some providers (Cerebras streaming has been
+      // observed to do this on certain chunk-shape variants) don't emit
+      // a ``usage`` chunk even with ``stream_options: { include_usage: true }``.
+      // Without this fallback the LLM cost silently shows ~0 for the
+      // whole call. char/4 is the canonical OpenAI-tokenizer rough estimate;
+      // conservative-upward is preferable to silent zero. Parity with Python.
+      if (!usageChunkReceived && metrics) {
+        let inputChars = 0;
+        for (const m of messages) {
+          const c = (m as { content?: unknown }).content;
+          if (typeof c === 'string') inputChars += c.length;
+        }
+        const outputChars = textParts.reduce((s, p) => s + p.length, 0);
+        const estimatedInput = Math.max(1, Math.floor(inputChars / 4));
+        const estimatedOutput = Math.max(1, Math.floor(outputChars / 4));
+        metrics.recordLlmUsage(
+          this._providerName,
+          this._modelName,
+          estimatedInput,
+          estimatedOutput,
+          0,
+          0,
+        );
+        getLogger().warn(
+          `LLM usage chunk missing from ${this._providerName}/${this._modelName} stream; ` +
+            `estimating output_tokens=${estimatedOutput} (input_tokens=${estimatedInput}) via char/4 fallback`,
+        );
       }
 
       if (!hasToolCalls) {

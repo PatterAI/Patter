@@ -7,7 +7,7 @@ forward bytes without an additional resample stage.
 
 import logging
 from enum import StrEnum
-from typing import AsyncIterator, Union
+from typing import ClassVar, AsyncIterator, Union
 
 import httpx
 
@@ -67,6 +67,9 @@ _INSTRUCTIONS_PREFIX = OpenAITTSModel.GPT_4O_MINI_TTS.value
 
 class OpenAITTS(TTSProvider):
     """OpenAI HTTP TTS provider with built-in 24k→target-rate resampling."""
+
+    #: Stable pricing/dashboard key — read by stream-handler/metrics.
+    provider_key: ClassVar[str] = "openai_tts"
 
     def __init__(
         self,

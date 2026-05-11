@@ -73,6 +73,8 @@ interface OpenAIToolDef {
 
 /** LLM provider backed by Google Gemini (Developer API, streaming SSE). */
 export class GoogleLLMProvider implements LLMProvider {
+  /** Stable pricing/dashboard key — read by stream-handler/metrics. */
+  static readonly providerKey = 'google';
   private readonly apiKey: string;
   readonly model: string;
   private readonly baseUrl: string;

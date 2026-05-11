@@ -1,11 +1,19 @@
 import type { Call } from './CallTable';
+import { fmtCostUSD } from './format';
 
 export interface CostPanelProps {
   call: Call | null;
 }
 
 function titleCase(s: string): string {
-  return s.length === 0 ? s : s.charAt(0).toUpperCase() + s.slice(1);
+  if (s.length === 0) return s;
+  // Strip provider-key transport suffixes (_ws, _rest) and role suffixes
+  // (_stt, _tts, _llm). Repeated `+` handles compound suffixes like
+  // "cartesia_tts_ws" -> "cartesia". The SDK uses provider_key like
+  // "elevenlabs_ws" / "cartesia_stt" to disambiguate adapter classes;
+  // the suffix is internal noise in user-facing UI.
+  const cleaned = s.replace(/(?:_(?:ws|rest|stt|tts|llm))+$/i, '');
+  return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
 }
 
 export function CostPanel({ call }: CostPanelProps) {
@@ -23,8 +31,15 @@ export function CostPanel({ call }: CostPanelProps) {
   const total = subtotal - cached;
   const seg = (v: number) => (subtotal > 0 ? (v / subtotal) * 100 : 0);
 
-  const sttLabel = call.sttProvider ? `${titleCase(call.sttProvider)} STT` : 'STT';
-  const ttsLabel = call.ttsProvider ? `${titleCase(call.ttsProvider)} TTS` : 'TTS';
+  const sttLabel = call.sttProvider
+    ? `${titleCase(call.sttProvider)} STT${call.sttModel ? ` · ${call.sttModel}` : ''}`
+    : 'STT';
+  const ttsLabel = call.ttsProvider
+    ? `${titleCase(call.ttsProvider)} TTS${call.ttsModel ? ` · ${call.ttsModel}` : ''}`
+    : 'TTS';
+  const llmLabel = call.llmModel
+    ? `${call.model ? titleCase(call.model) + ' · ' : ''}${call.llmModel}`
+    : call.model || 'LLM';
 
   return (
     <div className="rr-card peach">
@@ -40,29 +55,29 @@ export function CostPanel({ call }: CostPanelProps) {
           <span className="swatch" style={{ background: '#cc0000' }}></span>
           {call.carrier === 'twilio' ? 'Twilio' : 'Telnyx'}
         </span>
-        <span className="v">${telco.toFixed(3)}</span>
+        <span className="v">{fmtCostUSD(telco)}</span>
       </div>
       <div className="stack-row">
         <span className="lbl">
           <span className="swatch" style={{ background: '#DF9367' }}></span>
-          {call.model || 'LLM'}
+          {llmLabel}
         </span>
-        <span className="v">${llm.toFixed(3)}</span>
-        {cached > 0 && <span className="saved">−${cached.toFixed(3)} cached</span>}
+        <span className="v">{fmtCostUSD(llm)}</span>
+        {cached > 0 && <span className="saved">−{fmtCostUSD(cached)} cached</span>}
       </div>
       <div className="stack-row">
         <span className="lbl">
           <span className="swatch" style={{ background: '#1a1a1a' }}></span>
           {sttLabel}
         </span>
-        <span className="v">${stt.toFixed(3)}</span>
+        <span className="v">{fmtCostUSD(stt)}</span>
       </div>
       <div className="stack-row">
         <span className="lbl">
           <span className="swatch" style={{ background: '#6c6c6c' }}></span>
           {ttsLabel}
         </span>
-        <span className="v">${tts.toFixed(3)}</span>
+        <span className="v">{fmtCostUSD(tts)}</span>
       </div>
       <div className="stack-row">
         <span className="lbl">
@@ -78,7 +93,7 @@ export function CostPanel({ call }: CostPanelProps) {
             {call.status === 'live' ? '(running)' : ''}
           </span>
         </span>
-        <span className="v">${total.toFixed(3)}</span>
+        <span className="v">{fmtCostUSD(total)}</span>
       </div>
     </div>
   );

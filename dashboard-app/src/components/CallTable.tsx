@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { fmtDuration, fmtPhone } from './format';
+import { fmtDuration, fmtPhone, fmtCostUSD } from './format';
 import { IconArrowDown, IconArrowUp, IconSearch } from './icons';
 
 export interface CallCost {
@@ -28,14 +28,26 @@ export interface Call {
   duration?: number;
   latencyP95?: number;
   latencyP50?: number;
+  /** avg(llm_ms) across this call's turns — for the waterfall llm bar. */
+  llmAvg?: number;
   sttAvg?: number;
   ttsAvg?: number;
+  /** Number of completed turns. p50/p95 are statistically meaningful only when this is >= 5. */
+  turnCount?: number;
+  /** p50 of agent_response_ms (wait time after user stops speaking) — user-perceived latency. */
+  agentResponseP50?: number;
+  /** p95 of agent_response_ms — user-perceived latency outlier. */
+  agentResponseP95?: number;
   cost: CallCost;
   agent?: string;
   model?: string;
   mode?: CallMode;
   sttProvider?: string;
   ttsProvider?: string;
+  /** Model identifier within the provider, e.g. "ink-whisper", "eleven_flash_v2_5", "gpt-oss-120b". */
+  sttModel?: string;
+  ttsModel?: string;
+  llmModel?: string;
   transcriptKey?: string;
   endedAgo?: number;
 }
@@ -103,7 +115,7 @@ function CallRow({ call, isSelected, onSelect, isNew }: CallRowProps) {
           '—'
         )}
       </td>
-      <td className="num-cell">${totalCost.toFixed(2)}</td>
+      <td className="num-cell">{fmtCostUSD(totalCost)}</td>
     </tr>
   );
 }

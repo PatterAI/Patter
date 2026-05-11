@@ -82,6 +82,8 @@ export interface InworldTTSOptions {
  * before calling the constructor.
  */
 export class InworldTTS {
+  /** Stable pricing/dashboard key — read by stream-handler/metrics. */
+  static readonly providerKey = 'inworld';
   private readonly authToken: string;
   private readonly model: string;
   private readonly voice: string;

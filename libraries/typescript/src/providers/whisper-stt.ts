@@ -60,6 +60,8 @@ function wrapPcmInWav(pcm: Buffer, sampleRate: number = 16000, channels: number 
 
 /** Buffered STT adapter for OpenAI's Whisper transcription HTTP API. */
 export class WhisperSTT {
+  /** Stable pricing/dashboard key — read by stream-handler/metrics. */
+  static readonly providerKey: string = 'whisper';
   private readonly apiKey: string;
   private readonly model: string;
   private readonly language: string | undefined;

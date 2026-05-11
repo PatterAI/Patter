@@ -12,7 +12,7 @@ import json
 import logging
 from dataclasses import dataclass
 from enum import IntEnum, StrEnum
-from typing import AsyncIterator, Literal
+from typing import ClassVar, AsyncIterator, Literal
 from urllib.parse import urlencode
 
 import aiohttp
@@ -102,6 +102,9 @@ class CartesiaSTT(STTProvider):
         options: Full :class:`CartesiaSTTOptions`; overrides the individual
             kwargs when both are provided.
     """
+
+    #: Stable pricing/dashboard key — read by stream-handler/metrics.
+    provider_key: ClassVar[str] = "cartesia_stt"
 
     def __init__(
         self,
@@ -331,6 +334,26 @@ class CartesiaSTT(STTProvider):
             raise RuntimeError("Not connected. Call connect() first.")
         self._audio_bytes_sent += len(audio_chunk)
         await self._ws.send_bytes(audio_chunk)
+
+    async def finalize(self) -> None:
+        """Force Cartesia to finalise the in-flight utterance immediately.
+
+        Sends a ``finalize`` text frame on the live WebSocket. Cartesia
+        replies with the final transcript followed by ``flush_done``,
+        bypassing its conservative internal silence heuristic (which can
+        wait 2-7 s on PSTN audio before naturally finalising). Wired
+        into :meth:`StreamHandler` on the VAD ``speech_end`` event so
+        the SDK's authoritative end-of-speech detection forces an
+        immediate STT finalisation — turning Cartesia's natural-pause
+        endpointing into a deterministic VAD-driven one, parity with
+        the Deepgram fast-path. No-op when the WS isn't open.
+        """
+        if self._ws is None or self._ws.closed:
+            return
+        try:
+            await self._ws.send_str(CartesiaSTTClientFrame.FINALIZE.value)
+        except Exception as exc:  # noqa: BLE001 — defensive on a remote socket
+            logger.debug("Cartesia finalize send failed: %s", exc)
 
     async def receive_transcripts(self) -> AsyncIterator[Transcript]:
         """Async generator yielding :class:`Transcript` events as they arrive."""

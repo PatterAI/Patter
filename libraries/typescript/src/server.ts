@@ -1515,16 +1515,24 @@ export class EmbeddedServer {
               duration_seconds?: number;
               turns?: unknown[];
               cost?: Record<string, unknown>;
-              latency_p50?: { total_ms?: number };
-              latency_p95?: { total_ms?: number };
-              latency_p99?: { total_ms?: number };
+              latency_avg?: Record<string, number>;
+              latency_p50?: Record<string, number>;
+              latency_p95?: Record<string, number>;
+              latency_p99?: Record<string, number>;
             })
           | null;
+        // Persist full LatencyBreakdown per percentile so the dashboard
+        // hydrate path can render stt/llm/tts breakdown for historical
+        // calls. Keep flat ``p50_ms/p95_ms/p99_ms`` for backward compat.
         const latency = metricsObj
           ? {
               p50_ms: metricsObj.latency_p50?.total_ms ?? null,
               p95_ms: metricsObj.latency_p95?.total_ms ?? null,
               p99_ms: metricsObj.latency_p99?.total_ms ?? null,
+              avg: metricsObj.latency_avg ?? null,
+              p50: metricsObj.latency_p50 ?? null,
+              p95: metricsObj.latency_p95 ?? null,
+              p99: metricsObj.latency_p99 ?? null,
             }
           : null;
         // Fire-and-forget: call logging must never block the voice flow.

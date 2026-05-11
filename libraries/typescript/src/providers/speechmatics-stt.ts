@@ -148,6 +148,8 @@ interface SpeechmaticsTranscriptMessage {
  * ```
  */
 export class SpeechmaticsSTT {
+  /** Stable pricing/dashboard key — read by stream-handler/metrics. */
+  static readonly providerKey = 'speechmatics';
   private ws: WebSocket | null = null;
   private readonly transcriptCallbacks = new Set<TranscriptCallback>();
   private readonly errorCallbacks = new Set<ErrorCallback>();

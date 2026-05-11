@@ -143,6 +143,8 @@ export class AssemblyAISTTNotConnectedError extends Error {
 
 /** Streaming STT adapter for AssemblyAI's v3 Universal Streaming API. */
 export class AssemblyAISTT {
+  /** Stable pricing/dashboard key — read by stream-handler/metrics. */
+  static readonly providerKey = 'assemblyai';
   private ws: WebSocket | null = null;
   private readonly callbacks: Set<TranscriptCallback> = new Set();
   private closing = false;

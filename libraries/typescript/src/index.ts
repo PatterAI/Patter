@@ -132,10 +132,14 @@ export {
 } from "./providers/speechmatics-stt";
 
 // New namespaced TTS classes.
+// `ElevenLabsTTS` is the public facade — defaults to WebSocket streaming as
+// of 0.6.1. `ElevenLabsWebSocketTTS` is a backward-compat alias of the same
+// class. For explicit HTTP REST opt-out, use `ElevenLabsRestTTS`.
 export { TTS as ElevenLabsTTS } from "./tts/elevenlabs";
 export type { ElevenLabsTTSOptions } from "./tts/elevenlabs";
 export { TTS as ElevenLabsWebSocketTTS } from "./tts/elevenlabs-ws";
 export type { ElevenLabsWebSocketOptions } from "./tts/elevenlabs-ws";
+export { ElevenLabsTTS as ElevenLabsRestTTS } from "./providers/elevenlabs-tts";
 export { TTS as OpenAITTS } from "./tts/openai";
 export type { OpenAITTSOptions } from "./tts/openai";
 export { TTS as CartesiaTTS } from "./tts/cartesia";
@@ -162,6 +166,19 @@ export type { GoogleLLMOptions } from "./llm/google";
 // Voice Activity Detection (server-side) — Silero ONNX.
 export { SileroVAD } from "./providers/silero-vad";
 export type { SileroVADOptions, SileroSampleRate } from "./providers/silero-vad";
+
+// Noise-suppression audio filters (opt-in, plug into ``agent.audioFilter``).
+// DeepFilterNet — community ONNX, no license required.
+export { DeepFilterNetFilter } from "./providers/deepfilternet-filter";
+export type { DeepFilterNetOptions } from "./providers/deepfilternet-filter";
+// Krisp VIVA — scaffold for parity with Python SDK. Throws at construction
+// until Krisp publishes an official Node binding. See file header.
+export {
+  KrispVivaFilter,
+  KrispSampleRate,
+  KrispFrameDuration,
+} from "./providers/krisp-filter";
+export type { KrispVivaFilterOptions } from "./providers/krisp-filter";
 
 // Telephony carriers.
 export { Carrier as Twilio } from "./telephony/twilio";

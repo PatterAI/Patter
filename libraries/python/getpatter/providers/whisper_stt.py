@@ -7,7 +7,7 @@ import io
 import logging
 import wave
 from enum import StrEnum
-from typing import AsyncIterator, Literal
+from typing import ClassVar, AsyncIterator, Literal
 
 import httpx
 
@@ -73,6 +73,9 @@ class WhisperSTT(STTProvider):
         response_format: ``"json"`` (default) or ``"verbose_json"`` to
             surface per-segment timestamps / confidence.
     """
+
+    #: Stable pricing/dashboard key — read by stream-handler/metrics.
+    provider_key: ClassVar[str] = "whisper"
 
     def __init__(
         self,

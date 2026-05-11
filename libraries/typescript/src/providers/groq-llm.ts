@@ -58,6 +58,8 @@ export interface GroqLLMOptions {
 
 /** LLM provider backed by Groq's OpenAI-compatible Chat Completions API. */
 export class GroqLLMProvider implements LLMProvider {
+  /** Stable pricing/dashboard key — read by stream-handler/metrics. */
+  static readonly providerKey = 'groq';
   private readonly apiKey: string;
   readonly model: string;
   private readonly baseUrl: string;

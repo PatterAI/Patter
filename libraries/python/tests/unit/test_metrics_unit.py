@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import time
-from unittest.mock import patch
 
 import pytest
 
@@ -196,6 +194,34 @@ class TestUsageTracking:
         # Should have computed ~1 second of audio
         assert acc._total_stt_audio_seconds == pytest.approx(1.0, abs=0.01)
 
+    def test_twilio_stt_format_no_4x_overbill_regression(self) -> None:
+        """Regression guard: Twilio adapter must configure metrics with the
+        post-decode PCM16@16kHz format, not raw mulaw 8 kHz.
+
+        Stream handler decodes inbound mulaw to PCM16@16 kHz before calling
+        ``add_stt_audio_bytes``. If metrics were left at ``(8000, 1)`` (mulaw),
+        a 60 s call would report 240 s of audio and bill Deepgram 4× the real
+        cost ($0.0192 vs $0.0048 at Nova-3's $0.0048/min). With the correct
+        ``(16000, 2)`` config — what the post-fix Twilio adapter installs —
+        the 1.92 MB byte count maps back to ~60 s and ~$0.0048.
+        """
+        acc = _make_accumulator(
+            provider_mode="pipeline",
+            stt_provider="deepgram",
+            stt_model="nova-3",
+        )
+        # Post-fix Twilio adapter installs this format.
+        acc.configure_stt_format(sample_rate=16000, bytes_per_sample=2)
+
+        # 60 s of PCM16 @ 16 kHz = 60 * 16000 * 2 = 1_920_000 bytes.
+        acc.add_stt_audio_bytes(1_920_000)
+        metrics = acc.end_call()
+
+        # NOT 240 s — that was the pre-fix 4× over-bill failure mode.
+        assert acc._total_stt_audio_seconds == pytest.approx(60.0, abs=0.01)
+        # Deepgram nova-3 default = $0.0048/min × 1 min = $0.0048.
+        assert metrics.cost.stt == pytest.approx(0.0048, abs=1e-6)
+
 
 # ---------------------------------------------------------------------------
 # Cost calculation
@@ -209,7 +235,7 @@ class TestCostCalculation:
     def test_pipeline_mode_cost(self) -> None:
         acc = _make_accumulator(provider_mode="pipeline")
         acc._total_stt_audio_seconds = 60.0  # 1 minute
-        acc._total_tts_characters = 1000     # 1k chars
+        acc._total_tts_characters = 1000  # 1k chars
         cost = acc._compute_cost(duration_seconds=60.0)
         assert cost.stt > 0
         assert cost.tts > 0
@@ -235,7 +261,9 @@ class TestCostCalculation:
     def test_actual_stt_cost_overrides_estimate(self) -> None:
         acc = _make_accumulator(provider_mode="pipeline")
         acc.set_actual_stt_cost(0.042)
-        acc._total_stt_audio_seconds = 600.0  # large value that would give different estimate
+        acc._total_stt_audio_seconds = (
+            600.0  # large value that would give different estimate
+        )
         cost = acc._compute_cost(duration_seconds=60.0)
         assert cost.stt == pytest.approx(0.042, abs=1e-6)
 
@@ -273,14 +301,18 @@ class TestEndCall:
 
     def test_realtime_usage_accumulation(self) -> None:
         acc = _make_accumulator(provider_mode="openai_realtime")
-        acc.record_realtime_usage({
-            "input_token_details": {"audio_tokens": 100, "text_tokens": 50},
-            "output_token_details": {"audio_tokens": 200, "text_tokens": 100},
-        })
-        acc.record_realtime_usage({
-            "input_token_details": {"audio_tokens": 100, "text_tokens": 50},
-            "output_token_details": {"audio_tokens": 200, "text_tokens": 100},
-        })
+        acc.record_realtime_usage(
+            {
+                "input_token_details": {"audio_tokens": 100, "text_tokens": 50},
+                "output_token_details": {"audio_tokens": 200, "text_tokens": 100},
+            }
+        )
+        acc.record_realtime_usage(
+            {
+                "input_token_details": {"audio_tokens": 100, "text_tokens": 50},
+                "output_token_details": {"audio_tokens": 200, "text_tokens": 100},
+            }
+        )
         assert acc._total_realtime_cost > 0
         metrics = acc.end_call()
         assert metrics.cost.llm > 0
