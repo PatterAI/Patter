@@ -12,7 +12,7 @@ import json
 import logging
 from dataclasses import dataclass
 from enum import IntEnum, StrEnum
-from typing import AsyncIterator, Literal
+from typing import ClassVar, AsyncIterator, Literal
 from urllib.parse import urlencode
 
 import aiohttp
@@ -149,6 +149,9 @@ class AssemblyAISTT(STTProvider):
             the URL instead of the ``Authorization`` header. Default ``False``.
         options: Fine-grained :class:`AssemblyAISTTOptions`.
     """
+
+    #: Stable pricing/dashboard key — read by stream-handler/metrics.
+    provider_key: ClassVar[str] = "assemblyai"
 
     def __init__(
         self,

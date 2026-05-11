@@ -2040,7 +2040,12 @@ class PipelineStreamHandler(StreamHandler):
             # the ring buffer for pre-barge-in audio is never
             # populated. Mirrors the per-turn behaviour in
             # `_process_streaming_response` / `_process_regular_response`.
-            await self._begin_speaking()
+            #
+            # ``is_first_message=True`` pre-stamps ``_first_audio_sent_at``
+            # synchronously so the barge-in gate runs in parallel with TTS
+            # TTFB instead of only after audio arrives — without this, the
+            # firstMessage is effectively un-interruptible for 300-800 ms.
+            await self._begin_speaking(is_first_message=True)
             first_chunk_sent = False
             # Drop any stale PCM16 carry byte from a prior synth (none at call
             # start, but defensive for parity with TS ``ttsByteCarry = null``).
@@ -2093,6 +2098,15 @@ class PipelineStreamHandler(StreamHandler):
                 # the next user utterance is recognised cleanly.
                 await self._end_speaking_with_grace()
             if first_chunk_sent and self.metrics is not None:
+                # Bill the firstMessage TTS characters — they were synthesised
+                # at ElevenLabs (or the configured TTS provider) and the
+                # customer pays for them. The previous flow only called
+                # ``record_turn_complete`` here, which finalises the turn
+                # but does NOT increment ``_total_tts_characters`` — so a
+                # 5-turn call with an 82-char greeting was under-billed
+                # by ~22% on TTS cost. ``record_tts_complete`` is the
+                # canonical accumulator entry point for TTS char billing.
+                self.metrics.record_tts_complete(self.agent.first_message)
                 turn = self.metrics.record_turn_complete(self.agent.first_message)
                 self.conversation_history.append(
                     {
@@ -2653,6 +2667,9 @@ class PipelineStreamHandler(StreamHandler):
             if self.metrics is not None:
                 self.metrics.record_tts_stopped()
                 self.metrics.record_turn_interrupted()
+                # Re-anchor to legitimate VAD speech_start so post-barge-in
+                # latency anchors don't carry from the interrupted turn.
+                self.metrics.anchor_user_speech_start()
                 self.metrics.record_overlap_end(was_interruption=True)
 
     async def _start_pending_barge_in(self) -> None:
@@ -2692,6 +2709,9 @@ class PipelineStreamHandler(StreamHandler):
         )
         if self.metrics is not None:
             self.metrics.record_overlap_end(was_interruption=False)
+            # Re-anchor to legitimate VAD speech_start so anchors that drifted
+            # during the pending barge-in window don't pollute the next turn.
+            self.metrics.anchor_user_speech_start()
         self._barge_in_pending_since = None
         self._barge_in_pending_task = None
 
@@ -2772,193 +2792,197 @@ class PipelineStreamHandler(StreamHandler):
                 ):
                     continue
                 if not self._commit_transcript(transcript.text):
-                    continue
-
-                # Record one STT span per final transcript turn. The span is
-                # short-lived (just the attribute set) because STT is
-                # streaming — we do not re-wrap the long-lived iterator.
-                with start_span(
-                    SPAN_STT,
-                    {
-                        "getpatter.stt.text_len": len(transcript.text),
-                        "getpatter.stt.confidence": float(transcript.confidence or 0.0),
-                        "patter.call.id": self.call_id,
-                    },
-                ):
-                    pass
-
-                logger.debug("User: %s", sanitize_log_value(transcript.text))
-
-                if self.metrics is not None:
-                    self.metrics.start_turn_if_idle()  # turn may already be open
-                    # Known limitation: per-turn audio_seconds is not tracked
-                    # here; metrics rely on total _stt_byte_count plus the
-                    # end_call() estimation pass.
-                    self.metrics.record_vad_stop()
-                    self.metrics.record_stt_complete(transcript.text)
-                    self.metrics.record_stt_final_timestamp()
-
-                # Endpoint span — silence-detected → LLM-dispatch window. Open
-                # here (right after VAD stop / final transcript is recorded)
-                # and close it just before ``record_turn_committed`` below.
-                endpoint_span = start_span(
-                    SPAN_ENDPOINT,
-                    {"patter.call.id": self.call_id},
-                )
-                endpoint_span.__enter__()
-                # Wrapped in a list so the closure-style helper can flip the
-                # flag without needing ``nonlocal`` (we are inside a loop body,
-                # not a nested function — ``nonlocal`` would not bind here).
-                _endpoint_closed = [False]
-
-                def _close_endpoint_span() -> None:
-                    if _endpoint_closed[0]:
-                        return
-                    _endpoint_closed[0] = True
-                    try:
-                        endpoint_span.__exit__(None, None, None)
-                    except Exception:  # pragma: no cover - defensive
-                        pass
-
-                # Raw transcript always goes to dashboard/transcript log
-                self.transcript_entries.append(
-                    {"role": "user", "text": transcript.text}
-                )
-
-                if self.on_transcript:
-                    await self.on_transcript(
-                        {
-                            "role": "user",
-                            "text": transcript.text,
-                            "call_id": self.call_id,
-                            "history": list(self.conversation_history),
-                        }
-                    )
-
-                # --- afterTranscribe hook ---
-                hooks = getattr(self.agent, "hooks", None)
-                hook_executor = PipelineHookExecutor(hooks)
-                hook_ctx = self._build_hook_context()
-                filtered_text = await hook_executor.run_after_transcribe(
-                    transcript.text, hook_ctx
-                )
-                if filtered_text is None:
-                    logger.debug("afterTranscribe hook vetoed turn")
+                    # Final transcript dropped (dedup / hallucination /
+                    # back-to-back). Any VAD ``speech_end`` that fired
+                    # during this dropped utterance already stamped
+                    # ``_endpoint_signal_at``; if we leave it there, the
+                    # NEXT legitimate utterance inherits the stale anchor
+                    # (its agent_response_ms then includes the silence
+                    # gap between the dropped utterance and the real one).
                     if self.metrics is not None:
-                        self.metrics.record_turn_interrupted()
-                    _close_endpoint_span()
+                        self.metrics.anchor_user_speech_start()
                     continue
 
-                if self.metrics is not None:
-                    self.metrics.record_on_user_turn_completed_delay(0.0)
-                if self.on_message is None and self._llm_loop is None:
-                    # No message handler or LLM loop — discard orphaned turn
-                    if self.metrics is not None:
-                        self.metrics.record_turn_interrupted()
-                    _close_endpoint_span()
-                    continue
-
-                # Use filtered text in conversation history (sent to LLM)
-                self.conversation_history.append(
-                    {"role": "user", "text": filtered_text, "timestamp": time.time()}
-                )
-
-                # Built-in LLM loop path
-                if self.on_message is None and self._llm_loop is not None:
-                    call_ctx = {
-                        "call_id": self.call_id,
-                        "caller": self.caller,
-                        "callee": self.callee,
-                    }
-                    if self.metrics is not None:
-                        self.metrics.record_turn_committed()
-                    _close_endpoint_span()
-                    result = self._llm_loop.run(
-                        filtered_text,
-                        list(self.conversation_history),
-                        call_ctx,
-                        hook_executor=hook_executor,
-                        hook_ctx=hook_ctx,
-                        cancel_event=self._llm_cancel_event,
-                    )
-                    response_text = await self._process_streaming_response(
-                        result, self.call_id
-                    )
-                    if response_text:
-                        await self._emit_assistant_transcript(response_text)
-                    continue
-
-                # on_message handler path
-                if self.metrics is not None:
-                    self.metrics.record_turn_committed()
-                _close_endpoint_span()
-                msg_data = {
-                    "text": filtered_text,
-                    "call_id": self.call_id,
-                    "caller": self.caller,
-                    "callee": self.callee,
-                    "history": list(self.conversation_history),
-                }
-
-                response_text = ""
-                streaming = False
-
-                from getpatter.services.remote_message import (
-                    is_remote_url,
-                    is_websocket_url,
-                )
-
-                if is_remote_url(self.on_message):
-                    remote = self._remote_handler
-                    if is_websocket_url(self.on_message):
-                        result = remote.call_websocket(self.on_message, msg_data)
-                        streaming = True
-                    else:
-                        response_text = await remote.call_webhook(
-                            self.on_message, msg_data
-                        )
-                        streaming = False
-                elif self._msg_accepts_call:
-                    result = self.on_message(msg_data, self._call_control)
-                else:
-                    result = self.on_message(msg_data)
-
-                if not is_remote_url(self.on_message):
-                    if asyncio.iscoroutine(result):
-                        response_text = await result
-                        streaming = False
-                    elif inspect.isasyncgen(result):
-                        streaming = True
-                    else:
-                        response_text = result
-                        streaming = False
-
-                # Check if handler ended the call
-                if self._call_control is not None and self._call_control.ended:
-                    return
-
-                if streaming:
-                    response_text = await self._process_streaming_response(
-                        result, self.call_id
-                    )
-                    if response_text:
-                        await self._emit_assistant_transcript(response_text)
-                else:
-                    if not response_text:
-                        # Common misuse: on_message was provided as an observer
-                        # (returning None) but it actually replaces the built-in LLM
-                        # loop. Warn loudly — the caller hears no audio until the
-                        # handler returns a non-empty string.
-                        logger.warning(
-                            "on_message returned empty/None — no TTS will play. "
-                            "If you intended to observe transcripts, use on_transcript "
-                            "instead; if you meant to answer via the built-in LLM, "
-                            "remove on_message and pass openai_key."
-                        )
-                    await self._process_regular_response(response_text, self.call_id)
+                await self._dispatch_turn(transcript.text)
 
         except Exception as exc:
             logger.exception("Pipeline STT loop error: %s", exc)
+
+    async def _dispatch_turn(self, transcript_text: str) -> None:
+        """Run the post-commit pipeline (record STT → afterTranscribe →
+        LLM dispatch → TTS → turn-complete) inline on the STT loop.
+        """
+        # Record one STT span per final transcript turn. The span is
+        # short-lived (just the attribute set) because STT is
+        # streaming — we do not re-wrap the long-lived iterator.
+        with start_span(
+            SPAN_STT,
+            {
+                "getpatter.stt.text_len": len(transcript_text),
+                "patter.call.id": self.call_id,
+            },
+        ):
+            pass
+
+        logger.debug("User: %s", sanitize_log_value(transcript_text))
+
+        if self.metrics is not None:
+            self.metrics.start_turn_if_idle()  # turn may already be open
+            # Known limitation: per-turn audio_seconds is not tracked
+            # here; metrics rely on total _stt_byte_count plus the
+            # end_call() estimation pass.
+            self.metrics.record_vad_stop()
+            self.metrics.record_stt_complete(transcript_text)
+            self.metrics.record_stt_final_timestamp()
+
+        # Endpoint span — silence-detected → LLM-dispatch window. Open
+        # here (right after VAD stop / final transcript is recorded)
+        # and close it just before ``record_turn_committed`` below.
+        endpoint_span = start_span(
+            SPAN_ENDPOINT,
+            {"patter.call.id": self.call_id},
+        )
+        endpoint_span.__enter__()
+        endpoint_closed = False
+
+        def _close_endpoint_span() -> None:
+            nonlocal endpoint_closed
+            if endpoint_closed:
+                return
+            endpoint_closed = True
+            try:
+                endpoint_span.__exit__(None, None, None)
+            except Exception:  # pragma: no cover - defensive
+                pass
+
+        # Raw transcript always goes to dashboard/transcript log
+        self.transcript_entries.append({"role": "user", "text": transcript_text})
+
+        if self.on_transcript:
+            await self.on_transcript(
+                {
+                    "role": "user",
+                    "text": transcript_text,
+                    "call_id": self.call_id,
+                    "history": list(self.conversation_history),
+                }
+            )
+
+        # --- afterTranscribe hook ---
+        hooks = getattr(self.agent, "hooks", None)
+        hook_executor = PipelineHookExecutor(hooks)
+        hook_ctx = self._build_hook_context()
+        filtered_text = await hook_executor.run_after_transcribe(
+            transcript_text, hook_ctx
+        )
+        if filtered_text is None:
+            logger.debug("afterTranscribe hook vetoed turn")
+            if self.metrics is not None:
+                self.metrics.record_turn_interrupted()
+            _close_endpoint_span()
+            return
+
+        if self.metrics is not None:
+            self.metrics.record_on_user_turn_completed_delay(0.0)
+        if self.on_message is None and self._llm_loop is None:
+            # No message handler or LLM loop — discard orphaned turn
+            if self.metrics is not None:
+                self.metrics.record_turn_interrupted()
+            _close_endpoint_span()
+            return
+
+        # Use filtered text in conversation history (sent to LLM)
+        self.conversation_history.append(
+            {"role": "user", "text": filtered_text, "timestamp": time.time()}
+        )
+
+        # Built-in LLM loop path
+        if self.on_message is None and self._llm_loop is not None:
+            call_ctx = {
+                "call_id": self.call_id,
+                "caller": self.caller,
+                "callee": self.callee,
+            }
+            if self.metrics is not None:
+                self.metrics.record_turn_committed()
+            _close_endpoint_span()
+            result = self._llm_loop.run(
+                filtered_text,
+                list(self.conversation_history),
+                call_ctx,
+                hook_executor=hook_executor,
+                hook_ctx=hook_ctx,
+                cancel_event=self._llm_cancel_event,
+            )
+            response_text = await self._process_streaming_response(result, self.call_id)
+            if response_text:
+                await self._emit_assistant_transcript(response_text)
+            return
+
+        # on_message handler path
+        if self.metrics is not None:
+            self.metrics.record_turn_committed()
+        _close_endpoint_span()
+        msg_data = {
+            "text": filtered_text,
+            "call_id": self.call_id,
+            "caller": self.caller,
+            "callee": self.callee,
+            "history": list(self.conversation_history),
+        }
+
+        response_text = ""
+        streaming = False
+
+        from getpatter.services.remote_message import (
+            is_remote_url,
+            is_websocket_url,
+        )
+
+        if is_remote_url(self.on_message):
+            remote = self._remote_handler
+            if is_websocket_url(self.on_message):
+                result = remote.call_websocket(self.on_message, msg_data)
+                streaming = True
+            else:
+                response_text = await remote.call_webhook(self.on_message, msg_data)
+                streaming = False
+        elif self._msg_accepts_call:
+            result = self.on_message(msg_data, self._call_control)
+        else:
+            result = self.on_message(msg_data)
+
+        if not is_remote_url(self.on_message):
+            if asyncio.iscoroutine(result):
+                response_text = await result
+                streaming = False
+            elif inspect.isasyncgen(result):
+                streaming = True
+            else:
+                response_text = result
+                streaming = False
+
+        # Check if handler ended the call
+        if self._call_control is not None and self._call_control.ended:
+            return
+
+        if streaming:
+            response_text = await self._process_streaming_response(result, self.call_id)
+            if response_text:
+                await self._emit_assistant_transcript(response_text)
+        else:
+            if not response_text:
+                # Common misuse: on_message was provided as an observer
+                # (returning None) but it actually replaces the built-in LLM
+                # loop. Warn loudly — the caller hears no audio until the
+                # handler returns a non-empty string.
+                logger.warning(
+                    "on_message returned empty/None — no TTS will play. "
+                    "If you intended to observe transcripts, use on_transcript "
+                    "instead; if you meant to answer via the built-in LLM, "
+                    "remove on_message and pass openai_key."
+                )
+            await self._process_regular_response(response_text, self.call_id)
 
     async def on_audio_received(self, audio_bytes: bytes) -> None:
         """Forward caller audio to STT (transcoding to PCM16 16 kHz, running VAD/hooks)."""
@@ -3008,12 +3032,24 @@ class PipelineStreamHandler(StreamHandler):
                 vad_event = None
             if vad_event is not None:
                 if vad_event.type == "speech_start":
-                    if self._is_speaking and not self._can_barge_in():
+                    phantom_suppressed = self._is_speaking and not self._can_barge_in()
+                    if phantom_suppressed:
                         # Within the per-turn warmup gate. With AEC on
                         # this is the ~1 s filter convergence window;
                         # without AEC it is just a 0.25 s anti-flicker
                         # margin. INFO so unexpected suppressions are
                         # visible without enabling debug logs.
+                        #
+                        # CRITICAL: do NOT touch metrics state here.
+                        # An earlier bug (pre-0.6.1) called
+                        # ``start_turn_if_idle()`` for every
+                        # ``speech_start`` including suppressed phantoms,
+                        # which stamped ``_turn_start`` at echo/loopback
+                        # time. ``start_turn_if_idle`` then no-op'd on
+                        # the legitimate user-speech ``speech_start``
+                        # that followed (turn_start was already set),
+                        # so ``user_speech_duration_ms`` was reported as
+                        # 5-7 s even on short ~1 s utterances.
                         aec_state = (
                             "on" if getattr(self, "_aec", None) is not None else "off"
                         )
@@ -3053,8 +3089,14 @@ class PipelineStreamHandler(StreamHandler):
                                 self._first_audio_sent_at = None
                                 self._speaking_generation += 1
                                 self._last_cancel_at = time.time()
-                    if self.metrics is not None:
-                        self.metrics.start_turn_if_idle()
+                    if not phantom_suppressed and self.metrics is not None:
+                        # Industry-standard pattern: every legitimate VAD speech_start
+                        # re-anchors the turn timestamp pre-commit. This
+                        # repairs the case where a partial transcript /
+                        # rejected barge-in already stamped stale anchors,
+                        # plus the original "phantom during warmup gate"
+                        # vulnerability. No-op once the turn is committed.
+                        self.metrics.anchor_user_speech_start()
                 elif vad_event.type == "speech_end":
                     if self.metrics is not None:
                         self.metrics.record_vad_stop()
@@ -3139,7 +3181,7 @@ class PipelineStreamHandler(StreamHandler):
     # ``StreamHandler.POST_CANCEL_DRAIN_MS``.
     _POST_CANCEL_DRAIN_S: float = 0.15
 
-    async def _begin_speaking(self) -> None:
+    async def _begin_speaking(self, is_first_message: bool = False) -> None:
         """Mark TTS playback as in-progress and bump the generation counter.
 
         Awaits the post-cancel drain window before flipping state so the
@@ -3148,6 +3190,15 @@ class PipelineStreamHandler(StreamHandler):
         The generation counter is consulted by ``_end_speaking_with_grace``
         so a delayed flip-to-idle from a previous turn cannot cancel the
         speaking flag of the *current* turn.
+
+        Args:
+            is_first_message: When ``True`` stamps ``_first_audio_sent_at``
+                synchronously before the TTS loop starts so the
+                ``_can_barge_in()`` 250 ms anti-flicker gate (no-AEC PSTN
+                default) runs in PARALLEL with TTS TTFB rather than only
+                starting after audio actually arrives. Without this, the
+                firstMessage is effectively un-interruptible for the first
+                300-800 ms while waiting on cloud TTS first-byte.
         """
         if self._last_cancel_at is not None:
             elapsed = time.time() - self._last_cancel_at
@@ -3157,7 +3208,12 @@ class PipelineStreamHandler(StreamHandler):
         self._speaking_generation += 1
         self._is_speaking = True
         self._speaking_started_at = time.time()
-        self._first_audio_sent_at = None
+        if is_first_message:
+            # Parity with TS ``beginSpeaking(isFirstMessage=true)``: pre-stamp
+            # so the barge-in gate can fire before the first TTS byte lands.
+            self._first_audio_sent_at = time.time()
+        else:
+            self._first_audio_sent_at = None
         # Fresh turn — drop any stale pre-barge-in buffer from a previous
         # turn so we never replay yesterday's audio to STT.
         self._inbound_audio_ring = []

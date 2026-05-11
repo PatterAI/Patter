@@ -46,6 +46,8 @@ export interface LMNTTTSOptions {
 
 /** LMNT TTS adapter backed by the `/v1/ai/speech/bytes` HTTP streaming endpoint. */
 export class LMNTTTS {
+  /** Stable pricing/dashboard key — read by stream-handler/metrics. */
+  static readonly providerKey = 'lmnt';
   private readonly apiKey: string;
   private readonly model: LMNTModel;
   private readonly voice: string;

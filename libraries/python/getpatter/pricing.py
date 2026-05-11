@@ -86,15 +86,27 @@ DEFAULT_PRICING: dict[str, dict] = {
     # adapter exposes its model identifier (see ``_resolve_provider_rates``).
     "deepgram": {
         "unit": PricingUnit.MINUTE,
-        # Default = Nova-3 streaming monolingual ($0.0077/min). The previous
-        # $0.0043 was the batch rate; streaming is ~80% more expensive.
-        "price": 0.0077,
+        # Default = Nova-3 streaming monolingual ($0.0048/min, current Pay-
+        # As-You-Go promotional rate). Source: https://deepgram.com/pricing
+        # (verified 2026-05-11). The promo replaces the standard $0.0077/min
+        # quoted at Nova-3 launch and is the rate customers actually pay
+        # today; revisit when Deepgram removes the "Limited-time
+        # promotional rates on streaming" banner.
+        "price": 0.0048,
         "models": {
-            "nova-3": {"price": 0.0077},
-            "nova-3-multilingual": {"price": 0.0092},
+            # Nova-3 family — current flagship.
+            "nova-3": {"price": 0.0048},
+            "nova-3-multilingual": {"price": 0.0058},
+            # Flux family — new event-driven turn-taking STT (2026 launch).
+            "flux": {"price": 0.0065},
+            "flux-english": {"price": 0.0065},
+            "flux-multilingual": {"price": 0.0078},
+            # Legacy Nova-2 / Nova-1 — still supported but no longer
+            # featured on the public pricing page; rates kept as last
+            # verified ($0.0058 / $0.0043 per min).
             "nova-2": {"price": 0.0058},
             "nova": {"price": 0.0043},
-            # Whisper Cloud via Deepgram is billed at a separate tier.
+            # Whisper Cloud via Deepgram — separate tier.
             "whisper-large": {"price": 0.0048},
             "whisper-medium": {"price": 0.0048},
         },
@@ -134,27 +146,30 @@ DEFAULT_PRICING: dict[str, dict] = {
     # being over-billed ~4.3x.
     "speechmatics": {"unit": PricingUnit.MINUTE, "price": 0.004},
     # TTS — per 1,000 characters synthesized.
+    # Source: https://elevenlabs.io/pricing/api (verified 2026-05-11). The
+    # per-1K-character API/overage rate is flat across all plan tiers (Free
+    # through Business); only the included character bundle varies by plan.
     "elevenlabs": {
         "unit": PricingUnit.THOUSAND_CHARS,
-        # Default = eleven_flash_v2_5 (the Patter default model) at $0.06/1k.
-        "price": 0.06,
+        # Default = eleven_flash_v2_5 (the Patter default model) at $0.05/1k.
+        "price": 0.05,
         "models": {
-            "eleven_flash_v2_5": {"price": 0.06},
+            "eleven_flash_v2_5": {"price": 0.05},
             "eleven_turbo_v2_5": {"price": 0.05},
-            "eleven_multilingual_v2": {"price": 0.18},
-            "eleven_monolingual_v1": {"price": 0.18},
-            "eleven_v3": {"price": 0.30},
+            "eleven_multilingual_v2": {"price": 0.10},
+            "eleven_monolingual_v1": {"price": 0.10},
+            "eleven_v3": {"price": 0.10},
         },
     },
     # ElevenLabs WebSocket streaming TTS shares pricing with REST.
     "elevenlabs_ws": {
         "unit": PricingUnit.THOUSAND_CHARS,
-        "price": 0.06,
+        "price": 0.05,
         "models": {
-            "eleven_flash_v2_5": {"price": 0.06},
+            "eleven_flash_v2_5": {"price": 0.05},
             "eleven_turbo_v2_5": {"price": 0.05},
-            "eleven_multilingual_v2": {"price": 0.18},
-            "eleven_v3": {"price": 0.30},
+            "eleven_multilingual_v2": {"price": 0.10},
+            "eleven_v3": {"price": 0.10},
         },
     },
     "openai_tts": {
@@ -291,7 +306,25 @@ DEFAULT_PRICING: dict[str, dict] = {
     # receiving calls on a local number). For US toll-free inbound ($0.022/min)
     # or US outbound local ($0.0140/min), override via Patter(pricing={...}).
     "twilio": {"unit": PricingUnit.MINUTE, "price": 0.0085},
+    # Telnyx — direction-aware rates as of 2026-05-11.
+    # Sources:
+    #   https://telnyx.com/pricing/elastic-sip
+    #   https://telnyx.com/pricing/voice-api
+    # US inbound (DID / local termination, Pay-As-You-Go): $0.0035/min
+    # US outbound (Pay-As-You-Go, mid-range of $0.005-$0.009): $0.007/min
+    # Billing granularity is per-MINUTE (Telnyx rounds partial minutes up
+    # on the invoice; prior internal docs incorrectly claimed per-second).
+    # The legacy ``telnyx`` key is preserved at the outbound rate as a
+    # safe fallback for users who override ``pricing={"telnyx": {...}}``
+    # without knowing the direction; the metrics layer currently uses
+    # this flat key (direction is not threaded through to
+    # ``calculate_telephony_cost``). Direction-aware billing can be
+    # enabled by override-only: ``Patter(pricing={"telnyx":
+    # {"unit": "minute", "price": 0.0035}})`` to bill all inbound at
+    # the lower rate.
     "telnyx": {"unit": PricingUnit.MINUTE, "price": 0.007},
+    "telnyx_inbound": {"unit": PricingUnit.MINUTE, "price": 0.0035},
+    "telnyx_outbound": {"unit": PricingUnit.MINUTE, "price": 0.007},
 }
 
 
@@ -540,16 +573,18 @@ LLM_PRICING: dict[str, dict[str, dict[str, float]]] = {
         "gemma2-9b-it": {"input": 0.20, "output": 0.20},
     },
     "cerebras": {
-        # Rates as of 2026-05-08; verify against cerebras.net/inference.
-        # ``gpt-oss-120b`` is the Patter default for Cerebras (set in 0.5.4).
-        # On WSE-3 hardware all model sizes saturate the downstream TTS
-        # consumption rate (~150-300 tok/sec), so the 120B price is in line
-        # with the 70B tier rather than scaling with weight count.
-        "gpt-oss-120b": {"input": 0.85, "output": 1.20},
-        "llama3.1-8b": {"input": 0.10, "output": 0.20},
+        # Rates as of 2026-05-11 verified against the canonical per-model docs
+        # pages at ``https://inference-docs.cerebras.ai/models/<model>``. The
+        # previous 2026-05-08 update overcharged across the board (gpt-oss-120b
+        # 2.4x input, qwen-3-235b 1.67x input) because it conflated the launch
+        # blog quotes with the "Exploration pricing" banner now shown on each
+        # model page. Each entry below cites the docs URL it was sourced from.
+        "gpt-oss-120b": {"input": 0.35, "output": 0.75},
+        "llama3.1-8b": {"input": 0.10, "output": 0.10},
         "llama-3.3-70b": {"input": 0.85, "output": 1.20},
         "qwen-3-32b": {"input": 0.40, "output": 0.80},
-        "qwen-3-235b-a22b-instruct-2507": {"input": 1.00, "output": 1.50},
+        "qwen-3-235b-a22b-instruct-2507": {"input": 0.60, "output": 1.20},
+        "qwen-3-coder-480b": {"input": 2.00, "output": 2.00},
         "zai-glm-4.7": {"input": 0.85, "output": 1.20},
     },
 }

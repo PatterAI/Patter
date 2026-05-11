@@ -7,7 +7,7 @@ sensitive use cases prefer :mod:`elevenlabs_ws_tts` (WebSocket).
 
 import logging
 from enum import StrEnum
-from typing import AsyncIterator, Optional, Union
+from typing import AsyncIterator, ClassVar, Optional, Union
 import re
 import httpx
 from getpatter.providers.base import TTSProvider
@@ -154,6 +154,14 @@ class ElevenLabsTTS(TTSProvider):
       profile pinned to PCMU/8000 — pass ``output_format='ulaw_8000'``
       explicitly in that case.
     """
+
+    # Stable pricing/dashboard key — read by stream-handler/metrics via
+    # ``getattr(type(agent.tts), "provider_key", None)``. Without this
+    # the cost calculator falls back to the class name ``ElevenLabsTTS``
+    # which does NOT match the pricing table key ``elevenlabs``,
+    # silently zeroing TTS cost for callers that construct the raw REST
+    # class directly (exposed at top level as ``ElevenLabsRestTTS``).
+    provider_key: ClassVar[str] = "elevenlabs"
 
     def __init__(
         self,

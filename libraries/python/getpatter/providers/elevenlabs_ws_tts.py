@@ -42,7 +42,7 @@ import json
 import logging
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import AsyncGenerator, Optional, Union
+from typing import ClassVar, AsyncGenerator, Optional, Union
 from urllib.parse import quote, urlencode
 
 try:
@@ -125,8 +125,8 @@ class ElevenLabsPlanError(ElevenLabsTTSError):
 _PLAN_REQUIRED_MSG = (
     "ElevenLabs WS streaming requires a Pro plan or higher (the WS endpoint "
     "returned `payment_required`). Either upgrade at "
-    "https://elevenlabs.io/pricing, or use the HTTP `ElevenLabsTTS` class "
-    "which works on all plans (drop-in API)."
+    "https://elevenlabs.io/pricing, or use `ElevenLabsRestTTS` for HTTP REST "
+    "instead which works on all plans (drop-in API)."
 )
 
 
@@ -163,6 +163,13 @@ class ElevenLabsWebSocketTTS(TTSProvider):
     via the ``synthesize`` async iterator, identically to the HTTP variant.
     """
 
+    # Stable provider key for pricing / metrics lookup. Read by
+    # ``stream_handler`` via ``getattr(type(agent.tts), "provider_key", None)``.
+    # Without this the cost calculator falls through to the class name
+    # ("ElevenLabsWebSocketTTS") which doesn't match any pricing.py entry,
+    # making TTS cost = $0 silently.
+    provider_key: ClassVar[str] = "elevenlabs_ws"
+
     def __init__(
         self,
         api_key: str,
@@ -184,7 +191,7 @@ class ElevenLabsWebSocketTTS(TTSProvider):
         if str(model_id).startswith("eleven_v3"):
             raise ValueError(
                 f"{model_id!r} is not supported by the WebSocket stream-input "
-                "endpoint — use the HTTP ElevenLabsTTS class instead."
+                "endpoint — use `ElevenLabsRestTTS` for HTTP REST instead."
             )
         # Stored privately so it is not surfaced via ``vars(tts)`` or accidental
         # log serialisation. Public read access goes through ``api_key`` below.

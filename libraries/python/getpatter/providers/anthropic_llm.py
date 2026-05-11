@@ -20,7 +20,7 @@ import json
 import logging
 import os
 from enum import StrEnum
-from typing import AsyncIterator
+from typing import ClassVar, AsyncIterator
 
 logger = logging.getLogger("getpatter")
 
@@ -93,6 +93,9 @@ class AnthropicLLMProvider:
               * You explicitly want every turn to bypass the cache for
                 debugging or A/B comparisons.
     """
+
+    #: Stable pricing/dashboard key — read by stream-handler/metrics.
+    provider_key: ClassVar[str] = "anthropic"
 
     def __init__(
         self,

@@ -125,6 +125,8 @@ export interface SonioxSTTOptions {
 
 /** Streaming STT adapter for Soniox's real-time WebSocket API. */
 export class SonioxSTT {
+  /** Stable pricing/dashboard key — read by stream-handler/metrics. */
+  static readonly providerKey = 'soniox';
   private ws: WebSocket | null = null;
   private callbacks: TranscriptCallback[] = [];
   private final = new TokenAccumulator();

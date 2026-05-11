@@ -135,6 +135,12 @@ export interface CallMetrics {
   tts_provider: string;
   llm_provider: string;
   telephony_provider: string;
+  /** Model identifiers per provider (e.g. "ink-whisper", "eleven_flash_v2_5",
+   * "gpt-oss-120b"). Surface on the dashboard cost breakdown so operators
+   * can attribute per-call spend to a specific model. */
+  stt_model?: string;
+  tts_model?: string;
+  llm_model?: string;
 }
 
 // ---- CallControl interface ----
@@ -252,6 +258,10 @@ export class CallMetricsAccumulator {
   private _actualSttCost: number | null = null;
   // Fix 10: accumulated LLM token cost for non-Realtime pipeline mode.
   private _totalLlmCost = 0;
+  // Last LLM model identifier from a recordLlmUsage call — emitted on
+  // CallMetrics.llm_model so the dashboard cost panel can display
+  // "Cerebras gpt-oss-120b" instead of just "Cerebras".
+  private _llmModel = '';
 
   // ---- EventBus integration (item 3) ----
   private _eventBus: EventBus | undefined;
@@ -274,6 +284,23 @@ export class CallMetricsAccumulator {
   // ---- report_only_initial_ttfb (item 6) ----
   private _reportOnlyInitialTtfb: boolean;
   private _initialTtfbEmitted = false;
+
+  // ---- Barge-in anchor hygiene ----
+  /**
+   * Last barge-in detection timestamp (hrTimeMs). Used by
+   * ``_computeTurnLatency`` to gate endpoint_ms / stt_ms emission on turns
+   * that started immediately after a barge-in — those turns have unreliable
+   * VAD/STT anchors and would otherwise pollute the p95 distribution with
+   * synthetic 6+ second spikes.
+   */
+  private _lastBargeinAt: number | null = null;
+  /**
+   * Count of turns where ``recordSttComplete`` fired but no legitimate VAD
+   * ``speech_end`` had stamped ``_endpointSignalAt``. Exposed via metrics so
+   * we can spot environments where PSTN packet loss is dropping VAD stops
+   * (the common cause of missing endpoint signals).
+   */
+  private _endpointSignalMissingCount = 0;
 
   constructor(opts: {
     callId: string;
@@ -363,13 +390,51 @@ export class CallMetricsAccumulator {
     }
   }
 
+  /**
+   * Anchor the current turn at a legitimate VAD ``speech_start`` event.
+   *
+   * Industry-standard pattern: every VAD ``speech_start`` that fires while the agent
+   * is NOT in the suppressed warmup window re-anchors the turn timer to
+   * the wall-clock moment the user actually started speaking. Re-anchors:
+   *
+   *  * ``_turnStart`` — fixes the case where a phantom ``speech_start``
+   *    during agent TTS or a partial transcript from the previous user
+   *    attempt already stamped the field. Without this, the legitimate
+   *    user-speech ``speech_start`` no-op'd and ``user_speech_duration_ms``
+   *    inflated from ~1 s to 5-7 s (the original "I waited 7 seconds"
+   *    dashboard symptom).
+   *  * ``_endpointSignalAt``, ``_vadStoppedAt``, ``_sttFinalAt`` — any
+   *    stale anchor from a rejected barge-in / dropped final transcript
+   *    on the same uncommitted turn is cleared, so the next
+   *    ``recordVadStop`` / ``recordSttFinalTimestamp`` stamps fresh.
+   *  * ``_sttComplete``, ``_llmFirstToken``, ``_initialTtfbEmitted`` — same
+   *    rationale for the downstream pipeline timestamps.
+   *
+   * No-op once the turn is committed (``_turnCommittedMono`` set): a
+   * VAD ``speech_start`` after commit belongs to the NEXT turn's
+   * barge-in path, handled by ``recordTurnInterrupted`` instead.
+   */
+  anchorUserSpeechStart(): void {
+    if (this._turnCommittedMono !== null) return;
+    this._turnStart = hrTimeMs();
+    this._endpointSignalAt = null;
+    this._vadStoppedAt = null;
+    this._sttFinalAt = null;
+    this._sttComplete = null;
+    this._llmFirstToken = null;
+    this._initialTtfbEmitted = false;
+  }
+
   /** Stamp end-of-STT, capture the user's transcript, and accrue billed STT seconds. */
   recordSttComplete(text: string, audioSeconds = 0): void {
     this._sttComplete = hrTimeMs();
     this._sttFinalAt = this._sttComplete;
-    // STT-final is the fallback endpoint signal when no VAD-stop fired earlier.
+    // Don't fake _endpointSignalAt from _sttComplete — that creates dishonest
+    // endpoint_ms == stt_ms outliers. Honest "undefined" is better than a
+    // 6818ms percentile spike. The counter lets us know if this happens often
+    // (VAD speech_end being dropped on PSTN packets is the common cause).
     if (this._endpointSignalAt === null) {
-      this._endpointSignalAt = this._sttComplete;
+      this._endpointSignalMissingCount++;
     }
     this._turnUserText = text;
     this._turnSttAudioSeconds = audioSeconds;
@@ -487,7 +552,12 @@ export class CallMetricsAccumulator {
    * ``recordTtsStopped`` to compute ``bargein_ms``.
    */
   recordBargeinDetected(ts?: number): void {
-    this._bargeinDetectedAt = ts ?? hrTimeMs();
+    const t = ts ?? hrTimeMs();
+    this._bargeinDetectedAt = t;
+    // Stamp _lastBargeinAt on the same monotonic clock as _turnStart so the
+    // post-barge-in anchor-gating in _computeTurnLatency stays valid (see
+    // the comment there for rationale).
+    this._lastBargeinAt = t;
   }
 
   /**
@@ -532,7 +602,17 @@ export class CallMetricsAccumulator {
       timestamp: Date.now() / 1000,
     };
     this._turns.push(turn);
+    // Emit the turn record BEFORE reset so subscribers see the interrupted
+    // turn with its anchors still intact. Parity with recordTurnComplete().
+    this._eventBus?.emit('turn_ended', { callId: this.callId, turn });
+    this._eventBus?.emit('metrics_collected', { callId: this.callId, turn });
     this._resetTurnState();
+    // Extra paranoia: explicitly null out anchors that have caused leaks
+    // into subsequent turns when a barge-in is in flight. _resetTurnState
+    // already clears them, but keep this belt-and-braces line so future
+    // refactors that touch _resetTurnState don't silently regress us.
+    this._turnCommittedMono = null;
+    this._endpointSignalAt = null;
     return turn;
   }
 
@@ -721,6 +801,7 @@ export class CallMetricsAccumulator {
     cacheReadTokens = 0,
     cacheWriteTokens = 0,
   ): void {
+    this._llmModel = model;
     this._totalLlmCost += calculateLlmCost(
       provider, model,
       inputTokens, outputTokens,
@@ -768,6 +849,9 @@ export class CallMetricsAccumulator {
       tts_provider: this.ttsProvider,
       llm_provider: this.llmProvider,
       telephony_provider: this.telephonyProvider,
+      stt_model: this.sttModel,
+      tts_model: this.ttsModel,
+      llm_model: this._llmModel,
     };
 
     this._eventBus?.emit('call_ended', { callId: this.callId, metrics });
@@ -778,6 +862,16 @@ export class CallMetricsAccumulator {
   getCostSoFar(): CostBreakdown {
     const duration = (hrTimeMs() - this._callStart) / 1000;
     return this._computeCost(duration);
+  }
+
+  /**
+   * Number of turns where recordSttComplete fired without a prior legitimate
+   * VAD speech_end. Surfaced for diagnostics — a non-zero value points at
+   * dropped VAD stops (commonly PSTN packet loss), which is why we stopped
+   * faking _endpointSignalAt from _sttComplete in 0.6.x.
+   */
+  get endpointSignalMissingCount(): number {
+    return this._endpointSignalMissingCount;
   }
 
   // ---- Internal ----
@@ -796,6 +890,10 @@ export class CallMetricsAccumulator {
     this._bargeinStoppedAt = null;
     this._turnUserText = '';
     this._turnSttAudioSeconds = 0;
+    // Reset initial-TTFB latch so EventBus TTFB emission re-fires on the new
+    // turn. Without this, with reportOnlyInitialTtfb=true we lose the TTFB
+    // metric on the first turn after a barge-in / new turn.
+    this._initialTtfbEmitted = false;
   }
 
   private _computeTurnLatency(): LatencyBreakdown {
@@ -809,6 +907,15 @@ export class CallMetricsAccumulator {
     let bargein_ms: number | undefined;
     let tts_total_ms: number | undefined;
     let user_speech_duration_ms: number | undefined;
+
+    // Post-barge-in turns have unreliable anchors. Drop endpoint_ms / stt_ms
+    // to avoid polluting the p95 distribution with synthetic spikes. The
+    // honest "undefined" makes the metric usable for SLO/alerting; without
+    // this gate, a single barge-in produces 6+ second p95 outliers.
+    const postBargein =
+      this._lastBargeinAt !== null &&
+      this._turnStart !== null &&
+      Math.abs(this._turnStart - this._lastBargeinAt) <= 100;
 
     // ``stt_ms`` measures pure STT finalization: end-of-speech (VAD stop or
     // STT speech_final) → final transcript delivery. This is the
@@ -887,6 +994,15 @@ export class CallMetricsAccumulator {
       tts_ms > 0
     ) {
       agent_response_ms = round(endpoint_ms + llm_ttft_ms + tts_ms, 1);
+    }
+
+    // Post-barge-in anchor hygiene: when the current turn began within 100 ms
+    // of the last detected barge-in, the VAD/STT anchors are unreliable. Drop
+    // the polluted endpoint_ms and stt_ms so percentile aggregations ignore
+    // them (stt_ms = 0 is excluded by nonZero() in _computePercentileLatency).
+    if (postBargein) {
+      stt_ms = 0;
+      endpoint_ms = undefined;
     }
 
     // Note: in Realtime mode OpenAI handles STT+LLM+TTS as a single opaque
@@ -1000,6 +1116,8 @@ export class CallMetricsAccumulator {
     const endpointAvg = optAvg('endpoint_ms');
     const bargeinAvg = optAvg('bargein_ms');
     const ttsTotalAvg = optAvg('tts_total_ms');
+    const userSpeechAvg = optAvg('user_speech_duration_ms');
+    const agentResponseAvg = optAvg('agent_response_ms');
     return {
       stt_ms: round(turns.reduce((s, t) => s + t.latency.stt_ms, 0) / n, 1),
       llm_ms: round(turns.reduce((s, t) => s + t.latency.llm_ms, 0) / n, 1),
@@ -1010,6 +1128,8 @@ export class CallMetricsAccumulator {
       ...(endpointAvg !== undefined ? { endpoint_ms: endpointAvg } : {}),
       ...(bargeinAvg !== undefined ? { bargein_ms: bargeinAvg } : {}),
       ...(ttsTotalAvg !== undefined ? { tts_total_ms: ttsTotalAvg } : {}),
+      ...(userSpeechAvg !== undefined ? { user_speech_duration_ms: userSpeechAvg } : {}),
+      ...(agentResponseAvg !== undefined ? { agent_response_ms: agentResponseAvg } : {}),
     };
   }
 
@@ -1038,6 +1158,8 @@ export class CallMetricsAccumulator {
     const endpointP = optPct('endpoint_ms');
     const bargeinP = optPct('bargein_ms');
     const ttsTotalP = optPct('tts_total_ms');
+    const userSpeechP = optPct('user_speech_duration_ms');
+    const agentResponseP = optPct('agent_response_ms');
     return {
       stt_ms: round(percentile(nonZero(turns.map((t) => t.latency.stt_ms)), p), 1),
       llm_ms: round(percentile(nonZero(turns.map((t) => t.latency.llm_ms)), p), 1),
@@ -1048,6 +1170,8 @@ export class CallMetricsAccumulator {
       ...(endpointP !== undefined ? { endpoint_ms: endpointP } : {}),
       ...(bargeinP !== undefined ? { bargein_ms: bargeinP } : {}),
       ...(ttsTotalP !== undefined ? { tts_total_ms: ttsTotalP } : {}),
+      ...(userSpeechP !== undefined ? { user_speech_duration_ms: userSpeechP } : {}),
+      ...(agentResponseP !== undefined ? { agent_response_ms: agentResponseP } : {}),
     };
   }
 }

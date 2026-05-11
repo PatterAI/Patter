@@ -149,6 +149,12 @@ export class MetricsStore extends EventEmitter {
         // ``recordCallEnd``) would create a placeholder entry with no
         // transcript and no turns — and any dashboard fetch in that race
         // window would render the live-transcript pane blank. See BUG 2.
+        //
+        // TODO(0.6.2): updateCallStatus writes synthetic records with
+        // metrics:undefined when status callbacks arrive before
+        // recordCallEnd. The dashboard masks this via mergeCallPreserving
+        // (useDashboardData.ts) but the root cause is here — recordCallEnd
+        // should be the only writer to the completed buffer.
         const entry: CallRecord = {
           call_id: callId,
           caller: active.caller || '',
@@ -392,7 +398,10 @@ export class MetricsStore extends EventEmitter {
       costTel += cost.telephony || 0;
       totalDuration += (m.duration_seconds as number) || 0;
       const avgLat = (m.latency_avg as Record<string, number>) || {};
-      const tMs = avgLat.total_ms || 0;
+      // Prefer the user-perceived wait time (agent_response_ms) — falls
+      // back to round-trip total_ms only when the SDK didn't record the
+      // breakdown (legacy hydrate path).
+      const tMs = avgLat.agent_response_ms || avgLat.total_ms || 0;
       if (tMs > 0) {
         totalLatency += tMs;
         latencyCount++;
@@ -484,6 +493,19 @@ export class MetricsStore extends EventEmitter {
             );
             continue;
           }
+          // CallLogger writes the transcript to a separate ``transcript.jsonl``
+          // file (one turn per line) — ``metadata.json`` only carries a turn
+          // count. Without this fallback, hydrated past calls render with an
+          // empty transcript pane: the SPA polls /api/dashboard/calls/:id,
+          // the route serves the hydrated record verbatim, and ``transcript``
+          // is ``[]``. Read the sibling file and synthesise the entry list
+          // the SPA expects so the pane populates on click.
+          if (!record.transcript || record.transcript.length === 0) {
+            const fromJsonl = loadTranscriptJsonl(
+              path.join(childPath, 'transcript.jsonl'),
+            );
+            if (fromJsonl.length > 0) record.transcript = fromJsonl;
+          }
           collected.push(record);
           seen.add(callId);
         } catch (err) {
@@ -540,11 +562,26 @@ function metricsFromTopLevel(
   const out: Record<string, unknown> = {};
   if (cost !== null) out.cost = cost;
   if (latency !== null) {
-    const totalMs =
-      (typeof latency.p95_ms === 'number' && latency.p95_ms) ||
-      (typeof latency.p50_ms === 'number' && latency.p50_ms) ||
-      0;
-    out.latency_avg = { total_ms: totalMs };
+    // Prefer the full LatencyBreakdown objects (avg/p50/p95/p99) when the
+    // server persisted them. Old metadata.json files only carry flat
+    // ``p50_ms/p95_ms/p99_ms`` totals — synthesize a minimal latency_avg
+    // from those so the table still shows a number, but no breakdown is
+    // available for those historical rows.
+    const fullAvg = latency.avg && typeof latency.avg === 'object' ? (latency.avg as Record<string, unknown>) : null;
+    const fullP50 = latency.p50 && typeof latency.p50 === 'object' ? (latency.p50 as Record<string, unknown>) : null;
+    const fullP95 = latency.p95 && typeof latency.p95 === 'object' ? (latency.p95 as Record<string, unknown>) : null;
+    const fullP99 = latency.p99 && typeof latency.p99 === 'object' ? (latency.p99 as Record<string, unknown>) : null;
+    if (fullAvg) out.latency_avg = fullAvg;
+    if (fullP50) out.latency_p50 = fullP50;
+    if (fullP95) out.latency_p95 = fullP95;
+    if (fullP99) out.latency_p99 = fullP99;
+    if (!fullAvg && !fullP50 && !fullP95) {
+      const totalMs =
+        (typeof latency.p95_ms === 'number' && latency.p95_ms) ||
+        (typeof latency.p50_ms === 'number' && latency.p50_ms) ||
+        0;
+      out.latency_avg = { total_ms: totalMs };
+    }
     out.latency = latency;
   }
   if (typeof durationMs === 'number' && durationMs > 0) {
@@ -588,6 +625,54 @@ function metadataToCallRecord(
     metrics,
     transcript,
   };
+}
+
+/**
+ * Reconstruct the dashboard ``transcript`` array from a CallLogger
+ * ``transcript.jsonl`` file. Each line is a turn record carrying
+ * ``user_text`` / ``agent_text`` / ``ts`` (ISO-8601). We expand each
+ * non-empty side into a separate ``{role, text, timestamp}`` entry so the
+ * SPA's ``toUiTranscript`` mapper can render them in order. Returns an
+ * empty array on any IO/parse failure — hydrate is best-effort and a
+ * malformed transcript file should not block the call row from showing.
+ */
+function loadTranscriptJsonl(
+  filePath: string,
+): NonNullable<CallRecord['transcript']> {
+  try {
+    if (!fs.existsSync(filePath)) return [];
+    const raw = fs.readFileSync(filePath, 'utf8');
+    const lines = raw.split('\n').filter((l) => l.trim().length > 0);
+    const out: NonNullable<CallRecord['transcript']> = [];
+    for (const line of lines) {
+      let row: Record<string, unknown>;
+      try {
+        row = JSON.parse(line) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      const tsIso = typeof row.ts === 'string' ? Date.parse(row.ts) : NaN;
+      const tsNumeric =
+        typeof row.timestamp === 'number' ? row.timestamp * 1000 : NaN;
+      const timestamp = Number.isFinite(tsIso)
+        ? tsIso
+        : Number.isFinite(tsNumeric)
+          ? tsNumeric
+          : 0;
+      const userText = typeof row.user_text === 'string' ? row.user_text : '';
+      const agentText =
+        typeof row.agent_text === 'string' ? row.agent_text : '';
+      if (userText.length > 0) {
+        out.push({ role: 'user', text: userText, timestamp });
+      }
+      if (agentText.length > 0 && agentText !== '[interrupted]') {
+        out.push({ role: 'assistant', text: agentText, timestamp });
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
 }
 
 /**

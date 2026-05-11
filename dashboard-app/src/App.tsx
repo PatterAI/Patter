@@ -3,6 +3,7 @@ import { Topbar } from './components/Topbar';
 import { PageHeader } from './components/PageHeader';
 import { Metric, type MetricBucket } from './components/Metric';
 import { CallTable, type Call } from './components/CallTable';
+import { fmtCostUSD } from './components/format';
 import { LiveCallPanel } from './components/LiveCallPanel';
 import { MetricsPanel } from './components/MetricsPanel';
 import { useDashboardData } from './hooks/useDashboardData';
@@ -187,7 +188,7 @@ export function App() {
           />
           <Metric
             label={`Spend · ${RANGE_LABEL[range]}`}
-            value={`$${rangeSpend.toFixed(2)}`}
+            value={fmtCostUSD(rangeSpend)}
             spark={sparkSpend.heights}
             buckets={toBuckets(sparkSpend)}
             onSelectCall={setSelectedId}

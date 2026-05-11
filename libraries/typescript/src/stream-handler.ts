@@ -347,7 +347,7 @@ export class StreamHandler {
    * directly. Awaits the post-cancel drain window before flipping state
    * so the remote player has time to flush the cancelled turn's tail.
    */
-  private async beginSpeaking(): Promise<void> {
+  private async beginSpeaking(isFirstMessage = false): Promise<void> {
     if (this.lastCancelAt !== null) {
       const elapsed = Date.now() - this.lastCancelAt;
       const remaining = StreamHandler.POST_CANCEL_DRAIN_MS - elapsed;
@@ -358,7 +358,21 @@ export class StreamHandler {
     this.speakingGeneration++;
     this.isSpeaking = true;
     this.speakingStartedAt = Date.now();
-    this.firstAudioSentAt = null;
+    // Stamp ``firstAudioSentAt`` synchronously for EVERY turn so the
+    // ``canBargeIn()`` gate (250ms anti-flicker for PSTN no-AEC) runs in
+    // PARALLEL with LLM TTFT + TTS TTFB rather than starting only after
+    // the first audio chunk reaches the wire. Without this, a turn with
+    // a slow LLM (gpt-4o cold cache ~2 s) is effectively un-interruptible
+    // for the entire LLM window: ``firstAudioSentAt`` stays null, so
+    // ``canBargeIn`` returns false and every VAD ``speech_start`` is
+    // suppressed silently. Previously this fix was firstMessage-only;
+    // promoted to default on 2026-05-11 after the user reported
+    // "barge-in non funziona più" with gpt-4o.
+    //
+    // Note: the ``isFirstMessage`` parameter is kept for backward
+    // compatibility with the call site, but no longer changes behaviour.
+    void isFirstMessage;
+    this.firstAudioSentAt = Date.now();
     // Fresh turn — drop any stale pre-barge-in buffer from a previous turn
     // so we never replay yesterday's audio to STT.
     this.inboundAudioRing = [];
@@ -950,18 +964,28 @@ export class StreamHandler {
             );
           }
           if (evt?.type === 'speech_start') {
-            if (this.isSpeaking && !this.canBargeIn()) {
+            const phantomSuppressed = this.isSpeaking && !this.canBargeIn();
+            if (phantomSuppressed) {
               // Within the per-turn warmup gate. With AEC on this is the
               // ~1 s filter convergence window; without AEC it is just a
               // 250 ms anti-flicker margin. INFO so unexpected
               // suppressions are visible without enabling debug logs.
+              //
+              // CRITICAL: do NOT touch metrics state here. An earlier
+              // bug (pre-0.6.1) called ``startTurnIfIdle()`` for every
+              // ``speech_start`` including suppressed phantoms, which
+              // stamped ``turnStart`` at echo/loopback time. The
+              // legitimate user-speech ``speech_start`` that followed
+              // then no-op'd (turn_start was already set), so the
+              // dashboard reported ``user_speech_duration_ms`` of 5-7 s
+              // even on short ~1 s utterances.
               getLogger().info(
                 `[VAD] speech_start suppressed (agent speaking < gate, aec=${this.aec ? 'on' : 'off'})`,
               );
             } else if (this.isSpeaking) {
               if (this.bargeInStrategies.length > 0) {
                 this.startPendingBargeIn();
-                this.metricsAcc.startTurnIfIdle();
+                this.metricsAcc.anchorUserSpeechStart();
                 return;
               }
               getLogger().info('[VAD] speech_start during TTS → BARGE-IN');
@@ -995,7 +1019,13 @@ export class StreamHandler {
                 }
               }
             }
-            this.metricsAcc.startTurnIfIdle();
+            if (!phantomSuppressed) {
+              // Industry-standard pattern: every legitimate VAD speech_start re-anchors
+              // the turn timestamp pre-commit. Repairs stale anchors from
+              // rejected barge-ins / dropped final transcripts, plus the
+              // original phantom-during-warmup-gate vulnerability.
+              this.metricsAcc.anchorUserSpeechStart();
+            }
           } else if (evt?.type === 'speech_end') {
             this.metricsAcc.recordVadStop();
             // The SDK's VAD has detected end-of-speech earlier and more
@@ -1427,7 +1457,11 @@ export class StreamHandler {
       // and produces garbage transcripts, and the ring buffer for
       // pre-barge-in audio is never populated. Mirrors the per-turn
       // behaviour in `runPipelineLlm` / `runRegularLlm`.
-      await this.beginSpeaking();
+      // Pass isFirstMessage=true so the canBargeIn() anti-flicker gate
+      // starts running NOW — TTFB on the TTS provider often eats 300-800ms,
+      // and without an early anchor the firstMessage is uninterruptible
+      // during that window.
+      await this.beginSpeaking(true);
       let firstChunkSent = false;
       this.resetTtsCarry();
       // Check the prewarm cache first. When ``Patter.call`` was made
@@ -1483,6 +1517,15 @@ export class StreamHandler {
         this.endSpeakingWithGrace();
       }
       if (firstChunkSent) {
+        // Bill the firstMessage TTS characters — they were synthesised
+        // at ElevenLabs (or the configured TTS provider) and the
+        // customer pays for them. The previous flow only called
+        // ``recordTurnComplete`` here, which finalises the turn but does
+        // NOT increment the TTS char counter — so a 5-turn call with an
+        // 82-char greeting was under-billed by ~22% on TTS cost.
+        // ``recordTtsComplete`` is the canonical accumulator entry
+        // point for TTS char billing (parity with Python fix).
+        this.metricsAcc.recordTtsComplete(this.deps.agent.firstMessage);
         await this.emitTurnMetrics(this.metricsAcc.recordTurnComplete(this.deps.agent.firstMessage));
         this.history.push({ role: 'assistant', text: this.deps.agent.firstMessage, timestamp: Date.now() });
       }
@@ -1659,7 +1702,16 @@ export class StreamHandler {
     }
 
     if (!transcript.isFinal || !transcript.text) return;
-    if (!this.commitTranscript(transcript.text)) return;
+    if (!this.commitTranscript(transcript.text)) {
+      // Final transcript dropped (dedup / hallucination / back-to-back).
+      // Any VAD ``speech_end`` that fired during this dropped utterance
+      // already stamped ``_endpointSignalAt``; if we leave it there, the
+      // NEXT legitimate utterance inherits the stale anchor (its
+      // agent_response_ms then includes the silence gap between the
+      // dropped utterance and the real one).
+      this.metricsAcc.anchorUserSpeechStart();
+      return;
+    }
 
     const label = this.deps.bridge.label;
     // [DIAG-2026-05-05] Temporary INFO. Remove once root cause known.
@@ -1765,6 +1817,11 @@ export class StreamHandler {
     } else if (this.llmLoop) {
       responseText = await this.runPipelineLlm(filteredTranscript, hookExecutor, hookCtx);
     } else {
+      getLogger().warn(
+        `Pipeline (${label}) has no llm/onMessage handler — transcript ` +
+          `"${sanitizeLogValue(filteredTranscript.slice(0, 60))}" dropped. ` +
+          'Check that agent.llm or onMessage is configured.',
+      );
       return;
     }
 
@@ -1893,6 +1950,9 @@ export class StreamHandler {
       }
       this.metricsAcc.recordTtsStopped();
       this.metricsAcc.recordTurnInterrupted();
+      // Re-anchor turn metrics to the legitimate VAD speech_start so post-
+      // barge-in latency anchors don't carry over from the interrupted turn.
+      this.metricsAcc.anchorUserSpeechStart();
       this.metricsAcc.recordOverlapEnd(true);
     } finally {
       try {
@@ -1917,6 +1977,8 @@ export class StreamHandler {
         `Pending barge-in timed out after ${this.bargeInConfirmMs}ms; agent resumes (no strategy confirmed)`,
       );
       this.metricsAcc.recordOverlapEnd(false);
+      // Clear any anchors that drifted during the pending barge-in window.
+      this.metricsAcc.anchorUserSpeechStart();
       this.bargeInPendingSince = null;
       this.bargeInPendingTimer = null;
     }, this.bargeInConfirmMs);
@@ -2773,11 +2835,17 @@ export class StreamHandler {
     };
 
     // Single INFO line per call-end — duration, turns, cost, latency.
+    // "p95 wait" = agent_response_ms (user-perceived wait after they stop
+    // speaking). Matches the dashboard "p95 wait" tile. Fallback to total_ms
+    // for legacy/short calls where agent_response_ms is undefined.
     const cost = (finalMetrics.cost as { total?: number } | undefined)?.total ?? 0;
-    const latencyP95 = (finalMetrics.latency_p95 as { total_ms?: number } | undefined)?.total_ms ?? 0;
+    const p95Obj = finalMetrics.latency_p95 as
+      | { agent_response_ms?: number; total_ms?: number }
+      | undefined;
+    const latencyP95 = p95Obj?.agent_response_ms ?? p95Obj?.total_ms ?? 0;
     getLogger().info(
       `Call ended: ${this.callId} (${finalMetrics.duration_seconds.toFixed(1)}s, ` +
-        `${finalMetrics.turns.length} turns, cost=$${cost.toFixed(4)}, p95=${Math.round(latencyP95)}ms)`,
+        `${finalMetrics.turns.length} turns, cost=$${cost.toFixed(4)}, p95 wait=${Math.round(latencyP95)}ms)`,
     );
     this.deps.metricsStore.recordCallEnd(
       callEndData,

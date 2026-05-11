@@ -13,7 +13,7 @@ calls fail fast instead of silently dropping back to ``whisper-1``.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import ClassVar, Literal
 
 from getpatter.providers.whisper_stt import WhisperSTT
 
@@ -37,6 +37,9 @@ class OpenAITranscribeSTT(WhisperSTT):
             rejected here — use :class:`WhisperSTT` for that.
         response_format: ``"json"`` (default) or ``"verbose_json"``.
     """
+
+    #: Stable pricing/dashboard key — read by stream-handler/metrics.
+    provider_key: ClassVar[str] = "openai_transcribe"
 
     def __init__(
         self,

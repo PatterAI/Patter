@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { Call } from './CallTable';
+import { fmtCostUSD } from './format';
 
 export interface MetricBucket {
   /** Bar height 0-100. */
@@ -119,7 +120,7 @@ export function bucketHeadline(
   const count = calls.length;
   if (kind === 'spend') {
     const sum = calls.reduce((acc, c) => acc + callCost(c), 0);
-    return { label: 'TOTAL COST', value: `$${sum.toFixed(3)}` };
+    return { label: 'TOTAL COST', value: fmtCostUSD(sum) };
   }
   if (kind === 'latency') {
     const withLat = calls.filter((c) => typeof c.latencyP95 === 'number');
@@ -169,7 +170,7 @@ function SparkTooltip({ bucket, kind }: SparkTooltipProps) {
             <li key={c.id}>
               <span className="num">{num}</span>
               <span className="status">{c.status}</span>
-              <span className="cost">${callCost(c).toFixed(3)}</span>
+              <span className="cost">{fmtCostUSD(callCost(c))}</span>
             </li>
           );
         })}

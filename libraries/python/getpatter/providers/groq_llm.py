@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import os
 from enum import StrEnum
+from typing import ClassVar
 
 from getpatter.services.llm_loop import OpenAILLMProvider
 
@@ -57,10 +58,13 @@ class GroqLLMProvider(OpenAILLMProvider):
             :class:`OpenAILLMProvider`.
     """
 
+    #: Stable pricing/dashboard key — read by stream-handler/metrics.
+    provider_key: ClassVar[str] = "groq"
+
     def __init__(
         self,
         api_key: str | None = None,
-        model: Union[GroqModel, str] = _DEFAULT_MODEL,
+        model: GroqModel | str = _DEFAULT_MODEL,
         base_url: str = _GROQ_BASE_URL,
         **kwargs,
     ) -> None:

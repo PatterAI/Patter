@@ -18,6 +18,8 @@ const LPF_ALPHA_8K = 0.45;
 
 /** OpenAI TTS adapter with built-in streaming resample to 16/8 kHz. */
 export class OpenAITTS {
+  /** Stable pricing/dashboard key — read by stream-handler/metrics. */
+  static readonly providerKey = 'openai_tts';
   constructor(
     private readonly apiKey: string,
     private readonly voice: string = 'alloy',

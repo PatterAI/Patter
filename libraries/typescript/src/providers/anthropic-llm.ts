@@ -105,6 +105,8 @@ interface AnthropicSystemBlock {
 
 /** LLM provider backed by Anthropic's Messages API (streaming). */
 export class AnthropicLLMProvider implements LLMProvider {
+  /** Stable pricing/dashboard key — read by stream-handler/metrics. */
+  static readonly providerKey = 'anthropic';
   private readonly apiKey: string;
   private readonly model: string;
   private readonly maxTokens: number;

@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import os
 from enum import IntEnum, StrEnum
-from typing import Any, AsyncIterator, Literal, Optional
+from typing import ClassVar, Any, AsyncIterator, Literal, Optional
 
 logger = logging.getLogger("getpatter.providers.cartesia_tts")
 
@@ -116,6 +116,9 @@ class CartesiaTTS(TTSProvider):
       transcoding happens. This is the same as the bare constructor
       default and exists for API symmetry with the Twilio factory.
     """
+
+    #: Stable pricing/dashboard key — read by stream-handler/metrics.
+    provider_key: ClassVar[str] = "cartesia_tts"
 
     def __init__(
         self,

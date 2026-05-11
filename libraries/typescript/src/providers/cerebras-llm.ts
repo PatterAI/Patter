@@ -101,6 +101,8 @@ export interface CerebrasLLMOptions {
  *     - zai-glm-4.7
  */
 export class CerebrasLLMProvider implements LLMProvider {
+  /** Stable pricing/dashboard key — read by stream-handler/metrics. */
+  static readonly providerKey = 'cerebras';
   private readonly apiKey: string;
   readonly model: string;
   private readonly baseUrl: string;

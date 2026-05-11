@@ -8,10 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import gc
-import time
 from decimal import Decimal
 from typing import Any
-from unittest.mock import AsyncMock
 
 import psutil
 import pytest
@@ -69,7 +67,9 @@ async def test_s1_concurrent_calls_memory_growth(make_accumulator: Any) -> None:
 
     growth_pct = ((rss_after - rss_before) / rss_before) * 100 if rss_before else 0
     passed = growth_pct < 10
-    print(f"Memory growth: {growth_pct:.1f}% (threshold: 10.0%) {'PASS' if passed else 'FAIL'}")
+    print(
+        f"Memory growth: {growth_pct:.1f}% (threshold: 10.0%) {'PASS' if passed else 'FAIL'}"
+    )
 
     assert not exceptions, f"Unhandled exceptions: {exceptions}"
     assert all(f > 0 for f in frames_sent), "Some calls sent zero frames"
@@ -116,20 +116,20 @@ async def test_s2_1000_turn_conversation(make_accumulator: Any) -> None:
     # Verify turn count
     assert len(metrics.turns) == num_turns
 
-    # Verify STT cost: deepgram nova-3 streaming = $0.0077/min
-    # (the older $0.0043/min was the batch/pre-recorded rate; Wave 12b3
-    # corrected it to the streaming rate which is what Patter actually uses).
+    # Verify STT cost: deepgram nova-3 streaming = $0.0048/min (current
+    # PAYG promo rate at deepgram.com/pricing, verified 2026-05-11).
     # total_audio = 1.5 * 1000 = 1500 seconds = 25 minutes
-    # cost = 25 * 0.0077 = 0.1925
-    expected_stt = (per_turn_audio_seconds * num_turns / 60.0) * 0.0077
+    # cost = 25 * 0.0048 = 0.12
+    expected_stt = (per_turn_audio_seconds * num_turns / 60.0) * 0.0048
     assert abs(metrics.cost.stt - round(expected_stt, 6)) < 1e-6
 
-    # Verify TTS cost: elevenlabs flash_v2_5 direct API = $0.06/1k chars
-    # (the older $0.18/1k was the Creator-plan overage tier; Wave 12b3
-    # corrected it to the API tier which matches what Patter actually pays).
+    # Verify TTS cost: elevenlabs flash_v2_5 API tier = $0.05/1k chars
+    # (the public per-1K-character API/overage rate at
+    # https://elevenlabs.io/pricing/api, verified 2026-05-11; flat across
+    # all plan tiers).
     # total_chars = 20 * 1000 = 20000 chars = 20 k_chars
-    # cost = 20 * 0.06 = 1.2
-    expected_tts = (len(agent_response) * num_turns / 1000.0) * 0.06
+    # cost = 20 * 0.05 = 1.0
+    expected_tts = (len(agent_response) * num_turns / 1000.0) * 0.05
     assert abs(metrics.cost.tts - round(expected_tts, 6)) < 1e-6
 
     # Memory check
@@ -138,7 +138,9 @@ async def test_s2_1000_turn_conversation(make_accumulator: Any) -> None:
     print(f"S2 turn count: {len(metrics.turns)} (expected: {num_turns}) PASS")
     print(f"S2 STT cost: {metrics.cost.stt} (expected: {round(expected_stt, 6)}) PASS")
     print(f"S2 TTS cost: {metrics.cost.tts} (expected: {round(expected_tts, 6)}) PASS")
-    print(f"Memory growth: {growth_pct:.1f}% (threshold: 10.0%) {'PASS' if passed else 'FAIL'}")
+    print(
+        f"Memory growth: {growth_pct:.1f}% (threshold: 10.0%) {'PASS' if passed else 'FAIL'}"
+    )
     assert passed, f"RSS grew {growth_pct:.1f}% (> 10%)"
 
 
@@ -194,7 +196,9 @@ async def test_s3_websocket_reconnection_flapping(mock_ws_pair: Any) -> None:
         assert rt < 500, f"Cycle {i}: reconnect took {rt:.1f}ms (> 500ms)"
 
     print(f"S3 cycles: {num_cycles}, frames accounted: {len(flushed_or_dropped)} PASS")
-    print(f"S3 max reconnect time: {max(reconnect_times_ms):.1f}ms (threshold: 500ms) PASS")
+    print(
+        f"S3 max reconnect time: {max(reconnect_times_ms):.1f}ms (threshold: 500ms) PASS"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -235,11 +239,13 @@ async def test_s4_sse_subscriber_churn(metrics_store: MetricsStore) -> None:
 
     async def _publisher() -> None:
         for event_idx in range(num_events):
-            metrics_store.record_call_start({
-                "call_id": f"s4-event-{event_idx}",
-                "caller": "+1555000",
-                "callee": "+1555001",
-            })
+            metrics_store.record_call_start(
+                {
+                    "call_id": f"s4-event-{event_idx}",
+                    "caller": "+1555000",
+                    "callee": "+1555001",
+                }
+            )
             await asyncio.sleep(0.005)
         events_done.set()
 
@@ -252,10 +258,14 @@ async def test_s4_sse_subscriber_churn(metrics_store: MetricsStore) -> None:
     # At minimum, each subscriber should have received at least 1 event
     # (since they all overlap with the publisher in time)
     total_received = sum(len(evts) for evts in received_events.values())
-    subscribers_with_events = sum(1 for evts in received_events.values() if len(evts) > 0)
+    subscribers_with_events = sum(
+        1 for evts in received_events.values() if len(evts) > 0
+    )
 
     print(f"S4 total events received across subscribers: {total_received}")
-    print(f"S4 subscribers with >= 1 event: {subscribers_with_events}/{num_subscribers} PASS")
+    print(
+        f"S4 subscribers with >= 1 event: {subscribers_with_events}/{num_subscribers} PASS"
+    )
 
     # No deadlock (we reached this point within the timeout)
     assert subscribers_with_events > 0, "No subscriber received any events"
@@ -270,11 +280,13 @@ async def test_s4_sse_subscriber_churn(metrics_store: MetricsStore) -> None:
 def test_s5_buffer_wrap(metrics_store: MetricsStore) -> None:
     """S5: Writing 501 calls — oldest evicted, newest 500 present and ordered."""
     for i in range(501):
-        metrics_store.record_call_start({
-            "call_id": f"s5-call-{i}",
-            "caller": "+1555000",
-            "callee": "+1555001",
-        })
+        metrics_store.record_call_start(
+            {
+                "call_id": f"s5-call-{i}",
+                "caller": "+1555000",
+                "callee": "+1555001",
+            }
+        )
         metrics_store.record_call_end({"call_id": f"s5-call-{i}"})
 
     # The store has max_calls=500, so call index 0 should be evicted
@@ -291,7 +303,7 @@ def test_s5_buffer_wrap(metrics_store: MetricsStore) -> None:
     expected_ids = [f"s5-call-{i}" for i in range(1, 501)]
     assert call_ids == expected_ids, "Calls not in expected order after buffer wrap"
 
-    print(f"S5 buffer wrap: evicted index 0, retained 500 in order PASS")
+    print("S5 buffer wrap: evicted index 0, retained 500 in order PASS")
 
 
 # ---------------------------------------------------------------------------
@@ -340,9 +352,11 @@ def test_s6_cost_precision_1000_turns() -> None:
     tolerance = 1e-9
 
     passed = abs(actual_tts - expected_total) < tolerance
-    print(f"S6 cost precision: actual={actual_tts}, expected={expected_total}, "
-          f"diff={abs(actual_tts - expected_total):.2e} (tolerance: {tolerance:.0e}) "
-          f"{'PASS' if passed else 'FAIL'}")
+    print(
+        f"S6 cost precision: actual={actual_tts}, expected={expected_total}, "
+        f"diff={abs(actual_tts - expected_total):.2e} (tolerance: {tolerance:.0e}) "
+        f"{'PASS' if passed else 'FAIL'}"
+    )
 
     assert passed, (
         f"Cost precision failure: {actual_tts} != {expected_total} "

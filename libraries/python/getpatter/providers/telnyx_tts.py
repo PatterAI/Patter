@@ -12,7 +12,7 @@ from __future__ import annotations
 import base64
 import json
 from enum import IntEnum, StrEnum
-from typing import AsyncIterator
+from typing import ClassVar, AsyncIterator
 
 import aiohttp
 
@@ -54,6 +54,9 @@ class TelnyxTTS(TTSProvider):
         session: Optional pre-built ``aiohttp.ClientSession``. If omitted, a new
             session is created and closed with :meth:`close`.
     """
+
+    #: Stable pricing/dashboard key — read by stream-handler/metrics.
+    provider_key: ClassVar[str] = "telnyx_tts"
 
     def __init__(
         self,

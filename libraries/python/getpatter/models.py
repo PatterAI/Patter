@@ -399,6 +399,13 @@ class CallMetrics:
     tts_provider: str = ""
     llm_provider: str = ""
     telephony_provider: str = ""
+    # Model identifiers per provider (e.g. "ink-whisper", "eleven_flash_v2_5",
+    # "gpt-oss-120b"). Surface them on the dashboard cost breakdown so
+    # operators can attribute per-call spend to a specific model without
+    # cross-referencing the deployment config.
+    stt_model: str = ""
+    tts_model: str = ""
+    llm_model: str = ""
     # Additional percentiles exposed for richer latency dashboards.
     # Default to zero so older consumers still construct CallMetrics cleanly.
     latency_p50: LatencyBreakdown = field(default_factory=LatencyBreakdown)

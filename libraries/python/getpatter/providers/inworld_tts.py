@@ -16,7 +16,7 @@ import json
 import logging
 import os
 from enum import StrEnum
-from typing import Any, AsyncIterator, Optional, Union
+from typing import ClassVar, Any, AsyncIterator, Optional, Union
 
 from getpatter.providers.base import TTSProvider
 
@@ -71,6 +71,9 @@ class InworldTTS(TTSProvider):
     If you only have the raw API key string, base64-encode ``"<api_key>:"``
     yourself before calling the constructor.
     """
+
+    #: Stable pricing/dashboard key — read by stream-handler/metrics.
+    provider_key: ClassVar[str] = "inworld"
 
     def __init__(
         self,

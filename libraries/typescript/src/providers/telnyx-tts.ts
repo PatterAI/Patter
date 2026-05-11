@@ -38,6 +38,8 @@ const DEFAULT_VOICE: TelnyxTTSVoice = TelnyxTTSVoice.NATURAL_HD_ASTRA;
 
 /** Streaming TTS adapter for Telnyx's `/v2/text-to-speech/speech` WebSocket. */
 export class TelnyxTTS {
+  /** Stable pricing/dashboard key — read by stream-handler/metrics. */
+  static readonly providerKey = 'telnyx_tts';
   constructor(
     private readonly apiKey: string,
     private readonly voice: string = DEFAULT_VOICE,

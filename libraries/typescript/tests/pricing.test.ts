@@ -26,9 +26,9 @@ describe('DEFAULT_PRICING', () => {
 describe('mergePricing', () => {
   it('returns defaults when no overrides', () => {
     const merged = mergePricing();
-    // Deepgram Nova-3 streaming (monolingual) — $0.0077/min. Updated from
-    // the batch rate $0.0043 in 0.5.6 — the default model is streaming.
-    expect(merged.deepgram.price).toBe(0.0077);
+    // Deepgram Nova-3 streaming (monolingual) — $0.0048/min (current PAYG
+    // promo rate per deepgram.com/pricing, verified 2026-05-11).
+    expect(merged.deepgram.price).toBe(0.0048);
   });
 
   it('overrides individual provider values', () => {
@@ -47,8 +47,9 @@ describe('calculateSttCost', () => {
   it('calculates deepgram cost for 60 seconds', () => {
     const pricing = mergePricing();
     const cost = calculateSttCost('deepgram', 60, pricing);
-    // 60s / 60 * $0.0077/min (Nova-3 streaming monolingual) = $0.0077
-    expect(cost).toBeCloseTo(0.0077, 4);
+    // 60s / 60 * $0.0048/min (Nova-3 streaming monolingual, current PAYG
+    // promo rate per deepgram.com/pricing, verified 2026-05-11) = $0.0048
+    expect(cost).toBeCloseTo(0.0048, 4);
   });
 
   it('returns 0 for unknown provider', () => {
@@ -61,9 +62,11 @@ describe('calculateTtsCost', () => {
   it('calculates elevenlabs cost for 1000 characters', () => {
     const pricing = mergePricing();
     const cost = calculateTtsCost('elevenlabs', 1000, pricing);
-    // eleven_flash_v2_5 (the default model): $0.06/1k chars via direct API.
-    // The previous $0.18 matched only the Creator plan overage.
-    expect(cost).toBeCloseTo(0.06, 3);
+    // eleven_flash_v2_5 (the default model): $0.05/1k chars per the public
+    // API/overage rate at https://elevenlabs.io/pricing/api (verified
+    // 2026-05-11). Flat across all plan tiers — only the included character
+    // bundle changes per plan.
+    expect(cost).toBeCloseTo(0.05, 3);
   });
 
   it('calculates openai_tts cost', () => {
@@ -204,6 +207,28 @@ describe('calculateTelephonyCost', () => {
     const cost = calculateTelephonyCost('telnyx', 60, pricing);
     expect(cost).toBeCloseTo(0.007, 3);
   });
+
+  it('telnyx_inbound bills at $0.0035/min (US DID local termination)', () => {
+    // Verified against https://telnyx.com/pricing/elastic-sip (2026-05-11).
+    const pricing = mergePricing();
+    const cost = calculateTelephonyCost('telnyx_inbound', 60, pricing);
+    expect(cost).toBeCloseTo(0.0035, 4);
+  });
+
+  it('telnyx_outbound bills at $0.007/min (Pay-As-You-Go mid-range)', () => {
+    const pricing = mergePricing();
+    const cost = calculateTelephonyCost('telnyx_outbound', 60, pricing);
+    expect(cost).toBeCloseTo(0.007, 3);
+  });
+
+  it('legacy telnyx key falls back to outbound rate ($0.007/min)', () => {
+    // Users who override ``pricing: { telnyx: {...} }`` without a
+    // direction-aware split keep the previous behaviour. Direction-aware
+    // billing is opt-in via ``telnyx_inbound`` / ``telnyx_outbound``.
+    const pricing = mergePricing();
+    const cost = calculateTelephonyCost('telnyx', 60, pricing);
+    expect(cost).toBeCloseTo(0.007, 3);
+  });
 });
 
 describe('per-model rates under openai_realtime.models', () => {
@@ -256,14 +281,15 @@ describe('per-model rates under openai_realtime.models', () => {
 describe('model-aware STT pricing', () => {
   it('deepgram default is nova-3 streaming', () => {
     const pricing = mergePricing();
-    // 60s at $0.0077/min = $0.0077
-    expect(calculateSttCost('deepgram', 60, pricing)).toBeCloseTo(0.0077, 6);
+    // 60s at $0.0048/min = $0.0048 (PAYG promo rate, verified 2026-05-11).
+    expect(calculateSttCost('deepgram', 60, pricing)).toBeCloseTo(0.0048, 6);
   });
 
   it('deepgram multilingual nested rate', () => {
     const pricing = mergePricing();
+    // nova-3-multilingual is $0.0058/min on the PAYG promo tier.
     expect(calculateSttCost('deepgram', 60, pricing, 'nova-3-multilingual')).toBeCloseTo(
-      0.0092,
+      0.0058,
       6,
     );
   });
@@ -283,7 +309,7 @@ describe('model-aware STT pricing', () => {
   it('unknown model falls back to provider default', () => {
     const pricing = mergePricing();
     expect(calculateSttCost('deepgram', 60, pricing, 'some-future-model')).toBeCloseTo(
-      0.0077,
+      0.0048,
       6,
     );
   });
@@ -292,13 +318,15 @@ describe('model-aware STT pricing', () => {
 describe('model-aware TTS pricing', () => {
   it('elevenlabs default is flash_v2_5', () => {
     const pricing = mergePricing();
-    expect(calculateTtsCost('elevenlabs', 1000, pricing)).toBeCloseTo(0.06, 6);
+    // Default == flash_v2_5 at $0.05/1k (public API rate verified 2026-05-11).
+    expect(calculateTtsCost('elevenlabs', 1000, pricing)).toBeCloseTo(0.05, 6);
   });
 
   it('elevenlabs multilingual_v2 nested rate', () => {
     const pricing = mergePricing();
+    // Multilingual v2 / v3 share the $0.10/1k tier per the public API page.
     expect(calculateTtsCost('elevenlabs', 1000, pricing, 'eleven_multilingual_v2')).toBeCloseTo(
-      0.18,
+      0.10,
       6,
     );
   });
@@ -320,9 +348,9 @@ describe('per-model override merge semantics', () => {
       0.04,
       6,
     );
-    // Untouched
+    // Untouched — still original $0.10
     expect(calculateTtsCost('elevenlabs', 1000, pricing, 'eleven_multilingual_v2')).toBeCloseTo(
-      0.18,
+      0.10,
       6,
     );
   });
@@ -361,14 +389,17 @@ describe('LLM cost billing — Cerebras + Groq silent under-billing regression',
 
   it('cerebras default model (gpt-oss-120b) is billed', () => {
     const cost = calculateLlmCost('cerebras', 'gpt-oss-120b', 1000, 1000);
-    // Real rate-card math: 1000 in @ $0.85/M + 1000 out @ $1.20/M
-    expect(cost).toBeCloseTo((1000 / 1_000_000) * 0.85 + (1000 / 1_000_000) * 1.20, 9);
+    // Real rate-card math: 1000 in @ $0.35/M + 1000 out @ $0.75/M
+    // (verified at inference-docs.cerebras.ai/models/openai-oss).
+    expect(cost).toBeCloseTo((1000 / 1_000_000) * 0.35 + (1000 / 1_000_000) * 0.75, 9);
     expect(cost).toBeGreaterThan(0);
   });
 
   it('cerebras llama3.1-8b is billed (still supported until 2026-05-27 retirement)', () => {
     const cost = calculateLlmCost('cerebras', 'llama3.1-8b', 1000, 1000);
-    expect(cost).toBeCloseTo((1000 / 1_000_000) * 0.10 + (1000 / 1_000_000) * 0.20, 9);
+    // 1000 in @ $0.10/M + 1000 out @ $0.10/M
+    // (verified at inference-docs.cerebras.ai/models/llama-31-8b).
+    expect(cost).toBeCloseTo((1000 / 1_000_000) * 0.10 + (1000 / 1_000_000) * 0.10, 9);
     expect(cost).toBeGreaterThan(0);
   });
 

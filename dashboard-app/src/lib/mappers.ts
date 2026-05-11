@@ -42,14 +42,26 @@ export interface Call {
   readonly duration?: number;
   readonly latencyP95?: number;
   readonly latencyP50?: number;
+  /** avg(llm_ms) across this call's turns — for the waterfall llm bar. */
+  readonly llmAvg?: number;
   readonly sttAvg?: number;
   readonly ttsAvg?: number;
+  /** Number of completed turns. p50/p95 are statistically meaningful only when this is >= 5. */
+  readonly turnCount?: number;
+  /** p50 of agent_response_ms (wait time after user stops speaking). */
+  readonly agentResponseP50?: number;
+  /** p95 of agent_response_ms — user-perceived latency outlier. */
+  readonly agentResponseP95?: number;
   readonly cost: CallCostUi;
   readonly agent?: string;
   readonly model?: string;
   readonly mode?: CallMode;
   readonly sttProvider?: string;
   readonly ttsProvider?: string;
+  /** Model identifier within the provider (e.g. "ink-whisper"). */
+  readonly sttModel?: string;
+  readonly ttsModel?: string;
+  readonly llmModel?: string;
   readonly transcriptKey?: string;
   readonly endedAgo?: number;
 }
@@ -142,6 +154,9 @@ function computeCost(record: CallRecord): CallCostUi {
   if (typeof cost.llm === 'number') result.llm = cost.llm;
   if (typeof cost.stt === 'number') result.stt = cost.stt;
   if (typeof cost.tts === 'number') result.tts = cost.tts;
+  if (typeof cost.llm_cached_savings === 'number') {
+    result.cached = cost.llm_cached_savings;
+  }
   if (result.stt !== undefined || result.tts !== undefined) {
     result.sttTts = (result.stt ?? 0) + (result.tts ?? 0);
   }
@@ -178,7 +193,14 @@ export function toUiCall(record: CallRecord): Call {
   const status = mapStatus(record.status);
   const isLive = status === 'live' || (record.status !== undefined && LIVE_STATUSES.has(record.status));
   const latencyAvg = record.metrics?.latency_avg;
+  const latencyP50 = record.metrics?.latency_p50;
   const latencyP95 = record.metrics?.latency_p95;
+  // Total turn count from runtime metrics (preferred) — falls back to
+  // the persisted transcript length for hydrated rows. Percentile boxes
+  // are hidden in the UI when turnCount < 5 (statistical floor).
+  const turnCount =
+    (Array.isArray(record.metrics?.turns) ? record.metrics?.turns?.length : undefined) ??
+    (Array.isArray(record.transcript) ? record.transcript.length : undefined);
 
   const call: Call = {
     id: record.call_id,
@@ -190,16 +212,29 @@ export function toUiCall(record: CallRecord): Call {
     startedAtMs: typeof record.started_at === 'number' ? record.started_at * 1000 : undefined,
     durationStart: isLive ? record.started_at * 1000 : undefined,
     duration: computeDuration(record, isLive),
-    latencyP95: latencyP95?.total_ms ?? latencyAvg?.total_ms,
-    latencyP50: latencyAvg?.total_ms,
+    // User-perceived "latency" on the dashboard means wait-time AFTER the
+    // caller stops speaking (a.k.a. agent_response_ms / "response latency"
+    // — the metric Pipecat, LiveKit, and OpenAI Realtime all surface).
+    // Falls back to total_ms only for legacy rows that don't carry the
+    // agent_response_ms breakdown — those rows over-state perceived
+    // latency by the user-utterance duration but keep the table populated.
+    latencyP95: latencyP95?.agent_response_ms ?? latencyP95?.total_ms ?? latencyAvg?.total_ms,
+    latencyP50: latencyP50?.agent_response_ms ?? latencyP50?.total_ms ?? latencyAvg?.total_ms,
     sttAvg: latencyAvg?.stt_ms,
     ttsAvg: latencyAvg?.tts_ms,
+    llmAvg: latencyAvg?.llm_ms,
+    turnCount,
+    agentResponseP50: latencyP50?.agent_response_ms,
+    agentResponseP95: latencyP95?.agent_response_ms,
     cost: computeCost(record),
     agent: buildAgentLabel(record),
     model: record.metrics?.llm_provider,
     mode: mapMode(record.metrics?.provider_mode),
     sttProvider: record.metrics?.stt_provider,
     ttsProvider: record.metrics?.tts_provider,
+    sttModel: record.metrics?.stt_model,
+    ttsModel: record.metrics?.tts_model,
+    llmModel: record.metrics?.llm_model,
     transcriptKey: record.call_id,
     endedAgo: computeEndedAgo(record),
   };

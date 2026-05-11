@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import os
 from enum import IntEnum, StrEnum
-from typing import Any, AsyncIterator, Optional
+from typing import ClassVar, Any, AsyncIterator, Optional
 
 from getpatter.providers.base import TTSProvider
 
@@ -60,6 +60,9 @@ class LMNTTTS(TTSProvider):
     Default output is 16 kHz PCM_S16LE (``format='raw'``) which matches the
     Patter pipeline's standard telephony sample rate.
     """
+
+    #: Stable pricing/dashboard key — read by stream-handler/metrics.
+    provider_key: ClassVar[str] = "lmnt"
 
     def __init__(
         self,

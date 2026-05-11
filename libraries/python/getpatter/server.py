@@ -381,14 +381,28 @@ class EmbeddedServer:
                 cost_obj = getattr(metrics_obj, "cost", None) if metrics_obj else None
                 cost_dict = asdict(cost_obj) if is_dataclass(cost_obj) else None
                 latency_dict = None
+                avg = getattr(metrics_obj, "latency_avg", None) if metrics_obj else None
                 p95 = getattr(metrics_obj, "latency_p95", None) if metrics_obj else None
                 p50 = getattr(metrics_obj, "latency_p50", None) if metrics_obj else None
                 p99 = getattr(metrics_obj, "latency_p99", None) if metrics_obj else None
-                if p50 is not None or p95 is not None or p99 is not None:
+                if (
+                    avg is not None
+                    or p50 is not None
+                    or p95 is not None
+                    or p99 is not None
+                ):
+                    # Persist full LatencyBreakdown per percentile so the
+                    # dashboard hydrate path can render stt/llm/tts breakdown
+                    # for historical calls. Keep flat ``p50_ms/p95_ms/p99_ms``
+                    # for backward compat with consumers that only read totals.
                     latency_dict = {
                         "p50_ms": getattr(p50, "total_ms", None) if p50 else None,
                         "p95_ms": getattr(p95, "total_ms", None) if p95 else None,
                         "p99_ms": getattr(p99, "total_ms", None) if p99 else None,
+                        "avg": asdict(avg) if is_dataclass(avg) else None,
+                        "p50": asdict(p50) if is_dataclass(p50) else None,
+                        "p95": asdict(p95) if is_dataclass(p95) else None,
+                        "p99": asdict(p99) if is_dataclass(p99) else None,
                     }
                 turns_count = (
                     len(getattr(metrics_obj, "turns", []) or [])

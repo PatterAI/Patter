@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import base64
 import json
-from collections import deque
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -306,7 +305,10 @@ class TestTwilioStreamBridgeLifecycle:
         mock_create_metrics,
         mock_handler_cls,
     ) -> None:
-        from getpatter.telephony.twilio import twilio_stream_bridge, _MAX_WS_MESSAGE_BYTES
+        from getpatter.telephony.twilio import (
+            twilio_stream_bridge,
+            _MAX_WS_MESSAGE_BYTES,
+        )
 
         # Send an oversized message then stop
         huge_msg = "x" * (_MAX_WS_MESSAGE_BYTES + 1)
@@ -399,8 +401,12 @@ class TestTwilioStreamBridgeLifecycle:
             openai_key="sk-test",
         )
 
+        # PCM16@16kHz: the stream handler decodes inbound mulaw to PCM16
+        # before passing bytes to add_stt_audio_bytes, so metrics must be
+        # configured for the post-decode format (not raw mulaw 8 kHz) —
+        # regression guard for the 4× STT cost over-bill.
         mock_metrics.configure_stt_format.assert_called_once_with(
-            sample_rate=8000, bytes_per_sample=1
+            sample_rate=16000, bytes_per_sample=2
         )
         mock_metrics.end_call.assert_called_once()
 

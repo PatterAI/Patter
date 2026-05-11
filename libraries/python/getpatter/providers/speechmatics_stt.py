@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from enum import Enum, IntEnum, StrEnum
-from typing import Any, AsyncIterator, Union
+from typing import ClassVar, Any, AsyncIterator, Union
 
 from getpatter.providers.base import STTProvider, Transcript
 
@@ -108,6 +108,9 @@ class SpeechmaticsSTT(STTProvider):
         domain: Optional Speechmatics domain (e.g. ``"finance"``).
         output_locale: Optional output locale (e.g. ``"en-GB"``).
     """
+
+    #: Stable pricing/dashboard key — read by stream-handler/metrics.
+    provider_key: ClassVar[str] = "speechmatics"
 
     # Sentinel used to shut down the receive loop.
     _STOP = object()

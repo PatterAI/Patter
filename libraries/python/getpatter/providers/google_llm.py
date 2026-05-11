@@ -17,7 +17,7 @@ import json
 import logging
 import os
 from enum import StrEnum
-from typing import Any, AsyncIterator
+from typing import ClassVar, Any, AsyncIterator
 
 logger = logging.getLogger("getpatter")
 
@@ -71,6 +71,9 @@ class GoogleLLMProvider:
         temperature: Optional sampling temperature.
         max_output_tokens: Optional output token cap.
     """
+
+    #: Stable pricing/dashboard key — read by stream-handler/metrics.
+    provider_key: ClassVar[str] = "google"
 
     def __init__(
         self,

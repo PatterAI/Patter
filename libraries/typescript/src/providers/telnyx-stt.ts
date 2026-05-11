@@ -71,6 +71,8 @@ function createStreamingWavHeader(sampleRate: number, numChannels: number): Buff
 
 /** Streaming STT adapter for Telnyx's `/v2/speech-to-text` WebSocket. */
 export class TelnyxSTT {
+  /** Stable pricing/dashboard key — read by stream-handler/metrics. */
+  static readonly providerKey = 'telnyx_stt';
   private ws: WebSocket | null = null;
   private callbacks: TranscriptCallback[] = [];
   private headerSent = false;
