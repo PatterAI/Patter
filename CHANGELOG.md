@@ -2,6 +2,25 @@
 
 ## 0.6.1 (2026-05-12)
 
+### Fixed — TypeScript `onMark` clobbered `lastConfirmedMark` with stale/unknown mark names (parity with Python)
+
+`StreamHandler.onMark` in `libraries/typescript/src/stream-handler.ts`
+unconditionally assigned `this.lastConfirmedMark = markName` before
+checking whether the name corresponded to a queued mark. Any echo
+arriving after the queue was drained, or any mark name from outside
+the firstMessage queue, would overwrite the handler-level field and
+contaminate downstream barge-in heuristics gated on
+`lastConfirmedMark`.
+
+Python `stream_handler.py`'s `on_mark` never touches a handler-level
+field at all — the equivalent state lives on
+`TwilioAudioSender.last_confirmed_mark` and is updated only by the
+carrier's own echo handler. The TS path now matches that behaviour
+defensively: `lastConfirmedMark` is updated only after the queue
+lookup confirms a matching entry. Coverage:
+`libraries/typescript/tests/unit/stream-handler.test.ts`
+(`onMark only updates lastConfirmedMark on a matched mark`).
+
 ### Fixed — Dashboard SPA call list grew unbounded and ordering was non-deterministic across SSE refreshes
 
 `mergeCallPreserving` in `dashboard-app/src/hooks/mergeCalls.ts`

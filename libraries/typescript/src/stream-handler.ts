@@ -1282,7 +1282,6 @@ export class StreamHandler {
   /** Handle a Twilio Media Streams `mark` event acknowledging audio playback boundaries. */
   async onMark(markName: string): Promise<void> {
     if (!markName) return;
-    this.lastConfirmedMark = markName;
     // Resolve the firstMessage mark waiter (if any) so the send loop
     // can advance its sliding window. We resolve the matched entry AND
     // every entry before it in the queue — Twilio sometimes batches
@@ -1291,6 +1290,18 @@ export class StreamHandler {
     // numbered one (rare but observed on degraded edges).
     const idx = this.pendingMarks.findIndex((m) => m.name === markName);
     if (idx < 0) return;
+    // Only record the echo after we have confirmed it matches a known
+    // queued mark. Before this gate ``onMark`` clobbered
+    // ``lastConfirmedMark`` with any mark name — including stale
+    // echoes that no longer correspond to anything we sent, or marks
+    // emitted by adapters outside the firstMessage queue — which
+    // would contaminate any downstream barge-in heuristic gated on
+    // ``lastConfirmedMark``. The Python parity here is structural:
+    // ``stream_handler.py``'s ``on_mark`` never touches a handler-
+    // level field at all (the equivalent state lives on
+    // ``TwilioAudioSender.last_confirmed_mark``, updated only via
+    // the carrier's own echo handler).
+    this.lastConfirmedMark = markName;
     const resolved = this.pendingMarks.splice(0, idx + 1);
     for (const entry of resolved) {
       try {
