@@ -296,11 +296,19 @@ describe('[unit] streamPrewarmBytes — chunked send for cancel granularity (FIX
     type WSWebSocket = import('ws').WebSocket;
 
     const sendAudio = vi.fn();
+    let handlerRef: { onMark: (n: string) => Promise<void> } | null = null;
+    // BUG #128: every chunk now pairs with a Twilio mark and the loop
+    // window-blocks until echoes arrive. Production Twilio echoes within
+    // 100-250 ms of playback; in this test we echo synchronously so the
+    // chunking assertion can complete inside the vitest timeout.
+    const sendMark = vi.fn((_ws: unknown, name: string) => {
+      if (handlerRef) void handlerRef.onMark(name);
+    });
     const bridge = {
       label: 'TestBridge',
       telephonyProvider: 'twilio',
       sendAudio,
-      sendMark: vi.fn(),
+      sendMark,
       sendClear: vi.fn(),
       transferCall: vi.fn().mockResolvedValue(undefined),
       endCall: vi.fn().mockResolvedValue(undefined),
@@ -339,11 +347,13 @@ describe('[unit] streamPrewarmBytes — chunked send for cancel granularity (FIX
       streamSid: string;
       firstAudioSentAt: number | null;
       streamPrewarmBytes: (bytes: Buffer) => Promise<boolean>;
+      onMark: (n: string) => Promise<void>;
     }
     const p = h as unknown as Priv;
     p.isSpeaking = true;
     p.streamSid = 'SM-test';
     p.firstAudioSentAt = Date.now(); // gate open
+    handlerRef = p; // hand the handler to the mark-echo mock above
 
     // 5 s of PCM16 @ 16 kHz mono = 5 * 16000 * 2 = 160_000 bytes.
     const prewarmBytes = Buffer.alloc(160_000, 1);
