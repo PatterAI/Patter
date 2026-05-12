@@ -123,14 +123,22 @@ export function bucketHeadline(
     return { label: 'TOTAL COST', value: fmtCostUSD(sum) };
   }
   if (kind === 'latency') {
-    const withLat = calls.filter((c) => typeof c.latencyP95 === 'number');
-    const avg =
-      withLat.length > 0
-        ? Math.round(
-            withLat.reduce((acc, c) => acc + (c.latencyP95 ?? 0), 0) /
-              withLat.length,
-          )
-        : 0;
+    // Mirror the App-level avgP95 gating: per-call p95 with <10 turns is
+    // dominated by a single outlier, so the bucket tooltip filters out
+    // those calls. With nothing left to average we show "n/a" rather than
+    // a fake "0 ms".
+    const MIN_TURNS = 10;
+    const qualifying = calls.filter(
+      (c) =>
+        typeof c.latencyP95 === 'number' && (c.turnCount ?? 0) >= MIN_TURNS,
+    );
+    if (qualifying.length === 0) {
+      return { label: 'AVG LATENCY', value: 'n/a (n<10 turns)' };
+    }
+    const avg = Math.round(
+      qualifying.reduce((acc, c) => acc + (c.latencyP95 ?? 0), 0) /
+        qualifying.length,
+    );
     return { label: 'AVG LATENCY', value: `${avg} ms` };
   }
   return { label: count === 1 ? 'CALL' : 'CALLS', value: `${count}` };

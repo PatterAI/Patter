@@ -2,6 +2,11 @@ import { useState } from 'react';
 import type { Call } from './CallTable';
 import { fmtCostUSD } from './format';
 
+// See LatencyPanel for the rationale on 10. Kept in sync deliberately so the
+// detail-pane (LatencyPanel for pipeline calls with stt/llm/tts) and the
+// MetricsPanel tab (realtime calls or fallback) use the same statistical bar.
+export const MIN_TURNS_FOR_PERCENTILES = 10;
+
 export interface MetricsPanelProps {
   call: Call | null;
 }
@@ -73,25 +78,38 @@ function LatencyView({ call }: { call: Call }) {
   // round-trip, so the SDK only knows the end-to-end latency. Breaking it
   // into stt/llm/tts is meaningless. Pipeline-mode calls expose all four.
   if (isRealtime) {
-    const showPctRt = (call.turnCount ?? 0) >= 2;
+    const turnsRt = call.turnCount ?? 0;
+    const showPctRt = turnsRt >= MIN_TURNS_FOR_PERCENTILES;
+    const lowSampleHint = `p95 hidden until ≥${MIN_TURNS_FOR_PERCENTILES} turns — showing p50 instead (n=${turnsRt})`;
     return (
       <>
         <div className="lat-grid">
           <div className="latbox">
             <div className="l">end-to-end p50</div>
             <div className="v">
-              {showPctRt ? p50 || '—' : '—'}
-              {showPctRt && <span className="u">ms</span>}
+              {p50 || '—'}
+              {p50 > 0 && <span className="u">ms</span>}
             </div>
           </div>
-          <div className={'latbox' + (showPctRt && p95 > 600 ? ' warn' : '')}>
-            <div className="l">end-to-end p95</div>
+          <div
+            className={'latbox' + (showPctRt && p95 > 600 ? ' warn' : '')}
+            title={showPctRt ? undefined : lowSampleHint}
+          >
+            <div className="l">
+              {showPctRt ? 'end-to-end p95' : `end-to-end p50 (n<${MIN_TURNS_FOR_PERCENTILES})`}
+            </div>
             <div className="v">
-              {showPctRt ? p95 || '—' : '—'}
-              {showPctRt && <span className="u">ms</span>}
+              {showPctRt ? p95 || '—' : p50 || '—'}
+              {(showPctRt ? p95 : p50) > 0 && <span className="u">ms</span>}
             </div>
           </div>
         </div>
+        {!showPctRt && (
+          <div style={{ marginTop: -6, marginBottom: 8, fontSize: 11, opacity: 0.6 }}>
+            {turnsRt} {turnsRt === 1 ? 'turn' : 'turns'} — p95 hidden until ≥
+            {MIN_TURNS_FOR_PERCENTILES}, showing p50
+          </div>
+        )}
         <div className="waterfall">
           <div className="wf-row">
             <span className="lbl">e2e</span>
@@ -121,10 +139,13 @@ function LatencyView({ call }: { call: Call }) {
   const tts = call.ttsAvg || 0;
   const total = stt + llm + tts;
   const max = Math.max(total, 800);
-  // Percentile boxes are statistical noise on calls with too few turns
-  // (with n=4 samples, p95 is interpolation between sample[2] and sample[3]
-  // and doesn't correspond to any real turn). Show ``—`` until ≥5 turns.
-  const showPct = (call.turnCount ?? 0) >= 2;
+  // Percentile boxes are statistical noise on calls with too few turns.
+  // p95 with n<10 is dominated by the slowest single turn (an "ums and aahs"
+  // pause is enough to skew the headline), so below the threshold we show
+  // p50 — robust to outliers — and label the box accordingly.
+  const turns = call.turnCount ?? 0;
+  const showPct = turns >= MIN_TURNS_FOR_PERCENTILES;
+  const lowSampleHint = `p95 hidden until ≥${MIN_TURNS_FOR_PERCENTILES} turns — showing p50 instead (n=${turns})`;
 
   return (
     <>
@@ -132,15 +153,19 @@ function LatencyView({ call }: { call: Call }) {
         <div className="latbox">
           <div className="l">p50</div>
           <div className="v">
-            {showPct ? call.latencyP50 ?? '—' : '—'}
-            {showPct && <span className="u">ms</span>}
+            {call.latencyP50 ?? '—'}
+            {call.latencyP50 != null && <span className="u">ms</span>}
           </div>
         </div>
-        <div className={'latbox' + (showPct && p95 > 600 ? ' warn' : '')}>
-          <div className="l">p95</div>
+        <div
+          className={'latbox' + (showPct && p95 > 600 ? ' warn' : '')}
+          title={showPct ? undefined : lowSampleHint}
+        >
+          <div className="l">{showPct ? 'p95' : `p50 (n<${MIN_TURNS_FOR_PERCENTILES})`}</div>
           <div className="v">
-            {showPct ? p95 : '—'}
-            {showPct && <span className="u">ms</span>}
+            {showPct ? p95 || '—' : call.latencyP50 ?? '—'}
+            {(showPct ? p95 : call.latencyP50) != null &&
+              (showPct ? p95 : call.latencyP50)! > 0 && <span className="u">ms</span>}
           </div>
         </div>
         <div className="latbox">
@@ -158,6 +183,12 @@ function LatencyView({ call }: { call: Call }) {
           </div>
         </div>
       </div>
+      {!showPct && (
+        <div style={{ marginTop: -6, marginBottom: 8, fontSize: 11, opacity: 0.6 }}>
+          {turns} {turns === 1 ? 'turn' : 'turns'} — p95 hidden until ≥
+          {MIN_TURNS_FOR_PERCENTILES}, showing p50
+        </div>
+      )}
 
       <div className="waterfall">
         <div className="wf-row">

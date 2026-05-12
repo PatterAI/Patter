@@ -24,11 +24,25 @@ const RANGE_LABEL: Record<RangeKey, string> = {
   All: 'all-time',
 };
 
-function avgP95(calls: readonly Call[]): number {
-  const withLat = calls.filter((c) => typeof c.latencyP95 === 'number');
-  if (withLat.length === 0) return 0;
-  const total = withLat.reduce((s, c) => s + (c.latencyP95 ?? 0), 0);
-  return Math.round(total / withLat.length);
+// Headline "Avg latency p95" is the cross-call mean of each call's own p95.
+// A per-call p95 with <10 turns is statistically dominated by a single slow
+// turn (observed: n=5 call with p95=1977ms vs p50=309ms), so including such
+// calls in the average makes the dashboard headline swing wildly. We require
+// >=10 turns per call AND >=3 qualifying calls in the bucket before showing
+// a number — below that, the caller should look at per-call detail rather
+// than trust an aggregate.
+export const MIN_TURNS_FOR_AVG_P95 = 10;
+export const MIN_CALLS_FOR_AVG_P95 = 3;
+
+export function avgP95(calls: readonly Call[]): number {
+  const qualifying = calls.filter(
+    (c) =>
+      typeof c.latencyP95 === 'number' &&
+      (c.turnCount ?? 0) >= MIN_TURNS_FOR_AVG_P95,
+  );
+  if (qualifying.length < MIN_CALLS_FOR_AVG_P95) return 0;
+  const total = qualifying.reduce((s, c) => s + (c.latencyP95 ?? 0), 0);
+  return Math.round(total / qualifying.length);
 }
 
 function totalSpend(calls: readonly Call[]): number {
@@ -121,9 +135,14 @@ export function App() {
   // Headline counters reflect the active range (Total / Latency / Spend),
   // except "Active now" which is always the current live count.
   const totalCount = filteredCalls.length;
-  const rangeAvgP95 = avgP95(filteredCalls) || aggregates?.avg_latency_ms || 0;
+  // avgP95 returns 0 when too few calls qualify for a stable headline; in
+  // that case prefer the server-side aggregate (if present) and only fall
+  // back to "—" so the card doesn't claim "0 ms" — a number that looks like
+  // real data but is just the empty-state.
+  const rangeAvgP95Raw = avgP95(filteredCalls) || aggregates?.avg_latency_ms || 0;
   const rangeSpend = totalSpend(filteredCalls) || aggregates?.total_cost || 0;
   const phoneNumber = pickPhoneNumber(calls);
+  const hasStableAvgP95 = rangeAvgP95Raw > 0;
 
   const sparkTotalCalls = useMemo(
     () => computeSparkline(filteredCalls, 'totalCalls', strategy),
@@ -179,8 +198,8 @@ export function App() {
           />
           <Metric
             label="Avg latency p95"
-            value={rangeAvgP95 || 0}
-            unit="ms"
+            value={hasStableAvgP95 ? rangeAvgP95Raw : '—'}
+            unit={hasStableAvgP95 ? 'ms' : undefined}
             spark={sparkLatency.heights}
             buckets={toBuckets(sparkLatency)}
             onSelectCall={setSelectedId}

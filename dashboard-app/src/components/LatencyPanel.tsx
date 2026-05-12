@@ -4,15 +4,27 @@ export interface LatencyPanelProps {
   call: Call | null;
 }
 
-// 2 turn = almeno 1 turn user genuino oltre al firstMessage. Sotto a 2 i
-// percentili sono privi di senso (un singolo campione). Sopra a 2 sono
-// statisticamente magri ma informativi — meglio mostrarli che lasciare il
-// pannello con "—" quando la tabella sopra mostra già una p95 dal fallback
-// ad avg.
-const MIN_TURNS_FOR_PERCENTILES = 2;
+// With <10 samples p95 is dominated by a single outlier turn — observed on
+// a real n=5 call where p95=1977ms but p50=309ms, making the headline
+// number misleading. 10 turns is the threshold where p95 becomes a stable
+// signal (95th percentile = 9.5th-ranked sample, so at n=10 it interpolates
+// between the two slowest turns rather than reporting the absolute slowest).
+// Below the threshold we show p50 instead — robust, single-sample-resistant,
+// and labelled so the user knows why.
+const MIN_TURNS_FOR_PERCENTILES = 10;
 
 export function LatencyPanel({ call }: LatencyPanelProps) {
-  if (!call || (!call.latencyP95 && !call.agentResponseP95)) return null;
+  if (!call) return null;
+  // Hide the panel entirely when there is no latency signal at all (neither
+  // p50 nor p95 on either metric). Below the percentile threshold we still
+  // render — falling back to p50 — so a 1-2 turn call with measured timings
+  // does not show a blank pane.
+  const hasAnyLatency =
+    call.latencyP50 != null ||
+    call.latencyP95 != null ||
+    call.agentResponseP50 != null ||
+    call.agentResponseP95 != null;
+  if (!hasAnyLatency) return null;
 
   const stt = call.sttAvg ?? 0;
   const llm = call.llmAvg ?? 0;
@@ -24,6 +36,8 @@ export function LatencyPanel({ call }: LatencyPanelProps) {
   const showPercentiles = turns >= MIN_TURNS_FOR_PERCENTILES;
   const dash = '—';
 
+  const lowSampleHint = `p95 hidden until ≥${MIN_TURNS_FOR_PERCENTILES} turns — showing p50 instead (n=${turns})`;
+
   return (
     <div className="rr-card">
       <h3 style={{ marginBottom: 14 }}>Latency · this call</h3>
@@ -31,35 +45,59 @@ export function LatencyPanel({ call }: LatencyPanelProps) {
         <div className="latbox">
           <div className="l">p50 round-trip</div>
           <div className="v">
-            {showPercentiles ? call.latencyP50 ?? dash : dash}
-            {showPercentiles && <span className="u">ms</span>}
+            {call.latencyP50 ?? dash}
+            {call.latencyP50 != null && <span className="u">ms</span>}
           </div>
         </div>
-        <div className={'latbox' + (showPercentiles && (call.latencyP95 ?? 0) > 600 ? ' warn' : '')}>
-          <div className="l">p95 round-trip</div>
+        <div
+          className={
+            'latbox' + (showPercentiles && (call.latencyP95 ?? 0) > 600 ? ' warn' : '')
+          }
+          title={showPercentiles ? undefined : lowSampleHint}
+        >
+          <div className="l">
+            {showPercentiles
+              ? 'p95 round-trip'
+              : `p50 round-trip (n<${MIN_TURNS_FOR_PERCENTILES})`}
+          </div>
           <div className="v">
-            {showPercentiles ? call.latencyP95 ?? dash : dash}
-            {showPercentiles && <span className="u">ms</span>}
+            {showPercentiles ? call.latencyP95 ?? dash : call.latencyP50 ?? dash}
+            {(showPercentiles ? call.latencyP95 : call.latencyP50) != null && (
+              <span className="u">ms</span>
+            )}
           </div>
         </div>
         <div className="latbox">
           <div className="l">p50 wait</div>
           <div className="v">
-            {showPercentiles ? call.agentResponseP50 ?? dash : dash}
-            {showPercentiles && <span className="u">ms</span>}
+            {call.agentResponseP50 ?? dash}
+            {call.agentResponseP50 != null && <span className="u">ms</span>}
           </div>
         </div>
-        <div className={'latbox' + (showPercentiles && (call.agentResponseP95 ?? 0) > 600 ? ' warn' : '')}>
-          <div className="l">p95 wait</div>
+        <div
+          className={
+            'latbox' +
+            (showPercentiles && (call.agentResponseP95 ?? 0) > 600 ? ' warn' : '')
+          }
+          title={showPercentiles ? undefined : lowSampleHint}
+        >
+          <div className="l">
+            {showPercentiles ? 'p95 wait' : `p50 wait (n<${MIN_TURNS_FOR_PERCENTILES})`}
+          </div>
           <div className="v">
-            {showPercentiles ? call.agentResponseP95 ?? dash : dash}
-            {showPercentiles && <span className="u">ms</span>}
+            {showPercentiles
+              ? call.agentResponseP95 ?? dash
+              : call.agentResponseP50 ?? dash}
+            {(showPercentiles ? call.agentResponseP95 : call.agentResponseP50) != null && (
+              <span className="u">ms</span>
+            )}
           </div>
         </div>
       </div>
       {!showPercentiles && (
         <div style={{ marginTop: -6, marginBottom: 10, fontSize: 11, opacity: 0.6 }}>
-          {turns} {turns === 1 ? 'turn' : 'turns'} — percentiles need ≥{MIN_TURNS_FOR_PERCENTILES}
+          {turns} {turns === 1 ? 'turn' : 'turns'} — p95 hidden until ≥
+          {MIN_TURNS_FOR_PERCENTILES}, showing p50
         </div>
       )}
 

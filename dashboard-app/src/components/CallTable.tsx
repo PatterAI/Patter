@@ -2,6 +2,11 @@ import { useMemo } from 'react';
 import { fmtDuration, fmtPhone, fmtCostUSD } from './format';
 import { IconArrowDown, IconArrowUp, IconSearch } from './icons';
 
+// Kept in sync with LatencyPanel / MetricsPanel: below 10 turns p95 is
+// noise (one slow turn dominates the headline), so this column shows p50
+// instead and the cell labels which statistic it reports.
+export const MIN_TURNS_FOR_P95_COLUMN = 10;
+
 export interface CallCost {
   telco?: number;
   llm?: number;
@@ -65,8 +70,18 @@ function CallRow({ call, isSelected, onSelect, isNew }: CallRowProps) {
       ? fmtDuration((Date.now() - call.durationStart) / 1000)
       : fmtDuration(call.duration || 0);
 
-  const latPct = call.latencyP95 ? Math.min(100, (call.latencyP95 / 1000) * 100) : 0;
-  const warn = (call.latencyP95 ?? 0) > 600;
+  // Fall back to p50 below the sample threshold so the column still shows
+  // something representative for short calls without claiming a p95 that's
+  // really just the slowest of 3-4 turns.
+  const turns = call.turnCount ?? 0;
+  const usePct95 = turns >= MIN_TURNS_FOR_P95_COLUMN;
+  const latencyValue = usePct95 ? call.latencyP95 : call.latencyP50 ?? call.latencyP95;
+  const latLabel = usePct95 ? 'p95' : 'p50';
+  const latPct = latencyValue ? Math.min(100, (latencyValue / 1000) * 100) : 0;
+  const warn = (latencyValue ?? 0) > 600;
+  const latencyTooltip = usePct95
+    ? undefined
+    : `p95 hidden until ≥${MIN_TURNS_FOR_P95_COLUMN} turns — showing p50 instead (n=${turns})`;
 
   const totalCost =
     call.cost.total ??
@@ -103,13 +118,18 @@ function CallRow({ call, isSelected, onSelect, isNew }: CallRowProps) {
         </span>
       </td>
       <td className="num-cell">{call.status === 'no-answer' ? '—' : dur}</td>
-      <td>
-        {call.latencyP95 ? (
+      <td title={latencyTooltip}>
+        {latencyValue ? (
           <>
             <span className={'lat-bar' + (warn ? ' warn' : '')}>
               <i style={{ width: latPct + '%' }} />
             </span>
-            <span className="num-cell">{call.latencyP95} ms</span>
+            <span className="num-cell">
+              {latencyValue} ms
+              {!usePct95 && (
+                <span style={{ marginLeft: 4, opacity: 0.55, fontSize: 10 }}>({latLabel})</span>
+              )}
+            </span>
           </>
         ) : (
           '—'
@@ -187,7 +207,11 @@ export function CallTable({
               <th>From → To</th>
               <th>Carrier</th>
               <th>Duration</th>
-              <th>p95 latency</th>
+              <th
+                title={`p95 latency. Calls with <${MIN_TURNS_FOR_P95_COLUMN} turns fall back to p50 (marked) since p95 is dominated by a single outlier turn at low sample counts.`}
+              >
+                Latency
+              </th>
               <th>Cost</th>
             </tr>
           </thead>

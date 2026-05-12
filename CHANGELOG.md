@@ -2,6 +2,18 @@
 
 ## 0.6.1 (2026-05-12)
 
+### Changed — Dashboard percentile threshold raised back to 10 turns (with p50 fallback)
+
+The PR-#82 follow-up lowered the percentile sample threshold from 5 → 2 turns to keep the per-call detail pane in sync with the call-list column. In practice that produced misleading headline numbers on short calls: a live test with n=5 turns surfaced `p95=1977 ms` while `p50=309 ms` — the dashboard showed the 1977 ms outlier as "latency" because at n=5 the 95th-percentile collapses to "the single slowest turn" rather than a true tail estimate. Raised the threshold back to 10 (where p95 interpolates between samples 9 and 10 and starts being statistically meaningful), but instead of returning to a blank `—`, every surface now falls back to **p50** below the threshold and labels itself accordingly:
+
+- `LatencyPanel` (detail pane, pipeline calls): p95 boxes become `p50 round-trip (n<10)` / `p50 wait (n<10)` with a hover-tip explaining the fallback.
+- `MetricsPanel` (detail tab, realtime + pipeline): same treatment — `p50 (n<10)`, hover-tip, plus a footer line restating sample size.
+- `CallTable` "Latency" column (renamed from "p95 latency" since it now reports either): per-row fallback shows `<ms> (p50)` for short calls; header tooltip documents the rule.
+- App-level "Avg latency p95" card: now requires `>=10 turns/call AND >=3 qualifying calls` before showing a number; otherwise renders `—` rather than the prior "average of polluted per-call p95s" which would swing wildly when a single short call landed in the bucket.
+- Sparkline tooltips (`bucketHeadline` for `kind='latency'`): show `AVG LATENCY n/a (n<10 turns)` when no call in the bucket qualifies.
+
+The exported `MIN_TURNS_FOR_PERCENTILES` / `MIN_TURNS_FOR_P95_COLUMN` / `MIN_TURNS_FOR_AVG_P95` constants are kept in lockstep across `LatencyPanel.tsx`, `MetricsPanel.tsx`, `CallTable.tsx`, `Metric.tsx`, and `App.tsx` so the threshold is single-sourced. Files: `dashboard-app/src/components/LatencyPanel.tsx`, `dashboard-app/src/components/MetricsPanel.tsx`, `dashboard-app/src/components/CallTable.tsx`, `dashboard-app/src/components/Metric.tsx`, `dashboard-app/src/App.tsx`, `dashboard-app/src/App.test.ts` (new). Bundle re-synced to `libraries/{typescript,python}/.../dashboard/ui.html` via `dashboard-app/scripts/sync.mjs`.
+
 ### Changed — `StreamHandler` adopt-capability check now uses duck typing
 
 The TS realtime adopt branch in `stream-handler.ts` previously relied on `this.adapter instanceof OpenAIRealtimeAdapter` to gate the prewarm-handoff path. Switched to a duck-type check (`typeof adapter.adoptWebSocket === 'function'`) so the generic stream-handler module stays provider-agnostic on this hot path and matches the Python handler's `getattr(self._adapter, "adopt_websocket", None)` shape. Files: `libraries/typescript/src/stream-handler.ts`.
