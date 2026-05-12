@@ -2,6 +2,25 @@
 
 ## 0.6.1 (2026-05-12)
 
+### Changed — Cerebras usage-chunk fallback: INFO-once + DEBUG per iteration (Python + TypeScript parity)
+
+The char/4 fallback billing path in `services/llm_loop.py` /
+`src/llm-loop.ts` previously emitted `logger.warning` /
+`getLogger().warn` on every tool-loop iteration when the upstream
+provider stream did not include a `usage` chunk. On Cerebras (the
+common case for this fallback), a multi-tool turn could log 5-10
+identical WARN lines for the same call — drowning real warnings.
+
+Replaced with: first fallback in the call → INFO (so operators
+still see it once with the full diagnostic context — `provider`,
+`model`, `input_chars`, `output_chars`, `est_input_tokens`,
+`est_output_tokens`); subsequent iterations → DEBUG with the
+iteration index and a per-LLMLoop `_usage_missing_count` /
+`_usageMissingCount` total so the volume is still visible at
+DEBUG level. No behavioural change — billing still uses char/4
+estimation. Files: `libraries/python/getpatter/services/llm_loop.py`,
+`libraries/typescript/src/llm-loop.ts`.
+
 ### Fixed — Barge-in gate regression test: prewarmed first message must remain interruptible
 
 Locked in with parity tests on both SDKs that `_stream_prewarm_bytes` / `streamPrewarmBytes` open the barge-in gate (`_first_audio_sent_at` / `firstAudioSentAt`) once the first chunk reaches the wire. The gate was already opened by `_begin_speaking(is_first_message=True)` ahead of streaming, but a future refactor of the `_begin_speaking` path could regress the prewarm path silently — the per-chunk `_mark_first_audio_sent` call inside the streaming loop is the last line of defence and now has explicit coverage in `test_stream_prewarm_bytes_opens_barge_in_gate_on_first_chunk` (Python) and `opens the barge-in gate by stamping firstAudioSentAt after the first chunk` (TypeScript).

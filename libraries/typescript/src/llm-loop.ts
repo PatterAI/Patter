@@ -675,6 +675,11 @@ export class LLMLoop {
   // Fix 10: track provider/model so usage chunks can be attributed for billing.
   private readonly _providerName: string;
   private readonly _modelName: string;
+  // Diagnostics for the char/4 fallback billing path (see iterate loop).
+  // Counted per-LLMLoop instance (i.e. per call). Surfaced only via logs
+  // — keeps recordLlmUsage's public signature unchanged. Parity with Python.
+  private _usageMissingCount = 0;
+  private _loggedUsageFallback = false;
   // Optional async observer fired after a successful tool execution so
   // the host SDK (StreamHandler in pipeline mode) can surface tool calls
   // into the transcript timeline / `onTranscript` callback. Mirrors the
@@ -889,10 +894,28 @@ export class LLMLoop {
           0,
           0,
         );
-        getLogger().warn(
-          `LLM usage chunk missing from ${this._providerName}/${this._modelName} stream; ` +
-            `estimating output_tokens=${estimatedOutput} (input_tokens=${estimatedInput}) via char/4 fallback`,
-        );
+        this._usageMissingCount += 1;
+        // First fallback in this call → INFO so the operator sees it once.
+        // Subsequent iterations only DEBUG to avoid spamming logs on long
+        // tool-loop turns where every iteration is char/4-billed. Parity Py.
+        if (!this._loggedUsageFallback) {
+          this._loggedUsageFallback = true;
+          getLogger().info(
+            `llm_usage_fallback provider=${this._providerName} ` +
+              `model=${this._modelName} input_chars=${inputChars} ` +
+              `output_chars=${outputChars} est_input_tokens=${estimatedInput} ` +
+              `est_output_tokens=${estimatedOutput}`,
+          );
+        } else {
+          getLogger().debug(
+            `llm_usage_fallback provider=${this._providerName} ` +
+              `model=${this._modelName} iteration=${iter} ` +
+              `input_chars=${inputChars} output_chars=${outputChars} ` +
+              `est_input_tokens=${estimatedInput} ` +
+              `est_output_tokens=${estimatedOutput} ` +
+              `total_missing=${this._usageMissingCount}`,
+          );
+        }
       }
 
       if (!hasToolCalls) {
