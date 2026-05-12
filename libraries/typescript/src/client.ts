@@ -968,12 +968,16 @@ export class Patter {
    *
    * Pipeline-mode providers (``agent.stt`` / ``agent.tts`` / ``agent.llm``)
    * are picked up via the optional ``warmup()`` method on each instance.
-   * The Realtime / ConvAI all-in-one adapters are server-instantiated at
-   * ``StreamHandler.start`` time, so they are not reachable through the
-   * Agent fields — a transient ``OpenAIRealtimeAdapter`` is built here
-   * from the resolved Agent + the configured OpenAI key when the agent
-   * is in ``openai_realtime`` mode so the canonical session-prime
-   * handshake runs during the carrier ringing window.
+   *
+   * For ``openai_realtime`` mode the warmup-only handshake is a strict
+   * subset of what ``parkProviderConnections`` already performs (open WS
+   * → ``session.created`` → ``session.update`` → ``session.updated``) —
+   * and park keeps the socket open for adoption. Running both creates a
+   * double WebSocket handshake against ``api.openai.com`` per call,
+   * wastes 150-400 ms of ringing-window budget, and doubles the
+   * rate-limit pressure for no benefit. So when the agent is in
+   * ``openai_realtime`` mode we let park do all the Realtime-side work
+   * and skip the warmup-only adapter here.
    *
    * Best-effort: each provider's optional ``warmup()`` is wrapped in
    * ``Promise.allSettled`` so a slow or failing endpoint cannot block
@@ -994,13 +998,13 @@ export class Patter {
     collect(agent.tts, 'tts');
     collect(agent.llm, 'llm');
 
-    const realtimeAdapter = this.buildRealtimeWarmupAdapter(agent);
-    if (realtimeAdapter !== null) {
-      targets.push({
-        name: 'openai_realtime',
-        fn: () => realtimeAdapter.warmup(),
-      });
-    }
+    // ``buildRealtimeWarmupAdapter`` only fires for ``openai_realtime``
+    // agents, and for those we defer 100% of the Realtime-side warm
+    // work to ``parkProviderConnections`` (which runs under the same
+    // ``agent.prewarm`` gate on every outbound call). The warmup-only
+    // handshake is a strict subset of what park performs, so running
+    // both makes two WS handshakes against ``api.openai.com`` per call
+    // instead of one.
 
     if (targets.length === 0) return;
 

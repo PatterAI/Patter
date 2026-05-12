@@ -735,12 +735,16 @@ class Patter:
 
         Pipeline-mode providers (``agent.stt`` / ``agent.tts`` / ``agent.llm``)
         are picked up via the optional ``warmup()`` method on each instance.
-        The Realtime / ConvAI all-in-one adapters are server-instantiated
-        at ``stream_handler.start()`` time, so they are not reachable
-        through the Agent fields — a transient :class:`OpenAIRealtimeAdapter`
-        is built here from the resolved Agent + the configured OpenAI key
-        when ``agent.provider == "openai_realtime"`` so the canonical
-        session-prime handshake runs during the carrier ringing window.
+
+        For ``openai_realtime`` mode the warmup-only handshake is a
+        strict subset of what :meth:`_park_provider_connections` already
+        performs (open WS → ``session.created`` → ``session.update`` →
+        ``session.updated``) — and park keeps the socket open for adoption.
+        Running both creates a double WebSocket handshake against
+        ``api.openai.com`` per call, wastes 150-400 ms of ringing-window
+        budget, and doubles the rate-limit pressure for no benefit. So
+        when ``agent.provider == "openai_realtime"`` we let park do all
+        the Realtime-side work and skip the warmup-only adapter here.
 
         Best-effort: each provider's ``warmup()`` is wrapped in
         ``asyncio.gather(..., return_exceptions=True)`` so a slow or
@@ -761,9 +765,13 @@ class Patter:
                 continue
             targets.append(provider)
 
-        realtime_adapter = self._build_realtime_warmup_adapter(agent)
-        if realtime_adapter is not None:
-            targets.append(realtime_adapter)
+        # ``_build_realtime_warmup_adapter`` only fires for
+        # ``openai_realtime`` agents, and for those we defer 100% of the
+        # Realtime-side warm work to :meth:`_park_provider_connections`
+        # (which runs under the same ``agent.prewarm`` gate on every
+        # outbound call). The warmup-only handshake is a strict subset of
+        # what park performs, so running both makes two WS handshakes
+        # against ``api.openai.com`` per call instead of one.
 
         if not targets:
             return

@@ -1031,18 +1031,19 @@ async def test_stream_prewarm_bytes_opens_barge_in_gate_on_first_chunk() -> None
 # ---------------------------------------------------------------------------
 
 
-async def test_spawn_provider_warmup_invokes_realtime_when_provider_is_openai_realtime() -> (
-    None
-):
-    """Agent in ``openai_realtime`` mode → transient ``OpenAIRealtimeAdapter``
-    is built and its ``warmup()`` runs in parallel with STT/TTS/LLM warmups."""
-    from unittest.mock import AsyncMock
+async def test_spawn_provider_warmup_does_not_double_handshake_realtime() -> None:
+    """Agent in ``openai_realtime`` mode → ``_spawn_provider_warmup`` must
+    NOT build a transient ``OpenAIRealtimeAdapter``.
 
-    phone = _make_patter()
-    # Wire an OpenAI key on the resolved local_config the same way
-    # ``Patter._unpack_engine`` would after ``Patter.agent(engine=OpenAIRealtime(...))``.
+    The warmup-only handshake is a strict subset of what
+    :meth:`_park_provider_connections` performs (and park keeps the WS
+    open for adoption). Running both would create a double WS handshake
+    against ``api.openai.com`` per call, wasting 150-400 ms of the
+    ringing-window budget and doubling the rate-limit pressure. The
+    Realtime-side prewarm is performed exclusively by park."""
     import dataclasses
 
+    phone = _make_patter()
     phone._local_config = dataclasses.replace(phone._local_config, openai_key="sk-test")
 
     agent = Agent(
@@ -1053,16 +1054,12 @@ async def test_spawn_provider_warmup_invokes_realtime_when_provider_is_openai_re
         prewarm=True,
     )
 
-    captured: dict[str, object] = {}
+    constructed = 0
 
     class _RecordingAdapter:
-        def __init__(self, **kwargs: object) -> None:
-            captured["init_kwargs"] = kwargs
-            self.warmup = AsyncMock(return_value=None)
-            captured["instance"] = self
-
-        def __repr__(self) -> str:  # pragma: no cover - cosmetic
-            return "_RecordingAdapter()"
+        def __init__(self, **_kwargs: object) -> None:
+            nonlocal constructed
+            constructed += 1
 
     import getpatter.providers.openai_realtime as realtime_mod
 
@@ -1074,16 +1071,77 @@ async def test_spawn_provider_warmup_invokes_realtime_when_provider_is_openai_re
     finally:
         realtime_mod.OpenAIRealtimeAdapter = original_adapter  # type: ignore[misc]
 
-    instance = captured.get("instance")
-    assert instance is not None, "Realtime adapter was not constructed"
-    instance.warmup.assert_awaited_once()
-    kwargs = captured["init_kwargs"]
-    assert kwargs["api_key"] == "sk-test"
-    assert kwargs["voice"] == "alloy"
-    assert kwargs["model"] == "gpt-4o-mini-realtime-preview"
-    # Twilio + Telnyx both bridge through g711_ulaw — production parity.
-    assert kwargs["audio_format"] == "g711_ulaw"
-    assert kwargs["instructions"] == "You are a test assistant."
+    assert constructed == 0, (
+        "Realtime adapter was constructed by warmup — park already does this work"
+    )
+
+
+async def test_outbound_realtime_call_opens_single_ws_handshake() -> None:
+    """End-to-end: an outbound ``openai_realtime`` call with prewarm=True
+    must open exactly ONE WebSocket against ``api.openai.com`` during the
+    ringing window — namely the one that park keeps alive for adoption.
+
+    Regression for the double-handshake bug: previously warmup and park
+    each built a transient ``OpenAIRealtimeAdapter`` from the same
+    config, each opened its own WS, and only one of them was reusable
+    (park's). The warmup-only WS was opened, primed, and immediately
+    discarded — pure waste."""
+    import dataclasses
+
+    phone = _make_patter()
+    phone._local_config = dataclasses.replace(phone._local_config, openai_key="sk-test")
+    agent = Agent(
+        system_prompt="hi",
+        provider="openai_realtime",
+        voice="alloy",
+        prewarm=True,
+    )
+
+    constructed = 0
+    open_parked_calls = 0
+    warmup_calls = 0
+
+    class _RecordingAdapter:
+        def __init__(self, **_kwargs: object) -> None:
+            nonlocal constructed
+            constructed += 1
+
+            class _FakeWS:
+                closed = False
+
+                async def close(self) -> None:
+                    pass
+
+            async def _open_parked() -> object:
+                nonlocal open_parked_calls
+                open_parked_calls += 1
+                return _FakeWS()
+
+            async def _warmup() -> None:
+                nonlocal warmup_calls
+                warmup_calls += 1
+
+            self.open_parked_connection = _open_parked
+            self.warmup = _warmup
+
+    import getpatter.providers.openai_realtime as realtime_mod
+
+    original_adapter = realtime_mod.OpenAIRealtimeAdapter
+    realtime_mod.OpenAIRealtimeAdapter = _RecordingAdapter  # type: ignore[misc]
+    try:
+        phone._spawn_provider_warmup(agent)
+        phone._park_provider_connections(agent, "CAtest_double")
+        await _wait_for_tasks(phone)
+    finally:
+        realtime_mod.OpenAIRealtimeAdapter = original_adapter  # type: ignore[misc]
+
+    # Exactly ONE adapter constructed (by park); warmup did not build one.
+    assert constructed == 1, (
+        f"Expected 1 transient adapter, got {constructed} — double-handshake regression"
+    )
+    # Park opened the WS; warmup never ran.
+    assert open_parked_calls == 1
+    assert warmup_calls == 0
 
 
 async def test_spawn_provider_warmup_skips_realtime_when_provider_is_pipeline() -> None:
@@ -1146,38 +1204,10 @@ async def test_spawn_provider_warmup_skips_realtime_when_openai_key_missing() ->
     assert constructed == 0
 
 
-async def test_spawn_provider_warmup_swallows_realtime_warmup_failure(caplog) -> None:
-    """A failing Realtime ``warmup()`` is best-effort — must not raise."""
-    from unittest.mock import AsyncMock
-    import dataclasses
-
-    phone = _make_patter()
-    phone._local_config = dataclasses.replace(phone._local_config, openai_key="sk-test")
-    agent = Agent(system_prompt="hi", provider="openai_realtime")
-
-    class _BoomAdapter:
-        def __init__(self, **_kwargs: object) -> None:
-            self.warmup = AsyncMock(side_effect=RuntimeError("network down"))
-
-    import getpatter.providers.openai_realtime as realtime_mod
-
-    original_adapter = realtime_mod.OpenAIRealtimeAdapter
-    realtime_mod.OpenAIRealtimeAdapter = _BoomAdapter  # type: ignore[misc]
-    try:
-        with caplog.at_level(logging.DEBUG, logger="getpatter"):
-            phone._spawn_provider_warmup(agent)
-            await _wait_for_tasks(phone)
-    finally:
-        realtime_mod.OpenAIRealtimeAdapter = original_adapter  # type: ignore[misc]
-
-    # The failure is logged at DEBUG, not propagated.
-    assert any("warmup failed" in rec.message.lower() for rec in caplog.records)
-
-
-async def test_spawn_provider_warmup_realtime_forwards_optional_engine_knobs() -> None:
+async def test_park_realtime_forwards_optional_engine_knobs() -> None:
     """``reasoning_effort`` / ``input_audio_transcription_model`` reach the
-    warmup adapter so the primed session matches the production session
-    byte-for-byte."""
+    park-side adapter (since park is now the sole Realtime warm path) so
+    the primed session matches the production session byte-for-byte."""
     from unittest.mock import AsyncMock
     import dataclasses
 
@@ -1195,14 +1225,14 @@ async def test_spawn_provider_warmup_realtime_forwards_optional_engine_knobs() -
     class _RecordingAdapter:
         def __init__(self, **kwargs: object) -> None:
             captured["init_kwargs"] = kwargs
-            self.warmup = AsyncMock()
+            self.open_parked_connection = AsyncMock(return_value=object())
 
     import getpatter.providers.openai_realtime as realtime_mod
 
     original_adapter = realtime_mod.OpenAIRealtimeAdapter
     realtime_mod.OpenAIRealtimeAdapter = _RecordingAdapter  # type: ignore[misc]
     try:
-        phone._spawn_provider_warmup(agent)
+        phone._park_provider_connections(agent, "CAtest_knobs")
         await _wait_for_tasks(phone)
     finally:
         realtime_mod.OpenAIRealtimeAdapter = original_adapter  # type: ignore[misc]
