@@ -547,6 +547,19 @@ class OpenAIRealtimeAdapter:
                     continue
                 event_type = data.get("type", "")
 
+                # DIAG (0.6.1 follow-up): surface server-side acks for
+                # ``session.update`` so we can confirm whether
+                # ``turn_detection: None`` was actually accepted by the
+                # server. Mirrors the TS instrumentation.
+                if event_type in ("session.updated", "session.created"):
+                    sess = data.get("session") or {}
+                    td = sess.get("turn_detection", "<missing>")
+                    logger.info(
+                        "[DIAG-VAD] %s turn_detection=%s",
+                        event_type,
+                        "null" if td is None else td,
+                    )
+
                 if event_type == "response.audio.delta":
                     # Audio chunk from AI — in the configured audio_format
                     audio_bytes = base64.b64decode(data.get("delta", ""))
@@ -585,6 +598,14 @@ class OpenAIRealtimeAdapter:
 
                 elif event_type == "input_audio_buffer.speech_started":
                     # User started speaking — barge-in.
+                    # DIAG (0.6.1 follow-up): a speech_started during the
+                    # firstMessage lockout window is the canonical "server
+                    # VAD did NOT honour turn_detection=None" smoking gun.
+                    if self._first_message_protection_pending:
+                        logger.info(
+                            "[DIAG-VAD] speech_started fired DURING lockout "
+                            "— server-VAD still active!"
+                        )
                     yield ("speech_started", None)
 
                 elif event_type == "input_audio_buffer.speech_stopped":
@@ -627,6 +648,13 @@ class OpenAIRealtimeAdapter:
                         self._first_message_protection_pending
                         and self._saved_turn_detection is not None
                     ):
+                        # DIAG (0.6.1 follow-up): success signal — pair with
+                        # the upstream lockout arm line to verify protection
+                        # held through firstMessage streaming.
+                        logger.info(
+                            "[DIAG-VAD] response.done received during lockout "
+                            "— restoring turn_detection"
+                        )
                         try:
                             await self._ws.send(
                                 json.dumps(
@@ -638,6 +666,10 @@ class OpenAIRealtimeAdapter:
                                     }
                                 )
                             )
+                            logger.info(
+                                "[DIAG-VAD] sent session.update turn_detection=%s (restore)",
+                                self._saved_turn_detection,
+                            )
                         except Exception as exc:  # noqa: BLE001
                             logger.debug(
                                 "first_message: turn_detection restore failed: %s",
@@ -645,7 +677,24 @@ class OpenAIRealtimeAdapter:
                             )
                         self._first_message_protection_pending = False
                         self._saved_turn_detection = None
+                    elif self._first_message_protection_pending:
+                        logger.info(
+                            "[DIAG-VAD] response.done with pending=True but "
+                            "saved=None — protection state inconsistent"
+                        )
+                        self._first_message_protection_pending = False
                     yield ("response_done", data.get("response", {}))
+
+                elif event_type in ("response.cancelled", "response.canceled"):
+                    # DIAG (0.6.1 follow-up): the server cancelled the
+                    # in-flight response. If this fires while the lockout is
+                    # pending, the firstMessage was silently dropped — which
+                    # is the exact symptom we're chasing.
+                    logger.info(
+                        "[DIAG-VAD] %s (first_message_protection_pending=%s)",
+                        event_type,
+                        self._first_message_protection_pending,
+                    )
 
                 elif event_type == "error":
                     err = data.get("error", {})
@@ -797,6 +846,12 @@ class OpenAIRealtimeAdapter:
                     }
                 )
             )
+            # DIAG (0.6.1 follow-up): see TS counterpart. Pairs with the
+            # ``[DIAG-VAD] session.updated`` echo from the server to detect
+            # the race-condition / silent-ignore hypotheses.
+            logger.info(
+                "[DIAG-VAD] sent session.update turn_detection=null (lockout arm)"
+            )
         except Exception as exc:  # noqa: BLE001 - best-effort lockout
             logger.debug("send_first_message: turn_detection lockout failed: %s", exc)
             # Clear protection state so receive_events doesn't restore a
@@ -817,6 +872,8 @@ class OpenAIRealtimeAdapter:
                 }
             )
         )
+        # DIAG (0.6.1 follow-up): paired with the lockout-arm line.
+        logger.info("[DIAG-VAD] sent response.create (firstMessage)")
 
     async def send_function_result(self, call_id: str, result: str) -> None:
         """Send a function call result back to OpenAI and trigger a new response."""

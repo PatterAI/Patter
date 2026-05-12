@@ -1,5 +1,16 @@
 ## Unreleased
 
+### Added — Diagnostic instrumentation for OpenAI Realtime firstMessage VAD lockout
+
+The PR #95 fix (`session.update {turn_detection: null}` armed immediately before `response.create` for the firstMessage turn) shipped in 0.6.1 but a follow-up live test on the prewarm-adopted path still showed the original symptom — the agent did not deliver the scripted opening when the callee started talking first. Added temporary `[DIAG-VAD]` INFO-level instrumentation around the four lockout checkpoints in both SDKs so the next live test produces a deterministic root-cause trace:
+
+1. **Send sites** — log when the lockout `session.update` is sent, and when the `response.create` is sent.
+2. **Server echoes** — every inbound `session.created` / `session.updated` event logs the server-acknowledged `turn_detection` value. This is the smoking gun for the "server silently ignores `turn_detection: null`" hypothesis surfaced in OpenAI community threads.
+3. **Failure-mode events** — `input_audio_buffer.speech_started` events received while the lockout is armed and `response.cancelled` / `response.canceled` events both log explicitly so we can tell whether the firstMessage `response.create` was cancelled by server-side VAD.
+4. **Restore site** — `response.done` during the lockout window logs both the receive and the restore `session.update` send.
+
+These logs are pure diagnostics with no behavioural side effects; they should be removed once the root cause is pinned down. Files: `libraries/python/getpatter/providers/openai_realtime.py`, `libraries/typescript/src/providers/openai-realtime.ts`.
+
 ## 0.6.1 (2026-05-12)
 
 ### Fixed — OpenAI Realtime firstMessage silently cancelled on prewarm-adopted sessions

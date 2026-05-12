@@ -547,6 +547,19 @@ export class OpenAIRealtimeAdapter {
         return;
       }
       const t = data.type;
+      // DIAG (0.6.1 follow-up): surface server-side acks for ``session.update``
+      // so we can confirm whether ``turn_detection: null`` was actually
+      // accepted by the server. Some community reports indicate the server
+      // may silently retain the prior ``server_vad`` config. Logging the
+      // observed turn_detection echo on every ``session.updated`` makes this
+      // visible in a live test without needing the OpenAI proxy.
+      if (t === 'session.updated' || t === 'session.created') {
+        const sess = (data as unknown as { session?: { turn_detection?: unknown } }).session;
+        const td = sess?.turn_detection;
+        getLogger().info(
+          `[DIAG-VAD] ${t} turn_detection=${td === null ? 'null' : JSON.stringify(td)}`,
+        );
+      }
       if (t === 'response.audio.delta') {
         const buf = Buffer.from(data.delta ?? '', 'base64');
         this.currentResponseAudioMs += estimateAudioMs(buf, this.audioFormat);
@@ -567,9 +580,27 @@ export class OpenAIRealtimeAdapter {
           this.currentResponseFirstAudioAt = null;
         }
       } else if (t === 'input_audio_buffer.speech_started') {
+        // DIAG (0.6.1 follow-up): a speech_started event during the
+        // firstMessage lockout window is the canonical "server VAD did NOT
+        // honour turn_detection=null" smoking gun. Pair with the [DIAG-VAD]
+        // arm/echo lines to confirm whether the server applied the update
+        // BEFORE this event fired.
+        if (this.firstMessageProtectionPending) {
+          getLogger().info(
+            '[DIAG-VAD] speech_started fired DURING lockout — server-VAD still active!',
+          );
+        }
         dispatch('speech_started', null);
       } else if (t === 'input_audio_buffer.speech_stopped') {
         dispatch('speech_stopped', null);
+      } else if (t === 'response.cancelled' || t === 'response.canceled') {
+        // DIAG (0.6.1 follow-up): observability for the failure mode —
+        // server cancels the firstMessage response.create. If this fires
+        // while ``firstMessageProtectionPending`` is true, the lockout
+        // failed.
+        getLogger().info(
+          `[DIAG-VAD] ${t} (firstMessageProtectionPending=${this.firstMessageProtectionPending})`,
+        );
       } else if (t === 'conversation.item.input_audio_transcription.completed') {
         dispatch('transcript_input', data.transcript);
       } else if (t === 'response.function_call_arguments.done') {
@@ -591,12 +622,23 @@ export class OpenAIRealtimeAdapter {
           this.savedTurnDetection !== null &&
           this.ws !== null
         ) {
+          // DIAG (0.6.1 follow-up): record that we observed a response.done
+          // while still in the lockout window — i.e. the firstMessage turn
+          // completed before any barge-in cancelled it. This is the success
+          // signal: pairing this line with the upstream [DIAG-VAD] lockout
+          // arm tells us whether the protection held.
+          getLogger().info(
+            '[DIAG-VAD] response.done received during lockout — restoring turn_detection',
+          );
           try {
             this.ws.send(
               JSON.stringify({
                 type: 'session.update',
                 session: { turn_detection: this.savedTurnDetection },
               }),
+            );
+            getLogger().info(
+              `[DIAG-VAD] sent session.update turn_detection=${JSON.stringify(this.savedTurnDetection)} (restore)`,
             );
           } catch (err) {
             getLogger().debug?.(
@@ -605,6 +647,14 @@ export class OpenAIRealtimeAdapter {
           }
           this.firstMessageProtectionPending = false;
           this.savedTurnDetection = null;
+        } else if (this.firstMessageProtectionPending) {
+          // DIAG (0.6.1 follow-up): the lockout was armed but ``savedTurnDetection``
+          // got cleared along the way (e.g. send failed). Surface this so we
+          // can spot inconsistent protection-state transitions.
+          getLogger().info(
+            '[DIAG-VAD] response.done with pending=true but saved=null — protection state inconsistent',
+          );
+          this.firstMessageProtectionPending = false;
         }
         dispatch('response_done', data.response ?? null);
       } else if (t === 'error') {
@@ -740,6 +790,15 @@ export class OpenAIRealtimeAdapter {
           session: { turn_detection: null },
         }),
       );
+      // DIAG (0.6.1 follow-up): we want to know exactly when the lockout
+      // session.update is sent so a live test trace can correlate the
+      // ``[DIAG-VAD] session.updated`` echo back from the server. If the
+      // echo arrives AFTER the response.create below, the race hypothesis
+      // (server applies turn_detection update post-response trigger) is
+      // confirmed.
+      getLogger().info(
+        '[DIAG-VAD] sent session.update turn_detection=null (lockout arm)',
+      );
     } catch (err) {
       getLogger().debug?.(
         `sendFirstMessage: turn_detection lockout failed: ${String(err)}`,
@@ -756,6 +815,12 @@ export class OpenAIRealtimeAdapter {
         instructions: `Say exactly the following sentence as your first turn and nothing else: "${text}"`,
       },
     }));
+    // DIAG (0.6.1 follow-up): paired with the [DIAG-VAD] lockout line above.
+    // The ordering of these two log lines vs the ``session.updated`` echo from
+    // the server is the smoking gun for the race-condition hypothesis.
+    getLogger().info(
+      '[DIAG-VAD] sent response.create (firstMessage)',
+    );
   }
 
   /** Submit a tool/function-call result and request the next response. */
