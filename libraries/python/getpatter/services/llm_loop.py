@@ -712,6 +712,12 @@ class LLMLoop:
         else:
             self._provider_name = "openai"
 
+        # Diagnostics for the char/4 fallback billing path (see _run_completion).
+        # Counted per-LLMLoop instance (i.e. per call). Surfaced only via logs
+        # — keeps record_llm_usage's public signature unchanged.
+        self._usage_missing_count = 0
+        self._logged_usage_fallback = False
+
         # Build OpenAI-format tool definitions (without handler/webhook_url)
         self._openai_tools: list[dict] | None = None
         if tools:
@@ -911,14 +917,36 @@ class LLMLoop:
                     input_tokens=estimated_input,
                     output_tokens=estimated_output,
                 )
-                logger.warning(
-                    "LLM usage chunk missing from %s/%s stream; "
-                    "estimating output_tokens=%d (input_tokens=%d) via char/4 fallback",
-                    self._provider_name,
-                    self._model,
-                    estimated_output,
-                    estimated_input,
-                )
+                self._usage_missing_count += 1
+                # First fallback in this call → INFO so the operator sees it once.
+                # Subsequent iterations only DEBUG to avoid spamming logs on
+                # long tool-loop turns where every iteration is char/4-billed.
+                if not self._logged_usage_fallback:
+                    self._logged_usage_fallback = True
+                    logger.info(
+                        "llm_usage_fallback provider=%s model=%s input_chars=%d "
+                        "output_chars=%d est_input_tokens=%d est_output_tokens=%d",
+                        self._provider_name,
+                        self._model,
+                        input_chars,
+                        output_chars,
+                        estimated_input,
+                        estimated_output,
+                    )
+                else:
+                    logger.debug(
+                        "llm_usage_fallback provider=%s model=%s iteration=%d "
+                        "input_chars=%d output_chars=%d est_input_tokens=%d "
+                        "est_output_tokens=%d total_missing=%d",
+                        self._provider_name,
+                        self._model,
+                        iteration,
+                        input_chars,
+                        output_chars,
+                        estimated_input,
+                        estimated_output,
+                        self._usage_missing_count,
+                    )
 
             # If no tool calls, we're done
             if not has_tool_calls:
