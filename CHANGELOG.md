@@ -1,5 +1,28 @@
 ## Unreleased
 
+### Added — `patter.*` OTel attribute helpers in the TypeScript SDK (parity with Python)
+
+The Python SDK ships `record_patter_attrs`, `patter_call_scope`, and `attach_span_exporter` (in `getpatter.observability.attributes`) for stamping `patter.cost.*` / `patter.latency.*` span attributes and wiring an OTel `SpanExporter` into the tracer provider. The TypeScript SDK previously had no equivalent surface — calling code that wanted to record those attributes had to no-op manually or import `@opentelemetry/api` directly, which broke cross-SDK parity per `.claude/rules/sdk-parity.md`.
+
+This change ports the helpers to TypeScript as no-ops by default. When `PATTER_OTEL_ENABLED` is unset or `@opentelemetry/api` is not installed, every helper is a fast no-op, so existing call sites stay zero-cost. Available as:
+
+```ts
+import {
+  recordPatterAttrs,
+  patterCallScope,
+  attachSpanExporter,
+  DEFAULT_SIDE,
+} from 'getpatter/observability';
+```
+
+Semantic mapping (1:1 with Python):
+
+- `recordPatterAttrs(attrs)` ↔ `record_patter_attrs(attrs)`
+- `patterCallScope({ callId, side }, fn)` ↔ `patter_call_scope(call_id=..., side=...)` (the JS form takes an async callback because JS lacks `with`-style context managers; the closure is the scope body)
+- `attachSpanExporter(patterInstance, exporter, { side })` ↔ `attach_span_exporter(patter, exporter, side=...)`
+
+Files: `libraries/typescript/src/observability/attributes.ts` (new), `libraries/typescript/src/observability/index.ts` (re-exports), `libraries/typescript/tests/unit/observability-attributes.test.ts` (new).
+
 ### Fixed — `EOUMetrics` field semantics + unit parity between Python and TypeScript SDKs
 
 The Python implementation in `libraries/python/getpatter/services/metrics.py:_emit_eou_metrics` had `end_of_utterance_delay` and `transcription_delay` swapped relative to the TypeScript counterpart, and emitted them in seconds while the TypeScript SDK and the rest of the observability surface (`ttfb_ms`, `turn_ms`) use milliseconds. The dashboard, EventBus subscribers and any downstream exporter consuming both SDKs would have seen the two fields disagree by a factor of 1000× AND swapped — silently corrupting end-of-utterance latency dashboards on cross-SDK fleets.
