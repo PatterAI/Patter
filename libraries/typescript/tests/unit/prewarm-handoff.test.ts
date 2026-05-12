@@ -289,3 +289,82 @@ describe('[unit] prewarm-handoff — OpenAI Realtime', () => {
     expect(slot?.stt).toBeDefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Built-in tools (transfer_call / end_call) MUST land in the primed session
+// so adopted parked sessions can still call them. Regression for the bug
+// where ``buildRealtimeWarmupAdapter`` constructed the transient adapter
+// with no ``tools`` argument and the session.update sent during ringing
+// carried an empty tool list.
+// ---------------------------------------------------------------------------
+
+describe('[unit] prewarm-handoff — built-in tools in primed session', () => {
+  function makeRealtimePhone(): Patter {
+    return new Patter({
+      carrier: new Twilio({
+        accountSid: 'ACtest000000000000000000000000000',
+        authToken: 'tok',
+      }),
+      phoneNumber: '+15551234567',
+      webhookUrl: 'example.test',
+      openaiKey: 'sk-test',
+    });
+  }
+
+  it('warmup adapter is constructed with user tools + transfer_call + end_call', () => {
+    const phone = makeRealtimePhone();
+
+    const customTool = {
+      name: 'lookup_order',
+      description: 'Look up an order by id',
+      parameters: {
+        type: 'object',
+        properties: { orderId: { type: 'string' } },
+        required: ['orderId'],
+      },
+    } as const;
+
+    const agent: AgentOptions = {
+      systemPrompt: 'p',
+      provider: 'openai_realtime',
+      voice: 'alloy',
+      tools: [customTool],
+    };
+
+    const adapter = (
+      phone as unknown as {
+        buildRealtimeWarmupAdapter: (a: AgentOptions) => unknown;
+      }
+    ).buildRealtimeWarmupAdapter(agent);
+    expect(adapter).not.toBeNull();
+
+    // ``tools`` is a private field on ``OpenAIRealtimeAdapter`` — access
+    // via bracket to inspect the wired value.
+    const tools = (adapter as { tools?: Array<{ name: string }> }).tools;
+    expect(tools).toBeDefined();
+    const names = (tools ?? []).map((t) => t.name);
+    expect(names).toContain('lookup_order');
+    expect(names).toContain('transfer_call');
+    expect(names).toContain('end_call');
+  });
+
+  it('warmup adapter still injects transfer_call + end_call when agent has no tools', () => {
+    const phone = makeRealtimePhone();
+    const agent: AgentOptions = {
+      systemPrompt: 'p',
+      provider: 'openai_realtime',
+    };
+
+    const adapter = (
+      phone as unknown as {
+        buildRealtimeWarmupAdapter: (a: AgentOptions) => unknown;
+      }
+    ).buildRealtimeWarmupAdapter(agent);
+    expect(adapter).not.toBeNull();
+
+    const tools = (adapter as { tools?: Array<{ name: string }> }).tools;
+    expect(tools).toBeDefined();
+    const names = (tools ?? []).map((t) => t.name);
+    expect(names).toEqual(['transfer_call', 'end_call']);
+  });
+});

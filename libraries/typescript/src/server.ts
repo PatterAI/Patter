@@ -89,6 +89,47 @@ const END_CALL_TOOL = {
 };
 
 /**
+ * Wire-format type for an OpenAI Realtime function tool, identical to
+ * what {@link OpenAIRealtimeAdapter} accepts via its constructor.
+ */
+export type RealtimeToolDef = {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+  strict?: boolean;
+};
+
+/**
+ * Build the canonical OpenAI Realtime tools list — user-defined tools
+ * followed by the always-injected ``transfer_call`` / ``end_call``
+ * built-ins.
+ *
+ * Shared between {@link buildAIAdapter} (live call path) and
+ * ``Patter.buildRealtimeWarmupAdapter`` (prewarm path) so the primed
+ * ``session.update`` exchanged during ringing carries the exact same
+ * tool definitions that the live ``session.update`` would set. Without
+ * this, an adopted parked session lands on a server that has no idea
+ * ``transfer_call`` / ``end_call`` exist and the model silently refuses
+ * to call them on hit-prewarm calls.
+ */
+export function buildRealtimeTools(
+  agentTools: ReadonlyArray<{
+    name: string;
+    description?: string;
+    parameters?: Record<string, unknown>;
+    strict?: boolean;
+  }> | undefined,
+): RealtimeToolDef[] {
+  const mapped: RealtimeToolDef[] = (agentTools ?? []).map((t) => ({
+    name: t.name,
+    description: t.description ?? '',
+    parameters: t.parameters ?? {},
+    strict: t.strict,
+  }));
+  return [...mapped, TRANSFER_CALL_TOOL, END_CALL_TOOL];
+}
+
+/**
  * Escape a string for safe inclusion inside XML/HTML attributes or text nodes.
  */
 function xmlEscape(s: string): string {
@@ -364,13 +405,14 @@ export function buildAIAdapter(config: LocalConfig, agent: AgentOptions, resolve
   // and ``additionalProperties: false`` everywhere, which would break tools with
   // optional fields. The user's tool schemas are validated at agent() build time
   // (see tools/schema-validation.ts) so any strict-mode violation surfaces early.
-  const agentTools = agent.tools?.map((t) => ({
-    name: t.name,
-    description: t.description,
-    parameters: t.parameters,
-    strict: (t as { strict?: boolean }).strict,
-  })) ?? [];
-  const tools = [...agentTools, TRANSFER_CALL_TOOL, END_CALL_TOOL];
+  const tools = buildRealtimeTools(
+    agent.tools as ReadonlyArray<{
+      name: string;
+      description?: string;
+      parameters?: Record<string, unknown>;
+      strict?: boolean;
+    }> | undefined,
+  );
   const openaiKey = engine && engine.kind === 'openai_realtime' ? engine.apiKey : (config.openaiKey ?? '');
   // Forward optional engine-level Realtime knobs so the high-level
   // ``OpenAIRealtime`` engine wrapper has the same expressivity as the

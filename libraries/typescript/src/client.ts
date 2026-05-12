@@ -34,7 +34,7 @@ import type {
   AgentOptions,
   ServeOptions,
 } from "./types";
-import { EmbeddedServer } from "./server";
+import { EmbeddedServer, buildRealtimeTools } from "./server";
 import type { MetricsStore } from "./dashboard/store";
 import { Carrier as TwilioCarrier } from "./telephony/twilio";
 import { Carrier as TelnyxCarrier } from "./telephony/telnyx";
@@ -1056,6 +1056,19 @@ export class Patter {
             realtimeEngine.inputAudioTranscriptionModel;
         }
       }
+      // Build the same tools list (user-defined + ``transfer_call`` /
+      // ``end_call``) that ``buildAIAdapter`` would apply on a cold
+      // connect. Without this the primed ``session.update`` carries an
+      // empty tool list and an adopted parked session is silently
+      // incapable of calling the built-ins.
+      const tools = buildRealtimeTools(
+        agent.tools as ReadonlyArray<{
+          name: string;
+          description?: string;
+          parameters?: Record<string, unknown>;
+          strict?: boolean;
+        }> | undefined,
+      );
       // Twilio + Telnyx both bridge to OpenAI Realtime over ``g711_ulaw``
       // (see ``telephony/twilio.ts`` / ``telnyx.ts``); match that here so
       // the primed session config aligns with the production call.
@@ -1064,7 +1077,7 @@ export class Patter {
         agent.model,
         agent.voice,
         agent.systemPrompt,
-        undefined,
+        tools,
         OpenAIRealtimeAudioFormat.G711_ULAW,
         adapterOptions,
       );

@@ -118,6 +118,41 @@ END_CALL_TOOL: dict = {
 }
 
 
+def build_realtime_tools(agent_tools_field: object) -> list[dict]:
+    """Build the canonical OpenAI Realtime tools list: user-defined tools
+    followed by the always-injected ``transfer_call`` / ``end_call``
+    built-ins.
+
+    Called from both ``OpenAIRealtimeStreamHandler.start()`` and the
+    prewarm-side ``_build_realtime_warmup_adapter`` so the primed
+    ``session.update`` exchanged during ringing carries the exact same
+    tool definitions that the live call would have set on the first
+    cold ``connect()``. Without this, an adopted parked session lands
+    on a server that has no idea ``transfer_call`` / ``end_call`` exist
+    and the model silently refuses to call them.
+
+    ``agent_tools_field`` accepts the raw ``agent.tools`` value (``None``,
+    tuple, or list of tool dicts) so callers can pass it straight from
+    the ``Agent`` instance without unpacking.
+    """
+    tools: list[dict] = []
+    for t in agent_tools_field or ():  # type: ignore[union-attr]
+        entry: dict = {
+            "name": t["name"],
+            "description": t.get("description", ""),
+            "parameters": t.get("parameters", {}),
+        }
+        # Propagate strict-mode opt-in to the OpenAI session.update wire
+        # format. Schema is already validated at agent() build time so we
+        # can pass it through without re-checking.
+        if t.get("strict") is True:
+            entry["strict"] = True
+        tools.append(entry)
+    tools.append(TRANSFER_CALL_TOOL)
+    tools.append(END_CALL_TOOL)
+    return tools
+
+
 # ---------------------------------------------------------------------------
 # Audio sender protocol — abstracts Twilio vs Telnyx audio output
 # ---------------------------------------------------------------------------
@@ -919,20 +954,10 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         # not kill the entire call. Parity with TS ``initMcpTools``.
         await self._init_mcp_tools()
 
-        agent_tools: list[dict] = []
-        for t in self.agent.tools or []:
-            entry: dict = {
-                "name": t["name"],
-                "description": t.get("description", ""),
-                "parameters": t.get("parameters", {}),
-            }
-            # Propagate strict-mode opt-in to the OpenAI session.update
-            # wire format. Schema is already validated at agent() build
-            # time so we can pass it through without re-checking.
-            if t.get("strict") is True:
-                entry["strict"] = True
-            agent_tools.append(entry)
-        openai_tools: list[dict] = agent_tools + [TRANSFER_CALL_TOOL, END_CALL_TOOL]
+        # Canonical tools list — user-defined tools + transfer_call / end_call
+        # built-ins. Shared with the prewarm adapter so the primed
+        # session.update matches the live session.update byte-for-byte.
+        openai_tools: list[dict] = build_realtime_tools(self.agent.tools)
 
         # Forward optional engine-level Realtime knobs (carried on the Agent
         # by ``Patter._unpack_engine``) only when set, so the adapter's own
