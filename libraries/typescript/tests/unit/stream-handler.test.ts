@@ -861,4 +861,58 @@ describe('StreamHandler', () => {
       expect(p.firstMessageMarkCounter).toBe(0);
     });
   });
+
+  describe('onMark only updates lastConfirmedMark on a matched mark', () => {
+    interface OnMarkPriv {
+      pendingMarks: Array<{ name: string; resolve: () => void; promise: Promise<void> }>;
+      lastConfirmedMark: string;
+    }
+
+    it('does not overwrite lastConfirmedMark for an unknown mark name', async () => {
+      const h = new StreamHandler(
+        makeDeps(),
+        makeMockWs(),
+        '+15551111111',
+        '+15552222222',
+      );
+      const p = h as unknown as OnMarkPriv;
+
+      // Seed a real matched mark so lastConfirmedMark has a known
+      // baseline that the unmatched echo must not overwrite.
+      let resolveSeed!: () => void;
+      const seedPromise = new Promise<void>((r) => {
+        resolveSeed = r;
+      });
+      p.pendingMarks.push({ name: 'fm_seed', resolve: resolveSeed, promise: seedPromise });
+      await h.onMark('fm_seed');
+      expect(p.lastConfirmedMark).toBe('fm_seed');
+
+      // Emit a mark name that is NOT in pendingMarks — e.g. echo
+      // arrived after drain, or for an unknown identifier. The
+      // handler's lastConfirmedMark must NOT be clobbered.
+      await h.onMark('unknown_xyz');
+      expect(p.lastConfirmedMark).toBe('fm_seed');
+    });
+
+    it('updates lastConfirmedMark only after the queue match succeeds', async () => {
+      const h = new StreamHandler(
+        makeDeps(),
+        makeMockWs(),
+        '+15551111111',
+        '+15552222222',
+      );
+      const p = h as unknown as OnMarkPriv;
+      expect(p.lastConfirmedMark).toBe('');
+
+      let resolveA!: () => void;
+      const promiseA = new Promise<void>((r) => {
+        resolveA = r;
+      });
+      p.pendingMarks.push({ name: 'fm_1', resolve: resolveA, promise: promiseA });
+
+      await h.onMark('fm_1');
+      expect(p.lastConfirmedMark).toBe('fm_1');
+      expect(p.pendingMarks.length).toBe(0);
+    });
+  });
 });
