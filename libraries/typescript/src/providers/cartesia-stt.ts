@@ -457,4 +457,3 @@ function describeWarmupError(err: unknown): string {
   // Fallback: log the type, never the full string (which may contain URL).
   return typeof err;
 }
-
