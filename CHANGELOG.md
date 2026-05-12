@@ -1,5 +1,7 @@
 ## Unreleased
 
+## 0.6.1 (2026-05-12)
+
 ### Fixed — Barge-in gate regression test: prewarmed first message must remain interruptible
 
 Locked in with parity tests on both SDKs that `_stream_prewarm_bytes` / `streamPrewarmBytes` open the barge-in gate (`_first_audio_sent_at` / `firstAudioSentAt`) once the first chunk reaches the wire. The gate was already opened by `_begin_speaking(is_first_message=True)` ahead of streaming, but a future refactor of the `_begin_speaking` path could regress the prewarm path silently — the per-chunk `_mark_first_audio_sent` call inside the streaming loop is the last line of defence and now has explicit coverage in `test_stream_prewarm_bytes_opens_barge_in_gate_on_first_chunk` (Python) and `opens the barge-in gate by stamping firstAudioSentAt after the first chunk` (TypeScript).
@@ -52,8 +54,6 @@ The convention is now uniform across both SDKs (locked in by tests):
 Negative deltas from clock skew or out-of-order timestamps are now clamped to `0` on both sides (the TypeScript side already did this; Python now does too).
 
 Files: `libraries/python/getpatter/services/metrics.py`, `libraries/python/getpatter/observability/metric_types.py` (docstring), `libraries/python/tests/test_metrics.py` (new `TestEOUMetricsEmission`), `libraries/typescript/tests/unit/metrics.test.ts` (new `emitEouMetrics field semantics` block).
-
-## 0.6.1 (2026-05-09)
 
 ### Fixed — Barge-in bug bundle: 6.8s latency outliers, double-talk dispatch, stale anchors, firstMessage uninterruptible (Python + TypeScript parity)
 
