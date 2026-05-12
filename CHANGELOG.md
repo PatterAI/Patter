@@ -1,3 +1,19 @@
+## Unreleased
+
+### Fixed — `EOUMetrics` field semantics + unit parity between Python and TypeScript SDKs
+
+The Python implementation in `libraries/python/getpatter/services/metrics.py:_emit_eou_metrics` had `end_of_utterance_delay` and `transcription_delay` swapped relative to the TypeScript counterpart, and emitted them in seconds while the TypeScript SDK and the rest of the observability surface (`ttfb_ms`, `turn_ms`) use milliseconds. The dashboard, EventBus subscribers and any downstream exporter consuming both SDKs would have seen the two fields disagree by a factor of 1000× AND swapped — silently corrupting end-of-utterance latency dashboards on cross-SDK fleets.
+
+The convention is now uniform across both SDKs (locked in by tests):
+
+- `end_of_utterance_delay` / `endOfUtteranceDelay` = `stt_final − vad_stopped` (milliseconds)
+- `transcription_delay` / `transcriptionDelay` = `turn_committed − vad_stopped` (milliseconds)
+- `on_user_turn_completed_delay` / `onUserTurnCompletedDelay` = pipeline hook execution time (milliseconds)
+
+Negative deltas from clock skew or out-of-order timestamps are now clamped to `0` on both sides (the TypeScript side already did this; Python now does too).
+
+Files: `libraries/python/getpatter/services/metrics.py`, `libraries/python/getpatter/observability/metric_types.py` (docstring), `libraries/python/tests/test_metrics.py` (new `TestEOUMetricsEmission`), `libraries/typescript/tests/unit/metrics.test.ts` (new `emitEouMetrics field semantics` block).
+
 ## 0.6.1 (2026-05-09)
 
 ### Fixed — Barge-in bug bundle: 6.8s latency outliers, double-talk dispatch, stale anchors, firstMessage uninterruptible (Python + TypeScript parity)

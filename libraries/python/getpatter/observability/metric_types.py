@@ -75,9 +75,16 @@ class RealtimeUsage:
 class EOUMetrics:
     """End-of-utterance timing metrics.
 
-    All delay fields are in **seconds**. Captures the timing relationship
-    between VAD stop, STT final transcript, and the moment the pipeline
-    commits the turn for LLM processing.
+    All delay fields are in **milliseconds**, matching the rest of the
+    observability surface (``ttfb_ms``, ``turn_ms``) and the TypeScript
+    SDK. Captures the timing relationship between VAD stop, STT final
+    transcript, and the moment the pipeline commits the turn for LLM
+    processing.
+
+    Field semantics:
+        ``end_of_utterance_delay``       ms from VAD stop → STT final.
+        ``transcription_delay``          ms from VAD stop → turn committed to LLM.
+        ``on_user_turn_completed_delay`` ms from turn committed → pipeline hook done.
     """
 
     end_of_utterance_delay: float

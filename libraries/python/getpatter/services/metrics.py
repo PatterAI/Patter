@@ -513,6 +513,12 @@ class CallMetricsAccumulator:
 
         Guards against emitting garbage data when only a subset of timestamps
         has been recorded (e.g. VAD skipped in non-local mode).
+
+        Field semantics (must match TS ``emitEouMetrics``):
+            ``end_of_utterance_delay`` = stt_final − vad_stopped
+            ``transcription_delay``    = turn_committed − vad_stopped
+        Both deltas are emitted in **milliseconds** (raw wall-clock
+        ``time.time()`` timestamps are in seconds, hence the ``* 1000``).
         """
         if (
             self._vad_stopped_at is None
@@ -528,9 +534,13 @@ class CallMetricsAccumulator:
         from getpatter.observability.metric_types import EOUMetrics
 
         eou = EOUMetrics(
-            end_of_utterance_delay=self._turn_committed_at - self._vad_stopped_at,
-            transcription_delay=self._stt_final_at - self._vad_stopped_at,
-            on_user_turn_completed_delay=self._on_user_turn_completed_delay_ms / 1000.0,
+            end_of_utterance_delay=max(
+                0.0, (self._stt_final_at - self._vad_stopped_at) * 1000.0
+            ),
+            transcription_delay=max(
+                0.0, (self._turn_committed_at - self._vad_stopped_at) * 1000.0
+            ),
+            on_user_turn_completed_delay=self._on_user_turn_completed_delay_ms,
         )
         self._event_bus.emit("eou_metrics", eou)
 
