@@ -140,6 +140,16 @@ export class OpenAIRealtimeAdapter {
   // wall-clock cap corresponds to the maximum playback that real-time TTS
   // could have produced, which is what the user actually heard.
   private currentResponseFirstAudioAt: number | null = null;
+  // ``sendFirstMessage`` arms a one-shot server-VAD lockout so the
+  // firstMessage turn cannot be interrupted by the caller's first audio
+  // frames (which happens reliably on prewarm-adopted sessions where the
+  // adopt+response.create races the caller's "hello?" by a few hundred ms).
+  // The flag is consumed inside the message listener when the firstMessage
+  // ``response.done`` arrives, at which point we re-issue ``session.update``
+  // to restore the original ``turn_detection`` block captured in
+  // ``savedTurnDetection``. See ``sendFirstMessage`` for the full rationale.
+  private firstMessageProtectionPending = false;
+  private savedTurnDetection: Record<string, unknown> | null = null;
   private readonly options: OpenAIRealtimeOptions;
 
   constructor(
@@ -568,6 +578,34 @@ export class OpenAIRealtimeAdapter {
         this.currentResponseItemId = null;
         this.currentResponseAudioMs = 0;
         this.currentResponseFirstAudioAt = null;
+        // If ``sendFirstMessage`` armed the server-VAD lockout for the
+        // firstMessage turn, this ``response.done`` signals the firstMessage
+        // finished streaming and it is safe to restore the original
+        // ``turn_detection`` so barge-in works for the rest of the call.
+        // Best-effort: a failed send leaves the session without VAD which
+        // degrades barge-in but does not break the call — the next
+        // ``session.update`` (e.g. on a tool turn) would also rearm. See
+        // ``sendFirstMessage`` for the full rationale.
+        if (
+          this.firstMessageProtectionPending &&
+          this.savedTurnDetection !== null &&
+          this.ws !== null
+        ) {
+          try {
+            this.ws.send(
+              JSON.stringify({
+                type: 'session.update',
+                session: { turn_detection: this.savedTurnDetection },
+              }),
+            );
+          } catch (err) {
+            getLogger().debug?.(
+              `first_message: turn_detection restore failed: ${String(err)}`,
+            );
+          }
+          this.firstMessageProtectionPending = false;
+          this.savedTurnDetection = null;
+        }
         dispatch('response_done', data.response ?? null);
       } else if (t === 'error') {
         dispatch('error', data.error);
@@ -653,9 +691,65 @@ export class OpenAIRealtimeAdapter {
    * role-confused openings (e.g. a receptionist agent responding "I'd like
    * to schedule a haircut" because it took its own first_message as a
    * customer cue).
+   *
+   * Server-VAD lockout during firstMessage
+   * --------------------------------------
+   *
+   * OpenAI Realtime server-VAD treats any caller audio that arrives before
+   * the assistant's first audio frame as a barge-in and cancels the
+   * in-flight ``response.create``. On the prewarm-adopted path
+   * (``source=adopted ms=0``) the WS→audio bridge opens immediately at call
+   * pickup; the caller's "Hi" / "Hello?" reliably reaches OpenAI in the
+   * ~250-450 ms before the firstMessage audio starts streaming back, so the
+   * configured ``firstMessage`` is *silently cancelled* and the caller
+   * hears the agent respond to their hello instead of delivering the
+   * scripted opening.
+   *
+   * Fix: send a ``session.update`` that sets ``turn_detection`` to ``null``
+   * (OpenAI-documented: disables server-VAD entirely, no audio-driven
+   * response cancellation), then ``response.create`` the firstMessage. The
+   * message listener re-arms ``turn_detection`` from the saved snapshot the
+   * moment ``response.done`` arrives for the firstMessage turn, restoring
+   * normal barge-in for every subsequent turn. The complementary
+   * client-side guard (``firstAudioSentAt`` in stream-handler) already
+   * prevents the caller's outbound clear from firing — this lockout closes
+   * the gap on the *server* side.
+   *
+   * Best-effort: if ``session.update`` cannot be sent we still proceed with
+   * ``response.create``. The fallback behaviour matches the pre-fix state —
+   * a higher likelihood of first-message preemption — but never worse, so
+   * the call still completes.
    */
   async sendFirstMessage(text: string): Promise<void> {
-    this.ws?.send(JSON.stringify({
+    if (!this.ws) return;
+    // Snapshot the original turn_detection block so the message listener
+    // can restore it after the firstMessage ``response.done``. We build it
+    // from the same configured fields ``buildSessionConfig`` uses so the
+    // restore is byte-identical to the cold connect path.
+    this.savedTurnDetection = {
+      type: this.options.vadType ?? OpenAIRealtimeVADType.SERVER_VAD,
+      threshold: 0.5,
+      prefix_padding_ms: 300,
+      silence_duration_ms: this.options.silenceDurationMs ?? 300,
+    };
+    this.firstMessageProtectionPending = true;
+    try {
+      this.ws.send(
+        JSON.stringify({
+          type: 'session.update',
+          session: { turn_detection: null },
+        }),
+      );
+    } catch (err) {
+      getLogger().debug?.(
+        `sendFirstMessage: turn_detection lockout failed: ${String(err)}`,
+      );
+      // Clear protection state so the message listener doesn't restore a
+      // turn_detection we never actually disabled.
+      this.firstMessageProtectionPending = false;
+      this.savedTurnDetection = null;
+    }
+    this.ws.send(JSON.stringify({
       type: 'response.create',
       response: {
         modalities: ['audio', 'text'],

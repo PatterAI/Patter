@@ -386,6 +386,95 @@ describe('OpenAIRealtimeAdapter (deep)', () => {
     });
   });
 
+  // --- sendFirstMessage (server-VAD lockout) ---
+
+  describe('sendFirstMessage()', () => {
+    it('disables turn_detection before response.create then restores on response.done', async () => {
+      const adapter = new OpenAIRealtimeAdapter('sk-test');
+      const ws = await connectAdapter(adapter);
+      ws.send.mockClear();
+
+      await adapter.sendFirstMessage('Hello! Can you hear me?');
+
+      // Two sends expected before response.done:
+      //   1) session.update {turn_detection: null}
+      //   2) response.create with firstMessage instructions
+      expect(ws.send).toHaveBeenCalledTimes(2);
+
+      const lockoutMsg = JSON.parse(ws.send.mock.calls[0][0] as string);
+      expect(lockoutMsg.type).toBe('session.update');
+      expect(lockoutMsg.session.turn_detection).toBeNull();
+
+      const respMsg = JSON.parse(ws.send.mock.calls[1][0] as string);
+      expect(respMsg.type).toBe('response.create');
+      expect(respMsg.response.modalities).toEqual(['audio', 'text']);
+      expect(respMsg.response.instructions).toContain('Hello! Can you hear me?');
+
+      // Now simulate the server completing the firstMessage. The adapter
+      // must re-issue a session.update restoring the original turn_detection
+      // so subsequent turns barge in normally.
+      ws.send.mockClear();
+      ws.emit('message', Buffer.from(JSON.stringify({ type: 'response.done' })));
+
+      expect(ws.send).toHaveBeenCalledOnce();
+      const restoreMsg = JSON.parse(ws.send.mock.calls[0][0] as string);
+      expect(restoreMsg.type).toBe('session.update');
+      expect(restoreMsg.session.turn_detection).toMatchObject({
+        type: 'server_vad',
+        threshold: 0.5,
+        prefix_padding_ms: 300,
+        silence_duration_ms: 300,
+      });
+    });
+
+    it('restores turn_detection with the configured custom silenceDurationMs', async () => {
+      const adapter = new OpenAIRealtimeAdapter(
+        'sk-test',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { silenceDurationMs: 750, vadType: 'semantic_vad' },
+      );
+      const ws = await connectAdapter(adapter);
+      ws.send.mockClear();
+
+      await adapter.sendFirstMessage('Hi.');
+      ws.send.mockClear();
+
+      ws.emit('message', Buffer.from(JSON.stringify({ type: 'response.done' })));
+
+      expect(ws.send).toHaveBeenCalledOnce();
+      const restoreMsg = JSON.parse(ws.send.mock.calls[0][0] as string);
+      expect(restoreMsg.session.turn_detection).toMatchObject({
+        type: 'semantic_vad',
+        silence_duration_ms: 750,
+      });
+    });
+
+    it('only restores turn_detection once even if response.done arrives twice', async () => {
+      const adapter = new OpenAIRealtimeAdapter('sk-test');
+      const ws = await connectAdapter(adapter);
+      ws.send.mockClear();
+
+      await adapter.sendFirstMessage('Hi.');
+      ws.send.mockClear();
+
+      ws.emit('message', Buffer.from(JSON.stringify({ type: 'response.done' })));
+      // Spurious second response.done from a subsequent turn must NOT re-send
+      // the restore — the firstMessage lockout is one-shot.
+      ws.emit('message', Buffer.from(JSON.stringify({ type: 'response.done' })));
+
+      expect(ws.send).toHaveBeenCalledOnce();
+    });
+
+    it('does nothing when ws is null', async () => {
+      const adapter = new OpenAIRealtimeAdapter('sk-test');
+      await expect(adapter.sendFirstMessage('Hi.')).resolves.toBeUndefined();
+    });
+  });
+
   // --- cancelResponse ---
 
   describe('cancelResponse()', () => {

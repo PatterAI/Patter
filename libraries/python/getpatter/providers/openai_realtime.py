@@ -164,6 +164,16 @@ class OpenAIRealtimeAdapter:
         import time as _time
 
         self._session_start_monotonic: float = _time.monotonic()
+        # ``send_first_message`` arms a one-shot server-VAD lockout so the
+        # firstMessage turn cannot be interrupted by the caller's first audio
+        # frames (which happens reliably on prewarm-adopted sessions where the
+        # adopt+response.create races the caller's "hello?" by a few hundred
+        # ms). The flag is consumed inside ``receive_events`` when the
+        # firstMessage ``response.done`` arrives, at which point we re-issue
+        # ``session.update`` to restore the original ``turn_detection`` block
+        # captured here. See ``send_first_message`` for the full rationale.
+        self._first_message_protection_pending: bool = False
+        self._saved_turn_detection: dict | None = None
 
     def record_session_end(self) -> None:
         """Emit ``patter.cost.realtime_minutes`` for the elapsed session duration."""
@@ -603,6 +613,38 @@ class OpenAIRealtimeAdapter:
                     self._current_response_item_id = None
                     self._current_response_audio_ms = 0
                     self._current_response_first_audio_at = None
+                    # If ``send_first_message`` armed the server-VAD lockout
+                    # for the firstMessage turn, this ``response.done``
+                    # signals the firstMessage finished streaming and it is
+                    # safe to restore the original ``turn_detection`` so
+                    # barge-in works for the rest of the call. Best-effort:
+                    # a failed send leaves the session without VAD, which
+                    # degrades barge-in but does not break the call — the
+                    # next ``session.update`` (e.g. on a tool turn) would
+                    # also rearm. See ``send_first_message`` for the
+                    # full rationale.
+                    if (
+                        self._first_message_protection_pending
+                        and self._saved_turn_detection is not None
+                    ):
+                        try:
+                            await self._ws.send(
+                                json.dumps(
+                                    {
+                                        "type": "session.update",
+                                        "session": {
+                                            "turn_detection": self._saved_turn_detection,
+                                        },
+                                    }
+                                )
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug(
+                                "first_message: turn_detection restore failed: %s",
+                                exc,
+                            )
+                        self._first_message_protection_pending = False
+                        self._saved_turn_detection = None
                     yield ("response_done", data.get("response", {}))
 
                 elif event_type == "error":
@@ -704,9 +746,63 @@ class OpenAIRealtimeAdapter:
         producing role-confused openings (e.g. a receptionist agent
         responding "I'd like to schedule a haircut" because it took its own
         first_message as a customer cue).
+
+        Server-VAD lockout during firstMessage
+        -------------------------------------
+
+        OpenAI Realtime server-VAD treats any caller audio that arrives
+        before the assistant's first audio frame as a barge-in and cancels
+        the in-flight ``response.create``. On the prewarm-adopted path
+        (``source=adopted ms=0``) the WS→audio bridge opens immediately at
+        call pickup; the caller's "Hi" / "Hello?" reliably reaches OpenAI in
+        the ~250-450 ms before the firstMessage audio starts streaming back,
+        so the configured ``first_message`` is *silently cancelled* and the
+        caller hears the agent respond to their hello instead of delivering
+        the scripted opening.
+
+        Fix: send a ``session.update`` that sets ``turn_detection`` to
+        ``None`` (OpenAI-documented: disables server-VAD entirely, no
+        audio-driven response cancellation), then ``response.create`` the
+        firstMessage. ``receive_events`` re-arms ``turn_detection`` from the
+        saved snapshot the moment ``response.done`` arrives for the
+        firstMessage turn, restoring normal barge-in for every subsequent
+        turn. The complementary client-side guard (``_first_audio_sent_at``
+        in ``stream_handler``) already prevents the caller's outbound clear
+        from firing — this lockout closes the gap on the *server* side.
+
+        Best-effort: if ``session.update`` raises we still proceed with
+        ``response.create``. The fallback behaviour matches the pre-fix
+        state — a higher likelihood of first-message preemption — but never
+        worse, so the call still completes.
         """
         if self._ws is None:
             return
+        # Snapshot the original turn_detection block so ``receive_events``
+        # can restore it after the firstMessage ``response.done``. We build
+        # it from the same configured fields ``_build_session_config`` uses
+        # so the restore is byte-identical to the cold connect path.
+        self._saved_turn_detection = {
+            "type": self.vad_type,
+            "threshold": 0.5,
+            "prefix_padding_ms": 300,
+            "silence_duration_ms": self.silence_duration_ms,
+        }
+        self._first_message_protection_pending = True
+        try:
+            await self._ws.send(
+                json.dumps(
+                    {
+                        "type": "session.update",
+                        "session": {"turn_detection": None},
+                    }
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - best-effort lockout
+            logger.debug("send_first_message: turn_detection lockout failed: %s", exc)
+            # Clear protection state so receive_events doesn't restore a
+            # turn_detection we never actually disabled.
+            self._first_message_protection_pending = False
+            self._saved_turn_detection = None
         await self._ws.send(
             json.dumps(
                 {

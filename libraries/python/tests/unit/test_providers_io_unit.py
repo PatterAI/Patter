@@ -80,6 +80,7 @@ async def _fake_ws_connect(mock_ws):
 def _ws_connect_side_effect(mock_ws):
     async def _connect(*a, **kw):
         return mock_ws
+
     return _connect
 
 
@@ -100,7 +101,10 @@ class TestOpenAIRealtimeAdapterIO:
         mock_ws = AsyncMock()
         mock_ws.recv.return_value = json.dumps({"type": "session.created"})
 
-        with patch("getpatter.providers.openai_realtime.websockets.connect", side_effect=_ws_connect_side_effect(mock_ws)):
+        with patch(
+            "getpatter.providers.openai_realtime.websockets.connect",
+            side_effect=_ws_connect_side_effect(mock_ws),
+        ):
             await adapter.connect()
 
         assert adapter._running is True
@@ -136,12 +140,21 @@ class TestOpenAIRealtimeAdapterIO:
     async def test_connect_with_tools(self) -> None:
         from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
-        tools = [{"name": "search", "description": "Search", "parameters": {"type": "object"}}]
+        tools = [
+            {
+                "name": "search",
+                "description": "Search",
+                "parameters": {"type": "object"},
+            }
+        ]
         adapter = OpenAIRealtimeAdapter(api_key="sk-test", tools=tools)
         mock_ws = AsyncMock()
         mock_ws.recv.return_value = json.dumps({"type": "session.created"})
 
-        with patch("getpatter.providers.openai_realtime.websockets.connect", side_effect=_ws_connect_side_effect(mock_ws)):
+        with patch(
+            "getpatter.providers.openai_realtime.websockets.connect",
+            side_effect=_ws_connect_side_effect(mock_ws),
+        ):
             await adapter.connect()
 
         sent = json.loads(mock_ws.send.call_args[0][0])
@@ -152,11 +165,16 @@ class TestOpenAIRealtimeAdapterIO:
     async def test_connect_default_instructions(self) -> None:
         from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
-        adapter = OpenAIRealtimeAdapter(api_key="sk-test", instructions="", language="fr")
+        adapter = OpenAIRealtimeAdapter(
+            api_key="sk-test", instructions="", language="fr"
+        )
         mock_ws = AsyncMock()
         mock_ws.recv.return_value = json.dumps({"type": "session.created"})
 
-        with patch("getpatter.providers.openai_realtime.websockets.connect", side_effect=_ws_connect_side_effect(mock_ws)):
+        with patch(
+            "getpatter.providers.openai_realtime.websockets.connect",
+            side_effect=_ws_connect_side_effect(mock_ws),
+        ):
             await adapter.connect()
 
         sent = json.loads(mock_ws.send.call_args[0][0])
@@ -170,7 +188,10 @@ class TestOpenAIRealtimeAdapterIO:
         mock_ws = AsyncMock()
         mock_ws.recv.return_value = json.dumps({"type": "error"})
 
-        with patch("getpatter.providers.openai_realtime.websockets.connect", side_effect=_ws_connect_side_effect(mock_ws)):
+        with patch(
+            "getpatter.providers.openai_realtime.websockets.connect",
+            side_effect=_ws_connect_side_effect(mock_ws),
+        ):
             with pytest.raises(RuntimeError, match="Expected session.created"):
                 await adapter.connect()
 
@@ -229,6 +250,124 @@ class TestOpenAIRealtimeAdapterIO:
         assert first["item"]["call_id"] == "call_123"
 
     @pytest.mark.asyncio
+    async def test_send_first_message_disables_turn_detection_then_restores(
+        self,
+    ) -> None:
+        """``send_first_message`` must arm a one-shot server-VAD lockout
+        (``session.update`` with ``turn_detection: None``) BEFORE the
+        ``response.create`` so the caller's "hello" cannot pre-empt the
+        firstMessage. ``receive_events`` must restore ``turn_detection``
+        from the saved snapshot the moment the firstMessage
+        ``response.done`` arrives.
+        """
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
+
+        adapter = OpenAIRealtimeAdapter(api_key="sk-test")
+        adapter._ws = AsyncMock()
+
+        await adapter.send_first_message("Hello! Can you hear me?")
+
+        # Two sends expected pre-response.done: lockout + response.create.
+        assert adapter._ws.send.call_count == 2
+        lockout = json.loads(adapter._ws.send.call_args_list[0][0][0])
+        assert lockout["type"] == "session.update"
+        assert lockout["session"]["turn_detection"] is None
+
+        resp = json.loads(adapter._ws.send.call_args_list[1][0][0])
+        assert resp["type"] == "response.create"
+        assert resp["response"]["modalities"] == ["audio", "text"]
+        assert "Hello! Can you hear me?" in resp["response"]["instructions"]
+
+        # Protection flag must be armed for receive_events to restore.
+        assert adapter._first_message_protection_pending is True
+        assert adapter._saved_turn_detection is not None
+
+        # Simulate the server completing the firstMessage. The adapter
+        # must re-issue a session.update restoring the original
+        # turn_detection so subsequent turns barge in normally.
+        adapter._ws.send.reset_mock()
+        messages = [json.dumps({"type": "response.done", "response": {"id": "r1"}})]
+        # Re-bind the ws to the iterable mock; preserve the same send mock
+        # so the assertion below sees the restore call.
+        send_mock = adapter._ws.send
+        iter_ws = _AsyncIterableWS(messages)
+        iter_ws.send = send_mock
+        adapter._ws = iter_ws
+
+        events = []
+        async for event in adapter.receive_events():
+            events.append(event)
+
+        assert len(events) == 1 and events[0][0] == "response_done"
+        send_mock.assert_called_once()
+        restore = json.loads(send_mock.call_args_list[0][0][0])
+        assert restore["type"] == "session.update"
+        assert restore["session"]["turn_detection"]["type"] == "server_vad"
+        assert restore["session"]["turn_detection"]["silence_duration_ms"] == 300
+        assert restore["session"]["turn_detection"]["threshold"] == 0.5
+        assert restore["session"]["turn_detection"]["prefix_padding_ms"] == 300
+
+        # The lockout is one-shot — protection state must be cleared.
+        assert adapter._first_message_protection_pending is False
+        assert adapter._saved_turn_detection is None
+
+    @pytest.mark.asyncio
+    async def test_send_first_message_restore_honours_custom_silence_duration(
+        self,
+    ) -> None:
+        """Constructor overrides for VAD type and silence-duration must be
+        preserved when ``receive_events`` restores ``turn_detection``."""
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
+
+        adapter = OpenAIRealtimeAdapter(
+            api_key="sk-test",
+            silence_duration_ms=750,
+            vad_type="semantic_vad",
+        )
+        adapter._ws = AsyncMock()
+        await adapter.send_first_message("Hi.")
+
+        send_mock = adapter._ws.send
+        messages = [json.dumps({"type": "response.done"})]
+        iter_ws = _AsyncIterableWS(messages)
+        iter_ws.send = send_mock
+        adapter._ws = iter_ws
+
+        async for _event in adapter.receive_events():
+            pass
+
+        # 2 pre-response.done sends + 1 restore.
+        assert send_mock.call_count == 3
+        restore = json.loads(send_mock.call_args_list[2][0][0])
+        assert restore["session"]["turn_detection"]["type"] == "semantic_vad"
+        assert restore["session"]["turn_detection"]["silence_duration_ms"] == 750
+
+    @pytest.mark.asyncio
+    async def test_send_first_message_restore_is_one_shot(self) -> None:
+        """A second ``response.done`` (e.g. from a later turn) must NOT
+        re-issue the restore — the firstMessage lockout is one-shot."""
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
+
+        adapter = OpenAIRealtimeAdapter(api_key="sk-test")
+        adapter._ws = AsyncMock()
+        await adapter.send_first_message("Hi.")
+
+        send_mock = adapter._ws.send
+        messages = [
+            json.dumps({"type": "response.done"}),
+            json.dumps({"type": "response.done"}),
+        ]
+        iter_ws = _AsyncIterableWS(messages)
+        iter_ws.send = send_mock
+        adapter._ws = iter_ws
+
+        async for _event in adapter.receive_events():
+            pass
+
+        # 2 pre-response.done sends + exactly 1 restore (not 2).
+        assert send_mock.call_count == 3
+
+    @pytest.mark.asyncio
     async def test_receive_events_yields_audio(self) -> None:
         from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
@@ -248,7 +387,9 @@ class TestOpenAIRealtimeAdapterIO:
         from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
         adapter = OpenAIRealtimeAdapter(api_key="sk-test")
-        messages = [json.dumps({"type": "response.audio_transcript.delta", "delta": "Hello"})]
+        messages = [
+            json.dumps({"type": "response.audio_transcript.delta", "delta": "Hello"})
+        ]
         adapter._ws = _AsyncIterableWS(messages)
 
         events = []
@@ -261,7 +402,14 @@ class TestOpenAIRealtimeAdapterIO:
         from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
         adapter = OpenAIRealtimeAdapter(api_key="sk-test")
-        messages = [json.dumps({"type": "conversation.item.input_audio_transcription.completed", "transcript": "Hi"})]
+        messages = [
+            json.dumps(
+                {
+                    "type": "conversation.item.input_audio_transcription.completed",
+                    "transcript": "Hi",
+                }
+            )
+        ]
         adapter._ws = _AsyncIterableWS(messages)
 
         events = []
@@ -291,10 +439,16 @@ class TestOpenAIRealtimeAdapterIO:
         from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 
         adapter = OpenAIRealtimeAdapter(api_key="sk-test")
-        messages = [json.dumps({
-            "type": "response.function_call_arguments.done",
-            "call_id": "fc1", "name": "search", "arguments": '{"q":"test"}',
-        })]
+        messages = [
+            json.dumps(
+                {
+                    "type": "response.function_call_arguments.done",
+                    "call_id": "fc1",
+                    "name": "search",
+                    "arguments": '{"q":"test"}',
+                }
+            )
+        ]
         adapter._ws = _AsyncIterableWS(messages)
 
         events = []
@@ -380,7 +534,10 @@ class TestElevenLabsConvAIAdapterIO:
         adapter = ElevenLabsConvAIAdapter(api_key="el-test", agent_id="agent_xyz")
         mock_ws = AsyncMock()
 
-        with patch("getpatter.providers.elevenlabs_convai.websockets.connect", side_effect=_ws_connect_side_effect(mock_ws)) as mc:
+        with patch(
+            "getpatter.providers.elevenlabs_convai.websockets.connect",
+            side_effect=_ws_connect_side_effect(mock_ws),
+        ) as mc:
             await adapter.connect()
 
         call_url = mc.call_args[0][0]
@@ -390,23 +547,36 @@ class TestElevenLabsConvAIAdapterIO:
     async def test_connect_with_first_message(self) -> None:
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
-        adapter = ElevenLabsConvAIAdapter(api_key="el-test", agent_id="agent-test", first_message="Hi there!")
+        adapter = ElevenLabsConvAIAdapter(
+            api_key="el-test", agent_id="agent-test", first_message="Hi there!"
+        )
         mock_ws = AsyncMock()
 
-        with patch("getpatter.providers.elevenlabs_convai.websockets.connect", side_effect=_ws_connect_side_effect(mock_ws)):
+        with patch(
+            "getpatter.providers.elevenlabs_convai.websockets.connect",
+            side_effect=_ws_connect_side_effect(mock_ws),
+        ):
             await adapter.connect()
 
         sent = json.loads(mock_ws.send.call_args[0][0])
-        assert sent["conversation_config_override"]["agent"]["first_message"] == "Hi there!"
+        assert (
+            sent["conversation_config_override"]["agent"]["first_message"]
+            == "Hi there!"
+        )
 
     @pytest.mark.asyncio
     async def test_connect_without_first_message(self) -> None:
         from getpatter.providers.elevenlabs_convai import ElevenLabsConvAIAdapter
 
-        adapter = ElevenLabsConvAIAdapter(api_key="el-test", agent_id="agent-test", first_message="")
+        adapter = ElevenLabsConvAIAdapter(
+            api_key="el-test", agent_id="agent-test", first_message=""
+        )
         mock_ws = AsyncMock()
 
-        with patch("getpatter.providers.elevenlabs_convai.websockets.connect", side_effect=_ws_connect_side_effect(mock_ws)):
+        with patch(
+            "getpatter.providers.elevenlabs_convai.websockets.connect",
+            side_effect=_ws_connect_side_effect(mock_ws),
+        ):
             await adapter.connect()
 
         sent = json.loads(mock_ws.send.call_args[0][0])
@@ -470,11 +640,13 @@ class TestElevenLabsConvAIAdapterIO:
         adapter = ElevenLabsConvAIAdapter(api_key="el-test", agent_id="agent-test")
         await self._prime_adapter_with_ws(
             adapter,
-            _AsyncIterableWS([
-                json.dumps({"type": "user_transcript", "text": "Hi"}),
-                json.dumps({"type": "agent_response", "text": "Hello"}),
-                json.dumps({"type": "interruption"}),
-            ]),
+            _AsyncIterableWS(
+                [
+                    json.dumps({"type": "user_transcript", "text": "Hi"}),
+                    json.dumps({"type": "agent_response", "text": "Hello"}),
+                    json.dumps({"type": "interruption"}),
+                ]
+            ),
         )
 
         events = []
@@ -595,9 +767,13 @@ class TestElevenLabsConvAIAdapterIO:
         adapter = ElevenLabsConvAIAdapter(api_key="el-test", agent_id="agent-test")
         mock_ws = AsyncMock()
         # Iterable messages include a ping.
-        mock_ws.__aiter__ = lambda self: _AsyncIterHelper([
-            json.dumps({"type": "ping", "ping_event": {"event_id": "xyz", "ping_ms": 0}}),
-        ])
+        mock_ws.__aiter__ = lambda self: _AsyncIterHelper(
+            [
+                json.dumps(
+                    {"type": "ping", "ping_event": {"event_id": "xyz", "ping_ms": 0}}
+                ),
+            ]
+        )
         adapter._ws = mock_ws
         adapter._events = asyncio.Queue()
         adapter._reader_task = asyncio.create_task(adapter._read_loop())
@@ -830,7 +1006,10 @@ class TestDeepgramSTTIO:
         stt = DeepgramSTT(api_key="dg-test")
         mock_ws = AsyncMock()
 
-        with patch("getpatter.providers.deepgram_stt.websockets.connect", side_effect=_ws_connect_side_effect(mock_ws)) as mc:
+        with patch(
+            "getpatter.providers.deepgram_stt.websockets.connect",
+            side_effect=_ws_connect_side_effect(mock_ws),
+        ) as mc:
             await stt.connect()
 
         assert stt._ws is mock_ws
@@ -862,12 +1041,18 @@ class TestDeepgramSTTIO:
         from getpatter.providers.deepgram_stt import DeepgramSTT
 
         stt = DeepgramSTT(api_key="dg-test")
-        messages = [json.dumps({
-            "type": "Results",
-            "is_final": True,
-            "speech_final": True,
-            "channel": {"alternatives": [{"transcript": "Hello", "confidence": 0.9}]},
-        })]
+        messages = [
+            json.dumps(
+                {
+                    "type": "Results",
+                    "is_final": True,
+                    "speech_final": True,
+                    "channel": {
+                        "alternatives": [{"transcript": "Hello", "confidence": 0.9}]
+                    },
+                }
+            )
+        ]
         stt._ws = _AsyncIterableWS(messages)
 
         transcripts = []
@@ -979,7 +1164,7 @@ class TestOpenAITTSResample:
         samples = [100, 200, 300, 400, 500, 600]
         audio = struct.pack(f"<{len(samples)}h", *samples)
         result = OpenAITTS._resample_24k_to_16k(audio)
-        out_samples = struct.unpack(f"<{len(result)//2}h", result)
+        out_samples = struct.unpack(f"<{len(result) // 2}h", result)
         assert len(out_samples) == 4
 
     def test_resample_24k_to_16k_empty(self) -> None:
@@ -1092,7 +1277,9 @@ class TestTelnyxAdapterIO:
         adapter._client = AsyncMock()
         adapter._client.post.return_value = mock_resp
 
-        call_id = await adapter.initiate_call("+15551111111", "+15552222222", "wss://stream.example.com")
+        call_id = await adapter.initiate_call(
+            "+15551111111", "+15552222222", "wss://stream.example.com"
+        )
         assert call_id == "v3:new-id"
 
     @pytest.mark.asyncio
@@ -1386,11 +1573,15 @@ class TestTwilioAdapterIO:
         mock_number = MagicMock()
         mock_number.phone_number = "+15559999999"
         adapter._twilio_client = MagicMock()
-        adapter._twilio_client.available_phone_numbers.return_value.local.list.return_value = [mock_number]
+        adapter._twilio_client.available_phone_numbers.return_value.local.list.return_value = [
+            mock_number
+        ]
 
         mock_purchased = MagicMock()
         mock_purchased.phone_number = "+15559999999"
-        adapter._twilio_client.incoming_phone_numbers.create.return_value = mock_purchased
+        adapter._twilio_client.incoming_phone_numbers.create.return_value = (
+            mock_purchased
+        )
 
         number = await adapter.provision_number("US")
         assert number == "+15559999999"
@@ -1416,7 +1607,9 @@ class TestTwilioAdapterIO:
         adapter._twilio_client.incoming_phone_numbers.list.return_value = [mock_num]
 
         await adapter.configure_number("+15551111111", "https://example.com/webhook")
-        mock_num.update.assert_called_once_with(voice_url="https://example.com/webhook", voice_method="POST")
+        mock_num.update.assert_called_once_with(
+            voice_url="https://example.com/webhook", voice_method="POST"
+        )
 
     @pytest.mark.asyncio
     async def test_configure_number_not_found(self) -> None:
@@ -1427,7 +1620,9 @@ class TestTwilioAdapterIO:
         adapter._twilio_client.incoming_phone_numbers.list.return_value = []
 
         with pytest.raises(ValueError, match="not found"):
-            await adapter.configure_number("+15551111111", "https://example.com/webhook")
+            await adapter.configure_number(
+                "+15551111111", "https://example.com/webhook"
+            )
 
     @pytest.mark.asyncio
     async def test_initiate_call(self) -> None:
@@ -1439,7 +1634,9 @@ class TestTwilioAdapterIO:
         adapter._twilio_client = MagicMock()
         adapter._twilio_client.calls.create.return_value = mock_call
 
-        sid = await adapter.initiate_call("+15551111111", "+15552222222", "wss://stream.example.com")
+        sid = await adapter.initiate_call(
+            "+15551111111", "+15552222222", "wss://stream.example.com"
+        )
         assert sid == "CA_test_call_sid"
 
     @pytest.mark.asyncio
@@ -1453,7 +1650,9 @@ class TestTwilioAdapterIO:
         adapter._twilio_client.calls.create.return_value = mock_call
 
         sid = await adapter.initiate_call(
-            "+15551111111", "+15552222222", "wss://stream.example.com",
+            "+15551111111",
+            "+15552222222",
+            "wss://stream.example.com",
             extra_params={"machine_detection": "Enable"},
         )
         assert sid == "CA_test_call_sid"
@@ -1468,7 +1667,9 @@ class TestTwilioAdapterIO:
         adapter._twilio_client = MagicMock()
 
         await adapter.end_call("CA_test_call_sid")
-        adapter._twilio_client.calls.return_value.update.assert_called_once_with(status="completed")
+        adapter._twilio_client.calls.return_value.update.assert_called_once_with(
+            status="completed"
+        )
 
     def test_generate_stream_twiml(self) -> None:
         from getpatter.providers.twilio_adapter import TwilioAdapter
