@@ -2,6 +2,134 @@
 
 ## 0.6.1 (2026-05-12)
 
+### Fixed — TypeScript `onMark` clobbered `lastConfirmedMark` with stale/unknown mark names (parity with Python)
+
+`StreamHandler.onMark` in `libraries/typescript/src/stream-handler.ts`
+unconditionally assigned `this.lastConfirmedMark = markName` before
+checking whether the name corresponded to a queued mark. Any echo
+arriving after the queue was drained, or any mark name from outside
+the firstMessage queue, would overwrite the handler-level field and
+contaminate downstream barge-in heuristics gated on
+`lastConfirmedMark`.
+
+Python `stream_handler.py`'s `on_mark` never touches a handler-level
+field at all — the equivalent state lives on
+`TwilioAudioSender.last_confirmed_mark` and is updated only by the
+carrier's own echo handler. The TS path now matches that behaviour
+defensively: `lastConfirmedMark` is updated only after the queue
+lookup confirms a matching entry. Coverage:
+`libraries/typescript/tests/unit/stream-handler.test.ts`
+(`onMark only updates lastConfirmedMark on a matched mark`).
+
+### Fixed — Dashboard SPA call list grew unbounded and ordering was non-deterministic across SSE refreshes
+
+`mergeCallPreserving` in `dashboard-app/src/hooks/mergeCalls.ts`
+preserved ``prev_only`` calls indefinitely by appending them after the
+fresh snapshot block, with two consequences:
+
+1. On a long-lived session that cycled through more than 500 calls
+   (the server-side ``MetricsStore`` ring buffer default), the UI
+   array kept growing because rows the server had already evicted
+   stayed pinned by ``prev`` and were re-appended on every refresh.
+2. Ordering was non-deterministic: live rows landed at the position
+   the server snapshot gave them, while ``prev_only`` rows always
+   landed last regardless of their actual ``startedAtMs``, so a
+   newer call could end up below an older one.
+
+Fix: after the upsert pass, sort the merged list by ``startedAtMs``
+descending (newest first) and slice to ``MAX_UI_CALLS = 500`` so the
+SPA mirrors the server ring buffer. Coverage:
+`dashboard-app/src/hooks/mergeCalls.test.ts` — adds a 600-prev+1-fresh
+cap test and an explicit startedAtMs ordering test.
+
+### Fixed — firstMessage mark counter could persist stale numbering across re-used handler instances (Python + TypeScript parity)
+
+`PipelineStreamHandler._first_message_mark_counter` (Py) and
+`StreamHandler.firstMessageMarkCounter` (TS) were never reset between
+turns or calls. With handler re-use, the counter incremented
+monotonically — a paced send for the second turn issued
+`fm_<previous_count + 1>` while the carrier could still echo a stale
+`fm_<N>` from the previous turn, corrupting the FIFO matching in
+`on_mark` / `onMark`.
+
+Fix: reset the counter to 0 at the top of `_send_paced_first_message_bytes`
+(Py) / `sendPacedFirstMessageBytes` (TS) so every paced send begins a
+fresh `fm_1, fm_2, …` sequence. Also reset on cleanup
+(`PipelineStreamHandler.cleanup` Py, `handleStop` + `handleWsClose` TS)
+as a belt-and-braces against the cross-call boundary. Coverage:
+`libraries/python/tests/unit/test_first_message_pacing.py`
+(`TestFirstMessageMarkCounterReset`),
+`libraries/typescript/tests/unit/stream-handler.test.ts`
+(`firstMessage mark counter resets across sends + on cleanup`).
+
+### Fixed — firstMessage pending mark waiters leaked on abnormal call end (Python + TypeScript parity)
+
+`PipelineStreamHandler._send_paced_first_message_bytes` (Py) and
+`StreamHandler.sendPacedFirstMessageBytes` (TS) accumulate one
+`asyncio.Future` (Py) / `Promise` (TS) per chunk in `_pending_marks` /
+`pendingMarks` while the firstMessage is paced through the carrier.
+The cancel path (`runBargeInCancel` / barge-in confirm) already drained
+these, but a call that ended without going through cancel — carrier
+WebSocket drop, hangup mid firstMessage, stop event arriving before the
+paced sender finished — left every queued future unresolved. The send
+loop was awaiting them, so the orphan promises leaked until the handler
+itself was garbage-collected.
+
+Fix: `PipelineStreamHandler.cleanup` now invokes `_drain_pending_marks`
+before tearing down adapters; the TS `handleStop` and `handleWsClose`
+do the equivalent via `drainPendingMarks()`. Idempotent and safe when
+the queue is already empty. Files:
+`libraries/python/getpatter/stream_handler.py`,
+`libraries/typescript/src/stream-handler.ts`. Coverage:
+`libraries/python/tests/unit/test_first_message_pacing.py`
+(`TestCleanupDrainsPendingMarks`),
+`libraries/typescript/tests/unit/stream-handler.test.ts`
+(`cleanup drains pending firstMessage marks`).
+
+### Fixed — firstMessage was effectively un-interruptible: barge-in lost the race against the carrier outbound buffer (#128, Python + TypeScript parity)
+
+`StreamHandler.streamPrewarmBytes` (TS) /
+`PipelineStreamHandler._stream_prewarm_bytes` (Py) and the live-TTS
+firstMessage loop pushed every chunk into the carrier WebSocket as fast
+as the TTS provider yielded bytes. Twilio's outbound buffer ended up
+several seconds deep, and a barge-in's `sendClear` (`send_clear`) was
+queued behind the already-enqueued media frames — the agent kept
+talking on the user's earpiece for up to ~2 s after the user spoke.
+Filed as #128.
+
+Fix: route every firstMessage chunk through a paced sender that emits
+a unique Twilio mark after each chunk and waits for the oldest
+unconfirmed mark once `FIRST_MESSAGE_MARK_WINDOW` (3 chunks ≈ 120 ms)
+are in flight. `cancelSpeaking` (`_run_barge_in_cancel` on Python)
+drains every pending mark waiter so the loop exits on the next tick
+and `sendClear` lands on a near-empty carrier buffer. On Telnyx
+(no mark concept) the loop falls back to a playout-duration-based
+sleep so the buffer can't out-run a clear by more than one chunk.
+
+Files: `libraries/typescript/src/stream-handler.ts`,
+`libraries/python/getpatter/stream_handler.py`. Coverage:
+`libraries/typescript/tests/unit/stream-handler.test.ts`
+(`firstMessage mark-gated pacing`),
+`libraries/python/tests/unit/test_first_message_pacing.py`. The
+existing `streamPrewarmBytes` chunking test was updated to echo
+marks via the mock bridge so it interoperates with the new pacing.
+
+### Fixed — Dashboard SPA: live snapshot refresh dropped previously-visible calls when a new call started (#124)
+
+`mergeCallPreserving` in `dashboard-app/src/hooks/useDashboardData.ts`
+replaced the UI array with the server snapshot via `next.map(...)`. When
+a second call started back-to-back with the first, the SSE-triggered
+refresh could land before `/api/dashboard/calls` reflected the prior
+call (server publishes the SSE event ahead of the terminal write
+completing), and the prior call vanished from the SPA even though it
+was still in the server's ring buffer. The merge is now a true upsert:
+calls present in `prev` but absent from `next` are appended, so the
+prior row stays visible until the server snapshot stabilises. Pure
+merge helpers extracted to `dashboard-app/src/hooks/mergeCalls.ts` with
+unit coverage at `dashboard-app/src/hooks/mergeCalls.test.ts`; added a
+minimal Vitest setup to `dashboard-app` so the SPA can exercise the
+helper in isolation.
+
 ### Changed — Cerebras usage-chunk fallback: INFO-once + DEBUG per iteration (Python + TypeScript parity)
 
 The char/4 fallback billing path in `services/llm_loop.py` /
@@ -86,7 +214,6 @@ The convention is now uniform across both SDKs (locked in by tests):
 Negative deltas from clock skew or out-of-order timestamps are now clamped to `0` on both sides (the TypeScript side already did this; Python now does too).
 
 Files: `libraries/python/getpatter/services/metrics.py`, `libraries/python/getpatter/observability/metric_types.py` (docstring), `libraries/python/tests/test_metrics.py` (new `TestEOUMetricsEmission`), `libraries/typescript/tests/unit/metrics.test.ts` (new `emitEouMetrics field semantics` block).
-
 ### Fixed — Barge-in bug bundle: 6.8s latency outliers, double-talk dispatch, stale anchors, firstMessage uninterruptible (Python + TypeScript parity)
 
 Real PSTN test (round 10f, 11 turns with user-initiated interruptions) surfaced four correlated bugs in the barge-in pipeline that the previous strategy work in 0.6.1 did not cover. Investigation report (`/private/tmp/.../a6fae04df253294f2.output`) traced all four to anchor mismanagement around the interrupt boundary plus an over-aggressive VAD threshold.

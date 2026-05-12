@@ -1794,6 +1794,21 @@ class PipelineStreamHandler(StreamHandler):
         self._last_commit_at: float = 0.0
         # Per-handler StatefulResampler for mulaw 8 kHz -> PCM16 16 kHz transcoding.
         self._resampler_8k_to_16k = None
+        # FIFO of outstanding Twilio marks the SDK has sent but not yet seen
+        # echoed back. Used by the firstMessage paced sender to bound the
+        # carrier-side buffer depth — without this the loop pushed the entire
+        # TTS stream into Twilio's WebSocket in one burst and a sendClear
+        # racing the queued media frames was unable to interrupt the agent
+        # for up to ~2 s (BUG #128). ``on_mark`` pops entries when Twilio
+        # confirms playback; ``_drain_pending_marks`` resolves every entry on
+        # cancel so any awaiter exits on the next tick. Telnyx never
+        # populates this queue (no mark concept on Telnyx's wire protocol —
+        # the loop falls back to time-based pacing).
+        self._pending_marks: list[tuple[str, asyncio.Future[None]]] = []
+        # Monotonic counter for first-message mark names. Distinct from the
+        # generic ``audio_*`` marks the Realtime path sends so the two paths
+        # can coexist without name collisions.
+        self._first_message_mark_counter: int = 0
 
     async def start(self) -> None:
         """Initialize STT/TTS providers, hooks, and start the STT receive loop."""
@@ -2078,17 +2093,22 @@ class PipelineStreamHandler(StreamHandler):
                             first_chunk_sent = True
                             if self.metrics is not None:
                                 self.metrics.record_tts_first_byte()
-                        # Far-end tap for the echo canceller — push the
-                        # exact PCM the carrier-side encoder will transmit.
-                        # Without this the AEC adapt loop has no reference
-                        # signal during the intro, resulting in unmitigated
-                        # bleed-through and a "first turn unresponsive" UX
-                        # where the user's voice is masked by the agent's
-                        # TTS in the inbound channel.
-                        if self._aec is not None:
-                            self._aec.push_far_end(audio_chunk)
-                        await self.audio_sender.send_audio(audio_chunk)
-                        self._mark_first_audio_sent()
+                        # BUG #128: route every TTS chunk through the paced
+                        # sender so we never push more than
+                        # ``_FIRST_MESSAGE_MARK_WINDOW`` chunks of audio
+                        # ahead of carrier playback. The previous burst-send
+                        # let Twilio's outbound buffer reach several
+                        # seconds — a barge-in's send_clear race-lost
+                        # against the queued media frames and the agent
+                        # kept talking on the user's earpiece for up to
+                        # ~2 s after the user spoke. The paced sender also
+                        # drives the AEC far-end tap and
+                        # ``_mark_first_audio_sent`` internally so this
+                        # path stays parity-clean with
+                        # ``_stream_prewarm_bytes``.
+                        sent = await self._send_paced_first_message_bytes(audio_chunk)
+                        if not sent:
+                            break
             finally:
                 # Drop any partial int16 byte to prevent cross-turn corruption
                 # if the stream threw before a complete sample was delivered.
@@ -2657,6 +2677,16 @@ class PipelineStreamHandler(StreamHandler):
             self._speaking_started_at = None
             self._first_audio_sent_at = None
             self._last_cancel_at = time.time()
+            # Unblock any firstMessage paced-send loop that's sitting in
+            # ``_wait_for_mark_window`` — without this the loop keeps
+            # awaiting echoes for up to ``_MARK_AWAIT_TIMEOUT_S`` per
+            # outstanding mark before observing ``_is_speaking=False``,
+            # which keeps the agent "speaking" from the user's perspective
+            # for hundreds of extra ms after barge-in (BUG #128). Defensive
+            # ``getattr`` is for test fixtures that build a handler shell
+            # via ``object.__new__`` and skip ``__init__``.
+            if getattr(self, "_pending_marks", None) is not None:
+                self._drain_pending_marks()
             cancel_event = getattr(self, "_llm_cancel_event", None)
             if cancel_event is not None:
                 cancel_event.set()
@@ -3355,33 +3385,173 @@ class PipelineStreamHandler(StreamHandler):
     # is identical regardless of whether the firstMessage came from the
     # prewarm cache or a live ``tts.synthesize`` stream.
     _PREWARM_CHUNK_BYTES: int = 1280
+    # Maximum unconfirmed Twilio marks while streaming firstMessage. Each
+    # chunk is 40 ms of audio at 16 kHz PCM16, so a window of 3 caps the
+    # in-flight queue at ~120 ms. This means a barge-in's ``send_clear`` has
+    # at most ~120 ms of buffered audio to flush — vs. ~2-5 s with the
+    # previous burst-send code (BUG #128). 3 hit the smallest barge-in cap
+    # without audible playback gaps under typical PSTN RTT in 2026-05
+    # acceptance.
+    _FIRST_MESSAGE_MARK_WINDOW: int = 3
+    # Per-chunk soft timeout (s) for awaiting a mark echo. Caps the
+    # deadlock window when a carrier (or a test double) never echoes —
+    # playout may glitch by one chunk on timeout but the call stays alive.
+    _MARK_AWAIT_TIMEOUT_S: float = 0.5
+    # Bytes-per-millisecond for a 16 kHz PCM16 mono stream — used by the
+    # non-Twilio firstMessage pacing path to translate chunk size into a
+    # playout-duration sleep. 16000 samples/sec × 2 bytes = 32 bytes/ms.
+    _PCM16_16K_BYTES_PER_MS: int = 32
+
+    def _drain_pending_marks(self) -> None:
+        """Resolve every entry in ``_pending_marks`` and empty the FIFO.
+
+        Idempotent — safe to call from the barge-in cancel path and again
+        from the grace flip without leaking unresolved futures.
+        """
+        if not self._pending_marks:
+            return
+        for _name, fut in self._pending_marks:
+            if not fut.done():
+                try:
+                    fut.set_result(None)
+                except asyncio.InvalidStateError:
+                    pass
+        self._pending_marks.clear()
+
+    async def _send_mark_awaitable(self) -> asyncio.Future | None:
+        """Send a Twilio ``mark`` event and return a future that resolves
+        when the carrier echoes it back (via :meth:`on_mark`), or when
+        :meth:`_drain_pending_marks` runs. Returns ``None`` on non-Twilio
+        carriers — the caller should fall back to time-based pacing.
+        """
+        if not self._for_twilio:
+            return None
+        self._first_message_mark_counter += 1
+        mark_name = f"fm_{self._first_message_mark_counter}"
+        loop = asyncio.get_event_loop()
+        fut: asyncio.Future[None] = loop.create_future()
+        self._pending_marks.append((mark_name, fut))
+        try:
+            await self.audio_sender.send_mark(mark_name)
+        except Exception as exc:  # noqa: BLE001 - best effort
+            logger.debug("send_mark failed (%s): %s", mark_name, exc)
+            # Drop the waiter so the queue can't fill with orphans.
+            for idx, (name, f) in enumerate(self._pending_marks):
+                if name == mark_name:
+                    self._pending_marks.pop(idx)
+                    break
+            if not fut.done():
+                fut.set_result(None)
+        return fut
+
+    async def _wait_for_mark_window(self) -> None:
+        """Block until the in-flight mark queue depth is below
+        ``_FIRST_MESSAGE_MARK_WINDOW``. Returns immediately on cancel
+        because :meth:`_drain_pending_marks` resolves every pending future.
+        """
+        while (
+            self._is_speaking
+            and len(self._pending_marks) >= self._FIRST_MESSAGE_MARK_WINDOW
+        ):
+            _name, oldest = self._pending_marks[0]
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(oldest),
+                    timeout=self._MARK_AWAIT_TIMEOUT_S,
+                )
+            except asyncio.TimeoutError:
+                # Drop the head so subsequent loops don't deadlock on the
+                # same mark forever. Twilio mark echo may have been lost
+                # in transit; carrier playback will continue regardless.
+                pass
+            # Pop the head if still present (a successful echo would have
+            # done it via ``on_mark``; only a timeout leaves it in place).
+            if self._pending_marks and self._pending_marks[0][0] == _name:
+                self._pending_marks.pop(0)
+
+    async def on_mark(self, mark_name: str) -> None:
+        """Handle a Twilio ``mark`` echo and resolve the matching firstMessage
+        waiter (if any). Marks are matched FIFO: an echo for ``fm_3`` also
+        resolves ``fm_1`` and ``fm_2`` in case the carrier batches echoes.
+        """
+        if not mark_name:
+            return
+        idx = -1
+        for i, (name, _fut) in enumerate(self._pending_marks):
+            if name == mark_name:
+                idx = i
+                break
+        if idx < 0:
+            return
+        resolved = self._pending_marks[: idx + 1]
+        del self._pending_marks[: idx + 1]
+        for _name, fut in resolved:
+            if not fut.done():
+                try:
+                    fut.set_result(None)
+                except asyncio.InvalidStateError:
+                    pass
 
     async def _stream_prewarm_bytes(self, prewarm_bytes: bytes) -> bool:
-        """Stream a cached firstMessage buffer in pacing-friendly chunks.
+        """Stream a cached firstMessage buffer in pacing-friendly chunks."""
+        return await self._send_paced_first_message_bytes(prewarm_bytes)
 
-        Splits ``prewarm_bytes`` into ``_PREWARM_CHUNK_BYTES`` slices and
-        forwards each through ``self.audio_sender.send_audio`` exactly
-        like the live TTS path does — preserving Twilio mark/clear
-        granularity. A single multi-second send_audio call would push
-        the whole intro into the carrier in one go and a ``send_clear``
-        issued mid-buffer would have nothing to clear ("agent keeps
-        talking after barge-in" UX bug on the very first turn).
+    async def _send_paced_first_message_bytes(self, bytes_: bytes) -> bool:
+        """Iterate ``bytes_`` as ``_PREWARM_CHUNK_BYTES``-sized PCM16 slices
+        and forward each via ``audio_sender.send_audio`` with mark-gated
+        pacing (Twilio) or playout-time-based pacing (Telnyx).
 
-        Returns ``True`` when at least one chunk hit the wire — the
-        caller uses that to decide whether to record the
-        TTS-first-byte / turn-complete metrics.
+        Caps the carrier-side buffer at ``_FIRST_MESSAGE_MARK_WINDOW``
+        chunks so a barge-in's ``send_clear`` has at most ~120 ms (Twilio)
+        or zero (Telnyx, immediately after the latest sleep) of audio to
+        flush. The previous burst-send code let Twilio's buffer reach
+        several seconds — a barge-in's ``send_clear`` race-lost against
+        the queued media frames and the agent kept talking on the user's
+        earpiece for up to ~2 s after the user spoke (BUG #128).
+
+        Bails immediately when ``_is_speaking`` flips to ``False`` — both
+        via the loop's pre-iter check and via :meth:`_drain_pending_marks`
+        (called from the barge-in cancel path) which unblocks any
+        in-flight :meth:`_wait_for_mark_window` await.
+
+        Returns ``True`` when at least one chunk hit the wire — the caller
+        uses that to decide whether to record the TTS-first-byte /
+        turn-complete metrics.
         """
+        # Reset the per-send mark counter so each invocation produces a
+        # fresh ``fm_1, fm_2, ...`` sequence. Without this the counter
+        # grows monotonically across turns on a re-used handler and a
+        # stale ``fm_N`` echo from an earlier turn could match a mark
+        # name issued later, corrupting the FIFO matching in
+        # ``on_mark``. The ``_pending_marks`` queue is also expected
+        # empty here by the caller's cancel / cleanup paths; if it is
+        # not (defensive re-entry) we drain before resetting.
+        if self._pending_marks:
+            self._drain_pending_marks()
+        self._first_message_mark_counter = 0
         first_chunk_sent = False
-        for i in range(0, len(prewarm_bytes), self._PREWARM_CHUNK_BYTES):
+        for i in range(0, len(bytes_), self._PREWARM_CHUNK_BYTES):
             if not self._is_speaking:
-                break  # barge-in mid-prewarm — stop now
-            chunk = prewarm_bytes[i : i + self._PREWARM_CHUNK_BYTES]
+                break  # barge-in mid-buffer — stop now
+            # Back-pressure: if too many marks are unconfirmed, wait.
+            # Drains immediately on cancel.
+            await self._wait_for_mark_window()
+            if not self._is_speaking:
+                break
+            chunk = bytes_[i : i + self._PREWARM_CHUNK_BYTES]
             if not first_chunk_sent:
                 first_chunk_sent = True
             if self._aec is not None:
                 self._aec.push_far_end(chunk)
             await self.audio_sender.send_audio(chunk)
             self._mark_first_audio_sent()
+            mark_fut = await self._send_mark_awaitable()
+            if mark_fut is None:
+                # Telnyx (or any other carrier without marks): pace by
+                # chunk playout duration so the buffer can't out-run a
+                # send_clear by more than one chunk.
+                playout_ms = max(1, len(chunk) // self._PCM16_16K_BYTES_PER_MS)
+                await asyncio.sleep(playout_ms / 1000.0)
         return first_chunk_sent
 
     async def cleanup(self) -> None:
@@ -3395,6 +3565,18 @@ class PipelineStreamHandler(StreamHandler):
         # spurious overlap_end events. Idempotent: safe to call when no
         # pending state exists.
         self._clear_pending_barge_in()
+        # Resolve every pending firstMessage mark future before tearing
+        # down adapters. Without this, a call that ends abnormally mid
+        # firstMessage (carrier WS drop, hangup during the paced sender)
+        # leaves orphan ``asyncio.Future`` instances awaited by the send
+        # loop that nothing will ever resolve.
+        if getattr(self, "_pending_marks", None) is not None:
+            self._drain_pending_marks()
+        # Reset the firstMessage mark counter so a re-used handler
+        # instance starts ``fm_<n>`` numbering at 1 on the next call.
+        # See ``_send_paced_first_message_bytes`` for the per-send reset
+        # that protects the within-call path.
+        self._first_message_mark_counter = 0
         if self._stt_task:
             self._stt_task.cancel()
             try:

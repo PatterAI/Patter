@@ -333,6 +333,54 @@ export class StreamHandler {
    */
   private lastCancelAt: number | null = null;
   /**
+   * Promise queue tracking outstanding Twilio marks the SDK has sent but
+   * not yet seen echoed back. Used by the firstMessage send loop to bound
+   * the depth of audio queued at the carrier — without this the loop
+   * pushes the entire TTS stream into Twilio's WebSocket in one burst,
+   * and a sendClear issued mid-buffer races against several seconds of
+   * already-queued media frames (BUG #128). The window depth is
+   * ``FIRST_MESSAGE_MARK_WINDOW``; ``onMark`` drains entries as Twilio
+   * confirms playback, ``cancelSpeaking`` resolves every pending entry so
+   * any awaiter exits immediately. Telnyx never populates this queue
+   * (Telnyx's media-stream protocol has no mark concept — the loop
+   * falls back to time-based pacing on that carrier).
+   */
+  private pendingMarks: Array<{
+    name: string;
+    resolve: () => void;
+    promise: Promise<void>;
+  }> = [];
+  /**
+   * Monotonic counter for first-message mark names. Distinct from
+   * ``chunkCount`` (which the Realtime path uses) so the two paths can
+   * coexist without name collisions even when firstMessage finishes while
+   * a Realtime turn is still streaming.
+   */
+  private firstMessageMarkCounter = 0;
+  /**
+   * Maximum unconfirmed Twilio marks while streaming firstMessage. Each
+   * chunk is 40 ms of audio at 16 kHz PCM16, so a window of 3 caps
+   * the in-flight queue at ~120 ms. This means a barge-in's
+   * ``sendClear`` has at most 120 ms of already-buffered audio to flush
+   * — vs. ~2-5 s with the previous burst-send code, which was the
+   * root cause of "firstMessage non interrompibile". Higher values
+   * smooth playback under jittery RTT (each mark echo adds ~150-250 ms
+   * RTT on PSTN) at the cost of longer barge-in latency; lower values
+   * risk under-buffering. 3 hit the smallest barge-in cap without
+   * audible gaps in 2026-05 acceptance.
+   */
+  private static readonly FIRST_MESSAGE_MARK_WINDOW = 3;
+  /**
+   * Per-chunk soft timeout (ms) while awaiting a mark echo. Twilio's
+   * mark echoes typically arrive within 100-250 ms of audio playback.
+   * Capping at 500 ms guards against carriers (or test doubles) that
+   * never echo — without it a stalled echo would deadlock the loop and
+   * the agent would freeze mid-utterance. On timeout we drop the
+   * waiter from the queue and continue: playout may glitch by one
+   * chunk but the call stays alive.
+   */
+  private static readonly MARK_AWAIT_TIMEOUT_MS = 500;
+  /**
    * Minimum drain window (ms) between a ``cancelSpeaking`` and the next
    * ``beginSpeaking``. 150 ms covers a typical PSTN jitter buffer drain
    * + Twilio Media Stream clear propagation. Lower values risk audio
@@ -404,6 +452,14 @@ export class StreamHandler {
     this.speakingStartedAt = null;
     this.firstAudioSentAt = null;
     this.lastCancelAt = Date.now();
+    // Drain any firstMessage mark waiters so a loop blocked on
+    // ``waitForMarkWindow`` exits on the next tick and observes
+    // ``!isSpeaking``. Without this the loop would stay blocked until
+    // each mark either echoes (carrier still draining its queue) or
+    // hits ``MARK_AWAIT_TIMEOUT_MS`` — keeping the agent "speaking"
+    // from the user's perspective for hundreds of extra ms after
+    // barge-in.
+    this.drainPendingMarks();
     if (this.llmAbort !== null) {
       try {
         this.llmAbort.abort();
@@ -412,6 +468,86 @@ export class StreamHandler {
       }
     }
   }
+
+  /**
+   * Resolve every entry in ``pendingMarks`` and empty the queue. Idempotent
+   * — safe to call from ``cancelSpeaking`` and again from the grace path
+   * without leaking pending promises.
+   */
+  private drainPendingMarks(): void {
+    if (this.pendingMarks.length === 0) return;
+    for (const entry of this.pendingMarks) {
+      try {
+        entry.resolve();
+      } catch {
+        // No-op — pending entries always own a fresh resolve fn.
+      }
+    }
+    this.pendingMarks.length = 0;
+  }
+
+  /**
+   * Push a Twilio ``mark`` event AFTER the corresponding audio chunk and
+   * return a promise that resolves when the mark is echoed back via
+   * ``onMark`` (or when ``cancelSpeaking`` drains the queue, or after
+   * ``MARK_AWAIT_TIMEOUT_MS``). Returns null on non-Twilio carriers — the
+   * caller is expected to fall back to time-based pacing in that case.
+   */
+  private sendMarkAwaitable(): Promise<void> | null {
+    if (this.deps.bridge.telephonyProvider !== 'twilio') return null;
+    this.firstMessageMarkCounter += 1;
+    const markName = `fm_${this.firstMessageMarkCounter}`;
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => {
+      resolve = r;
+    });
+    this.pendingMarks.push({ name: markName, resolve, promise });
+    try {
+      this.deps.bridge.sendMark(this.ws, markName, this.streamSid);
+    } catch (err) {
+      getLogger().debug(`sendMark failed (${markName}): ${String(err)}`);
+      // Drop the waiter immediately so the queue doesn't fill with
+      // never-resolving entries that block the window.
+      const idx = this.pendingMarks.findIndex((m) => m.name === markName);
+      if (idx >= 0) this.pendingMarks.splice(idx, 1);
+      return Promise.resolve();
+    }
+    return promise;
+  }
+
+  /**
+   * If the in-flight mark queue is at or above ``FIRST_MESSAGE_MARK_WINDOW``
+   * entries, wait for the oldest entry to clear (mark echoed, agent
+   * cancelled, or per-mark timeout). Repeats until the queue depth is
+   * within the window — under high RTT the carrier may have several
+   * marks queued and we want every loop iteration to be naturally back-
+   * pressured by playback.
+   */
+  private async waitForMarkWindow(): Promise<void> {
+    while (
+      this.isSpeaking &&
+      this.pendingMarks.length >= StreamHandler.FIRST_MESSAGE_MARK_WINDOW
+    ) {
+      const oldest = this.pendingMarks[0];
+      const timeout = new Promise<void>((resolve) =>
+        setTimeout(resolve, StreamHandler.MARK_AWAIT_TIMEOUT_MS),
+      );
+      await Promise.race([oldest.promise, timeout]);
+      // Drop the head if it's still the same entry — onMark would
+      // have already removed it on echo; only a timeout leaves it
+      // in place.
+      if (this.pendingMarks[0] === oldest) {
+        this.pendingMarks.shift();
+      }
+    }
+  }
+
+  /**
+   * Bytes-per-millisecond for a 16 kHz PCM16 mono stream. Used by the
+   * non-Twilio firstMessage pacing path to translate chunk size into a
+   * playout-duration sleep. 16000 samples/sec × 2 bytes = 32 bytes/ms.
+   */
+  private static readonly PCM16_16K_BYTES_PER_MS = 32;
 
   /** Cancel and clear the pending grace timer, if any. */
   private clearGraceTimer(): void {
@@ -1145,8 +1281,34 @@ export class StreamHandler {
    */
   /** Handle a Twilio Media Streams `mark` event acknowledging audio playback boundaries. */
   async onMark(markName: string): Promise<void> {
-    if (markName) {
-      this.lastConfirmedMark = markName;
+    if (!markName) return;
+    // Resolve the firstMessage mark waiter (if any) so the send loop
+    // can advance its sliding window. We resolve the matched entry AND
+    // every entry before it in the queue — Twilio sometimes batches
+    // mark echoes, and dropping earlier entries first keeps FIFO order
+    // even when the higher-numbered echo arrives before a lower-
+    // numbered one (rare but observed on degraded edges).
+    const idx = this.pendingMarks.findIndex((m) => m.name === markName);
+    if (idx < 0) return;
+    // Only record the echo after we have confirmed it matches a known
+    // queued mark. Before this gate ``onMark`` clobbered
+    // ``lastConfirmedMark`` with any mark name — including stale
+    // echoes that no longer correspond to anything we sent, or marks
+    // emitted by adapters outside the firstMessage queue — which
+    // would contaminate any downstream barge-in heuristic gated on
+    // ``lastConfirmedMark``. The Python parity here is structural:
+    // ``stream_handler.py``'s ``on_mark`` never touches a handler-
+    // level field at all (the equivalent state lives on
+    // ``TwilioAudioSender.last_confirmed_mark``, updated only via
+    // the carrier's own echo handler).
+    this.lastConfirmedMark = markName;
+    const resolved = this.pendingMarks.splice(0, idx + 1);
+    for (const entry of resolved) {
+      try {
+        entry.resolve();
+      } catch {
+        // No-op.
+      }
     }
   }
 
@@ -1160,6 +1322,16 @@ export class StreamHandler {
     // metrics object — a slow leak in long-running servers and a race
     // producing spurious overlap_end events. Idempotent.
     this.clearPendingBargeIn();
+    // Resolve every pending firstMessage mark waiter before tearing the
+    // adapter down. A call that ends mid firstMessage (carrier stop
+    // arriving before the paced sender finished) would otherwise leak
+    // unresolved promises owned by the send loop.
+    this.drainPendingMarks();
+    // Reset the firstMessage mark counter so a re-used handler starts
+    // ``fm_<n>`` numbering at 1 on the next call. See
+    // ``sendPacedFirstMessageBytes`` for the per-send reset that
+    // protects the within-call path.
+    this.firstMessageMarkCounter = 0;
     this.clearGraceTimer();
     this.flushResamplers();
     await this.closeSttOnce();
@@ -1173,6 +1345,11 @@ export class StreamHandler {
     // See handleStop — drop pending barge-in timer before cleanup so a
     // dead handler can never fire a stale recordOverlapEnd callback.
     this.clearPendingBargeIn();
+    // See handleStop — drain pending firstMessage marks so an abnormal
+    // carrier WS drop during the paced sender cannot leak unresolved
+    // promises owned by the send loop, and reset the counter.
+    this.drainPendingMarks();
+    this.firstMessageMarkCounter = 0;
     this.clearGraceTimer();
     this.flushResamplers();
     // Drain STT first so in-flight transcripts fire before onCallEnd.
@@ -1253,17 +1430,60 @@ export class StreamHandler {
    * metrics.
    */
   private async streamPrewarmBytes(prewarmBytes: Buffer): Promise<boolean> {
+    return this.sendPacedFirstMessageBytes(prewarmBytes);
+  }
+
+  /**
+   * Iterate ``bytes`` as ``PREWARM_CHUNK_BYTES``-sized PCM16 slices and
+   * forward each via ``deps.bridge.sendAudio`` with mark-gated pacing
+   * (Twilio) or playout-time-based pacing (Telnyx). Caps the carrier-
+   * side buffer at ``FIRST_MESSAGE_MARK_WINDOW`` chunks so a barge-in's
+   * ``sendClear`` has ~120 ms (Twilio) or zero (Telnyx, immediately
+   * after the latest sleep) of audio to flush.
+   *
+   * Bails immediately when ``isSpeaking`` flips to false — both via the
+   * loop's pre-iter check and via ``drainPendingMarks`` (called from
+   * ``cancelSpeaking``) which unblocks any in-flight ``waitForMarkWindow``.
+   *
+   * Returns ``true`` when at least one chunk hit the wire — the caller
+   * uses that to decide whether to record TTS-first-byte / turn-complete
+   * metrics. See BUG #128 for the regression this fix targets.
+   */
+  private async sendPacedFirstMessageBytes(bytes: Buffer): Promise<boolean> {
+    // Reset the per-send mark counter so each invocation produces a
+    // fresh ``fm_1, fm_2, ...`` sequence. Without this the counter
+    // grows monotonically across turns on a re-used handler and a
+    // stale ``fm_N`` echo from an earlier turn could match a mark
+    // name issued later, corrupting the FIFO matching in ``onMark``.
+    // The queue is also expected empty here by ``cancelSpeaking`` /
+    // ``handleStop`` / ``handleWsClose``; drain defensively if not.
+    if (this.pendingMarks.length > 0) this.drainPendingMarks();
+    this.firstMessageMarkCounter = 0;
     let firstChunkSent = false;
-    for (let i = 0; i < prewarmBytes.length; i += StreamHandler.PREWARM_CHUNK_BYTES) {
-      if (!this.isSpeaking) break; // barge-in mid-prewarm — stop now
-      const chunk = prewarmBytes.subarray(i, i + StreamHandler.PREWARM_CHUNK_BYTES);
-      if (!firstChunkSent) {
-        firstChunkSent = true;
-      }
+    for (let i = 0; i < bytes.length; i += StreamHandler.PREWARM_CHUNK_BYTES) {
+      if (!this.isSpeaking) break; // barge-in mid-buffer — stop now
+      // Back-pressure: if too many marks are unconfirmed, wait. Drains
+      // immediately on cancelSpeaking.
+      await this.waitForMarkWindow();
+      if (!this.isSpeaking) break;
+      const chunk = bytes.subarray(i, i + StreamHandler.PREWARM_CHUNK_BYTES);
+      if (!firstChunkSent) firstChunkSent = true;
       if (this.aec) this.aec.pushFarEnd(chunk);
       const encoded = this.encodePipelineAudio(chunk);
       this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
       this.markFirstAudioSent();
+      const markPromise = this.sendMarkAwaitable();
+      if (markPromise === null) {
+        // Telnyx (or any future carrier without marks): pace by the
+        // chunk's playout duration so the carrier buffer can't out-run
+        // a sendClear by more than one chunk. PCM16 16 kHz is 32
+        // bytes/ms, so ``chunk.length / 32`` is the playout duration.
+        const playoutMs = Math.max(
+          1,
+          Math.floor(chunk.length / StreamHandler.PCM16_16K_BYTES_PER_MS),
+        );
+        await new Promise<void>((resolve) => setTimeout(resolve, playoutMs));
+      }
     }
     return firstChunkSent;
   }
@@ -1491,18 +1711,18 @@ export class StreamHandler {
               this.metricsAcc.recordTtsFirstByte();
               await this.emitAudioOut();
             }
-            // Far-end tap for the echo canceller — push the exact PCM the
-            // carrier-side encoder will transmit. Without this the AEC
-            // adapt loop has no reference signal during the intro,
-            // resulting in unmitigated bleed-through and a "first turn
-            // unresponsive" UX where the user's voice is masked by the
-            // agent's TTS in the inbound channel.
-            if (this.aec) {
-              this.aec.pushFarEnd(chunk);
-            }
-            const encoded = this.encodePipelineAudio(chunk);
-            this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
-            this.markFirstAudioSent();
+            // BUG #128: route every TTS chunk through the paced sender so
+            // we never push more than ``FIRST_MESSAGE_MARK_WINDOW`` chunks
+            // of audio ahead of carrier playback. The previous burst-send
+            // (sendAudio in a tight loop with no marks) let Twilio's
+            // outbound buffer reach several seconds — a barge-in's
+            // sendClear race-lost against the queued media frames and the
+            // agent kept talking on the user's earpiece for up to ~2 s
+            // after the user spoke. The paced sender also drives the AEC
+            // far-end tap and ``markFirstAudioSent`` internally so this
+            // path stays parity-clean with ``streamPrewarmBytes``.
+            const sent = await this.sendPacedFirstMessageBytes(chunk);
+            if (!sent) break;
           }
         }
       } catch (e) {
