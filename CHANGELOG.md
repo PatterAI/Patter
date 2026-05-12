@@ -2,6 +2,10 @@
 
 ## 0.6.1 (2026-05-12)
 
+### Fixed — OpenAI Realtime warmup now runs during the ringing window
+
+The `warmup()` method on `OpenAIRealtimeAdapter` (defined in both SDKs) was unreachable from `Patter.call()` — the provider warmup framework only iterated `agent.stt` / `agent.tts` / `agent.llm`, but OpenAI Realtime is an all-in-one provider that's server-instantiated at `StreamHandler.start()` time. `_spawn_provider_warmup` (Py) / `spawnProviderWarmup` (TS) now builds a transient `OpenAIRealtimeAdapter` from the resolved Agent + configured `openai_key` when `agent.provider == "openai_realtime"` and calls `warmup()` in parallel with the carrier `initiate_call`. Saves 150–400 ms of TLS + WebSocket handshake + `session.created` round-trip on the first turn. Files: `libraries/python/getpatter/client.py`, `libraries/typescript/src/client.ts`.
+
 ### Fixed — TypeScript `onMark` clobbered `lastConfirmedMark` with stale/unknown mark names (parity with Python)
 
 `StreamHandler.onMark` in `libraries/typescript/src/stream-handler.ts`

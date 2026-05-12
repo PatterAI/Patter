@@ -39,6 +39,11 @@ import type { MetricsStore } from "./dashboard/store";
 import { Carrier as TwilioCarrier } from "./telephony/twilio";
 import { Carrier as TelnyxCarrier } from "./telephony/telnyx";
 import { Realtime as OpenAIRealtime } from "./engines/openai";
+import {
+  OpenAIRealtimeAdapter,
+  OpenAIRealtimeAudioFormat,
+  type OpenAIRealtimeOptions,
+} from "./providers/openai-realtime";
 import { ConvAI as ElevenLabsConvAI } from "./engines/elevenlabs";
 import { CloudflareTunnel, Static as StaticTunnel } from "./tunnels";
 import { resolveLogRoot } from "./services/call-log";
@@ -933,6 +938,15 @@ export class Patter {
    * Spawn a fire-and-forget task that warms up STT / TTS / LLM in
    * parallel with the carrier-side ``initiateCall``.
    *
+   * Pipeline-mode providers (``agent.stt`` / ``agent.tts`` / ``agent.llm``)
+   * are picked up via the optional ``warmup()`` method on each instance.
+   * The Realtime / ConvAI all-in-one adapters are server-instantiated at
+   * ``StreamHandler.start`` time, so they are not reachable through the
+   * Agent fields — a transient ``OpenAIRealtimeAdapter`` is built here
+   * from the resolved Agent + the configured OpenAI key when the agent
+   * is in ``openai_realtime`` mode so the canonical session-prime
+   * handshake runs during the carrier ringing window.
+   *
    * Best-effort: each provider's optional ``warmup()`` is wrapped in
    * ``Promise.allSettled`` so a slow or failing endpoint cannot block
    * the others. Providers without ``warmup`` contribute nothing.
@@ -951,6 +965,15 @@ export class Patter {
     collect(agent.stt, 'stt');
     collect(agent.tts, 'tts');
     collect(agent.llm, 'llm');
+
+    const realtimeAdapter = this.buildRealtimeWarmupAdapter(agent);
+    if (realtimeAdapter !== null) {
+      targets.push({
+        name: 'openai_realtime',
+        fn: () => realtimeAdapter.warmup(),
+      });
+    }
+
     if (targets.length === 0) return;
 
     const task = (async () => {
@@ -965,6 +988,62 @@ export class Patter {
     })();
     this.prewarmTasks.add(task);
     void task.finally(() => this.prewarmTasks.delete(task));
+  }
+
+  /**
+   * Build a transient ``OpenAIRealtimeAdapter`` configured identically
+   * to the one ``StreamHandler.start()`` will instantiate, suitable for a
+   * single :py:meth:`warmup` call.
+   *
+   * Returns ``null`` when warmup is not applicable: the agent is not in
+   * ``openai_realtime`` mode, the OpenAI key is missing, or the adapter
+   * import fails.
+   */
+  private buildRealtimeWarmupAdapter(
+    agent: AgentOptions,
+  ): OpenAIRealtimeAdapter | null {
+    const engine = agent.engine;
+    const isRealtime =
+      agent.provider === 'openai_realtime' ||
+      (engine !== undefined && (engine as { kind?: string }).kind === 'openai_realtime');
+    if (!isRealtime) return null;
+    const engineKey =
+      engine !== undefined && (engine as { kind?: string }).kind === 'openai_realtime'
+        ? (engine as { apiKey?: string }).apiKey
+        : undefined;
+    const apiKey = engineKey ?? this.localConfig.openaiKey;
+    if (!apiKey) return null;
+    try {
+      const adapterOptions: OpenAIRealtimeOptions = {};
+      if (engine !== undefined && (engine as { kind?: string }).kind === 'openai_realtime') {
+        const realtimeEngine = engine as {
+          reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high';
+          inputAudioTranscriptionModel?: string;
+        };
+        if (realtimeEngine.reasoningEffort !== undefined) {
+          adapterOptions.reasoningEffort = realtimeEngine.reasoningEffort;
+        }
+        if (realtimeEngine.inputAudioTranscriptionModel !== undefined) {
+          adapterOptions.inputAudioTranscriptionModel =
+            realtimeEngine.inputAudioTranscriptionModel;
+        }
+      }
+      // Twilio + Telnyx both bridge to OpenAI Realtime over ``g711_ulaw``
+      // (see ``telephony/twilio.ts`` / ``telnyx.ts``); match that here so
+      // the primed session config aligns with the production call.
+      return new OpenAIRealtimeAdapter(
+        apiKey,
+        agent.model,
+        agent.voice,
+        agent.systemPrompt,
+        undefined,
+        OpenAIRealtimeAudioFormat.G711_ULAW,
+        adapterOptions,
+      );
+    } catch (err: unknown) {
+      getLogger().debug(`Realtime warmup adapter build failed: ${String(err)}`);
+      return null;
+    }
   }
 
   /**
