@@ -744,6 +744,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         audio_format: str = "pcm16",
         input_transcode: str | None = None,
         speech_events=None,
+        pop_prewarmed_connections=None,
     ) -> None:
         super().__init__(
             agent=agent,
@@ -763,6 +764,12 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         self._transfer_fn = transfer_fn
         self._hangup_fn = hangup_fn
         self._audio_format = audio_format
+        # Optional callback (set by ``server.py``) that pops the
+        # parked-connections slot for this call. Wired so the Realtime
+        # adapter built below can ``adopt_websocket`` the
+        # ``session.updated`` WS opened during the ringing window
+        # (see ``Patter._park_provider_connections``).
+        self._pop_prewarmed_connections = pop_prewarmed_connections
         # OpenAI Realtime API uses a single codec for both input and output
         # (``audio_format`` becomes both ``input_audio_format`` and
         # ``output_audio_format`` in the session). When the telephony leg
@@ -948,8 +955,56 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         if transcription_model is not None:
             adapter_kwargs["input_audio_transcription_model"] = transcription_model
         self._adapter = OpenAIRealtimeAdapter(**adapter_kwargs)
-        await self._adapter.connect()
-        logger.debug("OpenAI Realtime connected")
+
+        # Prewarm-handoff: try to adopt a pre-opened, already-
+        # ``session.updated`` Realtime WS parked during the carrier
+        # ringing window by ``Patter._park_provider_connections``.
+        # Saves the cold ``websockets.connect`` + ``session.created`` +
+        # ``session.update`` round-trip (~250-450 ms on first turn).
+        parked_realtime = None
+        if self._pop_prewarmed_connections is not None:
+            try:
+                slot = self._pop_prewarmed_connections(self.call_id)
+                if slot is not None:
+                    parked_realtime = slot.get("openai_realtime")
+            except Exception as exc:  # noqa: BLE001 - best-effort
+                logger.debug("pop_prewarmed_connections raised for Realtime: %s", exc)
+
+        adopted = False
+        if parked_realtime is not None:
+            adopt = getattr(self._adapter, "adopt_websocket", None)
+            ws_alive = parked_realtime is not None and not getattr(
+                parked_realtime, "closed", True
+            )
+            if callable(adopt) and ws_alive:
+                try:
+                    adopt(parked_realtime)
+                    adopted = True
+                    logger.info(
+                        "[CONNECT] callId=%s provider=openai_realtime "
+                        "source=adopted ms=0",
+                        self.call_id,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(
+                        "Realtime adopt_websocket failed: %s; falling back to connect",
+                        exc,
+                    )
+                    try:
+                        await parked_realtime.close()
+                    except Exception:
+                        pass
+            else:
+                try:
+                    await parked_realtime.close()
+                except Exception:
+                    pass
+
+        if not adopted:
+            await self._adapter.connect()
+            logger.debug("OpenAI Realtime connected (cold)")
+        else:
+            logger.debug("OpenAI Realtime adopted parked session")
 
         if self.agent.first_message:
             # Start measuring latency for the firstMessage turn (sendText →

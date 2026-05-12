@@ -623,6 +623,7 @@ async def telnyx_stream_bridge(
                         # 20 ms → PCMU 8 kHz. OpenAI Realtime with this
                         # codec forwards bytes pass-through on both legs.
                         audio_format="g711_ulaw",
+                        pop_prewarmed_connections=pop_prewarmed_connections,
                     )
 
                 # Inherit patter.side from the parent Patter instance so all

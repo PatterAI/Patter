@@ -234,3 +234,292 @@ async def test_park_skipped_when_neither_provider_supports_parking() -> None:
     phone._park_provider_connections(agent, "CAtest6")
     # No slot was created — pop returns None.
     assert phone.pop_prewarmed_connections("CAtest6") is None
+
+
+# ---------------------------------------------------------------------------
+# OpenAI Realtime parking + adoption — Patter._park_provider_connections
+# must open and stash a primed ``session.updated`` WS for ``openai_realtime``
+# agents so ``OpenAIRealtimeStreamHandler`` can adopt it on ``start``.
+# ---------------------------------------------------------------------------
+
+
+async def test_park_provider_connections_opens_realtime_session_ws() -> None:
+    """Agent in ``openai_realtime`` mode → ``open_parked_connection`` runs
+    on a transient Realtime adapter and the resulting WS lands in the slot."""
+    from unittest.mock import AsyncMock
+    import dataclasses
+
+    phone = _make_patter()
+    phone._local_config = dataclasses.replace(phone._local_config, openai_key="sk-test")
+    agent = Agent(system_prompt="p", provider="openai_realtime", voice="alloy")
+
+    parked_ws = FakeWS()
+    captured: dict[str, object] = {}
+
+    class _RecordingAdapter:
+        def __init__(self, **kwargs: object) -> None:
+            captured["init_kwargs"] = kwargs
+            self.open_parked_connection = AsyncMock(return_value=parked_ws)
+
+    import getpatter.providers.openai_realtime as realtime_mod
+
+    original_adapter = realtime_mod.OpenAIRealtimeAdapter
+    realtime_mod.OpenAIRealtimeAdapter = _RecordingAdapter  # type: ignore[misc]
+    try:
+        phone._park_provider_connections(agent, "CAtest_rt1")
+        await _drain(phone)
+    finally:
+        realtime_mod.OpenAIRealtimeAdapter = original_adapter  # type: ignore[misc]
+
+    slot = phone.pop_prewarmed_connections("CAtest_rt1")
+    assert slot is not None
+    assert slot.get("openai_realtime") is parked_ws
+    # And the adapter received the right config.
+    kwargs = captured["init_kwargs"]
+    assert kwargs["api_key"] == "sk-test"
+    assert kwargs["audio_format"] == "g711_ulaw"
+
+
+async def test_park_provider_connections_skips_realtime_without_openai_key() -> None:
+    """No OpenAI key → no Realtime adapter built → no slot allocated."""
+    phone = _make_patter()  # openai_key=""
+    agent = Agent(system_prompt="p", provider="openai_realtime")
+
+    constructed = 0
+
+    class _RecordingAdapter:
+        def __init__(self, **_kwargs: object) -> None:
+            nonlocal constructed
+            constructed += 1
+
+    import getpatter.providers.openai_realtime as realtime_mod
+
+    original_adapter = realtime_mod.OpenAIRealtimeAdapter
+    realtime_mod.OpenAIRealtimeAdapter = _RecordingAdapter  # type: ignore[misc]
+    try:
+        phone._park_provider_connections(agent, "CAtest_rt2")
+        await _drain(phone)
+    finally:
+        realtime_mod.OpenAIRealtimeAdapter = original_adapter  # type: ignore[misc]
+
+    assert constructed == 0
+    assert phone.pop_prewarmed_connections("CAtest_rt2") is None
+
+
+async def test_park_realtime_failure_does_not_propagate() -> None:
+    """A failing ``open_parked_connection`` is best-effort — slot stays empty
+    on the ``openai_realtime`` key but the call still proceeds."""
+    from unittest.mock import AsyncMock
+    import dataclasses
+
+    phone = _make_patter()
+    phone._local_config = dataclasses.replace(phone._local_config, openai_key="sk-test")
+    agent = Agent(system_prompt="p", provider="openai_realtime")
+
+    class _BoomAdapter:
+        def __init__(self, **_kwargs: object) -> None:
+            self.open_parked_connection = AsyncMock(
+                side_effect=RuntimeError("network down")
+            )
+
+    import getpatter.providers.openai_realtime as realtime_mod
+
+    original_adapter = realtime_mod.OpenAIRealtimeAdapter
+    realtime_mod.OpenAIRealtimeAdapter = _BoomAdapter  # type: ignore[misc]
+    try:
+        phone._park_provider_connections(agent, "CAtest_rt3")
+        await _drain(phone)
+    finally:
+        realtime_mod.OpenAIRealtimeAdapter = original_adapter  # type: ignore[misc]
+
+    slot = phone.pop_prewarmed_connections("CAtest_rt3")
+    # Slot is allocated (the helper sets it before scheduling tasks) but the
+    # ``openai_realtime`` key was never populated. Falling back to a cold
+    # ``connect()`` is the correct behaviour.
+    if slot is not None:
+        assert "openai_realtime" not in slot
+
+
+async def test_realtime_stream_handler_adopts_parked_ws() -> None:
+    """``OpenAIRealtimeStreamHandler.start()`` adopts a parked WS via
+    ``adopt_websocket`` instead of calling ``connect()``."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from getpatter.stream_handler import OpenAIRealtimeStreamHandler
+
+    parked_ws = FakeWS()
+    pop_calls: list[str] = []
+
+    def _pop(call_id: str) -> dict | None:
+        pop_calls.append(call_id)
+        return {"openai_realtime": parked_ws}
+
+    agent = Agent(
+        system_prompt="hi",
+        first_message="",
+        provider="openai_realtime",
+        model="gpt-4o-mini-realtime-preview",
+        voice="alloy",
+    )
+    audio_sender = MagicMock()
+    audio_sender.send_audio = AsyncMock()
+
+    handler = OpenAIRealtimeStreamHandler(
+        agent=agent,
+        audio_sender=audio_sender,
+        call_id="CAtest_adopt",
+        caller="+15550000001",
+        callee="+15550000002",
+        resolved_prompt="hi",
+        metrics=None,
+        openai_key="sk-test",
+        audio_format="g711_ulaw",
+        pop_prewarmed_connections=_pop,
+    )
+
+    # Patch the adapter so we can verify adopt vs connect without opening
+    # a real WS.
+    import getpatter.providers.openai_realtime as realtime_mod
+
+    adapter_instance: dict[str, object] = {}
+
+    class _StubAdapter:
+        def __init__(self, **kwargs: object) -> None:
+            self.connect = AsyncMock()
+            self.adopt_websocket = MagicMock()
+            self.send_first_message = AsyncMock()
+            self.send_text = AsyncMock()
+            self.receive_events = AsyncMock()
+            adapter_instance["instance"] = self
+
+    original_adapter = realtime_mod.OpenAIRealtimeAdapter
+    realtime_mod.OpenAIRealtimeAdapter = _StubAdapter  # type: ignore[misc]
+    try:
+        await handler.start()
+    finally:
+        realtime_mod.OpenAIRealtimeAdapter = original_adapter  # type: ignore[misc]
+        # Background _forward_events task — cancel to keep the test loop clean.
+        bg = getattr(handler, "_background_task", None)
+        if bg is not None:
+            bg.cancel()
+
+    assert pop_calls == ["CAtest_adopt"]
+    inst = adapter_instance["instance"]
+    inst.adopt_websocket.assert_called_once_with(parked_ws)  # type: ignore[attr-defined]
+    inst.connect.assert_not_called()  # type: ignore[attr-defined]
+
+
+async def test_realtime_stream_handler_falls_back_when_no_parked_slot() -> None:
+    """No parked WS → handler calls ``connect()`` as normal."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from getpatter.stream_handler import OpenAIRealtimeStreamHandler
+
+    agent = Agent(
+        system_prompt="hi",
+        first_message="",
+        provider="openai_realtime",
+        voice="alloy",
+    )
+    audio_sender = MagicMock()
+    audio_sender.send_audio = AsyncMock()
+
+    handler = OpenAIRealtimeStreamHandler(
+        agent=agent,
+        audio_sender=audio_sender,
+        call_id="CAtest_cold",
+        caller="+15550000001",
+        callee="+15550000002",
+        resolved_prompt="hi",
+        metrics=None,
+        openai_key="sk-test",
+        audio_format="g711_ulaw",
+        pop_prewarmed_connections=lambda _cid: None,
+    )
+
+    import getpatter.providers.openai_realtime as realtime_mod
+
+    adapter_instance: dict[str, object] = {}
+
+    class _StubAdapter:
+        def __init__(self, **kwargs: object) -> None:
+            self.connect = AsyncMock()
+            self.adopt_websocket = MagicMock()
+            self.send_first_message = AsyncMock()
+            self.send_text = AsyncMock()
+            self.receive_events = AsyncMock()
+            adapter_instance["instance"] = self
+
+    original_adapter = realtime_mod.OpenAIRealtimeAdapter
+    realtime_mod.OpenAIRealtimeAdapter = _StubAdapter  # type: ignore[misc]
+    try:
+        await handler.start()
+    finally:
+        realtime_mod.OpenAIRealtimeAdapter = original_adapter  # type: ignore[misc]
+        bg = getattr(handler, "_background_task", None)
+        if bg is not None:
+            bg.cancel()
+
+    inst = adapter_instance["instance"]
+    inst.connect.assert_awaited_once()  # type: ignore[attr-defined]
+    inst.adopt_websocket.assert_not_called()  # type: ignore[attr-defined]
+
+
+async def test_realtime_stream_handler_falls_back_when_parked_ws_died() -> None:
+    """A parked WS whose underlying socket closed between park and adopt
+    is detected via ``closed`` and the handler falls through to ``connect()``."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from getpatter.stream_handler import OpenAIRealtimeStreamHandler
+
+    dead_ws = FakeWS()
+    dead_ws.closed = True  # WS died during the ringing window
+
+    agent = Agent(
+        system_prompt="hi",
+        first_message="",
+        provider="openai_realtime",
+        voice="alloy",
+    )
+    audio_sender = MagicMock()
+    audio_sender.send_audio = AsyncMock()
+
+    handler = OpenAIRealtimeStreamHandler(
+        agent=agent,
+        audio_sender=audio_sender,
+        call_id="CAtest_dead",
+        caller="+15550000001",
+        callee="+15550000002",
+        resolved_prompt="hi",
+        metrics=None,
+        openai_key="sk-test",
+        audio_format="g711_ulaw",
+        pop_prewarmed_connections=lambda _cid: {"openai_realtime": dead_ws},
+    )
+
+    import getpatter.providers.openai_realtime as realtime_mod
+
+    adapter_instance: dict[str, object] = {}
+
+    class _StubAdapter:
+        def __init__(self, **kwargs: object) -> None:
+            self.connect = AsyncMock()
+            self.adopt_websocket = MagicMock()
+            self.send_first_message = AsyncMock()
+            self.send_text = AsyncMock()
+            self.receive_events = AsyncMock()
+            adapter_instance["instance"] = self
+
+    original_adapter = realtime_mod.OpenAIRealtimeAdapter
+    realtime_mod.OpenAIRealtimeAdapter = _StubAdapter  # type: ignore[misc]
+    try:
+        await handler.start()
+    finally:
+        realtime_mod.OpenAIRealtimeAdapter = original_adapter  # type: ignore[misc]
+        bg = getattr(handler, "_background_task", None)
+        if bg is not None:
+            bg.cancel()
+
+    inst = adapter_instance["instance"]
+    inst.connect.assert_awaited_once()  # type: ignore[attr-defined]
+    inst.adopt_websocket.assert_not_called()  # type: ignore[attr-defined]

@@ -210,3 +210,82 @@ describe('[unit] prewarm-handoff', () => {
     expect(phone.popPrewarmedConnections('CAtest6')).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// OpenAI Realtime parking + adoption
+// ---------------------------------------------------------------------------
+
+describe('[unit] prewarm-handoff — OpenAI Realtime', () => {
+  let phone: Patter;
+  let openParkedSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(async () => {
+    phone = new Patter({
+      carrier: new Twilio({
+        accountSid: 'ACtest000000000000000000000000000',
+        authToken: 'tok',
+      }),
+      phoneNumber: '+15551234567',
+      webhookUrl: 'example.test',
+      openaiKey: 'sk-test',
+    });
+    // Spy on the prototype method so any transient adapter instance the
+    // SDK builds inside ``parkProviderConnections`` returns a controllable
+    // FakeWS instead of opening a real WebSocket.
+    const realtimeModule = await import('../../src/providers/openai-realtime');
+    openParkedSpy = vi
+      .spyOn(realtimeModule.OpenAIRealtimeAdapter.prototype, 'openParkedConnection')
+      .mockImplementation(async () => new FakeWS() as unknown as import('ws').WebSocket);
+  });
+
+  it('parkProviderConnections opens a primed Realtime WS for openai_realtime agents', async () => {
+    const agent: AgentOptions = {
+      systemPrompt: 'p',
+      provider: 'openai_realtime',
+      voice: 'alloy',
+    };
+    (phone as unknown as { parkProviderConnections: (a: AgentOptions, id: string) => void })
+      .parkProviderConnections(agent, 'CArt1');
+    await new Promise<void>((r) => setTimeout(r, 30));
+    expect(openParkedSpy).toHaveBeenCalledTimes(1);
+    const slot = phone.popPrewarmedConnections('CArt1');
+    expect(slot).toBeDefined();
+    expect(slot?.openaiRealtime).toBeDefined();
+  });
+
+  it('skips Realtime parking when the OpenAI key is missing', async () => {
+    const keylessPhone = new Patter({
+      carrier: new Twilio({
+        accountSid: 'ACtest000000000000000000000000000',
+        authToken: 'tok',
+      }),
+      phoneNumber: '+15551234567',
+      webhookUrl: 'example.test',
+    });
+    const agent: AgentOptions = { systemPrompt: 'p', provider: 'openai_realtime' };
+    (keylessPhone as unknown as { parkProviderConnections: (a: AgentOptions, id: string) => void })
+      .parkProviderConnections(agent, 'CArt2');
+    await new Promise<void>((r) => setTimeout(r, 30));
+    expect(openParkedSpy).not.toHaveBeenCalled();
+    expect(keylessPhone.popPrewarmedConnections('CArt2')).toBeUndefined();
+  });
+
+  it('Realtime park failure is best-effort and does not block other providers', async () => {
+    openParkedSpy.mockRejectedValueOnce(new Error('network down'));
+    const stt = new StubSTTWithPark();
+    const agent: AgentOptions = {
+      systemPrompt: 'p',
+      provider: 'openai_realtime',
+      stt,
+    };
+    (phone as unknown as { parkProviderConnections: (a: AgentOptions, id: string) => void })
+      .parkProviderConnections(agent, 'CArt3');
+    await new Promise<void>((r) => setTimeout(r, 30));
+    // STT still parked successfully.
+    expect(stt.parkCalls).toBe(1);
+    const slot = phone.popPrewarmedConnections('CArt3');
+    // ``openaiRealtime`` key absent on the slot; STT key present.
+    expect(slot?.openaiRealtime).toBeUndefined();
+    expect(slot?.stt).toBeDefined();
+  });
+});
