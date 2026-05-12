@@ -1,5 +1,26 @@
 ## Unreleased
 
+### Fixed — Dashboard SPA call list grew unbounded and ordering was non-deterministic across SSE refreshes
+
+`mergeCallPreserving` in `dashboard-app/src/hooks/mergeCalls.ts`
+preserved ``prev_only`` calls indefinitely by appending them after the
+fresh snapshot block, with two consequences:
+
+1. On a long-lived session that cycled through more than 500 calls
+   (the server-side ``MetricsStore`` ring buffer default), the UI
+   array kept growing because rows the server had already evicted
+   stayed pinned by ``prev`` and were re-appended on every refresh.
+2. Ordering was non-deterministic: live rows landed at the position
+   the server snapshot gave them, while ``prev_only`` rows always
+   landed last regardless of their actual ``startedAtMs``, so a
+   newer call could end up below an older one.
+
+Fix: after the upsert pass, sort the merged list by ``startedAtMs``
+descending (newest first) and slice to ``MAX_UI_CALLS = 500`` so the
+SPA mirrors the server ring buffer. Coverage:
+`dashboard-app/src/hooks/mergeCalls.test.ts` — adds a 600-prev+1-fresh
+cap test and an explicit startedAtMs ordering test.
+
 ### Fixed — firstMessage mark counter could persist stale numbering across re-used handler instances (Python + TypeScript parity)
 
 `PipelineStreamHandler._first_message_mark_counter` (Py) and
