@@ -809,12 +809,22 @@ class Patter:
             logger.debug("Realtime warmup unavailable: %s", exc)
             return None
 
+        # Build the same tools list (user-defined + ``transfer_call`` /
+        # ``end_call``) that ``OpenAIRealtimeStreamHandler.start()`` would
+        # apply on a cold ``connect()``. Without this the primed
+        # ``session.update`` carries an empty tool list and an adopted
+        # parked session is silently incapable of calling the built-ins —
+        # ``transfer_call`` / ``end_call`` no-op until the next cold
+        # session.update (which never happens for adopted calls).
+        from getpatter.stream_handler import build_realtime_tools
+
         adapter_kwargs: dict[str, Any] = {
             "api_key": api_key,
             "model": agent.model,
             "voice": agent.voice,
             "instructions": agent.system_prompt,
             "language": agent.language,
+            "tools": build_realtime_tools(getattr(agent, "tools", None)),
             # Twilio + Telnyx both bridge to OpenAI Realtime over
             # ``g711_ulaw`` (see ``telephony/twilio.py`` / ``telnyx.py``);
             # match that here so the primed session config aligns with

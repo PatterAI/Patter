@@ -465,6 +465,75 @@ async def test_realtime_stream_handler_falls_back_when_no_parked_slot() -> None:
     inst.adopt_websocket.assert_not_called()  # type: ignore[attr-defined]
 
 
+# ---------------------------------------------------------------------------
+# Built-in tools (transfer_call / end_call) must be present in the primed
+# session — without them, hit-prewarm calls cannot transfer or end gracefully
+# because OpenAI server-side state has no record that those tools exist.
+# ---------------------------------------------------------------------------
+
+
+async def test_warmup_adapter_includes_builtin_and_user_tools() -> None:
+    """``Patter._build_realtime_warmup_adapter`` must pass the canonical
+    tools list (user tools + ``transfer_call`` + ``end_call``) to the
+    transient adapter so the primed ``session.update`` matches the live
+    one. Without this, adopted parked sessions silently refuse to call
+    the built-ins."""
+    import dataclasses
+
+    from getpatter.stream_handler import END_CALL_TOOL, TRANSFER_CALL_TOOL
+
+    phone = _make_patter()
+    phone._local_config = dataclasses.replace(phone._local_config, openai_key="sk-test")
+
+    custom_tool = {
+        "name": "lookup_order",
+        "description": "Look up an order by id",
+        "parameters": {
+            "type": "object",
+            "properties": {"order_id": {"type": "string"}},
+            "required": ["order_id"],
+        },
+    }
+    agent = Agent(
+        system_prompt="p",
+        provider="openai_realtime",
+        voice="alloy",
+        tools=(custom_tool,),
+    )
+
+    adapter = phone._build_realtime_warmup_adapter(agent)
+    assert adapter is not None
+    # Real ``OpenAIRealtimeAdapter`` was instantiated with ``tools=[...]``.
+    tool_names = [t["name"] for t in (adapter.tools or [])]
+    assert "lookup_order" in tool_names, (
+        f"user-defined tool missing from warmup adapter: {tool_names}"
+    )
+    assert TRANSFER_CALL_TOOL["name"] in tool_names, (
+        f"transfer_call missing from warmup adapter: {tool_names}"
+    )
+    assert END_CALL_TOOL["name"] in tool_names, (
+        f"end_call missing from warmup adapter: {tool_names}"
+    )
+
+
+async def test_warmup_adapter_includes_builtins_when_agent_has_no_tools() -> None:
+    """Even with no user tools, the warmup adapter must carry the two
+    Patter-injected built-ins so adopted sessions can still transfer /
+    end calls."""
+    import dataclasses
+
+    from getpatter.stream_handler import END_CALL_TOOL, TRANSFER_CALL_TOOL
+
+    phone = _make_patter()
+    phone._local_config = dataclasses.replace(phone._local_config, openai_key="sk-test")
+    agent = Agent(system_prompt="p", provider="openai_realtime")
+
+    adapter = phone._build_realtime_warmup_adapter(agent)
+    assert adapter is not None
+    tool_names = [t["name"] for t in (adapter.tools or [])]
+    assert tool_names == [TRANSFER_CALL_TOOL["name"], END_CALL_TOOL["name"]]
+
+
 async def test_realtime_stream_handler_falls_back_when_parked_ws_died() -> None:
     """A parked WS whose underlying socket closed between park and adopt
     is detected via ``closed`` and the handler falls through to ``connect()``."""
