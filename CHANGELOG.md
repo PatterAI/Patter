@@ -1,5 +1,55 @@
 ## Unreleased
 
+## 0.6.1 (2026-05-12)
+
+### Changed — Cerebras usage-chunk fallback: INFO-once + DEBUG per iteration (Python + TypeScript parity)
+
+The char/4 fallback billing path in `services/llm_loop.py` /
+`src/llm-loop.ts` previously emitted `logger.warning` /
+`getLogger().warn` on every tool-loop iteration when the upstream
+provider stream did not include a `usage` chunk. On Cerebras (the
+common case for this fallback), a multi-tool turn could log 5-10
+identical WARN lines for the same call — drowning real warnings.
+
+Replaced with: first fallback in the call → INFO (so operators
+still see it once with the full diagnostic context — `provider`,
+`model`, `input_chars`, `output_chars`, `est_input_tokens`,
+`est_output_tokens`); subsequent iterations → DEBUG with the
+iteration index and a per-LLMLoop `_usage_missing_count` /
+`_usageMissingCount` total so the volume is still visible at
+DEBUG level. No behavioural change — billing still uses char/4
+estimation. Files: `libraries/python/getpatter/services/llm_loop.py`,
+`libraries/typescript/src/llm-loop.ts`.
+
+### Changed — Krisp VIVA TypeScript scaffold: refreshed unavailability message (2026-05)
+
+The `KrispVivaFilter` constructor in
+`libraries/typescript/src/providers/krisp-filter.ts` already throws
+with guidance because Krisp does not publish a Node.js server SDK as
+of 2026-05. Refreshed the message to include the verification date,
+explicitly distinguish "server Node SDK" from existing browser/RN
+third-party wrappers, and note that those wrappers (browser WASM and
+mobile client variants) are scoped to local microphone capture and
+cannot process Patter's server-side PCM/mulaw audio. Python
+`KrispVivaFilter` and TS `DeepFilterNetFilter` remain the only
+shipped paths. No code behaviour change.
+
+### Fixed — Barge-in gate regression test: prewarmed first message must remain interruptible
+
+Locked in with parity tests on both SDKs that `_stream_prewarm_bytes` / `streamPrewarmBytes` open the barge-in gate (`_first_audio_sent_at` / `firstAudioSentAt`) once the first chunk reaches the wire. The gate was already opened by `_begin_speaking(is_first_message=True)` ahead of streaming, but a future refactor of the `_begin_speaking` path could regress the prewarm path silently — the per-chunk `_mark_first_audio_sent` call inside the streaming loop is the last line of defence and now has explicit coverage in `test_stream_prewarm_bytes_opens_barge_in_gate_on_first_chunk` (Python) and `opens the barge-in gate by stamping firstAudioSentAt after the first chunk` (TypeScript).
+
+Files: `libraries/python/tests/test_prewarm.py`, `libraries/typescript/tests/unit/prewarm.test.ts`.
+
+### Fixed — `ElevenLabsWebSocketTTS.adopt_websocket` leaked the previous parked WS when called outside an event loop
+
+`ElevenLabsWebSocketTTS.adopt_websocket` (Python) closed any previously parked WS handle via `asyncio.create_task(prev.ws.close())`. When invoked from a sync context with no running event loop — e.g. cleanup hooks fired from `__del__`, atexit handlers, or signal-driven teardown — the `create_task` call raised `RuntimeError` which the code silently swallowed with a bare `except RuntimeError: pass`, leaking the socket FD. ElevenLabs would eventually close the remote side after the inactivity timeout, but the FD on our side stayed allocated until process exit.
+
+The fix keeps the async fast path when a loop is running, and falls back to a best-effort synchronous `transport.close()` (non-blocking, skips the WS close handshake but cleans up the file descriptor) when no loop is available. A warning log is emitted on the fallback path so the FD-leak symptom shifts from "silent" to "logged".
+
+The TypeScript counterpart `adoptWebSocket` is unaffected — `ws.close()` from the `ws` package is synchronous so the same scenario doesn't reach an analogous error branch.
+
+Files: `libraries/python/getpatter/providers/elevenlabs_ws_tts.py`, `libraries/python/tests/unit/test_elevenlabs_ws_tts.py` (new `TestAdoptWebSocketCleanup`).
+
 ### Added — `patter.*` OTel attribute helpers in the TypeScript SDK (parity with Python)
 
 The Python SDK ships `record_patter_attrs`, `patter_call_scope`, and `attach_span_exporter` (in `getpatter.observability.attributes`) for stamping `patter.cost.*` / `patter.latency.*` span attributes and wiring an OTel `SpanExporter` into the tracer provider. The TypeScript SDK previously had no equivalent surface — calling code that wanted to record those attributes had to no-op manually or import `@opentelemetry/api` directly, which broke cross-SDK parity per `.claude/rules/sdk-parity.md`.
@@ -36,8 +86,6 @@ The convention is now uniform across both SDKs (locked in by tests):
 Negative deltas from clock skew or out-of-order timestamps are now clamped to `0` on both sides (the TypeScript side already did this; Python now does too).
 
 Files: `libraries/python/getpatter/services/metrics.py`, `libraries/python/getpatter/observability/metric_types.py` (docstring), `libraries/python/tests/test_metrics.py` (new `TestEOUMetricsEmission`), `libraries/typescript/tests/unit/metrics.test.ts` (new `emitEouMetrics field semantics` block).
-
-## 0.6.1 (2026-05-09)
 
 ### Fixed — Barge-in bug bundle: 6.8s latency outliers, double-talk dispatch, stale anchors, firstMessage uninterruptible (Python + TypeScript parity)
 
