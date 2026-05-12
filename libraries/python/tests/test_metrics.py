@@ -1,7 +1,5 @@
 """Tests for the CallMetricsAccumulator."""
 
-import time
-from unittest.mock import patch
 
 import pytest
 
@@ -145,7 +143,18 @@ class TestCallMetricsAccumulatorPipeline:
         # Telephony: non-negative (may be 0 in fast test runs)
         assert result.cost.telephony >= 0
         # Total = sum
-        assert abs(result.cost.total - (result.cost.stt + result.cost.tts + result.cost.llm + result.cost.telephony)) < 1e-6
+        assert (
+            abs(
+                result.cost.total
+                - (
+                    result.cost.stt
+                    + result.cost.tts
+                    + result.cost.llm
+                    + result.cost.telephony
+                )
+            )
+            < 1e-6
+        )
 
     def test_get_cost_so_far(self):
         acc = self._make_accumulator()
@@ -258,7 +267,9 @@ class TestLatencyStatistics:
             acc.record_turn_complete("Y")
 
         result = acc.end_call()
-        assert result.latency_p95.total_ms >= result.latency_avg.total_ms or True  # p95 >= avg in most cases
+        assert (
+            result.latency_p95.total_ms >= result.latency_avg.total_ms or True
+        )  # p95 >= avg in most cases
 
     def test_empty_turns_latency(self):
         acc = self._make_accumulator()
@@ -422,3 +433,82 @@ class TestCallMetricsDataclass:
 
         result = acc.end_call()
         assert isinstance(result.turns, tuple)
+
+
+class TestEOUMetricsEmission:
+    """EOUMetrics field semantics + unit parity with the TypeScript SDK.
+
+    Locks in the convention agreed in
+    ``libraries/typescript/src/observability/metric-types.ts``:
+
+        end_of_utterance_delay = stt_final  − vad_stopped  (ms)
+        transcription_delay    = turn_commit − vad_stopped (ms)
+
+    Regression guard for the bug where the Python implementation had the
+    two fields swapped AND emitted them in seconds while the TS side
+    emitted milliseconds.
+    """
+
+    def _make_accumulator(self):
+        return CallMetricsAccumulator(
+            call_id="eou-test",
+            provider_mode="pipeline",
+            telephony_provider="twilio",
+            stt_provider="deepgram",
+            tts_provider="elevenlabs",
+            llm_provider="openai",
+        )
+
+    def test_eou_fields_match_ts_convention_in_ms(self):
+        from getpatter.observability.event_bus import EventBus
+        from getpatter.observability.metric_types import EOUMetrics
+
+        bus = EventBus()
+        emitted: list[EOUMetrics] = []
+        bus.on("eou_metrics", lambda m: emitted.append(m))
+
+        acc = self._make_accumulator()
+        acc.attach_event_bus(bus)
+
+        # Wall-clock timestamps in seconds; deltas chosen so the field
+        # check is unambiguous:
+        #   VAD stop -> STT final         = 200 ms
+        #   VAD stop -> turn committed    = 350 ms
+        t_vad = 1_000_000.000  # arbitrary epoch base
+        t_stt = t_vad + 0.200
+        t_turn = t_vad + 0.350
+        acc.record_vad_stop(ts=t_vad)
+        acc.record_stt_final_timestamp(ts=t_stt)
+        acc.record_on_user_turn_completed_delay(50.0)  # already in ms
+        acc.record_turn_committed(ts=t_turn)  # triggers emit
+
+        assert len(emitted) == 1, "EOUMetrics should have been emitted exactly once"
+        m = emitted[0]
+        assert m.end_of_utterance_delay == pytest.approx(200.0, rel=1e-6)
+        assert m.transcription_delay == pytest.approx(350.0, rel=1e-6)
+        assert m.on_user_turn_completed_delay == pytest.approx(50.0, rel=1e-6)
+
+    def test_eou_clamps_negative_deltas_to_zero(self):
+        """Out-of-order timestamps (clock skew / replay) must not emit
+        negative durations downstream — clamp at 0."""
+        from getpatter.observability.event_bus import EventBus
+        from getpatter.observability.metric_types import EOUMetrics
+
+        bus = EventBus()
+        emitted: list[EOUMetrics] = []
+        bus.on("eou_metrics", lambda m: emitted.append(m))
+
+        acc = self._make_accumulator()
+        acc.attach_event_bus(bus)
+
+        t_vad = 1_000_000.500
+        # Inverted order: STT final + turn-commit are BEFORE the VAD stop.
+        acc.record_vad_stop(ts=t_vad)
+        acc.record_stt_final_timestamp(ts=t_vad - 0.100)
+        acc.record_on_user_turn_completed_delay(0.0)
+        acc.record_turn_committed(ts=t_vad - 0.050)
+
+        assert len(emitted) == 1
+        m = emitted[0]
+        assert m.end_of_utterance_delay == 0.0
+        assert m.transcription_delay == 0.0

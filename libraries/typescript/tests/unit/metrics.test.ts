@@ -344,4 +344,64 @@ describe('CallMetricsAccumulator', () => {
       expect(metrics.cost.tts).toBeCloseTo(0.50, 4); // 1k chars * 0.50
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // EOUMetrics field semantics + unit parity with the Python SDK.
+  // ---------------------------------------------------------------------------
+
+  describe('emitEouMetrics field semantics', () => {
+    it('emits endOfUtteranceDelay and transcriptionDelay in ms with the documented convention', async () => {
+      const { EventBus } = await import('../../src/observability/event-bus');
+      const acc = makeAccumulator();
+      const bus = new EventBus();
+      const emitted: unknown[] = [];
+      bus.on('eou_metrics', (m) => emitted.push(m));
+      acc.attachEventBus(bus);
+
+      // Deltas chosen so the field assignment is unambiguous:
+      //   VAD stop -> STT final      = 200 ms
+      //   VAD stop -> turn committed = 350 ms
+      const tVad = 1_000_000;
+      acc.recordVadStop(tVad);
+      acc.recordSttFinalTimestamp(tVad + 200);
+      acc.recordOnUserTurnCompletedDelay(50);
+      // recordTurnCommitted() auto-invokes emitEouMetrics() once all three
+      // timestamps are present — no explicit emit needed.
+      acc.recordTurnCommitted(tVad + 350);
+
+      expect(emitted).toHaveLength(1);
+      const m = emitted[0] as {
+        endOfUtteranceDelay: number;
+        transcriptionDelay: number;
+        onUserTurnCompletedDelay: number;
+      };
+      expect(m.endOfUtteranceDelay).toBeCloseTo(200, 6);
+      expect(m.transcriptionDelay).toBeCloseTo(350, 6);
+      expect(m.onUserTurnCompletedDelay).toBeCloseTo(50, 6);
+    });
+
+    it('clamps negative deltas to zero', async () => {
+      const { EventBus } = await import('../../src/observability/event-bus');
+      const acc = makeAccumulator();
+      const bus = new EventBus();
+      const emitted: unknown[] = [];
+      bus.on('eou_metrics', (m) => emitted.push(m));
+      acc.attachEventBus(bus);
+
+      const tVad = 1_000_500;
+      acc.recordVadStop(tVad);
+      acc.recordSttFinalTimestamp(tVad - 100);
+      acc.recordOnUserTurnCompletedDelay(0);
+      // recordTurnCommitted() auto-emits.
+      acc.recordTurnCommitted(tVad - 50);
+
+      expect(emitted).toHaveLength(1);
+      const m = emitted[0] as {
+        endOfUtteranceDelay: number;
+        transcriptionDelay: number;
+      };
+      expect(m.endOfUtteranceDelay).toBe(0);
+      expect(m.transcriptionDelay).toBe(0);
+    });
+  });
 });
