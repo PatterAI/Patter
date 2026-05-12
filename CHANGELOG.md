@@ -2,6 +2,30 @@
 
 ## 0.6.1 (2026-05-12)
 
+### Fixed — firstMessage pending mark waiters leaked on abnormal call end (Python + TypeScript parity)
+
+`PipelineStreamHandler._send_paced_first_message_bytes` (Py) and
+`StreamHandler.sendPacedFirstMessageBytes` (TS) accumulate one
+`asyncio.Future` (Py) / `Promise` (TS) per chunk in `_pending_marks` /
+`pendingMarks` while the firstMessage is paced through the carrier.
+The cancel path (`runBargeInCancel` / barge-in confirm) already drained
+these, but a call that ended without going through cancel — carrier
+WebSocket drop, hangup mid firstMessage, stop event arriving before the
+paced sender finished — left every queued future unresolved. The send
+loop was awaiting them, so the orphan promises leaked until the handler
+itself was garbage-collected.
+
+Fix: `PipelineStreamHandler.cleanup` now invokes `_drain_pending_marks`
+before tearing down adapters; the TS `handleStop` and `handleWsClose`
+do the equivalent via `drainPendingMarks()`. Idempotent and safe when
+the queue is already empty. Files:
+`libraries/python/getpatter/stream_handler.py`,
+`libraries/typescript/src/stream-handler.ts`. Coverage:
+`libraries/python/tests/unit/test_first_message_pacing.py`
+(`TestCleanupDrainsPendingMarks`),
+`libraries/typescript/tests/unit/stream-handler.test.ts`
+(`cleanup drains pending firstMessage marks`).
+
 ### Fixed — firstMessage was effectively un-interruptible: barge-in lost the race against the carrier outbound buffer (#128, Python + TypeScript parity)
 
 `StreamHandler.streamPrewarmBytes` (TS) /
