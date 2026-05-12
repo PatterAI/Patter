@@ -757,4 +757,108 @@ describe('StreamHandler', () => {
       await Promise.all([m1, m2, m3]);
     });
   });
+
+  describe('firstMessage mark counter resets across sends + on cleanup', () => {
+    interface CounterPriv {
+      isSpeaking: boolean;
+      speakingStartedAt: number | null;
+      firstAudioSentAt: number | null;
+      aec: unknown;
+      streamSid: string;
+      pendingMarks: Array<{ name: string; resolve: () => void; promise: Promise<void> }>;
+      firstMessageMarkCounter: number;
+      sendPacedFirstMessageBytes: (b: Buffer) => Promise<boolean>;
+      onMark: (n: string) => Promise<void>;
+    }
+
+    function priv(h: StreamHandler): CounterPriv {
+      return h as unknown as CounterPriv;
+    }
+
+    function primeForFirstMessage(h: StreamHandler): CounterPriv {
+      const p = priv(h);
+      p.isSpeaking = true;
+      p.speakingStartedAt = Date.now() - 5000;
+      p.firstAudioSentAt = Date.now() - 5000;
+      p.aec = null;
+      p.streamSid = 'MZtest';
+      return p;
+    }
+
+    it('sendPacedFirstMessageBytes resets counter between consecutive sends', async () => {
+      const sendAudio = vi.fn();
+      const sendMark = vi.fn();
+      const bridge = makeMockBridge({ sendAudio, sendMark });
+      const h = new StreamHandler(
+        makeDeps({ bridge }),
+        makeMockWs(),
+        '+15551111111',
+        '+15552222222',
+      );
+      const p = primeForFirstMessage(h);
+
+      // CHUNK_BYTES = 1280 matches StreamHandler.PREWARM_CHUNK_BYTES.
+      // Two chunks fit inside the window (3) so the loop completes
+      // synchronously after we resolve the marks.
+      const CHUNK_BYTES = 1280;
+      const bytes = Buffer.alloc(CHUNK_BYTES * 2, 0);
+
+      const send1 = p.sendPacedFirstMessageBytes(bytes);
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      await p.onMark('fm_1');
+      await p.onMark('fm_2');
+      await send1;
+      expect(p.firstMessageMarkCounter).toBe(2);
+      expect(p.pendingMarks.length).toBe(0);
+      const markCallsAfterFirst = sendMark.mock.calls.length;
+      expect(
+        sendMark.mock.calls.slice(0, markCallsAfterFirst).map((c) => c[1] as string),
+      ).toEqual(['fm_1', 'fm_2']);
+
+      // Second send: counter must reset to 0 at the top of the loop,
+      // so the new sequence is fm_1, fm_2 — NOT fm_3, fm_4.
+      const send2 = p.sendPacedFirstMessageBytes(bytes);
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      const newMarks = sendMark.mock.calls
+        .slice(markCallsAfterFirst)
+        .map((c) => c[1] as string);
+      expect(newMarks).toEqual(['fm_1', 'fm_2']);
+      expect(p.firstMessageMarkCounter).toBe(2);
+
+      await p.onMark('fm_1');
+      await p.onMark('fm_2');
+      await send2;
+    });
+
+    it('handleStop resets firstMessageMarkCounter', async () => {
+      const h = new StreamHandler(
+        makeDeps(),
+        makeMockWs(),
+        '+15551111111',
+        '+15552222222',
+      );
+      const p = priv(h);
+      // Pretend a prior turn left the counter at 7.
+      p.firstMessageMarkCounter = 7;
+
+      await h.handleStop();
+
+      expect(p.firstMessageMarkCounter).toBe(0);
+    });
+
+    it('handleWsClose resets firstMessageMarkCounter', async () => {
+      const h = new StreamHandler(
+        makeDeps(),
+        makeMockWs(),
+        '+15551111111',
+        '+15552222222',
+      );
+      const p = priv(h);
+      p.firstMessageMarkCounter = 7;
+
+      await h.handleWsClose();
+
+      expect(p.firstMessageMarkCounter).toBe(0);
+    });
+  });
 });

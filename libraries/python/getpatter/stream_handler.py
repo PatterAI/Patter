@@ -3518,6 +3518,17 @@ class PipelineStreamHandler(StreamHandler):
         uses that to decide whether to record the TTS-first-byte /
         turn-complete metrics.
         """
+        # Reset the per-send mark counter so each invocation produces a
+        # fresh ``fm_1, fm_2, ...`` sequence. Without this the counter
+        # grows monotonically across turns on a re-used handler and a
+        # stale ``fm_N`` echo from an earlier turn could match a mark
+        # name issued later, corrupting the FIFO matching in
+        # ``on_mark``. The ``_pending_marks`` queue is also expected
+        # empty here by the caller's cancel / cleanup paths; if it is
+        # not (defensive re-entry) we drain before resetting.
+        if self._pending_marks:
+            self._drain_pending_marks()
+        self._first_message_mark_counter = 0
         first_chunk_sent = False
         for i in range(0, len(bytes_), self._PREWARM_CHUNK_BYTES):
             if not self._is_speaking:
@@ -3561,6 +3572,11 @@ class PipelineStreamHandler(StreamHandler):
         # loop that nothing will ever resolve.
         if getattr(self, "_pending_marks", None) is not None:
             self._drain_pending_marks()
+        # Reset the firstMessage mark counter so a re-used handler
+        # instance starts ``fm_<n>`` numbering at 1 on the next call.
+        # See ``_send_paced_first_message_bytes`` for the per-send reset
+        # that protects the within-call path.
+        self._first_message_mark_counter = 0
         if self._stt_task:
             self._stt_task.cancel()
             try:

@@ -227,3 +227,69 @@ class TestCleanupDrainsPendingMarks:
         # Every queued future is resolved and the queue is empty.
         assert handler._pending_marks == []
         assert all(fut.done() for fut in pending_futures)
+
+
+@pytest.mark.unit
+class TestFirstMessageMarkCounterReset:
+    """The ``_first_message_mark_counter`` must reset at the top of each
+    paced send AND on cleanup so a re-used handler instance never reuses
+    a stale ``fm_<n>`` name across turns.
+    """
+
+    async def test_send_paced_resets_counter_between_consecutive_sends(self) -> None:
+        """Each ``_send_paced_first_message_bytes`` invocation re-starts
+        the ``fm_<n>`` numbering at 1 — without the reset, the counter
+        would grow monotonically across turns and a stale echo for an
+        earlier turn's ``fm_N`` could match a mark name issued later.
+        """
+        handler, sender = _make_handler(for_twilio=True)
+        bytes_ = b"\x00" * (CHUNK_BYTES * 2)
+
+        # First send: two chunks ≤ window (3) so the loop yields after
+        # the first ``_wait_for_mark_window`` pre-check on chunk 3.
+        task1 = asyncio.create_task(handler._send_paced_first_message_bytes(bytes_))
+        for _ in range(20):
+            await asyncio.sleep(0)
+        await handler.on_mark("fm_1")
+        await handler.on_mark("fm_2")
+        await task1
+        assert handler._first_message_mark_counter == 2
+        assert handler._pending_marks == []
+        assert sender.marks == ["fm_1", "fm_2"]
+
+        # Second send: counter must reset to 0 before iterating so the
+        # new sequence is fm_1, fm_2 — NOT fm_3, fm_4.
+        task2 = asyncio.create_task(handler._send_paced_first_message_bytes(bytes_))
+        for _ in range(20):
+            await asyncio.sleep(0)
+        # New marks recorded by the sender are appended after the prior
+        # turn's two marks.
+        new_marks = sender.marks[2:]
+        assert new_marks == ["fm_1", "fm_2"]
+        assert handler._first_message_mark_counter == 2
+
+        await handler.on_mark("fm_1")
+        await handler.on_mark("fm_2")
+        await task2
+
+    async def test_cleanup_resets_counter(self) -> None:
+        """Cleanup must reset ``_first_message_mark_counter`` to 0 so a
+        re-used handler starts fresh on the next call. Defensive: the
+        per-send reset is the canonical path, but cleanup belt-and-braces
+        the cross-call boundary.
+        """
+        handler, _sender = _make_handler(for_twilio=True)
+        handler._barge_in_pending_task = None
+        handler._barge_in_pending_since = None
+        handler._stt_task = None
+        handler._stt = None
+        handler._tts = None
+        handler._remote_handler = None
+        handler._resampler_8k_to_16k = None
+
+        # Pretend a prior call left the counter at 7.
+        handler._first_message_mark_counter = 7
+
+        await handler.cleanup()
+
+        assert handler._first_message_mark_counter == 0
