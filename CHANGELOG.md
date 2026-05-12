@@ -23,14 +23,14 @@ estimation. Files: `libraries/python/getpatter/services/llm_loop.py`,
 
 The `KrispVivaFilter` constructor in
 `libraries/typescript/src/providers/krisp-filter.ts` already throws
-with guidance because Krisp does not publish a Node.js server SDK.
-Refreshed the message to include the verification date (2026-05),
-explicitly distinguish "server Node SDK" from existing browser
-wrappers, and list the LiveKit browser/RN packages
-(`@livekit/krisp-noise-filter`, `@livekit/react-native-krisp-noise-filter`)
-that exist but cannot process Patter's server-side PCM/mulaw audio.
-Python `KrispVivaFilter` and TS `DeepFilterNetFilter` remain the
-only shipped paths. No code behaviour change.
+with guidance because Krisp does not publish a Node.js server SDK as
+of 2026-05. Refreshed the message to include the verification date,
+explicitly distinguish "server Node SDK" from existing browser/RN
+third-party wrappers, and note that those wrappers (browser WASM and
+mobile client variants) are scoped to local microphone capture and
+cannot process Patter's server-side PCM/mulaw audio. Python
+`KrispVivaFilter` and TS `DeepFilterNetFilter` remain the only
+shipped paths. No code behaviour change.
 
 ## 0.6.1 (2026-05-09)
 
