@@ -22,6 +22,14 @@ export {
 } from './tracing';
 export type { Span, InitTracingOptions } from './tracing';
 
+// ---- patter.* span attribute helpers (parity with Python) ----
+export {
+  recordPatterAttrs,
+  patterCallScope,
+  attachSpanExporter,
+  DEFAULT_SIDE,
+} from './attributes';
+
 /**
  * Call lifecycle event — TS mirror of ``getpatter.models.CallEvent``.
  *
