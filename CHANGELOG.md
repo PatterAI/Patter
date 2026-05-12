@@ -2,6 +2,10 @@
 
 ## 0.6.1 (2026-05-12)
 
+### Changed — `StreamHandler` adopt-capability check now uses duck typing
+
+The TS realtime adopt branch in `stream-handler.ts` previously relied on `this.adapter instanceof OpenAIRealtimeAdapter` to gate the prewarm-handoff path. Switched to a duck-type check (`typeof adapter.adoptWebSocket === 'function'`) so the generic stream-handler module stays provider-agnostic on this hot path and matches the Python handler's `getattr(self._adapter, "adopt_websocket", None)` shape. Files: `libraries/typescript/src/stream-handler.ts`.
+
 ### Fixed — Adapter state leak after a failed parked-session adoption
 
 When `adopt_websocket` / `adoptWebSocket` raised mid-adoption, the partially-adopted `OpenAIRealtimeAdapter` was in an inconsistent state — `_running` / `messageListenerAttached` was already `true`, the heartbeat task may have started, `_current_response_item_id` / `currentResponseItemId` may have carried leaked state from the parked session, and the `_ws` / `ws` reference pointed at a now-closed socket. Falling through to `connect()` on that carcass raced `session.created` against stale state and corrupted the live call. Fix: handler now re-instantiates the adapter before the cold connect path, guaranteeing a clean slate. Files: `libraries/python/getpatter/stream_handler.py`, `libraries/typescript/src/stream-handler.ts`.
