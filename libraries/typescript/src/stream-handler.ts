@@ -1316,6 +1316,11 @@ export class StreamHandler {
     // arriving before the paced sender finished) would otherwise leak
     // unresolved promises owned by the send loop.
     this.drainPendingMarks();
+    // Reset the firstMessage mark counter so a re-used handler starts
+    // ``fm_<n>`` numbering at 1 on the next call. See
+    // ``sendPacedFirstMessageBytes`` for the per-send reset that
+    // protects the within-call path.
+    this.firstMessageMarkCounter = 0;
     this.clearGraceTimer();
     this.flushResamplers();
     await this.closeSttOnce();
@@ -1331,8 +1336,9 @@ export class StreamHandler {
     this.clearPendingBargeIn();
     // See handleStop — drain pending firstMessage marks so an abnormal
     // carrier WS drop during the paced sender cannot leak unresolved
-    // promises owned by the send loop.
+    // promises owned by the send loop, and reset the counter.
     this.drainPendingMarks();
+    this.firstMessageMarkCounter = 0;
     this.clearGraceTimer();
     this.flushResamplers();
     // Drain STT first so in-flight transcripts fire before onCallEnd.
@@ -1433,6 +1439,15 @@ export class StreamHandler {
    * metrics. See BUG #128 for the regression this fix targets.
    */
   private async sendPacedFirstMessageBytes(bytes: Buffer): Promise<boolean> {
+    // Reset the per-send mark counter so each invocation produces a
+    // fresh ``fm_1, fm_2, ...`` sequence. Without this the counter
+    // grows monotonically across turns on a re-used handler and a
+    // stale ``fm_N`` echo from an earlier turn could match a mark
+    // name issued later, corrupting the FIFO matching in ``onMark``.
+    // The queue is also expected empty here by ``cancelSpeaking`` /
+    // ``handleStop`` / ``handleWsClose``; drain defensively if not.
+    if (this.pendingMarks.length > 0) this.drainPendingMarks();
+    this.firstMessageMarkCounter = 0;
     let firstChunkSent = false;
     for (let i = 0; i < bytes.length; i += StreamHandler.PREWARM_CHUNK_BYTES) {
       if (!this.isSpeaking) break; // barge-in mid-buffer — stop now

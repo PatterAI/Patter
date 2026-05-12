@@ -2,6 +2,26 @@
 
 ## 0.6.1 (2026-05-12)
 
+### Fixed — firstMessage mark counter could persist stale numbering across re-used handler instances (Python + TypeScript parity)
+
+`PipelineStreamHandler._first_message_mark_counter` (Py) and
+`StreamHandler.firstMessageMarkCounter` (TS) were never reset between
+turns or calls. With handler re-use, the counter incremented
+monotonically — a paced send for the second turn issued
+`fm_<previous_count + 1>` while the carrier could still echo a stale
+`fm_<N>` from the previous turn, corrupting the FIFO matching in
+`on_mark` / `onMark`.
+
+Fix: reset the counter to 0 at the top of `_send_paced_first_message_bytes`
+(Py) / `sendPacedFirstMessageBytes` (TS) so every paced send begins a
+fresh `fm_1, fm_2, …` sequence. Also reset on cleanup
+(`PipelineStreamHandler.cleanup` Py, `handleStop` + `handleWsClose` TS)
+as a belt-and-braces against the cross-call boundary. Coverage:
+`libraries/python/tests/unit/test_first_message_pacing.py`
+(`TestFirstMessageMarkCounterReset`),
+`libraries/typescript/tests/unit/stream-handler.test.ts`
+(`firstMessage mark counter resets across sends + on cleanup`).
+
 ### Fixed — firstMessage pending mark waiters leaked on abnormal call end (Python + TypeScript parity)
 
 `PipelineStreamHandler._send_paced_first_message_bytes` (Py) and
