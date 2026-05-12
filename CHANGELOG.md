@@ -1,5 +1,36 @@
 ## Unreleased
 
+### Changed — Twilio telephony billing is now direction- and country-aware
+
+`calculateTelephonyCost` / `calculate_telephony_cost` accept new optional
+`direction`, `destCountry` / `dest_country`, `destType` / `dest_type`
+arguments. When threaded through by the carrier adapter, the
+`cost.telephony` figure on the call log and dashboard resolves from a
+per-country rate table (`TWILIO_PRICING_MATRIX`) instead of the flat
+$0.0085/min US-inbound-local rate. The legacy rate was correct for the
+99% case of an agent receiving calls on a US local number, but
+under-estimated outbound by 9-40x for international mobile destinations
+(US → IT mobile is $0.3473/min vs $0.0085/min, ~40x). New module:
+`libraries/typescript/src/services/telephony-pricing-matrix.ts` and
+`libraries/python/getpatter/services/telephony_pricing_matrix.py`. New
+helper `parseE164Country` / `parse_e164_country` performs longest-prefix
+lookup over the included tiny ISO map (no new dependencies). New setter
+`CallMetricsAccumulator.setTelephonyContext` /
+`CallMetricsAccumulator.set_telephony_context` lets the carrier handler
+populate the context once direction and remote number are known.
+
+Backward compatibility: omitting all new arguments keeps the legacy code
+path intact and bills at `pricing["twilio"]["price"]` exactly as before
+— no integration that didn't opt in changes its numbers.
+
+Source: Twilio public pricing pages
+(`https://www.twilio.com/en-us/voice/pricing/<iso2>`) as of 2026-05-12,
+US-account perspective. Operators with negotiated Twilio rates should
+override via
+`new Patter({ pricing: { twilio_outbound_matrix: {...} } })` /
+`Patter(pricing={"twilio_outbound_matrix": {...}})` (matrix shape:
+`Record<iso2, { inbound?, outbound: { landline, mobile, tollfree? } }>`).
+
 ## 0.6.1 (2026-05-12)
 
 ### Changed — `StreamHandler` adopt-capability check now uses duck typing

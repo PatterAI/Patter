@@ -644,21 +644,57 @@ def calculate_llm_cost(
 
 
 def calculate_telephony_cost(
-    provider: str, duration_seconds: float, pricing: dict
+    provider: str,
+    duration_seconds: float,
+    pricing: dict,
+    *,
+    direction: str | None = None,
+    dest_country: str | None = None,
+    dest_type: str | None = None,
 ) -> float:
     """Calculate telephony cost from call duration.
 
-    Twilio bills in whole-minute increments (any partial minute rounded up
-    per twilio.com/help/223132307). Telnyx bills per-second. Detection is
-    by provider name.
+    Twilio bills in whole-minute increments (any partial minute rounded
+    up per twilio.com/help/223132307). Telnyx bills per-second. Detection
+    is by provider name.
+
+    When ``direction`` and ``dest_country`` are supplied for the
+    ``"twilio"`` provider, the rate resolves from the per-country
+    :data:`~getpatter.services.telephony_pricing_matrix.TWILIO_PRICING_MATRIX`
+    instead of the flat ``pricing["twilio"]["price"]`` default. Operators
+    can override the entire matrix per call by setting
+    ``pricing["twilio_outbound_matrix"]`` to a free-form dict matching
+    the shape of ``TWILIO_PRICING_MATRIX``.
+
+    ``dest_type`` defaults to ``"mobile"`` when omitted: international
+    mobile rates are universally higher than landline, and under-billing
+    is worse than over-billing on a margin-reporting dashboard.
+
+    Backward compatibility: omitting all three keyword arguments keeps
+    the legacy code path intact and bills at
+    ``pricing["twilio"]["price"]`` exactly as before.
     """
     import math
 
     config = pricing.get(provider, {})
     if config.get("unit") != "minute":
         return 0.0
+    per_minute = config.get("price", 0.0)
+    if provider == "twilio" and direction and dest_country:
+        # Lazy import to keep ``pricing.py``'s import graph shallow —
+        # the matrix module is dependency-free so the cost is
+        # negligible.
+        from getpatter.services.telephony_pricing_matrix import resolve_twilio_rate
+
+        override_matrix = pricing.get("twilio_outbound_matrix")
+        per_minute = resolve_twilio_rate(
+            direction,  # type: ignore[arg-type]
+            dest_country,
+            dest_type or "mobile",  # type: ignore[arg-type]
+            override_matrix,
+        )
     if provider == "twilio":
         minutes = math.ceil(duration_seconds / 60.0)
     else:
         minutes = duration_seconds / 60.0
-    return minutes * config.get("price", 0.0)
+    return minutes * per_minute

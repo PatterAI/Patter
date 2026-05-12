@@ -231,6 +231,155 @@ describe('calculateTelephonyCost', () => {
   });
 });
 
+describe('calculateTelephonyCost — direction- and country-aware Twilio matrix (0.6.1)', () => {
+  // Source: Twilio public pricing pages, verified 2026-05-12.
+  // Backward compatibility: omitting any of direction / destCountry
+  // falls back to the legacy flat ``pricing.twilio.price`` rate.
+
+  it('omitting context keeps the legacy $0.0085/min flat rate', () => {
+    const pricing = mergePricing();
+    // 60s rounded to 1 min * $0.0085 = $0.0085
+    const cost = calculateTelephonyCost('twilio', 60, pricing);
+    expect(cost).toBeCloseTo(0.0085, 6);
+  });
+
+  it('US → US mobile bills outbound $0.014/min (not inbound default)', () => {
+    const pricing = mergePricing();
+    const cost = calculateTelephonyCost('twilio', 60, pricing, {
+      direction: 'outbound',
+      destCountry: 'US',
+      destType: 'mobile',
+    });
+    expect(cost).toBeCloseTo(0.014, 6);
+  });
+
+  it('US → IT mobile bills $0.3473/min — ~40x the legacy default', () => {
+    // This was the bug class flagged on 0.6.1 audit: outbound
+    // international mobile costs under-estimated by 1-2 orders of magnitude.
+    const pricing = mergePricing();
+    const cost = calculateTelephonyCost('twilio', 120, pricing, {
+      direction: 'outbound',
+      destCountry: 'IT',
+      destType: 'mobile',
+    });
+    // 2 min * $0.3473 = $0.6946
+    expect(cost).toBeCloseTo(0.6946, 4);
+  });
+
+  it('US → GB landline bills $0.0158/min', () => {
+    const pricing = mergePricing();
+    const cost = calculateTelephonyCost('twilio', 60, pricing, {
+      direction: 'outbound',
+      destCountry: 'GB',
+      destType: 'landline',
+    });
+    expect(cost).toBeCloseTo(0.0158, 6);
+  });
+
+  it('omitting destType defaults to mobile (conservative)', () => {
+    const pricing = mergePricing();
+    const cost = calculateTelephonyCost('twilio', 60, pricing, {
+      direction: 'outbound',
+      destCountry: 'DE',
+    });
+    // DE mobile = $0.042/min, landline = $0.021/min
+    expect(cost).toBeCloseTo(0.042, 6);
+  });
+
+  it('unknown country falls back to $0.0085/min default', () => {
+    const pricing = mergePricing();
+    const cost = calculateTelephonyCost('twilio', 60, pricing, {
+      direction: 'outbound',
+      destCountry: 'ZZ',
+    });
+    expect(cost).toBeCloseTo(0.0085, 6);
+  });
+
+  it('inbound US local matches legacy $0.0085/min', () => {
+    const pricing = mergePricing();
+    const cost = calculateTelephonyCost('twilio', 60, pricing, {
+      direction: 'inbound',
+      destCountry: 'US',
+      destType: 'landline',
+    });
+    expect(cost).toBeCloseTo(0.0085, 6);
+  });
+
+  it('inbound US toll-free bills $0.022/min (2.6x local)', () => {
+    const pricing = mergePricing();
+    const cost = calculateTelephonyCost('twilio', 60, pricing, {
+      direction: 'inbound',
+      destCountry: 'US',
+      destType: 'tollfree',
+    });
+    expect(cost).toBeCloseTo(0.022, 6);
+  });
+
+  it('user-supplied twilio_outbound_matrix override wins over defaults', () => {
+    const pricing = mergePricing({
+      twilio_outbound_matrix: {
+        IT: { outbound: { landline: 0.005, mobile: 0.01 } },
+      },
+    } as unknown as Parameters<typeof mergePricing>[0]);
+    const cost = calculateTelephonyCost('twilio', 60, pricing, {
+      direction: 'outbound',
+      destCountry: 'IT',
+      destType: 'mobile',
+    });
+    expect(cost).toBeCloseTo(0.01, 6);
+  });
+
+  it('partial minute still rounds up per Twilio billing rules', () => {
+    const pricing = mergePricing();
+    // 30s = 1 billable minute at $0.3473/min
+    const cost = calculateTelephonyCost('twilio', 30, pricing, {
+      direction: 'outbound',
+      destCountry: 'IT',
+      destType: 'mobile',
+    });
+    expect(cost).toBeCloseTo(0.3473, 4);
+  });
+});
+
+describe('parseE164Country — E.164 → ISO-2 lookup', () => {
+  it('+1 maps to US', async () => {
+    const { parseE164Country } = await import('../src/services/telephony-pricing-matrix');
+    expect(parseE164Country('+14155551234')).toBe('US');
+  });
+
+  it('+39 maps to IT', async () => {
+    const { parseE164Country } = await import('../src/services/telephony-pricing-matrix');
+    expect(parseE164Country('+393331234567')).toBe('IT');
+  });
+
+  it('+44 maps to GB', async () => {
+    const { parseE164Country } = await import('../src/services/telephony-pricing-matrix');
+    expect(parseE164Country('+447700900123')).toBe('GB');
+  });
+
+  it('+351 (Portugal) wins longest-prefix match', async () => {
+    const { parseE164Country } = await import('../src/services/telephony-pricing-matrix');
+    expect(parseE164Country('+351912345678')).toBe('PT');
+  });
+
+  it('strips non-digit characters before lookup', async () => {
+    const { parseE164Country } = await import('../src/services/telephony-pricing-matrix');
+    expect(parseE164Country('+39 (033) 123-4567')).toBe('IT');
+  });
+
+  it('unknown country code returns null', async () => {
+    const { parseE164Country } = await import('../src/services/telephony-pricing-matrix');
+    expect(parseE164Country('+999123')).toBeNull();
+  });
+
+  it('empty / null / undefined returns null', async () => {
+    const { parseE164Country } = await import('../src/services/telephony-pricing-matrix');
+    expect(parseE164Country('')).toBeNull();
+    expect(parseE164Country(null)).toBeNull();
+    expect(parseE164Country(undefined)).toBeNull();
+  });
+});
+
 describe('per-model rates under openai_realtime.models', () => {
   it('exposes gpt-realtime, gpt-realtime-2, mini, and 4o-preview', () => {
     const models = DEFAULT_PRICING.openai_realtime.models!;

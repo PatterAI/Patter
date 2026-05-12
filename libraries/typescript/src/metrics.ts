@@ -14,6 +14,7 @@ import {
   mergePricing,
   type ProviderPricing,
 } from './pricing';
+import { parseE164Country } from './services/telephony-pricing-matrix';
 import type { EventBus } from './observability/event-bus';
 import type {
   EOUMetrics,
@@ -256,6 +257,16 @@ export class CallMetricsAccumulator {
   private _sttBytesPerSample = 2;
   private _actualTelephonyCost: number | null = null;
   private _actualSttCost: number | null = null;
+  /**
+   * Direction-aware telephony billing context. Populated by the telephony
+   * adapter (Twilio / Telnyx handler) once the call's direction and remote
+   * number are known. When unset, the legacy flat ``pricing.twilio.price``
+   * rate is used so existing integrations bill identically to before
+   * 0.6.1's direction-aware matrix shipped.
+   */
+  private _telephonyDirection: 'inbound' | 'outbound' | null = null;
+  private _telephonyDestCountry: string | null = null;
+  private _telephonyDestType: 'landline' | 'mobile' | 'tollfree' | null = null;
   // Fix 10: accumulated LLM token cost for non-Realtime pipeline mode.
   private _totalLlmCost = 0;
   // Last LLM model identifier from a recordLlmUsage call — emitted on
@@ -775,6 +786,40 @@ export class CallMetricsAccumulator {
     this._actualTelephonyCost = cost;
   }
 
+  /**
+   * Set direction-aware billing context for the telephony estimate.
+   *
+   * Called by the Twilio / Telnyx adapter once direction and the remote
+   * E.164 number are known. ``destNumber`` is parsed into an ISO-2 country
+   * via :func:`parseE164Country` — operators that pre-compute the country
+   * can pass ``destCountry`` directly. Both paths short-circuit when the
+   * country is unknown and the legacy flat rate kicks in transparently.
+   *
+   * All arguments are optional / nullable so adapters can call this in a
+   * single pass with whatever subset of metadata they have. Re-calling
+   * with a new value overrides the previous context for the rest of the
+   * call.
+   */
+  setTelephonyContext(opts: {
+    direction?: 'inbound' | 'outbound' | null;
+    destNumber?: string | null;
+    destCountry?: string | null;
+    destType?: 'landline' | 'mobile' | 'tollfree' | null;
+  }): void {
+    if (opts.direction !== undefined && opts.direction !== null) {
+      this._telephonyDirection = opts.direction;
+    }
+    if (opts.destCountry !== undefined && opts.destCountry !== null) {
+      this._telephonyDestCountry = opts.destCountry.toUpperCase();
+    } else if (opts.destNumber) {
+      const parsed = parseE164Country(opts.destNumber);
+      if (parsed) this._telephonyDestCountry = parsed;
+    }
+    if (opts.destType !== undefined && opts.destType !== null) {
+      this._telephonyDestType = opts.destType;
+    }
+  }
+
   /** Override the provider-billed STT cost when an exact figure is available. */
   setActualSttCost(cost: number): void {
     this._actualSttCost = cost;
@@ -1063,7 +1108,17 @@ export class CallMetricsAccumulator {
     const telephony =
       this._actualTelephonyCost !== null
         ? this._actualTelephonyCost
-        : calculateTelephonyCost(this.telephonyProvider, durationSeconds, this._pricing);
+        : calculateTelephonyCost(this.telephonyProvider, durationSeconds, this._pricing, {
+            ...(this._telephonyDirection !== null
+              ? { direction: this._telephonyDirection }
+              : {}),
+            ...(this._telephonyDestCountry !== null
+              ? { destCountry: this._telephonyDestCountry }
+              : {}),
+            ...(this._telephonyDestType !== null
+              ? { destType: this._telephonyDestType }
+              : {}),
+          });
 
     const total = stt + tts + llm + telephony;
 

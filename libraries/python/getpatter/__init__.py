@@ -258,6 +258,13 @@ from getpatter.pricing import (
     calculate_tts_cost,
     merge_pricing,
 )
+from getpatter.services.telephony_pricing_matrix import (
+    COUNTRY_CODE_TO_ISO2,
+    TWILIO_DEFAULT_FALLBACK_RATE,
+    TWILIO_PRICING_MATRIX,
+    parse_e164_country,
+    resolve_twilio_rate,
+)
 
 # Per-call metrics accumulator (TypeScript: ``CallMetricsAccumulator``).
 from getpatter.services.metrics import CallMetricsAccumulator
@@ -504,6 +511,12 @@ __all__ = [
     "calculate_tts_cost",
     "calculate_realtime_cost",
     "calculate_telephony_cost",
+    # Telephony pricing matrix (direction- and country-aware billing).
+    "TWILIO_PRICING_MATRIX",
+    "TWILIO_DEFAULT_FALLBACK_RATE",
+    "COUNTRY_CODE_TO_ISO2",
+    "parse_e164_country",
+    "resolve_twilio_rate",
     # Per-call metrics.
     "CallMetricsAccumulator",
     # Observability extras.

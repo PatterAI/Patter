@@ -665,22 +665,76 @@ export function calculateLlmCost(
   return Math.max(0, cost);
 }
 
+import {
+  resolveTwilioRate as _resolveTwilioRate,
+  type CountryPricing as _CountryPricing,
+} from './services/telephony-pricing-matrix';
+
+/**
+ * Optional context for direction- and country-aware telephony billing.
+ *
+ * When provided alongside ``calculateTelephonyCost``, the call falls into
+ * the per-country rate table from
+ * :module:`services/telephony-pricing-matrix` instead of the flat default
+ * stored under ``pricing.twilio.price``. All fields are optional — if any
+ * are missing the call bills at the legacy flat rate, preserving exact
+ * backward compatibility for callers that don't thread carrier metadata
+ * through.
+ */
+export interface TelephonyBillingContext {
+  /** ``"inbound"`` (agent received) or ``"outbound"`` (agent placed). */
+  direction?: 'inbound' | 'outbound';
+  /** ISO 3166-1 alpha-2 country code (``"US"``, ``"IT"``, ``"GB"``…). */
+  destCountry?: string | null;
+  /**
+   * Line-type bucket. Defaults to ``"mobile"`` — the conservative choice
+   * because mobile rates exceed landline rates everywhere except a few
+   * Twilio-bundled markets, and under-billing on a margin dashboard is
+   * worse than over-billing.
+   */
+  destType?: 'landline' | 'mobile' | 'tollfree';
+}
+
 /**
  * Calculate telephony cost from call duration.
  *
  * Twilio bills in whole-minute increments (any partial minute is rounded up
  * to the next full minute per twilio.com/help/223132307). Telnyx bills
  * per-second. We detect Twilio by provider name and apply the round-up.
+ *
+ * When ``context`` is supplied for the ``"twilio"`` provider, the rate
+ * resolves from the per-country
+ * :data:`~services/telephony-pricing-matrix.TWILIO_PRICING_MATRIX` instead
+ * of the flat ``pricing.twilio.price`` default. Operators can override the
+ * entire matrix per call by setting
+ * ``pricing.twilio_outbound_matrix`` to a free-form record matching
+ * :data:`~services/telephony-pricing-matrix.CountryPricing`.
+ *
+ * Backward compatibility: omitting ``context`` keeps the legacy code path
+ * intact and bills at ``pricing.twilio.price`` exactly as before.
  */
 export function calculateTelephonyCost(
   provider: string,
   durationSeconds: number,
   pricing: Record<string, ProviderPricing>,
+  context?: TelephonyBillingContext,
 ): number {
   const config = pricing[provider];
   if (!config || config.unit !== 'minute') return 0;
+  let perMinute = config.price ?? 0;
+  if (provider === 'twilio' && context && context.direction && context.destCountry) {
+    const overrideRaw = (pricing as Record<string, unknown>).twilio_outbound_matrix as
+      | Readonly<Record<string, _CountryPricing>>
+      | undefined;
+    perMinute = _resolveTwilioRate(
+      context.direction,
+      context.destCountry,
+      context.destType ?? 'mobile',
+      overrideRaw,
+    );
+  }
   const minutes = provider === 'twilio'
     ? Math.ceil(durationSeconds / 60)
     : durationSeconds / 60;
-  return minutes * (config.price ?? 0);
+  return minutes * perMinute;
 }

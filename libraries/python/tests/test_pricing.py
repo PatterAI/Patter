@@ -258,6 +258,199 @@ class TestCalculateTelephonyCost:
         assert cost == 0.0
 
 
+class TestTwilioDirectionCountryAware:
+    """Direction- and country-aware Twilio billing (0.6.1).
+
+    Source: Twilio public pricing pages, verified 2026-05-12. Backward
+    compatibility: omitting any of ``direction`` / ``dest_country``
+    falls back to the legacy flat ``pricing["twilio"]["price"]`` rate.
+    """
+
+    def test_no_context_keeps_legacy_flat_rate(self):
+        """Existing callers that don't pass context bill the legacy $0.0085/min."""
+        pricing = merge_pricing(None)
+        cost = calculate_telephony_cost("twilio", 60.0, pricing)
+        # 60s rounded to 1 min * $0.0085 = $0.0085
+        assert abs(cost - 0.0085) < 1e-6
+
+    def test_outbound_us_to_us_mobile(self):
+        """US → US mobile bills outbound rate $0.014/min — not inbound default."""
+        pricing = merge_pricing(None)
+        cost = calculate_telephony_cost(
+            "twilio",
+            60.0,
+            pricing,
+            direction="outbound",
+            dest_country="US",
+            dest_type="mobile",
+        )
+        assert abs(cost - 0.014) < 1e-6
+
+    def test_outbound_us_to_italy_mobile(self):
+        """US → IT mobile bills at $0.3473/min — ~40x the legacy default.
+
+        This was the bug class flagged on 0.6.1 audit: outbound
+        international mobile costs were under-estimated by 1-2 orders
+        of magnitude on the dashboard.
+        """
+        pricing = merge_pricing(None)
+        cost = calculate_telephony_cost(
+            "twilio",
+            120.0,
+            pricing,
+            direction="outbound",
+            dest_country="IT",
+            dest_type="mobile",
+        )
+        # 2 min * $0.3473 = $0.6946
+        assert abs(cost - 0.6946) < 1e-4
+
+    def test_outbound_us_to_gb_landline(self):
+        """US → GB landline bills $0.0158/min."""
+        pricing = merge_pricing(None)
+        cost = calculate_telephony_cost(
+            "twilio",
+            60.0,
+            pricing,
+            direction="outbound",
+            dest_country="GB",
+            dest_type="landline",
+        )
+        assert abs(cost - 0.0158) < 1e-6
+
+    def test_outbound_default_dest_type_is_mobile(self):
+        """Omitting ``dest_type`` falls back to mobile (conservative)."""
+        pricing = merge_pricing(None)
+        cost = calculate_telephony_cost(
+            "twilio",
+            60.0,
+            pricing,
+            direction="outbound",
+            dest_country="DE",
+        )
+        # DE mobile = $0.042/min, landline = $0.021/min
+        assert abs(cost - 0.042) < 1e-6
+
+    def test_unknown_country_falls_back_to_default(self):
+        """Unknown destination country bills at $0.0085/min fallback."""
+        pricing = merge_pricing(None)
+        cost = calculate_telephony_cost(
+            "twilio",
+            60.0,
+            pricing,
+            direction="outbound",
+            dest_country="ZZ",  # not in matrix
+        )
+        assert abs(cost - 0.0085) < 1e-6
+
+    def test_inbound_us_local_matches_default(self):
+        """Inbound to US local bills $0.0085/min — same as legacy default."""
+        pricing = merge_pricing(None)
+        cost = calculate_telephony_cost(
+            "twilio",
+            60.0,
+            pricing,
+            direction="inbound",
+            dest_country="US",
+            dest_type="landline",
+        )
+        assert abs(cost - 0.0085) < 1e-6
+
+    def test_inbound_us_tollfree_billed_higher(self):
+        """Inbound to US toll-free bills $0.022/min — 2.6x local rate."""
+        pricing = merge_pricing(None)
+        cost = calculate_telephony_cost(
+            "twilio",
+            60.0,
+            pricing,
+            direction="inbound",
+            dest_country="US",
+            dest_type="tollfree",
+        )
+        assert abs(cost - 0.022) < 1e-6
+
+    def test_user_override_matrix_wins(self):
+        """Operator-supplied ``twilio_outbound_matrix`` overrides defaults.
+
+        Lets operators with negotiated Twilio rates correct billing on
+        the dashboard without forking the SDK.
+        """
+        pricing = merge_pricing(
+            {
+                "twilio_outbound_matrix": {
+                    "IT": {
+                        "outbound": {"landline": 0.005, "mobile": 0.010},
+                    }
+                }
+            }
+        )
+        cost = calculate_telephony_cost(
+            "twilio",
+            60.0,
+            pricing,
+            direction="outbound",
+            dest_country="IT",
+            dest_type="mobile",
+        )
+        assert abs(cost - 0.010) < 1e-6
+
+    def test_partial_minute_still_rounded_up(self):
+        """Twilio per-minute billing rounds partial minutes up (preserved)."""
+        pricing = merge_pricing(None)
+        # 30s = 1 billable minute at $0.3473/min
+        cost = calculate_telephony_cost(
+            "twilio",
+            30.0,
+            pricing,
+            direction="outbound",
+            dest_country="IT",
+            dest_type="mobile",
+        )
+        assert abs(cost - 0.3473) < 1e-6
+
+
+class TestParseE164Country:
+    """E.164 → ISO-2 country code lookup with longest-prefix match."""
+
+    def test_us_plus_one(self):
+        from getpatter.services.telephony_pricing_matrix import parse_e164_country
+
+        assert parse_e164_country("+14155551234") == "US"
+
+    def test_italy_plus_39(self):
+        from getpatter.services.telephony_pricing_matrix import parse_e164_country
+
+        assert parse_e164_country("+393331234567") == "IT"
+
+    def test_uk_plus_44(self):
+        from getpatter.services.telephony_pricing_matrix import parse_e164_country
+
+        assert parse_e164_country("+447700900123") == "GB"
+
+    def test_portugal_three_digit_prefix(self):
+        from getpatter.services.telephony_pricing_matrix import parse_e164_country
+
+        # +351 must win over +35 (which doesn't exist).
+        assert parse_e164_country("+351912345678") == "PT"
+
+    def test_strips_non_digits(self):
+        from getpatter.services.telephony_pricing_matrix import parse_e164_country
+
+        assert parse_e164_country("+39 (033) 123-4567") == "IT"
+
+    def test_unknown_returns_none(self):
+        from getpatter.services.telephony_pricing_matrix import parse_e164_country
+
+        # +999 is not assigned.
+        assert parse_e164_country("+999123") is None
+
+    def test_empty_returns_none(self):
+        from getpatter.services.telephony_pricing_matrix import parse_e164_country
+
+        assert parse_e164_country("") is None
+        assert parse_e164_country(None) is None
+
+
 class TestRealtime2Pricing:
     """Per-model rates for ``gpt-realtime-2`` live under ``openai_realtime.models``."""
 

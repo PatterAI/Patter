@@ -56,7 +56,21 @@ export {
 } from "./providers";
 export type { RealtimeConfig } from "./providers";
 export { DEFAULT_PRICING, mergePricing, calculateSttCost, calculateTtsCost, calculateRealtimeCost, calculateTelephonyCost } from "./pricing";
-export type { ProviderPricing } from "./pricing";
+export type { ProviderPricing, TelephonyBillingContext } from "./pricing";
+export {
+  TWILIO_PRICING_MATRIX,
+  TWILIO_DEFAULT_FALLBACK_RATE,
+  COUNTRY_CODE_TO_ISO2,
+  parseE164Country,
+  resolveTwilioRate,
+} from "./services/telephony-pricing-matrix";
+export type {
+  CallDirection,
+  DestLineType,
+  CountryPricing,
+  OutboundRates,
+  InboundRates,
+} from "./services/telephony-pricing-matrix";
 export { CallMetricsAccumulator } from "./metrics";
 export type { LatencyBreakdown, CostBreakdown, TurnMetrics, CallMetrics, CallControl } from "./metrics";
 export type { LocalConfig } from "./server";

@@ -105,6 +105,15 @@ class CallMetricsAccumulator:
         # Actual provider costs (from post-call API queries)
         self._actual_telephony_cost: float | None = None
         self._actual_stt_cost: float | None = None
+        # Direction-aware telephony billing context. Populated by the
+        # telephony adapter (Twilio / Telnyx handler) once the call's
+        # direction and remote number are known. When unset, the legacy
+        # flat ``pricing["twilio"]["price"]`` rate is used so existing
+        # integrations bill identically to before 0.6.1's
+        # direction-aware matrix shipped.
+        self._telephony_direction: str | None = None
+        self._telephony_dest_country: str | None = None
+        self._telephony_dest_type: str | None = None
         # LLM token usage accumulated across all turns (pipeline mode)
         self._llm_total_input_tokens: int = 0
         self._llm_total_output_tokens: int = 0
@@ -647,6 +656,41 @@ class CallMetricsAccumulator:
         """
         self._actual_telephony_cost = cost
 
+    def set_telephony_context(
+        self,
+        *,
+        direction: str | None = None,
+        dest_number: str | None = None,
+        dest_country: str | None = None,
+        dest_type: str | None = None,
+    ) -> None:
+        """Set direction-aware billing context for the telephony estimate.
+
+        Called by the Twilio / Telnyx adapter once direction and the
+        remote E.164 number are known. ``dest_number`` is parsed into an
+        ISO-2 country via :func:`parse_e164_country` — operators that
+        pre-compute the country can pass ``dest_country`` directly. Both
+        paths short-circuit when the country is unknown and the legacy
+        flat rate kicks in transparently.
+
+        All arguments are optional / nullable so adapters can call this
+        in a single pass with whatever subset of metadata they have.
+        Re-calling with a new value overrides the previous context for
+        the rest of the call.
+        """
+        if direction is not None:
+            self._telephony_direction = direction
+        if dest_country is not None:
+            self._telephony_dest_country = dest_country.upper()
+        elif dest_number:
+            from getpatter.services.telephony_pricing_matrix import parse_e164_country
+
+            parsed = parse_e164_country(dest_number)
+            if parsed:
+                self._telephony_dest_country = parsed
+        if dest_type is not None:
+            self._telephony_dest_type = dest_type
+
     def set_actual_stt_cost(self, cost: float) -> None:
         """Set the actual STT cost from the provider API (post-call).
 
@@ -943,7 +987,12 @@ class CallMetricsAccumulator:
             telephony_cost = self._actual_telephony_cost
         else:
             telephony_cost = calculate_telephony_cost(
-                self.telephony_provider, duration_seconds, self._pricing
+                self.telephony_provider,
+                duration_seconds,
+                self._pricing,
+                direction=self._telephony_direction,
+                dest_country=self._telephony_dest_country,
+                dest_type=self._telephony_dest_type,
             )
 
         total = stt_cost + tts_cost + llm_cost + telephony_cost
