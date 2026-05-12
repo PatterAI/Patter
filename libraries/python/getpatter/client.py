@@ -880,12 +880,26 @@ class Patter:
         ``asyncio.gather(..., return_exceptions=True)`` so a slow or
         failing endpoint cannot block the others. Providers without
         ``open_parked_connection`` contribute nothing.
+
+        For ``openai_realtime`` mode the Realtime adapter is server-side
+        ephemeral, so a transient adapter is built from the resolved
+        Agent + the configured OpenAI key here and its
+        ``open_parked_connection`` opens a fully primed
+        ``session.updated`` WS that ``OpenAIRealtimeStreamHandler``
+        adopts at ``start`` time instead of paying the
+        ``session.created`` + ``session.update`` round-trip again.
         """
         stt = getattr(agent, "stt", None)
         tts = getattr(agent, "tts", None)
         stt_open = getattr(stt, "open_parked_connection", None) if stt else None
         tts_open = getattr(tts, "open_parked_connection", None) if tts else None
-        if stt_open is None and tts_open is None:
+        realtime_adapter = self._build_realtime_warmup_adapter(agent)
+        realtime_open = (
+            getattr(realtime_adapter, "open_parked_connection", None)
+            if realtime_adapter is not None
+            else None
+        )
+        if stt_open is None and tts_open is None and realtime_open is None:
             return
 
         slot: dict[str, Any] = {}
@@ -928,8 +942,27 @@ class Patter:
             except Exception as exc:  # noqa: BLE001 - best-effort
                 logger.debug("Park TTS failed for %s: %s", call_id, exc)
 
+        async def _park_realtime() -> None:
+            if realtime_open is None:
+                return
+            try:
+                handle = await realtime_open()
+                if self._prewarmed_connections.get(call_id) is not slot:
+                    await _safe_close_handle(handle)
+                    return
+                slot["openai_realtime"] = handle
+                logger.info(
+                    "[PREWARM] callId=%s provider=openai_realtime ms=%d",
+                    call_id,
+                    int((time.monotonic() - started_at) * 1000),
+                )
+            except Exception as exc:  # noqa: BLE001 - best-effort
+                logger.debug("Park Realtime failed for %s: %s", call_id, exc)
+
         async def _run_all() -> None:
-            await asyncio.gather(_park_stt(), _park_tts(), return_exceptions=True)
+            await asyncio.gather(
+                _park_stt(), _park_tts(), _park_realtime(), return_exceptions=True
+            )
 
         task = asyncio.create_task(_run_all())
         self._prewarm_tasks.add(task)

@@ -6,6 +6,10 @@
 
 The `warmup()` method on `OpenAIRealtimeAdapter` (defined in both SDKs) was unreachable from `Patter.call()` — the provider warmup framework only iterated `agent.stt` / `agent.tts` / `agent.llm`, but OpenAI Realtime is an all-in-one provider that's server-instantiated at `StreamHandler.start()` time. `_spawn_provider_warmup` (Py) / `spawnProviderWarmup` (TS) now builds a transient `OpenAIRealtimeAdapter` from the resolved Agent + configured `openai_key` when `agent.provider == "openai_realtime"` and calls `warmup()` in parallel with the carrier `initiate_call`. Saves 150–400 ms of TLS + WebSocket handshake + `session.created` round-trip on the first turn. Files: `libraries/python/getpatter/client.py`, `libraries/typescript/src/client.ts`.
 
+### Added — Parked OpenAI Realtime session adoption (sustained first-turn latency win across consecutive calls)
+
+`Patter._park_provider_connections` (Py) / `Patter.parkProviderConnections` (TS) now also park a fully primed (`session.created` → `session.update` → `session.updated`) OpenAI Realtime WebSocket during the carrier ringing window when `agent.provider == "openai_realtime"`. `OpenAIRealtimeStreamHandler` (Py) and the realtime branch of `StreamHandler.initRealtimeAdapter` (TS) consult the parked slot on `start()` and call `adopt_websocket(...)` / `adoptWebSocket(...)` on the configured adapter instead of paying the cold `connect()` round-trip again — saving ~250–450 ms on the first-turn audio. Best-effort: a dead parked WS, missing OpenAI key, or `open_parked_connection` failure all fall through transparently to the cold connect path. Files: `libraries/python/getpatter/client.py`, `libraries/python/getpatter/stream_handler.py`, `libraries/python/getpatter/telephony/twilio.py`, `libraries/python/getpatter/telephony/telnyx.py`, `libraries/typescript/src/client.ts`, `libraries/typescript/src/stream-handler.ts`.
+
 ### Fixed — TypeScript `onMark` clobbered `lastConfirmedMark` with stale/unknown mark names (parity with Python)
 
 `StreamHandler.onMark` in `libraries/typescript/src/stream-handler.ts`

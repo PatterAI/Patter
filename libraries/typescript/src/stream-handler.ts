@@ -2450,14 +2450,57 @@ export class StreamHandler {
     const label = this.deps.bridge.label;
     this.adapter = this.deps.buildAIAdapter(resolvedPrompt);
 
-    try {
-      await this.adapter.connect();
-      getLogger().debug(`AI adapter connected (${label})`);
-    } catch (e) {
-      getLogger().error(`AI adapter connect FAILED (${label}):`, e);
-      // Hang up the telephony call so it doesn't stay connected billing
-      try { await this.deps.bridge.endCall(this.callId, this.ws); } catch { /* best effort */ }
-      return;
+    // Prewarm-handoff: try to adopt a pre-opened, already-
+    // ``session.updated`` Realtime WS parked during the carrier ringing
+    // window by ``Patter.parkProviderConnections``. Saves the cold
+    // ``new WebSocket`` + ``session.created`` + ``session.update``
+    // round-trip (~250-450 ms on first turn).
+    let parkedRealtime: import('ws').WebSocket | undefined;
+    if (this.adapter instanceof OpenAIRealtimeAdapter && this.deps.popPrewarmedConnections) {
+      try {
+        const slot = this.deps.popPrewarmedConnections(this.callId);
+        parkedRealtime = slot?.openaiRealtime;
+      } catch (err) {
+        getLogger().debug(
+          `popPrewarmedConnections raised for Realtime: ${String(err)}`,
+        );
+      }
+    }
+
+    let adopted = false;
+    if (parkedRealtime && this.adapter instanceof OpenAIRealtimeAdapter) {
+      const wsAlive = parkedRealtime.readyState === 1 /* OPEN */;
+      const adoptFn = (this.adapter as { adoptWebSocket?: (ws: import('ws').WebSocket) => void }).adoptWebSocket;
+      if (typeof adoptFn === 'function' && wsAlive) {
+        try {
+          adoptFn.call(this.adapter, parkedRealtime);
+          adopted = true;
+          getLogger().info(
+            `[CONNECT] callId=${this.callId} provider=openai_realtime source=adopted ms=0`,
+          );
+        } catch (err) {
+          getLogger().debug(
+            `Realtime adoptWebSocket failed: ${String(err)}; falling back to connect`,
+          );
+          try { parkedRealtime.close(); } catch { /* ignore */ }
+        }
+      } else {
+        try { parkedRealtime.close(); } catch { /* ignore */ }
+      }
+    }
+
+    if (!adopted) {
+      try {
+        await this.adapter.connect();
+        getLogger().debug(`AI adapter connected (${label})`);
+      } catch (e) {
+        getLogger().error(`AI adapter connect FAILED (${label}):`, e);
+        // Hang up the telephony call so it doesn't stay connected billing
+        try { await this.deps.bridge.endCall(this.callId, this.ws); } catch { /* best effort */ }
+        return;
+      }
+    } else {
+      getLogger().debug(`AI adapter adopted parked session (${label})`);
     }
 
     if (this.deps.agent.firstMessage) {

@@ -865,7 +865,18 @@ export class Patter {
     const tts = agent.tts as { openParkedConnection?: () => Promise<import('./providers/elevenlabs-ws-tts').ElevenLabsParkedWS> } | undefined;
     const sttOpen = typeof stt?.openParkedConnection === 'function' ? stt.openParkedConnection.bind(stt) : null;
     const ttsOpen = typeof tts?.openParkedConnection === 'function' ? tts.openParkedConnection.bind(tts) : null;
-    if (!sttOpen && !ttsOpen) return;
+    // For ``openai_realtime`` mode the adapter is server-side ephemeral —
+    // build a transient one here so its ``openParkedConnection`` opens a
+    // fully primed ``session.updated`` WS that
+    // ``OpenAIRealtimeStreamHandler`` adopts at ``start`` time instead of
+    // paying the ``session.created`` + ``session.update`` round-trip
+    // again.
+    const realtimeAdapter = this.buildRealtimeWarmupAdapter(agent);
+    const realtimeOpen =
+      realtimeAdapter !== null
+        ? realtimeAdapter.openParkedConnection.bind(realtimeAdapter)
+        : null;
+    if (!sttOpen && !ttsOpen && !realtimeOpen) return;
 
     const slot: ParkedProviderConnections = {};
     this.prewarmedConnections.set(callId, slot);
@@ -906,6 +917,23 @@ export class Patter {
           );
         } catch (err) {
           getLogger().debug(`Park TTS failed for ${callId}: ${String(err)}`);
+        }
+      })());
+    }
+    if (realtimeOpen) {
+      tasks.push((async () => {
+        try {
+          const ws = await realtimeOpen();
+          if (this.prewarmedConnections.get(callId) !== slot) {
+            try { ws.close(); } catch { /* ignore */ }
+            return;
+          }
+          slot.openaiRealtime = ws;
+          getLogger().info(
+            `[PREWARM] callId=${callId} provider=openai_realtime ms=${Date.now() - startedAt}`,
+          );
+        } catch (err) {
+          getLogger().debug(`Park Realtime failed for ${callId}: ${String(err)}`);
         }
       })());
     }
