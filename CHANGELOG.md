@@ -2,6 +2,22 @@
 
 ## 0.6.1 (2026-05-12)
 
+### Fixed — Dashboard SPA: live snapshot refresh dropped previously-visible calls when a new call started (#124)
+
+`mergeCallPreserving` in `dashboard-app/src/hooks/useDashboardData.ts`
+replaced the UI array with the server snapshot via `next.map(...)`. When
+a second call started back-to-back with the first, the SSE-triggered
+refresh could land before `/api/dashboard/calls` reflected the prior
+call (server publishes the SSE event ahead of the terminal write
+completing), and the prior call vanished from the SPA even though it
+was still in the server's ring buffer. The merge is now a true upsert:
+calls present in `prev` but absent from `next` are appended, so the
+prior row stays visible until the server snapshot stabilises. Pure
+merge helpers extracted to `dashboard-app/src/hooks/mergeCalls.ts` with
+unit coverage at `dashboard-app/src/hooks/mergeCalls.test.ts`; added a
+minimal Vitest setup to `dashboard-app` so the SPA can exercise the
+helper in isolation.
+
 ### Changed — Cerebras usage-chunk fallback: INFO-once + DEBUG per iteration (Python + TypeScript parity)
 
 The char/4 fallback billing path in `services/llm_loop.py` /
@@ -86,7 +102,6 @@ The convention is now uniform across both SDKs (locked in by tests):
 Negative deltas from clock skew or out-of-order timestamps are now clamped to `0` on both sides (the TypeScript side already did this; Python now does too).
 
 Files: `libraries/python/getpatter/services/metrics.py`, `libraries/python/getpatter/observability/metric_types.py` (docstring), `libraries/python/tests/test_metrics.py` (new `TestEOUMetricsEmission`), `libraries/typescript/tests/unit/metrics.test.ts` (new `emitEouMetrics field semantics` block).
-
 ### Fixed — Barge-in bug bundle: 6.8s latency outliers, double-talk dispatch, stale anchors, firstMessage uninterruptible (Python + TypeScript parity)
 
 Real PSTN test (round 10f, 11 turns with user-initiated interruptions) surfaced four correlated bugs in the barge-in pipeline that the previous strategy work in 0.6.1 did not cover. Investigation report (`/private/tmp/.../a6fae04df253294f2.output`) traced all four to anchor mismanagement around the interrupt boundary plus an over-aggressive VAD threshold.
