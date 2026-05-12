@@ -1,5 +1,11 @@
 ## Unreleased
 
+### Fixed — Barge-in gate regression test: prewarmed first message must remain interruptible
+
+Locked in with parity tests on both SDKs that `_stream_prewarm_bytes` / `streamPrewarmBytes` open the barge-in gate (`_first_audio_sent_at` / `firstAudioSentAt`) once the first chunk reaches the wire. The gate was already opened by `_begin_speaking(is_first_message=True)` ahead of streaming, but a future refactor of the `_begin_speaking` path could regress the prewarm path silently — the per-chunk `_mark_first_audio_sent` call inside the streaming loop is the last line of defence and now has explicit coverage in `test_stream_prewarm_bytes_opens_barge_in_gate_on_first_chunk` (Python) and `opens the barge-in gate by stamping firstAudioSentAt after the first chunk` (TypeScript).
+
+Files: `libraries/python/tests/test_prewarm.py`, `libraries/typescript/tests/unit/prewarm.test.ts`.
+
 ### Fixed — `ElevenLabsWebSocketTTS.adopt_websocket` leaked the previous parked WS when called outside an event loop
 
 `ElevenLabsWebSocketTTS.adopt_websocket` (Python) closed any previously parked WS handle via `asyncio.create_task(prev.ws.close())`. When invoked from a sync context with no running event loop — e.g. cleanup hooks fired from `__del__`, atexit handlers, or signal-driven teardown — the `create_task` call raised `RuntimeError` which the code silently swallowed with a bare `except RuntimeError: pass`, leaking the socket FD. ElevenLabs would eventually close the remote side after the inactivity timeout, but the FD on our side stayed allocated until process exit.

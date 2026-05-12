@@ -432,6 +432,78 @@ describe('[unit] streamPrewarmBytes — chunked send for cancel granularity (FIX
     // iteration could invoke sendAudio.
     expect(sendAudio.mock.calls.length).toBe(2);
   });
+
+  it('opens the barge-in gate by stamping firstAudioSentAt after the first chunk', async () => {
+    // Regression for the bug where a prewarmed first message would be
+    // un-interruptible because ``firstAudioSentAt`` stayed null for the
+    // entire prewarm playout window. Mirrors the parity test in the
+    // Python SDK (test_stream_prewarm_bytes_opens_barge_in_gate_on_first_chunk).
+    const { StreamHandler } = await import('../../src/stream-handler');
+    const { MetricsStore } = await import('../../src/dashboard/store');
+    const { RemoteMessageHandler } = await import('../../src/remote-message');
+    type WSWebSocket = import('ws').WebSocket;
+
+    const sendAudio = vi.fn();
+    const bridge = {
+      label: 'TestBridge',
+      telephonyProvider: 'twilio',
+      sendAudio,
+      sendMark: vi.fn(),
+      sendClear: vi.fn(),
+      transferCall: vi.fn().mockResolvedValue(undefined),
+      endCall: vi.fn().mockResolvedValue(undefined),
+      createStt: vi.fn().mockReturnValue(null),
+      queryTelephonyCost: vi.fn().mockResolvedValue(undefined),
+    };
+    const ws = {
+      send: vi.fn(),
+      close: vi.fn(),
+      on: vi.fn(),
+      once: vi.fn(),
+      readyState: 1,
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    } as unknown as WSWebSocket;
+    const deps = {
+      config: { openaiKey: 'test-oai-key' },
+      agent: { systemPrompt: 'Test', provider: 'pipeline' as const },
+      bridge,
+      metricsStore: new MetricsStore(),
+      pricing: null,
+      remoteHandler: new RemoteMessageHandler(),
+      recording: false,
+      buildAIAdapter: vi.fn(),
+      sanitizeVariables: vi.fn((raw: Record<string, unknown>) => {
+        const safe: Record<string, string> = {};
+        for (const [k, v] of Object.entries(raw)) safe[k] = String(v);
+        return safe;
+      }),
+      resolveVariables: vi.fn((tpl: string) => tpl),
+    };
+    const h = new StreamHandler(deps, ws, '+1', '+2');
+    interface Priv {
+      isSpeaking: boolean;
+      streamSid: string;
+      firstAudioSentAt: number | null;
+      streamPrewarmBytes: (bytes: Buffer) => Promise<boolean>;
+    }
+    const p = h as unknown as Priv;
+    p.isSpeaking = true;
+    p.streamSid = 'SM-gate-test';
+    // Critical: the gate starts CLOSED. The prewarm loop itself must
+    // open it — not an earlier ``beginSpeaking(isFirstMessage=true)``
+    // pre-stamp.
+    p.firstAudioSentAt = null;
+
+    // Two chunks worth — small enough to run fast, large enough to
+    // exercise the per-iteration markFirstAudioSent call.
+    const prewarmBytes = Buffer.alloc(2560, 1);
+    await p.streamPrewarmBytes(prewarmBytes);
+
+    expect(p.firstAudioSentAt).not.toBeNull();
+    expect(p.firstAudioSentAt!).toBeGreaterThan(0);
+  });
 });
 
 // ---------------------------------------------------------------------------
