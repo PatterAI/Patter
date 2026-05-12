@@ -6,6 +6,17 @@ import type { CallRecord } from '../lib/api';
 import { toUiCall, type Call } from '../lib/mappers';
 
 /**
+ * Hard cap on the number of calls retained in the SPA after a merge.
+ * Mirrors the server-side ``MetricsStore`` ring buffer default (500) so the
+ * UI cannot accumulate ``prev_only`` rows for calls the server has already
+ * evicted. Without this cap, ``mergeCallPreserving`` would grow the array
+ * indefinitely on long-lived sessions: every prior call still pinned by
+ * ``prev`` would be re-appended on every refresh even after the server has
+ * dropped it from the ring buffer.
+ */
+const MAX_UI_CALLS = 500;
+
+/**
  * Project the server's active + recent payloads into a single UI list with
  * stable ordering: active calls first (live status surfaces at the top),
  * then completed calls newest-first as the server returned them. Duplicate
@@ -78,5 +89,15 @@ export function mergeCallPreserving(prev: Call[], next: Call[]): Call[] {
   for (const pc of prev) {
     if (!nextIds.has(pc.id)) merged.push(pc);
   }
-  return merged;
+  // Sort by ``startedAtMs`` descending so the newest call always lands at
+  // the top, regardless of whether it came from the snapshot or from
+  // ``prev``. Without this, ``prev_only`` entries appended after the
+  // snapshot block kept ordering non-deterministic (live row first only
+  // when the snapshot already contained it). Calls without an
+  // ``startedAtMs`` (rare — synthetic terminal rows before the canonical
+  // write) sort to the end so they don't outrank a live call.
+  merged.sort((a, b) => (b.startedAtMs ?? 0) - (a.startedAtMs ?? 0));
+  // Cap to ``MAX_UI_CALLS`` so a long-lived session that has cycled
+  // through more than 500 calls cannot grow the UI array unbounded.
+  return merged.slice(0, MAX_UI_CALLS);
 }

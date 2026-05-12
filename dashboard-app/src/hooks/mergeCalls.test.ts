@@ -135,4 +135,40 @@ describe('mergeCallPreserving', () => {
     state = mergeCallPreserving(state, mergeCalls([record('two')], []));
     expect(state.map((c) => c.id).sort()).toEqual(['one', 'two']);
   });
+
+  it('caps the merged UI list at 500 entries (mirrors server ring buffer)', () => {
+    // 600 prev rows with distinct ids and ascending startedAtMs so the
+    // sort can stably order them newest-first. The cap drops the
+    // oldest 100.
+    const prev: Call[] = Array.from({ length: 600 }, (_, i) =>
+      makeCall(`prev-${i}`, { startedAtMs: 1000 + i }),
+    );
+    // One fresh call from the snapshot.
+    const next: Call[] = [makeCall('fresh', { startedAtMs: 2000 })];
+
+    const result = mergeCallPreserving(prev, next);
+    expect(result.length).toBe(500);
+    // The newest (``fresh`` at 2000) lands first.
+    expect(result[0].id).toBe('fresh');
+    // 600 prev + 1 fresh = 601 candidates → slice keeps the top 500.
+    // ``fresh`` (2000) plus prev-599 (1599) down to prev-101 (1101)
+    // survive; prev-100 (1100) and older are dropped.
+    const ids = new Set(result.map((c) => c.id));
+    expect(ids.has('prev-0')).toBe(false);
+    expect(ids.has('prev-100')).toBe(false);
+    // The newest ``prev`` rows survive.
+    expect(ids.has('prev-599')).toBe(true);
+    expect(ids.has('prev-101')).toBe(true);
+  });
+
+  it('sorts merged calls by startedAtMs descending — newer first', () => {
+    // ``prev`` holds an older call A; ``next`` adds a newer call B.
+    // Without the sort, B (a ``next`` entry) would lead and A (a
+    // ``prev_only`` entry) would land at the bottom regardless of its
+    // start time. With the sort, ordering is purely by startedAtMs.
+    const prev: Call[] = [makeCall('A', { startedAtMs: 1000 })];
+    const next: Call[] = [makeCall('B', { startedAtMs: 2000 })];
+    const result = mergeCallPreserving(prev, next);
+    expect(result.map((c) => c.id)).toEqual(['B', 'A']);
+  });
 });
