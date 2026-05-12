@@ -2235,8 +2235,21 @@ export class StreamHandler {
     // window by ``Patter.parkProviderConnections``. Saves the cold
     // ``new WebSocket`` + ``session.created`` + ``session.update``
     // round-trip (~250-450 ms on first turn).
+    //
+    // Adopt capability is detected by duck typing
+    // (``typeof adoptWebSocket === 'function'``) rather than
+    // ``instanceof OpenAIRealtimeAdapter``: pipeline-only users should
+    // not pay the cost of a hard provider import in the generic
+    // stream-handler hot path, and the duck check mirrors the Python
+    // handler's ``getattr(self._adapter, "adopt_websocket", None)``
+    // shape (parity with the provider-agnostic rule).
+    const adoptFn = (this.adapter as {
+      adoptWebSocket?: (ws: import('ws').WebSocket) => void;
+    }).adoptWebSocket;
+    const canAdopt = typeof adoptFn === 'function';
+
     let parkedRealtime: import('ws').WebSocket | undefined;
-    if (this.adapter instanceof OpenAIRealtimeAdapter && this.deps.popPrewarmedConnections) {
+    if (canAdopt && this.deps.popPrewarmedConnections) {
       try {
         const slot = this.deps.popPrewarmedConnections(this.callId);
         parkedRealtime = slot?.openaiRealtime;
@@ -2249,12 +2262,11 @@ export class StreamHandler {
 
     let adopted = false;
     let adoptFailed = false;
-    if (parkedRealtime && this.adapter instanceof OpenAIRealtimeAdapter) {
+    if (parkedRealtime && canAdopt) {
       const wsAlive = parkedRealtime.readyState === 1 /* OPEN */;
-      const adoptFn = (this.adapter as { adoptWebSocket?: (ws: import('ws').WebSocket) => void }).adoptWebSocket;
-      if (typeof adoptFn === 'function' && wsAlive) {
+      if (wsAlive) {
         try {
-          adoptFn.call(this.adapter, parkedRealtime);
+          adoptFn!.call(this.adapter, parkedRealtime);
           adopted = true;
           getLogger().info(
             `[CONNECT] callId=${this.callId} provider=openai_realtime source=adopted ms=0`,
