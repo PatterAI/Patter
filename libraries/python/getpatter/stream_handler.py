@@ -1902,6 +1902,17 @@ class PipelineStreamHandler(StreamHandler):
         # generic ``audio_*`` marks the Realtime path sends so the two paths
         # can coexist without name collisions.
         self._first_message_mark_counter: int = 0
+        # Per-call abort event for the firstMessage ``tts.synthesize`` loop.
+        # Set by ``_do_cancel_for_barge_in`` so a barge-in DURING the agent's
+        # first utterance (pipeline mode) breaks out of the async iterator
+        # immediately, runs the generator's ``finally`` (which closes the
+        # provider WS), and frees the dispatch path for the user's next
+        # turn. Without this, the ``async for`` was suspended on
+        # ``ws.recv()`` while ``_is_speaking`` had already flipped to False
+        # — leaving the TTS WS in flight until ``frame_timeout`` (30 s on
+        # ElevenLabs WS TTS) and the call silent for the user. Mirrors TS
+        # ``firstMessageAbort``.
+        self._first_message_abort: asyncio.Event | None = None
 
     async def start(self) -> None:
         """Initialize STT/TTS providers, hooks, and start the STT receive loop."""
@@ -2171,41 +2182,103 @@ class PipelineStreamHandler(StreamHandler):
                 except Exception as exc:  # noqa: BLE001 - best-effort
                     logger.debug("pop_prewarm_audio raised: %s", exc)
                     prewarm_bytes = None
+            # Arm a fresh abort event so a barge-in during the firstMessage
+            # synth path can break the async iterator immediately rather
+            # than hanging on the next ``__anext__`` until
+            # ``frame_timeout`` (30 s on ElevenLabs WS TTS). Combined
+            # with ``tts.cancel()`` (closes the provider WS) the loop
+            # exits within one event-loop tick.
+            self._first_message_abort = asyncio.Event()
+            fm_abort = self._first_message_abort
             try:
                 if prewarm_bytes:
                     if self.metrics is not None:
                         self.metrics.record_tts_first_byte()
                     first_chunk_sent = await self._stream_prewarm_bytes(prewarm_bytes)
                 else:
-                    async for audio_chunk in self._tts.synthesize(
-                        self.agent.first_message
-                    ):
-                        if not self._is_speaking:
-                            break  # barge-in or test-hangup
-                        if not first_chunk_sent:
-                            first_chunk_sent = True
-                            if self.metrics is not None:
-                                self.metrics.record_tts_first_byte()
-                        # BUG #128: route every TTS chunk through the paced
-                        # sender so we never push more than
-                        # ``_FIRST_MESSAGE_MARK_WINDOW`` chunks of audio
-                        # ahead of carrier playback. The previous burst-send
-                        # let Twilio's outbound buffer reach several
-                        # seconds — a barge-in's send_clear race-lost
-                        # against the queued media frames and the agent
-                        # kept talking on the user's earpiece for up to
-                        # ~2 s after the user spoke. The paced sender also
-                        # drives the AEC far-end tap and
-                        # ``_mark_first_audio_sent`` internally so this
-                        # path stays parity-clean with
-                        # ``_stream_prewarm_bytes``.
-                        sent = await self._send_paced_first_message_bytes(audio_chunk)
-                        if not sent:
-                            break
+                    # Use the manual async-iterator protocol so we can race
+                    # ``__anext__`` against the abort event. ``async for``
+                    # does not surface a hook to cancel a pending
+                    # ``__anext__`` from outside.
+                    agen = self._tts.synthesize(self.agent.first_message)
+                    aiter = agen.__aiter__()
+                    try:
+                        while True:
+                            if not self._is_speaking or fm_abort.is_set():
+                                break
+                            next_task = asyncio.ensure_future(aiter.__anext__())
+                            abort_task = asyncio.ensure_future(fm_abort.wait())
+                            done, pending = await asyncio.wait(
+                                {next_task, abort_task},
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                            if abort_task in done and next_task not in done:
+                                # Cancel the pending ``__anext__`` so it
+                                # stops blocking on ``ws.recv()``; the
+                                # ``aclose`` in finally runs the
+                                # generator's ``finally`` (closes WS).
+                                next_task.cancel()
+                                try:
+                                    await next_task
+                                except (
+                                    asyncio.CancelledError,
+                                    StopAsyncIteration,
+                                    Exception,  # noqa: BLE001 - best-effort drain
+                                ):
+                                    pass
+                                break
+                            # next_task settled — drain the still-pending
+                            # abort_task so we don't leak a future per
+                            # iteration.
+                            if abort_task in pending:
+                                abort_task.cancel()
+                                try:
+                                    await abort_task
+                                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                                    pass
+                            try:
+                                audio_chunk = next_task.result()
+                            except StopAsyncIteration:
+                                break
+                            if not self._is_speaking:
+                                break  # barge-in or test-hangup
+                            if not first_chunk_sent:
+                                first_chunk_sent = True
+                                if self.metrics is not None:
+                                    self.metrics.record_tts_first_byte()
+                            # BUG #128: route every TTS chunk through the paced
+                            # sender so we never push more than
+                            # ``_FIRST_MESSAGE_MARK_WINDOW`` chunks of audio
+                            # ahead of carrier playback. The previous burst-send
+                            # let Twilio's outbound buffer reach several
+                            # seconds — a barge-in's send_clear race-lost
+                            # against the queued media frames and the agent
+                            # kept talking on the user's earpiece for up to
+                            # ~2 s after the user spoke. The paced sender also
+                            # drives the AEC far-end tap and
+                            # ``_mark_first_audio_sent`` internally so this
+                            # path stays parity-clean with
+                            # ``_stream_prewarm_bytes``.
+                            sent = await self._send_paced_first_message_bytes(
+                                audio_chunk
+                            )
+                            if not sent:
+                                break
+                    finally:
+                        # Always run the generator's ``finally`` so the
+                        # provider WS closes promptly. Idempotent — an
+                        # already-finalised generator just no-ops.
+                        try:
+                            await agen.aclose()
+                        except Exception as exc:  # noqa: BLE001 - best-effort
+                            logger.debug("firstMessage tts.aclose raised: %s", exc)
             finally:
                 # Drop any partial int16 byte to prevent cross-turn corruption
                 # if the stream threw before a complete sample was delivered.
                 self.audio_sender.reset_pcm_carry()
+                # Clear the abort event handle so the next turn does not
+                # see an already-set sentinel.
+                self._first_message_abort = None
                 # Flip back to not-speaking with grace so the ring
                 # buffer accumulated during the intro is flushed and
                 # the next user utterance is recognised cleanly.
@@ -2783,6 +2856,30 @@ class PipelineStreamHandler(StreamHandler):
             cancel_event = getattr(self, "_llm_cancel_event", None)
             if cancel_event is not None:
                 cancel_event.set()
+            # Signal any in-flight firstMessage ``synthesize`` loop to abort
+            # immediately. The loop races ``__anext__`` with this event and,
+            # on set, calls ``aclose`` on the async generator so its
+            # ``finally`` runs and the provider WS is closed promptly.
+            fm_abort = getattr(self, "_first_message_abort", None)
+            if fm_abort is not None and not fm_abort.is_set():
+                fm_abort.set()
+            # Adapter-side teardown: WS-based TTS providers own a
+            # long-lived socket inside ``synthesize`` whose ``ws.recv()``
+            # wait will otherwise hang until ``frame_timeout`` (30 s).
+            # Calling ``cancel`` from here closes the socket so the
+            # generator unblocks within one event-loop tick. Best-effort
+            # — providers without a ``cancel`` method (HTTP streaming
+            # adapters) simply skip this.
+            tts = getattr(self, "_tts", None)
+            tts_cancel = getattr(tts, "cancel", None) if tts is not None else None
+            if callable(tts_cancel):
+                try:
+                    tts_cancel()
+                except Exception as exc:  # noqa: BLE001 - best-effort
+                    logger.debug(
+                        "tts.cancel during firstMessage barge-in raised: %s",
+                        exc,
+                    )
             try:
                 await self.audio_sender.send_clear()
             except Exception as exc:

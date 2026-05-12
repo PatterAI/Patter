@@ -2,6 +2,10 @@
 
 ## 0.6.1 (2026-05-12)
 
+### Fixed — Barge-in during firstMessage in pipeline mode now aborts the TTS synthesize stream and unblocks subsequent LLM turn dispatch
+
+When the user interrupted the agent during the firstMessage in pipeline mode (Deepgram STT + LLM + ElevenLabs WS TTS), `cancelSpeaking` / `_do_cancel_for_barge_in` flipped `isSpeaking` / `_is_speaking` to `false` but the `for await` / `async for` consuming `tts.synthesizeStream` / `tts.synthesize` stayed suspended on the next-frame wait (`ws.recv()` on the provider socket). The check at the top of the loop body never re-ran, the provider WS sat idle until `FRAME_TIMEOUT_MS` (30 s on ElevenLabs WS TTS), and the "speaking lock" was never released — so subsequent user transcripts were captured by Deepgram but the LLM dispatch path never fired and the call went silent. Fix: added `firstMessageAbort` (TS, `AbortController`) / `_first_message_abort` (Py, `asyncio.Event`) raced against the iterator's `next()` / `__anext__`, plus an optional `cancel()` hook on the TTS adapter that closes the in-flight WS (`activeSocket` / `_active_socket`) so the next-frame wait unblocks within one event-loop tick. The generator's `finally` then runs cleanly and the call resumes normally. Files: `libraries/typescript/src/stream-handler.ts`, `libraries/typescript/src/provider-factory.ts`, `libraries/typescript/src/providers/elevenlabs-ws-tts.ts`, `libraries/python/getpatter/stream_handler.py`, `libraries/python/getpatter/providers/elevenlabs_ws_tts.py`.
+
 ### Changed — `StreamHandler` adopt-capability check now uses duck typing
 
 The TS realtime adopt branch in `stream-handler.ts` previously relied on `this.adapter instanceof OpenAIRealtimeAdapter` to gate the prewarm-handoff path. Switched to a duck-type check (`typeof adapter.adoptWebSocket === 'function'`) so the generic stream-handler module stays provider-agnostic on this hot path and matches the Python handler's `getattr(self._adapter, "adopt_websocket", None)` shape. Files: `libraries/typescript/src/stream-handler.ts`.

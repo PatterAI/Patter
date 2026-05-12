@@ -78,6 +78,17 @@ export interface TTSAdapter {
    * Default behaviour is a no-op. Failures must never abort the call.
    */
   warmup?(): Promise<void>;
+  /**
+   * Optional hook for adapters that hold a long-lived connection during
+   * ``synthesizeStream`` (e.g. WS-based providers). The stream handler
+   * calls this on barge-in during a firstMessage so the in-flight
+   * generator unblocks immediately instead of waiting for the next
+   * frame timeout. Implementations should be idempotent and best-effort
+   * — a missing or no-op ``cancel`` MUST NOT prevent the call from
+   * continuing. HTTP-streaming adapters with no persistent socket can
+   * omit it entirely.
+   */
+  cancel?(): void;
 }
 
 /**

@@ -226,6 +226,15 @@ class ElevenLabsWebSocketTTS(TTSProvider):
         # send) instead of opening a fresh socket. The slot is
         # consumed exactly once.
         self._adopted_connection: Optional[ElevenLabsParkedWS] = None
+        # Currently in-flight WebSocket inside :meth:`synthesize`.
+        # Captured at the top of the generator and cleared in the
+        # ``finally`` block. :meth:`cancel` inspects this handle and
+        # closes the socket so a barge-in that occurs while the
+        # iterator is suspended on ``ws.recv()`` can unblock the loop
+        # within one event-loop tick. Without this, the wait stays
+        # pending until ``frame_timeout`` (30 s) and the call goes
+        # silent for the user. Mirrors TS ``activeSocket``.
+        self._active_socket = None
 
     @property
     def api_key(self) -> str:
@@ -426,6 +435,9 @@ class ElevenLabsWebSocketTTS(TTSProvider):
                 ),
                 timeout=self.open_timeout,
             )
+        # Publish the active socket so :meth:`cancel` from outside can
+        # close it and unblock the next-frame wait. Cleared in finally.
+        self._active_socket = ws
         try:
             # Initial keep-alive packet establishes the session. Per the
             # ElevenLabs docs the first message must contain a single space
@@ -443,7 +455,7 @@ class ElevenLabsWebSocketTTS(TTSProvider):
             # after the consumer drains, which serves as the EOS.
             await ws.send(json.dumps({"text": text + " ", "flush": True}))
 
-            from websockets.exceptions import ConnectionClosedOK
+            from websockets.exceptions import ConnectionClosed, ConnectionClosedOK
 
             while True:
                 try:
@@ -454,6 +466,11 @@ class ElevenLabsWebSocketTTS(TTSProvider):
                     ) from exc
                 except ConnectionClosedOK:
                     # Server closed cleanly — treat as end-of-stream.
+                    return
+                except ConnectionClosed:
+                    # Local :meth:`cancel` closed the socket from outside —
+                    # treat as end-of-stream so the generator's ``finally``
+                    # runs and the consumer exits within one tick.
                     return
 
                 # WebSocket frames may be text (JSON) or bytes (rare —
@@ -507,6 +524,11 @@ class ElevenLabsWebSocketTTS(TTSProvider):
                 if msg.get("isFinal"):
                     return
         finally:
+            # Clear the active-socket handle BEFORE closing so a racing
+            # :meth:`cancel` from a parallel coroutine doesn't try to
+            # close a socket we are already tearing down.
+            if self._active_socket is ws:
+                self._active_socket = None
             # Best-effort: tell the server to stop synthesising any
             # buffered text the consumer is no longer interested in.
             # Failure to send is non-fatal — the socket close below
@@ -517,6 +539,41 @@ class ElevenLabsWebSocketTTS(TTSProvider):
                 pass
             try:
                 await ws.close()
+            except Exception:
+                pass
+
+    def cancel(self) -> None:
+        """Force-close the currently in-flight synthesis socket, if any.
+
+        Called by the stream handler on barge-in during a firstMessage
+        synth: the generator's frame wait is unblocked by the resulting
+        ``ConnectionClosed`` exception, which then drives the loop into
+        its ``finally`` for a clean teardown. No-op when no synth is in
+        flight. Idempotent — safe to call repeatedly.
+
+        Implemented as a sync method (not a coroutine) so the cancel
+        path can be invoked from any context — including inside the
+        synchronous portion of :func:`_do_cancel_for_barge_in` where an
+        ``await`` would change call ordering. The actual ``ws.close``
+        is scheduled on the running event loop and awaited best-effort
+        by the in-flight generator's ``finally``.
+        """
+        ws = self._active_socket
+        if ws is None:
+            return
+        self._active_socket = None
+        try:
+            loop = asyncio.get_event_loop()
+            loop.create_task(ws.close())
+        except Exception:
+            # No running loop or other transient failure — try the
+            # synchronous low-level transport fallback. The TCP socket
+            # close still wakes the pending ``ws.recv()`` with a
+            # ``ConnectionClosed`` on the next event-loop tick.
+            try:
+                transport = getattr(ws, "transport", None)
+                if transport is not None:
+                    transport.close()
             except Exception:
                 pass
 

@@ -321,6 +321,18 @@ export class StreamHandler {
    * earlier.  Mirrors Python ``_llm_cancel_event``.
    */
   private llmAbort: AbortController | null = null;
+  /**
+   * AbortController for the current firstMessage ``synthesizeStream`` loop.
+   * Aborted by ``cancelSpeaking`` so a barge-in DURING the agent's first
+   * utterance (pipeline mode) breaks out of the iterator immediately,
+   * invokes the TTS generator's ``finally`` (which closes the WS), and
+   * unblocks the LLM dispatch path for the user's next turn. Without
+   * this, the ``for await`` was suspended on the next chunk while
+   * ``isSpeaking`` had already flipped to false — leaving the TTS WS
+   * in flight until ``FRAME_TIMEOUT_MS`` (30 s) and the call silent
+   * for the user. Mirrors Python ``_first_message_abort``.
+   */
+  private firstMessageAbort: AbortController | null = null;
 
   /**
    * Wall-clock timestamp of the most recent ``cancelSpeaking`` call, or
@@ -465,6 +477,13 @@ export class StreamHandler {
         this.llmAbort.abort();
       } catch {
         // No-op — abort() throws nothing in modern runtimes, but be defensive.
+      }
+    }
+    if (this.firstMessageAbort !== null && !this.firstMessageAbort.signal.aborted) {
+      try {
+        this.firstMessageAbort.abort();
+      } catch {
+        // No-op — defensive against ancient runtimes.
       }
     }
   }
@@ -1698,31 +1717,105 @@ export class StreamHandler {
           getLogger().debug(`popPrewarmAudio raised: ${String(err)}`);
         }
       }
+      // Arm an abort controller so a barge-in during the firstMessage
+      // synth path can break the iterator immediately rather than
+      // hanging on the next ``await iter.next()`` until ``FRAME_TIMEOUT_MS``
+      // (30 s on ElevenLabs WS TTS) — see field doc above. Combined
+      // with ``tts.cancel?.()`` (closes the provider WS) the loop
+      // exits within one event-loop tick.
+      this.firstMessageAbort = new AbortController();
+      const fmAbortSignal = this.firstMessageAbort.signal;
       try {
         if (prewarmBytes) {
           this.metricsAcc.recordTtsFirstByte();
           await this.emitAudioOut();
           firstChunkSent = await this.streamPrewarmBytes(prewarmBytes);
         } else {
-          for await (const chunk of this.tts.synthesizeStream(this.deps.agent.firstMessage)) {
-            if (!this.isSpeaking) break; // barge-in or test-hangup
-            if (!firstChunkSent) {
-              firstChunkSent = true;
-              this.metricsAcc.recordTtsFirstByte();
-              await this.emitAudioOut();
+          const stream = this.tts.synthesizeStream(this.deps.agent.firstMessage);
+          // Use the manual iterator protocol so we can race ``.next()``
+          // with the abort signal. ``for await`` does not surface a hook
+          // to cancel a pending ``.next()`` from outside.
+          const iter = (stream as AsyncIterable<Buffer>)[Symbol.asyncIterator]();
+          try {
+            while (true) {
+              if (!this.isSpeaking || fmAbortSignal.aborted) break;
+              const nextP = iter.next();
+              let abortFired = false;
+              const abortP = new Promise<IteratorResult<Buffer>>((resolve) => {
+                const onAbort = () => {
+                  abortFired = true;
+                  resolve({ value: undefined, done: true });
+                };
+                if (fmAbortSignal.aborted) onAbort();
+                else fmAbortSignal.addEventListener('abort', onAbort, { once: true });
+              });
+              const result = await Promise.race([nextP, abortP]);
+              if (abortFired || result.done) {
+                if (abortFired) {
+                  // Adapter-side teardown: WS-based providers (e.g.
+                  // ElevenLabs WS) own a long-lived socket inside
+                  // ``synthesizeStream`` and the next-frame wait will
+                  // otherwise hang until ``FRAME_TIMEOUT_MS`` (30 s).
+                  // Closing it externally unblocks the wait so the
+                  // generator can run its ``finally`` and the
+                  // ``iter.return()`` below resolves promptly.
+                  // HTTP-streaming adapters with no persistent socket
+                  // simply have no ``cancel`` method and the call here
+                  // is a no-op.
+                  try {
+                    this.tts?.cancel?.();
+                  } catch (err) {
+                    getLogger().debug(
+                      `tts.cancel during firstMessage barge-in raised: ${String(err)}`,
+                    );
+                  }
+                  // Hand the in-flight ``.next()`` back to the generator
+                  // so its ``finally`` runs (closes the TTS WS,
+                  // releases the billing-side connection). Errors here
+                  // are best-effort — the call must continue regardless.
+                  try {
+                    await iter.return?.(undefined);
+                  } catch (err) {
+                    getLogger().debug(
+                      `firstMessage iter.return after abort raised: ${String(err)}`,
+                    );
+                  }
+                }
+                break;
+              }
+              const chunk = result.value;
+              if (!this.isSpeaking) break; // barge-in or test-hangup
+              if (!firstChunkSent) {
+                firstChunkSent = true;
+                this.metricsAcc.recordTtsFirstByte();
+                await this.emitAudioOut();
+              }
+              // BUG #128: route every TTS chunk through the paced sender so
+              // we never push more than ``FIRST_MESSAGE_MARK_WINDOW`` chunks
+              // of audio ahead of carrier playback. The previous burst-send
+              // (sendAudio in a tight loop with no marks) let Twilio's
+              // outbound buffer reach several seconds — a barge-in's
+              // sendClear race-lost against the queued media frames and the
+              // agent kept talking on the user's earpiece for up to ~2 s
+              // after the user spoke. The paced sender also drives the AEC
+              // far-end tap and ``markFirstAudioSent`` internally so this
+              // path stays parity-clean with ``streamPrewarmBytes``.
+              const sent = await this.sendPacedFirstMessageBytes(chunk);
+              if (!sent) break;
             }
-            // BUG #128: route every TTS chunk through the paced sender so
-            // we never push more than ``FIRST_MESSAGE_MARK_WINDOW`` chunks
-            // of audio ahead of carrier playback. The previous burst-send
-            // (sendAudio in a tight loop with no marks) let Twilio's
-            // outbound buffer reach several seconds — a barge-in's
-            // sendClear race-lost against the queued media frames and the
-            // agent kept talking on the user's earpiece for up to ~2 s
-            // after the user spoke. The paced sender also drives the AEC
-            // far-end tap and ``markFirstAudioSent`` internally so this
-            // path stays parity-clean with ``streamPrewarmBytes``.
-            const sent = await this.sendPacedFirstMessageBytes(chunk);
-            if (!sent) break;
+          } finally {
+            // Best-effort: if we exited via ``isSpeaking=false`` (not the
+            // abort branch) or via ``sendPacedFirstMessageBytes`` returning
+            // false, the generator's ``finally`` still needs to run.
+            // Idempotent: a generator already finalised by an earlier
+            // ``return()`` just no-ops here.
+            try {
+              await iter.return?.(undefined);
+            } catch (err) {
+              getLogger().debug(
+                `firstMessage iter.return on cleanup raised: ${String(err)}`,
+              );
+            }
           }
         }
       } catch (e) {
@@ -1731,6 +1824,9 @@ export class StreamHandler {
         // Drop any partial int16 byte to prevent cross-turn corruption
         // if the stream threw before a complete sample was delivered.
         this.resetTtsCarry();
+        // Release the abort controller so the next turn does not observe
+        // an already-aborted signal.
+        this.firstMessageAbort = null;
         // Flip back to not-speaking with grace so the ring buffer
         // accumulated during the intro is flushed and the next user
         // utterance is recognised cleanly.

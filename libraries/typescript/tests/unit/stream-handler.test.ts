@@ -397,6 +397,114 @@ describe('StreamHandler', () => {
   });
 
   // -------------------------------------------------------------------------
+  // 0.6.1 fix — Barge-in during firstMessage aborts the TTS synthesize stream
+  //
+  // Pre-fix: when the user spoke over the agent's firstMessage in pipeline
+  // mode (Deepgram + Cerebras + ElevenLabs WS TTS), ``cancelSpeaking``
+  // flipped ``isSpeaking=false`` BUT the ``for await`` consuming
+  // ``tts.synthesizeStream`` was suspended on ``await iter.next()``
+  // waiting for the next WS frame. The check at the top of the loop body
+  // never re-ran. The provider WS sat idle for up to ``FRAME_TIMEOUT_MS``
+  // (30 s on ElevenLabs WS) before raising — by then every subsequent
+  // user utterance was transcribed but no LLM dispatch fired because
+  // the "speaking lock" path had never released. The call was silent.
+  //
+  // Post-fix: ``cancelSpeaking`` aborts ``firstMessageAbort`` whose
+  // signal is raced against ``iter.next()`` inside the firstMessage
+  // loop. On abort the loop calls ``tts.cancel?.()`` (closes the
+  // provider WS) and ``iter.return()`` so the generator's ``finally``
+  // runs and exits within one event-loop tick rather than after
+  // ``FRAME_TIMEOUT_MS``.
+  // -------------------------------------------------------------------------
+  describe('barge-in during firstMessage aborts TTS stream', () => {
+    it('aborts firstMessageAbort on cancelSpeaking', () => {
+      const deps = makeDeps();
+      const ws = makeMockWs();
+      const handler = new StreamHandler(deps, ws, '+15551111111', '+15552222222');
+      const controller = new AbortController();
+      (handler as unknown as { firstMessageAbort: AbortController | null }).firstMessageAbort =
+        controller;
+      (handler as unknown as { isSpeaking: boolean }).isSpeaking = true;
+
+      expect(controller.signal.aborted).toBe(false);
+      (handler as unknown as { cancelSpeaking: () => void }).cancelSpeaking();
+      expect(controller.signal.aborted).toBe(true);
+    });
+
+    it('manual iterator race breaks within one tick of abort and calls adapter.cancel()', async () => {
+      // Sentinel async-generator that mimics ElevenLabs WS sitting on
+      // ``ws.recv()`` after the first chunk: yields one chunk, then
+      // ``await``s a promise that is ONLY resolved when the adapter's
+      // ``cancel()`` fires (mirroring ``ws.on('close', wakeWaiter)`` in
+      // ``elevenlabs-ws-tts.ts``). The test verifies that on abort the
+      // consumer (a) closes the adapter so the wait unblocks, (b) the
+      // generator's ``finally`` runs, and (c) the consumer exits
+      // promptly — NOT after a 30 s frame timeout.
+      const finallyRan = { value: false };
+      let resolveStall!: () => void;
+      const stallPromise = new Promise<void>((r) => {
+        resolveStall = r;
+      });
+      const stalled = (async function* () {
+        try {
+          yield Buffer.from([1, 2, 3, 4]);
+          await stallPromise; // Resolved by adapter.cancel() below.
+          yield Buffer.from([5, 6, 7, 8]);
+        } finally {
+          finallyRan.value = true;
+        }
+      })();
+
+      // Mock TTS adapter exposing the optional ``cancel()`` hook — the
+      // production ElevenLabsWebSocketTTS shape.
+      const adapterCancel = vi.fn(() => resolveStall());
+
+      // Replicate the race exactly as stream-handler does — iterator
+      // protocol + AbortController + adapter.cancel() + iter.return().
+      const ctrl = new AbortController();
+      const iter = (stalled as AsyncIterable<Buffer>)[Symbol.asyncIterator]();
+      const chunks: Buffer[] = [];
+      const consumer = (async () => {
+        while (true) {
+          if (ctrl.signal.aborted) break;
+          const nextP = iter.next();
+          let aborted = false;
+          const abortP = new Promise<IteratorResult<Buffer>>((resolve) => {
+            const onAbort = () => {
+              aborted = true;
+              resolve({ value: undefined, done: true });
+            };
+            if (ctrl.signal.aborted) onAbort();
+            else ctrl.signal.addEventListener('abort', onAbort, { once: true });
+          });
+          const result = await Promise.race([nextP, abortP]);
+          if (aborted || result.done) {
+            if (aborted) {
+              adapterCancel();
+              await iter.return?.(undefined);
+            }
+            break;
+          }
+          chunks.push(result.value);
+        }
+      })();
+
+      // Let the first chunk land, then trigger the barge-in.
+      await new Promise<void>((r) => setTimeout(r, 10));
+      ctrl.abort();
+      // Bounded await — the consumer MUST finish within a few ms once
+      // the abort flow closes the adapter. If we ever regress and
+      // forget to call ``adapter.cancel()`` this test will time out
+      // at the vitest 15 s default well below FRAME_TIMEOUT_MS=30 s.
+      await consumer;
+
+      expect(chunks.length).toBe(1); // First chunk delivered before abort
+      expect(adapterCancel).toHaveBeenCalledTimes(1);
+      expect(finallyRan.value).toBe(true); // Generator finally observed
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // canBargeIn() — adaptive gate on minimum speaking duration. With AEC on
   // it covers the filter's ~1 s warmup window; with AEC off it is just a
   // 250 ms anti-flicker margin so PSTN barge-in stays responsive.

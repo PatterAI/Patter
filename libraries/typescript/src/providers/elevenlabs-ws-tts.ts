@@ -161,6 +161,16 @@ export class ElevenLabsWebSocketTTS implements TTSAdapter {
   private adoptedConnection: ElevenLabsParkedWS | null = null;
 
   /**
+   * Currently in-flight WebSocket inside ``synthesizeStream``. Captured at
+   * the top of the generator and cleared in ``finally``. ``cancel()``
+   * inspects this handle and closes the socket so a barge-in that occurs
+   * while the iterator is suspended on the next-frame wait can unblock
+   * the loop within one event-loop tick. Without this, the wait stays
+   * pending until ``FRAME_TIMEOUT_MS`` (30 s) and the call goes silent.
+   */
+  private activeSocket: WebSocket | null = null;
+
+  /**
    * The wire format requested over the ElevenLabs WS. Initially set from
    * the constructor; ``setTelephonyCarrier`` may auto-flip it to the
    * carrier's native codec when the caller did NOT pass ``outputFormat``
@@ -311,6 +321,9 @@ export class ElevenLabsWebSocketTTS implements TTSAdapter {
         headers: { 'xi-api-key': this.apiKey },
       });
     }
+    // Publish the active socket so ``cancel()`` from outside can close it
+    // and unblock the next-frame wait. Cleared in finally.
+    this.activeSocket = ws;
 
     const queue: Buffer[] = [];
     let done = false;
@@ -462,6 +475,12 @@ export class ElevenLabsWebSocketTTS implements TTSAdapter {
       }
     } finally {
       if (connectTimer) clearTimeout(connectTimer);
+      // Clear the active-socket handle BEFORE closing so a racing
+      // ``cancel()`` from a parallel coroutine doesn't try to close a
+      // socket we are already tearing down.
+      if (this.activeSocket === ws) {
+        this.activeSocket = null;
+      }
       // Best-effort EOS so the server stops billing for unconsumed audio.
       try {
         if (ws.readyState === WebSocket.OPEN) {
@@ -625,10 +644,33 @@ export class ElevenLabsWebSocketTTS implements TTSAdapter {
     }
   }
 
+  /**
+   * Force-close the currently in-flight synthesis socket, if any. Used by
+   * the stream handler on barge-in during a firstMessage synth: the
+   * generator's frame wait is unblocked by the resulting ``close`` event,
+   * which then drives the loop into its ``finally`` for a clean teardown.
+   * No-op when no synth is in flight. Idempotent.
+   */
+  cancel(): void {
+    const ws = this.activeSocket;
+    if (!ws) return;
+    this.activeSocket = null;
+    try {
+      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+        ws.close();
+      }
+    } catch {
+      /* best-effort */
+    }
+  }
+
   /** No-op — connections are per-utterance and torn down inside synthesizeStream. */
   async close(): Promise<void> {
     // Drop any orphaned parked WS so we never leak it past close.
     this.discardAdoptedConnection();
+    // Also fold in the cancel() behaviour so callers who only know
+    // ``close()`` still tear down an in-flight synth cleanly.
+    this.cancel();
   }
 }
 

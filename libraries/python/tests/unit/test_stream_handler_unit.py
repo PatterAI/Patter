@@ -647,3 +647,179 @@ class TestBargeInCancelsLlmStream:
         # Without cancellation we would have 50 tokens; the cancel must bound it.
         assert len(consumed) < 50
         assert len(consumed) <= 4  # one extra possible due to ordering
+
+
+# ---------------------------------------------------------------------------
+# 0.6.1 fix — Barge-in during firstMessage aborts the TTS synthesize stream
+#
+# Pre-fix: when the user spoke over the agent's firstMessage in pipeline mode
+# (Deepgram STT + Cerebras LLM + ElevenLabs WS TTS), the cancel path flipped
+# ``_is_speaking=False`` BUT the ``async for`` consuming ``tts.synthesize``
+# was suspended on ``ws.recv()`` waiting for the next frame. The check at
+# the top of the loop body never re-ran. The provider WS sat idle for up
+# to ``frame_timeout`` (30 s on ElevenLabs WS) before raising — by then
+# every subsequent user utterance was transcribed but no LLM dispatch
+# fired because the "speaking lock" path had never released. The call
+# was silent for the user.
+#
+# Post-fix: ``_do_cancel_for_barge_in`` sets ``_first_message_abort``
+# whose ``wait()`` is raced against ``__anext__`` inside the firstMessage
+# loop AND calls ``tts.cancel()`` (closes the provider WS). The
+# generator's ``finally`` runs and the loop exits within one event-loop
+# tick rather than after ``frame_timeout``.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestBargeInDuringFirstMessageAbortsTtsStream:
+    async def test_barge_in_sets_first_message_abort_event(self) -> None:
+        """``_do_cancel_for_barge_in`` must set ``_first_message_abort``
+        so the firstMessage synth loop breaks immediately."""
+        from getpatter.stream_handler import PipelineStreamHandler
+        from getpatter.providers.base import Transcript
+
+        handler = object.__new__(PipelineStreamHandler)
+        handler._is_speaking = True
+        handler.metrics = None
+        handler.call_id = "test-call"
+        handler.audio_sender = MagicMock()
+        handler.audio_sender.send_clear = AsyncMock()
+        handler._llm_cancel_event = asyncio.Event()
+        handler._first_message_abort = asyncio.Event()
+        assert not handler._first_message_abort.is_set()
+
+        await handler._handle_barge_in(
+            Transcript(text="hold on", is_final=True, speech_final=True)
+        )
+
+        assert handler._first_message_abort.is_set(), (
+            "barge-in must set the firstMessage abort event so the "
+            "synthesize loop unblocks immediately"
+        )
+
+    async def test_barge_in_invokes_tts_cancel_when_available(self) -> None:
+        """``_do_cancel_for_barge_in`` must invoke ``tts.cancel()`` when the
+        configured TTS adapter exposes the optional hook (WS-based
+        providers). HTTP-streaming adapters without ``cancel`` are
+        silently skipped."""
+        from getpatter.stream_handler import PipelineStreamHandler
+        from getpatter.providers.base import Transcript
+
+        handler = object.__new__(PipelineStreamHandler)
+        handler._is_speaking = True
+        handler.metrics = None
+        handler.call_id = "test-call"
+        handler.audio_sender = MagicMock()
+        handler.audio_sender.send_clear = AsyncMock()
+        handler._llm_cancel_event = asyncio.Event()
+        handler._first_message_abort = asyncio.Event()
+        cancel_mock = MagicMock()
+        tts_stub = MagicMock()
+        tts_stub.cancel = cancel_mock
+        handler._tts = tts_stub
+
+        await handler._handle_barge_in(
+            Transcript(text="hold on", is_final=True, speech_final=True)
+        )
+
+        cancel_mock.assert_called_once()
+
+    async def test_cancel_safe_when_first_message_abort_unset(self) -> None:
+        """When no firstMessage is in flight ``_first_message_abort`` is
+        ``None`` — the cancel path must not raise."""
+        from getpatter.stream_handler import PipelineStreamHandler
+        from getpatter.providers.base import Transcript
+
+        handler = object.__new__(PipelineStreamHandler)
+        handler._is_speaking = True
+        handler.metrics = None
+        handler.call_id = "test-call"
+        handler.audio_sender = MagicMock()
+        handler.audio_sender.send_clear = AsyncMock()
+        handler._llm_cancel_event = asyncio.Event()
+        handler._first_message_abort = None
+        handler._tts = None  # no TTS adapter — cancel path skipped
+
+        # Must not raise even though the abort handle and TTS are None.
+        await handler._handle_barge_in(
+            Transcript(text="hold on", is_final=True, speech_final=True)
+        )
+        assert handler._llm_cancel_event.is_set()
+
+    async def test_manual_aiter_race_unblocks_stalled_generator(self) -> None:
+        """End-to-end async-iterator race: a stalled async generator
+        (mimics ElevenLabs WS sitting on ``ws.recv()``) must be broken
+        out of within one tick of (abort_event.set() + tts.cancel()), and
+        the generator's ``finally`` must run (closes the provider WS)."""
+        finally_ran = {"value": False}
+        recv_event = asyncio.Event()  # Resolved when adapter.cancel() fires.
+
+        async def stalled_synth():
+            try:
+                yield b"\x01\x02\x03\x04"
+                await recv_event.wait()  # Mirrors ws.recv() suspension.
+                yield b"\x05\x06\x07\x08"
+            finally:
+                finally_ran["value"] = True
+
+        adapter_cancel_calls = {"value": 0}
+
+        def adapter_cancel() -> None:
+            adapter_cancel_calls["value"] += 1
+            recv_event.set()
+
+        abort = asyncio.Event()
+        agen = stalled_synth()
+        aiter = agen.__aiter__()
+        chunks: list[bytes] = []
+
+        async def consume() -> None:
+            try:
+                while True:
+                    if abort.is_set():
+                        break
+                    next_task = asyncio.ensure_future(aiter.__anext__())
+                    abort_task = asyncio.ensure_future(abort.wait())
+                    done, pending = await asyncio.wait(
+                        {next_task, abort_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if abort_task in done and next_task not in done:
+                        adapter_cancel()
+                        next_task.cancel()
+                        try:
+                            await next_task
+                        except (asyncio.CancelledError, StopAsyncIteration, Exception):
+                            pass
+                        break
+                    if abort_task in pending:
+                        abort_task.cancel()
+                        try:
+                            await abort_task
+                        except (asyncio.CancelledError, Exception):
+                            pass
+                    try:
+                        chunks.append(next_task.result())
+                    except StopAsyncIteration:
+                        break
+            finally:
+                try:
+                    await agen.aclose()
+                except Exception:
+                    pass
+
+        consumer_task = asyncio.create_task(consume())
+        await asyncio.sleep(0.01)
+        abort.set()
+        # Bounded — must finish well under the imagined ``frame_timeout``.
+        await asyncio.wait_for(consumer_task, timeout=2.0)
+
+        assert chunks == [b"\x01\x02\x03\x04"], (
+            "first chunk should land before the abort fires"
+        )
+        assert adapter_cancel_calls["value"] == 1, (
+            "adapter.cancel() must be invoked exactly once on abort"
+        )
+        assert finally_ran["value"], (
+            "generator finally must run so the provider WS closes promptly"
+        )
