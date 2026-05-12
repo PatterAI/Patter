@@ -1951,6 +1951,29 @@ class PipelineStreamHandler(StreamHandler):
                     exc_info=True,
                 )
 
+        # After the carrier hint, the adapter may have flipped its wire
+        # format to the carrier-native codec. When that codec is μ-law @
+        # 8 kHz AND the carrier is Twilio (mulaw on the wire), flip the
+        # audio_sender into pass-through mode so it forwards the bytes
+        # as-is instead of resampling them as PCM16 16 kHz. Without this,
+        # ``TwilioAudioSender.send_audio`` would interpret the μ-law
+        # bytes as PCM16 samples, resample, and re-encode to μ-law —
+        # producing the loud, garbled hiss reported on the firstMessage
+        # live path with ``ElevenLabsWebSocketTTS()`` (defaults) + Twilio.
+        # Mirrors the ConvAI ``_native_mulaw_8k`` pattern earlier in the
+        # file and the TS ``ttsIsMulaw8k`` flag in ``stream-handler.ts``.
+        if self._tts is not None and self._for_twilio:
+            effective_format = getattr(self._tts, "output_format", None)
+            if effective_format == "ulaw_8000" and hasattr(
+                self.audio_sender, "_input_is_mulaw_8k"
+            ):
+                self.audio_sender._input_is_mulaw_8k = True  # type: ignore[attr-defined]
+                logger.debug(
+                    "pipeline mode: TTS native μ-law 8 kHz fast-path enabled "
+                    "(adapter output_format=ulaw_8000, carrier=twilio); "
+                    "skipping outbound PCM16→8k resample + mulaw transcode"
+                )
+
         if self._stt is None:
             logger.warning("Pipeline mode: no STT configured")
         if self._tts is None:

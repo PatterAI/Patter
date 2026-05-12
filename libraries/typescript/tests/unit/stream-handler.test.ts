@@ -915,4 +915,77 @@ describe('StreamHandler', () => {
       expect(p.pendingMarks.length).toBe(0);
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Native μ-law 8 kHz pass-through (TTS adapter auto-flipped to ulaw_8000)
+  // ---------------------------------------------------------------------------
+  //
+  // Guards the 0.6.1 fix: when ``ElevenLabsWebSocketTTS()`` is constructed
+  // without an explicit ``outputFormat`` and paired with a Twilio carrier,
+  // ``setTelephonyCarrier('twilio')`` auto-flips ``outputFormat`` to
+  // ``ulaw_8000``. The TTS adapter therefore streams μ-law bytes, but
+  // ``encodePipelineAudio`` always interpreted bytes as PCM16 16 kHz —
+  // resampling + re-encoding to μ-law produced loud garbled hiss on the
+  // wire (the firstMessage audio glitch report). The fix wires a
+  // ``ttsIsMulaw8k`` pass-through flag so the encoder forwards bytes
+  // as-is when the adapter speaks the carrier's native codec.
+  describe('encodePipelineAudio — native mulaw 8 kHz pass-through', () => {
+    interface EncodePriv {
+      ttsIsMulaw8k: boolean;
+      encodePipelineAudio(chunk: Buffer): string;
+    }
+
+    it('forwards mulaw bytes as base64 when ttsIsMulaw8k=true', () => {
+      const h = new StreamHandler(
+        makeDeps(),
+        makeMockWs(),
+        '+15551111111',
+        '+15552222222',
+      );
+      const p = h as unknown as EncodePriv;
+      p.ttsIsMulaw8k = true;
+
+      // Well-defined mulaw samples; pass-through must echo them byte-for-byte.
+      const mulaw = Buffer.from([0x7f, 0x80, 0xff, 0x00, 0x7e, 0x81]);
+      const encoded = p.encodePipelineAudio(mulaw);
+
+      expect(encoded).toBe(mulaw.toString('base64'));
+      // No PCM16 carry should accumulate on the pass-through path.
+      const carryView = h as unknown as { ttsByteCarry: Buffer | null };
+      expect(carryView.ttsByteCarry).toBeNull();
+    });
+
+    it('resamples + transcodes when ttsIsMulaw8k=false (default path)', () => {
+      const h = new StreamHandler(
+        makeDeps(),
+        makeMockWs(),
+        '+15551111111',
+        '+15552222222',
+      );
+      const p = h as unknown as EncodePriv;
+      expect(p.ttsIsMulaw8k).toBe(false);
+
+      // Aligned PCM16 16 kHz chunk → non-trivial mulaw output. The exact
+      // bytes depend on the resampler; we only assert that the output is
+      // non-empty AND differs from the pass-through interpretation, which
+      // is enough to catch a regression in the pass-through wiring.
+      const pcm16 = Buffer.alloc(64);
+      for (let i = 0; i < 32; i++) pcm16.writeInt16LE(i * 256, i * 2);
+      const encoded = p.encodePipelineAudio(pcm16);
+
+      expect(encoded.length).toBeGreaterThan(0);
+      expect(encoded).not.toBe(pcm16.toString('base64'));
+    });
+
+    it('initialises ttsIsMulaw8k=false at construction time', () => {
+      const h = new StreamHandler(
+        makeDeps(),
+        makeMockWs(),
+        '+15551111111',
+        '+15552222222',
+      );
+      const p = h as unknown as EncodePriv;
+      expect(p.ttsIsMulaw8k).toBe(false);
+    });
+  });
 });

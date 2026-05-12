@@ -719,6 +719,17 @@ export class StreamHandler {
   // Created lazily on first use; reset() on call end.
   private readonly inboundResampler: StatefulResampler = createResampler8kTo16k();
   private readonly outboundResampler: StatefulResampler = createResampler16kTo8k();
+  // Pipeline-mode TTS native-mulaw fast-path. Set to ``true`` in
+  // ``initPipeline`` when the TTS adapter's effective ``outputFormat`` is
+  // ``ulaw_8000`` AND the telephony carrier is Twilio (mulaw 8 kHz on the
+  // wire). In that case ``encodePipelineAudio`` skips the PCM16 → 8 kHz
+  // resample + mulaw transcode and just base64-encodes the bytes as-is —
+  // the adapter already speaks the carrier's native codec server-side.
+  //
+  // Without this flag the PCM16-resample path would misinterpret μ-law
+  // bytes as int16 samples (a perceptible, loud, garbled hiss — the bug
+  // this fix targets on the ElevenLabs WS + Twilio firstMessage path).
+  private ttsIsMulaw8k: boolean = false;
 
   private readonly history: ReturnType<typeof createHistoryManager>;
   private readonly metricsAcc: CallMetricsAccumulator;
@@ -1372,20 +1383,34 @@ export class StreamHandler {
   // ---------------------------------------------------------------------------
 
   /**
-   * Encode a PCM 16kHz audio chunk for the telephony provider.
+   * Encode a TTS audio chunk for the telephony provider.
    *
    * Both Twilio and Telnyx negotiate PCMU (mulaw) 8 kHz on the bidirectional
    * media stream — Twilio always, and Telnyx because ``streaming_start``
-   * (server.ts) requests ``stream_bidirectional_codec=PCMU`` at 8 kHz. So
-   * the wire format for both providers is mulaw 8 kHz; we resample 16 kHz
-   * PCM16 → 8 kHz then encode to mulaw. Mirrors the Python pipeline path
-   * (libraries/python/getpatter/handlers/telnyx_handler.py::TelnyxAudioSender).
+   * (server.ts) requests ``stream_bidirectional_codec=PCMU`` at 8 kHz.
    *
-   * Maintains a 1-byte carry across calls so unaligned HTTP chunks from
-   * streaming TTS providers never byte-swap the PCM16 samples downstream.
+   * Two paths depending on what the TTS adapter is emitting:
+   *
+   * - ``ttsIsMulaw8k=true`` (native fast-path): the adapter already streams
+   *   μ-law @ 8 kHz (e.g. ElevenLabs WS with ``output_format=ulaw_8000``
+   *   auto-flipped by ``setTelephonyCarrier('twilio')``). We base64-encode
+   *   the bytes as-is — no resample, no transcode. Treating these bytes as
+   *   PCM16 would cause the resampler + ``pcm16ToMulaw`` to misinterpret
+   *   them as int16 samples and emit loud garbled hiss on the wire.
+   *
+   * - default: chunks are PCM16 @ 16 kHz; resample 16 kHz → 8 kHz and
+   *   encode to μ-law. A 1-byte alignment carry guards against unaligned
+   *   HTTP chunks from streaming TTS providers.
+   *
+   * Mirrors the Python pipeline path (
+   * ``libraries/python/getpatter/telephony/twilio.py::TwilioAudioSender``).
    */
-  private encodePipelineAudio(pcm16k: Buffer): string {
-    const aligned = this.alignPcm16(pcm16k);
+  private encodePipelineAudio(chunk: Buffer): string {
+    if (this.ttsIsMulaw8k) {
+      // Adapter speaks the carrier's native codec — pass bytes through.
+      return chunk.toString('base64');
+    }
+    const aligned = this.alignPcm16(chunk);
     if (aligned.length === 0) return '';
     const pcm8k = this.outboundResampler.process(aligned);
     const mulaw = pcm16ToMulaw(pcm8k);
@@ -1516,6 +1541,29 @@ export class StreamHandler {
         } catch (e) {
           getLogger().debug(`TTS setTelephonyCarrier failed (${label}): ${String(e)}`);
         }
+      }
+
+      // After the carrier hint, the adapter may have flipped its wire
+      // format to the carrier-native codec. When that codec is μ-law @
+      // 8 kHz AND the carrier is Twilio (mulaw on the wire), enable the
+      // pass-through fast-path in ``encodePipelineAudio``. Without this,
+      // ``encodePipelineAudio`` would interpret the μ-law bytes as PCM16
+      // samples, resample, and re-encode to μ-law — producing the loud,
+      // garbled hiss reported on the firstMessage live path with
+      // ``ElevenLabsWebSocketTTS()`` (defaults) + Twilio.
+      const formatAware = this.tts as unknown as { outputFormat?: string };
+      const effectiveFormat =
+        typeof formatAware.outputFormat === 'string' ? formatAware.outputFormat : null;
+      const carrier = this.deps.bridge.telephonyProvider;
+      if (effectiveFormat === 'ulaw_8000' && carrier === 'twilio') {
+        this.ttsIsMulaw8k = true;
+        getLogger().debug(
+          `pipeline mode (${label}): TTS native μ-law 8 kHz fast-path enabled ` +
+            `(adapter outputFormat=ulaw_8000, carrier=twilio); skipping ` +
+            `outbound PCM16→8k resample + mulaw transcode`,
+        );
+      } else {
+        this.ttsIsMulaw8k = false;
       }
     }
 
