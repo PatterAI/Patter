@@ -1,5 +1,33 @@
 ## Unreleased
 
+### Fixed — firstMessage was effectively un-interruptible: barge-in lost the race against the carrier outbound buffer (#128, Python + TypeScript parity)
+
+`StreamHandler.streamPrewarmBytes` (TS) /
+`PipelineStreamHandler._stream_prewarm_bytes` (Py) and the live-TTS
+firstMessage loop pushed every chunk into the carrier WebSocket as fast
+as the TTS provider yielded bytes. Twilio's outbound buffer ended up
+several seconds deep, and a barge-in's `sendClear` (`send_clear`) was
+queued behind the already-enqueued media frames — the agent kept
+talking on the user's earpiece for up to ~2 s after the user spoke.
+Filed as #128.
+
+Fix: route every firstMessage chunk through a paced sender that emits
+a unique Twilio mark after each chunk and waits for the oldest
+unconfirmed mark once `FIRST_MESSAGE_MARK_WINDOW` (3 chunks ≈ 120 ms)
+are in flight. `cancelSpeaking` (`_run_barge_in_cancel` on Python)
+drains every pending mark waiter so the loop exits on the next tick
+and `sendClear` lands on a near-empty carrier buffer. On Telnyx
+(no mark concept) the loop falls back to a playout-duration-based
+sleep so the buffer can't out-run a clear by more than one chunk.
+
+Files: `libraries/typescript/src/stream-handler.ts`,
+`libraries/python/getpatter/stream_handler.py`. Coverage:
+`libraries/typescript/tests/unit/stream-handler.test.ts`
+(`firstMessage mark-gated pacing`),
+`libraries/python/tests/unit/test_first_message_pacing.py`. The
+existing `streamPrewarmBytes` chunking test was updated to echo
+marks via the mock bridge so it interoperates with the new pacing.
+
 ### Fixed — Dashboard SPA: live snapshot refresh dropped previously-visible calls when a new call started (#124)
 
 `mergeCallPreserving` in `dashboard-app/src/hooks/useDashboardData.ts`

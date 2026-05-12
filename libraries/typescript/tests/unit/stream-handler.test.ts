@@ -523,4 +523,163 @@ describe('StreamHandler', () => {
       });
     });
   });
+
+  // -------------------------------------------------------------------------
+  // firstMessage mark-gated pacing — BUG #128 regression coverage.
+  //
+  // Pre-fix the firstMessage TTS chunks were pushed into the carrier
+  // WebSocket as fast as the TTS provider yielded them. A barge-in
+  // mid-buffer issued ``sendClear``, but the WebSocket queue between the
+  // SDK and Twilio's edge held several seconds of media frames already,
+  // and the agent kept talking on the user's earpiece until that drained.
+  //
+  // Post-fix every chunk is followed by a mark; the loop awaits the
+  // oldest mark before sending more once ``FIRST_MESSAGE_MARK_WINDOW``
+  // chunks are unconfirmed. ``cancelSpeaking`` drains every pending mark
+  // so the waiting loop exits on the next tick.
+  // -------------------------------------------------------------------------
+  describe('firstMessage mark-gated pacing', () => {
+    interface FmPriv {
+      isSpeaking: boolean;
+      speakingStartedAt: number | null;
+      firstAudioSentAt: number | null;
+      aec: unknown;
+      streamSid: string;
+      pendingMarks: Array<{ name: string; resolve: () => void; promise: Promise<void> }>;
+      firstMessageMarkCounter: number;
+      sendPacedFirstMessageBytes: (b: Buffer) => Promise<boolean>;
+      onMark: (n: string) => Promise<void>;
+      runBargeInCancel: (t: string) => void;
+    }
+
+    function fmPriv(h: StreamHandler): FmPriv {
+      return h as unknown as FmPriv;
+    }
+
+    function primeForFirstMessage(h: StreamHandler): FmPriv {
+      const p = fmPriv(h);
+      p.isSpeaking = true;
+      p.speakingStartedAt = Date.now() - 5000;
+      p.firstAudioSentAt = Date.now() - 5000;
+      p.aec = null;
+      p.streamSid = 'MZtest';
+      return p;
+    }
+
+    async function flushMicrotasks(count = 10): Promise<void> {
+      for (let i = 0; i < count; i++) await Promise.resolve();
+    }
+
+    const CHUNK_BYTES = 1280; // matches StreamHandler.PREWARM_CHUNK_BYTES
+
+    it('caps in-flight chunks at FIRST_MESSAGE_MARK_WINDOW and bails on barge-in', async () => {
+      const sendAudio = vi.fn();
+      const sendMark = vi.fn();
+      const sendClear = vi.fn();
+      const bridge = makeMockBridge({ sendAudio, sendMark, sendClear });
+      const h = new StreamHandler(
+        makeDeps({ bridge }),
+        makeMockWs(),
+        '+15551111111',
+        '+15552222222',
+      );
+      const p = primeForFirstMessage(h);
+      // 4 chunks. Window=3, so chunks 1–3 send back-to-back and chunk 4
+      // blocks on waitForMarkWindow until either a mark echoes OR
+      // cancelSpeaking drains the queue.
+      const bytes = Buffer.alloc(CHUNK_BYTES * 4, 0);
+      const sendPromise = p.sendPacedFirstMessageBytes(bytes);
+
+      await flushMicrotasks();
+      expect(sendAudio).toHaveBeenCalledTimes(3);
+      expect(sendMark).toHaveBeenCalledTimes(3);
+      expect(p.pendingMarks.length).toBe(3);
+
+      // Simulate a confirmed barge-in: runBargeInCancel calls sendClear +
+      // cancelSpeaking, and cancelSpeaking drains pendingMarks so the
+      // sliding-window wait exits on the next tick.
+      p.runBargeInCancel('the user spoke');
+      await sendPromise;
+
+      expect(sendClear).toHaveBeenCalledTimes(1);
+      expect(p.isSpeaking).toBe(false);
+      // Chunk 4 must NOT have hit the wire.
+      expect(sendAudio).toHaveBeenCalledTimes(3);
+    });
+
+    it('echoed mark slides the window and the next chunk goes out', async () => {
+      const sendAudio = vi.fn();
+      const sendMark = vi.fn();
+      const bridge = makeMockBridge({ sendAudio, sendMark });
+      const h = new StreamHandler(
+        makeDeps({ bridge }),
+        makeMockWs(),
+        '+15551111111',
+        '+15552222222',
+      );
+      const p = primeForFirstMessage(h);
+      const bytes = Buffer.alloc(CHUNK_BYTES * 4, 0);
+      const sendPromise = p.sendPacedFirstMessageBytes(bytes);
+
+      await flushMicrotasks();
+      // Three chunks in flight, one waiting on the window.
+      expect(sendAudio).toHaveBeenCalledTimes(3);
+      expect(sendMark).toHaveBeenCalledTimes(3);
+
+      // Twilio echoes the FIRST chunk's mark — the loop should advance.
+      await p.onMark('fm_1');
+      await flushMicrotasks();
+
+      expect(sendAudio).toHaveBeenCalledTimes(4);
+      expect(sendMark).toHaveBeenCalledTimes(4);
+      // Let the remaining marks "play" so the loop returns.
+      await p.onMark('fm_2');
+      await p.onMark('fm_3');
+      await p.onMark('fm_4');
+      await sendPromise;
+      expect(p.pendingMarks.length).toBe(0);
+    });
+
+    it('Telnyx (no marks): paces via playout-time and bails on cancelSpeaking', async () => {
+      const sendAudio = vi.fn();
+      const sendMark = vi.fn();
+      const sendClear = vi.fn();
+      const bridge = makeMockBridge({
+        telephonyProvider: 'telnyx',
+        sendAudio,
+        sendMark,
+        sendClear,
+      });
+      const h = new StreamHandler(
+        makeDeps({ bridge }),
+        makeMockWs(),
+        '+15551111111',
+        '+15552222222',
+      );
+      const p = primeForFirstMessage(h);
+      // 4 chunks. With time-based pacing every iteration awaits a real
+      // setTimeout (40 ms for a 1280-byte PCM16 chunk), so the loop
+      // emits the first chunk and then yields long enough for the test
+      // to trigger a barge-in.
+      const bytes = Buffer.alloc(CHUNK_BYTES * 4, 0);
+      const sendPromise = p.sendPacedFirstMessageBytes(bytes);
+
+      await flushMicrotasks();
+      // Telnyx never sends marks — the queue stays empty even mid-loop.
+      expect(sendMark).not.toHaveBeenCalled();
+      expect(p.pendingMarks.length).toBe(0);
+      // At least the first chunk should have hit the wire by the time
+      // we trip the cancel.
+      const sentBeforeCancel = sendAudio.mock.calls.length;
+      expect(sentBeforeCancel).toBeGreaterThanOrEqual(1);
+
+      p.runBargeInCancel('user spoke');
+      await sendPromise;
+
+      expect(sendClear).toHaveBeenCalledTimes(1);
+      expect(p.isSpeaking).toBe(false);
+      // After cancel no further chunks may go out.
+      expect(sendAudio).toHaveBeenCalledTimes(sentBeforeCancel);
+    });
+  });
 });
