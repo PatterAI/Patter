@@ -175,6 +175,99 @@ describe('[unit] prewarm — provider warmup', () => {
   });
 });
 
+describe('[unit] prewarm — OpenAI Realtime warmup wiring', () => {
+  let phone: Patter;
+  let warmupSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(async () => {
+    phone = new Patter({
+      carrier: new Twilio({
+        accountSid: 'ACtest000000000000000000000000000',
+        authToken: 'tok',
+      }),
+      phoneNumber: '+15551234567',
+      webhookUrl: 'example.test',
+      openaiKey: 'sk-test',
+    });
+    // Spy on OpenAIRealtimeAdapter.prototype.warmup so we can verify the
+    // wiring without opening a real WebSocket.
+    const realtimeModule = await import('../../src/providers/openai-realtime');
+    warmupSpy = vi
+      .spyOn(realtimeModule.OpenAIRealtimeAdapter.prototype, 'warmup')
+      .mockResolvedValue(undefined);
+  });
+
+  afterEach(async () => {
+    await drainPrewarmTasks(phone);
+    warmupSpy.mockRestore();
+  });
+
+  it('builds a Realtime adapter and invokes warmup when provider=openai_realtime', async () => {
+    const agent: AgentOptions = {
+      systemPrompt: 'You are a test assistant.',
+      provider: 'openai_realtime',
+      voice: 'alloy',
+      model: 'gpt-4o-mini-realtime-preview',
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (phone as any).spawnProviderWarmup(agent);
+    await drainPrewarmTasks(phone);
+    expect(warmupSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('does NOT build a Realtime adapter in pipeline mode', async () => {
+    const stt = new StubSTT();
+    const tts = new StubTTS();
+    const agent: AgentOptions = {
+      systemPrompt: 'hi',
+      provider: 'pipeline',
+      stt,
+      tts,
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (phone as any).spawnProviderWarmup(agent);
+    await drainPrewarmTasks(phone);
+    expect(warmupSpy).not.toHaveBeenCalled();
+    // Pipeline-mode providers were still warmed.
+    expect(stt.warmupCalls).toBe(1);
+    expect(tts.warmupCalls).toBe(1);
+  });
+
+  it('skips Realtime warmup when the OpenAI key is missing', async () => {
+    // Replace this test's Patter with one missing the openaiKey.
+    await drainPrewarmTasks(phone);
+    const keylessPhone = new Patter({
+      carrier: new Twilio({
+        accountSid: 'ACtest000000000000000000000000000',
+        authToken: 'tok',
+      }),
+      phoneNumber: '+15551234567',
+      webhookUrl: 'example.test',
+    });
+    const agent: AgentOptions = {
+      systemPrompt: 'hi',
+      provider: 'openai_realtime',
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (keylessPhone as any).spawnProviderWarmup(agent);
+    await drainPrewarmTasks(keylessPhone);
+    expect(warmupSpy).not.toHaveBeenCalled();
+  });
+
+  it('a failing Realtime warmup is best-effort and never propagates', async () => {
+    warmupSpy.mockRejectedValueOnce(new Error('network down'));
+    const agent: AgentOptions = {
+      systemPrompt: 'hi',
+      provider: 'openai_realtime',
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (phone as any).spawnProviderWarmup(agent);
+    // Must not throw out of the task drain.
+    await drainPrewarmTasks(phone);
+    expect(warmupSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('[unit] prewarm — first-message cache', () => {
   let phone: Patter;
   beforeEach(() => {

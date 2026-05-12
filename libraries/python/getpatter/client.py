@@ -733,13 +733,22 @@ class Patter:
         """Spawn a fire-and-forget task that warms up STT / TTS / LLM in
         parallel with the carrier-side ``initiate_call``.
 
+        Pipeline-mode providers (``agent.stt`` / ``agent.tts`` / ``agent.llm``)
+        are picked up via the optional ``warmup()`` method on each instance.
+        The Realtime / ConvAI all-in-one adapters are server-instantiated
+        at ``stream_handler.start()`` time, so they are not reachable
+        through the Agent fields — a transient :class:`OpenAIRealtimeAdapter`
+        is built here from the resolved Agent + the configured OpenAI key
+        when ``agent.provider == "openai_realtime"`` so the canonical
+        session-prime handshake runs during the carrier ringing window.
+
         Best-effort: each provider's ``warmup()`` is wrapped in
         ``asyncio.gather(..., return_exceptions=True)`` so a slow or
         failing endpoint cannot block the others. The default
         ``warmup()`` on the abstract base classes is a no-op, so providers
         that don't override it contribute nothing to call latency.
         """
-        targets = []
+        targets: list[Any] = []
         for provider in (
             getattr(agent, "stt", None),
             getattr(agent, "tts", None),
@@ -751,6 +760,10 @@ class Patter:
             if warmup is None or not callable(warmup):
                 continue
             targets.append(provider)
+
+        realtime_adapter = self._build_realtime_warmup_adapter(agent)
+        if realtime_adapter is not None:
+            targets.append(realtime_adapter)
 
         if not targets:
             return
@@ -773,6 +786,54 @@ class Patter:
         # call and never blocks the user.
         self._prewarm_tasks.add(task)
         task.add_done_callback(self._prewarm_tasks.discard)
+
+    def _build_realtime_warmup_adapter(self, agent: Agent) -> Any | None:
+        """Build a transient :class:`OpenAIRealtimeAdapter` configured
+        identically to the one ``StreamHandler.start()`` will instantiate,
+        suitable for a single :py:meth:`warmup` call.
+
+        Returns ``None`` when warmup is not applicable: the agent is not
+        in ``openai_realtime`` mode, the OpenAI key is missing, or the
+        adapter import fails.
+        """
+        if getattr(agent, "provider", None) != "openai_realtime":
+            return None
+        api_key = getattr(self._local_config, "openai_key", None)
+        if not api_key:
+            return None
+        try:
+            from getpatter.providers.openai_realtime import (
+                OpenAIRealtimeAdapter,  # type: ignore[import]
+            )
+        except Exception as exc:  # noqa: BLE001 - best-effort
+            logger.debug("Realtime warmup unavailable: %s", exc)
+            return None
+
+        adapter_kwargs: dict[str, Any] = {
+            "api_key": api_key,
+            "model": agent.model,
+            "voice": agent.voice,
+            "instructions": agent.system_prompt,
+            "language": agent.language,
+            # Twilio + Telnyx both bridge to OpenAI Realtime over
+            # ``g711_ulaw`` (see ``telephony/twilio.py`` / ``telnyx.py``);
+            # match that here so the primed session config aligns with
+            # the production call.
+            "audio_format": "g711_ulaw",
+        }
+        reasoning_effort = getattr(agent, "openai_realtime_reasoning_effort", None)
+        if reasoning_effort is not None:
+            adapter_kwargs["reasoning_effort"] = reasoning_effort
+        transcription_model = getattr(
+            agent, "openai_realtime_input_audio_transcription_model", None
+        )
+        if transcription_model is not None:
+            adapter_kwargs["input_audio_transcription_model"] = transcription_model
+        try:
+            return OpenAIRealtimeAdapter(**adapter_kwargs)
+        except Exception as exc:  # noqa: BLE001 - best-effort
+            logger.debug("Realtime warmup adapter build failed: %s", exc)
+            return None
 
     def pop_prewarmed_connections(self, call_id: str) -> dict[str, Any] | None:
         """Pop and return the parked provider WS handles for ``call_id``,
