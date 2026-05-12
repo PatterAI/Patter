@@ -733,13 +733,26 @@ class Patter:
         """Spawn a fire-and-forget task that warms up STT / TTS / LLM in
         parallel with the carrier-side ``initiate_call``.
 
+        Pipeline-mode providers (``agent.stt`` / ``agent.tts`` / ``agent.llm``)
+        are picked up via the optional ``warmup()`` method on each instance.
+
+        For ``openai_realtime`` mode the warmup-only handshake is a
+        strict subset of what :meth:`_park_provider_connections` already
+        performs (open WS → ``session.created`` → ``session.update`` →
+        ``session.updated``) — and park keeps the socket open for adoption.
+        Running both creates a double WebSocket handshake against
+        ``api.openai.com`` per call, wastes 150-400 ms of ringing-window
+        budget, and doubles the rate-limit pressure for no benefit. So
+        when ``agent.provider == "openai_realtime"`` we let park do all
+        the Realtime-side work and skip the warmup-only adapter here.
+
         Best-effort: each provider's ``warmup()`` is wrapped in
         ``asyncio.gather(..., return_exceptions=True)`` so a slow or
         failing endpoint cannot block the others. The default
         ``warmup()`` on the abstract base classes is a no-op, so providers
         that don't override it contribute nothing to call latency.
         """
-        targets = []
+        targets: list[Any] = []
         for provider in (
             getattr(agent, "stt", None),
             getattr(agent, "tts", None),
@@ -751,6 +764,14 @@ class Patter:
             if warmup is None or not callable(warmup):
                 continue
             targets.append(provider)
+
+        # ``_build_realtime_warmup_adapter`` only fires for
+        # ``openai_realtime`` agents, and for those we defer 100% of the
+        # Realtime-side warm work to :meth:`_park_provider_connections`
+        # (which runs under the same ``agent.prewarm`` gate on every
+        # outbound call). The warmup-only handshake is a strict subset of
+        # what park performs, so running both makes two WS handshakes
+        # against ``api.openai.com`` per call instead of one.
 
         if not targets:
             return
@@ -773,6 +794,64 @@ class Patter:
         # call and never blocks the user.
         self._prewarm_tasks.add(task)
         task.add_done_callback(self._prewarm_tasks.discard)
+
+    def _build_realtime_warmup_adapter(self, agent: Agent) -> Any | None:
+        """Build a transient :class:`OpenAIRealtimeAdapter` configured
+        identically to the one ``StreamHandler.start()`` will instantiate,
+        suitable for a single :py:meth:`warmup` call.
+
+        Returns ``None`` when warmup is not applicable: the agent is not
+        in ``openai_realtime`` mode, the OpenAI key is missing, or the
+        adapter import fails.
+        """
+        if getattr(agent, "provider", None) != "openai_realtime":
+            return None
+        api_key = getattr(self._local_config, "openai_key", None)
+        if not api_key:
+            return None
+        try:
+            from getpatter.providers.openai_realtime import (
+                OpenAIRealtimeAdapter,  # type: ignore[import]
+            )
+        except Exception as exc:  # noqa: BLE001 - best-effort
+            logger.debug("Realtime warmup unavailable: %s", exc)
+            return None
+
+        # Build the same tools list (user-defined + ``transfer_call`` /
+        # ``end_call``) that ``OpenAIRealtimeStreamHandler.start()`` would
+        # apply on a cold ``connect()``. Without this the primed
+        # ``session.update`` carries an empty tool list and an adopted
+        # parked session is silently incapable of calling the built-ins —
+        # ``transfer_call`` / ``end_call`` no-op until the next cold
+        # session.update (which never happens for adopted calls).
+        from getpatter.stream_handler import build_realtime_tools
+
+        adapter_kwargs: dict[str, Any] = {
+            "api_key": api_key,
+            "model": agent.model,
+            "voice": agent.voice,
+            "instructions": agent.system_prompt,
+            "language": agent.language,
+            "tools": build_realtime_tools(getattr(agent, "tools", None)),
+            # Twilio + Telnyx both bridge to OpenAI Realtime over
+            # ``g711_ulaw`` (see ``telephony/twilio.py`` / ``telnyx.py``);
+            # match that here so the primed session config aligns with
+            # the production call.
+            "audio_format": "g711_ulaw",
+        }
+        reasoning_effort = getattr(agent, "openai_realtime_reasoning_effort", None)
+        if reasoning_effort is not None:
+            adapter_kwargs["reasoning_effort"] = reasoning_effort
+        transcription_model = getattr(
+            agent, "openai_realtime_input_audio_transcription_model", None
+        )
+        if transcription_model is not None:
+            adapter_kwargs["input_audio_transcription_model"] = transcription_model
+        try:
+            return OpenAIRealtimeAdapter(**adapter_kwargs)
+        except Exception as exc:  # noqa: BLE001 - best-effort
+            logger.debug("Realtime warmup adapter build failed: %s", exc)
+            return None
 
     def pop_prewarmed_connections(self, call_id: str) -> dict[str, Any] | None:
         """Pop and return the parked provider WS handles for ``call_id``,
@@ -819,12 +898,26 @@ class Patter:
         ``asyncio.gather(..., return_exceptions=True)`` so a slow or
         failing endpoint cannot block the others. Providers without
         ``open_parked_connection`` contribute nothing.
+
+        For ``openai_realtime`` mode the Realtime adapter is server-side
+        ephemeral, so a transient adapter is built from the resolved
+        Agent + the configured OpenAI key here and its
+        ``open_parked_connection`` opens a fully primed
+        ``session.updated`` WS that ``OpenAIRealtimeStreamHandler``
+        adopts at ``start`` time instead of paying the
+        ``session.created`` + ``session.update`` round-trip again.
         """
         stt = getattr(agent, "stt", None)
         tts = getattr(agent, "tts", None)
         stt_open = getattr(stt, "open_parked_connection", None) if stt else None
         tts_open = getattr(tts, "open_parked_connection", None) if tts else None
-        if stt_open is None and tts_open is None:
+        realtime_adapter = self._build_realtime_warmup_adapter(agent)
+        realtime_open = (
+            getattr(realtime_adapter, "open_parked_connection", None)
+            if realtime_adapter is not None
+            else None
+        )
+        if stt_open is None and tts_open is None and realtime_open is None:
             return
 
         slot: dict[str, Any] = {}
@@ -867,8 +960,27 @@ class Patter:
             except Exception as exc:  # noqa: BLE001 - best-effort
                 logger.debug("Park TTS failed for %s: %s", call_id, exc)
 
+        async def _park_realtime() -> None:
+            if realtime_open is None:
+                return
+            try:
+                handle = await realtime_open()
+                if self._prewarmed_connections.get(call_id) is not slot:
+                    await _safe_close_handle(handle)
+                    return
+                slot["openai_realtime"] = handle
+                logger.info(
+                    "[PREWARM] callId=%s provider=openai_realtime ms=%d",
+                    call_id,
+                    int((time.monotonic() - started_at) * 1000),
+                )
+            except Exception as exc:  # noqa: BLE001 - best-effort
+                logger.debug("Park Realtime failed for %s: %s", call_id, exc)
+
         async def _run_all() -> None:
-            await asyncio.gather(_park_stt(), _park_tts(), return_exceptions=True)
+            await asyncio.gather(
+                _park_stt(), _park_tts(), _park_realtime(), return_exceptions=True
+            )
 
         task = asyncio.create_task(_run_all())
         self._prewarm_tasks.add(task)

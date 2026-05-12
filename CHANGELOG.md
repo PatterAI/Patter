@@ -2,6 +2,30 @@
 
 ## 0.6.1 (2026-05-12)
 
+### Changed — `StreamHandler` adopt-capability check now uses duck typing
+
+The TS realtime adopt branch in `stream-handler.ts` previously relied on `this.adapter instanceof OpenAIRealtimeAdapter` to gate the prewarm-handoff path. Switched to a duck-type check (`typeof adapter.adoptWebSocket === 'function'`) so the generic stream-handler module stays provider-agnostic on this hot path and matches the Python handler's `getattr(self._adapter, "adopt_websocket", None)` shape. Files: `libraries/typescript/src/stream-handler.ts`.
+
+### Fixed — Adapter state leak after a failed parked-session adoption
+
+When `adopt_websocket` / `adoptWebSocket` raised mid-adoption, the partially-adopted `OpenAIRealtimeAdapter` was in an inconsistent state — `_running` / `messageListenerAttached` was already `true`, the heartbeat task may have started, `_current_response_item_id` / `currentResponseItemId` may have carried leaked state from the parked session, and the `_ws` / `ws` reference pointed at a now-closed socket. Falling through to `connect()` on that carcass raced `session.created` against stale state and corrupted the live call. Fix: handler now re-instantiates the adapter before the cold connect path, guaranteeing a clean slate. Files: `libraries/python/getpatter/stream_handler.py`, `libraries/typescript/src/stream-handler.ts`.
+
+### Fixed — Eliminated double WebSocket handshake on outbound OpenAI Realtime calls
+
+`_spawn_provider_warmup` (Py) / `spawnProviderWarmup` (TS) and `_park_provider_connections` / `parkProviderConnections` each built a transient `OpenAIRealtimeAdapter` and opened its own WS against `api.openai.com` during the ringing window — two handshakes per call where one suffices. The warmup-only handshake is a strict subset of what park performs (open WS → `session.created` → `session.update` → `session.updated`) and park keeps the socket open for adoption, so warmup's WS was opened, primed, and immediately discarded. Wasted 150-400 ms of ringing-window budget and doubled the rate-limit pressure against OpenAI. Fix: `_spawn_provider_warmup` no longer builds the Realtime adapter; park is the sole Realtime warm path. Pipeline-mode STT/TTS/LLM warmup is unchanged. Files: `libraries/python/getpatter/client.py`, `libraries/typescript/src/client.ts`.
+
+### Fixed — Built-in tools (`transfer_call` / `end_call`) now land in the primed Realtime session
+
+`_build_realtime_warmup_adapter` (Py) / `buildRealtimeWarmupAdapter` (TS) constructed the transient `OpenAIRealtimeAdapter` without a `tools=` argument, so the `session.update` sent during ringing carried an empty tool list. When `StreamHandler.start()` adopted that parked WebSocket it skipped a fresh `session.update`, leaving the upstream session permanently unaware that the two Patter built-ins existed — `transfer_call` and `end_call` silently no-op'd on every hit-prewarm call (~80% of outbound calls when prewarm is enabled). Added a shared `build_realtime_tools(...)` helper in `stream_handler.py` and `buildRealtimeTools(...)` in `server.ts` so both the live and warmup paths build the canonical tool list byte-for-byte. Files: `libraries/python/getpatter/stream_handler.py`, `libraries/python/getpatter/client.py`, `libraries/typescript/src/server.ts`, `libraries/typescript/src/client.ts`.
+
+### Fixed — OpenAI Realtime warmup now runs during the ringing window
+
+The `warmup()` method on `OpenAIRealtimeAdapter` (defined in both SDKs) was unreachable from `Patter.call()` — the provider warmup framework only iterated `agent.stt` / `agent.tts` / `agent.llm`, but OpenAI Realtime is an all-in-one provider that's server-instantiated at `StreamHandler.start()` time. `_spawn_provider_warmup` (Py) / `spawnProviderWarmup` (TS) now builds a transient `OpenAIRealtimeAdapter` from the resolved Agent + configured `openai_key` when `agent.provider == "openai_realtime"` and calls `warmup()` in parallel with the carrier `initiate_call`. Saves 150–400 ms of TLS + WebSocket handshake + `session.created` round-trip on the first turn. Files: `libraries/python/getpatter/client.py`, `libraries/typescript/src/client.ts`.
+
+### Added — Parked OpenAI Realtime session adoption (sustained first-turn latency win across consecutive calls)
+
+`Patter._park_provider_connections` (Py) / `Patter.parkProviderConnections` (TS) now also park a fully primed (`session.created` → `session.update` → `session.updated`) OpenAI Realtime WebSocket during the carrier ringing window when `agent.provider == "openai_realtime"`. `OpenAIRealtimeStreamHandler` (Py) and the realtime branch of `StreamHandler.initRealtimeAdapter` (TS) consult the parked slot on `start()` and call `adopt_websocket(...)` / `adoptWebSocket(...)` on the configured adapter instead of paying the cold `connect()` round-trip again — saving ~250–450 ms on the first-turn audio. Best-effort: a dead parked WS, missing OpenAI key, or `open_parked_connection` failure all fall through transparently to the cold connect path. Files: `libraries/python/getpatter/client.py`, `libraries/python/getpatter/stream_handler.py`, `libraries/python/getpatter/telephony/twilio.py`, `libraries/python/getpatter/telephony/telnyx.py`, `libraries/typescript/src/client.ts`, `libraries/typescript/src/stream-handler.ts`.
+
 ### Fixed — TypeScript `onMark` clobbered `lastConfirmedMark` with stale/unknown mark names (parity with Python)
 
 `StreamHandler.onMark` in `libraries/typescript/src/stream-handler.ts`

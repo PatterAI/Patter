@@ -175,6 +175,128 @@ describe('[unit] prewarm — provider warmup', () => {
   });
 });
 
+describe('[unit] prewarm — OpenAI Realtime warmup wiring', () => {
+  let phone: Patter;
+  let warmupSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(async () => {
+    phone = new Patter({
+      carrier: new Twilio({
+        accountSid: 'ACtest000000000000000000000000000',
+        authToken: 'tok',
+      }),
+      phoneNumber: '+15551234567',
+      webhookUrl: 'example.test',
+      openaiKey: 'sk-test',
+    });
+    // Spy on OpenAIRealtimeAdapter.prototype.warmup so we can verify the
+    // wiring without opening a real WebSocket.
+    const realtimeModule = await import('../../src/providers/openai-realtime');
+    warmupSpy = vi
+      .spyOn(realtimeModule.OpenAIRealtimeAdapter.prototype, 'warmup')
+      .mockResolvedValue(undefined);
+  });
+
+  afterEach(async () => {
+    await drainPrewarmTasks(phone);
+    warmupSpy.mockRestore();
+  });
+
+  it('does NOT double-handshake Realtime — park does all the Realtime warm work', async () => {
+    // Regression: previously ``spawnProviderWarmup`` built a transient
+    // OpenAIRealtimeAdapter and called ``warmup()`` on it, then
+    // ``parkProviderConnections`` built ANOTHER one and called
+    // ``openParkedConnection()``. Two WS handshakes per call against
+    // api.openai.com — wasted 150-400 ms and doubled rate-limit pressure.
+    // Now warmup skips the Realtime adapter entirely; park is the sole
+    // Realtime warm path.
+    const agent: AgentOptions = {
+      systemPrompt: 'You are a test assistant.',
+      provider: 'openai_realtime',
+      voice: 'alloy',
+      model: 'gpt-4o-mini-realtime-preview',
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (phone as any).spawnProviderWarmup(agent);
+    await drainPrewarmTasks(phone);
+    expect(warmupSpy).not.toHaveBeenCalled();
+  });
+
+  it('does NOT build a Realtime adapter in pipeline mode', async () => {
+    const stt = new StubSTT();
+    const tts = new StubTTS();
+    const agent: AgentOptions = {
+      systemPrompt: 'hi',
+      provider: 'pipeline',
+      stt,
+      tts,
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (phone as any).spawnProviderWarmup(agent);
+    await drainPrewarmTasks(phone);
+    expect(warmupSpy).not.toHaveBeenCalled();
+    // Pipeline-mode providers were still warmed.
+    expect(stt.warmupCalls).toBe(1);
+    expect(tts.warmupCalls).toBe(1);
+  });
+
+  it('skips Realtime warmup when the OpenAI key is missing', async () => {
+    // Replace this test's Patter with one missing the openaiKey.
+    await drainPrewarmTasks(phone);
+    const keylessPhone = new Patter({
+      carrier: new Twilio({
+        accountSid: 'ACtest000000000000000000000000000',
+        authToken: 'tok',
+      }),
+      phoneNumber: '+15551234567',
+      webhookUrl: 'example.test',
+    });
+    const agent: AgentOptions = {
+      systemPrompt: 'hi',
+      provider: 'openai_realtime',
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (keylessPhone as any).spawnProviderWarmup(agent);
+    await drainPrewarmTasks(keylessPhone);
+    expect(warmupSpy).not.toHaveBeenCalled();
+  });
+
+  it('outbound Realtime call opens exactly one WS handshake during ringing (no double-handshake)', async () => {
+    // End-to-end guarantee: warmup + park together result in a single
+    // OpenAIRealtimeAdapter being constructed (the one park uses), not
+    // two as in the old buggy behaviour.
+    const realtimeModule = await import('../../src/providers/openai-realtime');
+    let constructed = 0;
+    const ctorSpy = vi
+      .spyOn(realtimeModule, 'OpenAIRealtimeAdapter')
+      .mockImplementation(((..._args: unknown[]) => {
+        constructed += 1;
+        return {
+          warmup: async () => undefined,
+          openParkedConnection: async () => ({ readyState: 1, close: () => undefined }),
+        };
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      }) as any);
+
+    const agent: AgentOptions = {
+      systemPrompt: 'hi',
+      provider: 'openai_realtime',
+      voice: 'alloy',
+      prewarm: true,
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (phone as any).spawnProviderWarmup(agent);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (phone as any).parkProviderConnections(agent, 'CAtest-no-double');
+    await drainPrewarmTasks(phone);
+    await new Promise<void>((r) => setTimeout(r, 30));
+
+    expect(constructed).toBe(1);
+
+    ctorSpy.mockRestore();
+  });
+});
+
 describe('[unit] prewarm — first-message cache', () => {
   let phone: Patter;
   beforeEach(() => {

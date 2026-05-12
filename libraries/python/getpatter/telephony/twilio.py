@@ -516,6 +516,7 @@ async def twilio_stream_bridge(
                         # produces a deep, slurred voice.
                         audio_format="g711_ulaw",
                         speech_events=speech_events,
+                        pop_prewarmed_connections=pop_prewarmed_connections,
                     )
 
                 # Inherit patter.side from the parent Patter instance so all

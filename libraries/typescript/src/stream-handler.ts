@@ -2450,14 +2450,83 @@ export class StreamHandler {
     const label = this.deps.bridge.label;
     this.adapter = this.deps.buildAIAdapter(resolvedPrompt);
 
-    try {
-      await this.adapter.connect();
-      getLogger().debug(`AI adapter connected (${label})`);
-    } catch (e) {
-      getLogger().error(`AI adapter connect FAILED (${label}):`, e);
-      // Hang up the telephony call so it doesn't stay connected billing
-      try { await this.deps.bridge.endCall(this.callId, this.ws); } catch { /* best effort */ }
-      return;
+    // Prewarm-handoff: try to adopt a pre-opened, already-
+    // ``session.updated`` Realtime WS parked during the carrier ringing
+    // window by ``Patter.parkProviderConnections``. Saves the cold
+    // ``new WebSocket`` + ``session.created`` + ``session.update``
+    // round-trip (~250-450 ms on first turn).
+    //
+    // Adopt capability is detected by duck typing
+    // (``typeof adoptWebSocket === 'function'``) rather than
+    // ``instanceof OpenAIRealtimeAdapter``: pipeline-only users should
+    // not pay the cost of a hard provider import in the generic
+    // stream-handler hot path, and the duck check mirrors the Python
+    // handler's ``getattr(self._adapter, "adopt_websocket", None)``
+    // shape (parity with the provider-agnostic rule).
+    const adoptFn = (this.adapter as {
+      adoptWebSocket?: (ws: import('ws').WebSocket) => void;
+    }).adoptWebSocket;
+    const canAdopt = typeof adoptFn === 'function';
+
+    let parkedRealtime: import('ws').WebSocket | undefined;
+    if (canAdopt && this.deps.popPrewarmedConnections) {
+      try {
+        const slot = this.deps.popPrewarmedConnections(this.callId);
+        parkedRealtime = slot?.openaiRealtime;
+      } catch (err) {
+        getLogger().debug(
+          `popPrewarmedConnections raised for Realtime: ${String(err)}`,
+        );
+      }
+    }
+
+    let adopted = false;
+    let adoptFailed = false;
+    if (parkedRealtime && canAdopt) {
+      const wsAlive = parkedRealtime.readyState === 1 /* OPEN */;
+      if (wsAlive) {
+        try {
+          adoptFn!.call(this.adapter, parkedRealtime);
+          adopted = true;
+          getLogger().info(
+            `[CONNECT] callId=${this.callId} provider=openai_realtime source=adopted ms=0`,
+          );
+        } catch (err) {
+          getLogger().debug(
+            `Realtime adoptWebSocket failed: ${String(err)}; falling back to connect`,
+          );
+          adoptFailed = true;
+          try { parkedRealtime.close(); } catch { /* ignore */ }
+        }
+      } else {
+        try { parkedRealtime.close(); } catch { /* ignore */ }
+      }
+    }
+
+    // When ``adoptWebSocket`` raised mid-call the adapter is in an
+    // inconsistent state: ``messageListenerAttached`` may be true, the
+    // heartbeat timer may have started, ``currentResponseItemId`` may
+    // carry leaked state from the parked session, and the partially-
+    // adopted ``ws`` reference may point at a now-closed socket.
+    // Calling ``connect()`` on this carcass would race ``session.created``
+    // against stale state and corrupt the live call. Re-instantiate the
+    // adapter so the cold path starts from a clean slate.
+    if (adoptFailed) {
+      this.adapter = this.deps.buildAIAdapter(resolvedPrompt);
+    }
+
+    if (!adopted) {
+      try {
+        await this.adapter.connect();
+        getLogger().debug(`AI adapter connected (${label})`);
+      } catch (e) {
+        getLogger().error(`AI adapter connect FAILED (${label}):`, e);
+        // Hang up the telephony call so it doesn't stay connected billing
+        try { await this.deps.bridge.endCall(this.callId, this.ws); } catch { /* best effort */ }
+        return;
+      }
+    } else {
+      getLogger().debug(`AI adapter adopted parked session (${label})`);
     }
 
     if (this.deps.agent.firstMessage) {

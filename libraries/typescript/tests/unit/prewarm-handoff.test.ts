@@ -210,3 +210,275 @@ describe('[unit] prewarm-handoff', () => {
     expect(phone.popPrewarmedConnections('CAtest6')).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// OpenAI Realtime parking + adoption
+// ---------------------------------------------------------------------------
+
+describe('[unit] prewarm-handoff — OpenAI Realtime', () => {
+  let phone: Patter;
+  let openParkedSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(async () => {
+    phone = new Patter({
+      carrier: new Twilio({
+        accountSid: 'ACtest000000000000000000000000000',
+        authToken: 'tok',
+      }),
+      phoneNumber: '+15551234567',
+      webhookUrl: 'example.test',
+      openaiKey: 'sk-test',
+    });
+    // Spy on the prototype method so any transient adapter instance the
+    // SDK builds inside ``parkProviderConnections`` returns a controllable
+    // FakeWS instead of opening a real WebSocket.
+    const realtimeModule = await import('../../src/providers/openai-realtime');
+    openParkedSpy = vi
+      .spyOn(realtimeModule.OpenAIRealtimeAdapter.prototype, 'openParkedConnection')
+      .mockImplementation(async () => new FakeWS() as unknown as import('ws').WebSocket);
+  });
+
+  it('parkProviderConnections opens a primed Realtime WS for openai_realtime agents', async () => {
+    const agent: AgentOptions = {
+      systemPrompt: 'p',
+      provider: 'openai_realtime',
+      voice: 'alloy',
+    };
+    (phone as unknown as { parkProviderConnections: (a: AgentOptions, id: string) => void })
+      .parkProviderConnections(agent, 'CArt1');
+    await new Promise<void>((r) => setTimeout(r, 30));
+    expect(openParkedSpy).toHaveBeenCalledTimes(1);
+    const slot = phone.popPrewarmedConnections('CArt1');
+    expect(slot).toBeDefined();
+    expect(slot?.openaiRealtime).toBeDefined();
+  });
+
+  it('skips Realtime parking when the OpenAI key is missing', async () => {
+    const keylessPhone = new Patter({
+      carrier: new Twilio({
+        accountSid: 'ACtest000000000000000000000000000',
+        authToken: 'tok',
+      }),
+      phoneNumber: '+15551234567',
+      webhookUrl: 'example.test',
+    });
+    const agent: AgentOptions = { systemPrompt: 'p', provider: 'openai_realtime' };
+    (keylessPhone as unknown as { parkProviderConnections: (a: AgentOptions, id: string) => void })
+      .parkProviderConnections(agent, 'CArt2');
+    await new Promise<void>((r) => setTimeout(r, 30));
+    expect(openParkedSpy).not.toHaveBeenCalled();
+    expect(keylessPhone.popPrewarmedConnections('CArt2')).toBeUndefined();
+  });
+
+  it('Realtime park failure is best-effort and does not block other providers', async () => {
+    openParkedSpy.mockRejectedValueOnce(new Error('network down'));
+    const stt = new StubSTTWithPark();
+    const agent: AgentOptions = {
+      systemPrompt: 'p',
+      provider: 'openai_realtime',
+      stt,
+    };
+    (phone as unknown as { parkProviderConnections: (a: AgentOptions, id: string) => void })
+      .parkProviderConnections(agent, 'CArt3');
+    await new Promise<void>((r) => setTimeout(r, 30));
+    // STT still parked successfully.
+    expect(stt.parkCalls).toBe(1);
+    const slot = phone.popPrewarmedConnections('CArt3');
+    // ``openaiRealtime`` key absent on the slot; STT key present.
+    expect(slot?.openaiRealtime).toBeUndefined();
+    expect(slot?.stt).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Built-in tools (transfer_call / end_call) MUST land in the primed session
+// so adopted parked sessions can still call them. Regression for the bug
+// where ``buildRealtimeWarmupAdapter`` constructed the transient adapter
+// with no ``tools`` argument and the session.update sent during ringing
+// carried an empty tool list.
+// ---------------------------------------------------------------------------
+
+describe('[unit] prewarm-handoff — built-in tools in primed session', () => {
+  function makeRealtimePhone(): Patter {
+    return new Patter({
+      carrier: new Twilio({
+        accountSid: 'ACtest000000000000000000000000000',
+        authToken: 'tok',
+      }),
+      phoneNumber: '+15551234567',
+      webhookUrl: 'example.test',
+      openaiKey: 'sk-test',
+    });
+  }
+
+  it('warmup adapter is constructed with user tools + transfer_call + end_call', () => {
+    const phone = makeRealtimePhone();
+
+    const customTool = {
+      name: 'lookup_order',
+      description: 'Look up an order by id',
+      parameters: {
+        type: 'object',
+        properties: { orderId: { type: 'string' } },
+        required: ['orderId'],
+      },
+    } as const;
+
+    const agent: AgentOptions = {
+      systemPrompt: 'p',
+      provider: 'openai_realtime',
+      voice: 'alloy',
+      tools: [customTool],
+    };
+
+    const adapter = (
+      phone as unknown as {
+        buildRealtimeWarmupAdapter: (a: AgentOptions) => unknown;
+      }
+    ).buildRealtimeWarmupAdapter(agent);
+    expect(adapter).not.toBeNull();
+
+    // ``tools`` is a private field on ``OpenAIRealtimeAdapter`` — access
+    // via bracket to inspect the wired value.
+    const tools = (adapter as { tools?: Array<{ name: string }> }).tools;
+    expect(tools).toBeDefined();
+    const names = (tools ?? []).map((t) => t.name);
+    expect(names).toContain('lookup_order');
+    expect(names).toContain('transfer_call');
+    expect(names).toContain('end_call');
+  });
+
+  it('warmup adapter still injects transfer_call + end_call when agent has no tools', () => {
+    const phone = makeRealtimePhone();
+    const agent: AgentOptions = {
+      systemPrompt: 'p',
+      provider: 'openai_realtime',
+    };
+
+    const adapter = (
+      phone as unknown as {
+        buildRealtimeWarmupAdapter: (a: AgentOptions) => unknown;
+      }
+    ).buildRealtimeWarmupAdapter(agent);
+    expect(adapter).not.toBeNull();
+
+    const tools = (adapter as { tools?: Array<{ name: string }> }).tools;
+    expect(tools).toBeDefined();
+    const names = (tools ?? []).map((t) => t.name);
+    expect(names).toEqual(['transfer_call', 'end_call']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Adopt-failure recovery — when ``adoptWebSocket`` raises, the partially-
+// adopted adapter is in an inconsistent state (messageListenerAttached may
+// be true, heartbeat may have started, currentResponseItemId may carry leaked
+// state from the parked session). Calling ``connect()`` on that carcass races
+// ``session.created`` against stale state. Handler must recreate the adapter
+// before falling through to the cold ``connect()`` path.
+// ---------------------------------------------------------------------------
+
+describe('[unit] prewarm-handoff — adapter recreation on adopt failure', () => {
+  it('recreates the adapter when adoptWebSocket throws, then connects on the fresh one', async () => {
+    const { StreamHandler } = await import('../../src/stream-handler');
+    const { OpenAIRealtimeAdapter } = await import('../../src/providers/openai-realtime');
+    const { MetricsStore } = await import('../../src/dashboard/store');
+    const { RemoteMessageHandler } = await import('../../src/remote-message');
+    const wsMod = await import('ws');
+
+    // Force ``adoptWebSocket`` on every adapter instance to throw — the
+    // SDK must respond by rebuilding the adapter before falling through.
+    const adoptSpy = vi
+      .spyOn(OpenAIRealtimeAdapter.prototype, 'adoptWebSocket')
+      .mockImplementation(() => {
+        throw new Error('adopt blew up');
+      });
+    const connectSpy = vi
+      .spyOn(OpenAIRealtimeAdapter.prototype, 'connect')
+      .mockResolvedValue(undefined);
+    const onEventSpy = vi
+      .spyOn(OpenAIRealtimeAdapter.prototype, 'onEvent')
+      .mockImplementation(() => undefined);
+
+    // Parked WS — alive (readyState OPEN); ``adoptWebSocket`` will fail
+    // before it gets attached.
+    const parkedWs = {
+      readyState: 1,
+      close: () => undefined,
+    } as unknown as import('ws').WebSocket;
+
+    const built: Array<unknown> = [];
+    const deps = {
+      config: { openaiKey: 'sk-test' },
+      agent: {
+        systemPrompt: 'Test agent',
+        provider: 'openai_realtime' as const,
+      },
+      bridge: {
+        label: 'TestBridge',
+        telephonyProvider: 'twilio' as const,
+        sendAudio: vi.fn(),
+        sendMark: vi.fn(),
+        sendClear: vi.fn(),
+        transferCall: vi.fn().mockResolvedValue(undefined),
+        endCall: vi.fn().mockResolvedValue(undefined),
+        createStt: vi.fn().mockReturnValue(null),
+        queryTelephonyCost: vi.fn().mockResolvedValue(undefined),
+      },
+      metricsStore: new MetricsStore(),
+      pricing: null,
+      remoteHandler: new RemoteMessageHandler(),
+      recording: false,
+      buildAIAdapter: vi.fn().mockImplementation((_prompt: string) => {
+        const instance = new OpenAIRealtimeAdapter('sk-test', 'gpt-4o-mini-realtime-preview');
+        built.push(instance);
+        return instance;
+      }),
+      sanitizeVariables: vi.fn((raw: Record<string, unknown>) => {
+        const safe: Record<string, string> = {};
+        for (const [k, v] of Object.entries(raw)) safe[k] = String(v);
+        return safe;
+      }),
+      resolveVariables: vi.fn((tpl: string) => tpl),
+      popPrewarmedConnections: vi.fn().mockReturnValue({ openaiRealtime: parkedWs }),
+    };
+
+    const mockWs = {
+      send: vi.fn(),
+      close: vi.fn(),
+      on: vi.fn(),
+      once: vi.fn(),
+      readyState: 1,
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    } as unknown as import('ws').WebSocket;
+
+    const handler = new StreamHandler(
+      deps,
+      mockWs,
+      '+15551111111',
+      '+15552222222',
+    );
+
+    await handler.handleCallStart('CAtest-recreate');
+
+    // buildAIAdapter was called twice: first to build the original
+    // adapter (whose adopt failed), then again to recreate it for the
+    // cold connect path.
+    expect(deps.buildAIAdapter).toHaveBeenCalledTimes(2);
+    // Both adapters were OpenAIRealtimeAdapter instances.
+    expect(built).toHaveLength(2);
+    expect(built[0]).toBeInstanceOf(OpenAIRealtimeAdapter);
+    expect(built[1]).toBeInstanceOf(OpenAIRealtimeAdapter);
+    expect(built[0]).not.toBe(built[1]);
+    // adopt was called once (on the first adapter, threw). connect was
+    // called once (on the fresh adapter).
+    expect(adoptSpy).toHaveBeenCalledTimes(1);
+    expect(connectSpy).toHaveBeenCalledTimes(1);
+
+    adoptSpy.mockRestore();
+    connectSpy.mockRestore();
+    onEventSpy.mockRestore();
+  });
+});

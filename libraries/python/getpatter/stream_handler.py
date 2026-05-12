@@ -118,6 +118,41 @@ END_CALL_TOOL: dict = {
 }
 
 
+def build_realtime_tools(agent_tools_field: object) -> list[dict]:
+    """Build the canonical OpenAI Realtime tools list: user-defined tools
+    followed by the always-injected ``transfer_call`` / ``end_call``
+    built-ins.
+
+    Called from both ``OpenAIRealtimeStreamHandler.start()`` and the
+    prewarm-side ``_build_realtime_warmup_adapter`` so the primed
+    ``session.update`` exchanged during ringing carries the exact same
+    tool definitions that the live call would have set on the first
+    cold ``connect()``. Without this, an adopted parked session lands
+    on a server that has no idea ``transfer_call`` / ``end_call`` exist
+    and the model silently refuses to call them.
+
+    ``agent_tools_field`` accepts the raw ``agent.tools`` value (``None``,
+    tuple, or list of tool dicts) so callers can pass it straight from
+    the ``Agent`` instance without unpacking.
+    """
+    tools: list[dict] = []
+    for t in agent_tools_field or ():  # type: ignore[union-attr]
+        entry: dict = {
+            "name": t["name"],
+            "description": t.get("description", ""),
+            "parameters": t.get("parameters", {}),
+        }
+        # Propagate strict-mode opt-in to the OpenAI session.update wire
+        # format. Schema is already validated at agent() build time so we
+        # can pass it through without re-checking.
+        if t.get("strict") is True:
+            entry["strict"] = True
+        tools.append(entry)
+    tools.append(TRANSFER_CALL_TOOL)
+    tools.append(END_CALL_TOOL)
+    return tools
+
+
 # ---------------------------------------------------------------------------
 # Audio sender protocol — abstracts Twilio vs Telnyx audio output
 # ---------------------------------------------------------------------------
@@ -744,6 +779,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         audio_format: str = "pcm16",
         input_transcode: str | None = None,
         speech_events=None,
+        pop_prewarmed_connections=None,
     ) -> None:
         super().__init__(
             agent=agent,
@@ -763,6 +799,12 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         self._transfer_fn = transfer_fn
         self._hangup_fn = hangup_fn
         self._audio_format = audio_format
+        # Optional callback (set by ``server.py``) that pops the
+        # parked-connections slot for this call. Wired so the Realtime
+        # adapter built below can ``adopt_websocket`` the
+        # ``session.updated`` WS opened during the ringing window
+        # (see ``Patter._park_provider_connections``).
+        self._pop_prewarmed_connections = pop_prewarmed_connections
         # OpenAI Realtime API uses a single codec for both input and output
         # (``audio_format`` becomes both ``input_audio_format`` and
         # ``output_audio_format`` in the session). When the telephony leg
@@ -912,20 +954,10 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         # not kill the entire call. Parity with TS ``initMcpTools``.
         await self._init_mcp_tools()
 
-        agent_tools: list[dict] = []
-        for t in self.agent.tools or []:
-            entry: dict = {
-                "name": t["name"],
-                "description": t.get("description", ""),
-                "parameters": t.get("parameters", {}),
-            }
-            # Propagate strict-mode opt-in to the OpenAI session.update
-            # wire format. Schema is already validated at agent() build
-            # time so we can pass it through without re-checking.
-            if t.get("strict") is True:
-                entry["strict"] = True
-            agent_tools.append(entry)
-        openai_tools: list[dict] = agent_tools + [TRANSFER_CALL_TOOL, END_CALL_TOOL]
+        # Canonical tools list — user-defined tools + transfer_call / end_call
+        # built-ins. Shared with the prewarm adapter so the primed
+        # session.update matches the live session.update byte-for-byte.
+        openai_tools: list[dict] = build_realtime_tools(self.agent.tools)
 
         # Forward optional engine-level Realtime knobs (carried on the Agent
         # by ``Patter._unpack_engine``) only when set, so the adapter's own
@@ -948,8 +980,69 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         if transcription_model is not None:
             adapter_kwargs["input_audio_transcription_model"] = transcription_model
         self._adapter = OpenAIRealtimeAdapter(**adapter_kwargs)
-        await self._adapter.connect()
-        logger.debug("OpenAI Realtime connected")
+
+        # Prewarm-handoff: try to adopt a pre-opened, already-
+        # ``session.updated`` Realtime WS parked during the carrier
+        # ringing window by ``Patter._park_provider_connections``.
+        # Saves the cold ``websockets.connect`` + ``session.created`` +
+        # ``session.update`` round-trip (~250-450 ms on first turn).
+        parked_realtime = None
+        if self._pop_prewarmed_connections is not None:
+            try:
+                slot = self._pop_prewarmed_connections(self.call_id)
+                if slot is not None:
+                    parked_realtime = slot.get("openai_realtime")
+            except Exception as exc:  # noqa: BLE001 - best-effort
+                logger.debug("pop_prewarmed_connections raised for Realtime: %s", exc)
+
+        adopted = False
+        adopt_failed = False
+        if parked_realtime is not None:
+            adopt = getattr(self._adapter, "adopt_websocket", None)
+            ws_alive = parked_realtime is not None and not getattr(
+                parked_realtime, "closed", True
+            )
+            if callable(adopt) and ws_alive:
+                try:
+                    adopt(parked_realtime)
+                    adopted = True
+                    logger.info(
+                        "[CONNECT] callId=%s provider=openai_realtime "
+                        "source=adopted ms=0",
+                        self.call_id,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(
+                        "Realtime adopt_websocket failed: %s; falling back to connect",
+                        exc,
+                    )
+                    adopt_failed = True
+                    try:
+                        await parked_realtime.close()
+                    except Exception:
+                        pass
+            else:
+                try:
+                    await parked_realtime.close()
+                except Exception:
+                    pass
+
+        # When ``adopt_websocket`` raised mid-call the adapter is in an
+        # inconsistent state: ``_running`` may be ``True``, the heartbeat
+        # task may have been scheduled, ``_current_response_item_id`` may
+        # carry leaked state from the parked session, and the partially-
+        # adopted ``_ws`` reference may point at a now-closed socket.
+        # Calling ``connect()`` on this carcass would race ``session.created``
+        # against stale state and corrupt the live call. Re-instantiate the
+        # adapter so the cold path starts from a clean slate.
+        if adopt_failed:
+            self._adapter = OpenAIRealtimeAdapter(**adapter_kwargs)
+
+        if not adopted:
+            await self._adapter.connect()
+            logger.debug("OpenAI Realtime connected (cold)")
+        else:
+            logger.debug("OpenAI Realtime adopted parked session")
 
         if self.agent.first_message:
             # Start measuring latency for the firstMessage turn (sendText →
