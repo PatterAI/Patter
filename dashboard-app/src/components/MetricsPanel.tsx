@@ -80,7 +80,7 @@ function LatencyView({ call }: { call: Call }) {
   if (isRealtime) {
     const turnsRt = call.turnCount ?? 0;
     const showPctRt = turnsRt >= MIN_TURNS_FOR_PERCENTILES;
-    const lowSampleHint = `p95 hidden until ≥${MIN_TURNS_FOR_PERCENTILES} turns — showing p50 instead (n=${turnsRt})`;
+    const lowSampleHint = `p95 hidden — needs ≥${MIN_TURNS_FOR_PERCENTILES} turns (n=${turnsRt}). Currently showing p50.`;
     return (
       <>
         <div className="lat-grid">
@@ -91,12 +91,14 @@ function LatencyView({ call }: { call: Call }) {
               {p50 > 0 && <span className="u">ms</span>}
             </div>
           </div>
-          <div
-            className={'latbox' + (showPctRt && p95 > 600 ? ' warn' : '')}
-            title={showPctRt ? undefined : lowSampleHint}
-          >
+          <div className={'latbox' + (showPctRt && p95 > 600 ? ' warn' : '')}>
             <div className="l">
-              {showPctRt ? 'end-to-end p95' : `end-to-end p50 (n<${MIN_TURNS_FOR_PERCENTILES})`}
+              {showPctRt ? 'end-to-end p95' : 'end-to-end p50'}
+              {!showPctRt && (
+                <span className="info-q" title={lowSampleHint} aria-label={lowSampleHint}>
+                  ?
+                </span>
+              )}
             </div>
             <div className="v">
               {showPctRt ? p95 || '—' : p50 || '—'}
@@ -104,12 +106,6 @@ function LatencyView({ call }: { call: Call }) {
             </div>
           </div>
         </div>
-        {!showPctRt && (
-          <div style={{ marginTop: -6, marginBottom: 8, fontSize: 11, opacity: 0.6 }}>
-            {turnsRt} {turnsRt === 1 ? 'turn' : 'turns'} — p95 hidden until ≥
-            {MIN_TURNS_FOR_PERCENTILES}, showing p50
-          </div>
-        )}
         <div className="waterfall">
           <div className="wf-row">
             <span className="lbl">e2e</span>
@@ -145,7 +141,7 @@ function LatencyView({ call }: { call: Call }) {
   // p50 — robust to outliers — and label the box accordingly.
   const turns = call.turnCount ?? 0;
   const showPct = turns >= MIN_TURNS_FOR_PERCENTILES;
-  const lowSampleHint = `p95 hidden until ≥${MIN_TURNS_FOR_PERCENTILES} turns — showing p50 instead (n=${turns})`;
+  const lowSampleHint = `p95 hidden — needs ≥${MIN_TURNS_FOR_PERCENTILES} turns (n=${turns}). Currently showing p50.`;
 
   return (
     <>
@@ -157,11 +153,15 @@ function LatencyView({ call }: { call: Call }) {
             {call.latencyP50 != null && <span className="u">ms</span>}
           </div>
         </div>
-        <div
-          className={'latbox' + (showPct && p95 > 600 ? ' warn' : '')}
-          title={showPct ? undefined : lowSampleHint}
-        >
-          <div className="l">{showPct ? 'p95' : `p50 (n<${MIN_TURNS_FOR_PERCENTILES})`}</div>
+        <div className={'latbox' + (showPct && p95 > 600 ? ' warn' : '')}>
+          <div className="l">
+            {showPct ? 'p95' : 'p50'}
+            {!showPct && (
+              <span className="info-q" title={lowSampleHint} aria-label={lowSampleHint}>
+                ?
+              </span>
+            )}
+          </div>
           <div className="v">
             {showPct ? p95 || '—' : call.latencyP50 ?? '—'}
             {(showPct ? p95 : call.latencyP50) != null &&
@@ -183,12 +183,6 @@ function LatencyView({ call }: { call: Call }) {
           </div>
         </div>
       </div>
-      {!showPct && (
-        <div style={{ marginTop: -6, marginBottom: 8, fontSize: 11, opacity: 0.6 }}>
-          {turns} {turns === 1 ? 'turn' : 'turns'} — p95 hidden until ≥
-          {MIN_TURNS_FOR_PERCENTILES}, showing p50
-        </div>
-      )}
 
       <div className="waterfall">
         <div className="wf-row">

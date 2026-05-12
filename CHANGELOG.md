@@ -2,6 +2,10 @@
 
 ## 0.6.1 (2026-05-12)
 
+### Changed — Dashboard p95 fallback hint moved to a compact "?" tooltip
+
+The p95→p50 fallback (shipped earlier in this release) rendered a verbose explanatory row under each latency card — `"6 turns — p95 hidden until ≥10, showing p50"` — and parenthetical column labels like `"END-TO-END P50 (N<10)"`. On short calls this added two lines of repeated reasoning to every panel and the call-table row, drowning out the actual numbers. Replaced both with a single inline `?` badge next to the label that shows the same explanation on hover: `"p95 hidden — needs ≥10 turns (n=X). Currently showing p50."`. The label itself is now honest about what is being shown (`"p50 round-trip"`, `"end-to-end p50"`, `"p50"`, `"p50 wait"`) rather than masquerading as p95 with a parenthetical disclaimer. CallTable column tooltip phrasing updated to match. Files: `dashboard-app/src/components/LatencyPanel.tsx`, `dashboard-app/src/components/MetricsPanel.tsx`, `dashboard-app/src/components/CallTable.tsx`, `dashboard-app/src/styles/dashboard.css` (new `.info-q` badge style). Bundle re-synced to `libraries/{typescript,python}/.../dashboard/ui.html`.
+
 ### Changed — Dashboard percentile threshold raised back to 10 turns (with p50 fallback)
 
 The PR-#82 follow-up lowered the percentile sample threshold from 5 → 2 turns to keep the per-call detail pane in sync with the call-list column. In practice that produced misleading headline numbers on short calls: a live test with n=5 turns surfaced `p95=1977 ms` while `p50=309 ms` — the dashboard showed the 1977 ms outlier as "latency" because at n=5 the 95th-percentile collapses to "the single slowest turn" rather than a true tail estimate. Raised the threshold back to 10 (where p95 interpolates between samples 9 and 10 and starts being statistically meaningful), but instead of returning to a blank `—`, every surface now falls back to **p50** below the threshold and labels itself accordingly:

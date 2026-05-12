@@ -81,7 +81,7 @@ function CallRow({ call, isSelected, onSelect, isNew }: CallRowProps) {
   const warn = (latencyValue ?? 0) > 600;
   const latencyTooltip = usePct95
     ? undefined
-    : `p95 hidden until ≥${MIN_TURNS_FOR_P95_COLUMN} turns — showing p50 instead (n=${turns})`;
+    : `p95 hidden — needs ≥${MIN_TURNS_FOR_P95_COLUMN} turns (n=${turns}). Currently showing p50.`;
 
   const totalCost =
     call.cost.total ??

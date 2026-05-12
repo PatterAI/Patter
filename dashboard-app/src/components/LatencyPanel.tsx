@@ -36,7 +36,10 @@ export function LatencyPanel({ call }: LatencyPanelProps) {
   const showPercentiles = turns >= MIN_TURNS_FOR_PERCENTILES;
   const dash = '—';
 
-  const lowSampleHint = `p95 hidden until ≥${MIN_TURNS_FOR_PERCENTILES} turns — showing p50 instead (n=${turns})`;
+  // Compact tooltip explaining why the p95 box is rendering the p50 value.
+  // The "?" badge next to the label is the only visual cue — the verbose
+  // inline hint row was removed to keep the card uncluttered.
+  const lowSampleHint = `p95 hidden — needs ≥${MIN_TURNS_FOR_PERCENTILES} turns (n=${turns}). Currently showing p50.`;
 
   return (
     <div className="rr-card">
@@ -53,12 +56,14 @@ export function LatencyPanel({ call }: LatencyPanelProps) {
           className={
             'latbox' + (showPercentiles && (call.latencyP95 ?? 0) > 600 ? ' warn' : '')
           }
-          title={showPercentiles ? undefined : lowSampleHint}
         >
           <div className="l">
-            {showPercentiles
-              ? 'p95 round-trip'
-              : `p50 round-trip (n<${MIN_TURNS_FOR_PERCENTILES})`}
+            {showPercentiles ? 'p95 round-trip' : 'p50 round-trip'}
+            {!showPercentiles && (
+              <span className="info-q" title={lowSampleHint} aria-label={lowSampleHint}>
+                ?
+              </span>
+            )}
           </div>
           <div className="v">
             {showPercentiles ? call.latencyP95 ?? dash : call.latencyP50 ?? dash}
@@ -79,10 +84,14 @@ export function LatencyPanel({ call }: LatencyPanelProps) {
             'latbox' +
             (showPercentiles && (call.agentResponseP95 ?? 0) > 600 ? ' warn' : '')
           }
-          title={showPercentiles ? undefined : lowSampleHint}
         >
           <div className="l">
-            {showPercentiles ? 'p95 wait' : `p50 wait (n<${MIN_TURNS_FOR_PERCENTILES})`}
+            {showPercentiles ? 'p95 wait' : 'p50 wait'}
+            {!showPercentiles && (
+              <span className="info-q" title={lowSampleHint} aria-label={lowSampleHint}>
+                ?
+              </span>
+            )}
           </div>
           <div className="v">
             {showPercentiles
@@ -94,12 +103,6 @@ export function LatencyPanel({ call }: LatencyPanelProps) {
           </div>
         </div>
       </div>
-      {!showPercentiles && (
-        <div style={{ marginTop: -6, marginBottom: 10, fontSize: 11, opacity: 0.6 }}>
-          {turns} {turns === 1 ? 'turn' : 'turns'} — p95 hidden until ≥
-          {MIN_TURNS_FOR_PERCENTILES}, showing p50
-        </div>
-      )}
 
       <div className="waterfall">
         <div className="wf-row">
