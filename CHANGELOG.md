@@ -2,6 +2,10 @@
 
 ## 0.6.1 (2026-05-12)
 
+### Fixed — Adapter state leak after a failed parked-session adoption
+
+When `adopt_websocket` / `adoptWebSocket` raised mid-adoption, the partially-adopted `OpenAIRealtimeAdapter` was in an inconsistent state — `_running` / `messageListenerAttached` was already `true`, the heartbeat task may have started, `_current_response_item_id` / `currentResponseItemId` may have carried leaked state from the parked session, and the `_ws` / `ws` reference pointed at a now-closed socket. Falling through to `connect()` on that carcass raced `session.created` against stale state and corrupted the live call. Fix: handler now re-instantiates the adapter before the cold connect path, guaranteeing a clean slate. Files: `libraries/python/getpatter/stream_handler.py`, `libraries/typescript/src/stream-handler.ts`.
+
 ### Fixed — Eliminated double WebSocket handshake on outbound OpenAI Realtime calls
 
 `_spawn_provider_warmup` (Py) / `spawnProviderWarmup` (TS) and `_park_provider_connections` / `parkProviderConnections` each built a transient `OpenAIRealtimeAdapter` and opened its own WS against `api.openai.com` during the ringing window — two handshakes per call where one suffices. The warmup-only handshake is a strict subset of what park performs (open WS → `session.created` → `session.update` → `session.updated`) and park keeps the socket open for adoption, so warmup's WS was opened, primed, and immediately discarded. Wasted 150-400 ms of ringing-window budget and doubled the rate-limit pressure against OpenAI. Fix: `_spawn_provider_warmup` no longer builds the Realtime adapter; park is the sole Realtime warm path. Pipeline-mode STT/TTS/LLM warmup is unchanged. Files: `libraries/python/getpatter/client.py`, `libraries/typescript/src/client.ts`.
