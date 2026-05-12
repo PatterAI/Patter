@@ -592,3 +592,84 @@ async def test_realtime_stream_handler_falls_back_when_parked_ws_died() -> None:
     inst = adapter_instance["instance"]
     inst.connect.assert_awaited_once()  # type: ignore[attr-defined]
     inst.adopt_websocket.assert_not_called()  # type: ignore[attr-defined]
+
+
+async def test_realtime_stream_handler_recreates_adapter_on_adopt_failure() -> None:
+    """When ``adopt_websocket`` raises, the partially-adopted adapter is
+    in an inconsistent state — ``_running`` may be True, the heartbeat
+    task may have been scheduled, and ``_current_response_item_id`` may
+    carry leaked state from the parked session. Calling ``connect()`` on
+    that carcass would race ``session.created`` against stale state.
+    The handler must re-instantiate the adapter before falling through
+    to the cold ``connect()`` path."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from getpatter.stream_handler import OpenAIRealtimeStreamHandler
+
+    parked_ws = FakeWS()  # alive, but adopt will throw
+
+    agent = Agent(
+        system_prompt="hi",
+        first_message="",
+        provider="openai_realtime",
+        voice="alloy",
+    )
+    audio_sender = MagicMock()
+    audio_sender.send_audio = AsyncMock()
+
+    handler = OpenAIRealtimeStreamHandler(
+        agent=agent,
+        audio_sender=audio_sender,
+        call_id="CAtest_adopt_fail",
+        caller="+15550000001",
+        callee="+15550000002",
+        resolved_prompt="hi",
+        metrics=None,
+        openai_key="sk-test",
+        audio_format="g711_ulaw",
+        pop_prewarmed_connections=lambda _cid: {"openai_realtime": parked_ws},
+    )
+
+    import getpatter.providers.openai_realtime as realtime_mod
+
+    instances: list[object] = []
+
+    class _StubAdapter:
+        def __init__(self, **_kwargs: object) -> None:
+            self.connect = AsyncMock()
+            self.send_first_message = AsyncMock()
+            self.send_text = AsyncMock()
+            self.receive_events = AsyncMock()
+            # First-built adapter's adopt raises; subsequent adapters
+            # must NOT inherit this behaviour because the SDK rebuilds
+            # the adapter on failure.
+            if not instances:
+                self.adopt_websocket = MagicMock(
+                    side_effect=RuntimeError("adopt blew up")
+                )
+            else:
+                self.adopt_websocket = MagicMock()
+            instances.append(self)
+
+    original_adapter = realtime_mod.OpenAIRealtimeAdapter
+    realtime_mod.OpenAIRealtimeAdapter = _StubAdapter  # type: ignore[misc]
+    try:
+        await handler.start()
+    finally:
+        realtime_mod.OpenAIRealtimeAdapter = original_adapter  # type: ignore[misc]
+        bg = getattr(handler, "_background_task", None)
+        if bg is not None:
+            bg.cancel()
+
+    # Two adapter instances were constructed: the first failed adopt;
+    # the second was created fresh for the cold ``connect()`` path.
+    assert len(instances) == 2, (
+        f"Expected the adapter to be recreated after adopt failure; "
+        f"saw {len(instances)} instance(s)"
+    )
+    # The fresh adapter (instances[-1]) ran ``connect()``; the failed
+    # one did not.
+    instances[-1].connect.assert_awaited_once()  # type: ignore[attr-defined]
+    instances[0].connect.assert_not_called()  # type: ignore[attr-defined]
+    # ``handler._adapter`` now references the fresh instance.
+    assert handler._adapter is instances[-1]

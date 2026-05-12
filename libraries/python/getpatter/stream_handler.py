@@ -996,6 +996,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                 logger.debug("pop_prewarmed_connections raised for Realtime: %s", exc)
 
         adopted = False
+        adopt_failed = False
         if parked_realtime is not None:
             adopt = getattr(self._adapter, "adopt_websocket", None)
             ws_alive = parked_realtime is not None and not getattr(
@@ -1015,6 +1016,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                         "Realtime adopt_websocket failed: %s; falling back to connect",
                         exc,
                     )
+                    adopt_failed = True
                     try:
                         await parked_realtime.close()
                     except Exception:
@@ -1024,6 +1026,17 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                     await parked_realtime.close()
                 except Exception:
                     pass
+
+        # When ``adopt_websocket`` raised mid-call the adapter is in an
+        # inconsistent state: ``_running`` may be ``True``, the heartbeat
+        # task may have been scheduled, ``_current_response_item_id`` may
+        # carry leaked state from the parked session, and the partially-
+        # adopted ``_ws`` reference may point at a now-closed socket.
+        # Calling ``connect()`` on this carcass would race ``session.created``
+        # against stale state and corrupt the live call. Re-instantiate the
+        # adapter so the cold path starts from a clean slate.
+        if adopt_failed:
+            self._adapter = OpenAIRealtimeAdapter(**adapter_kwargs)
 
         if not adopted:
             await self._adapter.connect()

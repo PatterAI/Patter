@@ -368,3 +368,117 @@ describe('[unit] prewarm-handoff — built-in tools in primed session', () => {
     expect(names).toEqual(['transfer_call', 'end_call']);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Adopt-failure recovery — when ``adoptWebSocket`` raises, the partially-
+// adopted adapter is in an inconsistent state (messageListenerAttached may
+// be true, heartbeat may have started, currentResponseItemId may carry leaked
+// state from the parked session). Calling ``connect()`` on that carcass races
+// ``session.created`` against stale state. Handler must recreate the adapter
+// before falling through to the cold ``connect()`` path.
+// ---------------------------------------------------------------------------
+
+describe('[unit] prewarm-handoff — adapter recreation on adopt failure', () => {
+  it('recreates the adapter when adoptWebSocket throws, then connects on the fresh one', async () => {
+    const { StreamHandler } = await import('../../src/stream-handler');
+    const { OpenAIRealtimeAdapter } = await import('../../src/providers/openai-realtime');
+    const { MetricsStore } = await import('../../src/dashboard/store');
+    const { RemoteMessageHandler } = await import('../../src/remote-message');
+    const wsMod = await import('ws');
+
+    // Force ``adoptWebSocket`` on every adapter instance to throw — the
+    // SDK must respond by rebuilding the adapter before falling through.
+    const adoptSpy = vi
+      .spyOn(OpenAIRealtimeAdapter.prototype, 'adoptWebSocket')
+      .mockImplementation(() => {
+        throw new Error('adopt blew up');
+      });
+    const connectSpy = vi
+      .spyOn(OpenAIRealtimeAdapter.prototype, 'connect')
+      .mockResolvedValue(undefined);
+    const onEventSpy = vi
+      .spyOn(OpenAIRealtimeAdapter.prototype, 'onEvent')
+      .mockImplementation(() => undefined);
+
+    // Parked WS — alive (readyState OPEN); ``adoptWebSocket`` will fail
+    // before it gets attached.
+    const parkedWs = {
+      readyState: 1,
+      close: () => undefined,
+    } as unknown as import('ws').WebSocket;
+
+    const built: Array<unknown> = [];
+    const deps = {
+      config: { openaiKey: 'sk-test' },
+      agent: {
+        systemPrompt: 'Test agent',
+        provider: 'openai_realtime' as const,
+      },
+      bridge: {
+        label: 'TestBridge',
+        telephonyProvider: 'twilio' as const,
+        sendAudio: vi.fn(),
+        sendMark: vi.fn(),
+        sendClear: vi.fn(),
+        transferCall: vi.fn().mockResolvedValue(undefined),
+        endCall: vi.fn().mockResolvedValue(undefined),
+        createStt: vi.fn().mockReturnValue(null),
+        queryTelephonyCost: vi.fn().mockResolvedValue(undefined),
+      },
+      metricsStore: new MetricsStore(),
+      pricing: null,
+      remoteHandler: new RemoteMessageHandler(),
+      recording: false,
+      buildAIAdapter: vi.fn().mockImplementation((_prompt: string) => {
+        const instance = new OpenAIRealtimeAdapter('sk-test', 'gpt-4o-mini-realtime-preview');
+        built.push(instance);
+        return instance;
+      }),
+      sanitizeVariables: vi.fn((raw: Record<string, unknown>) => {
+        const safe: Record<string, string> = {};
+        for (const [k, v] of Object.entries(raw)) safe[k] = String(v);
+        return safe;
+      }),
+      resolveVariables: vi.fn((tpl: string) => tpl),
+      popPrewarmedConnections: vi.fn().mockReturnValue({ openaiRealtime: parkedWs }),
+    };
+
+    const mockWs = {
+      send: vi.fn(),
+      close: vi.fn(),
+      on: vi.fn(),
+      once: vi.fn(),
+      readyState: 1,
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    } as unknown as import('ws').WebSocket;
+
+    const handler = new StreamHandler(
+      deps,
+      mockWs,
+      '+15551111111',
+      '+15552222222',
+    );
+
+    await handler.handleCallStart('CAtest-recreate');
+
+    // buildAIAdapter was called twice: first to build the original
+    // adapter (whose adopt failed), then again to recreate it for the
+    // cold connect path.
+    expect(deps.buildAIAdapter).toHaveBeenCalledTimes(2);
+    // Both adapters were OpenAIRealtimeAdapter instances.
+    expect(built).toHaveLength(2);
+    expect(built[0]).toBeInstanceOf(OpenAIRealtimeAdapter);
+    expect(built[1]).toBeInstanceOf(OpenAIRealtimeAdapter);
+    expect(built[0]).not.toBe(built[1]);
+    // adopt was called once (on the first adapter, threw). connect was
+    // called once (on the fresh adapter).
+    expect(adoptSpy).toHaveBeenCalledTimes(1);
+    expect(connectSpy).toHaveBeenCalledTimes(1);
+
+    adoptSpy.mockRestore();
+    connectSpy.mockRestore();
+    onEventSpy.mockRestore();
+  });
+});

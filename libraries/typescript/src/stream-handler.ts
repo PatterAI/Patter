@@ -2248,6 +2248,7 @@ export class StreamHandler {
     }
 
     let adopted = false;
+    let adoptFailed = false;
     if (parkedRealtime && this.adapter instanceof OpenAIRealtimeAdapter) {
       const wsAlive = parkedRealtime.readyState === 1 /* OPEN */;
       const adoptFn = (this.adapter as { adoptWebSocket?: (ws: import('ws').WebSocket) => void }).adoptWebSocket;
@@ -2262,11 +2263,24 @@ export class StreamHandler {
           getLogger().debug(
             `Realtime adoptWebSocket failed: ${String(err)}; falling back to connect`,
           );
+          adoptFailed = true;
           try { parkedRealtime.close(); } catch { /* ignore */ }
         }
       } else {
         try { parkedRealtime.close(); } catch { /* ignore */ }
       }
+    }
+
+    // When ``adoptWebSocket`` raised mid-call the adapter is in an
+    // inconsistent state: ``messageListenerAttached`` may be true, the
+    // heartbeat timer may have started, ``currentResponseItemId`` may
+    // carry leaked state from the parked session, and the partially-
+    // adopted ``ws`` reference may point at a now-closed socket.
+    // Calling ``connect()`` on this carcass would race ``session.created``
+    // against stale state and corrupt the live call. Re-instantiate the
+    // adapter so the cold path starts from a clean slate.
+    if (adoptFailed) {
+      this.adapter = this.deps.buildAIAdapter(resolvedPrompt);
     }
 
     if (!adopted) {
