@@ -2,6 +2,10 @@
 
 ## 0.6.1 (2026-05-12)
 
+### Fixed — Dashboard SDK version label now auto-derives from `libraries/typescript/package.json`
+
+`dashboard-app/src/App.tsx` rendered the topbar/footer SDK version from a hardcoded `const SDK_VERSION = '0.6.0'` literal. After the SDK was bumped to `0.6.1`, the dashboard kept advertising `dashboard · v0.6.0` / `SDK · 0.6.0` until someone remembered to edit that literal by hand — silent drift between the published package and the UI users see. Fix: `dashboard-app/vite.config.ts` (and the matching `vitest.config.ts` for tests) read `libraries/typescript/package.json` at build time and inject the version through Vite's `define` as a `__SDK_VERSION__` global, declared in the new `dashboard-app/src/vite-env.d.ts`. The single source of truth is now the TS SDK's `package.json` (bumped in lockstep with the Python `pyproject.toml` and `__init__.py` per the release-via-pr rule). Regenerated bundle synced into `libraries/typescript/src/dashboard/ui.html` and `libraries/python/getpatter/dashboard/ui.html`. Files: `dashboard-app/src/App.tsx`, `dashboard-app/vite.config.ts`, `dashboard-app/vitest.config.ts`, `dashboard-app/src/vite-env.d.ts`, `libraries/typescript/src/dashboard/ui.html`, `libraries/python/getpatter/dashboard/ui.html`.
+
 ### Changed — `StreamHandler` adopt-capability check now uses duck typing
 
 The TS realtime adopt branch in `stream-handler.ts` previously relied on `this.adapter instanceof OpenAIRealtimeAdapter` to gate the prewarm-handoff path. Switched to a duck-type check (`typeof adapter.adoptWebSocket === 'function'`) so the generic stream-handler module stays provider-agnostic on this hot path and matches the Python handler's `getattr(self._adapter, "adopt_websocket", None)` shape. Files: `libraries/typescript/src/stream-handler.ts`.

@@ -16,7 +16,11 @@ import {
   type SparklineResult,
 } from './lib/mappers';
 
-const SDK_VERSION = '0.6.0';
+// Build-time constant injected by Vite `define` from
+// libraries/typescript/package.json — see ../vite.config.ts and
+// ./vite-env.d.ts. Auto-derived so a published SDK bump (Py + TS
+// kept in lockstep) updates the dashboard label without a manual edit.
+const SDK_VERSION = __SDK_VERSION__;
 const RANGE_LABEL: Record<RangeKey, string> = {
   '1h': '1h',
   '24h': '24h',
