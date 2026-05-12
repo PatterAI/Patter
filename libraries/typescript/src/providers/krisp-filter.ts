@@ -3,7 +3,7 @@
  *
  * Mirrors the API of the Python `getpatter.providers.krisp_filter.KrispVivaFilter`
  * for SDK parity. As of 2026-05 Krisp does not publish an official Node.js
- * (server) SDK; browser/RN wrappers exist (LiveKit) but cannot process
+ * (server) SDK; third-party browser/RN wrappers exist but cannot process
  * server-received PCM/mulaw audio. This class throws at construction time
  * and points the caller at the available paths (Python SDK or DeepFilterNet
  * on TS).
@@ -72,10 +72,10 @@ const NODE_SDK_UNAVAILABLE_MESSAGE =
   "'.../DeepFilterNet3.onnx' })` — community ONNX export, no license needed.\n\n" +
   'Browser/React Native (not applicable to Patter server-side, listed for ' +
   'completeness):\n' +
-  '  - `@livekit/krisp-noise-filter` — browser WASM track processor on the ' +
-  'local microphone capture; cannot process server-received PCM/mulaw audio.\n' +
-  '  - `@livekit/react-native-krisp-noise-filter` — iOS/Android native ' +
-  'wrapper; mobile client only.\n\n' +
+  '  - Browser WASM wrappers (various third-party packages) process local ' +
+  'microphone capture, not server-received PCM/mulaw audio.\n' +
+  '  - Mobile client wrappers (iOS/Android, various third-party packages) ' +
+  'are likewise client-side only.\n\n' +
   'Track Node SDK status:\n' +
   '  - https://krisp.ai/developers/\n' +
   '  - Patter backlog: task #38 "Krisp TS port decision"\n';
