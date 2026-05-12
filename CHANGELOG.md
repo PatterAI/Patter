@@ -1,3 +1,21 @@
+## Unreleased
+
+### Fixed — Dashboard SPA: live snapshot refresh dropped previously-visible calls when a new call started (#124)
+
+`mergeCallPreserving` in `dashboard-app/src/hooks/useDashboardData.ts`
+replaced the UI array with the server snapshot via `next.map(...)`. When
+a second call started back-to-back with the first, the SSE-triggered
+refresh could land before `/api/dashboard/calls` reflected the prior
+call (server publishes the SSE event ahead of the terminal write
+completing), and the prior call vanished from the SPA even though it
+was still in the server's ring buffer. The merge is now a true upsert:
+calls present in `prev` but absent from `next` are appended, so the
+prior row stays visible until the server snapshot stabilises. Pure
+merge helpers extracted to `dashboard-app/src/hooks/mergeCalls.ts` with
+unit coverage at `dashboard-app/src/hooks/mergeCalls.test.ts`; added a
+minimal Vitest setup to `dashboard-app` so the SPA can exercise the
+helper in isolation.
+
 ## 0.6.1 (2026-05-09)
 
 ### Fixed — Barge-in bug bundle: 6.8s latency outliers, double-talk dispatch, stale anchors, firstMessage uninterruptible (Python + TypeScript parity)
