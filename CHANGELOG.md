@@ -21,6 +21,19 @@ DEBUG level. No behavioural change — billing still uses char/4
 estimation. Files: `libraries/python/getpatter/services/llm_loop.py`,
 `libraries/typescript/src/llm-loop.ts`.
 
+### Changed — Krisp VIVA TypeScript scaffold: refreshed unavailability message (2026-05)
+
+The `KrispVivaFilter` constructor in
+`libraries/typescript/src/providers/krisp-filter.ts` already throws
+with guidance because Krisp does not publish a Node.js server SDK.
+Refreshed the message to include the verification date (2026-05),
+explicitly distinguish "server Node SDK" from existing browser
+wrappers, and list the LiveKit browser/RN packages
+(`@livekit/krisp-noise-filter`, `@livekit/react-native-krisp-noise-filter`)
+that exist but cannot process Patter's server-side PCM/mulaw audio.
+Python `KrispVivaFilter` and TS `DeepFilterNetFilter` remain the
+only shipped paths. No code behaviour change.
+
 ### Fixed — Barge-in gate regression test: prewarmed first message must remain interruptible
 
 Locked in with parity tests on both SDKs that `_stream_prewarm_bytes` / `streamPrewarmBytes` open the barge-in gate (`_first_audio_sent_at` / `firstAudioSentAt`) once the first chunk reaches the wire. The gate was already opened by `_begin_speaking(is_first_message=True)` ahead of streaming, but a future refactor of the `_begin_speaking` path could regress the prewarm path silently — the per-chunk `_mark_first_audio_sent` call inside the streaming loop is the last line of defence and now has explicit coverage in `test_stream_prewarm_bytes_opens_barge_in_gate_on_first_chunk` (Python) and `opens the barge-in gate by stamping firstAudioSentAt after the first chunk` (TypeScript).
