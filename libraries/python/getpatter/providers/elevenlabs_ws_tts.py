@@ -621,13 +621,39 @@ class ElevenLabsWebSocketTTS(TTSProvider):
         responsible for holding the handle alive until either the live
         request consumes it or the call ends (in which case
         :meth:`discard_adopted_connection` cleans it up).
+
+        If a different parked handle is already stashed (caller error
+        / second park before adopt), the previous handle is closed so
+        we don't leak the file descriptor. Closing is async — we
+        schedule it on the running loop when one is available, and
+        fall back to a synchronous transport close otherwise. The
+        earlier code path silently swallowed ``RuntimeError`` here and
+        leaked the socket whenever this method ran outside an event
+        loop, which happens on cleanup hooks fired from non-async
+        contexts (sync ``__del__``, atexit handlers, signal-driven
+        teardown).
         """
         prev = self._adopted_connection
         self._adopted_connection = parked
-        if prev is not None and prev is not parked:
+        if prev is None or prev is parked:
+            return
+        try:
+            asyncio.create_task(prev.ws.close())
+            return
+        except RuntimeError:
+            # No running event loop. Fall back to a synchronous best-
+            # effort close so the FD doesn't leak. ``transport.close``
+            # is non-blocking and safe to call off-loop; it skips the
+            # protocol close handshake but cleans up the socket.
+            logger.warning(
+                "adopt_websocket: no running event loop; "
+                "falling back to synchronous transport.close()"
+            )
+        transport = getattr(prev.ws, "transport", None)
+        if transport is not None:
             try:
-                asyncio.create_task(prev.ws.close())
-            except RuntimeError:
+                transport.close()
+            except Exception:  # noqa: BLE001 - best-effort FD cleanup
                 pass
 
     async def discard_adopted_connection(self) -> None:

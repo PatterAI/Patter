@@ -358,3 +358,120 @@ class TestPublicWrapper:
         from getpatter.tts.elevenlabs_ws import TTS
 
         assert TopLevel is TTS
+
+
+# ---------------------------------------------------------------------------
+# adopt_websocket cleanup behaviour
+# ---------------------------------------------------------------------------
+
+
+class _FakeTransport:
+    """Sync transport stub — records close() invocations."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FakeWS:
+    """Minimal async WebSocket stub mirroring the subset of the
+    ``websockets`` API touched by ``adopt_websocket``."""
+
+    def __init__(self) -> None:
+        self.transport = _FakeTransport()
+        self.async_closed = False
+
+    async def close(self) -> None:
+        self.async_closed = True
+
+
+class TestAdoptWebSocketCleanup:
+    """Regression for the silent FD leak in ``adopt_websocket``.
+
+    Before this fix the cleanup branch attempted
+    ``asyncio.create_task(prev.ws.close())`` and swallowed the resulting
+    ``RuntimeError`` when no event loop was running — leaking the parked
+    socket. The fix falls back to ``transport.close()`` in that case.
+    """
+
+    def test_replacing_parked_handle_with_running_loop_schedules_async_close(
+        self,
+    ) -> None:
+        # When called from inside an event loop, the old handle is
+        # closed via ``ws.close()`` scheduled on the loop. We only need
+        # to confirm the task was created (the close coroutine runs on
+        # the next tick); no transport.close fallback should fire.
+        import asyncio as _asyncio
+
+        async def _run() -> None:
+            from getpatter.providers.elevenlabs_ws_tts import (
+                ElevenLabsParkedWS,
+                ElevenLabsWebSocketTTS,
+            )
+
+            tts = ElevenLabsWebSocketTTS(api_key="k")
+            old_ws = _FakeWS()
+            new_ws = _FakeWS()
+            tts.adopt_websocket(ElevenLabsParkedWS(ws=old_ws))  # type: ignore[arg-type]
+            tts.adopt_websocket(ElevenLabsParkedWS(ws=new_ws))  # type: ignore[arg-type]
+            # Let the scheduled close() task run.
+            await _asyncio.sleep(0)
+            assert old_ws.async_closed is True
+            assert old_ws.transport.closed is False  # no fallback path
+            # And the new handle stays parked.
+            assert tts._adopted_connection is not None
+            assert tts._adopted_connection.ws is new_ws  # type: ignore[comparison-overlap]
+
+        _asyncio.run(_run())
+
+    def test_replacing_parked_handle_without_running_loop_closes_transport(
+        self,
+    ) -> None:
+        # The regression: without a running event loop,
+        # ``asyncio.create_task`` raises RuntimeError. The old code
+        # silently swallowed the error and leaked the socket. The fix
+        # now falls back to a synchronous transport.close().
+        import warnings
+
+        from getpatter.providers.elevenlabs_ws_tts import (
+            ElevenLabsParkedWS,
+            ElevenLabsWebSocketTTS,
+        )
+
+        tts = ElevenLabsWebSocketTTS(api_key="k")
+        old_ws = _FakeWS()
+        new_ws = _FakeWS()
+        # No event loop running here — this is a plain sync test.
+        tts.adopt_websocket(ElevenLabsParkedWS(ws=old_ws))  # type: ignore[arg-type]
+        # The fallback path will reach for ``create_task`` which builds
+        # the coroutine eagerly even when it then raises; that unawaited
+        # coroutine triggers a benign ``RuntimeWarning`` we silence here
+        # — it's the very symptom of the bug we're verifying.
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore", message=".*was never awaited.*", category=RuntimeWarning
+            )
+            tts.adopt_websocket(ElevenLabsParkedWS(ws=new_ws))  # type: ignore[arg-type]
+
+        assert old_ws.transport.closed is True, (
+            "old parked WS transport must be closed when no event loop is running"
+        )
+        # And the new handle stays parked.
+        assert tts._adopted_connection is not None
+        assert tts._adopted_connection.ws is new_ws  # type: ignore[comparison-overlap]
+
+    def test_adopting_same_handle_is_idempotent(self) -> None:
+        from getpatter.providers.elevenlabs_ws_tts import (
+            ElevenLabsParkedWS,
+            ElevenLabsWebSocketTTS,
+        )
+
+        tts = ElevenLabsWebSocketTTS(api_key="k")
+        ws = _FakeWS()
+        parked = ElevenLabsParkedWS(ws=ws)  # type: ignore[arg-type]
+        tts.adopt_websocket(parked)
+        tts.adopt_websocket(parked)
+        assert ws.transport.closed is False
+        assert ws.async_closed is False

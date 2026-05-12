@@ -1,5 +1,15 @@
 ## Unreleased
 
+### Fixed — `ElevenLabsWebSocketTTS.adopt_websocket` leaked the previous parked WS when called outside an event loop
+
+`ElevenLabsWebSocketTTS.adopt_websocket` (Python) closed any previously parked WS handle via `asyncio.create_task(prev.ws.close())`. When invoked from a sync context with no running event loop — e.g. cleanup hooks fired from `__del__`, atexit handlers, or signal-driven teardown — the `create_task` call raised `RuntimeError` which the code silently swallowed with a bare `except RuntimeError: pass`, leaking the socket FD. ElevenLabs would eventually close the remote side after the inactivity timeout, but the FD on our side stayed allocated until process exit.
+
+The fix keeps the async fast path when a loop is running, and falls back to a best-effort synchronous `transport.close()` (non-blocking, skips the WS close handshake but cleans up the file descriptor) when no loop is available. A warning log is emitted on the fallback path so the FD-leak symptom shifts from "silent" to "logged".
+
+The TypeScript counterpart `adoptWebSocket` is unaffected — `ws.close()` from the `ws` package is synchronous so the same scenario doesn't reach an analogous error branch.
+
+Files: `libraries/python/getpatter/providers/elevenlabs_ws_tts.py`, `libraries/python/tests/unit/test_elevenlabs_ws_tts.py` (new `TestAdoptWebSocketCleanup`).
+
 ### Added — `patter.*` OTel attribute helpers in the TypeScript SDK (parity with Python)
 
 The Python SDK ships `record_patter_attrs`, `patter_call_scope`, and `attach_span_exporter` (in `getpatter.observability.attributes`) for stamping `patter.cost.*` / `patter.latency.*` span attributes and wiring an OTel `SpanExporter` into the tracer provider. The TypeScript SDK previously had no equivalent surface — calling code that wanted to record those attributes had to no-op manually or import `@opentelemetry/api` directly, which broke cross-SDK parity per `.claude/rules/sdk-parity.md`.
