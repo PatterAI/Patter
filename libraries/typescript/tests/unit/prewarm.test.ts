@@ -202,7 +202,14 @@ describe('[unit] prewarm — OpenAI Realtime warmup wiring', () => {
     warmupSpy.mockRestore();
   });
 
-  it('builds a Realtime adapter and invokes warmup when provider=openai_realtime', async () => {
+  it('does NOT double-handshake Realtime — park does all the Realtime warm work', async () => {
+    // Regression: previously ``spawnProviderWarmup`` built a transient
+    // OpenAIRealtimeAdapter and called ``warmup()`` on it, then
+    // ``parkProviderConnections`` built ANOTHER one and called
+    // ``openParkedConnection()``. Two WS handshakes per call against
+    // api.openai.com — wasted 150-400 ms and doubled rate-limit pressure.
+    // Now warmup skips the Realtime adapter entirely; park is the sole
+    // Realtime warm path.
     const agent: AgentOptions = {
       systemPrompt: 'You are a test assistant.',
       provider: 'openai_realtime',
@@ -212,7 +219,7 @@ describe('[unit] prewarm — OpenAI Realtime warmup wiring', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (phone as any).spawnProviderWarmup(agent);
     await drainPrewarmTasks(phone);
-    expect(warmupSpy).toHaveBeenCalledTimes(1);
+    expect(warmupSpy).not.toHaveBeenCalled();
   });
 
   it('does NOT build a Realtime adapter in pipeline mode', async () => {
@@ -254,17 +261,39 @@ describe('[unit] prewarm — OpenAI Realtime warmup wiring', () => {
     expect(warmupSpy).not.toHaveBeenCalled();
   });
 
-  it('a failing Realtime warmup is best-effort and never propagates', async () => {
-    warmupSpy.mockRejectedValueOnce(new Error('network down'));
+  it('outbound Realtime call opens exactly one WS handshake during ringing (no double-handshake)', async () => {
+    // End-to-end guarantee: warmup + park together result in a single
+    // OpenAIRealtimeAdapter being constructed (the one park uses), not
+    // two as in the old buggy behaviour.
+    const realtimeModule = await import('../../src/providers/openai-realtime');
+    let constructed = 0;
+    const ctorSpy = vi
+      .spyOn(realtimeModule, 'OpenAIRealtimeAdapter')
+      .mockImplementation(((..._args: unknown[]) => {
+        constructed += 1;
+        return {
+          warmup: async () => undefined,
+          openParkedConnection: async () => ({ readyState: 1, close: () => undefined }),
+        };
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      }) as any);
+
     const agent: AgentOptions = {
       systemPrompt: 'hi',
       provider: 'openai_realtime',
+      voice: 'alloy',
+      prewarm: true,
     };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (phone as any).spawnProviderWarmup(agent);
-    // Must not throw out of the task drain.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (phone as any).parkProviderConnections(agent, 'CAtest-no-double');
     await drainPrewarmTasks(phone);
-    expect(warmupSpy).toHaveBeenCalledTimes(1);
+    await new Promise<void>((r) => setTimeout(r, 30));
+
+    expect(constructed).toBe(1);
+
+    ctorSpy.mockRestore();
   });
 });
 
