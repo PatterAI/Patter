@@ -191,3 +191,39 @@ class TestOnMarkResolvesWaiters:
         await handler.on_mark("fm_2")
         # fm_1 and fm_2 are drained; fm_3 stays pending.
         assert [name for name, _ in handler._pending_marks] == ["fm_3"]
+
+
+@pytest.mark.unit
+class TestCleanupDrainsPendingMarks:
+    """Cleanup on abnormal call end (carrier WS drop / hangup mid
+    firstMessage) must resolve every pending mark future so the paced
+    send loop never leaves orphan ``asyncio.Future`` instances.
+    """
+
+    async def test_cleanup_drains_pending_marks(self) -> None:
+        handler, _sender = _make_handler(for_twilio=True)
+        # Wire enough stubs so PipelineStreamHandler.cleanup() does not
+        # crash. The actual stt/tts/remote_handler tear-down branches
+        # short-circuit on ``None``.
+        handler._barge_in_pending_task = None
+        handler._barge_in_pending_since = None
+        handler._stt_task = None
+        handler._stt = None
+        handler._tts = None
+        handler._remote_handler = None
+        handler._resampler_8k_to_16k = None
+
+        # Queue three marks via the public send path then trigger
+        # cleanup to mimic an abnormal end mid-send.
+        await handler._send_mark_awaitable()
+        await handler._send_mark_awaitable()
+        await handler._send_mark_awaitable()
+        pending_futures = [fut for _name, fut in handler._pending_marks]
+        assert len(pending_futures) == 3
+        assert all(not fut.done() for fut in pending_futures)
+
+        await handler.cleanup()
+
+        # Every queued future is resolved and the queue is empty.
+        assert handler._pending_marks == []
+        assert all(fut.done() for fut in pending_futures)

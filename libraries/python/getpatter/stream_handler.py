@@ -3554,6 +3554,13 @@ class PipelineStreamHandler(StreamHandler):
         # spurious overlap_end events. Idempotent: safe to call when no
         # pending state exists.
         self._clear_pending_barge_in()
+        # Resolve every pending firstMessage mark future before tearing
+        # down adapters. Without this, a call that ends abnormally mid
+        # firstMessage (carrier WS drop, hangup during the paced sender)
+        # leaves orphan ``asyncio.Future`` instances awaited by the send
+        # loop that nothing will ever resolve.
+        if getattr(self, "_pending_marks", None) is not None:
+            self._drain_pending_marks()
         if self._stt_task:
             self._stt_task.cancel()
             try:

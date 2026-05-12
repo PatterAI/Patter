@@ -682,4 +682,79 @@ describe('StreamHandler', () => {
       expect(sendAudio).toHaveBeenCalledTimes(sentBeforeCancel);
     });
   });
+
+  describe('cleanup drains pending firstMessage marks', () => {
+    interface CleanupPriv {
+      isSpeaking: boolean;
+      speakingStartedAt: number | null;
+      firstAudioSentAt: number | null;
+      aec: unknown;
+      streamSid: string;
+      pendingMarks: Array<{ name: string; resolve: () => void; promise: Promise<void> }>;
+      firstMessageMarkCounter: number;
+      sendMarkAwaitable: () => Promise<void> | null;
+    }
+
+    function priv(h: StreamHandler): CleanupPriv {
+      return h as unknown as CleanupPriv;
+    }
+
+    function primeForFirstMessage(h: StreamHandler): CleanupPriv {
+      const p = priv(h);
+      p.isSpeaking = true;
+      p.speakingStartedAt = Date.now() - 5000;
+      p.firstAudioSentAt = Date.now() - 5000;
+      p.aec = null;
+      p.streamSid = 'MZtest';
+      return p;
+    }
+
+    it('handleStop resolves every pending mark', async () => {
+      const sendMark = vi.fn();
+      const bridge = makeMockBridge({ sendMark });
+      const h = new StreamHandler(
+        makeDeps({ bridge }),
+        makeMockWs(),
+        '+15551111111',
+        '+15552222222',
+      );
+      const p = primeForFirstMessage(h);
+
+      // Queue three marks via the public send path then simulate an
+      // abnormal stop mid firstMessage. Capture each promise so we
+      // can assert they all resolve after handleStop.
+      const m1 = p.sendMarkAwaitable();
+      const m2 = p.sendMarkAwaitable();
+      const m3 = p.sendMarkAwaitable();
+      expect(p.pendingMarks.length).toBe(3);
+
+      await h.handleStop();
+
+      expect(p.pendingMarks.length).toBe(0);
+      // Every captured promise resolved (await would hang otherwise).
+      await Promise.all([m1, m2, m3]);
+    });
+
+    it('handleWsClose resolves every pending mark', async () => {
+      const sendMark = vi.fn();
+      const bridge = makeMockBridge({ sendMark });
+      const h = new StreamHandler(
+        makeDeps({ bridge }),
+        makeMockWs(),
+        '+15551111111',
+        '+15552222222',
+      );
+      const p = primeForFirstMessage(h);
+
+      const m1 = p.sendMarkAwaitable();
+      const m2 = p.sendMarkAwaitable();
+      const m3 = p.sendMarkAwaitable();
+      expect(p.pendingMarks.length).toBe(3);
+
+      await h.handleWsClose();
+
+      expect(p.pendingMarks.length).toBe(0);
+      await Promise.all([m1, m2, m3]);
+    });
+  });
 });

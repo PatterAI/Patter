@@ -1311,6 +1311,11 @@ export class StreamHandler {
     // metrics object — a slow leak in long-running servers and a race
     // producing spurious overlap_end events. Idempotent.
     this.clearPendingBargeIn();
+    // Resolve every pending firstMessage mark waiter before tearing the
+    // adapter down. A call that ends mid firstMessage (carrier stop
+    // arriving before the paced sender finished) would otherwise leak
+    // unresolved promises owned by the send loop.
+    this.drainPendingMarks();
     this.clearGraceTimer();
     this.flushResamplers();
     await this.closeSttOnce();
@@ -1324,6 +1329,10 @@ export class StreamHandler {
     // See handleStop — drop pending barge-in timer before cleanup so a
     // dead handler can never fire a stale recordOverlapEnd callback.
     this.clearPendingBargeIn();
+    // See handleStop — drain pending firstMessage marks so an abnormal
+    // carrier WS drop during the paced sender cannot leak unresolved
+    // promises owned by the send loop.
+    this.drainPendingMarks();
     this.clearGraceTimer();
     this.flushResamplers();
     // Drain STT first so in-flight transcripts fire before onCallEnd.
