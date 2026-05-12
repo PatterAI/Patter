@@ -19,6 +19,19 @@ DEBUG level. No behavioural change — billing still uses char/4
 estimation. Files: `libraries/python/getpatter/services/llm_loop.py`,
 `libraries/typescript/src/llm-loop.ts`.
 
+### Changed — Krisp VIVA TypeScript scaffold: refreshed unavailability message (2026-05)
+
+The `KrispVivaFilter` constructor in
+`libraries/typescript/src/providers/krisp-filter.ts` already throws
+with guidance because Krisp does not publish a Node.js server SDK.
+Refreshed the message to include the verification date (2026-05),
+explicitly distinguish "server Node SDK" from existing browser
+wrappers, and list the LiveKit browser/RN packages
+(`@livekit/krisp-noise-filter`, `@livekit/react-native-krisp-noise-filter`)
+that exist but cannot process Patter's server-side PCM/mulaw audio.
+Python `KrispVivaFilter` and TS `DeepFilterNetFilter` remain the
+only shipped paths. No code behaviour change.
+
 ## 0.6.1 (2026-05-09)
 
 ### Fixed — Barge-in bug bundle: 6.8s latency outliers, double-talk dispatch, stale anchors, firstMessage uninterruptible (Python + TypeScript parity)

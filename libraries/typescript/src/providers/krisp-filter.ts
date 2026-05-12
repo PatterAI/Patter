@@ -2,9 +2,11 @@
  * Krisp VIVA noise-reduction AudioFilter — TypeScript scaffold.
  *
  * Mirrors the API of the Python `getpatter.providers.krisp_filter.KrispVivaFilter`
- * for SDK parity. Krisp does not publish a Node.js SDK as of 2026-05; this
- * class throws at construction time and points the caller at the available
- * paths (Python SDK or DeepFilterNet on TS).
+ * for SDK parity. As of 2026-05 Krisp does not publish an official Node.js
+ * (server) SDK; browser/RN wrappers exist (LiveKit) but cannot process
+ * server-received PCM/mulaw audio. This class throws at construction time
+ * and points the caller at the available paths (Python SDK or DeepFilterNet
+ * on TS).
  *
  * When Krisp publishes an official Node binding — or a community NAPI/WASM
  * wrapper becomes available — the import below and `process()` body will
@@ -57,9 +59,10 @@ export interface KrispVivaFilterOptions {
 
 const NODE_SDK_UNAVAILABLE_MESSAGE =
   'Krisp VIVA Filter is not yet available for the Patter TypeScript SDK.\n\n' +
-  'Krisp does not currently publish an official Node.js SDK. The Patter ' +
-  'TypeScript SDK ships only the AudioFilter interface scaffold (this file) ' +
-  'for parity with the Python implementation.\n\n' +
+  'As of 2026-05, Krisp does not publish an official Node.js (server) SDK. ' +
+  'The Patter TypeScript SDK ships only the AudioFilter interface scaffold ' +
+  '(this file) for parity with the Python implementation, since Patter runs ' +
+  'server-side on a real-time audio stream from the telephony carrier.\n\n' +
   'Available paths today:\n' +
   '  1. Use the Python SDK: `from getpatter.providers.krisp_filter import ' +
   'KrispVivaFilter` — fully implemented, requires `pip install ' +
@@ -67,6 +70,12 @@ const NODE_SDK_UNAVAILABLE_MESSAGE =
   '`KRISP_VIVA_FILTER_MODEL_PATH`.\n' +
   '  2. Use DeepFilterNet on TS: `new DeepFilterNetFilter({ modelPath: ' +
   "'.../DeepFilterNet3.onnx' })` — community ONNX export, no license needed.\n\n" +
+  'Browser/React Native (not applicable to Patter server-side, listed for ' +
+  'completeness):\n' +
+  '  - `@livekit/krisp-noise-filter` — browser WASM track processor on the ' +
+  'local microphone capture; cannot process server-received PCM/mulaw audio.\n' +
+  '  - `@livekit/react-native-krisp-noise-filter` — iOS/Android native ' +
+  'wrapper; mobile client only.\n\n' +
   'Track Node SDK status:\n' +
   '  - https://krisp.ai/developers/\n' +
   '  - Patter backlog: task #38 "Krisp TS port decision"\n';
