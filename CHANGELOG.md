@@ -1,5 +1,25 @@
 ## Unreleased
 
+### Fixed — First-message crackling on Twilio PSTN: always pace prewarmed audio by playout duration
+
+`sendPacedFirstMessageBytes` / `_send_paced_first_message_bytes` applied the
+real-time playout delay (`playoutMs` / `playout_ms`) only when the carrier did
+not support Twilio media-stream marks (i.e. Telnyx). For Twilio, the function
+relied exclusively on mark-based back-pressure (`waitForMarkWindow` /
+`_wait_for_mark_window`). Twilio can batch-resolve multiple mark ACKs in a
+single event-loop turn; when all `FIRST_MESSAGE_MARK_WINDOW` (3) pending marks
+resolved simultaneously the window unblocked 3 consecutive loop iterations with
+no delay, sending 3 chunks (~120 ms of audio) in a single burst. The carrier
+jitter buffer drained for a moment then refilled, producing audible crackling on
+the first message. Subsequent turns were unaffected because `synthesizeSentence`
+/ `synthesize_sentence` sends audio directly without mark gating.
+
+Fix: the `if markPromise === null` / `if mark_fut is None` guard has been
+removed — the playout sleep now runs unconditionally after every chunk on all
+carriers. Mark tracking is preserved for barge-in purposes. Files:
+`libraries/typescript/src/stream-handler.ts`,
+`libraries/python/getpatter/stream_handler.py`.
+
 ## 0.6.1 (2026-05-12)
 
 ### Changed — Cerebras usage-chunk fallback: INFO-once + DEBUG per iteration (Python + TypeScript parity)

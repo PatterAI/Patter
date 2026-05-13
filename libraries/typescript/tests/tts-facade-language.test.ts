@@ -75,13 +75,13 @@ describe("[unit] tts/elevenlabs facade — languageCode forwarding", () => {
     expect(() => new elevenlabs.TTS()).toThrow(/ELEVENLABS_API_KEY/);
   });
 
-  it("defaults to the WebSocket adapter (0.6.1 flip)", () => {
+  it("defaults to the HTTP REST adapter", () => {
     const tts = new elevenlabs.TTS();
-    // The facade now extends `ElevenLabsWebSocketTTS`, not the REST class.
-    expect(tts).toBeInstanceOf(ElevenLabsWebSocketTTS);
+    // The facade extends ElevenLabsTTS (HTTP REST), not the WebSocket class.
+    expect(tts).not.toBeInstanceOf(ElevenLabsWebSocketTTS);
     // Static provider key tag for callers / dashboards.
     expect((elevenlabs.TTS as unknown as { providerKey: string }).providerKey).toBe(
-      "elevenlabs_ws",
+      "elevenlabs",
     );
   });
 

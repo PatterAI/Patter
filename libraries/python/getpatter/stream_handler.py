@@ -3545,13 +3545,18 @@ class PipelineStreamHandler(StreamHandler):
                 self._aec.push_far_end(chunk)
             await self.audio_sender.send_audio(chunk)
             self._mark_first_audio_sent()
-            mark_fut = await self._send_mark_awaitable()
-            if mark_fut is None:
-                # Telnyx (or any other carrier without marks): pace by
-                # chunk playout duration so the buffer can't out-run a
-                # send_clear by more than one chunk.
-                playout_ms = max(1, len(chunk) // self._PCM16_16K_BYTES_PER_MS)
-                await asyncio.sleep(playout_ms / 1000.0)
+            await self._send_mark_awaitable()
+            # Always pace by real-time playout duration regardless of carrier.
+            # Twilio uses mark-based back-pressure (_wait_for_mark_window above)
+            # but marks can batch-resolve: when all _FIRST_MESSAGE_MARK_WINDOW
+            # pending marks ACK simultaneously the window unblocks 3 consecutive
+            # iterations with no delay, sending 3 chunks in a burst. That burst
+            # drains the carrier jitter buffer momentarily → audible crackling on
+            # the first message only (regular turns use synthesize_sentence which
+            # sends directly without marks and is unaffected). The playout sleep
+            # ensures at most one chunk per 40 ms on all carriers.
+            playout_ms = max(1, len(chunk) // self._PCM16_16K_BYTES_PER_MS)
+            await asyncio.sleep(playout_ms / 1000.0)
         return first_chunk_sent
 
     async def cleanup(self) -> None:

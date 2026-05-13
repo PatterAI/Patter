@@ -84,6 +84,24 @@ def _patch_mark_first(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+@pytest.fixture(autouse=True)
+def _instant_playout_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replace asyncio.sleep with sleep(0) so the playout pacing in
+    ``_send_paced_first_message_bytes`` yields once instead of waiting
+    40 ms per chunk. This lets mark-gating tests advance through multiple
+    chunks in a handful of ``asyncio.sleep(0)`` iterations without
+    waiting real time, while leaving ``asyncio.wait_for`` timeouts in
+    ``_wait_for_mark_window`` unaffected (they use the event-loop clock,
+    not asyncio.sleep).
+    """
+    _real_sleep = asyncio.sleep
+
+    async def _zero(secs: float) -> None:
+        await _real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", _zero)
+
+
 @pytest.mark.unit
 class TestFirstMessageMarkGatedPacing:
     """BUG #128 regression coverage: firstMessage must be cancellable."""

@@ -1472,18 +1472,21 @@ export class StreamHandler {
       const encoded = this.encodePipelineAudio(chunk);
       this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
       this.markFirstAudioSent();
-      const markPromise = this.sendMarkAwaitable();
-      if (markPromise === null) {
-        // Telnyx (or any future carrier without marks): pace by the
-        // chunk's playout duration so the carrier buffer can't out-run
-        // a sendClear by more than one chunk. PCM16 16 kHz is 32
-        // bytes/ms, so ``chunk.length / 32`` is the playout duration.
-        const playoutMs = Math.max(
-          1,
-          Math.floor(chunk.length / StreamHandler.PCM16_16K_BYTES_PER_MS),
-        );
-        await new Promise<void>((resolve) => setTimeout(resolve, playoutMs));
-      }
+      this.sendMarkAwaitable();
+      // Always pace by real-time playout duration regardless of carrier.
+      // Twilio uses mark-based back-pressure (waitForMarkWindow above) but
+      // marks can batch-resolve: when all FIRST_MESSAGE_MARK_WINDOW pending
+      // marks ACK simultaneously the window unblocks 3 consecutive
+      // iterations with no delay, sending 3 chunks in a burst. That burst
+      // drains the carrier jitter buffer momentarily → audible crackling
+      // on the first message only (regular turns use synthesizeSentence
+      // which sends directly without marks and is unaffected). The
+      // playout sleep ensures at most one chunk per 40 ms on all carriers.
+      const playoutMs = Math.max(
+        1,
+        Math.floor(chunk.length / StreamHandler.PCM16_16K_BYTES_PER_MS),
+      );
+      await new Promise<void>((resolve) => setTimeout(resolve, playoutMs));
     }
     return firstChunkSent;
   }

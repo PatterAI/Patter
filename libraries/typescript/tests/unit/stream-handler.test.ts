@@ -571,6 +571,16 @@ describe('StreamHandler', () => {
     }
 
     const CHUNK_BYTES = 1280; // matches StreamHandler.PREWARM_CHUNK_BYTES
+    // 1280 bytes / 32 bytes-per-ms = 40 ms of PCM16 16kHz audio per chunk.
+    const PLAYOUT_MS = CHUNK_BYTES / 32;
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
 
     it('caps in-flight chunks at FIRST_MESSAGE_MARK_WINDOW and bails on barge-in', async () => {
       const sendAudio = vi.fn();
@@ -584,13 +594,15 @@ describe('StreamHandler', () => {
         '+15552222222',
       );
       const p = primeForFirstMessage(h);
-      // 4 chunks. Window=3, so chunks 1–3 send back-to-back and chunk 4
-      // blocks on waitForMarkWindow until either a mark echoes OR
+      // 4 chunks. Window=3, so chunks 1–3 send after their 40ms sleeps and
+      // chunk 4 blocks on waitForMarkWindow until either a mark echoes OR
       // cancelSpeaking drains the queue.
       const bytes = Buffer.alloc(CHUNK_BYTES * 4, 0);
       const sendPromise = p.sendPacedFirstMessageBytes(bytes);
 
-      await flushMicrotasks();
+      // Advance fake clock by 3 × 40ms so chunks 1–3 complete their playout
+      // sleeps and the loop blocks at the mark window for chunk 4.
+      await vi.advanceTimersByTimeAsync(3 * PLAYOUT_MS);
       expect(sendAudio).toHaveBeenCalledTimes(3);
       expect(sendMark).toHaveBeenCalledTimes(3);
       expect(p.pendingMarks.length).toBe(3);
@@ -621,14 +633,18 @@ describe('StreamHandler', () => {
       const bytes = Buffer.alloc(CHUNK_BYTES * 4, 0);
       const sendPromise = p.sendPacedFirstMessageBytes(bytes);
 
-      await flushMicrotasks();
+      // Advance 3 × 40ms so chunks 1–3 complete their sleeps; chunk 4 blocks.
+      await vi.advanceTimersByTimeAsync(3 * PLAYOUT_MS);
       // Three chunks in flight, one waiting on the window.
       expect(sendAudio).toHaveBeenCalledTimes(3);
       expect(sendMark).toHaveBeenCalledTimes(3);
 
       // Twilio echoes the FIRST chunk's mark — the loop should advance.
       await p.onMark('fm_1');
+      // Flush microtasks so waitForMarkWindow exits and chunk 4 sends.
       await flushMicrotasks();
+      // Advance 1 × 40ms for chunk 4's playout sleep.
+      await vi.advanceTimersByTimeAsync(PLAYOUT_MS);
 
       expect(sendAudio).toHaveBeenCalledTimes(4);
       expect(sendMark).toHaveBeenCalledTimes(4);
@@ -657,13 +673,12 @@ describe('StreamHandler', () => {
         '+15552222222',
       );
       const p = primeForFirstMessage(h);
-      // 4 chunks. With time-based pacing every iteration awaits a real
-      // setTimeout (40 ms for a 1280-byte PCM16 chunk), so the loop
-      // emits the first chunk and then yields long enough for the test
-      // to trigger a barge-in.
+      // 4 chunks. Each iteration awaits a fake setTimeout (40 ms), so the loop
+      // emits the first chunk and suspends on the fake clock.
       const bytes = Buffer.alloc(CHUNK_BYTES * 4, 0);
       const sendPromise = p.sendPacedFirstMessageBytes(bytes);
 
+      // Flush microtasks to let chunk 1 send and hit the fake 40ms timer.
       await flushMicrotasks();
       // Telnyx never sends marks — the queue stays empty even mid-loop.
       expect(sendMark).not.toHaveBeenCalled();
@@ -674,6 +689,8 @@ describe('StreamHandler', () => {
       expect(sentBeforeCancel).toBeGreaterThanOrEqual(1);
 
       p.runBargeInCancel('user spoke');
+      // Fire the pending 40ms sleep so the loop can observe isSpeaking=false.
+      await vi.runAllTimersAsync();
       await sendPromise;
 
       expect(sendClear).toHaveBeenCalledTimes(1);
@@ -785,6 +802,14 @@ describe('StreamHandler', () => {
       return p;
     }
 
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
     it('sendPacedFirstMessageBytes resets counter between consecutive sends', async () => {
       const sendAudio = vi.fn();
       const sendMark = vi.fn();
@@ -798,13 +823,16 @@ describe('StreamHandler', () => {
       const p = primeForFirstMessage(h);
 
       // CHUNK_BYTES = 1280 matches StreamHandler.PREWARM_CHUNK_BYTES.
-      // Two chunks fit inside the window (3) so the loop completes
-      // synchronously after we resolve the marks.
+      // Two chunks fit inside the window (3) so the loop never blocks on
+      // waitForMarkWindow — only the per-chunk 40ms playout sleep gates progress.
       const CHUNK_BYTES = 1280;
+      const PLAYOUT_MS = CHUNK_BYTES / 32; // 40ms
       const bytes = Buffer.alloc(CHUNK_BYTES * 2, 0);
 
       const send1 = p.sendPacedFirstMessageBytes(bytes);
-      for (let i = 0; i < 10; i++) await Promise.resolve();
+      // Advance 2 × 40ms so both chunks complete their playout sleeps and
+      // the loop returns.  Marks are still pending — echo them to drain.
+      await vi.advanceTimersByTimeAsync(2 * PLAYOUT_MS);
       await p.onMark('fm_1');
       await p.onMark('fm_2');
       await send1;
@@ -818,7 +846,7 @@ describe('StreamHandler', () => {
       // Second send: counter must reset to 0 at the top of the loop,
       // so the new sequence is fm_1, fm_2 — NOT fm_3, fm_4.
       const send2 = p.sendPacedFirstMessageBytes(bytes);
-      for (let i = 0; i < 10; i++) await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(2 * PLAYOUT_MS);
       const newMarks = sendMark.mock.calls
         .slice(markCallsAfterFirst)
         .map((c) => c[1] as string);
