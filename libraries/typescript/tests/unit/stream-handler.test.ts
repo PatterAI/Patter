@@ -600,9 +600,11 @@ describe('StreamHandler', () => {
       const bytes = Buffer.alloc(CHUNK_BYTES * 4, 0);
       const sendPromise = p.sendPacedFirstMessageBytes(bytes);
 
-      // Advance fake clock by 3 × 40ms so chunks 1–3 complete their playout
-      // sleeps and the loop blocks at the mark window for chunk 4.
-      await vi.advanceTimersByTimeAsync(3 * PLAYOUT_MS);
+      // Chunks 1–2 go out without sleep (initial burst to pre-fill the PSTN
+      // jitter buffer). Chunk 3 triggers the first fill of the mark window
+      // and its 40ms playout sleep. Advancing by PLAYOUT_MS fires that sleep
+      // and the loop blocks at waitForMarkWindow for chunk 4.
+      await vi.advanceTimersByTimeAsync(PLAYOUT_MS);
       expect(sendAudio).toHaveBeenCalledTimes(3);
       expect(sendMark).toHaveBeenCalledTimes(3);
       expect(p.pendingMarks.length).toBe(3);
@@ -633,8 +635,8 @@ describe('StreamHandler', () => {
       const bytes = Buffer.alloc(CHUNK_BYTES * 4, 0);
       const sendPromise = p.sendPacedFirstMessageBytes(bytes);
 
-      // Advance 3 × 40ms so chunks 1–3 complete their sleeps; chunk 4 blocks.
-      await vi.advanceTimersByTimeAsync(3 * PLAYOUT_MS);
+      // Chunks 1–2 burst (no sleep). Chunk 3 fills the window → 40ms sleep.
+      await vi.advanceTimersByTimeAsync(PLAYOUT_MS);
       // Three chunks in flight, one waiting on the window.
       expect(sendAudio).toHaveBeenCalledTimes(3);
       expect(sendMark).toHaveBeenCalledTimes(3);
@@ -823,15 +825,17 @@ describe('StreamHandler', () => {
       const p = primeForFirstMessage(h);
 
       // CHUNK_BYTES = 1280 matches StreamHandler.PREWARM_CHUNK_BYTES.
-      // Two chunks fit inside the window (3) so the loop never blocks on
-      // waitForMarkWindow — only the per-chunk 40ms playout sleep gates progress.
+      // Two chunks stay below FIRST_MESSAGE_MARK_WINDOW (3) so initialFillComplete
+      // never flips to true and neither chunk triggers a playout sleep on Twilio.
+      // advanceTimersByTimeAsync flushes microtasks first so both chunks are sent
+      // synchronously before any time advance occurs.
       const CHUNK_BYTES = 1280;
-      const PLAYOUT_MS = CHUNK_BYTES / 32; // 40ms
+      const PLAYOUT_MS = CHUNK_BYTES / 32; // 40ms (not used on Twilio here, kept for Telnyx parity)
       const bytes = Buffer.alloc(CHUNK_BYTES * 2, 0);
 
       const send1 = p.sendPacedFirstMessageBytes(bytes);
-      // Advance 2 × 40ms so both chunks complete their playout sleeps and
-      // the loop returns.  Marks are still pending — echo them to drain.
+      // Flush microtasks (both chunks go out without sleep) and advance time
+      // to drain any stray timers; marks are still pending — echo them.
       await vi.advanceTimersByTimeAsync(2 * PLAYOUT_MS);
       await p.onMark('fm_1');
       await p.onMark('fm_2');

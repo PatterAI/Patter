@@ -3530,6 +3530,10 @@ class PipelineStreamHandler(StreamHandler):
             self._drain_pending_marks()
         self._first_message_mark_counter = 0
         first_chunk_sent = False
+        # Once the mark window is first filled we switch to playout-time pacing
+        # to prevent batch-ACK bursts. Before that we send in burst so the first
+        # _FIRST_MESSAGE_MARK_WINDOW chunks pre-fill the PSTN jitter buffer.
+        initial_fill_complete = False
         for i in range(0, len(bytes_), self._PREWARM_CHUNK_BYTES):
             if not self._is_speaking:
                 break  # barge-in mid-buffer — stop now
@@ -3545,18 +3549,20 @@ class PipelineStreamHandler(StreamHandler):
                 self._aec.push_far_end(chunk)
             await self.audio_sender.send_audio(chunk)
             self._mark_first_audio_sent()
-            await self._send_mark_awaitable()
-            # Always pace by real-time playout duration regardless of carrier.
-            # Twilio uses mark-based back-pressure (_wait_for_mark_window above)
-            # but marks can batch-resolve: when all _FIRST_MESSAGE_MARK_WINDOW
-            # pending marks ACK simultaneously the window unblocks 3 consecutive
-            # iterations with no delay, sending 3 chunks in a burst. That burst
-            # drains the carrier jitter buffer momentarily → audible crackling on
-            # the first message only (regular turns use synthesize_sentence which
-            # sends directly without marks and is unaffected). The playout sleep
-            # ensures at most one chunk per 40 ms on all carriers.
-            playout_ms = max(1, len(chunk) // self._PCM16_16K_BYTES_PER_MS)
-            await asyncio.sleep(playout_ms / 1000.0)
+            mark_future = await self._send_mark_awaitable()
+            if (
+                not initial_fill_complete
+                and len(self._pending_marks) >= self._FIRST_MESSAGE_MARK_WINDOW
+            ):
+                initial_fill_complete = True
+            # Telnyx has no mark concept — always pace by playout time.
+            # Twilio: the first _FIRST_MESSAGE_MARK_WINDOW chunks go out in burst
+            # to pre-fill the PSTN jitter buffer (250–1500 ms), then playout-time
+            # pacing kicks in (via the sticky initial_fill_complete flag) to prevent
+            # batch-ACK bursts from draining the buffer → crackling.
+            if mark_future is None or initial_fill_complete:
+                playout_ms = max(1, len(chunk) // self._PCM16_16K_BYTES_PER_MS)
+                await asyncio.sleep(playout_ms / 1000.0)
         return first_chunk_sent
 
     async def cleanup(self) -> None:
