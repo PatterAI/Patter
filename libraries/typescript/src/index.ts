@@ -132,9 +132,9 @@ export {
 } from "./providers/speechmatics-stt";
 
 // New namespaced TTS classes.
-// `ElevenLabsTTS` is the public facade — defaults to WebSocket streaming as
-// of 0.6.1. `ElevenLabsWebSocketTTS` is a backward-compat alias of the same
-// class. For explicit HTTP REST opt-out, use `ElevenLabsRestTTS`.
+// `ElevenLabsTTS` is the public facade — defaults to HTTP REST (pcm_16000).
+// `ElevenLabsWebSocketTTS` is the WebSocket streaming variant.
+// `ElevenLabsRestTTS` is a direct alias of the HTTP provider class.
 export { TTS as ElevenLabsTTS } from "./tts/elevenlabs";
 export type { ElevenLabsTTSOptions } from "./tts/elevenlabs";
 export { TTS as ElevenLabsWebSocketTTS } from "./tts/elevenlabs-ws";
