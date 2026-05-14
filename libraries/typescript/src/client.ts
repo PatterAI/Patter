@@ -39,6 +39,7 @@ import type { MetricsStore } from "./dashboard/store";
 import { Carrier as TwilioCarrier } from "./telephony/twilio";
 import { Carrier as TelnyxCarrier } from "./telephony/telnyx";
 import { Realtime as OpenAIRealtime } from "./engines/openai";
+import { Realtime2 as OpenAIRealtime2 } from "./engines/openai-2";
 import { ConvAI as ElevenLabsConvAI } from "./engines/elevenlabs";
 import { CloudflareTunnel, Static as StaticTunnel } from "./tunnels";
 import { resolveLogRoot } from "./services/call-log";
@@ -430,7 +431,7 @@ export class Patter {
         );
       }
       const engine = opts.engine;
-      if (engine instanceof OpenAIRealtime) {
+      if (engine instanceof OpenAIRealtime || engine instanceof OpenAIRealtime2) {
         working = {
           ...working,
           provider: 'openai_realtime',
@@ -450,7 +451,7 @@ export class Patter {
         };
       } else {
         throw new Error(
-          "Unknown engine. Expected OpenAIRealtime or ElevenLabsConvAI instance.",
+          "Unknown engine. Expected OpenAIRealtime, OpenAIRealtime2, or ElevenLabsConvAI instance.",
         );
       }
     } else if (

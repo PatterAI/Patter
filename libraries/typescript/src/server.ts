@@ -8,6 +8,7 @@ import express from 'express';
 import { createServer, Server as HTTPServer } from 'http';
 import { WebSocketServer, WebSocket as WSWebSocket } from 'ws';
 import { OpenAIRealtimeAdapter } from './providers/openai-realtime';
+import { OpenAIRealtime2Adapter } from './providers/openai-realtime-2';
 import { ElevenLabsConvAIAdapter } from './providers/elevenlabs-convai';
 import { createSTT } from './provider-factory';
 import type { STTAdapter } from './provider-factory';
@@ -371,13 +372,14 @@ export function buildAIAdapter(config: LocalConfig, agent: AgentOptions, resolve
     strict: (t as { strict?: boolean }).strict,
   })) ?? [];
   const tools = [...agentTools, TRANSFER_CALL_TOOL, END_CALL_TOOL];
-  const openaiKey = engine && engine.kind === 'openai_realtime' ? engine.apiKey : (config.openaiKey ?? '');
+  const isOpenAIEngine = engine && (engine.kind === 'openai_realtime' || engine.kind === 'openai_realtime_2');
+  const openaiKey = isOpenAIEngine ? engine.apiKey : (config.openaiKey ?? '');
   // Forward optional engine-level Realtime knobs so the high-level
-  // ``OpenAIRealtime`` engine wrapper has the same expressivity as the
-  // underlying ``OpenAIRealtimeAdapter``. Omitting the option keeps the
+  // ``OpenAIRealtime`` / ``OpenAIRealtime2`` engine wrappers have the same
+  // expressivity as the underlying adapters. Omitting the option keeps the
   // adapter's own defaults — backward compat with users on the prior shape.
   const adapterOptions: import('./providers/openai-realtime').OpenAIRealtimeOptions = {};
-  if (engine && engine.kind === 'openai_realtime') {
+  if (isOpenAIEngine) {
     if (engine.reasoningEffort !== undefined) {
       adapterOptions.reasoningEffort = engine.reasoningEffort;
     }
@@ -385,7 +387,13 @@ export function buildAIAdapter(config: LocalConfig, agent: AgentOptions, resolve
       adapterOptions.inputAudioTranscriptionModel = engine.inputAudioTranscriptionModel;
     }
   }
-  return new OpenAIRealtimeAdapter(
+  // Dispatch to the GA-API adapter when the caller passed the
+  // ``OpenAIRealtime2`` engine marker. Falls through to the v1-beta adapter
+  // for ``OpenAIRealtime`` and the legacy no-engine code path.
+  const AdapterCtor = engine && engine.kind === 'openai_realtime_2'
+    ? OpenAIRealtime2Adapter
+    : OpenAIRealtimeAdapter;
+  return new AdapterCtor(
     openaiKey,
     agent.model,
     agent.voice,

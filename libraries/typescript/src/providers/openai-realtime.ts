@@ -123,7 +123,11 @@ export interface OpenAIRealtimeOptions {
 
 /** Realtime WebSocket adapter for OpenAI's `gpt-realtime` family. */
 export class OpenAIRealtimeAdapter {
-  private ws: WebSocket | null = null;
+  // Fields exposed `protected` (not `private`) so a subclass can implement
+  // alternate transports — e.g. `OpenAIRealtime2Adapter` overrides
+  // `connect()` to speak the GA Realtime API while reusing the rest of
+  // the runtime (audio dispatch, barge-in, heartbeat).
+  protected ws: WebSocket | null = null;
   private readonly eventCallbacks: Set<RealtimeEventCallback> = new Set();
   private messageListenerAttached = false;
   private heartbeat: NodeJS.Timeout | null = null;
@@ -140,18 +144,18 @@ export class OpenAIRealtimeAdapter {
   // wall-clock cap corresponds to the maximum playback that real-time TTS
   // could have produced, which is what the user actually heard.
   private currentResponseFirstAudioAt: number | null = null;
-  private readonly options: OpenAIRealtimeOptions;
+  protected readonly options: OpenAIRealtimeOptions;
 
   constructor(
-    private readonly apiKey: string,
-    private readonly model: string = OpenAIRealtimeModel.GPT_REALTIME_MINI,
-    private readonly voice: string = OpenAIVoice.ALLOY,
-    private readonly instructions: string = '',
-    private readonly tools?: Array<{ name: string; description: string; parameters: Record<string, unknown>; strict?: boolean }>,
+    protected readonly apiKey: string,
+    protected readonly model: string = OpenAIRealtimeModel.GPT_REALTIME_MINI,
+    protected readonly voice: string = OpenAIVoice.ALLOY,
+    protected readonly instructions: string = '',
+    protected readonly tools?: Array<{ name: string; description: string; parameters: Record<string, unknown>; strict?: boolean }>,
     // Audio wire format negotiated with OpenAI Realtime. Mirrors the Python
     // ``audio_format`` kwarg. Default ``g711_ulaw`` matches the Twilio/Telnyx
     // inbound codec so audio flows through without transcoding.
-    private readonly audioFormat: OpenAIRealtimeAudioFormat = OpenAIRealtimeAudioFormat.G711_ULAW,
+    protected readonly audioFormat: OpenAIRealtimeAudioFormat = OpenAIRealtimeAudioFormat.G711_ULAW,
     options: OpenAIRealtimeOptions = {},
   ) {
     this.options = options;
@@ -399,7 +403,7 @@ export class OpenAIRealtimeAdapter {
     this.armHeartbeatAndListener();
   }
 
-  private armHeartbeatAndListener(): void {
+  protected armHeartbeatAndListener(): void {
     // Keep WS alive across long silent stretches. ws's server-side `pong`
     // handler satisfies this automatically; we just need to ping.
     this.heartbeat = setInterval(() => {

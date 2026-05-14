@@ -189,6 +189,9 @@ export type { TelnyxCarrierOptions } from "./telephony/telnyx";
 // Realtime / ConvAI engines.
 export { Realtime as OpenAIRealtime } from "./engines/openai";
 export type { RealtimeOptions as OpenAIRealtimeOptions } from "./engines/openai";
+export { Realtime2 as OpenAIRealtime2 } from "./engines/openai-2";
+export type { Realtime2Options as OpenAIRealtime2Options } from "./engines/openai-2";
+export { OpenAIRealtime2Adapter } from "./providers/openai-realtime-2";
 export { ConvAI as ElevenLabsConvAI } from "./engines/elevenlabs";
 export type { ConvAIOptions as ElevenLabsConvAIOptions } from "./engines/elevenlabs";
 

@@ -1,5 +1,76 @@
 ## Unreleased
 
+### Added — `OpenAIRealtime2` engine for `gpt-realtime-2` on the GA Realtime API (TypeScript only)
+
+The 0.6.1 enum entry for `gpt-realtime-2` advertised parity with the existing
+v1 Realtime adapter ("accepts the same v1 `session.update` wire shape so it
+slots into the existing adapter without protocol changes"). That turned out
+to be wrong: OpenAI promoted `gpt-realtime-2` to the **GA Realtime API**,
+which (a) rejects the legacy `OpenAI-Beta: realtime=v1` header with
+`invalid_model`, (b) requires `session.type === "realtime"` at the root of
+`session.update`, (c) renames `modalities` → `output_modalities`, (d) nests
+audio config under `session.audio.{input,output}` with MIME `type` strings
+(`audio/pcmu`, `audio/pcma`, `audio/pcm`) instead of v1 enums (`g711_ulaw`,
+`g711_alaw`, `pcm16`), and (e) renames the audio-delta event family from
+`response.audio.*` / `response.audio_transcript.*` to
+`response.output_audio.*` / `response.output_audio_transcript.*`. Going
+through the v1 `OpenAIRealtime` engine with `model: "gpt-realtime-2"`
+either timed out at `connect()` or completed the call with zero audio
+forwarded to Twilio/Telnyx (events fell through to the no-op branch of
+the v1 dispatcher).
+
+New `OpenAIRealtime2` engine marker + `OpenAIRealtime2Adapter` subclass:
+
+- **Separate engine marker.** `kind: "openai_realtime_2"`. The legacy
+  `OpenAIRealtime` engine continues to serve `gpt-realtime`,
+  `gpt-realtime-mini`, `gpt-realtime`, `gpt-4o-realtime-preview`, and
+  `gpt-4o-mini-realtime-preview` against the v1-beta endpoint byte-for-byte
+  unchanged; nothing in that path is touched.
+- **`OpenAIRealtime2Adapter` extends `OpenAIRealtimeAdapter`.** Overrides
+  only `connect()` (omits the beta header + sends the GA `session.update`
+  payload) and `sendFirstMessage()` (uses `output_modalities`, re-injects
+  `audio.output.voice` because the GA `response.create` does NOT inherit
+  it from session, and forces `reasoning: { effort: "minimal" }` for the
+  literal "say exactly X" greeting so TTFB is bounded by audio generation
+  rather than the session-level reasoning tier). Everything else
+  (`sendAudio`, `cancelResponse`, `sendText`, `sendFunctionResult`,
+  heartbeat) is inherited unchanged.
+- **WS-level event translation shim.** Wraps `ws.emit` to rewrite the
+  incoming `type` field for the renamed events
+  (`response.output_audio.{delta,done}` →
+  `response.audio.{delta,done}`; same for `output_audio_transcript`)
+  before the parent dispatcher sees the frame. Payloads are byte-identical
+  so no further changes are needed in `StreamHandler`, metrics, or the
+  dashboard.
+
+Selection becomes opt-in: `phone.agent({ engine: new OpenAIRealtime2({ reasoningEffort: "low" }) })`.
+Default model is `gpt-realtime-2`. Passing the GA marker to `Patter.agent`
+auto-resolves `provider = "openai_realtime"` so the rest of the pipeline
+(metrics, dashboard, cost line) treats the call identically to a v1
+Realtime call.
+
+Implementation: a handful of `private readonly` fields on the v1 adapter
+(`apiKey`, `model`, `voice`, `instructions`, `tools`, `audioFormat`,
+`options`, `ws`, `armHeartbeatAndListener`) were promoted to `protected`
+so the subclass can reuse the heartbeat + message dispatch. No public
+surface changed; both adapters still expose the exact same method set.
+
+Files: `libraries/typescript/src/providers/openai-realtime-2.ts` (new,
+~190 lines), `libraries/typescript/src/engines/openai-2.ts` (new, ~75
+lines), `libraries/typescript/src/providers/openai-realtime.ts` (visibility
+bumps only), `libraries/typescript/src/client.ts` (instanceof dispatch),
+`libraries/typescript/src/server.ts` (`buildAIAdapter` selects the new
+adapter when `engine.kind === "openai_realtime_2"`),
+`libraries/typescript/src/types.ts` (engine union widened),
+`libraries/typescript/src/index.ts` (re-export). Python parity is a
+follow-up — `OpenAIRealtime2` is TS-only in this commit, the daily
+`docs-feature-drift` job will flag it.
+
+Verified end-to-end on a real Twilio PSTN call:
+`Call ended: ... (13.6s, 3 turns, cost=$0.0255, p95 wait=642ms,
+engine=openai_realtime_2)` — `firstMessage` plays in the configured voice
+(`alloy`), language follows `systemPrompt`, audio flows both directions.
+
 ### Fixed — Dashboard MetricsPanel: Latency/Cost tabs render at the same height
 
 Switching the MetricsPanel tabs between **Latency** and **Cost** caused a

@@ -6,6 +6,7 @@
 import type { Carrier as TwilioCarrier } from "./telephony/twilio";
 import type { Carrier as TelnyxCarrier } from "./telephony/telnyx";
 import type { Realtime } from "./engines/openai";
+import type { Realtime2 } from "./engines/openai-2";
 import type { ConvAI } from "./engines/elevenlabs";
 import type { CloudflareTunnel, Static as StaticTunnel } from "./tunnels";
 import type { Tool as ToolInstance } from "./public-api";
@@ -392,7 +393,7 @@ export interface AgentOptions {
    * matching mode (``openai_realtime`` or ``elevenlabs_convai``). When absent,
    * pipeline mode is selected if ``stt`` and ``tts`` are provided.
    */
-  engine?: Realtime | ConvAI;
+  engine?: Realtime | Realtime2 | ConvAI;
   /**
    * Provider mode. Normally derived from ``engine`` / ``stt`` + ``tts``. Pass
    * ``'pipeline'`` explicitly when building a pipeline-mode agent without
