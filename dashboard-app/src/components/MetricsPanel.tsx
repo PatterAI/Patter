@@ -55,8 +55,10 @@ export function MetricsPanel({ call }: MetricsPanelProps) {
         </div>
       </div>
 
-      {activeTab === 'latency' && showLatency && <LatencyView call={call} />}
-      {activeTab === 'cost' && showCost && <CostView call={call} />}
+      <div className="metrics-panel-body">
+        {activeTab === 'latency' && showLatency && <LatencyView call={call} />}
+        {activeTab === 'cost' && showCost && <CostView call={call} />}
+      </div>
     </div>
   );
 }

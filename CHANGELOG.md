@@ -1,5 +1,24 @@
 ## Unreleased
 
+### Fixed — Dashboard MetricsPanel: Latency/Cost tabs render at the same height
+
+Switching the MetricsPanel tabs between **Latency** and **Cost** caused a
+visible vertical jump because each layout had a different natural height —
+Latency (pipeline mode) renders 4 latency cards + a 3-row waterfall +
+legend (~230 px), while Cost renders only the cost bar + 4-6 stack rows
+(~180 px). The card outer height changed by ~50 px on every toggle.
+
+Wrapped the tab content in a ``.metrics-panel-body`` container with
+``min-height: 240px`` — sized to the tallest layout (pipeline Latency).
+Both tabs now occupy exactly 321 px outer (body 240 px) and the tab
+switch is purely a content swap.
+
+Files touched:
+  dashboard-app/src/components/MetricsPanel.tsx
+  dashboard-app/src/styles/dashboard.css
+  libraries/python/getpatter/dashboard/ui.html (resynced bundle)
+  libraries/typescript/src/dashboard/ui.html (resynced bundle)
+
 ### Added — Dashboard: select & soft-delete calls (logs preserved as backup)
 
 Operators can now select one or more calls in the dashboard call list and

@@ -233,6 +233,9 @@ body.dark .bulk-btn.destructive{background:var(--peach);color:#000;border-color:
    (header ~50px + 540px scroll area ≈ 590px). */
 .rr-card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:18px;min-height:280px}
 .metrics-panel-h{margin-bottom:14px}
+/* Lock the body area to the tallest layout (pipeline latency: 4 latboxes +
+   waterfall + legend ≈ 230px) so switching Latency↔Cost tabs doesn't jump. */
+.metrics-panel-body{min-height:240px}
 .metrics-panel-h .seg{display:inline-flex;background:#fafaf8;border:1px solid var(--line);border-radius:8px;padding:2px}
 .metrics-panel-h .seg button{font-family:var(--font-mono);font-size:11px;border:0;background:transparent;padding:5px 14px;border-radius:6px;cursor:pointer;color:#4a4a4a;font-weight:500;transition:all var(--motion-fast) var(--easing);text-transform:uppercase;letter-spacing:.06em}
 .metrics-panel-h .seg button.on{background:#000;color:#fff}
