@@ -312,6 +312,121 @@ describe('MetricsStore', () => {
     });
   });
 
+  // --- Soft delete ---
+
+  describe('deleteCalls()', () => {
+    function seedCompleted(store: MetricsStore, id: string, latencyMs = 200, costTotal = 0.01) {
+      store.recordCallStart({
+        call_id: id,
+        caller: '+15551111111',
+        callee: '+15552222222',
+        direction: 'inbound',
+      });
+      store.recordCallEnd(
+        { call_id: id },
+        {
+          duration_seconds: 30,
+          cost: { total: costTotal, stt: 0, tts: 0, llm: 0, telephony: costTotal },
+          latency_avg: { agent_response_ms: latencyMs },
+        },
+      );
+    }
+
+    it('hides deleted calls from getCalls / getCall / callCount', () => {
+      const store = new MetricsStore();
+      seedCompleted(store, 'keep-1');
+      seedCompleted(store, 'drop-1');
+      expect(store.callCount).toBe(2);
+
+      const accepted = store.deleteCalls(['drop-1']);
+      expect(accepted).toEqual(['drop-1']);
+      expect(store.callCount).toBe(1);
+      expect(store.getCalls()).toHaveLength(1);
+      expect(store.getCalls()[0].call_id).toBe('keep-1');
+      expect(store.getCall('drop-1')).toBeNull();
+      expect(store.getCall('keep-1')).not.toBeNull();
+      expect(store.isDeleted('drop-1')).toBe(true);
+      expect(store.isDeleted('keep-1')).toBe(false);
+    });
+
+    it('excludes deleted calls from aggregates so avg latency + cost shift', () => {
+      const store = new MetricsStore();
+      seedCompleted(store, 'fast', 100, 0.01);
+      seedCompleted(store, 'slow', 900, 0.05);
+      const before = store.getAggregates() as Record<string, number>;
+      expect(before.total_calls).toBe(2);
+      expect(before.avg_latency_ms).toBe(500); // (100 + 900) / 2
+
+      store.deleteCalls(['slow']);
+      const after = store.getAggregates() as Record<string, number>;
+      expect(after.total_calls).toBe(1);
+      expect(after.avg_latency_ms).toBe(100); // only "fast" remains
+      expect(after.total_cost).toBe(0.01);
+    });
+
+    it('excludes deleted calls from getCallsInRange', () => {
+      const store = new MetricsStore();
+      seedCompleted(store, 'a');
+      seedCompleted(store, 'b');
+      expect(store.getCallsInRange()).toHaveLength(2);
+      store.deleteCalls(['b']);
+      const remaining = store.getCallsInRange();
+      expect(remaining).toHaveLength(1);
+      expect(remaining[0].call_id).toBe('a');
+    });
+
+    it('refuses to delete active calls', () => {
+      const store = new MetricsStore();
+      store.recordCallStart({
+        call_id: 'live-1',
+        caller: '+15551111111',
+        callee: '+15552222222',
+        direction: 'inbound',
+      });
+      const accepted = store.deleteCalls(['live-1']);
+      expect(accepted).toEqual([]);
+      expect(store.isDeleted('live-1')).toBe(false);
+      expect(store.getActiveCalls()).toHaveLength(1);
+    });
+
+    it('is idempotent — re-deleting an id returns empty + no extra event', () => {
+      const store = new MetricsStore();
+      seedCompleted(store, 'x');
+      const events: SSEEvent[] = [];
+      store.on('sse', (e: SSEEvent) => events.push(e));
+      const first = store.deleteCalls(['x']);
+      const second = store.deleteCalls(['x']);
+      expect(first).toEqual(['x']);
+      expect(second).toEqual([]);
+      const deletedEvents = events.filter((e) => e.type === 'calls_deleted');
+      expect(deletedEvents).toHaveLength(1);
+    });
+
+    it('emits SSE calls_deleted with the accepted ids', () => {
+      const store = new MetricsStore();
+      seedCompleted(store, 'a');
+      seedCompleted(store, 'b');
+      const events: SSEEvent[] = [];
+      store.on('sse', (e: SSEEvent) => events.push(e));
+      const accepted = store.deleteCalls(['a', 'b']);
+      expect(accepted).toEqual(['a', 'b']);
+      const deletedEvent = events.find((e) => e.type === 'calls_deleted');
+      expect(deletedEvent).toBeDefined();
+      expect(deletedEvent!.data.call_ids).toEqual(['a', 'b']);
+    });
+
+    it('handles empty / non-string / unknown ids gracefully', () => {
+      const store = new MetricsStore();
+      seedCompleted(store, 'real');
+      // unknown ids are still accepted into the deleted-set (so a future
+      // hydrate that resurrects them stays hidden) — matches Python.
+      expect(store.deleteCalls([])).toEqual([]);
+      expect(store.deleteCalls([''])).toEqual([]);
+      expect(store.deleteCalls(['unknown-id'])).toEqual(['unknown-id']);
+      expect(store.callCount).toBe(1);
+    });
+  });
+
   // --- Read/write isolation between event listeners ---
 
   describe('read/write isolation between event listeners', () => {

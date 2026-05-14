@@ -255,3 +255,48 @@ export async function fetchCall(callId: string): Promise<CallRecord | null> {
   const body = (await response.json()) as unknown;
   return parseCallRecord(body);
 }
+
+/**
+ * Soft-delete a batch of calls. The server keeps the on-disk metadata +
+ * transcript files as a backup; the dashboard view and aggregate metrics
+ * exclude the ids going forward. Active calls are silently dropped from
+ * the request. Idempotent.
+ *
+ * Returns the call_ids actually accepted (already-deleted / active ids
+ * are filtered server-side).
+ */
+export async function deleteCalls(callIds: readonly string[]): Promise<string[]> {
+  if (callIds.length === 0) return [];
+  if (callIds.length === 1) {
+    const url = `/api/dashboard/calls/${encodeURIComponent(callIds[0])}`;
+    const response = await fetch(url, {
+      method: 'DELETE',
+      headers: { Accept: 'application/json' },
+    });
+    if (!response.ok) {
+      throw new Error(`DELETE ${url} failed with status ${response.status}`);
+    }
+    const body = (await response.json()) as { deleted?: unknown };
+    return Array.isArray(body.deleted)
+      ? (body.deleted as unknown[]).filter(
+          (v): v is string => typeof v === 'string',
+        )
+      : [];
+  }
+  const response = await fetch('/api/dashboard/calls/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ call_ids: callIds }),
+  });
+  if (!response.ok) {
+    throw new Error(
+      `POST /api/dashboard/calls/delete failed with status ${response.status}`,
+    );
+  }
+  const body = (await response.json()) as { deleted?: unknown };
+  return Array.isArray(body.deleted)
+    ? (body.deleted as unknown[]).filter(
+        (v): v is string => typeof v === 'string',
+      )
+    : [];
+}

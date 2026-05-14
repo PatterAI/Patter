@@ -1,5 +1,60 @@
 ## Unreleased
 
+### Added — Dashboard: select & soft-delete calls (logs preserved as backup)
+
+Operators can now select one or more calls in the dashboard call list and
+remove them from the view + rolling metrics. The on-disk artefacts written
+by ``CallLogger`` (``<log_root>/calls/YYYY/MM/DD/<call_id>/metadata.json``
+and ``transcript.jsonl``) are intentionally NOT touched — they remain as a
+durable backup that the operator can audit or re-import outside the
+dashboard.
+
+Behaviour:
+
+- Soft-deleted ``call_id``s are excluded from ``get_calls`` / ``get_call`` /
+  ``get_aggregates`` / ``get_calls_in_range`` / ``call_count``. The "Avg
+  latency p95" and "Spend" cards recompute against the visible set, so the
+  numbers always match what the operator sees in the table.
+- Active calls are never deletable; a mid-call delete from the UI is
+  silently skipped server-side so the live-transcript pane cannot be
+  orphaned.
+- The deleted set persists to ``<log_root>/.deleted_call_ids.json`` (atomic
+  write). On process restart ``hydrate()`` reloads the set so previously
+  deleted calls stay hidden, while the on-disk metadata is left intact.
+
+API additions (parity across SDKs):
+
+- ``DELETE /api/dashboard/calls/:call_id`` — remove one.
+- ``POST /api/dashboard/calls/delete`` with ``{"call_ids": [...]}`` — batch.
+- SSE event ``calls_deleted`` with payload ``{ "call_ids": [...] }`` so
+  other tabs / external clients re-render immediately.
+
+Store-level API:
+
+- ``MetricsStore.delete_calls(call_ids)`` / ``deleteCalls(callIds)``
+- ``MetricsStore.is_deleted(call_id)`` / ``isDeleted(callId)``
+- ``MetricsStore.get_deleted_call_ids()`` / ``getDeletedCallIds()``
+
+UI: the call table gains a checkbox column (live rows disabled). Selecting
+≥1 row reveals a bulk-action bar with a clear-selection ghost button and a
+peach destructive "Delete" button gated by an inline confirmation step that
+explains the on-disk logs are preserved.
+
+Files touched:
+  libraries/typescript/src/dashboard/store.ts (deletedCallIds + filters)
+  libraries/typescript/src/dashboard/routes.ts (DELETE + batch POST)
+  libraries/python/getpatter/dashboard/store.py (parity)
+  libraries/python/getpatter/dashboard/routes.py (parity)
+  dashboard-app/src/components/CallTable.tsx (multi-select + bulk bar)
+  dashboard-app/src/components/icons.tsx (IconTrash / IconCheck / IconX)
+  dashboard-app/src/styles/dashboard.css (checkbox + bulk-bar styles)
+  dashboard-app/src/hooks/useDashboardData.ts (calls_deleted SSE +
+    removeCallsLocal optimistic update)
+  dashboard-app/src/lib/api.ts (deleteCalls client)
+  dashboard-app/src/App.tsx (wiring)
+  CHANGELOG.md
+  tests: dashboard-store delete coverage (TS + Py).
+
 ### Fixed — One-shot barge-in: VAD now reset between agent turns
 
 After a successful barge-in on PSTN (no-AEC), subsequent barge-in attempts in the

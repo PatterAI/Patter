@@ -1,6 +1,13 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { fmtDuration, fmtPhone, fmtCostUSD } from './format';
-import { IconArrowDown, IconArrowUp, IconSearch } from './icons';
+import {
+  IconArrowDown,
+  IconArrowUp,
+  IconCheck,
+  IconSearch,
+  IconTrash,
+  IconX,
+} from './icons';
 
 export interface CallCost {
   telco?: number;
@@ -57,9 +64,21 @@ interface CallRowProps {
   isSelected: boolean;
   onSelect: () => void;
   isNew: boolean;
+  isChecked: boolean;
+  /** ``null`` when the row cannot be checked (live calls). */
+  onToggleCheck: ((event: React.MouseEvent) => void) | null;
+  revealed: boolean;
 }
 
-function CallRow({ call, isSelected, onSelect, isNew }: CallRowProps) {
+function CallRow({
+  call,
+  isSelected,
+  onSelect,
+  isNew,
+  isChecked,
+  onToggleCheck,
+  revealed,
+}: CallRowProps) {
   const dur =
     call.status === 'live' && call.durationStart
       ? fmtDuration((Date.now() - call.durationStart) / 1000)
@@ -76,9 +95,47 @@ function CallRow({ call, isSelected, onSelect, isNew }: CallRowProps) {
 
   return (
     <tr
-      className={(isSelected ? 'selected ' : '') + (isNew ? 'new-row' : '')}
+      className={
+        (isSelected ? 'selected ' : '') +
+        (isNew ? 'new-row ' : '') +
+        (isChecked ? 'checked' : '')
+      }
       onClick={onSelect}
     >
+      <td
+        className="check-cell"
+        onClick={(e) => {
+          // The whole cell is the hit area to forgive imprecise clicks.
+          e.stopPropagation();
+          if (onToggleCheck) onToggleCheck(e);
+        }}
+        aria-disabled={onToggleCheck === null}
+      >
+        <button
+          type="button"
+          className={
+            'row-check' +
+            (isChecked ? ' on' : '') +
+            (onToggleCheck === null ? ' disabled' : '')
+          }
+          aria-label={
+            onToggleCheck === null
+              ? 'Live calls cannot be deleted'
+              : isChecked
+                ? 'Deselect call'
+                : 'Select call'
+          }
+          aria-pressed={isChecked}
+          disabled={onToggleCheck === null}
+          onClick={(e) => {
+            e.stopPropagation();
+            if (onToggleCheck) onToggleCheck(e);
+          }}
+          tabIndex={onToggleCheck === null ? -1 : 0}
+        >
+          {isChecked ? <IconCheck /> : null}
+        </button>
+      </td>
       <td>
         <span className={'pill ' + statusClass}>{call.status}</span>
       </td>
@@ -92,8 +149,8 @@ function CallRow({ call, isSelected, onSelect, isNew }: CallRowProps) {
         >
           {call.direction === 'inbound' ? <IconArrowDown /> : <IconArrowUp />}
         </span>
-        <span className="num-cell">
-          {fmtPhone(call.from)} → {fmtPhone(call.to)}
+        <span className="num-cell pii">
+          {fmtPhone(call.from, revealed)} → {fmtPhone(call.to, revealed)}
         </span>
       </td>
       <td>
@@ -127,6 +184,15 @@ export interface CallTableProps {
   newId: string | null;
   search: string;
   setSearch: (s: string) => void;
+  /**
+   * Confirmed deletion handler. The component owns the per-row checkbox
+   * state internally; ``onDeleteCalls`` is invoked with the ids the user
+   * confirmed in the bulk-action bar. Live ids are filtered out before
+   * this handler is called.
+   */
+  onDeleteCalls?: (ids: readonly string[]) => Promise<void> | void;
+  /** When ``false`` phone numbers are masked client-side (eye-OFF). */
+  revealed: boolean;
 }
 
 export function CallTable({
@@ -136,6 +202,8 @@ export function CallTable({
   newId,
   search,
   setSearch,
+  onDeleteCalls,
+  revealed,
 }: CallTableProps) {
   const filtered = useMemo(() => {
     if (!search.trim()) return calls;
@@ -149,6 +217,66 @@ export function CallTable({
         c.id.includes(q),
     );
   }, [calls, search]);
+
+  // Multi-select state lives in the table — App.tsx doesn't need it for any
+  // other reason. Persisting across filter changes is fine: a checked id
+  // that scrolls out of the visible list re-appears checked when it
+  // returns, matching how Gmail / Linear / Notion handle bulk-select.
+  const [checked, setChecked] = useState<ReadonlySet<string>>(new Set());
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  // Ids the user CAN delete in the current visible window (live rows are
+  // excluded — the server would skip them anyway, but doing it client-side
+  // keeps the counter honest).
+  const deletableIds = useMemo(
+    () => filtered.filter((c) => c.status !== 'live').map((c) => c.id),
+    [filtered],
+  );
+  const checkedDeletable = useMemo(
+    () => deletableIds.filter((id) => checked.has(id)),
+    [deletableIds, checked],
+  );
+  const allDeletableChecked =
+    deletableIds.length > 0 && checkedDeletable.length === deletableIds.length;
+  const someChecked = checkedDeletable.length > 0;
+
+  const toggleOne = (id: string) => {
+    setChecked((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleAll = () => {
+    setChecked((prev) => {
+      const next = new Set(prev);
+      if (allDeletableChecked) {
+        for (const id of deletableIds) next.delete(id);
+      } else {
+        for (const id of deletableIds) next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const clearSelection = () => {
+    setChecked(new Set());
+    setConfirming(false);
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!onDeleteCalls || checkedDeletable.length === 0 || busy) return;
+    setBusy(true);
+    try {
+      await onDeleteCalls(checkedDeletable);
+      clearSelection();
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <div className="panel">
@@ -179,10 +307,104 @@ export function CallTable({
           <span className="dot"></span>streaming · SSE
         </span>
       </div>
-      <div style={{ maxHeight: 540, overflow: 'auto' }}>
-        <table>
+
+      {someChecked ? (
+        <div
+          className={'bulk-bar' + (confirming ? ' confirming' : '')}
+          role="region"
+          aria-label="Bulk actions"
+        >
+          <span className="bulk-count">
+            <span className="bulk-num">{checkedDeletable.length}</span>
+            <span className="bulk-lbl">
+              {checkedDeletable.length === 1 ? 'call selected' : 'calls selected'}
+            </span>
+          </span>
+          <div className="bulk-spacer" />
+          {confirming ? (
+            <>
+              <span className="bulk-warn">
+                Removes from view + metrics. Logs kept on disk.
+              </span>
+              <button
+                type="button"
+                className="bulk-btn ghost"
+                onClick={() => setConfirming(false)}
+                disabled={busy}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="bulk-btn destructive"
+                onClick={() => void handleConfirmDelete()}
+                disabled={busy}
+                autoFocus
+              >
+                <IconTrash />
+                <span>
+                  {busy
+                    ? 'Deleting…'
+                    : `Delete ${checkedDeletable.length}`}
+                </span>
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                className="bulk-btn ghost"
+                onClick={clearSelection}
+                aria-label="Clear selection"
+              >
+                <IconX />
+                <span>Clear</span>
+              </button>
+              <button
+                type="button"
+                className="bulk-btn destructive"
+                onClick={() => setConfirming(true)}
+              >
+                <IconTrash />
+                <span>Delete</span>
+              </button>
+            </>
+          )}
+        </div>
+      ) : null}
+
+      <div style={{ minHeight: 540, maxHeight: 540, overflow: 'auto' }}>
+        <table className="call-table">
           <thead>
             <tr>
+              <th className="check-cell">
+                <button
+                  type="button"
+                  className={
+                    'row-check head' +
+                    (allDeletableChecked
+                      ? ' on'
+                      : someChecked
+                        ? ' indet'
+                        : '') +
+                    (deletableIds.length === 0 ? ' disabled' : '')
+                  }
+                  onClick={toggleAll}
+                  disabled={deletableIds.length === 0}
+                  aria-label={
+                    allDeletableChecked
+                      ? 'Deselect all'
+                      : 'Select all calls in view'
+                  }
+                  aria-pressed={allDeletableChecked}
+                >
+                  {allDeletableChecked ? (
+                    <IconCheck />
+                  ) : someChecked ? (
+                    <span className="indet-mark" />
+                  ) : null}
+                </button>
+              </th>
               <th>Status</th>
               <th>From → To</th>
               <th>Carrier</th>
@@ -194,7 +416,7 @@ export function CallTable({
           <tbody>
             {filtered.length === 0 ? (
               <tr>
-                <td colSpan={6} className="empty">
+                <td colSpan={7} className="empty">
                   No calls match "{search}"
                 </td>
               </tr>
@@ -206,6 +428,11 @@ export function CallTable({
                   isSelected={c.id === selectedId}
                   onSelect={() => onSelect(c.id)}
                   isNew={c.id === newId}
+                  isChecked={checked.has(c.id)}
+                  onToggleCheck={
+                    c.status === 'live' ? null : () => toggleOne(c.id)
+                  }
+                  revealed={revealed}
                 />
               ))
             )}

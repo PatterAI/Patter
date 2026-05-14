@@ -62,6 +62,16 @@ class MetricsStore:
         self._calls: list[dict[str, Any]] = []
         self._active_calls: dict[str, dict[str, Any]] = {}
         self._subscribers: set[asyncio.Queue] = set()
+        # User-driven soft delete: call_ids the operator has removed from the
+        # dashboard. The on-disk artefacts (metadata.json, transcript.jsonl)
+        # are intentionally NOT touched — they serve as the durable backup.
+        # All read paths (``get_calls`` / ``get_call`` / ``get_aggregates`` /
+        # ``get_calls_in_range`` / ``hydrate``) filter against this set so
+        # the call is invisible to the UI and excluded from rolling metrics.
+        # Populated from ``<log_root>/.deleted_call_ids.json`` on hydrate so
+        # deletions survive a process restart.
+        self._deleted_call_ids: set[str] = set()
+        self._deleted_ids_path: str | None = None
 
     # --- SSE event bus ---
 
@@ -337,18 +347,116 @@ class MetricsStore:
         )
 
     def get_calls(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
-        """Return the most recent completed calls, newest first."""
+        """Return the most recent completed calls, newest first.
+
+        Soft-deleted call_ids (see :py:meth:`delete_calls`) are filtered out
+        so the dashboard never re-shows a row the user removed. The on-disk
+        artefacts are intentionally preserved as a backup.
+        """
         with self._lock:
-            ordered = list(reversed(self._calls))
+            ordered = [
+                c
+                for c in reversed(self._calls)
+                if c.get("call_id") not in self._deleted_call_ids
+            ]
             return ordered[offset : offset + limit]
 
     def get_call(self, call_id: str) -> dict[str, Any] | None:
-        """Return the completed-call record for ``call_id`` if present."""
+        """Return the completed-call record for ``call_id`` if present.
+
+        Soft-deleted call_ids resolve to ``None`` so the SPA's detail pane
+        cannot render a row the user removed (it falls back to the live
+        record only when ``get_call`` returns ``None``, but a deleted call
+        is never live by construction).
+        """
         with self._lock:
+            if call_id in self._deleted_call_ids:
+                return None
             for call in reversed(self._calls):
                 if call["call_id"] == call_id:
                     return call
             return None
+
+    # --- Soft delete ---
+
+    def delete_calls(self, call_ids: list[str] | set[str]) -> list[str]:
+        """Soft-delete one or more calls from the dashboard view.
+
+        Adds each ``call_id`` to an in-memory set. Subsequent reads via
+        :py:meth:`get_calls` / :py:meth:`get_call` /
+        :py:meth:`get_aggregates` / :py:meth:`get_calls_in_range` exclude
+        the deleted ids, so rolling metrics (avg latency, total spend) are
+        recomputed without them. The on-disk ``metadata.json`` /
+        ``transcript.jsonl`` files written by ``CallLogger`` are NOT
+        touched — they serve as a durable backup the operator can audit
+        outside the dashboard.
+
+        **Active calls are never deletable.** A call_id that is currently
+        in ``_active_calls`` is silently skipped so a mid-call delete
+        from the UI cannot orphan the live transcript pane.
+
+        The deleted set is persisted to ``<log_root>/.deleted_call_ids.json``
+        when :py:meth:`hydrate` has been called with a log root — so the
+        deletion survives process restart. Persistence is best-effort; an
+        I/O error is logged at debug level and swallowed.
+
+        Args:
+            call_ids: Iterable of call_id strings to mark deleted. Empty or
+                already-deleted ids are de-duplicated. Active call_ids are
+                filtered out.
+
+        Returns:
+            The list of call_ids actually accepted as deleted (post-filter).
+        """
+        ids = {cid for cid in (call_ids or []) if isinstance(cid, str) and cid}
+        if not ids:
+            return []
+        with self._lock:
+            # Filter out active calls — never delete a live row.
+            ids -= set(self._active_calls.keys())
+            # De-dup against already-deleted.
+            new_ids = ids - self._deleted_call_ids
+            if not new_ids:
+                return []
+            self._deleted_call_ids |= new_ids
+            snapshot = sorted(self._deleted_call_ids)
+        # Persist outside the lock; SSE publish outside the lock.
+        self._persist_deleted_ids(snapshot)
+        accepted = sorted(new_ids)
+        self._publish("calls_deleted", {"call_ids": accepted})
+        return accepted
+
+    def is_deleted(self, call_id: str) -> bool:
+        """Return ``True`` when ``call_id`` was soft-deleted from the dashboard."""
+        with self._lock:
+            return call_id in self._deleted_call_ids
+
+    def get_deleted_call_ids(self) -> list[str]:
+        """Return a snapshot of the soft-deleted call_ids (sorted)."""
+        with self._lock:
+            return sorted(self._deleted_call_ids)
+
+    def _persist_deleted_ids(self, snapshot: list[str]) -> None:
+        """Atomically write the deleted-ids set to disk. Best-effort."""
+        if self._deleted_ids_path is None:
+            return
+        import json
+        import logging
+        import os
+        from pathlib import Path
+
+        path = Path(self._deleted_ids_path)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".json.tmp")
+            payload = {"version": 1, "deleted_call_ids": snapshot}
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, indent=2)
+            os.replace(tmp, path)
+        except OSError as exc:
+            logging.getLogger("getpatter.dashboard.store").debug(
+                "MetricsStore._persist_deleted_ids: %s", exc
+            )
 
     def get_active_calls(self) -> list[dict[str, Any]]:
         """Return the currently in-flight calls."""
@@ -366,9 +474,17 @@ class MetricsStore:
             return self._active_calls.get(call_id)
 
     def get_aggregates(self) -> dict[str, Any]:
-        """Compute aggregate stats (call count, cost, avg duration, latency) across history."""
+        """Compute aggregate stats (call count, cost, avg duration, latency) across history.
+
+        Soft-deleted calls are excluded so rolling metrics (avg latency,
+        total spend) are recomputed without them — matching what the
+        operator sees in the call list.
+        """
         with self._lock:
-            total_calls = len(self._calls)
+            visible = [
+                c for c in self._calls if c.get("call_id") not in self._deleted_call_ids
+            ]
+            total_calls = len(visible)
             if total_calls == 0:
                 return {
                     "total_calls": 0,
@@ -393,7 +509,7 @@ class MetricsStore:
             cost_llm = 0.0
             cost_tel = 0.0
 
-            for call in self._calls:
+            for call in visible:
                 m = call.get("metrics")
                 if m is None:
                     continue
@@ -432,10 +548,16 @@ class MetricsStore:
     def get_calls_in_range(
         self, from_ts: float = 0.0, to_ts: float = 0.0
     ) -> list[dict[str, Any]]:
-        """Return calls within a timestamp range (inclusive)."""
+        """Return calls within a timestamp range (inclusive).
+
+        Soft-deleted calls are filtered out so date-range exports and
+        analytics never include rows the operator removed from the UI.
+        """
         with self._lock:
             result = []
             for call in self._calls:
+                if call.get("call_id") in self._deleted_call_ids:
+                    continue
                 started = call.get("started_at", 0)
                 if from_ts and started < from_ts:
                     continue
@@ -446,9 +568,11 @@ class MetricsStore:
 
     @property
     def call_count(self) -> int:
-        """Number of completed calls currently held in memory."""
+        """Number of completed (non-deleted) calls currently held in memory."""
         with self._lock:
-            return len(self._calls)
+            return sum(
+                1 for c in self._calls if c.get("call_id") not in self._deleted_call_ids
+            )
 
     def hydrate(self, log_root: str | None) -> int:
         """Rebuild the call list from on-disk metadata.json files.
@@ -472,11 +596,37 @@ class MetricsStore:
 
         if not log_root:
             return 0
+        log = logging.getLogger("getpatter.dashboard.store")
+
+        # Wire the deleted-ids persistence path FIRST so any subsequent
+        # ``delete_calls`` call (even before any history hydrates) lands
+        # in the right file. Restoring the set from disk happens here too
+        # so deletions survive a process restart.
+        deleted_ids_path = Path(log_root) / ".deleted_call_ids.json"
+        loaded_deleted: set[str] = set()
+        if deleted_ids_path.is_file():
+            try:
+                with open(deleted_ids_path, encoding="utf-8") as fh:
+                    payload = json.load(fh)
+                raw = payload.get("deleted_call_ids", [])
+                if isinstance(raw, list):
+                    loaded_deleted = {
+                        cid for cid in raw if isinstance(cid, str) and cid
+                    }
+            except (OSError, json.JSONDecodeError) as exc:
+                log.debug(
+                    "MetricsStore.hydrate: skipping %s: %s",
+                    deleted_ids_path,
+                    exc,
+                )
+        with self._lock:
+            self._deleted_ids_path = str(deleted_ids_path)
+            self._deleted_call_ids |= loaded_deleted
+
         calls_root = Path(log_root) / "calls"
         if not calls_root.is_dir():
             return 0
 
-        log = logging.getLogger("getpatter.dashboard.store")
         collected: list[dict[str, Any]] = []
         with self._lock:
             seen = {c.get("call_id") for c in self._calls if c.get("call_id")}

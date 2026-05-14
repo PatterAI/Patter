@@ -16,8 +16,14 @@ button{font-family:inherit;color:inherit}
 .pulse.active{background:#3b6f3b;box-shadow:0 0 0 0 rgba(59,111,59,.6);animation:pulse 1.5s infinite}
 @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(59,111,59,.6)}70%{box-shadow:0 0 0 8px rgba(59,111,59,0)}100%{box-shadow:0 0 0 0 rgba(59,111,59,0)}}
 .num-chip{font-family:var(--font-mono);font-size:13px;background:#fff;border:1px solid var(--line);padding:5px 12px;border-radius:8px;color:#000;font-weight:500}
-.icon-btn{width:32px;height:32px;border-radius:8px;border:1px solid var(--line);background:#fff;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;color:#1a1a1a;transition:background var(--motion-fast) var(--easing)}
-.icon-btn:hover{background:#fafaf8}
+.icon-btn{width:32px;height:32px;border-radius:8px;border:1px solid var(--line);background:#fff;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;color:#1a1a1a;transition:background var(--motion-fast) var(--easing),border-color var(--motion-fast) var(--easing),color var(--motion-fast) var(--easing)}
+.icon-btn:hover{background:#fafaf8;border-color:#cbcbcb}
+.icon-btn:focus-visible{outline:2px solid var(--peach);outline-offset:2px}
+.icon-btn.toggle.on{background:#000;border-color:#000;color:#fff}
+.icon-btn.toggle.on:hover{background:#1a1a1a;border-color:#1a1a1a}
+/* PII cells use tabular numerics so masked + revealed states share a column
+   width — switching the eye toggle does not jitter the column. */
+.pii{font-variant-numeric:tabular-nums}
 .avatar{width:32px;height:32px;border-radius:999px;background:var(--peach);border:1.5px solid #000;display:flex;align-items:center;justify-content:center;font-family:var(--font-mono);font-size:11px;font-weight:600}
 
 /* page */
@@ -101,6 +107,104 @@ tbody tr:last-child td{border-bottom:0}
 tbody tr.new-row{animation:slideIn 400ms var(--easing)}
 @keyframes slideIn{from{background:#fff8ef;transform:translateY(-4px);opacity:0}to{background:transparent;transform:translateY(0);opacity:1}}
 
+/* ── Bulk select / delete ─────────────────────────────────────────
+   Refined-minimal: hand-drawn-feeling square checkboxes (1.5px hard
+   border), peach destructive accent reserved for the actual confirm
+   step. Header check and per-row check share .row-check styles so
+   hit-targets are visually consistent. */
+.call-table th.check-cell,
+.call-table td.check-cell{
+  width:38px;padding-left:14px;padding-right:0;text-align:left;
+}
+.call-table td.check-cell{cursor:default}
+.row-check{
+  appearance:none;display:inline-flex;align-items:center;justify-content:center;
+  width:16px;height:16px;border:1.5px solid #cbcbcb;border-radius:4px;
+  background:#fff;color:transparent;cursor:pointer;padding:0;
+  transition:border-color var(--motion-fast) var(--easing),
+             background var(--motion-fast) var(--easing),
+             color var(--motion-fast) var(--easing),
+             box-shadow var(--motion-fast) var(--easing);
+}
+.row-check:hover:not(.disabled){border-color:#000}
+.row-check:focus-visible{outline:2px solid var(--peach);outline-offset:2px}
+.row-check.on{background:#000;border-color:#000;color:#fff}
+.row-check.on:hover{background:#1a1a1a}
+.row-check.disabled{cursor:not-allowed;opacity:.35;background:#fafaf8}
+.row-check.head.indet{background:#fff;border-color:#000;color:transparent}
+.row-check.head .indet-mark{
+  width:8px;height:1.5px;background:#000;border-radius:1px;display:block;
+}
+.row-check svg{display:block;width:11px;height:11px}
+tbody tr.checked{background:#fbf3eb}
+tbody tr.checked:hover{background:#f7ead8}
+tbody tr.checked.selected{background:#fff8ef}
+tbody tr.checked.selected td:first-child{box-shadow:inset 3px 0 0 #DF9367}
+
+.bulk-bar{
+  display:flex;align-items:center;gap:10px;
+  padding:10px 16px 10px 12px;
+  background:#fafaf8;border-bottom:1px solid var(--line);
+  font-family:var(--font-sans);font-size:13px;color:#1a1a1a;
+  animation:bulkSlideIn 180ms var(--easing) both;
+}
+@keyframes bulkSlideIn{from{transform:translateY(-2px);opacity:0}to{transform:translateY(0);opacity:1}}
+.bulk-bar.confirming{background:#fff4e8;border-bottom-color:#EFC5AC}
+.bulk-count{display:inline-flex;align-items:baseline;gap:6px}
+.bulk-count .bulk-num{
+  font-family:var(--font-mono);font-size:14px;font-weight:600;
+  font-variant-numeric:tabular-nums;color:#000;
+}
+.bulk-count .bulk-lbl{
+  font-family:var(--font-mono);font-size:11px;letter-spacing:.04em;
+  text-transform:uppercase;color:#4a4a4a;font-weight:500;
+}
+.bulk-spacer{flex:1}
+.bulk-warn{
+  font-family:var(--font-mono);font-size:11px;letter-spacing:.02em;
+  color:#7a5b3e;margin-right:4px;
+}
+.bulk-btn{
+  display:inline-flex;align-items:center;gap:6px;
+  font-family:var(--font-mono);font-size:12px;font-weight:500;
+  height:30px;padding:0 12px;border-radius:8px;cursor:pointer;
+  border:1px solid var(--line);background:#fff;color:#1a1a1a;
+  transition:background var(--motion-fast) var(--easing),
+             color var(--motion-fast) var(--easing),
+             border-color var(--motion-fast) var(--easing),
+             transform var(--motion-fast) var(--easing);
+}
+.bulk-btn:hover:not(:disabled){background:#fafaf8;border-color:#cbcbcb}
+.bulk-btn:disabled{opacity:.5;cursor:not-allowed}
+.bulk-btn:focus-visible{outline:2px solid var(--peach);outline-offset:2px}
+.bulk-btn.ghost{background:transparent;border-color:transparent;color:#4a4a4a}
+.bulk-btn.ghost:hover:not(:disabled){background:#fff;border-color:var(--line);color:#000}
+.bulk-btn.destructive{
+  background:var(--peach);color:#000;border-color:var(--peach-deep);
+}
+.bulk-btn.destructive:hover:not(:disabled){background:var(--peach-deep);color:#fff;border-color:var(--peach-deep)}
+.bulk-btn.destructive:active:not(:disabled){transform:translateY(1px)}
+.bulk-btn svg{display:block}
+
+/* dark mode */
+body.dark .row-check{background:#0d0d0d;border-color:#3a3a3a}
+body.dark .row-check:hover:not(.disabled){border-color:#fff}
+body.dark .row-check.on{background:#fff;border-color:#fff;color:#000}
+body.dark .row-check.disabled{background:#0a0a0a}
+body.dark .row-check.head.indet .indet-mark{background:#fff}
+body.dark tbody tr.checked{background:#1a1410}
+body.dark tbody tr.checked:hover{background:#221911}
+body.dark .bulk-bar{background:#0d0d0d;border-bottom-color:#262626;color:#e5e5e5}
+body.dark .bulk-bar.confirming{background:#1f1611;border-bottom-color:#5a3f29}
+body.dark .bulk-count .bulk-num{color:#fff}
+body.dark .bulk-count .bulk-lbl{color:#888}
+body.dark .bulk-warn{color:#d4a578}
+body.dark .bulk-btn{background:#171717;border-color:#262626;color:#e5e5e5}
+body.dark .bulk-btn:hover:not(:disabled){background:#1f1f1f;border-color:#3a3a3a}
+body.dark .bulk-btn.ghost{background:transparent;border-color:transparent;color:#888}
+body.dark .bulk-btn.ghost:hover:not(:disabled){color:#fff;border-color:#262626;background:#171717}
+body.dark .bulk-btn.destructive{background:var(--peach);color:#000;border-color:var(--peach-deep)}
+
 .num-cell{font-family:var(--font-mono);font-size:13px;font-variant-numeric:tabular-nums}
 .pill{display:inline-flex;align-items:center;gap:5px;font-family:var(--font-mono);font-size:11px;font-weight:500;padding:3px 9px;border-radius:999px;border:1px solid;white-space:nowrap}
 .pill.live{background:#fff;border-color:#000;color:#000}
@@ -122,8 +226,12 @@ tbody tr.new-row{animation:slideIn 400ms var(--easing)}
 .dir.out{color:#4a4a4a}
 
 /* right rail: live call */
-.rr{display:flex;flex-direction:column;gap:14px}
-.rr-card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:18px}
+.rr{display:flex;flex-direction:column;gap:14px;min-height:590px}
+/* Baseline panel height for the right column (Live call + Metrics):
+   prevents the card from collapsing when no call is selected and keeps
+   the layout anchored at the same height as the recent-calls table
+   (header ~50px + 540px scroll area ≈ 590px). */
+.rr-card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:18px;min-height:280px}
 .metrics-panel-h{margin-bottom:14px}
 .metrics-panel-h .seg{display:inline-flex;background:#fafaf8;border:1px solid var(--line);border-radius:8px;padding:2px}
 .metrics-panel-h .seg button{font-family:var(--font-mono);font-size:11px;border:0;background:transparent;padding:5px 14px;border-radius:6px;cursor:pointer;color:#4a4a4a;font-weight:500;transition:all var(--motion-fast) var(--easing);text-transform:uppercase;letter-spacing:.06em}
@@ -224,27 +332,165 @@ body.dense tbody td{padding:9px 18px}
 body.dense .rr-card{padding:14px}
 body.dense .turn{margin-bottom:9px;font-size:12.5px}
 
-/* dark scheme (subtle, optional) */
-body.dark{background:#0d0d0d;color:#e8e8e8}
-body.dark .top,body.dark .panel,body.dark .metric,body.dark .rr-card,body.dark .num-chip,body.dark .icon-btn,body.dark .seg,body.dark .btn,body.dark .latbox,body.dark .ctrl,body.dark .duration-block,body.dark .statusbar{background:#171717;border-color:#262626;color:#e8e8e8}
-body.dark thead th{background:#0d0d0d;color:#888;border-color:#262626}
-body.dark tbody td,body.dark .rr-card{border-color:#262626}
-body.dark tbody tr:hover{background:#1a1a1a}
-body.dark tbody tr.selected{background:#1f1611}
-body.dark .pill.done{background:#0d0d0d;color:#888;border-color:#262626}
-body.dark .pill.live{background:#171717;color:#fff;border-color:#fff}
+/* dark scheme (subtle, optional)
+   Palette lifted on 2026-05-14: page #0d0d0d → #121212, cards
+   #171717 → #1c1c1c, borders #262626 → #2a2a2a. The previous
+   pitch-black felt oppressive against the brand's cream/peach
+   accent. Two-step neutral ramp keeps cards distinct from the
+   page without contrast loss on borders. */
+body.dark{background:#121212;color:#e8e8e8}
+body.dark .top,body.dark .panel,body.dark .metric,body.dark .rr-card,body.dark .num-chip,body.dark .icon-btn,body.dark .seg,body.dark .btn,body.dark .latbox,body.dark .ctrl,body.dark .duration-block,body.dark .statusbar{background:#1c1c1c;border-color:#2a2a2a;color:#e8e8e8}
+body.dark thead th{background:#121212;color:#888;border-color:#2a2a2a}
+body.dark tbody td,body.dark .rr-card{border-color:#2a2a2a}
+body.dark tbody tr:hover{background:#222222}
+body.dark tbody tr.selected{background:#2a1d15}
+body.dark .pill.done{background:#121212;color:#a0a0a0;border-color:#2a2a2a}
+body.dark .pill.live{background:#1c1c1c;color:#fff;border-color:#fff}
 body.dark .turn .av{border-color:#888}
-body.dark .turn.user .av{background:#262626;color:#fff}
-body.dark .lat-bar{background:#262626}
-body.dark .lat-bar i{background:#fff}
-body.dark .stack-row{border-color:#262626}
-body.dark .panel-h .search{background:#0d0d0d;border-color:#262626}
+body.dark .turn.user .av{background:#2a2a2a;color:#fff}
+body.dark .lat-bar{background:#2a2a2a}
+body.dark .lat-bar i{background:#e8e8e8}
+body.dark .lat-bar.warn i{background:var(--peach)}
+body.dark .stack-row{border-color:#2a2a2a}
+body.dark .panel-h .search{background:#121212;border-color:#2a2a2a}
 body.dark .panel-h .search input{color:#e8e8e8}
-body.dark .metric .val,body.dark .latbox .v,body.dark .num-cell{color:#fff}
-body.dark .seg button.on{background:#fff;color:#000}
-body.dark .ctrl.danger{background:#fff;color:#000;border-color:#fff}
-body.dark .brand .tag{background:#171717;color:#888;border-color:#262626}
-body.dark .metric.peach{background:#1f1611;border-color:#5a3a2a}
-body.dark .rr-card.peach{background:#1f1611;border-color:#5a3a2a}
-body.dark .duration-block,body.dark .latbox{background:#0d0d0d}
+body.dark .metric .val,body.dark .latbox .v,body.dark .num-cell,body.dark .duration-block .v{color:#fff}
+body.dark .duration-block .agent{color:#a8a8a8}
+body.dark .duration-block .l{color:#888}
+/* Active "pill" toggles + theme toggle: peach accent in dark mode (was stark
+   white — felt like a light-mode leftover floating on the dark page). */
+body.dark .seg button.on{background:var(--peach);color:#000;border-color:var(--peach)}
+body.dark .icon-btn{color:#e8e8e8}
+body.dark .icon-btn:hover{background:#262626;border-color:#3a3a3a}
+body.dark .icon-btn.toggle.on{background:var(--peach);border-color:var(--peach-deep);color:#000}
+body.dark .icon-btn.toggle.on:hover{background:var(--peach-deep);border-color:var(--peach-deep);color:#fff}
+body.dark .ctrl.danger{background:var(--peach);color:#000;border-color:var(--peach-deep)}
+body.dark .brand .tag{background:#1c1c1c;color:#a0a0a0;border-color:#2a2a2a}
+body.dark .metric.peach{background:#241814;border-color:#5a3a2a}
+body.dark .rr-card.peach{background:#241814;border-color:#5a3a2a}
+body.dark .duration-block,body.dark .latbox{background:#121212}
 body.dark tbody tr.selected td:first-child{box-shadow:inset 3px 0 0 #DF9367}
+
+/* ── Dark mode polish ────────────────────────────────────────────
+   Default light styles use ink (#000) for spark bars, dark grey
+   (#4a4a4a) for secondary text, and cream (#fafaf8) for chip
+   surfaces — all unreadable on a dark page. Overrides below fix
+   contrast across every surface that the screenshot revealed as
+   muddy: sparklines, kbd chip, "X inbound · X outbound" footer,
+   carrier label, page subtitle, metric delta, table empty state,
+   peach metric card, and the latency bar fill. */
+body.dark .ph h1{color:#fff}
+body.dark .ph .sub{color:#9a9a9a}
+body.dark .kbd{background:#0d0d0d;border-color:#3a3a3a;color:#cfcfcf;border-bottom-color:#262626}
+body.dark .metric .delta{color:#9a9a9a}
+body.dark .metric .lbl{color:#8a8a8a}
+body.dark .metric .footer,
+body.dark .metric .meta-foot{color:#a8a8a8}
+/* Spark bars: the default ``var(--ink)`` (#000) disappears on the
+   dark page. Use a light grey (with a subtle white-on-hover) so the
+   sparkline is legible without screaming. ``:not(.empty)`` is
+   important — without it the empty (zero-height) bars inherit the
+   light fill and become a visible grey strip at the bottom of each
+   card. */
+body.dark .metric .spark .spark-bar-static,
+body.dark .metric .spark .spark-bar:not(.empty){background:#a8a8a8;opacity:.85}
+body.dark .metric .spark .spark-bar:not(.empty):hover{background:var(--peach);opacity:1}
+body.dark .metric.peach .spark .spark-bar-static,
+body.dark .metric.peach .spark .spark-bar:not(.empty){background:var(--peach);opacity:.85}
+body.dark .metric.peach .spark .spark-bar:not(.empty):hover{background:#fff;opacity:1}
+body.dark .metric.peach .lbl,
+body.dark .metric.peach .delta{color:#c9a584}
+body.dark .car-tw{color:#a8a8a8}
+body.dark .empty{color:#666}
+body.dark .lat-bar{background:#2a2a2a}
+body.dark .lat-bar i{background:#e8e8e8}
+body.dark .lat-bar.warn i{background:var(--peach-deep)}
+body.dark .btn.primary{background:#fff;color:#000;border-color:#fff}
+body.dark .btn.primary:hover{background:#e8e8e8;border-color:#e8e8e8}
+body.dark .btn:hover{background:#1f1f1f;border-color:#3a3a3a}
+body.dark .seg{background:#0d0d0d;border-color:#262626}
+body.dark .seg button{color:#888}
+body.dark .seg button:not(.on):hover{color:#fff}
+body.dark .panel-h h3{color:#fff}
+body.dark .panel-h .sse{color:#888}
+body.dark .panel-h .search svg{color:#666}
+body.dark .panel-h .search input::placeholder{color:#666}
+body.dark .num-chip{color:#e8e8e8}
+body.dark .top-r .live-chip{color:#cfcfcf}
+body.dark .statusbar{color:#888}
+body.dark .statusbar .green{color:#76c777}
+body.dark .meta,
+body.dark .meta .sep{color:#9a9a9a}
+body.dark .pii{color:#e8e8e8}
+/* Live-call panel ctrl toggles (Recording, Mute, …): the light-peach
+   ``.ctrl.active`` state has higher specificity than the generic
+   ``body.dark .ctrl`` so we need explicit dark variants for active +
+   danger + hover or the panel sits as a cream blob on the dark page. */
+body.dark .ctrl{background:#1c1c1c;color:#e8e8e8;border-color:#2a2a2a}
+body.dark .ctrl:hover{background:#222;border-color:#3a3a3a}
+body.dark .ctrl.active{background:#2a1d15;border-color:var(--peach);color:var(--peach-light)}
+body.dark .ctrl.active:hover{background:#3a2a1f}
+body.dark .ctrl.danger{background:var(--peach);color:#000;border-color:var(--peach-deep)}
+body.dark .ctrl.danger:hover{background:var(--peach-deep);color:#fff;border-color:var(--peach-deep)}
+/* Queued / no-answer / fail pills had cool-blue / cream backgrounds. */
+body.dark .pill.queued{background:#1c1c1c;border-color:#2a2a2a;color:#9a9a9a}
+body.dark .pill.queued::before{background:#666}
+body.dark .pill.fail,
+body.dark .pill.noanswer{background:#2a1d15;border-color:#5a3a2a;color:var(--peach-light)}
+/* New-row flash animation used the light cream end-state — pick a dark
+   neutral so a freshly inserted row in dark mode doesn't flash white. */
+body.dark tbody tr.new-row{animation:slideInDark 400ms var(--easing)}
+@keyframes slideInDark{from{background:#2a1d15;transform:translateY(-4px);opacity:0}to{background:transparent;transform:translateY(0);opacity:1}}
+/* Carrier label colour drift between rows + table empty state. */
+body.dark .empty{color:#666;background:transparent}
+body.dark .car-tw{color:#a8a8a8}
+body.dark .car-dot.tx{background:#5a96f0}
+/* Selected + checked rows on the table — without these explicit dark
+   tones the warm peach overlay clashes with the lifted #1c1c1c card. */
+body.dark tbody tr.checked{background:#2a1d15}
+body.dark tbody tr.checked:hover{background:#3a2a1f}
+body.dark tbody tr.checked.selected{background:#3a2a1f}
+/* Transcript turn body text — default ``#1a1a1a`` is invisible on the
+   ``#1c1c1c`` card. Latency caption already uses ``var(--fg-tertiary)``
+   which resolves to a readable muted grey, but the actual conversation
+   text needs an explicit dark override. Also bump the avatar palette so
+   the user/agent rings stand against the lifted card surface. */
+body.dark .turn .body .txt{color:#e8e8e8}
+body.dark .turn .body .who{color:#a8a8a8}
+body.dark .turn .body .lat{color:#888}
+body.dark .turn .av{border-color:#3a3a3a}
+body.dark .turn.user .av{background:#2a2a2a;color:#fff;border-color:#3a3a3a}
+body.dark .turn.bot .av{color:#000}
+body.dark .turn.tool .av{background:#1a2436;color:#93c5fd;border-color:#264062}
+body.dark .turn.tool .body .who{color:#93c5fd}
+/* Waterfall — the light cream track + near-black STT bar + black value
+   caption all collapse to invisible/illegible on the dark card. Lift
+   them: dark track, soft-white STT, peach LLM (unchanged), cool-blue
+   TTS (unchanged), readable label/value text. */
+body.dark .wf-row .lbl{color:#a8a8a8}
+body.dark .wf-row .track{background:#2a2a2a}
+body.dark .wf-row .seg-bar{background:#e8e8e8}
+body.dark .wf-row .seg-bar.stt{background:#e8e8e8}
+body.dark .wf-row .seg-bar.llm{background:var(--peach)}
+body.dark .wf-row .seg-bar.tts{background:#5a96f0}
+body.dark .wf-row .v{color:#e8e8e8}
+body.dark .wf-legend{color:#a8a8a8}
+/* Stack rows (latency/cost breakdown) used cream-bordered dashed
+   separators; replace with the dark border palette + readable label
+   colour so the "stt / llm / tts" labels don't sink into the bg. */
+body.dark .stack-row{border-color:#2a2a2a}
+body.dark .stack-row:last-child{border-top-color:#2a2a2a}
+body.dark .stack-row .lbl{color:#a8a8a8}
+body.dark .stack-row .v{color:#e8e8e8}
+body.dark .stack-row .saved{color:#7fb787}
+/* latbox label/value were already mostly OK but the ``.warn`` variant
+   used a cream background that clashes — lift it to the warm-dark tone
+   matching the peach metric card. */
+body.dark .latbox.warn{background:#241814;border-color:#5a3a2a}
+body.dark .latbox.warn .v{color:var(--peach-light)}
+/* Patter logo SVGs inherit ``currentColor`` from the ``.brand``
+   ancestor. Force the brand colour to bright white in dark mode so the
+   black wordmark in ``light.svg`` (stroked via ``currentColor``)
+   reverses to a legible mark. */
+body.dark .brand,
+body.dark .patter-logo{color:#f4f4f4}

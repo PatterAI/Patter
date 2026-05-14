@@ -63,6 +63,37 @@ export function mountDashboard(app: Express, store: MetricsStore, token = ''): v
     res.json(store.getAggregates());
   });
 
+  // --- Soft delete ---
+  //
+  // ``DELETE /api/dashboard/calls/:callId`` removes a single call from the
+  // dashboard view + aggregates. ``POST /api/dashboard/calls/delete`` accepts
+  // a batch ``{ call_ids: [...] }``. Both are idempotent and never touch
+  // the on-disk artefacts — those serve as the durable backup. Active calls
+  // are silently skipped so a mid-call delete cannot orphan the live pane.
+  // Parity with Python.
+
+  app.delete('/api/dashboard/calls/:callId', auth, (req, res) => {
+    const callId = String(req.params.callId);
+    const accepted = store.deleteCalls([callId]);
+    res.json({ deleted: accepted, count: accepted.length });
+  });
+
+  app.post('/api/dashboard/calls/delete', auth, (req, res) => {
+    const body = (req.body ?? {}) as { call_ids?: unknown };
+    const raw = body.call_ids;
+    if (!Array.isArray(raw)) {
+      res
+        .status(400)
+        .json({ error: "Expected JSON body { 'call_ids': [...] }" });
+      return;
+    }
+    const ids = raw.filter(
+      (cid): cid is string => typeof cid === 'string' && cid.length > 0,
+    );
+    const accepted = store.deleteCalls(ids);
+    res.json({ deleted: accepted, count: accepted.length });
+  });
+
   // --- SSE endpoint ---
 
   app.get('/api/dashboard/events', auth, (req, res) => {

@@ -24,6 +24,12 @@ export interface DashboardData {
   readonly isStreaming: boolean;
   readonly error: string | null;
   readonly refresh: () => Promise<void>;
+  /**
+   * Optimistically remove ``ids`` from the local call list before the next
+   * server refresh lands. Avoids the brief flash of the deleted row
+   * lingering between the DELETE request and the next snapshot fetch.
+   */
+  readonly removeCallsLocal: (ids: readonly string[]) => void;
 }
 
 const RECONNECT_INITIAL_MS = 1_000;
@@ -36,6 +42,7 @@ const RELEVANT_EVENTS = [
   'call_initiated',
   'call_status',
   'call_end',
+  'calls_deleted',
 ] as const;
 
 function describeError(err: unknown): string {
@@ -181,5 +188,11 @@ export function useDashboardData(): DashboardData {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return { calls, aggregates, isStreaming, error, refresh };
+  const removeCallsLocal = useCallback((ids: readonly string[]): void => {
+    if (ids.length === 0) return;
+    const drop = new Set(ids);
+    setCalls((prev) => prev.filter((c) => !drop.has(c.id)));
+  }, []);
+
+  return { calls, aggregates, isStreaming, error, refresh, removeCallsLocal };
 }

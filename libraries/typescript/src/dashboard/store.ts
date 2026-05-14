@@ -47,6 +47,19 @@ export class MetricsStore extends EventEmitter {
   private readonly maxCalls: number;
   private calls: CallRecord[] = [];
   private activeCalls: Map<string, CallRecord> = new Map();
+  /**
+   * User-driven soft delete: call_ids the operator removed from the
+   * dashboard view. The on-disk artefacts written by ``CallLogger``
+   * (``metadata.json``, ``transcript.jsonl``) are intentionally NOT
+   * touched — they serve as the durable backup. All read paths
+   * (``getCalls`` / ``getCall`` / ``getAggregates`` / ``getCallsInRange``
+   * / ``hydrate``) filter against this set so the call is invisible
+   * to the UI and excluded from rolling metrics. Populated from
+   * ``<logRoot>/.deleted_call_ids.json`` on hydrate so deletions
+   * survive a process restart. Parity with Python.
+   */
+  private deletedCallIds: Set<string> = new Set();
+  private deletedIdsPath: string | null = null;
 
   /**
    * Accepts either a numeric ``maxCalls`` (legacy positional — matches the
@@ -340,18 +353,104 @@ export class MetricsStore extends EventEmitter {
     });
   }
 
-  /** Return a window of completed calls in newest-first order. */
+  /**
+   * Return a window of completed calls in newest-first order.
+   *
+   * Soft-deleted call_ids (see ``deleteCalls``) are filtered out so the
+   * dashboard never re-shows a row the user removed. The on-disk
+   * artefacts are intentionally preserved as a backup.
+   */
   getCalls(limit = 50, offset = 0): CallRecord[] {
-    const ordered = [...this.calls].reverse();
+    const visible = this.calls.filter((c) => !this.deletedCallIds.has(c.call_id));
+    const ordered = visible.reverse();
     return ordered.slice(offset, offset + limit);
   }
 
-  /** Look up a completed call by id (newest match wins). */
+  /**
+   * Look up a completed call by id (newest match wins).
+   *
+   * Soft-deleted call_ids resolve to ``null`` so the SPA's detail pane
+   * cannot render a row the user removed.
+   */
   getCall(callId: string): CallRecord | null {
+    if (this.deletedCallIds.has(callId)) return null;
     for (let i = this.calls.length - 1; i >= 0; i--) {
       if (this.calls[i].call_id === callId) return this.calls[i];
     }
     return null;
+  }
+
+  /**
+   * Soft-delete one or more calls from the dashboard view.
+   *
+   * Adds each ``call_id`` to an in-memory set. Subsequent reads via
+   * ``getCalls`` / ``getCall`` / ``getAggregates`` / ``getCallsInRange``
+   * exclude the deleted ids, so rolling metrics (avg latency, total
+   * spend) are recomputed without them. The on-disk
+   * ``metadata.json`` / ``transcript.jsonl`` files written by
+   * ``CallLogger`` are NOT touched — they serve as a durable backup
+   * the operator can audit outside the dashboard.
+   *
+   * Active calls are never deletable. A call_id that is currently
+   * in ``activeCalls`` is silently skipped so a mid-call delete
+   * from the UI cannot orphan the live transcript pane.
+   *
+   * Persisted to ``<logRoot>/.deleted_call_ids.json`` (best-effort)
+   * when ``hydrate()`` has been called with a log root. Parity with
+   * Python ``delete_calls``.
+   *
+   * @returns The list of call_ids actually accepted as deleted.
+   */
+  deleteCalls(callIds: readonly string[]): string[] {
+    const ids = new Set<string>();
+    for (const cid of callIds || []) {
+      if (typeof cid === 'string' && cid && !this.activeCalls.has(cid)) {
+        ids.add(cid);
+      }
+    }
+    if (ids.size === 0) return [];
+    const accepted: string[] = [];
+    for (const cid of ids) {
+      if (!this.deletedCallIds.has(cid)) {
+        this.deletedCallIds.add(cid);
+        accepted.push(cid);
+      }
+    }
+    if (accepted.length === 0) return [];
+    accepted.sort();
+    this.persistDeletedIds();
+    this.publish('calls_deleted', { call_ids: accepted });
+    return accepted;
+  }
+
+  /** Whether ``callId`` was soft-deleted from the dashboard. */
+  isDeleted(callId: string): boolean {
+    return this.deletedCallIds.has(callId);
+  }
+
+  /** Snapshot of soft-deleted call_ids (sorted). */
+  getDeletedCallIds(): string[] {
+    return Array.from(this.deletedCallIds).sort();
+  }
+
+  /** Atomically persist the deleted-ids set to disk. Best-effort. */
+  private persistDeletedIds(): void {
+    if (this.deletedIdsPath === null) return;
+    try {
+      const dir = path.dirname(this.deletedIdsPath);
+      fs.mkdirSync(dir, { recursive: true });
+      const tmp = this.deletedIdsPath + '.tmp';
+      const payload = {
+        version: 1,
+        deleted_call_ids: Array.from(this.deletedCallIds).sort(),
+      };
+      fs.writeFileSync(tmp, JSON.stringify(payload, null, 2), 'utf8');
+      fs.renameSync(tmp, this.deletedIdsPath);
+    } catch (err) {
+      getLogger().debug(
+        `MetricsStore.persistDeletedIds: ${String(err)}`,
+      );
+    }
   }
 
   /** Look up an active call by id (returns undefined if not active or unknown). */
@@ -364,9 +463,17 @@ export class MetricsStore extends EventEmitter {
     return Array.from(this.activeCalls.values());
   }
 
-  /** Compute summary statistics across the buffered call history. */
+  /**
+   * Compute summary statistics across the buffered call history.
+   *
+   * Soft-deleted calls are excluded so rolling metrics (avg latency,
+   * total spend) match exactly what the operator sees in the call list.
+   */
   getAggregates(): Record<string, unknown> {
-    const totalCalls = this.calls.length;
+    const visible = this.calls.filter(
+      (c) => !this.deletedCallIds.has(c.call_id),
+    );
+    const totalCalls = visible.length;
     if (totalCalls === 0) {
       return {
         total_calls: 0,
@@ -387,7 +494,7 @@ export class MetricsStore extends EventEmitter {
     let costLlm = 0;
     let costTel = 0;
 
-    for (const call of this.calls) {
+    for (const call of visible) {
       const m = call.metrics as Record<string, unknown> | null;
       if (!m) continue;
       const cost = (m.cost as Record<string, number>) || {};
@@ -425,9 +532,13 @@ export class MetricsStore extends EventEmitter {
     };
   }
 
-  /** Return calls whose `started_at` falls within `[fromTs, toTs]` (Unix seconds). */
+  /**
+   * Return calls whose `started_at` falls within `[fromTs, toTs]` (Unix
+   * seconds). Soft-deleted calls are filtered out.
+   */
   getCallsInRange(fromTs = 0, toTs = 0): CallRecord[] {
     return this.calls.filter((call) => {
+      if (this.deletedCallIds.has(call.call_id)) return false;
       const started = call.started_at || 0;
       if (fromTs && started < fromTs) return false;
       if (toTs && started > toTs) return false;
@@ -435,9 +546,13 @@ export class MetricsStore extends EventEmitter {
     });
   }
 
-  /** Number of completed calls currently in the ring buffer. */
+  /** Number of completed (non-deleted) calls currently in the ring buffer. */
   get callCount(): number {
-    return this.calls.length;
+    let n = 0;
+    for (const c of this.calls) {
+      if (!this.deletedCallIds.has(c.call_id)) n++;
+    }
+    return n;
   }
 
   /**
@@ -452,6 +567,32 @@ export class MetricsStore extends EventEmitter {
    */
   hydrate(logRoot: string | null | undefined): number {
     if (!logRoot) return 0;
+
+    // Wire the deleted-ids persistence path FIRST so any subsequent
+    // ``deleteCalls`` call (even before history hydrates) lands in the
+    // right file. Restore the set from disk so deletions survive a
+    // process restart.
+    const deletedIdsPath = path.join(logRoot, '.deleted_call_ids.json');
+    this.deletedIdsPath = deletedIdsPath;
+    if (fs.existsSync(deletedIdsPath)) {
+      try {
+        const raw = fs.readFileSync(deletedIdsPath, 'utf8');
+        const payload = JSON.parse(raw) as { deleted_call_ids?: unknown };
+        const arr = Array.isArray(payload.deleted_call_ids)
+          ? (payload.deleted_call_ids as unknown[])
+          : [];
+        for (const cid of arr) {
+          if (typeof cid === 'string' && cid.length > 0) {
+            this.deletedCallIds.add(cid);
+          }
+        }
+      } catch (err) {
+        getLogger().debug(
+          `MetricsStore.hydrate: skipping ${deletedIdsPath}: ${String(err)}`,
+        );
+      }
+    }
+
     const callsRoot = path.join(logRoot, 'calls');
     if (!fs.existsSync(callsRoot)) return 0;
 

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Call } from './CallTable';
-import { fmtDuration } from './format';
+import { fmtDuration, fmtPhone } from './format';
 import { IconForward, IconHangup, IconMic, IconRecord } from './icons';
 
 interface LiveDurationProps {
@@ -32,6 +32,8 @@ export interface LiveCallPanelProps {
   setRecording: (v: boolean) => void;
   muted: boolean;
   setMuted: (v: boolean) => void;
+  /** PII reveal — when false the displayed phone number is masked. */
+  revealed: boolean;
 }
 
 export function LiveCallPanel({
@@ -42,6 +44,7 @@ export function LiveCallPanel({
   setRecording,
   muted,
   setMuted,
+  revealed,
 }: LiveCallPanelProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -68,7 +71,12 @@ export function LiveCallPanel({
         <span className={'pill ' + (isLive ? 'live' : 'done')}>{call.status}</span>
       </h3>
       <div className="meta">
-        <strong>{call.direction === 'inbound' ? call.from : call.to}</strong>
+        <strong className="pii">
+          {fmtPhone(
+            call.direction === 'inbound' ? call.from : call.to,
+            revealed,
+          )}
+        </strong>
         <span className="sep">·</span>
         {call.agent}
       </div>

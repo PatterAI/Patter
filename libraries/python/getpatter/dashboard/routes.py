@@ -73,6 +73,35 @@ def mount_dashboard(app, store: MetricsStore, token: str = "") -> None:
     async def dashboard_aggregates(_=Depends(auth)):
         return JSONResponse(content=store.get_aggregates())
 
+    # --- Soft delete ---
+    #
+    # ``DELETE /api/dashboard/calls/{call_id}`` removes a single call from
+    # the dashboard view and aggregate metrics. ``POST
+    # /api/dashboard/calls/delete`` accepts a batch ``{"call_ids": [...]}``.
+    # Both are idempotent and never touch the on-disk artefacts written by
+    # ``CallLogger`` — those serve as the durable backup. Active calls are
+    # silently skipped so a mid-call delete cannot orphan the live pane.
+
+    @app.delete("/api/dashboard/calls/{call_id}", dependencies=[Depends(auth)])
+    async def dashboard_delete_call(call_id: str):
+        accepted = store.delete_calls([call_id])
+        return JSONResponse(content={"deleted": accepted, "count": len(accepted)})
+
+    @app.post("/api/dashboard/calls/delete", dependencies=[Depends(auth)])
+    async def dashboard_delete_calls(request: Request):
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        raw = body.get("call_ids") if isinstance(body, dict) else None
+        if not isinstance(raw, list):
+            return JSONResponse(
+                content={"error": "Expected JSON body {'call_ids': [...]}"},
+                status_code=400,
+            )
+        accepted = store.delete_calls([cid for cid in raw if isinstance(cid, str)])
+        return JSONResponse(content={"deleted": accepted, "count": len(accepted)})
+
     # --- SSE endpoint ---
 
     @app.get("/api/dashboard/events")

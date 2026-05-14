@@ -8,6 +8,8 @@ import { LiveCallPanel } from './components/LiveCallPanel';
 import { MetricsPanel } from './components/MetricsPanel';
 import { useDashboardData } from './hooks/useDashboardData';
 import { useTranscript } from './hooks/useTranscript';
+import { useUiPrefs } from './hooks/useUiPrefs';
+import { deleteCalls } from './lib/api';
 import {
   bucketStrategyForRange,
   computeSparkline,
@@ -54,7 +56,9 @@ function pickPhoneNumber(calls: readonly Call[]): string {
 }
 
 export function App() {
-  const { calls, aggregates, isStreaming, error, refresh } = useDashboardData();
+  const { calls, aggregates, isStreaming, error, refresh, removeCallsLocal } =
+    useDashboardData();
+  const { revealed, dark, toggleRevealed, toggleDark } = useUiPrefs();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [range, setRange] = useState<RangeKey>('24h');
@@ -157,6 +161,22 @@ export function App() {
     refresh().catch(() => undefined);
   };
 
+  const handleDeleteCalls = async (ids: readonly string[]): Promise<void> => {
+    if (ids.length === 0) return;
+    // Optimistic local removal so the rows vanish immediately. The SSE
+    // ``calls_deleted`` event triggers a refresh shortly after; if the
+    // server rejects an id (race with a status callback), it re-appears.
+    removeCallsLocal(ids);
+    if (ids.includes(selectedId ?? '')) setSelectedId(null);
+    try {
+      await deleteCalls(ids);
+    } catch {
+      // Pull the authoritative snapshot back if the call failed so the UI
+      // is consistent with the server's view.
+      await refresh().catch(() => undefined);
+    }
+  };
+
   return (
     <>
       <Topbar
@@ -164,6 +184,10 @@ export function App() {
         todayCount={totalCount}
         phoneNumber={phoneNumber}
         sdkVersion={SDK_VERSION}
+        revealed={revealed}
+        dark={dark}
+        onToggleRevealed={toggleRevealed}
+        onToggleDark={toggleDark}
       />
       <div className="page">
         <PageHeader range={range} setRange={(r) => setRange(r as RangeKey)} />
@@ -215,6 +239,8 @@ export function App() {
             newId={null}
             search={search}
             setSearch={setSearch}
+            onDeleteCalls={handleDeleteCalls}
+            revealed={revealed}
           />
           <div className="rr">
             <LiveCallPanel
@@ -225,6 +251,7 @@ export function App() {
               setRecording={setRecording}
               muted={muted}
               setMuted={setMuted}
+              revealed={revealed}
             />
             <MetricsPanel call={selected} />
           </div>

@@ -69,15 +69,19 @@ function PatterWordmark(props: SVGProps<SVGSVGElement>) {
 
 // Composite — mark on the left + wordmark on the right, sized
 // independently so the mark's line weight stays light when the wordmark
-// scales up. Both inherit ``currentColor`` so they adapt to dark mode.
+// scales up. Both SVGs use ``currentColor`` so they inherit the parent
+// ``.brand`` text colour — which is ``var(--ink)`` (#000) in light mode
+// and ``#e8e8e8`` in dark mode (cascaded from ``body.dark``). Do NOT pin
+// an inline ``color`` here: a hard-coded ``var(--ink)`` would render the
+// wordmark black-on-black on the dark page.
 export function PatterLogo() {
   return (
     <span
+      className="patter-logo"
       style={{
         display: 'inline-flex',
         alignItems: 'center',
         gap: 8,
-        color: 'var(--ink)',
       }}
       aria-label="Patter"
     >

@@ -167,6 +167,121 @@ class TestMetricsStore:
         assert call is not None
 
 
+class TestMetricsStoreDelete:
+    """Soft-delete tests for the dashboard MetricsStore — parity with TS."""
+
+    def _seed(
+        self, store: MetricsStore, call_id: str, latency_ms=200.0, cost_total=0.01
+    ):
+        store.record_call_start(
+            {
+                "call_id": call_id,
+                "caller": "+15551111111",
+                "callee": "+15552222222",
+                "direction": "inbound",
+            }
+        )
+        store.record_call_end(
+            {"call_id": call_id},
+            _make_metrics(
+                call_id=call_id,
+                duration=30.0,
+                cost_total=cost_total,
+                latency_avg_ms=latency_ms,
+            ),
+        )
+
+    def test_delete_hides_from_get_calls_and_call_count(self):
+        store = MetricsStore()
+        self._seed(store, "keep-1")
+        self._seed(store, "drop-1")
+        assert store.call_count == 2
+
+        accepted = store.delete_calls(["drop-1"])
+        assert accepted == ["drop-1"]
+        assert store.call_count == 1
+        assert [c["call_id"] for c in store.get_calls()] == ["keep-1"]
+        assert store.get_call("drop-1") is None
+        assert store.get_call("keep-1") is not None
+        assert store.is_deleted("drop-1")
+        assert not store.is_deleted("keep-1")
+
+    def test_delete_shifts_aggregates_latency_and_cost(self):
+        store = MetricsStore()
+        self._seed(store, "fast", latency_ms=100.0, cost_total=0.01)
+        self._seed(store, "slow", latency_ms=900.0, cost_total=0.05)
+        before = store.get_aggregates()
+        assert before["total_calls"] == 2
+        assert before["avg_latency_ms"] == 500.0
+
+        store.delete_calls(["slow"])
+        after = store.get_aggregates()
+        assert after["total_calls"] == 1
+        assert after["avg_latency_ms"] == 100.0
+        # 0.01 from "fast"; "slow"'s 0.05 must be gone from total_cost
+        assert after["total_cost"] == 0.01
+
+    def test_delete_filters_get_calls_in_range(self):
+        store = MetricsStore()
+        self._seed(store, "a")
+        self._seed(store, "b")
+        assert len(store.get_calls_in_range()) == 2
+        store.delete_calls(["b"])
+        remaining = store.get_calls_in_range()
+        assert len(remaining) == 1
+        assert remaining[0]["call_id"] == "a"
+
+    def test_delete_refuses_active_calls(self):
+        store = MetricsStore()
+        store.record_call_start(
+            {
+                "call_id": "live-1",
+                "caller": "+15551111111",
+                "callee": "+15552222222",
+                "direction": "inbound",
+            }
+        )
+        accepted = store.delete_calls(["live-1"])
+        assert accepted == []
+        assert not store.is_deleted("live-1")
+        assert len(store.get_active_calls()) == 1
+
+    def test_delete_is_idempotent(self):
+        store = MetricsStore()
+        self._seed(store, "x")
+        first = store.delete_calls(["x"])
+        second = store.delete_calls(["x"])
+        assert first == ["x"]
+        assert second == []
+
+    def test_delete_persists_to_log_root(self, tmp_path):
+        store = MetricsStore()
+        # Hydrate against an empty log root so the deleted-ids file path is wired.
+        (tmp_path / "calls").mkdir()
+        store.hydrate(str(tmp_path))
+        self._seed(store, "doomed")
+        store.delete_calls(["doomed"])
+
+        deleted_file = tmp_path / ".deleted_call_ids.json"
+        assert deleted_file.is_file()
+
+        # A fresh store re-reads the deleted set on hydrate and never resurfaces
+        # the call even if the on-disk metadata is intact.
+        store2 = MetricsStore()
+        store2.hydrate(str(tmp_path))
+        assert store2.is_deleted("doomed")
+
+    def test_delete_handles_empty_and_blank_ids(self):
+        store = MetricsStore()
+        self._seed(store, "real")
+        assert store.delete_calls([]) == []
+        assert store.delete_calls([""]) == []
+        # Unknown ids ARE accepted so a future hydrate that resurrects them
+        # stays hidden — matches TS behaviour.
+        assert store.delete_calls(["unknown-id"]) == ["unknown-id"]
+        assert store.call_count == 1
+
+
 class TestDashboardRoutes:
     """Test that dashboard routes are mountable."""
 
