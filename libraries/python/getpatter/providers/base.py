@@ -184,6 +184,20 @@ class VADProvider(ABC):
     async def close(self) -> None:
         """Release any model or backend resources held by the VAD."""
 
+    def reset(self) -> None:
+        """Reset all per-utterance state so the next ``process_frame`` starts
+        from a clean SILENCE state.
+
+        Default implementation is a no-op so existing providers compile
+        unchanged. Implementations that hold streaming detector state
+        (Silero RNN context, smoothing filters) should override this to
+        wipe the state between agent turns — without it, PSTN echo can
+        keep the detector "stuck" in SPEECH for the whole agent turn and
+        block barge-in on the next user utterance (one-shot barge-in
+        bug).
+        """
+        return None
+
 
 # === Audio filter (noise cancellation, gain, EQ) ===
 

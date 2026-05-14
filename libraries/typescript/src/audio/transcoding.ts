@@ -333,10 +333,15 @@ export class StatefulResampler {
 
     if (totalInput === 0) return Buffer.alloc(0);
 
-    // Seed FIR history on first call.
+    // Seed FIR history with silence on the first call.  The correct
+    // initial condition is zeros (there was no audio before this call).
+    // Seeding with input[0] created a startup transient when ElevenLabs
+    // audio began at non-zero amplitude — the all-input[0] history
+    // amplified the first output sample relative to steady-state, which
+    // sounded as crackling on the very first TTS chunk of a call.
     if (!this.firHistoryValid) {
-      this.firHistory[0] = input[0];
-      this.firHistory[1] = input[0];
+      this.firHistory[0] = 0;
+      this.firHistory[1] = 0;
       this.firHistoryValid = true;
     }
 

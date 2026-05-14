@@ -173,4 +173,25 @@ describe('SileroVAD', () => {
     await vad.close();
     await expect(vad.processFrame(silencePcm(512), 16000)).rejects.toThrow(/closed/);
   });
+
+  it('reset() returns VAD to SILENCE so the next utterance fires speech_start', async () => {
+    // Drive into SPEECH state, then reset, then drive INTO SPEECH again. Without
+    // reset() the second batch would not emit a fresh ``speech_start`` because
+    // ``pubSpeaking`` would still be ``true`` from the first batch.
+    const { vad } = buildVad({
+      probs: [0.95, 0.95, 0.95, 0.95, 0.95, 0.95, 0.95, 0.95],
+      minSpeechDuration: 0.032,
+    });
+    const first = await vad.processFrame(sinePcm(512, 16000), 16000);
+    expect(first?.type).toBe('speech_start');
+    vad.reset();
+    const second = await vad.processFrame(sinePcm(512, 16000), 16000);
+    expect(second?.type).toBe('speech_start');
+  });
+
+  it('reset() on a closed instance is a no-op', async () => {
+    const { vad } = buildVad({ probs: [0] });
+    await vad.close();
+    expect(() => vad.reset()).not.toThrow();
+  });
 });

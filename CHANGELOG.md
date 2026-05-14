@@ -1,26 +1,98 @@
 ## Unreleased
 
-### Fixed — First-message crackling on Twilio PSTN: initialFillComplete burst + playout pacing
+### Fixed — One-shot barge-in: VAD now reset between agent turns
 
-Root cause: `sendPacedFirstMessageBytes` / `_send_paced_first_message_bytes`
-relied exclusively on mark-based back-pressure (`waitForMarkWindow` /
-`_wait_for_mark_window`) for Twilio. When all `FIRST_MESSAGE_MARK_WINDOW` (3)
-pending marks resolved simultaneously (batch-ACK), the window unblocked 3
-consecutive loop iterations with no sleep, sending 3 chunks (~120 ms of audio)
-in a burst. The PSTN jitter buffer (250–1500 ms) drained momentarily → audible
-crackling on the first message only.
+After a successful barge-in on PSTN (no-AEC), subsequent barge-in attempts in the
+same call silently failed. Root cause: PSTN echo of the agent's TTS played back
+through the caller's phone speaker and returned through the mic, keeping
+SileroVAD's smoothed probability above `deactivationThreshold` (0.35) for the
+entire agent turn. The detector's `pubSpeaking` / `_pub_speaking` state stayed
+`true` across turns, so the next user utterance never produced a fresh
+`SILENCE → SPEECH` transition and `speech_start` never fired — barge-in
+behaved as if it were "one shot".
 
-A prior incorrect fix applied 40 ms playout sleep after EVERY chunk, including
-the initial 3. That eliminated the burst needed to pre-fill the jitter buffer,
-causing a different underrun for the same crackling symptom.
+Fix: added an optional `reset()` hook to the `VADProvider` interface
+(TypeScript) / abstract base class (Python). `SileroVAD` implements it by
+clearing the pending buffer, `pubSpeaking`, the speech/silence threshold
+durations, the exponential smoothing filter, AND the ONNX model's RNN hidden
+state + rolling context. `StreamHandler` invokes the reset in two places:
 
-Correct fix: introduce a sticky `initialFillComplete` / `initial_fill_complete`
-flag. The first `FIRST_MESSAGE_MARK_WINDOW` chunks go out in burst (no sleep) to
-pre-fill the carrier jitter buffer. Once the window is first full the flag flips
-to `true` permanently for the call and subsequent chunks are paced by playout
-time, preventing batch-ACK bursts from draining the buffer. On Telnyx (no mark
-concept, `markPromise === null` / `mark_future is None`) the playout sleep still
-runs unconditionally on every chunk. Files:
+  1. **`beginSpeaking()` / `_begin_speaking()`** — every new agent turn starts
+     with a clean VAD. The user's previous utterance has already been
+     committed by STT so no audio is lost.
+  2. **`endSpeakingWithGrace()` grace-timer fire** — natural turn end leaves
+     VAD ready for the next spontaneous user utterance.
+
+Failures in the optional `reset()` hook are logged and swallowed; a flaky
+reset can never silently kill barge-in for the rest of the call.
+
+Parity bonus: `_begin_speaking()` in Python now stamps `_first_audio_sent_at`
+unconditionally (matching TypeScript `beginSpeaking()` since 2026-05-11). The
+`is_first_message` parameter is kept for backward compat with callers but no
+longer changes behaviour. Without this, a turn with a slow LLM was
+un-interruptible for the entire LLM TTFT window because the barge-in gate
+anchor stayed `None`.
+
+Files: `libraries/typescript/src/types.ts`,
+`libraries/typescript/src/providers/silero-vad.ts`,
+`libraries/typescript/src/stream-handler.ts`,
+`libraries/python/getpatter/providers/base.py`,
+`libraries/python/getpatter/providers/silero_onnx.py`,
+`libraries/python/getpatter/providers/silero_vad.py`,
+`libraries/python/getpatter/stream_handler.py`.
+
+### Fixed — Barge-in gate reduced 250 ms → 100 ms; suppressed speech flushed to STT on grace end
+
+Two related barge-in defects on Twilio PSTN (no-AEC path):
+
+1. **Gate too long.** `MIN_AGENT_SPEAKING_MS_BEFORE_BARGE_IN_NO_AEC` was 250 ms, blocking
+   every `speech_start` VAD event for the first 250 ms after the agent began speaking.
+   On short agent turns (< ~400 ms of audio) the gate expired only near the end of the
+   turn, so the user's interruption was silently suppressed. Reduced to 100 ms, which is
+   still enough to block PSTN echo loopback (~100–200 ms round-trip) while letting genuine
+   user speech through on typical responses.
+
+2. **Suppressed speech silently discarded.** When VAD fired `speech_start` during the
+   agent's turn but barge-in was gate-suppressed, the user's audio accumulated in
+   `inboundAudioRing` / `_inbound_audio_ring` but was never flushed. The ring is cleared
+   at `beginSpeaking` / `_begin_speaking` (start of the next agent turn), so the user's
+   words vanished without ever reaching STT. Added `suppressedSpeechPending` /
+   `_suppressed_speech_pending` flag: set when speech_start is suppressed, cleared on
+   barge-in or new turn, and on grace-timer expiry the ring is flushed to STT so the
+   user's message is processed.
+
+Files: `libraries/typescript/src/stream-handler.ts`,
+`libraries/python/getpatter/stream_handler.py`.
+
+### Fixed — StatefulResampler FIR cold-start transient on first TTS chunk
+
+`StatefulResampler` (TypeScript, `libraries/typescript/src/audio/transcoding.ts`) seeded
+its 5-tap FIR history with `input[0]` on the first call. When ElevenLabs HTTP streaming
+delivers an audio chunk that starts at non-zero amplitude, this produced a startup
+transient on the resampled output — audible as a brief crackle at the beginning of the
+first TTS message. Fixed: FIR history is now seeded with zeros (the correct initial
+condition for a filter that has received no prior input), eliminating the transient.
+No Python equivalent — Python uses `scipy.signal.resample_poly` which handles boundary
+conditions internally.
+
+### Fixed — First-message crackling on Twilio PSTN: streaming path now uses simple sendAudio
+
+Root cause: the streaming first-message path (non-prewarm) was routing every
+ElevenLabs HTTP chunk through `sendPacedFirstMessageBytes` /
+`_send_paced_first_message_bytes`. That function was designed for the prewarm
+case (one large pre-synthesised buffer) and resets drain+counter state on each
+call. Applied per streaming chunk (~128 ms each), the drain+reset destroyed
+mark back-pressure continuity and the per-sub-chunk playout sleep slowed
+delivery below Twilio's playout rate, causing periodic buffer underruns
+(crackling on the first message only). Subsequent LLM responses used the
+simpler `synthesizeSentence` / `_synthesize_sentence` path (plain `sendAudio`)
+and never crackled, confirming the fix direction.
+
+Fix: the streaming first-message path now uses the same plain
+`encodePipelineAudio + sendAudio + markFirstAudioSent` pattern as subsequent
+turns. The prewarm path (pre-synthesised buffer) is unchanged and still uses
+`sendPacedFirstMessageBytes` / `_send_paced_first_message_bytes` because that
+buffer can be several seconds long and needs mark-gated pacing. Files:
 `libraries/typescript/src/stream-handler.ts`,
 `libraries/python/getpatter/stream_handler.py`.
 

@@ -53,7 +53,7 @@ logger = logging.getLogger("getpatter")
 # only — used on PSTN where AEC is a no-op so there is no warmup to
 # protect, and a long gate just suppresses real-user barge-in.
 MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN_AEC = 1.0
-MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN_NO_AEC = 0.25
+MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN_NO_AEC = 0.1
 # Backwards-compat alias used by tests; matches AEC variant.
 MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN = MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN_AEC
 
@@ -1768,6 +1768,11 @@ class PipelineStreamHandler(StreamHandler):
         # 16-bit mono) ≈ 640 bytes; capped to 30 frames ≈ 600 ms ≈
         # ~19 KB per concurrent call.
         self._inbound_audio_ring: list[bytes] = []
+        # True when VAD fired ``speech_start`` during the agent's turn but
+        # the barge-in gate suppressed it. The grace-timer flip drains the
+        # ring buffer to STT so the user's words are not silently discarded.
+        # Mirrors TS ``suppressedSpeechPending``.
+        self._suppressed_speech_pending: bool = False
         # Wall-clock timestamp of the most recent barge-in cancel, used by
         # ``_begin_speaking`` to enforce a short drain window so the remote
         # PSTN player finishes flushing the cancelled turn's tail before
@@ -2084,31 +2089,32 @@ class PipelineStreamHandler(StreamHandler):
                         self.metrics.record_tts_first_byte()
                     first_chunk_sent = await self._stream_prewarm_bytes(prewarm_bytes)
                 else:
+                    # Streaming TTS path (no prewarm cache). Uses the same
+                    # simple per-chunk send as _synthesize_sentence —
+                    # ElevenLabs HTTP streams at near-real-time speed so the
+                    # carrier-side buffer stays bounded without mark-gated
+                    # pacing.  Routing streaming chunks through
+                    # _send_paced_first_message_bytes caused crackling: its
+                    # drain+reset on every HTTP chunk destroyed mark
+                    # back-pressure continuity and the per-sub-chunk sleep
+                    # slowed delivery below Twilio's playout rate, producing
+                    # periodic buffer underruns.  The prewarm path (a single
+                    # pre-synthesised buffer) still uses
+                    # _send_paced_first_message_bytes because that buffer can
+                    # be several seconds long and needs pacing.
                     async for audio_chunk in self._tts.synthesize(
                         self.agent.first_message
                     ):
                         if not self._is_speaking:
-                            break  # barge-in or test-hangup
+                            break
                         if not first_chunk_sent:
                             first_chunk_sent = True
                             if self.metrics is not None:
                                 self.metrics.record_tts_first_byte()
-                        # BUG #128: route every TTS chunk through the paced
-                        # sender so we never push more than
-                        # ``_FIRST_MESSAGE_MARK_WINDOW`` chunks of audio
-                        # ahead of carrier playback. The previous burst-send
-                        # let Twilio's outbound buffer reach several
-                        # seconds — a barge-in's send_clear race-lost
-                        # against the queued media frames and the agent
-                        # kept talking on the user's earpiece for up to
-                        # ~2 s after the user spoke. The paced sender also
-                        # drives the AEC far-end tap and
-                        # ``_mark_first_audio_sent`` internally so this
-                        # path stays parity-clean with
-                        # ``_stream_prewarm_bytes``.
-                        sent = await self._send_paced_first_message_bytes(audio_chunk)
-                        if not sent:
-                            break
+                        if self._aec is not None:
+                            self._aec.push_far_end(audio_chunk)
+                        await self.audio_sender.send_audio(audio_chunk)
+                        self._mark_first_audio_sent()
             finally:
                 # Drop any partial int16 byte to prevent cross-turn corruption
                 # if the stream threw before a complete sample was delivered.
@@ -3087,6 +3093,10 @@ class PipelineStreamHandler(StreamHandler):
                             "VAD speech_start suppressed (agent speaking < gate, aec=%s)",
                             aec_state,
                         )
+                        # Real user speech detected but gated out. The
+                        # grace-timer flip will drain the ring buffer to
+                        # STT so the user's words are not silently lost.
+                        self._suppressed_speech_pending = True
                     elif self._is_speaking:
                         # Caller spoke over in-flight TTS. With opt-in
                         # confirmation strategies the cancel is deferred
@@ -3119,6 +3129,7 @@ class PipelineStreamHandler(StreamHandler):
                                 self._first_audio_sent_at = None
                                 self._speaking_generation += 1
                                 self._last_cancel_at = time.time()
+                                self._suppressed_speech_pending = False
                     if not phantom_suppressed and self.metrics is not None:
                         # Industry-standard pattern: every legitimate VAD speech_start
                         # re-anchors the turn timestamp pre-commit. This
@@ -3238,15 +3249,32 @@ class PipelineStreamHandler(StreamHandler):
         self._speaking_generation += 1
         self._is_speaking = True
         self._speaking_started_at = time.time()
-        if is_first_message:
-            # Parity with TS ``beginSpeaking(isFirstMessage=true)``: pre-stamp
-            # so the barge-in gate can fire before the first TTS byte lands.
-            self._first_audio_sent_at = time.time()
-        else:
-            self._first_audio_sent_at = None
+        # Stamp ``_first_audio_sent_at`` synchronously for EVERY turn so the
+        # ``_can_barge_in()`` gate (250 ms anti-flicker for PSTN no-AEC) runs
+        # in PARALLEL with LLM TTFT + TTS TTFB rather than starting only
+        # after the first audio chunk reaches the wire. Without this, a turn
+        # with a slow LLM (gpt-4o cold cache ~2 s) is effectively
+        # un-interruptible for the entire LLM window: ``_first_audio_sent_at``
+        # stays None, ``_can_barge_in`` returns False, and every VAD
+        # ``speech_start`` is suppressed silently. Promoted from
+        # firstMessage-only to default on 2026-05-14 (TS parity).
+        # ``is_first_message`` is kept for backward compat with callers but
+        # no longer changes behaviour.
+        _ = is_first_message
+        self._first_audio_sent_at = time.time()
         # Fresh turn — drop any stale pre-barge-in buffer from a previous
         # turn so we never replay yesterday's audio to STT.
         self._inbound_audio_ring = []
+        self._suppressed_speech_pending = False
+        # Reset the VAD detector so the next user utterance triggers a clean
+        # SILENCE→SPEECH transition. Without this, PSTN echo from the
+        # previous turn can keep the smoothed probability above the
+        # deactivation threshold (0.35) for the entire turn — the VAD never
+        # returns to SILENCE, ``speech_start`` never fires, and barge-in
+        # feels "one-shot". The user's previous utterance was already
+        # committed by STT before ``_begin_speaking`` is called, so resetting
+        # state here cannot lose data.
+        self._reset_vad()
 
     def _mark_first_audio_sent(self) -> None:
         """Record that the first TTS chunk of the current turn hit the wire.
@@ -3324,6 +3352,10 @@ class PipelineStreamHandler(StreamHandler):
             self._first_audio_sent_at = None
             self._clear_pending_barge_in()
             await self._reset_barge_in_strategies()
+            if self._suppressed_speech_pending:
+                self._suppressed_speech_pending = False
+                await self._flush_inbound_audio_ring()
+            self._reset_vad()
             return
 
         gen = self._speaking_generation
@@ -3339,6 +3371,13 @@ class PipelineStreamHandler(StreamHandler):
                     self._first_audio_sent_at = None
                     self._clear_pending_barge_in()
                     await self._reset_barge_in_strategies()
+                    if self._suppressed_speech_pending:
+                        self._suppressed_speech_pending = False
+                        await self._flush_inbound_audio_ring()
+                    # Reset VAD so any stuck SPEECH state from echo /
+                    # loopback during the agent's turn does not block the
+                    # next user utterance from emitting ``speech_start``.
+                    self._reset_vad()
             except asyncio.CancelledError:  # pragma: no cover
                 raise
             except Exception as exc:  # pragma: no cover - defensive
@@ -3352,6 +3391,25 @@ class PipelineStreamHandler(StreamHandler):
         from getpatter.services.barge_in_strategies import reset_strategies
 
         await reset_strategies(self._barge_in_strategies)
+
+    def _reset_vad(self) -> None:
+        """Reset the active VAD provider's per-utterance state.
+
+        No-op when the provider does not implement the optional
+        :py:meth:`getpatter.providers.base.VADProvider.reset` hook
+        (default implementation in ``VADProvider`` is a no-op). Safe to
+        call from any context — failures are swallowed; a flaky reset
+        must never silently kill barge-in for every subsequent turn.
+
+        Parity with TS ``resetVad``.
+        """
+        vad = getattr(self.agent, "vad", None) or self._auto_vad
+        if vad is None:
+            return
+        try:
+            vad.reset()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("VAD reset threw: %s", exc)
 
     async def _flush_inbound_audio_ring(self) -> None:
         """Replay the audio captured by the self-hearing guard right

@@ -184,13 +184,20 @@ describe('StatefulResampler 16k→8k', () => {
     }
   });
 
-  it('DC signal passes through unchanged (FIR unity gain on DC)', () => {
+  it('DC signal passes through unchanged after startup transient (FIR unity gain on DC)', () => {
     const r = createResampler16kTo8k();
     const input = i16buf(Array(20).fill(5000));
     const out = r.process(input);
     const samples = readI16(out);
-    // Allow ±1 LSB for integer rounding.
-    for (const s of samples) expect(Math.abs(s - 5000)).toBeLessThanOrEqual(1);
+    // The FIR history is zero-initialized (correct initial condition for
+    // no prior audio). The very first output sample blends zero history
+    // with the DC signal and produces a lower value — this is the
+    // expected startup transient. From sample[1] onward the filter is
+    // in steady state and unity gain at DC gives exactly 5000 (±1 LSB).
+    expect(samples.length).toBeGreaterThanOrEqual(2);
+    for (let i = 1; i < samples.length; i++) {
+      expect(Math.abs(samples[i] - 5000)).toBeLessThanOrEqual(1);
+    }
   });
 
   it('handles odd-byte input via carry (no throw, output still even)', () => {

@@ -313,6 +313,12 @@ class OnnxModel {
     const data = out.data as Float32Array;
     return data[0] ?? 0;
   }
+
+  /** Reset the RNN hidden state + rolling context to a fresh inference. */
+  reset(): void {
+    this.context = new Float32Array(this.contextSize);
+    this.rnnState = new Float32Array(2 * 1 * 128);
+  }
 }
 
 /**
@@ -541,5 +547,28 @@ export class SileroVAD implements VADProvider {
     if (this.closed) return;
     this.closed = true;
     // onnxruntime-node sessions are garbage-collected; no explicit release API.
+  }
+
+  /**
+   * Reset all per-utterance state so the next ``processFrame`` starts from
+   * a clean SILENCE state.
+   *
+   * Called by the stream handler between agent turns to prevent a "stuck
+   * SPEECH" condition where PSTN echo / loopback kept the detector's
+   * probability above ``deactivationThreshold`` for the entire agent turn.
+   * Without this reset the next user utterance would never trigger a
+   * SILENCE→SPEECH transition and barge-in would feel "one-shot" (works
+   * once, then never again until the call ends).
+   *
+   * Safe to call any time including on a closed instance (no-op).
+   */
+  reset(): void {
+    if (this.closed) return;
+    this.pending = new Float32Array(0);
+    this.pubSpeaking = false;
+    this.speechThresholdDuration = 0;
+    this.silenceThresholdDuration = 0;
+    this.expFilter.reset();
+    this.model.reset();
   }
 }

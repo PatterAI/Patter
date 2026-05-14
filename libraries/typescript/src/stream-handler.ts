@@ -298,6 +298,14 @@ export class StreamHandler {
   /** Timer that fires the pending-barge-in timeout. */
   private bargeInPendingTimer: ReturnType<typeof setTimeout> | null = null;
   /**
+   * Set to true when a VAD ``speech_start`` was suppressed by the
+   * anti-echo gate during the current agent turn.  Cleared on
+   * ``beginSpeaking`` and ``cancelSpeaking``.  When the turn ends
+   * naturally (grace timer), the inbound audio ring is flushed to STT
+   * so the user's speech is not silently discarded.
+   */
+  private suppressedSpeechPending = false;
+  /**
    * Minimum wall-clock duration (ms) the agent must have been speaking
    * before barge-in is allowed to fire when AEC is active. Covers the
    * AEC warmup window (~500 ms) plus a safety margin so residual bleed
@@ -308,10 +316,13 @@ export class StreamHandler {
    * Same as the AEC variant but for deployments where AEC is OFF
    * (default on PSTN — Twilio/Telnyx). Without an adaptive filter to
    * converge, the only justification for a gate is anti-flicker on
-   * micro-events (cough, click). A short 250 ms window keeps real-user
-   * barge-in responsive while still filtering tiny noise spikes.
+   * micro-events (cough, click). 100 ms covers the first PSTN echo
+   * round-trip (~40-100 ms) while allowing barge-in from 100 ms into
+   * the agent's turn — covering nearly all of any response.
+   * Previously 250 ms, which blocked barge-in entirely on short (<500 ms)
+   * agent responses.
    */
-  private static readonly MIN_AGENT_SPEAKING_MS_BEFORE_BARGE_IN_NO_AEC = 250;
+  private static readonly MIN_AGENT_SPEAKING_MS_BEFORE_BARGE_IN_NO_AEC = 100;
   /** Handle for the pending grace-period timer, so it can be cleared on cleanup. */
   private graceTimer: ReturnType<typeof setTimeout> | null = null;
   /**
@@ -406,6 +417,7 @@ export class StreamHandler {
     this.speakingGeneration++;
     this.isSpeaking = true;
     this.speakingStartedAt = Date.now();
+    this.suppressedSpeechPending = false;
     // Stamp ``firstAudioSentAt`` synchronously for EVERY turn so the
     // ``canBargeIn()`` gate (250ms anti-flicker for PSTN no-AEC) runs in
     // PARALLEL with LLM TTFT + TTS TTFB rather than starting only after
@@ -424,6 +436,16 @@ export class StreamHandler {
     // Fresh turn — drop any stale pre-barge-in buffer from a previous turn
     // so we never replay yesterday's audio to STT.
     this.inboundAudioRing = [];
+    // Reset the VAD detector so the next user utterance triggers a clean
+    // SILENCE→SPEECH transition. Without this, PSTN echo from the previous
+    // turn can keep the detector's smoothed probability above the
+    // deactivation threshold (0.35) for the entire turn — the VAD never
+    // returns to SILENCE, ``speech_start`` never fires for the user's next
+    // utterance, and barge-in feels "one-shot" (works once, then never
+    // again). The user's previous utterance was already committed by STT
+    // before ``beginSpeaking`` is called, so resetting state here cannot
+    // lose data.
+    this.resetVad();
   }
 
   /**
@@ -452,6 +474,7 @@ export class StreamHandler {
     this.speakingStartedAt = null;
     this.firstAudioSentAt = null;
     this.lastCancelAt = Date.now();
+    this.suppressedSpeechPending = false;
     // Drain any firstMessage mark waiters so a loop blocked on
     // ``waitForMarkWindow`` exits on the next tick and observes
     // ``!isSpeaking``. Without this the loop would stay blocked until
@@ -587,6 +610,18 @@ export class StreamHandler {
           this.firstAudioSentAt = null;
           this.clearPendingBargeIn();
           void this.resetBargeInStrategies();
+          // If VAD detected speech during the agent's turn but it was
+          // gate-suppressed (agent hadn't been speaking long enough for
+          // barge-in to fire), flush the ring buffer to STT now so the
+          // user's words aren't silently lost.
+          if (this.suppressedSpeechPending) {
+            this.suppressedSpeechPending = false;
+            this.flushInboundAudioRing();
+          }
+          // Reset VAD so any stuck SPEECH state from echo / loopback during
+          // the agent's turn does not block the next user utterance from
+          // emitting ``speech_start``.
+          this.resetVad();
         }
       }, grace);
     } else {
@@ -595,6 +630,11 @@ export class StreamHandler {
       this.firstAudioSentAt = null;
       this.clearPendingBargeIn();
       void this.resetBargeInStrategies();
+      if (this.suppressedSpeechPending) {
+        this.suppressedSpeechPending = false;
+        this.flushInboundAudioRing();
+      }
+      this.resetVad();
     }
   }
 
@@ -602,6 +642,28 @@ export class StreamHandler {
     if (this.bargeInStrategies.length === 0) return;
     const { resetStrategies } = await import('./services/barge-in-strategies.js');
     await resetStrategies(this.bargeInStrategies);
+  }
+
+  /**
+   * Reset the active VAD provider's per-utterance state. No-op when the
+   * provider does not implement the optional ``reset()`` hook. Safe to call
+   * from any context — failures are swallowed and the VAD is disabled for
+   * the rest of the call so a flaky reset can never silently kill barge-in
+   * for every subsequent turn.
+   */
+  private resetVad(): void {
+    const activeVad = this.deps.agent.vad ?? this.autoVad;
+    if (!activeVad || this.vadDisabled) return;
+    try {
+      const ret = activeVad.reset?.();
+      if (ret instanceof Promise) {
+        ret.catch((err) => {
+          getLogger().debug(`VAD reset threw: ${String(err)}`);
+        });
+      }
+    } catch (err) {
+      getLogger().debug(`VAD reset threw: ${String(err)}`);
+    }
   }
 
   /**
@@ -1104,7 +1166,7 @@ export class StreamHandler {
             if (phantomSuppressed) {
               // Within the per-turn warmup gate. With AEC on this is the
               // ~1 s filter convergence window; without AEC it is just a
-              // 250 ms anti-flicker margin. INFO so unexpected
+              // 100 ms anti-flicker margin. INFO so unexpected
               // suppressions are visible without enabling debug logs.
               //
               // CRITICAL: do NOT touch metrics state here. An earlier
@@ -1118,6 +1180,11 @@ export class StreamHandler {
               getLogger().info(
                 `[VAD] speech_start suppressed (agent speaking < gate, aec=${this.aec ? 'on' : 'off'})`,
               );
+              // Mark that real user speech was detected but gated out.
+              // The grace-timer callback will replay the ring buffer to
+              // STT so the speech isn't silently discarded when the
+              // agent finishes naturally without a barge-in.
+              this.suppressedSpeechPending = true;
             } else if (this.isSpeaking) {
               if (this.bargeInStrategies.length > 0) {
                 this.startPendingBargeIn();
@@ -1712,25 +1779,27 @@ export class StreamHandler {
           await this.emitAudioOut();
           firstChunkSent = await this.streamPrewarmBytes(prewarmBytes);
         } else {
+          // Streaming TTS path (no prewarm cache). Uses the same simple
+          // per-chunk send as synthesizeSentence — ElevenLabs HTTP streams
+          // at near-real-time speed so the carrier-side buffer stays bounded
+          // without mark-gated pacing.  Routing streaming chunks through
+          // sendPacedFirstMessageBytes caused crackling: its drain+reset on
+          // every HTTP chunk destroyed mark back-pressure continuity and the
+          // per-sub-chunk sleep slowed delivery below Twilio's playout rate,
+          // producing periodic buffer underruns.  The prewarm path (a single
+          // pre-synthesised buffer) still uses sendPacedFirstMessageBytes
+          // because that buffer can be several seconds long and needs pacing.
           for await (const chunk of this.tts.synthesizeStream(this.deps.agent.firstMessage)) {
-            if (!this.isSpeaking) break; // barge-in or test-hangup
+            if (!this.isSpeaking) break;
             if (!firstChunkSent) {
               firstChunkSent = true;
               this.metricsAcc.recordTtsFirstByte();
               await this.emitAudioOut();
             }
-            // BUG #128: route every TTS chunk through the paced sender so
-            // we never push more than ``FIRST_MESSAGE_MARK_WINDOW`` chunks
-            // of audio ahead of carrier playback. The previous burst-send
-            // (sendAudio in a tight loop with no marks) let Twilio's
-            // outbound buffer reach several seconds — a barge-in's
-            // sendClear race-lost against the queued media frames and the
-            // agent kept talking on the user's earpiece for up to ~2 s
-            // after the user spoke. The paced sender also drives the AEC
-            // far-end tap and ``markFirstAudioSent`` internally so this
-            // path stays parity-clean with ``streamPrewarmBytes``.
-            const sent = await this.sendPacedFirstMessageBytes(chunk);
-            if (!sent) break;
+            if (this.aec) this.aec.pushFarEnd(chunk);
+            const encoded = this.encodePipelineAudio(chunk);
+            this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
+            this.markFirstAudioSent();
           }
         }
       } catch (e) {

@@ -285,6 +285,15 @@ export interface VADEvent {
 export interface VADProvider {
   processFrame(pcmChunk: Buffer, sampleRate: number): Promise<VADEvent | null>;
   close(): Promise<void>;
+  /**
+   * Optional: reset all per-utterance state so the next ``processFrame``
+   * starts from a clean SILENCE state. Useful between agent turns to
+   * prevent a "stuck SPEECH" condition where PSTN echo / loopback kept the
+   * detector's internal probability above the deactivation threshold for
+   * the full agent turn, leaving the VAD unable to emit ``speech_start``
+   * on the next user utterance (one-shot barge-in bug).
+   */
+  reset?(): Promise<void> | void;
 }
 
 /** Pre-STT audio filter — noise cancellation, gain, EQ. */

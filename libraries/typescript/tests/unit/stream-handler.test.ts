@@ -437,24 +437,24 @@ describe('StreamHandler', () => {
     });
 
     // -----------------------------------------------------------------------
-    // AEC OFF (default — PSTN deployments). Gate is 250 ms.
+    // AEC OFF (default — PSTN deployments). Gate is 100 ms.
     // -----------------------------------------------------------------------
     describe('AEC off (PSTN default)', () => {
-      it('canBargeIn() false within 250 ms anti-flicker window', () => {
+      it('canBargeIn() false within 100 ms anti-flicker window', () => {
         const h = new StreamHandler(makeDeps(), makeMockWs(), '+15551111111', '+15552222222');
         const p = priv(h);
         p.aec = null;
-        p.speakingStartedAt = Date.now() - 100;
-        p.firstAudioSentAt = Date.now() - 100;
+        p.speakingStartedAt = Date.now() - 50;
+        p.firstAudioSentAt = Date.now() - 50; // 50 ms — still inside 100 ms gate
         expect(p.canBargeIn()).toBe(false);
       });
 
-      it('canBargeIn() true past 250 ms (well below the 1 s AEC gate)', () => {
+      it('canBargeIn() true past 100 ms (well below the 1 s AEC gate)', () => {
         const h = new StreamHandler(makeDeps(), makeMockWs(), '+15551111111', '+15552222222');
         const p = priv(h);
         p.aec = null;
-        p.speakingStartedAt = Date.now() - 400;
-        p.firstAudioSentAt = Date.now() - 400; // 400 ms — past 250 ms, under 1 s
+        p.speakingStartedAt = Date.now() - 200;
+        p.firstAudioSentAt = Date.now() - 200; // 200 ms — past 100 ms gate, under 1 s
         expect(p.canBargeIn()).toBe(true);
       });
 

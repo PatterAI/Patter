@@ -366,6 +366,29 @@ class SileroVAD(VADProvider):
         self._onnx_session = None  # type: ignore[assignment]
         self._model = None  # type: ignore[assignment]
 
+    def reset(self) -> None:
+        """Reset all per-utterance state so the next ``process_frame`` starts
+        from a clean SILENCE state.
+
+        Called by the stream handler between agent turns to prevent a "stuck
+        SPEECH" condition where PSTN echo / loopback kept the detector's
+        probability above ``deactivation_threshold`` for the entire agent
+        turn. Without this reset the next user utterance would never
+        trigger a SILENCE→SPEECH transition and barge-in would feel
+        "one-shot" (works once, then never again until the call ends).
+
+        Safe to call any time including on a closed instance (no-op).
+        """
+        if self._closed:
+            return
+        self._pending = np.zeros(0, dtype=np.float32)
+        self._pub_speaking = False
+        self._speech_threshold_duration = 0.0
+        self._silence_threshold_duration = 0.0
+        self._exp_filter.reset()
+        if self._model is not None:
+            self._model.reset()
+
 
 def _run_inference(model: OnnxModel, window: np.ndarray) -> float:
     """Blocking inference entrypoint executed in an executor thread."""

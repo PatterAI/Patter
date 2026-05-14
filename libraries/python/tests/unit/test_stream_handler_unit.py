@@ -521,7 +521,7 @@ class TestBargeInCancelsLlmStream:
 
     async def test_barge_in_fires_at_400ms_when_aec_off(self) -> None:
         """The bug fix: on PSTN deployments AEC is OFF and the gate
-        collapses to 0.25 s anti-flicker. A user saying "stop" 400 ms
+        collapses to 0.1 s anti-flicker. A user saying "stop" 400 ms
         into the agent's turn must cancel the agent — pre-fix this was
         silently suppressed by the hardcoded 1.0 s gate.
         """
@@ -546,14 +546,14 @@ class TestBargeInCancelsLlmStream:
         )
 
         assert handler._llm_cancel_event.is_set(), (
-            "barge-in must fire on PSTN at 400 ms — past the 0.25 s anti-flicker gate"
+            "barge-in must fire on PSTN at 400 ms — past the 0.1 s anti-flicker gate"
         )
 
     async def test_barge_in_suppressed_within_anti_flicker_when_aec_off(
         self,
     ) -> None:
-        """Anti-flicker side: even with AEC off, sub-100 ms blips
-        (cough, click, line noise) are still suppressed — the 0.25 s
+        """Anti-flicker side: even with AEC off, sub-50 ms blips
+        (cough, click, line noise) are still suppressed — the 0.1 s
         gate stays in place."""
         from getpatter.stream_handler import PipelineStreamHandler
         from getpatter.providers.base import Transcript
@@ -567,15 +567,15 @@ class TestBargeInCancelsLlmStream:
         handler.audio_sender.send_clear = AsyncMock()
         handler._llm_cancel_event = asyncio.Event()
         handler._aec = None
-        handler._speaking_started_at = time.time() - 0.1
-        handler._first_audio_sent_at = time.time() - 0.1
+        handler._speaking_started_at = time.time() - 0.05
+        handler._first_audio_sent_at = time.time() - 0.05  # 50 ms — inside 0.1 s gate
 
         await handler._handle_barge_in(
             Transcript(text="stop", is_final=True, speech_final=True)
         )
 
         assert not handler._llm_cancel_event.is_set(), (
-            "barge-in must be suppressed within the 0.25 s anti-flicker window"
+            "barge-in must be suppressed within the 0.1 s anti-flicker window"
         )
         assert handler._is_speaking is True
 

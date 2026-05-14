@@ -216,6 +216,36 @@ async def test_process_frame_after_close_raises() -> None:
 
 
 # ---------------------------------------------------------------------------
+# reset() — one-shot barge-in fix
+# ---------------------------------------------------------------------------
+
+
+async def test_reset_returns_vad_to_silence() -> None:
+    """After reset() the VAD must emit a FRESH speech_start for the next
+    utterance — without it, the persisted ``_pub_speaking=True`` state would
+    suppress the transition and barge-in would feel one-shot."""
+    vad, _ = _build_vad(
+        probs=[0.95, 0.95, 0.95, 0.95, 0.95, 0.95, 0.95, 0.95],
+        min_speech_duration=0.032,
+    )
+    first = await vad.process_frame(
+        _sine_pcm(512, sample_rate=16000), sample_rate=16000
+    )
+    assert first is not None and first.type == "speech_start"
+    vad.reset()
+    second = await vad.process_frame(
+        _sine_pcm(512, sample_rate=16000), sample_rate=16000
+    )
+    assert second is not None and second.type == "speech_start"
+
+
+async def test_reset_after_close_is_noop() -> None:
+    vad, _ = _build_vad(probs=[0.0])
+    await vad.close()
+    vad.reset()  # must not raise
+
+
+# ---------------------------------------------------------------------------
 # Integration (skipped by default — requires bundled model and onnxruntime)
 # ---------------------------------------------------------------------------
 

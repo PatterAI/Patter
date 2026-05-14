@@ -148,22 +148,24 @@ describe("resample16kTo8k", () => {
 
     const output = resample16kTo8k(input);
     expect(output.length).toBe(4);
-    // Output[0] at center=0 with edge-clamped s_m1, s_m2 = 100:
-    // (100 + 4*100 + 6*100 + 4*200 + 300 + 8) >> 4 = 2208 >> 4 = 138
-    expect(output.readInt16LE(0)).toBe(138);
-    // Output[1] at center=2 with edge-clamped s_p2 = 400:
+    // Output[0] at center=0 with zero-initialized history (s_m1=s_m2=0):
+    // (0 + 4*0 + 6*100 + 4*200 + 300 + 8) >> 4 = 1708 >> 4 = 106
+    expect(output.readInt16LE(0)).toBe(106);
+    // Output[1] at center=2 with s_m2=100, s_m1=200; s_p2 edge-clamped=400:
     // (100 + 4*200 + 6*300 + 4*400 + 400 + 8) >> 4 = 4708 >> 4 = 294
     expect(output.readInt16LE(2)).toBe(294);
   });
 
-  it("passes DC through unchanged (no aliasing on a constant signal)", () => {
-    // Filter is normalised (coefficients sum to 16, then >> 4) so a constant
-    // input must come out as the same constant.
+  it("passes DC through unchanged after startup transient (FIR unity gain on DC)", () => {
+    // The FIR history is zero-initialized (correct initial condition for no
+    // prior audio). The first output sample blends zero history with the DC
+    // signal — expected startup transient. From sample[1] onward the filter
+    // is in steady state and unity gain at DC gives exactly 5000 (±1 LSB).
     const input = Buffer.alloc(20);
     for (let i = 0; i < 10; i++) input.writeInt16LE(5000, i * 2);
     const output = resample16kTo8k(input);
     expect(output.length).toBe(10);
-    for (let i = 0; i < 5; i++) {
+    for (let i = 1; i < 5; i++) {
       // Allow +/- 1 LSB for rounding with (sum + 8) >> 4.
       const v = output.readInt16LE(i * 2);
       expect(Math.abs(v - 5000)).toBeLessThanOrEqual(1);

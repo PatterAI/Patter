@@ -157,3 +157,8 @@ class OnnxModel:
         out, self._rnn_state = self._sess.run(None, ort_inputs)
         self._context = self._input_buffer[:, -self._context_size :]  # type: ignore
         return out.item()  # type: ignore
+
+    def reset(self) -> None:
+        """Reset the RNN hidden state + rolling context to a fresh inference."""
+        self._context = np.zeros((1, self._context_size), dtype=np.float32)
+        self._rnn_state = np.zeros((2, 1, 128), dtype=np.float32)
