@@ -508,7 +508,7 @@ export class OpenAIRealtimeAdapter {
     this.eventCallbacks.delete(callback);
   }
 
-  private ensureMessageListener(): void {
+  protected ensureMessageListener(): void {
     if (this.messageListenerAttached || !this.ws) return;
     this.messageListenerAttached = true;
     const ws = this.ws;

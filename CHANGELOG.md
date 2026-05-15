@@ -1,5 +1,77 @@
 ## Unreleased
 
+### Fixed — `OpenAIRealtime2`: audio transcoding for Twilio + outbound chunking + VAD tuning (TypeScript only)
+
+End-to-end audio support for `gpt-realtime-2` over Twilio. The GA endpoint
+nominally accepts `audio/pcmu` (mulaw 8 kHz) in `session.update` but its
+audio engine silently drops mulaw frames — `input_audio_buffer.commit`
+reports *"buffer only has 0.00ms of audio"* even after several seconds
+of valid mulaw appended, so the user's voice never reaches the model and
+the model's response is generated as PCM-24 (regardless of the declared
+output format) — Twilio plays raw PCM bytes interpreted as mulaw and the
+caller hears nothing. Until OpenAI ships native g711 support on the GA
+endpoint (community thread #1380750), we transcode on both directions
+inside `OpenAIRealtime2Adapter`.
+
+**Inbound (Twilio → model).** Override `sendAudio`:
+- Decode mulaw → PCM-16 8 kHz (`mulawToPcm16`).
+- Apply 2× gain to compensate for the reduced dynamic range of the
+  decoded mulaw signal — telephony peaks land around ±8000 in PCM-16,
+  the GA VAD is calibrated against studio audio peaking around ±16-24k.
+- Direct 3× linear-interpolation upsample to 24 kHz with a one-sample
+  carry across chunk boundaries (eliminates the DC step at every 20 ms
+  Twilio frame boundary that previously kept the VAD pinned below
+  threshold).
+- Send `input_audio_buffer.append` with PCM-24 base64.
+- `session.audio.input.format` is set to `{ type: "audio/pcm",
+  rate: 24000 }` to match.
+
+**Outbound (model → Twilio).** Wrap the audio-delta translation:
+- Decode PCM-24 from `response.output_audio.delta`.
+- Resample 24 k → 16 k → 8 k using two chained `StatefulResampler`
+  instances. Direct 24 k → 8 k (one step) is available in
+  `transcoding.ts` but uses only linear interpolation with no
+  anti-alias filter; the two-step chain routes the signal through the
+  16 k → 8 k path which carries a 5-tap FIR anti-alias filter,
+  empirically the only configuration that produced audibly clean
+  speech on the carrier leg.
+- Encode PCM-8 → mulaw 8 kHz.
+- Split the resulting mulaw into 20 ms (160-byte) slices and emit one
+  synthetic `response.audio.delta` event per slice. Twilio's media
+  pipeline expects ~20 ms frames; shipping one ~200-400 ms delta as a
+  single frame stalls the playout scheduler and the caller hears
+  either a silent gap then a burst, or nothing at all if Twilio drops
+  the over-large frame.
+
+**VAD tuning.** GA `server_vad` is too strict by default for
+3×-upsampled telephony-band audio. We lower `threshold: 0.1` (from the
+0.5 default) and raise `silence_duration_ms: 500` so phone-band speech
+reliably triggers `speech_started` / `speech_stopped`.
+
+**Engine wrapper:** `sendFirstMessage` continues to inject explicit
+`output_modalities`, `audio.output.voice` and `reasoning.effort:"minimal"`
+(see prior commit). The first-message audio path now also benefits from
+the outbound transcoding + chunk-splitting changes — `firstMessage`
+plays in the configured voice (`alloy`) at native cadence.
+
+**Visibility bumps.** `OpenAIRealtimeAdapter` had a few more `private`
+fields promoted to `protected` (`ws`, `armHeartbeatAndListener`,
+`options`) so the subclass can install the wire-level shim and reuse
+the parent's message dispatch unchanged.
+
+**Known limitation.** The Twilio user's voice now reaches the GA model
+audibly but the GA `server_vad` is still tuned for studio audio and the
+caller side of the conversation requires a more aggressive workaround
+(custom semantic VAD or carrier-side audio enhancement). Pipeline-mode
+(STT + LLM + TTS) is the recommended production path for Twilio +
+telephony in 0.6.1 until OpenAI ships native g711_ulaw on the GA
+endpoint.
+
+Files: `libraries/typescript/src/providers/openai-realtime-2.ts`,
+`libraries/typescript/src/providers/openai-realtime.ts` (visibility
+bumps only). Python parity remains a follow-up — `OpenAIRealtime2`
+is still TS-only.
+
 ### Added — `OpenAIRealtime2` engine for `gpt-realtime-2` on the GA Realtime API (TypeScript only)
 
 The 0.6.1 enum entry for `gpt-realtime-2` advertised parity with the existing
