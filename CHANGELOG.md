@@ -1,5 +1,7 @@
 ## Unreleased
 
+## 0.6.1 (2026-05-15)
+
 ### Fixed — `OpenAIRealtime2`: audio transcoding for Twilio + outbound chunking + VAD tuning (TypeScript only)
 
 End-to-end audio support for `gpt-realtime-2` over Twilio. The GA endpoint
@@ -312,8 +314,6 @@ turns. The prewarm path (pre-synthesised buffer) is unchanged and still uses
 buffer can be several seconds long and needs mark-gated pacing. Files:
 `libraries/typescript/src/stream-handler.ts`,
 `libraries/python/getpatter/stream_handler.py`.
-
-## 0.6.1 (2026-05-12)
 
 ### Changed — Cerebras usage-chunk fallback: INFO-once + DEBUG per iteration (Python + TypeScript parity)
 
