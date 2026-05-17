@@ -87,6 +87,13 @@ jobs:
   bandit:
     name: Python static analysis (bandit)
     runs-on: ubuntu-latest
+    # `security-events: write` is required by `codeql-action/upload-sarif`
+    # to push findings into the GitHub Security tab. Without it the upload
+    # step fails with "Resource not accessible by integration". `contents:
+    # read` is the minimum the checkout step needs.
+    permissions:
+      contents: read
+      security-events: write
     steps:
       - uses: actions/checkout@v6
       - name: Set up Python 3.12
@@ -112,7 +119,7 @@ jobs:
           bandit -r libraries/python/getpatter -ll -iii \
             --exclude libraries/python/getpatter/dashboard/ui.py \
             -f sarif -o bandit.sarif || true
-      - uses: github/codeql-action/upload-sarif@v3
+      - uses: github/codeql-action/upload-sarif@v4
         # Only upload when the SARIF file was actually produced — if the
         # formatter install fails on a future bandit version the step
         # shouldn't fail the job, it just skips the Security-tab upload.

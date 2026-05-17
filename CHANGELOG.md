@@ -1,5 +1,17 @@
 ## Unreleased
 
+### Fixed
+
+- **CI: Security Audit workflow could not upload Bandit SARIF to the GitHub
+  Security tab.** The `bandit` job in `.github/workflows/audit.yml` was
+  failing on `github/codeql-action/upload-sarif` with `Resource not
+  accessible by integration` because the job inherited the repo-default
+  read-only `GITHUB_TOKEN` permissions. Added an explicit
+  `permissions: { contents: read, security-events: write }` block on the
+  job so SARIF findings reach the Security tab as intended. Bumped the
+  action from `@v3` to `@v4` to drop the deprecation warning ahead of the
+  December 2026 sunset.
+
 ## 0.6.1 (2026-05-15)
 
 ### Fixed — `OpenAIRealtime2`: audio transcoding for Twilio + outbound chunking + VAD tuning (TypeScript only)
