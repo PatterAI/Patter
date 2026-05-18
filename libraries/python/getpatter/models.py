@@ -214,23 +214,29 @@ class Agent:
     # call. See ``docs/python-sdk/latency.mdx`` for the cold-start latency
     # rationale.
     prewarm: bool = True
-    # When ``True`` (default since 0.6.2), ``Patter.call`` pre-renders
-    # ``first_message`` to TTS audio bytes during the ringing window and
-    # streams the cached buffer immediately when the carrier emits ``start``.
-    # Eliminates the 200-700 ms TTS first-byte latency on the greeting that
-    # dominated the first-turn ``p95`` on every pipeline acceptance run.
-    # The trade-off is paying the TTS bill even if the call is never
-    # answered (silently logged at WARN level when the call fails) —
-    # typically $0.001-$0.005 per ringing call depending on TTS provider.
-    # Opt out by passing ``prewarm_first_message=False`` (e.g. for very
-    # high-volume outbound where un-answered TTS spend matters).
+    # When ``True``, ``Patter.call`` pre-renders ``first_message`` to TTS
+    # audio bytes during the ringing window and streams the cached buffer
+    # immediately when the carrier emits ``start``. Eliminates the
+    # 200-700 ms TTS first-byte latency on the greeting that dominates
+    # the first-turn ``p95`` on pipeline calls.
+    #
+    # Dataclass default stays ``False`` to preserve backwards-compatible
+    # behaviour for callers who construct ``Agent(...)`` directly without
+    # going through :meth:`Patter.agent`. The recommended factory
+    # :meth:`Patter.agent` flips the default to ``True`` automatically
+    # when ``provider == "pipeline"`` (since 0.6.2) — parity with the
+    # TypeScript ``phone.agent({...})`` factory. Opt out from the factory
+    # by passing ``prewarm_first_message=False`` (e.g. for very
+    # high-volume outbound where un-answered TTS spend matters); cost
+    # trade-off is typically $0.001-$0.005 per ringing call depending on
+    # TTS provider.
     #
     # **Pipeline mode only.** Realtime / ConvAI provider modes never
     # consume the prewarm cache (the StreamHandler for those modes runs
     # its first-message emit through the provider's own audio path), so
     # ``Patter.call`` refuses to spawn the prewarm task and emits a WARN
     # when ``provider != "pipeline"``.
-    prewarm_first_message: bool = True
+    prewarm_first_message: bool = False
 
 
 @dataclass(frozen=True)

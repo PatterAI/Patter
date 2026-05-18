@@ -609,14 +609,30 @@ export class CallMetricsAccumulator {
     };
     this._turns.push(turn);
     this._resetTurnState();
+    // Bidirectional guard: mark the turn as closed so a late
+    // recordTurnInterrupted (e.g. from a future refactor that reorders
+    // the bargein + LLM-unwind paths) becomes a no-op instead of
+    // overwriting the just-emitted turn record. Mirrors the inverse
+    // guard in recordTurnInterrupted and keeps the two close paths
+    // symmetric.
+    this._turnAlreadyClosed = true;
     this._eventBus?.emit('turn_ended', { callId: this.callId, turn });
     this._eventBus?.emit('metrics_collected', { callId: this.callId, turn });
     return turn;
   }
 
-  /** Close the current turn as interrupted (barge-in) and return the recorded metrics. */
+  /**
+   * Close the current turn as interrupted (barge-in) and return the
+   * recorded metrics. Returns ``null`` when no turn is open, OR when
+   * ``recordTurnComplete`` has already finalised the current turn —
+   * bidirectional parity with the guard at the top of
+   * ``recordTurnComplete``. Prevents an out-of-order interruption (e.g.
+   * a future refactor that reorders the bargein + LLM-unwind paths)
+   * from overwriting a turn that the complete path already emitted.
+   */
   recordTurnInterrupted(): TurnMetrics | null {
     if (this._turnStart === null) return null;
+    if (this._turnAlreadyClosed) return null;
     const latency = this._computeTurnLatency();
     const turn: TurnMetrics = {
       turn_index: this._turns.length,

@@ -1122,6 +1122,7 @@ class Patter:
         engine: Any = None,
         llm: LLMProvider | None = None,
         mcp_servers: list | None = None,
+        prewarm_first_message: bool | None = None,
     ) -> Agent:
         """Create an ``Agent`` configuration.
 
@@ -1262,6 +1263,17 @@ class Patter:
                 self._guardrail_to_dict(g, index=i) for i, g in enumerate(guardrails)
             ]
 
+        # Default ``prewarm_first_message`` to True in pipeline mode (since
+        # 0.6.2). Greeting TTS pre-rendering during the ringing window
+        # collapses the 200-700 ms first-byte latency that dominated the
+        # first-turn p95 on every pipeline call. Realtime / ConvAI modes
+        # never consume the prewarm cache (the engine drives the first-
+        # message audio path itself), so the default stays False there to
+        # avoid silent TTS spend on un-answered rings. Parity with TS
+        # ``Patter.agent()`` factory (see ``client.ts``).
+        if prewarm_first_message is None:
+            prewarm_first_message = provider == "pipeline"
+
         return Agent(
             system_prompt=system_prompt,
             voice=voice,
@@ -1285,6 +1297,7 @@ class Patter:
             echo_cancellation=echo_cancellation,
             llm=llm,
             mcp_servers=mcp_servers,
+            prewarm_first_message=prewarm_first_message,
             openai_realtime_reasoning_effort=openai_realtime_reasoning_effort,
             openai_realtime_input_audio_transcription_model=openai_realtime_input_audio_transcription_model,
         )

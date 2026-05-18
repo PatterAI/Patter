@@ -443,15 +443,29 @@ class CallMetricsAccumulator:
                 {"call_id": self.call_id, "turn": turn},
             )
         self._reset_turn_state()
+        # Bidirectional guard: mark the turn as closed so a late
+        # record_turn_interrupted (e.g. from a future refactor that
+        # reorders the bargein + LLM-unwind paths) becomes a no-op
+        # instead of overwriting the just-emitted turn record. Mirrors
+        # the inverse guard in ``record_turn_interrupted`` and keeps
+        # the two close paths symmetric.
+        self._turn_already_closed = True
         return turn
 
     def record_turn_interrupted(self) -> TurnMetrics | None:
         """Handle a barge-in / interrupted turn.
 
         Returns partial ``TurnMetrics`` if a turn was in progress, else
-        ``None``.
+        ``None``. Also returns ``None`` when ``record_turn_complete`` has
+        already finalised the current turn — bidirectional parity with
+        the guard in :meth:`record_turn_complete`. Prevents an out-of-
+        order interruption (e.g. a future refactor that reorders the
+        bargein + LLM-unwind paths) from overwriting a turn that the
+        complete path already emitted.
         """
         if self._turn_start is None:
+            return None
+        if self._turn_already_closed:
             return None
 
         latency = self._compute_turn_latency()

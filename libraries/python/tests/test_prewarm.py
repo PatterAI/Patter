@@ -122,13 +122,16 @@ async def _wait_for_tasks(phone: Patter, timeout: float = 1.0) -> None:
 
 
 async def test_default_prewarm_flag_is_true() -> None:
-    """``Agent.prewarm`` and ``Agent.prewarm_first_message`` both default to
-    True since 0.6.2 — first-turn p95 on pipeline mode was dominated by
-    the 200-700 ms TTS first-byte latency on the greeting, eliminated by
-    pre-rendering during the ringing window."""
+    """``Agent.prewarm`` defaults to True; ``prewarm_first_message``
+    defaults to False at the dataclass level to preserve backwards-
+    compatible behaviour for direct ``Agent(...)`` construction. The
+    recommended :meth:`Patter.agent` factory flips it to True for
+    pipeline mode — see ``test_factory_defaults_prewarm_first_message_*``
+    below.
+    """
     agent = Agent(system_prompt="hi", first_message="hello")
     assert agent.prewarm is True
-    assert agent.prewarm_first_message is True
+    assert agent.prewarm_first_message is False
 
 
 async def test_prewarm_first_message_opt_out() -> None:
@@ -141,6 +144,62 @@ async def test_prewarm_first_message_opt_out() -> None:
         prewarm_first_message=False,
     )
     assert agent.prewarm_first_message is False
+
+
+async def test_factory_defaults_prewarm_first_message_true_in_pipeline_mode() -> None:
+    """``Patter.agent(...)`` factory auto-enables prewarm in pipeline
+    mode (since 0.6.2). Parity with the TypeScript factory in
+    ``client.ts``."""
+    phone = _make_patter()
+    stt = StubSTT()
+    tts = StubTTS()
+    llm = StubLLM()
+    agent = phone.agent(system_prompt="hi", stt=stt, tts=tts, llm=llm)
+    assert agent.provider == "pipeline"
+    assert agent.prewarm_first_message is True
+
+
+async def test_factory_does_not_default_prewarm_in_realtime_mode() -> None:
+    """``Patter.agent(...)`` factory leaves prewarm OFF on realtime /
+    ConvAI provider modes — those handlers never consume the cache, so
+    enabling it would only burn TTS spend on un-answered rings."""
+    from getpatter.engines.openai import Realtime as OpenAIRealtime
+
+    phone = _make_patter()
+    agent = phone.agent(
+        system_prompt="hi",
+        engine=OpenAIRealtime(api_key="sk-test"),
+    )
+    assert agent.provider == "openai_realtime"
+    assert agent.prewarm_first_message is False
+
+
+async def test_factory_respects_explicit_prewarm_first_message_value() -> None:
+    """Explicit kwarg always wins over the factory's mode-derived default."""
+    from getpatter.engines.openai import Realtime as OpenAIRealtime
+
+    phone = _make_patter()
+    stt = StubSTT()
+    tts = StubTTS()
+    llm = StubLLM()
+    # Pipeline mode, but caller explicitly opts out.
+    pipeline_opted_out = phone.agent(
+        system_prompt="hi",
+        stt=stt,
+        tts=tts,
+        llm=llm,
+        prewarm_first_message=False,
+    )
+    assert pipeline_opted_out.prewarm_first_message is False
+    # Realtime mode, but caller explicitly opts in (the WARN guard in
+    # ``_spawn_prewarm_first_message`` will still suppress the synth,
+    # but the flag stays at the user's chosen value).
+    realtime_opted_in = phone.agent(
+        system_prompt="hi",
+        engine=OpenAIRealtime(api_key="sk-test"),
+        prewarm_first_message=True,
+    )
+    assert realtime_opted_in.prewarm_first_message is True
 
 
 async def test_provider_warmup_default_is_noop() -> None:
