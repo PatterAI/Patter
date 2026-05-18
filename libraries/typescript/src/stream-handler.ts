@@ -565,13 +565,6 @@ export class StreamHandler {
     }
   }
 
-  /**
-   * Bytes-per-millisecond for a 16 kHz PCM16 mono stream. Used by the
-   * non-Twilio firstMessage pacing path to translate chunk size into a
-   * playout-duration sleep. 16000 samples/sec × 2 bytes = 32 bytes/ms.
-   */
-  private static readonly PCM16_16K_BYTES_PER_MS = 32;
-
   /** Cancel and clear the pending grace timer, if any. */
   private clearGraceTimer(): void {
     if (this.graceTimer !== null) {
@@ -1527,14 +1520,22 @@ export class StreamHandler {
     if (this.pendingMarks.length > 0) this.drainPendingMarks();
     this.firstMessageMarkCounter = 0;
     let firstChunkSent = false;
-    // Once the mark window is first filled we switch to playout-time pacing
-    // to prevent batch-ACK bursts. Before that we send in burst so the first
-    // FIRST_MESSAGE_MARK_WINDOW chunks pre-fill the PSTN jitter buffer.
-    let initialFillComplete = false;
+    // Burst delivery: send all chunks back-to-back, exactly like the live
+    // TTS path (synthesizeSentence / firstMessage live fallback). Twilio
+    // explicitly accepts "media messages of any size" — frames are
+    // "buffered and played in the order received" by the carrier-side
+    // media server, which is the source of truth for the 8 kHz playout
+    // clock. Earlier revisions paced each chunk by ``playoutMs`` via
+    // setTimeout to "throttle to the playout rate", but JavaScript
+    // setTimeout drift + the cumulative ``waitForMarkWindow`` wait
+    // pushed effective delivery BELOW Twilio's playout rate on long
+    // intros (the prewarm cache is typically 2-4 s of audio), producing
+    // periodic carrier-side buffer underruns audible to the caller as
+    // slow, gravelly, intermittent playback. Marks are still emitted
+    // per chunk so a barge-in's ``sendClear`` still has fine-grained
+    // granularity to cut.
     for (let i = 0; i < bytes.length; i += StreamHandler.PREWARM_CHUNK_BYTES) {
       if (!this.isSpeaking) break; // barge-in mid-buffer — stop now
-      // Back-pressure: if too many marks are unconfirmed, wait. Drains
-      // immediately on cancelSpeaking.
       await this.waitForMarkWindow();
       if (!this.isSpeaking) break;
       const chunk = bytes.subarray(i, i + StreamHandler.PREWARM_CHUNK_BYTES);
@@ -1543,22 +1544,7 @@ export class StreamHandler {
       const encoded = this.encodePipelineAudio(chunk);
       this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
       this.markFirstAudioSent();
-      const markPromise = this.sendMarkAwaitable();
-      if (!initialFillComplete && this.pendingMarks.length >= StreamHandler.FIRST_MESSAGE_MARK_WINDOW) {
-        initialFillComplete = true;
-      }
-      // Telnyx has no mark concept — always pace by playout time.
-      // Twilio: the first FIRST_MESSAGE_MARK_WINDOW chunks go out in burst
-      // to pre-fill the PSTN jitter buffer (250–1500 ms), then playout-time
-      // pacing kicks in (via the sticky initialFillComplete flag) to prevent
-      // batch-ACK bursts from draining the buffer → crackling.
-      if (markPromise === null || initialFillComplete) {
-        const playoutMs = Math.max(
-          1,
-          Math.floor(chunk.length / StreamHandler.PCM16_16K_BYTES_PER_MS),
-        );
-        await new Promise<void>((resolve) => setTimeout(resolve, playoutMs));
-      }
+      this.sendMarkAwaitable();
     }
     return firstChunkSent;
   }

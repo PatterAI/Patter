@@ -1,5 +1,32 @@
 ## Unreleased
 
+### Fixed
+
+- **First-message prewarm playback was slow + gravelly + intermittent on
+  Twilio.** `sendPacedFirstMessageBytes` (TS) /
+  `_send_paced_first_message_bytes` (Py) paced each prewarm chunk with a
+  `setTimeout` / `asyncio.sleep` of one chunk-equivalent of playout time
+  (~40 ms for the 1280-byte default chunk). Combined with the
+  `waitForMarkWindow` back-pressure await and JavaScript/asyncio timer
+  jitter, effective delivery dropped BELOW Twilio's 8 kHz playout clock
+  on the 2-4 s prewarmed greeting buffer, producing repeated carrier-
+  side underruns. Caller heard the message "slow, gravelly, and
+  arriving more slowly than the rest". Twilio's docs (Media Streams →
+  WebSocket Messages) explicitly state "media messages of any size" are
+  "buffered and played in the order received" by the carrier-side media
+  server — the carrier is the source of truth for the playout clock,
+  not our send loop. Removed the per-chunk sleep + the burst-vs-paced
+  switch (`initialFillComplete`) so the prewarm path now bursts all
+  chunks back-to-back, matching the live-TTS streaming path that has
+  always worked. Per-chunk marks are still emitted, so a barge-in's
+  `sendClear` keeps fine-grained granularity to cut.
+
+  Verified against `outbound-openai-transcribe-openai-openai`:
+  pre-fix the same acceptance scenario produced slow/gravelly first-
+  message playback with `p95 wait=0 ms` (prewarm cache hit was correct,
+  but downstream pacing was broken). Files: `libraries/typescript/src/
+  stream-handler.ts`, `libraries/python/getpatter/stream_handler.py`.
+
 ### Changed
 
 - **Pipeline `prewarmFirstMessage` / `prewarm_first_message` now defaults

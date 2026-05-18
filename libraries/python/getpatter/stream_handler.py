@@ -3455,10 +3455,6 @@ class PipelineStreamHandler(StreamHandler):
     # deadlock window when a carrier (or a test double) never echoes —
     # playout may glitch by one chunk on timeout but the call stays alive.
     _MARK_AWAIT_TIMEOUT_S: float = 0.5
-    # Bytes-per-millisecond for a 16 kHz PCM16 mono stream — used by the
-    # non-Twilio firstMessage pacing path to translate chunk size into a
-    # playout-duration sleep. 16000 samples/sec × 2 bytes = 32 bytes/ms.
-    _PCM16_16K_BYTES_PER_MS: int = 32
 
     def _drain_pending_marks(self) -> None:
         """Resolve every entry in ``_pending_marks`` and empty the FIFO.
@@ -3588,15 +3584,23 @@ class PipelineStreamHandler(StreamHandler):
             self._drain_pending_marks()
         self._first_message_mark_counter = 0
         first_chunk_sent = False
-        # Once the mark window is first filled we switch to playout-time pacing
-        # to prevent batch-ACK bursts. Before that we send in burst so the first
-        # _FIRST_MESSAGE_MARK_WINDOW chunks pre-fill the PSTN jitter buffer.
-        initial_fill_complete = False
+        # Burst delivery: send all chunks back-to-back, exactly like the live
+        # TTS path (synthesize_sentence / first_message live fallback).
+        # Twilio explicitly accepts "media messages of any size" — frames
+        # are "buffered and played in the order received" by the carrier-
+        # side media server, which is the source of truth for the 8 kHz
+        # playout clock. Earlier revisions paced each chunk by
+        # ``playout_ms`` via ``asyncio.sleep`` to "throttle to the playout
+        # rate", but the cumulative ``_wait_for_mark_window`` wait pushed
+        # effective delivery BELOW Twilio's playout rate on long intros
+        # (the prewarm cache is typically 2-4 s of audio), producing
+        # periodic carrier-side buffer underruns audible to the caller as
+        # slow, gravelly, intermittent playback. Marks are still emitted
+        # per chunk so a barge-in's ``send_clear`` still has fine-grained
+        # granularity to cut.
         for i in range(0, len(bytes_), self._PREWARM_CHUNK_BYTES):
             if not self._is_speaking:
                 break  # barge-in mid-buffer — stop now
-            # Back-pressure: if too many marks are unconfirmed, wait.
-            # Drains immediately on cancel.
             await self._wait_for_mark_window()
             if not self._is_speaking:
                 break
@@ -3607,20 +3611,7 @@ class PipelineStreamHandler(StreamHandler):
                 self._aec.push_far_end(chunk)
             await self.audio_sender.send_audio(chunk)
             self._mark_first_audio_sent()
-            mark_future = await self._send_mark_awaitable()
-            if (
-                not initial_fill_complete
-                and len(self._pending_marks) >= self._FIRST_MESSAGE_MARK_WINDOW
-            ):
-                initial_fill_complete = True
-            # Telnyx has no mark concept — always pace by playout time.
-            # Twilio: the first _FIRST_MESSAGE_MARK_WINDOW chunks go out in burst
-            # to pre-fill the PSTN jitter buffer (250–1500 ms), then playout-time
-            # pacing kicks in (via the sticky initial_fill_complete flag) to prevent
-            # batch-ACK bursts from draining the buffer → crackling.
-            if mark_future is None or initial_fill_complete:
-                playout_ms = max(1, len(chunk) // self._PCM16_16K_BYTES_PER_MS)
-                await asyncio.sleep(playout_ms / 1000.0)
+            await self._send_mark_awaitable()
         return first_chunk_sent
 
     async def cleanup(self) -> None:
