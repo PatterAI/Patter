@@ -750,6 +750,13 @@ class CallMetricsAccumulator:
         self._tts_first_byte = None
         self._tts_last_byte = None
         self._endpoint_signal_at = None
+        # Parity with TS ``metrics.ts:_resetTurnState`` — without clearing
+        # ``_turn_committed_mono`` here, the ``anchor_user_speech_start``
+        # guard (``if self._turn_committed_mono is not None: return``)
+        # falsely no-ops on a VAD ``speech_start`` arriving between
+        # ``record_turn_complete`` and the next ``start_turn`` on
+        # back-to-back turns.
+        self._turn_committed_mono = None
         self._bargein_detected_at = None
         self._bargein_stopped_at = None
         self._turn_user_text = ""
