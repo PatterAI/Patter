@@ -2,6 +2,25 @@
 
 ### Fixed
 
+- **Pipeline metrics: `transcript.jsonl` rows after a barge-in carried an
+  empty `user_text` even when the user had clearly spoken.** Root cause
+  was a race between the two turn-close paths: a VAD-driven barge-in
+  fired `record_turn_interrupted` / `recordTurnInterrupted` synchronously
+  inside the audio handler and `_reset_turn_state` cleared
+  `_turn_user_text`, while the in-flight pipeline LLM stream kept
+  unwinding on its own task and eventually reached
+  `record_turn_complete` / `recordTurnComplete` — which then pushed a
+  second turn for the same logical exchange carrying `user_text=""`.
+  Both SDKs now flip a `_turn_already_closed` / `_turnAlreadyClosed`
+  guard on `record_turn_interrupted` and have `record_turn_complete`
+  return `None` / `null` until the next `start_turn` re-arms the
+  accumulator. `_emit_turn_metrics` / `emitTurnMetrics` were already
+  null-safe, so the late call becomes a silent no-op end-to-end.
+  Regression tests pinning the bargein → llmAbort → late-complete
+  ordering live in `libraries/python/tests/test_metrics.py` and
+  `libraries/typescript/tests/metrics.test.ts`. See
+  `patter-sdk-acceptance/BUGS.md` (2026-05-05 entry).
+
 - **CI: Security Audit workflow could not upload Bandit SARIF to the GitHub
   Security tab.** The `bandit` job in `.github/workflows/audit.yml` was
   failing on `github/codeql-action/upload-sarif` with `Resource not

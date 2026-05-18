@@ -1,6 +1,5 @@
 """Tests for the CallMetricsAccumulator."""
 
-
 import pytest
 
 from getpatter.models import CallMetrics, CostBreakdown, LatencyBreakdown, TurnMetrics
@@ -88,6 +87,56 @@ class TestCallMetricsAccumulatorPipeline:
         acc = self._make_accumulator()
         turn = acc.record_turn_interrupted()
         assert turn is None
+
+    def test_record_turn_complete_is_noop_after_interrupted(self):
+        """Late ``record_turn_complete`` after ``record_turn_interrupted`` on
+        the same turn must be a no-op.
+
+        Repro of the VAD-barge-in / pipeline-LLM race documented in
+        ``BUGS.md`` (2026-05-05). The barge-in path closes the turn with
+        ``record_turn_interrupted`` while the in-flight pipeline LLM
+        stream eventually unwinds and reaches ``record_turn_complete``.
+        Without the guard, the late call would push a phantom turn with
+        ``user_text=''`` (since ``_reset_turn_state`` cleared the field)
+        and ``agent_text`` from the cancelled LLM stream.
+        """
+        acc = self._make_accumulator()
+
+        acc.start_turn()
+        acc.record_stt_complete("Hello", audio_seconds=1.0)
+        interrupted = acc.record_turn_interrupted()
+        assert interrupted is not None
+        assert interrupted.user_text == "Hello"
+        assert interrupted.agent_text == "[interrupted]"
+
+        # Late pipeline-LLM unwind reaches record_turn_complete with the
+        # cancelled responseText — must be silently dropped.
+        late = acc.record_turn_complete("partial LLM output")
+        assert late is None
+
+        # Only the interrupted turn is recorded.
+        result = acc.end_call()
+        assert len(result.turns) == 1
+        assert result.turns[0].agent_text == "[interrupted]"
+        assert result.turns[0].user_text == "Hello"
+
+    def test_record_turn_complete_rearms_after_start_turn(self):
+        """A fresh ``start_turn`` must re-arm the accumulator so the next
+        ``record_turn_complete`` is allowed again."""
+        acc = self._make_accumulator()
+
+        acc.start_turn()
+        acc.record_stt_complete("Hello")
+        acc.record_turn_interrupted()
+        assert acc.record_turn_complete("dropped") is None
+
+        # New turn begins.
+        acc.start_turn()
+        acc.record_stt_complete("Second turn")
+        completed = acc.record_turn_complete("Reply")
+        assert completed is not None
+        assert completed.user_text == "Second turn"
+        assert completed.agent_text == "Reply"
 
     def test_stt_audio_bytes_tracking(self):
         acc = self._make_accumulator()

@@ -245,6 +245,21 @@ export class CallMetricsAccumulator {
   private _bargeinStoppedAt: number | null = null;
   private _turnUserText = '';
   private _turnSttAudioSeconds = 0;
+  /**
+   * Guard against the recordTurnInterrupted / recordTurnComplete race.
+   *
+   * A VAD-path barge-in fires ``recordTurnInterrupted`` synchronously
+   * inside ``handleAudioAsync`` while the in-flight pipeline LLM stream
+   * keeps unwinding on its own task. When the LLM stream eventually
+   * exits, the existing pipeline path falls through to
+   * ``recordTurnComplete``, which would push a second turn for the same
+   * logical exchange (this time carrying ``user_text=''`` because the
+   * field was already reset). ``_turnAlreadyClosed`` is flipped by
+   * ``recordTurnInterrupted`` and read by ``recordTurnComplete`` so the
+   * late ``recordTurnComplete`` becomes a no-op until the next
+   * ``startTurn`` re-arms the accumulator.
+   */
+  private _turnAlreadyClosed = false;
 
   // Cumulative usage counters
   private _totalSttAudioSeconds = 0;
@@ -371,6 +386,7 @@ export class CallMetricsAccumulator {
     this._bargeinStoppedAt = null;
     this._turnUserText = '';
     this._turnSttAudioSeconds = 0;
+    this._turnAlreadyClosed = false;
     // Reset EOU state for this turn
     this._vadStoppedAt = null;
     this._sttFinalAt = null;
@@ -569,8 +585,18 @@ export class CallMetricsAccumulator {
     this._bargeinStoppedAt = ts ?? hrTimeMs();
   }
 
-  /** Close the current turn cleanly and append a `TurnMetrics` record. */
-  recordTurnComplete(agentText: string): TurnMetrics {
+  /**
+   * Close the current turn cleanly and append a `TurnMetrics` record.
+   *
+   * Returns ``null`` when ``recordTurnInterrupted`` has already closed
+   * the current turn — this protects against the VAD-barge-in /
+   * pipeline-LLM race where both paths try to finalise the same logical
+   * turn and the second would otherwise push a phantom entry with
+   * ``user_text=''``. The caller treats ``null`` as "nothing to emit";
+   * ``emitTurnMetrics`` is already null-safe.
+   */
+  recordTurnComplete(agentText: string): TurnMetrics | null {
+    if (this._turnAlreadyClosed) return null;
     const latency = this._computeTurnLatency();
     const turn: TurnMetrics = {
       turn_index: this._turns.length,
@@ -607,6 +633,9 @@ export class CallMetricsAccumulator {
     this._eventBus?.emit('turn_ended', { callId: this.callId, turn });
     this._eventBus?.emit('metrics_collected', { callId: this.callId, turn });
     this._resetTurnState();
+    // Mark the turn as closed so a late recordTurnComplete from the
+    // pipeline-LLM unwind path becomes a no-op (see _turnAlreadyClosed).
+    this._turnAlreadyClosed = true;
     // Extra paranoia: explicitly null out anchors that have caused leaks
     // into subsequent turns when a barge-in is in flight. _resetTurnState
     // already clears them, but keep this belt-and-braces line so future
