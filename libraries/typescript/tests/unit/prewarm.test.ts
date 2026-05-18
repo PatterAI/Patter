@@ -96,7 +96,40 @@ describe('[unit] prewarm — Agent flag defaults', () => {
     expect(agent.prewarmFirstMessage).toBeUndefined();
     // Default behaviour: prewarm is on unless user explicitly set false.
     expect(agent.prewarm !== false).toBe(true);
-    expect(Boolean(agent.prewarmFirstMessage)).toBe(false);
+  });
+
+  it('phone.agent() defaults prewarmFirstMessage to true in pipeline mode', () => {
+    const phone = makePatter();
+    const stt = new StubSTT();
+    const tts = new StubTTS();
+    const llm = new StubLLM();
+    const agent = phone.agent({ systemPrompt: 'hi', stt, tts, llm });
+    expect(agent.provider).toBe('pipeline');
+    expect(agent.prewarmFirstMessage).toBe(true);
+  });
+
+  it('phone.agent() does NOT default prewarmFirstMessage in realtime mode', () => {
+    // Realtime / ConvAI handlers never consume the prewarm cache; setting
+    // the flag would only waste TTS spend, so the default stays off when
+    // the caller didn't explicitly pick pipeline.
+    const phone = makePatter();
+    const agent = phone.agent({ systemPrompt: 'hi', provider: 'openai_realtime' });
+    expect(agent.prewarmFirstMessage).toBeUndefined();
+  });
+
+  it('phone.agent() preserves explicit prewarmFirstMessage=false in pipeline mode (opt-out)', () => {
+    const phone = makePatter();
+    const stt = new StubSTT();
+    const tts = new StubTTS();
+    const llm = new StubLLM();
+    const agent = phone.agent({
+      systemPrompt: 'hi',
+      stt,
+      tts,
+      llm,
+      prewarmFirstMessage: false,
+    });
+    expect(agent.prewarmFirstMessage).toBe(false);
   });
 });
 

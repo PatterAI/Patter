@@ -1,5 +1,28 @@
 ## Unreleased
 
+### Changed
+
+- **Pipeline `prewarmFirstMessage` / `prewarm_first_message` now defaults
+  to `true`.** Every pipeline acceptance run had a 1.5-2.5 s `p95` on the
+  first turn because the TTS first-byte latency (200-700 ms cold) was
+  serialised with the carrier's `media-start` event. Pre-rendering the
+  greeting during the ringing window and streaming the cached buffer at
+  pickup collapses that to a single `Buffer.copy` / `bytes` write —
+  first-turn `p95` on the regenerated matrix scripts drops back into the
+  same band as subsequent turns.
+
+  The trade-off is paying the TTS bill on calls that ring and never
+  answer (~$0.001-$0.005 each depending on TTS provider). Restore the
+  prior behaviour by passing `prewarmFirstMessage: false` (TS) /
+  `prewarm_first_message=False` (Py) on `phone.agent({...})` — useful
+  for very high-volume outbound where un-answered TTS spend matters.
+
+  Default applied at: `libraries/python/getpatter/models.py:Agent`
+  (dataclass field default) and
+  `libraries/typescript/src/client.ts:Patter.agent()` (factory default
+  for `provider === 'pipeline'`). Realtime / ConvAI provider modes are
+  not affected — those handlers never consume the prewarm cache.
+
 ### Fixed
 
 - **Pipeline metrics: `transcript.jsonl` rows after a barge-in carried an

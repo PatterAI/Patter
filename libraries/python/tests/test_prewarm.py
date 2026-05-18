@@ -122,10 +122,24 @@ async def _wait_for_tasks(phone: Patter, timeout: float = 1.0) -> None:
 
 
 async def test_default_prewarm_flag_is_true() -> None:
-    """``Agent.prewarm`` defaults to True; ``prewarm_first_message`` defaults
-    to False to preserve the prior cost surface (opt-in for the TTS bill)."""
+    """``Agent.prewarm`` and ``Agent.prewarm_first_message`` both default to
+    True since 0.6.2 — first-turn p95 on pipeline mode was dominated by
+    the 200-700 ms TTS first-byte latency on the greeting, eliminated by
+    pre-rendering during the ringing window."""
     agent = Agent(system_prompt="hi", first_message="hello")
     assert agent.prewarm is True
+    assert agent.prewarm_first_message is True
+
+
+async def test_prewarm_first_message_opt_out() -> None:
+    """Callers can disable greeting pre-rendering with
+    ``prewarm_first_message=False`` to restore the pre-0.6.2 cost surface
+    (no TTS bill on un-answered calls)."""
+    agent = Agent(
+        system_prompt="hi",
+        first_message="hello",
+        prewarm_first_message=False,
+    )
     assert agent.prewarm_first_message is False
 
 

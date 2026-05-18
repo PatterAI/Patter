@@ -520,6 +520,19 @@ export class Patter {
       validateAllToolSchemas(working.tools as ToolDefinition[]);
     }
 
+    // Default `prewarmFirstMessage` to true in pipeline mode (0.6.2).
+    // First-turn p95 on every pipeline acceptance run was dominated by
+    // the 200-700 ms TTS first-byte latency on the greeting; pre-rendering
+    // during the ringing window collapses that to a single buffer-copy at
+    // pickup. Opt-out by passing `prewarmFirstMessage: false` explicitly
+    // — high-volume outbound where un-answered TTS spend matters can
+    // restore the pre-0.6.2 behaviour. Realtime / ConvAI modes never
+    // consume the cache; leave them unchanged so we don't pay TTS for a
+    // synth no caller will hear.
+    if (working.prewarmFirstMessage === undefined && working.provider === 'pipeline') {
+      working = { ...working, prewarmFirstMessage: true };
+    }
+
     return working;
   }
 
