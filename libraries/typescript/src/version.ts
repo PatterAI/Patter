@@ -1,8 +1,24 @@
 /**
- * SDK version constant — kept in sync with ``package.json``.
+ * SDK version constant — auto-derived from ``package.json`` at runtime.
  *
- * Hard-coded (rather than imported from ``package.json``) so the SDK works in
- * both bundled (no JSON loader) and ESM/CJS dual-export environments without
- * platform-specific JSON-import flags.
+ * tsup builds with ``shims: true`` so ``__dirname`` resolves to the
+ * dist directory in both CJS and ESM. Reading ``../package.json``
+ * from there always lands on the installed package's manifest. The
+ * fallback covers the (unlikely) case where the file is missing.
+ *
+ * Source of truth: ``libraries/typescript/package.json#version``.
  */
-export const VERSION = '0.5.5';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+
+function readVersion(): string {
+  try {
+    const pkgPath = path.resolve(__dirname, '..', 'package.json');
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8')) as { version?: string };
+    return typeof pkg.version === 'string' && pkg.version.length > 0 ? pkg.version : '';
+  } catch {
+    return '';
+  }
+}
+
+export const VERSION: string = readVersion();

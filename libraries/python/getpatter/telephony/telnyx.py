@@ -402,8 +402,9 @@ async def telnyx_stream_bridge(
                 # 8 kHz to match the `streaming_start` PCMU bidirectional
                 # stream — forward bytes as-is. Pipeline and ConvAI still
                 # produce PCM16 that Telnyx accepts when L16 is negotiated.
-                _input_is_mulaw = (
-                    getattr(agent, "provider", "openai_realtime") == "openai_realtime"
+                _input_is_mulaw = getattr(agent, "provider", "openai_realtime") in (
+                    "openai_realtime",
+                    "openai_realtime_2",
                 )
                 audio_sender = TelnyxAudioSender(
                     websocket, input_is_mulaw_8k=_input_is_mulaw
@@ -623,6 +624,7 @@ async def telnyx_stream_bridge(
                         # 20 ms → PCMU 8 kHz. OpenAI Realtime with this
                         # codec forwards bytes pass-through on both legs.
                         audio_format="g711_ulaw",
+                        pop_prewarmed_connections=pop_prewarmed_connections,
                     )
 
                 # Inherit patter.side from the parent Patter instance so all

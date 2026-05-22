@@ -179,10 +179,20 @@ export class ElevenLabsTTS {
   private readonly apiKey: string;
   private readonly voiceId: string;
   private readonly modelId: string;
-  private readonly outputFormat: ElevenLabsOutputFormat;
+  private _outputFormat: ElevenLabsOutputFormat;
+  private readonly _outputFormatExplicit: boolean;
   private readonly voiceSettings: ElevenLabsVoiceSettings | undefined;
   private readonly languageCode: string | undefined;
   private readonly chunkSize: number;
+
+  /**
+   * Public view of the (possibly auto-flipped) wire format. Read by the
+   * stream-handler to decide whether to skip the client-side resample +
+   * mulaw encode when the bytes are already in the carrier's wire codec.
+   */
+  get outputFormat(): ElevenLabsOutputFormat {
+    return this._outputFormat;
+  }
 
   // Overloads: positional form (back-compat, accepts `string` for
   // outputFormat so existing callers passing arbitrary strings keep
@@ -205,17 +215,47 @@ export class ElevenLabsTTS {
       const o = voiceIdOrOptions;
       this.voiceId = resolveVoiceId(o.voiceId ?? '21m00Tcm4TlvDq8ikWAM');
       this.modelId = o.modelId ?? ElevenLabsModel.FLASH_V2_5;
-      this.outputFormat = o.outputFormat ?? ElevenLabsOutputFormat.PCM_16000;
+      this._outputFormatExplicit = o.outputFormat !== undefined;
+      this._outputFormat = o.outputFormat ?? ElevenLabsOutputFormat.PCM_16000;
       this.voiceSettings = o.voiceSettings;
       this.languageCode = o.languageCode;
       this.chunkSize = o.chunkSize ?? 4096;
     } else {
       this.voiceId = resolveVoiceId(voiceIdOrOptions);
       this.modelId = modelId;
-      this.outputFormat = outputFormat as ElevenLabsOutputFormat;
+      // Positional 4th-arg form: treat as explicit only when the caller
+      // passed something different from the default. Mirrors the WS
+      // variant's _outputFormatExplicit semantics.
+      this._outputFormatExplicit =
+        outputFormat !== ElevenLabsOutputFormat.PCM_16000;
+      this._outputFormat = outputFormat as ElevenLabsOutputFormat;
       this.voiceSettings = undefined;
       this.languageCode = undefined;
       this.chunkSize = 4096;
+    }
+  }
+
+  /**
+   * Hook called by ``StreamHandler.initPipeline`` to advise the carrier
+   * wire format. When the user did NOT pass an explicit ``outputFormat``,
+   * auto-flip to the carrier's native codec so the audio bytes ElevenLabs
+   * returns are already in Twilio/Telnyx wire format — eliminating the
+   * client-side 16 kHz → 8 kHz resample and PCM → μ-law encode. The
+   * resample/encode chain was a source of audible artifacts on the
+   * prewarmed firstMessage (see 0.6.2 acceptance notes — burst delivery
+   * of resampled audio crackled on the carrier-side jitter buffer).
+   *
+   * No-op when the caller passed an explicit ``outputFormat`` (incl. via
+   * the ``forTwilio`` / ``forTelnyx`` factories) — user wins.
+   *
+   * Parity with {@link ElevenLabsWebSocketTTS.setTelephonyCarrier}.
+   */
+  setTelephonyCarrier(carrier: string): void {
+    if (this._outputFormatExplicit) return;
+    if (carrier === 'twilio') {
+      this._outputFormat = ElevenLabsOutputFormat.ULAW_8000;
+    } else if (carrier === 'telnyx') {
+      this._outputFormat = ElevenLabsOutputFormat.PCM_16000;
     }
   }
 
@@ -293,7 +333,7 @@ export class ElevenLabsTTS {
    * good choice for low-latency telephony.
    */
   async *synthesizeStream(text: string): AsyncGenerator<Buffer> {
-    const url = `${ELEVENLABS_BASE_URL}/text-to-speech/${encodeURIComponent(this.voiceId)}/stream?output_format=${encodeURIComponent(this.outputFormat)}`;
+    const url = `${ELEVENLABS_BASE_URL}/text-to-speech/${encodeURIComponent(this.voiceId)}/stream?output_format=${encodeURIComponent(this._outputFormat)}`;
 
     const body: Record<string, unknown> = {
       text,

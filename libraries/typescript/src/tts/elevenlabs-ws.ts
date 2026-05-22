@@ -41,12 +41,18 @@ function resolveApiKey(apiKey: string | undefined): string {
 function buildOpts(opts: ElevenLabsWebSocketOptions): ElevenLabsWebSocketTTSOptions {
   // Voice ID default is owned by the provider class — passing ``undefined``
   // here lets it apply its own default (parity Python ↔ TS).
+  //
+  // CRITICAL: only forward ``outputFormat`` when the caller actually
+  // passed one. Forwarding a fallback ("pcm_16000") flips the parent's
+  // ``_outputFormatExplicit`` flag and disables the carrier-aware
+  // auto-flip in ``setTelephonyCarrier`` — on Twilio the WS would keep
+  // negotiating PCM16 16 kHz and pay the client-side resample/encode.
   const out: ElevenLabsWebSocketTTSOptions = {
     apiKey: resolveApiKey(opts.apiKey),
     modelId: opts.modelId ?? 'eleven_flash_v2_5',
-    outputFormat: opts.outputFormat ?? 'pcm_16000',
     autoMode: opts.autoMode ?? true,
   };
+  if (opts.outputFormat !== undefined) out.outputFormat = opts.outputFormat;
   if (opts.voiceId !== undefined) out.voiceId = opts.voiceId;
   if (opts.voiceSettings !== undefined) out.voiceSettings = opts.voiceSettings;
   if (opts.languageCode !== undefined) out.languageCode = opts.languageCode;

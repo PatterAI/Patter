@@ -124,14 +124,27 @@ function resolvePersistRoot(persist: boolean | string | undefined): string | nul
   if (persist === false) return null;
   if (persist === true) return resolveLogRoot('auto');
   if (typeof persist === 'string') return resolveLogRoot(persist);
-  return resolveLogRoot();
+  // Changed from the prior opt-in behaviour on 2026-05-21: the dashboard's
+  // hydrate path requires on-disk records to survive process restarts, so
+  // persistence now defaults to ON when `persist` is omitted. Set
+  // `persist: false` to keep the old ephemeral-RAM-only behaviour.
+  const envRoot = resolveLogRoot();
+  if (envRoot !== null) return envRoot;
+  return resolveLogRoot('auto');
 }
 
 /** Close every parked socket inside a ``ParkedProviderConnections`` slot. */
 function closeParkedConnections(slot: ParkedProviderConnections): void {
   if (slot.stt) { try { slot.stt.close(); } catch { /* ignore */ } }
   if (slot.tts) { try { slot.tts.ws.close(); } catch { /* ignore */ } }
-  if (slot.openaiRealtime) { try { slot.openaiRealtime.close(); } catch { /* ignore */ } }
+  if (slot.openaiRealtime) {
+    const wsAny = slot.openaiRealtime as unknown as { _parkedKeepalive?: NodeJS.Timeout };
+    if (wsAny._parkedKeepalive) {
+      clearInterval(wsAny._parkedKeepalive);
+      delete wsAny._parkedKeepalive;
+    }
+    try { slot.openaiRealtime.close(); } catch { /* ignore */ }
+  }
 }
 
 /** Top-level SDK entry point — wraps a carrier + embedded server + agent loop. */
@@ -520,19 +533,17 @@ export class Patter {
       validateAllToolSchemas(working.tools as ToolDefinition[]);
     }
 
-    // Default `prewarmFirstMessage` to true in pipeline mode (0.6.2).
-    // First-turn p95 on every pipeline acceptance run was dominated by
-    // the 200-700 ms TTS first-byte latency on the greeting; pre-rendering
-    // during the ringing window collapses that to a single buffer-copy at
-    // pickup. Opt-out by passing `prewarmFirstMessage: false` explicitly
-    // — high-volume outbound where un-answered TTS spend matters can
-    // restore the pre-0.6.2 behaviour. Realtime / ConvAI modes never
-    // consume the cache; leave them unchanged so we don't pay TTS for a
-    // synth no caller will hear.
-    if (working.prewarmFirstMessage === undefined && working.provider === 'pipeline') {
-      working = { ...working, prewarmFirstMessage: true };
-    }
-
+    // ``prewarmFirstMessage`` is opt-in (default false) — reverted from
+    // 2026-05-18's default-on attempt after the 0.6.2 acceptance run
+    // surfaced a phantom-barge-in interaction: prewarm bursts audio
+    // at pickup, the very first inbound carrier frame triggered Silero
+    // VAD speech_start, the firstMessage was cancelled mid-playback
+    // and the user heard a clipped (graffiante) fragment. Until the
+    // root cause (anchoring the barge-in gate on first-mark-echo
+    // rather than ``firstAudioSentAt = beginSpeaking time``) is fully
+    // addressed, default it off so most pipeline calls take the
+    // live-streaming path that the user is happy with. Opt in
+    // explicitly per agent when willing to pay the trade-off.
     return working;
   }
 
@@ -874,7 +885,19 @@ export class Patter {
     const tts = agent.tts as { openParkedConnection?: () => Promise<import('./providers/elevenlabs-ws-tts').ElevenLabsParkedWS> } | undefined;
     const sttOpen = typeof stt?.openParkedConnection === 'function' ? stt.openParkedConnection.bind(stt) : null;
     const ttsOpen = typeof tts?.openParkedConnection === 'function' ? tts.openParkedConnection.bind(tts) : null;
-    if (!sttOpen && !ttsOpen) return;
+    // Detect OpenAI Realtime agents (provider == 'openai_realtime' or
+    // 'openai_realtime_2'). The adapter isn't constructed yet — the
+    // per-call StreamHandler builds it at `start`. We instantiate a
+    // throw-away one here just long enough to call openParkedConnection
+    // and produce a primed WS, then store the WS in the slot. The live
+    // adapter (built per-call) adopts it via `adoptWebSocket`. Cast
+    // through `string` because the public ``AgentOptions.provider``
+    // literal union doesn't yet enumerate ``openai_realtime_2`` (the
+    // GA engine carries it through internally).
+    const providerStr = (agent.provider as unknown as string | undefined) ?? '';
+    const wantsRealtimePark =
+      providerStr === 'openai_realtime' || providerStr === 'openai_realtime_2';
+    if (!sttOpen && !ttsOpen && !wantsRealtimePark) return;
 
     const slot: ParkedProviderConnections = {};
     this.prewarmedConnections.set(callId, slot);
@@ -915,6 +938,47 @@ export class Patter {
           );
         } catch (err) {
           getLogger().debug(`Park TTS failed for ${callId}: ${String(err)}`);
+        }
+      })());
+    }
+    if (wantsRealtimePark) {
+      tasks.push((async () => {
+        // Defer the import so users that don't use Realtime don't pay
+        // the load-time cost of the adapter + ws module.
+        const { OpenAIRealtime2Adapter } = await import('./providers/openai-realtime-2');
+        const apiKey = process.env.OPENAI_API_KEY ?? '';
+        if (!apiKey) {
+          getLogger().debug(`Park OpenAI Realtime skipped for ${callId}: no OPENAI_API_KEY`);
+          return;
+        }
+        try {
+          // Build a throw-away adapter just to call openParkedConnection.
+          // The session.update payload mirrors what the per-call
+          // StreamHandler would send so no second session.update is
+          // needed after adoption. The constructor signature is
+          // positional (inherited from OpenAIRealtimeAdapter).
+          const tmpAdapter = new OpenAIRealtime2Adapter(
+            apiKey,
+            (agent.model as string | undefined) ?? 'gpt-realtime-mini',
+            (agent.voice as string | undefined) ?? 'alloy',
+            (agent.systemPrompt as string | undefined) ?? '',
+            [],
+            // audioFormat — the GA adapter always emits audio/pcm@24000
+            // internally regardless of this value, but it's a required
+            // positional param. Default to g711_ulaw (Twilio wire format).
+            undefined,
+          );
+          const ws = await tmpAdapter.openParkedConnection();
+          if (this.prewarmedConnections.get(callId) !== slot) {
+            try { ws.close(); } catch { /* ignore */ }
+            return;
+          }
+          slot.openaiRealtime = ws;
+          getLogger().info(
+            `[PREWARM] callId=${callId} provider=openai_realtime ms=${Date.now() - startedAt}`,
+          );
+        } catch (err) {
+          getLogger().debug(`Park OpenAI Realtime failed for ${callId}: ${String(err)}`);
         }
       })());
     }
@@ -1005,6 +1069,7 @@ export class Patter {
     agent: AgentOptions,
     callId: string,
     ringTimeout: number | null | undefined,
+    carrier?: 'twilio' | 'telnyx',
   ): void {
     if (!agent.prewarmFirstMessage) return;
     // FIX #94 — Realtime / ConvAI never consume the cache. Refuse early
@@ -1022,6 +1087,28 @@ export class Patter {
     const tts = agent.tts;
     if (!firstMessage || !tts) return;
     if (typeof tts.synthesizeStream !== 'function') return;
+
+    // Advise the TTS adapter of the telephony carrier BEFORE we trigger
+    // the synth so it can produce wire-native bytes (``ulaw_8000`` for
+    // Twilio, ``pcm_16000`` for Telnyx) — skipping the client-side
+    // resample + mulaw encode that produced audible artifacts on the
+    // prewarmed firstMessage during 0.6.2 acceptance. The hook is opt-in
+    // per-adapter; adapters that don't expose it (or that the user
+    // configured with an explicit outputFormat) keep their format.
+    if (carrier) {
+      const carrierAware = tts as unknown as {
+        setTelephonyCarrier?: (c: string) => void;
+      };
+      if (typeof carrierAware.setTelephonyCarrier === 'function') {
+        try {
+          carrierAware.setTelephonyCarrier(carrier);
+        } catch (err) {
+          getLogger().debug(
+            `Prewarm TTS setTelephonyCarrier failed for ${callId}: ${String(err)}`,
+          );
+        }
+      }
+    }
 
     // FIX #96 — refuse to spawn when the cache (live entries +
     // in-flight synth tasks) would exceed the cap. Counting both
@@ -1198,16 +1285,30 @@ export class Patter {
       } catch {
         /* non-fatal */
       }
-      if (this.embeddedServer && telnyxCallId) {
-        this.embeddedServer.metricsStore.recordCallInitiated({
+      if (telnyxCallId) {
+        const initiatedPayload = {
           call_id: telnyxCallId,
           caller: phoneNumber,
           callee: options.to,
           direction: 'outbound',
-        });
+          status: 'initiated',
+        } as const;
+        if (this.embeddedServer) {
+          this.embeddedServer.metricsStore.recordCallInitiated(initiatedPayload);
+        }
+        // Relay to a standalone dashboard (running in a separate process)
+        // so it surfaces the dial attempt during ringing, not only when
+        // media arrives on pickup. Fire-and-forget — silent when no
+        // standalone dashboard is listening.
+        try {
+          const { notifyDashboard } = await import('./dashboard/persistence');
+          notifyDashboard(initiatedPayload);
+        } catch {
+          /* ignore */
+        }
       }
       if (telnyxCallId) {
-        this.spawnPrewarmFirstMessage(options.agent, telnyxCallId, effectiveRingTimeout);
+        this.spawnPrewarmFirstMessage(options.agent, telnyxCallId, effectiveRingTimeout, 'telnyx');
         // Park provider WebSockets in parallel so the per-call
         // StreamHandler can adopt them at ``start`` instead of paying
         // the cold-handshake on first turn. Off when the user
@@ -1293,23 +1394,33 @@ export class Patter {
     } catch {
       /* non-fatal — the statusCallback will register anyway */
     }
-    if (this.embeddedServer && twilioCallSid) {
-      this.embeddedServer.metricsStore.recordCallInitiated({
+    if (twilioCallSid) {
+      const initiatedPayload = {
         call_id: twilioCallSid,
         caller: phoneNumber,
         callee: options.to,
         direction: 'outbound',
-      });
-      if (twilioNotificationsPath) {
-        getLogger().info(
-          `Outbound call ${twilioCallSid} placed. ` +
-            `Twilio notifications: https://api.twilio.com${twilioNotificationsPath} ` +
-            '(check here if the call drops with no audio).',
-        );
+        status: 'initiated',
+      } as const;
+      if (this.embeddedServer) {
+        this.embeddedServer.metricsStore.recordCallInitiated(initiatedPayload);
+        if (twilioNotificationsPath) {
+          getLogger().info(
+            `Outbound call ${twilioCallSid} placed. ` +
+              `Twilio notifications: https://api.twilio.com${twilioNotificationsPath} ` +
+              '(check here if the call drops with no audio).',
+          );
+        }
+      }
+      try {
+        const { notifyDashboard } = await import('./dashboard/persistence');
+        notifyDashboard(initiatedPayload);
+      } catch {
+        /* ignore */
       }
     }
     if (twilioCallSid) {
-      this.spawnPrewarmFirstMessage(options.agent, twilioCallSid, effectiveRingTimeout);
+      this.spawnPrewarmFirstMessage(options.agent, twilioCallSid, effectiveRingTimeout, 'twilio');
       // Park provider WebSockets in parallel so the per-call
       // StreamHandler can adopt them at ``start`` instead of paying
       // the cold-handshake on first turn. Off when the user

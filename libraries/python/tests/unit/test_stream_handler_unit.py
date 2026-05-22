@@ -519,13 +519,17 @@ class TestBargeInCancelsLlmStream:
             "barge-in must fire normally after the AEC warmup gate elapses"
         )
 
-    async def test_barge_in_fires_at_400ms_when_aec_off(self) -> None:
-        """The bug fix: on PSTN deployments AEC is OFF and the gate
-        collapses to 0.1 s anti-flicker. A user saying "stop" 400 ms
-        into the agent's turn must cancel the agent — pre-fix this was
-        silently suppressed by the hardcoded 1.0 s gate.
+    async def test_barge_in_fires_at_600ms_when_aec_off(self) -> None:
+        """On PSTN deployments AEC is OFF and the gate is
+        MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN_NO_AEC (0.5 s, bumped from
+        0.1 s in 0.6.2 acceptance to filter phantom speech_start on first
+        inbound frame). A user saying "stop" 600 ms into the agent's turn
+        must cancel the agent — just past the 0.5 s gate.
         """
-        from getpatter.stream_handler import PipelineStreamHandler
+        from getpatter.stream_handler import (
+            MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN_NO_AEC,
+            PipelineStreamHandler,
+        )
         from getpatter.providers.base import Transcript
         import time
 
@@ -536,17 +540,18 @@ class TestBargeInCancelsLlmStream:
         handler.audio_sender = MagicMock()
         handler.audio_sender.send_clear = AsyncMock()
         handler._llm_cancel_event = asyncio.Event()
-        # AEC OFF (PSTN default) — gate is 0.25 s.
+        # AEC OFF (PSTN default) — gate is 0.5 s.
         handler._aec = None
-        handler._speaking_started_at = time.time() - 0.4
-        handler._first_audio_sent_at = time.time() - 0.4
+        past_gate = MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN_NO_AEC + 0.1
+        handler._speaking_started_at = time.time() - past_gate
+        handler._first_audio_sent_at = time.time() - past_gate
 
         await handler._handle_barge_in(
             Transcript(text="stop", is_final=True, speech_final=True)
         )
 
         assert handler._llm_cancel_event.is_set(), (
-            "barge-in must fire on PSTN at 400 ms — past the 0.1 s anti-flicker gate"
+            "barge-in must fire on PSTN at 600 ms — past the 0.5 s gate"
         )
 
     async def test_barge_in_suppressed_within_anti_flicker_when_aec_off(

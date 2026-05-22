@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
@@ -71,9 +72,12 @@ def _resolve_persist_root(persist: bool | str | None) -> str | None:
     - ``persist is False`` → ``None`` (force off, even if env var is set)
     - ``persist is True`` → platform default (``resolve_log_root("auto")``)
     - ``persist`` is a string → exactly that path (after ``~`` expansion)
-    - ``persist is None`` → fall back to ``PATTER_LOG_DIR`` env var, or
-      ``None`` if the env is also unset (preserves the prior opt-in
-      behaviour where persistence required setting the env explicitly)
+    - ``persist is None`` → ``PATTER_LOG_DIR`` env var if set, else platform
+      default (``resolve_log_root("auto")``). Changed from the prior
+      opt-in behaviour on 2026-05-21: the dashboard's hydrate path
+      requires on-disk records to survive process restarts, so persistence
+      now defaults to ON. Set ``persist=False`` to keep the old
+      ephemeral-RAM-only behaviour.
     """
     from getpatter.services.call_log import resolve_log_root
 
@@ -86,6 +90,11 @@ def _resolve_persist_root(persist: bool | str | None) -> str | None:
         result = resolve_log_root(persist)
         return str(result) if result is not None else None
     result = resolve_log_root()
+    if result is not None:
+        return str(result)
+    # No explicit persist + no env var → fall back to platform default so
+    # the dashboard hydrate path always has something to read.
+    result = resolve_log_root("auto")
     return str(result) if result is not None else None
 
 
@@ -135,7 +144,15 @@ async def _safe_close_handle(handle: Any) -> None:
         if ws is not None:
             await ws.close()
             return
-        # Bare websocket
+        # Bare websocket — may have a parked keepalive task attached by
+        # the GA Realtime parker. Cancel it before closing so the loop
+        # doesn't race the close handshake with another send().
+        ka = getattr(handle, "_parked_keepalive_task", None)
+        if ka is not None:
+            try:
+                ka.cancel()
+            except Exception:
+                pass
         await handle.close()
     except Exception:
         pass
@@ -624,39 +641,41 @@ class Patter:
                 # penalty on human pickups — the call connects immediately
                 # and the result arrives via the ``/webhooks/twilio/amd``
                 # callback. Twilio best-practice default.
-                extra_params["MachineDetection"] = "DetectMessageEnd"
-                extra_params["AsyncAmd"] = "true"
-                extra_params["AsyncAmdStatusCallback"] = (
+                #
+                # NOTE: All keys here MUST be snake_case. The twilio-python
+                # SDK's ``client.calls.create(**kwargs)`` accepts snake_case
+                # arguments and internally translates them to the PascalCase
+                # form Twilio's REST API requires on the wire. Passing
+                # ``MachineDetection`` / ``StatusCallback`` etc. directly to
+                # ``calls.create`` raises ``TypeError: unexpected keyword
+                # argument`` and crashes every outbound call (the bug that
+                # shipped through 0.5.x and was reported externally).
+                extra_params["machine_detection"] = "DetectMessageEnd"
+                extra_params["async_amd"] = "true"
+                extra_params["async_amd_status_callback"] = (
                     f"https://{config.webhook_url}/webhooks/twilio/amd"
                 )
             if ring_timeout is not None:
-                extra_params["Timeout"] = int(ring_timeout)
+                extra_params["timeout"] = int(ring_timeout)
             # Status callback so the dashboard sees ringing/failed/
             # no-answer transitions before any media webhook fires.
             extra_params.setdefault(
-                "StatusCallback",
+                "status_callback",
                 f"https://{config.webhook_url}/webhooks/twilio/status",
             )
-            extra_params.setdefault("StatusCallbackMethod", "POST")
-            # ``StatusCallbackEvent`` must be a list (twilio-python
+            extra_params.setdefault("status_callback_method", "POST")
+            # ``status_callback_event`` must be a list (twilio-python
             # serialises it as repeated query params), NOT a
-            # space-separated single string. Pass via the snake_case key
-            # ``status_callback_event`` that the twilio-python SDK
-            # documents — the space-separated form triggered Twilio
-            # notification 21626 ("invalid statusCallbackEvents") and on
-            # some ingestion paths also broke the answer-handler webhook
-            # (root cause of intermittent 11100 WS-upgrade failures).
+            # space-separated single string. The space-separated form
+            # triggered Twilio notification 21626 ("invalid
+            # statusCallbackEvents") and on some ingestion paths also
+            # broke the answer-handler webhook (root cause of intermittent
+            # 11100 WS-upgrade failures).
             # See https://www.twilio.com/docs/voice/api/call-resource#statuscallbackevent
-            if (
-                "StatusCallbackEvent" not in extra_params
-                and "status_callback_event" not in extra_params
-            ):
-                extra_params["status_callback_event"] = [
-                    "initiated",
-                    "ringing",
-                    "answered",
-                    "completed",
-                ]
+            extra_params.setdefault(
+                "status_callback_event",
+                ["initiated", "ringing", "answered", "completed"],
+            )
             call_id = await adapter.initiate_call(
                 config.phone_number or from_number,
                 to,
@@ -666,28 +685,41 @@ class Patter:
             logger.info("Outbound call initiated: %s", call_id)
             # Pre-register the call so the dashboard surfaces attempts
             # that never reach media (no-answer, busy, carrier-reject).
+            initiated_payload = {
+                "call_id": call_id,
+                "caller": config.phone_number or from_number,
+                "callee": to,
+                "direction": "outbound",
+                "status": "initiated",
+            }
             if (
                 self._server is not None
                 and getattr(self._server, "_metrics_store", None) is not None
             ):
                 try:
-                    self._server._metrics_store.record_call_initiated(
-                        {
-                            "call_id": call_id,
-                            "caller": config.phone_number or from_number,
-                            "callee": to,
-                            "direction": "outbound",
-                        }
-                    )
+                    self._server._metrics_store.record_call_initiated(initiated_payload)
                 except Exception as exc:
                     logger.debug("record_call_initiated: %s", exc)
-            self._spawn_prewarm_first_message(agent, call_id, ring_timeout=ring_timeout)
+            # Relay to a standalone dashboard (``patter dashboard`` running
+            # in a separate process) so it surfaces the dial attempt the
+            # moment we hand off to the carrier, not only when media arrives
+            # on pickup. Fire-and-forget — silent when no standalone
+            # dashboard is listening.
+            try:
+                from getpatter.dashboard.persistence import notify_dashboard
+
+                asyncio.create_task(notify_dashboard(initiated_payload))
+            except Exception:
+                pass
+            self._spawn_prewarm_first_message(
+                agent, call_id, ring_timeout=ring_timeout, carrier="twilio"
+            )
             # Park provider WebSockets in parallel so the per-call
             # StreamHandler can adopt them at ``start`` instead of
             # paying the cold-handshake on first turn. Off when the
             # user explicitly sets ``agent.prewarm=False``.
             if getattr(agent, "prewarm", True) is not False:
-                self._park_provider_connections(agent, call_id)
+                self._park_provider_connections(agent, call_id, carrier="twilio")
         elif config.telephony_provider == "telnyx":
             from getpatter.providers.telnyx_adapter import TelnyxAdapter  # type: ignore[import]
 
@@ -704,28 +736,36 @@ class Patter:
                 machine_detection=wants_amd,
             )
             logger.info("Outbound call initiated: %s", call_id)
+            initiated_payload = {
+                "call_id": call_id,
+                "caller": config.phone_number or from_number,
+                "callee": to,
+                "direction": "outbound",
+                "status": "initiated",
+            }
             if (
                 self._server is not None
                 and getattr(self._server, "_metrics_store", None) is not None
             ):
                 try:
-                    self._server._metrics_store.record_call_initiated(
-                        {
-                            "call_id": call_id,
-                            "caller": config.phone_number or from_number,
-                            "callee": to,
-                            "direction": "outbound",
-                        }
-                    )
+                    self._server._metrics_store.record_call_initiated(initiated_payload)
                 except Exception as exc:
                     logger.debug("record_call_initiated: %s", exc)
-            self._spawn_prewarm_first_message(agent, call_id, ring_timeout=ring_timeout)
+            try:
+                from getpatter.dashboard.persistence import notify_dashboard
+
+                asyncio.create_task(notify_dashboard(initiated_payload))
+            except Exception:
+                pass
+            self._spawn_prewarm_first_message(
+                agent, call_id, ring_timeout=ring_timeout, carrier="telnyx"
+            )
             # Park provider WebSockets in parallel so the per-call
             # StreamHandler can adopt them at ``start`` instead of
             # paying the cold-handshake on first turn. Off when the
             # user explicitly sets ``agent.prewarm=False``.
             if getattr(agent, "prewarm", True) is not False:
-                self._park_provider_connections(agent, call_id)
+                self._park_provider_connections(agent, call_id, carrier="telnyx")
 
     # === Pre-warm helpers ===
 
@@ -802,7 +842,13 @@ class Patter:
         if slot is not None:
             _close_parked_slot(slot)
 
-    def _park_provider_connections(self, agent: Agent, call_id: str) -> None:
+    def _park_provider_connections(
+        self,
+        agent: Agent,
+        call_id: str,
+        *,
+        carrier: str | None = None,
+    ) -> None:
         """Open and park provider WebSockets in parallel with the
         carrier-side ``initiate_call``. Unlike :meth:`_spawn_provider_warmup`
         (which closes the WS after a brief idle), the sockets opened here
@@ -824,7 +870,9 @@ class Patter:
         tts = getattr(agent, "tts", None)
         stt_open = getattr(stt, "open_parked_connection", None) if stt else None
         tts_open = getattr(tts, "open_parked_connection", None) if tts else None
-        if stt_open is None and tts_open is None:
+        provider = getattr(agent, "provider", None)
+        wants_realtime_park = provider in ("openai_realtime", "openai_realtime_2")
+        if stt_open is None and tts_open is None and not wants_realtime_park:
             return
 
         slot: dict[str, Any] = {}
@@ -867,8 +915,93 @@ class Patter:
             except Exception as exc:  # noqa: BLE001 - best-effort
                 logger.debug("Park TTS failed for %s: %s", call_id, exc)
 
+        async def _park_openai_realtime() -> None:
+            if not wants_realtime_park:
+                return
+            # Build a throw-away adapter instance JUST to call
+            # ``open_parked_connection`` and produce a primed WS. The
+            # per-call StreamHandler builds its own adapter and adopts
+            # the returned WS via ``adopt_websocket``. Constructed with
+            # the same agent-derived kwargs the StreamHandler would use,
+            # so the parked session.update matches what the live session
+            # expects — no second session.update round-trip on adopt.
+            from getpatter.providers.openai_realtime_2 import (  # type: ignore[import]
+                OpenAIRealtime2Adapter,
+            )
+
+            # The OpenAI key lives on ``LocalConfig.openai_key`` (set by
+            # the user when constructing ``Patter()``); fall back to
+            # ``OPENAI_API_KEY`` env var when not explicitly configured.
+            api_key = getattr(self._local_config, "openai_key", None) or os.environ.get(
+                "OPENAI_API_KEY"
+            )
+            if not api_key:
+                logger.info(
+                    "[PREWARM] callId=%s provider=openai_realtime SKIPPED — "
+                    "no OPENAI_API_KEY available",
+                    call_id,
+                )
+                return
+            try:
+                adapter_kwargs: dict[str, Any] = {
+                    "api_key": api_key,
+                    "model": agent.model,
+                    "voice": agent.voice,
+                    "instructions": agent.system_prompt or "",
+                    "language": agent.language,
+                    "tools": [],
+                    # Carrier-derived placeholder; the GA adapter's session
+                    # always emits ``audio/pcm @ 24000`` regardless of this
+                    # value (it transcodes mulaw↔pcm internally), so any
+                    # non-None value keeps the parent class happy.
+                    "audio_format": "g711_ulaw" if carrier == "twilio" else "pcm16",
+                }
+                reasoning_effort = getattr(
+                    agent, "openai_realtime_reasoning_effort", None
+                )
+                if reasoning_effort is not None:
+                    adapter_kwargs["reasoning_effort"] = reasoning_effort
+                transcription_model = getattr(
+                    agent,
+                    "openai_realtime_input_audio_transcription_model",
+                    None,
+                )
+                if transcription_model is not None:
+                    adapter_kwargs["input_audio_transcription_model"] = (
+                        transcription_model
+                    )
+                tmp_adapter = OpenAIRealtime2Adapter(**adapter_kwargs)
+                ws = await tmp_adapter.open_parked_connection()
+                if self._prewarmed_connections.get(call_id) is not slot:
+                    try:
+                        await ws.close()
+                    except Exception:
+                        pass
+                    return
+                slot["openai_realtime"] = ws
+                logger.info(
+                    "[PREWARM] callId=%s provider=openai_realtime ms=%d",
+                    call_id,
+                    int((time.monotonic() - started_at) * 1000),
+                )
+            except Exception as exc:  # noqa: BLE001 - best-effort
+                # Bumped to INFO so prewarm failures surface in normal
+                # logs — they're best-effort but invisible failures make
+                # the latency optimisation hard to debug. Callers can
+                # silence with a logging filter if they really want.
+                logger.info(
+                    "[PREWARM] callId=%s provider=openai_realtime FAILED: %s",
+                    call_id,
+                    exc,
+                )
+
         async def _run_all() -> None:
-            await asyncio.gather(_park_stt(), _park_tts(), return_exceptions=True)
+            await asyncio.gather(
+                _park_stt(),
+                _park_tts(),
+                _park_openai_realtime(),
+                return_exceptions=True,
+            )
 
         task = asyncio.create_task(_run_all())
         self._prewarm_tasks.add(task)
@@ -915,7 +1048,12 @@ class Patter:
             )
 
     def _spawn_prewarm_first_message(
-        self, agent: Agent, call_id: str, *, ring_timeout: int | None
+        self,
+        agent: Agent,
+        call_id: str,
+        *,
+        ring_timeout: int | None,
+        carrier: str | None = None,
     ) -> None:
         """Pre-render ``agent.first_message`` to TTS bytes during the
         ringing window and stash them in ``_prewarm_audio[call_id]``.
@@ -935,6 +1073,12 @@ class Patter:
         **Capped at ``_PREWARM_CACHE_MAX`` concurrent entries.** Refused
         with a WARN when the cap is reached (the call still proceeds —
         StreamHandler falls back to live TTS).
+
+        ``carrier`` — when provided (``"twilio"`` / ``"telnyx"``), the TTS
+        adapter's ``set_telephony_carrier`` hook is called BEFORE synthesis
+        so it can produce wire-native bytes (``ulaw_8000`` for Twilio,
+        ``pcm_16000`` for Telnyx) and skip the client-side transcode.
+        Parity with TS ``Patter.spawnPrewarmFirstMessage(carrier)``.
         """
         if not getattr(agent, "prewarm_first_message", False):
             return
@@ -956,6 +1100,26 @@ class Patter:
         synthesize = getattr(tts, "synthesize", None)
         if synthesize is None or not callable(synthesize):
             return
+
+        # Advise the TTS adapter of the telephony carrier BEFORE we trigger
+        # the synth so it can produce wire-native bytes (``ulaw_8000`` for
+        # Twilio, ``pcm_16000`` for Telnyx) — skipping the client-side
+        # resample + mulaw encode that produced audible artifacts on the
+        # prewarmed firstMessage during 0.6.2 acceptance. The hook is opt-in
+        # per-adapter; adapters that don't expose it (or that the user
+        # configured with an explicit output_format) keep their format.
+        # Parity with TS ``Patter.spawnPrewarmFirstMessage``.
+        if carrier:
+            set_carrier = getattr(tts, "set_telephony_carrier", None)
+            if callable(set_carrier):
+                try:
+                    set_carrier(carrier)
+                except Exception as _exc:
+                    logger.debug(
+                        "Prewarm TTS set_telephony_carrier failed for %s: %s",
+                        call_id,
+                        _exc,
+                    )
 
         # FIX #96 — refuse to spawn when the cache (live entries +
         # in-flight synth tasks) would exceed the cap. Counting both
@@ -1102,7 +1266,7 @@ class Patter:
         self,
         system_prompt: str,
         voice: str = "alloy",
-        model: str = "gpt-4o-mini-realtime-preview",
+        model: str = "gpt-realtime-mini",
         language: str = "en",
         first_message: str = "",
         tools: list[Tool] | None = None,
@@ -1180,9 +1344,9 @@ class Patter:
             # users sometimes pass the engine AND a specific voice.
             if voice == "alloy" and engine_fields.get("voice"):
                 voice = engine_fields["voice"]
-            if model == "gpt-4o-mini-realtime-preview" and engine_fields.get("model"):
+            if model == "gpt-realtime-mini" and engine_fields.get("model"):
                 model = engine_fields["model"]
-            if engine_kind == "openai_realtime":
+            if engine_kind in ("openai_realtime", "openai_realtime_2"):
                 openai_engine_key = engine_fields.get("api_key", "")
                 openai_realtime_reasoning_effort = engine_fields.get("reasoning_effort")
                 openai_realtime_input_audio_transcription_model = engine_fields.get(
@@ -1213,7 +1377,10 @@ class Patter:
                 self._local_config, elevenlabs_key=elevenlabs_engine_key
             )
 
-        if provider == "openai_realtime" and not self._local_config.openai_key:
+        if (
+            provider in ("openai_realtime", "openai_realtime_2")
+            and not self._local_config.openai_key
+        ):
             raise ValueError(
                 "OpenAI Realtime mode requires an OpenAI API key. Pass "
                 "engine=OpenAIRealtime(api_key='sk-...') or set OPENAI_API_KEY "
@@ -1263,16 +1430,19 @@ class Patter:
                 self._guardrail_to_dict(g, index=i) for i, g in enumerate(guardrails)
             ]
 
-        # Default ``prewarm_first_message`` to True in pipeline mode (since
-        # 0.6.2). Greeting TTS pre-rendering during the ringing window
-        # collapses the 200-700 ms first-byte latency that dominated the
-        # first-turn p95 on every pipeline call. Realtime / ConvAI modes
-        # never consume the prewarm cache (the engine drives the first-
-        # message audio path itself), so the default stays False there to
-        # avoid silent TTS spend on un-answered rings. Parity with TS
-        # ``Patter.agent()`` factory (see ``client.ts``).
+        # ``prewarm_first_message`` is opt-in (default False) — reverted
+        # from 2026-05-18's default-on attempt after the 0.6.2 acceptance
+        # run surfaced a phantom-barge-in interaction: prewarm bursts
+        # audio at pickup, the very first inbound carrier frame triggered
+        # Silero VAD speech_start, the firstMessage was cancelled
+        # mid-playback and the user heard a clipped (graffiante) fragment.
+        # Until the root cause (anchoring the barge-in gate on
+        # first-mark-echo rather than ``first_audio_sent_at = begin_speaking
+        # time``) is fully addressed, default it off so most pipeline calls
+        # take the live-streaming path that the user is happy with. Opt in
+        # explicitly per agent when willing to pay the trade-off.
         if prewarm_first_message is None:
-            prewarm_first_message = provider == "pipeline"
+            prewarm_first_message = False
 
         return Agent(
             system_prompt=system_prompt,
@@ -1307,7 +1477,16 @@ class Patter:
         """Convert an engine instance to ``(kind, {voice, model, api_key, agent_id})``."""
         from getpatter.engines.elevenlabs import ConvAI as _ConvAI
         from getpatter.engines.openai import Realtime as _Realtime
+        from getpatter.engines.openai_realtime_2 import Realtime2 as _Realtime2
 
+        if isinstance(engine, _Realtime2):
+            return "openai_realtime_2", {
+                "api_key": engine.api_key,
+                "voice": engine.voice,
+                "model": engine.model,
+                "reasoning_effort": engine.reasoning_effort,
+                "input_audio_transcription_model": engine.input_audio_transcription_model,
+            }
         if isinstance(engine, _Realtime):
             return "openai_realtime", {
                 "api_key": engine.api_key,
@@ -1323,8 +1502,8 @@ class Patter:
                 "voice": engine.voice,
             }
         raise TypeError(
-            "engine= must be an OpenAIRealtime(...) or ElevenLabsConvAI(...) "
-            f"instance, got {type(engine).__name__}"
+            "engine= must be an OpenAIRealtime(...), OpenAIRealtime2(...), or "
+            f"ElevenLabsConvAI(...) instance, got {type(engine).__name__}"
         )
 
     @staticmethod

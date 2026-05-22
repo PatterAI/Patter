@@ -77,7 +77,9 @@ from getpatter._public_api import Tool, tool, guardrail
 from getpatter.carriers.twilio import Carrier as Twilio
 from getpatter.carriers.telnyx import Carrier as Telnyx
 from getpatter.engines.openai import Realtime as OpenAIRealtime
+from getpatter.engines.openai_realtime_2 import Realtime2 as OpenAIRealtime2
 from getpatter.engines.elevenlabs import ConvAI as ElevenLabsConvAI
+from getpatter.providers.openai_realtime_2 import OpenAIRealtime2Adapter
 
 # STT flat aliases — parity with libraries/typescript/src/index.ts.
 from getpatter.stt.deepgram import STT as DeepgramSTT
@@ -407,6 +409,8 @@ __all__ = [
     "Twilio",
     "Telnyx",
     "OpenAIRealtime",
+    "OpenAIRealtime2",
+    "OpenAIRealtime2Adapter",
     "ElevenLabsConvAI",
     "DeepgramSTT",
     "WhisperSTT",

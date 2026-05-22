@@ -146,17 +146,17 @@ async def test_prewarm_first_message_opt_out() -> None:
     assert agent.prewarm_first_message is False
 
 
-async def test_factory_defaults_prewarm_first_message_true_in_pipeline_mode() -> None:
-    """``Patter.agent(...)`` factory auto-enables prewarm in pipeline
-    mode (since 0.6.2). Parity with the TypeScript factory in
-    ``client.ts``."""
+async def test_factory_defaults_prewarm_first_message_false_in_pipeline_mode() -> None:
+    """``Patter.agent(...)`` factory defaults prewarm_first_message to False
+    (reverted from True in 0.6.2 acceptance — opt-in only).
+    Parity with the TypeScript factory in ``client.ts``."""
     phone = _make_patter()
     stt = StubSTT()
     tts = StubTTS()
     llm = StubLLM()
     agent = phone.agent(system_prompt="hi", stt=stt, tts=tts, llm=llm)
     assert agent.provider == "pipeline"
-    assert agent.prewarm_first_message is True
+    assert agent.prewarm_first_message is False
 
 
 async def test_factory_does_not_default_prewarm_in_realtime_mode() -> None:

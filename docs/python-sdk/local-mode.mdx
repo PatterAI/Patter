@@ -80,31 +80,40 @@ await phone.serve(agent, port=8000)
 
 ## Making Outbound Calls
 
-In local mode, use `call()` to make outbound calls while the server is running:
+In local mode, use `call()` to make outbound calls while the server is running.
+
+**Important:** the server must be fully initialized before you call `phone.call()`. Use `await phone.ready` — it resolves once the tunnel is up, the embedded server is in `listen` state, and the carrier webhook is configured. This is the reliable replacement for `asyncio.sleep()` guesswork:
 
 ```python
 import asyncio
 
 async def main():
-    # Start the server in background
+    # Start the server in the background — don't await it yet.
     server_task = asyncio.create_task(phone.serve(agent, port=8000))
 
-    # Wait a moment for the server to be ready
-    await asyncio.sleep(1)
+    # Block until tunnel + HTTP server + carrier webhook are all wired up.
+    # Resolves to the public webhook hostname as a string.
+    await phone.ready
 
-    # Make an outbound call
-    await phone.call(
-        to="+15550009876",
-        agent=agent,
-        machine_detection=True,
-        voicemail_message="Please call us back at 555-000-1234.",
-    )
-
-    # Keep the server running
-    await server_task
+    try:
+        # Now safe to make outbound calls
+        await phone.call(
+            to="+15550009876",
+            agent=agent,
+            machine_detection=True,
+            voicemail_message="Please call us back at 555-000-1234.",
+        )
+    finally:
+        # Clean shutdown
+        await phone.disconnect()
+        server_task.cancel()
 
 asyncio.run(main())
 ```
+
+`phone.ready` rejects with the underlying exception if `serve()` fails before the server reaches `listen` state, so you get an immediate error instead of a hanging `await`.
+
+**Advanced — tunnel hostname only:** if you only need the public URL (for example, to register a webhook manually) without waiting for the HTTP server to be in `listen` state, use `await phone.tunnel_ready` instead. It resolves earlier but a `phone.call()` placed immediately afterwards can race the WebSocket upgrade path and produce a dropped call on answer.
 
 ### call() Parameters (Local Mode)
 

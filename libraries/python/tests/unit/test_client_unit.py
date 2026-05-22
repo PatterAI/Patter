@@ -366,6 +366,137 @@ class TestDisconnect:
 
 
 # ---------------------------------------------------------------------------
+# ready / tunnel_ready — serve-ready futures (parity with TS phone.ready)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestReadyFuture:
+    """phone.ready and phone.tunnel_ready — lazy futures that track serve() state."""
+
+    # --- lazy creation -------------------------------------------------------
+
+    async def test_ready_creates_future_on_first_access(self) -> None:
+        """Accessing phone.ready before serve() returns a pending Future."""
+        import asyncio
+
+        client = _local_phone()
+        fut = client.ready
+        assert isinstance(fut, asyncio.Future)
+        assert not fut.done()
+
+    async def test_tunnel_ready_creates_future_on_first_access(self) -> None:
+        """Accessing phone.tunnel_ready before serve() returns a pending Future.
+
+        Use webhook_url="" so there is no static pre-resolution — the tunnel
+        must call _resolve_tunnel_ready() before the future is done.
+        """
+        import asyncio
+
+        client = _local_phone(webhook_url="")
+        fut = client.tunnel_ready
+        assert isinstance(fut, asyncio.Future)
+        assert not fut.done()
+
+    async def test_ready_returns_same_future_on_repeated_access(self) -> None:
+        """Repeated accesses return the same Future object (idempotent)."""
+        client = _local_phone()
+        assert client.ready is client.ready
+
+    async def test_tunnel_ready_returns_same_future_on_repeated_access(self) -> None:
+        client = _local_phone(webhook_url="")
+        assert client.tunnel_ready is client.tunnel_ready
+
+    # --- resolution ----------------------------------------------------------
+
+    async def test_ready_resolves_when_server_listening(self) -> None:
+        """_resolve_ready() fulfils phone.ready with the webhook hostname."""
+        client = _local_phone()
+        fut = client.ready
+        assert not fut.done()
+
+        client._resolve_ready("my-tunnel.trycloudflare.com")
+
+        assert fut.done()
+        assert await fut == "my-tunnel.trycloudflare.com"
+
+    async def test_tunnel_ready_resolves_when_tunnel_known(self) -> None:
+        client = _local_phone(webhook_url="")
+        fut = client.tunnel_ready
+        client._resolve_tunnel_ready("tunnel.example.com")
+
+        assert fut.done()
+        assert await fut == "tunnel.example.com"
+
+    async def test_ready_rejects_on_serve_failure(self) -> None:
+        """_reject_ready() causes phone.ready to raise the propagated error."""
+        import asyncio
+
+        client = _local_phone()
+        fut = client.ready
+
+        err = RuntimeError("port already in use")
+        client._reject_ready(err)
+
+        assert fut.done()
+        with pytest.raises(RuntimeError, match="port already in use"):
+            await asyncio.shield(fut)
+
+    # --- idempotence (safe to call resolve/reject multiple times) -----------
+
+    async def test_resolve_ready_is_idempotent(self) -> None:
+        """Calling _resolve_ready() twice does not raise FutureDoneError."""
+        client = _local_phone()
+        client._resolve_ready("host-a.com")
+        client._resolve_ready("host-b.com")  # should be a no-op, not raise
+        assert await client.ready == "host-a.com"
+
+    async def test_reject_ready_after_resolve_is_noop(self) -> None:
+        client = _local_phone()
+        client._resolve_ready("host.com")
+        client._reject_ready(RuntimeError("ignored"))  # must not raise
+        assert await client.ready == "host.com"
+
+    # --- static-webhook pre-resolution (no tunnel) --------------------------
+
+    async def test_tunnel_ready_pre_resolved_for_static_webhook(self) -> None:
+        """With an explicit webhookUrl, tunnel_ready is resolved immediately."""
+        client = _local_phone(webhook_url="static.example.com")
+        fut = client.tunnel_ready
+        assert fut.done()
+        assert fut.result() == "static.example.com"
+
+    # --- disconnect recreates the futures -----------------------------------
+
+    async def test_disconnect_recreates_ready_future(self) -> None:
+        """After disconnect(), phone.ready is a fresh pending Future.
+
+        Mirrors the TS test:
+          'recreates ready / tunnelReady so a follow-up serve() can resolve them'
+        """
+        client = _local_phone()
+        before = client.ready
+        client._resolve_ready("host.com")
+
+        await client.disconnect()
+
+        after = client.ready
+        assert after is not before
+        assert not after.done()
+
+    async def test_disconnect_recreates_tunnel_ready_future(self) -> None:
+        client = _local_phone(webhook_url="")
+        before = client.tunnel_ready
+        client._resolve_tunnel_ready("t.example.com")
+
+        await client.disconnect()
+
+        after = client.tunnel_ready
+        assert after is not before
+        assert not after.done()
+
+
+# ---------------------------------------------------------------------------
 # Module-level factories (guardrail, tool)
 # ---------------------------------------------------------------------------
 

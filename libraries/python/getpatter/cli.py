@@ -21,7 +21,10 @@ def main() -> None:
         help="Start the standalone call monitoring dashboard",
     )
     dash.add_argument(
-        "--port", type=int, default=8000, help="Port to serve dashboard on (default: 8000)"
+        "--port",
+        type=int,
+        default=8000,
+        help="Port to serve dashboard on (default: 8000)",
     )
 
     # patter eval run <suite>
@@ -74,13 +77,23 @@ async def _run_dashboard(port: int) -> None:
     async def health():
         return {"status": "ok", "mode": "dashboard"}
 
-    # Ingest endpoint — SDK POSTs completed call data here for live updates
+    # Ingest endpoint — SDK POSTs call lifecycle events here so a
+    # standalone dashboard surfaces them live. Three event kinds:
+    #   * status="initiated" — outbound dial handed off to carrier,
+    #     callee hasn't picked up yet. Surfaces the row immediately so
+    #     the user sees the attempt during ringing.
+    #   * default (no status) — call_start, media stream began.
+    #   * ended_at present — call_end, final metrics + transcript.
     @app.post("/api/dashboard/ingest")
     async def ingest(request: Request):
         data = await request.json()
         call_id = data.get("call_id", "")
         if not call_id:
             return {"ok": False, "error": "missing call_id"}
+        status = data.get("status")
+        if status == "initiated":
+            store.record_call_initiated(data)
+            return {"ok": True, "call_id": call_id, "event": "initiated"}
         store.record_call_start(data)
         if data.get("ended_at"):
             store.record_call_end(data, metrics=data.get("metrics"))

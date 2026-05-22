@@ -57,7 +57,7 @@ class TTS(_ElevenLabsWebSocketTTS):
         *,
         voice_id: str = "EXAVITQu4vr4xnSDxMaL",
         model_id: str = "eleven_flash_v2_5",
-        output_format: str = "pcm_16000",
+        output_format: str | None = None,
         language_code: str | None = None,
         voice_settings: dict | None = None,
         auto_mode: bool = True,
@@ -68,13 +68,23 @@ class TTS(_ElevenLabsWebSocketTTS):
         # (chunking is driven by ``chunk_length_schedule`` on that path).
         chunk_size: int | None = None,
     ) -> None:
+        # CRITICAL: only forward ``output_format`` when the caller actually
+        # passed one.  Forwarding a fallback (``"pcm_16000"``) would flip the
+        # parent's ``_output_format_explicit`` flag to ``True`` and disable the
+        # carrier-aware auto-flip in ``set_telephony_carrier`` — the prewarm
+        # path on Twilio would keep emitting PCM16 16 kHz and pay the
+        # client-side resample/encode that produced the "audio a scatti"
+        # user report.  Leaving the field out lets the parent default to
+        # PCM_16000 with the explicit-flag cleared so the carrier hook can
+        # flip to ulaw_8000 at call time.  Parity with TS ``tts/elevenlabs.ts``.
         kwargs: dict = {
             "api_key": _resolve_api_key(api_key),
             "voice_id": voice_id,
             "model_id": model_id,
-            "output_format": output_format,
             "auto_mode": auto_mode,
         }
+        if output_format is not None:
+            kwargs["output_format"] = output_format
         if voice_settings is not None:
             kwargs["voice_settings"] = voice_settings
         if language_code is not None:

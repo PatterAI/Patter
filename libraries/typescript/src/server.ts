@@ -1488,10 +1488,15 @@ export class EmbeddedServer {
         const resolvedCaller = dataCaller || active?.caller || '';
         const resolvedCallee = dataCallee || active?.callee || '';
         // Fire-and-forget: call logging must never block the voice flow.
+        const resolvedDirection =
+          (typeof data.direction === 'string' ? data.direction : '') ||
+          active?.direction ||
+          'inbound';
         void logger
           .logCallStart(callId, {
             caller: resolvedCaller,
             callee: resolvedCallee,
+            direction: resolvedDirection,
             telephonyProvider: bridge.telephonyProvider,
             providerMode: agent.provider ?? '',
             agent: agentSnapshot(),

@@ -226,6 +226,13 @@ class ElevenLabsWebSocketTTS(TTSProvider):
         # send) instead of opening a fresh socket. The slot is
         # consumed exactly once.
         self._adopted_connection: Optional[ElevenLabsParkedWS] = None
+        # Holds a reference to the currently open synthesis WebSocket so
+        # ``cancel_active_stream`` can force-close it from outside the
+        # generator.  Set just before the ``while True`` receive loop in
+        # ``synthesize``; cleared in the generator's ``finally`` block.
+        # ``None`` when no synthesis is in progress.
+        # Parity with TS ``ElevenLabsWebSocketTTS.activeStreamWs``.
+        self._active_stream_ws: object = None
 
     @property
     def api_key(self) -> str:
@@ -338,6 +345,44 @@ class ElevenLabsWebSocketTTS(TTSProvider):
             return
         self.output_format = native
 
+    def cancel_active_stream(self) -> None:
+        """Force-close the currently open synthesis WebSocket (if any).
+
+        Called by ``StreamHandler`` from ``_do_cancel_for_barge_in``,
+        ``on_stop``, and ``on_ws_close`` to unblock the in-flight
+        ``synthesize`` generator's ``await ws.recv()`` immediately.
+        Without this the generator stays blocked in the receive loop
+        for up to ``frame_timeout`` (default 30 s) — ``_init_pipeline``
+        would never return, the STT ``on_transcript`` callback would
+        never register, and every subsequent user turn would be silently
+        dropped.
+
+        No-op when no synthesis is in progress.  Thread-safe: the close
+        is idempotent on an already-closed websocket.
+
+        Parity with TS ``ElevenLabsWebSocketTTS.cancelActiveStream``.
+        """
+        ws = self._active_stream_ws
+        if ws is None:
+            return
+        self._active_stream_ws = None
+        try:
+            # ``websockets`` connection objects are asyncio-aware; close()
+            # schedules the close on the running event loop.  We fire-and-
+            # forget here because cancel_active_stream is called from sync
+            # context (signal handler / barge-in cancel path).
+            import asyncio
+
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.call_soon_threadsafe(
+                    lambda: asyncio.ensure_future(ws.close())  # type: ignore[attr-defined]
+                )
+            else:
+                asyncio.run(ws.close())  # type: ignore[attr-defined]
+        except Exception:
+            pass  # defensive — socket may already be closed
+
     # ------------------------------------------------------------------
     # Streaming
     # ------------------------------------------------------------------
@@ -445,6 +490,12 @@ class ElevenLabsWebSocketTTS(TTSProvider):
 
             from websockets.exceptions import ConnectionClosedOK
 
+            # Expose the in-flight WS so ``cancel_active_stream`` (called
+            # from the stream-handler barge-in / stop / ws-close paths) can
+            # force-close it and unblock the ``await ws.recv()`` below.
+            # Parity with TS ``ElevenLabsWebSocketTTS.activeStreamWs``.
+            self._active_stream_ws = ws
+
             while True:
                 try:
                     raw = await asyncio.wait_for(ws.recv(), timeout=self.frame_timeout)
@@ -507,6 +558,11 @@ class ElevenLabsWebSocketTTS(TTSProvider):
                 if msg.get("isFinal"):
                     return
         finally:
+            # Clear the active-stream slot. A concurrent ``cancel_active_stream``
+            # call may have already set it to None; that is safe — ``ws`` is a
+            # local binding and the close below is idempotent.
+            if self._active_stream_ws is ws:
+                self._active_stream_ws = None
             # Best-effort: tell the server to stop synthesising any
             # buffered text the consumer is no longer interested in.
             # Failure to send is non-fatal — the socket close below

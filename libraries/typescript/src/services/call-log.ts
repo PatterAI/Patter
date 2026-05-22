@@ -89,9 +89,16 @@ function retentionDays(): number {
 }
 
 function redactMode(): RedactMode {
-  const raw = (process.env.PATTER_LOG_REDACT_PHONE || 'mask').trim().toLowerCase();
+  // Default ``full`` (changed from ``mask`` on 2026-05-21): the dashboard
+  // UI's reveal toggle (``revealed=true`` in ``format.ts:fmtPhone``) cannot
+  // reconstruct a raw number once the persisted record has already been
+  // masked, so storing raw on disk is required for the toggle to actually
+  // work. The on-disk path (platform user data dir) is user-private.
+  // Override with ``PATTER_LOG_REDACT_PHONE=mask`` for setups that ship
+  // logs off-host.
+  const raw = (process.env.PATTER_LOG_REDACT_PHONE || 'full').trim().toLowerCase();
   if (raw === 'full' || raw === 'mask' || raw === 'hash_only') return raw;
-  return 'mask';
+  return 'full';
 }
 
 function redactPhone(raw: string): string {
@@ -146,6 +153,7 @@ async function appendJsonl(filePath: string, record: unknown): Promise<void> {
 export interface CallStartInput {
   readonly caller?: string;
   readonly callee?: string;
+  readonly direction?: string;
   readonly telephonyProvider?: string;
   readonly providerMode?: string;
   readonly agent?: Record<string, unknown>;
@@ -230,6 +238,7 @@ export class CallLogger {
       status: 'in_progress',
       caller: redactPhone(input.caller ?? ''),
       callee: redactPhone(input.callee ?? ''),
+      direction: input.direction || 'inbound',
       telephony_provider: input.telephonyProvider ?? '',
       provider_mode: input.providerMode ?? '',
       agent: input.agent ?? {},

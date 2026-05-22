@@ -9,7 +9,6 @@ import logging
 import re
 import time
 from collections import deque
-from urllib.parse import quote
 
 from getpatter.observability.attributes import patter_call_scope
 from getpatter.stream_handler import (
@@ -91,11 +90,15 @@ def twilio_webhook_handler(
     # Lazy import — provider adapter may be created by the parallel agent
     from getpatter.providers.twilio_adapter import TwilioAdapter  # type: ignore[import]
 
-    stream_url = (
-        f"wss://{webhook_base_url}/ws/stream/{call_sid}"
-        f"?caller={quote(caller)}&callee={quote(callee)}"
+    # Twilio Media Streams strips the query string from ``<Stream url=...>``
+    # before opening the WS, so caller/callee must travel as
+    # ``<Parameter>`` children — the bridge then reads them from
+    # ``start.customParameters`` on the WS ``start`` frame.
+    stream_url = f"wss://{webhook_base_url}/ws/stream/{call_sid}"
+    return TwilioAdapter.generate_stream_twiml(
+        stream_url,
+        parameters={"caller": caller, "callee": callee},
     )
-    return TwilioAdapter.generate_stream_twiml(stream_url)
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +320,15 @@ async def twilio_stream_bridge(
                 start_data = data.get("start", {})
                 call_sid_actual = start_data.get("callSid", "")
                 custom_params: dict = start_data.get("customParameters", {})
+                # Inbound path: caller / callee travel via TwiML
+                # ``<Parameter>`` tags (Twilio strips query params from
+                # ``<Stream url=...>``), so the WS-level query-param read
+                # above lands empty. Fall back to ``customParameters`` on
+                # the ``start`` frame.
+                if not caller:
+                    caller = custom_params.get("caller", "") or caller
+                if not callee:
+                    callee = custom_params.get("callee", "") or callee
 
                 # Single INFO line per call-start — full context in one place.
                 _mode = (
@@ -405,7 +417,7 @@ async def twilio_stream_bridge(
                 # to emit g711_ulaw @ 8 kHz directly (see below), so for that
                 # provider we skip the built-in PCM→mulaw transcoding path.
                 # Pipeline / ConvAI still produce PCM16 @ 16 kHz.
-                _input_is_mulaw = provider == "openai_realtime"
+                _input_is_mulaw = provider in ("openai_realtime", "openai_realtime_2")
                 audio_sender = TwilioAudioSender(
                     websocket, stream_sid, input_is_mulaw_8k=_input_is_mulaw
                 )
@@ -516,6 +528,7 @@ async def twilio_stream_bridge(
                         # produces a deep, slurred voice.
                         audio_format="g711_ulaw",
                         speech_events=speech_events,
+                        pop_prewarmed_connections=pop_prewarmed_connections,
                     )
 
                 # Inherit patter.side from the parent Patter instance so all

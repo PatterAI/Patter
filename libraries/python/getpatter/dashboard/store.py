@@ -5,9 +5,12 @@ from __future__ import annotations
 __all__ = ["MetricsStore", "MetricsStoreProtocol"]
 
 import asyncio
+import json
 import threading
 import time
 from dataclasses import asdict
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from getpatter.models import CallMetrics
@@ -277,10 +280,36 @@ class MetricsStore:
                         existing = self._calls[idx]
                         break
 
+            # Resolve the final transcript and turns. ``data["transcript"]``
+            # from the SDK is the authoritative ``conversation_history``
+            # snapshot at hang-up; when it's missing or empty (e.g.
+            # webhook-rejected inbound, Realtime adopted path where
+            # ``conversation.item.input_audio_transcription.completed`` raced
+            # a ``response.cancel`` and never fired, or the active record
+            # was already moved to ``self._calls`` by an earlier
+            # statusCallback), fall back to the running transcript /
+            # turns we accumulated on the active record via ``record_turn``.
+            # This keeps the live-transcript pane stable across the
+            # ``call_status (completed)`` → ``call_end`` gap, and matches
+            # the TS parity (``dashboard/store.ts`` resolvedTranscript /
+            # resolvedTurns). See dashboard BUG D.
+            data_transcript = data.get("transcript") or []
+            resolved_transcript: list[Any]
+            if data_transcript:
+                resolved_transcript = list(data_transcript)
+            elif active is not None and active.get("transcript"):
+                resolved_transcript = list(active["transcript"])
+            elif existing is not None and existing.get("transcript"):
+                resolved_transcript = list(existing["transcript"])
+            else:
+                resolved_transcript = []
+            source_for_turns = active or existing or {}
+            preserved_turns = list(source_for_turns.get("turns") or [])
             entry: dict[str, Any] = {
                 "call_id": call_id,
                 "ended_at": time.time(),
-                "transcript": data.get("transcript", []),
+                "transcript": resolved_transcript,
+                "turns": preserved_turns,
             }
             source = active or existing
             if source:
@@ -498,6 +527,7 @@ class MetricsStore:
                         "telephony": 0.0,
                     },
                     "active_calls": len(self._active_calls),
+                    "sdk_version": _sdk_version(),
                 }
 
             total_cost = 0.0
@@ -543,6 +573,7 @@ class MetricsStore:
                     "telephony": round(cost_tel, 6),
                 },
                 "active_calls": len(self._active_calls),
+                "sdk_version": _sdk_version(),
             }
 
     def get_calls_in_range(
@@ -663,6 +694,18 @@ class MetricsStore:
                                 meta_path,
                             )
                             continue
+                        # Backfill transcript from sibling ``transcript.jsonl``
+                        # when ``metadata.json`` doesn't carry the flat
+                        # transcript array (CallLogger writes one turn per
+                        # line; ``metadata.json`` only carries the aggregate
+                        # count). Without this, hydrated past calls render
+                        # with an empty transcript pane on click. Parity
+                        # with TS ``loadTranscriptJsonl`` (store.ts:780).
+                        if not record.get("transcript"):
+                            jsonl_path = call_dir / "transcript.jsonl"
+                            from_jsonl = _load_transcript_jsonl(jsonl_path)
+                            if from_jsonl:
+                                record["transcript"] = from_jsonl
                         collected.append(record)
                         seen.add(call_id)
 
@@ -786,3 +829,81 @@ def _metadata_to_call_record(
     if ended is not None:
         record["ended_at"] = ended
     return record
+
+
+def _sdk_version() -> str:
+    """Resolve the installed ``getpatter`` package version at runtime.
+
+    Single source of truth: ``getpatter.__version__``. Surfaced via the
+    dashboard ``/api/dashboard/aggregates`` payload so the SPA top-bar
+    pill / footer always tracks the package version that's actually
+    serving the dashboard — no manual sync needed when bumping versions.
+    """
+    try:
+        from getpatter import __version__
+
+        return str(__version__)
+    except Exception:
+        return ""
+
+
+def _load_transcript_jsonl(file_path: Path) -> list[dict[str, Any]]:
+    """Reconstruct a flat ``[{role, text, timestamp}, ...]`` transcript
+    array from a per-call ``transcript.jsonl`` file written by
+    ``CallLogger.log_turn``. Parity with TS ``loadTranscriptJsonl``
+    (libraries/typescript/src/dashboard/store.ts:780).
+
+    Each JSONL line carries ``user_text`` / ``agent_text`` plus a
+    timestamp (``ts`` ISO-8601 or ``timestamp`` numeric seconds). Splits
+    the row into one or two entries so the dashboard's transcript pane
+    renders user + assistant turns interleaved. Filters the
+    ``[interrupted]`` placeholder agent text (cancelled barge-in turns).
+    """
+    if not file_path.is_file():
+        return []
+    out: list[dict[str, Any]] = []
+    try:
+        with open(file_path, encoding="utf-8") as fh:
+            for raw_line in fh:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                ts_iso = row.get("ts")
+                ts_num = row.get("timestamp")
+                timestamp: float = 0.0
+                if isinstance(ts_iso, str):
+                    try:
+                        timestamp = datetime.fromisoformat(
+                            ts_iso.replace("Z", "+00:00")
+                        ).timestamp()
+                    except ValueError:
+                        timestamp = 0.0
+                if timestamp == 0.0 and isinstance(ts_num, (int, float)):
+                    timestamp = float(ts_num)
+                user_text = row.get("user_text") or ""
+                agent_text = row.get("agent_text") or ""
+                if isinstance(user_text, str) and user_text:
+                    out.append(
+                        {"role": "user", "text": user_text, "timestamp": timestamp}
+                    )
+                if (
+                    isinstance(agent_text, str)
+                    and agent_text
+                    and agent_text != "[interrupted]"
+                ):
+                    out.append(
+                        {
+                            "role": "assistant",
+                            "text": agent_text,
+                            "timestamp": timestamp,
+                        }
+                    )
+    except OSError:
+        return out
+    return out

@@ -86,6 +86,18 @@ const ttsTelnyx = ElevenLabsTTS.forTelnyx({ voiceId: "rachel" });
 
 `for_twilio` / `forTwilio` saves ~30–80 ms first-byte plus per-frame CPU and removes a potential aliasing source. If your Telnyx profile is pinned to PCMU/8000 instead, construct directly with `output_format='ulaw_8000'`.
 
+### Carrier auto-detect — `set_telephony_carrier`
+
+When you don't know the carrier at construction time, `StreamHandler` calls `set_telephony_carrier(carrier)` at call start to advise the provider of the wire format:
+
+```python
+tts = ElevenLabsTTS()                  # output_format defaults to pcm_16000
+tts.set_telephony_carrier("twilio")    # auto-flips to ulaw_8000
+tts.set_telephony_carrier("telnyx")    # keeps pcm_16000 (Telnyx default)
+```
+
+When `output_format` was passed explicitly to the constructor (or via `for_twilio` / `for_telnyx`), `set_telephony_carrier` is a no-op — the user's choice always wins. Calling with an unknown carrier (`""` / `"custom"`) is also a no-op.
+
 ## Constructor
 
 <CodeGroup>

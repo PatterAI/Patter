@@ -76,12 +76,24 @@ async function main(): Promise<void> {
     res.json({ status: 'ok', mode: 'dashboard' });
   });
 
-  // Ingest endpoint — SDK POSTs completed call data here for live updates
+  // Ingest endpoint — SDK POSTs call lifecycle events here so a
+  // standalone dashboard surfaces them live. Three event kinds:
+  //   * status="initiated" — outbound dial handed off to carrier,
+  //     callee hasn't picked up yet. Surfaces the row immediately so
+  //     the user sees the attempt during ringing.
+  //   * default (no status) — call_start, media stream began.
+  //   * ended_at present — call_end, final metrics + transcript.
   app.post('/api/dashboard/ingest', (req, res) => {
     const data = req.body as Record<string, unknown>;
     const callId = (data.call_id as string) || '';
     if (!callId) {
       res.json({ ok: false, error: 'missing call_id' });
+      return;
+    }
+    const status = data.status as string | undefined;
+    if (status === 'initiated') {
+      store.recordCallInitiated(data);
+      res.json({ ok: true, call_id: callId, event: 'initiated' });
       return;
     }
     store.recordCallStart(data);

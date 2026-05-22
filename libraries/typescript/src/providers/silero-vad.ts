@@ -416,6 +416,19 @@ export class SileroVAD implements VADProvider {
   static forPhoneCall(options: SileroVADOptions = {}): Promise<SileroVAD> {
     return SileroVAD.load({
       sampleRate: 16000,
+      // Telephony bumps the activation threshold from the upstream
+      // 0.5 → 0.8 (with deactivation 0.65) so background voices and
+      // low-volume audio in the caller's room don't trip barge-in.
+      // Near-mic speech typically scores 0.85-0.98 on Silero — above
+      // 0.8 — while a distant second speaker through a phone's noise-
+      // suppression pipeline lands around 0.4-0.6 and is now correctly
+      // ignored. Bumped twice during 2026-05-20 acceptance: first 0.5
+      // → 0.7 (still triggered on quiet voices), then 0.7 → 0.8.
+      // Trade-off: a whispered legitimate input may not trigger;
+      // typical phone-call speakers are unaffected. Pass an explicit
+      // ``activationThreshold`` to override per call site.
+      activationThreshold: 0.8,
+      deactivationThreshold: 0.65,
       ...options,
     });
   }

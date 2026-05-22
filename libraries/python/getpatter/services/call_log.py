@@ -104,10 +104,18 @@ def _retention_days() -> int:
 
 
 def _redact_mode() -> str:
-    raw = (os.environ.get("PATTER_LOG_REDACT_PHONE") or "mask").strip().lower()
+    # Default ``full`` (changed from ``mask`` on 2026-05-21): the dashboard
+    # UI's reveal toggle (``revealed=true`` in ``format.ts:fmtPhone``)
+    # cannot reconstruct a raw number once the persisted record has
+    # already been masked, so storing raw on disk is required for the
+    # toggle to actually work. The on-disk path
+    # (``~/Library/Application Support/patter/`` on macOS / XDG data dir
+    # on Linux) is user-private. Override with ``PATTER_LOG_REDACT_PHONE=mask``
+    # for setups that ship logs off-host.
+    raw = (os.environ.get("PATTER_LOG_REDACT_PHONE") or "full").strip().lower()
     if raw in {"full", "mask", "hash_only"}:
         return raw
-    return "mask"
+    return "full"
 
 
 def _redact_phone(raw: str) -> str:
@@ -211,6 +219,7 @@ class CallLogger:
         *,
         caller: str = "",
         callee: str = "",
+        direction: str = "",
         telephony_provider: str = "",
         provider_mode: str = "",
         agent: dict[str, Any] | None = None,
@@ -233,6 +242,7 @@ class CallLogger:
             "status": "in_progress",
             "caller": _redact_phone(caller),
             "callee": _redact_phone(callee),
+            "direction": direction or "inbound",
             "telephony_provider": telephony_provider,
             "provider_mode": provider_mode,
             "agent": agent or {},

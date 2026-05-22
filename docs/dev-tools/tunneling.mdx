@@ -8,9 +8,11 @@ icon: "cloud"
 
 Patter needs a public URL so your telephony provider can send webhooks to the local server. There are three options, all configured via the `tunnel=` argument on `Patter()` (or `new Patter({ tunnel })`).
 
-## CloudflareTunnel (recommended)
+## CloudflareTunnel (dev / acceptance only)
 
-The built-in Cloudflare Quick Tunnel creates a public `*.trycloudflare.com` URL. No account or setup required — just the `cloudflared` binary on `PATH` (or the `cloudflared` npm package).
+The built-in Cloudflare Quick Tunnel creates a public `*.trycloudflare.com` URL with zero setup. No account required — just the `cloudflared` binary on `PATH` (or the `cloudflared` npm package).
+
+**Warning (Twilio outbound calls):** Cloudflare Quick Tunnel routes traffic through a different edge pool than Twilio's Media Streams WebSocket upgrade path. On **first outbound call**, the WSS upgrade can race and drop ~1 % of calls. For production Twilio outbound use, replace this with [ngrok](#static-user-managed-tunnel) or a pre-provisioned named Cloudflare tunnel instead.
 
 <CodeGroup>
 ```python Python
@@ -99,7 +101,9 @@ If auto-configuration fails (for example the Twilio auth token doesn't have perm
 
 ## Static (user-managed tunnel)
 
-Running ngrok or some other public hostname yourself? Use `Static(hostname=...)` — Patter will skip process management and just trust the hostname you provide.
+For production, especially with Twilio outbound calls, manage your own tunnel using ngrok or a pre-provisioned Cloudflare Named Tunnel. Patter will skip process management and trust the hostname you provide.
+
+**Recommended for Twilio outbound:** ngrok stabilizes the WSS upgrade path and eliminates the Quick Tunnel race. Sign up free at [ngrok.com](https://ngrok.com), then:
 
 ```bash
 ngrok http 8000

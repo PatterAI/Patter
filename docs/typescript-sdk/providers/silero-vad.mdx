@@ -51,8 +51,8 @@ const vad = await SileroVAD.forPhoneCall();
 
 // Or, full control:
 const vad2 = await SileroVAD.load({
-  activationThreshold: 0.5,        // Silero `threshold`
-  deactivationThreshold: 0.35,     // `neg_threshold = threshold - 0.15`
+  activationThreshold: 0.8,        // Silero `threshold`; 0.8 tuned for telephony
+  deactivationThreshold: 0.65,     // `neg_threshold = threshold - 0.15`
   minSpeechDuration: 0.25,         // seconds, `min_speech_duration_ms = 250`
   minSilenceDuration: 0.1,         // seconds, `min_silence_duration_ms = 100`
   prefixPaddingDuration: 0.03,     // seconds, `speech_pad_ms = 30`
@@ -68,8 +68,8 @@ from getpatter.providers.silero_vad import SileroVAD
 vad = await asyncio.to_thread(SileroVAD.for_phone_call)
 
 vad2 = SileroVAD.load(
-    activation_threshold=0.5,
-    deactivation_threshold=0.35,
+    activation_threshold=0.8,
+    deactivation_threshold=0.65,
     min_speech_duration=0.25,
     min_silence_duration=0.1,
     prefix_padding_duration=0.03,
@@ -81,15 +81,15 @@ vad2 = SileroVAD.load(
 
 ### Phone-call preset (`forPhoneCall`)
 
-Identical to `load()` but pins `sampleRate` to 16000 Hz — the only sample rate Patter's pipeline-mode audio bus uses (8 kHz mulaw from Twilio is upsampled to 16 kHz PCM before reaching the VAD). All other parameters mirror the upstream Silero defaults from `snakers4/silero-vad`:
+Identical to `load()` but pins `sampleRate` to 16000 Hz — the only sample rate Patter's pipeline-mode audio bus uses (8 kHz mulaw from Twilio is upsampled to 16 kHz PCM before reaching the VAD). Parameters are tuned for telephony-band audio (not the upstream Silero studio defaults):
 
-- `activationThreshold = 0.5` — upstream `threshold`
-- `deactivationThreshold = 0.35` — upstream `neg_threshold = threshold - 0.15`
+- `activationThreshold = 0.8` — raised from upstream default 0.5 to filter background noise on telephony
+- `deactivationThreshold = 0.65` — raised from upstream default 0.35 to match activation with no hysteresis gap
 - `minSpeechDuration = 0.25` — upstream `min_speech_duration_ms = 250`
 - `minSilenceDuration = 0.1` — upstream `min_silence_duration_ms = 100`
 - `prefixPaddingDuration = 0.03` — upstream `speech_pad_ms = 30`
 
-Override any field via the options object. Deployments that experience truncation on natural pauses can raise `minSilenceDuration` (e.g. 0.5–1.0 s):
+Override any field via the options object. Deployments that experience truncation on natural pauses can raise `minSilenceDuration` (e.g. 0.5–1.0 s). To restore the upstream Silero defaults for studio audio, pass `activationThreshold: 0.5, deactivationThreshold: 0.35`:
 
 <CodeGroup>
 ```typescript TypeScript

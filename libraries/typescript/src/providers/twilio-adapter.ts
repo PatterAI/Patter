@@ -203,17 +203,37 @@ export class TwilioAdapter {
   }
 
   /**
-   * Build a minimal ``<Response><Connect><Stream url="..."/></Connect></Response>``
-   * TwiML document. Mirrors the Python adapter's ``generate_stream_twiml``.
+   * Build a ``<Response><Connect><Stream url="...">`` TwiML document.
+   *
+   * ``parameters`` is forwarded as ``<Parameter name="..." value="..."/>``
+   * children of ``<Stream>``. Twilio Media Streams strips query-string params
+   * from the ``<Stream url=...>`` before the WS handshake, so
+   * ``<Parameter>`` tags are the supported way to pre-populate
+   * ``start.customParameters`` on the WS ``start`` frame. Used by the
+   * inbound path to carry caller / callee through to the bridge.
+   *
+   * Mirrors the Python adapter's ``generate_stream_twiml``.
    */
-  static generateStreamTwiml(streamUrl: string): string {
-    const escaped = streamUrl
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&apos;');
-    return `<?xml version="1.0" encoding="UTF-8"?><Response><Connect><Stream url="${escaped}"/></Connect></Response>`;
+  static generateStreamTwiml(
+    streamUrl: string,
+    parameters?: Record<string, string>,
+  ): string {
+    const esc = (s: string): string =>
+      s
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&apos;');
+    const escapedUrl = esc(streamUrl);
+    let paramTags = '';
+    if (parameters) {
+      for (const [name, value] of Object.entries(parameters)) {
+        if (value == null) continue;
+        paramTags += `<Parameter name="${esc(name)}" value="${esc(String(value))}"/>`;
+      }
+    }
+    return `<?xml version="1.0" encoding="UTF-8"?><Response><Connect><Stream url="${escapedUrl}">${paramTags}</Stream></Connect></Response>`;
   }
 
   /** Force-complete an in-progress call. */

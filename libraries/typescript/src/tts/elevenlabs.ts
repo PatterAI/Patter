@@ -63,10 +63,22 @@ export class TTS extends _ElevenLabsTTS {
     // Use the parent's options-object overload so optional fields
     // (languageCode, voiceSettings) reach the underlying provider —
     // the legacy positional signature drops them silently.
+    //
+    // CRITICAL: only forward ``outputFormat`` when the caller actually
+    // passed one. Forwarding a fallback ("pcm_16000") would flip the
+    // parent's ``_outputFormatExplicit`` flag to true and disable the
+    // carrier-aware auto-flip in ``setTelephonyCarrier`` — the prewarm
+    // path on Twilio would keep emitting PCM16 16 kHz and pay the
+    // client-side resample/encode that produced the "audio a scatti"
+    // user report. Leaving the field out lets the parent default to
+    // PCM_16000 with the explicit-flag cleared so the carrier hook can
+    // flip to ulaw_8000 at call time.
     super(resolveApiKey(opts.apiKey), {
       voiceId: opts.voiceId ?? "EXAVITQu4vr4xnSDxMaL",
       modelId: opts.modelId ?? "eleven_flash_v2_5",
-      outputFormat: (opts.outputFormat ?? "pcm_16000") as ElevenLabsOutputFormat,
+      ...(opts.outputFormat !== undefined
+        ? { outputFormat: opts.outputFormat as ElevenLabsOutputFormat }
+        : {}),
       languageCode: opts.languageCode,
       voiceSettings: opts.voiceSettings as never,
     });

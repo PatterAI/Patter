@@ -47,13 +47,42 @@ from getpatter.utils.log_sanitize import mask_phone_number, sanitize_log_value
 logger = logging.getLogger("getpatter")
 
 
+def _is_parked_ws_alive(ws: object) -> bool:
+    """Best-effort liveness check across ``websockets`` library versions.
+
+    The legacy client (``websockets<11``) exposes ``ws.closed: bool``.
+    The current asyncio client (``websockets>=12``) exposes ``ws.state``
+    (an ``IntEnum`` with ``OPEN == 1``) and ``ws.close_code`` (``None``
+    while still open). Return ``True`` only when we can confirm the
+    socket is OPEN — never default to True on unknown shapes, otherwise
+    we'd hand a dead socket to the live adapter.
+    """
+    state = getattr(ws, "state", None)
+    if state is not None:
+        try:
+            return int(state) == 1
+        except Exception:
+            return getattr(state, "name", "").upper() == "OPEN"
+    close_code = getattr(ws, "close_code", "__unset__")
+    if close_code != "__unset__":
+        return close_code is None
+    closed = getattr(ws, "closed", None)
+    if closed is None:
+        return False
+    return not bool(closed)
+
+
 # Minimum wall-clock duration (seconds) the agent must have been speaking
 # before barge-in is allowed to fire. AEC variant (1.0 s) covers the
-# filter convergence window. NO_AEC variant (0.25 s) is anti-flicker
-# only — used on PSTN where AEC is a no-op so there is no warmup to
-# protect, and a long gate just suppresses real-user barge-in.
+# filter convergence window. NO_AEC variant raised 0.1 → 0.5 s on
+# 2026-05-19 after the 0.6.2 acceptance run showed a phantom VAD
+# speech_start firing on the very first inbound frame, cancelling the
+# prewarmed firstMessage and leaving the turn-state machine wedged
+# (``_turn_already_closed=True``). 0.5 s filters those phantoms while
+# still allowing real interruptions to land within half a second of
+# agent onset.
 MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN_AEC = 1.0
-MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN_NO_AEC = 0.1
+MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN_NO_AEC = 0.5
 # Backwards-compat alias used by tests; matches AEC variant.
 MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN = MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN_AEC
 
@@ -66,6 +95,14 @@ MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN = MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN_AEC
 # emit when fed silence or TTS echo on mulaw 8 kHz. Dropping them as turns
 # prevents the caller from entering a feedback loop where every silent frame
 # triggers a new LLM+TTS turn. Parity with TS ``HALLUCINATIONS``.
+#
+# Whisper-specific full-phrase hallucinations (the model's training set
+# was dominated by YouTube captions — on silence / echo it falls back to
+# the most common training-set closers). These fire HARD on PSTN echo
+# loopback when the agent's outbound audio bleeds into the input buffer
+# and the upstream VAD commits a "non-empty" segment to transcription.
+# Comparison happens against the lower-cased + stripped form, so add
+# the canonical lowercase spelling here.
 _STT_HALLUCINATIONS: frozenset[str] = frozenset(
     {
         "you",
@@ -84,6 +121,22 @@ _STT_HALLUCINATIONS: frozenset[str] = frozenset(
         "bye",
         "right",
         "cool",
+        # Whisper YouTube-caption hallucinations
+        "thank you for watching",
+        "thanks for watching",
+        "thank you for watching!",
+        "thanks for watching!",
+        "thank you so much for watching",
+        "thanks for listening",
+        "please subscribe",
+        "subscribe",
+        "music",
+        "[music]",
+        "♪",
+        "[no audio]",
+        "[silence]",
+        "[blank_audio]",
+        "(silence)",
     }
 )
 
@@ -251,7 +304,7 @@ def create_metrics_accumulator(
             tts_model = str(getattr(agent.tts, "model", "") or "")
         else:
             tts_name = "elevenlabs" if elevenlabs_key else ""
-    elif provider == "openai_realtime":
+    elif provider in ("openai_realtime", "openai_realtime_2"):
         stt_name = "openai"
         tts_name = "openai"
         # Realtime collapses STT+LLM+TTS into one model — capture it so the
@@ -262,7 +315,7 @@ def create_metrics_accumulator(
     elif provider == "elevenlabs_convai":
         stt_name = "elevenlabs"
         tts_name = "elevenlabs"
-    if provider == "openai_realtime":
+    if provider in ("openai_realtime", "openai_realtime_2"):
         llm_name = "openai"
     elif provider == "elevenlabs_convai":
         llm_name = "elevenlabs"
@@ -744,6 +797,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         audio_format: str = "pcm16",
         input_transcode: str | None = None,
         speech_events=None,
+        pop_prewarmed_connections=None,
     ) -> None:
         super().__init__(
             agent=agent,
@@ -763,6 +817,11 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         self._transfer_fn = transfer_fn
         self._hangup_fn = hangup_fn
         self._audio_format = audio_format
+        # Callback supplied by the telephony adapter so we can adopt a
+        # Realtime WS that ``Patter._park_provider_connections`` opened
+        # during the ringing window. ``None`` skips adoption — we fall
+        # back to a cold ``connect()``.
+        self._pop_prewarmed_connections = pop_prewarmed_connections
         # OpenAI Realtime API uses a single codec for both input and output
         # (``audio_format`` becomes both ``input_audio_format`` and
         # ``output_audio_format`` in the session). When the telephony leg
@@ -902,9 +961,19 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
 
     async def start(self) -> None:
         """Connect to OpenAI Realtime, register tools, and begin event forwarding."""
-        from getpatter.providers.openai_realtime import (
-            OpenAIRealtimeAdapter,  # type: ignore[import]
+        # Both ``openai_realtime`` and ``openai_realtime_2`` engines now
+        # route through the GA-compatible ``OpenAIRealtime2Adapter`` —
+        # OpenAI deprecated the Beta Realtime API on 2026-05, returning
+        # `invalid_model` to the legacy ``session.update`` shape and the
+        # ``OpenAI-Beta: realtime=v1`` header. Only the default model
+        # string differs between the two engines (mini vs flagship);
+        # everything else (session shape, MIME types, event names) is
+        # identical and lives in the GA adapter.
+        from getpatter.providers.openai_realtime_2 import (  # type: ignore[import]
+            OpenAIRealtime2Adapter,
         )
+
+        _adapter_cls = OpenAIRealtime2Adapter
 
         # Resolve MCP servers BEFORE the adapter is built so the
         # discovered tools are visible in the first ``session.update``.
@@ -947,9 +1016,87 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         )
         if transcription_model is not None:
             adapter_kwargs["input_audio_transcription_model"] = transcription_model
-        self._adapter = OpenAIRealtimeAdapter(**adapter_kwargs)
-        await self._adapter.connect()
-        logger.debug("OpenAI Realtime connected")
+        self._adapter = _adapter_cls(**adapter_kwargs)
+
+        # Try to adopt a Realtime WebSocket parked during the ringing
+        # window. When present we skip the cold ``connect()`` — the
+        # parked socket has already paid the TCP + TLS + HTTP-101 +
+        # ``session.update`` ack round-trip (~300-600 ms saved on first
+        # audible word). Fall back transparently on cache miss / dead
+        # socket / adapter missing ``adopt_websocket``.
+        parked: dict | None = None
+        pop_cb = self._pop_prewarmed_connections
+        if pop_cb is None:
+            logger.info(
+                "[PREWARM] callId=%s provider=openai_realtime SKIPPED adoption: "
+                "pop_prewarmed_connections callback not wired",
+                self.call_id,
+            )
+        else:
+            try:
+                parked = pop_cb(self.call_id)
+            except Exception as exc:  # noqa: BLE001 - best-effort
+                logger.info(
+                    "[PREWARM] callId=%s provider=openai_realtime FAILED pop: %s",
+                    self.call_id,
+                    exc,
+                )
+                parked = None
+            if parked is None:
+                logger.info(
+                    "[PREWARM] callId=%s provider=openai_realtime no slot present "
+                    "(cache miss / parked task still in flight)",
+                    self.call_id,
+                )
+        parked_realtime_ws = (parked or {}).get("openai_realtime")
+        adopt_ok = False
+        if parked_realtime_ws is not None:
+            adopt = getattr(self._adapter, "adopt_websocket", None)
+            # Liveness check robust across ``websockets`` versions. The
+            # legacy client exposes a ``closed`` bool, the new asyncio
+            # client exposes ``state`` (websockets.protocol.State enum)
+            # and ``close_code`` (None while OPEN). Pre-2025-04 we used
+            # ``getattr(ws, "closed", True)`` which defaulted to True
+            # when the attribute didn't exist — causing the GA-shape
+            # parked WS to be treated as dead and forcibly closed
+            # right before adoption.
+            ws_alive = _is_parked_ws_alive(parked_realtime_ws)
+            ws_closed = not ws_alive
+            if not callable(adopt):
+                logger.info(
+                    "[PREWARM] callId=%s provider=openai_realtime adopter missing "
+                    "adopt_websocket method",
+                    self.call_id,
+                )
+            elif not ws_alive:
+                logger.info(
+                    "[PREWARM] callId=%s provider=openai_realtime parked WS died "
+                    "between park and adopt (closed=%s)",
+                    self.call_id,
+                    ws_closed,
+                )
+            else:
+                try:
+                    adopt(parked_realtime_ws)
+                    logger.info(
+                        "[CONNECT] callId=%s provider=openai_realtime source=adopted ms=0",
+                        self.call_id,
+                    )
+                    adopt_ok = True
+                except Exception as exc:  # noqa: BLE001
+                    logger.info(
+                        "[PREWARM] callId=%s provider=openai_realtime adopt FAILED: %s",
+                        self.call_id,
+                        exc,
+                    )
+            if not adopt_ok:
+                try:
+                    await parked_realtime_ws.close()
+                except Exception:
+                    pass
+        if not adopt_ok:
+            await self._adapter.connect()
+        logger.debug("OpenAI Realtime connected (adapter=%s)", _adapter_cls.__name__)
 
         if self.agent.first_message:
             # Start measuring latency for the firstMessage turn (sendText →
@@ -1020,6 +1167,24 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
 
                 elif ev_type == "transcript_input":
                     logger.debug("User: %s", sanitize_log_value(ev_data))
+                    # Filter known Whisper-on-silence hallucinations. The
+                    # Realtime API's input_audio_transcription is Whisper,
+                    # and Whisper's training-set bias means PSTN echo /
+                    # silence segments often transcribe as
+                    # "Thank you for watching." / "Thanks for watching." /
+                    # "[music]" etc. — feeding those back to the LLM
+                    # produces phantom user turns the caller never spoke.
+                    _ev_stripped = (
+                        (ev_data or "").strip().rstrip(".,!?;: ").strip().lower()
+                    )
+                    if _ev_stripped in _STT_HALLUCINATIONS or not _ev_stripped:
+                        logger.info(
+                            "Realtime transcript_input dropped (likely "
+                            "Whisper hallucination on silence/echo): %r",
+                            sanitize_log_value((ev_data or "")[:60]),
+                        )
+                        self._user_transcript_pending = False
+                        continue
                     if self.metrics is not None:
                         # Fallback: start turn here if speech_stopped was missed
                         # (server VAD disabled or custom config).
@@ -1048,6 +1213,20 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                                 "history": list(self.conversation_history),
                             }
                         )
+                    # Drive the assistant response. The session config sets
+                    # ``turn_detection.create_response: false`` so OpenAI's
+                    # server VAD no longer auto-creates a response on every
+                    # ``input_audio_buffer.committed`` — that path triggers
+                    # phantom assistant turns on Whisper-hallucinated input
+                    # ("Thank you for watching." etc.). Patter now requests
+                    # the response explicitly here, AFTER the
+                    # hallucination filter accepts the transcript above.
+                    request_response = getattr(self._adapter, "request_response", None)
+                    if callable(request_response):
+                        try:
+                            await request_response()
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug("Realtime request_response failed: %s", exc)
                     # User transcript landed — flush any assistant turn
                     # that was buffered waiting for it.
                     self._user_transcript_pending = False
@@ -1084,6 +1263,33 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                             current_agent_text += response_text
 
                 elif ev_type == "speech_started":
+                    # Gate the cancel/flush path with an anti-flicker window
+                    # similar to the pipeline mode. OpenAI's server VAD
+                    # fires ``speech_started`` on echo of the agent's own
+                    # audio in PSTN no-AEC scenarios (carrier loopback
+                    # feeds our outbound mulaw back into the input buffer).
+                    # Without this gate every phantom ``speech_started``
+                    # cancels the response — most visibly, the
+                    # firstMessage gets truncated mid-sentence.
+                    #
+                    # ``OpenAIRealtimeStreamHandler`` doesn't carry the
+                    # full pipeline TTS-tracking state (no
+                    # ``_is_speaking`` / ``_first_audio_sent_at``), so
+                    # we use the adapter's own response-tracking
+                    # attributes as a proxy.
+                    response_started_at = getattr(
+                        self._adapter,
+                        "_current_response_first_audio_at",
+                        None,
+                    )
+                    if response_started_at is not None:
+                        elapsed = time.monotonic() - response_started_at
+                        if elapsed < MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN_NO_AEC:
+                            logger.info(
+                                "Realtime barge-in suppressed (response < gate, %.2fs)",
+                                elapsed,
+                            )
+                            continue
                     await self.audio_sender.send_clear()
                     await self._adapter.cancel_response()
                     if self.metrics is not None:
@@ -1814,6 +2020,13 @@ class PipelineStreamHandler(StreamHandler):
         # generic ``audio_*`` marks the Realtime path sends so the two paths
         # can coexist without name collisions.
         self._first_message_mark_counter: int = 0
+        # Cached result of ``_is_tts_output_format_native_for_carrier()``
+        # — settled once at ``start()`` time after ``set_telephony_carrier``
+        # has run on the TTS adapter. ``True`` means
+        # ``_encode_pipeline_audio`` can take the bypass path (raw bytes
+        # → base64, no resample/encode). Parity with TS
+        # ``StreamHandler.ttsOutputFormatNativeForCarrier``.
+        self._tts_output_format_native_for_carrier: bool = False
 
     async def start(self) -> None:
         """Initialize STT/TTS providers, hooks, and start the STT receive loop."""
@@ -1862,6 +2075,25 @@ class PipelineStreamHandler(StreamHandler):
                     "TTS set_telephony_carrier failed; using construction-time format",
                     exc_info=True,
                 )
+        # Re-evaluate after set_telephony_carrier so the _encode_pipeline_audio
+        # fast path is enabled for the current carrier when the adapter
+        # auto-flipped (or the user constructed with a native format).
+        # Parity with TS ``StreamHandler.ttsOutputFormatNativeForCarrier``.
+        self._tts_output_format_native_for_carrier = (
+            self._is_tts_output_format_native_for_carrier()
+        )
+        if self._tts_output_format_native_for_carrier:
+            logger.debug(
+                "TTS outputFormat matches %s wire codec — bypassing client-side transcode",
+                "twilio" if self._for_twilio else "telnyx",
+            )
+            # Flip the audio sender into pass-through mode so it stops
+            # transcoding (16 kHz PCM → mulaw) bytes that are already in
+            # the carrier's wire format. Mirrors the ConvAI handler's
+            # ``_native_mulaw_8k`` fast-path and TS ``encodePipelineAudio``
+            # bypass. Parity with TS ``StreamHandler.ttsOutputFormatNativeForCarrier``.
+            if hasattr(self.audio_sender, "_input_is_mulaw_8k"):
+                self.audio_sender._input_is_mulaw_8k = True  # type: ignore[attr-defined]
 
         if self._stt is None:
             logger.warning("Pipeline mode: no STT configured")
@@ -2696,6 +2928,22 @@ class PipelineStreamHandler(StreamHandler):
             cancel_event = getattr(self, "_llm_cancel_event", None)
             if cancel_event is not None:
                 cancel_event.set()
+            # Force-close any in-flight TTS streaming socket. Without this,
+            # the firstMessage live ``synthesize`` path (used when the prewarm
+            # accumulator hadn't completed before pickup) would block on its
+            # inner ``await ws.recv()`` for up to ``frame_timeout`` (30 s) —
+            # ``_init_pipeline`` would never return, the STT ``on_transcript``
+            # callback would never register, and every subsequent user turn
+            # would be silently dropped. Provider-duck-typed: adapters that
+            # don't expose ``cancel_active_stream`` are no-ops here.
+            # Parity with TS ``StreamHandler.cancelSpeaking``.
+            _tts = getattr(self, "_tts", None)
+            _cancel_fn = getattr(_tts, "cancel_active_stream", None)
+            if callable(_cancel_fn):
+                try:
+                    _cancel_fn()
+                except Exception as _exc:
+                    logger.debug("TTS cancel_active_stream raised: %s", _exc)
             try:
                 await self.audio_sender.send_clear()
             except Exception as exc:
@@ -3438,6 +3686,28 @@ class PipelineStreamHandler(StreamHandler):
             replayed * 20,
         )
 
+    def _is_tts_output_format_native_for_carrier(self) -> bool:
+        """Return True when the TTS adapter's output_format is already in the
+        carrier's wire codec — meaning no client-side resample/transcode is
+        needed in ``TwilioAudioSender.send_audio``.
+
+        Twilio expects ``ulaw_8000``; Telnyx expects ``pcm_16000``. Anything
+        else goes through the normal resample-and-encode path.
+
+        Parity with TS ``StreamHandler.isTtsOutputFormatNativeForCarrier``.
+        """
+        if self._tts is None:
+            return False
+        fmt = getattr(self._tts, "output_format", None)
+        if not isinstance(fmt, str):
+            return False
+        carrier = "twilio" if self._for_twilio else "telnyx"
+        if carrier == "twilio":
+            return fmt == "ulaw_8000"
+        if carrier == "telnyx":
+            return fmt == "pcm_16000"
+        return False
+
     # 40 ms @ 16 kHz mono PCM16 = 1280 bytes. Sized to mirror the smallest
     # live-TTS chunk boundary so cancel granularity (mark/clear bookkeeping)
     # is identical regardless of whether the firstMessage came from the
@@ -3455,6 +3725,13 @@ class PipelineStreamHandler(StreamHandler):
     # deadlock window when a carrier (or a test double) never echoes —
     # playout may glitch by one chunk on timeout but the call stays alive.
     _MARK_AWAIT_TIMEOUT_S: float = 0.5
+    # Bytes-per-millisecond for a 16 kHz PCM16 mono stream. Used by
+    # ``_send_paced_first_message_bytes`` to translate chunk size into a
+    # playout-duration sleep so we never deliver faster than the carrier
+    # can decode + play out (which manifested as severe crackling on the
+    # HTTP-TTS path with client-side resampling). 16000 samples/sec × 2
+    # bytes/sample = 32 bytes/ms.
+    _PCM16_16K_BYTES_PER_MS: int = 32
 
     def _drain_pending_marks(self) -> None:
         """Resolve every entry in ``_pending_marks`` and empty the FIFO.
@@ -3584,20 +3861,18 @@ class PipelineStreamHandler(StreamHandler):
             self._drain_pending_marks()
         self._first_message_mark_counter = 0
         first_chunk_sent = False
-        # Burst delivery: send all chunks back-to-back, exactly like the live
-        # TTS path (synthesize_sentence / first_message live fallback).
-        # Twilio explicitly accepts "media messages of any size" — frames
-        # are "buffered and played in the order received" by the carrier-
-        # side media server, which is the source of truth for the 8 kHz
-        # playout clock. Earlier revisions paced each chunk by
-        # ``playout_ms`` via ``asyncio.sleep`` to "throttle to the playout
-        # rate", but the cumulative ``_wait_for_mark_window`` wait pushed
-        # effective delivery BELOW Twilio's playout rate on long intros
-        # (the prewarm cache is typically 2-4 s of audio), producing
-        # periodic carrier-side buffer underruns audible to the caller as
-        # slow, gravelly, intermittent playback. Marks are still emitted
-        # per chunk so a barge-in's ``send_clear`` still has fine-grained
-        # granularity to cut.
+        # Once the mark window is first filled we switch to playout-time
+        # pacing to prevent batch-ACK bursts from draining the carrier
+        # jitter buffer. Before that we send in burst so the first
+        # ``_FIRST_MESSAGE_MARK_WINDOW`` chunks pre-fill the PSTN jitter
+        # buffer (250–1500 ms). The earlier experiment of pure-burst
+        # delivery (no per-chunk sleep) produced severe carrier-side
+        # crackling on the HTTP TTS path (pcm_16000 → mulaw_8000 client-
+        # side resample) because the burst arrived at Twilio faster than
+        # its media-stream decoder could process — even though the docs
+        # say "of any size". The pace-by-playout path is the robust
+        # default; mark back-pressure remains as an extra guard.
+        initial_fill_complete = False
         for i in range(0, len(bytes_), self._PREWARM_CHUNK_BYTES):
             if not self._is_speaking:
                 break  # barge-in mid-buffer — stop now
@@ -3611,11 +3886,44 @@ class PipelineStreamHandler(StreamHandler):
                 self._aec.push_far_end(chunk)
             await self.audio_sender.send_audio(chunk)
             self._mark_first_audio_sent()
-            await self._send_mark_awaitable()
+            mark_awaitable = await self._send_mark_awaitable()
+            if (
+                not initial_fill_complete
+                and len(self._pending_marks) >= self._FIRST_MESSAGE_MARK_WINDOW
+            ):
+                initial_fill_complete = True
+            # Telnyx has no mark concept — always pace by playout time.
+            # Twilio: the first ``_FIRST_MESSAGE_MARK_WINDOW`` chunks go
+            # out in burst to pre-fill the PSTN jitter buffer, then
+            # playout-time pacing kicks in (via the sticky
+            # ``initial_fill_complete`` flag) to prevent batch-ACK bursts
+            # from draining the buffer → crackling.
+            if mark_awaitable is None or initial_fill_complete:
+                playout_ms = max(
+                    1,
+                    len(chunk) // self._PCM16_16K_BYTES_PER_MS,
+                )
+                await asyncio.sleep(playout_ms / 1000.0)
         return first_chunk_sent
 
     async def cleanup(self) -> None:
         """Cancel the STT loop and close STT/TTS/remote-message adapters."""
+        # Abort any in-flight LLM stream and close any in-flight TTS WS so
+        # the run_pipeline_llm / synthesize awaits unblock immediately
+        # instead of waiting up to 30 s for their own watchdog timers.
+        # Without this, the carrier's stop event ends the call but a
+        # pending TTS WS frame-wait fires a stale "LLM loop error" /
+        # "TTS streaming error" log line tens of seconds later. Parity
+        # with TS ``StreamHandler.handleStop`` / ``handleWsClose``.
+        cancel_event = getattr(self, "_llm_cancel_event", None)
+        if cancel_event is not None:
+            cancel_event.set()
+        _tts_cancel = getattr(getattr(self, "_tts", None), "cancel_active_stream", None)
+        if callable(_tts_cancel):
+            try:
+                _tts_cancel()
+            except Exception:
+                pass
         # Drop any pending barge-in timeout BEFORE we tear down metrics /
         # adapters. Without this, a call that ends while a barge-in is
         # pending leaves an asyncio.Task scheduled to fire

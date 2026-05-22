@@ -161,6 +161,21 @@ export class ElevenLabsWebSocketTTS implements TTSAdapter {
   private adoptedConnection: ElevenLabsParkedWS | null = null;
 
   /**
+   * Active WS for the in-flight ``synthesizeStream`` call, if any. Set
+   * when a stream starts, cleared in its ``finally`` block. The
+   * stream-handler calls ``cancelActiveStream()`` from ``cancelSpeaking``
+   * to unblock the generator's inner ``await Promise<frame>`` — without
+   * it, a barge-in on the firstMessage live path leaves the for-await
+   * stuck waiting for the next frame; ElevenLabs never sends
+   * ``isFinal=true`` after the consumer breaks, the 30 s frame timeout
+   * fires post-call, and meanwhile ``initPipeline`` never returns so
+   * the STT ``onTranscript`` callback never registers and subsequent
+   * user turns are silently dropped (root cause of the 2026-05-20
+   * "first message OK, then no response" symptom).
+   */
+  private activeStreamWs: WebSocket | null = null;
+
+  /**
    * The wire format requested over the ElevenLabs WS. Initially set from
    * the constructor; ``setTelephonyCarrier`` may auto-flip it to the
    * carrier's native codec when the caller did NOT pass ``outputFormat``
@@ -217,6 +232,34 @@ export class ElevenLabsWebSocketTTS implements TTSAdapter {
     const native = CARRIER_NATIVE_FORMAT[carrier];
     if (!native) return;
     this._outputFormat = native;
+  }
+
+  /**
+   * Force-close the WebSocket of any in-flight ``synthesizeStream`` call.
+   * Called by the stream-handler from ``cancelSpeaking`` (barge-in) so
+   * the generator's inner ``await Promise<frame>`` loop unblocks cleanly
+   * via the ``onClose`` handler — instead of waiting up to 30 s for the
+   * ``FRAME_TIMEOUT_MS`` watchdog to fire. No-op when no stream is in
+   * flight or when the WS is already closing.
+   *
+   * Without this, a barge-in during the firstMessage live path left the
+   * for-await stuck (ElevenLabs never sends ``isFinal=true`` after the
+   * consumer breaks), ``initPipeline`` never returned, the STT
+   * ``onTranscript`` callback never registered, and the entire remainder
+   * of the call was silent for the user. Surfaced during the 2026-05-20
+   * acceptance run.
+   */
+  cancelActiveStream(): void {
+    const ws = this.activeStreamWs;
+    if (!ws) return;
+    this.activeStreamWs = null;
+    try {
+      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+        ws.close();
+      }
+    } catch {
+      /* best-effort — finally block in synthesizeStream will also try */
+    }
   }
 
   /** Pre-configured for Twilio Media Streams (`ulaw_8000`). */
@@ -311,6 +354,11 @@ export class ElevenLabsWebSocketTTS implements TTSAdapter {
         headers: { 'xi-api-key': this.apiKey },
       });
     }
+    // Expose the in-flight WS so ``cancelActiveStream`` (called from
+    // the stream-handler's ``cancelSpeaking``) can force a clean exit
+    // out of the inner ``await Promise<frame>`` loop. Cleared in the
+    // outer finally so a stale reference can't leak across calls.
+    this.activeStreamWs = ws;
 
     const queue: Buffer[] = [];
     let done = false;
@@ -462,6 +510,11 @@ export class ElevenLabsWebSocketTTS implements TTSAdapter {
       }
     } finally {
       if (connectTimer) clearTimeout(connectTimer);
+      // Clear the active-stream reference BEFORE we close, so a
+      // concurrent ``cancelActiveStream`` call from the stream-handler
+      // observes that the stream is already cleaning itself up and
+      // avoids a double-close.
+      if (this.activeStreamWs === ws) this.activeStreamWs = null;
       // Best-effort EOS so the server stops billing for unconsumed audio.
       try {
         if (ws.readyState === WebSocket.OPEN) {

@@ -74,6 +74,12 @@ export interface Aggregates {
   readonly avg_latency_ms: number;
   readonly cost_breakdown: CostBreakdown;
   readonly active_calls: number;
+  /**
+   * SDK version reported by the server (auto-derived from
+   * ``getpatter.__version__`` in Python / ``package.json#version`` in TS).
+   * Optional — older backends omit it; the SPA falls back gracefully.
+   */
+  readonly sdk_version?: string;
 }
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
@@ -204,6 +210,7 @@ function parseAggregates(raw: unknown): Aggregates {
       active_calls: 0,
     };
   }
+  const sdkVersion = asString(raw.sdk_version);
   return {
     total_calls: asNumber(raw.total_calls),
     total_cost: asNumber(raw.total_cost),
@@ -211,6 +218,7 @@ function parseAggregates(raw: unknown): Aggregates {
     avg_latency_ms: asNumber(raw.avg_latency_ms),
     cost_breakdown: parseCostBreakdown(raw.cost_breakdown),
     active_calls: asNumber(raw.active_calls),
+    ...(sdkVersion ? { sdk_version: sdkVersion } : {}),
   };
 }
 

@@ -42,6 +42,7 @@ asyncio.run(main())
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `api_key` | `str` | `""` | OpenAI API key. Reads from `OPENAI_API_KEY` when empty. |
+| `language` | `str` | `"en"` | BCP-47 language code (e.g., `"ja"`, `"es"`, `"fr"`). Seeds the auto-generated fallback system prompt (`"Respond in {language}"`). Has no effect when you supply your own `system_prompt` — write the prompt in the target language and OpenAI Realtime will auto-detect from the audio. |
 | `voice` | `str` | `"alloy"` | One of `"alloy"`, `"echo"`, `"fable"`, `"onyx"`, `"nova"`, `"shimmer"`. |
 | `model` | `str` | `"gpt-4o-mini-realtime-preview"` | OpenAI Realtime model ID. See [supported models](/python-sdk/providers/openai-realtime#models). |
 

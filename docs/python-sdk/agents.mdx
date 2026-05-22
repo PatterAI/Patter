@@ -89,7 +89,7 @@ agent = phone.agent(
 | `barge_in_threshold_ms` | `int` | `300` | Sustained-voice window (ms) before treating caller audio as barge-in. Set to `0` to disable. |
 | `aggressive_first_flush` | `bool` | `False` | Opt-in low-latency mode: emits the first clause on a soft punctuation boundary (`,`, em-dash, en-dash) once the buffer reaches ~40 chars. Saves 200–500 ms TTFA on the first sentence at the cost of slightly clipped prosody. **Hard-disabled when `language` starts with `"it"`** (Italian decimal commas would split mid-number). Pipeline mode only. |
 | `disable_phone_preamble` | `bool` | `False` | When `False` (default), Patter prepends a phone-friendly preamble to `system_prompt` that instructs the LLM to avoid markdown, emojis, bullet lists, and code blocks; spell out numbers and dates; and keep replies short. Set to `True` to ship `system_prompt` verbatim. |
-| `prewarm_first_message` | `bool` | `True` since 0.6.2 | Pre-render `first_message` to TTS audio bytes during the ringing window and stream the cached buffer the instant the call connects, eliminating the 200–700 ms TTS first-byte latency on the greeting. Pipeline mode only — the flag is silently ignored (with a `WARN` log) on Realtime / ConvAI engines. Trade-off: pays for the greeting's TTS even when the call rings out unanswered (~$0.001–$0.005 per ring). Set `False` to restore the pre-0.6.2 behaviour. |
+| `prewarm_first_message` | `bool` | `False` | Pre-render `first_message` to TTS audio bytes during the ringing window and stream the cached buffer the instant the call connects, eliminating the 200–700 ms TTS first-byte latency on the greeting. Pipeline mode only — the flag is silently ignored (with a `WARN` log) on Realtime / ConvAI engines. Trade-off: pays for the greeting's TTS even when the call rings out unanswered (~$0.001–$0.005 per ring). Opt in explicitly for inbound calls and low-noise deployments: `prewarm_first_message=True`. |
 
 ## Agent Dataclass
 
@@ -156,17 +156,17 @@ agent = phone.agent(
 
 ### Pre-warming the first message
 
-Since 0.6.2, pipeline-mode agents pre-render the `first_message` audio during the ringing window and stream the cached buffer the instant the call connects — eliminating the 200–700 ms TTS first-byte latency on the greeting.
-
-This is enabled by default (`prewarm_first_message=True`). The trade-off is paying for the greeting's TTS even when the call rings out unanswered (typically $0.001–$0.005 per ring depending on TTS provider). Opt out for very high-volume outbound where un-answered TTS spend matters:
+Pipeline-mode agents can pre-render the `first_message` audio during the ringing window and stream the cached buffer the instant the call connects — eliminating the 200–700 ms TTS first-byte latency on the greeting. Opt in explicitly:
 
 ```python
 agent = phone.agent(
     system_prompt="...",
     first_message="Hello!",
-    prewarm_first_message=False,  # disable pre-rendering
+    prewarm_first_message=True,  # enable pre-rendering
 )
 ```
+
+The trade-off is paying for the greeting's TTS even when the call rings out unanswered (typically $0.001–$0.005 per ring depending on TTS provider). Good for inbound calls and low-noise deployments; disable for very high-volume outbound where un-answered TTS spend matters.
 
 Realtime / ConvAI engines don't consume the pre-rendered cache (their first message goes through the engine's own audio path); the flag is silently ignored with a `WARN` log when set on a non-pipeline agent.
 
@@ -206,12 +206,12 @@ agent = phone.agent(
 )
 ```
 
-`SileroVAD.for_phone_call(**overrides)` is identical to `SileroVAD.load(...)` but pins `sample_rate` to 16 000 Hz — the only sample rate Patter's pipeline-mode audio bus uses (8 kHz mulaw from Twilio is upsampled to 16 kHz PCM before reaching the VAD). All other parameters use the upstream `snakers4/silero-vad` defaults:
+`SileroVAD.for_phone_call(**overrides)` is identical to `SileroVAD.load(...)` but pins `sample_rate` to 16 000 Hz — the only sample rate Patter's pipeline-mode audio bus uses (8 kHz mulaw from Twilio is upsampled to 16 kHz PCM before reaching the VAD). Parameters are tuned for telephony-band audio (not the upstream Silero studio defaults):
 
 | Field | Default | Upstream equivalent |
 |-------|---------|---------------------|
-| `activation_threshold` | `0.5` | `threshold` |
-| `deactivation_threshold` | `0.35` | `neg_threshold = threshold − 0.15` |
+| `activation_threshold` | `0.8` | `threshold` (tuned for telephony, not studio) |
+| `deactivation_threshold` | `0.65` | `neg_threshold = threshold − 0.15` (tuned for telephony) |
 | `min_speech_duration` | `0.25` s | `min_speech_duration_ms = 250` |
 | `min_silence_duration` | `0.1` s | `min_silence_duration_ms = 100` |
 | `prefix_padding_duration` | `0.03` s | `speech_pad_ms = 30` |

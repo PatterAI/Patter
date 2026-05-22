@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from getpatter import OpenAIRealtime, Patter, Twilio, tool
+from getpatter import OpenAIRealtime, Patter, Twilio
 from getpatter.models import Agent
 
 
@@ -24,6 +24,8 @@ def _local_phone(webhook_url="abc.ngrok.io"):
 def _local_agent(phone: Patter) -> Agent:
     """Build an OpenAI Realtime agent for the tests below."""
     return phone.agent(engine=OpenAIRealtime(api_key="sk_test"), system_prompt="Test")
+
+
 from getpatter.telephony.twilio import _TRANSFER_CALL_TOOL, _END_CALL_TOOL
 
 
@@ -65,11 +67,20 @@ def test_transfer_call_tool_injected_when_no_agent_tools():
 
 def test_transfer_call_tool_injected_alongside_agent_tools():
     """transfer_call is appended after agent-defined tools."""
-    user_tool = {"name": "lookup", "description": "Look up", "parameters": {}, "webhook_url": "https://x.com"}
+    user_tool = {
+        "name": "lookup",
+        "description": "Look up",
+        "parameters": {},
+        "webhook_url": "https://x.com",
+    }
     agent = Agent(system_prompt="Test", tools=[user_tool])
     # Simulate what the handler does
     agent_tools = [
-        {"name": t["name"], "description": t.get("description", ""), "parameters": t.get("parameters", {})}
+        {
+            "name": t["name"],
+            "description": t.get("description", ""),
+            "parameters": t.get("parameters", {}),
+        }
         for t in (agent.tools or [])
     ]
     openai_tools = agent_tools + [_TRANSFER_CALL_TOOL]
@@ -127,9 +138,8 @@ def test_serve_passes_recording_to_server():
         MockServer.return_value = mock_instance
 
         import asyncio
-        asyncio.run(
-            phone.serve(agent, recording=True)
-        )
+
+        asyncio.run(phone.serve(agent, recording=True))
 
         MockServer.assert_called_once()
         call_args = MockServer.call_args
@@ -167,6 +177,7 @@ def test_call_accepts_machine_detection_param():
     agent = _local_agent(phone)
     # Verify the parameter is accepted by the function signature
     import inspect
+
     sig = inspect.signature(phone.call)
     assert "machine_detection" in sig.parameters
 
@@ -182,16 +193,18 @@ def test_machine_detection_adds_params_to_twilio_call():
         MockAdapter.return_value = mock_instance
 
         import asyncio
-        asyncio.run(
-            phone.call(to="+39123456789", agent=agent, machine_detection=True)
-        )
+
+        asyncio.run(phone.call(to="+39123456789", agent=agent, machine_detection=True))
 
         mock_instance.initiate_call.assert_called_once()
         _, kwargs = mock_instance.initiate_call.call_args
         extra = kwargs.get("extra_params", {})
-        assert extra.get("MachineDetection") == "DetectMessageEnd"
-        assert extra.get("AsyncAmd") == "true"
-        assert "AsyncAmdStatusCallback" in extra
+        # twilio-python's ``calls.create(**kwargs)`` accepts snake_case
+        # only — PascalCase raises ``TypeError: unexpected keyword
+        # argument``. Defaults must therefore be snake_case at the source.
+        assert extra.get("machine_detection") == "DetectMessageEnd"
+        assert extra.get("async_amd") == "true"
+        assert "async_amd_status_callback" in extra
 
 
 def test_amd_callback_url_uses_webhook_host():
@@ -205,13 +218,12 @@ def test_amd_callback_url_uses_webhook_host():
         MockAdapter.return_value = mock_instance
 
         import asyncio
-        asyncio.run(
-            phone.call(to="+39123456789", agent=agent, machine_detection=True)
-        )
+
+        asyncio.run(phone.call(to="+39123456789", agent=agent, machine_detection=True))
 
         _, kwargs = mock_instance.initiate_call.call_args
         extra = kwargs.get("extra_params", {})
-        assert "my.ngrok.io" in extra.get("AsyncAmdStatusCallback", "")
+        assert "my.ngrok.io" in extra.get("async_amd_status_callback", "")
 
 
 def test_amd_webhook_endpoint_exists():
@@ -244,17 +256,18 @@ def test_machine_detection_false_no_extra_params():
         MockAdapter.return_value = mock_instance
 
         import asyncio
-        asyncio.run(
-            phone.call(to="+39123456789", agent=agent, machine_detection=False)
-        )
+
+        asyncio.run(phone.call(to="+39123456789", agent=agent, machine_detection=False))
 
         _, kwargs = mock_instance.initiate_call.call_args
         extra = kwargs.get("extra_params", {})
         # AMD-specific params must be absent when machine_detection=False.
-        assert "MachineDetection" not in extra
-        assert "AsyncAmd" not in extra
-        # StatusCallback is always wired (BUG #06 — dashboard sees failures).
-        assert extra.get("StatusCallback", "").endswith("/webhooks/twilio/status")
+        assert "machine_detection" not in extra
+        assert "async_amd" not in extra
+        # status_callback is always wired (BUG #06 — dashboard sees failures).
+        # Snake_case is mandatory: twilio-python's ``calls.create``
+        # rejects PascalCase with ``TypeError: unexpected keyword``.
+        assert extra.get("status_callback", "").endswith("/webhooks/twilio/status")
 
 
 # ---------------------------------------------------------------------------
@@ -280,10 +293,19 @@ def test_end_call_tool_reason_is_optional():
 
 def test_end_call_tool_injected_in_openai_tools():
     """_END_CALL_TOOL is injected alongside _TRANSFER_CALL_TOOL in OpenAI tool list."""
-    user_tool = {"name": "lookup", "description": "Look up", "parameters": {}, "webhook_url": "https://x.com"}
+    user_tool = {
+        "name": "lookup",
+        "description": "Look up",
+        "parameters": {},
+        "webhook_url": "https://x.com",
+    }
     agent = Agent(system_prompt="Test", tools=[user_tool])
     agent_tools = [
-        {"name": t["name"], "description": t.get("description", ""), "parameters": t.get("parameters", {})}
+        {
+            "name": t["name"],
+            "description": t.get("description", ""),
+            "parameters": t.get("parameters", {}),
+        }
         for t in (agent.tools or [])
     ]
     openai_tools = agent_tools + [_TRANSFER_CALL_TOOL, _END_CALL_TOOL]
@@ -308,6 +330,7 @@ def test_end_call_tool_injected_with_no_agent_tools():
 def test_voicemail_message_param_on_call():
     """Patter.call() accepts voicemail_message parameter."""
     import inspect
+
     phone = _local_phone()
     sig = inspect.signature(phone.call)
     assert "voicemail_message" in sig.parameters
@@ -316,6 +339,7 @@ def test_voicemail_message_param_on_call():
 def test_voicemail_message_param_on_serve():
     """Patter.serve() accepts voicemail_message parameter."""
     import inspect
+
     phone = _local_phone()
     sig = inspect.signature(phone.serve)
     assert "voicemail_message" in sig.parameters
@@ -334,7 +358,9 @@ def test_embedded_server_accepts_voicemail_message():
         webhook_url="abc.ngrok.io",
     )
     agent = Agent(system_prompt="Test")
-    server = EmbeddedServer(config=config, agent=agent, voicemail_message="Please call back.")
+    server = EmbeddedServer(
+        config=config, agent=agent, voicemail_message="Please call back."
+    )
     assert server.voicemail_message == "Please call back."
 
 
@@ -366,9 +392,8 @@ def test_serve_passes_voicemail_message_to_server():
         MockServer.return_value = mock_instance
 
         import asyncio
-        asyncio.run(
-            phone.serve(agent, voicemail_message="Hi, please call back.")
-        )
+
+        asyncio.run(phone.serve(agent, voicemail_message="Hi, please call back."))
 
         MockServer.assert_called_once()
         call_kwargs = MockServer.call_args.kwargs
@@ -480,7 +505,9 @@ def test_resolve_variables_replaces_placeholders():
     """_resolve_variables substitutes {key} with corresponding values."""
     from getpatter.telephony.twilio import _resolve_variables
 
-    result = _resolve_variables("Hello {name}, order #{order_id}!", {"name": "Mario", "order_id": "42"})
+    result = _resolve_variables(
+        "Hello {name}, order #{order_id}!", {"name": "Mario", "order_id": "42"}
+    )
     assert result == "Hello Mario, order #42!"
 
 
@@ -530,11 +557,13 @@ async def test_conversation_history_pipeline_tracks_user_messages():
     ws.query_params = {"caller": "+1", "callee": "+2"}
 
     events = [
-        json.dumps({
-            "event": "start",
-            "streamSid": "SID",
-            "start": {"callSid": "CA1", "customParameters": {}},
-        }),
+        json.dumps(
+            {
+                "event": "start",
+                "streamSid": "SID",
+                "start": {"callSid": "CA1", "customParameters": {}},
+            }
+        ),
         json.dumps({"event": "stop"}),
     ]
     ws.receive_text = AsyncMock(side_effect=events)
@@ -555,9 +584,12 @@ async def test_conversation_history_pipeline_tracks_user_messages():
 
     mock_stt.receive_transcripts = fake_receive
 
-    with patch("getpatter.telephony.twilio._create_stt_from_config", return_value=None), \
-         patch("getpatter.telephony.twilio._create_tts_from_config", return_value=None):
+    with (
+        patch("getpatter.telephony.twilio._create_stt_from_config", return_value=None),
+        patch("getpatter.telephony.twilio._create_tts_from_config", return_value=None),
+    ):
         from getpatter.telephony.twilio import twilio_stream_bridge
+
         try:
             await asyncio.wait_for(
                 twilio_stream_bridge(
@@ -597,11 +629,13 @@ async def test_conversation_history_passed_to_on_call_end():
     ws.query_params = {"caller": "+1", "callee": "+2"}
 
     events = [
-        json.dumps({
-            "event": "start",
-            "streamSid": "SID",
-            "start": {"callSid": "CA1", "customParameters": {}},
-        }),
+        json.dumps(
+            {
+                "event": "start",
+                "streamSid": "SID",
+                "start": {"callSid": "CA1", "customParameters": {}},
+            }
+        ),
         json.dumps({"event": "stop"}),
     ]
     ws.receive_text = AsyncMock(side_effect=events)
@@ -620,8 +654,12 @@ async def test_conversation_history_passed_to_on_call_end():
 
     mock_adapter.receive_events = fake_receive_events
 
-    with patch("getpatter.providers.openai_realtime.OpenAIRealtimeAdapter", return_value=mock_adapter):
+    with patch(
+        "getpatter.providers.openai_realtime.OpenAIRealtimeAdapter",
+        return_value=mock_adapter,
+    ):
         from getpatter.telephony.twilio import twilio_stream_bridge
+
         try:
             await asyncio.wait_for(
                 twilio_stream_bridge(

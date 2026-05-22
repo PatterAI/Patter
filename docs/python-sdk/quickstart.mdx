@@ -146,6 +146,36 @@ Swap `AnthropicLLM()` for `OpenAILLM()`, `GroqLLM()`, `CerebrasLLM()`, or `Googl
 
 ---
 
+## Non-English agents
+
+OpenAI Realtime auto-detects the spoken language from the inbound audio and matches the language of your `system_prompt`. Writing the prompt in the target language is the primary control:
+
+```python
+# Japanese — write the prompt in Japanese.
+agent = phone.agent(
+    engine=OpenAIRealtime(),
+    system_prompt="あなたは丁寧な日本語のアシスタントです。",
+    first_message="お電話ありがとうございます。ご用件をお伺いします。",
+)
+```
+
+The `language="ja"` parameter on `OpenAIRealtime` only seeds the auto-generated fallback prompt (`"Respond in {language}"`) when you don't supply your own `system_prompt`. It does not configure the Realtime API session itself.
+
+For pipeline mode the STT needs the language code so it can pick the right acoustic model:
+
+```python
+agent = phone.agent(
+    stt=DeepgramSTT(language="ja"),        # required: Deepgram needs the JP model
+    llm=AnthropicLLM(),                    # LLM responds in whatever language you prompt it in
+    tts=ElevenLabsTTS(voice_id="..."),     # ElevenLabs auto-detects from text; pick a voice that supports JP
+    system_prompt="あなたは丁寧な日本語のアシスタントです。",
+)
+```
+
+**E.164 formatting for international calls:** outbound `to=` values must be E.164. Many regions drop the trunk-zero — Japanese numbers like `090-xxxx-xxxx` are dialled as `+81XXXXXXXXX` (drop the leading `0`).
+
+---
+
 ## What's next
 
 <CardGroup cols={2}>

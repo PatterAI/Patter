@@ -78,7 +78,7 @@ Available LLM providers: `OpenAILLM`, `AnthropicLLM`, `GroqLLM`, `CerebrasLLM`, 
 | `bargeInThresholdMs` | `number` | No | `300` | Barge-in hang-over window (ms). Set to `0` to disable. |
 | `aggressiveFirstFlush` | `boolean` | No | `false` | Opt-in low-latency mode: emits the first clause on soft punctuation (`,`, em-dash) once the buffer reaches ≥40 chars. Saves 200–500 ms TTFA. Hard-disabled when `language="it"` (Italian punctuation patterns are incompatible). |
 | `disablePhonePreamble` | `boolean` | No | `false` | When `false` (default), Patter prepends a phone-friendly preamble to `systemPrompt` that instructs the LLM to avoid markdown, emojis, bullet lists, and code blocks; spell out numbers and dates; and keep replies short. Set to `true` to ship `systemPrompt` verbatim. |
-| `prewarmFirstMessage` | `boolean` | No | `true` since 0.6.2 (pipeline mode only) | Pre-render `firstMessage` to TTS audio bytes during the ringing window and stream the cached buffer the instant the call connects, eliminating the 200–700 ms TTS first-byte latency on the greeting. Realtime / ConvAI engines silently ignore the flag (with a `WARN` log) — only pipeline mode consumes the cache. Trade-off: pays for the greeting's TTS even when the call rings out unanswered (~$0.001–$0.005 per ring). Set `false` to restore the pre-0.6.2 behaviour. |
+| `prewarmFirstMessage` | `boolean` | No | `false` (pipeline mode only) | Pre-render `firstMessage` to TTS audio bytes during the ringing window and stream the cached buffer the instant the call connects, eliminating the 200–700 ms TTS first-byte latency on the greeting. Realtime / ConvAI engines silently ignore the flag (with a `WARN` log) — only pipeline mode consumes the cache. Trade-off: pays for the greeting's TTS even when the call rings out unanswered (~$0.001–$0.005 per ring). Opt in explicitly for inbound calls and low-noise deployments: `prewarmFirstMessage: true`. |
 | `provider` | `'openai_realtime' \| 'elevenlabs_convai' \| 'pipeline'` | No | derived | Provider mode. Normally derived from `engine` / `stt` + `tts`. Pass `'pipeline'` explicitly when building a pipeline-mode agent without an engine instance. |
 
 ## Validation Rules
@@ -137,8 +137,8 @@ const agent = phone.agent({
 
 | Field | Default | Upstream equivalent |
 |-------|---------|---------------------|
-| `activationThreshold` | `0.5` | `threshold` |
-| `deactivationThreshold` | `0.35` | `neg_threshold = threshold − 0.15` |
+| `activationThreshold` | `0.8` | `threshold` (tuned for telephony, not studio) |
+| `deactivationThreshold` | `0.65` | `neg_threshold = threshold − 0.15` (tuned for telephony) |
 | `minSpeechDuration` | `0.25` s | `min_speech_duration_ms = 250` |
 | `minSilenceDuration` | `0.1` s | `min_silence_duration_ms = 100` |
 | `prefixPaddingDuration` | `0.03` s | `speech_pad_ms = 30` |

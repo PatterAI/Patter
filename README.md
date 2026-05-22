@@ -72,7 +72,9 @@ await phone.serve({ agent, tunnel: true });
 
 </details>
 
-`tunnel: true` spawns a Cloudflare tunnel and points your Twilio number at it. In production, pass `webhook_url` / `webhookUrl` to the constructor instead. Every carrier and provider reads its credentials from environment variables by default; see each SDK's README for the full catalog.
+`tunnel: true` spawns a Cloudflare quick tunnel and points your Twilio number at it — great for dev / acceptance. For production outbound calls (especially on Twilio), replace it with [ngrok](https://ngrok.com) or a static `webhook_url` to avoid WSS upgrade races on first call. See [Tunneling](/docs/dev-tools/tunneling) for details.
+
+Every carrier and provider reads its credentials from environment variables by default; see each SDK's README for the full catalog.
 
 ## How Patter compares
 

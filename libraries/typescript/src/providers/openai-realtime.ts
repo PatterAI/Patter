@@ -247,7 +247,6 @@ export class OpenAIRealtimeAdapter {
         const sock = new WebSocket(url, {
           headers: {
             Authorization: `Bearer ${this.apiKey}`,
-            'OpenAI-Beta': 'realtime=v1',
           },
         });
         const timer = setTimeout(() => {
@@ -335,7 +334,6 @@ export class OpenAIRealtimeAdapter {
     this.ws = new WebSocket(url, {
       headers: {
         Authorization: `Bearer ${this.apiKey}`,
-        'OpenAI-Beta': 'realtime=v1',
       },
     });
 
@@ -437,7 +435,6 @@ export class OpenAIRealtimeAdapter {
     const ws = new WebSocket(url, {
       headers: {
         Authorization: `Bearer ${this.apiKey}`,
-        'OpenAI-Beta': 'realtime=v1',
       },
     });
     await new Promise<void>((resolve, reject) => {
@@ -610,22 +607,29 @@ export class OpenAIRealtimeAdapter {
    */
   cancelResponse(): void {
     if (!this.ws) return;
-    if (this.currentResponseItemId) {
-      let audioEndMs = this.currentResponseAudioMs;
-      if (this.currentResponseFirstAudioAt !== null) {
-        const elapsedMs = Date.now() - this.currentResponseFirstAudioAt;
-        audioEndMs = Math.min(audioEndMs, Math.max(elapsedMs, 0));
-      }
-      try {
-        this.ws.send(JSON.stringify({
-          type: 'conversation.item.truncate',
-          item_id: this.currentResponseItemId,
-          content_index: 0,
-          audio_end_ms: audioEndMs,
-        }));
-      } catch (err) {
-        getLogger().debug?.(`conversation.item.truncate failed: ${String(err)}`);
-      }
+    if (!this.currentResponseItemId) {
+      // No response in flight — nothing to cancel. OpenAI Realtime GA
+      // rejects an unconditional ``response.cancel`` with
+      // ``response_cancel_not_active``, which surfaces as ERROR-level
+      // log spam on every phantom VAD ``speech_started`` (echo of
+      // agent audio, voicemail beep, line noise). Silent no-op here
+      // keeps the cancel idempotent across stale callers.
+      return;
+    }
+    let audioEndMs = this.currentResponseAudioMs;
+    if (this.currentResponseFirstAudioAt !== null) {
+      const elapsedMs = Date.now() - this.currentResponseFirstAudioAt;
+      audioEndMs = Math.min(audioEndMs, Math.max(elapsedMs, 0));
+    }
+    try {
+      this.ws.send(JSON.stringify({
+        type: 'conversation.item.truncate',
+        item_id: this.currentResponseItemId,
+        content_index: 0,
+        audio_end_ms: audioEndMs,
+      }));
+    } catch (err) {
+      getLogger().debug?.(`conversation.item.truncate failed: ${String(err)}`);
     }
     this.ws.send(JSON.stringify({ type: 'response.cancel' }));
     // Reset per-response tracking so any post-cancel late frames and the
@@ -641,6 +645,20 @@ export class OpenAIRealtimeAdapter {
       type: 'conversation.item.create',
       item: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] },
     }));
+    this.ws?.send(JSON.stringify({ type: 'response.create' }));
+  }
+
+  /**
+   * Trigger `response.create` with no new user item.
+   *
+   * Used by the Realtime stream-handler to drive a response after the
+   * client-side hallucination filter accepts an
+   * `input_audio_transcription.completed` event. The server VAD config
+   * sets `create_response: false` so OpenAI no longer auto-creates a
+   * response on every `input_audio_buffer.committed`; Patter is now
+   * responsible for triggering it explicitly when a real user turn lands.
+   */
+  async requestResponse(): Promise<void> {
     this.ws?.send(JSON.stringify({ type: 'response.create' }));
   }
 

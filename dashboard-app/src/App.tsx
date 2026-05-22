@@ -18,7 +18,11 @@ import {
   type SparklineResult,
 } from './lib/mappers';
 
-const SDK_VERSION = '0.6.0';
+// Fallback when the server-side ``aggregates.sdk_version`` field is missing
+// (older backend, transient fetch error). Both SDKs (Python + TS) now ship
+// the live ``getpatter.__version__`` / ``package.json#version`` in every
+// ``/api/dashboard/aggregates`` response.
+const SDK_VERSION_FALLBACK = 'dev';
 const RANGE_LABEL: Record<RangeKey, string> = {
   '1h': '1h',
   '24h': '24h',
@@ -128,6 +132,12 @@ export function App() {
   const rangeAvgP95 = avgP95(filteredCalls) || aggregates?.avg_latency_ms || 0;
   const rangeSpend = totalSpend(filteredCalls) || aggregates?.total_cost || 0;
   const phoneNumber = pickPhoneNumber(calls);
+  // Server-derived SDK version (single source of truth: ``getpatter.__version__``
+  // in Python / ``package.json#version`` in TS, surfaced via the aggregates
+  // payload). Falls back when the server side is older than this SPA build.
+  const sdkVersion =
+    (typeof aggregates?.sdk_version === 'string' && aggregates.sdk_version) ||
+    SDK_VERSION_FALLBACK;
 
   const sparkTotalCalls = useMemo(
     () => computeSparkline(filteredCalls, 'totalCalls', strategy),
@@ -183,7 +193,7 @@ export function App() {
         liveCount={liveCount}
         todayCount={totalCount}
         phoneNumber={phoneNumber}
-        sdkVersion={SDK_VERSION}
+        sdkVersion={sdkVersion}
         revealed={revealed}
         dark={dark}
         onToggleRevealed={toggleRevealed}
@@ -262,7 +272,7 @@ export function App() {
             <span className={isStreaming ? 'green' : ''}>
               {isStreaming ? 'streaming · sse' : error ? `error · ${error}` : 'idle'}
             </span>
-            <span>SDK · {SDK_VERSION}</span>
+            <span>SDK · {sdkVersion}</span>
           </div>
           <div className="group">
             <span>

@@ -349,6 +349,11 @@ class EmbeddedServer:
                     call_id_str,
                     caller=resolved_caller,
                     callee=resolved_callee,
+                    direction=(
+                        data.get("direction")
+                        or active_record.get("direction")
+                        or "inbound"
+                    ),
                     telephony_provider=data.get("telephony_provider", "") or "",
                     provider_mode=getattr(agent, "provider", "") or "",
                     agent=_agent_snapshot(),

@@ -10,7 +10,8 @@ Two regressions are locked in here:
      in-memory metrics store.
   2. **IMP2** — callers may set ``ring_timeout`` on ``Patter.call()`` to
      control how long the phone rings before the carrier gives up. It
-     must land as ``Timeout`` on Twilio's REST payload and ``timeout_secs``
+     must land as ``timeout`` on the twilio-python kwarg payload
+     (translated to Twilio's ``Timeout`` REST param) and as ``timeout_secs``
      on Telnyx's — the old code silently dropped it.
 
 The tests exercise the endpoint directly via the ASGI layer, and exercise
@@ -254,9 +255,7 @@ class TestRingTimeoutPropagation:
             "getpatter.providers.twilio_adapter.TwilioAdapter"
         ) as mock_adapter_cls:
             mock_adapter = mock_adapter_cls.return_value
-            mock_adapter.initiate_call = AsyncMock(
-                return_value="CA" + "9" * 32
-            )
+            mock_adapter.initiate_call = AsyncMock(return_value="CA" + "9" * 32)
 
             await phone.call(
                 to="+15559876543",
@@ -265,10 +264,8 @@ class TestRingTimeoutPropagation:
             )
 
             mock_adapter.initiate_call.assert_awaited_once()
-            extra_params = mock_adapter.initiate_call.await_args.kwargs[
-                "extra_params"
-            ]
-            assert extra_params["Timeout"] == 45
+            extra_params = mock_adapter.initiate_call.await_args.kwargs["extra_params"]
+            assert extra_params["timeout"] == 45
 
     @pytest.mark.asyncio
     async def test_twilio_ring_timeout_default_is_25(self) -> None:
@@ -292,16 +289,12 @@ class TestRingTimeoutPropagation:
             "getpatter.providers.twilio_adapter.TwilioAdapter"
         ) as mock_adapter_cls:
             mock_adapter = mock_adapter_cls.return_value
-            mock_adapter.initiate_call = AsyncMock(
-                return_value="CA" + "8" * 32
-            )
+            mock_adapter.initiate_call = AsyncMock(return_value="CA" + "8" * 32)
 
             await phone.call(to="+15559876543", agent=make_agent())
 
-            extra_params = mock_adapter.initiate_call.await_args.kwargs[
-                "extra_params"
-            ]
-            assert extra_params["Timeout"] == 25
+            extra_params = mock_adapter.initiate_call.await_args.kwargs["extra_params"]
+            assert extra_params["timeout"] == 25
 
     @pytest.mark.asyncio
     async def test_twilio_ring_timeout_omitted_when_none(self) -> None:
@@ -324,18 +317,16 @@ class TestRingTimeoutPropagation:
             "getpatter.providers.twilio_adapter.TwilioAdapter"
         ) as mock_adapter_cls:
             mock_adapter = mock_adapter_cls.return_value
-            mock_adapter.initiate_call = AsyncMock(
-                return_value="CA" + "8" * 32
-            )
+            mock_adapter.initiate_call = AsyncMock(return_value="CA" + "8" * 32)
 
             await phone.call(
-                to="+15559876543", agent=make_agent(), ring_timeout=None,
+                to="+15559876543",
+                agent=make_agent(),
+                ring_timeout=None,
             )
 
-            extra_params = mock_adapter.initiate_call.await_args.kwargs[
-                "extra_params"
-            ]
-            assert "Timeout" not in extra_params
+            extra_params = mock_adapter.initiate_call.await_args.kwargs["extra_params"]
+            assert "timeout" not in extra_params
 
     @pytest.mark.asyncio
     async def test_twilio_statuscallback_always_registered(self) -> None:
@@ -359,24 +350,23 @@ class TestRingTimeoutPropagation:
             "getpatter.providers.twilio_adapter.TwilioAdapter"
         ) as mock_adapter_cls:
             mock_adapter = mock_adapter_cls.return_value
-            mock_adapter.initiate_call = AsyncMock(
-                return_value="CA" + "7" * 32
-            )
+            mock_adapter.initiate_call = AsyncMock(return_value="CA" + "7" * 32)
 
             await phone.call(to="+15559876543", agent=make_agent())
 
-            extra = mock_adapter.initiate_call.await_args.kwargs[
-                "extra_params"
-            ]
+            extra = mock_adapter.initiate_call.await_args.kwargs["extra_params"]
+            # Keys are snake_case — the twilio-python SDK's
+            # ``calls.create(**kwargs)`` rejects PascalCase with
+            # ``TypeError: unexpected keyword argument``.
             assert (
-                extra["StatusCallback"]
+                extra["status_callback"]
                 == "https://test.ngrok.io/webhooks/twilio/status"
             )
-            assert extra["StatusCallbackMethod"] == "POST"
-            # Events we care about for BUG #06. Now passed as a list under
+            assert extra["status_callback_method"] == "POST"
+            # Events we care about for BUG #06. Passed as a list under
             # the snake_case key the twilio-python SDK expects (see
             # 2026-04-29 fix for Twilio notification 21626).
-            events = extra.get("status_callback_event") or extra.get("StatusCallbackEvent")
+            events = extra["status_callback_event"]
             assert "ringing" in events
             assert "completed" in events
 

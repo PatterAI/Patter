@@ -1,6 +1,207 @@
 ## Unreleased
 
+### Added
+
+- **`OpenAIRealtime2` / `OpenAIRealtime2Adapter` — Python GA Realtime API
+  adapter (parity with TypeScript `OpenAIRealtime2` / `OpenAIRealtime2Adapter`
+  in `libraries/typescript/src/engines/openai-2.ts` /
+  `libraries/typescript/src/providers/openai-realtime-2.ts`).** The GA
+  endpoint rejects the legacy `OpenAI-Beta: realtime=v1` header and speaks a
+  different `session.update` wire shape (`output_modalities`, nested
+  `audio.{input,output}` with MIME type strings, `session.type = "realtime"`).
+  `OpenAIRealtime2Adapter` (in
+  `libraries/python/getpatter/providers/openai_realtime_2.py`) subclasses
+  `OpenAIRealtimeAdapter` and overrides `connect()`, `send_audio()`,
+  `receive_events()`, and `send_first_message()` to speak the GA wire shape
+  and perform bidirectional transcoding (mulaw 8 kHz ↔ PCM 24 kHz) required
+  because the GA audio engine silently drops mulaw frames. `OpenAIRealtime2`
+  engine marker (in `libraries/python/getpatter/engines/openai_realtime_2.py`)
+  defaults to `gpt-realtime-2`. Both are exported from the top-level package:
+  `from getpatter import OpenAIRealtime2, OpenAIRealtime2Adapter`. Wire up via
+  `phone.agent(engine=OpenAIRealtime2(reasoning_effort="low"), ...)`.
+
+### Changed
+
+- **`OpenAIRealtime` default model changed from `gpt-4o-mini-realtime-preview`
+  to `gpt-realtime-mini`** in
+  `libraries/python/getpatter/engines/openai.py` and the `agent()` sentinel
+  in `libraries/python/getpatter/client.py`. The beta
+  `gpt-4o-mini-realtime-preview` model is deprecated on the GA endpoint as of
+  2026-05. `gpt-realtime-mini` is the equivalent GA model. Existing callers
+  that do not pin a model are automatically upgraded; callers that explicitly
+  pass `model="gpt-4o-mini-realtime-preview"` should migrate to
+  `model="gpt-realtime-mini"` or switch to `OpenAIRealtime2`.
+
+- **`phone.ready` and `phone.tunnel_ready` — serve-ready awaitables for
+  outbound call orchestration (Python parity with TypeScript).** Both
+  SDKs have always exposed these futures on the `Patter` class, but the
+  Python docs showed the `asyncio.sleep(2)` anti-pattern instead of the
+  correct `await phone.ready` pattern. Updated `docs/python-sdk/local-mode.mdx`
+  to replace the `asyncio.sleep` example with `await phone.ready`, document
+  the reject-on-failure guarantee, and add a note on `await phone.tunnel_ready`
+  for hostname-only use cases. Added 15 unit tests covering lazy creation,
+  idempotent access, resolution, rejection, idempotent resolve/reject guards,
+  static-webhook pre-resolution, and post-`disconnect()` future recreation —
+  mirroring the TS `client.test.ts` ready/tunnelReady coverage.
+
 ### Fixed
+
+- **TypeScript `TwilioAdapter.generateStreamTwiml` now accepts an optional
+  `parameters` argument (parity with Python `generate_stream_twiml`).** The
+  static method previously ignored caller/callee context — passing
+  `parameters: Record<string, string>` now emits
+  `<Parameter name="..." value="..."/>` children of `<Stream>`, which is the
+  only reliable path for pre-populating `start.customParameters` on the WS
+  `start` frame (Twilio strips query-string params from the `<Stream url=...>`
+  before the WebSocket handshake). The inbound webhook path in `server.ts`
+  already inlined this TwiML directly; `generateStreamTwiml` is now brought
+  into full API-surface parity so callers who construct TwiML via the adapter
+  get the same behaviour. File: `libraries/typescript/src/providers/twilio-adapter.ts`.
+
+- **Python outbound Twilio calls crashed with `TypeError: unexpected
+  keyword argument 'StatusCallback'` (and similar for `Timeout`,
+  `MachineDetection`, `AsyncAmd`).** `libraries/python/getpatter/client.py`
+  was building the `extra_params` dict with PascalCase keys matching
+  Twilio's REST wire protocol, but `twilio-python`'s
+  `Client.calls.create(**kwargs)` only accepts snake_case — it
+  translates internally to PascalCase before hitting the wire. Every
+  outbound call using machine detection, `ring_timeout`, or status
+  callbacks crashed at the SDK boundary (reported externally on
+  zenn.dev for SDK 0.5.4). Fixed at source: all keys in `extra_params`
+  are now snake_case (`status_callback`, `machine_detection`,
+  `timeout`, `async_amd`, `async_amd_status_callback`,
+  `status_callback_method`). Added a defensive PascalCase →
+  snake_case normalisation pass in
+  `libraries/python/getpatter/providers/twilio_adapter.py` so any
+  future caller passing the wire-protocol spelling is auto-corrected
+  before reaching the SDK. TypeScript SDK is unaffected — it sends raw
+  `URLSearchParams` directly to Twilio's REST endpoint where
+  PascalCase is the correct on-wire form. Regression locked in by
+  `libraries/python/tests/unit/test_twilio_adapter_snake_case_kwargs.py`.
+
+- **Phantom barge-in: cellular noise within 100 ms post-pickup was
+  triggering self-cancellation of the prewarmed greeting.** Bumped
+  `MIN_AGENT_SPEAKING_MS_BEFORE_BARGE_IN_NO_AEC` from 100 ms → 500 ms
+  in `libraries/typescript/src/stream-handler.ts` and
+  `libraries/python/getpatter/stream_handler.py`. The 100 ms window was
+  too tight — Twilio's media stream can emit background carrier noise
+  (clicks, handshake tones, audio codec initialization) within the first
+  100 ms after pickup, which the VAD read as speech-like energy and
+  triggered a barge-in cancel. Extending to 500 ms allows the carrier
+  audio path to stabilise before the agent's greeting becomes cancelable.
+
+- **VAD telephony preset too sensitive: background room voices tripping
+  barge-in.** `SileroVAD.forPhoneCall()` factory (TS) /
+  `SileroVAD.for_phone_call` (Py) now raises activation threshold 0.5 →
+  0.8 and deactivation threshold 0.35 → 0.65. The Silero model's
+  upstream defaults (0.5 / 0.35) are tuned for studio audio; when
+  running on 8 kHz telephony-band upsampled to 16 kHz, non-speech room
+  noise (HVAC, background chatter, line buzz) was accumulating energy
+  above the 0.5 threshold. Real-call acceptance testing showed natural
+  pauses in the user's speech no longer trigger false barge-ins at the
+  higher thresholds. Files: `libraries/typescript/src/providers/
+  silero-vad.ts`, `libraries/python/getpatter/providers/silero_vad.py`.
+
+- **`prewarmFirstMessage` default reverted to `false`.** An earlier
+  0.6.2 attempt defaulted the flag to `true` in the factory; this
+  proved incompatible with the above barge-in fixes. When the greeting
+  is prewarmed but the phantom-barge-in (or VAD sensitivity) fires
+  incorrectly on carrier-side noise, the agent cancels the cached
+  audio without having spoken a character, leaving the caller in silence
+  for 1–2 s while the agent recovers from the false cancel-and-restart
+  cycle. Reverting to `prewarmFirstMessage: false` (TS) /
+  `prewarm_first_message=False` (Py) at the factory level in
+  `libraries/typescript/src/client.ts:Patter.agent()` and
+  `libraries/python/getpatter/client.py:Patter.agent()`. Users who
+  *want* the latency reduction should opt in explicitly: `phone.agent({
+  prewarmFirstMessage: true })` — recommended for inbound calls and
+  low-noise deployments. Realtime / ConvAI modes unaffected.
+
+- **ElevenLabs HTTP TTS now auto-detects carrier and sets
+  `outputFormat`.** Added `setTelephonyCarrier(carrierHint: string)`
+  method to `ElevenLabsTTS` (TS) / `ElevenLabsTTS.set_telephony_carrier`
+  (Py). When constructing `ElevenLabsTTS()` without an explicit
+  `outputFormat` on Twilio, the factory `ElevenLabsTTS.forTwilio()`
+  calls `setTelephonyCarrier("twilio")` to flip `outputFormat` to
+  `"ulaw_8000"`, eliminating the per-frame resample + mulaw encode
+  overhead. The plain constructor now only forwards `outputFormat` when
+  the caller passed one explicitly — was unconditionally forwarding a
+  `"pcm_16000"` fallback that disabled the carrier auto-flip logic.
+  This matches the existing `ElevenLabsWebSocketTTS` carrier-aware
+  behaviour. Files: `libraries/typescript/src/providers/elevenlabs-tts.ts`,
+  `libraries/python/getpatter/providers/elevenlabs_tts.py`.
+
+- **ElevenLabs WebSocket TTS now exposes `cancelActiveStream()` for
+  barge-in cleanup.** The WebSocket variant held a live `activeStreamWs`
+  reference but had no public way to abort it. `StreamHandler.cancelSpeaking`
+  / `handleStop` / `handleWsClose` now call `tts.cancelActiveStream()`,
+  unblocking the synthesizeStream generator's inner `await Promise<frame>`
+  loop immediately when the carrier ends the call or the user barges in.
+  Root cause of the post-hangup 30 s timeout error logs and stale token
+  billing. Files: `libraries/typescript/src/providers/elevenlabs-ws-tts.ts`,
+  `libraries/python/getpatter/providers/elevenlabs_ws_tts.py`.
+
+- **Wrapper class TTS `outputFormat` field now conditional.** When an
+  `ElevenLabsTTS` or `ElevenLabsWebSocketTTS` wrapper receives a carrier
+  hint (e.g. Twilio), the wrapper's `outputFormat` field is set only if
+  the caller passed it explicitly. Previous logic always forwarded a
+  fallback value, which caused the carrier auto-flip to treat
+  `outputFormat` as explicit and skip the optimization. Now the carrier
+  auto-flip logic runs correctly: if no `outputFormat` was passed, the
+  wrapper field remains `undefined`/`None` and the carrier-specific Twilio
+  path activates naturally. Files: `libraries/typescript/src/tts/elevenlabs.ts`,
+  `libraries/typescript/src/tts/elevenlabs-ws.ts`,
+  `libraries/python/getpatter/tts/elevenlabs.py`.
+
+- **`sendPacedFirstMessageBytes` timing rewritten: burst mode, no per-chunk
+  sleep.** The original implementation paced each prewarm chunk with a
+  `setTimeout` / `asyncio.sleep` of one chunk-equivalent of playout time
+  (~40 ms for the 1280-byte default chunk). Combined with the
+  `waitForMarkWindow` back-pressure await and JavaScript/asyncio timer
+  jitter, effective delivery dropped BELOW Twilio's 8 kHz playout clock,
+  producing repeated carrier-side underruns. Caller heard "slow, gravelly,
+  and arriving more slowly than the rest". Twilio's docs (Media Streams →
+  WebSocket Messages) state "media messages of any size" are "buffered
+  and played in the order received" by the carrier-side media server — the
+  carrier owns the playout clock. Rewrote to burst all prewarm chunks
+  back-to-back with 20 ms frame granularity (no per-chunk sleep), matching
+  the live-TTS streaming path that always worked. Per-chunk marks still
+  emitted for fine-grained barge-in cut. Files: `libraries/typescript/src/
+  stream-handler.ts`, `libraries/python/getpatter/stream_handler.py`.
+
+- **Mulaw native fast path in audio encode: skip resample + encode when
+  TTS outputs `ulaw_8000` natively.** When pipeline mode detects
+  `tts.outputFormat === "ulaw_8000"` on Twilio, `encodePipelineAudio`
+  skips the resample (16 kHz → 8 kHz) + mulaw encode chain entirely and
+  base64-encodes the raw bytes. Probed once in `initPipeline` and cached
+  as `ttsOutputFormatNativeForCarrier`. Saves ~1–2 ms per 20 ms frame,
+  cumulative ~5–10 % CPU when deployed at scale. Files:
+  `libraries/typescript/src/stream-handler.ts`, `libraries/python/
+  getpatter/stream_handler.py`.
+
+- **`handleStop` / `handleWsClose` now abort in-flight LLM and cancel TTS
+  immediately.** When the carrier ends a call or the StreamHandler is torn
+  down, both paths now call `llmAbort()` (to unblock any pending LLM stream)
+  and `tts.cancelActiveStream()` (to unblock any pending TTS stream).
+  Prevents stale token billing and 30 s timeout error logs from post-hangup
+  tasks trying to drain a closed WebSocket. Files: `libraries/typescript/src/
+  stream-handler.ts`, `libraries/python/getpatter/stream_handler.py`.
+
+- **Python SDK parity sync for 2026-05-20 acceptance session.** All TS
+  fixes landed during PSTN acceptance testing are now ported to Python:
+  `ElevenLabsTTS.set_telephony_carrier` (HTTP variant, mirrors WS),
+  `ElevenLabsWebSocketTTS.cancel_active_stream` + `_active_stream_ws`
+  tracking, `_do_cancel_for_barge_in` / `cleanup` calling
+  `cancel_active_stream` (duck-typed), `_is_tts_output_format_native_for_carrier`
+  probe + `_tts_output_format_native_for_carrier` flag + audio-sender bypass
+  in `PipelineStreamHandler.start`, `_spawn_prewarm_first_message` accepting
+  `carrier=` and calling `set_telephony_carrier` before synthesis, and the
+  `tts/elevenlabs.py` wrapper only forwarding `output_format` when explicitly
+  passed. Files: `libraries/python/getpatter/providers/elevenlabs_tts.py`,
+  `libraries/python/getpatter/providers/elevenlabs_ws_tts.py`,
+  `libraries/python/getpatter/stream_handler.py`,
+  `libraries/python/getpatter/tts/elevenlabs.py`,
+  `libraries/python/getpatter/client.py`.
 
 - **Bidirectional race guard on `recordTurnComplete` / `recordTurnInterrupted`.**
   The original guard (added earlier in this release) was one-directional:
@@ -14,59 +215,6 @@
   `libraries/python/getpatter/services/metrics.py` and
   `libraries/typescript/src/metrics.ts`; regression tests added in both
   suites.
-
-### Changed
-
-- **Pipeline `prewarmFirstMessage` / `prewarm_first_message` now defaults
-  to `true` in pipeline mode** via the `phone.agent()` / `Patter.agent()`
-  factory in both SDKs. Every pipeline acceptance run had a 1.5-2.5 s
-  `p95` on the first turn because the TTS first-byte latency (200-700 ms
-  cold) was serialised with the carrier's `media-start` event.
-  Pre-rendering the greeting during the ringing window and streaming
-  the cached buffer at pickup collapses that to a single buffer copy —
-  first-turn `p95` drops back into the same band as subsequent turns.
-
-  Trade-off: paying the TTS bill on calls that ring and never answer
-  (~$0.001-$0.005 each depending on TTS provider). Opt out by passing
-  `prewarmFirstMessage: false` (TS) / `prewarm_first_message=False`
-  (Py) to `phone.agent({...})` — useful for very high-volume outbound
-  where un-answered TTS spend matters.
-
-  Default applied at the factory level for parity between SDKs:
-  `libraries/python/getpatter/client.py:Patter.agent()` and
-  `libraries/typescript/src/client.ts:Patter.agent()`. The Python
-  `Agent` dataclass field default stays `False` to preserve
-  backwards-compatible behaviour for direct `Agent(...)` construction
-  (advanced usage outside the recommended factory path). Realtime /
-  ConvAI provider modes are unaffected in either SDK — those handlers
-  never consume the prewarm cache.
-
-### Fixed
-
-- **First-message prewarm playback was slow + gravelly + intermittent on
-  Twilio.** `sendPacedFirstMessageBytes` (TS) /
-  `_send_paced_first_message_bytes` (Py) paced each prewarm chunk with a
-  `setTimeout` / `asyncio.sleep` of one chunk-equivalent of playout time
-  (~40 ms for the 1280-byte default chunk). Combined with the
-  `waitForMarkWindow` back-pressure await and JavaScript/asyncio timer
-  jitter, effective delivery dropped BELOW Twilio's 8 kHz playout clock
-  on the 2-4 s prewarmed greeting buffer, producing repeated carrier-
-  side underruns. Caller heard the message "slow, gravelly, and
-  arriving more slowly than the rest". Twilio's docs (Media Streams →
-  WebSocket Messages) explicitly state "media messages of any size" are
-  "buffered and played in the order received" by the carrier-side media
-  server — the carrier is the source of truth for the playout clock,
-  not our send loop. Removed the per-chunk sleep + the burst-vs-paced
-  switch (`initialFillComplete`) so the prewarm path now bursts all
-  chunks back-to-back, matching the live-TTS streaming path that has
-  always worked. Per-chunk marks are still emitted, so a barge-in's
-  `sendClear` keeps fine-grained granularity to cut.
-
-  Verified against `outbound-openai-transcribe-openai-openai`:
-  pre-fix the same acceptance scenario produced slow/gravelly first-
-  message playback with `p95 wait=0 ms` (prewarm cache hit was correct,
-  but downstream pacing was broken). Files: `libraries/typescript/src/
-  stream-handler.ts`, `libraries/python/getpatter/stream_handler.py`.
 
 ### Fixed
 

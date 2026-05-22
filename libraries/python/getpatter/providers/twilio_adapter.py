@@ -6,12 +6,29 @@ dispatched to a thread executor so the event loop is never blocked.
 
 import asyncio
 import logging
+import re
 from functools import partial
 from twilio.rest import Client as TwilioClient
 from twilio.twiml.voice_response import VoiceResponse, Connect
 from getpatter.providers.base import TelephonyProvider
 
 logger = logging.getLogger("getpatter.providers.twilio_adapter")
+
+
+_PASCAL_TO_SNAKE_RE = re.compile(r"(?<!^)(?=[A-Z])")
+
+
+def _to_snake_case(name: str) -> str:
+    """Translate a PascalCase / camelCase Twilio param to snake_case.
+
+    The ``twilio-python`` SDK's ``client.calls.create(**kwargs)`` accepts
+    snake_case keyword arguments only — it translates them to the
+    PascalCase form Twilio's REST wire protocol requires. Passing a
+    PascalCase key directly raises ``TypeError: unexpected keyword
+    argument``. This helper normalises both shapes so the adapter is
+    robust regardless of how the caller spelled the param.
+    """
+    return _PASCAL_TO_SNAKE_RE.sub("_", name).lower()
 
 
 class TwilioAdapter(TelephonyProvider):
@@ -68,7 +85,14 @@ class TwilioAdapter(TelephonyProvider):
         twiml.append(connect)
         call_kwargs: dict = {"to": to_number, "from_": from_number, "twiml": str(twiml)}
         if extra_params:
-            call_kwargs.update(extra_params)
+            # Defensive normalisation: the ``twilio-python`` SDK rejects
+            # PascalCase kwargs (``StatusCallback``, ``MachineDetection``,
+            # …) with ``TypeError: unexpected keyword argument``.
+            # ``getpatter.client`` already builds the dict in snake_case
+            # form; this guard catches any third-party caller (or future
+            # regression) that still passes the wire-protocol spelling.
+            for key, value in extra_params.items():
+                call_kwargs[_to_snake_case(key)] = value
         call = await self._run_sync(self._twilio_client.calls.create, **call_kwargs)
         return call.sid
 
@@ -98,10 +122,26 @@ class TwilioAdapter(TelephonyProvider):
             logger.debug("record_call_end_cost failed", exc_info=True)
 
     @staticmethod
-    def generate_stream_twiml(stream_url: str) -> str:
-        """Return TwiML that connects the inbound call to the given media stream URL."""
+    def generate_stream_twiml(
+        stream_url: str,
+        parameters: dict[str, str] | None = None,
+    ) -> str:
+        """Return TwiML that connects the inbound call to the media stream URL.
+
+        ``parameters`` is forwarded as ``<Parameter name="..." value="..."/>``
+        children of ``<Stream>``. Twilio Media Streams ignores query-string
+        params on the ``<Stream url=...>`` (they are stripped before the WS
+        handshake), so ``<Parameter>`` tags are the supported way to
+        pre-populate ``start.customParameters`` on the WS payload. Used by
+        the inbound path to carry caller / callee through to the bridge.
+        """
         response = VoiceResponse()
         connect = Connect()
-        connect.stream(url=stream_url)
+        stream = connect.stream(url=stream_url)
+        if parameters:
+            for name, value in parameters.items():
+                if value is None:
+                    continue
+                stream.parameter(name=name, value=str(value))
         response.append(connect)
         return str(response)

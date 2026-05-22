@@ -240,7 +240,6 @@ class OpenAIRealtimeAdapter:
                     url,
                     additional_headers={
                         "Authorization": f"Bearer {self.api_key}",
-                        "OpenAI-Beta": "realtime=v1",
                     },
                     ping_interval=20,
                     ping_timeout=20,
@@ -345,7 +344,6 @@ class OpenAIRealtimeAdapter:
             url,
             additional_headers={
                 "Authorization": f"Bearer {self.api_key}",
-                "OpenAI-Beta": "realtime=v1",
             },
             # Keep the connection alive on long conversational pauses; a
             # dropped WS mid-call is the single most common failure on
@@ -360,7 +358,14 @@ class OpenAIRealtimeAdapter:
             response = await self._ws.recv()
             data = json.loads(response)
             if data.get("type") != "session.created":
-                raise RuntimeError(f"Expected session.created, got {data.get('type')}")
+                # Surface the actual server-side error so callers see the
+                # OpenAI message (auth, model not available, quota, etc.)
+                # rather than the bare "got error" wrapper.
+                err = data.get("error") or {}
+                msg = err.get("message") or err.get("code") or str(data)
+                raise RuntimeError(
+                    f"Expected session.created, got {data.get('type')!r}: {msg}"
+                )
 
             await self._ws.send(
                 json.dumps(
@@ -404,7 +409,6 @@ class OpenAIRealtimeAdapter:
                 url,
                 additional_headers={
                     "Authorization": f"Bearer {self.api_key}",
-                    "OpenAI-Beta": "realtime=v1",
                 },
                 ping_interval=20,
                 ping_timeout=20,
@@ -415,7 +419,11 @@ class OpenAIRealtimeAdapter:
             response = await asyncio.wait_for(ws.recv(), timeout=2.0)
             data = json.loads(response)
             if data.get("type") != "session.created":
-                raise RuntimeError(f"Expected session.created, got {data.get('type')}")
+                err = data.get("error") or {}
+                msg = err.get("message") or err.get("code") or str(data)
+                raise RuntimeError(
+                    f"Expected session.created, got {data.get('type')!r}: {msg}"
+                )
             await ws.send(
                 json.dumps(
                     {
@@ -644,28 +652,35 @@ class OpenAIRealtimeAdapter:
         """
         if self._ws is None:
             return
-        if self._current_response_item_id:
-            audio_end_ms = self._current_response_audio_ms
-            if self._current_response_first_audio_at is not None:
-                # Cap by wall-clock playback time. Subtracting from the
-                # generated total keeps audio_end_ms ≥ 0 and ≤ generated_ms.
-                elapsed_ms = int(
-                    (time.monotonic() - self._current_response_first_audio_at) * 1000
+        if not self._current_response_item_id:
+            # No response in flight — nothing to cancel. OpenAI Realtime
+            # GA rejects unconditional ``response.cancel`` with
+            # ``response_cancel_not_active``, which surfaces as ERROR-level
+            # log spam on every phantom VAD ``speech_started`` (echo of
+            # agent audio, voicemail beep, line noise). Silent no-op here
+            # keeps the cancel idempotent across stale callers.
+            return
+        audio_end_ms = self._current_response_audio_ms
+        if self._current_response_first_audio_at is not None:
+            # Cap by wall-clock playback time. Subtracting from the
+            # generated total keeps audio_end_ms ≥ 0 and ≤ generated_ms.
+            elapsed_ms = int(
+                (time.monotonic() - self._current_response_first_audio_at) * 1000
+            )
+            audio_end_ms = min(audio_end_ms, max(elapsed_ms, 0))
+        try:
+            await self._ws.send(
+                json.dumps(
+                    {
+                        "type": "conversation.item.truncate",
+                        "item_id": self._current_response_item_id,
+                        "content_index": 0,
+                        "audio_end_ms": audio_end_ms,
+                    }
                 )
-                audio_end_ms = min(audio_end_ms, max(elapsed_ms, 0))
-            try:
-                await self._ws.send(
-                    json.dumps(
-                        {
-                            "type": "conversation.item.truncate",
-                            "item_id": self._current_response_item_id,
-                            "content_index": 0,
-                            "audio_end_ms": audio_end_ms,
-                        }
-                    )
-                )
-            except Exception as exc:  # pragma: no cover
-                logger.debug("conversation.item.truncate failed: %s", exc)
+            )
+        except Exception as exc:  # pragma: no cover
+            logger.debug("conversation.item.truncate failed: %s", exc)
         await self._ws.send(json.dumps({"type": "response.cancel"}))
         # Reset per-response tracking so subsequent audio chunks (post-cancel
         # late frames) and the next response.create start clean.
@@ -689,6 +704,21 @@ class OpenAIRealtimeAdapter:
                 }
             )
         )
+        await self._ws.send(json.dumps({"type": "response.create"}))
+
+    async def request_response(self) -> None:
+        """Trigger ``response.create`` with no new user item.
+
+        Used by the Realtime stream-handler to drive a response after the
+        client-side hallucination filter accepts an
+        ``input_audio_transcription.completed`` event. The server VAD
+        config sets ``create_response: false`` so OpenAI no longer
+        auto-creates a response on every ``input_audio_buffer.committed``;
+        Patter is now responsible for triggering it explicitly when a
+        real user turn lands.
+        """
+        if self._ws is None:
+            return
         await self._ws.send(json.dumps({"type": "response.create"}))
 
     async def send_first_message(self, text: str) -> None:

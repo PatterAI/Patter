@@ -121,12 +121,35 @@ function isValidE164(number: string): boolean {
  * Short words / phrases that Whisper (and, less often, Deepgram) routinely
  * emit when fed silence or TTS echo on mulaw 8 kHz. Dropping them as turns
  * prevents the caller from entering a feedback loop where every silent frame
- * triggers a new LLM+TTS turn.
+ * triggers a new LLM+TTS turn. Parity with Python `_STT_HALLUCINATIONS`.
+ *
+ * Whisper-specific full-phrase hallucinations: the model's training set was
+ * dominated by YouTube captions — on silence / echo it falls back to the most
+ * common training-set closers. These fire hard on PSTN echo loopback when the
+ * agent's outbound audio bleeds into the input buffer and the upstream VAD
+ * commits a "non-empty" segment to transcription.
+ * Comparison happens against the lower-cased + stripped form.
  */
 const HALLUCINATIONS = new Set([
   'you', 'thank you', 'thanks', 'yeah', 'yes', 'no',
   'okay', 'ok', 'uh', 'um', 'mmm', 'hmm', '.', 'bye',
   'right', 'cool',
+  // Whisper YouTube-caption hallucinations
+  'thank you for watching',
+  'thanks for watching',
+  'thank you for watching!',
+  'thanks for watching!',
+  'thank you so much for watching',
+  'thanks for listening',
+  'please subscribe',
+  'subscribe',
+  'music',
+  '[music]',
+  '♪',
+  '[no audio]',
+  '[silence]',
+  '[blank_audio]',
+  '(silence)',
 ]);
 
 // ---------------------------------------------------------------------------
@@ -316,13 +339,17 @@ export class StreamHandler {
    * Same as the AEC variant but for deployments where AEC is OFF
    * (default on PSTN — Twilio/Telnyx). Without an adaptive filter to
    * converge, the only justification for a gate is anti-flicker on
-   * micro-events (cough, click). 100 ms covers the first PSTN echo
-   * round-trip (~40-100 ms) while allowing barge-in from 100 ms into
-   * the agent's turn — covering nearly all of any response.
-   * Previously 250 ms, which blocked barge-in entirely on short (<500 ms)
-   * agent responses.
+   * micro-events (cough, click). Raised 100 → 500 ms on 2026-05-19
+   * after the 0.6.2 acceptance run showed a phantom VAD speech_start
+   * firing on the very first inbound frame (~500 ms into the call,
+   * which is past a 100 ms gate). The phantom barge-in cancelled the
+   * prewarmed firstMessage, the user heard a clipped (graffiante)
+   * audio fragment, and the SDK left ``_turnAlreadyClosed=true`` so
+   * subsequent ``recordTurnComplete`` calls were no-ops. 500 ms
+   * filters those phantoms while still letting a real interruption
+   * land within half a second of agent onset.
    */
-  private static readonly MIN_AGENT_SPEAKING_MS_BEFORE_BARGE_IN_NO_AEC = 100;
+  private static readonly MIN_AGENT_SPEAKING_MS_BEFORE_BARGE_IN_NO_AEC = 500;
   /** Handle for the pending grace-period timer, so it can be cleared on cleanup. */
   private graceTimer: ReturnType<typeof setTimeout> | null = null;
   /**
@@ -367,30 +394,12 @@ export class StreamHandler {
    * coexist without name collisions even when firstMessage finishes while
    * a Realtime turn is still streaming.
    */
-  private firstMessageMarkCounter = 0;
-  /**
-   * Maximum unconfirmed Twilio marks while streaming firstMessage. Each
-   * chunk is 40 ms of audio at 16 kHz PCM16, so a window of 3 caps
-   * the in-flight queue at ~120 ms. This means a barge-in's
-   * ``sendClear`` has at most 120 ms of already-buffered audio to flush
-   * — vs. ~2-5 s with the previous burst-send code, which was the
-   * root cause of "firstMessage non interrompibile". Higher values
-   * smooth playback under jittery RTT (each mark echo adds ~150-250 ms
-   * RTT on PSTN) at the cost of longer barge-in latency; lower values
-   * risk under-buffering. 3 hit the smallest barge-in cap without
-   * audible gaps in 2026-05 acceptance.
-   */
-  private static readonly FIRST_MESSAGE_MARK_WINDOW = 3;
-  /**
-   * Per-chunk soft timeout (ms) while awaiting a mark echo. Twilio's
-   * mark echoes typically arrive within 100-250 ms of audio playback.
-   * Capping at 500 ms guards against carriers (or test doubles) that
-   * never echo — without it a stalled echo would deadlock the loop and
-   * the agent would freeze mid-utterance. On timeout we drop the
-   * waiter from the queue and continue: playout may glitch by one
-   * chunk but the call stays alive.
-   */
-  private static readonly MARK_AWAIT_TIMEOUT_MS = 500;
+  // firstMessageMarkCounter / FIRST_MESSAGE_MARK_WINDOW /
+  // MARK_AWAIT_TIMEOUT_MS were retired with the move to the Twilio-FIFO-
+  // trusts model (sendPacedFirstMessageBytes no longer emits marks).
+  // Marks are still consumed via ``onMark`` for any adapter that wants
+  // to round-trip one, but the firstMessage path no longer back-pressures
+  // on them.
   /**
    * Minimum drain window (ms) between a ``cancelSpeaking`` and the next
    * ``beginSpeaking``. 150 ms covers a typical PSTN jitter buffer drain
@@ -490,6 +499,24 @@ export class StreamHandler {
         // No-op — abort() throws nothing in modern runtimes, but be defensive.
       }
     }
+    // Force-close any in-flight TTS streaming socket. Without this, the
+    // firstMessage live ``synthesizeStream`` path (used when the prewarm
+    // accumulator hadn't completed before pickup) would block on its
+    // inner ``await Promise<frame>`` for 30 s — ``initPipeline`` would
+    // never return, the STT ``onTranscript`` callback would never
+    // register, and every subsequent user turn would be silently
+    // dropped. Provider-duck-typed: adapters that don't expose
+    // ``cancelActiveStream`` are no-ops here.
+    const ttsCancelable = this.tts as
+      | { cancelActiveStream?: () => void }
+      | undefined;
+    if (typeof ttsCancelable?.cancelActiveStream === 'function') {
+      try {
+        ttsCancelable.cancelActiveStream();
+      } catch (err) {
+        getLogger().debug(`TTS cancelActiveStream raised: ${String(err)}`);
+      }
+    }
   }
 
   /**
@@ -509,61 +536,22 @@ export class StreamHandler {
     this.pendingMarks.length = 0;
   }
 
-  /**
-   * Push a Twilio ``mark`` event AFTER the corresponding audio chunk and
-   * return a promise that resolves when the mark is echoed back via
-   * ``onMark`` (or when ``cancelSpeaking`` drains the queue, or after
-   * ``MARK_AWAIT_TIMEOUT_MS``). Returns null on non-Twilio carriers — the
-   * caller is expected to fall back to time-based pacing in that case.
-   */
-  private sendMarkAwaitable(): Promise<void> | null {
-    if (this.deps.bridge.telephonyProvider !== 'twilio') return null;
-    this.firstMessageMarkCounter += 1;
-    const markName = `fm_${this.firstMessageMarkCounter}`;
-    let resolve!: () => void;
-    const promise = new Promise<void>((r) => {
-      resolve = r;
-    });
-    this.pendingMarks.push({ name: markName, resolve, promise });
-    try {
-      this.deps.bridge.sendMark(this.ws, markName, this.streamSid);
-    } catch (err) {
-      getLogger().debug(`sendMark failed (${markName}): ${String(err)}`);
-      // Drop the waiter immediately so the queue doesn't fill with
-      // never-resolving entries that block the window.
-      const idx = this.pendingMarks.findIndex((m) => m.name === markName);
-      if (idx >= 0) this.pendingMarks.splice(idx, 1);
-      return Promise.resolve();
-    }
-    return promise;
-  }
+  // Mark-based back-pressure (sendMarkAwaitable / waitForMarkWindow)
+  // was removed when sendPacedFirstMessageBytes switched to the
+  // Twilio-FIFO-trusts model — see that method's doc comment for
+  // rationale. ``pendingMarks`` and ``onMark`` are still kept so an
+  // adapter that wants to round-trip a mark for some other purpose can
+  // still do so without breaking the firstMessage path.
 
   /**
-   * If the in-flight mark queue is at or above ``FIRST_MESSAGE_MARK_WINDOW``
-   * entries, wait for the oldest entry to clear (mark echoed, agent
-   * cancelled, or per-mark timeout). Repeats until the queue depth is
-   * within the window — under high RTT the carrier may have several
-   * marks queued and we want every loop iteration to be naturally back-
-   * pressured by playback.
+   * Bytes-per-millisecond for a 16 kHz PCM16 mono stream. Used by
+   * ``sendPacedFirstMessageBytes`` to translate chunk size into a
+   * playout-duration sleep so we never deliver faster than the carrier
+   * can decode + play out (which manifested as severe crackling on the
+   * HTTP-TTS path with client-side resampling). 16000 samples/sec × 2
+   * bytes/sample = 32 bytes/ms.
    */
-  private async waitForMarkWindow(): Promise<void> {
-    while (
-      this.isSpeaking &&
-      this.pendingMarks.length >= StreamHandler.FIRST_MESSAGE_MARK_WINDOW
-    ) {
-      const oldest = this.pendingMarks[0];
-      const timeout = new Promise<void>((resolve) =>
-        setTimeout(resolve, StreamHandler.MARK_AWAIT_TIMEOUT_MS),
-      );
-      await Promise.race([oldest.promise, timeout]);
-      // Drop the head if it's still the same entry — onMark would
-      // have already removed it on echo; only a timeout leaves it
-      // in place.
-      if (this.pendingMarks[0] === oldest) {
-        this.pendingMarks.shift();
-      }
-    }
-  }
+  private static readonly PCM16_16K_BYTES_PER_MS = 32;
 
   /** Cancel and clear the pending grace timer, if any. */
   private clearGraceTimer(): void {
@@ -1375,6 +1363,23 @@ export class StreamHandler {
   /** Handle call stop / stream end. */
   /** Handle a carrier-emitted `stop` event signalling the call has ended. */
   async handleStop(): Promise<void> {
+    // Abort any in-flight LLM stream and close any in-flight TTS WS so
+    // the runPipelineLlm / synthesizeStream awaits unblock immediately
+    // instead of waiting up to 30 s for their own watchdog timers.
+    // Without this, the carrier's ``stop`` event ends the call but a
+    // pending TTS WS frame-wait fires a stale ``LLM loop error`` /
+    // ``TTS streaming error`` log line tens of seconds later, and in
+    // rapid-conversation scenarios where the user hangs up mid-response
+    // the in-flight call kept billing tokens after the carrier was gone.
+    if (this.llmAbort !== null) {
+      try { this.llmAbort.abort(); } catch { /* defensive */ }
+    }
+    const ttsCancelable = this.tts as
+      | { cancelActiveStream?: () => void }
+      | undefined;
+    if (typeof ttsCancelable?.cancelActiveStream === 'function') {
+      try { ttsCancelable.cancelActiveStream(); } catch { /* defensive */ }
+    }
     // Drop any pending barge-in timer BEFORE we tear down metrics /
     // adapters. Without this, a call that ends while a barge-in is
     // pending leaves a setTimeout scheduled to fire ``bargeInConfirmMs``
@@ -1391,7 +1396,6 @@ export class StreamHandler {
     // ``fm_<n>`` numbering at 1 on the next call. See
     // ``sendPacedFirstMessageBytes`` for the per-send reset that
     // protects the within-call path.
-    this.firstMessageMarkCounter = 0;
     this.clearGraceTimer();
     this.flushResamplers();
     await this.closeSttOnce();
@@ -1402,6 +1406,17 @@ export class StreamHandler {
   /** Handle WebSocket close event. */
   /** Tear down adapter, STT/TTS, and per-call state when the carrier WebSocket closes. */
   async handleWsClose(): Promise<void> {
+    // Mirror handleStop's in-flight cleanup so a carrier WebSocket drop
+    // unblocks LLM / TTS awaits immediately — see comment there.
+    if (this.llmAbort !== null) {
+      try { this.llmAbort.abort(); } catch { /* defensive */ }
+    }
+    const ttsCancelable = this.tts as
+      | { cancelActiveStream?: () => void }
+      | undefined;
+    if (typeof ttsCancelable?.cancelActiveStream === 'function') {
+      try { ttsCancelable.cancelActiveStream(); } catch { /* defensive */ }
+    }
     // See handleStop — drop pending barge-in timer before cleanup so a
     // dead handler can never fire a stale recordOverlapEnd callback.
     this.clearPendingBargeIn();
@@ -1409,7 +1424,6 @@ export class StreamHandler {
     // carrier WS drop during the paced sender cannot leak unresolved
     // promises owned by the send loop, and reset the counter.
     this.drainPendingMarks();
-    this.firstMessageMarkCounter = 0;
     this.clearGraceTimer();
     this.flushResamplers();
     // Drain STT first so in-flight transcripts fire before onCallEnd.
@@ -1444,12 +1458,48 @@ export class StreamHandler {
    * Maintains a 1-byte carry across calls so unaligned HTTP chunks from
    * streaming TTS providers never byte-swap the PCM16 samples downstream.
    */
-  private encodePipelineAudio(pcm16k: Buffer): string {
-    const aligned = this.alignPcm16(pcm16k);
+  private encodePipelineAudio(audioChunk: Buffer): string {
+    // Carrier-native fast path: when the TTS adapter is configured to
+    // emit ``ulaw_8000`` (Twilio wire codec) the bytes coming in are
+    // already in the format Twilio expects. Skip the 16 kHz → 8 kHz
+    // resample and the PCM → μ-law encode entirely — base64 the raw
+    // bytes and hand them to the carrier. This eliminates the client-
+    // side DSP chain that produced audible artifacts on the prewarmed
+    // firstMessage during 0.6.2 acceptance (the resampler-bursting
+    // crackle the user reported).
+    if (this.ttsOutputFormatNativeForCarrier === true) {
+      return audioChunk.toString('base64');
+    }
+    const aligned = this.alignPcm16(audioChunk);
     if (aligned.length === 0) return '';
     const pcm8k = this.outboundResampler.process(aligned);
     const mulaw = pcm16ToMulaw(pcm8k);
     return mulaw.toString('base64');
+  }
+
+  /**
+   * Cached result of ``isTtsOutputFormatNativeForCarrier()`` — settled
+   * once at ``initPipeline`` time after ``setTelephonyCarrier`` has run
+   * on the TTS adapter. Stable for the call lifetime: changes to the
+   * adapter's output format mid-call would NOT flip this. ``true`` means
+   * ``encodePipelineAudio`` can take the bypass path.
+   */
+  private ttsOutputFormatNativeForCarrier: boolean = false;
+
+  /**
+   * Probe whether the TTS adapter is configured to emit bytes already in
+   * the carrier's wire codec. Currently: Twilio expects ``ulaw_8000``,
+   * Telnyx expects ``pcm_16000`` (no client transcode in either case if
+   * matched). Anything else takes the resample-and-encode path.
+   */
+  private isTtsOutputFormatNativeForCarrier(): boolean {
+    if (!this.tts) return false;
+    const fmt = (this.tts as { outputFormat?: string }).outputFormat;
+    if (typeof fmt !== 'string') return false;
+    const carrier = this.deps.bridge.telephonyProvider;
+    if (carrier === 'twilio') return fmt === 'ulaw_8000';
+    if (carrier === 'telnyx') return fmt === 'pcm_16000';
+    return false;
   }
 
   /**
@@ -1467,17 +1517,10 @@ export class StreamHandler {
   }
 
   /**
-   * 40 ms @ 16 kHz mono PCM16 = 1280 bytes. Sized to mirror the smallest
-   * live-TTS chunk boundary so cancel granularity (mark/clear bookkeeping)
-   * is identical regardless of whether the firstMessage came from the
-   * prewarm cache or a live ``tts.synthesizeStream`` stream.
-   */
-  private static readonly PREWARM_CHUNK_BYTES = 1280;
-
-  /**
    * Stream a cached firstMessage buffer in pacing-friendly chunks.
    *
-   * Splits ``prewarmBytes`` into ``PREWARM_CHUNK_BYTES`` slices and
+   * Splits ``prewarmBytes`` into 20 ms slices (matching Twilio's PSTN
+   * frame quantum) and
    * forwards each through ``deps.bridge.sendAudio`` exactly like the
    * live TTS path does — preserving Twilio mark/clear granularity. A
    * single multi-second sendAudio call would push the whole intro into
@@ -1494,7 +1537,7 @@ export class StreamHandler {
   }
 
   /**
-   * Iterate ``bytes`` as ``PREWARM_CHUNK_BYTES``-sized PCM16 slices and
+   * Iterate ``bytes`` in 20 ms slices (Twilio PSTN frame quantum) and
    * forward each via ``deps.bridge.sendAudio`` with mark-gated pacing
    * (Twilio) or playout-time-based pacing (Telnyx). Caps the carrier-
    * side buffer at ``FIRST_MESSAGE_MARK_WINDOW`` chunks so a barge-in's
@@ -1510,41 +1553,52 @@ export class StreamHandler {
    * metrics. See BUG #128 for the regression this fix targets.
    */
   private async sendPacedFirstMessageBytes(bytes: Buffer): Promise<boolean> {
-    // Reset the per-send mark counter so each invocation produces a
-    // fresh ``fm_1, fm_2, ...`` sequence. Without this the counter
-    // grows monotonically across turns on a re-used handler and a
-    // stale ``fm_N`` echo from an earlier turn could match a mark
-    // name issued later, corrupting the FIFO matching in ``onMark``.
-    // The queue is also expected empty here by ``cancelSpeaking`` /
-    // ``handleStop`` / ``handleWsClose``; drain defensively if not.
+    // Reset any stale mark state defensively — we don't emit marks on
+    // this path but ``onMark`` and the rest of the handler rely on the
+    // counter being monotonic across the call lifetime.
     if (this.pendingMarks.length > 0) this.drainPendingMarks();
-    this.firstMessageMarkCounter = 0;
     let firstChunkSent = false;
-    // Burst delivery: send all chunks back-to-back, exactly like the live
-    // TTS path (synthesizeSentence / firstMessage live fallback). Twilio
-    // explicitly accepts "media messages of any size" — frames are
-    // "buffered and played in the order received" by the carrier-side
-    // media server, which is the source of truth for the 8 kHz playout
-    // clock. Earlier revisions paced each chunk by ``playoutMs`` via
-    // setTimeout to "throttle to the playout rate", but JavaScript
-    // setTimeout drift + the cumulative ``waitForMarkWindow`` wait
-    // pushed effective delivery BELOW Twilio's playout rate on long
-    // intros (the prewarm cache is typically 2-4 s of audio), producing
-    // periodic carrier-side buffer underruns audible to the caller as
-    // slow, gravelly, intermittent playback. Marks are still emitted
-    // per chunk so a barge-in's ``sendClear`` still has fine-grained
-    // granularity to cut.
-    for (let i = 0; i < bytes.length; i += StreamHandler.PREWARM_CHUNK_BYTES) {
+    // Slice on the PSTN/G.711 packet quantum (20 ms). Twilio Media
+    // Streams emits and consumes 20 ms μ-law frames natively, so each
+    // ``sendAudio`` corresponds to exactly one carrier-side frame.
+    const PSTN_FRAME_MS = 20;
+    const bytesPerMs = this.ttsOutputFormatNativeForCarrier
+      ? 8 // μ-law 8 kHz native (one byte per sample, 8000 sps)
+      : StreamHandler.PCM16_16K_BYTES_PER_MS; // 32 bytes/ms for PCM16 16 kHz
+    const sliceBytes = bytesPerMs * PSTN_FRAME_MS;
+    // No pacing, no mark gating. Twilio's media-stream protocol
+    // explicitly buffers and plays frames in order received — its FIFO
+    // owns the 8 kHz playout clock, not our send loop. Every attempt
+    // we've made to "help" Twilio (per-chunk sleep, mark back-pressure,
+    // initial-fill burst, absolute-clock scheduling) introduced its own
+    // jitter source: setTimeout drift, mark-echo RTT > playout window,
+    // or burst-then-stall patterns. The result the user heard as
+    // "scatti" / "differenza di frequenza" was the side effect of our
+    // pacing fighting the carrier clock, not the carrier itself.
+    //
+    // Mirror the pattern used by Twilio's own call-gpt reference sample
+    // and Pipecat's TwilioFrameSerializer: dump every 20 ms slice into
+    // the WebSocket back-to-back, return, let Twilio drain. For prewarm
+    // this is ~250 sendAudio calls in <50 ms for a 5 s greeting; the
+    // WebSocket buffer absorbs them and the carrier plays at exactly
+    // 50 frames/s with no further intervention from us. Barge-in still
+    // works via ``sendClear`` which flushes whatever Twilio has queued
+    // regardless of marks.
+    for (let i = 0; i < bytes.length; i += sliceBytes) {
       if (!this.isSpeaking) break; // barge-in mid-buffer — stop now
-      await this.waitForMarkWindow();
-      if (!this.isSpeaking) break;
-      const chunk = bytes.subarray(i, i + StreamHandler.PREWARM_CHUNK_BYTES);
+      const chunk = bytes.subarray(i, i + sliceBytes);
       if (!firstChunkSent) firstChunkSent = true;
-      if (this.aec) this.aec.pushFarEnd(chunk);
+      // Far-end tap is only valid when the bytes are PCM16 — the AEC's
+      // ``int16BufferToFloat32`` ingest assumes int16 LE. On the mulaw
+      // native fast path we MUST NOT push the wire bytes or AEC's
+      // reference signal becomes garbage. AEC is opt-in (off by default
+      // on PSTN), so this guard only matters when the caller opted in.
+      if (this.aec && !this.ttsOutputFormatNativeForCarrier) {
+        this.aec.pushFarEnd(chunk);
+      }
       const encoded = this.encodePipelineAudio(chunk);
       this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
       this.markFirstAudioSent();
-      this.sendMarkAwaitable();
     }
     return firstChunkSent;
   }
@@ -1577,6 +1631,15 @@ export class StreamHandler {
         } catch (e) {
           getLogger().debug(`TTS setTelephonyCarrier failed (${label}): ${String(e)}`);
         }
+      }
+      // Re-evaluate after setTelephonyCarrier so the encodePipelineAudio
+      // fast path is enabled for the current carrier when the adapter
+      // auto-flipped (or the user constructed with a native format).
+      this.ttsOutputFormatNativeForCarrier = this.isTtsOutputFormatNativeForCarrier();
+      if (this.ttsOutputFormatNativeForCarrier) {
+        getLogger().debug(
+          `TTS outputFormat matches ${this.deps.bridge.telephonyProvider} wire codec — bypassing client-side transcode`,
+        );
       }
     }
 
@@ -2513,14 +2576,52 @@ export class StreamHandler {
     const label = this.deps.bridge.label;
     this.adapter = this.deps.buildAIAdapter(resolvedPrompt);
 
-    try {
-      await this.adapter.connect();
-      getLogger().debug(`AI adapter connected (${label})`);
-    } catch (e) {
-      getLogger().error(`AI adapter connect FAILED (${label}):`, e);
-      // Hang up the telephony call so it doesn't stay connected billing
-      try { await this.deps.bridge.endCall(this.callId, this.ws); } catch { /* best effort */ }
-      return;
+    // Try to adopt a Realtime WS parked during the ringing window.
+    // When present we skip the cold ``adapter.connect()`` — the
+    // parked socket has already paid the TCP + TLS + HTTP-101 +
+    // ``session.update`` ack round-trip (~300-600 ms saved on first
+    // audible word). Falls back transparently on cache miss / dead
+    // socket / adapter missing ``adoptWebSocket``.
+    let parked: import('./client').ParkedProviderConnections | undefined;
+    if (typeof this.deps.popPrewarmedConnections === 'function') {
+      try {
+        parked = this.deps.popPrewarmedConnections(this.callId);
+      } catch (err) {
+        getLogger().debug(`popPrewarmedConnections raised: ${String(err)}`);
+      }
+    }
+    const parkedRealtimeWs = parked?.openaiRealtime;
+    let adoptOk = false;
+    if (parkedRealtimeWs !== undefined) {
+      const adapterAny = this.adapter as
+        | { adoptWebSocket?: (ws: import('ws').WebSocket) => void }
+        | undefined;
+      const wsAlive = parkedRealtimeWs.readyState === 1 /* OPEN */;
+      if (typeof adapterAny?.adoptWebSocket === 'function' && wsAlive) {
+        try {
+          adapterAny.adoptWebSocket(parkedRealtimeWs);
+          getLogger().info(
+            `[CONNECT] callId=${this.callId} provider=openai_realtime source=adopted ms=0`,
+          );
+          adoptOk = true;
+        } catch (err) {
+          getLogger().debug(`Realtime adoptWebSocket failed: ${String(err)}; falling back`);
+        }
+      }
+      if (!adoptOk) {
+        try { parkedRealtimeWs.close(); } catch { /* ignore */ }
+      }
+    }
+    if (!adoptOk) {
+      try {
+        await this.adapter.connect();
+        getLogger().debug(`AI adapter connected (${label})`);
+      } catch (e) {
+        getLogger().error(`AI adapter connect FAILED (${label}):`, e);
+        // Hang up the telephony call so it doesn't stay connected billing
+        try { await this.deps.bridge.endCall(this.callId, this.ws); } catch { /* best effort */ }
+        return;
+      }
     }
 
     if (this.deps.agent.firstMessage) {
@@ -2694,8 +2795,32 @@ export class StreamHandler {
   }
 
   private async onAdapterTranscriptInput(inputText: string): Promise<void> {
+    // Hallucination filter: drop Realtime transcript_input events whose text
+    // matches a known Whisper hallucination phrase (empty, common filler, or
+    // YouTube-caption closer). These fire on PSTN echo loopback — committing
+    // them to the LLM would create phantom user turns the caller never spoke.
+    // Parity with Python stream_handler.py `transcript_input` branch.
+    const stripped = inputText.trim().toLowerCase();
+    if (HALLUCINATIONS.has(stripped) || stripped === '') {
+      getLogger().debug(
+        `Realtime transcript_input dropped (likely Whisper hallucination on silence/echo): ${sanitizeLogValue(inputText.slice(0, 60))}`,
+      );
+      this.userTranscriptPending = false;
+      return;
+    }
     getLogger().debug(`User (${this.deps.bridge.label}): ${sanitizeLogValue(inputText)}`);
     this.history.push({ role: 'user', text: inputText, timestamp: Date.now() });
+    // Hallucination filter accepted — drive response.create explicitly now
+    // that server VAD is configured with create_response: false. Without
+    // this call the model never generates a reply (the server no longer
+    // auto-creates a response on input_audio_buffer.committed). Parity with
+    // Python stream_handler.py which calls
+    // ``await self._adapter.request_response()`` at this point.
+    if (this.adapter instanceof OpenAIRealtimeAdapter) {
+      void this.adapter.requestResponse().catch((err) =>
+        getLogger().debug(`Realtime requestResponse failed: ${String(err)}`),
+      );
+    }
     // Fallback: if speech_stopped was missed (server VAD disabled, custom
     // config, ...) still start the turn here so latency is non-zero.
     if (!this.metricsAcc.turnActive) {
@@ -2887,6 +3012,29 @@ export class StreamHandler {
   }
 
   private async onAdapterSpeechInterrupt(): Promise<void> {
+    // Gate the cancel/flush path with an anti-flicker window similar to
+    // the pipeline mode. OpenAI's server VAD fires ``speech_started`` on
+    // echo of the agent's own audio in PSTN no-AEC scenarios (carrier
+    // loopback feeds our outbound mulaw back into the input buffer).
+    // Without this gate every phantom ``speech_started`` cancels the
+    // response — most visibly, the firstMessage gets truncated
+    // mid-sentence. The Realtime adapter manages its own TTS span so
+    // ``isSpeaking`` (a pipeline-only flag) stays false; consult the
+    // adapter's own response-tracking timestamp as a proxy.
+    if (this.adapter instanceof OpenAIRealtimeAdapter) {
+      const startedAt = (
+        this.adapter as unknown as { currentResponseFirstAudioAt: number | null }
+      ).currentResponseFirstAudioAt;
+      if (startedAt !== null) {
+        const elapsedMs = Date.now() - startedAt;
+        if (elapsedMs < StreamHandler.MIN_AGENT_SPEAKING_MS_BEFORE_BARGE_IN_NO_AEC) {
+          getLogger().info(
+            `Realtime barge-in suppressed (response < gate, ${elapsedMs}ms)`,
+          );
+          return;
+        }
+      }
+    }
     this.deps.bridge.sendClear(this.ws, this.streamSid);
     if (this.adapter instanceof OpenAIRealtimeAdapter) this.adapter.cancelResponse();
     this.metricsAcc.recordTurnInterrupted();

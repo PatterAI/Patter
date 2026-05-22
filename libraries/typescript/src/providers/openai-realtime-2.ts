@@ -113,17 +113,33 @@ export class OpenAIRealtime2Adapter extends OpenAIRealtimeAdapter {
           transcription: {
             model: opts.inputAudioTranscriptionModel ?? OpenAITranscriptionModel.WHISPER_1,
           },
-          // Lower threshold (0.3 vs the 0.5 default) because the inbound
-          // audio is telephony-band (8 kHz) linearly upsampled to 24 kHz —
-          // the upper 4-12 kHz band is interpolation, not real harmonics,
-          // and the GA server VAD's default tuning was calibrated against
-          // studio-quality 24 kHz audio. A more permissive threshold
-          // recovers reliable speech detection on phone-band input.
+          // VAD threshold raised back to the OpenAI default (0.5) on
+          // 2026-05-22. The earlier 0.1 tuning (motivated by the
+          // upsampled telephony-band loss in high frequencies) made the
+          // server VAD trigger on the carrier-loopback echo of the
+          // agent's OWN outbound audio in PSTN no-AEC scenarios.
+          // Combined with the default ``turn_detection.create_response:
+          // true``, every phantom ``speech_started`` ended a turn early
+          // and auto-created a new response that the agent immediately
+          // spoke over, leading to a runaway loop where the first
+          // message was repeatedly cut and re-generated.
           turn_detection: {
             type: opts.vadType ?? OpenAIRealtimeVADType.SERVER_VAD,
-            threshold: 0.1,
+            threshold: 0.5,
             prefix_padding_ms: 300,
             silence_duration_ms: opts.silenceDurationMs ?? 500,
+            // Defer ``response.create`` to the application: when OpenAI's
+            // server VAD commits an ``input_audio_buffer.committed`` segment
+            // that turns out to be a Whisper hallucination on silence/echo,
+            // auto-creating a response would generate a phantom turn (the
+            // model reads the hallucinated text as user input). Patter
+            // triggers ``response.create`` explicitly in the Realtime
+            // stream-handler AFTER validating ``transcript_input`` against
+            // the hallucination filter. Pair with ``interrupt_response:
+            // false`` so server VAD also leaves in-flight responses alone —
+            // barge-in is gated client-side.
+            create_response: false,
+            interrupt_response: false,
           },
         },
         output: {
@@ -293,6 +309,152 @@ export class OpenAIRealtime2Adapter extends OpenAIRealtimeAdapter {
   }
 
   /**
+   * GA-API variant of {@link OpenAIRealtimeAdapter.openParkedConnection}.
+   * Opens a fresh Realtime WS against the GA endpoint, exchanges
+   * `session.created` → GA-shape `session.update` → `session.updated`
+   * so the upstream session is fully primed, and returns the OPEN
+   * socket WITHOUT taking it on `this.ws` or arming the heartbeat /
+   * message listener.
+   *
+   * Used by `Patter.parkProviderConnections` during the carrier
+   * ringing window so the per-call `StreamHandler` can adopt the
+   * primed socket at carrier `start` — eliminating the TCP + TLS +
+   * HTTP-101 + `session.update` ack round-trip from the critical path.
+   * Saves ~300-600 ms of first-audible-word latency.
+   *
+   * Bounded by 8 s. Throws on timeout / handshake failure / GA-side
+   * rejection. Callers treat any error as a cache miss and fall
+   * through to the cold {@link connect} path.
+   *
+   * Billing safety: confirmed by OpenAI's Managing Realtime Costs
+   * guide — `session.update` does NOT invoke the model and bills no
+   * tokens. An idle parked socket costs $0.
+   */
+  override async openParkedConnection(): Promise<WebSocket> {
+    const url = `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(this.model)}`;
+    const ws = new WebSocket(url, {
+      headers: { Authorization: `Bearer ${this.apiKey}` },
+    });
+    await new Promise<void>((resolve, reject) => {
+      let sessionCreated = false;
+      let settled = false;
+      const onMessage = (raw: Buffer | string): void => {
+        let msg: { type?: string; error?: { message?: string } };
+        try {
+          msg = JSON.parse(raw.toString()) as { type?: string; error?: { message?: string } };
+        } catch {
+          return;
+        }
+        if (msg.type === 'session.created' && !sessionCreated) {
+          sessionCreated = true;
+          try {
+            ws.send(JSON.stringify({ type: 'session.update', session: this.buildGASessionConfig() }));
+          } catch (err) {
+            cleanup();
+            reject(err instanceof Error ? err : new Error(String(err)));
+          }
+        } else if (msg.type === 'session.updated') {
+          cleanup();
+          resolve();
+        } else if (msg.type === 'error') {
+          cleanup();
+          reject(new Error(`OpenAI Realtime 2 parked-setup error: ${msg.error?.message ?? JSON.stringify(msg)}`));
+        }
+      };
+      const onError = (err: Error): void => {
+        cleanup();
+        reject(err);
+      };
+      const cleanup = (): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        ws.off('message', onMessage);
+        ws.off('error', onError);
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error('OpenAI Realtime 2 park connect timeout'));
+      }, 8000);
+      ws.on('message', onMessage);
+      ws.on('error', onError);
+    });
+    // Application-level keepalive. Empirically, OpenAI's GA Realtime
+    // edge closes idle parked sockets within ~6-7 s — WS-level PINGs
+    // alone are not counted as activity. Re-sending the (idempotent)
+    // `session.update` every 3 s keeps the session alive across the
+    // 3-15 s ringing window. Cancelled in `adoptWebSocket` when the
+    // live adapter takes over. Billing safety: `session.update` bills
+    // no tokens (no model invocation).
+    const keepalive = setInterval(() => {
+      if (ws.readyState !== ws.OPEN) {
+        clearInterval(keepalive);
+        return;
+      }
+      try {
+        ws.send(JSON.stringify({ type: 'session.update', session: this.buildGASessionConfig() }));
+      } catch {
+        clearInterval(keepalive);
+      }
+    }, 3000);
+    (ws as unknown as { _parkedKeepalive?: NodeJS.Timeout })._parkedKeepalive = keepalive;
+    return ws;
+  }
+
+  /**
+   * GA-API variant of {@link OpenAIRealtimeAdapter.adoptWebSocket}. Takes
+   * over a WS that {@link openParkedConnection} produced (already through
+   * `session.created` + `session.update` + `session.updated`) and arms
+   * the heartbeat + message listener so the GA event-translation shim
+   * is wired up. Skips the cold-connect path — saves ~300-600 ms on
+   * first audible word.
+   *
+   * Caller MUST verify `ws.readyState === OPEN` before calling. If the
+   * parked WS died between park and adopt, fall back to {@link connect}.
+   */
+  override adoptWebSocket(ws: WebSocket): void {
+    // Cancel the parked keepalive before the live adapter starts
+    // sending its own frames — otherwise the interval would race
+    // input_audio_buffer.append writes on the same socket.
+    const wsAny = ws as unknown as { _parkedKeepalive?: NodeJS.Timeout };
+    if (wsAny._parkedKeepalive) {
+      clearInterval(wsAny._parkedKeepalive);
+      delete wsAny._parkedKeepalive;
+    }
+    this.ws = ws;
+    // Re-attach the GA event-translation `ws.on` shim BEFORE
+    // `armHeartbeatAndListener` registers the persistent message
+    // listener — otherwise GA event names fall through to the v1
+    // dispatcher's no-op branch and audio is silently dropped. This
+    // mirrors the patch the parent `connect` installs on its
+    // freshly-opened socket; we apply it to the adopted one too.
+    const wsRef = ws as unknown as {
+      on: (event: string, handler: (...args: unknown[]) => void) => unknown;
+    };
+    const originalOn = wsRef.on.bind(ws);
+    wsRef.on = (event: string, handler: (...args: unknown[]) => void): unknown => {
+      if (event !== 'message') return originalOn(event, handler);
+      const wrapped = (raw: unknown, ...rest: unknown[]): void => {
+        try {
+          const text = typeof raw === 'string' ? raw : (raw as Buffer).toString();
+          const parsed = JSON.parse(text) as { type?: string };
+          const t = parsed.type;
+          if (t && Object.prototype.hasOwnProperty.call(GA_TO_V1_EVENT_NAMES, t)) {
+            (parsed as { type?: string }).type = GA_TO_V1_EVENT_NAMES[t];
+            handler(JSON.stringify(parsed), ...rest);
+            return;
+          }
+        } catch {
+          /* fall through */
+        }
+        handler(raw, ...rest);
+      };
+      return originalOn(event, wrapped);
+    };
+    this.armHeartbeatAndListener();
+  }
+
+  /**
    * GA-API variant of {@link OpenAIRealtimeAdapter.sendFirstMessage}. Two
    * differences from the v1 path:
    *
@@ -398,21 +560,21 @@ export class OpenAIRealtime2Adapter extends OpenAIRealtimeAdapter {
   }
 
   async sendFirstMessage(text: string): Promise<void> {
-    // Bypass reasoning for the first message: this is a literal "say
-    // exactly X" instruction, not an open question, so the reasoning
-    // tier inherited from the session (`reasoningEffort` — typically
-    // "low" for production voice) only adds time-to-first-audio without
-    // changing the output. Forcing `minimal` here lets the first message
-    // start streaming as fast as possible; subsequent VAD-triggered
-    // `response.create`s continue to use the session's reasoning tier.
-    this.ws?.send(JSON.stringify({
-      type: 'response.create',
-      response: {
-        output_modalities: ['audio'],
-        audio: { output: { voice: this.voice } },
-        reasoning: { effort: 'minimal' },
-        instructions: `Say exactly the following sentence as your first turn and nothing else: "${text}"`,
-      },
-    }));
+    // ``reasoning.effort`` is only accepted by the flagship GA variants
+    // (``gpt-realtime``, ``gpt-realtime-2``). The cost-tier
+    // ``gpt-realtime-mini`` rejects it with "Unsupported option for
+    // this model" and the first message never reaches the carrier.
+    // Forward the field only when the caller explicitly opted into a
+    // tier — the session.update already configured the inherited tier
+    // for subsequent VAD-driven turns.
+    const responseBody: Record<string, unknown> = {
+      output_modalities: ['audio'],
+      audio: { output: { voice: this.voice } },
+      instructions: `Say exactly the following sentence as your first turn and nothing else: "${text}"`,
+    };
+    if (this.options.reasoningEffort !== undefined) {
+      responseBody.reasoning = { effort: this.options.reasoningEffort };
+    }
+    this.ws?.send(JSON.stringify({ type: 'response.create', response: responseBody }));
   }
 }

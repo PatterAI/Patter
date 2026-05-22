@@ -31,7 +31,7 @@ class Realtime:
 
     api_key: str = ""
     voice: str = "alloy"
-    model: str = "gpt-4o-mini-realtime-preview"
+    model: str = "gpt-realtime-mini"
     # Reasoning-effort tier for ``gpt-realtime-2``. ``None`` leaves the
     # ``session.reasoning`` field unset (server default applies). OpenAI
     # recommends ``"low"`` for production voice flows — higher tiers add

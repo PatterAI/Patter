@@ -41,6 +41,16 @@ carrier = twilio.Carrier(account_sid="AC...", auth_token="...")
 
 On `serve()`, Patter automatically sets the `voice_url` on the Twilio number to `https://<webhook_url>/webhooks/twilio/voice` via the Twilio REST API — no manual Console configuration needed.
 
+### Twilio trial account limitations
+
+Twilio trial accounts apply a few platform-level restrictions that affect first-time testing. None of these are Patter limitations — they're Twilio platform rules:
+
+1. **Verified Caller IDs required for outbound** — trial accounts can only call numbers you've added under **Phone Numbers › Verified Caller IDs** in the Twilio Console. Verifying via the CLI is also restricted; do it from the Console.
+2. **Trial announcement prepended on outbound calls** — Twilio plays an English trial-account message before connecting the call to your agent; the callee has to press a key to continue.
+3. **Trial caller-ID restrictions** — the caller-ID shown to the recipient may be masked or labelled differently than your purchased number until the account is upgraded.
+
+Upgrading the account in the Twilio Console clears all three. Refer to the Twilio docs (search: "trial account") for the current exact behaviour — Twilio may change these over time.
+
 ### Signature verification
 
 The Auth Token is also used to verify every Twilio webhook with HMAC-SHA1 against the `X-Twilio-Signature` header. Requests with invalid signatures are rejected with HTTP 403.

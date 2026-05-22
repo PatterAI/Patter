@@ -15,6 +15,12 @@ import { EventEmitter } from 'events';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { getLogger } from '../logger';
+import { VERSION } from '../version';
+
+/** Resolved SDK version (single source of truth: ``package.json``). */
+function sdkVersion(): string {
+  return VERSION;
+}
 
 /** Snapshot of a call as held by the dashboard store. */
 export interface CallRecord {
@@ -482,6 +488,7 @@ export class MetricsStore extends EventEmitter {
         avg_latency_ms: 0,
         cost_breakdown: { stt: 0, tts: 0, llm: 0, telephony: 0 },
         active_calls: this.activeCalls.size,
+        sdk_version: sdkVersion(),
       };
     }
 
@@ -529,6 +536,7 @@ export class MetricsStore extends EventEmitter {
         telephony: Math.round(costTel * 1e6) / 1e6,
       },
       active_calls: this.activeCalls.size,
+      sdk_version: sdkVersion(),
     };
   }
 
