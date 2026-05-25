@@ -4,7 +4,11 @@
 export interface RealtimeOptions {
   /** API key. Falls back to OPENAI_API_KEY env var when omitted. */
   apiKey?: string;
-  /** Realtime model. Defaults to gpt-4o-mini-realtime-preview. */
+  /**
+   * Realtime model. Defaults to ``gpt-realtime-mini`` (bumped from the
+   * deprecated ``gpt-4o-mini-realtime-preview`` on 2026-05-25 for
+   * parity with the Python SDK and the GA Realtime API surface).
+   */
   model?: string;
   /** Voice preset. Defaults to alloy. */
   voice?: string;
@@ -57,7 +61,7 @@ export class Realtime {
       );
     }
     this.apiKey = key;
-    this.model = opts.model ?? "gpt-4o-mini-realtime-preview";
+    this.model = opts.model ?? "gpt-realtime-mini";
     this.voice = opts.voice ?? "alloy";
     this.reasoningEffort = opts.reasoningEffort;
     this.inputAudioTranscriptionModel = opts.inputAudioTranscriptionModel;

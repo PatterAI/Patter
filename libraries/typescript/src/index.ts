@@ -109,6 +109,24 @@ export type { AssemblyAIModel, AssemblyAIEncoding } from "./providers/assemblyai
 export type { CartesiaEncoding } from "./providers/cartesia-stt";
 export type { LMNTAudioFormat, LMNTModel, LMNTSampleRate } from "./providers/lmnt-tts";
 
+// Provider-defined const enums + types. Re-exported here so user code
+// can ``import { OpenAIRealtimeModel, ElevenLabsModel, ... } from "getpatter"``
+// without reaching into ``getpatter/providers/*``. Mirrors the Python
+// SDK's top-level ``getpatter`` namespace.
+export {
+  OpenAIRealtimeAudioFormat,
+  OpenAIRealtimeModel,
+  OpenAIRealtimeVADType,
+  OpenAITranscriptionModel,
+  OpenAIVoice,
+} from "./providers/openai-realtime";
+export { ElevenLabsModel, ElevenLabsOutputFormat } from "./providers/elevenlabs-tts";
+export { DeepgramModel } from "./providers/deepgram-stt";
+export { CartesiaTTSModel, CartesiaTTSVoiceMode } from "./providers/cartesia-tts";
+export { RimeModel, RimeAudioFormat } from "./providers/rime-tts";
+export { PricingUnit, PRICING_VERSION, PRICING_LAST_UPDATED } from "./pricing";
+export type { PricingUnitValue, ModelPricing } from "./pricing";
+
 // New namespaced STT classes — options-object constructor with env fallback.
 export { STT as DeepgramSTT } from "./stt/deepgram";
 export type { DeepgramSTTOptions } from "./stt/deepgram";
