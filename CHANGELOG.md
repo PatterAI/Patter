@@ -1,5 +1,25 @@
 ## Unreleased
 
+### Added
+
+- **Telnyx `call.recording.saved` webhook handler — Python parity with
+  TypeScript.** `libraries/python/getpatter/server.py` now handles the
+  Telnyx `call.recording.saved` Call Control event and logs the recording
+  URL (mirrors `libraries/typescript/src/server.ts:1115`). Fallback order:
+  `recording_urls.mp3` → `recording_urls.wav` → `public_recording_urls.mp3`
+  → `public_recording_urls.wav`. Closes the parity gap that left the
+  Python webhook silent on recording completion while the bridge already
+  POSTed to `actions/record_start` / `actions/record_stop`.
+
+### Changed
+
+- **READMEs (root + `libraries/python/` + `libraries/typescript/`) no
+  longer claim "Recording is Twilio-only".** Telnyx recording parity is
+  now documented consistently across all three READMEs. The Python and
+  TypeScript stream bridges already drove `actions/record_start` /
+  `actions/record_stop` against the Telnyx Call Control API when
+  `recording=True` was passed; the README copy lagged behind the code.
+
 ## 0.6.2 (2026-05-25)
 
 ### Added
