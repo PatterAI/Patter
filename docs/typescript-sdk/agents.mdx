@@ -59,7 +59,7 @@ Available LLM providers: `OpenAILLM`, `AnthropicLLM`, `GroqLLM`, `CerebrasLLM`, 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `systemPrompt` | `string` | Yes | — | Instructions that define the agent's persona and behavior. |
-| `engine` | `OpenAIRealtime \| ElevenLabsConvAI` | No | defaults to `OpenAIRealtime` | End-to-end engine. See [Engines](/typescript-sdk/engines). Omit for pipeline mode. |
+| `engine` | `OpenAIRealtime \| OpenAIRealtime2 \| ElevenLabsConvAI` | No | defaults to `OpenAIRealtime` when none provided and pipeline pieces are absent | End-to-end engine. See [Engines](/typescript-sdk/engines). Omit for pipeline mode. |
 | `stt` | `STTProvider` | No | — | STT instance for pipeline mode (`new DeepgramSTT()`, `new CartesiaSTT()`, ...). |
 | `llm` | `LLMProvider` | No | — | LLM instance for pipeline mode (`new AnthropicLLM()`, `new GroqLLM()`, ...). Mutually exclusive with `onMessage` on `serve()`. Ignored when `engine` is set. See [LLM](/typescript-sdk/llm). |
 | `tts` | `TTSProvider` | No | — | TTS instance for pipeline mode (`new ElevenLabsTTS()`, `new RimeTTS()`, ...). |

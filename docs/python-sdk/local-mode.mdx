@@ -117,13 +117,18 @@ asyncio.run(main())
 
 ### call() Parameters (Local Mode)
 
+All keyword arguments are **snake_case** (e.g. `machine_detection=`, `ring_timeout=`, `on_machine_detection=`).
+
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `to` | `str` | *required* | Phone number to call (E.164 format). |
 | `agent` | `Agent` | *required* | Agent instance to use for this call. |
+| `first_message` | `str` | `""` | What the AI says when the callee answers. |
 | `from_number` | `str` | `""` | Override the configured phone number. |
-| `machine_detection` | `bool` | `False` | Enable answering machine detection. |
-| `voicemail_message` | `str` | `""` | Message to leave on voicemail (requires `machine_detection=True`). |
+| `machine_detection` | `bool` | `True` | Enable answering machine detection. Defaults **on** since 0.6.2 — on Twilio Patter uses `MachineDetection=DetectMessageEnd` + Async AMD so there is no answer-latency penalty on human pickups. Pass `False` to skip per-call AMD billing for known destinations. |
+| `on_machine_detection` | `Callable[[MachineDetectionResult], Awaitable[None] \| None] \| None` | `None` | Fires once when the carrier reports the AMD outcome (`human` or `machine`). |
+| `voicemail_message` | `str` | `""` | Message to leave on voicemail. A non-empty value also implicitly enables `machine_detection`. |
+| `ring_timeout` | `int \| None` | `25` | Ring timeout in seconds before treating the call as no-answer. Defaults to 25 s — production-recommended. Pass `60` for legacy carrier-default parity, or `None` to omit the parameter entirely (carrier picks its own default). |
 
 ---
 
@@ -158,11 +163,15 @@ The `LocalConfig` dataclass holds all provider credentials for local mode. It is
 | `twilio_token` | `str` | Twilio Auth Token (unpacked from `Twilio(...)`). |
 | `telnyx_key` | `str` | Telnyx API key (unpacked from `Telnyx(...)`). |
 | `telnyx_connection_id` | `str` | Telnyx Call Control Application ID (unpacked from `Telnyx(...)`). |
+| `telnyx_public_key` | `str` | Telnyx Ed25519 public key for webhook signature verification (optional). |
 | `openai_key` | `str` | OpenAI API key (resolved from `OpenAIRealtime(...)` or `OPENAI_API_KEY`). |
 | `elevenlabs_key` | `str` | ElevenLabs API key. |
 | `deepgram_key` | `str` | Deepgram API key. |
+| `cartesia_key`, `rime_key`, `lmnt_key`, `soniox_key`, `speechmatics_key`, `assemblyai_key` | `str` | Provider-specific keys backfilled from the matching constructor or env var. |
 | `phone_number` | `str` | Phone number in E.164 format. |
 | `webhook_url` | `str` | Public hostname (no scheme). |
+| `require_signature` | `bool` | When `True` (default), inbound webhooks with missing credentials return HTTP 503 instead of silently accepting. Disable only for local mock-provider testing. |
+| `persist_root` | `str \| None` | Resolved persistence path for the dashboard's on-disk call history, or `None` to disable. Set by the `persist=` argument on `Patter(...)` (with `PATTER_LOG_DIR` env fallback). |
 
 ---
 

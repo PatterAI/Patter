@@ -4,7 +4,9 @@ description: "Opt-in per-call filesystem logs: metadata, transcripts, and operat
 icon: "folder-open"
 ---
 
-Patter can persist every call to a directory tree on disk so you can replay transcripts, audit tool calls, and track latency/cost trends without running a hosted dashboard. Logging is **opt-in and off by default** — nothing is written unless you ask for it.
+Patter can persist every call to a directory tree on disk so you can replay transcripts, audit tool calls, and track latency/cost trends without running a hosted dashboard.
+
+Persistence is **on by default since 0.6.2** — `Patter(...)` writes under the platform default location unless you pass `persist=False` (force-off) or override the path. The default was flipped from off→on because the dashboard's hydrate path needs on-disk records to survive process restarts.
 
 The same on-disk layout also backs the local dashboard's call history: when persistence is enabled, `phone.serve()` rebuilds the in-memory dashboard from disk on startup so call history survives process restarts without an external database.
 
@@ -26,7 +28,7 @@ phone = Patter(carrier=Twilio(), phone_number="+15555550100", persist="/var/log/
 
 | `persist` value | Behaviour |
 |-----------------|-----------|
-| omitted / `None` (default) | Falls back to `PATTER_LOG_DIR`; off when env is also unset (backward-compatible). |
+| omitted / `None` (default) | Reads `PATTER_LOG_DIR` if set; otherwise falls back to the platform default location. On by default since 0.6.2. |
 | `False` | Force-off, even if `PATTER_LOG_DIR` is set. |
 | `True` | Platform default location (see below). |
 | `"<path>"` | Use the supplied path (`~` expanded). |
@@ -49,7 +51,7 @@ Platform defaults for `auto` (and for `persist=True`):
 - Linux: `$XDG_DATA_HOME/patter` (falls back to `~/.local/share/patter`)
 - Windows: `%LOCALAPPDATA%\patter`
 
-When `persist` is unset and the env var is unset, the logger is a no-op — no directories are created, no files are written. When `persist` is set explicitly, the env var is ignored.
+When `persist` is unset and the env var is unset, Patter falls back to the platform default path (persistence is on by default since 0.6.2). When `persist` is set explicitly, the env var is ignored. Pass `persist=False` to force the logger to be a no-op.
 
 ## Layout
 
@@ -87,18 +89,20 @@ When `persist` is unset and the env var is unset, the logger is a no-op — no d
 
 ## Phone redaction
 
-Caller / callee numbers in `metadata.json` are masked by default (last 4 digits). Change via:
+Caller / callee numbers in `metadata.json` default to **full** (raw E.164) since 0.6.2 so the dashboard's reveal toggle has something to reconstruct from. The on-disk path under `~/Library/Application Support/patter/` (macOS) / XDG data dir (Linux) / `%LOCALAPPDATA%\patter` (Windows) is user-private. Override via:
 
 ```bash
-# Mask last 4 digits (default): "***4567"
-export PATTER_LOG_REDACT_PHONE=mask
-
-# Store the full E.164 number (disables redaction)
+# Store the full E.164 number (default since 0.6.2)
 export PATTER_LOG_REDACT_PHONE=full
+
+# Mask last 4 digits: "***4567"
+export PATTER_LOG_REDACT_PHONE=mask
 
 # Replace with a sha256 prefix for correlation without storing the number
 export PATTER_LOG_REDACT_PHONE=hash_only
 ```
+
+Set `PATTER_LOG_REDACT_PHONE=mask` for setups that ship logs off-host.
 
 `transcript.jsonl` is **not** redacted — it can contain customer PII spoken during the call. Gate access to the log root and/or wire up your own redaction pipeline before exporting.
 

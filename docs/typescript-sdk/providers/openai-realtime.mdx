@@ -16,11 +16,11 @@ Pass any of these to `model:` on `new OpenAIRealtime(...)`. Pricing is auto-reso
 
 | Model | Audio in / out (per M tokens) | Notes |
 |-------|-------------------------------|-------|
-| `"gpt-realtime-mini"` (default) | $10 / $20 | Fastest + cheapest. Production default for most voice flows. |
+| `"gpt-4o-mini-realtime-preview"` (engine marker default) | $10 / $20 | Default when `new OpenAIRealtime()` is constructed without an explicit `model`. Earlier preview line. |
+| `"gpt-realtime-mini"` | $10 / $20 | GA mini — recommended cheap default for new deployments. Pass `model: "gpt-realtime-mini"` explicitly. |
 | `"gpt-realtime"` | $32 / $64 | GA realtime model (Aug 2025). |
-| `"gpt-realtime-2"` | $32 / $64 | Most-capable. Stronger instruction following, 128K context, supports `reasoningEffort`. |
+| `"gpt-realtime-2"` | $32 / $64 | Most-capable. Stronger instruction following, 128K context, supports `reasoningEffort`. Use the [`OpenAIRealtime2`](/typescript-sdk/providers/openai-realtime-2) engine for the GA wire shape. |
 | `"gpt-4o-realtime-preview"` | $100 / $200 | Earlier preview, retained for compatibility. |
-| `"gpt-4o-mini-realtime-preview"` | $10 / $20 | Earlier preview, retained for compatibility. |
 
 The same identifiers are exposed as a const object for editor autocomplete:
 
@@ -123,9 +123,10 @@ The `reasoningEffort` and `inputAudioTranscriptionModel` options live on `OpenAI
 
 ## Backward compatibility
 
-- Defaults are unchanged: `model: "gpt-realtime-mini"`, `inputAudioTranscriptionModel: "whisper-1"`, `reasoningEffort: undefined`.
+- Engine marker default: `model: "gpt-4o-mini-realtime-preview"` (unchanged since first release). The underlying `OpenAIRealtimeAdapter` falls back to `gpt-realtime-mini` only when constructed without a model — the `OpenAIRealtime` wrapper always passes a model through, so the wire default is `gpt-4o-mini-realtime-preview`. Pass `model: "gpt-realtime-mini"` explicitly to upgrade.
+- `inputAudioTranscriptionModel: "whisper-1"`, `reasoningEffort: undefined` (server default).
 - All existing `new OpenAIRealtime(...)` constructions keep working without code changes.
-- Pricing for new models is added under `DEFAULT_PRICING.openai_realtime.models[...]`. The earlier `new Patter({ pricing: { openai_realtime: DEFAULT_PRICING.openai_realtime_2 } })` workaround is no longer needed — just construct with `model: "gpt-realtime-2"`.
+- Pricing for new models is added under `DEFAULT_PRICING.openai_realtime.models[...]`. The earlier `new Patter({ pricing: { openai_realtime: DEFAULT_PRICING.openai_realtime_2 } })` workaround is no longer needed — just construct with `model: "gpt-realtime-2"` (or use the [`OpenAIRealtime2`](/typescript-sdk/providers/openai-realtime-2) engine for the GA wire shape).
 
 ## What's Next
 

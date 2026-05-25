@@ -100,6 +100,7 @@
                     "pages": [
                       "python-sdk/engines",
                       "python-sdk/providers/openai-realtime",
+                      "python-sdk/providers/openai-realtime-2",
                       "python-sdk/providers/gemini-live",
                       "python-sdk/providers/ultravox-realtime",
                       "python-sdk/providers/elevenlabs-convai"
@@ -231,6 +232,7 @@
                     "pages": [
                       "typescript-sdk/engines",
                       "typescript-sdk/providers/openai-realtime",
+                      "typescript-sdk/providers/openai-realtime-2",
                       "typescript-sdk/providers/gemini-live",
                       "typescript-sdk/providers/ultravox-realtime",
                       "typescript-sdk/providers/elevenlabs-convai"

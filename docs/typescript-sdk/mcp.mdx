@@ -51,7 +51,7 @@ const agent = phone.agent({
   ],
 });
 
-await phone.serve(agent, { port: 8000 });
+await phone.serve({ agent, port: 8000 });
 ```
 
 At call start you'll see a log line:
@@ -154,7 +154,7 @@ const agent = phone.agent({
   ],
 });
 
-await phone.serve(agent, { port: 8000 });
+await phone.serve({ agent, port: 8000 });
 ```
 
 ```python Python

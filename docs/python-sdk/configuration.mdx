@@ -27,7 +27,7 @@ The carrier instance reads credentials from environment variables when you don't
 | `webhook_url` | `str` | `""` | Public hostname of this server, without scheme (e.g., `"abc.ngrok.io"`). See [Tunneling](/dev-tools/tunneling) for ways to get one. |
 | `tunnel` | `CloudflareTunnel \| Static \| bool \| None` | `None` | Tunnel directive. `True` is shorthand for `CloudflareTunnel()`. See [Tunneling](/dev-tools/tunneling). |
 | `pricing` | `dict \| None` | `None` | Override default provider pricing estimates. See [Metrics & Cost Tracking](/python-sdk/metrics). |
-| `persist` | `bool \| str \| None` | `None` | Persist the dashboard's call history to disk so it survives process restarts. See [Persistent dashboard history](#persistent-dashboard-history) below. |
+| `persist` | `bool \| str \| None` | `None` (=on, platform default path) | Persist the dashboard's call history to disk so it survives process restarts. Defaults **on** since 0.6.2 — the dashboard's hydrate path requires on-disk records to recover history across restarts. Pass `False` to keep the old ephemeral-RAM-only behaviour. See [Persistent dashboard history](#persistent-dashboard-history) below. |
 
 ## Environment variables
 
@@ -55,7 +55,7 @@ These tune SDK runtime behaviour (no credential lookup).
 |---------|---------|--------|
 | `PATTER_LOG_DIR` | unset | Persistent dashboard root (see [Persistent dashboard history](#persistent-dashboard-history) below). |
 | `PATTER_LOG_RETENTION_DAYS` | `30` | Days of disk history to retain. `0` disables cleanup. |
-| `PATTER_LOG_REDACT_PHONE` | `1` | Mask phone numbers in `metadata.json` (last 4 digits). Set to `0` to store full E.164. |
+| `PATTER_LOG_REDACT_PHONE` | `full` | One of `full` (store raw E.164), `mask` (last 4 digits), or `hash_only` (sha256:prefix). Changed from `mask` to `full` on 2026-05-21 so the dashboard's reveal toggle has something to reconstruct from. |
 | `PATTER_DASHBOARD_NOTIFY` | enabled | Set to `0`, `false`, `no`, or `off` (case-insensitive) to skip the fire-and-forget dashboard ingest POST. Use this when you embed Patter alongside your own FastAPI server on port 8000 to avoid 404 spam in your access log. |
 | `PATTER_BIND_HOST` | `127.0.0.1` | Host the embedded server binds to. Set to `0.0.0.0` when running inside a container whose port must be reachable from the host (e.g. `docker run -p 8000:8000` — Docker's port-mapping cannot forward to a 127.0.0.1 listener inside the container). |
 
@@ -129,8 +129,8 @@ By default the dashboard is an in-memory ring buffer — restart the process and
 
 | `persist` value | Behaviour |
 |-----------------|-----------|
-| omitted / `None` (default) | Falls back to the `PATTER_LOG_DIR` env var. If the env var is also unset, persistence is **off** — backward-compatible with prior releases. |
-| `False` | Force-off. Disk writes are skipped even when `PATTER_LOG_DIR` is set. |
+| omitted / `None` (default) | Reads `PATTER_LOG_DIR` if set; **otherwise falls back to the platform default location**. Persistence is **on by default** since 0.6.2 so the dashboard's hydrate path recovers history across process restarts. |
+| `False` | Force-off. Disk writes are skipped even when `PATTER_LOG_DIR` is set. Use this for ephemeral RAM-only behaviour. |
 | `True` | Write under the platform default location (see below). Equivalent to `PATTER_LOG_DIR=auto`. |
 | `"<path>"` (string) | Write under the supplied path (`~` is expanded). Equivalent to `PATTER_LOG_DIR=<path>`. |
 
@@ -215,7 +215,7 @@ export PATTER_LOG_RETENTION_DAYS=0
 ```
 
 <Warning>
-Retention defaults to **30 days** and phone numbers in `metadata.json` are **masked by default** (last 4 digits) via `PATTER_LOG_REDACT_PHONE`. If you need to keep call history indefinitely or store full E.164 numbers, set those env vars explicitly — and gate access to the log root, since `transcript.jsonl` is never redacted and may contain customer PII spoken during the call.
+Retention defaults to **30 days**. Phone numbers in `metadata.json` default to **full** (raw E.164) since 0.6.2 so the dashboard's reveal toggle has something to reconstruct from — set `PATTER_LOG_REDACT_PHONE=mask` for setups that ship logs off-host. Gate access to the log root regardless, since `transcript.jsonl` is never redacted and may contain customer PII spoken during the call.
 </Warning>
 
 See [Call logging](/python-sdk/call-logging) for the full layout, schema, and reading patterns.

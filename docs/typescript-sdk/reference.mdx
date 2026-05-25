@@ -23,6 +23,7 @@ new Patter(options: PatterOptions)
 | `webhookUrl` | `string` | Conditional | Public hostname, no scheme. Required unless using `tunnel: true` in `serve()`. |
 | `tunnel` | `CloudflareTunnel \| StaticTunnel \| boolean` | No | Tunnel directive. `true` is shorthand for `new CloudflareTunnel()`. |
 | `pricing` | `Record<string, Partial<ProviderPricing>>` | No | Custom pricing overrides. |
+| `persist` | `boolean \| string` | No | Persist the dashboard's call history to disk. Defaults to ON since 0.6.2 — pass `persist: false` to disable. See [Configuration](/typescript-sdk/configuration#persistent-dashboard-history). |
 
 ### Instance Methods
 
@@ -68,7 +69,7 @@ class Telnyx {
 ## Engines
 
 ```typescript
-import { OpenAIRealtime, ElevenLabsConvAI } from "getpatter";
+import { OpenAIRealtime, OpenAIRealtime2, ElevenLabsConvAI } from "getpatter";
 ```
 
 ### OpenAIRealtime
@@ -79,9 +80,39 @@ class OpenAIRealtime {
   readonly apiKey: string;     // reads OPENAI_API_KEY when omitted
   readonly voice: string;      // default "alloy"
   readonly model: string;      // default "gpt-4o-mini-realtime-preview"
-  constructor(opts?: { apiKey?: string; voice?: string; model?: string });
+  readonly reasoningEffort?: "minimal" | "low" | "medium" | "high";
+  readonly inputAudioTranscriptionModel?: string;
+  constructor(opts?: {
+    apiKey?: string;
+    voice?: string;
+    model?: string;
+    reasoningEffort?: "minimal" | "low" | "medium" | "high";
+    inputAudioTranscriptionModel?: string;
+  });
 }
 ```
+
+### OpenAIRealtime2
+
+```typescript
+class OpenAIRealtime2 {
+  readonly kind: "openai_realtime_2";
+  readonly apiKey: string;     // reads OPENAI_API_KEY when omitted
+  readonly voice: string;      // default "alloy"
+  readonly model: string;      // default "gpt-realtime-2"
+  readonly reasoningEffort?: "minimal" | "low" | "medium" | "high";
+  readonly inputAudioTranscriptionModel?: string;
+  constructor(opts?: {
+    apiKey?: string;
+    voice?: string;
+    model?: string;
+    reasoningEffort?: "minimal" | "low" | "medium" | "high";
+    inputAudioTranscriptionModel?: string;
+  });
+}
+```
+
+Routes through `OpenAIRealtime2Adapter` and speaks the GA `session.update` wire shape (`output_modalities`, nested `audio.{input,output}`, `session.type = "realtime"`). GA session config pins `turn_detection.create_response: false` and `interrupt_response: false` so Patter owns response creation and barge-in cancellation. See [`OpenAIRealtime2`](/typescript-sdk/providers/openai-realtime-2).
 
 ### ElevenLabsConvAI
 
@@ -184,7 +215,7 @@ class Guardrail {
 ```typescript
 interface AgentOptions {
   systemPrompt: string;
-  engine?: OpenAIRealtime | ElevenLabsConvAI;
+  engine?: OpenAIRealtime | OpenAIRealtime2 | ElevenLabsConvAI;
   stt?: STTProvider;
   llm?: LLMProvider;
   tts?: TTSProvider;
@@ -203,6 +234,7 @@ interface AgentOptions {
   bargeInThresholdMs?: number;
   aggressiveFirstFlush?: boolean;
   disablePhonePreamble?: boolean;
+  prewarmFirstMessage?: boolean;  // default false; pipeline mode only
   provider?: 'openai_realtime' | 'elevenlabs_convai' | 'pipeline';
 }
 ```
@@ -228,6 +260,7 @@ interface ServeOptions {
   dashboardToken?: string;
   dashboardDb?: string;
   dashboardPersist?: boolean;
+  manageWebhook?: boolean;  // default true; ignored when tunnel: true
 }
 ```
 
@@ -347,7 +380,8 @@ export {
   Twilio, Telnyx,
 
   // Engines
-  OpenAIRealtime, ElevenLabsConvAI,
+  OpenAIRealtime, OpenAIRealtime2, ElevenLabsConvAI,
+  OpenAIRealtimeAdapter, OpenAIRealtime2Adapter, ElevenLabsConvAIAdapter,
 
   // STT classes
   DeepgramSTT, WhisperSTT, CartesiaSTT, AssemblyAISTT, SonioxSTT,

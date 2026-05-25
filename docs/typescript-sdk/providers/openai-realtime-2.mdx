@@ -1,0 +1,134 @@
+---
+title: "OpenAI Realtime 2 (GA)"
+description: "GA Realtime API engine — separate adapter that speaks the new session.update wire shape required by gpt-realtime-2."
+icon: "bolt"
+---
+
+# OpenAI Realtime 2
+
+`OpenAIRealtime2` is the engine marker for OpenAI's **GA Realtime API** (the production endpoint that replaces the beta `OpenAI-Beta: realtime=v1` channel). It targets `gpt-realtime-2` by default and routes through `OpenAIRealtime2Adapter` — a dedicated adapter that speaks the GA `session.update` wire shape and performs bidirectional audio transcoding (mulaw 8 kHz ↔ PCM 24 kHz) required by the GA audio engine.
+
+For the legacy beta endpoint and the lower-cost `gpt-realtime-mini` model, keep using [`OpenAIRealtime`](/typescript-sdk/providers/openai-realtime). The two engines coexist — pick `OpenAIRealtime2` only when you specifically want the GA endpoint or the `gpt-realtime-2` model.
+
+<Note>
+The GA endpoint rejects the legacy `OpenAI-Beta: realtime=v1` header and expects `output_modalities`, nested `audio.{input,output}` blocks with MIME-type strings, and `session.type = "realtime"`. These wire-shape differences are why GA needs its own adapter — the beta `OpenAIRealtimeAdapter` cannot reach `gpt-realtime-2` reliably.
+</Note>
+
+## When to use
+
+| Use `OpenAIRealtime2` when… | Stick with `OpenAIRealtime` when… |
+|----------------------------|-----------------------------------|
+| You want `gpt-realtime-2` — strongest instruction following + 128K context + configurable `reasoningEffort`. | You're on `gpt-realtime-mini` for cost / latency reasons. |
+| You're hitting the GA endpoint and the beta channel is being deprecated for your account. | You don't need the GA wire shape and want to keep the existing adapter path. |
+| You want the bidirectional PCM 24 kHz transcoding handled by the SDK rather than the model silently dropping mulaw frames. | Your audio is already PCM 24 kHz end-to-end and beta works for you. |
+
+## Quickstart
+
+```typescript
+import { Patter, Twilio, OpenAIRealtime2 } from "getpatter";
+
+const phone = new Patter({
+  carrier: new Twilio(),                  // TWILIO_* from env
+  phoneNumber: "+15555550100",
+});
+
+const agent = phone.agent({
+  engine: new OpenAIRealtime2({ reasoningEffort: "low" }),
+  systemPrompt: "You are a friendly receptionist.",
+  firstMessage: "Hello! How can I help today?",
+});
+
+await phone.serve({ agent });
+```
+
+`reasoningEffort: "low"` is OpenAI's recommended production tier for live voice — it gives the best instruction following without measurable per-turn latency.
+
+## Constructor
+
+```typescript
+import { OpenAIRealtime2, type OpenAIRealtime2Options } from "getpatter";
+
+new OpenAIRealtime2({
+  apiKey?: string;                            // reads OPENAI_API_KEY
+  voice?: string;                             // default: "alloy"
+  model?: string;                             // default: "gpt-realtime-2"
+  reasoningEffort?: "minimal" | "low" | "medium" | "high";
+  inputAudioTranscriptionModel?: string;      // default: "whisper-1"
+});
+```
+
+All fields are optional with safe defaults. `apiKey` falls back to the `OPENAI_API_KEY` environment variable.
+
+### Reasoning effort
+
+| Value | When to use |
+|-------|-------------|
+| `"minimal"` | Snappy turn-taking. Skips most reasoning. |
+| `"low"` | **Recommended for production voice.** Good instruction following without measurable per-turn latency. |
+| `"medium"` | Multi-step tool flows where the model should plan. Adds latency. |
+| `"high"` | Complex reasoning. Not recommended for live phone calls. |
+
+When set, Patter injects `session.reasoning = { effort: ... }` into the GA `session.update` payload. When omitted, the field is not sent and OpenAI's server default applies.
+
+### Streaming transcription
+
+Set `inputAudioTranscriptionModel` to override `audio.input.transcription.model`. The same identifiers as the beta endpoint apply — see the [streaming-transcription table on the OpenAI Realtime page](/typescript-sdk/providers/openai-realtime#streaming-transcription) for the full list (`whisper-1`, `gpt-4o-mini-transcribe`, `gpt-4o-transcribe`, `gpt-realtime-whisper`).
+
+## Audio path
+
+The GA audio engine speaks PCM 24 kHz and silently drops mulaw frames. Patter handles the conversion transparently inside `OpenAIRealtime2Adapter`:
+
+- **Inbound** (Twilio/Telnyx → model): mulaw 8 kHz → PCM 24 kHz
+- **Outbound** (model → Twilio/Telnyx): PCM 24 kHz → mulaw 8 kHz
+
+No caller-side change is required — both Twilio Media Streams (mulaw 8 kHz) and Telnyx Call Control (PCM 16 kHz / mulaw 8 kHz) work out of the box.
+
+## Direct adapter use
+
+`OpenAIRealtime2Adapter` is exported and may be constructed directly when you need to share connection state across calls or override low-level fields. The constructor signature is **positional** (inherited from `OpenAIRealtimeAdapter`):
+
+```typescript
+import { OpenAIRealtime2Adapter } from "getpatter";
+
+const adapter = new OpenAIRealtime2Adapter(
+  process.env.OPENAI_API_KEY ?? "",   // apiKey
+  "gpt-realtime-2",                   // model
+  "nova",                             // voice
+  "You are a helpful assistant.",     // instructions
+  undefined,                          // tools
+  "g711_ulaw",                        // audioFormat — GA adapter emits PCM24
+                                      // internally regardless of this value,
+                                      // but the positional arg is required.
+  {
+    reasoningEffort: "low",
+    inputAudioTranscriptionModel: "gpt-realtime-whisper",
+  },
+);
+
+const agent = phone.agent({
+  engine: adapter,
+  systemPrompt: "...",
+  firstMessage: "...",
+});
+```
+
+The adapter extends `OpenAIRealtimeAdapter` and overrides `connect()`, `sendAudio()`, `receiveEvents()`, and `sendFirstMessage()` for the GA wire shape.
+
+### GA session config — `create_response: false` / `interrupt_response: false`
+
+The GA adapter unconditionally pins both flags in `session.update.turn_detection`. Patter owns response creation (`response.create`) and barge-in cancellation explicitly so the hallucination filter and barge-in pipeline can decide per turn rather than letting the server VAD auto-trigger. This is why the GA adapter is required — the legacy beta endpoint did not expose these knobs in the same shape.
+
+## Backward compatibility
+
+- Existing `new OpenAIRealtime({...})` callers are **unaffected**. The legacy engine continues to target the beta endpoint with `gpt-realtime-mini` as the default.
+- `OpenAIRealtime2` ships as an additive engine — no migration required. Pick it when you want the GA endpoint; otherwise stay where you are.
+- Pricing for `gpt-realtime-2` is auto-resolved per model from `DEFAULT_PRICING.openai_realtime.models["gpt-realtime-2"]` — see [Metrics](/typescript-sdk/metrics).
+
+## What's Next
+
+<CardGroup cols={2}>
+  <Card title="OpenAI Realtime (beta)" icon="bolt" href="/typescript-sdk/providers/openai-realtime">The legacy engine for `gpt-realtime-mini` and earlier preview models.</Card>
+  <Card title="Engines" icon="bolt" href="/typescript-sdk/engines">All engine classes side by side.</Card>
+  <Card title="Agents" icon="user-gear" href="/typescript-sdk/agents">Configure system prompts, tools, and first messages.</Card>
+  <Card title="Tools" icon="screwdriver-wrench" href="/typescript-sdk/tools">Function calling inside a Realtime session.</Card>
+</CardGroup>

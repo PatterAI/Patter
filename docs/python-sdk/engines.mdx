@@ -1,6 +1,6 @@
 ---
 title: "Engines"
-description: "End-to-end speech-to-speech runtimes (OpenAI Realtime, ElevenLabs ConvAI)."
+description: "End-to-end speech-to-speech runtimes (OpenAI Realtime, OpenAI Realtime 2, ElevenLabs ConvAI)."
 icon: "bolt"
 ---
 
@@ -8,9 +8,10 @@ icon: "bolt"
 
 An **engine** is an end-to-end speech-to-speech runtime. Pass an engine instance to `phone.agent(engine=...)` and Patter wires the audio stream straight through to the provider — no separate STT or TTS is needed.
 
-Patter ships with two engine classes today:
+Patter ships with three engine classes today:
 
-- [`OpenAIRealtime`](#openairealtime) — OpenAI's Realtime API
+- [`OpenAIRealtime`](#openairealtime) — OpenAI's Realtime API (v1-beta family, `gpt-realtime-mini` / `gpt-realtime` / `gpt-4o-*-realtime-preview`)
+- [`OpenAIRealtime2`](#openairealtime2) — OpenAI's GA Realtime API (`gpt-realtime-2`), separate marker because the GA endpoint speaks a different `session.update` wire shape
 - [`ElevenLabsConvAI`](#elevenlabsconvai) — ElevenLabs Conversational AI
 
 Each class ships as both a **flat alias** (`from getpatter import OpenAIRealtime`) and a **namespaced** class (`from getpatter.engines import openai` → `openai.Realtime()`). They are equivalent.
@@ -42,9 +43,10 @@ asyncio.run(main())
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `api_key` | `str` | `""` | OpenAI API key. Reads from `OPENAI_API_KEY` when empty. |
-| `language` | `str` | `"en"` | BCP-47 language code (e.g., `"ja"`, `"es"`, `"fr"`). Seeds the auto-generated fallback system prompt (`"Respond in {language}"`). Has no effect when you supply your own `system_prompt` — write the prompt in the target language and OpenAI Realtime will auto-detect from the audio. |
-| `voice` | `str` | `"alloy"` | One of `"alloy"`, `"echo"`, `"fable"`, `"onyx"`, `"nova"`, `"shimmer"`. |
-| `model` | `str` | `"gpt-4o-mini-realtime-preview"` | OpenAI Realtime model ID. See [supported models](/python-sdk/providers/openai-realtime#models). |
+| `voice` | `str` | `"alloy"` | One of `"alloy"`, `"ash"`, `"ballad"`, `"coral"`, `"echo"`, `"fable"`, `"nova"`, `"onyx"`, `"sage"`, `"shimmer"`, `"verse"`. |
+| `model` | `str` | `"gpt-realtime-mini"` | OpenAI Realtime model ID. See [supported models](/python-sdk/providers/openai-realtime#models). |
+| `reasoning_effort` | `"minimal" \| "low" \| "medium" \| "high" \| None` | `None` | Reasoning tier for `gpt-realtime-2`. `None` leaves the field unset (server default). OpenAI recommends `"low"` for production voice flows; higher tiers add measurable per-turn latency. No-op on models that ignore it. |
+| `input_audio_transcription_model` | `str \| None` | `None` | Override the Realtime session's `input_audio_transcription.model`. `None` keeps the adapter default (`"whisper-1"`). Use `"gpt-realtime-whisper"` for low-latency partials, `"gpt-4o-transcribe"` for higher accuracy. |
 
 ### Supported model identifiers
 
@@ -68,6 +70,49 @@ from getpatter.engines import openai as openai_engine
 engine = openai_engine.Realtime()                     # reads OPENAI_API_KEY
 engine = openai_engine.Realtime(voice="nova", model="gpt-realtime-2")
 ```
+
+## OpenAIRealtime2
+
+Marker class that selects the **GA Realtime API** (`gpt-realtime-2`). The GA endpoint speaks a different `session.update` wire shape than the v1-beta family (no `OpenAI-Beta: realtime=v1` header, `session.type: "realtime"`, nested `audio.{input,output}` with MIME types, `output_modalities` instead of `modalities`), so `OpenAIRealtime2` dispatches to a separate adapter (`OpenAIRealtime2Adapter`).
+
+```python
+import asyncio
+from getpatter import Patter, Twilio, OpenAIRealtime2
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")   # TWILIO_* from env
+
+agent = phone.agent(
+    engine=OpenAIRealtime2(reasoning_effort="low"),             # OPENAI_API_KEY from env
+    system_prompt="You are a friendly receptionist.",
+    first_message="Hello! How can I help?",
+)
+
+async def main():
+    await phone.serve(agent)
+
+asyncio.run(main())
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `api_key` | `str` | `""` | OpenAI API key. Reads from `OPENAI_API_KEY` when empty. |
+| `voice` | `str` | `"alloy"` | Same voice set as `OpenAIRealtime`. |
+| `model` | `str` | `"gpt-realtime-2"` | Pinned to the GA model. Override only if OpenAI ships future GA-shaped models. |
+| `reasoning_effort` | `"minimal" \| "low" \| "medium" \| "high" \| None` | `None` | `gpt-realtime-2` reasoning tier. `"low"` is OpenAI's recommendation for production voice flows. |
+| `input_audio_transcription_model` | `str \| None` | `None` | Override for `audio.input.transcription.model`. `None` keeps the adapter default (`"whisper-1"`). |
+
+Namespaced form:
+
+```python
+from getpatter.engines import openai_realtime_2
+
+engine = openai_realtime_2.Realtime2()
+engine = openai_realtime_2.Realtime2(reasoning_effort="low")
+```
+
+<Note>
+PCM transport: the GA endpoint accepts only PCM-16-LE at >=24 kHz. Patter transcodes inbound mulaw 8 kHz → PCM 24 kHz and outbound PCM 24 kHz → mulaw 8 kHz transparently on the carrier side; you don't need to configure anything.
+</Note>
 
 ## ElevenLabsConvAI
 

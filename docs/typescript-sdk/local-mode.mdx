@@ -78,13 +78,12 @@ Returns `{ "status": "ok", "mode": "local" }`.
 
 ## WebSocket Streams
 
-Audio streams are handled over WebSocket:
+Audio streams are handled over WebSocket. The server upgrades HTTP connections to WebSocket on the `/ws/stream/` path and each call gets its own connection. How `caller` and `callee` reach the handler depends on the carrier:
 
-```
-wss://{webhookUrl}/ws/stream/{callId}?caller={caller}&callee={callee}
-```
+- **Twilio** — the `wss://{webhookUrl}/ws/stream/{callId}` URL has no query string. Twilio strips query-string params during the WS upgrade handshake, so the inbound TwiML emits the caller / callee as `<Parameter name="caller" value="..."/>` / `<Parameter name="callee" value="..."/>` children of `<Stream>`. The values are then surfaced in the WS `start` frame as `start.customParameters` and applied by `StreamHandler.handleCallStart`.
+- **Telnyx** — `wss://{webhookUrl}/ws/stream/{callControlId}?caller={caller}&callee={callee}`. The Call Control flow includes the metadata in the answer command and the SDK reads the query string on the WS upgrade.
 
-The server upgrades HTTP connections to WebSocket on the `/ws/stream/` path. Each call gets its own WebSocket connection.
+If you construct the inbound TwiML yourself (rather than letting Patter's `/webhooks/twilio/voice` route emit it), use `TwilioAdapter.generateStreamTwiml(streamUrl, { caller, callee })` — the `parameters` argument is forwarded as `<Parameter>` children of `<Stream>` so it lands on `start.customParameters`.
 
 ### Rate Limiting
 

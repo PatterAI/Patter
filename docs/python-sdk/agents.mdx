@@ -70,12 +70,12 @@ agent = phone.agent(
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `system_prompt` | `str` | *required* | Instructions that define the agent's behavior. |
-| `engine` | `OpenAIRealtime \| ElevenLabsConvAI \| None` | `None` → OpenAI Realtime | End-to-end engine. See [Engines](/python-sdk/engines). Omit for pipeline mode. |
+| `engine` | `OpenAIRealtime \| OpenAIRealtime2 \| ElevenLabsConvAI \| None` | `None` → OpenAI Realtime | End-to-end engine. See [Engines](/python-sdk/engines). Omit for pipeline mode. |
 | `stt` | `STTProvider \| None` | `None` | STT instance for pipeline mode (`DeepgramSTT()`, `CartesiaSTT()`, ...). See [STT](/python-sdk/stt). |
 | `llm` | `LLMProvider \| None` | `None` | LLM instance for pipeline mode (`AnthropicLLM()`, `GroqLLM()`, ...). Mutually exclusive with `on_message` on `serve()`. Ignored when `engine` is set. See [LLM](/python-sdk/llm). |
 | `tts` | `TTSProvider \| None` | `None` | TTS instance for pipeline mode (`ElevenLabsTTS()`, `RimeTTS()`, ...). See [TTS](/python-sdk/tts). |
 | `voice` | `str` | `"alloy"` | Voice name. Usually inferred from the engine or TTS instance. |
-| `model` | `str` | `"gpt-4o-mini-realtime-preview"` | Model ID for OpenAI Realtime. Usually inferred from the engine. |
+| `model` | `str` | `"gpt-realtime-mini"` | Model ID for OpenAI Realtime. Usually inferred from the engine. |
 | `language` | `str` | `"en"` | BCP-47 language code. |
 | `first_message` | `str` | `""` | If set, the agent speaks this immediately when a call connects. |
 | `tools` | `list[Tool] \| None` | `None` | `Tool(...)` instances for function calling. See [Tools](/python-sdk/tools). |
@@ -176,7 +176,7 @@ Voice is usually inferred from the engine or TTS instance — e.g. `OpenAIRealti
 
 <Tabs>
   <Tab title="OpenAI Realtime">
-    `"alloy"`, `"echo"`, `"fable"`, `"onyx"`, `"nova"`, `"shimmer"`
+    `"alloy"`, `"ash"`, `"ballad"`, `"coral"`, `"echo"`, `"fable"`, `"nova"`, `"onyx"`, `"sage"`, `"shimmer"`, `"verse"`
   </Tab>
   <Tab title="ElevenLabs">
     Any ElevenLabs voice ID or name (e.g., `"rachel"`, `"adam"`).

@@ -110,6 +110,10 @@ You'll see the Patter banner, a Cloudflare tunnel URL, and a log line confirming
 
 Pick up your phone, dial your Twilio number, and the agent will answer with `"Hello! How can I help?"`. Start talking.
 
+<Note>
+Since 0.6.2, `Patter(...)` persists per-call records (`metadata.json`, `transcript.jsonl`, `events.jsonl`) to the platform default data directory by default so the local dashboard's call history survives process restarts. Pass `persist=False` to keep the old ephemeral-RAM-only behaviour, or `persist="/custom/path"` to choose a different location. See [Call logging](/python-sdk/call-logging) for the full layout.
+</Note>
+
 ---
 
 ## Using a different engine

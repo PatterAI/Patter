@@ -113,9 +113,9 @@ asyncio.run(main())
 ```
 </CodeGroup>
 
-<Warning>
-The `reasoning_effort` and `input_audio_transcription_model` arguments live on `OpenAIRealtimeAdapter`. The shorthand `OpenAIRealtime(model=...)` engine wrapper currently exposes only `api_key`, `voice`, and `model` — use the adapter directly when you need the new fields.
-</Warning>
+<Note>
+Since 0.6.2 you can pass `reasoning_effort` and `input_audio_transcription_model` directly to the engine wrapper — `OpenAIRealtime(model="gpt-realtime-2", reasoning_effort="low", input_audio_transcription_model="gpt-realtime-whisper")`. Reach for the lower-level `OpenAIRealtimeAdapter` only when you need every field (custom VAD type, modalities, `silence_duration_ms`, etc.). For the GA `gpt-realtime-2` endpoint, prefer the dedicated [`OpenAIRealtime2`](/python-sdk/engines#openairealtime2) marker — it dispatches to a separate adapter that handles the GA-shape `session.update` wire format automatically.
+</Note>
 
 ## Backward compatibility
 

@@ -102,6 +102,41 @@ The embedded server exposes these endpoints regardless of carrier choice:
 | `POST /webhooks/twilio/amd` | Async AMD (answering machine detection) results. |
 | `POST /webhooks/telnyx/voice` | Incoming Telnyx call → returns Call Control commands. |
 
+## Outbound calls
+
+Use `phone.call(...)` to place an outbound call on either carrier. Every keyword argument is **snake_case**:
+
+```python
+import asyncio
+from getpatter import Patter, Twilio, OpenAIRealtime
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+agent = phone.agent(engine=OpenAIRealtime(), system_prompt="You are a friendly receptionist.")
+
+async def main():
+    server = asyncio.create_task(phone.serve(agent, tunnel=True))
+    await phone.ready                                   # wait until tunnel + listener are up
+
+    await phone.call(
+        to="+15550009876",
+        agent=agent,
+        first_message="Hi! This is a courtesy call from Acme.",
+        machine_detection=True,                          # default since 0.6.2
+        ring_timeout=25,                                 # default since 0.6.2
+        voicemail_message="Please call us back at +15550001234.",
+    )
+
+asyncio.run(main())
+```
+
+Key defaults changed in 0.6.2:
+
+- `machine_detection` defaults to `True`. On Twilio Patter sends `MachineDetection=DetectMessageEnd` + Async AMD so there is no answer-latency penalty on human pickups. Pass `False` to skip per-call AMD billing.
+- `ring_timeout` defaults to `25` seconds. Pass `60` for legacy carrier-default parity, or `None` to omit the parameter entirely.
+- The AMD callback was renamed `on_machine` → `on_machine_detection` and now receives a `MachineDetectionResult` (not a raw dict).
+
+See [Local Mode › call() Parameters](/python-sdk/local-mode#call-parameters-local-mode) for the full parameter table.
+
 ## What's Next
 
 <CardGroup cols={2}>

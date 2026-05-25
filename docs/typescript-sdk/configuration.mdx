@@ -27,7 +27,7 @@ The carrier instance reads credentials from environment variables when you don't
 | `webhookUrl` | `string` | Conditional | — | Public hostname for webhooks (no protocol prefix, no path). Required unless using `tunnel: true` in `serve()`. |
 | `tunnel` | `CloudflareTunnel \| StaticTunnel \| boolean` | No | — | Tunnel directive. `true` is shorthand for `new CloudflareTunnel()`. See [Tunneling](/dev-tools/tunneling). |
 | `pricing` | `Record<string, Partial<ProviderPricing>>` | No | — | Override default provider pricing estimates. See [Metrics](/typescript-sdk/metrics). |
-| `persist` | `boolean \| string` | No | — | Persist the dashboard's call history to disk so it survives process restarts. See [Persistent dashboard history](#persistent-dashboard-history) below. |
+| `persist` | `boolean \| string` | No | `true` (on, platform default path) | Persist the dashboard's call history to disk so it survives process restarts. Defaults to ON since 0.6.2 — pass `persist: false` to keep the prior ephemeral-RAM-only behaviour. See [Persistent dashboard history](#persistent-dashboard-history) below. |
 
 ## Webhook URL Format
 
@@ -134,7 +134,7 @@ By default the dashboard is an in-memory ring buffer — restart the process and
 
 | `persist` value | Behaviour |
 |-----------------|-----------|
-| omitted / `undefined` (default) | Falls back to the `PATTER_LOG_DIR` env var. If the env var is also unset, persistence is **off** — backward-compatible with prior releases. |
+| omitted / `undefined` (default) | Persistence is **on**. Falls back to `PATTER_LOG_DIR` when set; otherwise writes under the platform default location. Changed from opt-in to default-on in 0.6.2 so the dashboard's hydrate path can rebuild call history across process restarts without extra wiring. |
 | `false` | Force-off. Disk writes are skipped even when `PATTER_LOG_DIR` is set. |
 | `true` | Write under the platform default location (see below). Equivalent to `PATTER_LOG_DIR=auto`. |
 | `"<path>"` (string) | Write under the supplied path (`~` is expanded). Equivalent to `PATTER_LOG_DIR=<path>`. |

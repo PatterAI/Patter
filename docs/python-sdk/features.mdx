@@ -39,20 +39,30 @@ for record in recordings:
 
 Detect whether a human or machine answered an outbound call. When a machine is detected, optionally leave a voicemail message and hang up.
 
+AMD is **on by default** since 0.6.2. On Twilio, Patter uses `MachineDetection=DetectMessageEnd` + Async AMD so there is no answer-latency penalty on human pickups — the call connects immediately and the classification arrives via the `/webhooks/twilio/amd` callback. Pass `machine_detection=False` to skip per-call AMD billing when the destination is known to be a human.
+
 ```python
-# Enable AMD on outbound calls
+# AMD is on by default; just pass a voicemail_message to leave a message
+# when a machine answers.
 await phone.call(
     to="+15550009876",
     agent=agent,
-    machine_detection=True,
     voicemail_message="Hi, this is Acme Corp calling about your appointment. Please call us back at 555-000-1234.",
+)
+
+# Or opt out explicitly for a known-human destination
+await phone.call(
+    to="+15550009876",
+    agent=agent,
+    machine_detection=False,
 )
 ```
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `machine_detection` | `bool` | `False` | Enable answering machine detection. |
-| `voicemail_message` | `str` | `""` | Message to speak when a machine is detected. If empty, the call hangs up silently. |
+| `machine_detection` | `bool` | `True` | Enable answering machine detection. Defaults on since 0.6.2. Pass `False` to skip AMD billing. |
+| `voicemail_message` | `str` | `""` | Message to speak when a machine is detected. If empty, the call hangs up silently. A non-empty value implicitly enables AMD even if `machine_detection=False`. |
+| `on_machine_detection` | `Callable[[MachineDetectionResult], Awaitable[None] \| None] \| None` | `None` | Fires once when the carrier reports the AMD outcome (`human` or `machine`). Useful for acceptance tests that need to mark a run INVALID when classification is not `human`. |
 
 ### How It Works
 

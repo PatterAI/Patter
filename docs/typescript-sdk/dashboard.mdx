@@ -17,7 +17,8 @@ Patter ships a built-in web dashboard for monitoring calls in real time. It runs
 The dashboard is enabled by default whenever you start a server in local mode:
 
 ```typescript
-await phone.serve(agent, {
+await phone.serve({
+  agent,
   port: 8000,
   dashboard: true,                // Enable dashboard (default: true)
   dashboardToken: "secret",       // Optional: protect with a token
@@ -35,7 +36,8 @@ Once running, open your browser at `http://127.0.0.1:8000/`.
 Protect the dashboard with a token:
 
 ```typescript
-await phone.serve(agent, {
+await phone.serve({
+  agent,
   port: 8000,
   dashboardToken: "my-secret-token",
 });

@@ -19,8 +19,9 @@ Patter(
     carrier: Twilio | Telnyx | None = None,
     phone_number: str = "",
     webhook_url: str = "",
-    tunnel: CloudflareTunnel | Static | bool | None = None,
+    tunnel: CloudflareTunnel | Static | Ngrok | bool | None = None,
     pricing: dict | None = None,
+    persist: bool | str | None = None,
 )
 ```
 
@@ -29,8 +30,9 @@ Patter(
 | `carrier` | `Twilio \| Telnyx \| None` | `None` | Telephony carrier instance. Reads credentials from env vars when arguments are omitted. |
 | `phone_number` | `str` | `""` | Phone number in E.164 format. |
 | `webhook_url` | `str` | `""` | Public hostname, no scheme. |
-| `tunnel` | `CloudflareTunnel \| Static \| bool \| None` | `None` | Tunnel directive. `True` is shorthand for `CloudflareTunnel()`. |
+| `tunnel` | `CloudflareTunnel \| Static \| Ngrok \| bool \| None` | `None` | Tunnel directive. `True` is shorthand for `CloudflareTunnel()`. |
 | `pricing` | `dict \| None` | `None` | Override default provider pricing. See [Metrics & Cost Tracking](/python-sdk/metrics). |
+| `persist` | `bool \| str \| None` | `None` | Persistent dashboard history. `None` (default) → falls back to `PATTER_LOG_DIR`, then platform default — i.e. persistence is ON by default since 0.6.2. `False` force-off. `True` → platform default path. String → explicit path (`~` expanded). See [Configuration](/python-sdk/configuration#persistent-dashboard-history). |
 
 ---
 
@@ -41,12 +43,12 @@ Patter(
 ```python
 def agent(
     system_prompt: str,
-    engine: OpenAIRealtime | ElevenLabsConvAI | None = None,
+    engine: OpenAIRealtime | OpenAIRealtime2 | ElevenLabsConvAI | None = None,
     stt: STTProvider | None = None,
     llm: LLMProvider | None = None,
     tts: TTSProvider | None = None,
     voice: str = "alloy",
-    model: str = "gpt-4o-mini-realtime-preview",
+    model: str = "gpt-realtime-mini",
     language: str = "en",
     first_message: str = "",
     tools: list[Tool] | None = None,
@@ -60,20 +62,23 @@ def agent(
     barge_in_threshold_ms: int = 300,
     aggressive_first_flush: bool = False,
     disable_phone_preamble: bool = False,
+    echo_cancellation: bool = False,
+    mcp_servers: list | None = None,
+    prewarm_first_message: bool | None = None,
 ) -> Agent
 ```
 
-Pass `engine=OpenAIRealtime(...)` or `engine=ElevenLabsConvAI(...)` for end-to-end engines; omit `engine=` and pass `stt=`/`tts=` for pipeline mode.
+Pass `engine=OpenAIRealtime(...)`, `engine=OpenAIRealtime2(...)`, or `engine=ElevenLabsConvAI(...)` for end-to-end engines; omit `engine=` and pass `stt=`/`tts=` for pipeline mode.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `system_prompt` | `str` | *required* | Agent instructions. |
-| `engine` | `OpenAIRealtime \| ElevenLabsConvAI \| None` | `None` | End-to-end voice runtime. Omit for pipeline mode. |
+| `engine` | `OpenAIRealtime \| OpenAIRealtime2 \| ElevenLabsConvAI \| None` | `None` | End-to-end voice runtime. Omit for pipeline mode. |
 | `stt` | `STTProvider \| None` | `None` | STT instance for pipeline mode (e.g. `DeepgramSTT()`). |
 | `llm` | `LLMProvider \| None` | `None` | LLM provider instance for pipeline mode (e.g. `AnthropicLLM()`). Mutually exclusive with `on_message` on `serve()`. Ignored when `engine` is set. |
 | `tts` | `TTSProvider \| None` | `None` | TTS instance for pipeline mode (e.g. `ElevenLabsTTS()`). |
 | `voice` | `str` | `"alloy"` | TTS voice name (when engine doesn't carry it). |
-| `model` | `str` | `"gpt-4o-mini-realtime-preview"` | AI model ID (when engine doesn't carry it). |
+| `model` | `str` | `"gpt-realtime-mini"` | AI model ID (when engine doesn't carry it). |
 | `language` | `str` | `"en"` | BCP-47 language code. |
 | `first_message` | `str` | `""` | Greeting spoken at call start. |
 | `tools` | `list[Tool] \| None` | `None` | `Tool(...)` instances for function calling. |
@@ -87,6 +92,9 @@ Pass `engine=OpenAIRealtime(...)` or `engine=ElevenLabsConvAI(...)` for end-to-e
 | `barge_in_threshold_ms` | `int` | `300` | Barge-in hang-over window (ms). Set to `0` to disable. |
 | `aggressive_first_flush` | `bool` | `False` | Emit the first clause on a soft punctuation boundary (`,`, em/en-dash) once buffer ≥40 chars. Saves 200–500 ms TTFA. Hard-disabled when `language` starts with `"it"`. Pipeline mode only. |
 | `disable_phone_preamble` | `bool` | `False` | Disable the phone-friendly preamble Patter prepends to `system_prompt` (no markdown / emojis / lists, numbers spelled out, replies kept short). Default `False` keeps the preamble on. |
+| `echo_cancellation` | `bool` | `False` | Pipeline mode only. Instantiates an `NlmsEchoCanceller` per call so the agent's own TTS bleed is removed from the inbound mic before VAD/STT. See [Echo Cancellation](/python-sdk/features#echo-cancellation-nlms-aec). |
+| `mcp_servers` | `list \| None` | `None` | List of MCP server definitions exposed to the agent as tools. See [MCP](/python-sdk/mcp). |
+| `prewarm_first_message` | `bool \| None` | `None` (=`False`) | Opt in to pre-rendering `first_message` TTS during the ringing window so playback starts instantly on pickup. Off by default in 0.6.2 — re-enable per agent when you've validated barge-in interaction. |
 
 **Raises:** `ValueError` if required credentials are missing or conflicting options are passed (e.g. both `engine` and `stt`/`tts`).
 
@@ -120,17 +128,21 @@ Start the embedded server. Blocks until stopped.
 ```python
 async def call(
     to: str,
+    agent: Agent | None = None,
     first_message: str = "",
     from_number: str = "",
-    agent: Agent | None = None,
-    machine_detection: bool = False,
-    on_machine: Callable[[dict], Awaitable[None]] | None = None,
+    machine_detection: bool = True,
+    on_machine_detection: Callable[[MachineDetectionResult], Awaitable[None] | None] | None = None,
     voicemail_message: str = "",
-    ring_timeout: int | None = None,
+    ring_timeout: int | None = 25,
 ) -> None
 ```
 
-Make an outbound call.
+Make an outbound call. Keyword arguments are **snake_case** — e.g. `machine_detection=`, `ring_timeout=`, `on_machine_detection=` (the latter was renamed from `on_machine` in 0.6.2; the callback receives a `MachineDetectionResult` not a raw dict).
+
+`machine_detection` defaults to **`True`** since 0.6.2 — on Twilio Patter uses `MachineDetection=DetectMessageEnd` + Async AMD so there is no answer-latency penalty on human pickups. Pass `machine_detection=False` to skip per-call AMD billing for known destinations.
+
+`ring_timeout` defaults to **25 seconds**, the production-recommended value. Pass `60` for legacy carrier-default parity, or `None` to omit the parameter entirely (carrier picks its own default).
 
 ---
 
@@ -190,8 +202,8 @@ class Telnyx:
 ## Engines
 
 ```python
-from getpatter import OpenAIRealtime, ElevenLabsConvAI              # flat aliases
-from getpatter.engines import openai, elevenlabs                     # namespaced
+from getpatter import OpenAIRealtime, OpenAIRealtime2, ElevenLabsConvAI   # flat aliases
+from getpatter.engines import openai, openai_realtime_2, elevenlabs       # namespaced
 ```
 
 ### OpenAIRealtime
@@ -201,8 +213,24 @@ from getpatter.engines import openai, elevenlabs                     # namespace
 class OpenAIRealtime:
     api_key: str = ""                                # reads OPENAI_API_KEY when empty
     voice: str = "alloy"
-    model: str = "gpt-4o-mini-realtime-preview"
+    model: str = "gpt-realtime-mini"
+    reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = None
+    input_audio_transcription_model: str | None = None
 ```
+
+### OpenAIRealtime2
+
+```python
+@dataclass(frozen=True)
+class OpenAIRealtime2:
+    api_key: str = ""                                # reads OPENAI_API_KEY when empty
+    voice: str = "alloy"
+    model: str = "gpt-realtime-2"
+    reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = None
+    input_audio_transcription_model: str | None = None
+```
+
+Selects the GA Realtime API. Separate marker from `OpenAIRealtime` because the GA endpoint speaks a different `session.update` wire shape. See [Engines › OpenAIRealtime2](/python-sdk/engines#openairealtime2).
 
 ### ElevenLabsConvAI
 
@@ -315,7 +343,7 @@ All data classes are frozen (immutable) dataclasses.
 class Agent:
     system_prompt: str
     voice: str = "alloy"
-    model: str = "gpt-4o-mini-realtime-preview"
+    model: str = "gpt-realtime-mini"
     language: str = "en"
     first_message: str = ""
     tools: list[dict] | None = None
@@ -332,9 +360,11 @@ class Agent:
     barge_in_threshold_ms: int = 300
     aggressive_first_flush: bool = False
     disable_phone_preamble: bool = False
+    echo_cancellation: bool = False
+    prewarm_first_message: bool = False
 ```
 
-`provider` is a closed string literal — only `"openai_realtime"`, `"elevenlabs_convai"`, or `"pipeline"` are valid. It is normally derived from `engine` / `stt`+`tts` and rarely set by hand.
+`provider` is a closed string literal — `"openai_realtime"`, `"openai_realtime_2"`, `"elevenlabs_convai"`, or `"pipeline"`. It is normally derived from `engine` / `stt`+`tts` and rarely set by hand.
 
 ### CallEvent
 
@@ -462,7 +492,7 @@ from getpatter import (
     TwilioAdapter, TelnyxAdapter,                  # advanced: direct adapter access
 
     # Engines
-    OpenAIRealtime, ElevenLabsConvAI,
+    OpenAIRealtime, OpenAIRealtime2, ElevenLabsConvAI,
 
     # STT classes
     DeepgramSTT, WhisperSTT, OpenAITranscribeSTT,
@@ -513,7 +543,7 @@ from getpatter import (
 )
 
 from getpatter.carriers import twilio, telnyx
-from getpatter.engines import openai, elevenlabs
+from getpatter.engines import openai, openai_realtime_2, elevenlabs
 from getpatter.stt import deepgram, whisper, openai_transcribe, cartesia, assemblyai, soniox, speechmatics
 from getpatter.tts import elevenlabs, openai, cartesia, rime, lmnt
 from getpatter.llm import openai, anthropic, groq, cerebras, google

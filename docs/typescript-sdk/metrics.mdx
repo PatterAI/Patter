@@ -161,15 +161,14 @@ The most common case: pick a model on your adapter, and Patter bills the right r
 
 <CodeGroup>
 ```typescript TypeScript
-import { Patter, Twilio } from "getpatter";
-import { OpenAIRealtimeAdapter, OpenAIRealtimeModel } from "getpatter";
-
-const agent = Patter.agent({
-  systemPrompt: "You are a helpful assistant.",
-  realtime: new OpenAIRealtimeAdapter({ model: OpenAIRealtimeModel.GPT_REALTIME_2 }),
-});
+import { Patter, Twilio, OpenAIRealtime } from "getpatter";
 
 const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  systemPrompt: "You are a helpful assistant.",
+  engine: new OpenAIRealtime({ model: "gpt-realtime-2" }),
+});
 // Billing auto-uses the gpt-realtime-2 rate ($32/M audio in, $64/M audio out).
 ```
 

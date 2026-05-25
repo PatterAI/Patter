@@ -8,12 +8,13 @@ icon: "bolt"
 
 An **engine** is an end-to-end speech-to-speech runtime. Pass an engine instance to `phone.agent({ engine })` and Patter wires the audio stream straight through to the provider — no separate STT or TTS is needed.
 
-Patter ships with two engine classes today:
+Patter ships with three engine classes today:
 
-- [`OpenAIRealtime`](#openairealtime) — OpenAI's Realtime API
+- [`OpenAIRealtime`](#openairealtime) — OpenAI's Realtime API (beta endpoint)
+- [`OpenAIRealtime2`](#openairealtime2) — OpenAI's GA Realtime API (targets `gpt-realtime-2`)
 - [`ElevenLabsConvAI`](#elevenlabsconvai) — ElevenLabs Conversational AI
 
-Both classes are imported by name from the package barrel: `import { OpenAIRealtime, ElevenLabsConvAI } from "getpatter"`.
+All three classes are imported by name from the package barrel: `import { OpenAIRealtime, OpenAIRealtime2, ElevenLabsConvAI } from "getpatter"`.
 
 If you need full control over STT, LLM, and TTS independently, use [pipeline mode](/typescript-sdk/llm#pipeline-mode) instead and omit `engine`.
 
@@ -41,6 +42,8 @@ await phone.serve({ agent });
 | `apiKey` | `string` | — | OpenAI API key. Reads from `OPENAI_API_KEY` when omitted. |
 | `voice` | `string` | `"alloy"` | One of `"alloy"`, `"ash"`, `"ballad"`, `"coral"`, `"echo"`, `"sage"`, `"shimmer"`, `"verse"`. |
 | `model` | `string` | `"gpt-4o-mini-realtime-preview"` | OpenAI Realtime model ID. See [supported models](/typescript-sdk/providers/openai-realtime#models). |
+| `reasoningEffort` | `"minimal" \| "low" \| "medium" \| "high"` | — | Reasoning-effort tier for `gpt-realtime-2`. When omitted, the field is not sent and the server default applies. OpenAI recommends `"low"` for production voice. |
+| `inputAudioTranscriptionModel` | `string` | — | Override for the Realtime session's `input_audio_transcription.model`. Omit to keep `whisper-1`. |
 
 ### Supported model identifiers
 
@@ -48,13 +51,44 @@ The `model` option accepts any OpenAI Realtime model ID. Common values:
 
 | Model | Notes |
 |-------|-------|
-| `"gpt-realtime-mini"` | Default. Lowest latency / lowest cost. |
+| `"gpt-4o-mini-realtime-preview"` | Engine marker default. Earlier preview line — cheap and low-latency. |
+| `"gpt-realtime-mini"` | GA mini — recommended cheap default for new deployments. |
 | `"gpt-realtime"` | GA realtime model (Aug 2025). |
-| `"gpt-realtime-2"` | Most-capable: stronger instruction following, configurable `reasoningEffort`, 128K context. |
+| `"gpt-realtime-2"` | Most-capable: stronger instruction following, configurable `reasoningEffort`, 128K context. Use [`OpenAIRealtime2`](#openairealtime2) for the GA wire shape. |
 | `"gpt-4o-realtime-preview"` | Earlier preview line; ~10x the per-token cost of mini. |
-| `"gpt-4o-mini-realtime-preview"` | Earlier preview line. |
 
 Pricing is auto-resolved per model — see [Metrics](/typescript-sdk/metrics). For `reasoningEffort`, transcription model, and the full configuration surface, see [OpenAI Realtime — full reference](/typescript-sdk/providers/openai-realtime).
+
+## OpenAIRealtime2
+
+OpenAI's **GA Realtime API** — separate engine marker because the GA endpoint speaks a different `session.update` wire shape (`output_modalities`, nested `audio.{input,output}` blocks, `session.type = "realtime"`) and rejects the legacy beta header. Targets `gpt-realtime-2` by default and routes through `OpenAIRealtime2Adapter`, which also handles bidirectional mulaw 8 kHz ↔ PCM 24 kHz transcoding (the GA audio engine silently drops mulaw frames).
+
+```typescript
+// npx tsx example.ts
+import { Patter, Twilio, OpenAIRealtime2 } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  engine: new OpenAIRealtime2({ reasoningEffort: "low" }),  // OPENAI_API_KEY from env
+  systemPrompt: "You are a helpful assistant.",
+  firstMessage: "Hello!",
+});
+
+await phone.serve({ agent });
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `apiKey` | `string` | — | OpenAI API key. Reads from `OPENAI_API_KEY` when omitted. |
+| `voice` | `string` | `"alloy"` | Voice preset. |
+| `model` | `string` | `"gpt-realtime-2"` | GA Realtime model. |
+| `reasoningEffort` | `"minimal" \| "low" \| "medium" \| "high"` | — | When omitted, the field is not sent and the server default applies. OpenAI recommends `"low"` for production voice. |
+| `inputAudioTranscriptionModel` | `string` | — | Override for `audio.input.transcription.model`. Omit to keep `whisper-1`. |
+
+<Note>
+The GA adapter pins `turn_detection.create_response: false` and `interrupt_response: false` in the `session.update` payload. Patter owns response creation (`response.create`) and barge-in cancellation explicitly so the hallucination filter and barge-in pipeline can decide per turn rather than letting the server VAD auto-trigger. See [`OpenAIRealtime2` — full reference](/typescript-sdk/providers/openai-realtime-2).
+</Note>
 
 ## ElevenLabsConvAI
 

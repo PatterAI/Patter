@@ -36,6 +36,10 @@ const phone = new Patter({
 
 On `serve()`, Patter automatically sets the `voice_url` on the Twilio number to `https://<webhookUrl>/webhooks/twilio/voice` via the Twilio REST API — no manual Console configuration needed.
 
+### How caller / callee reach the agent
+
+Inbound Twilio calls deliver the caller and callee numbers via TwiML `<Parameter name="caller" value="..."/>` / `<Parameter name="callee" value="..."/>` children of `<Stream>` — Twilio surfaces these on the WS `start` frame as `start.customParameters`. Patter's `/webhooks/twilio/voice` route emits this TwiML automatically. If you construct the TwiML yourself, build it with `TwilioAdapter.generateStreamTwiml(streamUrl, { caller, callee })` so the values land on the WS `start` frame. Query-string parameters on the `<Stream url=...>` are stripped by Twilio before the WS handshake and will not work.
+
 ### Signature verification
 
 The Auth Token is also used to verify every Twilio webhook with HMAC-SHA1 against the `X-Twilio-Signature` header. Requests with invalid signatures are rejected with HTTP 403.
@@ -66,6 +70,10 @@ const phone = new Patter({
 | `apiKey` | `string` | — | Telnyx API v2 key. Reads from `TELNYX_API_KEY` when omitted. |
 | `connectionId` | `string` | — | Call Control Application ID. Reads from `TELNYX_CONNECTION_ID` when omitted. |
 | `publicKey` | `string` | — | Optional. Ed25519 public key for webhook signature verification. Reads from `TELNYX_PUBLIC_KEY` when omitted. |
+
+### How caller / callee reach the agent
+
+The Telnyx WS upgrade URL carries the metadata as query-string parameters: `wss://<webhookUrl>/ws/stream/<callControlId>?caller=<from>&callee=<to>`. Telnyx preserves the query string through the WebSocket handshake, so no equivalent of TwiML `<Parameter>` is needed.
 
 ### Signature verification
 

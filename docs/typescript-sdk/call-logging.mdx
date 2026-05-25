@@ -4,7 +4,7 @@ description: "Opt-in per-call filesystem logs: metadata, transcripts, and operat
 icon: "folder-open"
 ---
 
-Patter can persist every call to a directory tree on disk so you can replay transcripts, audit tool calls, and track latency/cost trends without running a hosted dashboard. Logging is **opt-in and off by default** — nothing is written unless you ask for it.
+Patter can persist every call to a directory tree on disk so you can replay transcripts, audit tool calls, and track latency/cost trends without running a hosted dashboard. Persistence is **on by default since 0.6.2** (writes land under the platform default location described below) so the dashboard rebuilds across process restarts without extra wiring. Pass `persist: false` to keep the prior ephemeral-RAM-only behaviour.
 
 The same on-disk layout also backs the local dashboard's call history: when persistence is enabled, `phone.serve()` rebuilds the in-memory dashboard from disk on startup so call history survives process restarts without an external database.
 
@@ -30,7 +30,7 @@ const phone = new Patter({
 
 | `persist` value | Behaviour |
 |-----------------|-----------|
-| omitted / `undefined` (default) | Falls back to `PATTER_LOG_DIR`; off when env is also unset (backward-compatible). |
+| omitted / `undefined` (default) | **On**. Falls back to `PATTER_LOG_DIR` when set; otherwise writes under the platform default location. (Changed from opt-in to default-on in 0.6.2 for dashboard hydrate.) |
 | `false` | Force-off, even if `PATTER_LOG_DIR` is set. |
 | `true` | Platform default location (see below). |
 | `"<path>"` | Use the supplied path (`~` expanded). |
@@ -53,7 +53,7 @@ Platform defaults for `auto` (and for `persist: true`):
 - Linux: `$XDG_DATA_HOME/patter` (falls back to `~/.local/share/patter`)
 - Windows: `%LOCALAPPDATA%\patter`
 
-When `persist` is unset and the env var is unset, the logger is a no-op — no directories are created, no files are written. When `persist` is set explicitly, the env var is ignored.
+When `persist` is set explicitly the env var is ignored. When `persist` is left unset (the default) the logger uses `PATTER_LOG_DIR` if set, otherwise the platform default location. Pass `persist: false` to disable disk writes entirely.
 
 ## Layout
 
@@ -159,7 +159,7 @@ for (const line of transcript.split('\n').filter(Boolean)) {
 ## Safety guarantees
 
 - File-write errors never raise into the call path — a full disk or a permissions hiccup logs a warning and the call continues uninterrupted.
-- When persistence is disabled (`persist: false`, or `persist` unset and `PATTER_LOG_DIR` unset), `CallLogger.enabled` is `false` and every method returns immediately.
+- When persistence is disabled (`persist: false`), `CallLogger.enabled` is `false` and every method returns immediately.
 
 ## Interop
 
