@@ -1096,7 +1096,10 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                     pass
         if not adopt_ok:
             await self._adapter.connect()
-        logger.debug("OpenAI Realtime connected (adapter=%s)", _adapter_cls.__name__)
+        logger.debug(
+            "OpenAI Realtime connected (adapter=%s)",
+            getattr(_adapter_cls, "__name__", repr(_adapter_cls)),
+        )
 
         if self.agent.first_message:
             # Start measuring latency for the firstMessage turn (sendText →

@@ -7,15 +7,12 @@ import asyncio
 import pytest
 
 from getpatter import (
-    DeepgramSTT,
     ElevenLabsTTS,
     OpenAIRealtime,
     Patter,
     Telnyx,
-    Tool,
     Twilio,
     guardrail,
-    tool,
 )
 from getpatter.models import Agent, Guardrail
 
@@ -215,9 +212,7 @@ def test_call_validates_e164_no_plus():
     phone = _local_phone()
     agent = phone.agent(engine=OpenAIRealtime(api_key="sk"), system_prompt="test")
     with pytest.raises(ValueError, match="E.164"):
-        asyncio.run(
-            phone.call(to="0039123456789", agent=agent)
-        )
+        asyncio.run(phone.call(to="0039123456789", agent=agent))
 
 
 def test_call_validates_e164_empty():
@@ -225,9 +220,7 @@ def test_call_validates_e164_empty():
     phone = _local_phone()
     agent = phone.agent(engine=OpenAIRealtime(api_key="sk"), system_prompt="test")
     with pytest.raises(ValueError, match="E.164"):
-        asyncio.run(
-            phone.call(to="", agent=agent)
-        )
+        asyncio.run(phone.call(to="", agent=agent))
 
 
 def test_call_validates_e164_non_string():
@@ -235,9 +228,7 @@ def test_call_validates_e164_non_string():
     phone = _local_phone()
     agent = phone.agent(engine=OpenAIRealtime(api_key="sk"), system_prompt="test")
     with pytest.raises(ValueError, match="E.164"):
-        asyncio.run(
-            phone.call(to=12345, agent=agent)
-        )
+        asyncio.run(phone.call(to=12345, agent=agent))
 
 
 def test_call_valid_e164_accepted():
@@ -252,9 +243,7 @@ def test_call_valid_e164_accepted():
         mock_instance.initiate_call = AsyncMock(return_value="CA123")
         MockAdapter.return_value = mock_instance
 
-        asyncio.run(
-            phone.call(to="+39123456789", agent=agent)
-        )
+        asyncio.run(phone.call(to="+39123456789", agent=agent))
 
         mock_instance.initiate_call.assert_called_once()
 
@@ -455,11 +444,13 @@ async def test_guardrail_triggers_cancel_and_replacement():
         ],
     )
 
-    start_payload = json.dumps({
-        "event": "start",
-        "streamSid": "SID_guard",
-        "start": {"callSid": "CA_guard", "customParameters": {}},
-    })
+    start_payload = json.dumps(
+        {
+            "event": "start",
+            "streamSid": "SID_guard",
+            "start": {"callSid": "CA_guard", "customParameters": {}},
+        }
+    )
     stop_payload = json.dumps({"event": "stop"})
     messages = [start_payload, stop_payload]
     idx = 0
@@ -498,7 +489,14 @@ async def test_guardrail_triggers_cancel_and_replacement():
 
     mock_adapter.receive_events = MagicMock(return_value=fake_events())
 
-    with patch("getpatter.providers.openai_realtime.OpenAIRealtimeAdapter", return_value=mock_adapter):
+    # ``stream_handler.OpenAIRealtimeStreamHandler.start`` routes both
+    # ``openai_realtime`` and ``openai_realtime_2`` engines through the
+    # GA adapter (the v1-beta API is deprecated server-side), so the
+    # patch target must be the GA adapter class.
+    with patch(
+        "getpatter.providers.openai_realtime_2.OpenAIRealtime2Adapter",
+        return_value=mock_adapter,
+    ):
         from getpatter.telephony.twilio import twilio_stream_bridge
 
         try:
@@ -528,15 +526,22 @@ async def test_guardrail_does_not_trigger_on_clean_response():
         system_prompt="test",
         provider="openai_realtime",
         guardrails=[
-            {"name": "no-bad", "blocked_terms": ["blocked_word"], "check": None, "replacement": "..."}
+            {
+                "name": "no-bad",
+                "blocked_terms": ["blocked_word"],
+                "check": None,
+                "replacement": "...",
+            }
         ],
     )
 
-    start_payload = json.dumps({
-        "event": "start",
-        "streamSid": "SID_clean",
-        "start": {"callSid": "CA_clean", "customParameters": {}},
-    })
+    start_payload = json.dumps(
+        {
+            "event": "start",
+            "streamSid": "SID_clean",
+            "start": {"callSid": "CA_clean", "customParameters": {}},
+        }
+    )
     stop_payload = json.dumps({"event": "stop"})
     messages = [start_payload, stop_payload]
     idx = 0
@@ -572,7 +577,10 @@ async def test_guardrail_does_not_trigger_on_clean_response():
 
     mock_adapter.receive_events = MagicMock(return_value=fake_events())
 
-    with patch("getpatter.providers.openai_realtime.OpenAIRealtimeAdapter", return_value=mock_adapter):
+    with patch(
+        "getpatter.providers.openai_realtime.OpenAIRealtimeAdapter",
+        return_value=mock_adapter,
+    ):
         from getpatter.telephony.twilio import twilio_stream_bridge
 
         try:

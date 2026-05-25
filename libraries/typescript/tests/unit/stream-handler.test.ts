@@ -437,35 +437,38 @@ describe('StreamHandler', () => {
     });
 
     // -----------------------------------------------------------------------
-    // AEC OFF (default — PSTN deployments). Gate is 100 ms.
+    // AEC OFF (default — PSTN deployments). Gate is 500 ms (raised 100 →
+    // 500 on 2026-05-19 after the 0.6.2 acceptance run showed phantom VAD
+    // ``speech_start`` events firing within the first ~250 ms of the
+    // prewarmed firstMessage and cancelling it).
     // -----------------------------------------------------------------------
     describe('AEC off (PSTN default)', () => {
-      it('canBargeIn() false within 100 ms anti-flicker window', () => {
+      it('canBargeIn() false within 500 ms anti-flicker window', () => {
         const h = new StreamHandler(makeDeps(), makeMockWs(), '+15551111111', '+15552222222');
         const p = priv(h);
         p.aec = null;
-        p.speakingStartedAt = Date.now() - 50;
-        p.firstAudioSentAt = Date.now() - 50; // 50 ms — still inside 100 ms gate
+        p.speakingStartedAt = Date.now() - 250;
+        p.firstAudioSentAt = Date.now() - 250; // 250 ms — still inside 500 ms gate
         expect(p.canBargeIn()).toBe(false);
       });
 
-      it('canBargeIn() true past 100 ms (well below the 1 s AEC gate)', () => {
+      it('canBargeIn() true past 500 ms (well below the 1 s AEC gate)', () => {
         const h = new StreamHandler(makeDeps(), makeMockWs(), '+15551111111', '+15552222222');
         const p = priv(h);
         p.aec = null;
-        p.speakingStartedAt = Date.now() - 200;
-        p.firstAudioSentAt = Date.now() - 200; // 200 ms — past 100 ms gate, under 1 s
+        p.speakingStartedAt = Date.now() - 700;
+        p.firstAudioSentAt = Date.now() - 700; // 700 ms — past 500 ms gate, under 1 s
         expect(p.canBargeIn()).toBe(true);
       });
 
-      it('handleBargeIn fires after 400 ms with AEC off (the bug fix)', () => {
+      it('handleBargeIn fires after 600 ms with AEC off (the bug fix)', () => {
         // Pre-fix this would have been suppressed by the hardcoded 1 s gate.
         const h = new StreamHandler(makeDeps(), makeMockWs(), '+15551111111', '+15552222222');
         const p = priv(h);
         p.aec = null;
         p.isSpeaking = true;
-        p.speakingStartedAt = Date.now() - 400;
-        p.firstAudioSentAt = Date.now() - 400;
+        p.speakingStartedAt = Date.now() - 600;
+        p.firstAudioSentAt = Date.now() - 600;
         const result = p.handleBargeIn({ text: 'stop' });
         expect(result).toBe(true);
         expect(p.isSpeaking).toBe(false);
@@ -538,7 +541,16 @@ describe('StreamHandler', () => {
   // chunks are unconfirmed. ``cancelSpeaking`` drains every pending mark
   // so the waiting loop exits on the next tick.
   // -------------------------------------------------------------------------
-  describe('firstMessage mark-gated pacing', () => {
+  // SKIPPED 2026-05-22: mark-gated per-chunk pacing was replaced with a
+  // burst-deliver model in commit 5574997
+  // (``fix(prewarm): burst-deliver prewarmed first-message bytes, drop the
+  // slow per-chunk sleep``). ``sendPacedFirstMessageBytes`` /
+  // ``firstMessageMarkCounter`` / ``sendMarkAwaitable`` no longer exist as
+  // public surface. Left as ``describe.skip`` to preserve the historical
+  // intent — the regression these tests pinned (audio buffered past
+  // barge-in on the WS edge) is now covered by the burst-deliver path's
+  // own ``cancelActiveStream`` plumbing.
+  describe.skip('firstMessage mark-gated pacing', () => {
     interface FmPriv {
       isSpeaking: boolean;
       speakingStartedAt: number | null;
@@ -702,7 +714,10 @@ describe('StreamHandler', () => {
     });
   });
 
-  describe('cleanup drains pending firstMessage marks', () => {
+  // SKIPPED 2026-05-22: see note on the ``firstMessage mark-gated pacing``
+  // block above — burst-deliver replaced the mark-window plumbing; pending
+  // marks no longer exist to drain.
+  describe.skip('cleanup drains pending firstMessage marks', () => {
     interface CleanupPriv {
       isSpeaking: boolean;
       speakingStartedAt: number | null;
@@ -777,7 +792,10 @@ describe('StreamHandler', () => {
     });
   });
 
-  describe('firstMessage mark counter resets across sends + on cleanup', () => {
+  // SKIPPED 2026-05-22: see note on the ``firstMessage mark-gated pacing``
+  // block above — burst-deliver replaced the mark-counter plumbing;
+  // ``firstMessageMarkCounter`` no longer exists.
+  describe.skip('firstMessage mark counter resets across sends + on cleanup', () => {
     interface CounterPriv {
       isSpeaking: boolean;
       speakingStartedAt: number | null;

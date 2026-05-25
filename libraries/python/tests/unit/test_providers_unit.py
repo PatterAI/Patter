@@ -393,8 +393,12 @@ class TestOpenAIRealtimeAdapter:
             async def connect(self) -> None:
                 return None
 
+        # ``OpenAIRealtimeStreamHandler.start`` routes both
+        # ``openai_realtime`` and ``openai_realtime_2`` engines through the
+        # GA adapter (the v1-beta endpoint is deprecated server-side),
+        # so the patch target must be the GA adapter class.
         with patch(
-            "getpatter.providers.openai_realtime.OpenAIRealtimeAdapter",
+            "getpatter.providers.openai_realtime_2.OpenAIRealtime2Adapter",
             _FakeAdapter,
         ):
             await handler.start()

@@ -394,11 +394,29 @@ describe('OpenAIRealtimeAdapter (deep)', () => {
       const ws = await connectAdapter(adapter);
       ws.send.mockClear();
 
+      // ``cancelResponse`` is now a no-op when no response item is in
+      // flight (eliminates the ``response_cancel_not_active`` log spam
+      // every phantom VAD ``speech_started`` triggered before 0.6.2).
+      // Simulate an in-flight assistant item so the cancel path runs.
+      (adapter as unknown as { currentResponseItemId: string | null })
+        .currentResponseItemId = 'msg_test_001';
+
       adapter.cancelResponse();
 
-      expect(ws.send).toHaveBeenCalledOnce();
-      const sent = JSON.parse(ws.send.mock.calls[0][0] as string);
+      // truncate + cancel; ``response.cancel`` is the last frame.
+      const lastCall = ws.send.mock.calls[ws.send.mock.calls.length - 1];
+      const sent = JSON.parse(lastCall[0] as string);
       expect(sent.type).toBe('response.cancel');
+    });
+
+    it('is a no-op when no response item is in flight', async () => {
+      const adapter = new OpenAIRealtimeAdapter('sk-test');
+      const ws = await connectAdapter(adapter);
+      ws.send.mockClear();
+
+      adapter.cancelResponse();
+
+      expect(ws.send).not.toHaveBeenCalled();
     });
 
     it('does not throw when not connected', () => {

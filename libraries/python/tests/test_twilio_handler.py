@@ -1,7 +1,6 @@
 """Tests for Twilio webhook handler."""
 
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 
 # ---------------------------------------------------------------------------
@@ -74,25 +73,29 @@ def test_stream_url_has_ws_stream_path():
 
 
 def test_stream_url_contains_caller_param():
-    """Stream URL includes caller query param."""
+    """caller travels as a TwiML ``<Parameter>`` (Twilio strips URL query)."""
     with patch("getpatter.providers.twilio_adapter.TwilioAdapter") as MockAdapter:
         MockAdapter.generate_stream_twiml.return_value = "<Response/>"
         from getpatter.telephony.twilio import twilio_webhook_handler
 
         twilio_webhook_handler("CA123", "+39111", "+16592", "abc.ngrok.io")
-        url = MockAdapter.generate_stream_twiml.call_args[0][0]
-        assert "caller=" in url
+        params = MockAdapter.generate_stream_twiml.call_args.kwargs.get(
+            "parameters", {}
+        )
+        assert params.get("caller") == "+39111"
 
 
 def test_stream_url_contains_callee_param():
-    """Stream URL includes callee query param."""
+    """callee travels as a TwiML ``<Parameter>`` (Twilio strips URL query)."""
     with patch("getpatter.providers.twilio_adapter.TwilioAdapter") as MockAdapter:
         MockAdapter.generate_stream_twiml.return_value = "<Response/>"
         from getpatter.telephony.twilio import twilio_webhook_handler
 
         twilio_webhook_handler("CA123", "+39111", "+16592", "abc.ngrok.io")
-        url = MockAdapter.generate_stream_twiml.call_args[0][0]
-        assert "callee=" in url
+        params = MockAdapter.generate_stream_twiml.call_args.kwargs.get(
+            "parameters", {}
+        )
+        assert params.get("callee") == "+16592"
 
 
 # ---------------------------------------------------------------------------

@@ -35,7 +35,9 @@ def _twilio_phone(**kwargs) -> Patter:
 
 
 def test_local_config_defaults():
-    cfg = LocalConfig(telephony_provider="twilio", phone_number="+1555", webhook_url="x.ngrok.io")
+    cfg = LocalConfig(
+        telephony_provider="twilio", phone_number="+1555", webhook_url="x.ngrok.io"
+    )
     assert cfg.telephony_provider == "twilio"
     assert cfg.openai_key == ""
     assert cfg.twilio_sid == ""
@@ -93,7 +95,9 @@ def test_agent_pipeline_provider():
     )
     assert a.provider == "pipeline"
     assert a.voice == "21m00Tcm4TlvDq8ikWAM"
-    assert a.model == "gpt-4o-mini-realtime-preview"  # model field still present, unused in pipeline mode
+    assert (
+        a.model == "gpt-4o-mini-realtime-preview"
+    )  # model field still present, unused in pipeline mode
 
 
 def test_agent_factory_pipeline_provider():
@@ -182,11 +186,18 @@ async def test_serve_calls_embedded_server():
     mock_server = MagicMock()
     mock_server.start = AsyncMock()
 
-    with patch("getpatter.server.EmbeddedServer", return_value=mock_server) as MockServer:
+    with patch(
+        "getpatter.server.EmbeddedServer", return_value=mock_server
+    ) as MockServer:
         await phone.serve(agent, port=9000)
 
         MockServer.assert_called_once_with(
-            config=phone._local_config, agent=agent, recording=False, voicemail_message="", pricing=None, dashboard=True,
+            config=phone._local_config,
+            agent=agent,
+            recording=False,
+            voicemail_message="",
+            pricing=None,
+            dashboard=True,
             dashboard_token="",
         )
         mock_server.start.assert_called_once_with(port=9000)
@@ -241,9 +252,13 @@ def test_twilio_webhook_handler_url():
 
     MockAdapter.generate_stream_twiml.assert_called_once()
     call_args = MockAdapter.generate_stream_twiml.call_args[0][0]
-    assert call_args.startswith("wss://abc.ngrok.io/ws/stream/CA123")
-    assert "caller=" in call_args
-    assert "callee=" in call_args
+    # Stream URL is the bare wss endpoint — caller/callee no longer ride
+    # as query params (Twilio strips them); they travel as a TwiML
+    # ``<Parameter>`` child of ``<Stream>`` via the ``parameters`` kwarg.
+    assert call_args == "wss://abc.ngrok.io/ws/stream/CA123"
+    params = MockAdapter.generate_stream_twiml.call_args.kwargs.get("parameters", {})
+    assert params.get("caller") == "+14155551234"
+    assert params.get("callee") == "+15550001111"
     assert result == "<Response/>"
 
 
@@ -267,7 +282,10 @@ def test_telnyx_webhook_handler_structure():
     assert any(c["command"] == "answer" for c in commands)
     stream_cmd = next((c for c in commands if c["command"] == "stream_start"), None)
     assert stream_cmd is not None
-    assert "wss://abc.ngrok.io/ws/telnyx/stream/ctrl_123" in stream_cmd["params"]["stream_url"]
+    assert (
+        "wss://abc.ngrok.io/ws/telnyx/stream/ctrl_123"
+        in stream_cmd["params"]["stream_url"]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -314,16 +332,20 @@ async def test_twilio_stream_bridge_pipeline_sends_audio_to_stt():
     agent = Agent(system_prompt="test", provider="pipeline")
 
     # Build a fake WebSocket that returns start then a media event then stop
-    start_payload = json.dumps({
-        "event": "start",
-        "streamSid": "SID123",
-        "start": {"callSid": "CA_test"},
-    })
+    start_payload = json.dumps(
+        {
+            "event": "start",
+            "streamSid": "SID123",
+            "start": {"callSid": "CA_test"},
+        }
+    )
     mulaw_bytes = b"\x00" * 160
-    media_payload = json.dumps({
-        "event": "media",
-        "media": {"payload": base64.b64encode(mulaw_bytes).decode()},
-    })
+    media_payload = json.dumps(
+        {
+            "event": "media",
+            "media": {"payload": base64.b64encode(mulaw_bytes).decode()},
+        }
+    )
     stop_payload = json.dumps({"event": "stop"})
 
     messages = [start_payload, media_payload, stop_payload]
@@ -351,7 +373,6 @@ async def test_twilio_stream_bridge_pipeline_sends_audio_to_stt():
     fake_ws = FakeWS()
 
     # Patch DeepgramSTT and ElevenLabsTTS so no real connections are made
-    import getpatter.telephony.twilio as twilio_mod
 
     mock_stt = AsyncMock()
     mock_stt.connect = AsyncMock()
@@ -372,7 +393,9 @@ async def test_twilio_stream_bridge_pipeline_sends_audio_to_stt():
     # bridge instantiates the plain DeepgramSTT constructor — not for_twilio.
     with (
         patch("getpatter.providers.deepgram_stt.DeepgramSTT", return_value=mock_stt),
-        patch("getpatter.providers.elevenlabs_tts.ElevenLabsTTS", return_value=mock_tts),
+        patch(
+            "getpatter.providers.elevenlabs_tts.ElevenLabsTTS", return_value=mock_tts
+        ),
     ):
         # Run with a short timeout — we only care that it starts up correctly
         try:
@@ -534,15 +557,19 @@ async def test_dtmf_event_fires_transcript_callback():
 
     agent = Agent(system_prompt="test", provider="pipeline")
 
-    start_payload = json.dumps({
-        "event": "start",
-        "streamSid": "SID_dtmf",
-        "start": {"callSid": "CA_dtmf"},
-    })
-    dtmf_payload = json.dumps({
-        "event": "dtmf",
-        "dtmf": {"track": "inbound_track", "digit": "5"},
-    })
+    start_payload = json.dumps(
+        {
+            "event": "start",
+            "streamSid": "SID_dtmf",
+            "start": {"callSid": "CA_dtmf"},
+        }
+    )
+    dtmf_payload = json.dumps(
+        {
+            "event": "dtmf",
+            "dtmf": {"track": "inbound_track", "digit": "5"},
+        }
+    )
     stop_payload = json.dumps({"event": "stop"})
 
     messages = [start_payload, dtmf_payload, stop_payload]
@@ -587,7 +614,9 @@ async def test_dtmf_event_fires_transcript_callback():
 
     with (
         patch("getpatter.providers.deepgram_stt.DeepgramSTT", return_value=mock_stt),
-        patch("getpatter.providers.elevenlabs_tts.ElevenLabsTTS", return_value=mock_tts),
+        patch(
+            "getpatter.providers.elevenlabs_tts.ElevenLabsTTS", return_value=mock_tts
+        ),
     ):
         try:
             await asyncio.wait_for(
@@ -612,7 +641,9 @@ async def test_dtmf_event_fires_transcript_callback():
 
 def test_dtmf_event_format():
     """DTMF event payload includes digit under dtmf.digit."""
-    raw = json.loads('{"event": "dtmf", "dtmf": {"track": "inbound_track", "digit": "1"}}')
+    raw = json.loads(
+        '{"event": "dtmf", "dtmf": {"track": "inbound_track", "digit": "1"}}'
+    )
     assert raw["event"] == "dtmf"
     assert raw["dtmf"]["digit"] == "1"
 
@@ -624,7 +655,9 @@ def test_dtmf_event_format():
 
 def test_mark_event_format():
     """Mark events from Twilio include mark.name."""
-    raw = json.loads('{"event": "mark", "streamSid": "SID", "mark": {"name": "audio_3"}}')
+    raw = json.loads(
+        '{"event": "mark", "streamSid": "SID", "mark": {"name": "audio_3"}}'
+    )
     assert raw["event"] == "mark"
     assert raw["mark"]["name"] == "audio_3"
 
@@ -637,11 +670,13 @@ async def test_mark_events_sent_after_audio():
 
     agent = Agent(system_prompt="test", provider="openai_realtime")
 
-    start_payload = json.dumps({
-        "event": "start",
-        "streamSid": "SID_mark",
-        "start": {"callSid": "CA_mark"},
-    })
+    start_payload = json.dumps(
+        {
+            "event": "start",
+            "streamSid": "SID_mark",
+            "start": {"callSid": "CA_mark"},
+        }
+    )
     stop_payload = json.dumps({"event": "stop"})
     messages = [start_payload, stop_payload]
     idx = 0
@@ -683,8 +718,11 @@ async def test_mark_events_sent_after_audio():
     mock_adapter.receive_events = MagicMock(return_value=fake_events())
     mock_adapter.send_text = AsyncMock()
 
+    # Both ``openai_realtime`` and ``openai_realtime_2`` engines now
+    # route through ``OpenAIRealtime2Adapter`` after the GA deprecation
+    # of the Beta endpoint — patch the GA adapter so the mock is reached.
     with patch(
-        "getpatter.providers.openai_realtime.OpenAIRealtimeAdapter",
+        "getpatter.providers.openai_realtime_2.OpenAIRealtime2Adapter",
         return_value=mock_adapter,
     ):
         try:
@@ -701,7 +739,9 @@ async def test_mark_events_sent_after_audio():
 
     sent_events = [json.loads(s) for s in fake_ws.sent]
     mark_events = [e for e in sent_events if e.get("event") == "mark"]
-    assert len(mark_events) >= 1, f"Expected at least one mark event, got: {sent_events}"
+    assert len(mark_events) >= 1, (
+        f"Expected at least one mark event, got: {sent_events}"
+    )
     assert mark_events[0]["mark"]["name"].startswith("audio_")
 
 
@@ -718,14 +758,16 @@ async def test_custom_params_passed_to_on_call_start():
 
     agent = Agent(system_prompt="test", provider="pipeline")
 
-    start_payload = json.dumps({
-        "event": "start",
-        "streamSid": "SID_params",
-        "start": {
-            "callSid": "CA_params",
-            "customParameters": {"agent_name": "Aria", "language": "it"},
-        },
-    })
+    start_payload = json.dumps(
+        {
+            "event": "start",
+            "streamSid": "SID_params",
+            "start": {
+                "callSid": "CA_params",
+                "customParameters": {"agent_name": "Aria", "language": "it"},
+            },
+        }
+    )
     stop_payload = json.dumps({"event": "stop"})
     messages = [start_payload, stop_payload]
     idx = 0
@@ -768,8 +810,13 @@ async def test_custom_params_passed_to_on_call_start():
     mock_tts.close = AsyncMock()
 
     with (
-        patch("getpatter.providers.deepgram_stt.DeepgramSTT.for_twilio", return_value=mock_stt),
-        patch("getpatter.providers.elevenlabs_tts.ElevenLabsTTS", return_value=mock_tts),
+        patch(
+            "getpatter.providers.deepgram_stt.DeepgramSTT.for_twilio",
+            return_value=mock_stt,
+        ),
+        patch(
+            "getpatter.providers.elevenlabs_tts.ElevenLabsTTS", return_value=mock_tts
+        ),
     ):
         try:
             await asyncio.wait_for(
@@ -786,7 +833,10 @@ async def test_custom_params_passed_to_on_call_start():
         except asyncio.TimeoutError:
             pass
 
-    assert call_start_data.get("custom_params") == {"agent_name": "Aria", "language": "it"}
+    assert call_start_data.get("custom_params") == {
+        "agent_name": "Aria",
+        "language": "it",
+    }
     assert call_start_data.get("call_id") == "CA_params"
 
 
@@ -800,14 +850,18 @@ def test_custom_params_in_call_start_format():
 
 def test_custom_params_extracted_from_start_event():
     """customParameters from the TwiML start event are parsed correctly."""
-    raw = json.loads(json.dumps({
-        "event": "start",
-        "streamSid": "SID",
-        "start": {
-            "callSid": "CA123",
-            "customParameters": {"foo": "bar", "baz": "42"},
-        },
-    }))
+    raw = json.loads(
+        json.dumps(
+            {
+                "event": "start",
+                "streamSid": "SID",
+                "start": {
+                    "callSid": "CA123",
+                    "customParameters": {"foo": "bar", "baz": "42"},
+                },
+            }
+        )
+    )
     start_data = raw.get("start", {})
     custom_params = start_data.get("customParameters", {})
     assert custom_params == {"foo": "bar", "baz": "42"}

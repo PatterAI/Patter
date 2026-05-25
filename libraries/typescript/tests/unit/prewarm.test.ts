@@ -98,14 +98,19 @@ describe('[unit] prewarm — Agent flag defaults', () => {
     expect(agent.prewarm !== false).toBe(true);
   });
 
-  it('phone.agent() defaults prewarmFirstMessage to true in pipeline mode', () => {
+  it('phone.agent() leaves prewarmFirstMessage undefined in pipeline mode (opt-in)', () => {
+    // Default-on was reverted on 2026-05-19 after the 0.6.2 acceptance
+    // run showed a phantom-barge-in interaction: the prewarm burst at
+    // pickup tripped Silero VAD on the very first inbound frame and the
+    // firstMessage was cancelled mid-playback. Pipeline mode now leaves
+    // the flag opt-in; callers wanting the prewarm path set it explicitly.
     const phone = makePatter();
     const stt = new StubSTT();
     const tts = new StubTTS();
     const llm = new StubLLM();
     const agent = phone.agent({ systemPrompt: 'hi', stt, tts, llm });
     expect(agent.provider).toBe('pipeline');
-    expect(agent.prewarmFirstMessage).toBe(true);
+    expect(agent.prewarmFirstMessage).toBeUndefined();
   });
 
   it('phone.agent() does NOT default prewarmFirstMessage in realtime mode', () => {
