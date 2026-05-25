@@ -954,6 +954,26 @@ class EmbeddedServer:
                             self.record_prewarm_waste(call_control_id)
                         except Exception as exc:  # noqa: BLE001 - defensive
                             logger.debug("record_prewarm_waste raised: %s", exc)
+                elif event_type == "call.recording.saved":
+                    # Telnyx Call Control recording completion — produced
+                    # when a ``record_start`` action is followed by a
+                    # ``record_stop`` or the call ends. Mirrors the
+                    # Twilio ``/webhooks/twilio/recording`` route which
+                    # logs RecordingSid and RecordingUrl.
+                    recording_urls = payload.get("recording_urls") or {}
+                    public_urls = payload.get("public_recording_urls") or {}
+                    recording_url = (
+                        recording_urls.get("mp3")
+                        or recording_urls.get("wav")
+                        or public_urls.get("mp3")
+                        or public_urls.get("wav")
+                        or ""
+                    )
+                    logger.info(
+                        "Telnyx recording saved for %s: %s",
+                        sanitize_log_value(call_control_id),
+                        sanitize_log_value(recording_url),
+                    )
                 else:
                     logger.debug("Telnyx event ignored: %s", event_type)
             except Exception as exc:
