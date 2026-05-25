@@ -32,9 +32,19 @@ Patter is the open-source SDK that gives your AI agent a phone number. Point it 
 
 Set the env vars your carrier and engine need:
 
+**Twilio**
+
 ```bash
 export TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 export TWILIO_AUTH_TOKEN=your_auth_token
+export OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+**Telnyx**
+
+```bash
+export TELNYX_API_KEY=KEYxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+export TELNYX_CONNECTION_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 export OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
@@ -53,6 +63,16 @@ agent = phone.agent(engine=OpenAIRealtime(), system_prompt="You are a friendly r
 await phone.serve(agent, tunnel=True)
 ```
 
+Or with **Telnyx**:
+
+```python
+from getpatter import Patter, Telnyx, OpenAIRealtime
+
+phone = Patter(carrier=Telnyx(), phone_number="+15550001234")
+agent = phone.agent(engine=OpenAIRealtime(), system_prompt="You are a friendly receptionist for Acme Corp.", first_message="Hello! How can I help?")
+await phone.serve(agent, tunnel=True)
+```
+
 </details>
 
 <details>
@@ -66,6 +86,16 @@ npm install getpatter
 import { Patter, Twilio, OpenAIRealtime } from "getpatter";
 
 const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+const agent = phone.agent({ engine: new OpenAIRealtime(), systemPrompt: "You are a friendly receptionist for Acme Corp.", firstMessage: "Hello! How can I help?" });
+await phone.serve({ agent, tunnel: true });
+```
+
+Or with **Telnyx**:
+
+```typescript
+import { Patter, Telnyx, OpenAIRealtime } from "getpatter";
+
+const phone = new Patter({ carrier: new Telnyx(), phoneNumber: "+15550001234" });
 const agent = phone.agent({ engine: new OpenAIRealtime(), systemPrompt: "You are a friendly receptionist for Acme Corp.", firstMessage: "Hello! How can I help?" });
 await phone.serve({ agent, tunnel: true });
 ```
@@ -162,6 +192,9 @@ cd python && pip install -r requirements.txt && python main.py
 | `TWILIO_ACCOUNT_SID` | Yes | Twilio account SID |
 | `TWILIO_AUTH_TOKEN` | Yes | Twilio auth token |
 | `TWILIO_PHONE_NUMBER` | Yes | Your Twilio phone number (E.164) |
+| `TELNYX_API_KEY` | Yes (Telnyx) | Telnyx API key |
+| `TELNYX_CONNECTION_ID` | Yes (Telnyx) | Telnyx Call Control Application connection ID |
+| `TELNYX_PHONE_NUMBER` | Yes (Telnyx) | Your Telnyx phone number (E.164) |
 | `DEEPGRAM_API_KEY` | Pipeline mode | Deepgram STT key |
 | `ELEVENLABS_API_KEY` | Pipeline mode | ElevenLabs TTS key |
 | `ANTHROPIC_API_KEY` | Custom LLM | For bringing your own model |
@@ -172,7 +205,7 @@ cp .env.example .env
 # Edit .env with your API keys
 ```
 
-> **Telnyx:** Telnyx is a fully supported telephony provider alternative to Twilio. Both carriers receive equal support for DTMF, transfer, and metrics. Recording is Twilio-only.
+> **Telnyx:** Telnyx is a fully supported telephony provider alternative to Twilio. Both carriers receive equal support for DTMF, transfer, and metrics. Recording parity is supported via Telnyx Call Control; consult the Telnyx portal for configuration details.
 
 ### Docker
 
