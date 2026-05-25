@@ -1,5 +1,7 @@
 ## Unreleased
 
+## 0.6.2 (2026-05-25)
+
 ### Added
 
 - **`OpenAIRealtime2` / `OpenAIRealtime2Adapter` — Python GA Realtime API
