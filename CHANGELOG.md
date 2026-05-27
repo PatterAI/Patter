@@ -50,6 +50,97 @@
   `actions/record_stop` against the Telnyx Call Control API when
   `recording=True` was passed; the README copy lagged behind the code.
 
+### Fixed
+
+- **Python: pipeline mode crashed immediately on stream start with
+  `AttributeError: 'ClientConnection' object has no attribute 'closed'`
+  (#111, #113).** Three WS-liveness checks
+  (`libraries/python/getpatter/stream_handler.py:2192` /
+  `:2230` and
+  `libraries/python/getpatter/providers/elevenlabs_ws_tts.py:453`)
+  still used the legacy `websockets<11` `.closed` property, but Patter
+  pins `websockets>=14,<16` in
+  `libraries/python/pyproject.toml` where `.closed` was removed in v12.
+  Promoted the existing `_is_parked_ws_alive` helper out of
+  `stream_handler.py` into
+  `libraries/python/getpatter/utils/ws.py` as `is_ws_alive`, and
+  re-used it at every call site. Handles modern (`state`,
+  `close_code`), legacy (`closed`), and unknown shapes; never defaults
+  to "alive" on unknown shapes so a dead socket can't be handed to the
+  live adapter. 8 new unit tests in
+  `libraries/python/tests/test_utils_ws.py`. Thanks
+  [@knowsuchagency](https://github.com/knowsuchagency).
+
+- **Python: pipeline mode did not inject the built-in `transfer_call`
+  / `end_call` tools into the `LLMLoop`, so pipeline agents could not
+  initiate a handoff or hangup no matter what the system prompt said
+  (#110, #115).** Realtime mode had been injecting both built-ins at
+  `libraries/python/getpatter/stream_handler.py:997`
+  (`agent_tools + [TRANSFER_CALL_TOOL, END_CALL_TOOL]`), but the
+  pipeline path at
+  `libraries/python/getpatter/stream_handler.py:2426` was passing
+  through only the user-provided tools. Added
+  `_augment_with_builtin_handoff_tools` that builds handler closures
+  with the `(arguments, call_context)` signature expected by
+  `ToolExecutor._invoke_handler` and wires them to the existing
+  telephony-level `_transfer_fn` / `_hangup_fn` already attached to
+  `PipelineStreamHandler`. Built-ins are skipped when the
+  corresponding telephony fn is missing (keeps the non-telephony test
+  harness path clean). Verified end-to-end against `gpt-4o-mini` on
+  Twilio: caller says "transfer me", LLM emits
+  `transfer_call({"number": "+1..."})`, `_twilio_transfer` fires, the
+  call bridges. 6 new unit tests in
+  `libraries/python/tests/test_pipeline_builtin_tools.py`. Thanks
+  [@knowsuchagency](https://github.com/knowsuchagency).
+
+- **TypeScript: pipeline mode missing built-in `transfer_call` /
+  `end_call` tools — parity fix for #115.** Both `new LLMLoop(...)`
+  call sites in `libraries/typescript/src/stream-handler.ts:1891` and
+  `:1906` were passing `agent.tools` through unchanged; the built-ins
+  shipped in `server.ts` (now exported as `TRANSFER_CALL_TOOL` /
+  `END_CALL_TOOL`) were only injected into the Realtime path at
+  `server.ts:374`. Added `augmentWithBuiltinHandoffTools` in
+  `libraries/typescript/src/stream-handler.ts` that mirrors the Python
+  helper: appends the two built-ins with handler closures that
+  validate E.164 / default `reason` and dispatch to the existing
+  telephony bridge methods (`this.deps.bridge.transferCall` /
+  `endCall`). 8 new unit tests in
+  `libraries/typescript/tests/pipeline-builtin-tools.test.ts`. Closes
+  the parity gap surfaced by #115.
+
+- **Docs: `docs/typescript-sdk/events.mdx` advertised the same
+  non-existent `phone.events.on(PatterEventType.X, handler)` API as
+  the Python events page — TypeScript parity fix for #114.** The TS
+  `Patter` class never exposed an `.events` attribute; `EventBus` is
+  instantiated per `StreamHandler`. Replaced the broken `EventBus`
+  section with documentation of the APIs that actually exist on the
+  TypeScript `Patter` class: **Speech-edge events** via the attribute
+  setters (`onUserSpeechStarted` / `onUserSpeechEnded` /
+  `onUserSpeechEos` / `onAgentSpeechStarted` / `onAgentSpeechEnded` /
+  `onLlmToken` / `onAudioOut`, proxied to `this.speechEvents` at
+  `libraries/typescript/src/client.ts:241-330`) and **Tool events via
+  `onTranscript`** (tool invocations surface with `role === "tool"`,
+  `tool_name`, `tool_args`, `tool_result` — payload defined at
+  `libraries/typescript/src/stream-handler.ts:2988-3010`).
+
+- **Docs: `docs/python-sdk/events.mdx` advertised a non-existent
+  `phone.events.on(PatterEventType.X, handler)` API that crashed
+  immediately with `AttributeError: 'Patter' object has no attribute
+  'events'` (#112, #114).** The `_EventBus` is instantiated per
+  `StreamHandler` (`libraries/python/getpatter/stream_handler.py:517`)
+  and never exposed on the `Patter` class. Replaced the broken
+  `EventBus` section with documentation of the APIs that actually
+  exist: **Speech-edge events** via the attribute setters on `Patter`
+  (`on_user_speech_started` / `on_user_speech_ended` /
+  `on_user_speech_eos` / `on_agent_speech_started` /
+  `on_agent_speech_ended` / `on_llm_token` / `on_audio_out`, proxied
+  to `self.speech_events` at
+  `libraries/python/getpatter/client.py:351-410`) and **Tool events
+  via `on_transcript`** (tool invocations surface with `role="tool"`,
+  `tool_name`, `tool_args`, `tool_result` — payload defined at
+  `libraries/python/getpatter/stream_handler.py:929`). Thanks
+  [@knowsuchagency](https://github.com/knowsuchagency).
+
 ## 0.6.2 (2026-05-25)
 
 ### Added

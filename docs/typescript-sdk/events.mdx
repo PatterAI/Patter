@@ -18,7 +18,7 @@ Patter emits events at key moments during a call. Register callbacks in `serve()
 | `onMessage` | User transcript ready for response (pipeline mode) | `serve()` |
 | `onMetrics` | After each conversational turn completes | `serve()` |
 
-For **fine-grained pipeline observability** (every interim transcript, every LLM chunk, every TTS chunk, every tool start) subscribe to the [EventBus](#eventbus) below — it complements these callbacks rather than replacing them.
+For **fine-grained pipeline observability** see the [Speech-edge events](#speech-edge-events) and [Tool events via onTranscript](#tool-events-via-ontranscript) sections below — they complement the lifecycle callbacks rather than replacing them.
 
 For **mutating prompts and responses** (RAG augmentation, output validation, PII redaction) use [PipelineHooks](#pipelinehooks-beforellm--afterllm) — they sit *inside* the LLM step rather than firing alongside it.
 
@@ -241,26 +241,75 @@ await phone.serve({
 }
 ```
 
-## EventBus
+## Speech-edge events
 
-The `EventBus` exposes fine-grained pipeline events that don't have first-class callbacks. Subscribe with `events.on(eventType, handler)` from anywhere you have a `Patter` reference.
+For turn-taking, TTFT measurement, and barge-in / interrupt observability, set the speech-edge callbacks directly on the `Patter` instance. They proxy to a per-process `SpeechEvents` dispatcher and fire from any in-flight call.
 
 ```typescript
-import { Patter, PatterEventType } from "getpatter";
+phone.onUserSpeechEos = async (ev) => {
+  // Committed end-of-utterance — anchor TTFT here.
+  console.log(`EOS via ${ev.trigger} at ${ev.timestamp_ms}ms`);
+};
 
-phone.events.on(PatterEventType.TRANSCRIPT_PARTIAL, (ev) => console.log("partial:", ev.text));
-phone.events.on(PatterEventType.LLM_CHUNK, (ev) => logChunk(ev.call_id, ev.text));
+phone.onLlmToken = async (ev) => {
+  // First LLM token of the turn — TTFT marker.
+  console.log(`TTFT, model=${ev.model}, t=${ev.timestamp_ms}ms`);
+};
+
+phone.onAgentSpeechEnded = async (ev) => {
+  const status = ev.interrupted ? "interrupted" : "completed";
+  console.log(`Turn ${ev.turn_idx} ${status}`);
+};
+
+phone.onUserSpeechStarted = async (ev) => { /* raw VAD positive edge */ };
+phone.onUserSpeechEnded = async (ev) => { /* raw VAD trailing edge */ };
+phone.onAgentSpeechStarted = async (ev) => { /* first wire-time audio chunk */ };
+phone.onAudioOut = async (ev) => { /* first TTS audio bytes produced */ };
 ```
 
-| `PatterEventType` | Fires |
+| Attribute | Fires |
 |---|---|
-| `TRANSCRIPT_PARTIAL` | Every interim STT result (before endpointing). |
-| `TRANSCRIPT_FINAL` | Every final STT result (after endpointing). Same payload as `onTranscript`. |
-| `LLM_CHUNK` | Every streamed LLM token / chunk. |
-| `TTS_CHUNK` | Every TTS audio chunk written to the carrier. |
-| `TOOL_CALL_STARTED` | Tool dispatched (paired with the existing `tool_call_completed` you can observe via `onCallEnd`). |
+| `onUserSpeechStarted` | Raw VAD positive edge (caller begins speaking). |
+| `onUserSpeechEnded` | Raw VAD trailing edge (caller stops speaking). |
+| `onUserSpeechEos` | Committed end-of-utterance — anchor TTFT here. |
+| `onAgentSpeechStarted` | First wire-time agent audio chunk — turn-start marker for the caller. |
+| `onAgentSpeechEnded` | Last agent audio chunk. Payload includes `interrupted` flag for barge-in. |
+| `onLlmToken` | First LLM token of the turn — TTFT marker. |
+| `onAudioOut` | First TTS audio bytes produced — TTS warmup signal. |
 
-Handlers are non-blocking (fire-and-forget). Throwing inside a handler logs the error but does not interrupt the call.
+Callbacks are async. Throwing inside a callback logs the error but does not interrupt the call.
+
+## Tool events via `onTranscript`
+
+Tool invocations (including the built-in `transfer_call` and `end_call`) surface through the same `onTranscript` callback you pass to `phone.serve(...)`. Filter on `role === "tool"` to handle them:
+
+```typescript
+await phone.serve({
+  agent,
+  onTranscript: async (ev) => {
+    if (ev.role === "tool") {
+      console.log(
+        `tool=${ev.tool_name} ` +
+        `args=${JSON.stringify(ev.tool_args)} ` +
+        `result=${ev.tool_result}`,
+      );
+    } else {
+      console.log(`[${ev.role}] ${ev.text}`);
+    }
+  },
+});
+```
+
+The event payload for tool calls carries:
+
+| Key | Type | Notes |
+|---|---|---|
+| `role` | `"tool"` | Always `"tool"` for tool events. |
+| `tool_name` | `string` | The tool that was dispatched. |
+| `tool_args` | `Record<string, unknown>` | Arguments emitted by the LLM. |
+| `tool_result` | `string \| null` | Result returned by the tool handler (truncated for log readability). |
+| `call_id` | `string` | The active call ID. |
+| `text` | `string` | Pre-formatted `tool_name(args) → result` string. |
 
 ---
 

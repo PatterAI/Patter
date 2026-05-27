@@ -60,7 +60,7 @@ export interface LocalConfig {
 
 type AIAdapter = OpenAIRealtimeAdapter | ElevenLabsConvAIAdapter;
 
-const TRANSFER_CALL_TOOL = {
+export const TRANSFER_CALL_TOOL = {
   name: 'transfer_call',
   description: 'Transfer the call to a human agent at the specified phone number',
   parameters: {
@@ -75,7 +75,7 @@ const TRANSFER_CALL_TOOL = {
   },
 };
 
-const END_CALL_TOOL = {
+export const END_CALL_TOOL = {
   name: 'end_call',
   description: 'End the current phone call. Use when the conversation is complete or the user says goodbye.',
   parameters: {

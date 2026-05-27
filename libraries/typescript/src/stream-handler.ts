@@ -23,7 +23,7 @@ import { MCPManager } from './tools/mcp-client';
 import type { AgentOptions, Guardrail, HookContext, PipelineMessageHandler, ToolDefinition, VADProvider } from './types';
 import type { MetricsStore } from './dashboard/store';
 import { getLogger } from './logger';
-import { validateTwilioSid } from './server';
+import { validateTwilioSid, TRANSFER_CALL_TOOL, END_CALL_TOOL } from './server';
 import type { ProviderPricing } from './pricing';
 import { SentenceChunker } from './sentence-chunker';
 import { PipelineHookExecutor } from './pipeline-hooks';
@@ -115,6 +115,56 @@ export function maskPhoneNumber(number: unknown): string {
 
 function isValidE164(number: string): boolean {
   return /^\+[1-9]\d{6,14}$/.test(number);
+}
+
+/**
+ * Augment a tool list with the built-in `transfer_call` / `end_call` tools,
+ * wired to the telephony-level transfer / hangup callbacks. Used by pipeline
+ * mode to match the Realtime path's tool surface (Realtime injects the same
+ * two built-ins at `server.ts` and dispatches them via the bridge in this
+ * file's tool dispatcher around line 3100). Without this the pipeline LLM
+ * never sees the built-ins and cannot initiate a transfer or hangup
+ * regardless of system-prompt instructions. Parity with Python helper
+ * `_augment_with_builtin_handoff_tools` in `stream_handler.py`.
+ *
+ * Built-ins are skipped when the corresponding callback is missing (keeps
+ * non-telephony test harnesses clean). User-provided tools keep their
+ * original order; the built-ins are appended.
+ */
+export function augmentWithBuiltinHandoffTools(
+  userTools: ToolDefinition[] | null | undefined,
+  callbacks: {
+    transferCall?: (number: string) => Promise<void>;
+    endCall?: (reason: string) => Promise<void>;
+  },
+): ToolDefinition[] {
+  const out: ToolDefinition[] = [...(userTools ?? [])];
+  if (callbacks.transferCall) {
+    const transferCall = callbacks.transferCall;
+    out.push({
+      ...TRANSFER_CALL_TOOL,
+      handler: async (args: Record<string, unknown>): Promise<string> => {
+        const number = typeof args.number === 'string' ? args.number : '';
+        if (!isValidE164(number)) {
+          return JSON.stringify({ error: 'Invalid phone number format', status: 'rejected' });
+        }
+        await transferCall(number);
+        return JSON.stringify({ status: 'transferring', to: number });
+      },
+    });
+  }
+  if (callbacks.endCall) {
+    const endCall = callbacks.endCall;
+    out.push({
+      ...END_CALL_TOOL,
+      handler: async (args: Record<string, unknown>): Promise<string> => {
+        const reason = typeof args.reason === 'string' ? args.reason : 'conversation_complete';
+        await endCall(reason);
+        return JSON.stringify({ status: 'ending', reason });
+      },
+    });
+  }
+  return out;
 }
 
 /**
@@ -1888,11 +1938,23 @@ export class StreamHandler {
       }
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const providerModel = (this.deps.agent.llm as any)?.model ?? '';
+      // Inject the built-in transfer_call / end_call tools — parity with the
+      // Realtime path which injects them at `server.ts` and dispatches via
+      // the bridge in this file's tool dispatcher. Without this, pipeline-mode
+      // LLMs never see the built-ins and can't initiate a handoff or hangup
+      // no matter what the system prompt says.
+      const augmentedTools = augmentWithBuiltinHandoffTools(
+        this.deps.agent.tools as ToolDefinition[] | null | undefined,
+        {
+          transferCall: (number) => this.deps.bridge.transferCall(this.callId, number),
+          endCall: () => this.deps.bridge.endCall(this.callId, this.ws),
+        },
+      );
       this.llmLoop = new LLMLoop(
         '', // apiKey unused when llmProvider is supplied
         providerModel, // propagate so calculateLlmCost can match the price row
         resolvedPrompt,
-        this.deps.agent.tools as ToolDefinition[] | undefined,
+        augmentedTools,
         this.deps.agent.llm,
         this.deps.agent.disablePhonePreamble ?? false,
       );
@@ -1903,11 +1965,18 @@ export class StreamHandler {
     } else if (!this.deps.onMessage && this.deps.config.openaiKey) {
       let llmModel = this.deps.agent.model || 'gpt-4o-mini';
       if (llmModel.includes('realtime')) llmModel = 'gpt-4o-mini';
+      const augmentedTools = augmentWithBuiltinHandoffTools(
+        this.deps.agent.tools as ToolDefinition[] | null | undefined,
+        {
+          transferCall: (number) => this.deps.bridge.transferCall(this.callId, number),
+          endCall: () => this.deps.bridge.endCall(this.callId, this.ws),
+        },
+      );
       this.llmLoop = new LLMLoop(
         this.deps.config.openaiKey,
         llmModel,
         resolvedPrompt,
-        this.deps.agent.tools as ToolDefinition[] | undefined,
+        augmentedTools,
         undefined,
         this.deps.agent.disablePhonePreamble ?? false,
       );
