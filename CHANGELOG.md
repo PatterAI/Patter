@@ -1,5 +1,21 @@
 ## Unreleased
 
+### Added
+
+- **Agent Skills bundle under `skills/`.** Five [Anthropic Agent Skills
+  spec](https://agentskills.io)-compliant `SKILL.md` files plus references —
+  `setup-patter`, `build-voice-agent`, `configure-telephony`,
+  `add-tools-and-handoffs`, `inspect-calls-and-metrics` — that teach any
+  compatible AI agent (Claude Code, Claude Desktop, OpenClaw, Hermes, Cursor,
+  Codex, ~50 others via `npx skills add`) how to use the SDK end-to-end.
+  Both Python and TypeScript surfaces are covered in side-by-side code
+  examples; skill content reflects the 0.6.2 public API (`OpenAIRealtime2`,
+  `phone.metrics_store`, `dashboard_token` auth, `phone.serve(... on_call_end=...)`
+  kwarg, default `machine_detection=True`, `ring_timeout=25`, etc.). Discoverable
+  via `npx skills add patterai/patter --skill <name>` and listed on
+  [skills.sh](https://skills.sh) via install telemetry. README updated with
+  install snippet.
+
 ## 0.6.2 (2026-05-25)
 
 ### Added

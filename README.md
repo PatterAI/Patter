@@ -184,6 +184,23 @@ cp .env.example .env    # fill in your keys
 cd python && pip install -r requirements.txt && python main.py
 ```
 
+## Agent Skills
+
+Patter ships [Anthropic Agent Skills](https://agentskills.io) under [`skills/`](./skills) that teach
+any compatible AI agent — Claude Code, Claude Desktop, OpenClaw, Hermes, Cursor, Codex, and ~50
+others — how to use the SDK end-to-end.
+
+```bash
+# Install one skill
+npx skills add patterai/patter --skill build-voice-agent
+
+# Or install all five
+npx skills add patterai/patter
+```
+
+The bundle covers `setup-patter`, `build-voice-agent`, `configure-telephony`, `add-tools-and-handoffs`,
+and `inspect-calls-and-metrics`. See [`skills/README.md`](./skills) for the full list and install options.
+
 ## Configuration
 
 ### Environment Variables
