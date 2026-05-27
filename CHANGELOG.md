@@ -2,6 +2,16 @@
 
 ### Added
 
+- **Docs: new `Integrations → OpenClaw` page at
+  [`docs.getpatter.com/integrations/openclaw`](https://docs.getpatter.com/integrations/openclaw).**
+  Shows the `npx skills add patterai/skills` one-liner for OpenClaw users,
+  documents the alternative `openclaw mcp set patter ...` path with both
+  stdio and streamable-http transports, and surfaces the
+  `before_tool_call.requireApproval` caveat (MCP tools bypass OpenClaw's
+  native approval hooks, so outbound `patter__make_call` should be in
+  `tools.elevated`). Added under a new `Integrations` group in the Home
+  product nav (`docs/docs.json`).
+
 - **Telnyx `call.recording.saved` webhook handler — Python parity with
   TypeScript.** `libraries/python/getpatter/server.py` now handles the
   Telnyx `call.recording.saved` Call Control event and logs the recording

@@ -62,6 +62,13 @@
             ]
           },
           {
+            "group": "Integrations",
+            "icon": "plug",
+            "pages": [
+              "integrations/openclaw"
+            ]
+          },
+          {
             "group": "Dev Tools",
             "icon": "wrench",
             "pages": [
