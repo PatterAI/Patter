@@ -20,7 +20,7 @@ All callbacks are **async functions**. They are passed as parameters to `serve()
 | `on_message` | User message received (pipeline mode) |
 | `on_metrics` | After each conversation turn (real-time cost/latency) |
 
-For **fine-grained pipeline observability** (every interim transcript, every LLM chunk, every TTS chunk, every tool start) subscribe to the [EventBus](#eventbus) below — it complements these callbacks rather than replacing them.
+For **fine-grained pipeline observability** see the [Speech-edge events](#speech-edge-events) and [Tool events via on_transcript](#tool-events-via-on_transcript) sections below — they complement the lifecycle callbacks rather than replacing them.
 
 For **mutating prompts and responses** (RAG augmentation, output validation, PII redaction) use [PipelineHooks](#pipelinehooks-before_llm--after_llm) — they sit *inside* the LLM step rather than firing alongside it.
 
@@ -134,27 +134,72 @@ Return a `str` with the agent's response. This text is sent to the TTS provider 
 
 ---
 
-## EventBus
+## Speech-edge events
 
-The `EventBus` exposes fine-grained pipeline events that don't have first-class callbacks. Subscribe with `on(event_type, handler)` from inside `on_call_start` (or any place you have a `Patter` reference).
+For turn-taking, TTFT measurement, and barge-in / interrupt observability, set the speech-edge callbacks directly on the `Patter` instance. They proxy to a per-process `SpeechEvents` dispatcher and fire from any in-flight call.
 
 ```python
-from getpatter import EventBus, PatterEventType
+async def on_user_speech_eos(ev):
+    # Committed end-of-utterance — anchor TTFT here.
+    print(f"EOS via {ev['trigger']} at {ev['timestamp_ms']}ms")
 
-# `phone.events` is the per-process EventBus.
-phone.events.on(PatterEventType.TRANSCRIPT_PARTIAL, lambda ev: print("partial:", ev["text"]))
-phone.events.on(PatterEventType.LLM_CHUNK, lambda ev: log_chunk(ev["call_id"], ev["text"]))
+async def on_llm_token(ev):
+    # First LLM token of the turn — TTFT marker.
+    print(f"TTFT, model={ev['model']}, t={ev['timestamp_ms']}ms")
+
+async def on_agent_speech_ended(ev):
+    status = "interrupted" if ev["interrupted"] else "completed"
+    print(f"Turn {ev['turn_idx']} {status}")
+
+phone.on_user_speech_started = ...   # raw VAD positive edge
+phone.on_user_speech_ended = ...     # raw VAD trailing edge
+phone.on_user_speech_eos = on_user_speech_eos
+phone.on_agent_speech_started = ...  # first wire-time audio chunk
+phone.on_agent_speech_ended = on_agent_speech_ended
+phone.on_llm_token = on_llm_token
+phone.on_audio_out = ...             # first TTS audio bytes produced
 ```
 
-| `PatterEventType` | Fires |
+| Attribute | Fires |
 |---|---|
-| `TRANSCRIPT_PARTIAL` | Every interim STT result (before endpointing). |
-| `TRANSCRIPT_FINAL` | Every final STT result (after endpointing). Same payload as `on_transcript`. |
-| `LLM_CHUNK` | Every streamed LLM token / chunk. |
-| `TTS_CHUNK` | Every TTS audio chunk written to the carrier. |
-| `TOOL_CALL_STARTED` | Tool dispatched (paired with the existing `tool_call_completed` you can observe via `on_call_end`). |
+| `on_user_speech_started` | Raw VAD positive edge (caller begins speaking). |
+| `on_user_speech_ended` | Raw VAD trailing edge (caller stops speaking). |
+| `on_user_speech_eos` | Committed end-of-utterance — anchor TTFT here. |
+| `on_agent_speech_started` | First wire-time agent audio chunk — turn-start marker for the caller. |
+| `on_agent_speech_ended` | Last agent audio chunk. Payload includes `interrupted` flag for barge-in. |
+| `on_llm_token` | First LLM token of the turn — TTFT marker. |
+| `on_audio_out` | First TTS audio bytes produced — TTS warmup signal. |
 
-Handlers are non-blocking (run in a fire-and-forget task). Throwing inside a handler logs the error but does not interrupt the call.
+Callbacks are async. Throwing inside a callback logs the error but does not interrupt the call.
+
+## Tool events via `on_transcript`
+
+Tool invocations (including the built-in `transfer_call` and `end_call`) surface through the same `on_transcript` callback you pass to `phone.serve(...)`. Filter on `role == "tool"` to handle them:
+
+```python
+async def on_transcript(ev):
+    if ev["role"] == "tool":
+        print(
+            f"tool={ev['tool_name']} "
+            f"args={ev['tool_args']} "
+            f"result={ev['tool_result']}"
+        )
+    else:
+        print(f"[{ev['role']}] {ev['text']}")
+
+await phone.serve(agent, on_transcript=on_transcript)
+```
+
+The event payload for tool calls carries:
+
+| Key | Type | Notes |
+|---|---|---|
+| `role` | `"tool"` | Always `"tool"` for tool events. |
+| `tool_name` | `str` | The tool that was dispatched. |
+| `tool_args` | `dict` | Arguments emitted by the LLM. |
+| `tool_result` | `str \| None` | Result returned by the tool handler (truncated for log readability). |
+| `call_id` | `str` | The active call ID. |
+| `text` | `str` | Pre-formatted "tool_name(args) → result" string. |
 
 ---
 
