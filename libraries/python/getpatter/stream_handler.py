@@ -171,6 +171,42 @@ END_CALL_TOOL: dict = {
 }
 
 
+def _augment_with_builtin_handoff_tools(
+    user_tools: list[dict] | None,
+    *,
+    transfer_fn: Any | None,
+    hangup_fn: Any | None,
+) -> list[dict]:
+    """Return ``user_tools`` with the built-in ``transfer_call`` and
+    ``end_call`` tools appended, each wired with a handler closure that
+    routes to the telephony-level ``_transfer_fn`` / ``_hangup_fn``
+    already attached to the stream handler.
+
+    Used by pipeline mode to match the realtime path's tool surface
+    (see ``OpenAIRealtimeStreamHandler.start`` where the same two
+    built-ins are injected into ``session.update``). Without this the
+    pipeline LLM never sees the built-in tools and cannot initiate a
+    transfer or hangup regardless of system-prompt instructions.
+
+    Tools are appended (not prepended) so user-provided tools keep their
+    original order. The handler signature ``(arguments, call_context)``
+    matches the calling convention used by ``ToolExecutor._invoke_handler``.
+    """
+    out: list[dict] = list(user_tools or [])
+    if transfer_fn is not None:
+        async def _transfer_handler(arguments: dict, call_context: dict) -> str:
+            number = (arguments or {}).get("number", "")
+            await transfer_fn(number)
+            return f"Transferring to {number}" if number else "Transfer rejected"
+        out.append({**TRANSFER_CALL_TOOL, "handler": _transfer_handler})
+    if hangup_fn is not None:
+        async def _hangup_handler(arguments: dict, call_context: dict) -> str:
+            await hangup_fn()
+            return "Call ended"
+        out.append({**END_CALL_TOOL, "handler": _hangup_handler})
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Audio sender protocol — abstracts Twilio vs Telnyx audio output
 # ---------------------------------------------------------------------------
@@ -2415,7 +2451,18 @@ class PipelineStreamHandler(StreamHandler):
             from getpatter.services.llm_loop import LLMLoop
             from getpatter.tools.tool_executor import ToolExecutor
 
-            tool_executor = ToolExecutor() if self.agent.tools else None
+            # Inject the built-in transfer_call / end_call tools — parity with
+            # the realtime path (see ``OpenAIRealtimeStreamHandler.start``
+            # where ``openai_tools = agent_tools + [TRANSFER_CALL_TOOL,
+            # END_CALL_TOOL]``). Without this, pipeline-mode LLMs never see
+            # the built-ins and can't initiate a handoff or hangup no matter
+            # what the system prompt says.
+            combined_tools = _augment_with_builtin_handoff_tools(
+                self.agent.tools,
+                transfer_fn=self._transfer_fn,
+                hangup_fn=self._hangup_fn,
+            )
+            tool_executor = ToolExecutor() if combined_tools else None
             llm_model = self.agent.model
             if "realtime" in llm_model:
                 llm_model = "gpt-4o-mini"
@@ -2423,7 +2470,7 @@ class PipelineStreamHandler(StreamHandler):
                 openai_key=self._openai_key,
                 model=llm_model,
                 system_prompt=self.resolved_prompt,
-                tools=self.agent.tools,
+                tools=combined_tools,
                 tool_executor=tool_executor,
                 llm_provider=agent_llm,
                 metrics=self.metrics,
