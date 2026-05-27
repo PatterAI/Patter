@@ -59,6 +59,7 @@ from getpatter.providers.elevenlabs_tts import (
     ElevenLabsOutputFormat,
     resolve_voice_id,
 )
+from getpatter.utils.ws import is_ws_alive
 
 logger = logging.getLogger("getpatter")
 
@@ -450,7 +451,7 @@ class ElevenLabsWebSocketTTS(TTSProvider):
         self._adopted_connection = None
         bos_already_sent = False
         ws = None
-        if parked is not None and not parked.ws.closed:
+        if parked is not None and is_ws_alive(parked.ws):
             ws = parked.ws
             bos_already_sent = parked.bos_sent
         else:

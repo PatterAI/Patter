@@ -47,29 +47,7 @@ from getpatter.utils.log_sanitize import mask_phone_number, sanitize_log_value
 logger = logging.getLogger("getpatter")
 
 
-def _is_parked_ws_alive(ws: object) -> bool:
-    """Best-effort liveness check across ``websockets`` library versions.
-
-    The legacy client (``websockets<11``) exposes ``ws.closed: bool``.
-    The current asyncio client (``websockets>=12``) exposes ``ws.state``
-    (an ``IntEnum`` with ``OPEN == 1``) and ``ws.close_code`` (``None``
-    while still open). Return ``True`` only when we can confirm the
-    socket is OPEN — never default to True on unknown shapes, otherwise
-    we'd hand a dead socket to the live adapter.
-    """
-    state = getattr(ws, "state", None)
-    if state is not None:
-        try:
-            return int(state) == 1
-        except Exception:
-            return getattr(state, "name", "").upper() == "OPEN"
-    close_code = getattr(ws, "close_code", "__unset__")
-    if close_code != "__unset__":
-        return close_code is None
-    closed = getattr(ws, "closed", None)
-    if closed is None:
-        return False
-    return not bool(closed)
+from getpatter.utils.ws import is_ws_alive as _is_parked_ws_alive  # noqa: E402
 
 
 # Minimum wall-clock duration (seconds) the agent must have been speaking
@@ -2189,7 +2167,7 @@ class PipelineStreamHandler(StreamHandler):
         parked_tts = (parked or {}).get("tts")
         if parked_tts is not None and self._tts is not None:
             adopt = getattr(self._tts, "adopt_websocket", None)
-            ws_alive = parked_tts.ws is not None and not parked_tts.ws.closed
+            ws_alive = parked_tts.ws is not None and _is_parked_ws_alive(parked_tts.ws)
             if callable(adopt) and ws_alive:
                 try:
                     adopt(parked_tts)
@@ -2227,7 +2205,7 @@ class PipelineStreamHandler(StreamHandler):
                 and len(parked_stt) == 2
             ):
                 session, ws = parked_stt
-                if not ws.closed:
+                if _is_parked_ws_alive(ws):
                     try:
                         adopt_stt(session, ws)
                         logger.info(
