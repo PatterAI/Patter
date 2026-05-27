@@ -11,21 +11,27 @@
   Python webhook silent on recording completion while the bridge already
   POSTed to `actions/record_start` / `actions/record_stop`.
 
-- **Agent Skills bundle under `skills/`.** Five [Anthropic Agent Skills
-  spec](https://agentskills.io)-compliant `SKILL.md` files plus references —
-  `setup-patter`, `build-voice-agent`, `configure-telephony`,
-  `add-tools-and-handoffs`, `inspect-calls-and-metrics` — that teach any
-  compatible AI agent (Claude Code, Claude Desktop, OpenClaw, Hermes, Cursor,
-  Codex, ~50 others via `npx skills add`) how to use the SDK end-to-end.
-  Both Python and TypeScript surfaces are covered in side-by-side code
-  examples; skill content reflects the 0.6.2 public API (`OpenAIRealtime2`,
-  `phone.metrics_store`, `dashboard_token` auth, `phone.serve(... on_call_end=...)`
-  kwarg, default `machine_detection=True`, `ring_timeout=25`, etc.). Discoverable
-  via `npx skills add patterai/patter --skill <name>` and listed on
-  [skills.sh](https://skills.sh) via install telemetry. README updated with
-  install snippet.
+- **README: prominent "Skills for Coding Agents" section linking to
+  [`PatterAI/skills`](https://github.com/PatterAI/skills).** Top-nav anchor,
+  callout quote with one-line install (`npx skills add patterai/skills`),
+  table of the five skills, version pinning instructions, and link to the
+  `skills.sh` page. Mirrors the pattern adopted by ElevenLabs, Vapi,
+  Cartesia, Anthropic, and Coinbase (every vendor ships skills in a
+  dedicated `<org>/skills` repo rather than inside the SDK).
 
 ### Changed
+
+- **Agent Skills moved out of the SDK into a dedicated repository:
+  [`PatterAI/skills`](https://github.com/PatterAI/skills).** The five
+  `SKILL.md` files (and references) previously under `skills/` in this
+  repo have been migrated to their own repository, matching the industry
+  pattern (ElevenLabs `elevenlabs/skills`, Vapi `VapiAI/skills`, Cartesia
+  `cartesia-ai/skills`, Anthropic `anthropics/skills`). The dedicated repo
+  gives skills independent versioning, a cleaner `npx skills add
+  patterai/skills` install path, and avoids growing the SDK clone size
+  with non-runtime files. Skill content is unchanged — only the location
+  moved. The previous install path `npx skills add patterai/patter` no
+  longer resolves; use `npx skills add patterai/skills` instead.
 
 - **READMEs (root + `libraries/python/` + `libraries/typescript/`) no
   longer claim "Recording is Twilio-only".** Telnyx recording parity is

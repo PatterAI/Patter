@@ -18,6 +18,7 @@
 
 <p align="center">
   <a href="#quickstart">Quickstart</a> •
+  <a href="#skills-for-coding-agents">Skills</a> •
   <a href="#features">Features</a> •
   <a href="#templates">Templates</a> •
   <a href="#configuration">Configuration</a> •
@@ -184,22 +185,44 @@ cp .env.example .env    # fill in your keys
 cd python && pip install -r requirements.txt && python main.py
 ```
 
-## Agent Skills
+## Skills for Coding Agents
 
-Patter ships [Anthropic Agent Skills](https://agentskills.io) under [`skills/`](./skills) that teach
-any compatible AI agent — Claude Code, Claude Desktop, OpenClaw, Hermes, Cursor, Codex, and ~50
-others — how to use the SDK end-to-end.
+> Using Claude Code, Claude Desktop, OpenClaw, Hermes, Cursor, Codex, or other AI coding agents?
+>
+> **[Install Patter skills for voice agents →](https://www.skills.sh/patterai/skills)**
 
 ```bash
-# Install one skill
-npx skills add patterai/patter --skill build-voice-agent
+# Install all five skills (recommended)
+npx skills add patterai/skills
 
-# Or install all five
-npx skills add patterai/patter
+# Or install one
+npx skills add patterai/skills --skill build-voice-agent
 ```
 
-The bundle covers `setup-patter`, `build-voice-agent`, `configure-telephony`, `add-tools-and-handoffs`,
-and `inspect-calls-and-metrics`. See [`skills/README.md`](./skills) for the full list and install options.
+The bundle works in **~55 agent harnesses** that consume the
+[Anthropic Agent Skills](https://agentskills.io) standard — Claude Code,
+Claude Desktop, OpenClaw, Hermes Agent, Cursor, GitHub Copilot, Codex, Cline,
+Crush, Goose, Amp, Antigravity, and more. Install once; every agent on your
+machine learns the SDK.
+
+| Skill | What it teaches the agent |
+|---|---|
+| [`setup-patter`](https://github.com/PatterAI/skills/tree/main/setup-patter) | Install Patter, walk the user through provider/carrier consoles, validate each API key, write `.env` |
+| [`build-voice-agent`](https://github.com/PatterAI/skills/tree/main/build-voice-agent) | Build a voice agent — Realtime / ConvAI / Pipeline modes, with full Python and TypeScript examples |
+| [`configure-telephony`](https://github.com/PatterAI/skills/tree/main/configure-telephony) | Twilio or Telnyx carrier setup — phone numbers, webhooks, tunnels, AMD, voicemail drop |
+| [`add-tools-and-handoffs`](https://github.com/PatterAI/skills/tree/main/add-tools-and-handoffs) | Custom tools, `transfer_call`, `end_call`, output guardrails |
+| [`inspect-calls-and-metrics`](https://github.com/PatterAI/skills/tree/main/inspect-calls-and-metrics) | Live dashboard, `CallMetrics`, cost tracking, CSV/JSON export |
+
+Skills live in a dedicated repository: **[`PatterAI/skills`](https://github.com/PatterAI/skills)**.
+
+Pin to an SDK version for reproducibility:
+
+```bash
+npx skills add patterai/skills#v0.6.2 --skill build-voice-agent
+```
+
+Pages on [skills.sh](https://www.skills.sh/patterai/skills) update automatically
+via install telemetry — no submission required.
 
 ## Configuration
 
