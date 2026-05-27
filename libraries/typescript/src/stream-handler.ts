@@ -908,8 +908,8 @@ export class StreamHandler {
   }
 
   /**
-   * Start call recording when configured. Currently Twilio-only — bridges may
-   * expose ``startRecording`` for parity when we add other carriers.
+   * Start call recording when configured. Bridges expose
+   * ``startRecording`` for carrier parity (Twilio and Telnyx supported).
    */
   private async startRecordingIfRequested(callId: string): Promise<void> {
     const { recording, config } = this.deps;

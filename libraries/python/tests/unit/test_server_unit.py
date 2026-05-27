@@ -739,6 +739,127 @@ class TestTelnyxVoiceRoute:
         assert srv._telnyx_sig_warning_logged is True
 
 
+class TestTelnyxRecordingSavedWebhook:
+    """POST /webhooks/telnyx/voice with call.recording.saved logs the recording URL.
+
+    Mirrors the TypeScript handler in ``libraries/typescript/src/server.ts``
+    around the ``call.recording.saved`` branch. Fallback order:
+    ``recording_urls.mp3`` → ``recording_urls.wav`` →
+    ``public_recording_urls.mp3`` → ``public_recording_urls.wav``.
+    """
+
+    def _telnyx_server(self) -> EmbeddedServer:
+        cfg = LocalConfig(
+            telephony_provider="telnyx",
+            telnyx_key="tk_test",
+            telnyx_connection_id="conn-1",
+            openai_key="sk-test",
+            webhook_url="test.ngrok.io",
+            phone_number="+15551234567",
+            require_signature=False,
+        )
+        return EmbeddedServer(config=cfg, agent=make_agent(), dashboard=False)
+
+    def _recording_saved_request(self, payload: dict) -> _MockRequest:
+        return _MockRequest(
+            json_data={
+                "data": {
+                    "event_type": "call.recording.saved",
+                    "payload": {
+                        "call_control_id": "v3:rec-abc",
+                        "from": "+15551234567",
+                        "to": "+15559876543",
+                        **payload,
+                    },
+                }
+            },
+        )
+
+    @pytest.mark.asyncio
+    async def test_recording_saved_logs_mp3_url_first(self, caplog) -> None:
+        srv = self._telnyx_server()
+        app = srv._create_app()
+        endpoint = _get_endpoint(app, "/webhooks/telnyx/voice")
+
+        request = self._recording_saved_request(
+            {
+                "recording_urls": {
+                    "mp3": "https://api.telnyx.com/v2/recordings/abc.mp3",
+                    "wav": "https://api.telnyx.com/v2/recordings/abc.wav",
+                },
+            }
+        )
+
+        with caplog.at_level("INFO", logger="getpatter"):
+            response = await endpoint(request)
+
+        assert response.status_code == 200
+        assert any(
+            "recording saved" in r.message.lower() and "abc.mp3" in r.message
+            for r in caplog.records
+        ), f"Expected INFO log with mp3 URL, got: {[r.message for r in caplog.records]}"
+
+    @pytest.mark.asyncio
+    async def test_recording_saved_falls_back_to_wav(self, caplog) -> None:
+        srv = self._telnyx_server()
+        app = srv._create_app()
+        endpoint = _get_endpoint(app, "/webhooks/telnyx/voice")
+
+        request = self._recording_saved_request(
+            {"recording_urls": {"wav": "https://api.telnyx.com/v2/recordings/abc.wav"}}
+        )
+
+        with caplog.at_level("INFO", logger="getpatter"):
+            response = await endpoint(request)
+
+        assert response.status_code == 200
+        assert any("abc.wav" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_recording_saved_falls_back_to_public_urls(self, caplog) -> None:
+        srv = self._telnyx_server()
+        app = srv._create_app()
+        endpoint = _get_endpoint(app, "/webhooks/telnyx/voice")
+
+        request = self._recording_saved_request(
+            {
+                "recording_urls": {},
+                "public_recording_urls": {
+                    "mp3": "https://public.example.com/abc.mp3",
+                },
+            }
+        )
+
+        with caplog.at_level("INFO", logger="getpatter"):
+            response = await endpoint(request)
+
+        assert response.status_code == 200
+        assert any("public.example.com/abc.mp3" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_recording_saved_with_no_urls_logs_empty_but_returns_200(
+        self, caplog
+    ) -> None:
+        srv = self._telnyx_server()
+        app = srv._create_app()
+        endpoint = _get_endpoint(app, "/webhooks/telnyx/voice")
+
+        # No recording_urls / public_recording_urls keys at all — Telnyx
+        # may emit this if the recording was stopped before any audio.
+        request = self._recording_saved_request({})
+
+        with caplog.at_level("INFO", logger="getpatter"):
+            response = await endpoint(request)
+
+        assert response.status_code == 200
+        # The handler still logs the event (with an empty URL) so the
+        # call_control_id is traceable in logs.
+        assert any(
+            "recording saved" in r.message.lower() and "v3:rec-abc" in r.message
+            for r in caplog.records
+        )
+
+
 # ---------------------------------------------------------------------------
 # stop() — graceful shutdown
 # ---------------------------------------------------------------------------

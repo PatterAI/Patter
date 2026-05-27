@@ -371,3 +371,95 @@ class TestTelnyxStreamBridgeLifecycle:
         # (BUG #18).
         call_kwargs = mock_handler_cls.call_args[1]
         assert call_kwargs.get("audio_format") == "g711_ulaw"
+
+
+# ---------------------------------------------------------------------------
+# Recording
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestTelnyxRecording:
+    """telnyx_stream_bridge starts recording when recording=True."""
+
+    @pytest.mark.asyncio
+    @patch("getpatter.telephony.telnyx.OpenAIRealtimeStreamHandler")
+    @patch("getpatter.telephony.telnyx.create_metrics_accumulator")
+    @patch("getpatter.telephony.telnyx.resolve_agent_prompt", return_value="prompt")
+    @patch("getpatter.telephony.telnyx.fetch_deepgram_cost", new_callable=AsyncMock)
+    async def test_recording_posts_to_telnyx_api(
+        self,
+        mock_fetch_dg,
+        mock_resolve,
+        mock_create_metrics,
+        mock_handler_cls,
+    ) -> None:
+        from getpatter.telephony.telnyx import telnyx_stream_bridge
+
+        call_control_id = "v3:test-call-id"
+        messages = [_stream_started_message(call_control_id=call_control_id), _stream_stopped_message()]
+        ws = _make_mock_ws(messages)
+
+        mock_handler = AsyncMock()
+        mock_handler.stt = None
+        mock_handler_cls.return_value = mock_handler
+        mock_create_metrics.return_value = MagicMock()
+
+        mock_http = AsyncMock()
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("httpx.AsyncClient", return_value=mock_http):
+            await telnyx_stream_bridge(
+                websocket=ws,
+                agent=make_agent(provider="openai_realtime"),
+                openai_key="sk-test",
+                telnyx_key="KEYtest",
+                recording=True,
+            )
+
+        # Verify record_start was called
+        post_calls = [c for c in mock_http.post.call_args_list]
+        record_start_calls = [c for c in post_calls if "record_start" in str(c)]
+        assert len(record_start_calls) == 1, f"Expected 1 record_start call, got {len(record_start_calls)}"
+
+    @pytest.mark.asyncio
+    @patch("getpatter.telephony.telnyx.OpenAIRealtimeStreamHandler")
+    @patch("getpatter.telephony.telnyx.create_metrics_accumulator")
+    @patch("getpatter.telephony.telnyx.resolve_agent_prompt", return_value="prompt")
+    @patch("getpatter.telephony.telnyx.fetch_deepgram_cost", new_callable=AsyncMock)
+    async def test_recording_stopped_on_call_end(
+        self,
+        mock_fetch_dg,
+        mock_resolve,
+        mock_create_metrics,
+        mock_handler_cls,
+    ) -> None:
+        from getpatter.telephony.telnyx import telnyx_stream_bridge
+
+        call_control_id = "v3:test-end-id"
+        messages = [_stream_started_message(call_control_id=call_control_id), _stream_stopped_message()]
+        ws = _make_mock_ws(messages)
+
+        mock_handler = AsyncMock()
+        mock_handler.stt = None
+        mock_handler_cls.return_value = mock_handler
+        mock_create_metrics.return_value = MagicMock()
+
+        mock_http = AsyncMock()
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("httpx.AsyncClient", return_value=mock_http):
+            await telnyx_stream_bridge(
+                websocket=ws,
+                agent=make_agent(provider="openai_realtime"),
+                openai_key="sk-test",
+                telnyx_key="KEYtest",
+                recording=True,
+            )
+
+        # Verify record_stop was called in finally block
+        post_calls = [c for c in mock_http.post.call_args_list]
+        record_stop_calls = [c for c in post_calls if "record_stop" in str(c)]
+        assert len(record_stop_calls) == 1, f"Expected 1 record_stop call, got {len(record_stop_calls)}"
