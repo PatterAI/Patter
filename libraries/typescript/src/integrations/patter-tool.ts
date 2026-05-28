@@ -73,10 +73,8 @@
  * ```
  */
 
-import { EventEmitter } from 'node:events';
 import type { Patter } from '../client';
-import type { MetricsStore, SSEEvent } from '../dashboard/store';
-import type { AgentOptions } from '../types';
+import type { AgentOptions, CallResult } from '../types';
 
 /** JSON-Schema of the call args. Identical wire shape across openai/anthropic/hermes. */
 const PARAMETERS_SCHEMA = {
@@ -152,16 +150,15 @@ export interface PatterToolResult {
   call_id: string;
   status: string;
   duration_seconds: number;
+  /**
+   * Carrier-agnostic outcome (answered / voicemail / no_answer / busy /
+   * failed) lifted from the SDK {@link CallResult}. Optional for backward
+   * compatibility with any code constructing this envelope without it.
+   */
+  outcome?: string;
   cost_usd?: number;
   transcript: Array<{ role: string; text: string; timestamp?: number }>;
   metrics?: Record<string, unknown> | null;
-}
-
-interface PendingCall {
-  resolve: (r: PatterToolResult) => void;
-  reject: (e: Error) => void;
-  timer: NodeJS.Timeout;
-  startedAt: number;
 }
 
 /** Wraps a live `Patter` instance as a tool callable from external agent frameworks. */
@@ -173,24 +170,6 @@ export class PatterTool {
   private readonly maxDurationSec: number;
   private readonly recording: boolean;
   private started = false;
-  /** Resolver for the next `call_initiated` SSE event. Only set inside the
-   *  dial mutex (`dialQueue`), so two parallel `execute()` calls never share
-   *  it and never lose a dispatch. */
-  private pendingDial: ((callId: string) => void) | null = null;
-  /** Mutex that serializes the dial → call_id capture critical section.
-   *  Each `execute()` chains a continuation onto this promise so the
-   *  `pendingDial` slot is owned by exactly one caller at a time. */
-  private dialQueue: Promise<void> = Promise.resolve();
-  /** Captured SSE listener so `stop()` can detach it (prevents leaks when
-   *  the underlying Patter instance outlives this tool). */
-  private sseListener: ((event: SSEEvent) => void) | null = null;
-  /** Captured Patter metrics store, for cleanup in `stop()`. */
-  private metricsStoreRef: MetricsStore | null = null;
-  /** call_id → pending promise machinery. */
-  private readonly pending = new Map<string, PendingCall>();
-  private readonly bus = new EventEmitter();
-  /** How long to wait for the `call_initiated` SSE before failing the dial. */
-  private static readonly DIAL_CAPTURE_TIMEOUT_MS = 10_000;
 
   constructor(opts: PatterToolOptions) {
     if (!opts.phone) {
@@ -252,7 +231,15 @@ export class PatterTool {
 
   // --- Lifecycle ----------------------------------------------------------
 
-  /** Start the underlying Patter server. Idempotent. */
+  /**
+   * Start the underlying Patter server. Idempotent.
+   *
+   * `execute()` relies on `Patter.call({ wait: true })`, which requires an
+   * active server to receive the carrier completion webhooks — that's what
+   * `serve()` provides here. No `onCallEnd` callback is wired: the SDK's own
+   * per-callId completion registry resolves the result, so the user's
+   * `onCallEnd` slot is left free.
+   */
   async start(): Promise<void> {
     if (this.started) return;
     if (!this.agent) {
@@ -266,66 +253,35 @@ export class PatterTool {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       agent: builtAgent as any,
       recording: this.recording,
-      onCallEnd: this.onCallEndHandler.bind(this),
     });
-
-    // Subscribe to the metrics store so we can correlate outbound dials
-    // (call_initiated) with the call_id Patter assigns at dial time.
-    const store = this.phone.metricsStore;
-    if (!store) {
-      throw new Error(
-        'PatterTool.start: phone.metricsStore is null after serve() — is the dashboard disabled?',
-      );
-    }
-    const listener = (event: SSEEvent) => {
-      if (event.type === 'call_initiated' && this.pendingDial) {
-        const callId = (event.data.call_id as string) || '';
-        if (callId) {
-          const dispatch = this.pendingDial;
-          this.pendingDial = null;
-          dispatch(callId);
-        }
-      }
-    };
-    store.on('sse', listener);
-    this.sseListener = listener;
-    this.metricsStoreRef = store;
-
     this.started = true;
   }
 
-  /** Stop the underlying Patter server (and reject any pending calls). */
+  /** Best-effort shutdown — tear the Patter server down via `disconnect()`. */
   async stop(): Promise<void> {
     if (!this.started) return;
-    // Detach the SSE listener so a long-lived `Patter` instance shared with
-    // other consumers doesn't accumulate dead listeners every time a tool is
-    // stopped/restarted.
-    if (this.metricsStoreRef && this.sseListener) {
-      this.metricsStoreRef.off('sse', this.sseListener);
-    }
-    this.sseListener = null;
-    this.metricsStoreRef = null;
-    // Drop any in-flight dial waiter (silently — caller will get the
-    // shutdown rejection from `pending` below if it ever set its waiter).
-    this.pendingDial = null;
-    for (const [, p] of this.pending) {
-      clearTimeout(p.timer);
-      p.reject(new Error('PatterTool: shutdown while call pending'));
-    }
-    this.pending.clear();
-    // Best-effort — Patter's `stop()` is on the embedded server; not all
-    // versions expose a public stop on the Patter class.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const stoppable = this.phone as unknown as { stop?: () => Promise<void> };
-    if (typeof stoppable.stop === 'function') {
-      await stoppable.stop();
+    const disconnectable = this.phone as unknown as { disconnect?: () => Promise<void> };
+    if (typeof disconnectable.disconnect === 'function') {
+      try {
+        await disconnectable.disconnect();
+      } catch {
+        /* defensive — shutdown must not throw */
+      }
     }
     this.started = false;
   }
 
   // --- Execution ----------------------------------------------------------
 
-  /** Place an outbound call and resolve once it ends with the transcript and metrics. */
+  /**
+   * Dial outbound, wait for the call to end, return a structured result.
+   *
+   * Thin wrapper over `Patter.call({ wait: true })`: the SDK now owns the
+   * dial → callId → terminal-signal correlation, so this just bounds the wait
+   * with `max_duration_sec` and maps the {@link CallResult} into the tool's
+   * public envelope. Mirrors Python's `PatterTool.execute`.
+   */
   async execute(args: PatterToolExecuteArgs): Promise<PatterToolResult> {
     if (!this.started) await this.start();
     if (!args || typeof args.to !== 'string' || !args.to.startsWith('+')) {
@@ -343,75 +299,34 @@ export class PatterTool {
       ...(args.first_message !== undefined ? { firstMessage: args.first_message } : {}),
     });
 
-    // Serialize the dial → call_id capture across concurrent execute() calls.
-    // `pendingDial` is a single slot, so two parallel callers would clobber
-    // each other's resolver and one of them would hang forever waiting for
-    // an SSE event that already went to the other. Chain through dialQueue
-    // so exactly one execute() owns the slot at a time. Once the call_id is
-    // captured we release the queue immediately — the actual call_end can
-    // run concurrently with later dials.
-    const callId = await this.acquireCallId(args.to, overrideAgent);
-
-    return new Promise<PatterToolResult>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(callId);
-        reject(new Error(`PatterTool.execute: call ${callId} exceeded ${timeoutSec}s timeout`));
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        reject(
+          new Error(
+            `PatterTool.execute: call to ${args.to} exceeded ${timeoutSec}s timeout`,
+          ),
+        );
       }, timeoutSec * 1000);
-      this.pending.set(callId, {
-        resolve,
-        reject,
-        timer,
-        startedAt: Date.now() / 1000,
-      });
+      timer.unref?.();
     });
-  }
 
-  /** Issue the outbound dial under the mutex and return its assigned call_id. */
-  private async acquireCallId(to: string, agent: AgentOptions): Promise<string> {
-    // Chain on dialQueue. Each call replaces dialQueue with a tail promise so
-    // the *next* execute() can also enqueue. We resolve the queue promise as
-    // soon as we capture the call_id (or fail) so we don't hold the slot for
-    // the call's full duration.
-    let release!: () => void;
-    const slot = new Promise<void>((r) => {
-      release = r;
-    });
-    const previous = this.dialQueue;
-    this.dialQueue = previous.then(() => slot);
-    await previous;
-
-    // We now own the slot. Set up the dispatcher, dial, and wait for the
-    // call_initiated SSE — bounded by DIAL_CAPTURE_TIMEOUT_MS so a missed
-    // event doesn't hang the caller forever.
-    let captureTimer: NodeJS.Timeout | null = null;
+    let result: CallResult | void;
     try {
-      const callIdPromise = new Promise<string>((resolve, reject) => {
-        this.pendingDial = resolve;
-        captureTimer = setTimeout(() => {
-          this.pendingDial = null;
-          reject(
-            new Error(
-              `PatterTool.execute: did not observe call_initiated within ${PatterTool.DIAL_CAPTURE_TIMEOUT_MS}ms`,
-            ),
-          );
-        }, PatterTool.DIAL_CAPTURE_TIMEOUT_MS);
-      });
-
-      await this.phone.call({
-        to,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        agent: agent as any,
-      });
-
-      const callId = await callIdPromise;
-      if (captureTimer) clearTimeout(captureTimer);
-      return callId;
+      result = await Promise.race([
+        this.phone.call({
+          to: args.to,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          agent: overrideAgent as any,
+          wait: true,
+        }),
+        timeout,
+      ]);
     } finally {
-      // Always clear pendingDial; release the mutex so the next dial can run.
-      if (captureTimer) clearTimeout(captureTimer);
-      this.pendingDial = null;
-      release();
+      if (timer) clearTimeout(timer);
     }
+
+    return resultFromCallResult(result);
   }
 
   /**
@@ -430,45 +345,44 @@ export class PatterTool {
       }
     };
   }
+}
 
-  // --- Internal: onCallEnd dispatcher -------------------------------------
-
-  private async onCallEndHandler(data: Record<string, unknown>): Promise<void> {
-    const callId = (data.call_id as string) || '';
-    if (!callId) return;
-    const pending = this.pending.get(callId);
-    if (!pending) {
-      this.bus.emit('orphan_end', { call_id: callId, data });
-      return;
-    }
-    clearTimeout(pending.timer);
-    this.pending.delete(callId);
-    const metrics =
-      data.metrics && typeof data.metrics === 'object'
-        ? (data.metrics as Record<string, unknown>)
-        : null;
-    const cost =
-      metrics &&
-      typeof metrics.cost === 'object' &&
-      metrics.cost &&
-      typeof (metrics.cost as Record<string, unknown>).total === 'number'
-        ? ((metrics.cost as Record<string, unknown>).total as number)
-        : undefined;
-    const duration =
-      typeof (metrics?.duration_seconds as number | undefined) === 'number'
-        ? (metrics?.duration_seconds as number)
-        : Math.max(0, Date.now() / 1000 - pending.startedAt);
-    const transcript = Array.isArray(data.transcript)
-      ? (data.transcript as PatterToolResult['transcript'])
-      : [];
-    const status = (data.status as string) || 'completed';
-    pending.resolve({
-      call_id: callId,
-      status,
-      duration_seconds: duration,
-      cost_usd: cost,
-      transcript,
-      metrics,
-    });
+/**
+ * Map an SDK {@link CallResult} into the tool's public envelope.
+ *
+ * Reads structured fields off the result directly — `cost.total` and
+ * `durationSeconds` are real numbers here. `metrics` is passed through as a
+ * plain object so JSON serialization for the Hermes/MCP wire envelope stays
+ * clean. Mirrors Python's `_result_from_call_result`.
+ */
+function resultFromCallResult(result: CallResult | void): PatterToolResult {
+  if (!result) {
+    // call({ wait: true }) always resolves to a CallResult; this guard only
+    // exists because the union type includes void. Treat the impossible case
+    // as an empty completed result rather than throwing.
+    return {
+      call_id: '',
+      status: 'completed',
+      outcome: '',
+      duration_seconds: 0,
+      cost_usd: undefined,
+      transcript: [],
+      metrics: null,
+    };
   }
+  const costTotal = result.cost?.total;
+  const costUsd = typeof costTotal === 'number' ? costTotal : undefined;
+  const metrics = result.metrics
+    ? (result.metrics as unknown as Record<string, unknown>)
+    : null;
+  return {
+    call_id: result.callId || '',
+    status: result.status || 'completed',
+    outcome: result.outcome || '',
+    duration_seconds:
+      typeof result.durationSeconds === 'number' ? result.durationSeconds : 0,
+    cost_usd: costUsd,
+    transcript: result.transcript ? [...result.transcript] : [],
+    metrics,
+  };
 }

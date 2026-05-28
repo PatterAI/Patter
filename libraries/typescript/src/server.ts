@@ -25,7 +25,15 @@ import { RemoteMessageHandler } from './remote-message';
 import { StreamHandler, sanitizeLogValue } from './stream-handler';
 import { getLogger } from './logger';
 import type { TelephonyBridge } from './stream-handler';
-import type { AgentOptions, PipelineMessageHandler, MachineDetectionResult, CarrierKind } from './types';
+import type {
+  AgentOptions,
+  PipelineMessageHandler,
+  MachineDetectionResult,
+  CarrierKind,
+  CallOutcome,
+  CallResult,
+} from './types';
+import type { CallMetrics, CostBreakdown } from './metrics';
 import { CallLogger, resolveLogRoot } from './services/call-log';
 
 /** Resolved configuration consumed by `EmbeddedServer` (carrier credentials, webhook URL, etc.). */
@@ -134,6 +142,36 @@ function classifyTelnyxAmd(result: string): MachineDetectionResult['classificati
   if (result === 'machine' || result === 'machine_detected') return 'machine';
   if (result === 'fax') return 'fax';
   return 'unknown';
+}
+
+/**
+ * Map a no-media Twilio terminal ``CallStatus`` to a {@link CallResult}
+ * outcome. Only called for statuses that imply the call never reached the
+ * media stream (``no-answer`` / ``busy`` / ``failed`` / ``canceled``);
+ * connected calls resolve via ``onCallEnd`` instead. Mirrors Python's
+ * ``_twilio_status_to_outcome``.
+ */
+export function twilioStatusToOutcome(callStatus: string): CallOutcome {
+  const s = (callStatus || '').toLowerCase();
+  if (s === 'no-answer') return 'no_answer';
+  if (s === 'busy') return 'busy';
+  return 'failed'; // failed / canceled / any other terminal no-media status
+}
+
+/**
+ * Map a Telnyx ``hangup_cause`` to a no-media {@link CallResult} outcome, or
+ * ``null`` when the cause implies the call connected (``normal_clearing``).
+ *
+ * Connected calls return ``null`` here so they resolve via ``onCallEnd`` with
+ * the full transcript + metrics rather than being prematurely closed as a
+ * no-media outcome. Mirrors Python's ``_telnyx_hangup_outcome``.
+ */
+export function telnyxHangupOutcome(cause: string): CallOutcome | null {
+  const c = (cause || '').toLowerCase();
+  if (c === 'no_answer' || c === 'timeout' || c === 'no_user_response') return 'no_answer';
+  if (c === 'user_busy' || c === 'busy') return 'busy';
+  if (c === 'call_rejected' || c === 'rejected' || c === 'destination_out_of_order') return 'failed';
+  return null;
 }
 
 /**
@@ -766,6 +804,29 @@ export class EmbeddedServer {
    */
   public recordPrewarmWaste: (callId: string) => void = () => undefined;
 
+  /**
+   * Per-callId completion deferreds for ``Patter.call({ wait: true })``.
+   * Resolved by the FIRST terminal signal: the Twilio/Telnyx status callback
+   * for no-media outcomes (no-answer / busy / failed), or ``onCallEnd`` for a
+   * connected call (answered / voicemail). The AMD classification is recorded
+   * per callId so the connected-call path can distinguish ``answered`` from
+   * ``voicemail``. This is what lets ``call({ wait: true })`` resolve to a
+   * structured {@link CallResult} without the caller hand-wiring ``onCallEnd``
+   * to a promise. Public so ``client.ts`` can register/await + fail in-flight
+   * waiters on ``disconnect()``. Mirrors Python's ``EmbeddedServer._completions``.
+   */
+  public readonly completions = new Map<
+    string,
+    {
+      readonly promise: Promise<CallResult>;
+      readonly resolve: (r: CallResult) => void;
+      readonly reject: (e: Error) => void;
+      done: boolean;
+    }
+  >();
+  /** AMD classification recorded per callId, used by the connected-call path. */
+  private readonly amdClass = new Map<string, MachineDetectionResult['classification']>();
+
   constructor(
     private readonly config: LocalConfig,
     private readonly agent: AgentOptions,
@@ -808,6 +869,97 @@ export class EmbeddedServer {
         getLogger().warn(`Dashboard hydration failed: ${String(err)}`);
       }
     }
+  }
+
+  // === Outbound completion registry (call({ wait: true })) ===
+
+  /**
+   * Register (or return) a completion promise for an outbound call.
+   *
+   * Called by ``Patter.call({ wait: true })`` immediately after the carrier
+   * accepts the dial — the promise resolves to a {@link CallResult} once a
+   * terminal signal arrives. Idempotent: returns the existing pending promise
+   * if one is already registered for ``callId``. Mirrors Python's
+   * ``register_completion``.
+   */
+  registerCompletion(callId: string): Promise<CallResult> {
+    const existing = this.completions.get(callId);
+    if (existing && !existing.done) {
+      return existing.promise;
+    }
+    let resolve!: (r: CallResult) => void;
+    let reject!: (e: Error) => void;
+    const promise = new Promise<CallResult>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    this.completions.set(callId, { promise, resolve, reject, done: false });
+    return promise;
+  }
+
+  /** Drop a registered completion (e.g. on a backstop timeout) without resolving it. */
+  deleteCompletion(callId: string): void {
+    this.completions.delete(callId);
+    this.amdClass.delete(callId);
+  }
+
+  /**
+   * Resolve a pending completion with a {@link CallResult}.
+   *
+   * No-op when no completion is registered for ``callId`` (the common case —
+   * most calls are placed without ``wait: true``) or it is already done.
+   * Builds the result from the ``onCallEnd`` payload when ``data`` is provided
+   * (connected calls carry transcript + {@link CallMetrics}); no-media
+   * outcomes pass ``data`` undefined and yield an empty transcript / no cost.
+   * Mirrors Python's ``_resolve_completion``.
+   */
+  resolveCompletion(
+    callId: string,
+    args: { outcome: CallOutcome; status: string; data?: Record<string, unknown> },
+  ): void {
+    const entry = this.completions.get(callId);
+    if (!entry || entry.done) return;
+
+    const data = args.data;
+    const metrics = (data?.metrics ?? null) as CallMetrics | null;
+    const cost = (metrics?.cost ?? null) as CostBreakdown | null;
+    const durationRaw = metrics?.duration_seconds;
+    const duration = typeof durationRaw === 'number' ? durationRaw : 0;
+    const transcriptRaw = data?.transcript;
+    const transcript = Array.isArray(transcriptRaw)
+      ? (transcriptRaw as CallResult['transcript'])
+      : [];
+
+    const result: CallResult = {
+      callId,
+      outcome: args.outcome,
+      status: args.status,
+      durationSeconds: duration,
+      transcript,
+      cost,
+      metrics,
+    };
+    entry.done = true;
+    entry.resolve(result);
+    this.completions.delete(callId);
+    this.amdClass.delete(callId);
+  }
+
+  /**
+   * Fail every in-flight completion with ``error``. Called by
+   * ``Patter.disconnect()`` so a ``call({ wait: true })`` awaiter does not
+   * hang until its backstop timeout once the server is gone. Mirrors the
+   * Python ``disconnect()`` change that fails in-flight ``wait=True`` awaiters.
+   */
+  failPendingCompletions(error: Error): void {
+    for (const entry of this.completions.values()) {
+      if (!entry.done) {
+        entry.done = true;
+        entry.reject(error);
+      }
+    }
+    this.completions.clear();
+    this.amdClass.clear();
   }
 
   /** Bind HTTP + WebSocket listeners on `port`, mount carrier webhooks and dashboard routes. */
@@ -896,8 +1048,14 @@ export class EmbeddedServer {
         return;
       }
       const body = req.body as Record<string, string>;
-      const callSid = sanitizeLogValue(body['CallSid'] ?? '');
-      const callStatus = sanitizeLogValue(body['CallStatus'] ?? '');
+      // Raw carrier values — the completion registry is keyed by the raw
+      // Twilio Call SID assigned at dial time, and the status string drives
+      // the carrier-agnostic outcome mapping. ``callSid`` / ``callStatus``
+      // below are sanitized for logging + the metrics store only.
+      const rawCallSid = body['CallSid'] ?? '';
+      const rawCallStatus = body['CallStatus'] ?? '';
+      const callSid = sanitizeLogValue(rawCallSid);
+      const callStatus = sanitizeLogValue(rawCallStatus);
       const duration = body['CallDuration'] ?? body['Duration'] ?? '';
       getLogger().info(
         `Twilio status ${callStatus} for call ${callSid} (duration=${duration})`,
@@ -925,6 +1083,13 @@ export class EmbeddedServer {
         } catch (err) {
           getLogger().debug(`recordPrewarmWaste threw: ${String(err)}`);
         }
+        // Resolve any pending call({ wait: true }) for a call that never
+        // reached media — no onCallEnd will fire for these. Keyed by the raw
+        // Call SID so it matches the id registered at dial time.
+        this.resolveCompletion(rawCallSid, {
+          outcome: twilioStatusToOutcome(rawCallStatus),
+          status: rawCallStatus,
+        });
       }
       res.status(204).send();
     });
@@ -969,6 +1134,12 @@ export class EmbeddedServer {
       const answeredBy = body['AnsweredBy'] ?? '';
       const callSid = body['CallSid'] ?? '';
       getLogger().info(`AMD result for ${sanitizeLogValue(callSid)}: ${sanitizeLogValue(answeredBy)}`);
+
+      // Record the AMD classification so a later onCallEnd can resolve
+      // call({ wait: true }) as ``voicemail`` vs ``answered``.
+      if (callSid) {
+        this.amdClass.set(callSid, classifyTwilioAmd(answeredBy));
+      }
 
       // Fire the per-call onMachineDetection callback (if set by Patter.call())
       // BEFORE the voicemail-drop logic so callers see the result regardless
@@ -1150,6 +1321,11 @@ export class EmbeddedServer {
         getLogger().info(
           `Telnyx AMD result for ${sanitizeLogValue(amdCallId)}: ${sanitizeLogValue(amdResult)}`,
         );
+        // Record the AMD classification so a later onCallEnd can resolve
+        // call({ wait: true }) as ``voicemail`` vs ``answered``.
+        if (amdCallId) {
+          this.amdClass.set(amdCallId, classifyTelnyxAmd(amdResult));
+        }
         // Fire the per-call onMachineDetection callback. Same rationale as
         // the Twilio path above — caller sees the result even when no
         // voicemailMessage is configured, and errors in user code don't
@@ -1200,6 +1376,17 @@ export class EmbeddedServer {
             this.recordPrewarmWaste(hangupCallId);
           } catch (err) {
             getLogger().debug(`recordPrewarmWaste threw: ${String(err)}`);
+          }
+          // Resolve a pending call({ wait: true }) only for no-media hangup
+          // causes (no-answer / busy / rejected). ``normal_clearing`` implies
+          // the call connected → ``null`` here so onCallEnd resolves it with
+          // the full transcript instead.
+          const noMediaOutcome = telnyxHangupOutcome(hangupCause);
+          if (noMediaOutcome !== null) {
+            this.resolveCompletion(hangupCallId, {
+              outcome: noMediaOutcome,
+              status: hangupCause,
+            });
           }
         }
         return res.status(200).send();
@@ -1715,6 +1902,18 @@ export class EmbeddedServer {
           .catch((err) => getLogger().error(`call_log end error: ${String(err)}`));
       }
       if (userEnd) await userEnd(data);
+      // Resolve any pending call({ wait: true }) for this call. A media-stream
+      // end means the call connected: classify ``voicemail`` when AMD tagged
+      // the callee as a machine, else ``answered``. Fan-out — this runs
+      // regardless of (and after) the user's own onCallEnd callback, so
+      // wiring a callback no longer monopolises completion signalling.
+      // Mirrors the Python ``_on_call_end`` wrapper.
+      const cid = typeof data.call_id === 'string' ? data.call_id : '';
+      if (cid) {
+        const cls = this.amdClass.get(cid);
+        const outcome: CallOutcome = cls === 'machine' ? 'voicemail' : 'answered';
+        this.resolveCompletion(cid, { outcome, status: 'completed', data });
+      }
     };
 
     return [wrappedStart, wrappedMetrics, wrappedEnd];

@@ -1,24 +1,66 @@
 /**
  * Tests for the PatterTool integration adapter.
  *
- * The full call flow needs a live Patter+carrier+webhook setup, so these
- * tests focus on the deterministic surface: schema shape, option validation,
- * and the call_id dispatcher / promise lifecycle (using a fake Patter).
+ * Mirrors `libraries/python/tests/unit/test_patter_tool.py` so the cross-SDK
+ * contract stays in lockstep. The full call flow needs a live carrier+webhook,
+ * so these tests focus on the deterministic surface: schema shape, option
+ * validation, the delegation to `Patter.call({ wait: true })` (using a fake
+ * Patter that honours the `CallResult` contract), and the Hermes handler
+ * envelope.
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { EventEmitter } from 'node:events';
 import { PatterTool } from '../src/integrations/patter-tool';
+import type { CallResult } from '../src/types';
 
-class FakePatter {
-  private readonly metrics = new MetricsStub();
+/** Build a realistic CallResult like the SDK's completion registry emits. */
+function fakeCallResult(callId: string, outcome: CallResult['outcome'] = 'answered'): CallResult {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private serveOpts: any = null;
-  callsIssued: Array<{ to: string }> = [];
+  const metrics: any = {
+    call_id: callId,
+    duration_seconds: 12.3,
+    turns: [],
+    cost: { stt: 0, tts: 0, llm: 0, telephony: 0, total: 0.0123 },
+    latency_avg: { stt_ms: 0, llm_ms: 0, tts_ms: 0, total_ms: 0 },
+    latency_p95: { stt_ms: 0, llm_ms: 0, tts_ms: 0, total_ms: 0 },
+    provider_mode: 'pipeline',
+    stt_provider: '',
+    tts_provider: '',
+    llm_provider: '',
+    telephony_provider: 'twilio',
+  };
+  return {
+    callId,
+    outcome,
+    status: 'completed',
+    durationSeconds: 12.3,
+    transcript: [
+      { role: 'agent', text: 'Hello!' },
+      { role: 'user', text: 'Hi.' },
+    ],
+    cost: { stt: 0, tts: 0, llm: 0, telephony: 0, total: 0.0123 },
+    metrics,
+  };
+}
 
-  get metricsStore(): MetricsStub {
-    return this.metrics;
-  }
+/**
+ * In-memory Patter double that honours the `call({ wait: true })` contract.
+ *
+ * `call({ wait: true })` resolves to a CallResult (what PatterTool now
+ * consumes); `wait: false` resolves to void like the real SDK. Set
+ * `neverEnd = true` to simulate a call that never reaches a terminal signal so
+ * the `execute()` timeout path can be exercised.
+ */
+class FakePatter {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  serveOpts: any = null;
+  callsIssued: Array<{ to: string; agent: unknown; call_id: string; wait: boolean }> = [];
+  private counter = 0;
+  neverEnd = false;
+  // PatterTool never touches this, but a real served Patter has a server.
+  private server: object | null = {};
+
+  constructor(private readonly outcome: CallResult['outcome'] = 'answered') {}
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   agent(opts: any): any {
@@ -30,43 +72,44 @@ class FakePatter {
     this.serveOpts = opts;
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  async call(opts: any): Promise<void> {
-    this.callsIssued.push({ to: opts.to });
-    // Simulate the recordCallInitiated → SSE event Patter normally fires.
-    const callId = `CA-${this.callsIssued.length}`;
-    this.metrics.emit('sse', {
-      type: 'call_initiated',
-      data: { call_id: callId, callee: opts.to },
+  async disconnect(): Promise<void> {
+    this.server = null;
+  }
+
+  async call(opts: {
+    to: string;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    agent: any;
+    wait?: boolean;
+  }): Promise<CallResult | void> {
+    // No await between increment and read → each call() gets a distinct id
+    // even under Promise.all (single-threaded event loop).
+    this.counter += 1;
+    const callId = `CA-${this.counter}`;
+    this.callsIssued.push({
+      to: opts.to,
+      agent: opts.agent,
+      call_id: callId,
+      wait: Boolean(opts.wait),
     });
-    // Defer the call_end to a real macrotask so execute() has time to
-    // register its pending waiter (microtask would race with the await chain).
-    setTimeout(() => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const onEnd = this.serveOpts?.onCallEnd as (d: any) => Promise<void>;
-      if (onEnd) {
-        void onEnd({
-          call_id: callId,
-          status: 'completed',
-          transcript: [
-            { role: 'agent', text: 'Hello!' },
-            { role: 'user', text: 'Hi.' },
-          ],
-          metrics: { duration_seconds: 12.3, cost: { total: 0.0123 } },
-        });
-      }
-    }, 0);
+    if (!opts.wait) return;
+    if (this.neverEnd) {
+      // Simulate a call that never reaches a terminal state so the execute()
+      // backstop timeout fires.
+      await new Promise<never>(() => {});
+    }
+    return fakeCallResult(callId, this.outcome);
   }
 }
 
-class MetricsStub extends EventEmitter {}
+// --- Schema exporters ---------------------------------------------------
 
 describe('PatterTool — schema exporters', () => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const phone = new FakePatter() as any;
-  const tool = new PatterTool({ phone, agent: { systemPrompt: 'be polite' } });
 
   it('openaiSchema returns an OpenAI-style function tool', () => {
+    const tool = new PatterTool({ phone, agent: { systemPrompt: 'be polite' } });
     const s = tool.openaiSchema();
     expect(s.type).toBe('function');
     expect(s.function.name).toBe('make_phone_call');
@@ -81,6 +124,7 @@ describe('PatterTool — schema exporters', () => {
   });
 
   it('anthropicSchema returns the Anthropic input_schema variant', () => {
+    const tool = new PatterTool({ phone, agent: { systemPrompt: 'x' } });
     const s = tool.anthropicSchema();
     expect(s.name).toBe('make_phone_call');
     expect(s.input_schema.type).toBe('object');
@@ -88,18 +132,20 @@ describe('PatterTool — schema exporters', () => {
   });
 
   it('hermesSchema returns the same JSON-schema under `parameters`', () => {
+    const tool = new PatterTool({ phone, agent: { systemPrompt: 'x' } });
     const s = tool.hermesSchema();
     expect(s.name).toBe('make_phone_call');
     expect(s.parameters.required).toEqual(['to']);
   });
 
   it('honours custom name + description', () => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const t = new PatterTool({ phone, agent: { systemPrompt: 'x' }, name: 'dial', description: 'pick up the phone' });
+    const t = new PatterTool({ phone, agent: { systemPrompt: 'x' }, name: 'dial', description: 'ring it' });
     expect(t.openaiSchema().function.name).toBe('dial');
-    expect(t.openaiSchema().function.description).toBe('pick up the phone');
+    expect(t.openaiSchema().function.description).toBe('ring it');
   });
 });
+
+// --- execute() ---------------------------------------------------------
 
 describe('PatterTool — execute()', () => {
   it('rejects when `to` is missing or not E.164', async () => {
@@ -111,11 +157,10 @@ describe('PatterTool — execute()', () => {
     await expect(tool.execute({ to: '5551234567' })).rejects.toThrow(/E\.164/);
   });
 
-  it('dials, awaits onCallEnd, and resolves with structured result', async () => {
+  it('dials and returns the structured result envelope', async () => {
+    const phone = new FakePatter();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const phone = new FakePatter() as any;
-    const tool = new PatterTool({ phone, agent: { systemPrompt: 'x' } });
-
+    const tool = new PatterTool({ phone: phone as any, agent: { systemPrompt: 'x' } });
     const result = await tool.execute({ to: '+15551234567', goal: 'book dentist' });
 
     expect(phone.callsIssued).toHaveLength(1);
@@ -132,7 +177,6 @@ describe('PatterTool — execute()', () => {
     const phone = new FakePatter() as any;
     const tool = new PatterTool({ phone, agent: { systemPrompt: 'x' } });
     const handler = tool.hermesHandler();
-
     const out = await handler({ to: '+15551234567' });
     expect(typeof out).toBe('string');
     const parsed = JSON.parse(out);
@@ -146,7 +190,6 @@ describe('PatterTool — execute()', () => {
     const phone = new FakePatter() as any;
     const tool = new PatterTool({ phone, agent: { systemPrompt: 'x' } });
     const handler = tool.hermesHandler();
-
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const out = await handler({ to: 'not-e164' } as any);
     const parsed = JSON.parse(out);
@@ -154,28 +197,21 @@ describe('PatterTool — execute()', () => {
     expect(parsed.call_id).toBeUndefined();
   });
 
-  it('times out when onCallEnd never arrives', async () => {
-    class SilentPatter extends FakePatter {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      async call(opts: any): Promise<void> {
-        this.callsIssued.push({ to: opts.to });
-        // Emit call_initiated so the dispatcher resolves, but never call_end.
-        const callId = `CA-${this.callsIssued.length}`;
-        this.metricsStore.emit('sse', {
-          type: 'call_initiated',
-          data: { call_id: callId, callee: opts.to },
-        });
-      }
-    }
+  it('times out when the call never reaches a terminal state', async () => {
+    const phone = new FakePatter();
+    phone.neverEnd = true;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const phone = new SilentPatter() as any;
-    const tool = new PatterTool({ phone, agent: { systemPrompt: 'x' }, maxDurationSec: 5 });
+    const tool = new PatterTool({ phone: phone as any, agent: { systemPrompt: 'x' }, maxDurationSec: 5 });
+    // Start with real timers so serve()'s async resolves cleanly, then switch
+    // to fake timers to drive the execute() backstop deterministically.
+    await tool.start();
 
     vi.useFakeTimers();
-    const promise = tool.execute({ to: '+15551234567', max_duration_sec: 5 });
+    // `execute()` clamps the timeout to a 5 s floor (same as Python's
+    // `max(5, ...)`), so advance just past that to fire the backstop.
+    const promise = tool.execute({ to: '+15551234567', max_duration_sec: 1 });
     // Attach the rejection handler synchronously, BEFORE advancing the fake
-    // timers. Otherwise vitest flags the rejection as "unhandled" because the
-    // rejection lands on the microtask queue before `expect().rejects` does.
+    // timers — otherwise vitest flags the rejection as "unhandled".
     const captured = promise.catch((err) => err);
     await vi.advanceTimersByTimeAsync(6000);
     const err = await captured;
@@ -185,14 +221,15 @@ describe('PatterTool — execute()', () => {
   });
 });
 
+// --- start/stop --------------------------------------------------------
+
 describe('PatterTool — start/stop', () => {
   it('start is idempotent', async () => {
+    const phone = new FakePatter();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const phone = new FakePatter() as any;
-    const tool = new PatterTool({ phone, agent: { systemPrompt: 'x' } });
+    const tool = new PatterTool({ phone: phone as any, agent: { systemPrompt: 'x' } });
     await tool.start();
-    await tool.start(); // should be a no-op
-    // dial should still work after double-start
+    await tool.start(); // no-op
     const result = await tool.execute({ to: '+15551234567' });
     expect(result.call_id).toBe('CA-1');
   });
@@ -203,64 +240,51 @@ describe('PatterTool — start/stop', () => {
     const tool = new PatterTool({ phone });
     await expect(tool.start()).rejects.toThrow(/agent/);
   });
+});
 
-  it('stop detaches the SSE listener so the underlying store has no leaks', async () => {
+// --- Hermes registry helper -------------------------------------------
+
+describe('PatterTool — register helper', () => {
+  it('hermesHandler is callable and returns a function', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const phone = new FakePatter() as any;
     const tool = new PatterTool({ phone, agent: { systemPrompt: 'x' } });
-    await tool.start();
-    expect(phone.metricsStore.listenerCount('sse')).toBe(1);
-    await tool.stop();
-    expect(phone.metricsStore.listenerCount('sse')).toBe(0);
+    expect(typeof tool.hermesHandler()).toBe('function');
   });
 });
 
-describe('PatterTool — concurrent execute()', () => {
-  it('serializes parallel dials so each call captures its own call_id', async () => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const phone = new FakePatter() as any;
-    const tool = new PatterTool({ phone, agent: { systemPrompt: 'x' } });
+// --- delegation to call({ wait: true }) -------------------------------
 
-    // Fire two execute() calls in parallel — without the dial mutex, one
-    // would clobber pendingDial and hang forever.
+describe('PatterTool — delegation to call({ wait: true })', () => {
+  it('execute() delegates to call({ wait: true })', async () => {
+    // The whole point of the refactor: the SDK owns dial→completion
+    // correlation now, so execute() must request wait:true.
+    const phone = new FakePatter();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const tool = new PatterTool({ phone: phone as any, agent: { systemPrompt: 'x' } });
+    await tool.execute({ to: '+15551234567' });
+    expect(phone.callsIssued[0].wait).toBe(true);
+  });
+
+  it('surfaces the CallResult outcome (voicemail vs answered)', async () => {
+    const phone = new FakePatter('voicemail');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const tool = new PatterTool({ phone: phone as any, agent: { systemPrompt: 'x' } });
+    const result = await tool.execute({ to: '+15551234567' });
+    expect(result.outcome).toBe('voicemail');
+  });
+
+  it('concurrent execute() calls each get their own CallResult', async () => {
+    // Each dial is correlated to its own completion by the SDK — no shared
+    // mutable slot, so two parallel execute() calls get distinct results.
+    const phone = new FakePatter();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const tool = new PatterTool({ phone: phone as any, agent: { systemPrompt: 'x' } });
     const [a, b] = await Promise.all([
       tool.execute({ to: '+15551111111' }),
       tool.execute({ to: '+15552222222' }),
     ]);
-
-    // Both calls completed and got distinct call_ids.
     expect(a.call_id).not.toBe(b.call_id);
     expect(new Set([a.call_id, b.call_id])).toEqual(new Set(['CA-1', 'CA-2']));
-    expect(phone.callsIssued.map((c: { to: string }) => c.to)).toEqual([
-      '+15551111111',
-      '+15552222222',
-    ]);
-  });
-
-  it('rejects with a clear message when call_initiated never fires', async () => {
-    class NoSseEmitPatter extends FakePatter {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      async call(opts: any): Promise<void> {
-        // Intentionally do NOT emit call_initiated and do NOT fire onCallEnd.
-        // Real-world equivalent: metrics store crashed mid-call.
-        this.callsIssued.push({ to: opts.to });
-      }
-    }
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const phone = new NoSseEmitPatter() as any;
-    const tool = new PatterTool({ phone, agent: { systemPrompt: 'x' } });
-
-    // Start so the dial can proceed; the promise will fail at the dial-capture
-    // timeout (≤10s real-time). Use fake timers to keep the test fast.
-    await tool.start();
-
-    vi.useFakeTimers();
-    const promise = tool.execute({ to: '+15551234567' });
-    const captured = promise.catch((err) => err);
-    await vi.advanceTimersByTimeAsync(11_000);
-    const err = await captured;
-    expect(err).toBeInstanceOf(Error);
-    expect((err as Error).message).toMatch(/call_initiated/);
-    vi.useRealTimers();
   });
 });

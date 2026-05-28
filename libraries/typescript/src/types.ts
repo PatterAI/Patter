@@ -20,6 +20,7 @@ import type { Tool as ToolInstance } from "./public-api";
 import type { STTAdapter, TTSAdapter } from "./provider-factory";
 import type { LLMProvider } from "./llm-loop";
 import type { BargeInStrategy } from "./services/barge-in-strategies";
+import type { CallMetrics, CostBreakdown } from "./metrics";
 
 /** Inbound message handed to a `MessageHandler` per turn (legacy single-turn API). */
 export interface IncomingMessage {
@@ -620,4 +621,61 @@ export interface LocalCallOptions {
    * own default).
    */
   ringTimeout?: number | null;
+  /**
+   * When `true`, block until the call reaches a terminal state and resolve
+   * to a {@link CallResult} (`outcome` ∈ answered / voicemail / no_answer /
+   * busy / failed, plus duration, transcript, cost). **Requires an active
+   * server** — call `serve(...)` first or use `await using phone = ...`
+   * (the {@link Patter[Symbol.asyncDispose]} disposer) — because the
+   * terminal signals (carrier status callback, AMD, media-stream end) are
+   * delivered to the embedded server's webhooks. The default (`false`) is
+   * fire-and-forget and resolves to `void` the instant the carrier accepts
+   * the dial (unchanged behaviour).
+   *
+   * Mirrors Python's `Patter.call(..., wait=True)`.
+   */
+  wait?: boolean;
+}
+
+/**
+ * Carrier-agnostic terminal outcomes for an outbound call. `answered` means a
+ * human (or at least a live connection) picked up and the conversation ran;
+ * `voicemail` means AMD classified the callee as a machine; the remaining
+ * three come straight from the carrier status callback when the call never
+ * reaches the media stream. Mirrors `CallOutcome` in
+ * `libraries/python/getpatter/models.py`.
+ */
+export type CallOutcome = 'answered' | 'voicemail' | 'no_answer' | 'busy' | 'failed';
+
+/**
+ * Structured outcome of an outbound call placed with `call({ wait: true })`.
+ *
+ * Resolved only when `call({ ..., wait: true })` is awaited — a
+ * fire-and-forget `call()` (the default, `wait: false`) still resolves to
+ * `void` for backward compatibility. Every field is derived from a real
+ * carrier signal: `answered` / `voicemail` from the AMD result + media-stream
+ * end, `no_answer` / `busy` / `failed` from the carrier status callback when
+ * the call terminates before any media flows.
+ *
+ * Mirrors `CallResult` in `libraries/python/getpatter/models.py` (snake_case
+ * fields there, same positions).
+ */
+export interface CallResult {
+  readonly callId: string;
+  readonly outcome: CallOutcome;
+  /**
+   * Carrier-raw final status verbatim (e.g. "completed", "no-answer",
+   * "busy", "failed"). `outcome` is the carrier-agnostic projection to check
+   * in code; `status` is preserved for logging / debugging.
+   */
+  readonly status: string;
+  readonly durationSeconds: number;
+  readonly transcript: readonly { role: string; text: string; timestamp?: number }[];
+  /**
+   * Populated only when the call connected (`answered` / `voicemail`).
+   * `cost.total` is the headline USD figure. `null` for calls that never
+   * reached media (`no_answer` / `busy` / `failed`).
+   */
+  readonly cost: CostBreakdown | null;
+  readonly metrics: CallMetrics | null;
 }

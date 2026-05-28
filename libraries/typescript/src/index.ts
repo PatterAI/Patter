@@ -20,6 +20,8 @@ export type {
   AgentOptions,
   ServeOptions,
   LocalCallOptions,
+  CallResult,
+  CallOutcome,
   MessageHandler,
   CallEventHandler,
   PipelineMessageHandler,

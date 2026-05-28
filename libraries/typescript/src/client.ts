@@ -26,7 +26,7 @@
  * usage) is not part of this release.  Cloud mode will return in a future
  * release; until then, passing ``apiKey`` raises a clear error.
  */
-import { ProvisionError } from "./errors";
+import { ProvisionError, PatterConnectionError, ErrorCode } from "./errors";
 import type { TunnelHandle } from "./tunnel";
 import type {
   LocalOptions,
@@ -34,6 +34,7 @@ import type {
   AgentOptions,
   ServeOptions,
   CarrierKind,
+  CallResult,
 } from "./types";
 import { EmbeddedServer } from "./server";
 import type { MetricsStore } from "./dashboard/store";
@@ -1209,15 +1210,35 @@ export class Patter {
     });
   }
 
-  /** Place an outbound call via the configured carrier. */
-  async call(options: LocalCallOptions): Promise<void> {
+  /**
+   * Place an outbound call via the configured carrier.
+   *
+   * With `wait: false` (default) this resolves to `void` the instant the
+   * carrier accepts the dial (fire-and-forget). With `wait: true` it blocks
+   * until the call reaches a terminal state and resolves to a
+   * {@link CallResult} — see {@link LocalCallOptions.wait}. Mirrors Python's
+   * `Patter.call(..., wait=False)`.
+   */
+  async call(options: LocalCallOptions): Promise<CallResult | void> {
     if (!options.to) {
       throw new Error("'to' phone number is required");
     }
     if (!options.to.startsWith('+')) {
       throw new Error(`'to' must be in E.164 format (e.g., '+1234567890'). Got: '${options.to}'`);
     }
+    if (options.wait && !this.embeddedServer) {
+      throw new PatterConnectionError(
+        'call({ wait: true }) requires an active server to receive the ' +
+          'carrier completion webhooks. Call `await phone.serve(...)` first, ' +
+          'or use `await using phone = new Patter(...)` (and serve inside the ' +
+          'block) which keeps the server up for the duration of the block.',
+      );
+    }
     const { phoneNumber, webhookUrl, carrier } = this.localConfig;
+    // Hoisted to method scope so the wait block below can correlate the
+    // carrier-issued id with its completion promise. Assigned in each carrier
+    // branch from the carrier API response.
+    let callId = '';
 
     // Default ring timeout — 25 s limits phantom calls. Pass ``ringTimeout:
     // 60`` for legacy parity, or ``ringTimeout: null`` to omit and let the
@@ -1315,6 +1336,7 @@ export class Patter {
         }
       }
       if (telnyxCallId) {
+        callId = telnyxCallId;
         this.spawnPrewarmFirstMessage(options.agent, telnyxCallId, effectiveRingTimeout, 'telnyx');
         // Park provider WebSockets in parallel so the per-call
         // StreamHandler can adopt them at ``start`` instead of paying
@@ -1324,7 +1346,7 @@ export class Patter {
           this.parkProviderConnections(options.agent, telnyxCallId);
         }
       }
-      return;
+      return this.maybeAwaitCompletion(options, callId, effectiveRingTimeout);
     }
 
     if (carrier.kind === 'plivo') {
@@ -1497,6 +1519,7 @@ export class Patter {
       }
     }
     if (twilioCallSid) {
+      callId = twilioCallSid;
       this.spawnPrewarmFirstMessage(options.agent, twilioCallSid, effectiveRingTimeout, 'twilio');
       // Park provider WebSockets in parallel so the per-call
       // StreamHandler can adopt them at ``start`` instead of paying
@@ -1505,6 +1528,62 @@ export class Patter {
       if (options.agent.prewarm !== false) {
         this.parkProviderConnections(options.agent, twilioCallSid);
       }
+    }
+    return this.maybeAwaitCompletion(options, callId, effectiveRingTimeout);
+  }
+
+  /**
+   * When `options.wait` is set, register a completion promise keyed by the
+   * carrier-issued `callId` and await it (bounded by a backstop timeout).
+   * Otherwise resolve to `void` immediately (fire-and-forget).
+   *
+   * The registration happens here — after the carrier accepted the dial and
+   * issued the id — so the future correlates to the right call. The race
+   * window between `initiateCall` returning and this registration is
+   * harmless: the callee is still ringing, so no terminal signal can fire
+   * before we register. Mirrors the Python `call(wait=True)` tail block.
+   */
+  private async maybeAwaitCompletion(
+    options: LocalCallOptions,
+    callId: string,
+    ringTimeout: number | null,
+  ): Promise<CallResult | void> {
+    if (!options.wait) return;
+    const server = this.embeddedServer;
+    if (!server || !callId) {
+      // Should be unreachable — the precondition in call() threw when there
+      // was no server, and both carrier branches set callId — but stay
+      // defensive rather than await a promise that can never resolve.
+      throw new PatterConnectionError(
+        'call({ wait: true }): no active server or carrier call id.',
+      );
+    }
+    const completion = server.registerCompletion(callId);
+    // Backstop only — the real resolution comes from a carrier signal. Sized
+    // at the ring window plus a generous in-call ceiling so a legitimately
+    // long conversation is never cut short. Matches Python's
+    // ``(ring_timeout or 25) + 1800``.
+    const backstopMs = ((ringTimeout ?? 25) + 1800) * 1000;
+    let timer: NodeJS.Timeout | undefined;
+    const backstop = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        // Drop the dangling completion so a late signal can't resolve a
+        // result nobody is awaiting.
+        server.deleteCompletion(callId);
+        reject(
+          new PatterConnectionError(
+            `call({ wait: true }): no terminal signal for call ${callId} ` +
+              `within ${(backstopMs / 1000).toFixed(0)}s`,
+            { code: ErrorCode.TIMEOUT },
+          ),
+        );
+      }, backstopMs);
+      timer.unref?.();
+    });
+    try {
+      return await Promise.race([completion, backstop]);
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 
@@ -1556,6 +1635,15 @@ export class Patter {
       this.tunnelHandle = null;
     }
     if (this.embeddedServer) {
+      // Fail any in-flight call({ wait: true }) awaiters before the server
+      // goes away — otherwise they'd hang until their backstop timeout since
+      // no terminal signal can reach a stopped server. Mirrors the Python
+      // disconnect() change.
+      this.embeddedServer.failPendingCompletions(
+        new PatterConnectionError(
+          'Patter.disconnect() called while a call({ wait: true }) was still in flight.',
+        ),
+      );
       await this.embeddedServer.stop();
       this.embeddedServer = null;
     }
@@ -1582,6 +1670,31 @@ export class Patter {
       this._readyReject = reject;
     });
     this._ready.catch(() => {});
+  }
+
+  /**
+   * Explicit-resource-management disposer so callers can write
+   * ``await using phone = new Patter(...)`` and have {@link disconnect} run
+   * automatically when the block exits — on the normal path AND when the
+   * body throws. This guarantees the embedded server, any auto-started
+   * tunnel, and in-flight prewarm/TTS work are torn down so a still-running
+   * TTS WebSocket cannot keep the user billed after the block ends, and any
+   * in-flight ``call({ wait: true })`` awaiter is failed rather than left
+   * hanging. ``disconnect()`` is idempotent, so an explicit ``disconnect()``
+   * inside the block is still safe. Mirrors Python's ``async with Patter(...)``.
+   *
+   * Note: this does NOT start the server (``serve()`` blocks until shutdown,
+   * so it cannot run from a disposer) — call ``serve(...)`` inside the block:
+   *
+   * ```ts
+   * await using phone = new Patter({ carrier: new Twilio(), phoneNumber: "+1555..." });
+   * await phone.serve({ agent });               // inbound, or
+   * const result = await phone.call({ to: "+1555...", agent, wait: true });
+   * // disconnect() has run here — nothing left running.
+   * ```
+   */
+  async [Symbol.asyncDispose](): Promise<void> {
+    await this.disconnect();
   }
 
   /**
