@@ -65,7 +65,8 @@
             "group": "Integrations",
             "icon": "plug",
             "pages": [
-              "integrations/openclaw"
+              "integrations/openclaw",
+              "integrations/hermes"
             ]
           },
           {
