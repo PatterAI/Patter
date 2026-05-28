@@ -134,6 +134,38 @@ def _classify_telnyx_amd(result: str) -> str:
     return "unknown"
 
 
+def _twilio_status_to_outcome(call_status: str) -> str:
+    """Map a no-media Twilio terminal ``CallStatus`` to a ``CallResult``
+    outcome. Only called for statuses that imply the call never reached the
+    media stream (``no-answer`` / ``busy`` / ``failed`` / ``canceled``);
+    connected calls resolve via ``on_call_end`` instead.
+    """
+    s = (call_status or "").lower()
+    if s == "no-answer":
+        return "no_answer"
+    if s == "busy":
+        return "busy"
+    return "failed"  # failed / canceled / any other terminal no-media status
+
+
+def _telnyx_hangup_outcome(cause: str) -> str | None:
+    """Map a Telnyx ``hangup_cause`` to a no-media ``CallResult`` outcome, or
+    ``None`` when the cause implies the call connected (``normal_clearing``).
+
+    Connected calls return ``None`` here so they resolve via ``on_call_end``
+    with the full transcript + metrics rather than being prematurely closed
+    as a no-media outcome.
+    """
+    c = (cause or "").lower()
+    if c in ("no_answer", "timeout", "no_user_response"):
+        return "no_answer"
+    if c in ("user_busy", "busy"):
+        return "busy"
+    if c in ("call_rejected", "rejected", "destination_out_of_order"):
+        return "failed"
+    return None
+
+
 def _validate_telnyx_signature(
     raw_body: bytes,
     signature: str,
@@ -305,6 +337,16 @@ class EmbeddedServer:
         # recent outbound call. Cleared after firing once per call so a result
         # for a previous call cannot leak into a new caller's callback.
         self.on_machine_detection = None
+        # Per-call_id completion futures for ``Patter.call(wait=True)``.
+        # Resolved by the FIRST terminal signal: the Twilio/Telnyx status
+        # callback for no-media outcomes (no-answer / busy / failed), or
+        # ``on_call_end`` for a connected call (answered / voicemail). The
+        # AMD classification is recorded per call_id so the connected-call
+        # path can distinguish ``answered`` from ``voicemail``. This is what
+        # lets ``call(wait=True)`` return a structured ``CallResult`` without
+        # the caller hand-wiring ``on_call_end`` to an ``asyncio.Event``.
+        self._completions: dict[str, asyncio.Future] = {}
+        self._amd_class: dict[str, str] = {}
         # Pre-warm first-message audio accessor wired by ``Patter.serve()``.
         # The per-call StreamHandler invokes this with its ``call_id`` at the
         # start of the firstMessage emit; a non-None return is sent verbatim
@@ -345,6 +387,62 @@ class EmbeddedServer:
         # Per-client-IP active WebSocket counter for DoS protection.
         # Mirrors TS server.ts:1042 (wsConnectionsByIp).
         self._ws_conn_counts: defaultdict[str, int] = defaultdict(int)
+
+    # === Outbound completion registry (call(wait=True)) ===
+
+    def register_completion(self, call_id: str) -> "asyncio.Future":
+        """Register (or return) a completion future for an outbound call.
+
+        Called by ``Patter.call(wait=True)`` immediately after the carrier
+        accepts the dial — the future resolves to a ``CallResult`` once a
+        terminal signal arrives. Idempotent: returns the existing pending
+        future if one is already registered for ``call_id``.
+        """
+        existing = self._completions.get(call_id)
+        if existing is not None and not existing.done():
+            return existing
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._completions[call_id] = fut
+        return fut
+
+    def _resolve_completion(
+        self,
+        call_id: str,
+        *,
+        outcome: str,
+        status: str,
+        data: dict | None = None,
+    ) -> None:
+        """Resolve a pending completion future with a ``CallResult``.
+
+        No-op when no future is registered for ``call_id`` (the common case —
+        most calls are placed without ``wait=True``) or it is already done.
+        Builds the result from the ``on_call_end`` payload when ``data`` is
+        provided (connected calls carry transcript + ``CallMetrics``); no-media
+        outcomes pass ``data=None`` and yield an empty transcript / no cost.
+        """
+        fut = self._completions.get(call_id)
+        if fut is None or fut.done():
+            return
+        from getpatter.models import CallResult
+
+        metrics = data.get("metrics") if data else None
+        cost = getattr(metrics, "cost", None)
+        duration = float(getattr(metrics, "duration_seconds", 0.0) or 0.0)
+        transcript = tuple(data.get("transcript", ()) or ()) if data else ()
+        fut.set_result(
+            CallResult(
+                call_id=call_id,
+                outcome=outcome,  # type: ignore[arg-type]
+                status=status,
+                duration_seconds=duration,
+                transcript=transcript,
+                cost=cost,
+                metrics=metrics if metrics is not None else None,
+            )
+        )
+        self._completions.pop(call_id, None)
+        self._amd_class.pop(call_id, None)
 
     def _wrap_callbacks(self):
         """Return (on_call_start, on_call_end, on_metrics) wrappers.
@@ -492,6 +590,18 @@ class EmbeddedServer:
                 )
             if user_end is not None:
                 await user_end(data)
+            # Resolve any pending call(wait=True) future. A media-stream end
+            # means the call connected: classify ``voicemail`` when AMD tagged
+            # the callee as a machine, else ``answered``. Fan-out — this runs
+            # regardless of (and after) the user's own on_call_end callback,
+            # so wiring a callback no longer monopolises completion signalling.
+            cid = data.get("call_id", "")
+            if cid:
+                cls = self._amd_class.get(cid)
+                outcome = "voicemail" if cls == "machine" else "answered"
+                self._resolve_completion(
+                    cid, outcome=outcome, status="completed", data=data
+                )
 
         async def _on_metrics(data):
             if store is not None:
@@ -683,6 +793,13 @@ class EmbeddedServer:
                     self.record_prewarm_waste(call_sid)
                 except Exception as exc:  # noqa: BLE001 - defensive
                     logger.debug("record_prewarm_waste raised: %s", exc)
+                # Resolve any pending call(wait=True) future for a call that
+                # never reached media — no on_call_end will fire for these.
+                self._resolve_completion(
+                    call_sid,
+                    outcome=_twilio_status_to_outcome(call_status),
+                    status=call_status,
+                )
             return Response(content="", status_code=204)
 
         @app.post("/webhooks/twilio/recording")
@@ -711,6 +828,11 @@ class EmbeddedServer:
             answered_by = form.get("AnsweredBy", "")
             call_sid = form.get("CallSid", "")
             logger.info("AMD result for %s: %s", call_sid, answered_by)
+
+            # Record the AMD classification so a later on_call_end can resolve
+            # call(wait=True) as ``voicemail`` vs ``answered``.
+            if call_sid:
+                self._amd_class[call_sid] = _classify_twilio_amd(answered_by)
 
             # Fire the per-call on_machine_detection callback (if any) BEFORE
             # the voicemail-drop logic so callers see the result regardless
@@ -966,6 +1088,12 @@ class EmbeddedServer:
                         sanitize_log_value(call_control_id),
                         sanitize_log_value(amd_result),
                     )
+                    # Record the AMD classification so a later on_call_end can
+                    # resolve call(wait=True) as ``voicemail`` vs ``answered``.
+                    if call_control_id:
+                        self._amd_class[call_control_id] = _classify_telnyx_amd(
+                            amd_result
+                        )
                     # Fire the per-call on_machine_detection callback. Same
                     # rationale as the Twilio path above — caller sees the
                     # result even when no voicemail_message is configured,
@@ -1026,6 +1154,18 @@ class EmbeddedServer:
                             self.record_prewarm_waste(call_control_id)
                         except Exception as exc:  # noqa: BLE001 - defensive
                             logger.debug("record_prewarm_waste raised: %s", exc)
+                        # Resolve a pending call(wait=True) future only for
+                        # no-media hangup causes (no-answer / busy / rejected).
+                        # ``normal_clearing`` implies the call connected →
+                        # ``None`` here so on_call_end resolves it with the
+                        # full transcript instead.
+                        no_media_outcome = _telnyx_hangup_outcome(hangup_cause)
+                        if no_media_outcome is not None:
+                            self._resolve_completion(
+                                call_control_id,
+                                outcome=no_media_outcome,
+                                status=hangup_cause,
+                            )
                 elif event_type == "call.recording.saved":
                     # Telnyx Call Control recording completion — produced
                     # when a ``record_start`` action is followed by a

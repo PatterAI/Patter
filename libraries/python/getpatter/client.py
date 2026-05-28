@@ -35,6 +35,7 @@ from getpatter.services.llm_loop import LLMProvider
 if TYPE_CHECKING:  # pragma: no cover — typing only
     from getpatter._public_api import Tool
     from getpatter._speech_events import SpeechEventCallback
+    from getpatter.models import CallResult
 
 
 # Maximum concurrent entries in the prewarm-first-message cache. Bounds
@@ -594,7 +595,8 @@ class Patter:
         ) = None,
         voicemail_message: str = "",
         ring_timeout: int | None = 25,
-    ) -> None:
+        wait: bool = False,
+    ) -> "CallResult | None":
         """Make an outbound call.
 
         Args:
@@ -619,12 +621,32 @@ class Patter:
                 that limits phantom calls. Pass ``ring_timeout=60`` for legacy
                 carrier-default parity, or ``None`` to omit the parameter
                 entirely (carrier picks its own default).
+            wait: When ``True``, block until the call reaches a terminal state
+                and return a :class:`CallResult` (``outcome`` ∈ answered /
+                voicemail / no_answer / busy / failed, plus duration,
+                transcript, cost). **Requires an active server** — call
+                ``serve(...)`` first or use ``async with Patter(...)`` — because
+                the terminal signals (carrier status callback, AMD, media-stream
+                end) are delivered to the embedded server's webhooks. The
+                default (``False``) is fire-and-forget and returns ``None``
+                the instant the carrier accepts the dial (unchanged behaviour).
+
+        Returns:
+            ``None`` when ``wait=False`` (default). A :class:`CallResult` when
+            ``wait=True``.
         """
         if not agent:
             raise PatterConnectionError("call() requires the agent parameter.")
         if not isinstance(to, str) or not to.startswith("+"):
             raise ValueError(
                 f"'to' must be a phone number in E.164 format (e.g., '+1234567890'), got '{to}'."
+            )
+        if wait and self._server is None:
+            raise PatterConnectionError(
+                "call(wait=True) requires an active server to receive the "
+                "carrier completion webhooks. Call `await phone.serve(...)` "
+                "first, or use `async with Patter(...) as phone:` which keeps "
+                "the server up for the duration of the block."
             )
         # Store voicemail message on embedded server so AMD webhook can use it
         if voicemail_message and self._server is not None:
@@ -648,6 +670,10 @@ class Patter:
         if getattr(agent, "prewarm", True):
             self._spawn_provider_warmup(agent)
 
+        # Hoisted to method scope so the wait=True block below can correlate
+        # the carrier-issued id with its completion future. Assigned in each
+        # carrier branch from ``initiate_call``.
+        call_id: str = ""
         config = self._local_config
         if config.telephony_provider == "twilio":
             from getpatter.providers.twilio_adapter import TwilioAdapter  # type: ignore[import]
@@ -846,6 +872,39 @@ class Patter:
             )
             if getattr(agent, "prewarm", True) is not False:
                 self._park_provider_connections(agent, call_id, carrier="plivo")
+
+        # --- wait=True: block until the call reaches a terminal state ---
+        # Register the completion future now that the carrier has issued the
+        # call_id. The future resolves from the first terminal signal handled
+        # by the embedded server (status callback / AMD + media-stream end).
+        # The race window between ``initiate_call`` returning and this
+        # registration is harmless: the callee is still ringing, so no
+        # terminal signal can fire before we register.
+        if wait:
+            server = self._server
+            if server is None or not call_id:
+                # Should be unreachable — the precondition above raised when
+                # no server, and both carrier branches set call_id — but stay
+                # defensive rather than await a future that can never resolve.
+                raise PatterConnectionError(
+                    "call(wait=True): no active server or carrier call id."
+                )
+            fut = server.register_completion(call_id)
+            # Backstop only — the real resolution comes from a carrier signal.
+            # Sized at the ring window plus a generous in-call ceiling so a
+            # legitimately long conversation is never cut short.
+            backstop = float((ring_timeout or 25) + 1800)
+            try:
+                return await asyncio.wait_for(fut, timeout=backstop)
+            except asyncio.TimeoutError as exc:
+                # Drop the dangling future so a late signal can't resolve a
+                # result nobody is awaiting.
+                server._completions.pop(call_id, None)
+                raise TimeoutError(
+                    f"call(wait=True): no terminal signal for call {call_id} "
+                    f"within {backstop:.0f}s"
+                ) from exc
+        return None
 
     # === Pre-warm helpers ===
 
@@ -1909,6 +1968,33 @@ class Patter:
 
         attach_span_exporter(self, exporter, side=side)
 
+    # === Async context manager ===
+
+    async def __aenter__(self) -> "Patter":
+        """Enter an async context. Returns ``self`` WITHOUT starting the
+        server — ``serve()`` blocks until shutdown, so it cannot run here.
+
+        The value of ``async with`` is the guaranteed ``disconnect()`` on exit
+        (see ``__aexit__``): it tears down the embedded server, any auto-started
+        tunnel, and in-flight prewarm/TTS work so a still-running TTS WebSocket
+        cannot keep the user billed after the block ends. Pattern::
+
+            async with Patter(carrier=Twilio(), phone_number="+15550000000") as phone:
+                await phone.serve(agent=agent)          # inbound, or
+                result = await phone.call(to="+1555...", agent=agent, wait=True)
+            # disconnect() has run here — nothing left running.
+        """
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        """Exit the async context — always tears down via ``disconnect()``.
+
+        Runs on the normal path AND when the body raises, so resources are
+        released either way. ``disconnect()`` is idempotent, so an explicit
+        ``disconnect()`` inside the block is still safe.
+        """
+        await self.disconnect()
+
     async def disconnect(self) -> None:
         """Stop the embedded server and any auto-started tunnel.
 
@@ -1959,6 +2045,20 @@ class Patter:
                     pass
         self._prewarmed_connections.clear()
         if self._server:
+            # Fail any in-flight call(wait=True) awaiters before the server
+            # goes away — otherwise they'd hang until their backstop timeout
+            # since no terminal signal can reach a stopped server.
+            completions = getattr(self._server, "_completions", None)
+            if isinstance(completions, dict) and completions:
+                for fut in list(completions.values()):
+                    if not fut.done():
+                        fut.set_exception(
+                            PatterConnectionError(
+                                "Patter.disconnect() called while a "
+                                "call(wait=True) was still in flight."
+                            )
+                        )
+                completions.clear()
             await self._server.stop()
             self._server = None
         if self._tunnel_handle:

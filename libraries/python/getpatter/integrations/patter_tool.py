@@ -42,7 +42,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any, Awaitable, Callable
 
 logger = logging.getLogger("getpatter.integrations.patter_tool")
@@ -101,6 +101,10 @@ class PatterToolResult:
     call_id: str
     status: str
     duration_seconds: float
+    # Carrier-agnostic outcome (answered / voicemail / no_answer / busy /
+    # failed) lifted from the SDK ``CallResult``. Defaulted for backward
+    # compatibility with any code constructing this envelope positionally.
+    outcome: str = ""
     transcript: list[dict[str, Any]] = field(default_factory=list)
     cost_usd: float | None = None
     metrics: dict[str, Any] | None = None
@@ -133,11 +137,6 @@ class PatterTool:
         self._max_duration_sec = max(5, min(1800, int(max_duration_sec)))
         self._recording = recording
         self._started = False
-        # Map of call_id -> asyncio.Future awaiting the call_end payload.
-        self._pending: dict[str, asyncio.Future] = {}
-        # Single-slot future for the next dial's call_id (FIFO via Lock).
-        self._next_call_id: asyncio.Future[str] | None = None
-        self._dial_lock: asyncio.Lock | None = None
 
     # --- Schema exporters --------------------------------------------------
 
@@ -194,7 +193,14 @@ class PatterTool:
     # --- Lifecycle ---------------------------------------------------------
 
     async def start(self) -> None:
-        """Start the underlying Patter server. Idempotent."""
+        """Start the underlying Patter server. Idempotent.
+
+        ``execute()`` relies on ``Patter.call(wait=True)``, which requires an
+        active server to receive the carrier completion webhooks — that's what
+        ``serve()`` provides here. No ``on_call_end`` callback is wired: the
+        SDK's own per-call_id completion registry resolves the result, so the
+        user's ``on_call_end`` slot is left free.
+        """
         if self._started:
             return
         if not self._agent_spec:
@@ -203,40 +209,19 @@ class PatterTool:
                 "`{'stt': ..., 'llm': ..., 'tts': ...}` or an `engine` "
                 "(e.g. OpenAIRealtime) when constructing PatterTool."
             )
-        self._dial_lock = asyncio.Lock()
         built_agent = self._phone.agent(**self._agent_spec)
-        await self._phone.serve(
-            agent=built_agent,
-            recording=self._recording,
-            on_call_end=self._on_call_end,
-        )
-        # Subscribe to the metrics store SSE stream so we can correlate
-        # outbound dials (`call_initiated`) with the call_id Patter assigns
-        # at dial time.
-        store = self._phone.metrics_store
-        if store is None:
-            raise RuntimeError(
-                "PatterTool.start: phone.metrics_store is None after serve() — "
-                "is the dashboard disabled?"
-            )
-        # The Python MetricsStore exposes an asyncio.Queue subscription.
-        queue = store.subscribe()
-        asyncio.create_task(self._consume_metrics_events(queue, store))
+        await self._phone.serve(agent=built_agent, recording=self._recording)
         self._started = True
 
     async def stop(self) -> None:
-        """Best-effort shutdown — fail any pending calls and stop the server."""
+        """Best-effort shutdown — tear the Patter server down via disconnect()."""
         if not self._started:
             return
-        for fut in list(self._pending.values()):
-            if not fut.done():
-                fut.set_exception(RuntimeError("PatterTool: shutdown while call pending"))
-        self._pending.clear()
-        if hasattr(self._phone, "stop"):
+        if hasattr(self._phone, "disconnect"):
             try:
-                await self._phone.stop()
+                await self._phone.disconnect()
             except Exception:  # pragma: no cover - defensive
-                logger.debug("PatterTool.stop: phone.stop() failed", exc_info=True)
+                logger.debug("PatterTool.stop: phone.disconnect() failed", exc_info=True)
         self._started = False
 
     # --- Execution ---------------------------------------------------------
@@ -248,7 +233,13 @@ class PatterTool:
         first_message: str | None = None,
         max_duration_sec: int | None = None,
     ) -> PatterToolResult:
-        """Dial outbound, wait for the call to end, return a structured result."""
+        """Dial outbound, wait for the call to end, return a structured result.
+
+        Thin wrapper over ``Patter.call(wait=True)``: the SDK now owns the
+        dial → call_id → terminal-signal correlation, so this just bounds the
+        wait with ``max_duration_sec`` and maps the ``CallResult`` into the
+        tool's public envelope.
+        """
         if not isinstance(to, str) or not to.startswith("+"):
             raise ValueError(
                 'PatterTool.execute: `to` must be an E.164 phone number (e.g. "+15551234567").'
@@ -264,36 +255,17 @@ class PatterTool:
             agent_kwargs["first_message"] = first_message
         override_agent = self._phone.agent(**agent_kwargs)
 
-        # Acquire the dial lock so concurrent execute() calls don't fight over
-        # which one captures the next call_initiated event. Use try/finally
-        # to guarantee `_next_call_id` is cleared on every exit path —
-        # otherwise a TimeoutError leaves a completed-with-exception future
-        # in place, and the SSE consumer task would call `set_result` on it
-        # (raising InvalidStateError, silently swallowed) while the next
-        # legitimate execute() would wait on a stale future.
-        assert self._dial_lock is not None
-        async with self._dial_lock:
-            loop = asyncio.get_running_loop()
-            self._next_call_id = loop.create_future()
-            try:
-                await self._phone.call(to=to, agent=override_agent)
-                call_id: str = await asyncio.wait_for(
-                    self._next_call_id, timeout=10.0
-                )
-            finally:
-                self._next_call_id = None
-            end_future: asyncio.Future = loop.create_future()
-            self._pending[call_id] = end_future
-
         try:
-            data = await asyncio.wait_for(end_future, timeout=timeout)
+            result = await asyncio.wait_for(
+                self._phone.call(to=to, agent=override_agent, wait=True),
+                timeout=timeout,
+            )
         except asyncio.TimeoutError as exc:
-            self._pending.pop(call_id, None)
             raise TimeoutError(
-                f"PatterTool.execute: call {call_id} exceeded {timeout}s timeout"
+                f"PatterTool.execute: call to {to} exceeded {timeout}s timeout"
             ) from exc
 
-        return _build_result(call_id, data)
+        return _result_from_call_result(result)
 
     def hermes_handler(self) -> Callable[..., Awaitable[str]]:
         """Return a Hermes-compatible handler ``(args, **kw) -> Awaitable[str]``.
@@ -317,58 +289,34 @@ class PatterTool:
 
         return handler
 
-    # --- Internal: SSE consumer + onCallEnd hook --------------------------
+def _result_from_call_result(result: Any) -> PatterToolResult:
+    """Map an SDK ``CallResult`` into the tool's public envelope.
 
-    async def _consume_metrics_events(self, queue: asyncio.Queue, store: Any) -> None:
-        try:
-            while True:
-                event = await queue.get()
-                if (
-                    event.get("type") == "call_initiated"
-                    and self._next_call_id is not None
-                    and not self._next_call_id.done()
-                ):
-                    call_id = event.get("data", {}).get("call_id") or ""
-                    if call_id:
-                        self._next_call_id.set_result(call_id)
-        except asyncio.CancelledError:
-            pass
-        finally:
-            try:
-                store.unsubscribe(queue)
-            except Exception:
-                pass
+    Reads structured attributes off the dataclass directly — ``cost.total``
+    and ``duration_seconds`` are real numbers here (the previous dict-probing
+    implementation silently dropped both because the live payload delivers a
+    ``CallMetrics`` dataclass, not a dict). ``metrics`` is flattened to a plain
+    dict so ``to_dict()`` stays JSON-friendly for the Hermes/MCP wire envelope.
+    """
+    cost_obj = getattr(result, "cost", None)
+    cost_total = getattr(cost_obj, "total", None)
+    cost_usd = float(cost_total) if isinstance(cost_total, (int, float)) else None
 
-    async def _on_call_end(self, data: dict[str, Any]) -> None:
-        call_id = data.get("call_id") or ""
-        if not call_id:
-            return
-        future = self._pending.pop(call_id, None)
-        if future is None or future.done():
-            return
-        future.set_result(data)
+    metrics_obj = getattr(result, "metrics", None)
+    if is_dataclass(metrics_obj):
+        metrics_dict: dict[str, Any] | None = asdict(metrics_obj)
+    elif isinstance(metrics_obj, dict):
+        metrics_dict = metrics_obj
+    else:
+        metrics_dict = None
 
-
-def _build_result(call_id: str, data: dict[str, Any]) -> PatterToolResult:
-    """Translate Patter's ``onCallEnd`` payload into the public envelope."""
-    metrics = data.get("metrics") if isinstance(data.get("metrics"), dict) else None
-    cost: float | None = None
-    duration: float = 0.0
-    if metrics is not None:
-        # `metrics` may be a dataclass-like object or a plain dict depending on
-        # how the underlying transport serialised it.
-        cost_obj = metrics.get("cost") if isinstance(metrics, dict) else None
-        if isinstance(cost_obj, dict) and isinstance(cost_obj.get("total"), (int, float)):
-            cost = float(cost_obj["total"])
-        dur_raw = metrics.get("duration_seconds") if isinstance(metrics, dict) else None
-        if isinstance(dur_raw, (int, float)):
-            duration = float(dur_raw)
-    transcript = data.get("transcript") if isinstance(data.get("transcript"), list) else []
+    transcript = list(getattr(result, "transcript", ()) or [])
     return PatterToolResult(
-        call_id=call_id,
-        status=str(data.get("status") or "completed"),
-        duration_seconds=duration,
-        cost_usd=cost,
-        transcript=list(transcript),
-        metrics=metrics,
+        call_id=getattr(result, "call_id", ""),
+        status=str(getattr(result, "status", "") or "completed"),
+        outcome=str(getattr(result, "outcome", "") or ""),
+        duration_seconds=float(getattr(result, "duration_seconds", 0.0) or 0.0),
+        cost_usd=cost_usd,
+        transcript=transcript,
+        metrics=metrics_dict,
     )

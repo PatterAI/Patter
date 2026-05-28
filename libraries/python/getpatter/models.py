@@ -421,6 +421,45 @@ class CallMetrics:
     latency_p99: LatencyBreakdown = field(default_factory=LatencyBreakdown)
 
 
+# Carrier-agnostic terminal outcomes for an outbound call. ``answered`` means a
+# human (or at least a live connection) picked up and the conversation ran;
+# ``voicemail`` means AMD classified the callee as a machine; the remaining
+# three come straight from the carrier status callback when the call never
+# reaches the media stream. Mirrors ``CallOutcome`` in
+# ``libraries/typescript/src/types.ts``.
+CallOutcome = Literal["answered", "voicemail", "no_answer", "busy", "failed"]
+
+
+@dataclass(frozen=True)
+class CallResult:
+    """Structured outcome of an outbound call placed with ``call(wait=True)``.
+
+    Returned only when ``call(..., wait=True)`` is awaited — a fire-and-forget
+    ``call()`` (the default, ``wait=False``) still returns ``None`` for
+    backward compatibility. Every field is derived from a real carrier signal:
+    ``answered`` / ``voicemail`` from the AMD result + media-stream end,
+    ``no_answer`` / ``busy`` / ``failed`` from the carrier status callback when
+    the call terminates before any media flows.
+
+    Mirrors ``CallResult`` in ``libraries/typescript/src/types.ts`` (camelCase
+    fields there, same positions).
+    """
+
+    call_id: str
+    outcome: CallOutcome
+    # Carrier-raw final status verbatim (e.g. "completed", "no-answer",
+    # "busy", "failed"). ``outcome`` is the carrier-agnostic projection to
+    # check in code; ``status`` is preserved for logging / debugging.
+    status: str
+    duration_seconds: float = 0.0
+    transcript: tuple[dict, ...] = ()
+    # Populated only when the call connected (``answered`` / ``voicemail``).
+    # ``cost.total`` is the headline USD figure. ``None`` for calls that never
+    # reached media (``no_answer`` / ``busy`` / ``failed``).
+    cost: CostBreakdown | None = None
+    metrics: CallMetrics | None = None
+
+
 class CallControl:
     """In-call control interface passed to ``on_message`` handlers.
 
