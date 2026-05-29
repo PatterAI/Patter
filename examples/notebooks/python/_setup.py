@@ -64,6 +64,9 @@ class NotebookEnv:
     telnyx_connection_id: str
     telnyx_number: str
     telnyx_public_key: str
+    plivo_auth_id: str
+    plivo_auth_token: str
+    plivo_number: str
     target_number: str
     ngrok_token: str
     public_webhook_url: str
@@ -104,6 +107,9 @@ _KEY_FIELD_MAP: dict[str, str] = {
     "TELNYX_CONNECTION_ID": "telnyx_connection_id",
     "TELNYX_PHONE_NUMBER": "telnyx_number",
     "TELNYX_PUBLIC_KEY": "telnyx_public_key",
+    "PLIVO_AUTH_ID": "plivo_auth_id",
+    "PLIVO_AUTH_TOKEN": "plivo_auth_token",
+    "PLIVO_PHONE_NUMBER": "plivo_number",
     "TARGET_PHONE_NUMBER": "target_number",
     "NGROK_AUTHTOKEN": "ngrok_token",
     "PUBLIC_WEBHOOK_URL": "public_webhook_url",
@@ -401,6 +407,9 @@ def load(env_file: Path | str | None = None) -> NotebookEnv:
         telnyx_connection_id=_get("TELNYX_CONNECTION_ID"),
         telnyx_number=_get("TELNYX_PHONE_NUMBER"),
         telnyx_public_key=_get("TELNYX_PUBLIC_KEY"),
+        plivo_auth_id=_get("PLIVO_AUTH_ID"),
+        plivo_auth_token=_get("PLIVO_AUTH_TOKEN"),
+        plivo_number=_get("PLIVO_PHONE_NUMBER"),
         target_number=_get("TARGET_PHONE_NUMBER"),
         ngrok_token=_get("NGROK_AUTHTOKEN"),
         public_webhook_url=_get("PUBLIC_WEBHOOK_URL"),

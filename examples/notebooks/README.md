@@ -1,6 +1,6 @@
 # Patter Notebook Tutorial Series
 
-24 Jupyter notebooks (12 topics × Python + TypeScript) that walk through every public Patter feature and every supported provider.  Three layers in every notebook let you start with zero credentials and progress to live PSTN calls at your own pace.
+26 Jupyter notebooks (13 topics × Python + TypeScript) that walk through every public Patter feature and every supported provider.  Three layers in every notebook let you start with zero credentials and progress to live PSTN calls at your own pace.
 
 ## Layer overview
 
@@ -67,7 +67,7 @@ Fill `.env` one tier at a time.  Every missing key only skips the cells that nee
 
 | Env var | Unlocks cells in | Tier |
 |---------|-----------------|------|
-| `OPENAI_API_KEY` | 01 (realtime), 02 (realtime), 04 (TTS), 05 (LLM), 08 (tools), 09 (guardrails), 10 (advanced), 11 (metrics), 12 (security), all T4 | T3 / T4 |
+| `OPENAI_API_KEY` | 01 (realtime), 02 (realtime), 04 (TTS), 05 (LLM), 09 (tools), 10 (guardrails), 11 (advanced), 12 (metrics), 13 (security), all T4 | T3 / T4 |
 | `ANTHROPIC_API_KEY` | 05 (LLM — Anthropic provider) | T3 |
 | `GOOGLE_API_KEY` | 02 (Gemini Live), 05 (LLM — Gemini provider) | T3 |
 | `GROQ_API_KEY` | 05 (LLM — Groq provider) | T3 |
@@ -85,6 +85,7 @@ Fill `.env` one tier at a time.  Every missing key only skips the cells that nee
 | `ULTRAVOX_API_KEY` | 02 (Ultravox Realtime) | T3 |
 | `TWILIO_ACCOUNT_SID` + `TWILIO_AUTH_TOKEN` + `TWILIO_PHONE_NUMBER` | 06 (Twilio §3), all Twilio T4 cells | T4 |
 | `TELNYX_API_KEY` + `TELNYX_CONNECTION_ID` + `TELNYX_PHONE_NUMBER` + `TELNYX_PUBLIC_KEY` | 07 (Telnyx §3) | T4 |
+| `PLIVO_AUTH_ID` + `PLIVO_AUTH_TOKEN` + `PLIVO_PHONE_NUMBER` | 08 (Plivo §3) | T4 |
 | `TARGET_PHONE_NUMBER` | All T4 live-call cells | T4 |
 | `NGROK_AUTHTOKEN` | T4 cells without `PUBLIC_WEBHOOK_URL` set | T4 |
 | `PUBLIC_WEBHOOK_URL` | T4 cells — overrides ngrok auto-launch | T4 |
@@ -110,11 +111,12 @@ NOTEBOOK_MAX_COST_USD=0.25
 | 05 | `pipeline_llm` | OpenAI, Anthropic, Gemini, Groq, Cerebras; custom `on_message`; `LLMLoop`; tool-call protocol |
 | 06 | `telephony_twilio` | Webhook parsing, HMAC-SHA1, AMD, DTMF, recording, transfer, status callback, TwiML |
 | 07 | `telephony_telnyx` | Call Control flows, Ed25519 signatures, AMD, DTMF, anti-replay |
-| 08 | `tools` | `@tool` / `tool()` factory, auto-injected `transfer_call`/`end_call`, dynamic variables, JSON schema validation |
-| 09 | `guardrails_hooks` | Keyword block, PII redact, pipeline hooks, text transforms, sentence chunker |
-| 10 | `advanced` | Scheduler (cron / once / interval), fallback LLM chain, background audio mixer, noise filter, custom providers |
-| 11 | `metrics_dashboard` | `CallMetricsAccumulator`, `MetricsStore`, dashboard SSE, CSV/JSON export, pricing, basic auth |
-| 12 | `security` | Twilio HMAC, Telnyx Ed25519, SSRF guard, webhook URL validation, secret hygiene, cost cap |
+| 08 | `telephony_plivo` | V3 (HMAC-SHA256 of url+sorted-params+nonce) signatures, Plivo XML answer, AMD, native DTMF send, voicemail drop |
+| 09 | `tools` | `@tool` / `tool()` factory, auto-injected `transfer_call`/`end_call`, dynamic variables, JSON schema validation |
+| 10 | `guardrails_hooks` | Keyword block, PII redact, pipeline hooks, text transforms, sentence chunker |
+| 11 | `advanced` | Scheduler (cron / once / interval), fallback LLM chain, background audio mixer, noise filter, custom providers |
+| 12 | `metrics_dashboard` | `CallMetricsAccumulator`, `MetricsStore`, dashboard SSE, CSV/JSON export, pricing, basic auth |
+| 13 | `security` | Twilio HMAC, Telnyx Ed25519, Plivo V3, SSRF guard, webhook URL validation, secret hygiene, cost cap |
 
 ---
 

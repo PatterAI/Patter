@@ -38,6 +38,9 @@ export interface NotebookEnv {
   readonly telnyxConnectionId: string;
   readonly telnyxNumber: string;
   readonly telnyxPublicKey: string;
+  readonly plivoAuthId: string;
+  readonly plivoAuthToken: string;
+  readonly plivoNumber: string;
   readonly targetNumber: string;
   readonly ngrokToken: string;
   readonly publicWebhookUrl: string;
@@ -78,6 +81,9 @@ export function load(opts: { envFile?: string } = {}): NotebookEnv {
     telnyxConnectionId: get("TELNYX_CONNECTION_ID"),
     telnyxNumber: get("TELNYX_PHONE_NUMBER"),
     telnyxPublicKey: get("TELNYX_PUBLIC_KEY"),
+    plivoAuthId: get("PLIVO_AUTH_ID"),
+    plivoAuthToken: get("PLIVO_AUTH_TOKEN"),
+    plivoNumber: get("PLIVO_PHONE_NUMBER"),
     targetNumber: get("TARGET_PHONE_NUMBER"),
     ngrokToken: get("NGROK_AUTHTOKEN"),
     publicWebhookUrl: get("PUBLIC_WEBHOOK_URL"),
@@ -111,6 +117,9 @@ const KEY_FIELD_MAP: Record<string, keyof NotebookEnv> = {
   TELNYX_CONNECTION_ID: "telnyxConnectionId",
   TELNYX_PHONE_NUMBER: "telnyxNumber",
   TELNYX_PUBLIC_KEY: "telnyxPublicKey",
+  PLIVO_AUTH_ID: "plivoAuthId",
+  PLIVO_AUTH_TOKEN: "plivoAuthToken",
+  PLIVO_PHONE_NUMBER: "plivoNumber",
   TARGET_PHONE_NUMBER: "targetNumber",
   NGROK_AUTHTOKEN: "ngrokToken",
   PUBLIC_WEBHOOK_URL: "publicWebhookUrl",
