@@ -18,6 +18,7 @@ def test_notebook_env_is_frozen_dataclass():
         lmnt_key="", rime_key="", ultravox_key="",
         twilio_sid="", twilio_token="", twilio_number="",
         telnyx_key="", telnyx_connection_id="", telnyx_number="", telnyx_public_key="",
+        plivo_auth_id="", plivo_auth_token="", plivo_number="",
         target_number="", ngrok_token="", public_webhook_url="",
         patter_version="0.5.2",
         enable_live_calls=False,
