@@ -120,10 +120,12 @@ async def handle_amd_result(
     base = f"{PLIVO_API_BASE}/Account/{auth_id}/Call/{quote(call_uuid, safe='')}"
     try:
         async with httpx.AsyncClient(timeout=10.0) as http:
+            # Plivo's Speak API expects form-encoded body per the docs
+            # (https://www.plivo.com/docs/voice/api/call/speak-text-on-calls).
             speak = await http.post(
                 f"{base}/Speak/",
                 auth=(auth_id, auth_token),
-                json={"text": voicemail_message},
+                data={"text": voicemail_message},
             )
             if speak.status_code >= 400:
                 logger.warning(

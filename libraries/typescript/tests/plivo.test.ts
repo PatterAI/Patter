@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { PlivoBridge } from '../src/server';
 import type { LocalConfig } from '../src/server';
-import { Carrier as Plivo } from '../src/telephony/plivo';
+import { Carrier as Plivo, validatePlivoSignature } from '../src/telephony/plivo';
 import { PlivoAdapter } from '../src/providers/plivo-adapter';
+import crypto from 'node:crypto';
 import { DEFAULT_PRICING, calculateTelephonyCost } from '../src/pricing';
 
 function makeConfig(overrides: Partial<LocalConfig> = {}): LocalConfig {
@@ -164,6 +165,64 @@ describe('PlivoBridge', () => {
     const bridge = new PlivoBridge(makeConfig());
     await bridge.sendDtmf(ws as never, 'callid', 'xyz', 0);
     expect(ws.sent).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// V3 signature
+// ---------------------------------------------------------------------------
+
+/** Mirror of plivo-python ``signature_v3``: HMAC-SHA256 of
+ *  ``url + sorted_post_params + "." + nonce`` (POST) or ``url + "." + nonce``
+ *  (GET), base64-encoded. */
+function v3Sig(
+  url: string,
+  nonce: string,
+  token: string,
+  params?: Record<string, string>,
+): string {
+  let base = url;
+  if (params) {
+    const keys = Object.keys(params).sort();
+    base += keys.map((k) => `${k}${params[k]}`).join('');
+  }
+  return crypto.createHmac('sha256', token).update(`${base}.${nonce}`).digest('base64');
+}
+
+describe('V3 signature', () => {
+  const url = 'https://h/webhooks/plivo/voice';
+  const token = 'tok';
+  const nonce = 'n1';
+
+  it('accepts a GET signed as url + "." + nonce', () => {
+    const sig = v3Sig(url, nonce, token);
+    expect(validatePlivoSignature(url, nonce, sig, token, undefined, 'GET')).toBe(true);
+  });
+
+  it('accepts a POST signed as url + sorted(key+value) + "." + nonce', () => {
+    const params = { CallUUID: 'CU1', From: '+15551112222', To: '+15553334444' };
+    const sig = v3Sig(url, nonce, token, params);
+    expect(validatePlivoSignature(url, nonce, sig, token, params, 'POST')).toBe(true);
+  });
+
+  it('rejects a tampered POST param', () => {
+    const original = { CallUUID: 'CU1', From: '+1' };
+    const sig = v3Sig(url, nonce, token, original);
+    const tampered = { CallUUID: 'CU1', From: '+9' };
+    expect(validatePlivoSignature(url, nonce, sig, token, tampered, 'POST')).toBe(false);
+  });
+
+  it('supports comma-separated signatures for key rotation', () => {
+    const sig = v3Sig(url, nonce, token);
+    expect(
+      validatePlivoSignature(url, nonce, `oldsig, ${sig}`, token, undefined, 'GET'),
+    ).toBe(true);
+  });
+
+  it('returns false when any input is missing', () => {
+    expect(validatePlivoSignature('u', '', 'sig', 'tok')).toBe(false);
+    expect(validatePlivoSignature('u', 'n', '', 'tok')).toBe(false);
+    expect(validatePlivoSignature('u', 'n', 'sig', '')).toBe(false);
   });
 });
 

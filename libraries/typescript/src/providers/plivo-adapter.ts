@@ -34,10 +34,12 @@ export async function dropPlivoVoicemail(
   const auth = `Basic ${Buffer.from(`${authId}:${authToken}`).toString('base64')}`;
   const base = `${PLIVO_API_BASE}/Account/${encodeURIComponent(authId)}/Call/${encodeURIComponent(callUuid)}`;
   try {
+    // Plivo's Speak API expects form-encoded body per the docs
+    // (https://www.plivo.com/docs/voice/api/call/speak-text-on-calls).
     const speak = await fetch(`${base}/Speak/`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: auth },
-      body: JSON.stringify({ text: voicemailMessage }),
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Authorization: auth },
+      body: new URLSearchParams({ text: voicemailMessage }).toString(),
       signal: AbortSignal.timeout(10_000),
     });
     if (!speak.ok) {

@@ -94,22 +94,39 @@ export function classifyPlivoAmd(result: string): MachineDetectionResult['classi
 }
 
 /**
- * Validate a Plivo V3 webhook signature. The V3 scheme signs ``url + nonce``
- * with HMAC-SHA256 keyed on the account ``authToken`` and base64-encodes the
- * digest. The ``X-Plivo-Signature-V3`` header may carry multiple
- * comma-separated signatures during key rotation; accept if any matches.
- * Mirrors Python ``_validate_plivo_signature``.
+ * Validate a Plivo V3 webhook signature.
+ *
+ * Mirrors the algorithm in plivo-python's ``signature_v3`` module:
+ *
+ *   - **POST**: ``signed = url + sortedPostParams + "." + nonce`` where POST
+ *     params are sorted alphabetically by key (case-sensitive) and
+ *     concatenated as ``key1value1key2value2…`` with no delimiters.
+ *   - **GET**:  ``signed = url + "." + nonce`` — query params live in the URL
+ *     already so no separate concatenation.
+ *
+ * HMAC-SHA256 keyed on ``authToken``, base64-encoded. The
+ * ``X-Plivo-Signature-V3`` header may carry multiple comma-separated
+ * signatures during key rotation; accept if any matches.
  */
 export function validatePlivoSignature(
   url: string,
   nonce: string,
   signature: string,
   authToken: string,
+  params?: Record<string, string>,
+  method: 'GET' | 'POST' = 'POST',
 ): boolean {
   if (!signature || !nonce || !authToken) return false;
+  let base = url;
+  if (method === 'POST' && params && Object.keys(params).length > 0) {
+    // Plivo SDK ``get_sorted_params_string``: sort keys, concat ``k+v``.
+    const keys = Object.keys(params).sort();
+    base += keys.map((k) => `${k}${params[k]}`).join('');
+  }
+  const signed = `${base}.${nonce}`;
   const expected = crypto
     .createHmac('sha256', authToken)
-    .update(url + nonce)
+    .update(signed)
     .digest('base64');
   const expBuf = Buffer.from(expected);
   for (const rawSig of signature.split(',')) {

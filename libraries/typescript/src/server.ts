@@ -1276,10 +1276,11 @@ export class EmbeddedServer {
 
     // --- Plivo ---
 
-    // Verify the X-Plivo-Signature-V3 header (V3 = HMAC-SHA256 of url + nonce).
-    // Returns false (and writes the error response) to short-circuit the route.
-    // Works for both POST (voice/status/amd) and GET (transfer) since V3 signs
-    // only the URL and nonce, independent of method or body.
+    // Verify the X-Plivo-Signature-V3 header. V3 signs ``url + sorted_post_params
+    // + "." + nonce`` for POST and ``url + "." + nonce`` for GET — so the form
+    // body (already parsed by express.urlencoded) has to feed into the
+    // signature calculation. Returns false (and writes the error response) to
+    // short-circuit the route.
     const validatePlivoRequest = (req: express.Request, res: express.Response): boolean => {
       const authToken = this.config.plivoAuthToken;
       if (!authToken) {
@@ -1292,10 +1293,17 @@ export class EmbeddedServer {
         }
         return true;
       }
+      const method = req.method.toUpperCase() as 'GET' | 'POST';
+      const params: Record<string, string> =
+        method === 'POST' && req.body && typeof req.body === 'object'
+          ? Object.fromEntries(
+              Object.entries(req.body as Record<string, unknown>).map(([k, v]) => [k, String(v)]),
+            )
+          : {};
       const signature = (req.headers['x-plivo-signature-v3'] as string) || '';
       const nonce = (req.headers['x-plivo-signature-v3-nonce'] as string) || '';
       const url = `https://${this.config.webhookUrl}${req.originalUrl}`;
-      if (!validatePlivoSignature(url, nonce, signature, authToken)) {
+      if (!validatePlivoSignature(url, nonce, signature, authToken, params, method)) {
         getLogger().warn('Plivo webhook rejected: invalid or missing V3 signature');
         res.status(403).send('Invalid signature');
         return false;

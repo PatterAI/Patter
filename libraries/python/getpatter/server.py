@@ -223,24 +223,38 @@ def _validate_plivo_signature(
     nonce: str,
     signature: str,
     auth_token: str,
+    params: dict | None = None,
+    method: str = "POST",
 ) -> bool:
     """Verify a Plivo V3 webhook signature.
 
-    The V3 scheme signs ``url + nonce`` with HMAC-SHA256 keyed on the account
-    ``auth_token`` and base64-encodes the digest. The ``X-Plivo-Signature-V3``
-    header may carry multiple comma-separated signatures during key rotation;
-    accept the request if any one matches. Returns False when any step fails
-    (missing inputs, no match). Mirrors the TS ``validatePlivoSignature``.
+    Mirrors the algorithm in plivo-python's ``signature_v3`` module:
+
+    * **POST**: ``signed = url + sorted_post_params + "." + nonce`` where
+      POST params are sorted alphabetically by key (case-sensitive) and
+      concatenated as ``key1value1key2value2…`` with no delimiters.
+    * **GET**:  ``signed = url + "." + nonce`` — query params live in the
+      URL already, so no separate concatenation.
+
+    HMAC-SHA256 keyed on the account ``auth_token``, base64-encoded. The
+    ``X-Plivo-Signature-V3`` header may carry multiple comma-separated
+    signatures during key rotation; accept if any matches. Returns False
+    when any step fails (missing inputs, no match).
     """
     if not signature or not nonce or not auth_token:
         return False
     import hashlib
     import hmac
 
+    base = url
+    if method.upper() == "POST" and params:
+        # Plivo SDK ``get_sorted_params_string``: sort keys, concat ``k+v``.
+        base += "".join(f"{k}{params[k]}" for k in sorted(params))
+    signed = f"{base}.{nonce}"
     expected = base64.b64encode(
         hmac.new(
             auth_token.encode("utf-8"),
-            (url + nonce).encode("utf-8"),
+            signed.encode("utf-8"),
             hashlib.sha256,
         ).digest()
     ).decode("ascii")
@@ -1082,16 +1096,22 @@ class EmbeddedServer:
 
         # --- Plivo ---
 
-        def _validate_plivo_request(request: Request):
-            """Verify the ``X-Plivo-Signature-V3`` header (V3 = HMAC-SHA256 of
-            ``url + nonce``).
+        async def _validate_plivo_request(request: Request):
+            """Verify the ``X-Plivo-Signature-V3`` header.
 
-            Returns ``None`` on success or a :class:`Response` (403/503) to
-            short-circuit the route. Works for both POST (voice / status / amd)
-            and GET (transfer) routes because V3 signs only the URL and nonce,
-            independent of the HTTP method or body. Fails closed when no
-            ``plivo_auth_token`` is configured and ``require_signature`` is True.
+            Returns ``(form_dict, None)`` on success or ``(None, Response)`` to
+            short-circuit the route. Mirrors the
+            :func:`_read_and_validate_twilio_form` pattern so callers don't
+            re-parse the form themselves. V3 signs ``url + sorted_post_params
+            + "." + nonce`` for POST and ``url + "." + nonce`` for GET — so the
+            form has to be parsed *before* signature validation, not after.
+            Fails closed when no ``plivo_auth_token`` is configured and
+            ``require_signature`` is True.
             """
+            method = request.method.upper()
+            form_params: dict = {}
+            if method == "POST":
+                form_params = {k: str(v) for k, v in (await request.form()).items()}
             auth_token = self.config.plivo_auth_token
             require_sig = getattr(self.config, "require_signature", True)
             if not auth_token:
@@ -1101,10 +1121,10 @@ class EmbeddedServer:
                         "and require_signature=True. Set plivo_auth_token, or "
                         "explicitly opt out with LocalConfig(require_signature=False)."
                     )
-                    return Response(
+                    return None, Response(
                         status_code=503, content="Webhook signature required"
                     )
-                return None
+                return form_params, None
             signature = request.headers.get("X-Plivo-Signature-V3", "")
             nonce = request.headers.get("X-Plivo-Signature-V3-Nonce", "")
             # Reconstruct the exact public URL Plivo signed (the answer_url /
@@ -1117,19 +1137,21 @@ class EmbeddedServer:
                 url = f"https://{self.config.webhook_url}{path_and_query}"
             else:
                 url = str(req_url).replace("http://", "https://")
-            if not _validate_plivo_signature(url, nonce, signature, auth_token):
+            if not _validate_plivo_signature(
+                url, nonce, signature, auth_token,
+                params=form_params, method=method,
+            ):
                 logger.warning(
                     "Plivo webhook rejected: invalid or missing V3 signature"
                 )
-                return Response(status_code=403, content="Invalid signature")
-            return None
+                return None, Response(status_code=403, content="Invalid signature")
+            return form_params, None
 
         @app.post("/webhooks/plivo/voice")
         async def plivo_voice(request: Request):
-            sig_err = _validate_plivo_request(request)
+            form, sig_err = await _validate_plivo_request(request)
             if sig_err is not None:
                 return sig_err
-            form = await request.form()
             # Plivo posts CallUUID + From/To on the answer_url for both inbound
             # and answered-outbound calls. The same route serves both.
             call_uuid = form.get("CallUUID", "")
@@ -1142,10 +1164,9 @@ class EmbeddedServer:
 
         @app.post("/webhooks/plivo/status")
         async def plivo_status_callback(request: Request):
-            sig_err = _validate_plivo_request(request)
+            form, sig_err = await _validate_plivo_request(request)
             if sig_err is not None:
                 return sig_err
-            form = await request.form()
             call_uuid = form.get("CallUUID", "")
             # Plivo's hangup_url posts CallStatus (completed / busy / no-answer
             # / failed / timeout / cancel) once the call ends.
@@ -1182,10 +1203,9 @@ class EmbeddedServer:
 
         @app.post("/webhooks/plivo/amd")
         async def plivo_amd_callback(request: Request):
-            sig_err = _validate_plivo_request(request)
+            form, sig_err = await _validate_plivo_request(request)
             if sig_err is not None:
                 return sig_err
-            form = await request.form()
             call_uuid = form.get("CallUUID", "")
             # Plivo's async AMD result field name varies by API version —
             # accept the common spellings; _classify_plivo_amd normalises them.
@@ -1237,7 +1257,7 @@ class EmbeddedServer:
         async def plivo_transfer_xml(request: Request):
             # Returns the ``<Dial>`` XML that the blind-transfer ``aleg_url``
             # redirects the A-leg to. Validated like every other Plivo webhook.
-            sig_err = _validate_plivo_request(request)
+            _form, sig_err = await _validate_plivo_request(request)
             if sig_err is not None:
                 return sig_err
             from getpatter.providers.plivo_adapter import _xml_escape

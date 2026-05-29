@@ -110,24 +110,63 @@ async def test_send_audio_transcodes_pcm16_to_mulaw():
 # ---------------------------------------------------------------------------
 
 
-def _v3_sig(url: str, nonce: str, token: str) -> str:
+def _v3_sig(url: str, nonce: str, token: str, params: dict | None = None) -> str:
+    """Mirror of plivo-python ``signature_v3``: HMAC-SHA256 of
+    ``url + sorted_post_params + "." + nonce``, base64-encoded."""
+    base = url
+    if params:
+        base += "".join(f"{k}{params[k]}" for k in sorted(params))
+    signed = f"{base}.{nonce}"
     return base64.b64encode(
-        hmac.new(token.encode(), (url + nonce).encode(), hashlib.sha256).digest()
+        hmac.new(token.encode(), signed.encode(), hashlib.sha256).digest()
     ).decode()
 
 
-def test_validate_plivo_signature_accepts_valid():
+def test_validate_plivo_signature_accepts_valid_get():
     from getpatter.server import _validate_plivo_signature
 
     url, nonce, token = "https://h/webhooks/plivo/voice", "nonce123", "tok"
-    assert _validate_plivo_signature(url, nonce, _v3_sig(url, nonce, token), token)
+    sig = _v3_sig(url, nonce, token)
+    assert _validate_plivo_signature(url, nonce, sig, token, method="GET")
+
+
+def test_validate_plivo_signature_accepts_valid_post_with_params():
+    """POST signs url + sorted(k+v) + "." + nonce — must match Plivo's SDK."""
+    from getpatter.server import _validate_plivo_signature
+
+    url, nonce, token = "https://h/webhooks/plivo/voice", "n", "tok"
+    params = {"CallUUID": "CU1", "From": "+15551112222", "To": "+15553334444"}
+    sig = _v3_sig(url, nonce, token, params)
+    assert _validate_plivo_signature(url, nonce, sig, token, params=params, method="POST")
+
+
+def test_validate_plivo_signature_post_without_params_falls_back_to_url_nonce():
+    """Empty POST params behaves like GET — just url + "." + nonce."""
+    from getpatter.server import _validate_plivo_signature
+
+    url, nonce, token = "https://h/webhooks/plivo/voice", "n", "tok"
+    sig = _v3_sig(url, nonce, token)  # no params
+    assert _validate_plivo_signature(url, nonce, sig, token, params={}, method="POST")
 
 
 def test_validate_plivo_signature_rejects_tampered():
     from getpatter.server import _validate_plivo_signature
 
     url, nonce, token = "https://h/webhooks/plivo/voice", "nonce123", "tok"
-    assert not _validate_plivo_signature(url, nonce, "deadbeef", token)
+    assert not _validate_plivo_signature(url, nonce, "deadbeef", token, method="GET")
+
+
+def test_validate_plivo_signature_rejects_param_mismatch():
+    """Tampering with any POST param value must invalidate the signature."""
+    from getpatter.server import _validate_plivo_signature
+
+    url, nonce, token = "https://h/webhooks/plivo/voice", "n", "tok"
+    original = {"CallUUID": "CU1", "From": "+1"}
+    sig = _v3_sig(url, nonce, token, original)
+    tampered = {"CallUUID": "CU1", "From": "+9"}
+    assert not _validate_plivo_signature(
+        url, nonce, sig, token, params=tampered, method="POST"
+    )
 
 
 def test_validate_plivo_signature_supports_rotation():
@@ -135,7 +174,9 @@ def test_validate_plivo_signature_supports_rotation():
 
     url, nonce, token = "https://h/webhooks/plivo/voice", "n", "tok"
     good = _v3_sig(url, nonce, token)
-    assert _validate_plivo_signature(url, nonce, f"oldsig, {good}", token)
+    assert _validate_plivo_signature(
+        url, nonce, f"oldsig, {good}", token, method="GET"
+    )
 
 
 def test_validate_plivo_signature_requires_all_inputs():
