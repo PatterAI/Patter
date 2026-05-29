@@ -92,18 +92,22 @@ Once registered, tools surface to your Hermes Agent under names like `patter-voi
 
 ## Use as an optional plugin
 
-Hermes Agent supports plugin-based integrations. If you prefer the plugin route over
-MCP, install the Patter optional bundle directly:
+Hermes Agent supports plugin-based integrations. A Patter bundle — an
+`optional-mcps/patter-voice` manifest plus a bundled `patter-voice` skill — is
+proposed for the Hermes catalog in
+[NousResearch/hermes-agent#33937](https://github.com/NousResearch/hermes-agent/pull/33937).
 
-```bash
-hermes plugin add patter-voice
-```
+<Note>
+  Once that PR is merged upstream, installing both the MCP tools and the skill
+  will be a single command:
 
-This installs the manifest from [NousResearch/hermes-agent → optional-mcps/patter-voice](https://github.com/NousResearch/hermes-agent/tree/main/optional-mcps/patter-voice)
-and the bundled [`patter-voice` skill](https://github.com/NousResearch/hermes-agent/tree/main/optional-skills/productivity/patter-voice), part of the
-[optional-skills/productivity](https://github.com/NousResearch/hermes-agent/tree/main/optional-skills/productivity)
-catalog. Reload Hermes (`hermes reload`) and the agent picks up both the MCP tools and
-the skill automatically.
+  ```bash
+  hermes plugin add patter-voice
+  ```
+
+  Until then, use the [skills](#install) (`npx skills add patterai/skills`) or
+  the MCP server path described above — both work today.
+</Note>
 
 ## Quick start: outbound call from Hermes Agent
 
