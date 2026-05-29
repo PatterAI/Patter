@@ -8,6 +8,20 @@
   (`dashboard-app/`). Also added `"plivo"` to the PyPI / npm package keywords
   so the SDK surfaces in Plivo-related searches. (#123)
 
+### Fixed
+
+- **Pipeline-mode turns after the first now record per-turn metrics and
+  broadcast the live dashboard transcript.** `anchorUserSpeechStart()` re-opened
+  a turn (set `_turnStart`) without clearing the `_turnAlreadyClosed` guard, so
+  every user→agent turn after the `firstMessage` made `recordTurnComplete()` a
+  no-op — silently dropping per-turn latency/cost AND the live SSE
+  `turn_complete` event that feeds the dashboard transcript (the transcript only
+  appeared after the call ended). Cleared the flag in `anchorUserSpeechStart()`,
+  mirroring what `startTurn()` already does, in both SDKs
+  (`libraries/typescript/src/metrics.ts`,
+  `libraries/python/getpatter/services/metrics.py`). The post-commit barge-in
+  guard is untouched — the method no-ops once the turn is committed.
+
 ## 0.6.3 (2026-05-29)
 
 ### Added

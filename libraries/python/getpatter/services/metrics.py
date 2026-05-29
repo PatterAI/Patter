@@ -262,6 +262,15 @@ class CallMetricsAccumulator:
         if self._turn_committed_mono is not None:
             return
         self._turn_start = time.monotonic()
+        # A pre-commit VAD speech_start opens a NEW turn — re-arm the guard
+        # exactly as start_turn() does. Without this, the guard set by the
+        # previous turn's record_turn_complete persists, and every later
+        # anchor-opened turn makes record_turn_complete a no-op (dropping
+        # per-turn metrics AND the live SSE transcript). Safe: this method
+        # no-ops after commit (guard above), so we only ever re-arm at the
+        # start of a fresh, uncommitted turn — never the post-commit
+        # barge-in path that _turn_already_closed protects.
+        self._turn_already_closed = False
         self._endpoint_signal_at = None
         self._vad_stopped_at = None
         self._stt_final_at = None

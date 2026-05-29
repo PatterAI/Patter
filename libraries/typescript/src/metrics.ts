@@ -433,6 +433,15 @@ export class CallMetricsAccumulator {
   anchorUserSpeechStart(): void {
     if (this._turnCommittedMono !== null) return;
     this._turnStart = hrTimeMs();
+    // A pre-commit VAD speech_start opens a NEW turn — re-arm the guard
+    // exactly as startTurn() does. Without this, the guard set by the
+    // previous turn's recordTurnComplete persists, and every later
+    // anchor-opened turn makes recordTurnComplete a no-op (dropping per-turn
+    // metrics AND the live SSE transcript). Safe: this method no-ops after
+    // commit (guard above), so we only ever re-arm at the start of a fresh,
+    // uncommitted turn — never the post-commit barge-in path that
+    // _turnAlreadyClosed protects.
+    this._turnAlreadyClosed = false;
     this._endpointSignalAt = null;
     this._vadStoppedAt = null;
     this._sttFinalAt = null;
