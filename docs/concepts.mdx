@@ -31,7 +31,7 @@ When someone dials your number, audio flows through five layers. Each layer is *
        │  (phone network, PSTN)
        ▼
 ┌─────────────┐
-│ Carrier     │  Twilio or Telnyx — answers the call, opens a media stream
+│ Carrier     │  Twilio, Telnyx, or Plivo — answers, opens a media stream
 └──────┬──────┘
        │  (WebSocket, audio frames)
        ▼
@@ -179,6 +179,6 @@ OpenAI TTS returns 24 kHz PCM — Patter resamples to 16 kHz before sending to t
 <CardGroup cols={2}>
   <Card title="Python Quickstart" icon="rocket" href="/python-sdk/quickstart">Answer a real phone call in 5 minutes.</Card>
   <Card title="TypeScript Quickstart" icon="rocket" href="/typescript-sdk/quickstart">Same, but in TS.</Card>
-  <Card title="Carrier setup" icon="phone" href="/python-sdk/carrier">Twilio / Telnyx credentials.</Card>
+  <Card title="Carrier setup" icon="phone" href="/python-sdk/carrier">Twilio / Telnyx / Plivo credentials.</Card>
   <Card title="Engines" icon="bolt" href="/python-sdk/engines">OpenAI Realtime, ElevenLabs ConvAI.</Card>
 </CardGroup>

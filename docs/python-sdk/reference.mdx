@@ -456,7 +456,7 @@ except PatterError as exc:
 | `AUTH` | Provider rejected our credentials (HTTP 401/403, invalid signature). |
 | `TIMEOUT` | Provider response, voicemail post, or other awaited operation timed out. |
 | `RATE_LIMIT` | Provider returned HTTP 429. |
-| `WEBHOOK_VERIFICATION` | Twilio / Telnyx webhook signature verification failed. |
+| `WEBHOOK_VERIFICATION` | Twilio / Telnyx / Plivo webhook signature verification failed. |
 | `INPUT_VALIDATION` | Caller passed a malformed phone number, tool arg, etc. |
 | `PROVIDER_ERROR` | Generic catch-all for unexpected upstream provider failures. |
 | `PROVISION` | Phone number provisioning, webhook configuration, or carrier setup failed. |

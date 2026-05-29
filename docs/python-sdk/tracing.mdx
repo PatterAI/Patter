@@ -55,7 +55,7 @@ Beyond the spans listed above, every billable hot path stamps `patter.cost.*` an
 | Attribute | Type | Where it fires |
 |---|---|---|
 | `patter.call_id`, `patter.side` | str | Every cost/latency span (routing tags) |
-| `patter.cost.telephony_minutes`, `patter.telephony`, `patter.direction` | float / str | Twilio + Telnyx adapters on call end |
+| `patter.cost.telephony_minutes`, `patter.telephony`, `patter.direction` | float / str | Twilio, Telnyx, and Plivo adapters on call end |
 | `patter.cost.stt_seconds`, `patter.stt.provider` | float / str | Each final transcript (Deepgram, AssemblyAI, Whisper, OpenAI-Transcribe, Soniox, Speechmatics, Cartesia) |
 | `patter.cost.tts_chars`, `patter.tts.provider` | int / str | Each synthesis (ElevenLabs, OpenAI, Cartesia, LMNT, Rime) |
 | `patter.cost.llm_input_tokens`, `patter.cost.llm_output_tokens`, `patter.llm.provider` | int / int / str | Each completion (OpenAI, Anthropic, Google Gemini, Groq, Cerebras) |

@@ -1,16 +1,16 @@
 ---
 title: "Carrier"
-description: "Telephony providers: Twilio and Telnyx."
+description: "Telephony providers: Twilio, Telnyx, and Plivo."
 icon: "phone"
 ---
 
 # Carrier
 
-The carrier delivers the phone call to Patter. Patter supports **Twilio** and **Telnyx**. Both share DTMF, call transfer, AMD, status callbacks, and cost tracking; recording is Twilio-only.
+The carrier delivers the phone call to Patter. Patter supports **Twilio**, **Telnyx**, and **Plivo**. All three share inbound DTMF, call transfer, AMD, status callbacks, recording, voicemail drop, and cost tracking. **Plivo** additionally supports native DTMF *send* over the media WebSocket — a capability Twilio Media Streams lacks.
 
 You configure one carrier per `Patter` instance by passing an instance to the `carrier` field. Each carrier class falls back to environment variables when constructor arguments are omitted.
 
-Both carriers are imported by name from the package barrel: `import { Twilio, Telnyx } from "getpatter"`.
+All three carriers are imported by name from the package barrel: `import { Twilio, Telnyx, Plivo } from "getpatter"`.
 
 ## Twilio
 
@@ -79,6 +79,51 @@ The Telnyx WS upgrade URL carries the metadata as query-string parameters: `wss:
 
 When `publicKey` is set (or `TELNYX_PUBLIC_KEY` is present), every Telnyx webhook is verified with Ed25519. Requests older than 5 minutes are rejected (replay protection).
 
+## Plivo
+
+```typescript
+import { Patter, Plivo } from "getpatter";
+
+const phone = new Patter({
+  carrier: new Plivo(),                                 // reads env
+  phoneNumber: "+15550001234",
+});
+
+// Or explicitly:
+const phone = new Patter({
+  carrier: new Plivo({ authId: "MA...", authToken: "..." }),
+  phoneNumber: "+15550001234",
+});
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `authId` | `string` | — | Plivo Auth ID (starts with `MA` or `SA`). Reads from `PLIVO_AUTH_ID` when omitted. |
+| `authToken` | `string` | — | Plivo Auth Token. Used for HTTP Basic auth on the Plivo REST API *and* as the V3 webhook signature key. Reads from `PLIVO_AUTH_TOKEN` when omitted. |
+
+On `serve()`, Patter best-effort creates a Plivo Application bound to `https://<webhookUrl>/webhooks/plivo/voice` and links it to your phone number via the Plivo REST API. Most production deployments pre-configure the Plivo Application in the console — pass `manageWebhook: false` on `serve()` to opt out.
+
+### How caller / callee reach the agent
+
+Plivo preserves the WebSocket query string through the handshake, so caller and callee travel on the WSS URL: `wss://<webhookUrl>/ws/plivo/stream/<callUuid>?caller=<from>&callee=<to>`. Patter also forwards them via the `extraHeaders` attribute on `<Stream>` as a belt-and-suspenders fallback — Plivo delivers `extraHeaders` back on the WS `start` frame's `extra_headers` field.
+
+### Wire format and parity gains
+
+- **Audio**: mulaw 8 kHz, pinned via the `<Stream contentType="audio/x-mulaw;rate=8000">` answer XML. Plivo's `<Stream>` element places the WSS URL as its text content (not a `url=` attribute, as Twilio does).
+- **Native DTMF send** over the media WebSocket via `sendDTMF` — a parity gain over Twilio Media Streams.
+- **Voicemail drop** uses Plivo's live-call Speak API + `DELETE /Call/{uuid}/` hangup.
+- **AMD** is async: Patter sets `machine_detection="true"` + `machine_detection_url=/webhooks/plivo/amd` so human pickups don't incur the detection-window latency.
+- **Status callback**: Patter wires `hangup_url=/webhooks/plivo/status` on outbound calls so no-answer / busy / failed transitions reach the dashboard before any media webhook fires.
+
+### Signature verification
+
+The Auth Token doubles as the V3 webhook signature key. The V3 scheme is:
+
+- **POST**: `signed = url + sortedPostParams + "." + nonce` — POST params sorted alphabetically by key (case-sensitive) and concatenated as `key1value1key2value2…` with no delimiters.
+- **GET**:  `signed = url + "." + nonce` — query parameters live in the URL already.
+
+Both are HMAC-SHA256 keyed on the Auth Token and base64-encoded, delivered as the `X-Plivo-Signature-V3` header alongside `X-Plivo-Signature-V3-Nonce`. The signature header may carry comma-separated values during key rotation; any matching value accepts. Requests with invalid signatures are rejected with HTTP 403.
+
 ## Webhook Endpoints
 
 The embedded server exposes these endpoints regardless of carrier choice:
@@ -90,6 +135,10 @@ The embedded server exposes these endpoints regardless of carrier choice:
 | `POST /webhooks/twilio/recording` | Recording completion callbacks. |
 | `POST /webhooks/twilio/amd` | Async AMD (answering machine detection) results. |
 | `POST /webhooks/telnyx/voice` | Incoming Telnyx call → returns Call Control commands. |
+| `POST /webhooks/plivo/voice` | Incoming Plivo call → returns Plivo XML to start streaming. Also serves outbound `answer_url`. |
+| `POST /webhooks/plivo/status` | Plivo `hangup_url` callback — call lifecycle (completed, busy, no-answer, failed, timeout, cancel). |
+| `POST /webhooks/plivo/amd` | Async AMD result (`machine_detection_url`). |
+| `GET|POST /webhooks/plivo/transfer` | `<Dial>` XML for blind transfer (Plivo `aleg_url`). |
 
 ## What's Next
 

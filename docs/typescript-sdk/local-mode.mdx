@@ -147,7 +147,7 @@ Phone Speaker
 Call `phone.disconnect()` to gracefully stop the embedded server. The shutdown sequence:
 
 1. **Stop accepting new connections** — the HTTP server stops listening.
-2. **Hang up active calls** — each active call is terminated via the telephony provider API (Twilio or Telnyx).
+2. **Hang up active calls** — each active call is terminated via the telephony provider API (Twilio, Telnyx, or Plivo).
 3. **Close WebSocket connections** — a close frame (`1001 Server shutting down`) is sent to all active WebSocket connections.
 4. **Wait for drain** — the server waits up to **10 seconds** for active connections to close cleanly.
 5. **Force-terminate** — any connections still open after the drain timeout are forcibly terminated.

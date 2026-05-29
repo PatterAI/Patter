@@ -17,7 +17,7 @@ npm install getpatter
 ## Requirements
 
 - Node.js 18 or higher
-- A telephony account — Twilio or Telnyx (both fully supported)
+- A telephony account — Twilio, Telnyx, or Plivo (all three fully supported)
 - An AI provider key (OpenAI, ElevenLabs, or Deepgram)
 
 ## Minimal Example
@@ -35,7 +35,7 @@ That's the full file. Every provider class reads its API key from an env var whe
 
 ## How Patter runs
 
-Patter runs entirely in your own process — an embedded Express server and all provider adapters live directly in your application. Bring your own telephony (Twilio or Telnyx) and AI provider credentials; no external platform or hosted backend required.
+Patter runs entirely in your own process — an embedded Express server and all provider adapters live directly in your application. Bring your own telephony (Twilio, Telnyx, or Plivo) and AI provider credentials; no external platform or hosted backend required.
 
 <Note>A hosted Patter Cloud option will return in a future release.</Note>
 

@@ -87,7 +87,7 @@ const tts = ElevenLabsTTS.forTwilio({ voiceId: "rachel" });
 const tts2 = ElevenLabsTTS.forTelnyx({ voiceId: "rachel" });
 ```
 
-`CartesiaTTS.forTwilio()` / `forTelnyx()` and `ElevenLabsConvAI.forTwilio()` / `forTelnyx()` work the same way. Use them whenever you know the call will go out over Twilio or Telnyx — they shave tens of milliseconds off TTFB and drop CPU on long calls.
+`CartesiaTTS.forTwilio()` / `forTelnyx()` and `ElevenLabsConvAI.forTwilio()` / `forTelnyx()` work the same way. Use them whenever you know the call will go out over Twilio or Telnyx — they shave tens of milliseconds off TTFB and drop CPU on long calls. **Plivo** pins mulaw 8 kHz in its answer XML, so the `forTwilio()` factories apply unchanged.
 
 <Note>
   **WebSocket variant**: `ElevenLabsWebSocketTTS` is a drop-in alternative that streams audio over a WebSocket connection, saving ~50 ms of HTTP setup + TLS cold-start per utterance. See [ElevenLabs WebSocket TTS](/typescript-sdk/providers/elevenlabs-websocket) for the full reference and limitations.
