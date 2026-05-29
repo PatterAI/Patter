@@ -1,5 +1,7 @@
 ## Unreleased
 
+## 0.6.3 (2026-05-29)
+
 ### Added
 
 - **Completion-aware outbound calls: `call(wait=True)` → `CallResult`
