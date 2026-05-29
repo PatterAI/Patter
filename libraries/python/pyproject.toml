@@ -7,7 +7,7 @@ license = { text = "MIT" }
 authors = [
     { name = "PatterAI", email = "hello@getpatter.com" },
 ]
-keywords = ["voice", "ai", "voice-ai", "phone", "telephony", "speech", "tts", "stt", "twilio", "telnyx", "openai", "elevenlabs", "llm", "agent", "ai-agent", "conversational-ai", "realtime", "call", "ivr", "chatbot"]
+keywords = ["voice", "ai", "voice-ai", "phone", "telephony", "speech", "tts", "stt", "twilio", "telnyx", "plivo", "openai", "elevenlabs", "llm", "agent", "ai-agent", "conversational-ai", "realtime", "call", "ivr", "chatbot"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",

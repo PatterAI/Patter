@@ -185,7 +185,8 @@ Patter is purpose-built for production voice over real telephony. Out of the box
 <td align="center">→</td>
 <td align="center">
   <strong>Twilio</strong><br><sub>Telephony</sub><br><br>
-  <strong>Telnyx</strong><br><sub>Telephony</sub>
+  <strong>Telnyx</strong><br><sub>Telephony</sub><br><br>
+  <strong>Plivo</strong><br><sub>Telephony</sub>
 </td>
 </tr>
 </table>
@@ -237,7 +238,7 @@ machine learns the SDK.
 |---|---|
 | [`setup-patter`](https://github.com/PatterAI/skills/tree/main/setup-patter) | Install Patter, walk the user through provider/carrier consoles, validate each API key, write `.env` |
 | [`build-voice-agent`](https://github.com/PatterAI/skills/tree/main/build-voice-agent) | Build a voice agent — Realtime / ConvAI / Pipeline modes, with full Python and TypeScript examples |
-| [`configure-telephony`](https://github.com/PatterAI/skills/tree/main/configure-telephony) | Twilio or Telnyx carrier setup — phone numbers, webhooks, tunnels, AMD, voicemail drop |
+| [`configure-telephony`](https://github.com/PatterAI/skills/tree/main/configure-telephony) | Twilio, Telnyx, or Plivo carrier setup — phone numbers, webhooks, tunnels, AMD, voicemail drop |
 | [`add-tools-and-handoffs`](https://github.com/PatterAI/skills/tree/main/add-tools-and-handoffs) | Custom tools, `transfer_call`, `end_call`, output guardrails |
 | [`inspect-calls-and-metrics`](https://github.com/PatterAI/skills/tree/main/inspect-calls-and-metrics) | Live dashboard, `CallMetrics`, cost tracking, CSV/JSON export |
 
@@ -317,7 +318,7 @@ Pipeline mode composes STT + LLM + TTS sequentially and inherits the latency of 
 | `serve(agent, port?, tunnel?, dashboard?, ...)` | Start the embedded server and listen for calls |
 | `call(to, agent?, machine_detection?, voicemail_message?, ring_timeout?, ...)` | Place an outbound call |
 
-`call()` accepts a `ring_timeout` (seconds) that maps to Twilio's `Timeout` dial parameter and Telnyx's `timeout_secs`. When the carrier reports `no-answer`, `busy`, or `canceled`, the outcome is forwarded to the dashboard's `/webhooks/twilio/status` callback so it appears in the call log even if no media frames were ever exchanged.
+`call()` accepts a `ring_timeout` (seconds) that maps to Twilio's `Timeout` dial parameter, Telnyx's `timeout_secs`, and Plivo's `ring_timeout`. When the carrier reports `no-answer`, `busy`, or `canceled`, the outcome is forwarded to the dashboard via the per-carrier status callback (`/webhooks/twilio/status`, `/webhooks/plivo/status`, or Telnyx's `call.hangup` event) so it appears in the call log even if no media frames were ever exchanged.
 
 **`serve()` options:**
 

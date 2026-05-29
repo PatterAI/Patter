@@ -1,5 +1,6 @@
 import type { Call } from './CallTable';
 import { fmtCostUSD } from './format';
+import { CarrierBadge } from './CarrierBadge';
 
 export interface CostPanelProps {
   call: Call | null;
@@ -52,8 +53,7 @@ export function CostPanel({ call }: CostPanelProps) {
       </div>
       <div className="stack-row">
         <span className="lbl">
-          <span className="swatch" style={{ background: '#cc0000' }}></span>
-          {call.carrier === 'twilio' ? 'Twilio' : 'Telnyx'}
+          <CarrierBadge carrier={call.carrier} />
         </span>
         <span className="v">{fmtCostUSD(telco)}</span>
       </div>

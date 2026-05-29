@@ -1,5 +1,7 @@
 import { useMemo, useState } from 'react';
 import { fmtDuration, fmtPhone, fmtCostUSD } from './format';
+import { CarrierChip } from './CarrierBadge';
+import type { CallCarrier } from '../lib/mappers';
 import {
   IconArrowDown,
   IconArrowUp,
@@ -28,7 +30,7 @@ export interface Call {
   direction: 'inbound' | 'outbound';
   from: string;
   to: string;
-  carrier: 'twilio' | 'telnyx';
+  carrier: CallCarrier;
   /** ms epoch — set for any call we know started, live or ended. */
   startedAtMs?: number;
   durationStart?: number;
@@ -154,10 +156,7 @@ function CallRow({
         </span>
       </td>
       <td>
-        <span className="car-tw">
-          <span className={'car-dot ' + (call.carrier === 'twilio' ? 'tw' : 'tx')}></span>
-          {call.carrier === 'twilio' ? 'Twilio' : 'Telnyx'}
-        </span>
+        <CarrierChip carrier={call.carrier} />
       </td>
       <td className="num-cell">{call.status === 'no-answer' ? '—' : dur}</td>
       <td>

@@ -27,6 +27,7 @@
     "stt",
     "twilio",
     "telnyx",
+    "plivo",
     "openai",
     "elevenlabs",
     "llm",

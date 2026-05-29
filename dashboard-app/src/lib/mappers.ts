@@ -12,7 +12,18 @@ import type { CallRecord } from './api';
 
 export type CallStatus = 'live' | 'ended' | 'no-answer' | 'queued' | 'fail';
 export type CallDirection = 'inbound' | 'outbound';
-export type CallCarrier = 'twilio' | 'telnyx';
+/** Carrier metadata registry — the **single source of truth** for which
+ *  carriers the dashboard knows about. {@link CallCarrier} is derived from
+ *  these keys, {@link mapCarrier} accepts the same keys for runtime
+ *  validation, and the UI components read ``label`` + ``dotClass`` from here.
+ *  Adding a fourth carrier is one entry, full stop. */
+export const CARRIERS = {
+  twilio: { label: 'Twilio', dotClass: 'tw' },
+  telnyx: { label: 'Telnyx', dotClass: 'tx' },
+  plivo:  { label: 'Plivo',  dotClass: 'pl' },
+} as const;
+
+export type CallCarrier = keyof typeof CARRIERS;
 export type CallMode = 'realtime' | 'pipeline' | 'convai' | 'unknown';
 
 export interface CallCostUi {
@@ -107,9 +118,16 @@ function mapDirection(raw: string | undefined): CallDirection {
   return raw === 'outbound' ? 'outbound' : 'inbound';
 }
 
+/** Runtime view of the carrier registry — derived so adding a new carrier
+ *  to {@link CARRIERS} automatically widens what {@link mapCarrier} accepts. */
+const KNOWN_CARRIERS: ReadonlySet<string> = new Set(Object.keys(CARRIERS));
+
 function mapCarrier(provider: string | undefined): CallCarrier {
-  if (typeof provider === 'string' && provider.toLowerCase().includes('telnyx')) {
-    return 'telnyx';
+  // The SDK sets `telephonyProvider` to the literal carrier kind. Match
+  // exactly so a future carrier value falls through to the fallback
+  // instead of silently being labelled Twilio.
+  if (typeof provider === 'string' && KNOWN_CARRIERS.has(provider)) {
+    return provider as CallCarrier;
   }
   return 'twilio';
 }

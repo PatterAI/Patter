@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { Call } from './CallTable';
 import { fmtDuration, fmtPhone } from './format';
 import { IconForward, IconHangup, IconMic, IconRecord } from './icons';
+import { CARRIERS } from '../lib/mappers';
 
 interface LiveDurationProps {
   start: number;
@@ -85,7 +86,7 @@ export function LiveCallPanel({
         <span className="l">duration</span>
         <span className="agent">
           {call.direction === 'inbound' ? 'inbound' : 'outbound'} ·{' '}
-          {call.carrier === 'twilio' ? 'Twilio' : 'Telnyx'}
+          {CARRIERS[call.carrier].label}
         </span>
         <span className="v">
           {isLive && call.durationStart ? (

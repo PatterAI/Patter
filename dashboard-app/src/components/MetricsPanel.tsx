@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { Call } from './CallTable';
 import { fmtCostUSD } from './format';
+import { CarrierBadge } from './CarrierBadge';
 
 export interface MetricsPanelProps {
   call: Call | null;
@@ -261,8 +262,7 @@ function CostView({ call }: { call: Call }) {
       {telco > 0 && (
         <div className="stack-row">
           <span className="lbl">
-            <span className="swatch" style={{ background: '#cc0000' }}></span>
-            {call.carrier === 'twilio' ? 'Twilio' : 'Telnyx'}
+            <CarrierBadge carrier={call.carrier} />
           </span>
           <span className="v">{fmtCostUSD(telco)}</span>
         </div>

@@ -74,6 +74,7 @@ Every provider reads its credentials from the environment by default. Pass `api_
 |---|---|
 | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` | `Twilio()` carrier |
 | `TELNYX_API_KEY`, `TELNYX_CONNECTION_ID`, `TELNYX_PUBLIC_KEY` (optional) | `Telnyx()` carrier |
+| `PLIVO_AUTH_ID`, `PLIVO_AUTH_TOKEN` | `Plivo()` carrier — Auth Token doubles as the V3 webhook signature key |
 | `OPENAI_API_KEY` | `OpenAIRealtime`, `getpatter.stt.whisper.STT`, `getpatter.tts.openai.TTS` |
 | `ELEVENLABS_API_KEY`, `ELEVENLABS_AGENT_ID` | `ElevenLabsConvAI`, `getpatter.tts.elevenlabs.TTS` |
 | `DEEPGRAM_API_KEY` | `getpatter.stt.deepgram.STT` |
@@ -93,7 +94,7 @@ cp .env.example .env
 # Edit .env with your API keys
 ```
 
-> **Telnyx:** Telnyx is a fully supported telephony provider alternative to Twilio. Both carriers receive equal support for DTMF, transfer, and metrics. Recording parity is supported via Telnyx Call Control; consult the Telnyx portal for configuration details.
+> **Other carriers:** **Telnyx** and **Plivo** are both fully supported alternatives to Twilio. All three carriers receive equal support for inbound DTMF, transfer, AMD, status callbacks, recording, voicemail drop, and metrics. **Plivo** additionally supports native DTMF *send* over the media WebSocket — a capability Twilio Media Streams lacks. Plivo's Auth Token doubles as the V3 webhook signature key (no separate public key, unlike Telnyx Ed25519).
 
 ## Voice Modes
 
@@ -109,7 +110,7 @@ cp .env.example .env
 
 ```python
 Patter(
-    carrier: Twilio | Telnyx,
+    carrier: Twilio | Telnyx | Plivo,
     phone_number: str,
     webhook_url: str = "",         # Public hostname (no scheme). Mutually exclusive with tunnel=...
     tunnel: CloudflareTunnel | Static | Ngrok | None = None,
@@ -119,7 +120,7 @@ Patter(
 
 | Parameter | Type | Description |
 |---|---|---|
-| `carrier` | `Twilio` / `Telnyx` | Carrier instance. Reads env vars by default. |
+| `carrier` | `Twilio` / `Telnyx` / `Plivo` | Carrier instance. Reads env vars by default. |
 | `phone_number` | `str` | Your phone number in E.164 format. |
 | `webhook_url` | `str` | Public hostname your local server is reachable on. Use instead of `tunnel=`. |
 | `tunnel` | instance | `CloudflareTunnel()`, `Static(hostname=...)`, or `Ngrok()`. |
@@ -183,7 +184,7 @@ Flat re-exports (short form):
 
 ```python
 from getpatter import (
-    Twilio, Telnyx,
+    Twilio, Telnyx, Plivo,
     OpenAIRealtime, ElevenLabsConvAI,
     # STT / TTS classes live in namespaced modules — see below.
 )

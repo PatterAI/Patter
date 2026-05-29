@@ -215,8 +215,9 @@ body.dark .bulk-btn.destructive{background:var(--peach);color:#000;border-color:
 .pill.queued::before{content:"";width:6px;height:6px;background:#aaa;border-radius:999px}
 .car-tw{display:inline-flex;gap:6px;align-items:center;font-size:12px;color:#4a4a4a;font-weight:500}
 .car-dot{width:6px;height:6px;border-radius:999px;display:inline-block}
-.car-dot.tw{background:#cc0000}
-.car-dot.tx{background:#00C896}
+.car-dot.tw,.swatch.tw{background:#cc0000}
+.car-dot.tx,.swatch.tx{background:#00C896}
+.car-dot.pl,.swatch.pl{background:#8B5CF6}
 .lat-bar{display:inline-block;width:54px;height:5px;background:#eee;border-radius:999px;overflow:hidden;vertical-align:middle;margin-right:8px}
 .lat-bar i{display:block;height:100%;background:#000;border-radius:999px;transition:width 400ms var(--easing)}
 .lat-bar.warn i{background:#DF9367}
@@ -447,7 +448,8 @@ body.dark tbody tr.new-row{animation:slideInDark 400ms var(--easing)}
 /* Carrier label colour drift between rows + table empty state. */
 body.dark .empty{color:#666;background:transparent}
 body.dark .car-tw{color:#a8a8a8}
-body.dark .car-dot.tx{background:#5a96f0}
+body.dark .car-dot.tx,body.dark .swatch.tx{background:#5a96f0}
+body.dark .car-dot.pl,body.dark .swatch.pl{background:#A78BFA}
 /* Selected + checked rows on the table — without these explicit dark
    tones the warm peach overlay clashes with the lifted #1c1c1c card. */
 body.dark tbody tr.checked{background:#2a1d15}
