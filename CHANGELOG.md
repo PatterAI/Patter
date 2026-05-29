@@ -1,5 +1,13 @@
 ## Unreleased
 
+### Added
+
+- **Dashboard: Plivo carrier support in the UI.** The call dashboard now
+  renders a Plivo `CarrierBadge` and maps Plivo calls across the cost,
+  live-call, and metrics panels, alongside Twilio and Telnyx
+  (`dashboard-app/`). Also added `"plivo"` to the PyPI / npm package keywords
+  so the SDK surfaces in Plivo-related searches. (#123)
+
 ## 0.6.3 (2026-05-29)
 
 ### Added
