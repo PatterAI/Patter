@@ -34,6 +34,27 @@ npm run build
 7. **Validate locally**: `bash scripts/pr-validate.sh` (see below)
 8. Open a Pull Request against `main`
 
+### Before you open a PR — checklist
+
+These are the things CI (and reviewers) will block on. Catch them locally:
+
+- [ ] **Both SDKs.** Every user-visible feature ships in **Python AND
+      TypeScript** in the same PR — same API shape and defaults, `snake_case`
+      ↔ `camelCase`. There is no "Python-only" / "TS-only" public surface.
+- [ ] **`CHANGELOG.md`.** Add an entry under `## Unreleased`
+      (`### Added` / `### Changed` / `### Fixed` / …) for any user-visible
+      change. Pure refactors, test-only, and docs-only diffs are exempt.
+- [ ] **`bash scripts/pr-validate.sh` is green** (mirrors the PR-blocking CI).
+- [ ] **Notebooks**: if you touched `examples/notebooks/`, run `nbstripout`
+      (bundled in pre-commit) and keep the Python/TypeScript pair structurally
+      aligned — `python3 scripts/check_notebook_parity.py` must pass.
+- [ ] **No external license headers / "ported from <repo>" provenance
+      comments** in source. Naming a provider/carrier you integrate (Twilio,
+      Telnyx, Plivo, OpenAI, …) is fine; copying a competitor's lineage is not.
+
+> AI agents (Claude Code, Cursor, Codex, …): see [`AGENTS.md`](./AGENTS.md)
+> for the same checklist in a machine-readable form.
+
 ## Pre-PR validation
 
 Run every PR-blocking CI check locally before opening the PR:
