@@ -96,16 +96,16 @@ Hermes Agent supports plugin-based integrations. A Patter bundle — an
 `optional-mcps/patter-voice` manifest plus a bundled `patter-voice` skill — is
 proposed for the Hermes catalog in
 [NousResearch/hermes-agent#33937](https://github.com/NousResearch/hermes-agent/pull/33937).
-Once it is merged upstream, installing both the MCP tools and the skill will be
-a single command:
+Once it is merged upstream, a single command installs both the MCP tools and
+the skill:
 
 ```bash
 hermes plugin add patter-voice
 ```
 
-<Note>
-  Until #33937 is merged, use the [skills](#install) (`npx skills add patterai/skills`) or the MCP server path described above — both work today.
-</Note>
+Until then, install Patter via the skills (`npx skills add patterai/skills`) or
+the MCP server path described above — both work today, with no upstream
+dependency.
 
 ## Quick start: outbound call from Hermes Agent
 
