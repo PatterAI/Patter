@@ -1339,6 +1339,18 @@ class EmbeddedServer:
                     self.record_prewarm_waste(call_uuid)
                 except Exception as exc:  # noqa: BLE001 - defensive
                     logger.debug("record_prewarm_waste raised: %s", exc)
+                # Resolve a pending call(wait=True) for a call that never
+                # reached media — no on_call_end will fire for these.
+                outcome = (
+                    "no_answer"
+                    if call_status in ("no-answer", "timeout")
+                    else "busy"
+                    if call_status == "busy"
+                    else "failed"
+                )
+                self._resolve_completion(
+                    call_uuid, outcome=outcome, status=call_status
+                )
             return Response(content="", status_code=200)
 
         @app.post("/webhooks/plivo/amd")
@@ -1357,6 +1369,10 @@ class EmbeddedServer:
             )
             logger.info("AMD result for %s: %s", call_uuid, amd_raw)
             classification = _classify_plivo_amd(amd_raw)
+            # Record the AMD classification so a later on_call_end can resolve
+            # a pending call(wait=True) as ``voicemail`` vs ``answered``.
+            if call_uuid:
+                self._amd_class[call_uuid] = classification
 
             if self.on_machine_detection is not None and call_uuid:
                 try:

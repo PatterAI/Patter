@@ -1539,6 +1539,15 @@ export class EmbeddedServer {
         } catch (err) {
           getLogger().debug(`recordPrewarmWaste threw: ${String(err)}`);
         }
+        // Resolve a pending call({ wait: true }) for a call that never reached
+        // media — no onCallEnd will fire for these.
+        const outcome: CallOutcome =
+          callStatus === 'no-answer' || callStatus === 'timeout'
+            ? 'no_answer'
+            : callStatus === 'busy'
+              ? 'busy'
+              : 'failed';
+        this.resolveCompletion(callUuid, { outcome, status: callStatus });
       }
       res.status(200).send();
     });
@@ -1553,6 +1562,9 @@ export class EmbeddedServer {
         body['Machine'] || body['MachineDetection'] || body['AnsweredBy'] || body['CallStatus'] || '';
       getLogger().info(`AMD result for ${sanitizeLogValue(callUuid)}: ${sanitizeLogValue(amdRaw)}`);
       const classification = classifyPlivoAmd(amdRaw);
+      // Record the AMD classification so a later onCallEnd can resolve a
+      // pending call({ wait: true }) as ``voicemail`` vs ``answered``.
+      if (callUuid) this.amdClass.set(callUuid, classification);
 
       const cb = this.onMachineDetection;
       if (cb && callUuid) {

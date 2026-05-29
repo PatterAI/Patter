@@ -4,6 +4,18 @@
 
 ### Added
 
+- **Plivo as a third telephony carrier (both SDKs), full Twilio/Telnyx
+  parity.** `Patter(carrier=Plivo(), ...)` / `new Patter({ carrier: new
+  Plivo(), ... })` — outbound dials via Plivo's REST API (`answer_url` /
+  `hangup_url` / async `machine_detection_url`), inbound voice/status/AMD/
+  transfer webhooks with **V3 HMAC-SHA256 signature verification** (fails
+  closed), bidirectional media WebSocket (`playAudio` / `clearAudio` /
+  `checkpoint`), native `sendDTMF` over the media socket (a capability
+  Twilio Media Streams lacks), voicemail drop, and pricing reconciled from
+  the Plivo CDR. `Plivo` / `PlivoAdapter` exported from both package roots.
+  `call(wait=True)` resolves correctly for Plivo too (AMD → voicemail,
+  status callback → no_answer / busy / failed). Contributed by
+  @amalshaji-plivo (#121).
 - **Completion-aware outbound calls: `call(wait=True)` → `CallResult`
   (both SDKs).** An AI agent can now place a call and `await` its real
   outcome in one line instead of hand-wiring `on_call_end`/`onCallEnd` to
@@ -77,6 +89,13 @@
 
 ### Fixed
 
+- **Plivo + Pipeline + ElevenLabs produced garbled/static outbound audio
+  (TypeScript).** `StreamHandler.isTtsOutputFormatNativeForCarrier()` only
+  handled `twilio` / `telnyx`, so for `plivo` it returned `false` and the
+  pipeline re-encoded the already-μ-law ElevenLabs output as if it were
+  PCM16 — mangling it. Added the `plivo → ulaw_8000` native-format case
+  (`libraries/typescript/src/stream-handler.ts`). Python was unaffected
+  (its Plivo bridge runs the handler with `for_twilio=True`).
 - **`PatterTool` (Python) reported `cost_usd=None` and
   `duration_seconds=0.0` on every call.** The result builder probed the
   `on_call_end` `metrics` payload as a `dict`, but the live payload delivers
