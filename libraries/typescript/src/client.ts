@@ -33,11 +33,13 @@ import type {
   LocalCallOptions,
   AgentOptions,
   ServeOptions,
+  CarrierKind,
 } from "./types";
 import { EmbeddedServer } from "./server";
 import type { MetricsStore } from "./dashboard/store";
 import { Carrier as TwilioCarrier } from "./telephony/twilio";
 import { Carrier as TelnyxCarrier } from "./telephony/telnyx";
+import { Carrier as PlivoCarrier } from "./telephony/plivo";
 import { Realtime as OpenAIRealtime } from "./engines/openai";
 import { Realtime2 as OpenAIRealtime2 } from "./engines/openai-2";
 import { ConvAI as ElevenLabsConvAI } from "./engines/elevenlabs";
@@ -95,7 +97,7 @@ export interface ParkedProviderConnections {
 
 /** Internal local-mode state — holds carrier + resolved runtime settings. */
 export interface ResolvedLocalConfig {
-  carrier: TwilioCarrier | TelnyxCarrier;
+  carrier: TwilioCarrier | TelnyxCarrier | PlivoCarrier;
   phoneNumber: string;
   webhookUrl?: string;
   tunnel?: CloudflareTunnel | StaticTunnel | boolean;
@@ -371,7 +373,8 @@ export class Patter {
     if (!options.carrier) {
       throw new Error(
         'Local mode requires a `carrier` instance. ' +
-          'Pass `carrier: new Twilio({...})` or `carrier: new Telnyx({...})`.',
+          'Pass `carrier: new Twilio({...})`, `carrier: new Telnyx({...})` or ' +
+          '`carrier: new Plivo({...})`.',
       );
     }
 
@@ -650,7 +653,7 @@ export class Patter {
     }
 
     const carrier = this.localConfig.carrier;
-    const telephonyProvider = carrier.kind === 'twilio' ? 'twilio' : 'telnyx';
+    const telephonyProvider = carrier.kind;
 
     // Auto-configure the carrier so inbound calls hit this server without
     // manual Console setup. Mirrors Python's server.py start() flow.
@@ -671,6 +674,8 @@ export class Patter {
         twilioToken: carrier.kind === 'twilio' ? carrier.authToken : undefined,
         telnyxKey: carrier.kind === 'telnyx' ? carrier.apiKey : undefined,
         telnyxConnectionId: carrier.kind === 'telnyx' ? carrier.connectionId : undefined,
+        plivoAuthId: carrier.kind === 'plivo' ? carrier.authId : undefined,
+        plivoAuthToken: carrier.kind === 'plivo' ? carrier.authToken : undefined,
         phoneNumber: this.localConfig.phoneNumber,
         webhookHost: webhookUrl,
       });
@@ -687,6 +692,8 @@ export class Patter {
         telnyxKey: carrier.kind === 'telnyx' ? carrier.apiKey : undefined,
         telnyxConnectionId: carrier.kind === 'telnyx' ? carrier.connectionId : undefined,
         telnyxPublicKey: carrier.kind === 'telnyx' ? carrier.publicKey : undefined,
+        plivoAuthId: carrier.kind === 'plivo' ? carrier.authId : undefined,
+        plivoAuthToken: carrier.kind === 'plivo' ? carrier.authToken : undefined,
         persistRoot: this.localConfig.persistRoot,
       },
       opts.agent,
@@ -1069,7 +1076,7 @@ export class Patter {
     agent: AgentOptions,
     callId: string,
     ringTimeout: number | null | undefined,
-    carrier?: 'twilio' | 'telnyx',
+    carrier?: CarrierKind,
   ): void {
     if (!agent.prewarmFirstMessage) return;
     // FIX #94 — Realtime / ConvAI never consume the cache. Refuse early
@@ -1320,6 +1327,76 @@ export class Patter {
       return;
     }
 
+    if (carrier.kind === 'plivo') {
+      // Plivo outbound: POST /Call/ with an answer_url. Plivo fetches that URL
+      // on pickup and the /webhooks/plivo/voice handler returns the <Stream>
+      // XML — so the WSS URL travels in the answer XML, not as a dial param.
+      // Mirrors ``libraries/python/getpatter/providers/plivo_adapter.py``.
+      const auth = `Basic ${Buffer.from(`${carrier.authId}:${carrier.authToken}`).toString('base64')}`;
+      const plivoPayload: Record<string, unknown> = {
+        from: phoneNumber,
+        to: options.to,
+        answer_url: `https://${webhookUrl}/webhooks/plivo/voice`,
+        answer_method: 'POST',
+        // hangup_url is Plivo's StatusCallback analogue — without it the
+        // /webhooks/plivo/status route never fires for outbound calls and
+        // the dashboard misses no-answer / busy / failed.
+        hangup_url: `https://${webhookUrl}/webhooks/plivo/status`,
+        hangup_method: 'POST',
+      };
+      if (effectiveRingTimeout !== null && effectiveRingTimeout !== undefined) {
+        plivoPayload.ring_timeout = Math.max(1, Math.floor(effectiveRingTimeout));
+      }
+      if (wantsAmd) {
+        plivoPayload.machine_detection = 'true';
+        plivoPayload.machine_detection_time = 5000;
+        plivoPayload.machine_detection_url = `https://${webhookUrl}/webhooks/plivo/amd`;
+        plivoPayload.machine_detection_method = 'POST';
+      }
+      // Store voicemail message on the running server so the AMD webhook can use it.
+      if (options.voicemailMessage && this.embeddedServer) {
+        this.embeddedServer.voicemailMessage = options.voicemailMessage;
+      }
+      const response = await fetch(`https://api.plivo.com/v1/Account/${carrier.authId}/Call/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: auth },
+        body: JSON.stringify(plivoPayload),
+      });
+      if (!response.ok) {
+        throw new ProvisionError(`Failed to initiate Plivo call: ${await response.text()}`);
+      }
+      let plivoCallId: string | undefined;
+      try {
+        const body = (await response.clone().json()) as { request_uuid?: string };
+        plivoCallId = body.request_uuid;
+      } catch {
+        /* non-fatal */
+      }
+      if (plivoCallId) {
+        const initiatedPayload = {
+          call_id: plivoCallId,
+          caller: phoneNumber,
+          callee: options.to,
+          direction: 'outbound',
+          status: 'initiated',
+        } as const;
+        if (this.embeddedServer) {
+          this.embeddedServer.metricsStore.recordCallInitiated(initiatedPayload);
+        }
+        try {
+          const { notifyDashboard } = await import('./dashboard/persistence');
+          notifyDashboard(initiatedPayload);
+        } catch {
+          /* ignore */
+        }
+        this.spawnPrewarmFirstMessage(options.agent, plivoCallId, effectiveRingTimeout, 'plivo');
+        if (options.agent.prewarm !== false) {
+          this.parkProviderConnections(options.agent, plivoCallId);
+        }
+      }
+      return;
+    }
+
     // Twilio
     const twilioSid = carrier.accountSid;
     const twilioToken = carrier.authToken;
@@ -1560,6 +1637,18 @@ export class Patter {
       });
       if (!res.ok) {
         throw new Error(`Telnyx hangup failed: ${res.status} ${await res.text()}`);
+      }
+      return;
+    }
+    if (carrier.kind === 'plivo') {
+      const auth = Buffer.from(`${carrier.authId}:${carrier.authToken}`).toString('base64');
+      const res = await fetch(
+        `https://api.plivo.com/v1/Account/${carrier.authId}/Call/${encodeURIComponent(callSid)}/`,
+        { method: 'DELETE', headers: { Authorization: `Basic ${auth}` } },
+      );
+      // Plivo returns 204 on success and 404 when the call already ended.
+      if (!res.ok && res.status !== 404) {
+        throw new Error(`Plivo hangup failed: ${res.status} ${await res.text()}`);
       }
       return;
     }

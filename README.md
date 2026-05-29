@@ -48,6 +48,14 @@ export TELNYX_CONNECTION_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 export OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
+**Plivo**
+
+```bash
+export PLIVO_AUTH_ID=MAxxxxxxxxxxxxxxxxxx
+export PLIVO_AUTH_TOKEN=your_auth_token
+export OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxx
+```
+
 <details open>
 <summary><strong>Python</strong></summary>
 
@@ -69,6 +77,16 @@ Or with **Telnyx**:
 from getpatter import Patter, Telnyx, OpenAIRealtime
 
 phone = Patter(carrier=Telnyx(), phone_number="+15550001234")
+agent = phone.agent(engine=OpenAIRealtime(), system_prompt="You are a friendly receptionist for Acme Corp.", first_message="Hello! How can I help?")
+await phone.serve(agent, tunnel=True)
+```
+
+Or with **Plivo**:
+
+```python
+from getpatter import Patter, Plivo, OpenAIRealtime
+
+phone = Patter(carrier=Plivo(), phone_number="+15550001234")
 agent = phone.agent(engine=OpenAIRealtime(), system_prompt="You are a friendly receptionist for Acme Corp.", first_message="Hello! How can I help?")
 await phone.serve(agent, tunnel=True)
 ```
@@ -100,6 +118,16 @@ const agent = phone.agent({ engine: new OpenAIRealtime(), systemPrompt: "You are
 await phone.serve({ agent, tunnel: true });
 ```
 
+Or with **Plivo**:
+
+```typescript
+import { Patter, Plivo, OpenAIRealtime } from "getpatter";
+
+const phone = new Patter({ carrier: new Plivo(), phoneNumber: "+15550001234" });
+const agent = phone.agent({ engine: new OpenAIRealtime(), systemPrompt: "You are a friendly receptionist for Acme Corp.", firstMessage: "Hello! How can I help?" });
+await phone.serve({ agent, tunnel: true });
+```
+
 </details>
 
 `tunnel: true` spawns a Cloudflare quick tunnel and points your Twilio number at it — great for dev / acceptance. For production outbound calls (especially on Twilio), replace it with [ngrok](https://ngrok.com) or a static `webhook_url` to avoid WSS upgrade races on first call. See [Tunneling](/docs/dev-tools/tunneling) for details.
@@ -108,7 +136,7 @@ Every carrier and provider reads its credentials from environment variables by d
 
 ## How Patter compares
 
-Patter is purpose-built for production voice over real telephony. Out of the box you get **Twilio + Telnyx parity** (DTMF, transfer, AMD, voicemail drop, recording), **both architectures from one API** — speech-to-speech (Realtime / ConvAI engines) and the sandwich pipeline (STT → LLM → TTS) — and **production-grade barge-in / VAD / IVR primitives** that work the same on every carrier. Observability is vendor-neutral OpenTelemetry tracing, plus a built-in dashboard and tunnel; no extra collector required. The 4-line quickstart above replaces ~50 lines of glue you'd otherwise write against a generic voice-agent toolkit, and the **Python and TypeScript SDKs are identical** — same surface, same hooks, same events — so cross-runtime teams ship the same agent twice without rewriting it.
+Patter is purpose-built for production voice over real telephony. Out of the box you get **Twilio + Telnyx + Plivo parity** (DTMF, transfer, AMD, voicemail drop, recording), **both architectures from one API** — speech-to-speech (Realtime / ConvAI engines) and the sandwich pipeline (STT → LLM → TTS) — and **production-grade barge-in / VAD / IVR primitives** that work the same on every carrier. Observability is vendor-neutral OpenTelemetry tracing, plus a built-in dashboard and tunnel; no extra collector required. The 4-line quickstart above replaces ~50 lines of glue you'd otherwise write against a generic voice-agent toolkit, and the **Python and TypeScript SDKs are identical** — same surface, same hooks, same events — so cross-runtime teams ship the same agent twice without rewriting it.
 
 ## Features
 
@@ -197,6 +225,9 @@ cd python && pip install -r requirements.txt && python main.py
 | `TELNYX_API_KEY` | Yes (Telnyx) | Telnyx API key |
 | `TELNYX_CONNECTION_ID` | Yes (Telnyx) | Telnyx Call Control Application connection ID |
 | `TELNYX_PHONE_NUMBER` | Yes (Telnyx) | Your Telnyx phone number (E.164) |
+| `PLIVO_AUTH_ID` | Yes (Plivo) | Plivo Auth ID (also the V3 webhook signature account) |
+| `PLIVO_AUTH_TOKEN` | Yes (Plivo) | Plivo Auth Token (Basic auth + V3 webhook signature key) |
+| `PLIVO_PHONE_NUMBER` | Yes (Plivo) | Your Plivo phone number (E.164) |
 | `DEEPGRAM_API_KEY` | Pipeline mode | Deepgram STT key |
 | `ELEVENLABS_API_KEY` | Pipeline mode | ElevenLabs TTS key |
 | `ANTHROPIC_API_KEY` | Custom LLM | For bringing your own model |

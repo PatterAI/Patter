@@ -34,7 +34,7 @@ describe('TelnyxBridge.sendDtmf', () => {
 
   it('sends one POST per digit with send_dtmf action', async () => {
     const bridge = new TelnyxBridge(makeConfig());
-    await bridge.sendDtmf('1234', '12#4', 0); // delayMs=0 for fast test
+    await bridge.sendDtmf(null as never,'1234', '12#4', 0); // delayMs=0 for fast test
 
     expect(fetchMock).toHaveBeenCalledTimes(4);
 
@@ -48,7 +48,7 @@ describe('TelnyxBridge.sendDtmf', () => {
 
   it('filters invalid characters before sending', async () => {
     const bridge = new TelnyxBridge(makeConfig());
-    await bridge.sendDtmf('call-id', 'ab!!XY1', 0); // only a, b, 1 survive (XY out)
+    await bridge.sendDtmf(null as never,'call-id', 'ab!!XY1', 0); // only a, b, 1 survive (XY out)
     expect(fetchMock).toHaveBeenCalledTimes(3);
     const digits = fetchMock.mock.calls.map(
       (c) => JSON.parse((c[1] as { body: string }).body).digits,
@@ -58,13 +58,13 @@ describe('TelnyxBridge.sendDtmf', () => {
 
   it('no-ops when digits string is empty', async () => {
     const bridge = new TelnyxBridge(makeConfig());
-    await bridge.sendDtmf('call-id', '', 0);
+    await bridge.sendDtmf(null as never,'call-id', '', 0);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('no-ops when telnyxKey is missing', async () => {
     const bridge = new TelnyxBridge({ ...makeConfig(), telnyxKey: undefined });
-    await bridge.sendDtmf('call-id', '123', 0);
+    await bridge.sendDtmf(null as never,'call-id', '123', 0);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -73,7 +73,7 @@ describe('TelnyxBridge.sendDtmf', () => {
     const bridge = new TelnyxBridge(makeConfig());
     const setTimeoutSpy = vi.spyOn(global, 'setTimeout');
 
-    const promise = bridge.sendDtmf('call-id', '12', 500);
+    const promise = bridge.sendDtmf(null as never,'call-id', '12', 500);
     // Advance through fake timers in between digits.
     await vi.advanceTimersByTimeAsync(500);
     await promise;

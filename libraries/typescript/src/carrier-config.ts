@@ -7,9 +7,11 @@
  * the user to open the Twilio/Telnyx console.
  */
 import { getLogger } from './logger';
+import type { CarrierKind } from './types';
 
 const TWILIO_API_BASE = 'https://api.twilio.com/2010-04-01';
 const TELNYX_API_BASE = 'https://api.telnyx.com/v2';
+const PLIVO_API_BASE = 'https://api.plivo.com/v1';
 
 interface TwilioIncomingNumber {
   sid: string;
@@ -98,21 +100,67 @@ export async function configureTelnyxNumber(
 }
 
 /**
+ * Point a Plivo number's inbound answer flow at our embedded server.
+ *
+ * Plivo routes inbound calls through an Application, so we create (or reuse)
+ * an application bound to `answerUrl` and link the number to it. Mirrors
+ * Python's `PlivoAdapter.configure_number()`.
+ */
+export async function configurePlivoNumber(
+  authId: string,
+  authToken: string,
+  phoneNumber: string,
+  answerUrl: string,
+): Promise<void> {
+  const auth = `Basic ${Buffer.from(`${authId}:${authToken}`).toString('base64')}`;
+  const base = `${PLIVO_API_BASE}/Account/${encodeURIComponent(authId)}`;
+  const appResp = await fetch(`${base}/Application/`, {
+    method: 'POST',
+    headers: { Authorization: auth, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      app_name: 'patter-inbound',
+      answer_url: answerUrl,
+      answer_method: 'POST',
+    }),
+  });
+  if (!appResp.ok) {
+    throw new Error(`Plivo Application create failed: ${appResp.status} ${await appResp.text()}`);
+  }
+  const appBody = (await appResp.json()) as { app_id?: string };
+  if (!appBody.app_id) {
+    getLogger().warn('Plivo Application create returned no app_id');
+    return;
+  }
+  const linkResp = await fetch(`${base}/Number/${encodeURIComponent(phoneNumber)}/`, {
+    method: 'POST',
+    headers: { Authorization: auth, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ app_id: appBody.app_id }),
+  });
+  if (!linkResp.ok) {
+    throw new Error(`Plivo Number update failed: ${linkResp.status} ${await linkResp.text()}`);
+  }
+}
+
+/**
  * Best-effort auto-configuration invoked from `serve()` once the public
  * hostname is known. Any failure is logged and swallowed — the user can
  * still set the webhook manually in the provider console.
  */
 export async function autoConfigureCarrier(params: {
-  telephonyProvider?: 'twilio' | 'telnyx';
+  telephonyProvider?: CarrierKind;
   twilioSid?: string;
   twilioToken?: string;
   telnyxKey?: string;
   telnyxConnectionId?: string;
+  plivoAuthId?: string;
+  plivoAuthToken?: string;
   phoneNumber: string;
   webhookHost: string;
 }): Promise<void> {
   const log = getLogger();
-  const provider = params.telephonyProvider ?? (params.twilioSid ? 'twilio' : 'telnyx');
+  const provider =
+    params.telephonyProvider ??
+    (params.twilioSid ? 'twilio' : params.plivoAuthId ? 'plivo' : 'telnyx');
 
   if (provider === 'twilio' && params.twilioSid && params.twilioToken) {
     const voiceUrl = `https://${params.webhookHost}/webhooks/twilio/voice`;
@@ -132,6 +180,18 @@ export async function autoConfigureCarrier(params: {
       log.info('Telnyx number %s associated with connection %s', params.phoneNumber, params.telnyxConnectionId);
     } catch (err) {
       log.warn('Could not auto-configure Telnyx number: %s', err instanceof Error ? err.message : String(err));
+    }
+    return;
+  }
+
+  if (provider === 'plivo' && params.plivoAuthId && params.plivoAuthToken) {
+    const answerUrl = `https://${params.webhookHost}/webhooks/plivo/voice`;
+    try {
+      await configurePlivoNumber(params.plivoAuthId, params.plivoAuthToken, params.phoneNumber, answerUrl);
+      log.info('Plivo answer URL set to %s', answerUrl);
+    } catch (err) {
+      log.warn('Could not auto-configure Plivo answer URL: %s', err instanceof Error ? err.message : String(err));
+      log.info('Set the Plivo application answer URL manually to: %s', answerUrl);
     }
   }
 }

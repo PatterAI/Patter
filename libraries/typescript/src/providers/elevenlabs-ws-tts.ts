@@ -118,6 +118,8 @@ interface ElevenLabsWsMessage {
 const CARRIER_NATIVE_FORMAT: Readonly<Record<string, string>> = {
   twilio: 'ulaw_8000',
   telnyx: 'pcm_16000',
+  // Plivo streams mulaw 8 kHz (we pin contentType in the answer XML).
+  plivo: 'ulaw_8000',
 };
 
 /**

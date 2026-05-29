@@ -57,6 +57,16 @@ _PREWARM_TTL_GRACE_S = 5.0
 # typical ring + AMD windows (Twilio ~25 s, Telnyx ~25 s).
 _PARKED_CONN_TTL_S = 30.0
 
+# Wire format the OpenAI Realtime parked-connection should emit per carrier.
+# Single source of truth — keeps the prewarm-parking path from sprinkling
+# carrier-name checks. Carriers absent from this map fall back to ``pcm16``.
+_CARRIER_REALTIME_AUDIO_FORMAT: dict[str, str] = {
+    "twilio": "g711_ulaw",
+    "plivo": "g711_ulaw",
+    "telnyx": "pcm16",
+}
+
+
 
 _CLOUD_NOT_IMPLEMENTED_MSG = (
     "Patter Cloud is not yet available in this SDK release. Use local mode "
@@ -226,6 +236,8 @@ class Patter:
         telnyx_key = ""
         telnyx_connection_id = ""
         telnyx_public_key = ""
+        plivo_auth_id = ""
+        plivo_auth_token = ""
 
         if carrier_kind == "twilio":
             twilio_sid = carrier_creds["account_sid"]
@@ -234,6 +246,9 @@ class Patter:
             telnyx_key = carrier_creds["api_key"]
             telnyx_connection_id = carrier_creds["connection_id"]
             telnyx_public_key = carrier_creds.get("public_key", "")
+        elif carrier_kind == "plivo":
+            plivo_auth_id = carrier_creds["auth_id"]
+            plivo_auth_token = carrier_creds["auth_token"]
 
         # --- Local mode validation (only when a carrier is provided) ---
         if carrier_kind is not None:
@@ -249,6 +264,8 @@ class Patter:
             telnyx_key=telnyx_key,
             telnyx_connection_id=telnyx_connection_id,
             telnyx_public_key=telnyx_public_key,
+            plivo_auth_id=plivo_auth_id,
+            plivo_auth_token=plivo_auth_token,
             phone_number=phone_number,
             webhook_url=webhook_url,
             persist_root=_resolve_persist_root(persist),
@@ -414,7 +431,8 @@ class Patter:
 
     @staticmethod
     def _unpack_carrier(carrier: Any) -> tuple[str | None, dict]:
-        """Convert a ``Twilio(...)``/``Telnyx(...)`` instance to kind + creds.
+        """Convert a ``Twilio(...)``/``Telnyx(...)``/``Plivo(...)`` instance to
+        kind + creds.
 
         Returns ``(None, {})`` when *carrier* is ``None``. Raises
         :class:`TypeError` if the argument does not expose a ``.kind`` attribute
@@ -423,6 +441,7 @@ class Patter:
         if carrier is None:
             return None, {}
         # Import lazily to keep the module import graph flat.
+        from getpatter.carriers.plivo import Carrier as _Plivo
         from getpatter.carriers.telnyx import Carrier as _Telnyx
         from getpatter.carriers.twilio import Carrier as _Twilio
 
@@ -437,8 +456,14 @@ class Patter:
                 "connection_id": carrier.connection_id,
                 "public_key": carrier.public_key,
             }
+        if isinstance(carrier, _Plivo):
+            return "plivo", {
+                "auth_id": carrier.auth_id,
+                "auth_token": carrier.auth_token,
+            }
         raise TypeError(
-            f"carrier= must be a Twilio(...) or Telnyx(...) instance, got {type(carrier).__name__}"
+            "carrier= must be a Twilio(...), Telnyx(...) or Plivo(...) instance, "
+            f"got {type(carrier).__name__}"
         )
 
     @staticmethod
@@ -766,6 +791,61 @@ class Patter:
             # user explicitly sets ``agent.prewarm=False``.
             if getattr(agent, "prewarm", True) is not False:
                 self._park_provider_connections(agent, call_id, carrier="telnyx")
+        elif config.telephony_provider == "plivo":
+            from getpatter.providers.plivo_adapter import PlivoAdapter  # type: ignore[import]
+
+            adapter = PlivoAdapter(
+                auth_id=config.plivo_auth_id,
+                auth_token=config.plivo_auth_token,
+            )
+            # Plivo fetches ``answer_url`` on pickup and that handler returns
+            # the ``<Stream>`` XML — so the WSS path is unused as a dial param
+            # (retained only for TelephonyProvider parity). The same
+            # ``/webhooks/plivo/voice`` route serves inbound and outbound.
+            stream_url = f"wss://{config.webhook_url}/ws/plivo/stream/outbound"
+            answer_url = f"https://{config.webhook_url}/webhooks/plivo/voice"
+            status_url = f"https://{config.webhook_url}/webhooks/plivo/status"
+            amd_url = f"https://{config.webhook_url}/webhooks/plivo/amd"
+            call_id = await adapter.initiate_call(
+                config.phone_number or from_number,
+                to,
+                stream_url,
+                answer_url=answer_url,
+                # hangup_url is Plivo's StatusCallback analogue — without it,
+                # the /webhooks/plivo/status route never fires for outbound
+                # calls and the dashboard misses no-answer / busy / failed.
+                hangup_url=status_url,
+                ring_timeout=ring_timeout,
+                machine_detection=wants_amd,
+                machine_detection_url=amd_url if wants_amd else "",
+            )
+            logger.info("Outbound call initiated: %s", call_id)
+            initiated_payload = {
+                "call_id": call_id,
+                "caller": config.phone_number or from_number,
+                "callee": to,
+                "direction": "outbound",
+                "status": "initiated",
+            }
+            if (
+                self._server is not None
+                and getattr(self._server, "_metrics_store", None) is not None
+            ):
+                try:
+                    self._server._metrics_store.record_call_initiated(initiated_payload)
+                except Exception as exc:
+                    logger.debug("record_call_initiated: %s", exc)
+            try:
+                from getpatter.dashboard.persistence import notify_dashboard
+
+                asyncio.create_task(notify_dashboard(initiated_payload))
+            except Exception:
+                pass
+            self._spawn_prewarm_first_message(
+                agent, call_id, ring_timeout=ring_timeout, carrier="plivo"
+            )
+            if getattr(agent, "prewarm", True) is not False:
+                self._park_provider_connections(agent, call_id, carrier="plivo")
 
     # === Pre-warm helpers ===
 
@@ -953,8 +1033,13 @@ class Patter:
                     # Carrier-derived placeholder; the GA adapter's session
                     # always emits ``audio/pcm @ 24000`` regardless of this
                     # value (it transcodes mulaw↔pcm internally), so any
-                    # non-None value keeps the parent class happy.
-                    "audio_format": "g711_ulaw" if carrier == "twilio" else "pcm16",
+                    # non-None value keeps the parent class happy. Looked up
+                    # via ``_CARRIER_REALTIME_AUDIO_FORMAT`` so the
+                    # "Plivo is like Twilio audio-wise" decision lives in
+                    # exactly one place.
+                    "audio_format": _CARRIER_REALTIME_AUDIO_FORMAT.get(
+                        carrier or "", "pcm16"
+                    ),
                 }
                 reasoning_effort = getattr(
                     agent, "openai_realtime_reasoning_effort", None
@@ -2009,6 +2094,20 @@ class Patter:
             await asyncio.to_thread(
                 lambda: api.request("post", f"/v2/calls/{call_sid}/actions/hangup")
             )
+        elif telephony == "plivo":
+            if not cfg.plivo_auth_id or not cfg.plivo_auth_token:
+                raise ValueError(
+                    "Plivo credentials not configured on this Patter instance"
+                )
+            from getpatter.providers.plivo_adapter import PlivoAdapter
+
+            adapter = PlivoAdapter(
+                auth_id=cfg.plivo_auth_id, auth_token=cfg.plivo_auth_token
+            )
+            try:
+                await adapter.end_call(call_sid)
+            finally:
+                await adapter.close()
         else:
             raise ValueError(
                 f"end_call() requires a configured carrier; got telephony_provider={telephony!r}"

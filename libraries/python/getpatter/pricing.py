@@ -305,7 +305,7 @@ DEFAULT_PRICING: dict[str, dict] = {
     # twilio default = US inbound local (the 99% case for voice agents
     # receiving calls on a local number). For US toll-free inbound ($0.022/min)
     # or US outbound local ($0.0140/min), override via Patter(pricing={...}).
-    "twilio": {"unit": PricingUnit.MINUTE, "price": 0.0085},
+    "twilio": {"unit": PricingUnit.MINUTE, "price": 0.0085, "round_up": True},
     # Telnyx — direction-aware rates as of 2026-05-11.
     # Sources:
     #   https://telnyx.com/pricing/elastic-sip
@@ -325,6 +325,18 @@ DEFAULT_PRICING: dict[str, dict] = {
     "telnyx": {"unit": PricingUnit.MINUTE, "price": 0.007},
     "telnyx_inbound": {"unit": PricingUnit.MINUTE, "price": 0.0035},
     "telnyx_outbound": {"unit": PricingUnit.MINUTE, "price": 0.007},
+    # Plivo — official US pay-as-you-go voice rates (per minute; Plivo rounds
+    # partial minutes up like Twilio). Source: https://www.plivo.com/voice/pricing/
+    #   US local inbound:   $0.0055/min
+    #   US local outbound:  $0.0115/min
+    #   US toll-free inbound: $0.0180/min (override via Patter(pricing=...))
+    # The flat ``plivo`` key defaults to inbound local (the 99% case for an
+    # inbound voice agent); the metrics layer uses it since direction is not
+    # threaded through ``calculate_telephony_cost``. The actual billed amount
+    # is reconciled post-call from the Plivo CDR (``total_amount``).
+    "plivo": {"unit": PricingUnit.MINUTE, "price": 0.0055, "round_up": True},
+    "plivo_inbound": {"unit": PricingUnit.MINUTE, "price": 0.0055, "round_up": True},
+    "plivo_outbound": {"unit": PricingUnit.MINUTE, "price": 0.0115, "round_up": True},
 }
 
 
@@ -657,7 +669,7 @@ def calculate_telephony_cost(
     config = pricing.get(provider, {})
     if config.get("unit") != "minute":
         return 0.0
-    if provider == "twilio":
+    if config.get("round_up"):
         minutes = math.ceil(duration_seconds / 60.0)
     else:
         minutes = duration_seconds / 60.0

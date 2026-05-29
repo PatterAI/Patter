@@ -2,8 +2,8 @@
 
 Each submodule exposes a ``Carrier`` frozen dataclass carrying the minimal
 credentials needed to dispatch to the matching provider in Phase 2. The
-``.kind`` property returns a stable string (``"twilio"`` / ``"telnyx"``)
-for runtime narrowing.
+``.kind`` property returns a stable string (``"twilio"`` / ``"telnyx"`` /
+``"plivo"``) for runtime narrowing.
 
 Usage::
 
@@ -13,4 +13,4 @@ Usage::
 
 from __future__ import annotations
 
-__all__ = ["twilio", "telnyx"]
+__all__ = ["twilio", "telnyx", "plivo"]

@@ -10,6 +10,11 @@ import { WebSocketServer, WebSocket as WSWebSocket } from 'ws';
 import { OpenAIRealtimeAdapter } from './providers/openai-realtime';
 import { OpenAIRealtime2Adapter } from './providers/openai-realtime-2';
 import { ElevenLabsConvAIAdapter } from './providers/elevenlabs-convai';
+import { PlivoAdapter, dropPlivoVoicemail } from './providers/plivo-adapter';
+import { PlivoBridge, classifyPlivoAmd, validatePlivoSignature } from './telephony/plivo';
+// Re-export so existing imports from './server' keep working after the
+// extraction of PlivoBridge into ./telephony/plivo.
+export { PlivoBridge } from './telephony/plivo';
 import { createSTT } from './provider-factory';
 import type { STTAdapter } from './provider-factory';
 import { CallMetricsAccumulator } from './metrics';
@@ -20,7 +25,7 @@ import { RemoteMessageHandler } from './remote-message';
 import { StreamHandler, sanitizeLogValue } from './stream-handler';
 import { getLogger } from './logger';
 import type { TelephonyBridge } from './stream-handler';
-import type { AgentOptions, PipelineMessageHandler, MachineDetectionResult } from './types';
+import type { AgentOptions, PipelineMessageHandler, MachineDetectionResult, CarrierKind } from './types';
 import { CallLogger, resolveLogRoot } from './services/call-log';
 
 /** Resolved configuration consumed by `EmbeddedServer` (carrier credentials, webhook URL, etc.). */
@@ -30,9 +35,13 @@ export interface LocalConfig {
   openaiKey?: string;
   phoneNumber: string;
   webhookUrl: string;
-  telephonyProvider?: 'twilio' | 'telnyx';
+  telephonyProvider?: CarrierKind;
   telnyxKey?: string;
   telnyxConnectionId?: string;
+  /** Plivo Auth ID — HTTP Basic username for the Plivo REST API. */
+  plivoAuthId?: string;
+  /** Plivo Auth Token — Basic password AND the V3 webhook signature key. */
+  plivoAuthToken?: string;
   /**
    * Telnyx Ed25519 public key (base64-encoded, DER/SPKI format) used to verify
    * incoming webhook signatures. Obtain from the Telnyx portal under
@@ -412,6 +421,7 @@ export function buildAIAdapter(config: LocalConfig, agent: AgentOptions, resolve
 class TwilioBridge implements TelephonyBridge {
   readonly label = 'Twilio';
   readonly telephonyProvider = 'twilio' as const;
+  readonly inputWireFormat = 'ulaw_8000' as const;
 
   constructor(private readonly config: LocalConfig) {}
 
@@ -531,6 +541,11 @@ async function sleep(ms: number): Promise<void> {
 export class TelnyxBridge implements TelephonyBridge {
   readonly label = 'Telnyx';
   readonly telephonyProvider = 'telnyx' as const;
+  // ``streaming_start`` negotiates PCMU bidirectional by default — keeping
+  // ``ulaw_8000`` here matches what TwilioBridge does and keeps the stream
+  // handler's input-transcode branch in the right shape. If a deployment
+  // overrides the negotiation to L16, this should flip to ``pcm_16000``.
+  readonly inputWireFormat = 'ulaw_8000' as const;
 
   constructor(private readonly config: LocalConfig) {}
 
@@ -564,7 +579,7 @@ export class TelnyxBridge implements TelephonyBridge {
     getLogger().info(`Telnyx call transferred to ${toNumber}`);
   }
 
-  async sendDtmf(callId: string, digits: string, delayMs: number): Promise<void> {
+  async sendDtmf(_ws: WSWebSocket, callId: string, digits: string, delayMs: number): Promise<void> {
     if (!digits) {
       getLogger().warn('TelnyxBridge.sendDtmf called with empty digits');
       return;
@@ -1259,6 +1274,137 @@ export class EmbeddedServer {
       return res.status(200).send();
     });
 
+    // --- Plivo ---
+
+    // Verify the X-Plivo-Signature-V3 header (V3 = HMAC-SHA256 of url + nonce).
+    // Returns false (and writes the error response) to short-circuit the route.
+    // Works for both POST (voice/status/amd) and GET (transfer) since V3 signs
+    // only the URL and nonce, independent of method or body.
+    const validatePlivoRequest = (req: express.Request, res: express.Response): boolean => {
+      const authToken = this.config.plivoAuthToken;
+      if (!authToken) {
+        if (this.config.requireSignature !== false) {
+          getLogger().error(
+            'Plivo webhook rejected: plivoAuthToken not configured and requireSignature is not false',
+          );
+          res.status(503).send('Webhook signature required');
+          return false;
+        }
+        return true;
+      }
+      const signature = (req.headers['x-plivo-signature-v3'] as string) || '';
+      const nonce = (req.headers['x-plivo-signature-v3-nonce'] as string) || '';
+      const url = `https://${this.config.webhookUrl}${req.originalUrl}`;
+      if (!validatePlivoSignature(url, nonce, signature, authToken)) {
+        getLogger().warn('Plivo webhook rejected: invalid or missing V3 signature');
+        res.status(403).send('Invalid signature');
+        return false;
+      }
+      return true;
+    };
+
+    app.post('/webhooks/plivo/voice', (req, res) => {
+      if (!validatePlivoRequest(req, res)) return;
+      const body = (req.body ?? {}) as Record<string, string>;
+      // Plivo posts CallUUID + From/To on the answer_url for inbound AND
+      // answered-outbound calls — the same route serves both.
+      const callUuid = body['CallUUID'] ?? '';
+      const caller = body['From'] ?? '';
+      const callee = body['To'] ?? '';
+      const qs = `?caller=${encodeURIComponent(caller)}&callee=${encodeURIComponent(callee)}`;
+      const streamUrl = `wss://${this.config.webhookUrl}/ws/plivo/stream/${callUuid || 'outbound'}${qs}`;
+      const xml = PlivoAdapter.generateStreamXml(streamUrl, 'audio/x-mulaw;rate=8000', {
+        'X-PH-caller': caller,
+        'X-PH-callee': callee,
+      });
+      res.type('text/xml').send(xml);
+    });
+
+    app.post('/webhooks/plivo/status', (req, res) => {
+      if (!validatePlivoRequest(req, res)) return;
+      const body = (req.body ?? {}) as Record<string, string>;
+      const callUuid = body['CallUUID'] ?? '';
+      const callStatus = body['CallStatus'] ?? body['Status'] ?? '';
+      const duration = body['Duration'] ?? body['BillDuration'] ?? '';
+      getLogger().info(
+        `Plivo status ${sanitizeLogValue(callStatus)} for call ${sanitizeLogValue(callUuid)} (duration=${duration})`,
+      );
+      if (callUuid && callStatus) {
+        const extra: Record<string, unknown> = {};
+        const parsed = parseFloat(duration);
+        if (!Number.isNaN(parsed)) extra.duration_seconds = parsed;
+        this.metricsStore.updateCallStatus(callUuid, callStatus, extra);
+      }
+      if (
+        callUuid &&
+        ['no-answer', 'busy', 'failed', 'timeout', 'cancel'].includes(callStatus)
+      ) {
+        try {
+          this.recordPrewarmWaste(callUuid);
+        } catch (err) {
+          getLogger().debug(`recordPrewarmWaste threw: ${String(err)}`);
+        }
+      }
+      res.status(200).send();
+    });
+
+    app.post('/webhooks/plivo/amd', async (req, res) => {
+      if (!validatePlivoRequest(req, res)) return;
+      const body = (req.body ?? {}) as Record<string, string>;
+      const callUuid = body['CallUUID'] ?? '';
+      // Plivo's async AMD result field name varies by API version — accept the
+      // common spellings; classifyPlivoAmd normalises them.
+      const amdRaw =
+        body['Machine'] || body['MachineDetection'] || body['AnsweredBy'] || body['CallStatus'] || '';
+      getLogger().info(`AMD result for ${sanitizeLogValue(callUuid)}: ${sanitizeLogValue(amdRaw)}`);
+      const classification = classifyPlivoAmd(amdRaw);
+
+      const cb = this.onMachineDetection;
+      if (cb && callUuid) {
+        try {
+          await cb({
+            call_id: callUuid,
+            carrier: 'plivo',
+            classification,
+            raw: amdRaw,
+            detected_at: Date.now() / 1000,
+          });
+        } catch (err) {
+          getLogger().warn(`onMachineDetection callback threw: ${sanitizeLogValue(String(err))}`);
+        }
+      }
+
+      if (classification === 'machine' && callUuid) {
+        try {
+          this.recordPrewarmWaste(callUuid);
+        } catch (err) {
+          getLogger().debug(`recordPrewarmWaste threw: ${String(err)}`);
+        }
+        if (this.voicemailMessage && this.config.plivoAuthId && this.config.plivoAuthToken) {
+          await dropPlivoVoicemail(
+            callUuid,
+            this.voicemailMessage,
+            this.config.plivoAuthId,
+            this.config.plivoAuthToken,
+          );
+        }
+      }
+      res.status(200).send();
+    });
+
+    // Blind-transfer target XML: the ``aleg_url`` PlivoBridge.transferCall
+    // redirects the A-leg to. Served for GET and POST (Plivo may use either).
+    app.all('/webhooks/plivo/transfer', (req, res) => {
+      if (!validatePlivoRequest(req, res)) return;
+      const to = String((req.query.to as string) ?? '');
+      if (!to || !/^\+[1-9]\d{6,14}$/.test(to)) {
+        getLogger().warn(`Plivo transfer XML: invalid target ${JSON.stringify(to)}`);
+        res.type('text/xml').send('<Response><Hangup/></Response>');
+        return;
+      }
+      res.type('text/xml').send(`<Response><Dial><Number>${xmlEscape(to)}</Number></Dial></Response>`);
+    });
+
     this.server = createServer(app);
     this.wss = new WebSocketServer({ noServer: true });
 
@@ -1300,9 +1446,11 @@ export class EmbeddedServer {
         this.activeConnections.delete(ws);
       });
 
-      const isTelnyx = this.config.telephonyProvider === 'telnyx';
-      if (isTelnyx) {
+      const provider = this.config.telephonyProvider;
+      if (provider === 'telnyx') {
         this.handleTelnyxStream(ws, url);
+      } else if (provider === 'plivo') {
+        this.handlePlivoStream(ws, url);
       } else {
         this.handleTwilioStream(ws, url);
       }
@@ -1703,6 +1851,71 @@ export class EmbeddedServer {
   }
 
   // ---------------------------------------------------------------------------
+  // Plivo WebSocket message parser (thin layer)
+  // ---------------------------------------------------------------------------
+
+  private handlePlivoStream(ws: WSWebSocket, url: URL): void {
+    const caller = url.searchParams.get('caller') ?? '';
+    const callee = url.searchParams.get('callee') ?? '';
+    const bridge = new PlivoBridge(this.config);
+    const handler = new StreamHandler(this.buildStreamHandlerDeps(bridge), ws, caller, callee);
+
+    ws.on('message', async (raw) => {
+      try {
+        // Plivo media-stream frames: ``start`` (callId/streamId/mediaFormat),
+        // ``media``, ``playedStream`` (checkpoint ack ≈ Twilio mark), ``dtmf``,
+        // ``clearedAudio`` / ``playFailed`` / ``error``, ``stop``. Mirror of
+        // the Python ``plivo_stream_bridge``.
+        let data: {
+          event?: string;
+          start?: { callId?: string; streamId?: string; mediaFormat?: { encoding?: string; sampleRate?: number } };
+          media?: { payload?: string };
+          dtmf?: { digit?: string };
+          name?: string;
+          reason?: string;
+        };
+        try {
+          data = JSON.parse(raw.toString()) as typeof data;
+        } catch (e) {
+          getLogger().error('Failed to parse Plivo WS message:', e);
+          return;
+        }
+        const event = data.event ?? '';
+
+        if (event === 'start') {
+          // Plivo's CallUUID arrives here as ``callId`` and is the id used for
+          // hangup / transfer / recording / cost REST calls.
+          handler.setStreamSid(data.start?.streamId ?? '');
+          const callId = data.start?.callId ?? '';
+          if (callId) this.activeCallIds.set(ws, callId);
+          await handler.handleCallStart(callId);
+        } else if (event === 'media') {
+          const payload = data.media?.payload ?? '';
+          if (payload) handler.handleAudio(Buffer.from(payload, 'base64'));
+        } else if (event === 'playedStream') {
+          // Checkpoint acknowledgement — the analogue of a Twilio mark.
+          const markName = String(data.name ?? '');
+          if (markName) await handler.onMark(markName);
+        } else if (event === 'dtmf') {
+          const digit = String(data.dtmf?.digit ?? '').trim();
+          if (digit) await handler.handleDtmf(digit);
+        } else if (event === 'playFailed' || event === 'error') {
+          getLogger().warn(`Plivo ${event}: ${data.reason ?? 'unknown'}`);
+        } else if (event === 'stop') {
+          await handler.handleStop();
+        }
+      } catch (err) {
+        getLogger().error('Stream handler error (Plivo):', err);
+      }
+    });
+
+    ws.on('close', async () => {
+      this.activeCallIds.delete(ws);
+      await handler.handleWsClose();
+    });
+  }
+
+  // ---------------------------------------------------------------------------
   // Graceful shutdown
   // ---------------------------------------------------------------------------
 
@@ -1724,10 +1937,15 @@ export class EmbeddedServer {
     });
 
     // 2. Hang up all active telephony calls via provider API
-    const isTelnyx = this.config.telephonyProvider === 'telnyx';
+    const provider = this.config.telephonyProvider;
     for (const [ws, callId] of this.activeCallIds) {
       try {
-        const bridge = isTelnyx ? new TelnyxBridge(this.config) : new TwilioBridge(this.config);
+        const bridge =
+          provider === 'telnyx'
+            ? new TelnyxBridge(this.config)
+            : provider === 'plivo'
+              ? new PlivoBridge(this.config)
+              : new TwilioBridge(this.config);
         await bridge.endCall(callId, ws);
       } catch { /* best effort */ }
     }

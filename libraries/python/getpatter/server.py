@@ -197,6 +197,60 @@ def _validate_telnyx_signature(
     return False
 
 
+def _classify_plivo_amd(result: str) -> str:
+    """Map a Plivo AMD result to the carrier-agnostic classification
+    (``human`` / ``machine`` / ``fax`` / ``unknown``).
+
+    Plivo's async machine-detection callback reports the outcome via a
+    result field; values vary by API version so we match the common shapes
+    defensively (``human`` / ``person`` → human, anything starting with
+    ``machine`` plus ``answering_machine`` / ``amd`` / ``true`` → machine).
+    Anything unrecognised collapses to ``unknown`` rather than raising.
+    Mirrors the TS helper in ``libraries/typescript/src/server.ts``.
+    """
+    r = (result or "").strip().lower()
+    if r in ("human", "person"):
+        return "human"
+    if r.startswith("machine") or r in ("answering_machine", "amd", "true"):
+        return "machine"
+    if r == "fax":
+        return "fax"
+    return "unknown"
+
+
+def _validate_plivo_signature(
+    url: str,
+    nonce: str,
+    signature: str,
+    auth_token: str,
+) -> bool:
+    """Verify a Plivo V3 webhook signature.
+
+    The V3 scheme signs ``url + nonce`` with HMAC-SHA256 keyed on the account
+    ``auth_token`` and base64-encodes the digest. The ``X-Plivo-Signature-V3``
+    header may carry multiple comma-separated signatures during key rotation;
+    accept the request if any one matches. Returns False when any step fails
+    (missing inputs, no match). Mirrors the TS ``validatePlivoSignature``.
+    """
+    if not signature or not nonce or not auth_token:
+        return False
+    import hashlib
+    import hmac
+
+    expected = base64.b64encode(
+        hmac.new(
+            auth_token.encode("utf-8"),
+            (url + nonce).encode("utf-8"),
+            hashlib.sha256,
+        ).digest()
+    ).decode("ascii")
+    for raw_sig in signature.split(","):
+        raw_sig = raw_sig.strip()
+        if raw_sig and hmac.compare_digest(raw_sig, expected):
+            return True
+    return False
+
+
 class EmbeddedServer:
     """Self-contained server that handles Twilio/Telnyx webhooks and streams.
 
@@ -446,6 +500,10 @@ class EmbeddedServer:
 
     def _create_app(self):
         """Build the FastAPI application with webhook + stream routes."""
+        from getpatter.telephony.plivo import (
+            plivo_stream_bridge,
+            plivo_webhook_handler,
+        )
         from getpatter.telephony.telnyx import telnyx_stream_bridge
         from getpatter.telephony.twilio import (
             twilio_stream_bridge,
@@ -1022,6 +1080,224 @@ class EmbeddedServer:
                 else:
                     self._ws_conn_counts[client_ip] = remaining
 
+        # --- Plivo ---
+
+        def _validate_plivo_request(request: Request):
+            """Verify the ``X-Plivo-Signature-V3`` header (V3 = HMAC-SHA256 of
+            ``url + nonce``).
+
+            Returns ``None`` on success or a :class:`Response` (403/503) to
+            short-circuit the route. Works for both POST (voice / status / amd)
+            and GET (transfer) routes because V3 signs only the URL and nonce,
+            independent of the HTTP method or body. Fails closed when no
+            ``plivo_auth_token`` is configured and ``require_signature`` is True.
+            """
+            auth_token = self.config.plivo_auth_token
+            require_sig = getattr(self.config, "require_signature", True)
+            if not auth_token:
+                if require_sig:
+                    logger.error(
+                        "Plivo webhook rejected: plivo_auth_token not configured "
+                        "and require_signature=True. Set plivo_auth_token, or "
+                        "explicitly opt out with LocalConfig(require_signature=False)."
+                    )
+                    return Response(
+                        status_code=503, content="Webhook signature required"
+                    )
+                return None
+            signature = request.headers.get("X-Plivo-Signature-V3", "")
+            nonce = request.headers.get("X-Plivo-Signature-V3-Nonce", "")
+            # Reconstruct the exact public URL Plivo signed (the answer_url /
+            # callback we registered), independent of any proxy/tunnel rewrite.
+            req_url = request.url
+            if hasattr(req_url, "path"):
+                path_and_query = req_url.path
+                if getattr(req_url, "query", ""):
+                    path_and_query += "?" + req_url.query
+                url = f"https://{self.config.webhook_url}{path_and_query}"
+            else:
+                url = str(req_url).replace("http://", "https://")
+            if not _validate_plivo_signature(url, nonce, signature, auth_token):
+                logger.warning(
+                    "Plivo webhook rejected: invalid or missing V3 signature"
+                )
+                return Response(status_code=403, content="Invalid signature")
+            return None
+
+        @app.post("/webhooks/plivo/voice")
+        async def plivo_voice(request: Request):
+            sig_err = _validate_plivo_request(request)
+            if sig_err is not None:
+                return sig_err
+            form = await request.form()
+            # Plivo posts CallUUID + From/To on the answer_url for both inbound
+            # and answered-outbound calls. The same route serves both.
+            call_uuid = form.get("CallUUID", "")
+            caller = form.get("From", "")
+            callee = form.get("To", "")
+            xml = plivo_webhook_handler(
+                call_uuid or "outbound", caller, callee, self.config.webhook_url
+            )
+            return Response(content=xml, media_type="text/xml")
+
+        @app.post("/webhooks/plivo/status")
+        async def plivo_status_callback(request: Request):
+            sig_err = _validate_plivo_request(request)
+            if sig_err is not None:
+                return sig_err
+            form = await request.form()
+            call_uuid = form.get("CallUUID", "")
+            # Plivo's hangup_url posts CallStatus (completed / busy / no-answer
+            # / failed / timeout / cancel) once the call ends.
+            call_status = form.get("CallStatus", "") or form.get("Status", "")
+            duration = form.get("Duration", "") or form.get("BillDuration", "")
+            logger.info(
+                "Plivo status %s for call %s (duration=%s)",
+                sanitize_log_value(call_status),
+                sanitize_log_value(call_uuid),
+                sanitize_log_value(duration),
+            )
+            if self._metrics_store is not None and call_uuid and call_status:
+                extra: dict = {}
+                if duration:
+                    try:
+                        extra["duration_seconds"] = float(duration)
+                    except ValueError:
+                        pass
+                self._metrics_store.update_call_status(
+                    call_uuid, call_status, **extra
+                )
+            if call_uuid and call_status in (
+                "no-answer",
+                "busy",
+                "failed",
+                "timeout",
+                "cancel",
+            ):
+                try:
+                    self.record_prewarm_waste(call_uuid)
+                except Exception as exc:  # noqa: BLE001 - defensive
+                    logger.debug("record_prewarm_waste raised: %s", exc)
+            return Response(content="", status_code=200)
+
+        @app.post("/webhooks/plivo/amd")
+        async def plivo_amd_callback(request: Request):
+            sig_err = _validate_plivo_request(request)
+            if sig_err is not None:
+                return sig_err
+            form = await request.form()
+            call_uuid = form.get("CallUUID", "")
+            # Plivo's async AMD result field name varies by API version —
+            # accept the common spellings; _classify_plivo_amd normalises them.
+            amd_raw = (
+                form.get("Machine", "")
+                or form.get("MachineDetection", "")
+                or form.get("AnsweredBy", "")
+                or form.get("CallStatus", "")
+            )
+            logger.info("AMD result for %s: %s", call_uuid, amd_raw)
+            classification = _classify_plivo_amd(amd_raw)
+
+            if self.on_machine_detection is not None and call_uuid:
+                try:
+                    result = MachineDetectionResult(
+                        call_id=call_uuid,
+                        carrier="plivo",
+                        classification=classification,
+                        raw=amd_raw,
+                        detected_at=time.time(),
+                    )
+                    cb_ret = self.on_machine_detection(result)
+                    if asyncio.iscoroutine(cb_ret):
+                        await cb_ret
+                except Exception as exc:
+                    logger.warning("on_machine_detection callback threw: %s", exc)
+
+            if classification == "machine" and call_uuid:
+                try:
+                    self.record_prewarm_waste(call_uuid)
+                except Exception as exc:  # noqa: BLE001 - defensive
+                    logger.debug("record_prewarm_waste raised: %s", exc)
+                if (
+                    self.voicemail_message
+                    and self.config.plivo_auth_id
+                    and self.config.plivo_auth_token
+                ):
+                    from getpatter.telephony.plivo import handle_amd_result
+
+                    await handle_amd_result(
+                        call_uuid=call_uuid,
+                        voicemail_message=self.voicemail_message,
+                        auth_id=self.config.plivo_auth_id,
+                        auth_token=self.config.plivo_auth_token,
+                    )
+            return Response(content="", status_code=200)
+
+        @app.api_route("/webhooks/plivo/transfer", methods=["GET", "POST"])
+        async def plivo_transfer_xml(request: Request):
+            # Returns the ``<Dial>`` XML that the blind-transfer ``aleg_url``
+            # redirects the A-leg to. Validated like every other Plivo webhook.
+            sig_err = _validate_plivo_request(request)
+            if sig_err is not None:
+                return sig_err
+            from getpatter.providers.plivo_adapter import _xml_escape
+            from getpatter.telephony.common import _validate_e164
+
+            to = request.query_params.get("to", "")
+            if not to or not _validate_e164(to):
+                logger.warning("Plivo transfer XML: invalid target %r", to)
+                return Response(
+                    content="<Response><Hangup/></Response>", media_type="text/xml"
+                )
+            xml = (
+                f"<Response><Dial><Number>{_xml_escape(to)}</Number></Dial></Response>"
+            )
+            return Response(content=xml, media_type="text/xml")
+
+        @app.websocket("/ws/plivo/stream/{call_id}")
+        async def plivo_stream_websocket(websocket: WebSocket, call_id: str):
+            # Per-IP DoS cap (mirrors the Twilio / Telnyx handlers).
+            client_ip = _client_ip_for_ws(websocket)
+            if self._ws_conn_counts[client_ip] >= MAX_WS_PER_IP:
+                logger.warning(
+                    "WebSocket upgrade rejected: too many connections from %s",
+                    client_ip,
+                )
+                await websocket.close(code=1008, reason="Too Many Requests")
+                return
+            self._ws_conn_counts[client_ip] += 1
+            self._active_connections.add(websocket)
+            try:
+                _start, _end, _metrics = self._wrap_callbacks()
+                await plivo_stream_bridge(
+                    websocket=websocket,
+                    agent=self.agent,
+                    pop_prewarm_audio=self.pop_prewarm_audio,
+                    pop_prewarmed_connections=self.pop_prewarmed_connections,
+                    openai_key=self.config.openai_key,
+                    on_call_start=_start,
+                    on_call_end=_end,
+                    on_transcript=self.on_transcript,
+                    on_message=self.on_message,
+                    deepgram_key=self.config.deepgram_key,
+                    elevenlabs_key=self.config.elevenlabs_key,
+                    plivo_auth_id=self.config.plivo_auth_id,
+                    plivo_auth_token=self.config.plivo_auth_token,
+                    webhook_host=self.config.webhook_url,
+                    recording=self.recording,
+                    on_metrics=_metrics,
+                    pricing=self.pricing,
+                    report_only_initial_ttfb=self.config.report_only_initial_ttfb,
+                    speech_events=getattr(self, "speech_events", None),
+                )
+            finally:
+                self._active_connections.discard(websocket)
+                remaining = self._ws_conn_counts[client_ip] - 1
+                if remaining <= 0:
+                    self._ws_conn_counts.pop(client_ip, None)
+                else:
+                    self._ws_conn_counts[client_ip] = remaining
+
         self._app = app
         return app
 
@@ -1067,6 +1343,37 @@ class EmbeddedServer:
                     self.config.webhook_url,
                 )
 
+        # Auto-configure the Plivo application answer URL if possible. Plivo
+        # routes inbound calls through an Application, so this is best-effort;
+        # most deployments pre-configure it in the Plivo console.
+        if (
+            self.config.telephony_provider == "plivo"
+            and self.config.plivo_auth_id
+            and self.config.webhook_url
+        ):
+            try:
+                from getpatter.providers.plivo_adapter import PlivoAdapter  # type: ignore[import]
+
+                adapter = PlivoAdapter(
+                    auth_id=self.config.plivo_auth_id,
+                    auth_token=self.config.plivo_auth_token,
+                )
+                webhook_url = f"https://{self.config.webhook_url}/webhooks/plivo/voice"
+                if not validate_webhook_url(webhook_url):
+                    raise ValueError(
+                        f"Refusing to configure Plivo with unsafe webhook URL: {webhook_url}"
+                    )
+                await adapter.configure_number(self.config.phone_number, webhook_url)
+                await adapter.close()
+                logger.info("Plivo answer URL set to %s", webhook_url)
+            except Exception as exc:
+                logger.warning("Could not auto-configure webhook: %s", exc)
+                logger.info(
+                    "Set the Plivo application answer URL manually to: "
+                    "https://%s/webhooks/plivo/voice",
+                    self.config.webhook_url,
+                )
+
         logger.info("Server starting on port %s", port)
         logger.info("Webhook URL: https://%s", self.config.webhook_url)
         logger.info("Phone:   %s", self.config.phone_number)
@@ -1088,6 +1395,13 @@ class EmbeddedServer:
             ):
                 logger.warning(
                     "Telnyx webhook enforcement ACTIVE but telnyx_public_key is empty "
+                    "— webhooks will 503. Set require_signature=False for local dev."
+                )
+            if provider == "plivo" and not getattr(
+                self.config, "plivo_auth_token", ""
+            ):
+                logger.warning(
+                    "Plivo webhook enforcement ACTIVE but plivo_auth_token is empty "
                     "— webhooks will 503. Set require_signature=False for local dev."
                 )
 

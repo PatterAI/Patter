@@ -76,6 +76,7 @@ from getpatter._public_api import Tool, tool, guardrail
 # Flat aliases for the 4-line quickstart.
 from getpatter.carriers.twilio import Carrier as Twilio
 from getpatter.carriers.telnyx import Carrier as Telnyx
+from getpatter.carriers.plivo import Carrier as Plivo
 from getpatter.engines.openai import Realtime as OpenAIRealtime
 from getpatter.engines.openai_realtime_2 import Realtime2 as OpenAIRealtime2
 from getpatter.engines.elevenlabs import ConvAI as ElevenLabsConvAI
@@ -115,6 +116,7 @@ from getpatter.llm.google import LLM as GoogleLLM
 # direct access to provider-specific APIs (e.g. custom webhook wiring).
 from getpatter.providers.twilio_adapter import TwilioAdapter
 from getpatter.providers.telnyx_adapter import TelnyxAdapter
+from getpatter.providers.plivo_adapter import PlivoAdapter
 
 
 # VAD — opt-in (needs the ``silero`` extra: numpy + onnxruntime). Loaded
@@ -408,6 +410,7 @@ __all__ = [
     "guardrail",
     "Twilio",
     "Telnyx",
+    "Plivo",
     "OpenAIRealtime",
     "OpenAIRealtime2",
     "OpenAIRealtime2Adapter",
@@ -434,6 +437,7 @@ __all__ = [
     "GoogleLLM",
     "TwilioAdapter",
     "TelnyxAdapter",
+    "PlivoAdapter",
     "TelnyxSTT",
     "TelnyxTTS",
     "SileroVAD",

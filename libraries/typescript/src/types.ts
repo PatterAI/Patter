@@ -5,6 +5,13 @@
 
 import type { Carrier as TwilioCarrier } from "./telephony/twilio";
 import type { Carrier as TelnyxCarrier } from "./telephony/telnyx";
+import type { Carrier as PlivoCarrier } from "./telephony/plivo";
+
+/** Discriminator string carried on every {@link Carrier}.kind and threaded
+ *  through every per-carrier dispatch in the SDK. The single source of truth
+ *  for "which carriers exist" — extending the SDK to a new carrier should
+ *  only require adding a literal here and to ``Carrier`` union sites. */
+export type CarrierKind = "twilio" | "telnyx" | "plivo";
 import type { Realtime } from "./engines/openai";
 import type { Realtime2 } from "./engines/openai-2";
 import type { ConvAI } from "./engines/elevenlabs";
@@ -153,7 +160,7 @@ export interface LocalOptions {
    * const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+1..." });
    * ```
    */
-  carrier: TwilioCarrier | TelnyxCarrier;
+  carrier: TwilioCarrier | TelnyxCarrier | PlivoCarrier;
   /**
    * Tunnel configuration. Accepts a tunnel instance, ``true`` (alias for
    * ``new CloudflareTunnel()``), or ``false`` / omitted (no tunnel).
@@ -564,7 +571,7 @@ export interface ServeOptions {
  */
 export interface MachineDetectionResult {
   readonly call_id: string;
-  readonly carrier: 'twilio' | 'telnyx';
+  readonly carrier: CarrierKind;
   /** Carrier-agnostic projection. Use this in app code unless you really need the raw provider value. */
   readonly classification: 'human' | 'machine' | 'fax' | 'unknown';
   /**

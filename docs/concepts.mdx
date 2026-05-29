@@ -58,6 +58,7 @@ The carrier puts the call on the internet. Patter ships two:
 |---|---|---|
 | `Twilio()` | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` | mulaw 8 kHz; webhook signature verification via HMAC-SHA1 |
 | `Telnyx()` | `TELNYX_API_KEY`, `TELNYX_CONNECTION_ID`, `TELNYX_PUBLIC_KEY` | PCM 16 kHz native; Ed25519 webhook verification |
+| `Plivo()` | `PLIVO_AUTH_ID`, `PLIVO_AUTH_TOKEN` | mulaw 8 kHz; V3 (HMAC-SHA256) webhook verification; native DTMF send |
 
 You pass one instance to `Patter(carrier=...)`. See [Carrier](/python-sdk/carrier).
 
@@ -169,6 +170,7 @@ The carriers don't all speak the same format. Patter transcodes so every STT / e
 |---|---|---|
 | Twilio | mulaw 8 kHz (`ulaw/8000`) | Decode to PCM 16 kHz in, encode back to mulaw out |
 | Telnyx | PCM 16 kHz (L16/16000) | Passthrough |
+| Plivo | mulaw 8 kHz (`audio/x-mulaw`) | Decode to PCM 16 kHz in, encode back to mulaw out |
 
 OpenAI TTS returns 24 kHz PCM — Patter resamples to 16 kHz before sending to the carrier. You never touch any of this.
 

@@ -11,6 +11,7 @@ export { defineTool } from "./tools/tool-decorator";
 export type { DefineToolInput, ParamSpec } from "./tools/tool-decorator";
 export type { Logger } from "./logger";
 export { getLogger, setLogger } from "./logger";
+export type { CarrierKind } from "./types";
 export type {
   IncomingMessage,
   STTConfig,
@@ -203,6 +204,8 @@ export { Carrier as Twilio } from "./telephony/twilio";
 export type { TwilioCarrierOptions } from "./telephony/twilio";
 export { Carrier as Telnyx } from "./telephony/telnyx";
 export type { TelnyxCarrierOptions } from "./telephony/telnyx";
+export { Carrier as Plivo } from "./telephony/plivo";
+export type { PlivoCarrierOptions } from "./telephony/plivo";
 
 // Realtime / ConvAI engines.
 export { Realtime as OpenAIRealtime } from "./engines/openai";
@@ -288,6 +291,11 @@ export type {
   InitiateCallResult as TelnyxInitiateCallResult,
   EndCallOptions as TelnyxEndCallOptions,
 } from "./providers/telnyx-adapter";
+export { PlivoAdapter } from "./providers/plivo-adapter";
+export type {
+  InitiateCallOptions as PlivoInitiateCallOptions,
+  InitiateCallResult as PlivoInitiateCallResult,
+} from "./providers/plivo-adapter";
 
 // Telnyx STT / TTS public enums (parity with Python — these were
 // previously defined but never re-exported from the package root).

@@ -20,7 +20,7 @@ import { RemoteMessageHandler, isRemoteUrl, isWebSocketUrl } from './remote-mess
 import { createHistoryManager } from './handler-utils';
 import { DefaultToolExecutor } from './llm-loop';
 import { MCPManager } from './tools/mcp-client';
-import type { AgentOptions, Guardrail, HookContext, PipelineMessageHandler, ToolDefinition, VADProvider } from './types';
+import type { AgentOptions, Guardrail, HookContext, PipelineMessageHandler, ToolDefinition, VADProvider, CarrierKind } from './types';
 import type { MetricsStore } from './dashboard/store';
 import { getLogger } from './logger';
 import { validateTwilioSid } from './server';
@@ -42,12 +42,18 @@ type AIAdapter = OpenAIRealtimeAdapter | ElevenLabsConvAIAdapter;
 // Telephony bridge — abstracts Twilio vs Telnyx wire differences
 // ---------------------------------------------------------------------------
 
-/** Provider-specific operations that differ between Twilio and Telnyx. */
+/** Provider-specific operations that differ between Twilio, Telnyx and Plivo. */
 export interface TelephonyBridge {
   /** Human-readable label for log messages. */
   readonly label: string;
   /** Telephony provider name for metrics. */
-  readonly telephonyProvider: 'twilio' | 'telnyx';
+  readonly telephonyProvider: CarrierKind;
+  /** Wire format of the inbound media stream after the carrier has accepted
+   *  the call. Lets the StreamHandler decide whether to decode + resample
+   *  inbound audio without needing carrier-name knowledge — mulaw 8 kHz
+   *  carriers (Twilio, Plivo) say ``ulaw_8000``, PCM 16 kHz carriers
+   *  (Telnyx with PCMU bidirectional negotiation off) say ``pcm_16000``. */
+  readonly inputWireFormat: 'ulaw_8000' | 'pcm_16000';
 
   /** Send an audio chunk (base64-encoded) to the telephony WebSocket. */
   sendAudio(ws: WSWebSocket, audioBase64: string, streamSid: string): void;
@@ -60,8 +66,9 @@ export interface TelephonyBridge {
   transferCall(callId: string, toNumber: string): Promise<void>;
   /** Hang up the call via provider API. */
   endCall(callId: string, ws: WSWebSocket): Promise<void>;
-  /** Send DTMF digits via provider API (optional; default no-op). */
-  sendDtmf?(callId: string, digits: string, delayMs: number): Promise<void>;
+  /** Send DTMF digits to the caller. Carriers using REST (Telnyx) ignore
+   *  ``ws``; carriers that send DTMF as a media-stream message (Plivo) use it. */
+  sendDtmf?(ws: WSWebSocket, callId: string, digits: string, delayMs: number): Promise<void>;
   /** Start call recording via provider API (optional). */
   startRecording?(callId: string): Promise<void>;
   /** Stop call recording via provider API (optional). */
@@ -1289,7 +1296,7 @@ export class StreamHandler {
       // resample on every inbound frame.
       if (
         this.adapter instanceof ElevenLabsConvAIAdapter &&
-        this.deps.bridge.telephonyProvider === 'twilio' &&
+        this.deps.bridge.inputWireFormat === 'ulaw_8000' &&
         this.adapter.inputAudioFormat !== 'ulaw_8000'
       ) {
         const pcm8k = mulawToPcm16(audioBuffer);
@@ -1690,18 +1697,18 @@ export class StreamHandler {
     // keep AEC off (default) and tune the VAD ``min_speech_duration`` if
     // bleed-driven false positives appear during firstMessage.
     if (this.deps.agent.echoCancellation) {
-      const carrier = this.deps.bridge.telephonyProvider;
-      if (carrier === 'twilio' || carrier === 'telnyx') {
-        getLogger().warn(
-          `echoCancellation: true on ${carrier} (PSTN). Server-side NLMS ` +
-            `cannot model PSTN's ~250–1500 ms round-trip echo with a ` +
-            `32 ms filter window — it will silently no-op. Best practice: ` +
-            `keep echoCancellation: false; rely on the carrier + caller ` +
-            `device's built-in echo suppression and Patter's self-hearing ` +
-            `guard. Enable AEC only for browser/native deployments where ` +
-            `the SDK owns the audio path end-to-end.`,
-        );
-      }
+      // Every ``CarrierKind`` today is a PSTN carrier (Twilio / Telnyx /
+      // Plivo), so the warning fires unconditionally. If a non-PSTN carrier
+      // ever lands, lift this onto ``TelephonyBridge`` as a property.
+      getLogger().warn(
+        `echoCancellation: true on ${this.deps.bridge.telephonyProvider} (PSTN). ` +
+          `Server-side NLMS cannot model PSTN's ~250–1500 ms round-trip echo ` +
+          `with a 32 ms filter window — it will silently no-op. Best practice: ` +
+          `keep echoCancellation: false; rely on the carrier + caller ` +
+          `device's built-in echo suppression and Patter's self-hearing ` +
+          `guard. Enable AEC only for browser/native deployments where ` +
+          `the SDK owns the audio path end-to-end.`,
+      );
       try {
         const { NlmsEchoCanceller } = await import('./audio/aec');
         this.aec = new NlmsEchoCanceller({ sampleRate: 16000 });

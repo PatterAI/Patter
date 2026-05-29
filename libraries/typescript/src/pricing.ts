@@ -49,6 +49,13 @@ export interface ProviderPricing {
    */
   unit: PricingUnitValue | string;
   price?: number;
+  /**
+   * Telephony-only: round partial minutes up to the next whole minute.
+   * Twilio and Plivo bill this way; Telnyx bills per-second so leaves it
+   * unset/false. Lets ``calculateTelephonyCost`` pick the rounding rule
+   * from the rate config instead of branching on the provider name.
+   */
+  roundUp?: boolean;
   audio_input_per_token?: number;
   audio_output_per_token?: number;
   text_input_per_token?: number;
@@ -317,7 +324,7 @@ export const DEFAULT_PRICING: Record<string, ProviderPricing> = {
   // twilio default = US inbound local (the 99% case for voice agents receiving
   // calls on a local number). For US toll-free inbound ($0.022/min) or US
   // outbound local ($0.0140/min), override via Patter({ pricing: { twilio: {...} } }).
-  twilio: { unit: PricingUnit.MINUTE, price: 0.0085 },
+  twilio: { unit: PricingUnit.MINUTE, price: 0.0085, roundUp: true },
   // Telnyx — direction-aware rates as of 2026-05-11.
   // Sources:
   //   https://telnyx.com/pricing/elastic-sip
@@ -336,6 +343,16 @@ export const DEFAULT_PRICING: Record<string, ProviderPricing> = {
   telnyx: { unit: PricingUnit.MINUTE, price: 0.007 },
   telnyx_inbound: { unit: PricingUnit.MINUTE, price: 0.0035 },
   telnyx_outbound: { unit: PricingUnit.MINUTE, price: 0.007 },
+  // Plivo — official US pay-as-you-go voice rates (per minute; Plivo rounds
+  // partial minutes up like Twilio). Source: https://www.plivo.com/voice/pricing/
+  //   US local inbound:    $0.0055/min
+  //   US local outbound:   $0.0115/min
+  //   US toll-free inbound: $0.0180/min (override via new Patter({ pricing }))
+  // The flat ``plivo`` key defaults to inbound local; the billed amount is
+  // also reconciled post-call from the Plivo CDR (``total_amount``).
+  plivo: { unit: PricingUnit.MINUTE, price: 0.0055, roundUp: true },
+  plivo_inbound: { unit: PricingUnit.MINUTE, price: 0.0055, roundUp: true },
+  plivo_outbound: { unit: PricingUnit.MINUTE, price: 0.0115, roundUp: true },
 };
 
 function cloneProviderEntry(entry: ProviderPricing): ProviderPricing {
@@ -679,7 +696,7 @@ export function calculateTelephonyCost(
 ): number {
   const config = pricing[provider];
   if (!config || config.unit !== 'minute') return 0;
-  const minutes = provider === 'twilio'
+  const minutes = config.roundUp
     ? Math.ceil(durationSeconds / 60)
     : durationSeconds / 60;
   return minutes * (config.price ?? 0);

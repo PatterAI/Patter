@@ -64,6 +64,18 @@ const ELEVENLABS_VOICE_ID_BY_NAME: Record<string, string> = {
 
 const VOICE_ID_PATTERN = /^[A-Za-z0-9]{20}$/;
 
+/** Per-carrier native wire format. Single source of truth used by
+ * {@link ElevenLabsTTS.setTelephonyCarrier} so the codec decision lives
+ * in one place instead of in an if/else chain. Parity with the
+ * ``CARRIER_NATIVE_FORMAT`` map in ``elevenlabs-ws-tts.ts`` and Python's
+ * ``_CARRIER_NATIVE_FORMAT`` dict. */
+const CARRIER_NATIVE_FORMAT: Readonly<Record<string, ElevenLabsOutputFormat>> = {
+  twilio: 'ulaw_8000',
+  telnyx: 'pcm_16000',
+  // Plivo streams mulaw 8 kHz (we pin contentType in the answer XML).
+  plivo: 'ulaw_8000',
+};
+
 /**
  * Return an ElevenLabs voice ID from either a UUID-like ID or a display name.
  *
@@ -252,11 +264,8 @@ export class ElevenLabsTTS {
    */
   setTelephonyCarrier(carrier: string): void {
     if (this._outputFormatExplicit) return;
-    if (carrier === 'twilio') {
-      this._outputFormat = ElevenLabsOutputFormat.ULAW_8000;
-    } else if (carrier === 'telnyx') {
-      this._outputFormat = ElevenLabsOutputFormat.PCM_16000;
-    }
+    const native = CARRIER_NATIVE_FORMAT[carrier];
+    if (native !== undefined) this._outputFormat = native;
   }
 
   /**

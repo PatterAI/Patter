@@ -324,6 +324,8 @@ class ElevenLabsWebSocketTTS(TTSProvider):
     _CARRIER_NATIVE_FORMAT: dict[str, ElevenLabsOutputFormat] = {
         "twilio": ElevenLabsOutputFormat.ULAW_8000,
         "telnyx": ElevenLabsOutputFormat.PCM_16000,
+        # Plivo streams mulaw 8 kHz (we pin contentType in the answer XML).
+        "plivo": ElevenLabsOutputFormat.ULAW_8000,
     }
 
     def set_telephony_carrier(self, carrier: str) -> None:
