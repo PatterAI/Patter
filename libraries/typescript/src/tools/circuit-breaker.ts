@@ -39,6 +39,8 @@ interface PerToolState {
   state: CircuitBreakerState;
   consecutiveFailures: number;
   openedAt: number;
+  /** True while a HALF_OPEN probe call is already in-flight. */
+  probeInFlight: boolean;
 }
 
 /** Per-name registry tracking circuit state for a fleet of tools. */
@@ -66,11 +68,14 @@ export class CircuitBreakerRegistry {
         // Cooldown elapsed — allow exactly one probe to determine if
         // the downstream has recovered.
         s.state = CircuitBreakerState.HALF_OPEN;
+        s.probeInFlight = true;
         return true;
       }
       return false;
     }
     // HALF_OPEN — allow only one in-flight probe at a time.
+    if (s.probeInFlight) return false;
+    s.probeInFlight = true;
     return true;
   }
 
@@ -81,6 +86,7 @@ export class CircuitBreakerRegistry {
     s.state = CircuitBreakerState.CLOSED;
     s.consecutiveFailures = 0;
     s.openedAt = 0;
+    s.probeInFlight = false;
   }
 
   /** Mark a failed execution; trips OPEN once threshold is reached. */
@@ -88,13 +94,14 @@ export class CircuitBreakerRegistry {
     if (this.threshold <= 0) return;
     let s = this.state.get(toolName);
     if (!s) {
-      s = { state: CircuitBreakerState.CLOSED, consecutiveFailures: 0, openedAt: 0 };
+      s = { state: CircuitBreakerState.CLOSED, consecutiveFailures: 0, openedAt: 0, probeInFlight: false };
       this.state.set(toolName, s);
     }
     s.consecutiveFailures += 1;
     if (s.consecutiveFailures >= this.threshold) {
       s.state = CircuitBreakerState.OPEN;
       s.openedAt = this.clock();
+      s.probeInFlight = false;
     }
   }
 

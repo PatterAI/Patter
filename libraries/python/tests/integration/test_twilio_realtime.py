@@ -6,16 +6,13 @@ with a mocked OpenAI Realtime adapter. No real network calls.
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import json
-from collections import deque
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from getpatter.telephony.twilio import twilio_stream_bridge, TwilioAudioSender
-from getpatter.models import Agent
 
 from tests.conftest import fake_mulaw_frame, make_agent
 
@@ -50,7 +47,9 @@ def _make_ws_mock(events: list[dict]) -> AsyncMock:
     return ws
 
 
-def _twilio_start_event(call_sid: str = "CA" + "a" * 32, stream_sid: str = "MZ_test") -> dict:
+def _twilio_start_event(
+    call_sid: str = "CA" + "a" * 32, stream_sid: str = "MZ_test"
+) -> dict:
     return {
         "event": "start",
         "streamSid": stream_sid,
@@ -77,6 +76,7 @@ def _twilio_stop_event() -> dict:
 
 
 @pytest.mark.integration
+@pytest.mark.mocked
 class TestTwilioRealtime:
     """Twilio + OpenAI Realtime: inbound call lifecycle."""
 
@@ -96,12 +96,14 @@ class TestTwilioRealtime:
         call_sid = "CA" + "a" * 32
         audio_frame = fake_mulaw_frame()
 
-        ws = _make_ws_mock([
-            _twilio_start_event(call_sid=call_sid),
-            _twilio_media_event(audio_frame),
-            _twilio_media_event(audio_frame),
-            _twilio_stop_event(),
-        ])
+        ws = _make_ws_mock(
+            [
+                _twilio_start_event(call_sid=call_sid),
+                _twilio_media_event(audio_frame),
+                _twilio_media_event(audio_frame),
+                _twilio_stop_event(),
+            ]
+        )
 
         on_call_start = AsyncMock(return_value=None)
         on_call_end = AsyncMock()
@@ -164,11 +166,13 @@ class TestTwilioRealtime:
 
         agent = make_agent(provider="openai_realtime")
 
-        ws = _make_ws_mock([
-            _twilio_start_event(),
-            {"event": "dtmf", "dtmf": {"digit": "5"}},
-            _twilio_stop_event(),
-        ])
+        ws = _make_ws_mock(
+            [
+                _twilio_start_event(),
+                {"event": "dtmf", "dtmf": {"digit": "5"}},
+                _twilio_stop_event(),
+            ]
+        )
 
         await twilio_stream_bridge(
             websocket=ws,
@@ -201,6 +205,7 @@ class TestTwilioRealtime:
         ws.accept = AsyncMock()
 
         idx = 0
+
         async def _recv():
             nonlocal idx
             if idx < len(events):
@@ -208,6 +213,7 @@ class TestTwilioRealtime:
                 idx += 1
                 return data
             raise Exception("done")
+
         ws.receive_text = AsyncMock(side_effect=_recv)
 
         await twilio_stream_bridge(

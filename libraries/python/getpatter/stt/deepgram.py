@@ -36,7 +36,7 @@ class STT(_DeepgramSTT):
         sample_rate: int = 16000,
         endpointing_ms: int = 150,
         utterance_end_ms: int | None = 1000,
-        smart_format: bool = True,
+        smart_format: bool = False,
         interim_results: bool = True,
         vad_events: bool = True,
     ) -> None:

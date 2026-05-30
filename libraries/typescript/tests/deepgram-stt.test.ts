@@ -2,8 +2,8 @@ import { describe, it, expect, vi } from 'vitest';
 import { DeepgramSTT } from '../src/providers/deepgram-stt';
 
 // Mock ws so no real network connections are made
-vi.mock('ws', () => {
-  const EventEmitter = require('events');
+vi.mock('ws', async () => {
+  const { EventEmitter } = await import('events');
 
   class MockWebSocket extends EventEmitter {
     static OPEN = 1;
@@ -27,7 +27,7 @@ vi.mock('ws', () => {
   return { default: MockWebSocket };
 });
 
-describe('DeepgramSTT', () => {
+describe('[mocked] DeepgramSTT', () => {
   it('initializes with required api key', () => {
     const stt = new DeepgramSTT('dg_test');
     expect(stt).toBeDefined();

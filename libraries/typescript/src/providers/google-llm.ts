@@ -160,65 +160,69 @@ export class GoogleLLMProvider implements LLMProvider {
       | { promptTokenCount?: number; candidatesTokenCount?: number; cachedContentTokenCount?: number }
       | undefined;
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith('data: ')) continue;
-        const data = trimmed.slice(6);
-        if (!data) continue;
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith('data: ')) continue;
+          const data = trimmed.slice(6);
+          if (!data) continue;
 
-        let payload: {
-          candidates?: Array<{
-            content?: { parts?: GeminiPart[] };
-          }>;
-          usageMetadata?: {
-            promptTokenCount?: number;
-            candidatesTokenCount?: number;
-            cachedContentTokenCount?: number;
-          };
-        };
-        try {
-          payload = JSON.parse(data);
-        } catch {
-          continue;
-        }
-
-        // Gemini emits usageMetadata on every chunk (running total). Don't
-        // yield until the stream is over — otherwise we'd double-count by
-        // accumulating partial sums.
-        if (payload.usageMetadata) {
-          lastUsage = payload.usageMetadata;
-        }
-
-        const candidate = payload.candidates?.[0];
-        const parts = candidate?.content?.parts ?? [];
-        for (const part of parts) {
-          if (part.functionCall) {
-            const args = part.functionCall.args ?? {};
-            const callId =
-              part.functionCall.id ?? `gemini_call_${nextIndex}`;
-            yield {
-              type: 'tool_call',
-              index: nextIndex,
-              id: callId,
-              name: part.functionCall.name ?? '',
-              arguments: JSON.stringify(args),
+          let payload: {
+            candidates?: Array<{
+              content?: { parts?: GeminiPart[] };
+            }>;
+            usageMetadata?: {
+              promptTokenCount?: number;
+              candidatesTokenCount?: number;
+              cachedContentTokenCount?: number;
             };
-            nextIndex++;
+          };
+          try {
+            payload = JSON.parse(data);
+          } catch {
             continue;
           }
-          if (part.text) {
-            yield { type: 'text', content: part.text };
+
+          // Gemini emits usageMetadata on every chunk (running total). Don't
+          // yield until the stream is over — otherwise we'd double-count by
+          // accumulating partial sums.
+          if (payload.usageMetadata) {
+            lastUsage = payload.usageMetadata;
+          }
+
+          const candidate = payload.candidates?.[0];
+          const parts = candidate?.content?.parts ?? [];
+          for (const part of parts) {
+            if (part.functionCall) {
+              const args = part.functionCall.args ?? {};
+              const callId =
+                part.functionCall.id ?? `gemini_call_${nextIndex}`;
+              yield {
+                type: 'tool_call',
+                index: nextIndex,
+                id: callId,
+                name: part.functionCall.name ?? '',
+                arguments: JSON.stringify(args),
+              };
+              nextIndex++;
+              continue;
+            }
+            if (part.text) {
+              yield { type: 'text', content: part.text };
+            }
           }
         }
       }
+    } finally {
+      reader.cancel().catch(() => {});
     }
 
     if (lastUsage) {
@@ -342,5 +346,22 @@ function toGeminiContents(
     }
   }
 
-  return { systemInstruction: systemParts.join('\n\n'), contents };
+  // Gemini requires that all functionResponse parts for a single model turn
+  // appear in ONE user content entry (multiple parts). Consecutive role='user'
+  // entries whose parts are exclusively functionResponse objects are the result
+  // of mapping parallel tool-call results one-per-message. Merge them so the
+  // API doesn't reject the request.
+  const merged: GeminiContent[] = [];
+  for (const entry of contents) {
+    const prev = merged[merged.length - 1];
+    const isFunctionResponseOnly = (c: GeminiContent): boolean =>
+      c.role === 'user' && c.parts.every((p) => p.functionResponse !== undefined);
+    if (prev && isFunctionResponseOnly(prev) && isFunctionResponseOnly(entry)) {
+      prev.parts.push(...entry.parts);
+    } else {
+      merged.push(entry);
+    }
+  }
+
+  return { systemInstruction: systemParts.join('\n\n'), contents: merged };
 }

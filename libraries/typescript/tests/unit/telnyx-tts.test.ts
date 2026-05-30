@@ -11,6 +11,7 @@ const mockWsInstances: Array<{
   handlers: Map<string, Array<(...args: unknown[]) => void>>;
   send: ReturnType<typeof vi.fn>;
   close: ReturnType<typeof vi.fn>;
+  removeAllListeners: ReturnType<typeof vi.fn>;
   once: (event: string, cb: (...args: unknown[]) => void) => void;
 }> = [];
 
@@ -19,6 +20,7 @@ vi.mock('ws', () => {
     handlers = new Map<string, Array<(...args: unknown[]) => void>>();
     send = vi.fn();
     close = vi.fn();
+    removeAllListeners = vi.fn();
 
     constructor(_url: string, _opts?: unknown) {
       mockWsInstances.push(this as unknown as (typeof mockWsInstances)[number]);

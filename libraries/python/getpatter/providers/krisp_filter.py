@@ -10,6 +10,7 @@ Requires the proprietary Krisp Audio SDK; see
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import Any, Union
@@ -144,16 +145,12 @@ class KrispVivaFilter(AudioFilter):
             logger.error("Failed to create Krisp session: %s", e)
             raise
 
-    async def process(self, pcm_chunk: bytes, sample_rate: int) -> bytes:
-        """Run the PCM chunk through Krisp and return the filtered bytes.
+    def _process_sync(self, pcm_chunk: bytes, sample_rate: int) -> bytes:
+        """Run the blocking Krisp C-extension work synchronously.
 
-        When filtering is disabled the input is returned unchanged.  Errors in
-        the underlying SDK are logged and the original PCM is returned to
-        avoid breaking the call audio path.
+        Intended to be called via ``asyncio.to_thread`` from :meth:`process`
+        so the event loop is never blocked by the native DSP pipeline.
         """
-        if not self._filtering_enabled:
-            return pcm_chunk
-
         try:
             import numpy as np  # local import keeps numpy optional
         except ImportError as e:  # pragma: no cover - numpy ships with krisp
@@ -194,6 +191,21 @@ class KrispVivaFilter(AudioFilter):
         except Exception as e:
             logger.error("Error processing Krisp frame: %s", e)
             return pcm_chunk
+
+    async def process(self, pcm_chunk: bytes, sample_rate: int) -> bytes:
+        """Run the PCM chunk through Krisp and return the filtered bytes.
+
+        When filtering is disabled the input is returned unchanged.  Errors in
+        the underlying SDK are logged and the original PCM is returned to
+        avoid breaking the call audio path.
+
+        The blocking C-extension DSP work is offloaded to a thread via
+        ``asyncio.to_thread`` to avoid stalling the event loop.
+        """
+        if not self._filtering_enabled:
+            return pcm_chunk
+
+        return await asyncio.to_thread(self._process_sync, pcm_chunk, sample_rate)
 
     def enable(self) -> None:
         """Enable noise filtering."""

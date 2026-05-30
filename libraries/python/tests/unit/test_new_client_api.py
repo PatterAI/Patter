@@ -158,7 +158,10 @@ class TestSTTTTSDispatch:
 
     def test_stt_provider_bypasses_config_resolution(self) -> None:
         """An STTProvider instance must flow through untouched to downstream dispatch."""
-        from getpatter.telephony.common import _create_stt_from_config, _create_tts_from_config
+        from getpatter.telephony.common import (
+            _create_stt_from_config,
+            _create_tts_from_config,
+        )
 
         stt = deepgram_stt.STT(api_key="dg_bypass")
         tts = elevenlabs_tts.TTS(api_key="el_bypass")
@@ -190,7 +193,8 @@ class TestToolsAndGuardrails:
             system_prompt="hi",
             tools=[Tool(name="ping", handler=ping)],
         )
-        assert isinstance(agent.tools, list)
+        # Public collection fields are immutable tuples (frozen-dataclass contract).
+        assert isinstance(agent.tools, tuple)
         assert agent.tools[0]["name"] == "ping"
         assert agent.tools[0]["handler"] is ping
         # Default parameters filled in.
@@ -243,9 +247,10 @@ class TestToolsAndGuardrails:
             system_prompt="hi",
             guardrails=[g],
         )
-        assert isinstance(agent.guardrails, list)
+        # Public collection fields are immutable tuples (frozen-dataclass contract).
+        assert isinstance(agent.guardrails, tuple)
         assert agent.guardrails[0]["name"] == "no-foo"
-        assert agent.guardrails[0]["blocked_terms"] == ["foo"]
+        assert agent.guardrails[0]["blocked_terms"] == ("foo",)
 
     def test_guardrail_factory_alias(self) -> None:
         phone = self._phone()
@@ -330,7 +335,9 @@ class TestTunnelDirective:
 
 
 class TestQuickstartSmoke:
-    def test_four_line_quickstart_env_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_four_line_quickstart_env_fallback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setenv("TWILIO_ACCOUNT_SID", "AC_env")
         monkeypatch.setenv("TWILIO_AUTH_TOKEN", "tok_env")
         monkeypatch.setenv("OPENAI_API_KEY", "sk-env")

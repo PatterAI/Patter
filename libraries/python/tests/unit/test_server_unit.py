@@ -739,6 +739,67 @@ class TestTelnyxVoiceRoute:
         assert srv._telnyx_sig_warning_logged is True
 
 
+class TestTelnyxWebhookSignatureRejection:
+    """POST /webhooks/telnyx/voice returns 403 when telnyx_public_key is
+    configured and the request carries no (or an invalid) Ed25519 signature.
+
+    Mirrors the enforcement path in server.py lines 765-774.
+    """
+
+    def _telnyx_server_with_key(self) -> EmbeddedServer:
+        cfg = LocalConfig(
+            telephony_provider="telnyx",
+            telnyx_key="tk_test",
+            telnyx_connection_id="conn-1",
+            telnyx_public_key="somekey",
+            openai_key="sk-test",
+            webhook_url="test.ngrok.io",
+            phone_number="+15551234567",
+            require_signature=True,
+        )
+        return EmbeddedServer(config=cfg, agent=make_agent(), dashboard=False)
+
+    def _valid_body(self) -> dict:
+        return {
+            "data": {
+                "event_type": "call.initiated",
+                "payload": {
+                    "call_control_id": "v3:abc123",
+                    "from": "+15551234567",
+                    "to": "+15559876543",
+                },
+            }
+        }
+
+    @pytest.mark.asyncio
+    async def test_missing_signature_header_returns_403(self) -> None:
+        srv = self._telnyx_server_with_key()
+        app = srv._create_app()
+        endpoint = _get_endpoint(app, "/webhooks/telnyx/voice")
+
+        # No telnyx-signature-ed25519 header present at all.
+        request = _MockRequest(json_data=self._valid_body())
+        response = await endpoint(request)
+        assert response.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_invalid_signature_returns_403(self) -> None:
+        srv = self._telnyx_server_with_key()
+        app = srv._create_app()
+        endpoint = _get_endpoint(app, "/webhooks/telnyx/voice")
+
+        # Provide a clearly invalid (forged) signature.
+        request = _MockRequest(
+            json_data=self._valid_body(),
+            headers={
+                "telnyx-signature-ed25519": "invalidsignaturevalue",
+                "telnyx-timestamp": "1700000000",
+            },
+        )
+        response = await endpoint(request)
+        assert response.status_code == 403
+
+
 class TestTelnyxRecordingSavedWebhook:
     """POST /webhooks/telnyx/voice with call.recording.saved logs the recording URL.
 

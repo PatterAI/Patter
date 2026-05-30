@@ -550,9 +550,10 @@ export class AssemblyAISTT {
     maxTurnSilence?: number;
   }): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      throw new AssemblyAISTTNotConnectedError(
-        'AssemblyAISTT.updateConfiguration: WebSocket is not open',
+      getLogger().debug(
+        'AssemblyAISTT.updateConfiguration: WebSocket is not open — dropping update (call teardown).',
       );
+      return;
     }
     const payload: Record<string, unknown> = {
       type: AssemblyAIClientFrame.UPDATE_CONFIGURATION,
@@ -575,9 +576,10 @@ export class AssemblyAISTT {
   /** Force the server to finalize the current turn (for barge-in). */
   forceEndpoint(): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      throw new AssemblyAISTTNotConnectedError(
-        'AssemblyAISTT.forceEndpoint: WebSocket is not open',
+      getLogger().debug(
+        'AssemblyAISTT.forceEndpoint: WebSocket is not open — dropping request (call teardown).',
       );
+      return;
     }
     this.ws.send(JSON.stringify({ type: AssemblyAIClientFrame.FORCE_ENDPOINT }));
   }
@@ -594,6 +596,18 @@ export class AssemblyAISTT {
   async close(): Promise<void> {
     this.closing = true;
     if (!this.ws) return;
+
+    // Flush any accumulated partial audio frames before terminating so
+    // the final words of the utterance are not silently discarded.
+    if (this.chunkBufferBytes > 0 && this.ws.readyState === WebSocket.OPEN) {
+      try {
+        this.ws.send(Buffer.concat(this.chunkBuffer, this.chunkBufferBytes));
+      } catch {
+        // ignore
+      }
+      this.chunkBuffer = [];
+      this.chunkBufferBytes = 0;
+    }
 
     try {
       this.ws.send(JSON.stringify({ type: AssemblyAIClientFrame.TERMINATE }));

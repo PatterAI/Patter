@@ -54,7 +54,16 @@ class EventBus:
         Returns a zero-argument callable that removes the listener when called.
         """
         self._listeners.setdefault(event, []).append(cb)
-        return lambda: self._listeners[event].remove(cb)
+
+        def _unsubscribe() -> None:
+            listeners = self._listeners.get(event)
+            if listeners is not None:
+                try:
+                    listeners.remove(cb)
+                except ValueError:
+                    pass
+
+        return _unsubscribe
 
     def emit(self, event: PatterEventType, payload: Any) -> None:
         """Fire *event* with *payload* to all registered listeners.
@@ -67,6 +76,17 @@ class EventBus:
             try:
                 result = cb(payload)
                 if hasattr(result, "__await__"):
-                    asyncio.create_task(result)  # noqa: RUF006
+                    task = asyncio.create_task(result)
+
+                    def _log_listener_exc(t: "asyncio.Task[object]") -> None:
+                        if t.cancelled():
+                            return
+                        exc = t.exception()
+                        if exc is not None:
+                            logger.error(
+                                "event_bus async listener raised", exc_info=exc
+                            )
+
+                    task.add_done_callback(_log_listener_exc)
             except Exception:
                 logger.exception("event_bus listener raised")

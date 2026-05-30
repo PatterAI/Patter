@@ -4,16 +4,38 @@ from __future__ import annotations
 
 import base64
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from getpatter.audio.transcoding import (
+    PcmCarry,
+    create_resampler_16k_to_8k,
+    pcm16_to_mulaw,
+)
 from getpatter.telephony.twilio import (
     TwilioAudioSender,
     _validate_twilio_sid,
     _xml_escape,
     twilio_webhook_handler,
 )
+
+
+def _compute_expected_mulaw(audio: bytes) -> bytes:
+    """Compute the expected wire bytes for a PCM16@16kHz chunk.
+
+    Mirrors the exact chain inside TwilioAudioSender.send_audio:
+    PcmCarry.align → StatefulResampler.process → pcm16_to_mulaw.
+    Use a fresh carry+resampler pair so IIR filter state is cold, matching
+    a newly-constructed sender.
+    """
+    carry = PcmCarry()
+    resampler = create_resampler_16k_to_8k()
+    aligned = carry.align(audio)
+    if not aligned:
+        return b""
+    resampled = resampler.process(aligned)
+    return pcm16_to_mulaw(resampled)
 
 
 # ---------------------------------------------------------------------------
@@ -99,9 +121,7 @@ class TestTwilioWebhookHandler:
 
     @patch("getpatter.providers.twilio_adapter.TwilioAdapter")
     def test_generates_twiml(self, mock_adapter_cls) -> None:
-        mock_adapter_cls.generate_stream_twiml.return_value = (
-            '<?xml version="1.0"?><Response><Connect><Stream url="wss://host/ws/stream/CA123" /></Connect></Response>'
-        )
+        mock_adapter_cls.generate_stream_twiml.return_value = '<?xml version="1.0"?><Response><Connect><Stream url="wss://host/ws/stream/CA123" /></Connect></Response>'
         result = twilio_webhook_handler(
             call_sid="CA123",
             caller="+15551111111",
@@ -122,7 +142,9 @@ class TestTwilioWebhookHandler:
             webhook_base_url="example.com",
         )
         call_args = mock_adapter_cls.generate_stream_twiml.call_args
-        stream_url = call_args[0][0] if call_args[0] else call_args[1].get("stream_url", "")
+        stream_url = (
+            call_args[0][0] if call_args[0] else call_args[1].get("stream_url", "")
+        )
         assert "CA_test" in stream_url
 
 
@@ -133,66 +155,44 @@ class TestTwilioWebhookHandler:
 
 @pytest.mark.unit
 class TestTwilioAudioSender:
-    """TwilioAudioSender transcoding and WebSocket messaging."""
+    """TwilioAudioSender transcoding and WebSocket messaging.
+
+    Tests use the real pcm16_to_mulaw and create_resampler_16k_to_8k functions
+    (no mocking of internal transcoding path) so the encoded wire payload is
+    actually verified to be correct mulaw output. Per the authentic-tests rule,
+    mocking internal module helpers is prohibited; only paid/external boundaries
+    may be mocked.
+    """
 
     def _make_sender(self) -> tuple[TwilioAudioSender, AsyncMock]:
         ws = AsyncMock()
         ws.send_text = AsyncMock()
-        with patch(
-            "getpatter.audio.transcoding.pcm16_to_mulaw",
-            side_effect=lambda x: x,
-            create=True,
-        ), patch(
-            "getpatter.audio.transcoding.create_resampler_16k_to_8k",
-            return_value=MagicMock(process=MagicMock(side_effect=lambda x: x), flush=MagicMock(return_value=b"")),
-            create=True,
-        ):
-            sender = TwilioAudioSender(ws, stream_sid="MZ_test")
+        sender = TwilioAudioSender(ws, stream_sid="MZ_test")
         return sender, ws
 
     async def test_send_audio(self) -> None:
         ws = AsyncMock()
         ws.send_text = AsyncMock()
-        mock_mulaw = MagicMock(side_effect=lambda x: x)
-        mock_resampler = MagicMock(
-            process=MagicMock(side_effect=lambda x: x),
-            flush=MagicMock(return_value=b""),
-        )
+        sender = TwilioAudioSender(ws, stream_sid="MZ_test")
 
-        with patch(
-            "getpatter.audio.transcoding.pcm16_to_mulaw",
-            mock_mulaw,
-            create=True,
-        ), patch(
-            "getpatter.audio.transcoding.create_resampler_16k_to_8k",
-            return_value=mock_resampler,
-            create=True,
-        ):
-            sender = TwilioAudioSender(ws, stream_sid="MZ_test")
-
+        # 4 bytes = 2 PCM16 samples @ 16 kHz (even-length, no carry)
         audio = b"\x00\x01\x02\x03"
+        expected_mulaw = _compute_expected_mulaw(audio)
+
         await sender.send_audio(audio)
+
         ws.send_text.assert_awaited_once()
         payload = json.loads(ws.send_text.call_args[0][0])
         assert payload["event"] == "media"
         assert payload["streamSid"] == "MZ_test"
-        # Payload should be base64-encoded
         decoded = base64.b64decode(payload["media"]["payload"])
-        assert decoded == audio  # identity mock
+        # Real 16kHz→8kHz downsample + mulaw encoding — result differs from raw input
+        assert decoded == expected_mulaw
 
     async def test_send_clear(self) -> None:
         ws = AsyncMock()
         ws.send_text = AsyncMock()
-        with patch(
-            "getpatter.audio.transcoding.pcm16_to_mulaw",
-            lambda x: x,
-            create=True,
-        ), patch(
-            "getpatter.audio.transcoding.create_resampler_16k_to_8k",
-            return_value=MagicMock(process=MagicMock(side_effect=lambda x: x), flush=MagicMock(return_value=b"")),
-            create=True,
-        ):
-            sender = TwilioAudioSender(ws, stream_sid="MZ_test")
+        sender = TwilioAudioSender(ws, stream_sid="MZ_test")
 
         await sender.send_clear()
         ws.send_text.assert_awaited_once()
@@ -203,16 +203,7 @@ class TestTwilioAudioSender:
     async def test_send_mark_increments_count(self) -> None:
         ws = AsyncMock()
         ws.send_text = AsyncMock()
-        with patch(
-            "getpatter.audio.transcoding.pcm16_to_mulaw",
-            lambda x: x,
-            create=True,
-        ), patch(
-            "getpatter.audio.transcoding.create_resampler_16k_to_8k",
-            return_value=MagicMock(process=MagicMock(side_effect=lambda x: x), flush=MagicMock(return_value=b"")),
-            create=True,
-        ):
-            sender = TwilioAudioSender(ws, stream_sid="MZ_test")
+        sender = TwilioAudioSender(ws, stream_sid="MZ_test")
 
         await sender.send_mark("m1")
         payload1 = json.loads(ws.send_text.call_args[0][0])
@@ -224,16 +215,7 @@ class TestTwilioAudioSender:
 
     def test_on_mark_confirmed(self) -> None:
         ws = AsyncMock()
-        with patch(
-            "getpatter.audio.transcoding.pcm16_to_mulaw",
-            lambda x: x,
-            create=True,
-        ), patch(
-            "getpatter.audio.transcoding.create_resampler_16k_to_8k",
-            return_value=MagicMock(process=MagicMock(side_effect=lambda x: x), flush=MagicMock(return_value=b"")),
-            create=True,
-        ):
-            sender = TwilioAudioSender(ws, stream_sid="MZ_test")
+        sender = TwilioAudioSender(ws, stream_sid="MZ_test")
 
         assert sender.last_confirmed_mark == ""
         sender.on_mark_confirmed("audio_1")
@@ -245,18 +227,10 @@ class TestTwilioAudioSender:
         at every synth boundary."""
         ws = AsyncMock()
         ws.send_text = AsyncMock()
-        with patch(
-            "getpatter.audio.transcoding.pcm16_to_mulaw",
-            lambda x: x,
-            create=True,
-        ), patch(
-            "getpatter.audio.transcoding.create_resampler_16k_to_8k",
-            return_value=MagicMock(process=MagicMock(side_effect=lambda x: x), flush=MagicMock(return_value=b"")),
-            create=True,
-        ):
-            sender = TwilioAudioSender(ws, stream_sid="MZ_test")
+        sender = TwilioAudioSender(ws, stream_sid="MZ_test")
 
-        # Push an odd-length chunk — the last byte is buffered into carry
+        # Push an odd-length chunk — the last byte is buffered into carry by
+        # the real PcmCarry instance inside the sender.
         await sender.send_audio(b"\x00\x01\x02")
         assert sender._pcm_carry._carry == b"\x02"
 

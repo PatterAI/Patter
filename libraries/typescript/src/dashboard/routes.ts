@@ -36,8 +36,8 @@ export function mountDashboard(app: Express, store: MetricsStore, token = ''): v
   // --- Dashboard API ---
 
   app.get('/api/dashboard/calls', auth, (req, res) => {
-    const limit = Math.min(parseInt((req.query.limit as string) || '50', 10) || 50, 1000);
-    const offset = parseInt((req.query.offset as string) || '0', 10) || 0;
+    const limit = Math.min(Math.max(0, parseInt((req.query.limit as string) || '50', 10) || 50), 1000);
+    const offset = Math.max(0, parseInt((req.query.offset as string) || '0', 10) || 0);
     res.json(store.getCalls(limit, offset));
   });
 
@@ -163,8 +163,8 @@ export function mountApi(app: Express, store: MetricsStore, token = ''): void {
   const auth = makeAuthMiddleware(token);
 
   app.get('/api/v1/calls', auth, (req, res) => {
-    const limit = Math.min(parseInt((req.query.limit as string) || '50', 10) || 50, 1000);
-    const offset = parseInt((req.query.offset as string) || '0', 10) || 0;
+    const limit = Math.min(Math.max(0, parseInt((req.query.limit as string) || '50', 10) || 50), 1000);
+    const offset = Math.max(0, parseInt((req.query.offset as string) || '0', 10) || 0);
     const calls = store.getCalls(limit, offset);
     res.json({
       data: calls,

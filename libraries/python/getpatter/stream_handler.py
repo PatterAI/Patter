@@ -19,7 +19,7 @@ import os
 import time
 from abc import ABC, abstractmethod
 from collections import deque
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     pass
@@ -172,15 +172,19 @@ def _augment_with_builtin_handoff_tools(
     """
     out: list[dict] = list(user_tools or [])
     if transfer_fn is not None:
+
         async def _transfer_handler(arguments: dict, call_context: dict) -> str:
             number = (arguments or {}).get("number", "")
             await transfer_fn(number)
             return f"Transferring to {number}" if number else "Transfer rejected"
+
         out.append({**TRANSFER_CALL_TOOL, "handler": _transfer_handler})
     if hangup_fn is not None:
+
         async def _hangup_handler(arguments: dict, call_context: dict) -> str:
             await hangup_fn()
             return "Call ended"
+
         out.append({**END_CALL_TOOL, "handler": _hangup_handler})
     return out
 
@@ -559,7 +563,7 @@ class StreamHandler(ABC):
         # the discovered tools alongside user-defined ones.
         import dataclasses
 
-        self.agent = dataclasses.replace(self.agent, tools=existing + discovered)
+        self.agent = dataclasses.replace(self.agent, tools=tuple(existing + discovered))
         self._mcp_manager = manager
         logger.info("MCP: merged %d tool(s) into agent", len(discovered))
 
@@ -1383,11 +1387,17 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                     func_data = ev_data
                     if func_data["name"] == "transfer_call":
                         raw_args = func_data.get("arguments", "{}")
-                        args = (
-                            json.loads(raw_args)
-                            if isinstance(raw_args, str)
-                            else raw_args
-                        )
+                        try:
+                            args = (
+                                json.loads(raw_args)
+                                if isinstance(raw_args, str)
+                                else raw_args
+                            )
+                        except (json.JSONDecodeError, ValueError):
+                            logger.warning(
+                                "function_call transfer_call: malformed JSON args, skipping"
+                            )
+                            continue
                         transfer_number = args.get("number", "")
                         if not _validate_e164(transfer_number):
                             logger.warning(
@@ -1432,11 +1442,17 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
 
                     elif func_data["name"] == "end_call":
                         raw_args = func_data.get("arguments", "{}")
-                        args = (
-                            json.loads(raw_args)
-                            if isinstance(raw_args, str)
-                            else raw_args
-                        )
+                        try:
+                            args = (
+                                json.loads(raw_args)
+                                if isinstance(raw_args, str)
+                                else raw_args
+                            )
+                        except (json.JSONDecodeError, ValueError):
+                            logger.warning(
+                                "function_call end_call: malformed JSON args, skipping"
+                            )
+                            continue
                         reason = args.get("reason", "conversation_complete")
                         logger.debug("Ending call: %s", reason)
                         result = json.dumps({"status": "ending", "reason": reason})
@@ -1470,7 +1486,14 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                         ):
                             args = func_data.get("arguments", "{}")
                             if isinstance(args, str):
-                                args = json.loads(args)
+                                try:
+                                    args = json.loads(args)
+                                except (json.JSONDecodeError, ValueError):
+                                    logger.warning(
+                                        "function_call %s: malformed JSON args, skipping",
+                                        func_data["name"],
+                                    )
+                                    continue
                             # Surface the invocation BEFORE execution so the
                             # dashboard timeline shows it at the right point
                             # even if the handler throws or hangs.
@@ -1547,6 +1570,9 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
 
     async def cleanup(self) -> None:
         """Cancel the event-forward task and close the OpenAI Realtime adapter."""
+        if self._pending_assistant_timer is not None:
+            self._pending_assistant_timer.cancel()
+            self._pending_assistant_timer = None
         if self._background_task:
             self._background_task.cancel()
             try:
@@ -1775,6 +1801,15 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
                         self.transcript_entries.append(
                             {"role": "assistant", "text": current_agent_text}
                         )
+                        if self.on_transcript:
+                            await self.on_transcript(
+                                {
+                                    "role": "assistant",
+                                    "text": current_agent_text,
+                                    "call_id": self.call_id,
+                                    "history": list(self.conversation_history),
+                                }
+                            )
                         if self.metrics is not None:
                             turn = self.metrics.record_turn_complete(current_agent_text)
                             await self._emit_turn_metrics(turn)
@@ -3170,6 +3205,21 @@ class PipelineStreamHandler(StreamHandler):
         # Raw transcript always goes to dashboard/transcript log
         self.transcript_entries.append({"role": "user", "text": transcript_text})
 
+        # Reuse the timestamp already captured by _commit_transcript and stored
+        # in self._last_commit_at. This avoids a second time.time() call per
+        # transcript, which would exhaust the finite fake-clock iterators used
+        # in unit tests (and is wasteful in production too).
+        _turn_ts = self._last_commit_at
+
+        # Append raw text to conversation_history NOW so that on_transcript
+        # receives a history snapshot that includes the current user turn
+        # (parity with OpenAIRealtimeStreamHandler which appends before firing
+        # on_transcript). Replaced by filtered_text below, or popped on any
+        # early-return path so a vetoed/orphaned turn never lingers.
+        self.conversation_history.append(
+            {"role": "user", "text": transcript_text, "timestamp": _turn_ts}
+        )
+
         if self.on_transcript:
             await self.on_transcript(
                 {
@@ -3191,21 +3241,42 @@ class PipelineStreamHandler(StreamHandler):
             logger.debug("afterTranscribe hook vetoed turn")
             if self.metrics is not None:
                 self.metrics.record_turn_interrupted()
+            # Remove the speculatively-appended user turn before returning so a
+            # vetoed turn does not linger in conversation_history.
+            if (
+                self.conversation_history
+                and self.conversation_history[-1].get("text") == transcript_text
+            ):
+                self.conversation_history.pop()
             _close_endpoint_span()
             return
 
         if self.metrics is not None:
             self.metrics.record_on_user_turn_completed_delay(0.0)
         if self.on_message is None and self._llm_loop is None:
-            # No message handler or LLM loop — discard orphaned turn
+            # No message handler or LLM loop — discard orphaned turn.
             if self.metrics is not None:
                 self.metrics.record_turn_interrupted()
+            # Pop the speculatively-appended user turn so it does not
+            # accumulate as an orphaned entry when there is nothing to consume
+            # it (no handler and no built-in LLM loop).
+            if (
+                self.conversation_history
+                and self.conversation_history[-1].get("text") == transcript_text
+            ):
+                self.conversation_history.pop()
             _close_endpoint_span()
             return
 
-        # Use filtered text in conversation history (sent to LLM)
+        # Replace the raw-text speculative entry with filtered_text (the text
+        # actually sent to the LLM).
+        if (
+            self.conversation_history
+            and self.conversation_history[-1].get("text") == transcript_text
+        ):
+            self.conversation_history.pop()
         self.conversation_history.append(
-            {"role": "user", "text": filtered_text, "timestamp": time.time()}
+            {"role": "user", "text": filtered_text, "timestamp": _turn_ts}
         )
 
         # Built-in LLM loop path

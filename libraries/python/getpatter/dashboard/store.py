@@ -8,6 +8,7 @@ import asyncio
 import json
 import threading
 import time
+from collections import deque
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -62,7 +63,8 @@ class MetricsStore:
     def __init__(self, max_calls: int = 500) -> None:
         self._lock = threading.Lock()
         self._max_calls = max_calls
-        self._calls: list[dict[str, Any]] = []
+        # O(1) eviction: deque with maxlen drops the oldest element automatically.
+        self._calls: deque[dict[str, Any]] = deque(maxlen=max_calls)
         self._active_calls: dict[str, dict[str, Any]] = {}
         self._subscribers: set[asyncio.Queue] = set()
         # User-driven soft delete: call_ids the operator has removed from the
@@ -225,8 +227,6 @@ class MetricsStore:
                     }
                     self._active_calls.pop(call_id, None)
                     self._calls.append(entry)
-                    if len(self._calls) > self._max_calls:
-                        self._calls = self._calls[-self._max_calls :]
             else:
                 # Call already completed — patch the existing row if found.
                 for call in reversed(self._calls):
@@ -363,8 +363,6 @@ class MetricsStore:
                 self._calls[existing_idx] = entry
             else:
                 self._calls.append(entry)
-                if len(self._calls) > self._max_calls:
-                    self._calls = self._calls[-self._max_calls :]
             event_metrics = entry.get("metrics")
         # Publish outside lock to avoid deadlock with subscribe/unsubscribe
         self._publish(
@@ -450,7 +448,23 @@ class MetricsStore:
             self._deleted_call_ids |= new_ids
             snapshot = sorted(self._deleted_call_ids)
         # Persist outside the lock; SSE publish outside the lock.
-        self._persist_deleted_ids(snapshot)
+        # Schedule async I/O on the thread pool so this (sync) method never
+        # blocks the event loop — matches async-everywhere rule.
+        try:
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(self._persist_deleted_ids_async(snapshot))
+            task.add_done_callback(
+                lambda t: (
+                    not t.cancelled()
+                    and t.exception()
+                    and __import__("logging")
+                    .getLogger("getpatter.dashboard.store")
+                    .debug("MetricsStore.delete_calls persist error: %s", t.exception())
+                )
+            )
+        except RuntimeError:
+            # No running event loop (e.g. called from a sync test or CLI).
+            self._persist_deleted_ids(snapshot)
         accepted = sorted(new_ids)
         self._publish("calls_deleted", {"call_ids": accepted})
         return accepted
@@ -486,6 +500,10 @@ class MetricsStore:
             logging.getLogger("getpatter.dashboard.store").debug(
                 "MetricsStore._persist_deleted_ids: %s", exc
             )
+
+    async def _persist_deleted_ids_async(self, snapshot: list[str]) -> None:
+        """Off-load the synchronous disk write to a thread pool."""
+        await asyncio.to_thread(self._persist_deleted_ids, snapshot)
 
     def get_active_calls(self) -> list[dict[str, Any]]:
         """Return the currently in-flight calls."""
@@ -722,9 +740,17 @@ class MetricsStore:
                     continue
                 self._calls.append(rec)
                 existing_ids.add(rec["call_id"])
-                if len(self._calls) > self._max_calls:
-                    self._calls = self._calls[-self._max_calls :]
         return len(collected)
+
+    async def hydrate_async(self, log_root: str | None) -> int:
+        """Async wrapper for :py:meth:`hydrate`.
+
+        Offloads the synchronous directory scan and file I/O to a thread pool
+        so that the uvicorn event loop is never blocked during server startup.
+        Call this instead of ``hydrate`` from async contexts (e.g. FastAPI
+        lifespan or ``EmbeddedServer.start``).
+        """
+        return await asyncio.to_thread(self.hydrate, log_root)
 
 
 def _numeric_subdirs(parent):

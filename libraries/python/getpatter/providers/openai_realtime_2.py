@@ -123,6 +123,11 @@ class OpenAIRealtime2Adapter(OpenAIRealtimeAdapter):
         # boundary becomes a small DC step that the GA server VAD interprets
         # as constant low-energy noise.
         self._inbound_8k_carry: int | None = None
+        # Parked keepalive task created by open_parked_connection(). Tracked
+        # here so close() can cancel it when the parked WS is abandoned
+        # without adopt_websocket() being called (e.g. call dropped during
+        # ringing). Cleared by adopt_websocket() or close().
+        self._parked_keepalive_task: asyncio.Task | None = None
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -516,13 +521,17 @@ class OpenAIRealtime2Adapter(OpenAIRealtimeAdapter):
             self._parked_keepalive_loop(ws),
             name=f"openai-realtime-parked-keepalive:{id(ws)}",
         )
+        # Store on self so close() can cancel if the parked WS is abandoned
+        # without adopt_websocket() (e.g. call dropped during ringing).
+        self._parked_keepalive_task = keepalive_task
         attached = False
         try:
             ws._parked_keepalive_task = keepalive_task  # type: ignore[attr-defined]
             attached = True
         except Exception as exc:
-            keepalive_task.cancel()
-            logger.info("[PREWARM-KA] setattr failed: %s — task cancelled", exc)
+            logger.info(
+                "[PREWARM-KA] setattr failed: %s — task still tracked on self", exc
+            )
         logger.info(
             "[PREWARM-KA] task scheduled attached=%s ws_id=%s", attached, id(ws)
         )
@@ -607,8 +616,30 @@ class OpenAIRealtime2Adapter(OpenAIRealtimeAdapter):
                 delattr(ws, "_parked_keepalive_task")
             except Exception:
                 pass
+        # Also clear the self-tracked reference so close() doesn't double-cancel.
+        self._parked_keepalive_task = None
         self._ws = ws
         self._running = True
+
+    async def close(self) -> None:
+        """Cancel any parked keepalive task then delegate to the parent close().
+
+        The parent's close() only cancels ``self._receive_task``. If
+        ``open_parked_connection()`` was called but the parked WS was
+        abandoned without ``adopt_websocket()`` (e.g. call dropped during
+        ringing), the keepalive task would otherwise keep running until the
+        remote end closes the WS (~3-15 s). This override ensures it is
+        cancelled immediately.
+        """
+        ka = self._parked_keepalive_task
+        if ka is not None and not ka.done():
+            ka.cancel()
+            try:
+                await ka
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._parked_keepalive_task = None
+        await super().close()
 
     async def send_audio(self, audio: bytes) -> None:
         """Send audio to the GA Realtime API.

@@ -219,15 +219,35 @@ export class RemoteMessageHandler {
         yield chunks.shift()!;
       }
 
-      // Then wait for new messages
+      // Then wait for new messages (with a per-read timeout to avoid
+      // hanging forever if the server connects but then goes silent).
+      const READ_TIMEOUT_MS = 30_000;
       while (!done && !error) {
-        const text = await new Promise<string | null>((resolve) => {
+        const messagePromise = new Promise<string | null>((resolve) => {
           if (chunks.length > 0) {
             resolve(chunks.shift()!);
           } else {
             resolveNext = resolve;
           }
         });
+        let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          timeoutHandle = setTimeout(
+            () => reject(new Error('WebSocket read timeout: no frame received within 30 s')),
+            READ_TIMEOUT_MS
+          );
+        });
+        let text: string | null;
+        try {
+          text = await Promise.race([messagePromise, timeoutPromise]);
+        } catch (timeoutErr) {
+          // Clean up the pending resolve so the message handler doesn't call it
+          // after we've already given up.
+          resolveNext = null;
+          throw timeoutErr;
+        } finally {
+          clearTimeout(timeoutHandle);
+        }
         if (text === null) break;
         yield text;
       }

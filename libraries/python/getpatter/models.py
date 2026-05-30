@@ -35,15 +35,21 @@ class Guardrail:
         name: Identifier used in log messages when the guardrail fires.
         check: Optional callable ``(text: str) -> bool`` that returns ``True``
             when the response should be blocked.
-        blocked_terms: Optional list of words/phrases; any match blocks the
+        blocked_terms: Optional tuple of words/phrases; any match blocks the
             response (case-insensitive substring check).
         replacement: What the agent says instead when a response is blocked.
     """
 
     name: str
     check: Callable[[str], bool] | None = None
-    blocked_terms: list[str] | None = None
+    blocked_terms: tuple[str, ...] | None = None
     replacement: str = "I'm sorry, I can't respond to that."
+
+    def __post_init__(self) -> None:
+        # Backward-compat: accept a list of terms but store an immutable
+        # tuple so the frozen dataclass holds no mutable shared state.
+        if self.blocked_terms is not None and not isinstance(self.blocked_terms, tuple):
+            object.__setattr__(self, "blocked_terms", tuple(self.blocked_terms))
 
 
 @dataclass(frozen=True)
@@ -112,21 +118,21 @@ class Agent:
 
     system_prompt: str
     voice: str = "alloy"
-    model: str = "gpt-4o-mini-realtime-preview"
+    model: str = "gpt-realtime-mini"
     language: str = "en"
     first_message: str = ""
-    tools: list[dict] | None = None
+    tools: tuple[dict, ...] | None = None
     provider: ProviderMode = "openai_realtime"
     stt: STTConfig | None = None  # which STT provider to use in pipeline mode
     tts: TTSConfig | None = None  # which TTS provider to use in pipeline mode
     variables: dict | None = (
         None  # Dynamic variables for ``{placeholder}`` substitution in system_prompt
     )
-    guardrails: list[Guardrail | dict] | None = (
-        None  # List of Guardrail objects or guardrail dicts
+    guardrails: tuple[Guardrail | dict, ...] | None = (
+        None  # Tuple of Guardrail objects or guardrail dicts
     )
     hooks: PipelineHooks | None = None  # Pipeline hooks for pipeline mode
-    text_transforms: list[Callable] | None = (
+    text_transforms: tuple[Callable, ...] | None = (
         None  # Text transforms applied to LLM output before TTS
     )
     vad: "VADProvider | None" = (
@@ -148,7 +154,7 @@ class Agent:
     # tools into ``tools`` with synthetic handlers that dispatch to
     # ``tools/call``. Requires the optional ``mcp`` package — install
     # via ``pip install getpatter[mcp]``. ``None`` (default) disables MCP.
-    mcp_servers: list | None = None
+    mcp_servers: tuple | None = None
     # Minimum sustained voice (ms) before treating caller audio as a barge-in
     # and interrupting TTS. ``0`` disables barge-in entirely — useful on noisy
     # links (ngrok tunnels, speakerphone) where the agent can hear itself.
@@ -277,7 +283,12 @@ class MachineDetectionResult:
 
 @dataclass(frozen=True)
 class STTConfig:
-    """Pipeline-mode STT provider selection (provider key + credentials + options)."""
+    """Pipeline-mode STT provider selection (provider key + credentials + options).
+
+    ``options`` is caller-immutable by convention — do not mutate the dict after
+    passing it to the constructor; frozen only prevents attribute reassignment, not
+    in-place dict mutation.
+    """
 
     provider: str
     api_key: str
@@ -287,7 +298,11 @@ class STTConfig:
     options: dict | None = None
 
     def to_dict(self) -> dict:
-        """Serialize to a plain dict for transport / logging."""
+        """Serialize to a plain dict for transport.
+
+        WARNING: the returned dict contains ``api_key`` in plain text.
+        Never pass the output of this method to a logger.
+        """
         out = {
             "provider": self.provider,
             "api_key": self.api_key,
@@ -300,7 +315,12 @@ class STTConfig:
 
 @dataclass(frozen=True)
 class TTSConfig:
-    """Pipeline-mode TTS provider selection (provider key + credentials + voice)."""
+    """Pipeline-mode TTS provider selection (provider key + credentials + voice).
+
+    ``options`` is caller-immutable by convention — do not mutate the dict after
+    passing it to the constructor; frozen only prevents attribute reassignment, not
+    in-place dict mutation.
+    """
 
     provider: str
     api_key: str
@@ -308,7 +328,11 @@ class TTSConfig:
     options: dict | None = None
 
     def to_dict(self) -> dict:
-        """Serialize to a plain dict for transport / logging."""
+        """Serialize to a plain dict for transport.
+
+        WARNING: the returned dict contains ``api_key`` in plain text.
+        Never pass the output of this method to a logger.
+        """
         out = {"provider": self.provider, "api_key": self.api_key, "voice": self.voice}
         if self.options:
             out["options"] = dict(self.options)

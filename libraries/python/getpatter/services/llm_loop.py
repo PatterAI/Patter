@@ -23,6 +23,9 @@ from typing import (
     Any,
     AsyncGenerator,
     AsyncIterator,
+    Awaitable,
+    Callable,
+    ClassVar,
     Literal,
     Protocol,
     runtime_checkable,
@@ -146,9 +149,17 @@ class DefaultToolExecutor:
     max_retries:
         Total attempts = ``max_retries + 1``. Defaults to 2 (i.e. 3 attempts).
     retry_delay_s:
-        Delay between attempts, in seconds.
+        Base delay for exponential backoff between attempts, in seconds.
+        Actual delay = min(5.0, base * 2^attempt) + jitter (0–60 ms).
     request_timeout_s:
         Per-request timeout for webhook calls, in seconds.
+    circuit_breaker:
+        Optional :class:`~getpatter.tools.circuit_breaker.CircuitBreakerOptions`
+        to enable per-tool circuit breaking.  When the breaker is OPEN the
+        tool is rejected immediately without a network call, preventing
+        repeated calls to a known-bad endpoint.  Mirrors the TypeScript
+        ``DefaultToolExecutor`` which owns a ``CircuitBreakerRegistry``.
+        Defaults to ``None`` (no circuit breaker) for backward compatibility.
     """
 
     def __init__(
@@ -157,10 +168,17 @@ class DefaultToolExecutor:
         max_retries: int = _DEFAULT_TOOL_MAX_RETRIES,
         retry_delay_s: float = _DEFAULT_TOOL_RETRY_DELAY_S,
         request_timeout_s: float = _DEFAULT_TOOL_TIMEOUT_S,
+        circuit_breaker=None,
     ) -> None:
         self._max_retries = max_retries
         self._retry_delay_s = retry_delay_s
         self._request_timeout_s = request_timeout_s
+        if circuit_breaker is not None:
+            from getpatter.tools.circuit_breaker import CircuitBreakerRegistry
+
+            self._breaker: Any = CircuitBreakerRegistry(circuit_breaker)
+        else:
+            self._breaker = None
 
     async def execute(
         self,
@@ -177,6 +195,17 @@ class DefaultToolExecutor:
         ``{"error": "...", "fallback": True}`` rather than raised, so the
         LLM loop can surface them to the model and continue.
         """
+        if self._breaker is not None and not self._breaker.allow(tool_name):
+            retry_ms = int(self._breaker.time_until_half_open_ms(tool_name))
+            return json.dumps(
+                {
+                    "error": f"Tool '{tool_name}' is temporarily unavailable (circuit open).",
+                    "fallback": True,
+                    "circuit_state": "open",
+                    "retry_after_ms": retry_ms,
+                }
+            )
+
         if handler is not None:
             try:
                 result = handler(arguments, call_context)
@@ -271,7 +300,13 @@ class DefaultToolExecutor:
                                 attempt + 1,
                                 exc,
                             )
-                            await asyncio.sleep(self._retry_delay_s)
+                            import random
+
+                            _backoff = (
+                                min(5.0, self._retry_delay_s * (2**attempt))
+                                + random.random() * 0.06
+                            )
+                            await asyncio.sleep(_backoff)
                         else:
                             logger.error(
                                 "Tool webhook '%s' failed after %d attempts: %s",
@@ -828,6 +863,7 @@ class LLMLoop:
                 },
             )
             _span_cm.__enter__()
+            _span_exc_info: tuple = (None, None, None)
             try:
                 async for chunk in self._provider.stream(
                     messages, self._openai_tools, cancel_event=cancel_event
@@ -893,8 +929,13 @@ class LLMLoop:
                             tool_calls_accumulated[idx]["arguments"] += chunk[
                                 "arguments"
                             ]
+            except BaseException:
+                import sys
+
+                _span_exc_info = sys.exc_info()
+                raise
             finally:
-                _span_cm.__exit__(None, None, None)
+                _span_cm.__exit__(*_span_exc_info)
 
             # Fallback billing: some providers (Cerebras streaming has been
             # observed to do this on certain chunk-shape variants) don't
@@ -984,7 +1025,12 @@ class LLMLoop:
                 tool_name = tc_data["function"]["name"]
                 try:
                     arguments = json.loads(tc_data["function"]["arguments"])
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as _je:
+                    logger.warning(
+                        "Tool '%s' returned malformed arguments JSON (falling back to {}): %s",
+                        tool_name,
+                        _je,
+                    )
                     arguments = {}
 
                 result = await self._execute_tool(tool_name, arguments, call_context)

@@ -21,6 +21,7 @@ from getpatter.models import Agent
 # but the Twilio SID validator prevents path-traversal SSRF against the
 # Twilio REST API.  We test that validator here as the SSRF surface.
 
+
 @pytest.mark.security
 class TestSSRFProtection:
     """SEC-1 — Reject internal/private addresses, accept public ones."""
@@ -46,15 +47,19 @@ class TestSSRFProtection:
 
 # ── SEC-2: XSS injection in dashboard fields ──────────────────────────────
 
+
 @pytest.mark.security
 class TestXSSSanitisation:
     """SEC-2 — Malicious HTML/script tags are neutralised."""
 
-    @pytest.mark.parametrize("payload", [
-        "<script>alert(1)</script>",
-        '<img src=x onerror="alert(1)">',
-        "javascript:alert(document.cookie)",
-    ])
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            "<script>alert(1)</script>",
+            '<img src=x onerror="alert(1)">',
+            "javascript:alert(document.cookie)",
+        ],
+    )
     def test_sanitize_strips_or_escapes_xss(self, payload: str) -> None:
         result = _sanitize_variable_value(payload)
         # _sanitize_variable_value strips control chars and truncates, but
@@ -81,21 +86,25 @@ class TestXSSSanitisation:
 
 # ── SEC-3: E.164 phone number fuzzing ─────────────────────────────────────
 
+
 @pytest.mark.security
 class TestE164Validation:
     """SEC-3 — Reject malformed numbers, accept valid E.164."""
 
-    @pytest.mark.parametrize("bad_number", [
-        "",
-        "+",
-        "+1",
-        "+0000000000000000",   # starts with 0 after +
-        "+123abc456",
-        "null",
-        "undefined",
-        "+" + "1" * 10000,     # very long
-        "+0123456789",         # leading zero after +
-    ])
+    @pytest.mark.parametrize(
+        "bad_number",
+        [
+            "",
+            "+",
+            "+1",
+            "+0000000000000000",  # starts with 0 after +
+            "+123abc456",
+            "null",
+            "undefined",
+            "+" + "1" * 10000,  # very long
+            "+0123456789",  # leading zero after +
+        ],
+    )
     def test_rejects_invalid_numbers(self, bad_number: str) -> None:
         assert _validate_e164(bad_number) is False
 
@@ -116,18 +125,19 @@ class TestE164Validation:
 
 # ── SEC-4: TwiML payload injection ────────────────────────────────────────
 
+
 @pytest.mark.security
 class TestTwiMLInjection:
     """SEC-4 — Injected TwiML verbs are escaped before inclusion."""
 
     def test_redirect_verb_escaped(self) -> None:
-        malicious = '<Redirect>http://attacker.example/evil</Redirect>'
+        malicious = "<Redirect>http://attacker.example/evil</Redirect>"
         escaped = _xml_escape(malicious)
         assert "<Redirect>" not in escaped
         assert "&lt;Redirect&gt;" in escaped
 
     def test_dial_injection_escaped(self) -> None:
-        malicious = '</Say><Dial>+15551234567</Dial><Say>'
+        malicious = "</Say><Dial>+15551234567</Dial><Say>"
         escaped = _xml_escape(malicious)
         assert "<Dial>" not in escaped
         assert "&lt;Dial&gt;" in escaped
@@ -145,6 +155,7 @@ class TestTwiMLInjection:
 
 
 # ── SEC-5: Secret leakage in logs and error messages ──────────────────────
+
 
 @pytest.mark.security
 class TestSecretLeakage:
@@ -166,6 +177,16 @@ class TestSecretLeakage:
             + r")"
         )
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "LocalConfig uses the default dataclass repr which includes all "
+            "field values verbatim — twilio_token and openai_key are exposed. "
+            "A custom __repr__ that masks secrets (e.g. '***') must be added "
+            "before this test can pass. Marked strict so an accidental fix "
+            "is caught and the xfail removed explicitly."
+        ),
+    )
     def test_local_config_repr_hides_secrets(self) -> None:
         config = LocalConfig(
             twilio_sid="ACtest000000000000000000000000000",
@@ -173,13 +194,12 @@ class TestSecretLeakage:
             openai_key=self.FAKE_OPENAI_KEY,
         )
         output = repr(config)
-        # LocalConfig is a frozen dataclass; its default repr includes all
-        # fields. We check that if secrets appear they are at least present
-        # in a way that tests can flag. The important thing is that error
-        # messages (tested below) do not leak them.
-        # Note: dataclass repr does include values — this test documents the
-        # current behavior so we can catch regressions if masking is added.
-        assert isinstance(output, str)
+        assert self.FAKE_TWILIO_TOKEN not in output, (
+            "twilio_token must not appear verbatim in LocalConfig repr"
+        )
+        assert self.FAKE_OPENAI_KEY not in output, (
+            "openai_key must not appear verbatim in LocalConfig repr"
+        )
 
     def test_twilio_adapter_repr_masks_credentials(self) -> None:
         """TwilioAdapter.__repr__ must not contain full account_sid."""
@@ -198,6 +218,17 @@ class TestSecretLeakage:
         assert len(str(err)) > 10
         assert "timeout" in str(err).lower() or "connection" in str(err).lower()
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "STTConfig uses the default dataclass repr which includes api_key "
+            "verbatim, and Agent repr includes the nested STTConfig repr — "
+            "so the API key is exposed in Agent repr. A custom __repr__ on "
+            "STTConfig that masks api_key (e.g. '***') must be added before "
+            "this test can pass. Marked strict so an accidental fix is caught "
+            "and the xfail removed explicitly."
+        ),
+    )
     def test_agent_repr_does_not_leak_stt_key(self) -> None:
         from getpatter.models import STTConfig
 
@@ -207,6 +238,6 @@ class TestSecretLeakage:
             stt=stt,
         )
         output = repr(agent)
-        # frozen dataclass repr includes nested objects; verify the key
-        # is present to document the surface (not a pass/fail on masking)
-        assert isinstance(output, str)
+        assert self.FAKE_API_KEY not in output, (
+            "STTConfig.api_key must not appear verbatim in Agent repr"
+        )

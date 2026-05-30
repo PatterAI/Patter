@@ -8,54 +8,54 @@
 
 /** Provider/model metadata attached to most metric payloads. */
 export interface Metadata {
-  modelName?: string | null;
-  modelProvider?: string | null;
+  readonly modelName?: string | null;
+  readonly modelProvider?: string | null;
 }
 
 // ---- LLM usage ----
 
 /** Token-usage breakdown for a single LLM completion. */
 export interface LLMUsage {
-  promptTokens: number;
-  completionTokens: number;
-  totalTokens: number;
-  promptCachedTokens?: number;
-  cacheCreationTokens?: number;
-  cacheReadTokens?: number;
+  readonly promptTokens: number;
+  readonly completionTokens: number;
+  readonly totalTokens: number;
+  readonly promptCachedTokens?: number;
+  readonly cacheCreationTokens?: number;
+  readonly cacheReadTokens?: number;
 }
 
 // ---- Realtime usage ----
 
 /** Per-modality breakdown of cached tokens reported by Realtime providers. */
 export interface CachedTokenDetails {
-  audioTokens: number;
-  textTokens: number;
-  imageTokens: number;
+  readonly audioTokens: number;
+  readonly textTokens: number;
+  readonly imageTokens: number;
 }
 
 /** Realtime input-token breakdown (audio, text, image, cached). */
 export interface InputTokenDetails {
-  audioTokens: number;
-  textTokens: number;
-  imageTokens: number;
-  cachedTokens: number;
-  cachedTokensDetails?: CachedTokenDetails | null;
+  readonly audioTokens: number;
+  readonly textTokens: number;
+  readonly imageTokens: number;
+  readonly cachedTokens: number;
+  readonly cachedTokensDetails?: CachedTokenDetails | null;
 }
 
 /** Realtime output-token breakdown (text, audio, image). */
 export interface OutputTokenDetails {
-  textTokens: number;
-  audioTokens: number;
-  imageTokens: number;
+  readonly textTokens: number;
+  readonly audioTokens: number;
+  readonly imageTokens: number;
 }
 
 /** Aggregate token-and-duration usage for a Realtime session. */
 export interface RealtimeUsage {
-  sessionDurationSeconds: number;
-  tokensPerSecond: number;
-  inputTokenDetails: InputTokenDetails;
-  outputTokenDetails: OutputTokenDetails;
-  metadata?: Metadata | null;
+  readonly sessionDurationSeconds: number;
+  readonly tokensPerSecond: number;
+  readonly inputTokenDetails: InputTokenDetails;
+  readonly outputTokenDetails: OutputTokenDetails;
+  readonly metadata?: Metadata | null;
 }
 
 // ---- EOU metrics ----
@@ -68,12 +68,12 @@ export interface RealtimeUsage {
  * ``onUserTurnCompletedDelay`` ms from turn committed → pipeline hook done.
  */
 export interface EOUMetrics {
-  timestamp: number;
-  endOfUtteranceDelay: number;
-  transcriptionDelay: number;
-  onUserTurnCompletedDelay: number;
-  speechId?: string | null;
-  metadata?: Metadata | null;
+  readonly timestamp: number;
+  readonly endOfUtteranceDelay: number;
+  readonly transcriptionDelay: number;
+  readonly onUserTurnCompletedDelay: number;
+  readonly speechId?: string | null;
+  readonly metadata?: Metadata | null;
 }
 
 // ---- Interruption metrics ----
@@ -85,29 +85,29 @@ export interface EOUMetrics {
  * it is reserved for a future ML-based overlap classifier.
  */
 export interface InterruptionMetrics {
-  timestamp: number;
-  totalDuration: number;
-  predictionDuration: number;
-  detectionDelay: number;
-  numInterruptions: number;
-  numBackchannels: number;
-  metadata?: Metadata | null;
+  readonly timestamp: number;
+  readonly totalDuration: number;
+  readonly predictionDuration: number;
+  readonly detectionDelay: number;
+  readonly numInterruptions: number;
+  readonly numBackchannels: number;
+  readonly metadata?: Metadata | null;
 }
 
 // ---- TTFB / processing metrics ----
 
 /** Time-to-first-byte for a single processor (STT/LLM/TTS). */
 export interface TTFBMetrics {
-  timestamp: number;
-  processor: string;
-  model?: string | null;
-  value: number;
+  readonly timestamp: number;
+  readonly processor: string;
+  readonly model?: string | null;
+  readonly value: number;
 }
 
 /** Total processing time for a single processor stage. */
 export interface ProcessingMetrics {
-  timestamp: number;
-  processor: string;
-  model?: string | null;
-  value: number;
+  readonly timestamp: number;
+  readonly processor: string;
+  readonly model?: string | null;
+  readonly value: number;
 }

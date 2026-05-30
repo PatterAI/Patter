@@ -24,17 +24,32 @@ function sdkVersion(): string {
 
 /** Snapshot of a call as held by the dashboard store. */
 export interface CallRecord {
+  readonly call_id: string;
+  readonly caller: string;
+  readonly callee: string;
+  readonly direction: string;
+  readonly started_at: number;
+  readonly ended_at?: number;
+  /**
+   * Current lifecycle state: ``initiated`` (pre-registered), ``ringing``,
+   * ``in-progress``, ``completed``, ``no-answer``, ``busy``, ``failed``,
+   * ``canceled``, or ``webhook_error``.
+   */
+  readonly status?: string;
+  readonly transcript?: ReadonlyArray<{ readonly role: string; readonly text: string; readonly timestamp: number }>;
+  readonly turns?: readonly unknown[];
+  readonly metrics?: Record<string, unknown> | null;
+  readonly [key: string]: unknown;
+}
+
+/** Mutable internal representation used while a call is in flight. */
+interface MutableCallRecord {
   call_id: string;
   caller: string;
   callee: string;
   direction: string;
   started_at: number;
   ended_at?: number;
-  /**
-   * Current lifecycle state: ``initiated`` (pre-registered), ``ringing``,
-   * ``in-progress``, ``completed``, ``no-answer``, ``busy``, ``failed``,
-   * ``canceled``, or ``webhook_error``.
-   */
   status?: string;
   transcript?: Array<{ role: string; text: string; timestamp: number }>;
   turns?: unknown[];
@@ -44,15 +59,15 @@ export interface CallRecord {
 
 /** Server-Sent-Event payload broadcast by `MetricsStore` for live UI updates. */
 export interface SSEEvent {
-  type: string;
-  data: Record<string, unknown>;
+  readonly type: string;
+  readonly data: Readonly<Record<string, unknown>>;
 }
 
 /** In-memory bounded ring buffer of recent calls plus active-call tracking. */
 export class MetricsStore extends EventEmitter {
   private readonly maxCalls: number;
-  private calls: CallRecord[] = [];
-  private activeCalls: Map<string, CallRecord> = new Map();
+  private calls: MutableCallRecord[] = [];
+  private activeCalls: Map<string, MutableCallRecord> = new Map();
   /**
    * User-driven soft delete: call_ids the operator removed from the
    * dashboard view. The on-disk artefacts written by ``CallLogger``
@@ -100,7 +115,7 @@ export class MetricsStore extends EventEmitter {
       existing.status = 'in-progress';
       existing.turns = existing.turns || [];
     } else {
-      const record: CallRecord = {
+      const record: MutableCallRecord = {
         call_id: callId,
         caller: (data.caller as string) || '',
         callee: (data.callee as string) || '',
@@ -130,7 +145,7 @@ export class MetricsStore extends EventEmitter {
     if (!callId) return;
     if (this.activeCalls.has(callId)) return; // first writer wins
 
-    const record: CallRecord = {
+    const record: MutableCallRecord = {
       call_id: callId,
       caller: (data.caller as string) || '',
       callee: (data.callee as string) || '',
@@ -174,7 +189,7 @@ export class MetricsStore extends EventEmitter {
         // recordCallEnd. The dashboard masks this via mergeCallPreserving
         // (useDashboardData.ts) but the root cause is here — recordCallEnd
         // should be the only writer to the completed buffer.
-        const entry: CallRecord = {
+        const entry: MutableCallRecord = {
           call_id: callId,
           caller: active.caller || '',
           callee: active.callee || '',
@@ -200,8 +215,7 @@ export class MetricsStore extends EventEmitter {
     } else {
       for (let i = this.calls.length - 1; i >= 0; i--) {
         if (this.calls[i].call_id === callId) {
-          this.calls[i].status = status;
-          Object.assign(this.calls[i], extra);
+          this.calls[i] = { ...this.calls[i], status, ...extra };
           break;
         }
       }
@@ -303,8 +317,8 @@ export class MetricsStore extends EventEmitter {
     // transcript we accumulated on the active record via ``recordTurn``.
     // This keeps the live-transcript pane stable across the call_status
     // (``completed``) → call_end gap. See dashboard BUG 2.
-    const dataTranscript = data.transcript as CallRecord['transcript'];
-    const resolvedTranscript: CallRecord['transcript'] =
+    const dataTranscript = data.transcript as MutableCallRecord['transcript'];
+    const resolvedTranscript: MutableCallRecord['transcript'] =
       dataTranscript && dataTranscript.length > 0
         ? dataTranscript
         : active?.transcript && active.transcript.length > 0
@@ -318,7 +332,7 @@ export class MetricsStore extends EventEmitter {
         : existing?.turns && existing.turns.length > 0
           ? existing.turns
           : undefined;
-    const entry: CallRecord = {
+    const entry: MutableCallRecord = {
       call_id: callId,
       caller:
         (data.caller as string) ||
@@ -381,7 +395,7 @@ export class MetricsStore extends EventEmitter {
   getCall(callId: string): CallRecord | null {
     if (this.deletedCallIds.has(callId)) return null;
     for (let i = this.calls.length - 1; i >= 0; i--) {
-      if (this.calls[i].call_id === callId) return this.calls[i];
+      if (this.calls[i].call_id === callId) return { ...this.calls[i] };
     }
     return null;
   }
@@ -424,7 +438,9 @@ export class MetricsStore extends EventEmitter {
     }
     if (accepted.length === 0) return [];
     accepted.sort();
-    this.persistDeletedIds();
+    this.persistDeletedIds().catch((err) =>
+      getLogger().debug(`MetricsStore.deleteCalls: persistDeletedIds failed: ${String(err)}`),
+    );
     this.publish('calls_deleted', { call_ids: accepted });
     return accepted;
   }
@@ -439,19 +455,19 @@ export class MetricsStore extends EventEmitter {
     return Array.from(this.deletedCallIds).sort();
   }
 
-  /** Atomically persist the deleted-ids set to disk. Best-effort. */
-  private persistDeletedIds(): void {
+  /** Atomically persist the deleted-ids set to disk. Best-effort async. */
+  private async persistDeletedIds(): Promise<void> {
     if (this.deletedIdsPath === null) return;
     try {
       const dir = path.dirname(this.deletedIdsPath);
-      fs.mkdirSync(dir, { recursive: true });
+      await fs.promises.mkdir(dir, { recursive: true });
       const tmp = this.deletedIdsPath + '.tmp';
       const payload = {
         version: 1,
         deleted_call_ids: Array.from(this.deletedCallIds).sort(),
       };
-      fs.writeFileSync(tmp, JSON.stringify(payload, null, 2), 'utf8');
-      fs.renameSync(tmp, this.deletedIdsPath);
+      await fs.promises.writeFile(tmp, JSON.stringify(payload, null, 2), 'utf8');
+      await fs.promises.rename(tmp, this.deletedIdsPath);
     } catch (err) {
       getLogger().debug(
         `MetricsStore.persistDeletedIds: ${String(err)}`,
@@ -461,7 +477,8 @@ export class MetricsStore extends EventEmitter {
 
   /** Look up an active call by id (returns undefined if not active or unknown). */
   getActive(callId: string): CallRecord | undefined {
-    return this.activeCalls.get(callId);
+    const rec = this.activeCalls.get(callId);
+    return rec !== undefined ? { ...rec } : undefined;
   }
 
   /** Return all currently active (not yet ended) calls. */
@@ -604,7 +621,7 @@ export class MetricsStore extends EventEmitter {
     const callsRoot = path.join(logRoot, 'calls');
     if (!fs.existsSync(callsRoot)) return 0;
 
-    const collected: CallRecord[] = [];
+    const collected: MutableCallRecord[] = [];
     const seen = new Set<string>(this.calls.map((c) => c.call_id));
 
     const walk = (dir: string, depth: number): void => {
@@ -751,7 +768,7 @@ function metricsFromTopLevel(
 function metadataToCallRecord(
   callId: string,
   meta: Record<string, unknown>,
-): CallRecord | null {
+): MutableCallRecord | null {
   const startedAt = parseTimestamp(meta.started_at);
   if (startedAt === null) return null;
   const endedAt = parseTimestamp(meta.ended_at);
@@ -761,7 +778,7 @@ function metadataToCallRecord(
       ? (meta.metrics as Record<string, unknown>)
       : metricsFromTopLevel(meta);
   const transcript = Array.isArray(meta.transcript)
-    ? (meta.transcript as CallRecord['transcript'])
+    ? (meta.transcript as MutableCallRecord['transcript'])
     : [];
   return {
     call_id: callId,
@@ -787,12 +804,12 @@ function metadataToCallRecord(
  */
 function loadTranscriptJsonl(
   filePath: string,
-): NonNullable<CallRecord['transcript']> {
+): NonNullable<MutableCallRecord['transcript']> {
   try {
     if (!fs.existsSync(filePath)) return [];
     const raw = fs.readFileSync(filePath, 'utf8');
     const lines = raw.split('\n').filter((l) => l.trim().length > 0);
-    const out: NonNullable<CallRecord['transcript']> = [];
+    const out: NonNullable<MutableCallRecord['transcript']> = [];
     for (const line of lines) {
       let row: Record<string, unknown>;
       try {
@@ -800,9 +817,9 @@ function loadTranscriptJsonl(
       } catch {
         continue;
       }
-      const tsIso = typeof row.ts === 'string' ? Date.parse(row.ts) : NaN;
+      const tsIso = typeof row.ts === 'string' ? Date.parse(row.ts) / 1000 : NaN;
       const tsNumeric =
-        typeof row.timestamp === 'number' ? row.timestamp * 1000 : NaN;
+        typeof row.timestamp === 'number' ? row.timestamp : NaN;
       const timestamp = Number.isFinite(tsIso)
         ? tsIso
         : Number.isFinite(tsNumeric)

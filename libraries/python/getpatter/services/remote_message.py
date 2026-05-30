@@ -10,6 +10,7 @@ from __future__ import annotations
 
 __all__ = ["RemoteMessageHandler", "is_remote_url", "is_websocket_url"]
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -22,6 +23,10 @@ logger = logging.getLogger("getpatter")
 
 # Maximum response size from webhook (64 KB)
 _MAX_RESPONSE_BYTES = 64 * 1024
+
+# Overall timeout (seconds) for a WebSocket on_message exchange.
+# Matches the httpx.AsyncClient timeout used by call_webhook.
+_WS_TIMEOUT = 30.0
 
 
 class RemoteMessageHandler:
@@ -114,6 +119,11 @@ class RemoteMessageHandler:
 
         A frame with ``{"done": true}`` signals end of response.
 
+        The entire exchange is bounded by a ``_WS_TIMEOUT`` second wall-clock
+        timeout (matching the httpx timeout on the HTTP webhook path). A
+        ``asyncio.TimeoutError`` is caught and logged as a warning so the call
+        can continue without hanging.
+
         Args:
             url: The WebSocket URL (``ws://`` or ``wss://``).
             data: Message data dict.
@@ -129,6 +139,7 @@ class RemoteMessageHandler:
             )
         import ipaddress
         from urllib.parse import urlparse
+
         from getpatter.tools.tool_executor import _BLOCKED_HOSTNAMES
 
         parsed = urlparse(url)
@@ -169,25 +180,33 @@ class RemoteMessageHandler:
                 "Install it with: pip install websockets"
             )
 
-        async with websockets.connect(url) as ws:
-            await ws.send(json.dumps(data))
+        try:
+            async with asyncio.timeout(_WS_TIMEOUT):
+                async with websockets.connect(url, open_timeout=10) as ws:
+                    await ws.send(json.dumps(data))
 
-            async for raw in ws:
-                try:
-                    frame = json.loads(raw)
-                except (json.JSONDecodeError, TypeError):
-                    # Plain text frame
-                    yield str(raw)
-                    continue
+                    async for raw in ws:
+                        try:
+                            frame = json.loads(raw)
+                        except (json.JSONDecodeError, TypeError):
+                            # Plain text frame
+                            yield str(raw)
+                            continue
 
-                if isinstance(frame, dict):
-                    if frame.get("done"):
-                        return
-                    text = frame.get("text", "")
-                    if text:
-                        yield text
-                else:
-                    yield str(frame)
+                        if isinstance(frame, dict):
+                            if frame.get("done"):
+                                return
+                            text = frame.get("text", "")
+                            if text:
+                                yield text
+                        else:
+                            yield str(frame)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "on_message WebSocket exchange timed out after %.1f s for %r",
+                _WS_TIMEOUT,
+                url,
+            )
 
 
 def is_remote_url(on_message) -> bool:

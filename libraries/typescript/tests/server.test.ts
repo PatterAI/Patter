@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { EmbeddedServer, validateWebhookUrl, sanitizeVariables } from '../src/server';
 import type { LocalConfig } from '../src/server';
 import type { AgentOptions } from '../src/types';
@@ -369,10 +369,9 @@ describe('EmbeddedServer wraps logging callbacks with active-record fallback', (
         telephony_provider: 'twilio',
       });
 
-      // Poll for the fire-and-forget logCallStart promise to drain. A
-      // fixed 50 ms wait was enough on Node 20 but flakes on Node 22
-      // (~10 % failure rate in CI) because the async scheduler defers
-      // the atomic-write resolve a tick longer. Bounded poll up to 2 s.
+      // Wait for the fire-and-forget logCallStart promise to drain using
+      // vi.waitFor, which uses exponential back-off and surfaces a clean
+      // timeout error instead of exhausting a manual deadline loop.
       const metaPaths: string[] = [];
       const walk = (d: string): void => {
         for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
@@ -381,13 +380,14 @@ describe('EmbeddedServer wraps logging callbacks with active-record fallback', (
           else if (entry.name === 'metadata.json') metaPaths.push(full);
         }
       };
-      const deadline = Date.now() + 2000;
-      while (Date.now() < deadline) {
-        metaPaths.length = 0;
-        walk(tmp);
-        if (metaPaths.length >= 1) break;
-        await new Promise((resolve) => setTimeout(resolve, 25));
-      }
+      await vi.waitFor(
+        () => {
+          metaPaths.length = 0;
+          walk(tmp);
+          expect(metaPaths.length).toBeGreaterThanOrEqual(1);
+        },
+        { timeout: 2000 },
+      );
       expect(metaPaths).toHaveLength(1);
       const payload = JSON.parse(fs.readFileSync(metaPaths[0], 'utf8')) as {
         caller: string;

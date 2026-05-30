@@ -127,13 +127,12 @@ function resolvePersistRoot(persist: boolean | string | undefined): string | nul
   if (persist === false) return null;
   if (persist === true) return resolveLogRoot('auto');
   if (typeof persist === 'string') return resolveLogRoot(persist);
-  // Changed from the prior opt-in behaviour on 2026-05-21: the dashboard's
-  // hydrate path requires on-disk records to survive process restarts, so
-  // persistence now defaults to ON when `persist` is omitted. Set
-  // `persist: false` to keep the old ephemeral-RAM-only behaviour.
+  // Restore opt-in semantics: when `persist` is omitted and PATTER_LOG_DIR
+  // is not set, return null (no disk writes). This preserves the documented
+  // backward-compatible default in LocalOptions.persist JSDoc.
   const envRoot = resolveLogRoot();
   if (envRoot !== null) return envRoot;
-  return resolveLogRoot('auto');
+  return null;
 }
 
 /** Close every parked socket inside a ``ParkedProviderConnections`` slot. */
@@ -1223,8 +1222,8 @@ export class Patter {
     if (!options.to) {
       throw new Error("'to' phone number is required");
     }
-    if (!options.to.startsWith('+')) {
-      throw new Error(`'to' must be in E.164 format (e.g., '+1234567890'). Got: '${options.to}'`);
+    if (!/^\+[1-9]\d{6,14}$/.test(options.to)) {
+      throw new Error("'to' must be E.164 format (+<country><digits>). Got value with invalid format.");
     }
     if (options.wait && !this.embeddedServer) {
       throw new PatterConnectionError(
@@ -1246,19 +1245,17 @@ export class Patter {
     const effectiveRingTimeout: number | null =
       options.ringTimeout === undefined ? 25 : options.ringTimeout;
 
-    // Wire the per-call onMachineDetection callback into the embedded
-    // server BEFORE dispatching the call so a fast AMD result (Twilio
-    // async AMD typically lands within 2-5 s of answer) can never arrive
-    // before the callback is in place. Cleared on the next call() so a
-    // result for a previous call cannot leak into a new caller's callback.
+    // The per-call onMachineDetection callback is registered into the
+    // embedded server's per-callSid Map (``onMachineDetectionByCallSid``)
+    // inside each carrier branch below, once the callSid is known. Keying by
+    // callSid (instead of a single shared slot) means concurrent outbound
+    // calls each get their own callback and a fast AMD result for one call
+    // can never leak into another caller's callback.
     // AMD is **on by default**; pass ``machineDetection: false`` to
     // explicitly skip it (e.g. to save per-call AMD billing when the
     // destination is known to be a human). A non-empty voicemailMessage
     // also implicitly requires AMD regardless of the flag.
     const wantsAmd = options.machineDetection !== false || Boolean(options.voicemailMessage);
-    if (this.embeddedServer) {
-      this.embeddedServer.onMachineDetection = options.onMachineDetection;
-    }
 
     // Pre-warm provider connections in parallel with the carrier-side
     // ``initiateCall`` so DNS / TLS / HTTP/2 handshakes complete during
@@ -1323,6 +1320,15 @@ export class Patter {
         } as const;
         if (this.embeddedServer) {
           this.embeddedServer.metricsStore.recordCallInitiated(initiatedPayload);
+          // Register the per-callSid AMD callback now that we have the
+          // call_control_id. Keying by callSid avoids a single-slot race
+          // when multiple outbound calls are in flight simultaneously.
+          if (options.onMachineDetection) {
+            this.embeddedServer.onMachineDetectionByCallSid.set(
+              telnyxCallId,
+              options.onMachineDetection,
+            );
+          }
         }
         // Relay to a standalone dashboard (running in a separate process)
         // so it surfaces the dial attempt during ringing, not only when
@@ -1404,6 +1410,18 @@ export class Patter {
         } as const;
         if (this.embeddedServer) {
           this.embeddedServer.metricsStore.recordCallInitiated(initiatedPayload);
+          // Register the per-callSid AMD callback now that we have an id.
+          // NOTE: Plivo's POST /Call/ returns ``request_uuid`` (the queued
+          // handle), while the inbound AMD webhook fires with the live
+          // ``CallUUID`` — the two identifiers differ. The Plivo AMD webhook
+          // in server.ts therefore falls back to the single pending callback
+          // when the keyed lookup misses, so this registration still fires.
+          if (options.onMachineDetection) {
+            this.embeddedServer.onMachineDetectionByCallSid.set(
+              plivoCallId,
+              options.onMachineDetection,
+            );
+          }
         }
         try {
           const { notifyDashboard } = await import('./dashboard/persistence');
@@ -1503,6 +1521,15 @@ export class Patter {
       } as const;
       if (this.embeddedServer) {
         this.embeddedServer.metricsStore.recordCallInitiated(initiatedPayload);
+        // Register the per-callSid AMD callback now that we have the CallSid.
+        // Keying by callSid avoids a single-slot race when multiple outbound
+        // calls are in flight simultaneously.
+        if (options.onMachineDetection) {
+          this.embeddedServer.onMachineDetectionByCallSid.set(
+            twilioCallSid,
+            options.onMachineDetection,
+          );
+        }
         if (twilioNotificationsPath) {
           getLogger().info(
             `Outbound call ${twilioCallSid} placed. ` +

@@ -13,8 +13,8 @@ export interface OpenAITTSOptions {
   speed?: number;
   /**
    * Enable anti-aliasing LPF ahead of the 3:2 decimation. Defaults to
-   * ``false`` for backwards-compatibility; set to ``true`` for cleaner
-   * audio on sibilants / fricatives.
+   * ``true`` (matches the provider default); set to ``false`` to opt out
+   * for bit-exact downsample-only output.
    */
   antiAlias?: boolean;
 }
@@ -45,7 +45,7 @@ export class TTS extends _OpenAITTS {
       opts.model ?? "gpt-4o-mini-tts",
       opts.instructions ?? null,
       opts.speed ?? null,
-      opts.antiAlias ?? false,
+      opts.antiAlias ?? true,
     );
   }
 }

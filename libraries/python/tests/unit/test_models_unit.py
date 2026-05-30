@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
@@ -84,7 +83,7 @@ class TestAgentDefaults:
     def test_defaults(self) -> None:
         agent = Agent(system_prompt="You help.")
         assert agent.voice == "alloy"
-        assert agent.model == "gpt-4o-mini-realtime-preview"
+        assert agent.model == "gpt-realtime-mini"
         assert agent.language == "en"
         assert agent.first_message == ""
         assert agent.tools is None

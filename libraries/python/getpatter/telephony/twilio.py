@@ -346,8 +346,8 @@ async def twilio_stream_bridge(
                     "Call started: %s (Twilio, %s, %s → %s)",
                     call_sid_actual,
                     _mode,
-                    caller or "?",
-                    callee or "?",
+                    mask_phone_number(caller) or "?",
+                    mask_phone_number(callee) or "?",
                 )
                 if custom_params:
                     logger.debug("Custom params: %s", custom_params)
@@ -660,7 +660,8 @@ async def twilio_stream_bridge(
                         "caller": caller,
                         "callee": callee,
                         "ended_at": time.time(),
-                        "transcript": list(conversation_history),
+                        "transcript": list(transcript_entries),
+                        "conversation_history": list(conversation_history),
                         "metrics": call_metrics,
                     }
                 )

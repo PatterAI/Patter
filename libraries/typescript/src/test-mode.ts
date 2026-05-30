@@ -148,14 +148,13 @@ export class TestSession {
           continue;
         }
 
-        conversationHistory.push({
-          role: 'user',
-          text: userInput,
-          timestamp: Date.now(),
-        });
-
         // Get response
         if (onMessage) {
+          conversationHistory.push({
+            role: 'user',
+            text: userInput,
+            timestamp: Date.now(),
+          });
           try {
             const responseText = await onMessage({
               text: userInput,
@@ -176,15 +175,28 @@ export class TestSession {
             log.error(`  [Error: ${String(e)}]`);
           }
         } else if (llmLoop) {
+          // Pass history WITHOUT the current user message — LLMLoop.buildMessages
+          // unconditionally appends userText itself; pushing it here first would
+          // send the message twice and corrupt the LLM context.
           const callCtx = { call_id: callId, caller, callee };
           const parts: string[] = [];
+          // Intentional: streaming token output requires partial-line writes; logger
+          // does not support this. Acceptable only in interactive terminal test mode.
           process.stdout.write('  Agent: ');
           for await (const token of llmLoop.run(userInput, conversationHistory, callCtx)) {
             parts.push(token);
+            // Intentional: streaming token output requires partial-line writes; logger
+            // does not support this. Acceptable only in interactive terminal test mode.
             process.stdout.write(token);
           }
           log.info('');
           const responseText = parts.join('');
+          // Record the user turn and assistant response after the LLM has replied.
+          conversationHistory.push({
+            role: 'user',
+            text: userInput,
+            timestamp: Date.now(),
+          });
           if (responseText) {
             conversationHistory.push({
               role: 'assistant',

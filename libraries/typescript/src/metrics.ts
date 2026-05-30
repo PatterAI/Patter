@@ -34,48 +34,48 @@ export interface LatencyBreakdown {
    * number as "STT latency". Falls back to turn_start when the endpoint
    * signal is unavailable (degraded provider, batch STT, etc.).
    */
-  stt_ms: number;
+  readonly stt_ms: number;
   /**
    * Duration of the user's utterance (turn_start → end-of-speech). Useful
    * to distinguish "user spoke for 4s" from "STT took 4s to finalize" —
    * they used to be conflated in stt_ms before 0.6.1. Optional — undefined
    * when the endpoint signal is unavailable.
    */
-  user_speech_duration_ms?: number;
+  readonly user_speech_duration_ms?: number;
   /**
    * Backwards-compatible LLM bucket. With the split below, this now reflects
    * the user-perceived first-token latency (TTFT) when streaming is available
    * and the full generation time otherwise. Prefer ``llm_ttft_ms`` /
    * ``llm_total_ms`` in new code.
    */
-  llm_ms: number;
+  readonly llm_ms: number;
   /** Time-to-first-token (UX-facing latency): stt_complete → first LLM token. */
-  llm_ttft_ms?: number;
+  readonly llm_ttft_ms?: number;
   /**
    * Total LLM generation time: stt_complete → last LLM token. Distinct from
    * ``llm_ms`` so cost/throughput analysis and TTFT can be tracked separately.
    */
-  llm_total_ms?: number;
-  tts_ms: number;
-  total_ms: number;
+  readonly llm_total_ms?: number;
+  readonly tts_ms: number;
+  readonly total_ms: number;
   /**
    * Endpoint latency: time from end-of-user-speech (VAD stop or STT
    * ``speech_final``) to LLM dispatch. Captures the silence-detection +
    * transcript-finalization gap. Optional — undefined when the source signal
    * is missing.
    */
-  endpoint_ms?: number;
+  readonly endpoint_ms?: number;
   /**
    * Barge-in latency: time from user-interrupt detection to TTS playback
    * actually halting (i.e. after ``sendClear`` returned). Optional — only
    * populated on interrupted turns.
    */
-  bargein_ms?: number;
+  readonly bargein_ms?: number;
   /**
    * Total TTS time: LLM-first-token (or first-sentence boundary) to last
    * TTS audio byte sent. Optional — undefined when TTS never completed.
    */
-  tts_total_ms?: number;
+  readonly tts_total_ms?: number;
   /**
    * **User-perceived agent response latency**: time from end-of-user-speech
    * (VAD stop or STT ``speech_final``) to the first audio byte the agent
@@ -88,59 +88,57 @@ export interface LatencyBreakdown {
    * the system-controlled latency: silence detection + LLM TTFT + TTS
    * first byte.
    */
-  agent_response_ms?: number;
+  readonly agent_response_ms?: number;
 }
 
 /** Per-call cost breakdown by component (STT/TTS/LLM/telephony) plus the total. */
 export interface CostBreakdown {
-  stt: number;
-  tts: number;
-  llm: number;
-  telephony: number;
-  total: number;
+  readonly stt: number;
+  readonly tts: number;
+  readonly llm: number;
+  readonly telephony: number;
+  readonly total: number;
   /**
    * Amount saved on LLM cost thanks to OpenAI Realtime prompt caching.
    * ``llm`` above is the net cost AFTER this discount. Dashboards can
    * render ``saved $X (pct%)`` next to the LLM line when > 0.
    */
-  llm_cached_savings?: number;
+  readonly llm_cached_savings: number;
 }
 
 /** Metrics captured for a single conversation turn. */
 export interface TurnMetrics {
-  turn_index: number;
-  user_text: string;
-  agent_text: string;
-  latency: LatencyBreakdown;
-  stt_audio_seconds: number;
-  tts_characters: number;
-  timestamp: number;
+  readonly turn_index: number;
+  readonly user_text: string;
+  readonly agent_text: string;
+  readonly latency: LatencyBreakdown;
+  readonly stt_audio_seconds: number;
+  readonly tts_characters: number;
+  readonly timestamp: number;
 }
 
 /** Aggregated metrics for an entire call (turns, costs, latency percentiles). */
 export interface CallMetrics {
-  call_id: string;
-  duration_seconds: number;
-  turns: TurnMetrics[];
-  cost: CostBreakdown;
-  latency_avg: LatencyBreakdown;
-  latency_p95: LatencyBreakdown;
-  // Optional for backwards compatibility with external consumers that
-  // construct CallMetrics literals. Always populated by endCall().
-  latency_p50?: LatencyBreakdown;
-  latency_p90?: LatencyBreakdown;
-  latency_p99?: LatencyBreakdown;
-  provider_mode: string;
-  stt_provider: string;
-  tts_provider: string;
-  llm_provider: string;
-  telephony_provider: string;
+  readonly call_id: string;
+  readonly duration_seconds: number;
+  readonly turns: readonly TurnMetrics[];
+  readonly cost: CostBreakdown;
+  readonly latency_avg: LatencyBreakdown;
+  readonly latency_p95: LatencyBreakdown;
+  readonly latency_p50: LatencyBreakdown;
+  readonly latency_p90: LatencyBreakdown;
+  readonly latency_p99: LatencyBreakdown;
+  readonly provider_mode: string;
+  readonly stt_provider: string;
+  readonly tts_provider: string;
+  readonly llm_provider: string;
+  readonly telephony_provider: string;
   /** Model identifiers per provider (e.g. "ink-whisper", "eleven_flash_v2_5",
    * "gpt-oss-120b"). Surface on the dashboard cost breakdown so operators
    * can attribute per-call spend to a specific model. */
-  stt_model?: string;
-  tts_model?: string;
-  llm_model?: string;
+  readonly stt_model?: string;
+  readonly tts_model?: string;
+  readonly llm_model?: string;
 }
 
 // ---- CallControl interface ----
@@ -205,7 +203,7 @@ function percentile(values: number[], p: number): number {
 
 /** Mutable per-call accumulator that stamps timestamps and emits final `CallMetrics`. */
 export class CallMetricsAccumulator {
-  callId: string;
+  readonly callId: string;
   readonly providerMode: string;
   readonly telephonyProvider: string;
   readonly sttProvider: string;
@@ -222,7 +220,7 @@ export class CallMetricsAccumulator {
 
   private readonly _pricing: Record<string, ProviderPricing>;
   private readonly _callStart: number;
-  private readonly _turns: TurnMetrics[] = [];
+  private readonly _turns: TurnMetrics[] = []; // mutable internal array; immutable when exposed via TurnMetrics[] → readonly TurnMetrics[]
 
   // Per-turn timing state
   private _turnStart: number | null = null;
@@ -387,6 +385,10 @@ export class CallMetricsAccumulator {
     this._turnUserText = '';
     this._turnSttAudioSeconds = 0;
     this._turnAlreadyClosed = false;
+    // Reset initial-TTFB latch so the first TTFB of each new turn is always
+    // forwarded. Mirrors Python start_turn() which resets _llm_ttfb_emitted
+    // and _tts_ttfb_emitted on every new turn start.
+    this._initialTtfbEmitted = false;
     // Reset EOU state for this turn
     this._vadStoppedAt = null;
     this._sttFinalAt = null;
@@ -617,6 +619,11 @@ export class CallMetricsAccumulator {
       timestamp: Date.now() / 1000,
     };
     this._turns.push(turn);
+    // Emit BEFORE reset so subscribers see the turn with its anchors intact.
+    // Matches Python record_turn_complete (emits before _reset_turn_state) and
+    // is consistent with recordTurnInterrupted which also emits before reset.
+    this._eventBus?.emit('turn_ended', { callId: this.callId, turn });
+    this._eventBus?.emit('metrics_collected', { callId: this.callId, turn });
     this._resetTurnState();
     // Bidirectional guard: mark the turn as closed so a late
     // recordTurnInterrupted (e.g. from a future refactor that reorders
@@ -625,8 +632,6 @@ export class CallMetricsAccumulator {
     // guard in recordTurnInterrupted and keeps the two close paths
     // symmetric.
     this._turnAlreadyClosed = true;
-    this._eventBus?.emit('turn_ended', { callId: this.callId, turn });
-    this._eventBus?.emit('metrics_collected', { callId: this.callId, turn });
     return turn;
   }
 
@@ -712,8 +717,10 @@ export class CallMetricsAccumulator {
 
   /**
    * Record the delta (ms) between turn-committed and when on_user_turn_completed
-   * pipeline hook finished.  Stored for inclusion in the next ``emitEouMetrics``
-   * call (or an explicit re-emit if desired).
+   * pipeline hook finished. Does NOT re-emit: like Python's
+   * ``record_on_user_turn_completed_delay``, this only stores the value; the
+   * single EOU emission happens on ``recordTurnCommitted`` (3-timestamp guard,
+   * delay defaults to 0 if not yet recorded).
    */
   recordOnUserTurnCompletedDelay(delayMs: number): void {
     this._onUserTurnCompletedDelayMs = delayMs;
@@ -727,7 +734,7 @@ export class CallMetricsAccumulator {
    * ``transcriptionDelay``       = turnCommitted − vadStopped  (ms)
    * ``onUserTurnCompletedDelay`` = caller-supplied delta (ms) or 0
    */
-  /** Emit `EOUMetrics` once VAD-stop, STT-final, and turn-committed timestamps are all known. */
+  /** Emit `EOUMetrics` once VAD-stop, STT-final, turn-committed, and on_user_turn_completed delay are all known. */
   emitEouMetrics(): void {
     if (
       this._vadStoppedAt === null ||

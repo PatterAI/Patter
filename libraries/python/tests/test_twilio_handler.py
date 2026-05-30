@@ -1,5 +1,6 @@
 """Tests for Twilio webhook handler."""
 
+import pytest
 from unittest.mock import patch
 
 
@@ -8,6 +9,7 @@ from unittest.mock import patch
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.unit
 def test_twilio_webhook_generates_string():
     """twilio_webhook_handler returns a string."""
     with patch("getpatter.providers.twilio_adapter.TwilioAdapter") as MockAdapter:
@@ -18,16 +20,24 @@ def test_twilio_webhook_generates_string():
         assert isinstance(result, str)
 
 
-def test_twilio_webhook_calls_generate_stream_twiml():
-    """generate_stream_twiml is invoked exactly once."""
-    with patch("getpatter.providers.twilio_adapter.TwilioAdapter") as MockAdapter:
-        MockAdapter.generate_stream_twiml.return_value = "<Response/>"
-        from getpatter.telephony.twilio import twilio_webhook_handler
+@pytest.mark.unit
+def test_twilio_webhook_twiml_contains_stream_and_connect():
+    """twilio_webhook_handler returns TwiML with real <Connect> and <Stream> elements.
 
-        twilio_webhook_handler("CA123", "+39111", "+16592", "abc.ngrok.io")
-        MockAdapter.generate_stream_twiml.assert_called_once()
+    Uses the real TwilioAdapter.generate_stream_twiml (no mock) so the
+    assertion exercises the actual TwiML-generation code path rather than just
+    verifying that a mock method was called.
+    """
+    from getpatter.telephony.twilio import twilio_webhook_handler
+
+    result = twilio_webhook_handler("CA123", "+39111", "+16592", "abc.ngrok.io")
+    assert isinstance(result, str)
+    assert "<Connect>" in result or "<Connect " in result
+    assert "Stream" in result
+    assert "wss://abc.ngrok.io/ws/stream/CA123" in result
 
 
+@pytest.mark.unit
 def test_twilio_webhook_returns_adapter_output():
     """Return value matches what generate_stream_twiml returns."""
     expected = "<Response><Connect><Stream/></Connect></Response>"
@@ -39,6 +49,7 @@ def test_twilio_webhook_returns_adapter_output():
         assert result == expected
 
 
+@pytest.mark.unit
 def test_stream_url_is_wss():
     """Stream URL passed to generate_stream_twiml uses wss:// scheme."""
     with patch("getpatter.providers.twilio_adapter.TwilioAdapter") as MockAdapter:
@@ -50,6 +61,7 @@ def test_stream_url_is_wss():
         assert url.startswith("wss://")
 
 
+@pytest.mark.unit
 def test_stream_url_contains_webhook_host():
     """Stream URL contains the webhook base URL."""
     with patch("getpatter.providers.twilio_adapter.TwilioAdapter") as MockAdapter:
@@ -61,6 +73,7 @@ def test_stream_url_contains_webhook_host():
         assert "custom.ngrok.io" in url
 
 
+@pytest.mark.unit
 def test_stream_url_has_ws_stream_path():
     """Stream URL path includes /ws/stream/{call_sid}."""
     with patch("getpatter.providers.twilio_adapter.TwilioAdapter") as MockAdapter:
@@ -72,6 +85,7 @@ def test_stream_url_has_ws_stream_path():
         assert "/ws/stream/CASID99" in url
 
 
+@pytest.mark.unit
 def test_stream_url_contains_caller_param():
     """caller travels as a TwiML ``<Parameter>`` (Twilio strips URL query)."""
     with patch("getpatter.providers.twilio_adapter.TwilioAdapter") as MockAdapter:
@@ -85,6 +99,7 @@ def test_stream_url_contains_caller_param():
         assert params.get("caller") == "+39111"
 
 
+@pytest.mark.unit
 def test_stream_url_contains_callee_param():
     """callee travels as a TwiML ``<Parameter>`` (Twilio strips URL query)."""
     with patch("getpatter.providers.twilio_adapter.TwilioAdapter") as MockAdapter:
@@ -103,6 +118,7 @@ def test_stream_url_contains_callee_param():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.unit
 def test_telnyx_webhook_returns_dict():
     from getpatter.telephony.telnyx import telnyx_webhook_handler
 
@@ -115,6 +131,7 @@ def test_telnyx_webhook_returns_dict():
     assert isinstance(result, dict)
 
 
+@pytest.mark.unit
 def test_telnyx_webhook_has_commands():
     from getpatter.telephony.telnyx import telnyx_webhook_handler
 
@@ -122,6 +139,7 @@ def test_telnyx_webhook_has_commands():
     assert "commands" in result
 
 
+@pytest.mark.unit
 def test_telnyx_webhook_has_answer_command():
     from getpatter.telephony.telnyx import telnyx_webhook_handler
 
@@ -130,6 +148,7 @@ def test_telnyx_webhook_has_answer_command():
     assert any(c["command"] == "answer" for c in commands)
 
 
+@pytest.mark.unit
 def test_telnyx_webhook_has_stream_start_command():
     from getpatter.telephony.telnyx import telnyx_webhook_handler
 
@@ -139,6 +158,7 @@ def test_telnyx_webhook_has_stream_start_command():
     assert stream_cmd is not None
 
 
+@pytest.mark.unit
 def test_telnyx_webhook_stream_url_wss():
     from getpatter.telephony.telnyx import telnyx_webhook_handler
 
@@ -148,6 +168,7 @@ def test_telnyx_webhook_stream_url_wss():
     assert stream_cmd["params"]["stream_url"].startswith("wss://")
 
 
+@pytest.mark.unit
 def test_telnyx_webhook_stream_url_contains_call_id():
     from getpatter.telephony.telnyx import telnyx_webhook_handler
 
@@ -157,6 +178,7 @@ def test_telnyx_webhook_stream_url_contains_call_id():
     assert "ctrl_unique" in stream_cmd["params"]["stream_url"]
 
 
+@pytest.mark.unit
 def test_telnyx_webhook_stream_url_inbound_track():
     """Telnyx ``streaming_start`` is configured for ``inbound_track`` only.
 
@@ -172,6 +194,7 @@ def test_telnyx_webhook_stream_url_inbound_track():
     assert stream_cmd["params"]["stream_track"] == "inbound_track"
 
 
+@pytest.mark.unit
 def test_telnyx_webhook_stream_url_uses_telnyx_path():
     """Stream URL must point to the Telnyx-specific WebSocket handler, not the Twilio one."""
     from getpatter.telephony.telnyx import telnyx_webhook_handler

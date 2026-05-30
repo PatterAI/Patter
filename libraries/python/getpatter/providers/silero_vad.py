@@ -130,9 +130,8 @@ class SileroVAD(VADProvider):
         min_silence_duration: float = 0.4,
         prefix_padding_duration: float = 0.03,
         activation_threshold: float = 0.5,
-        sample_rate: Union[
-            SileroSampleRate, Literal[8000, 16000]
-        ] = SileroSampleRate.HZ_16000,
+        sample_rate: SileroSampleRate
+        | Literal[8000, 16000] = SileroSampleRate.HZ_16000,
         force_cpu: bool = True,
         onnx_file_path: Path | str | None = None,
         deactivation_threshold: float | None = None,
@@ -299,7 +298,7 @@ class SileroVAD(VADProvider):
         self._pending = np.concatenate([self._pending, samples_f32])
 
         window_size = self._model.window_size_samples
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         event: VADEvent | None = None
 
         while self._pending.shape[0] >= window_size:

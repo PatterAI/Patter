@@ -25,6 +25,14 @@ import uuid
 logger = logging.getLogger("getpatter")
 
 
+async def _maybe_await(fn, *args):
+    """Call *fn* with *args*; await the result if it is a coroutine."""
+    result = fn(*args)
+    if asyncio.iscoroutine(result):
+        return await result
+    return result
+
+
 class TestSession:
     """Interactive terminal test session for an agent."""
 
@@ -66,13 +74,14 @@ class TestSession:
 
         # Fire on_call_start
         if on_call_start:
-            result = await on_call_start(
+            result = await _maybe_await(
+                on_call_start,
                 {
                     "call_id": call_id,
                     "caller": caller,
                     "callee": callee,
                     "direction": "test",
-                }
+                },
             )
             if isinstance(result, dict):
                 logger.info("on_call_start returned overrides: %s", list(result.keys()))
@@ -206,8 +215,6 @@ class TestSession:
                     parts = []
                     async for token in result:
                         parts.append(token)
-                        print(token, end="", flush=True)
-                    print()
                     response_text = "".join(parts)
                 else:
                     response_text = result
@@ -219,14 +226,12 @@ class TestSession:
                     "callee": callee,
                 }
                 parts = []
-                print("  Agent: ", end="", flush=True)
                 async for token in llm_loop.run(
                     user_input, conversation_history, call_ctx
                 ):
                     parts.append(token)
-                    print(token, end="", flush=True)
-                print()
                 response_text = "".join(parts)
+                print(f"  Agent: {response_text}")
             else:
                 print("  [No on_message handler or LLM loop configured]")
                 continue
@@ -248,12 +253,13 @@ class TestSession:
 
         # Fire on_call_end
         if on_call_end:
-            await on_call_end(
+            await _maybe_await(
+                on_call_end,
                 {
                     "call_id": call_id,
                     "caller": caller,
                     "callee": callee,
                     "direction": "test",
                     "transcript": conversation_history,
-                }
+                },
             )

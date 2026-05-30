@@ -11,12 +11,18 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 from enum import IntEnum, StrEnum
-from typing import ClassVar, AsyncIterator
-
-import aiohttp
+from typing import ClassVar, AsyncIterator, Union
 
 from getpatter.providers.base import TTSProvider
+
+logger = logging.getLogger("getpatter.providers.telnyx_tts")
+
+try:  # pragma: no cover - trivial import guard
+    import aiohttp
+except ImportError:  # pragma: no cover
+    aiohttp = None  # type: ignore
 
 TELNYX_TTS_WS_URL = "wss://api.telnyx.com/v2/text-to-speech/speech"
 
@@ -64,8 +70,13 @@ class TelnyxTTS(TTSProvider):
         voice: Union[TelnyxTTSVoice, str] = TelnyxTTSVoice.NATURAL_HD_ASTRA,
         *,
         base_url: str = TELNYX_TTS_WS_URL,
-        session: aiohttp.ClientSession | None = None,
+        session: "aiohttp.ClientSession | None" = None,
     ) -> None:
+        if aiohttp is None:
+            raise ImportError(
+                "aiohttp is required for TelnyxTTS. "
+                "Install with: pip install getpatter[telnyx-ai]"
+            )
         self.api_key = api_key
         self.voice = voice
         self.base_url = base_url
@@ -76,7 +87,21 @@ class TelnyxTTS(TTSProvider):
     def __repr__(self) -> str:
         return f"TelnyxTTS(voice={self.voice!r})"
 
-    def _ensure_session(self) -> aiohttp.ClientSession:
+    def _record_synthesis_cost(self, text: str) -> None:
+        """Emit ``patter.cost.tts_chars`` for the synthesised text."""
+        try:
+            from getpatter.observability.attributes import record_patter_attrs
+
+            record_patter_attrs(
+                {
+                    "patter.cost.tts_chars": len(text),
+                    "patter.tts.provider": "telnyx_tts",
+                }
+            )
+        except Exception:  # pragma: no cover — defense in depth
+            logger.debug("_record_synthesis_cost failed", exc_info=True)
+
+    def _ensure_session(self) -> "aiohttp.ClientSession":
         if self._session is None:
             self._session = aiohttp.ClientSession()
             self._owns_session = True
@@ -90,6 +115,7 @@ class TelnyxTTS(TTSProvider):
         decode these through an MP3 decoder before feeding the telephony
         WebSocket.
         """
+        self._record_synthesis_cost(text)
         session = self._ensure_session()
         url = f"{self.base_url}?voice={self.voice}"
         headers = {"Authorization": f"Bearer {self.api_key}"}
@@ -106,6 +132,7 @@ class TelnyxTTS(TTSProvider):
                     try:
                         data = json.loads(msg.data)
                     except (ValueError, TypeError):
+                        logger.warning("TelnyxTTS: received non-JSON frame, skipping")
                         continue
                     audio_b64 = data.get("audio")
                     if not audio_b64:
@@ -113,6 +140,9 @@ class TelnyxTTS(TTSProvider):
                     try:
                         audio_bytes = base64.b64decode(audio_b64)
                     except (ValueError, TypeError):
+                        logger.warning(
+                            "TelnyxTTS: invalid base64 in audio frame, skipping"
+                        )
                         continue
                     if audio_bytes:
                         yield audio_bytes
@@ -123,7 +153,12 @@ class TelnyxTTS(TTSProvider):
                 ):
                     break
                 elif msg.type == aiohttp.WSMsgType.ERROR:
-                    break
+                    exc = ws.exception()
+                    raise RuntimeError(
+                        f"TelnyxTTS WebSocket error: {exc}"
+                        if exc
+                        else "TelnyxTTS WebSocket closed with error"
+                    )
         finally:
             try:
                 await ws.close()

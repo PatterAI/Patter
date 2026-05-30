@@ -105,6 +105,57 @@ def builtin_clip_path(clip: BuiltinAudioClip | str) -> str:
 AudioSource = Union[str, BuiltinAudioClip]
 
 
+def resample_pcm(src: bytes, src_sr: int, dst_sr: int) -> bytes:
+    """Resample mono int16 LE PCM from *src_sr* to *dst_sr*.
+
+    Parity with TypeScript ``resamplePcm`` in
+    ``libraries/typescript/src/audio/background-audio.ts``.
+
+    Uses linear interpolation — adequate for background hold music and
+    ambient cues that are heavily attenuated.  Requires numpy
+    (``pip install 'getpatter[background-audio]'``).  Raises
+    :exc:`ImportError` when numpy is not installed.
+
+    Parameters
+    ----------
+    src:
+        Raw int16 little-endian PCM bytes (mono).
+    src_sr:
+        Source sample rate in Hz.
+    dst_sr:
+        Destination sample rate in Hz.
+
+    Returns
+    -------
+    bytes
+        Resampled int16 LE PCM bytes.
+    """
+    if src_sr == dst_sr:
+        return src
+
+    if not _AUDIO_DEPS_AVAILABLE:
+        raise ImportError(
+            "resample_pcm requires numpy. "
+            "Install the 'background-audio' extra: "
+            "pip install 'getpatter[background-audio]'."
+        )
+
+    src_samples = len(src) // 2
+    if src_samples == 0:
+        return b""
+
+    ratio = dst_sr / src_sr
+    dst_samples = int(src_samples * ratio)
+    if dst_samples <= 0:
+        return b""
+
+    arr = np.frombuffer(src, dtype="<i2").astype(np.float32)
+    idx = np.linspace(0, src_samples - 1, num=dst_samples, dtype=np.float64)
+    resampled = np.interp(idx, np.arange(src_samples), arr)
+    result = np.clip(resampled, -32768.0, 32767.0).astype("<i2")
+    return result.tobytes()
+
+
 def select_sound_from_list(sounds: list["AudioConfig"]) -> "AudioConfig | None":
     """Probability-weighted random pick from a list of :class:`AudioConfig`.
 
@@ -171,7 +222,7 @@ class PlayHandle:
     """
 
     def __init__(self) -> None:
-        self._done: asyncio.Future[None] = asyncio.get_event_loop().create_future()
+        self._done: asyncio.Future[None] = asyncio.get_running_loop().create_future()
 
     def done(self) -> bool:
         """Return ``True`` when playback has finished or :meth:`stop` was called."""
@@ -448,5 +499,6 @@ __all__ = [
     "BuiltinAudioClip",
     "PlayHandle",
     "builtin_clip_path",
+    "resample_pcm",
     "select_sound_from_list",
 ]

@@ -20,7 +20,6 @@
  * a streaming-friendly graph, swap to that and remove this caveat.
  */
 import { getLogger } from '../logger';
-import { StatefulResampler } from '../audio/transcoding';
 import type { AudioFilter } from '../types';
 
 // Resolve the logger lazily so tests that swap it via ``setLogger`` after
@@ -36,9 +35,9 @@ const DEEPFILTERNET_SR = 48000;
 export interface DeepFilterNetOptions {
   /** Absolute path to a DeepFilterNet ONNX model.  If omitted, the filter
    *  logs a warning and becomes a pass-through. */
-  modelPath?: string;
+  readonly modelPath?: string;
   /** When true, disable the pass-through warning (used by tests). */
-  silenceWarnings?: boolean;
+  readonly silenceWarnings?: boolean;
 }
 
 // ``onnxruntime-node`` is declared as a peer/optional dependency; the module
@@ -72,7 +71,7 @@ async function loadOnnxRuntime(): Promise<OnnxRuntimeModule | null> {
 
 /**
  * Convert a PCM16 Buffer to a Float32Array for ONNX inference.
- * Kept as a thin helper — resampling is now handled by StatefulResampler.
+ * Kept as a thin helper — resampling is handled by ArbitraryResampler.
  */
 
 function pcm16ToFloat32(pcm: Buffer): Float32Array {
@@ -93,6 +92,74 @@ function float32ToPcm16(samples: Float32Array): Buffer {
   return out;
 }
 
+/**
+ * Stateful linear-interpolation resampler that supports arbitrary integer rate
+ * pairs, including the telephony↔48 kHz conversions (e.g. 8000↔48000,
+ * 16000↔48000) that StatefulResampler cannot handle.
+ *
+ * Maintains fractional phase and the last input sample across chunk calls so
+ * chunk-boundary samples are never discarded.
+ */
+class ArbitraryResampler {
+  private readonly srcRate: number;
+  private readonly dstRate: number;
+  private phase = 0;          // fractional position into the current chunk
+  private lastSample = 0;     // last input sample from the previous chunk
+  private hasHistory = false;
+
+  constructor(srcRate: number, dstRate: number) {
+    this.srcRate = srcRate;
+    this.dstRate = dstRate;
+  }
+
+  /** Process a chunk of PCM16-LE mono audio and return resampled PCM16-LE. */
+  process(pcm: Buffer): Buffer {
+    const sampleCount = Math.floor(pcm.length / 2);
+    if (sampleCount === 0) return Buffer.alloc(0);
+
+    const step = this.srcRate / this.dstRate;
+    const outArr: number[] = [];
+    let phase = this.phase;
+
+    while (true) {
+      const idx = Math.floor(phase);
+      if (idx >= sampleCount) break;
+
+      const frac = phase - idx;
+      let s0: number;
+      let s1: number;
+
+      if (idx < 0) {
+        s0 = this.hasHistory ? this.lastSample : 0;
+        s1 = pcm.readInt16LE(0);
+      } else {
+        s0 = pcm.readInt16LE(idx * 2);
+        s1 = idx + 1 < sampleCount ? pcm.readInt16LE((idx + 1) * 2) : s0;
+      }
+
+      const interp = Math.round(s0 + (s1 - s0) * frac);
+      outArr.push(Math.max(-32768, Math.min(32767, interp)));
+      phase += step;
+    }
+
+    this.lastSample = pcm.readInt16LE((sampleCount - 1) * 2);
+    this.hasHistory = true;
+    this.phase = phase - sampleCount;
+
+    const out = Buffer.alloc(outArr.length * 2);
+    for (let j = 0; j < outArr.length; j++) out.writeInt16LE(outArr[j], j * 2);
+    return out;
+  }
+
+  /** Flush any buffered state and reset. Returns any remaining tail output. */
+  flush(): Buffer {
+    this.phase = 0;
+    this.lastSample = 0;
+    this.hasHistory = false;
+    return Buffer.alloc(0);
+  }
+}
+
 /** OSS noise-suppression filter backed by a DeepFilterNet ONNX model. */
 export class DeepFilterNetFilter implements AudioFilter {
   private readonly modelPath: string | undefined;
@@ -101,11 +168,12 @@ export class DeepFilterNetFilter implements AudioFilter {
   private ort: OnnxRuntimeModule | null = null;
   private warned = false;
   private closed = false;
-  // Fix 5: stateful resamplers for src_sr↔48k conversions so chunk-boundary
+  // Stateful resamplers for src_sr↔48k conversions so chunk-boundary
   // samples are not discarded. Lazy-created and torn down on rate change.
+  // Uses ArbitraryResampler which supports any integer rate pair.
   private _resamplerSrcRate: number | null = null;
-  private _upsamplerInst: StatefulResampler | null = null;
-  private _downsamplerInst: StatefulResampler | null = null;
+  private _upsamplerInst: ArbitraryResampler | null = null;
+  private _downsamplerInst: ArbitraryResampler | null = null;
 
   constructor(options: DeepFilterNetOptions = {}) {
     this.modelPath = options.modelPath;
@@ -168,13 +236,14 @@ export class DeepFilterNetFilter implements AudioFilter {
     }
 
     try {
-      // Fix 5: use stateful resamplers so samples spanning chunk boundaries
-      // are not silently discarded (stateless np.interp-style had this bug).
+      // Use stateful resamplers so samples spanning chunk boundaries are not
+      // silently discarded. ArbitraryResampler supports any integer rate pair,
+      // including the telephony↔48kHz conversions StatefulResampler cannot handle.
       if (this._resamplerSrcRate !== sampleRate) {
         // Rate changed or first call — create fresh instances.
         this._resamplerSrcRate = sampleRate;
-        this._upsamplerInst = new StatefulResampler({ srcRate: sampleRate, dstRate: DEEPFILTERNET_SR });
-        this._downsamplerInst = new StatefulResampler({ srcRate: DEEPFILTERNET_SR, dstRate: sampleRate });
+        this._upsamplerInst = new ArbitraryResampler(sampleRate, DEEPFILTERNET_SR);
+        this._downsamplerInst = new ArbitraryResampler(DEEPFILTERNET_SR, sampleRate);
       }
 
       const samples = pcm16ToFloat32(pcmChunk);
@@ -205,7 +274,7 @@ export class DeepFilterNetFilter implements AudioFilter {
 
   /** Flush resamplers, release the ONNX session, and mark the filter closed. */
   async close(): Promise<void> {
-    // Fix 5: flush stateful resamplers so tail samples are not clipped.
+    // Flush stateful resamplers so tail samples are not clipped.
     try { this._upsamplerInst?.flush(); } catch { /* best effort */ }
     try { this._downsamplerInst?.flush(); } catch { /* best effort */ }
     this._upsamplerInst = null;

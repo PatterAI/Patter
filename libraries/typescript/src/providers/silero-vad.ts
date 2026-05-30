@@ -97,14 +97,14 @@ const DEFAULT_MODEL_PATH = resolveDefaultModelPath();
 
 /** Options accepted by {@link SileroVAD.load}. */
 export interface SileroVADOptions {
-  minSpeechDuration?: number;
-  minSilenceDuration?: number;
-  prefixPaddingDuration?: number;
-  activationThreshold?: number;
-  deactivationThreshold?: number;
-  sampleRate?: SileroSampleRate;
-  forceCpu?: boolean;
-  onnxFilePath?: string;
+  readonly minSpeechDuration?: number;
+  readonly minSilenceDuration?: number;
+  readonly prefixPaddingDuration?: number;
+  readonly activationThreshold?: number;
+  readonly deactivationThreshold?: number;
+  readonly sampleRate?: SileroSampleRate;
+  readonly forceCpu?: boolean;
+  readonly onnxFilePath?: string;
 }
 
 /**
@@ -336,6 +336,8 @@ export class SileroVAD implements VADProvider {
   private speechThresholdDuration = 0;
   private silenceThresholdDuration = 0;
   private closed = false;
+  /** Transitions produced in the current processFrame call but not yet returned. */
+  private eventQueue: VADEvent[] = [];
 
   private constructor(
     private readonly model: OnnxModel,
@@ -481,17 +483,17 @@ export class SileroVAD implements VADProvider {
       );
     }
     if (pcmChunk.length === 0) {
-      return null;
+      return this.eventQueue.shift() ?? null;
     }
 
     // int16 LE PCM -> Float32Array in [-1.0, 1.0]
     const numSamples = Math.floor(pcmChunk.length / 2);
     if (numSamples === 0) {
-      return null;
+      return this.eventQueue.shift() ?? null;
     }
     const samples = new Float32Array(numSamples);
     for (let i = 0; i < numSamples; i++) {
-      samples[i] = pcmChunk.readInt16LE(i * 2) / 32767;
+      samples[i] = pcmChunk.readInt16LE(i * 2) / 32768;
     }
 
     // Append to pending buffer
@@ -501,7 +503,6 @@ export class SileroVAD implements VADProvider {
     this.pending = merged;
 
     const windowSize = this.model.windowSizeSamples;
-    let event: VADEvent | null = null;
 
     while (this.pending.length >= windowSize) {
       const window = this.pending.slice(0, windowSize);
@@ -513,11 +514,12 @@ export class SileroVAD implements VADProvider {
       const windowDuration = windowSize / this.opts.sampleRate;
       const transition = this.advanceState(p, windowDuration);
       if (transition !== null) {
-        event = transition;  // overwrite — last event wins
+        this.eventQueue.push(transition);
       }
     }
 
-    return event;
+    // Return one event per call; the rest remain queued for subsequent calls.
+    return this.eventQueue.shift() ?? null;
   }
 
   private advanceState(p: number, windowDuration: number): VADEvent | null {
@@ -581,6 +583,7 @@ export class SileroVAD implements VADProvider {
     this.pubSpeaking = false;
     this.speechThresholdDuration = 0;
     this.silenceThresholdDuration = 0;
+    this.eventQueue = [];
     this.expFilter.reset();
     this.model.reset();
   }

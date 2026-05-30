@@ -3,6 +3,9 @@ import type { Call } from './CallTable';
 import { fmtDuration, fmtPhone } from './format';
 import { IconForward, IconHangup, IconMic, IconRecord } from './icons';
 import { CARRIERS } from '../lib/mappers';
+import type { TranscriptTurn } from '../lib/mappers';
+
+export type { TranscriptTurn };
 
 interface LiveDurationProps {
   start: number;
@@ -15,14 +18,6 @@ function LiveDuration({ start }: LiveDurationProps) {
     return () => clearInterval(t);
   }, []);
   return <>{fmtDuration((Date.now() - start) / 1000)}</>;
-}
-
-export interface TranscriptTurn {
-  who: 'user' | 'bot' | 'tool';
-  txt?: string;
-  args?: Record<string, string | number>;
-  typing?: boolean;
-  lat?: { stt?: number; llm?: number; tts?: number; total?: number };
 }
 
 export interface LiveCallPanelProps {

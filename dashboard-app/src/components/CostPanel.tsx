@@ -18,7 +18,7 @@ function titleCase(s: string): string {
 }
 
 export function CostPanel({ call }: CostPanelProps) {
-  if (!call || !call.cost?.telco) return null;
+  if (!call || call.cost?.telco == null) return null;
 
   const c = call.cost;
   const telco = c.telco ?? 0;

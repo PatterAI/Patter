@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from typing import AsyncIterator
-from unittest.mock import patch
 
 import pytest
 
@@ -50,9 +49,7 @@ class FailingProvider:
 class PartialThenFailProvider:
     """A provider that yields some chunks then raises."""
 
-    def __init__(
-        self, chunks: list[dict], error: Exception | None = None
-    ) -> None:
+    def __init__(self, chunks: list[dict], error: Exception | None = None) -> None:
         self._chunks = list(chunks)
         self._error = error or RuntimeError("mid-stream failure")
 
@@ -126,13 +123,17 @@ class TestFallbackLLMProvider:
     # 1. Primary provider succeeds -> returns its output
     @pytest.mark.asyncio
     async def test_primary_succeeds(self) -> None:
-        primary = SucceedingProvider([
-            {"type": "text", "content": "Hello"},
-            {"type": "text", "content": " world"},
-        ])
-        fallback = SucceedingProvider([
-            {"type": "text", "content": "Fallback"},
-        ])
+        primary = SucceedingProvider(
+            [
+                {"type": "text", "content": "Hello"},
+                {"type": "text", "content": " world"},
+            ]
+        )
+        fallback = SucceedingProvider(
+            [
+                {"type": "text", "content": "Fallback"},
+            ]
+        )
 
         provider = FallbackLLMProvider([primary, fallback])
         chunks = await collect_chunks(provider)
@@ -147,9 +148,11 @@ class TestFallbackLLMProvider:
     @pytest.mark.asyncio
     async def test_fallback_on_primary_failure(self) -> None:
         primary = FailingProvider()
-        fallback = SucceedingProvider([
-            {"type": "text", "content": "Fallback response"},
-        ])
+        fallback = SucceedingProvider(
+            [
+                {"type": "text", "content": "Fallback response"},
+            ]
+        )
 
         provider = FallbackLLMProvider([primary, fallback])
         chunks = await collect_chunks(provider)
@@ -173,12 +176,16 @@ class TestFallbackLLMProvider:
     # 4. Primary fails after yielding tokens -> throws (no retry)
     @pytest.mark.asyncio
     async def test_partial_stream_error(self) -> None:
-        primary = PartialThenFailProvider([
-            {"type": "text", "content": "partial"},
-        ])
-        fallback = SucceedingProvider([
-            {"type": "text", "content": "Fallback"},
-        ])
+        primary = PartialThenFailProvider(
+            [
+                {"type": "text", "content": "partial"},
+            ]
+        )
+        fallback = SucceedingProvider(
+            [
+                {"type": "text", "content": "Fallback"},
+            ]
+        )
 
         provider = FallbackLLMProvider([primary, fallback])
 
@@ -190,16 +197,21 @@ class TestFallbackLLMProvider:
     # 5. Primary recovers after being marked unavailable
     @pytest.mark.asyncio
     async def test_recovery_after_unavailable(self) -> None:
-        recovering = FailNTimesThenSucceed(1, [
-            {"type": "text", "content": "recovered"},
-        ])
-        fallback = SucceedingProvider([
-            {"type": "text", "content": "Fallback"},
-        ])
+        recovering = FailNTimesThenSucceed(
+            1,
+            [
+                {"type": "text", "content": "recovered"},
+            ],
+        )
+        fallback = SucceedingProvider(
+            [
+                {"type": "text", "content": "Fallback"},
+            ]
+        )
 
         provider = FallbackLLMProvider(
             [recovering, fallback],
-            recovery_interval_s=0.05,
+            recovery_interval_s=0.001,
         )
 
         # First call: primary fails, fallback succeeds
@@ -207,8 +219,12 @@ class TestFallbackLLMProvider:
         assert chunks == [{"type": "text", "content": "Fallback"}]
         assert provider.get_availability() == [False, True]
 
-        # Wait for recovery probe to run
-        await asyncio.sleep(0.1)
+        # Poll until recovery probe marks provider 0 available (up to 2 s)
+        async def _wait_for_recovery() -> None:
+            while provider.get_availability() != [True, True]:
+                await asyncio.sleep(0.005)
+
+        await asyncio.wait_for(_wait_for_recovery(), timeout=2.0)
 
         # Provider 0 should now be available
         assert provider.get_availability() == [True, True]
@@ -219,9 +235,11 @@ class TestFallbackLLMProvider:
     @pytest.mark.asyncio
     async def test_max_retry_per_provider(self) -> None:
         primary = CallCountingFailingProvider()
-        fallback = SucceedingProvider([
-            {"type": "text", "content": "Fallback"},
-        ])
+        fallback = SucceedingProvider(
+            [
+                {"type": "text", "content": "Fallback"},
+            ]
+        )
 
         provider = FallbackLLMProvider(
             [primary, fallback],
@@ -265,9 +283,11 @@ class TestFallbackLLMProvider:
     @pytest.mark.asyncio
     async def test_empty_stream_is_success(self) -> None:
         empty = SucceedingProvider([])
-        fallback = SucceedingProvider([
-            {"type": "text", "content": "Should not reach"},
-        ])
+        fallback = SucceedingProvider(
+            [
+                {"type": "text", "content": "Should not reach"},
+            ]
+        )
 
         provider = FallbackLLMProvider([empty, fallback])
         chunks = await collect_chunks(provider)
@@ -313,7 +333,7 @@ class TestFallbackLLMProvider:
 
         provider = FallbackLLMProvider(
             [primary, fallback],
-            recovery_interval_s=0.05,
+            recovery_interval_s=0.001,
         )
 
         with pytest.raises(AllProvidersFailedError):
@@ -321,21 +341,35 @@ class TestFallbackLLMProvider:
 
         provider.destroy()
 
-        # No lingering tasks should cause issues
-        await asyncio.sleep(0.15)
+        # Yield control briefly to confirm no lingering tasks cause issues
+        await asyncio.sleep(0.01)
 
     @pytest.mark.asyncio
     async def test_tool_call_chunks_are_yielded(self) -> None:
-        primary = SucceedingProvider([
-            {"type": "tool_call", "index": 0, "id": "tc_1", "name": "greet", "arguments": "{}"},
-            {"type": "text", "content": "done"},
-        ])
+        primary = SucceedingProvider(
+            [
+                {
+                    "type": "tool_call",
+                    "index": 0,
+                    "id": "tc_1",
+                    "name": "greet",
+                    "arguments": "{}",
+                },
+                {"type": "text", "content": "done"},
+            ]
+        )
 
         provider = FallbackLLMProvider([primary])
         chunks = await collect_chunks(provider)
 
         assert chunks == [
-            {"type": "tool_call", "index": 0, "id": "tc_1", "name": "greet", "arguments": "{}"},
+            {
+                "type": "tool_call",
+                "index": 0,
+                "id": "tc_1",
+                "name": "greet",
+                "arguments": "{}",
+            },
             {"type": "text", "content": "done"},
         ]
         provider.destroy()

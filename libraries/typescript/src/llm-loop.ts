@@ -33,7 +33,7 @@ export interface LlmUsageRecorder {
     inputTokens: number,
     outputTokens: number,
     cacheReadTokens?: number,
-    cacheCreationTokens?: number,
+    cacheWriteTokens?: number,
   ): void;
 }
 
@@ -313,7 +313,7 @@ export interface LLMChunk {
   inputTokens?: number;
   outputTokens?: number;
   cacheReadInputTokens?: number;
-  cacheCreationInputTokens?: number;
+  cacheWriteInputTokens?: number;
 }
 
 /**
@@ -526,7 +526,7 @@ export class OpenAILLMProvider implements LLMProvider {
     // signal fires, so a barge-in that arrives mid-fetch tears the
     // connection down immediately instead of waiting for the timeout.
     const signal = mergeAbortSignals(opts?.signal, AbortSignal.timeout(30_000));
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    const response = await fetch(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -550,78 +550,82 @@ export class OpenAILLMProvider implements LLMProvider {
     const decoder = new TextDecoder();
     let buffer = '';
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || !trimmed.startsWith('data: ')) continue;
-        const data = trimmed.slice(6);
-        if (data === '[DONE]') continue;
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith('data: ')) continue;
+          const data = trimmed.slice(6);
+          if (data === '[DONE]') continue;
 
-        let chunk: {
-          choices?: Array<{
-            delta?: {
-              content?: string;
-              tool_calls?: Array<{
-                index: number;
-                id?: string;
-                function?: { name?: string; arguments?: string };
-              }>;
+          let chunk: {
+            choices?: Array<{
+              delta?: {
+                content?: string;
+                tool_calls?: Array<{
+                  index: number;
+                  id?: string;
+                  function?: { name?: string; arguments?: string };
+                }>;
+              };
+            }>;
+            usage?: {
+              prompt_tokens?: number;
+              completion_tokens?: number;
+              prompt_tokens_details?: { cached_tokens?: number };
             };
-          }>;
-          usage?: {
-            prompt_tokens?: number;
-            completion_tokens?: number;
-            prompt_tokens_details?: { cached_tokens?: number };
           };
-        };
-        try {
-          chunk = JSON.parse(data);
-        } catch {
-          continue;
-        }
+          try {
+            chunk = JSON.parse(data);
+          } catch {
+            continue;
+          }
 
-        // Final usage chunk arrives with choices=[] when stream_options
-        // include_usage is set. Forward it for cost attribution.
-        if (chunk.usage) {
-          const cached = chunk.usage.prompt_tokens_details?.cached_tokens ?? 0;
-          // OpenAI's prompt_tokens is the TOTAL input including cached tokens.
-          // Subtract cached so inputTokens represents only the uncached portion
-          // and calculateLlmCost doesn't bill cached tokens at the full rate.
-          const uncachedInput = Math.max(0, (chunk.usage.prompt_tokens ?? 0) - cached);
-          yield {
-            type: 'usage',
-            inputTokens: uncachedInput,
-            outputTokens: chunk.usage.completion_tokens,
-            cacheReadInputTokens: cached,
-          };
-        }
-
-        const delta = chunk.choices?.[0]?.delta;
-        if (!delta) continue;
-
-        if (delta.content) {
-          yield { type: 'text', content: delta.content };
-        }
-
-        if (delta.tool_calls) {
-          for (const tc of delta.tool_calls) {
+          // Final usage chunk arrives with choices=[] when stream_options
+          // include_usage is set. Forward it for cost attribution.
+          if (chunk.usage) {
+            const cached = chunk.usage.prompt_tokens_details?.cached_tokens ?? 0;
+            // OpenAI's prompt_tokens is the TOTAL input including cached tokens.
+            // Subtract cached so inputTokens represents only the uncached portion
+            // and calculateLlmCost doesn't bill cached tokens at the full rate.
+            const uncachedInput = Math.max(0, (chunk.usage.prompt_tokens ?? 0) - cached);
             yield {
-              type: 'tool_call',
-              index: tc.index,
-              id: tc.id,
-              name: tc.function?.name,
-              arguments: tc.function?.arguments,
+              type: 'usage',
+              inputTokens: uncachedInput,
+              outputTokens: chunk.usage.completion_tokens,
+              cacheReadInputTokens: cached,
             };
+          }
+
+          const delta = chunk.choices?.[0]?.delta;
+          if (!delta) continue;
+
+          if (delta.content) {
+            yield { type: 'text', content: delta.content };
+          }
+
+          if (delta.tool_calls) {
+            for (const tc of delta.tool_calls) {
+              yield {
+                type: 'tool_call',
+                index: tc.index,
+                id: tc.id,
+                name: tc.function?.name,
+                arguments: tc.function?.arguments,
+              };
+            }
           }
         }
       }
+    } finally {
+      reader.cancel().catch(() => {});
     }
   }
 }
@@ -850,7 +854,7 @@ export class LLMLoop {
             chunk.inputTokens ?? 0,
             chunk.outputTokens ?? 0,
             chunk.cacheReadInputTokens ?? 0,
-            chunk.cacheCreationInputTokens ?? 0,
+            chunk.cacheWriteInputTokens ?? 0,
           );
         } else if (chunk.type === 'tool_call') {
           hasToolCalls = true;

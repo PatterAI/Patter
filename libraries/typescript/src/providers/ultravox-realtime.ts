@@ -108,6 +108,7 @@ export class UltravoxRealtimeAdapter {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15_000),
     });
     if (!resp.ok) {
       const text = await resp.text().catch(() => '');
@@ -120,12 +121,30 @@ export class UltravoxRealtimeAdapter {
     this.ws = new WebSocket(call.joinUrl);
     await new Promise<void>((resolve, reject) => {
       const ws = this.ws!;
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        ws.off('open', onOpen);
+        ws.off('error', onError);
+        this.ws = null;
+        try { ws.close(); } catch { /* ignore */ }
+        reject(new Error('Ultravox WS connect timeout'));
+      }, 15_000);
       const onOpen = (): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
         ws.off('error', onError);
         resolve();
       };
       const onError = (err: Error): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
         ws.off('open', onOpen);
+        this.ws = null;
+        try { ws.close(); } catch { /* ignore */ }
         reject(err);
       };
       ws.once('open', onOpen);

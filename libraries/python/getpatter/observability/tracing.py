@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from contextlib import contextmanager
 from typing import Any, Iterator
 
@@ -97,15 +98,23 @@ def init_tracing(
             OTLPSpanExporter,
         )
 
-        exporter = OTLPSpanExporter(endpoint=f"{endpoint}/v1/traces") if endpoint else OTLPSpanExporter()
+        exporter = (
+            OTLPSpanExporter(endpoint=f"{endpoint}/v1/traces")
+            if endpoint
+            else OTLPSpanExporter()
+        )
         _provider.add_span_processor(BatchSpanProcessor(exporter))
     except ImportError:
-        logger.warning("opentelemetry OTLP exporter not installed; spans will not be exported")
+        logger.warning(
+            "opentelemetry OTLP exporter not installed; spans will not be exported"
+        )
 
     trace.set_tracer_provider(_provider)
     _tracer = trace.get_tracer(service_name)
     _initialized = True
-    logger.info("Patter OTel tracing enabled (service=%s, endpoint=%s)", service_name, endpoint)
+    logger.info(
+        "Patter OTel tracing enabled (service=%s, endpoint=%s)", service_name, endpoint
+    )
     return True
 
 
@@ -130,6 +139,7 @@ def start_span(
 
     span_cm = _tracer.start_as_current_span(name)
     span = span_cm.__enter__()
+    exc_info: tuple[Any, Any, Any] = (None, None, None)
     try:
         if attributes:
             for k, v in attributes.items():
@@ -138,15 +148,16 @@ def start_span(
                 except Exception:  # pragma: no cover
                     pass
         yield span
-    except Exception as exc:  # pragma: no cover - we still need to record + re-raise
+    except Exception as exc:
+        exc_info = sys.exc_info()
         try:
             span.record_exception(exc)
-        except Exception:
+        except Exception:  # pragma: no cover
             pass
         raise
     finally:
         try:
-            span_cm.__exit__(None, None, None)
+            span_cm.__exit__(*exc_info)
         except Exception:  # pragma: no cover
             pass
 

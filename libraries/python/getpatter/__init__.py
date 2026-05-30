@@ -51,16 +51,22 @@ from getpatter.models import (
 from getpatter.services.barge_in_strategies import (
     BargeInStrategy,
     MinWordsStrategy,
+    evaluate_strategies as evaluate_barge_in_strategies,
+    reset_strategies as reset_barge_in_strategies,
 )
 from getpatter.exceptions import (
     ErrorCode,
     PatterError,
+    PatterConfigError,
     PatterConnectionError,
     AuthenticationError,
     ProvisionError,
     RateLimitError,
 )
-from getpatter.services.sentence_chunker import SentenceChunker
+from getpatter.services.sentence_chunker import (
+    SentenceChunker,
+    DEFAULT_MIN_SENTENCE_LEN,
+)
 from getpatter.services.pipeline_hooks import PipelineHookExecutor
 from getpatter.services.text_transforms import (
     filter_markdown,
@@ -179,6 +185,7 @@ from getpatter.services.fallback_provider import (
 )
 from getpatter.services.chat_context import ChatContext, ChatMessage
 from getpatter.services.ivr import (
+    DTMF_EVENTS,
     DtmfEvent,
     IVRActivity,
     TfidfLoopDetector,
@@ -233,8 +240,10 @@ from getpatter.audio.background_audio import (
     BackgroundAudioPlayer,
     BuiltinAudioClip,
     builtin_clip_path,
+    resample_pcm,
     select_sound_from_list,
 )
+from getpatter.tools.tool_decorator import define_tool
 
 # Audio transcoding helpers — parity with the TypeScript ``transcoding``
 # module. Python ships ``create_resampler_24k_to_16k`` only (no eager
@@ -258,6 +267,9 @@ from getpatter.audio.transcoding import (
 # ``calculateRealtimeCost``, ``calculateTelephonyCost``.
 from getpatter.pricing import (
     DEFAULT_PRICING,
+    PRICING_LAST_UPDATED,
+    PRICING_VERSION,
+    PricingUnit,
     calculate_realtime_cost,
     calculate_stt_cost,
     calculate_telephony_cost,
@@ -398,13 +410,17 @@ __all__ = [
     "TurnMetrics",
     "BargeInStrategy",
     "MinWordsStrategy",
+    "evaluate_barge_in_strategies",
+    "reset_barge_in_strategies",
     "ErrorCode",
     "PatterError",
+    "PatterConfigError",
     "PatterConnectionError",
     "AuthenticationError",
     "ProvisionError",
     "RateLimitError",
     "SentenceChunker",
+    "DEFAULT_MIN_SENTENCE_LEN",
     "PipelineHookExecutor",
     "filter_markdown",
     "filter_emoji",
@@ -412,6 +428,7 @@ __all__ = [
     "tool",
     "Tool",
     "guardrail",
+    "define_tool",
     "Twilio",
     "Telnyx",
     "Plivo",
@@ -463,6 +480,7 @@ __all__ = [
     "PartialStreamError",
     "ChatContext",
     "ChatMessage",
+    "DTMF_EVENTS",
     "IVRActivity",
     "TfidfLoopDetector",
     "DtmfEvent",
@@ -496,6 +514,7 @@ __all__ = [
     "BackgroundAudioPlayer",
     "BuiltinAudioClip",
     "builtin_clip_path",
+    "resample_pcm",
     "select_sound_from_list",
     # Transcoding.
     "PcmCarry",
@@ -511,6 +530,9 @@ __all__ = [
     "resample_24k_to_16k",
     # Pricing.
     "DEFAULT_PRICING",
+    "PricingUnit",
+    "PRICING_VERSION",
+    "PRICING_LAST_UPDATED",
     "merge_pricing",
     "calculate_stt_cost",
     "calculate_tts_cost",

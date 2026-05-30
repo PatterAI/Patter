@@ -64,7 +64,7 @@ def test_local_config_full():
 def test_agent_defaults():
     a = Agent(system_prompt="You are helpful.")
     assert a.voice == "alloy"
-    assert a.model == "gpt-4o-mini-realtime-preview"
+    assert a.model == "gpt-realtime-mini"
     assert a.language == "en"
     assert a.first_message == ""
     assert a.tools is None
@@ -96,7 +96,7 @@ def test_agent_pipeline_provider():
     assert a.provider == "pipeline"
     assert a.voice == "21m00Tcm4TlvDq8ikWAM"
     assert (
-        a.model == "gpt-4o-mini-realtime-preview"
+        a.model == "gpt-realtime-mini"
     )  # model field still present, unused in pipeline mode
 
 

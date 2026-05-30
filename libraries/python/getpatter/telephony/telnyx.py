@@ -26,6 +26,8 @@ from getpatter.stream_handler import (
     resolve_agent_prompt,
 )
 
+logger = logging.getLogger("getpatter")
+
 # DTMF digits accepted by the Telnyx ``send_dtmf`` command. Duration bounds
 # mirror Telnyx API constraints (100–500 ms per digit).
 #
@@ -117,8 +119,6 @@ def _is_valid_transfer_target(target: str) -> bool:
         return True
     return bool(_SIP_URI_RE.match(target))
 
-
-logger = logging.getLogger("getpatter")
 
 # Maximum size (bytes) of a single WebSocket message accepted from Telnyx.
 # Telnyx 16 kHz PCM frames are ~640 bytes (20 ms).  1 MB defends against
@@ -357,8 +357,8 @@ async def telnyx_stream_bridge(
                     "Call started: %s (Telnyx, %s, %s → %s)",
                     call_id_actual,
                     _mode,
-                    caller or "?",
-                    callee or "?",
+                    mask_phone_number(caller) or "?",
+                    mask_phone_number(callee) or "?",
                 )
 
                 # Fire on_call_start callback — may return per-call config overrides

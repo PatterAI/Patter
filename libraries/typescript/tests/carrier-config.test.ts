@@ -98,10 +98,13 @@ describe('configureTelnyxNumber', () => {
 
     expect(calls).toHaveLength(1);
     expect(calls[0].url).toBe(
-      `https://api.telnyx.com/v2/phone_numbers/${encodeURIComponent('+15550001234')}`,
+      `https://api.telnyx.com/v2/phone_numbers/${encodeURIComponent('+15550001234')}/voice`,
     );
     expect(calls[0].init?.method).toBe('PATCH');
-    expect(JSON.parse(calls[0].init?.body as string)).toEqual({ connection_id: '100200' });
+    expect(JSON.parse(calls[0].init?.body as string)).toEqual({
+      connection_id: '100200',
+      tech_prefix_enabled: false,
+    });
   });
 
   it('throws on non-2xx response', async () => {

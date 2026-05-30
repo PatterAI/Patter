@@ -356,21 +356,32 @@ describe('StreamHandler', () => {
   // ``signal`` is checked between tokens, breaking the loop early.
   // -------------------------------------------------------------------------
   describe('barge-in cancels in-flight LLM stream', () => {
-    it('aborts the AbortController on cancelSpeaking', () => {
-      const deps = makeDeps();
+    it('issues sendClear on speech_started (observable barge-in contract)', async () => {
+      // Drive barge-in through the public surface: the adapter fires
+      // ``speech_started`` via its ``onEvent`` callback, which calls
+      // ``onAdapterSpeechInterrupt`` → ``bridge.sendClear``.
+      // This verifies the observable outcome without touching private fields.
+      const bridge = makeMockBridge();
+      const mockAdapter = makeMockAdapter();
+      let capturedCb: ((type: string, data: unknown) => Promise<void>) | null = null;
+      mockAdapter.onEvent.mockImplementation(
+        async (cb: (type: string, data: unknown) => Promise<void>) => {
+          capturedCb = cb;
+        },
+      );
+      const deps = makeDeps({
+        bridge,
+        buildAIAdapter: vi.fn().mockReturnValue(mockAdapter),
+      });
       const ws = makeMockWs();
       const handler = new StreamHandler(deps, ws, '+15551111111', '+15552222222');
-      // Simulate that runPipelineLlm has set up an AbortController for the turn.
-      const controller = new AbortController();
-      // Use bracket access to reach the private field for test purposes only.
-      (handler as unknown as { llmAbort: AbortController | null }).llmAbort =
-        controller;
-      (handler as unknown as { isSpeaking: boolean }).isSpeaking = true;
+      await handler.handleCallStart('call-bargein-llm');
 
-      expect(controller.signal.aborted).toBe(false);
-      // cancelSpeaking is private — invoke the public surface that calls it.
-      (handler as unknown as { cancelSpeaking: () => void }).cancelSpeaking();
-      expect(controller.signal.aborted).toBe(true);
+      // Emit speech_started via the adapter callback — the observable
+      // contract is that sendClear is issued so carrier audio is flushed.
+      if (capturedCb) await capturedCb('speech_started', null);
+
+      expect(bridge.sendClear).toHaveBeenCalled();
     });
 
     it('signal.aborted bounds tokens consumed below tokens emitted', async () => {

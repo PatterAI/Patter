@@ -99,8 +99,26 @@ class MCPManager:
 
         from contextlib import AsyncExitStack
 
+        from getpatter.tools.tool_executor import _validate_webhook_url
+
         aggregated: list[dict] = []
         for cfg in self._configs:
+            # SSRF guard: refuse to connect to MCP servers on internal /
+            # loopback / link-local / private targets (cloud metadata at
+            # 169.254.169.254, localhost/127.0.0.0/8, 10/8, 172.16/12,
+            # 192.168/16, ::1, …). Parity with the TS ``validateWebhookUrl``
+            # check in mcp-client.ts. Best-effort (DNS rebinding can still
+            # bypass) but MCP URLs are user-supplied config, not caller input.
+            try:
+                _validate_webhook_url(cfg["url"])
+            except ValueError as exc:
+                logger.error(
+                    "MCP server '%s' (%s) rejected by SSRF guard: %s",
+                    cfg["name"],
+                    cfg["url"],
+                    exc,
+                )
+                continue
             stack = AsyncExitStack()
             try:
                 read_stream, write_stream, _ = await stack.enter_async_context(

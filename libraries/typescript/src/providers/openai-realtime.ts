@@ -473,6 +473,7 @@ export class OpenAIRealtimeAdapter {
       };
       const timer = setTimeout(() => {
         cleanup();
+        try { ws.close(); } catch { /* ignore */ }
         reject(new Error('OpenAI Realtime park connect timeout'));
       }, 8000);
       ws.on('message', onMessage);

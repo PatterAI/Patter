@@ -481,6 +481,11 @@ class TwilioBridge implements TelephonyBridge {
         getLogger().warn(`TwilioBridge.transferCall rejected: invalid CallSid ${JSON.stringify(callId)}`);
         return;
       }
+      const E164_RE = /^\+[1-9]\d{6,14}$/;
+      if (!E164_RE.test(toNumber)) {
+        getLogger().warn(`TwilioBridge.transferCall rejected: invalid target ${JSON.stringify(toNumber)}`);
+        return;
+      }
       const transferUrl = `https://api.twilio.com/2010-04-01/Accounts/${this.config.twilioSid}/Calls/${callId}.json`;
       await fetch(transferUrl, {
         method: 'POST',
@@ -765,12 +770,17 @@ export class EmbeddedServer {
   private readonly activeCallIds = new Map<WSWebSocket, string>();
 
   /**
-   * Per-call AMD result callback set by ``Patter.call()`` for the most
-   * recent outbound call. Public so ``client.ts`` can populate it after
-   * server start. Cleared after firing once per call to avoid leaking
-   * across calls.
+   * Per-call AMD result callbacks keyed by CallSid / call_control_id.
+   * Public so ``client.ts`` can register a callback per outbound call.
+   * The Map slot is deleted after the callback fires once — preventing
+   * cross-call misfires when multiple concurrent outbound calls are in
+   * flight (single-slot was a race condition: the last registered callback
+   * would win for every in-flight AMD result).
    */
-  public onMachineDetection?: (result: MachineDetectionResult) => void | Promise<void>;
+  public onMachineDetectionByCallSid: Map<
+    string,
+    (result: MachineDetectionResult) => void | Promise<void>
+  > = new Map();
 
   /**
    * Pre-warm first-message audio accessor wired by ``Patter.serve()``.
@@ -1013,6 +1023,9 @@ export class EmbeddedServer {
           }
           next();
         });
+        req.on('error', (err) => {
+          next(err);
+        });
       } else {
         next();
       }
@@ -1145,8 +1158,11 @@ export class EmbeddedServer {
       // BEFORE the voicemail-drop logic so callers see the result regardless
       // of whether a voicemail message was configured. Errors in user code
       // must not break webhook delivery — Twilio retries on non-2xx.
-      const cb = this.onMachineDetection;
+      // Looked up by callSid so concurrent outbound calls each get their
+      // own callback (Map replaces the old single-slot field).
+      const cb = callSid ? this.onMachineDetectionByCallSid.get(callSid) : undefined;
       if (cb && callSid) {
+        this.onMachineDetectionByCallSid.delete(callSid);
         try {
           await cb({
             call_id: callSid,
@@ -1330,8 +1346,11 @@ export class EmbeddedServer {
         // the Twilio path above — caller sees the result even when no
         // voicemailMessage is configured, and errors in user code don't
         // break webhook delivery.
-        const cbTx = this.onMachineDetection;
+        // Looked up by amdCallId (call_control_id) so concurrent outbound
+        // calls each get their own callback.
+        const cbTx = amdCallId ? this.onMachineDetectionByCallSid.get(amdCallId) : undefined;
         if (cbTx && amdCallId) {
+          this.onMachineDetectionByCallSid.delete(amdCallId);
           try {
             await cbTx({
               call_id: amdCallId,
@@ -1566,8 +1585,20 @@ export class EmbeddedServer {
       // pending call({ wait: true }) as ``voicemail`` vs ``answered``.
       if (callUuid) this.amdClass.set(callUuid, classification);
 
-      const cb = this.onMachineDetection;
+      // Fire the per-call onMachineDetection callback. Plivo registers under
+      // its dial-time ``request_uuid``, but this webhook only carries the live
+      // ``CallUUID`` — the two identifiers differ. Try a keyed lookup first
+      // (works if a future Plivo change ever aligns them), then fall back to
+      // the single pending callback when exactly one is registered. The
+      // fallback preserves the single-slot semantics Python uses for Plivo
+      // while still benefiting from the per-callSid Map for Twilio / Telnyx.
+      let cbKey = callUuid && this.onMachineDetectionByCallSid.has(callUuid) ? callUuid : undefined;
+      if (cbKey === undefined && this.onMachineDetectionByCallSid.size === 1) {
+        cbKey = this.onMachineDetectionByCallSid.keys().next().value;
+      }
+      const cb = cbKey !== undefined ? this.onMachineDetectionByCallSid.get(cbKey) : undefined;
       if (cb && callUuid) {
+        if (cbKey !== undefined) this.onMachineDetectionByCallSid.delete(cbKey);
         try {
           await cb({
             call_id: callUuid,
@@ -1663,7 +1694,7 @@ export class EmbeddedServer {
       }
     });
 
-    await new Promise<void>((resolve) => {
+    await new Promise<void>((resolve, reject) => {
       // Default bind = 127.0.0.1 (loopback, safest). Set
       // ``PATTER_BIND_HOST=0.0.0.0`` when the SDK runs inside a container
       // whose port must be reachable from the host (e.g. ``docker run -p
@@ -1671,20 +1702,25 @@ export class EmbeddedServer {
       // port-mapping cannot forward to a 127.0.0.1 listener inside the
       // container because that's the container's own loopback).
       const bindHost = process.env.PATTER_BIND_HOST ?? '127.0.0.1';
+      this.server!.once('error', reject);
       this.server!.listen(port, bindHost, () => {
+        this.server!.off('error', reject);
         getLogger().info(`Server on port ${port}`);
         getLogger().info(`Webhook: https://${this.config.webhookUrl}`);
         getLogger().info(`Phone:   ${this.config.phoneNumber}`);
         // Warn if the agent runs a non-default Realtime model — DEFAULT_PRICING
-        // is calibrated for gpt-4o-mini-realtime-preview. Other models differ
-        // by 3-10x so cost display would under-report without an override.
+        // is calibrated for the default Realtime models (gpt-realtime-mini /
+        // gpt-4o-mini-realtime-preview, which share the same rates). Other
+        // models differ by 3-10x so cost display would under-report.
         const model = this.agent.model ?? '';
-        if (model && model !== 'gpt-4o-mini-realtime-preview' && model.includes('realtime')) {
+        const calibrated = ['gpt-realtime-mini', 'gpt-4o-mini-realtime-preview'];
+        if (model && !calibrated.includes(model) && model.includes('realtime')) {
           // Dev-supplied string — sanitize to avoid ANSI/log-injection in
           // aggregators.
           getLogger().warn(
             `Agent uses "${sanitizeLogValue(model)}" but DEFAULT_PRICING.openai_realtime is ` +
-            'calibrated for "gpt-4o-mini-realtime-preview". Pass ' +
+            'calibrated for the default Realtime models (gpt-realtime-mini / ' +
+            'gpt-4o-mini-realtime-preview). Pass ' +
             'Patter({ pricing: { openai_realtime: {...} } }) to set rates for ' +
             'this model, otherwise the dashboard cost display will under-report.'
           );
@@ -2182,17 +2218,18 @@ export class EmbeddedServer {
     // 3. Wait up to 10 seconds for active calls to drain
     if (this.activeConnections.size > 0) {
       getLogger().info(`Waiting for ${this.activeConnections.size} active connection(s) to close...`);
-      await Promise.race([
-        new Promise<void>((resolve) => {
-          const checkInterval = setInterval(() => {
-            if (this.activeConnections.size === 0) {
-              clearInterval(checkInterval);
-              resolve();
-            }
-          }, 100);
-        }),
-        new Promise<void>((resolve) => setTimeout(resolve, GRACEFUL_SHUTDOWN_TIMEOUT_MS)),
-      ]);
+      let checkInterval: ReturnType<typeof setInterval> | undefined;
+      const drainPromise = new Promise<void>((resolve) => {
+        checkInterval = setInterval(() => {
+          if (this.activeConnections.size === 0) {
+            clearInterval(checkInterval!);
+            resolve();
+          }
+        }, 100);
+      });
+      const timeoutPromise = new Promise<void>((resolve) => setTimeout(resolve, GRACEFUL_SHUTDOWN_TIMEOUT_MS));
+      await Promise.race([drainPromise, timeoutPromise]);
+      clearInterval(checkInterval!);
     }
 
     // 4. Force-close remaining connections

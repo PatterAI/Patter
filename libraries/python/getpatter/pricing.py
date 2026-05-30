@@ -513,8 +513,23 @@ def calculate_realtime_cached_savings(
 
     total_audio = input_details.get("audio_tokens", 0)
     total_text = input_details.get("text_tokens", 0)
-    cached_audio = min(cached.get("audio_tokens", 0), total_audio)
-    cached_text = min(cached.get("text_tokens", 0), total_text)
+
+    # Prefer cached_tokens_details breakdown. When absent (e.g. Azure OpenAI
+    # responses that only provide the top-level cached_tokens scalar), fall
+    # back to pro-rating by the audio/text split — mirrors the same fallback
+    # in calculate_realtime_cost so savings and cost figures stay consistent.
+    if cached and ("audio_tokens" in cached or "text_tokens" in cached):
+        cached_audio = min(cached.get("audio_tokens", 0), total_audio)
+        cached_text = min(cached.get("text_tokens", 0), total_text)
+    elif input_details.get("cached_tokens", 0) > 0:
+        cached_total = input_details["cached_tokens"]
+        total_in = total_audio + total_text
+        ratio = (cached_total / total_in) if total_in > 0 else 0
+        cached_audio = min(round(total_audio * ratio), total_audio)
+        cached_text = min(round(total_text * ratio), total_text)
+    else:
+        cached_audio = 0
+        cached_text = 0
 
     full_cost = cached_audio * rates.get(
         "audio_input_per_token", 0

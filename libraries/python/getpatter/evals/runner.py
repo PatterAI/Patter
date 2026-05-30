@@ -28,7 +28,7 @@ class EvalSuite:
     """A named collection of :class:`EvalCase` to run together."""
 
     name: str
-    cases: list[EvalCase]
+    cases: tuple[EvalCase, ...]
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -60,9 +60,7 @@ class EvalRunner:
             results.append(result)
         return results
 
-    async def run_case(
-        self, case: EvalCase, agent_factory: AgentFactory
-    ) -> EvalResult:
+    async def run_case(self, case: EvalCase, agent_factory: AgentFactory) -> EvalResult:
         """Run a single case and return its :class:`EvalResult`."""
         start = time.monotonic()
         transcript: list[dict[str, str]] = []
@@ -88,7 +86,9 @@ class EvalRunner:
                 for needle in turn.expected_contains:
                     if needle.lower() not in (reply or "").lower():
                         logger.info(
-                            "case=%r expected_contains=%r missing in reply", case.name, needle
+                            "case=%r expected_contains=%r missing in reply",
+                            case.name,
+                            needle,
                         )
         except Exception as exc:  # noqa: BLE001 - we need catch-all here
             error = f"{type(exc).__name__}: {exc}"
@@ -159,7 +159,9 @@ def load_suite(path: Path) -> EvalSuite:
         data = json.loads(text)
 
     if not isinstance(data, dict):
-        raise ValueError(f"Eval suite {path} must be a mapping, got {type(data).__name__}")
+        raise ValueError(
+            f"Eval suite {path} must be a mapping, got {type(data).__name__}"
+        )
 
     cases_raw = data.get("cases", [])
     if not isinstance(cases_raw, list):
@@ -191,6 +193,6 @@ def load_suite(path: Path) -> EvalSuite:
 
     return EvalSuite(
         name=str(data.get("name", path.stem)),
-        cases=cases,
+        cases=tuple(cases),
         metadata=dict(data.get("metadata", {}) or {}),
     )

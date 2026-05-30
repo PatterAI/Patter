@@ -262,7 +262,8 @@ def test_guardrail_dataclass_creation():
         replacement="Nope.",
     )
     assert g.name == "test"
-    assert g.blocked_terms == ["bad"]
+    # blocked_terms is stored as an immutable tuple (frozen-dataclass contract).
+    assert g.blocked_terms == ("bad",)
     assert g.replacement == "Nope."
 
 

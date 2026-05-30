@@ -320,7 +320,7 @@ describe('Patter (local mode)', () => {
       });
       await expect(
         client.call({ to: '5551234567', agent: { systemPrompt: 'Hi' } }),
-      ).rejects.toThrow("'to' must be in E.164 format");
+      ).rejects.toThrow("'to' must be E.164 format");
     });
 
     it('makes a Twilio outbound call via fetch with inline TwiML', async () => {

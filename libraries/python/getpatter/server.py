@@ -192,7 +192,10 @@ def _validate_telnyx_signature(
     ts_ms = ts * 1000 if ts < 1_000_000_000_000 else ts
     now_ms = int(time.time() * 1000)
     age_ms = now_ms - ts_ms
-    if age_ms < 0 or age_ms > tolerance_sec * 1000:
+    # ``abs`` tolerates small negative skew (timestamp slightly ahead of the
+    # local clock when the webhook host is a touch behind Telnyx) while still
+    # enforcing the ±tolerance anti-replay window.
+    if abs(age_ms) > tolerance_sec * 1000:
         return False
     try:
         from cryptography.exceptions import InvalidSignature
@@ -336,7 +339,17 @@ class EmbeddedServer:
         # Per-call AMD result callback set by ``Patter.call()`` for the most
         # recent outbound call. Cleared after firing once per call so a result
         # for a previous call cannot leak into a new caller's callback.
+        #
+        # ``on_machine_detection`` is the legacy single-slot fallback (last
+        # registered callback). ``on_machine_detection_by_call_sid`` keys the
+        # callback by the carrier-issued call id (Twilio CallSid / Telnyx
+        # call_control_id / Plivo CallUUID) so concurrent outbound calls do
+        # not clobber each other's callbacks. Parity with the TypeScript
+        # ``onMachineDetectionByCallSid`` map. The webhook handlers prefer the
+        # per-call entry and fall back to the single-slot callback; both are
+        # one-shot (deleted after firing).
         self.on_machine_detection = None
+        self.on_machine_detection_by_call_sid: dict = {}
         # Per-call_id completion futures for ``Patter.call(wait=True)``.
         # Resolved by the FIRST terminal signal: the Twilio/Telnyx status
         # callback for no-media outcomes (no-answer / busy / failed), or
@@ -421,6 +434,12 @@ class EmbeddedServer:
         provided (connected calls carry transcript + ``CallMetrics``); no-media
         outcomes pass ``data=None`` and yield an empty transcript / no cost.
         """
+        # Drop any AMD callback that never fired (human answer, no-media
+        # outcome, …) so the per-call map does not leak. Runs for every
+        # terminal signal — connected via ``_on_call_end`` and no-media via
+        # the carrier status callbacks — regardless of ``wait``.
+        if call_id:
+            self.on_machine_detection_by_call_sid.pop(call_id, None)
         fut = self._completions.get(call_id)
         if fut is None or fut.done():
             return
@@ -443,6 +462,32 @@ class EmbeddedServer:
         )
         self._completions.pop(call_id, None)
         self._amd_class.pop(call_id, None)
+
+    async def _fire_machine_detection(
+        self, call_sid: str, result: MachineDetectionResult
+    ) -> None:
+        """Fire the per-call AMD callback exactly once.
+
+        Prefers the per-callSid entry registered by ``Patter.call()`` so
+        concurrent outbound calls do not clobber each other; falls back to
+        the legacy single-slot ``on_machine_detection``. Both are one-shot —
+        the map entry is removed after firing. User-code exceptions are
+        swallowed (logged) so a throwing callback never breaks webhook
+        delivery (carriers retry on non-2xx).
+        """
+        cb = None
+        if call_sid:
+            cb = self.on_machine_detection_by_call_sid.pop(call_sid, None)
+        if cb is None:
+            cb = self.on_machine_detection
+        if cb is None:
+            return
+        try:
+            cb_ret = cb(result)
+            if asyncio.iscoroutine(cb_ret):
+                await cb_ret
+        except Exception as exc:
+            logger.warning("on_machine_detection callback threw: %s", exc)
 
     def _wrap_callbacks(self):
         """Return (on_call_start, on_call_end, on_metrics) wrappers.
@@ -836,22 +881,21 @@ class EmbeddedServer:
 
             # Fire the per-call on_machine_detection callback (if any) BEFORE
             # the voicemail-drop logic so callers see the result regardless
-            # of whether a voicemail message was configured. Errors in user
-            # code must not break webhook delivery — Twilio retries on non-2xx.
-            if self.on_machine_detection is not None and call_sid:
-                try:
-                    result = MachineDetectionResult(
+            # of whether a voicemail message was configured. Keyed by CallSid
+            # so concurrent outbound calls do not clobber each other. Errors in
+            # user code must not break webhook delivery — Twilio retries on
+            # non-2xx.
+            if call_sid:
+                await self._fire_machine_detection(
+                    call_sid,
+                    MachineDetectionResult(
                         call_id=call_sid,
                         carrier="twilio",
                         classification=_classify_twilio_amd(answered_by),
                         raw=answered_by,
                         detected_at=time.time(),
-                    )
-                    cb_ret = self.on_machine_detection(result)
-                    if asyncio.iscoroutine(cb_ret):
-                        await cb_ret
-                except Exception as exc:
-                    logger.warning("on_machine_detection callback threw: %s", exc)
+                    ),
+                )
 
             # FIX #91 — when AMD classifies as machine, the agent's first
             # message will not be played (we drop voicemail or hang up), so
@@ -1098,22 +1142,19 @@ class EmbeddedServer:
                     # rationale as the Twilio path above — caller sees the
                     # result even when no voicemail_message is configured,
                     # and errors in user code don't break webhook delivery.
-                    if self.on_machine_detection is not None and call_control_id:
-                        try:
-                            result = MachineDetectionResult(
+                    # Keyed by call_control_id so concurrent outbound calls
+                    # do not clobber each other.
+                    if call_control_id:
+                        await self._fire_machine_detection(
+                            call_control_id,
+                            MachineDetectionResult(
                                 call_id=call_control_id,
                                 carrier="telnyx",
                                 classification=_classify_telnyx_amd(amd_result),
                                 raw=amd_result,
                                 detected_at=time.time(),
-                            )
-                            cb_ret = self.on_machine_detection(result)
-                            if asyncio.iscoroutine(cb_ret):
-                                await cb_ret
-                        except Exception as exc:
-                            logger.warning(
-                                "on_machine_detection callback threw: %s", exc
-                            )
+                            ),
+                        )
                     if self.voicemail_message:
                         from getpatter.telephony.telnyx import handle_amd_result
 
@@ -1278,8 +1319,12 @@ class EmbeddedServer:
             else:
                 url = str(req_url).replace("http://", "https://")
             if not _validate_plivo_signature(
-                url, nonce, signature, auth_token,
-                params=form_params, method=method,
+                url,
+                nonce,
+                signature,
+                auth_token,
+                params=form_params,
+                method=method,
             ):
                 logger.warning(
                     "Plivo webhook rejected: invalid or missing V3 signature"
@@ -1325,9 +1370,7 @@ class EmbeddedServer:
                         extra["duration_seconds"] = float(duration)
                     except ValueError:
                         pass
-                self._metrics_store.update_call_status(
-                    call_uuid, call_status, **extra
-                )
+                self._metrics_store.update_call_status(call_uuid, call_status, **extra)
             if call_uuid and call_status in (
                 "no-answer",
                 "busy",
@@ -1348,9 +1391,7 @@ class EmbeddedServer:
                     if call_status == "busy"
                     else "failed"
                 )
-                self._resolve_completion(
-                    call_uuid, outcome=outcome, status=call_status
-                )
+                self._resolve_completion(call_uuid, outcome=outcome, status=call_status)
             return Response(content="", status_code=200)
 
         @app.post("/webhooks/plivo/amd")
@@ -1374,20 +1415,19 @@ class EmbeddedServer:
             if call_uuid:
                 self._amd_class[call_uuid] = classification
 
-            if self.on_machine_detection is not None and call_uuid:
-                try:
-                    result = MachineDetectionResult(
+            # Keyed by CallUUID so concurrent outbound calls do not clobber
+            # each other; falls back to the legacy single-slot callback.
+            if call_uuid:
+                await self._fire_machine_detection(
+                    call_uuid,
+                    MachineDetectionResult(
                         call_id=call_uuid,
                         carrier="plivo",
                         classification=classification,
                         raw=amd_raw,
                         detected_at=time.time(),
-                    )
-                    cb_ret = self.on_machine_detection(result)
-                    if asyncio.iscoroutine(cb_ret):
-                        await cb_ret
-                except Exception as exc:
-                    logger.warning("on_machine_detection callback threw: %s", exc)
+                    ),
+                )
 
             if classification == "machine" and call_uuid:
                 try:
@@ -1552,7 +1592,7 @@ class EmbeddedServer:
 
         logger.info("Server starting on port %s", port)
         logger.info("Webhook URL: https://%s", self.config.webhook_url)
-        logger.info("Phone:   %s", self.config.phone_number)
+        logger.info("Phone:   %s", mask_phone_number(self.config.phone_number))
         logger.info("Agent:   %s / %s", self.agent.model, self.agent.voice)
 
         # Startup-time warning when webhook signature enforcement is active
@@ -1573,9 +1613,7 @@ class EmbeddedServer:
                     "Telnyx webhook enforcement ACTIVE but telnyx_public_key is empty "
                     "— webhooks will 503. Set require_signature=False for local dev."
                 )
-            if provider == "plivo" and not getattr(
-                self.config, "plivo_auth_token", ""
-            ):
+            if provider == "plivo" and not getattr(self.config, "plivo_auth_token", ""):
                 logger.warning(
                     "Plivo webhook enforcement ACTIVE but plivo_auth_token is empty "
                     "— webhooks will 503. Set require_signature=False for local dev."
@@ -1592,15 +1630,18 @@ class EmbeddedServer:
         # created false-positive alarm fatigue for operators.)
 
         # Warn if the agent runs a non-default Realtime model — DEFAULT_PRICING
-        # is calibrated for gpt-4o-mini-realtime-preview. Other models differ
-        # by 3-10x so cost display would under-report without an override.
+        # is calibrated for the default Realtime models (gpt-realtime-mini /
+        # gpt-4o-mini-realtime-preview, which share the same rates). Other
+        # models differ by 3-10x so cost display would under-report.
         model = self.agent.model or ""
-        if model and model != "gpt-4o-mini-realtime-preview" and "realtime" in model:
+        _calibrated = ("gpt-realtime-mini", "gpt-4o-mini-realtime-preview")
+        if model and model not in _calibrated and "realtime" in model:
             # Dev-supplied string — sanitize to avoid ANSI/log-injection in
             # the startup warning, matching TS parity.
             logger.warning(
                 "Agent uses %r but DEFAULT_PRICING.openai_realtime is "
-                "calibrated for 'gpt-4o-mini-realtime-preview'. Pass "
+                "calibrated for the default Realtime models (gpt-realtime-mini "
+                "/ gpt-4o-mini-realtime-preview). Pass "
                 "Patter(pricing={'openai_realtime': {...}}) to set rates for "
                 "this model, otherwise the dashboard cost display will "
                 "under-report.",

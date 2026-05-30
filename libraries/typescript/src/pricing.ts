@@ -532,6 +532,7 @@ export function calculateRealtimeCachedSavings(
     input_token_details?: {
       audio_tokens?: number;
       text_tokens?: number;
+      cached_tokens?: number;
       cached_tokens_details?: { audio_tokens?: number; text_tokens?: number };
     };
   },
@@ -541,11 +542,32 @@ export function calculateRealtimeCachedSavings(
   const rates = resolveProviderRates(pricing.openai_realtime, model);
   if (rates.unit !== 'token') return 0;
   const input = usage.input_token_details ?? {};
-  const cached = input.cached_tokens_details ?? {};
   const cachedAudioRate = rates.cached_audio_input_per_token ?? rates.audio_input_per_token ?? 0;
   const cachedTextRate = rates.cached_text_input_per_token ?? rates.text_input_per_token ?? 0;
-  const cachedAudio = Math.min(cached.audio_tokens ?? 0, input.audio_tokens ?? 0);
-  const cachedText = Math.min(cached.text_tokens ?? 0, input.text_tokens ?? 0);
+
+  const totalAudio = input.audio_tokens ?? 0;
+  const totalText = input.text_tokens ?? 0;
+
+  // Prefer the cached_tokens_details breakdown. When absent (some Azure
+  // OpenAI responses only carry the top-level cached_tokens scalar) fall
+  // back to pro-rating it by the audio/text split so the savings figure is
+  // still surfaced — parity with the same fallback in calculateRealtimeCost.
+  let cachedAudio: number;
+  let cachedText: number;
+  const details = input.cached_tokens_details;
+  if (details && (details.audio_tokens !== undefined || details.text_tokens !== undefined)) {
+    cachedAudio = Math.min(details.audio_tokens ?? 0, totalAudio);
+    cachedText = Math.min(details.text_tokens ?? 0, totalText);
+  } else if (input.cached_tokens && input.cached_tokens > 0) {
+    const totalIn = totalAudio + totalText;
+    const ratio = totalIn > 0 ? input.cached_tokens / totalIn : 0;
+    cachedAudio = Math.min(Math.round(totalAudio * ratio), totalAudio);
+    cachedText = Math.min(Math.round(totalText * ratio), totalText);
+  } else {
+    cachedAudio = 0;
+    cachedText = 0;
+  }
+
   const fullAudio = cachedAudio * (rates.audio_input_per_token ?? 0);
   const fullText = cachedText * (rates.text_input_per_token ?? 0);
   const discountedAudio = cachedAudio * cachedAudioRate;

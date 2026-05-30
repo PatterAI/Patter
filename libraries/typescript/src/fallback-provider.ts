@@ -7,7 +7,7 @@
  * background.
  */
 
-import type { LLMProvider, LLMChunk } from './llm-loop';
+import type { LLMProvider, LLMChunk, LLMStreamOptions } from './llm-loop';
 import { getLogger } from './logger';
 
 // ---------------------------------------------------------------------------
@@ -117,8 +117,9 @@ export class FallbackLLMProvider implements LLMProvider {
   async *completeStream(
     messages: Array<Record<string, unknown>>,
     tools?: Array<Record<string, unknown>> | null,
+    opts?: LLMStreamOptions,
   ): AsyncGenerator<string, void, unknown> {
-    for await (const chunk of this.stream(messages, tools)) {
+    for await (const chunk of this.stream(messages, tools, opts)) {
       if ((chunk as { type?: string }).type === 'text') {
         yield ((chunk as { content?: string }).content ?? '') as string;
       }
@@ -133,6 +134,7 @@ export class FallbackLLMProvider implements LLMProvider {
   async *stream(
     messages: Array<Record<string, unknown>>,
     tools?: Array<Record<string, unknown>> | null,
+    opts?: LLMStreamOptions,
   ): AsyncGenerator<LLMChunk, void, unknown> {
     const errors: Error[] = [];
 
@@ -142,6 +144,7 @@ export class FallbackLLMProvider implements LLMProvider {
       tools,
       /* availableOnly */ true,
       errors,
+      opts,
     );
     if (result === 'done') return;
 
@@ -154,6 +157,7 @@ export class FallbackLLMProvider implements LLMProvider {
       tools,
       /* availableOnly */ false,
       errors,
+      opts,
     );
     if (retryResult === 'done') return;
 
@@ -171,6 +175,7 @@ export class FallbackLLMProvider implements LLMProvider {
     tools: Array<Record<string, unknown>> | null | undefined,
     availableOnly: boolean,
     errors: Error[],
+    opts?: LLMStreamOptions,
   ): AsyncGenerator<LLMChunk, 'done' | 'exhausted', unknown> {
     for (let i = 0; i < this.providers.length; i++) {
       if (availableOnly && !this.availability[i]) continue;
@@ -182,7 +187,7 @@ export class FallbackLLMProvider implements LLMProvider {
           );
 
           let yieldedTokens = false;
-          const gen = this.providers[i].stream(messages, tools);
+          const gen = this.providers[i].stream(messages, tools, opts);
 
           // Consume and re-yield every chunk from the provider
           while (true) {

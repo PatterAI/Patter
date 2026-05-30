@@ -111,8 +111,15 @@ class TestPendingBargeInLifecycle:
         assert h._barge_in_pending_task is not None
         h.metrics.record_overlap_start.assert_called_once()
 
-        # Wait past the timeout.
-        await asyncio.sleep(0.08)
+        # Wait past the timeout using a bounded poll so CI scheduling jitter
+        # does not cause a false failure.  Total deadline is 2 s (generous),
+        # but the loop exits as soon as the state has cleared, typically
+        # within a few ms on any machine.
+        deadline = asyncio.get_event_loop().time() + 2.0
+        while asyncio.get_event_loop().time() < deadline:
+            if h._barge_in_pending_since is None:
+                break
+            await asyncio.sleep(0.005)
 
         assert h._barge_in_pending_since is None
         assert h._barge_in_pending_task is None

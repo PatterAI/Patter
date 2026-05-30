@@ -19,7 +19,7 @@ class EvalTurn:
     user: str
     # Optional: a regex the agent's reply must match — used as a cheap
     # pre-filter before invoking the LLM judge.
-    expected_contains: list[str] = field(default_factory=list)
+    expected_contains: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -27,11 +27,11 @@ class EvalCase:
     """A complete evaluation scenario."""
 
     name: str
-    turns: list[EvalTurn]
+    turns: tuple[EvalTurn, ...]
     expected_behavior: str
     rubric: str
     # Optional metadata for reporting/filtering.
-    tags: list[str] = field(default_factory=list)
+    tags: tuple[str, ...] = field(default_factory=tuple)
     # Optional first-message the agent should emit before any user turn.
     first_message: str = ""
 
@@ -50,7 +50,7 @@ class EvalResult:
     """The result of running a single :class:`EvalCase`."""
 
     case_name: str
-    transcript: list[dict[str, str]]  # [{"role": "user"|"agent", "text": ...}]
+    transcript: tuple[dict[str, str], ...]  # [{"role": "user"|"agent", "text": ...}]
     judge: JudgeResult
     duration_s: float
     error: str | None = None

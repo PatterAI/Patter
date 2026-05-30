@@ -181,6 +181,7 @@ class CallLogger:
 
     def __init__(self, root: Path | str | None) -> None:
         self._root: Path | None = None
+        self._started_at: dict[str, float] = {}
         if root is not None:
             self._root = Path(root).expanduser()
             try:
@@ -229,6 +230,7 @@ class CallLogger:
         if not self.enabled:
             return
         started_at = time.time()
+        self._started_at[call_id] = started_at
         call_dir = self._call_dir(call_id, started_at)
         if call_dir is None:
             return
@@ -274,7 +276,7 @@ class CallLogger:
         """
         if not self.enabled:
             return
-        call_dir = self._call_dir(call_id)
+        call_dir = self._call_dir(call_id, self._started_at.get(call_id))
         if call_dir is None:
             return
         record = {
@@ -296,7 +298,7 @@ class CallLogger:
         """Append an operational event (tool_call, barge_in, error, ...)."""
         if not self.enabled:
             return
-        call_dir = self._call_dir(call_id)
+        call_dir = self._call_dir(call_id, self._started_at.get(call_id))
         if call_dir is None:
             return
         record = {
@@ -324,7 +326,7 @@ class CallLogger:
         """Finalise ``metadata.json`` with end-of-call aggregates."""
         if not self.enabled:
             return
-        call_dir = self._call_dir(call_id)
+        call_dir = self._call_dir(call_id, self._started_at.pop(call_id, None))
         if call_dir is None:
             return
         metadata_path = call_dir / "metadata.json"

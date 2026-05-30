@@ -9,6 +9,11 @@
 import { getLogger } from './logger';
 import type { CarrierKind } from './types';
 
+/** Mask a phone number to last-4 digits for safe use in logs / errors. */
+function redactPhone(n: string): string {
+  return n.slice(0, 3) + '***' + n.slice(-4);
+}
+
 const TWILIO_API_BASE = 'https://api.twilio.com/2010-04-01';
 const TELNYX_API_BASE = 'https://api.telnyx.com/v2';
 const PLIVO_API_BASE = 'https://api.plivo.com/v1';
@@ -53,7 +58,7 @@ export async function configureTwilioNumber(
   const body = (await listResp.json()) as TwilioListResponse;
   const match = body.incoming_phone_numbers?.[0];
   if (!match) {
-    throw new Error(`Twilio number ${phoneNumber} not found on account ${accountSid}`);
+    throw new Error(`Twilio number ${redactPhone(phoneNumber)} not found on account ${accountSid}`);
   }
 
   const updateUrl = `${TWILIO_API_BASE}/Accounts/${accountSid}/IncomingPhoneNumbers/${match.sid}.json`;
@@ -84,17 +89,20 @@ export async function configureTelnyxNumber(
   connectionId: string,
   phoneNumber: string,
 ): Promise<void> {
-  const resp = await fetch(`${TELNYX_API_BASE}/phone_numbers/${encodeURIComponent(phoneNumber)}`, {
-    method: 'PATCH',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
+  const resp = await fetch(
+    `${TELNYX_API_BASE}/phone_numbers/${encodeURIComponent(phoneNumber)}/voice`,
+    {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ connection_id: connectionId, tech_prefix_enabled: false }),
     },
-    body: JSON.stringify({ connection_id: connectionId }),
-  });
+  );
   if (!resp.ok) {
     throw new Error(
-      `Telnyx PATCH /phone_numbers/${phoneNumber} failed: ${resp.status} ${await resp.text()}`,
+      `Telnyx PATCH /phone_numbers/${redactPhone(phoneNumber)}/voice failed: ${resp.status} ${await resp.text()}`,
     );
   }
 }
@@ -177,7 +185,7 @@ export async function autoConfigureCarrier(params: {
   if (provider === 'telnyx' && params.telnyxKey && params.telnyxConnectionId) {
     try {
       await configureTelnyxNumber(params.telnyxKey, params.telnyxConnectionId, params.phoneNumber);
-      log.info('Telnyx number %s associated with connection %s', params.phoneNumber, params.telnyxConnectionId);
+      log.info('Telnyx number ***%s associated with connection %s', params.phoneNumber.slice(-4), params.telnyxConnectionId);
     } catch (err) {
       log.warn('Could not auto-configure Telnyx number: %s', err instanceof Error ? err.message : String(err));
     }

@@ -118,47 +118,49 @@ export interface PatterToolOptions {
    * Patter instance to dial through. Must be in local mode (have a `carrier`).
    * The tool boots `phone.serve()` on `start()`; do not call `serve()` yourself.
    */
-  phone: Patter;
+  readonly phone: Patter;
   /**
    * Default agent config used for outbound calls. Per-call overrides come from
    * `execute({ goal, first_message })`.
    */
-  agent?: AgentOptions;
+  readonly agent?: AgentOptions;
   /** Tool name shown to the LLM. Default `'make_phone_call'`. */
-  name?: string;
+  readonly name?: string;
   /** Tool description for the LLM. Default tuned for English assistants. */
-  description?: string;
+  readonly description?: string;
   /** Default per-call timeout in seconds. Default 180. */
-  maxDurationSec?: number;
+  readonly maxDurationSec?: number;
   /**
    * Optional pass-through for `phone.serve()`'s `recording` flag — record all
    * outbound calls placed via this tool.
    */
-  recording?: boolean;
+  readonly recording?: boolean;
 }
 
 /** Args accepted by `PatterTool.execute()` (and the OpenAI/Anthropic/Hermes tool schemas). */
 export interface PatterToolExecuteArgs {
-  to: string;
-  goal?: string;
-  first_message?: string;
-  max_duration_sec?: number;
+  readonly to: string;
+  readonly goal?: string;
+  readonly first_message?: string;
+  readonly max_duration_sec?: number;
 }
 
 /** Result envelope returned by `PatterTool.execute()` once the underlying call ends. */
 export interface PatterToolResult {
-  call_id: string;
-  status: string;
-  duration_seconds: number;
+  readonly call_id: string;
+  readonly status: string;
+  readonly duration_seconds: number;
   /**
    * Carrier-agnostic outcome (answered / voicemail / no_answer / busy /
    * failed) lifted from the SDK {@link CallResult}. Optional for backward
    * compatibility with any code constructing this envelope without it.
    */
-  outcome?: string;
-  cost_usd?: number;
-  transcript: Array<{ role: string; text: string; timestamp?: number }>;
-  metrics?: Record<string, unknown> | null;
+  readonly outcome?: string;
+  readonly cost_usd?: number;
+  readonly transcript: ReadonlyArray<
+    Readonly<{ role: string; text: string; timestamp?: number }>
+  >;
+  readonly metrics?: Readonly<Record<string, unknown>> | null;
 }
 
 /** Wraps a live `Patter` instance as a tool callable from external agent frameworks. */
@@ -170,6 +172,11 @@ export class PatterTool {
   private readonly maxDurationSec: number;
   private readonly recording: boolean;
   private started = false;
+  /** Cached in-progress (or completed) start promise so concurrent execute()
+   *  callers all await the same boot sequence instead of each racing into
+   *  phone.serve(). Reset to null on failure so callers can retry after a
+   *  transient error. */
+  private startPromise: Promise<void> | null = null;
 
   constructor(opts: PatterToolOptions) {
     if (!opts.phone) {
@@ -239,8 +246,23 @@ export class PatterTool {
    * `serve()` provides here. No `onCallEnd` callback is wired: the SDK's own
    * per-callId completion registry resolves the result, so the user's
    * `onCallEnd` slot is left free.
+   *
+   * Idempotent and concurrency-safe: concurrent callers all await the same
+   * in-progress boot instead of each racing into `phone.serve()`.
    */
   async start(): Promise<void> {
+    if (this.startPromise) return this.startPromise;
+    this.startPromise = this._doStart();
+    try {
+      await this.startPromise;
+    } catch (err) {
+      // Allow retry after a transient failure.
+      this.startPromise = null;
+      throw err;
+    }
+  }
+
+  private async _doStart(): Promise<void> {
     if (this.started) return;
     if (!this.agent) {
       throw new Error(
@@ -270,6 +292,7 @@ export class PatterTool {
       }
     }
     this.started = false;
+    this.startPromise = null;
   }
 
   // --- Execution ----------------------------------------------------------

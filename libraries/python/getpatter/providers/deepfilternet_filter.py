@@ -134,13 +134,8 @@ class DeepFilterNetFilter(AudioFilter):
         x_dst = np.linspace(0.0, 1.0, num=dst_len, endpoint=False)
         return np.interp(x_dst, x_src, samples).astype(samples.dtype)
 
-    async def process(self, pcm_chunk: bytes, sample_rate: int) -> bytes:
-        """Run DeepFilterNet enhancement on the given PCM chunk."""
-        if self._closed:
-            raise RuntimeError("DeepFilterNetFilter is closed")
-        if not pcm_chunk:
-            return pcm_chunk
-
+    def _process_sync(self, pcm_chunk: bytes, sample_rate: int) -> bytes:
+        """Synchronous CPU-bound DeepFilterNet enhancement (runs in a thread)."""
         import numpy as np
         import torch
 
@@ -178,6 +173,17 @@ class DeepFilterNetFilter(AudioFilter):
         # Down-sample back to the caller's rate.
         restored = self._resample(enhanced_np, self._native_sr, sample_rate)
         return self._float32_to_pcm16(restored)
+
+    async def process(self, pcm_chunk: bytes, sample_rate: int) -> bytes:
+        """Run DeepFilterNet enhancement on the given PCM chunk."""
+        import asyncio
+
+        if self._closed:
+            raise RuntimeError("DeepFilterNetFilter is closed")
+        if not pcm_chunk:
+            return pcm_chunk
+
+        return await asyncio.to_thread(self._process_sync, pcm_chunk, sample_rate)
 
     async def close(self) -> None:
         """Release model references (GC handles actual teardown)."""

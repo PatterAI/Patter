@@ -35,6 +35,8 @@
 
 import type { ToolDefinition } from '../types';
 import { getLogger } from '../logger';
+import { validateWebhookUrl } from '../server';
+import { VERSION } from '../version';
 
 /** Public MCP server config. ``string`` is shorthand for ``{ url }``. */
 export type MCPServerConfig =
@@ -127,10 +129,16 @@ export class MCPManager {
 
     const aggregatedTools: ToolDefinition[] = [];
     for (const cfg of this.configs) {
+      try {
+        validateWebhookUrl(cfg.url);
+      } catch (e) {
+        getLogger().error(`MCP server '${cfg.name}' (${cfg.url}) rejected by SSRF guard: ${String(e)}`);
+        continue;
+      }
       const transport = new transportModule.StreamableHTTPClientTransport(new URL(cfg.url), {
         requestInit: { headers: cfg.headers },
       });
-      const client = new mcpModule.Client({ name: 'patter', version: '0.6.0' });
+      const client = new mcpModule.Client({ name: 'patter', version: VERSION });
       try {
         await client.connect(transport);
       } catch (e) {

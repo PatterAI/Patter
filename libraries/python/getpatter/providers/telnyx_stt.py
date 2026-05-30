@@ -10,13 +10,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import struct
 from enum import IntEnum, StrEnum
-from typing import ClassVar, AsyncIterator, Literal
+from typing import ClassVar, AsyncIterator, Literal, Union
+from urllib.parse import urlencode
 
 import aiohttp
 
 from getpatter.providers.base import STTProvider, Transcript
+
+logger = logging.getLogger("getpatter.providers.telnyx_stt")
 
 TELNYX_STT_WS_URL = "wss://api.telnyx.com/v2/speech-to-text/transcription"
 
@@ -119,12 +123,33 @@ class TelnyxSTT(STTProvider):
         self._header_sent = False
         self._queue: asyncio.Queue[Transcript | None] = asyncio.Queue()
         self._recv_task: asyncio.Task[None] | None = None
+        # Bytes of audio forwarded to Telnyx since the last cost emission.
+        # Used by ``_record_transcript_cost`` to compute ``patter.cost.stt_seconds``.
+        self._audio_bytes_sent: int = 0
 
     def __repr__(self) -> str:
         return (
             f"TelnyxSTT(engine={self.transcription_engine!r}, "
             f"language={self.language!r}, sample_rate={self.sample_rate})"
         )
+
+    def _record_transcript_cost(self) -> None:
+        """Emit ``patter.cost.stt_seconds`` for audio buffered since the last
+        final transcript. No-op when OTel is missing / no scope active."""
+        try:
+            from getpatter.observability.attributes import record_patter_attrs
+
+            # Telnyx STT always receives 16-bit PCM (bytes_per_sample=2).
+            seconds = self._audio_bytes_sent / float(self.sample_rate * 2)
+            record_patter_attrs(
+                {
+                    "patter.cost.stt_seconds": seconds,
+                    "patter.stt.provider": "telnyx",
+                }
+            )
+            self._audio_bytes_sent = 0
+        except Exception:  # pragma: no cover — defense in depth
+            logger.debug("_record_transcript_cost failed", exc_info=True)
 
     async def connect(self) -> None:
         """Open the Telnyx Speech-to-Text WebSocket and start the recv loop."""
@@ -137,8 +162,7 @@ class TelnyxSTT(STTProvider):
             "language": self.language,
             "input_format": TelnyxSTTInputFormat.WAV.value,
         }
-        query_string = "&".join(f"{k}={v}" for k, v in params.items())
-        url = f"{self.base_url}?{query_string}"
+        url = f"{self.base_url}?{urlencode(params)}"
         headers = {"Authorization": f"Bearer {self.api_key}"}
 
         self._ws = await self._session.ws_connect(url, headers=headers)
@@ -155,6 +179,7 @@ class TelnyxSTT(STTProvider):
             self._header_sent = True
 
         await self._ws.send_bytes(audio_chunk)
+        self._audio_bytes_sent += len(audio_chunk)
 
     async def receive_transcripts(self) -> AsyncIterator[Transcript]:
         """Yield :class:`Transcript` items as Telnyx returns transcription frames."""
@@ -173,6 +198,8 @@ class TelnyxSTT(STTProvider):
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     parsed = self._parse_message(msg.data)
                     if parsed is not None:
+                        if parsed.is_final:
+                            self._record_transcript_cost()
                         await self._queue.put(parsed)
                 elif msg.type in (
                     aiohttp.WSMsgType.CLOSE,

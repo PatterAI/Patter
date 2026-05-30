@@ -179,80 +179,84 @@ export async function* parseOpenAISseStream(
   const decoder = new TextDecoder();
   let buffer = '';
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
 
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
 
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed || !trimmed.startsWith('data: ')) continue;
-      const data = trimmed.slice(6);
-      if (data === '[DONE]') continue;
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith('data: ')) continue;
+        const data = trimmed.slice(6);
+        if (data === '[DONE]') continue;
 
-      let chunk: {
-        choices?: Array<{
-          delta?: {
-            content?: string;
-            tool_calls?: Array<{
-              index: number;
-              id?: string;
-              function?: { name?: string; arguments?: string };
-            }>;
-          };
-        }>;
-        usage?: {
-          prompt_tokens?: number;
-          completion_tokens?: number;
-          prompt_tokens_details?: { cached_tokens?: number };
-        };
-        // Some Groq deployments return ``x_groq.usage`` in the final chunk.
-        x_groq?: {
+        let chunk: {
+          choices?: Array<{
+            delta?: {
+              content?: string;
+              tool_calls?: Array<{
+                index: number;
+                id?: string;
+                function?: { name?: string; arguments?: string };
+              }>;
+            };
+          }>;
           usage?: {
             prompt_tokens?: number;
             completion_tokens?: number;
+            prompt_tokens_details?: { cached_tokens?: number };
+          };
+          // Some Groq deployments return ``x_groq.usage`` in the final chunk.
+          x_groq?: {
+            usage?: {
+              prompt_tokens?: number;
+              completion_tokens?: number;
+            };
           };
         };
-      };
-      try {
-        chunk = JSON.parse(data);
-      } catch {
-        continue;
-      }
+        try {
+          chunk = JSON.parse(data);
+        } catch {
+          continue;
+        }
 
-      // Final chunk with usage (choices=[]). Forward for cost attribution.
-      const usage = chunk.usage ?? chunk.x_groq?.usage;
-      if (usage) {
-        const cached = chunk.usage?.prompt_tokens_details?.cached_tokens ?? 0;
-        yield {
-          type: 'usage',
-          inputTokens: usage.prompt_tokens,
-          outputTokens: usage.completion_tokens,
-          cacheReadInputTokens: cached,
-        };
-      }
-
-      const delta = chunk.choices?.[0]?.delta;
-      if (!delta) continue;
-
-      if (delta.content) {
-        yield { type: 'text', content: delta.content };
-      }
-
-      if (delta.tool_calls) {
-        for (const tc of delta.tool_calls) {
+        // Final chunk with usage (choices=[]). Forward for cost attribution.
+        const usage = chunk.usage ?? chunk.x_groq?.usage;
+        if (usage) {
+          const cached = chunk.usage?.prompt_tokens_details?.cached_tokens ?? 0;
           yield {
-            type: 'tool_call',
-            index: tc.index,
-            id: tc.id,
-            name: tc.function?.name,
-            arguments: tc.function?.arguments,
+            type: 'usage',
+            inputTokens: usage.prompt_tokens,
+            outputTokens: usage.completion_tokens,
+            cacheReadInputTokens: cached,
           };
+        }
+
+        const delta = chunk.choices?.[0]?.delta;
+        if (!delta) continue;
+
+        if (delta.content) {
+          yield { type: 'text', content: delta.content };
+        }
+
+        if (delta.tool_calls) {
+          for (const tc of delta.tool_calls) {
+            yield {
+              type: 'tool_call',
+              index: tc.index,
+              id: tc.id,
+              name: tc.function?.name,
+              arguments: tc.function?.arguments,
+            };
+          }
         }
       }
     }
+  } finally {
+    reader.cancel().catch(() => {});
   }
 }

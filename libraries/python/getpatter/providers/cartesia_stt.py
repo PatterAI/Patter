@@ -314,7 +314,16 @@ class CartesiaSTT(STTProvider):
             # Different session was already created (caller error /
             # connect was raced) — close the parked session to avoid
             # a leak.
-            asyncio.create_task(session.close())
+            t = asyncio.create_task(session.close())
+            t.add_done_callback(
+                lambda f: (
+                    not f.cancelled()
+                    and f.exception()
+                    and logger.debug(
+                        "CartesiaSTT: leaked session close error: %s", f.exception()
+                    )
+                )
+            )
         self._ws = ws
         self._arm_recv_and_keepalive()
 

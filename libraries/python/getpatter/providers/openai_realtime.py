@@ -355,7 +355,7 @@ class OpenAIRealtimeAdapter:
 
         try:
             # Wait for session.created
-            response = await self._ws.recv()
+            response = await asyncio.wait_for(self._ws.recv(), timeout=15.0)
             data = json.loads(response)
             if data.get("type") != "session.created":
                 # Surface the actual server-side error so callers see the
@@ -681,7 +681,10 @@ class OpenAIRealtimeAdapter:
             )
         except Exception as exc:  # pragma: no cover
             logger.debug("conversation.item.truncate failed: %s", exc)
-        await self._ws.send(json.dumps({"type": "response.cancel"}))
+        try:
+            await self._ws.send(json.dumps({"type": "response.cancel"}))
+        except Exception as exc:
+            logger.debug("response.cancel failed: %s", exc)
         # Reset per-response tracking so subsequent audio chunks (post-cancel
         # late frames) and the next response.create start clean.
         self._current_response_item_id = None

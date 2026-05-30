@@ -512,7 +512,8 @@ class TestFactories:
             replacement="See a doctor.",
         )
         assert g.name == "No medical"
-        assert g.blocked_terms == ["diagnosis"]
+        # blocked_terms is stored as an immutable tuple (frozen-dataclass contract).
+        assert g.blocked_terms == ("diagnosis",)
         assert g.replacement == "See a doctor."
 
     def test_tool_factory_with_handler(self) -> None:

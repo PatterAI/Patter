@@ -13,12 +13,6 @@
 import { getLogger } from "../logger";
 
 const INWORLD_BASE_URL = "https://api.inworld.ai/tts/v1/voice:stream";
-// Voice metadata endpoint used as a billing-safe warmup target. The
-// streaming endpoint above is POST-only so HEAD against it returns 405.
-// `GET /tts/v1/voices` is documented as a free metadata read that
-// returns the configured voice catalogue without invoking the synthesis
-// pipeline (per https://docs.inworld.ai/).
-const INWORLD_VOICES_URL = "https://api.inworld.ai/tts/v1/voices";
 
 /** Inworld TTS model families. */
 export const InworldModel = {
@@ -159,7 +153,8 @@ export class InworldTTS {
    */
   async warmup(): Promise<void> {
     try {
-      await fetch(INWORLD_VOICES_URL, {
+      const voicesUrl = new URL(this.baseUrl).origin + "/tts/v1/voices";
+      await fetch(voicesUrl, {
         method: "GET",
         headers: {
           Authorization: `Basic ${this.authToken}`,

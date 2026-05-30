@@ -94,7 +94,7 @@ _DEFAULT_DESCRIPTION = (
 )
 
 
-@dataclass
+@dataclass(frozen=True)
 class PatterToolResult:
     """Structured result returned by ``PatterTool.execute``."""
 
@@ -105,7 +105,7 @@ class PatterToolResult:
     # failed) lifted from the SDK ``CallResult``. Defaulted for backward
     # compatibility with any code constructing this envelope positionally.
     outcome: str = ""
-    transcript: list[dict[str, Any]] = field(default_factory=list)
+    transcript: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     cost_usd: float | None = None
     metrics: dict[str, Any] | None = None
 
@@ -221,7 +221,9 @@ class PatterTool:
             try:
                 await self._phone.disconnect()
             except Exception:  # pragma: no cover - defensive
-                logger.debug("PatterTool.stop: phone.disconnect() failed", exc_info=True)
+                logger.debug(
+                    "PatterTool.stop: phone.disconnect() failed", exc_info=True
+                )
         self._started = False
 
     # --- Execution ---------------------------------------------------------
@@ -289,6 +291,7 @@ class PatterTool:
 
         return handler
 
+
 def _result_from_call_result(result: Any) -> PatterToolResult:
     """Map an SDK ``CallResult`` into the tool's public envelope.
 
@@ -310,7 +313,7 @@ def _result_from_call_result(result: Any) -> PatterToolResult:
     else:
         metrics_dict = None
 
-    transcript = list(getattr(result, "transcript", ()) or [])
+    transcript = tuple(getattr(result, "transcript", ()) or ())
     return PatterToolResult(
         call_id=getattr(result, "call_id", ""),
         status=str(getattr(result, "status", "") or "completed"),

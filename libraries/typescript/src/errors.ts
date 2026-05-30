@@ -59,6 +59,18 @@ export class PatterError extends Error {
   }
 }
 
+/**
+ * Invalid constructor arguments, a missing required environment variable, or a
+ * frozen-config constraint violation. Parity with Python's
+ * ``PatterConfigError`` in ``libraries/python/getpatter/exceptions.py``.
+ */
+export class PatterConfigError extends PatterError {
+  constructor(message: string, options?: { code?: ErrorCode }) {
+    super(message, { code: options?.code ?? ErrorCode.CONFIG });
+    this.name = "PatterConfigError";
+  }
+}
+
 /** Network / WebSocket / HTTP-level connectivity failure when talking to a provider. */
 export class PatterConnectionError extends PatterError {
   constructor(message: string, options?: { code?: ErrorCode }) {

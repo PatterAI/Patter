@@ -150,12 +150,27 @@ class InworldTTS(TTSProvider):
             payload["deliveryMode"] = str(self.delivery_mode)
         return payload
 
+    def _record_synthesis_cost(self, text: str) -> None:
+        """Emit ``patter.cost.tts_chars`` for the synthesised text."""
+        try:
+            from getpatter.observability.attributes import record_patter_attrs
+
+            record_patter_attrs(
+                {
+                    "patter.cost.tts_chars": len(text),
+                    "patter.tts.provider": "inworld",
+                }
+            )
+        except Exception:  # pragma: no cover — defense in depth
+            logger.debug("_record_synthesis_cost failed", exc_info=True)
+
     async def synthesize(self, text: str) -> AsyncIterator[bytes]:
         """Stream audio bytes for ``text``.
 
         With the default ``audio_encoding=PCM`` these are raw PCM_S16LE
         chunks at ``sample_rate`` Hz.
         """
+        self._record_synthesis_cost(text)
         session = self._ensure_session()
 
         headers = {

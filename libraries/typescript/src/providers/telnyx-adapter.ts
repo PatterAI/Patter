@@ -142,7 +142,8 @@ export class TelnyxAdapter {
       '/number_orders',
       orderBody,
     );
-    const orderId = order.data?.id ?? '';
+    const orderId = order.data?.id;
+    if (!orderId) throw new Error('TelnyxAdapter: /number_orders returned no order id');
     return { phoneNumber: chosen, orderId };
   }
 
@@ -158,11 +159,18 @@ export class TelnyxAdapter {
     // ``PATCH /phone_numbers/{id}`` endpoint does not accept ``connection_id``
     // consistently across the v2 API. ``phoneNumber`` may be the
     // phone_number ID or the E.164 string; both are accepted.
-    await this.request<unknown>(
-      'PATCH',
-      `/phone_numbers/${encodeURIComponent(phoneNumber)}/voice`,
-      { connection_id: opts.connectionId, tech_prefix_enabled: false },
-    );
+    try {
+      await this.request<unknown>(
+        'PATCH',
+        `/phone_numbers/${encodeURIComponent(phoneNumber)}/voice`,
+        { connection_id: opts.connectionId, tech_prefix_enabled: false },
+      );
+    } catch (err) {
+      // Re-throw with a sanitised message that omits the phone number from the
+      // path to prevent E.164 PII leaking through error logs.
+      const status = err instanceof Error ? err.message.replace(/\+\d{7,15}/g, '[REDACTED]') : String(err);
+      throw new Error(`TelnyxAdapter: configureNumber failed: ${status}`);
+    }
   }
 
   /**

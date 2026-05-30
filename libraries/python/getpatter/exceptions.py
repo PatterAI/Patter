@@ -14,9 +14,8 @@ Example::
 
     try:
         ...
-    except PatterError as exc:
-        if exc.code is ErrorCode.CONFIG:
-            ...
+    except PatterConfigError:
+        ...
 """
 
 from __future__ import annotations
@@ -89,6 +88,13 @@ class PatterError(Exception):
             self.code = code
 
 
+class PatterConfigError(PatterError):
+    """Raised when constructor arguments are invalid, a required environment
+    variable is missing, or a frozen-config constraint is violated."""
+
+    code: ErrorCode = ErrorCode.CONFIG
+
+
 class PatterConnectionError(PatterError):
     """Raised when the SDK cannot establish or maintain a network connection
     to a Patter backend or upstream provider."""
@@ -119,6 +125,7 @@ class RateLimitError(PatterConnectionError):
 __all__ = [
     "ErrorCode",
     "PatterError",
+    "PatterConfigError",
     "PatterConnectionError",
     "AuthenticationError",
     "ProvisionError",

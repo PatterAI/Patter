@@ -340,8 +340,8 @@ class ElevenLabsTTS(TTSProvider):
             params={"output_format": self.output_format},
         )
         resp = await self._client.send(req, stream=True)
-        resp.raise_for_status()
         try:
+            resp.raise_for_status()
             async for chunk in resp.aiter_bytes(chunk_size=self.chunk_size):
                 yield chunk
         finally:

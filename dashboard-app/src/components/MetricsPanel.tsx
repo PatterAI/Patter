@@ -83,14 +83,14 @@ function LatencyView({ call }: { call: Call }) {
           <div className="latbox">
             <div className="l">end-to-end p50</div>
             <div className="v">
-              {showPctRt ? p50 || '—' : '—'}
+              {showPctRt ? p50 ?? '—' : '—'}
               {showPctRt && <span className="u">ms</span>}
             </div>
           </div>
           <div className={'latbox' + (showPctRt && p95 > 600 ? ' warn' : '')}>
             <div className="l">end-to-end p95</div>
             <div className="v">
-              {showPctRt ? p95 || '—' : '—'}
+              {showPctRt ? p95 ?? '—' : '—'}
               {showPctRt && <span className="u">ms</span>}
             </div>
           </div>

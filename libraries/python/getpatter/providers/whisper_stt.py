@@ -101,7 +101,9 @@ class WhisperSTT(STTProvider):
         self.encoding = "linear16"
         self._buffer = bytearray()
         self._audio_bytes_sent: int = 0
-        self._transcript_queue: asyncio.Queue[Transcript] = asyncio.Queue()
+        # Queue holds Transcript items; None is a sentinel that signals the
+        # generator to stop after draining all real transcripts.
+        self._transcript_queue: asyncio.Queue[Transcript | None] = asyncio.Queue()
         self._running = False
         self._pending: set[asyncio.Task] = set()
         self._client = httpx.AsyncClient(
@@ -196,14 +198,31 @@ class WhisperSTT(STTProvider):
             return None
 
     async def receive_transcripts(self) -> AsyncIterator[Transcript]:
-        """Async generator that yields transcripts as they arrive."""
-        while self._running:
+        """Async generator that yields transcripts as they arrive.
+
+        Continues draining the queue after ``_running`` is set to False so
+        that transcripts flushed by :meth:`close` (trailing audio buffer +
+        in-flight tasks) are not silently dropped.  ``close()`` places a
+        ``None`` sentinel into the queue once all flushing is complete, which
+        causes this generator to return.
+        """
+        while True:
             try:
                 transcript = await asyncio.wait_for(
                     self._transcript_queue.get(), timeout=0.1
                 )
             except asyncio.TimeoutError:
+                # If _running is False and the queue is empty there is nothing
+                # left to yield — the sentinel has not arrived yet only if
+                # close() hasn't been called; keep waiting in that case.
+                if not self._running and self._transcript_queue.empty():
+                    # close() was never called (e.g. unit test tear-down) —
+                    # give up gracefully instead of looping forever.
+                    break
                 continue
+            # Sentinel placed by close() after all pending tasks finish.
+            if transcript is None:
+                break
             if transcript.is_final:
                 self._record_transcript_cost()
             yield transcript
@@ -216,15 +235,27 @@ class WhisperSTT(STTProvider):
         dropped. Previously the buffer was only transcribed when it had
         accumulated more than ~25% of ``BUFFER_SIZE_BYTES``, which discarded
         short tail-end utterances entirely.
+
+        Ordering is deliberate: ``_running`` is set to False *after* all
+        pending tasks complete and the remaining buffer is transcribed.  A
+        ``None`` sentinel is then placed in the queue so that
+        :meth:`receive_transcripts` can drain every real transcript before
+        it stops iterating — nothing is silently dropped.
         """
-        self._running = False
+        # Flush remaining buffer before signalling the receiver to stop.
         if len(self._buffer) > 0:
             transcript = await self._transcribe_buffer(bytes(self._buffer))
             if transcript:
                 await self._transcript_queue.put(transcript)
         self._buffer.clear()
+        # Wait for any in-flight transcription tasks so their results land in
+        # the queue before the sentinel.
         if self._pending:
             await asyncio.gather(*self._pending, return_exceptions=True)
+        # Signal _running=False then place sentinel so receive_transcripts()
+        # drains remaining items and exits cleanly.
+        self._running = False
+        await self._transcript_queue.put(None)
         await self._client.aclose()
 
 

@@ -20,7 +20,7 @@ import json
 import logging
 import os
 from enum import StrEnum
-from typing import ClassVar, AsyncIterator
+from typing import ClassVar, AsyncIterator, Union
 
 logger = logging.getLogger("getpatter")
 
@@ -223,8 +223,12 @@ class AnthropicLLMProvider:
         # ``output_tokens`` placeholder); ``message_delta`` carries the
         # running ``output_tokens`` total. Capture both so the cost helper
         # sees the final figures.
+        # Anthropic also reports cache_creation_input_tokens (write) and
+        # cache_read_input_tokens (read) on the ``message_start`` usage object.
         prompt_tokens = 0
         completion_tokens = 0
+        cache_write_tokens = 0
+        cache_read_tokens = 0
 
         async with self._client.messages.stream(**kwargs) as stream:
             async for event in stream:
@@ -238,6 +242,12 @@ class AnthropicLLMProvider:
                     if usage is not None:
                         prompt_tokens = getattr(usage, "input_tokens", 0) or 0
                         completion_tokens = getattr(usage, "output_tokens", 0) or 0
+                        cache_write_tokens = (
+                            getattr(usage, "cache_creation_input_tokens", 0) or 0
+                        )
+                        cache_read_tokens = (
+                            getattr(usage, "cache_read_input_tokens", 0) or 0
+                        )
 
                 elif event_type == "message_delta":
                     usage = getattr(event, "usage", None)
@@ -293,6 +303,13 @@ class AnthropicLLMProvider:
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
             )
+            yield {
+                "type": "usage",
+                "input_tokens": prompt_tokens,
+                "output_tokens": completion_tokens,
+                "cache_read_tokens": cache_read_tokens,
+                "cache_write_tokens": cache_write_tokens,
+            }
 
         yield {"type": "done"}
 
@@ -395,20 +412,24 @@ def _to_anthropic_messages(messages: list[dict]) -> tuple[str, list[dict]]:
         if role == "tool":
             tool_call_id = msg.get("tool_call_id", "")
             content = msg.get("content", "")
-            out.append(
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": tool_call_id,
-                            "content": content
-                            if isinstance(content, str)
-                            else json.dumps(content),
-                        }
-                    ],
-                }
-            )
+            block = {
+                "type": "tool_result",
+                "tool_use_id": tool_call_id,
+                "content": content if isinstance(content, str) else json.dumps(content),
+            }
+            # Group consecutive tool results into a single user message so the
+            # Anthropic API's alternating-role requirement is not violated when
+            # the assistant made parallel tool calls.
+            if (
+                out
+                and out[-1]["role"] == "user"
+                and isinstance(out[-1]["content"], list)
+                and out[-1]["content"]
+                and out[-1]["content"][0].get("type") == "tool_result"
+            ):
+                out[-1]["content"].append(block)
+            else:
+                out.append({"role": "user", "content": [block]})
             continue
 
     return "\n\n".join(system_parts), out

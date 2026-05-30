@@ -141,7 +141,6 @@ class OpenAITTS(TTSProvider):
             body["speed"] = self.speed
         request = self._client.build_request("POST", OPENAI_TTS_URL, json=body)
         response = await self._client.send(request, stream=True)
-        response.raise_for_status()
 
         # StatefulResampler preserves audioop.ratecv filter state across
         # chunk boundaries, preventing the pops/garbled audio that occurred
@@ -158,6 +157,7 @@ class OpenAITTS(TTSProvider):
 
             resampler = create_resampler_24k_to_16k()
         try:
+            response.raise_for_status()
             # 1024-byte chunks ≈ 21 ms at 24 kHz / 16-bit (vs ~85 ms at the
             # previous 4096), which lowers TTFB on the synthesized audio.
             # The StatefulResampler is chunk-size-agnostic — it carries

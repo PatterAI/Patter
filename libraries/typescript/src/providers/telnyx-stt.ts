@@ -74,7 +74,7 @@ export class TelnyxSTT {
   /** Stable pricing/dashboard key — read by stream-handler/metrics. */
   static readonly providerKey = 'telnyx_stt';
   private ws: WebSocket | null = null;
-  private callbacks: TranscriptCallback[] = [];
+  private callbacks: Set<TranscriptCallback> = new Set();
   private headerSent = false;
 
   constructor(
@@ -150,14 +150,14 @@ export class TelnyxSTT {
     this.ws.send(audio);
   }
 
-  /** Register a transcript listener (max 10 concurrent listeners). */
+  /** Register a transcript listener. */
   onTranscript(callback: TranscriptCallback): void {
-    if (this.callbacks.length >= 10) {
-      getLogger().warn('TelnyxSTT: maximum of 10 onTranscript callbacks reached; replacing the last callback.');
-      this.callbacks[this.callbacks.length - 1] = callback;
-      return;
-    }
-    this.callbacks.push(callback);
+    this.callbacks.add(callback);
+  }
+
+  /** Unregister a previously-registered transcript listener. */
+  offTranscript(callback: TranscriptCallback): void {
+    this.callbacks.delete(callback);
   }
 
   /** Close the streaming WebSocket. */
@@ -170,5 +170,6 @@ export class TelnyxSTT {
       }
       this.ws = null;
     }
+    this.headerSent = false;
   }
 }

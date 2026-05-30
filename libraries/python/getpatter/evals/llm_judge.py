@@ -17,9 +17,9 @@ _JUDGE_SYSTEM = (
     "You will be given: (1) the expected behavior for the agent, (2) a rubric, "
     "(3) a transcript of the conversation. "
     "Return a JSON object with exactly three keys:\n"
-    "  - \"score\": float between 0.0 and 1.0\n"
-    "  - \"passed\": boolean (true when score >= threshold)\n"
-    "  - \"reasoning\": short string explaining the score\n"
+    '  - "score": float between 0.0 and 1.0\n'
+    '  - "passed": boolean (true when score >= threshold)\n'
+    '  - "reasoning": short string explaining the score\n'
     "Do not return any text outside the JSON object."
 )
 
@@ -44,6 +44,7 @@ class LLMJudge:
         self.api_key = api_key
         self.pass_threshold = pass_threshold
         self._backend = backend  # for tests — any object exposing ``judge(prompt)``.
+        self._openai_client: Any = None  # lazily initialised; reused across calls
 
     async def judge_case(
         self, case: EvalCase, transcript: list[dict[str, str]]
@@ -56,9 +57,7 @@ class LLMJudge:
             raw = await self._call_openai(prompt)
         return self._parse(raw)
 
-    def _build_prompt(
-        self, case: EvalCase, transcript: list[dict[str, str]]
-    ) -> str:
+    def _build_prompt(self, case: EvalCase, transcript: list[dict[str, str]]) -> str:
         lines = [
             f"EXPECTED BEHAVIOR: {case.expected_behavior}",
             f"RUBRIC: {case.rubric}",
@@ -79,8 +78,11 @@ class LLMJudge:
                 "Install with: pip install getpatter[evals]"
             ) from exc
 
-        client = AsyncOpenAI(api_key=self.api_key) if self.api_key else AsyncOpenAI()
-        response = await client.chat.completions.create(
+        if self._openai_client is None:
+            self._openai_client = (
+                AsyncOpenAI(api_key=self.api_key) if self.api_key else AsyncOpenAI()
+            )
+        response = await self._openai_client.chat.completions.create(
             model=self.model,
             messages=[
                 {"role": "system", "content": _JUDGE_SYSTEM},
@@ -103,7 +105,9 @@ class LLMJudge:
         except json.JSONDecodeError:
             logger.warning("LLMJudge: invalid JSON, defaulting to fail: %r", raw)
             return JudgeResult(
-                score=0.0, passed=False, reasoning=f"Judge returned invalid JSON: {raw[:200]}"
+                score=0.0,
+                passed=False,
+                reasoning=f"Judge returned invalid JSON: {raw[:200]}",
             )
         score_raw = data.get("score", 0.0)
         try:

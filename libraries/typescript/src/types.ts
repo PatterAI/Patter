@@ -80,11 +80,11 @@ export type MCPServerConfig =
 
 /** Internal shape of a tool definition (matches `Tool` from `public-api.ts`). */
 export interface ToolDefinition {
-  name: string;
-  description: string;
-  parameters: Record<string, unknown>;
+  readonly name: string;
+  readonly description: string;
+  readonly parameters: Readonly<Record<string, unknown>>;
   /** Webhook URL — called when the LLM invokes this tool. Mutually exclusive with handler. */
-  webhookUrl?: string;
+  readonly webhookUrl?: string;
   /**
    * Local handler — called instead of ``webhookUrl`` when present.
    *
@@ -102,7 +102,7 @@ export interface ToolDefinition {
    *    ignores the progress yields — the final value is still used as
    *    the tool result.
    */
-  handler?:
+  readonly handler?:
     | ((args: Record<string, unknown>, context: Record<string, unknown>) => Promise<string>)
     | ((
         args: Record<string, unknown>,
@@ -124,7 +124,7 @@ export interface ToolDefinition {
    * synthesises it inline. Pipeline mode has no clean injection point
    * mid-turn yet; the option is silently ignored there. Off by default.
    */
-  reassurance?: string | { message: string; afterMs?: number };
+  readonly reassurance?: string | Readonly<{ message: string; afterMs?: number }>;
   /**
    * Enable OpenAI strict mode for this tool's function schema. When ``true``
    * the model is constrained to emit arguments that exactly match the
@@ -145,7 +145,7 @@ export interface ToolDefinition {
    * Recommended for any tool whose handler/webhook can't safely tolerate
    * malformed arguments (DB writes, payment, transfers).
    */
-  strict?: boolean;
+  readonly strict?: boolean;
 }
 
 // === Local mode ===
@@ -161,14 +161,14 @@ export interface LocalOptions {
    * const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+1..." });
    * ```
    */
-  carrier: TwilioCarrier | TelnyxCarrier | PlivoCarrier;
+  readonly carrier: TwilioCarrier | TelnyxCarrier | PlivoCarrier;
   /**
    * Tunnel configuration. Accepts a tunnel instance, ``true`` (alias for
    * ``new CloudflareTunnel()``), or ``false`` / omitted (no tunnel).
    */
-  tunnel?: CloudflareTunnel | StaticTunnel | boolean;
-  phoneNumber: string;
-  webhookUrl?: string;
+  readonly tunnel?: CloudflareTunnel | StaticTunnel | boolean;
+  readonly phoneNumber: string;
+  readonly webhookUrl?: string;
   /**
    * On-disk persistence for the dashboard's call history. The dashboard
    * itself is in-memory, but enabling ``persist`` writes per-call records
@@ -196,26 +196,26 @@ export interface LocalOptions {
    * Phone numbers are masked by default; control via
    * ``PATTER_LOG_REDACT_PHONE``.
    */
-  persist?: boolean | string;
+  readonly persist?: boolean | string;
   /**
    * @internal — allows ``StreamHandler`` to build the default OpenAI
    * ``LLMLoop`` when no ``onMessage`` handler is supplied. The
    * ``OpenAIRealtime`` engine instance carries its own key when one is
    * used via ``phone.agent({ engine: new OpenAIRealtime({ apiKey }) })``.
    */
-  openaiKey?: string;
+  readonly openaiKey?: string;
 }
 
 /** Internal shape of a guardrail (matches `Guardrail` class from `public-api.ts`). */
 export interface Guardrail {
   /** Name for logging when triggered */
-  name: string;
+  readonly name: string;
   /** List of terms that trigger the guardrail (case-insensitive) */
-  blockedTerms?: string[];
+  readonly blockedTerms?: ReadonlyArray<string>;
   /** Custom check function — return true to block the response */
-  check?: (text: string) => boolean;
+  readonly check?: (text: string) => boolean;
   /** Replacement text spoken when guardrail triggers */
-  replacement?: string;
+  readonly replacement?: string;
 }
 
 /** Per-call context passed to every pipeline hook. */
@@ -333,29 +333,29 @@ export interface BackgroundAudioPlayer {
  */
 /** Configuration for a local-mode voice AI agent (passed to `phone.agent({...})`). */
 export interface AgentOptions {
-  systemPrompt: string;
+  readonly systemPrompt: string;
   /**
    * Voice preset. When ``engine`` is provided, its ``voice`` is used unless
    * explicitly overridden here. Format depends on the engine:
    * OpenAI Realtime accepts a name (``'alloy'``, ``'echo'``, ...);
    * ElevenLabs ConvAI accepts a voice ID.
    */
-  voice?: string;
+  readonly voice?: string;
   /**
    * LLM / Realtime model. When ``engine`` is provided, its ``model`` is used
    * unless explicitly overridden here.
    */
-  model?: string;
+  readonly model?: string;
   /**
    * BCP-47 language code (e.g. ``'en'``, ``'it'``). Forwarded to STT (in
    * pipeline mode) and to the engine adapter at call time. STTConfig has its
    * own ``language`` field for the rare case where STT must use a different
    * language than the rest of the pipeline.
    */
-  language?: string;
-  firstMessage?: string;
+  readonly language?: string;
+  readonly firstMessage?: string;
   /** Tool definitions — ``Tool`` class instances from ``getpatter``. */
-  tools?: Array<ToolInstance>;
+  readonly tools?: ReadonlyArray<ToolInstance>;
   /**
    * Model Context Protocol (MCP) servers to plug into this agent. Each
    * server is queried at call start via ``tools/list`` and its tools
@@ -376,14 +376,14 @@ export interface AgentOptions {
    * call start (~50-200 ms × N servers). Future iterations may cache
    * the discovered list process-wide.
    */
-  mcpServers?: ReadonlyArray<MCPServerConfig>;
+  readonly mcpServers?: ReadonlyArray<MCPServerConfig>;
   /**
    * When ``true``, ship ``systemPrompt`` to the LLM verbatim. Default
    * (``false``) prepends a phone-friendly preamble that instructs the
    * model to avoid markdown, emojis, bullet lists, and verbose replies —
    * the conventions live phone calls require.
    */
-  disablePhonePreamble?: boolean;
+  readonly disablePhonePreamble?: boolean;
   /**
    * Acoustic echo cancellation. When `true` (pipeline mode only) the SDK
    * instantiates an `NlmsEchoCanceller` that subtracts the agent's own
@@ -395,53 +395,53 @@ export interface AgentOptions {
    * convergence period would briefly attenuate caller speech if they
    * spoke before any TTS played.
    */
-  echoCancellation?: boolean;
+  readonly echoCancellation?: boolean;
   /**
    * Realtime / ConvAI engine instance. When present, the agent runs in the
    * matching mode (``openai_realtime`` or ``elevenlabs_convai``). When absent,
    * pipeline mode is selected if ``stt`` and ``tts`` are provided.
    */
-  engine?: Realtime | Realtime2 | ConvAI;
+  readonly engine?: Realtime | Realtime2 | ConvAI;
   /**
    * Provider mode. Normally derived from ``engine`` / ``stt`` + ``tts``. Pass
    * ``'pipeline'`` explicitly when building a pipeline-mode agent without
    * an engine instance.
    */
-  provider?: 'openai_realtime' | 'elevenlabs_convai' | 'pipeline';
+  readonly provider?: 'openai_realtime' | 'elevenlabs_convai' | 'pipeline';
   /** Pre-instantiated STT adapter (e.g. ``new DeepgramSTT({ apiKey })``). */
-  stt?: STTAdapter;
+  readonly stt?: STTAdapter;
   /** Pre-instantiated TTS adapter (e.g. ``new ElevenLabsTTS({ apiKey })``). */
-  tts?: TTSAdapter;
+  readonly tts?: TTSAdapter;
   /**
    * Pipeline-mode LLM provider (e.g. ``new AnthropicLLM()``). When set, the
    * built-in LLM loop uses this provider instead of the OpenAI default.
    * Mutually exclusive with ``onMessage`` passed to ``serve()``. Ignored
    * when ``engine`` is set (realtime mode bypasses the pipeline LLM).
    */
-  llm?: LLMProvider;
+  readonly llm?: LLMProvider;
   /** Dynamic variables for ``{placeholder}`` substitution in systemPrompt at call time. */
-  variables?: Record<string, string>;
+  readonly variables?: Readonly<Record<string, string>>;
   /** Output guardrails — ``Guardrail`` class instances from ``getpatter``. */
-  guardrails?: Array<Guardrail>;
+  readonly guardrails?: ReadonlyArray<Guardrail>;
   /** Pipeline hooks — intercept and transform data at each pipeline stage (pipeline mode only). */
-  hooks?: PipelineHooks;
+  readonly hooks?: PipelineHooks;
   /** Text transforms applied to LLM output before TTS (pipeline mode only).
    *  Each function receives a string and returns the transformed string.
    *  Applied in order before the ``beforeSynthesize`` hook. */
-  textTransforms?: Array<(text: string) => string>;
+  readonly textTransforms?: ReadonlyArray<(text: string) => string>;
   /** Optional server-side VAD (e.g., Silero). Pipeline mode only. */
-  vad?: VADProvider;
+  readonly vad?: VADProvider;
   /** Optional pre-STT audio filter (noise cancellation). Pipeline mode only. */
-  audioFilter?: AudioFilter;
+  readonly audioFilter?: AudioFilter;
   /** Optional background audio mixer (hold music, thinking cues). Pipeline mode only. */
-  backgroundAudio?: BackgroundAudioPlayer;
+  readonly backgroundAudio?: BackgroundAudioPlayer;
   /**
    * Minimum sustained voice (ms) before treating caller audio as a barge-in
    * and interrupting TTS. `0` disables barge-in entirely — useful on noisy
    * links (ngrok tunnels, speakerphone) where the agent can hear itself.
    * Default: 300.
    */
-  bargeInThresholdMs?: number;
+  readonly bargeInThresholdMs?: number;
   /**
    * Opt-in barge-in confirmation strategies (pipeline mode). With the
    * default empty array the SDK falls back to the legacy
@@ -458,14 +458,14 @@ export interface AgentOptions {
    * ``MinWordsStrategy`` for the protocol and a reference
    * implementation.
    */
-  bargeInStrategies?: readonly BargeInStrategy[];
+  readonly bargeInStrategies?: readonly BargeInStrategy[];
   /**
    * Maximum time (ms) to wait for at least one strategy to confirm a
    * pending barge-in before discarding the pending state and resuming
    * TTS. Only consulted when ``bargeInStrategies`` is non-empty.
    * Default: 1500.
    */
-  bargeInConfirmMs?: number;
+  readonly bargeInConfirmMs?: number;
   /**
    * When ``true`` (default), ``Patter.call`` warms up the STT, TTS, and
    * LLM provider connections in parallel with the carrier-side
@@ -476,7 +476,7 @@ export interface AgentOptions {
    * of the WebSocket bridge. Best-effort: warmup failures are logged
    * at debug level and never abort the call. Default: ``true``.
    */
-  prewarm?: boolean;
+  readonly prewarm?: boolean;
   /**
    * When ``true`` (default since 0.6.2 in pipeline mode), ``Patter.call``
    * pre-renders ``firstMessage`` to TTS audio bytes during the ringing
@@ -495,7 +495,7 @@ export interface AgentOptions {
    * ``Patter.call`` refuses to spawn the prewarm task and emits a warn
    * when ``provider !== 'pipeline'``.
    */
-  prewarmFirstMessage?: boolean;
+  readonly prewarmFirstMessage?: boolean;
   /**
    * When true, the sentence chunker emits the first clause of each response
    * on a soft punctuation boundary (",", em-dash, en-dash) once ~40 chars
@@ -507,7 +507,7 @@ export interface AgentOptions {
    * See SentenceChunker constructor for the full guard list (decimal,
    * currency, balanced delimiter, ellipsis).
    */
-  aggressiveFirstFlush?: boolean;
+  readonly aggressiveFirstFlush?: boolean;
 }
 
 /** Pipeline-mode message handler — given full turn context, returns the agent's reply. */
@@ -515,32 +515,32 @@ export type PipelineMessageHandler = (data: Record<string, unknown>) => Promise<
 
 /** Options for `Patter.serve({...})`. */
 export interface ServeOptions {
-  agent: AgentOptions;
-  port?: number;
+  readonly agent: AgentOptions;
+  readonly port?: number;
   /** When true, start a cloudflared tunnel automatically (requires `cloudflared` npm package). */
-  tunnel?: boolean;
-  onCallStart?: (data: Record<string, unknown>) => Promise<void>;
-  onCallEnd?: (data: Record<string, unknown>) => Promise<void>;
-  onTranscript?: (data: Record<string, unknown>) => Promise<void>;
+  readonly tunnel?: boolean;
+  readonly onCallStart?: (data: Record<string, unknown>) => Promise<void>;
+  readonly onCallEnd?: (data: Record<string, unknown>) => Promise<void>;
+  readonly onTranscript?: (data: Record<string, unknown>) => Promise<void>;
   /** Pipeline mode only — called with the user's transcript; return value is spoken.
    *  Can also be a URL string for remote webhook/WebSocket integration. */
-  onMessage?: PipelineMessageHandler | string;
+  readonly onMessage?: PipelineMessageHandler | string;
   /** Called after each turn with per-turn metrics. */
-  onMetrics?: (data: Record<string, unknown>) => Promise<void>;
+  readonly onMetrics?: (data: Record<string, unknown>) => Promise<void>;
   /** When true, record calls via the Twilio Recordings API. */
-  recording?: boolean;
+  readonly recording?: boolean;
   /** If set, spoken as a voicemail message when AMD detects a machine. */
-  voicemailMessage?: string;
+  readonly voicemailMessage?: string;
   /** Custom pricing overrides for cost calculation. */
-  pricing?: Record<string, Record<string, unknown>>;
+  readonly pricing?: Readonly<Record<string, Record<string, unknown>>>;
   /** When true (default), serve a dashboard UI at /dashboard. */
-  dashboard?: boolean;
+  readonly dashboard?: boolean;
   /** Bearer token for dashboard/API authentication. */
-  dashboardToken?: string;
+  readonly dashboardToken?: string;
   /** Path to SQLite database for dashboard persistence (not used in TS yet). */
-  dashboardDb?: string;
+  readonly dashboardDb?: string;
   /** When true (default), persist dashboard data. */
-  dashboardPersist?: boolean;
+  readonly dashboardPersist?: boolean;
   /**
    * When true (default), `serve()` calls the carrier's API on startup to
    * point the configured phone number's webhook URL at this server. Set
@@ -560,7 +560,7 @@ export interface ServeOptions {
    * hostname is dynamic and only known at runtime — the carrier MUST be
    * reconfigured for inbound calls to land.
    */
-  manageWebhook?: boolean;
+  readonly manageWebhook?: boolean;
 }
 
 /**
@@ -588,8 +588,8 @@ export interface MachineDetectionResult {
 
 /** Options for `Patter.call({...})` to place an outbound call. */
 export interface LocalCallOptions {
-  to: string;
-  agent: AgentOptions;
+  readonly to: string;
+  readonly agent: AgentOptions;
   /**
    * Enable answering-machine detection. **Defaults to ``true``** — the SDK
    * asks Twilio (``MachineDetection=DetectMessageEnd`` + Async AMD) or
@@ -600,7 +600,7 @@ export interface LocalCallOptions {
    * disable when you want to skip per-call AMD billing or you already
    * know the destination is a human.
    */
-  machineDetection?: boolean;
+  readonly machineDetection?: boolean;
   /**
    * Called once when the carrier finishes the AMD check. Fires for both
    * ``human`` and ``machine`` outcomes. Combine with ``voicemailMessage``
@@ -608,11 +608,11 @@ export interface LocalCallOptions {
    * fires the callback after the drop is queued). Acceptance tests use
    * this to mark a run INVALID when ``classification !== 'human'``.
    */
-  onMachineDetection?: (result: MachineDetectionResult) => void | Promise<void>;
+  readonly onMachineDetection?: (result: MachineDetectionResult) => void | Promise<void>;
   /** If set, spoken as a voicemail message when AMD detects a machine. Implicitly enables ``machineDetection``. */
-  voicemailMessage?: string;
+  readonly voicemailMessage?: string;
   /** Dynamic variables merged into agent.variables before call. Override agent-level variables. */
-  variables?: Record<string, string>;
+  readonly variables?: Readonly<Record<string, string>>;
   /**
    * Ring timeout in seconds. Forwarded to Twilio as `Timeout` and to Telnyx
    * as `timeout_secs`. Defaults to **25 s** — the production-recommended
@@ -620,7 +620,7 @@ export interface LocalCallOptions {
    * parity, or `null` to omit the parameter entirely (carrier picks its
    * own default).
    */
-  ringTimeout?: number | null;
+  readonly ringTimeout?: number | null;
   /**
    * When `true`, block until the call reaches a terminal state and resolve
    * to a {@link CallResult} (`outcome` ∈ answered / voicemail / no_answer /
@@ -634,7 +634,7 @@ export interface LocalCallOptions {
    *
    * Mirrors Python's `Patter.call(..., wait=True)`.
    */
-  wait?: boolean;
+  readonly wait?: boolean;
 }
 
 /**

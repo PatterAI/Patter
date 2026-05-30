@@ -684,8 +684,15 @@ class ElevenLabsWebSocketTTS(TTSProvider):
         prev = self._adopted_connection
         self._adopted_connection = parked
         if prev is not None and prev is not parked:
+
+            async def _close_prev_silently(ws: object) -> None:
+                try:
+                    await ws.close()  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+
             try:
-                asyncio.create_task(prev.ws.close())
+                asyncio.create_task(_close_prev_silently(prev.ws))
             except RuntimeError:
                 pass
 

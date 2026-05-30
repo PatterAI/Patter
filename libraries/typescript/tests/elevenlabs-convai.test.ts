@@ -26,7 +26,7 @@ vi.mock('ws', () => {
   return { default: MockWebSocket };
 });
 
-describe('ElevenLabsConvAIAdapter', () => {
+describe('[mocked] ElevenLabsConvAIAdapter', () => {
   it('initializes with defaults', () => {
     const adapter = new ElevenLabsConvAIAdapter('el_key');
     expect(adapter).toBeDefined();

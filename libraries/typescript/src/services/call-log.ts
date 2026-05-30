@@ -27,7 +27,7 @@
  * - ``PATTER_LOG_DIR``             root directory or ``"auto"``
  * - ``PATTER_LOG_RETENTION_DAYS``  auto-cleanup threshold (default ``30``;
  *                                  ``0`` = keep forever)
- * - ``PATTER_LOG_REDACT_PHONE``    ``full`` | ``mask`` (default) | ``hash_only``
+ * - ``PATTER_LOG_REDACT_PHONE``    ``full`` (default) | ``mask`` | ``hash_only``
  */
 
 import * as crypto from 'node:crypto';
@@ -254,7 +254,9 @@ export class CallLogger {
     }
     // Sample-based sweep (~2%) so we don't need a daemon.
     if (crypto.randomBytes(1)[0] < 5) {
-      this.sweepOldDays();
+      void this.sweepOldDays().catch((e) =>
+        getLogger().debug(`call_log sweep failed: ${sanitizeLogValue(String(e))}`),
+      );
     }
   }
 
@@ -337,23 +339,27 @@ export class CallLogger {
 
   // --- Retention ---------------------------------------------------------
 
-  private sweepOldDays(): void {
+  private async sweepOldDays(): Promise<void> {
     if (this.root === null) return;
     const days = retentionDays();
     if (days === 0) return;
     const cutoff = Date.now() / 1000 - days * 86400;
     const callsRoot = path.join(this.root, 'calls');
-    if (!fs.existsSync(callsRoot)) return;
     try {
-      for (const yearName of fs.readdirSync(callsRoot)) {
+      await fsp.access(callsRoot);
+    } catch {
+      return;
+    }
+    try {
+      for (const yearName of await fsp.readdir(callsRoot)) {
         if (!/^\d+$/.test(yearName)) continue;
         const yearDir = path.join(callsRoot, yearName);
-        if (!fs.statSync(yearDir).isDirectory()) continue;
-        for (const monthName of fs.readdirSync(yearDir)) {
+        if (!(await fsp.stat(yearDir)).isDirectory()) continue;
+        for (const monthName of await fsp.readdir(yearDir)) {
           if (!/^\d+$/.test(monthName)) continue;
           const monthDir = path.join(yearDir, monthName);
-          if (!fs.statSync(monthDir).isDirectory()) continue;
-          for (const dayName of fs.readdirSync(monthDir)) {
+          if (!(await fsp.stat(monthDir)).isDirectory()) continue;
+          for (const dayName of await fsp.readdir(monthDir)) {
             if (!/^\d+$/.test(dayName)) continue;
             const dayDir = path.join(monthDir, dayName);
             const y = Number.parseInt(yearName, 10);
@@ -361,17 +367,17 @@ export class CallLogger {
             const d = Number.parseInt(dayName, 10);
             const ts = Date.UTC(y, m - 1, d) / 1000;
             if (ts < cutoff) {
-              rmTree(dayDir);
+              await rmTreeAsync(dayDir);
             }
           }
           try {
-            if (fs.readdirSync(monthDir).length === 0) fs.rmdirSync(monthDir);
+            if ((await fsp.readdir(monthDir)).length === 0) await fsp.rmdir(monthDir);
           } catch {
             // ignore
           }
         }
         try {
-          if (fs.readdirSync(yearDir).length === 0) fs.rmdirSync(yearDir);
+          if ((await fsp.readdir(yearDir)).length === 0) await fsp.rmdir(yearDir);
         } catch {
           // ignore
         }
@@ -382,22 +388,22 @@ export class CallLogger {
   }
 }
 
-function rmTree(target: string): void {
+async function rmTreeAsync(target: string): Promise<void> {
   try {
-    for (const child of fs.readdirSync(target)) {
+    for (const child of await fsp.readdir(target)) {
       const childPath = path.join(target, child);
-      const stat = fs.lstatSync(childPath);
+      const stat = await fsp.lstat(childPath);
       if (stat.isDirectory()) {
-        rmTree(childPath);
+        await rmTreeAsync(childPath);
       } else {
         try {
-          fs.unlinkSync(childPath);
+          await fsp.unlink(childPath);
         } catch {
           // ignore
         }
       }
     }
-    fs.rmdirSync(target);
+    await fsp.rmdir(target);
   } catch {
     // ignore
   }

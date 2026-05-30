@@ -255,7 +255,12 @@ export class StatefulResampler {
    * Resets all state after flushing.
    */
   flush(): Buffer {
-    this.carry.flush();
+    const carryTail = this.carry.flush();
+    if (carryTail.length > 0) {
+      getLogger().warn(
+        '[patter] StatefulResampler.flush: trailing odd byte discarded — upstream produced odd-length PCM stream',
+      );
+    }
 
     if (this.srcRate === 16000 && this.dstRate === 8000 && this.firPendingSample !== null) {
       // We have one pending input sample that hasn't generated output yet.

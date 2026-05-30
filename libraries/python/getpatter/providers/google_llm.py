@@ -386,4 +386,33 @@ def _to_gemini_contents(messages: list[dict]) -> tuple[str, list[Any]]:
             )
             continue
 
-    return "\n\n".join(system_parts), contents
+    # Gemini requires that all function_response parts for a single model turn
+    # appear in ONE user Content entry (multiple parts). Mapping parallel
+    # tool-call results one-per-message produces consecutive role='user'
+    # Contents whose parts are exclusively function_response — which Gemini
+    # rejects with a 400. Collapse those runs into a single Content so the
+    # request is accepted. Single-tool and text turns are untouched.
+    def _is_function_response_only(c: "types.Content") -> bool:
+        parts = c.parts or []
+        return (
+            c.role == "user"
+            and len(parts) > 0
+            and all(getattr(p, "function_response", None) is not None for p in parts)
+        )
+
+    merged: list[types.Content] = []
+    for entry in contents:
+        if (
+            merged
+            and _is_function_response_only(merged[-1])
+            and _is_function_response_only(entry)
+        ):
+            prev = merged[-1]
+            merged[-1] = types.Content(
+                role="user",
+                parts=list(prev.parts or []) + list(entry.parts or []),
+            )
+        else:
+            merged.append(entry)
+
+    return "\n\n".join(system_parts), merged

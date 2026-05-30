@@ -254,11 +254,26 @@ export class CerebrasLLMProvider implements LLMProvider {
 
       const advisoryMs = parseRateLimitResetMs(response.headers);
       const exponentialMs = RETRY_BACKOFF_BASE_MS * Math.pow(2, attempt);
-      const delayMs = Math.max(advisoryMs, exponentialMs);
+      // Cap advisory delay to a voice-call-safe maximum so a 60-s rate-limit
+      // header does not stall the pipeline for the full advisory period.
+      const delayMs = Math.min(5_000, Math.max(advisoryMs, exponentialMs));
       getLogger().warn(
         `Cerebras API ${response.status} (attempt ${attempt + 1}/${maxAttempts}); retrying after ${delayMs}ms`,
       );
-      await new Promise<void>((r) => setTimeout(r, delayMs));
+      // AbortSignal-aware sleep: if the caller aborts (barge-in, hangup) during
+      // the backoff window the sleep is cancelled immediately instead of blocking
+      // the pipeline for the full delay period.
+      await new Promise<void>((resolve, reject) => {
+        const t = setTimeout(resolve, delayMs);
+        opts?.signal?.addEventListener(
+          'abort',
+          () => {
+            clearTimeout(t);
+            reject((opts!.signal as AbortSignal).reason);
+          },
+          { once: true },
+        );
+      });
     }
 
     // Defensive — loop above always returns or throws, but TypeScript

@@ -12,53 +12,53 @@ import {
 } from './icons';
 
 export interface CallCost {
-  telco?: number;
-  llm?: number;
-  stt?: number;
-  tts?: number;
+  readonly telco?: number;
+  readonly llm?: number;
+  readonly stt?: number;
+  readonly tts?: number;
   /** @deprecated Sum of stt+tts kept for legacy aggregate-spend callers. */
-  sttTts?: number;
-  cached?: number;
-  total?: number;
+  readonly sttTts?: number;
+  readonly cached?: number;
+  readonly total?: number;
 }
 
 export type CallMode = 'realtime' | 'pipeline' | 'convai' | 'unknown';
 
 export interface Call {
-  id: string;
-  status: 'live' | 'ended' | 'no-answer' | 'queued' | 'fail';
-  direction: 'inbound' | 'outbound';
-  from: string;
-  to: string;
-  carrier: CallCarrier;
+  readonly id: string;
+  readonly status: 'live' | 'ended' | 'no-answer' | 'queued' | 'fail';
+  readonly direction: 'inbound' | 'outbound';
+  readonly from: string;
+  readonly to: string;
+  readonly carrier: CallCarrier;
   /** ms epoch — set for any call we know started, live or ended. */
-  startedAtMs?: number;
-  durationStart?: number;
-  duration?: number;
-  latencyP95?: number;
-  latencyP50?: number;
+  readonly startedAtMs?: number;
+  readonly durationStart?: number;
+  readonly duration?: number;
+  readonly latencyP95?: number;
+  readonly latencyP50?: number;
   /** avg(llm_ms) across this call's turns — for the waterfall llm bar. */
-  llmAvg?: number;
-  sttAvg?: number;
-  ttsAvg?: number;
+  readonly llmAvg?: number;
+  readonly sttAvg?: number;
+  readonly ttsAvg?: number;
   /** Number of completed turns. p50/p95 are statistically meaningful only when this is >= 5. */
-  turnCount?: number;
+  readonly turnCount?: number;
   /** p50 of agent_response_ms (wait time after user stops speaking) — user-perceived latency. */
-  agentResponseP50?: number;
+  readonly agentResponseP50?: number;
   /** p95 of agent_response_ms — user-perceived latency outlier. */
-  agentResponseP95?: number;
-  cost: CallCost;
-  agent?: string;
-  model?: string;
-  mode?: CallMode;
-  sttProvider?: string;
-  ttsProvider?: string;
+  readonly agentResponseP95?: number;
+  readonly cost: CallCost;
+  readonly agent?: string;
+  readonly model?: string;
+  readonly mode?: CallMode;
+  readonly sttProvider?: string;
+  readonly ttsProvider?: string;
   /** Model identifier within the provider, e.g. "ink-whisper", "eleven_flash_v2_5", "gpt-oss-120b". */
-  sttModel?: string;
-  ttsModel?: string;
-  llmModel?: string;
-  transcriptKey?: string;
-  endedAgo?: number;
+  readonly sttModel?: string;
+  readonly ttsModel?: string;
+  readonly llmModel?: string;
+  readonly transcriptKey?: string;
+  readonly endedAgo?: number;
 }
 
 interface CallRowProps {

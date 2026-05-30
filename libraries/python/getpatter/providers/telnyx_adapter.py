@@ -31,6 +31,12 @@ class TelnyxAdapter(TelephonyProvider):
     def __repr__(self) -> str:
         return f"TelnyxAdapter(connection_id={self.connection_id!r})"
 
+    async def __aenter__(self) -> "TelnyxAdapter":
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        await self.close()
+
     async def provision_number(self, country: str) -> str:
         """Search and order an available Telnyx number for the given ISO country."""
         # Telnyx search filter uses nested ``filter[phone_number][country_code]``

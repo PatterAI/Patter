@@ -236,68 +236,112 @@ export class AnthropicLLMProvider implements LLMProvider {
     const toolIdByBlock = new Map<number, string>();
     let nextIndex = 0;
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    // Track token usage from message_start / message_delta events.
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let cacheReadTokens = 0;
+    let cacheWriteTokens = 0;
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith('data: ')) continue;
-        const data = trimmed.slice(6);
-        if (!data || data === '[DONE]') continue;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
 
-        let event: {
-          type?: string;
-          index?: number;
-          content_block?: { type?: string; id?: string; name?: string };
-          delta?: { type?: string; text?: string; partial_json?: string };
-        };
-        try {
-          event = JSON.parse(data);
-        } catch {
-          continue;
-        }
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith('data: ')) continue;
+          const data = trimmed.slice(6);
+          if (!data || data === '[DONE]') continue;
 
-        if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
-          const blockIdx = event.index ?? 0;
-          const toolId = event.content_block.id ?? '';
-          const toolName = event.content_block.name ?? '';
-          const patterIndex = nextIndex++;
-          toolIndexByBlock.set(blockIdx, patterIndex);
-          toolIdByBlock.set(blockIdx, toolId);
-          yield {
-            type: 'tool_call',
-            index: patterIndex,
-            id: toolId,
-            name: toolName,
-            arguments: '',
+          let event: {
+            type?: string;
+            index?: number;
+            content_block?: { type?: string; id?: string; name?: string };
+            delta?: { type?: string; text?: string; partial_json?: string };
+            message?: {
+              usage?: {
+                input_tokens?: number;
+                cache_creation_input_tokens?: number;
+                cache_read_input_tokens?: number;
+              };
+            };
+            usage?: { output_tokens?: number };
           };
-          continue;
-        }
-
-        if (event.type === 'content_block_delta') {
-          if (event.delta?.type === 'text_delta' && event.delta.text) {
-            yield { type: 'text', content: event.delta.text };
+          try {
+            event = JSON.parse(data);
+          } catch {
             continue;
           }
-          if (event.delta?.type === 'input_json_delta' && event.delta.partial_json) {
+
+          // Capture input + prompt-cache token counts from the opening message event.
+          if (event.type === 'message_start' && event.message?.usage) {
+            const u = event.message.usage;
+            if (u.input_tokens) inputTokens = u.input_tokens;
+            if (u.cache_creation_input_tokens) cacheWriteTokens = u.cache_creation_input_tokens;
+            if (u.cache_read_input_tokens) cacheReadTokens = u.cache_read_input_tokens;
+            continue;
+          }
+
+          // Capture output token count from the closing message delta event.
+          if (event.type === 'message_delta' && event.usage?.output_tokens) {
+            outputTokens = event.usage.output_tokens;
+            continue;
+          }
+
+          if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
             const blockIdx = event.index ?? 0;
-            const patterIndex = toolIndexByBlock.get(blockIdx);
-            if (patterIndex !== undefined) {
-              yield {
-                type: 'tool_call',
-                index: patterIndex,
-                id: toolIdByBlock.get(blockIdx),
-                arguments: event.delta.partial_json,
-              };
+            const toolId = event.content_block.id ?? '';
+            const toolName = event.content_block.name ?? '';
+            const patterIndex = nextIndex++;
+            toolIndexByBlock.set(blockIdx, patterIndex);
+            toolIdByBlock.set(blockIdx, toolId);
+            yield {
+              type: 'tool_call',
+              index: patterIndex,
+              id: toolId,
+              name: toolName,
+              arguments: '',
+            };
+            continue;
+          }
+
+          if (event.type === 'content_block_delta') {
+            if (event.delta?.type === 'text_delta' && event.delta.text) {
+              yield { type: 'text', content: event.delta.text };
+              continue;
+            }
+            if (event.delta?.type === 'input_json_delta' && event.delta.partial_json) {
+              const blockIdx = event.index ?? 0;
+              const patterIndex = toolIndexByBlock.get(blockIdx);
+              if (patterIndex !== undefined) {
+                yield {
+                  type: 'tool_call',
+                  index: patterIndex,
+                  id: toolIdByBlock.get(blockIdx),
+                  arguments: event.delta.partial_json,
+                };
+              }
             }
           }
         }
       }
+    } finally {
+      reader.cancel().catch(() => {});
+    }
+
+    // Emit token usage before done so the llm-loop can record accurate billing.
+    if (inputTokens > 0 || outputTokens > 0 || cacheReadTokens > 0 || cacheWriteTokens > 0) {
+      yield {
+        type: 'usage',
+        inputTokens,
+        outputTokens,
+        cacheReadInputTokens: cacheReadTokens,
+        cacheWriteInputTokens: cacheWriteTokens,
+      } as LLMChunk;
     }
 
     yield { type: 'done' };
@@ -384,16 +428,27 @@ function toAnthropicMessages(
     if (role === 'tool') {
       const contentStr =
         typeof rawMsg.content === 'string' ? rawMsg.content : JSON.stringify(rawMsg.content);
-      out.push({
-        role: 'user',
-        content: [
-          {
-            type: 'tool_result',
-            tool_use_id: rawMsg.tool_call_id ?? '',
-            content: contentStr,
-          },
-        ],
-      });
+      const toolResultBlock = {
+        type: 'tool_result',
+        tool_use_id: rawMsg.tool_call_id ?? '',
+        content: contentStr,
+      };
+      // Anthropic requires that all tool_result blocks for a single assistant
+      // turn appear in ONE user message.  If the previous message is already a
+      // user message whose content consists entirely of tool_result blocks,
+      // append to it instead of pushing a new message.
+      const prev = out.length > 0 ? out[out.length - 1] : undefined;
+      if (
+        prev &&
+        prev.role === 'user' &&
+        Array.isArray(prev.content) &&
+        prev.content.length > 0 &&
+        (prev.content as Array<Record<string, unknown>>).every((b) => b['type'] === 'tool_result')
+      ) {
+        (prev.content as Array<Record<string, unknown>>).push(toolResultBlock);
+      } else {
+        out.push({ role: 'user', content: [toolResultBlock] });
+      }
       continue;
     }
   }

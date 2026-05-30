@@ -390,22 +390,6 @@ export class DeepgramSTT {
     } catch {
       return;
     }
-    // [DIAG-2026-05-05] Log every Deepgram message type so we can see
-    // whether finalize triggers a Results frame, whether UtteranceEnd
-    // arrives, and whether the socket is still being fed.
-    const dataType = String((data as unknown as Record<string, unknown>).type ?? 'unknown');
-    if (dataType === 'Results') {
-      const transcript = (data.channel?.alternatives?.[0]?.transcript ?? '').trim();
-      const isFinal = Boolean(data.is_final);
-      const speechFinal = Boolean(data.speech_final);
-      const fromFinalize = Boolean((data as unknown as Record<string, unknown>).from_finalize);
-      getLogger().info(
-        `[DIAG] DG Results text=${JSON.stringify(transcript.slice(0, 60))} isFinal=${isFinal} speechFinal=${speechFinal} fromFinalize=${fromFinalize}`,
-      );
-    } else if (dataType !== 'Metadata') {
-      getLogger().info(`[DIAG] DG event type=${dataType}`);
-    }
-
     if (data.type === 'Metadata' && data.request_id) {
       this.requestId = data.request_id;
       return;
@@ -516,7 +500,7 @@ export class DeepgramSTT {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       this.audioDroppedCount++;
       if (this.audioDroppedCount === 1 || this.audioDroppedCount % 50 === 0) {
-        getLogger().info(
+        getLogger().debug(
           `[DIAG] DeepgramSTT.sendAudio dropped (ws state=${this.ws?.readyState ?? 'null'}) — total dropped=${this.audioDroppedCount}`,
         );
       }
@@ -528,7 +512,7 @@ export class DeepgramSTT {
     if (audio.length === 0) return;
     this.audioSentCount++;
     if (this.audioSentCount === 1 || this.audioSentCount % 100 === 0) {
-      getLogger().info(
+      getLogger().debug(
         `[DIAG] DeepgramSTT.sendAudio: total chunks sent=${this.audioSentCount} (last=${audio.length} bytes)`,
       );
     }
@@ -571,16 +555,16 @@ export class DeepgramSTT {
   finalize(): void {
     const ws = this.ws;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
-      getLogger().info(
+      getLogger().debug(
         `[DIAG] DeepgramSTT.finalize SKIPPED (ws state=${ws?.readyState ?? 'null'})`,
       );
       return;
     }
     try {
       ws.send(JSON.stringify({ type: 'Finalize' }));
-      getLogger().info('[DIAG] DeepgramSTT.finalize sent {type:Finalize}');
+      getLogger().debug('[DIAG] DeepgramSTT.finalize sent {type:Finalize}');
     } catch (err) {
-      getLogger().info(`[DIAG] DeepgramSTT.finalize send failed: ${String(err)}`);
+      getLogger().debug(`[DIAG] DeepgramSTT.finalize send failed: ${String(err)}`);
     }
   }
 

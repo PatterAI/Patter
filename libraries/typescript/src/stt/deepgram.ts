@@ -41,7 +41,7 @@ export class STT extends _DeepgramSTT {
       {
         endpointingMs: opts.endpointingMs ?? 150,
         utteranceEndMs: opts.utteranceEndMs === null ? null : opts.utteranceEndMs ?? 1000,
-        smartFormat: opts.smartFormat ?? true,
+        smartFormat: opts.smartFormat ?? false,
         interimResults: opts.interimResults ?? true,
         ...(opts.vadEvents !== undefined ? { vadEvents: opts.vadEvents } : {}),
       },

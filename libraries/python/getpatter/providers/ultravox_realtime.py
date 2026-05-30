@@ -231,7 +231,12 @@ class UltravoxRealtimeAdapter:
             self._session = None
             raise RuntimeError("Ultravox response missing joinUrl")
 
-        self._ws = await self._session.ws_connect(join_url, heartbeat=20.0)
+        try:
+            self._ws = await self._session.ws_connect(join_url, heartbeat=20.0)
+        except Exception:
+            await self._session.close()
+            self._session = None
+            raise
         self._running = True
 
     async def send_audio(self, audio: bytes) -> None:

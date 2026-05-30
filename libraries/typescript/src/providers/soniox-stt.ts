@@ -111,16 +111,16 @@ class TokenAccumulator {
 
 /** Constructor options for {@link SonioxSTT}. */
 export interface SonioxSTTOptions {
-  model?: SonioxModel | string;
-  languageHints?: string[];
-  languageHintsStrict?: boolean;
-  sampleRate?: SonioxSampleRate | number;
-  numChannels?: number;
-  enableSpeakerDiarization?: boolean;
-  enableLanguageIdentification?: boolean;
-  maxEndpointDelayMs?: number;
-  clientReferenceId?: string;
-  baseUrl?: string;
+  readonly model?: SonioxModel | string;
+  readonly languageHints?: readonly string[];
+  readonly languageHintsStrict?: boolean;
+  readonly sampleRate?: SonioxSampleRate | number;
+  readonly numChannels?: number;
+  readonly enableSpeakerDiarization?: boolean;
+  readonly enableLanguageIdentification?: boolean;
+  readonly maxEndpointDelayMs?: number;
+  readonly clientReferenceId?: string;
+  readonly baseUrl?: string;
 }
 
 /** Streaming STT adapter for Soniox's real-time WebSocket API. */
@@ -128,13 +128,13 @@ export class SonioxSTT {
   /** Stable pricing/dashboard key — read by stream-handler/metrics. */
   static readonly providerKey = 'soniox';
   private ws: WebSocket | null = null;
-  private callbacks: TranscriptCallback[] = [];
+  private readonly callbacks = new Set<TranscriptCallback>();
   private final = new TokenAccumulator();
   private keepaliveTimer: ReturnType<typeof setInterval> | null = null;
 
   private readonly apiKey: string;
   private readonly model: string;
-  private readonly languageHints?: string[];
+  private readonly languageHints?: readonly string[];
   private readonly languageHintsStrict: boolean;
   private readonly sampleRate: number;
   private readonly numChannels: number;
@@ -314,16 +314,14 @@ export class SonioxSTT {
     this.ws.send(audio);
   }
 
-  /** Register a transcript listener (max 10 concurrent listeners). */
+  /** Register a transcript listener. */
   onTranscript(callback: TranscriptCallback): void {
-    if (this.callbacks.length >= 10) {
-      getLogger().warn(
-        'SonioxSTT: maximum of 10 onTranscript callbacks reached; replacing the last callback.',
-      );
-      this.callbacks[this.callbacks.length - 1] = callback;
-      return;
-    }
-    this.callbacks.push(callback);
+    this.callbacks.add(callback);
+  }
+
+  /** Unregister a previously registered transcript listener. */
+  offTranscript(callback: TranscriptCallback): void {
+    this.callbacks.delete(callback);
   }
 
   /** Send the empty-frame stream terminator and close the WebSocket. */

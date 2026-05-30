@@ -17,7 +17,6 @@ Covers:
 
 from __future__ import annotations
 
-from typing import Callable
 
 import pytest
 
@@ -374,7 +373,9 @@ class TestTelnyxCarrier:
     def test_missing_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from getpatter.carriers import telnyx
 
-        _scrub_env(monkeypatch, "TELNYX_API_KEY", "TELNYX_CONNECTION_ID", "TELNYX_PUBLIC_KEY")
+        _scrub_env(
+            monkeypatch, "TELNYX_API_KEY", "TELNYX_CONNECTION_ID", "TELNYX_PUBLIC_KEY"
+        )
         with pytest.raises(ValueError, match="TELNYX_API_KEY"):
             telnyx.Carrier()
 
@@ -510,7 +511,9 @@ class TestTool:
     def test_rejects_neither_handler_nor_webhook(self) -> None:
         from getpatter import Tool
 
-        with pytest.raises(ValueError, match="handler.*webhook_url|webhook_url.*handler"):
+        with pytest.raises(
+            ValueError, match="handler.*webhook_url|webhook_url.*handler"
+        ):
             Tool(name="x")
 
     def test_rejects_empty_name(self) -> None:
@@ -563,7 +566,8 @@ class TestGuardrail:
 
         g = Guardrail(name="no-medical", blocked_terms=["prescription"])
         assert g.name == "no-medical"
-        assert g.blocked_terms == ["prescription"]
+        # blocked_terms is stored as an immutable tuple (frozen-dataclass contract).
+        assert g.blocked_terms == ("prescription",)
         # Frozen dataclass — mutation should fail.
         with pytest.raises(Exception):
             g.name = "other"  # type: ignore[misc]
@@ -575,6 +579,7 @@ class TestGuardrail:
         assert isinstance(g, Guardrail)
         assert g.name == "custom"
         assert callable(g.check)
+
 
 # ---------------------------------------------------------------------------
 # Flat aliases

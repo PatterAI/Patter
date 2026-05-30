@@ -86,7 +86,7 @@ export interface TelephonyBridge {
 // Shared utility: guardrails
 // ---------------------------------------------------------------------------
 
-function checkGuardrails(text: string, guardrails: Guardrail[] | undefined): Guardrail | null {
+function checkGuardrails(text: string, guardrails: readonly Guardrail[] | undefined): Guardrail | null {
   if (!guardrails) return null;
   for (const guard of guardrails) {
     let blocked = false;
@@ -626,7 +626,16 @@ export class StreamHandler {
    * barge-in armed during the audible tail. Tunable via env.
    */
   private endSpeakingWithGrace(): void {
-    const grace = Number(process.env.PATTER_TTS_TAIL_GRACE_MS ?? 1500);
+    const rawGrace = process.env.PATTER_TTS_TAIL_GRACE_MS;
+    const parsedGrace = rawGrace !== undefined ? Number(rawGrace) : NaN;
+    const grace = (rawGrace !== undefined && Number.isFinite(parsedGrace))
+      ? parsedGrace
+      : 1500;
+    if (rawGrace !== undefined && !Number.isFinite(parsedGrace)) {
+      getLogger().warn(
+        `PATTER_TTS_TAIL_GRACE_MS="${rawGrace}" is not a valid number — using default 1500ms`,
+      );
+    }
     // NOTE: we DO NOT flush ``inboundAudioRing`` here — the ring is only
     // drained on a real barge-in (where VAD confirmed user speech). Flushing
     // on every natural turn end was tried in an earlier iteration and
@@ -751,6 +760,14 @@ export class StreamHandler {
       `[DIAG] Flushed ${replayed} pre-barge-in frame(s) (~${replayed * 20} ms) to STT`,
     );
   }
+  /**
+   * Per-call resolved tool list. Starts as ``null`` (falls back to
+   * ``deps.agent.tools``). Populated by ``initMcpTools`` when MCP servers
+   * are configured so discovered tools are merged in without mutating the
+   * shared ``AgentOptions`` object. Code that needs the effective tool list
+   * should read ``this.resolvedTools ?? this.deps.agent.tools``.
+   */
+  private resolvedTools: ToolDefinition[] | null = null;
   private llmLoop: LLMLoop | null = null;
   /**
    * Per-call tool executor — provides retry-with-exponential-backoff and a
@@ -1032,7 +1049,11 @@ export class StreamHandler {
   /** Initialize per-call state, build the AI adapter, and dispatch the `onCallStart` callback. */
   async handleCallStart(callId: string, customParams: Record<string, string> = {}): Promise<void> {
     this.callId = callId;
-    this.metricsAcc.callId = callId;
+    // metricsAcc.callId is readonly at the public type level but is INTERNAL
+    // per-call state — the accumulator is always owned by this handler
+    // instance and callId is not known at construction time (it arrives with
+    // the first telephony event). Cast to mutable to stamp it here.
+    (this.metricsAcc as unknown as { callId: string }).callId = callId;
 
     // Prefer TwiML <Parameter> values over WebSocket query params (Twilio
     // strips query params from the Stream URL, so customParams is the only
@@ -1046,7 +1067,7 @@ export class StreamHandler {
         ? `engine=${(this.deps.agent.engine as { kind?: string }).kind ?? 'unknown'}`
         : 'pipeline';
     getLogger().info(
-      `Call started: ${callId} (${this.deps.bridge.label}, ${mode}, ${sanitizeLogValue(this.caller || '?')} → ${sanitizeLogValue(this.callee || '?')})`,
+      `Call started: ${callId} (${this.deps.bridge.label}, ${mode}, ${maskPhoneNumber(this.caller || '?')} → ${maskPhoneNumber(this.callee || '?')})`,
     );
 
     if (Object.keys(customParams).length > 0) {
@@ -1143,12 +1164,13 @@ export class StreamHandler {
     }
     if (discovered.length === 0) return;
     MCPManager.assertNoConflicts(this.deps.agent.tools as ToolDefinition[] | undefined, discovered);
-    // Merge into agent.tools. The interface is readonly at compile time
-    // but the underlying array is owned by the SDK at runtime — we cast
-    // to mutate in place so ``buildAIAdapter`` and the LLM loop see
-    // the discovered tools without a parallel plumbing parameter.
-    const mutableAgent = this.deps.agent as { tools?: ToolDefinition[] };
-    mutableAgent.tools = [...(mutableAgent.tools ?? []), ...discovered];
+    // Merge into a per-call tool list. The shared ``deps.agent`` is
+    // intentionally NOT mutated (readonly; shared across concurrent calls on
+    // the same ``serve()`` instance — mutating it would race with other
+    // calls' ``initMcpTools``). Store the merged list on the handler
+    // instance so ``buildAIAdapter`` and ``LLMLoop`` constructors below see
+    // the discovered tools via ``this.resolvedTools``.
+    this.resolvedTools = [...(this.deps.agent.tools as ToolDefinition[] | undefined ?? []), ...discovered];
     getLogger().info(`MCP: merged ${discovered.length} tool(s) into agent`);
   }
 
@@ -1190,8 +1212,12 @@ export class StreamHandler {
           // H4: protect hot path against slow ONNX inference — if VAD takes
           // longer than 25 ms, treat the frame as silent and continue.
           const vadPromise = activeVad.processFrame(pcm16k, 16000);
-          const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 25));
+          let vadTimeoutId: ReturnType<typeof setTimeout>;
+          const timeoutPromise = new Promise<null>((resolve) => {
+            vadTimeoutId = setTimeout(() => resolve(null), 25);
+          });
           const evt = await Promise.race([vadPromise, timeoutPromise]);
+          clearTimeout(vadTimeoutId!);
           if (evt) {
             // INFO-level log so the user can see VAD activity in the standard
             // server output without flipping debug logging.
@@ -1324,8 +1350,12 @@ export class StreamHandler {
 
       // beforeSendToStt hook — gate/transform the audio chunk before it
       // reaches STT (custom VAD, echo cancellation, PII redaction, ...).
+      // Guard: only allocate the executor + history spread when the hook is
+      // actually registered — this path runs ~50/s so per-frame allocations
+      // (PipelineHookExecutor + [...history.entries]) accumulate GC pressure
+      // quickly on long calls.
       const hooks = this.deps.agent.hooks;
-      if (hooks) {
+      if (hooks?.beforeSendToStt) {
         const hookExecutor = new PipelineHookExecutor(hooks);
         const hookCtx = this.buildHookContext();
         const processed = await hookExecutor.runBeforeSendToStt(pcm16k, hookCtx);
@@ -1956,7 +1986,7 @@ export class StreamHandler {
       // LLMs never see the built-ins and can't initiate a handoff or hangup
       // no matter what the system prompt says.
       const augmentedTools = augmentWithBuiltinHandoffTools(
-        this.deps.agent.tools as ToolDefinition[] | null | undefined,
+        (this.resolvedTools ?? this.deps.agent.tools) as ToolDefinition[] | null | undefined,
         {
           transferCall: (number) => this.deps.bridge.transferCall(this.callId, number),
           endCall: () => this.deps.bridge.endCall(this.callId, this.ws),
@@ -1978,7 +2008,7 @@ export class StreamHandler {
       let llmModel = this.deps.agent.model || 'gpt-4o-mini';
       if (llmModel.includes('realtime')) llmModel = 'gpt-4o-mini';
       const augmentedTools = augmentWithBuiltinHandoffTools(
-        this.deps.agent.tools as ToolDefinition[] | null | undefined,
+        (this.resolvedTools ?? this.deps.agent.tools) as ToolDefinition[] | null | undefined,
         {
           transferCall: (number) => this.deps.bridge.transferCall(this.callId, number),
           endCall: () => this.deps.bridge.endCall(this.callId, this.ws),
@@ -3083,7 +3113,9 @@ export class StreamHandler {
         this.userTranscriptPending = false;
         if (buffered !== null) {
           // Fire-and-forget — caller is a setTimeout, can't await.
-          void this.flushAssistantTurn(buffered);
+          this.flushAssistantTurn(buffered).catch((err) =>
+            getLogger().error('flushAssistantTurn (fallback timer) failed:', err),
+          );
         }
       }, StreamHandler.REALTIME_USER_TRANSCRIPT_WAIT_MS);
       this.responseAudioStarted = false;
@@ -3223,7 +3255,8 @@ export class StreamHandler {
     // circuit breaker. Previously only `webhookUrl` worked in Realtime
     // mode (handler tools fell through and hung the model); now both are
     // routed through the same robust executor used by pipeline mode.
-    const toolDef = this.deps.agent.tools?.find((t) => t.name === fc.name);
+    const effectiveTools = (this.resolvedTools ?? this.deps.agent.tools) as ToolDefinition[] | undefined;
+    const toolDef = effectiveTools?.find((t) => t.name === fc.name);
     if (!toolDef) {
       getLogger().warn(`Realtime tool '${fc.name}' not found in agent.tools — skipping`);
       const result = JSON.stringify({ error: `Tool '${fc.name}' not registered`, fallback: true });

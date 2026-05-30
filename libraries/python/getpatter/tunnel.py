@@ -103,9 +103,12 @@ async def start_tunnel(port: int, timeout: float = _STARTUP_TIMEOUT) -> TunnelHa
                 hostname = result
                 break
 
-        # Cancel remaining tasks
+        # Cancel remaining tasks and await them to prevent
+        # "Task was destroyed but it is pending!" warnings in Python 3.12+
         for task in pending:
             task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     except Exception:
         try:

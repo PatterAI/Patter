@@ -127,7 +127,7 @@ export class OpenAIRealtime2Adapter extends OpenAIRealtimeAdapter {
             type: opts.vadType ?? OpenAIRealtimeVADType.SERVER_VAD,
             threshold: 0.5,
             prefix_padding_ms: 300,
-            silence_duration_ms: opts.silenceDurationMs ?? 500,
+            silence_duration_ms: opts.silenceDurationMs ?? 300,
             // Defer ``response.create`` to the application: when OpenAI's
             // server VAD commits an ``input_audio_buffer.committed`` segment
             // that turns out to be a Whisper hallucination on silence/echo,
@@ -230,14 +230,7 @@ export class OpenAIRealtime2Adapter extends OpenAIRealtimeAdapter {
             // parent dispatcher → StreamHandler → bridge.sendAudio
             // chain the natural cadence it expects.
             if (t === 'response.output_audio.delta' && typeof (parsed as { delta?: string }).delta === 'string') {
-              const mulaw = this.transcodeOutboundPcm24ToMulaw8Buffer((parsed as { delta: string }).delta);
-              const FRAME_BYTES = 160; // 20 ms of mulaw at 8 kHz
-              if (mulaw.length === 0) return; // resampler warmup
-              for (let off = 0; off < mulaw.length; off += FRAME_BYTES) {
-                const slice = mulaw.subarray(off, Math.min(off + FRAME_BYTES, mulaw.length));
-                const frame = { ...(parsed as Record<string, unknown>), type: newType, delta: slice.toString('base64') };
-                handler(Buffer.from(JSON.stringify(frame)), ...rest);
-              }
+              this.translateGaAudioDelta(parsed as Record<string, unknown>, handler, rest);
               return;
             }
             (parsed as { type: string }).type = newType;
@@ -374,6 +367,7 @@ export class OpenAIRealtime2Adapter extends OpenAIRealtimeAdapter {
       };
       const timer = setTimeout(() => {
         cleanup();
+        try { ws.close(); } catch { /* ignore */ }
         reject(new Error('OpenAI Realtime 2 park connect timeout'));
       }, 8000);
       ws.on('message', onMessage);
@@ -440,8 +434,14 @@ export class OpenAIRealtime2Adapter extends OpenAIRealtimeAdapter {
           const parsed = JSON.parse(text) as { type?: string };
           const t = parsed.type;
           if (t && Object.prototype.hasOwnProperty.call(GA_TO_V1_EVENT_NAMES, t)) {
+            // Audio deltas require transcoding (PCM-24 → mulaw-8) and 20 ms
+            // frame splitting — delegate to the shared helper used by connect().
+            if (t === 'response.output_audio.delta' && typeof (parsed as { delta?: string }).delta === 'string') {
+              this.translateGaAudioDelta(parsed as Record<string, unknown>, handler, rest);
+              return;
+            }
             (parsed as { type?: string }).type = GA_TO_V1_EVENT_NAMES[t];
-            handler(JSON.stringify(parsed), ...rest);
+            handler(Buffer.from(JSON.stringify(parsed)), ...rest);
             return;
           }
         } catch {
@@ -538,6 +538,41 @@ export class OpenAIRealtime2Adapter extends OpenAIRealtimeAdapter {
       out.writeInt16LE(Math.round((s0 + s1 * 2) / 3), i * 6 + 4);
     }
     return out;
+  }
+
+  /**
+   * Shared audio-delta translation helper. Transcodes a GA
+   * `response.output_audio.delta` payload (base64 PCM-16-LE 24 kHz)
+   * into mulaw 8 kHz and splits the result into 160-byte (20 ms) frames,
+   * dispatching one synthetic `response.audio.delta` event per frame.
+   *
+   * Called from BOTH the `connect()` shim and the `adoptWebSocket()` shim
+   * so that warm-path (prewarm/adopted) calls receive identical transcoding
+   * to cold-path calls. Without this, adopted sockets forwarded raw PCM-24
+   * to Twilio/Telnyx, producing garbled or silent audio on every warm call.
+   *
+   * @param parsed  - The parsed GA event object (type already checked to be
+   *                  `response.output_audio.delta` with a string `delta`).
+   * @param handler - The downstream message listener to dispatch each frame to.
+   * @param rest    - Extra arguments forwarded from the original `message` event.
+   * @returns `true` if frames were dispatched (caller should return early),
+   *          `false` if the resampler is still warming up (zero output bytes).
+   */
+  private translateGaAudioDelta(
+    parsed: Record<string, unknown>,
+    handler: (...args: unknown[]) => void,
+    rest: unknown[],
+  ): boolean {
+    const newType = GA_TO_V1_EVENT_NAMES['response.output_audio.delta'];
+    const mulaw = this.transcodeOutboundPcm24ToMulaw8Buffer(parsed.delta as string);
+    const FRAME_BYTES = 160; // 20 ms of mulaw at 8 kHz
+    if (mulaw.length === 0) return false; // resampler warmup — drop silently
+    for (let off = 0; off < mulaw.length; off += FRAME_BYTES) {
+      const slice = mulaw.subarray(off, Math.min(off + FRAME_BYTES, mulaw.length));
+      const frame = { ...parsed, type: newType, delta: slice.toString('base64') };
+      handler(Buffer.from(JSON.stringify(frame)), ...rest);
+    }
+    return true;
   }
 
   /**

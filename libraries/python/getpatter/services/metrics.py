@@ -159,14 +159,10 @@ class CallMetricsAccumulator:
         # (the common cause of missing endpoint signals).
         self._endpoint_signal_missing_count: int = 0
 
-        # --- Initial-TTFB guard reset on barge-in / new turn ---
-        # When ``report_only_initial_ttfb=True`` is set, the EventBus TTFB
-        # emission is suppressed after the first event per call. After a
-        # barge-in we want the NEXT turn's TTFB to fire again so the
-        # dashboard can show post-barge-in recovery latency. Set by
-        # ``record_llm_first_token`` / ``record_tts_first_byte`` and reset
-        # by ``_reset_turn_state``.
-        self._initial_ttfb_emitted: bool = False
+        # Per-turn LLM cost accumulated from record_llm_usage() calls.
+        # Populated eagerly each time record_llm_usage() is called so the
+        # observable cost matches TS metrics.ts behaviour.
+        self._total_llm_cost: float = 0.0
 
     # ---- EventBus attachment ----
 
@@ -321,6 +317,11 @@ class CallMetricsAccumulator:
     def record_stt_complete(self, text: str, audio_seconds: float = 0.0) -> None:
         """Mark STT as complete for the current turn."""
         self._stt_complete = time.monotonic()
+        # Parity with TS metrics.ts: auto-stamp _stt_final_at so EOU metrics
+        # work even when record_stt_final_timestamp() is never called explicitly.
+        # record_stt_final_timestamp() may still override this with a more
+        # precise provider-supplied timestamp.
+        self._stt_final_at = time.time()
         # Don't fake _endpoint_signal_at from _stt_complete — that creates
         # dishonest endpoint_ms == stt_ms outliers (6818 ms p95 spikes observed
         # on PSTN when VAD speech_end is dropped). Honest None is better than a
@@ -574,7 +575,6 @@ class CallMetricsAccumulator:
             self._vad_stopped_at is None
             or self._stt_final_at is None
             or self._turn_committed_at is None
-            or self._on_user_turn_completed_delay_ms is None
         ):
             return
 
@@ -590,7 +590,7 @@ class CallMetricsAccumulator:
             transcription_delay=max(
                 0.0, (self._turn_committed_at - self._vad_stopped_at) * 1000.0
             ),
-            on_user_turn_completed_delay=self._on_user_turn_completed_delay_ms,
+            on_user_turn_completed_delay=(self._on_user_turn_completed_delay_ms or 0.0),
         )
         self._event_bus.emit("eou_metrics", eou)
 
@@ -688,6 +688,16 @@ class CallMetricsAccumulator:
         self._llm_total_output_tokens += output_tokens
         self._llm_total_cache_read_tokens += cache_read_tokens
         self._llm_total_cache_write_tokens += cache_write_tokens
+        # Parity with TS metrics.ts: accumulate cost per-turn eagerly so
+        # get_cost_so_far() returns an up-to-date value mid-call.
+        self._total_llm_cost += calculate_llm_cost(
+            provider=provider,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_write_tokens=cache_write_tokens,
+        )
 
     def set_actual_telephony_cost(self, cost: float) -> None:
         """Set the actual telephony cost from the provider API (post-call).
@@ -784,10 +794,6 @@ class CallMetricsAccumulator:
         self._bargein_stopped_at = None
         self._turn_user_text = ""
         self._turn_stt_audio_seconds = 0.0
-        # Reset initial-TTFB latch so EventBus TTFB emission re-fires on the
-        # new turn. Without this, with report_only_initial_ttfb=True we lose
-        # the TTFB metric on the first turn after a barge-in / new turn.
-        self._initial_ttfb_emitted = False
         self._llm_ttfb_emitted = False
         self._tts_ttfb_emitted = False
 
@@ -831,8 +837,12 @@ class CallMetricsAccumulator:
                 0.0, (self._endpoint_signal_at - self._turn_start) * 1000
             )
 
-        if self._stt_complete is not None and self._llm_complete is not None:
-            llm_ms = (self._llm_complete - self._stt_complete) * 1000
+        # Parity with TS metrics.ts: llm_ms = TTFT when first-token is available,
+        # otherwise falls back to full generation time (stt_complete → llm_complete).
+        if self._stt_complete is not None and self._llm_first_token is not None:
+            llm_ms = max(0.0, (self._llm_first_token - self._stt_complete) * 1000)
+        elif self._stt_complete is not None and self._llm_complete is not None:
+            llm_ms = max(0.0, (self._llm_complete - self._stt_complete) * 1000)
 
         # Fix 5: LLM TTFT = first-token time minus stt_complete.
         if self._stt_complete is not None and self._llm_first_token is not None:
@@ -981,19 +991,10 @@ class CallMetricsAccumulator:
                 self._pricing,
                 model=self.tts_model or None,
             )
-            # Pipeline LLM cost: calculated from accumulated token usage when
-            # record_llm_usage() was called; otherwise 0 (custom on_message).
-            if self._llm_total_input_tokens or self._llm_total_output_tokens:
-                llm_cost = calculate_llm_cost(
-                    provider=self._llm_provider_name,
-                    model=self._llm_model,
-                    input_tokens=self._llm_total_input_tokens,
-                    output_tokens=self._llm_total_output_tokens,
-                    cache_read_tokens=self._llm_total_cache_read_tokens,
-                    cache_write_tokens=self._llm_total_cache_write_tokens,
-                )
-            else:
-                llm_cost = 0.0
+            # Pipeline LLM cost: already accumulated per-turn in
+            # record_llm_usage(); _total_llm_cost is 0 when on_message
+            # is a custom handler that never calls record_llm_usage().
+            llm_cost = self._total_llm_cost
 
         # Prefer actual telephony cost from provider API over estimate
         if self._actual_telephony_cost is not None:

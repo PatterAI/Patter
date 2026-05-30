@@ -1410,6 +1410,9 @@ class TestOpenAITTSSynthesize:
         mock_resp.raise_for_status.side_effect = httpx.HTTPStatusError(
             "Server Error", request=MagicMock(), response=MagicMock()
         )
+        # aclose is awaited in the finally block — must be an AsyncMock so
+        # that cleanup runs even when raise_for_status() throws inside try.
+        mock_resp.aclose = AsyncMock()
 
         tts._client = AsyncMock()
         tts._client.build_request.return_value = MagicMock()

@@ -135,7 +135,9 @@ export class CartesiaSTT {
       });
       ws.once('error', (err: Error) => {
         clearTimeout(timer);
-        reject(err);
+        // Sanitize before re-throwing: raw `ws` handshake errors can include
+        // the upgrade URL, which carries the API key as a query-string param.
+        reject(new Error(`Cartesia STT park connect failed: ${describeWarmupError(err)}`));
       });
     });
     return ws;

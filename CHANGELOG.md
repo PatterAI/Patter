@@ -7,9 +7,71 @@
   live-call, and metrics panels, alongside Twilio and Telnyx
   (`dashboard-app/`). Also added `"plivo"` to the PyPI / npm package keywords
   so the SDK surfaces in Plivo-related searches. (#123)
+- **`PatterConfigError` (both SDKs).** Added to the TypeScript error taxonomy
+  (`errors.ts`) to match Python's `PatterConfigError`, and exported from the
+  Python package root — raised for invalid SDK configuration.
+- **New Python package exports**: `resample_pcm`, `define_tool`, `DTMF_EVENTS`,
+  barge-in strategy helpers, and pricing constants (`PricingUnit`,
+  `PRICING_VERSION`, `PRICING_LAST_UPDATED`) are now importable from `getpatter`
+  for parity with the TypeScript surface.
+
+### Changed
+
+- **Public config collections are now immutable.** `Agent.tools` / `guardrails`
+  / `text_transforms` / `mcp_servers` and `Guardrail.blocked_terms` are tuples
+  (Python, `frozen=True`) / `readonly` arrays (TypeScript). Code comparing these
+  against a literal `list`/array must compare against a tuple / readonly array.
+- **Default `Agent.model` is now `gpt-realtime-mini`** (was
+  `gpt-4o-mini-realtime-preview`), aligning the Python dataclass default with the
+  TypeScript adapter default. Both are aliases for the same OpenAI Realtime model
+  family and share the same pricing row, so cost is unaffected — this removes a
+  Python↔TypeScript default mismatch and an internal Python inconsistency (the
+  `agent()` helper already defaulted to `gpt-realtime-mini`).
 
 ### Fixed
 
+- **DeepFilterNet noise suppression was a silent no-op.** The resampler could
+  never reach the 48 kHz the model requires, the error was swallowed, and raw
+  audio passed through unsuppressed. Now resampled correctly
+  (`providers/deepfilternet_filter.py`, `providers/deepfilternet-filter.ts`).
+- **Parallel tool-calls returned a 400 from Anthropic and Gemini.** Multiple
+  tool results in one turn produced consecutive same-role messages both
+  providers reject; they are now merged into a single turn in both SDKs
+  (`providers/anthropic_llm.py` / `anthropic-llm.ts`, `providers/google_llm.py`
+  / `google-llm.ts`).
+- **Anthropic prompt-cache savings were not billed in TypeScript.** The TS
+  Anthropic provider now emits cache read/write token counts on its usage chunk
+  (parity with Python), so cached-prompt cost reductions are reflected in the
+  metrics (`providers/anthropic-llm.ts`).
+- **MCP client URLs were not SSRF-guarded.** Both SDKs now validate the MCP
+  server URL (blocking link-local, loopback, and private ranges) before opening
+  the transport (`tools/mcp_client.py`, `tools/mcp-client.ts`).
+- **AMD callbacks were clobbered across concurrent outbound calls.** The single
+  answering-machine-detection slot is now a per-call map in both SDKs, keyed by
+  call SID (`server.py` / `server.ts`, `client.ts`).
+- **`FallbackLLMProvider` crashed in pipeline mode (Python).** `stream()` now
+  accepts and forwards `cancel_event`, matching how the pipeline invokes every
+  provider (`services/fallback_provider.py`).
+- **Blocking model/inference calls ran on the event loop.** Krisp and Whisper
+  now offload to `asyncio.to_thread` so audio is not dropped
+  (`providers/krisp_filter.py`, `providers/whisper_stt.py`).
+- **WebSocket reads could hang indefinitely.** Added read timeouts and surfaced
+  background-task exceptions across providers and the remote-message path
+  (`services/remote_message.py` / `remote-message.ts`).
+- **ElevenLabs API key was a publicly readable field.** It is now private in
+  both SDKs (`providers/elevenlabs_ws_tts.py`, `providers/elevenlabs-ws-tts.ts`).
+- **Async done-callbacks raised `CancelledError` on normal shutdown.** They now
+  guard `cancelled()` before reading `.exception()` (`observability/event_bus.py`,
+  `providers/cartesia_stt.py`, `dashboard/store.py`).
+- **Pipeline could accumulate orphaned conversation-history turns.** The
+  speculative user turn is popped on the no-handler / vetoed path
+  (`stream_handler.py`).
+- **Py↔TS parity drift fixed**: `DTMF_EVENTS` ordering, the OpenAI TTS default
+  model, and the end-of-utterance metric emit guard now match across SDKs.
+- **Telnyx STT logs now use the `getpatter.*` namespace.**
+  `providers/telnyx_stt.py` logged under the stale `patter.providers.telnyx_stt`
+  namespace; aligned to `getpatter.providers.telnyx_stt` like every other module
+  so `getpatter.*` log-level filters capture it.
 - **Pipeline-mode turns after the first now record per-turn metrics and
   broadcast the live dashboard transcript.** `anchorUserSpeechStart()` re-opened
   a turn (set `_turnStart`) without clearing the `_turnAlreadyClosed` guard, so

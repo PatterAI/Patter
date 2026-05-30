@@ -36,6 +36,9 @@ export type TelnyxTTSSampleRate =
 
 const DEFAULT_VOICE: TelnyxTTSVoice = TelnyxTTSVoice.NATURAL_HD_ASTRA;
 
+/** Milliseconds to wait for a frame after the connection is open. */
+const FRAME_TIMEOUT_MS = 30_000;
+
 /** Streaming TTS adapter for Telnyx's `/v2/text-to-speech/speech` WebSocket. */
 export class TelnyxTTS {
   /** Stable pricing/dashboard key — read by stream-handler/metrics. */
@@ -63,76 +66,88 @@ export class TelnyxTTS {
    */
   async *synthesizeStream(text: string): AsyncGenerator<Buffer> {
     const url = `${this.baseUrl}?voice=${encodeURIComponent(this.voice)}`;
-    const ws = new WebSocket(url, {
-      headers: { Authorization: `Bearer ${this.apiKey}` },
-    });
-
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Telnyx TTS connect timeout')), 10_000);
-      ws.once('open', () => {
-        clearTimeout(timer);
-        resolve();
-      });
-      ws.once('error', (err) => {
-        clearTimeout(timer);
-        reject(err);
-      });
-    });
-
-    // Queue for chunks. Null signals end-of-stream.
-    type QueueItem = Buffer | null | { error: Error };
-    const queue: QueueItem[] = [];
-    const waiters: Array<(item: QueueItem) => void> = [];
-
-    function push(item: QueueItem): void {
-      const w = waiters.shift();
-      if (w) {
-        w(item);
-      } else {
-        queue.push(item);
-      }
-    }
-
-    ws.on('message', (raw) => {
-      let data: { audio?: string };
-      try {
-        data = JSON.parse(raw.toString()) as typeof data;
-      } catch {
-        getLogger().warn('TelnyxTTS: received invalid JSON');
-        return;
-      }
-
-      const audioB64 = data.audio;
-      if (!audioB64) return;
-
-      try {
-        const audioBytes = Buffer.from(audioB64, 'base64');
-        if (audioBytes.length > 0) {
-          push(audioBytes);
-        }
-      } catch {
-        // Ignore malformed base64 frames
-      }
-    });
-
-    ws.on('close', () => {
-      push(null);
-    });
-
-    ws.on('error', (err) => {
-      push({ error: err instanceof Error ? err : new Error(String(err)) });
-    });
-
-    // Protocol: send empty warm-up frame, then the text, then terminator.
-    ws.send(JSON.stringify({ text: ' ' }));
-    ws.send(JSON.stringify({ text }));
-    ws.send(JSON.stringify({ text: '' }));
-
+    let ws: WebSocket | null = null;
     try {
+      ws = new WebSocket(url, {
+        headers: { Authorization: `Bearer ${this.apiKey}` },
+      });
+
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('Telnyx TTS connect timeout')), 10_000);
+        ws!.once('open', () => {
+          clearTimeout(timer);
+          resolve();
+        });
+        ws!.once('error', (err) => {
+          clearTimeout(timer);
+          reject(err);
+        });
+      });
+
+      // Queue for chunks. Null signals end-of-stream.
+      type QueueItem = Buffer | null | { error: Error };
+      const queue: QueueItem[] = [];
+      const waiters: Array<(item: QueueItem) => void> = [];
+
+      function push(item: QueueItem): void {
+        const w = waiters.shift();
+        if (w) {
+          w(item);
+        } else {
+          queue.push(item);
+        }
+      }
+
+      ws.on('message', (raw) => {
+        let data: { audio?: string };
+        try {
+          data = JSON.parse(raw.toString()) as typeof data;
+        } catch {
+          getLogger().warn('TelnyxTTS: received invalid JSON');
+          return;
+        }
+
+        const audioB64 = data.audio;
+        if (!audioB64) return;
+
+        try {
+          const audioBytes = Buffer.from(audioB64, 'base64');
+          if (audioBytes.length > 0) {
+            push(audioBytes);
+          }
+        } catch {
+          // Ignore malformed base64 frames
+        }
+      });
+
+      ws.on('close', () => {
+        push(null);
+      });
+
+      ws.on('error', (err) => {
+        push({ error: err instanceof Error ? err : new Error(String(err)) });
+      });
+
+      // Protocol: send empty warm-up frame, then the text, then terminator.
+      ws.send(JSON.stringify({ text: ' ' }));
+      ws.send(JSON.stringify({ text }));
+      ws.send(JSON.stringify({ text: '' }));
+
       while (true) {
+        let frameTimer: ReturnType<typeof setTimeout> | undefined;
         const item = queue.length > 0
           ? queue.shift()!
-          : await new Promise<QueueItem>((resolve) => waiters.push(resolve));
+          : await Promise.race([
+              new Promise<QueueItem>((resolve) => waiters.push(resolve)),
+              new Promise<never>((_, reject) => {
+                frameTimer = setTimeout(
+                  () => reject(new Error('Telnyx TTS frame timeout')),
+                  FRAME_TIMEOUT_MS,
+                );
+              }),
+            ]).finally(() => {
+              if (frameTimer !== undefined) clearTimeout(frameTimer);
+            });
 
         if (item === null) return;
         if (typeof item === 'object' && 'error' in item) throw item.error;
@@ -140,10 +155,11 @@ export class TelnyxTTS {
       }
     } finally {
       try {
-        ws.close();
+        ws?.close();
       } catch {
         // ignore
       }
+      ws?.removeAllListeners();
     }
   }
 }

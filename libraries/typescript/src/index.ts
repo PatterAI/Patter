@@ -38,6 +38,7 @@ export { filterMarkdown, filterEmoji, filterForTTS } from "./text-transforms";
 export {
   ErrorCode,
   PatterError,
+  PatterConfigError,
   PatterConnectionError,
   AuthenticationError,
   ProvisionError,

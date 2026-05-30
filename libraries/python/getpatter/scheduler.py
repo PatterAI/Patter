@@ -35,7 +35,7 @@ logger = logging.getLogger("getpatter.scheduler")
 JobCallback = Callable[[], Union[None, Coroutine[Any, Any, None]]]
 
 
-@dataclass
+@dataclass(frozen=True)
 class ScheduleHandle:
     """Returned from every schedule call — used to cancel."""
 
@@ -91,7 +91,11 @@ def _get_scheduler() -> Any:
             "Install with: pip install getpatter[scheduling]"
         ) from exc
 
-    scheduler = AsyncIOScheduler(event_loop=loop)
+    try:
+        scheduler = AsyncIOScheduler(event_loop=loop)
+    except TypeError:
+        # APScheduler 4.x removed the event_loop kwarg; it picks the running loop automatically.
+        scheduler = AsyncIOScheduler()
     scheduler.start()
     _schedulers_by_loop[id(loop)] = scheduler
     return scheduler
@@ -110,11 +114,13 @@ def reset_for_tests() -> None:
 def _wrap_callback(cb: JobCallback) -> Callable[[], Any]:
     """Run sync and async callbacks uniformly on the scheduler loop."""
     if inspect.iscoroutinefunction(cb):
+
         async def runner() -> None:
             try:
                 await cb()  # type: ignore[misc]
             except Exception:
                 logger.exception("Scheduled async callback raised")
+
         return runner
 
     def sync_runner() -> None:
@@ -144,9 +150,7 @@ def schedule_cron(cron: str, callback: JobCallback) -> ScheduleHandle:
     try:
         from apscheduler.triggers.cron import CronTrigger  # type: ignore[import-not-found]
     except ImportError as exc:  # pragma: no cover
-        raise RuntimeError(
-            "Scheduling requires the 'apscheduler' package."
-        ) from exc
+        raise RuntimeError("Scheduling requires the 'apscheduler' package.") from exc
 
     scheduler = _get_scheduler()
     trigger = CronTrigger.from_crontab(cron)
@@ -160,9 +164,7 @@ def schedule_once(at: datetime, callback: JobCallback) -> ScheduleHandle:
     try:
         from apscheduler.triggers.date import DateTrigger  # type: ignore[import-not-found]
     except ImportError as exc:  # pragma: no cover
-        raise RuntimeError(
-            "Scheduling requires the 'apscheduler' package."
-        ) from exc
+        raise RuntimeError("Scheduling requires the 'apscheduler' package.") from exc
 
     scheduler = _get_scheduler()
     trigger = DateTrigger(run_date=at)
@@ -180,9 +182,7 @@ def schedule_interval(seconds: float, callback: JobCallback) -> ScheduleHandle:
     try:
         from apscheduler.triggers.interval import IntervalTrigger  # type: ignore[import-not-found]
     except ImportError as exc:  # pragma: no cover
-        raise RuntimeError(
-            "Scheduling requires the 'apscheduler' package."
-        ) from exc
+        raise RuntimeError("Scheduling requires the 'apscheduler' package.") from exc
 
     scheduler = _get_scheduler()
     trigger = IntervalTrigger(seconds=seconds)

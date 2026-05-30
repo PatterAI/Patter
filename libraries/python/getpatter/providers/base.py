@@ -3,20 +3,24 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, AsyncIterator, Literal
 
 
 # === STT ===
 
 
-@dataclass
+@dataclass(frozen=True)
 class Transcript:
     """A transcription result emitted by an :class:`STTProvider`.
 
     ``is_final`` distinguishes provisional partials from finalised utterances;
     additional fields carry provider-specific hints (``speech_final``,
     ``event_type``) and metadata used for cost reconciliation.
+
+    This dataclass is frozen (immutable). ``words`` uses a tuple so the
+    container is hashable; the inner dicts remain mutable (shallow immutability
+    only — a known limitation documented in the immutability rule).
     """
 
     text: str
@@ -35,7 +39,7 @@ class Transcript:
     request_id: str | None = None
     # Per-word timings/metadata when the provider emits them. Shape is
     # provider-specific; callers that consume it should introspect carefully.
-    words: list[dict[str, Any]] = field(default_factory=list)
+    words: tuple[dict[str, Any], ...] = ()
     # Type of event from the provider. ``Results`` is the default transcript
     # frame; ``UtteranceEnd`` and ``SpeechStarted`` are VAD events emitted
     # by Deepgram when ``vad_events=true``.
@@ -114,7 +118,7 @@ class TTSProvider(ABC):
 # === Telephony ===
 
 
-@dataclass
+@dataclass(frozen=True)
 class CallInfo:
     """Lightweight descriptor for an active call (id, parties, direction)."""
 
@@ -149,7 +153,7 @@ class TelephonyProvider(ABC):
 # === VAD (Voice Activity Detection) ===
 
 
-@dataclass
+@dataclass(frozen=True)
 class VADEvent:
     """Voice activity event emitted by a VADProvider.
 

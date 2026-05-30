@@ -109,7 +109,11 @@ def _parse_docstring(docstring: str | None) -> tuple[str, dict[str, str]]:
 
     for line in after_args.splitlines():
         # Stop at the next section header (e.g. "Returns:", "Raises:")
-        if re.match(r"^\s{0,1}\S", line) and line.strip() and not line.strip().startswith("-"):
+        if (
+            re.match(r"^\s{0,1}\S", line)
+            and line.strip()
+            and not line.strip().startswith("-")
+        ):
             break
 
         arg_match = _ARG_LINE_RE.match(line)
@@ -190,8 +194,9 @@ def tool(fn: Callable[..., Any]) -> ToolDefinition:
     # Without this adapter every ``@tool`` function fails at runtime with
     # ``takes 1 positional argument but 2 were given``.
     _param_names = tuple(sig.parameters.keys())
-    _is_legacy_twoarg = (
-        len(_param_names) == 2 and _param_names == ("arguments", "call_context")
+    _is_legacy_twoarg = len(_param_names) == 2 and _param_names == (
+        "arguments",
+        "call_context",
     )
     import asyncio as _asyncio
 
@@ -199,9 +204,7 @@ def tool(fn: Callable[..., Any]) -> ToolDefinition:
         if _is_legacy_twoarg:
             result = fn(arguments, call_context)
         else:
-            filtered = {
-                k: v for k, v in (arguments or {}).items() if k in _param_names
-            }
+            filtered = {k: v for k, v in (arguments or {}).items() if k in _param_names}
             result = fn(**filtered)
         if _asyncio.iscoroutine(result) or _asyncio.isfuture(result):
             result = await result
@@ -213,5 +216,90 @@ def tool(fn: Callable[..., Any]) -> ToolDefinition:
         "name": fn.__name__,
         "description": summary,
         "parameters": parameters,
+        "handler": _adapter,
+    }
+
+
+# ── define_tool: schema-first factory (mirrors TS defineTool) ───────────
+
+
+class ParamSpec(typing.TypedDict, total=False):
+    """Shorthand property spec accepted by :func:`define_tool`."""
+
+    type: str  # required
+    description: str
+    default: Any  # when present the parameter is *not* required
+
+
+def define_tool(
+    name: str,
+    description: str,
+    parameters: dict[str, ParamSpec],
+    handler: Callable[..., Any],
+) -> ToolDefinition:
+    """Schema-first factory that builds a ``ToolDefinition`` dict.
+
+    Mirrors the TypeScript ``defineTool`` function: caller supplies an
+    explicit JSON-Schema-style parameter map rather than relying on
+    function type annotations.
+
+    Parameters that include a ``default`` key are treated as optional;
+    all others are added to the JSON Schema ``required`` array.
+
+    Example::
+
+        from getpatter import define_tool
+
+        async def _handler(args, context):
+            unit = args.get("unit", "celsius")
+            return f"Sunny, 22 {unit}"
+
+        get_weather = define_tool(
+            name="get_weather",
+            description="Get the current weather for a location.",
+            parameters={
+                "location": {"type": "string", "description": "City name or zip code"},
+                "unit": {"type": "string", "description": "Temperature unit", "default": "celsius"},
+            },
+            handler=_handler,
+        )
+    """
+    import asyncio as _asyncio
+
+    properties: dict[str, dict[str, Any]] = {}
+    required: list[str] = []
+
+    for param_name, spec in parameters.items():
+        prop: dict[str, Any] = {"type": spec.get("type", "string")}
+        if "description" in spec:
+            prop["description"] = spec["description"]
+        properties[param_name] = prop
+        if "default" not in spec:
+            required.append(param_name)
+
+    json_schema: dict[str, Any] = {
+        "type": "object",
+        "properties": properties,
+    }
+    if required:
+        json_schema["required"] = required
+
+    # Wrap plain callables in an async adapter so the runtime can always
+    # await the result — matching the behaviour of the @tool decorator.
+    _param_names = tuple(parameters.keys())
+
+    async def _adapter(arguments: dict, call_context: dict):
+        filtered = {k: v for k, v in (arguments or {}).items() if k in _param_names}
+        result = handler(filtered, call_context)
+        if _asyncio.iscoroutine(result) or _asyncio.isfuture(result):
+            result = await result
+        return result
+
+    _adapter.__wrapped__ = handler  # type: ignore[attr-defined]
+
+    return {
+        "name": name,
+        "description": description,
+        "parameters": json_schema,
         "handler": _adapter,
     }

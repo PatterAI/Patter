@@ -68,7 +68,6 @@ _CARRIER_REALTIME_AUDIO_FORMAT: dict[str, str] = {
 }
 
 
-
 _CLOUD_NOT_IMPLEMENTED_MSG = (
     "Patter Cloud is not yet available in this SDK release. Use local mode "
     "with a `carrier=` and `phone_number=`. Cloud mode will return in a "
@@ -532,7 +531,10 @@ class Patter:
         registration) only need the hostname, not the WS server.
         """
         if self._tunnel_ready is None:
-            loop = asyncio.get_event_loop()
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
             self._tunnel_ready = loop.create_future()
             if self._tunnel_ready_pre_resolved is not None:
                 self._tunnel_ready.set_result(self._tunnel_ready_pre_resolved)
@@ -554,7 +556,10 @@ class Patter:
         the server is listening.
         """
         if self._ready is None:
-            loop = asyncio.get_event_loop()
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
             self._ready = loop.create_future()
         return self._ready
 
@@ -637,9 +642,15 @@ class Patter:
         """
         if not agent:
             raise PatterConnectionError("call() requires the agent parameter.")
-        if not isinstance(to, str) or not to.startswith("+"):
+        from getpatter.telephony.common import _validate_e164
+
+        if not isinstance(to, str) or not _validate_e164(to):
             raise ValueError(
-                f"'to' must be a phone number in E.164 format (e.g., '+1234567890'), got '{to}'."
+                f"'to' must be a valid E.164 phone number (e.g., '+1234567890'), got '{to}'."
+            )
+        if from_number and not _validate_e164(from_number):
+            raise ValueError(
+                f"'from_number' must be a valid E.164 phone number, got '{from_number}'."
             )
         if wait and self._server is None:
             raise PatterConnectionError(
@@ -654,12 +665,19 @@ class Patter:
         # Wire the per-call AMD callback into the embedded server BEFORE
         # dispatching the call so a fast Twilio Async AMD result (typically
         # 2-5 s after answer) cannot arrive before the callback is in place.
-        # Cleared on the next ``call()`` so a previous-call result cannot
-        # leak into a new caller's callback. AMD is **on by default**;
-        # pass ``machine_detection=False`` to explicitly skip it. A
-        # non-empty ``voicemail_message`` also implicitly requires AMD.
+        # The single-slot ``on_machine_detection`` is the pre-dispatch
+        # fallback (used only for the brief window before the carrier issues
+        # a call id); once ``initiate_call`` returns we also register the
+        # callback in ``on_machine_detection_by_call_sid`` keyed by that id so
+        # concurrent outbound calls do not clobber each other's callbacks
+        # (parity with the TypeScript ``onMachineDetectionByCallSid`` map).
+        # AMD is **on by default**; pass ``machine_detection=False`` to
+        # explicitly skip it. A non-empty ``voicemail_message`` also
+        # implicitly requires AMD.
         wants_amd = bool(machine_detection) or bool(voicemail_message)
         if self._server is not None:
+            # Clear/refresh the legacy single-slot fallback on every call so a
+            # previous call's callback cannot leak through the fallback path.
             self._server.on_machine_detection = on_machine_detection  # type: ignore[attr-defined]
 
         # Pre-warm provider connections in parallel with the carrier-side
@@ -872,6 +890,15 @@ class Patter:
             )
             if getattr(agent, "prewarm", True) is not False:
                 self._park_provider_connections(agent, call_id, carrier="plivo")
+
+        # Register the AMD callback keyed by the carrier-issued call id so
+        # concurrent outbound calls each get their own callback (the embedded
+        # server's webhook handlers prefer this per-call entry over the
+        # single-slot fallback and remove it after firing once).
+        if self._server is not None and on_machine_detection is not None and call_id:
+            self._server.on_machine_detection_by_call_sid[call_id] = (  # type: ignore[attr-defined]
+                on_machine_detection
+            )
 
         # --- wait=True: block until the call reaches a terminal state ---
         # Register the completion future now that the carrier has issued the
@@ -1594,14 +1621,16 @@ class Patter:
             model=model,
             language=language,
             first_message=first_message,
-            tools=tools_out,
+            tools=tuple(tools_out) if tools_out is not None else None,
             provider=provider,
             stt=stt_resolved,
             tts=tts_resolved,
             variables=variables,
-            guardrails=guardrails_out,
+            guardrails=tuple(guardrails_out) if guardrails_out is not None else None,
             hooks=hooks,
-            text_transforms=text_transforms,
+            text_transforms=(
+                tuple(text_transforms) if text_transforms is not None else None
+            ),
             vad=vad,
             audio_filter=audio_filter,
             background_audio=background_audio,
@@ -1610,7 +1639,7 @@ class Patter:
             disable_phone_preamble=disable_phone_preamble,
             echo_cancellation=echo_cancellation,
             llm=llm,
-            mcp_servers=mcp_servers,
+            mcp_servers=tuple(mcp_servers) if mcp_servers is not None else None,
             prewarm_first_message=prewarm_first_message,
             openai_realtime_reasoning_effort=openai_realtime_reasoning_effort,
             openai_realtime_input_audio_transcription_model=openai_realtime_input_audio_transcription_model,
@@ -1879,7 +1908,7 @@ class Patter:
         try:
             # Poll uvicorn's ``started`` flag (set after the listen socket
             # is bound and the lifespan startup phase completes).
-            deadline_loop = asyncio.get_event_loop()
+            deadline_loop = asyncio.get_running_loop()
             start = deadline_loop.time()
             while deadline_loop.time() - start < 30.0:
                 if serve_task.done():
@@ -1913,6 +1942,13 @@ class Patter:
         except BaseException as exc:
             self._reject_ready(exc)
             serve_task.cancel()
+            if self._tunnel_handle is not None:
+                self._tunnel_handle.stop()
+                self._tunnel_handle = None
+                from dataclasses import replace as _replace
+
+                self._local_config = _replace(self._local_config, webhook_url="")
+                self._tunnel_owns_webhook_url = False
             raise
         await serve_task
 

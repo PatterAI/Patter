@@ -61,6 +61,10 @@ class DtmfEvent(str, Enum):
     D = "D"
 
 
+DTMF_EVENTS: tuple[str, ...] = tuple(e.value for e in DtmfEvent)
+"""All valid DTMF digit strings, matching the TypeScript ``DTMF_EVENTS`` array."""
+
+
 def format_dtmf(events: list[DtmfEvent]) -> str:
     """Join DTMF events into a space-separated debug string."""
     return " ".join(event.value for event in events)
@@ -393,6 +397,7 @@ class IVRActivity:
 
 
 __all__ = [
+    "DTMF_EVENTS",
     "DtmfEvent",
     "IVRActivity",
     "TfidfLoopDetector",

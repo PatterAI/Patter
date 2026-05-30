@@ -74,19 +74,19 @@ const FAR_END_BUFFER_SECONDS = 0.5;
 /** Constructor options for {@link NlmsEchoCanceller}. */
 export interface NlmsEchoCancellerOptions {
   /** Sample rate of the inbound and outbound streams. 8000 or 16000. */
-  sampleRate?: 8000 | 16000;
+  readonly sampleRate?: 8000 | 16000;
   /** Number of taps in the adaptive filter. Default: 512 (= 32 ms @ 16 kHz). */
-  filterTaps?: number;
+  readonly filterTaps?: number;
   /** Steady-state NLMS step in `(0, 1]`. Default: 0.1. */
-  stepSize?: number;
+  readonly stepSize?: number;
   /** Aggressive NLMS step during the warmup window. Default: 0.5. */
-  warmupStepSize?: number;
+  readonly warmupStepSize?: number;
   /** Duration of the warmup window in seconds. Default: 0.5. */
-  warmupSeconds?: number;
+  readonly warmupSeconds?: number;
   /** Per-iteration weight leakage in `(0, 1]`. Default: 0.9999. */
-  leakage?: number;
+  readonly leakage?: number;
   /** Geigel rho — double-talk detector sensitivity. Default: 0.6. */
-  doubleTalkRho?: number;
+  readonly doubleTalkRho?: number;
 }
 
 /**

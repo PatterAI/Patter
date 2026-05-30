@@ -139,7 +139,7 @@ export interface ElevenLabsParkedWS {
 /** WebSocket-based ElevenLabs TTS adapter — opt-in low-latency variant. */
 export class ElevenLabsWebSocketTTS implements TTSAdapter {
   static readonly providerKey = 'elevenlabs_ws';
-  readonly apiKey: string;
+  private readonly apiKey: string;
   readonly voiceId: string;
   readonly modelId: string;
   readonly voiceSettings?: Record<string, unknown>;

@@ -57,7 +57,9 @@ afterEach(() => {
 describe('ElevenLabsWebSocketTTS — construction', () => {
   it('creates with required apiKey', () => {
     const tts = new ElevenLabsWebSocketTTS({ apiKey: 'el-key' });
-    expect(tts.apiKey).toBe('el-key');
+    // apiKey is private (the secret must not be a public, externally
+    // readable field) — read through a cast to assert it was stored.
+    expect((tts as unknown as { apiKey: string }).apiKey).toBe('el-key');
     expect(tts.modelId).toBe('eleven_flash_v2_5');
     expect(tts.outputFormat).toBe('pcm_16000');
     expect(tts.autoMode).toBe(true);
