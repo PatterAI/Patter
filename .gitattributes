@@ -1,0 +1,18 @@
+# Normalize line endings to LF on checkin; let Git pick the working-tree EOL.
+* text=auto eol=lf
+
+# Generated / vendored — collapse in diffs and exclude from language stats.
+package-lock.json linguist-generated=true
+*.min.js linguist-generated=true
+*.min.css linguist-generated=true
+
+# Binary assets.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.mp3 binary
+*.wav binary
