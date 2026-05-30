@@ -38,14 +38,11 @@ calls. It ships **two SDKs with full parity**: Python (`pip install getpatter`,
 
 ```bash
 bash scripts/pr-validate.sh          # mirrors PR-blocking CI (~3-5 min)
-bash scripts/pr-validate.sh --quick  # pre-commit + notebooks (~30 s)
+bash scripts/pr-validate.sh --quick  # pre-commit + lint (~30 s)
 ```
 
 A green local run lines up with green CI (Python 3.11/3.12/3.13, TypeScript
-20/22, pre-commit/lint, notebooks parity, security). If you touched
-`examples/notebooks/`, the script also runs `nbstripout` and
-`python3 scripts/check_notebook_parity.py` (Python/TS notebooks must stay
-structurally aligned).
+20/22, pre-commit/lint, security).
 
 ## Where things live
 
@@ -54,7 +51,6 @@ libraries/python/getpatter/   Python SDK   (client.py, models.py, server.py,
                                             telephony/, providers/, services/)
 libraries/typescript/src/     TypeScript SDK (client.ts, types.ts, server.ts,
                                             stream-handler.ts, telephony/, …)
-examples/notebooks/           Paired Python + TypeScript runnable notebooks
 docs/                         Mintlify docs site
 scripts/pr-validate.sh        Local mirror of PR-blocking CI
 ```

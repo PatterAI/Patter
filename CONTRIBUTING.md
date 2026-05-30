@@ -45,9 +45,6 @@ These are the things CI (and reviewers) will block on. Catch them locally:
       (`### Added` / `### Changed` / `### Fixed` / …) for any user-visible
       change. Pure refactors, test-only, and docs-only diffs are exempt.
 - [ ] **`bash scripts/pr-validate.sh` is green** (mirrors the PR-blocking CI).
-- [ ] **Notebooks**: if you touched `examples/notebooks/`, run `nbstripout`
-      (bundled in pre-commit) and keep the Python/TypeScript pair structurally
-      aligned — `python3 scripts/check_notebook_parity.py` must pass.
 - [ ] **No external license headers / "ported from <repo>" provenance
       comments** in source. Naming a provider/carrier you integrate (Twilio,
       Telnyx, Plivo, OpenAI, …) is fine; copying a competitor's lineage is not.
@@ -61,13 +58,12 @@ Run every PR-blocking CI check locally before opening the PR:
 
 ```bash
 bash scripts/pr-validate.sh           # default: ~3-5 min
-bash scripts/pr-validate.sh --quick   # pre-commit + notebooks (~30s)
+bash scripts/pr-validate.sh --quick   # pre-commit + lint (~30s)
 bash scripts/pr-validate.sh --full    # default + e2e + all-extras (~10 min)
 ```
 
-The script mirrors `.github/workflows/test.yml` and `notebooks.yml` so a
-green local run lines up with green CI. Selective skips: `--skip-py`,
-`--skip-ts`, `--skip-notebooks`, `--no-stop`.
+The script mirrors `.github/workflows/test.yml` so a green local run lines up
+with green CI. Selective skips: `--skip-py`, `--skip-ts`, `--no-stop`.
 
 First-time setup:
 

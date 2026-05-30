@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 # scripts/pr-validate.sh — Run every PR-blocking CI check locally before
-# opening a PR. Mirrors .github/workflows/{test,notebooks}.yml so a green
+# opening a PR. Mirrors .github/workflows/test.yml so a green
 # local run lines up with a green CI run.
 #
 # Usage:
 #   bash scripts/pr-validate.sh                # core checks (default, ~3-5 min)
-#   bash scripts/pr-validate.sh --quick        # pre-commit + parity only (~30s)
+#   bash scripts/pr-validate.sh --quick        # pre-commit + lint only (~30s)
 #   bash scripts/pr-validate.sh --full         # core + e2e + python-all-extras (~10 min)
 #   bash scripts/pr-validate.sh --skip-py      # skip Python jobs
 #   bash scripts/pr-validate.sh --skip-ts      # skip TypeScript jobs
-#   bash scripts/pr-validate.sh --skip-notebooks
 #   bash scripts/pr-validate.sh --no-stop      # don't stop on first failure
 #
 # Exits 0 when all selected checks pass, non-zero on any failure. Prints a
@@ -26,7 +25,6 @@ cd "$REPO_ROOT"
 MODE="core"
 SKIP_PY=0
 SKIP_TS=0
-SKIP_NOTEBOOKS=0
 NO_STOP=0
 for arg in "$@"; do
     case "$arg" in
@@ -34,7 +32,6 @@ for arg in "$@"; do
         --full) MODE="full" ;;
         --skip-py) SKIP_PY=1 ;;
         --skip-ts) SKIP_TS=1 ;;
-        --skip-notebooks) SKIP_NOTEBOOKS=1 ;;
         --no-stop) NO_STOP=1 ;;
         -h|--help)
             grep '^#' "$0" | sed 's/^# \?//'
@@ -113,19 +110,15 @@ summary() {
 }
 
 # ── Pre-commit (always, fast) ───────────────────────────────────────────
-# Mirrors test.yml `pre-commit` job. Catches whitespace, EOF, nbstripout,
+# Mirrors test.yml `pre-commit` job. Catches whitespace, EOF, and
 # secret patterns. ~5-10s warm.
 #
 # Local-environment escape hatches (CI runs the full pre-commit unaltered):
 #   PR_VALIDATE_SKIP_GITLEAKS=1   bypass the bundled gitleaks Go build
 #                                 (OOMs on memory-constrained machines —
 #                                 the script falls back to a system gitleaks)
-#   PR_VALIDATE_SKIP_NBSTRIPOUT=1 bypass pre-commit's nbstripout venv
-#                                 (rpds.so mmap fails on hardened macOS —
-#                                 the script falls back to a system nbstripout)
 PRECOMMIT_SKIP=""
 [ -n "${PR_VALIDATE_SKIP_GITLEAKS:-}" ] && PRECOMMIT_SKIP="${PRECOMMIT_SKIP:+$PRECOMMIT_SKIP,}gitleaks"
-[ -n "${PR_VALIDATE_SKIP_NBSTRIPOUT:-}" ] && PRECOMMIT_SKIP="${PRECOMMIT_SKIP:+$PRECOMMIT_SKIP,}nbstripout"
 [ -n "${PRE_COMMIT_SKIP:-}" ] && PRECOMMIT_SKIP="${PRECOMMIT_SKIP:+$PRECOMMIT_SKIP,}$PRE_COMMIT_SKIP"
 
 if command -v pre-commit >/dev/null 2>&1; then
@@ -137,40 +130,6 @@ if command -v pre-commit >/dev/null 2>&1; then
 else
     printf "${YEL}⚠${OFF}  %-45s ${DIM}skipped (pip install pre-commit==3.8.0)${OFF}\n" "pre-commit (lint + hygiene)"
     RESULTS_NAME+=("pre-commit (lint + hygiene)"); RESULTS_STATUS+=("SKIP"); RESULTS_TIME+=("0s"); RESULTS_DETAIL+=("install pre-commit")
-fi
-
-# Fallbacks when pre-commit's bundled hooks were skipped above.
-# We intentionally don't fall back to a system gitleaks — it can OOM-kill on
-# memory-constrained machines too, and CI runs trufflehog/gitleaks anyway as
-# its own job. This local fallback only verifies notebook hygiene.
-# When pre-commit's nbstripout was skipped (rpds.so mmap fails on hardened
-# macOS), the next check ("notebooks: outputs stripped") already greps for
-# outputs in committed notebooks, so we're covered there — no separate
-# fallback step needed.
-
-# ── Notebook gates ──────────────────────────────────────────────────────
-if [ "$SKIP_NOTEBOOKS" = "0" ]; then
-    run_check "notebooks: parity" python3 python3 scripts/check_notebook_parity.py
-    run_check "notebooks: outputs stripped" python3 bash -c '
-        set -e
-        for f in examples/notebooks/python/*.ipynb examples/notebooks/typescript/*.ipynb; do
-            if grep -q "\"outputs\": \[\(\s*{\)" "$f"; then
-                echo "FAIL: $f contains outputs (run nbstripout)"
-                exit 1
-            fi
-        done
-        python3 scripts/scan_notebook_secrets.py examples/notebooks/python/*.ipynb examples/notebooks/typescript/*.ipynb
-    '
-    if [ "$MODE" != "quick" ]; then
-        run_check "notebooks: scaffold tests" pytest \
-            pytest scripts/test_scaffold_notebook.py scripts/test_check_notebook_parity.py scripts/test_generate_notebook_fixtures.py -q
-        run_check "notebooks: setup tests (Python)" pytest \
-            pytest examples/notebooks/python/tests -q
-        if [ -d examples/notebooks/typescript ] && [ -f examples/notebooks/typescript/package.json ]; then
-            run_check "notebooks: setup tests (TS)" npm \
-                bash -c "cd examples/notebooks/typescript && npm install --silent && npm test --silent"
-        fi
-    fi
 fi
 
 # ── Python SDK ──────────────────────────────────────────────────────────
