@@ -17,12 +17,10 @@ venv/
 .coverage
 htmlcov/
 # --- .claude/: AI-agent config. Ignore everything, then re-include only the
-#     shareable engineering-discipline rules and subagent definitions so
-#     contributors and their agents inherit the project conventions.
-#     Machine state (settings.local.json), shared config (settings.json),
-#     slash-commands and hooks stay local. ---
+#     shareable subagent definitions so contributors and their agents can
+#     reuse them. Rules, machine state (settings.local.json), shared config
+#     (settings.json), slash-commands and hooks stay local. ---
 .claude/*
-!.claude/rules/
 !.claude/agents/
 # Root CLAUDE.md is now committed; per-library quickstarts remain tracked.
 !libraries/*/CLAUDE.md
