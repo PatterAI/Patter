@@ -16,9 +16,10 @@ venv/
 .ruff_cache/
 .coverage
 htmlcov/
-# .claude/ (AI-agent config: rules, agents, hooks, local state) stays local.
+# .claude/ (AI-agent config: rules, agents, hooks, local state) and the root
+# CLAUDE.md stay local. Per-library CLAUDE.md quickstarts remain tracked.
 .claude/
-# Root CLAUDE.md is committed; per-library quickstarts remain tracked.
+CLAUDE.md
 !libraries/*/CLAUDE.md
 node_modules/
 *.sqlite
