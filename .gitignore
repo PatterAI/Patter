@@ -16,13 +16,9 @@ venv/
 .ruff_cache/
 .coverage
 htmlcov/
-# --- .claude/: AI-agent config. Ignore everything, then re-include only the
-#     shareable subagent definitions so contributors and their agents can
-#     reuse them. Rules, machine state (settings.local.json), shared config
-#     (settings.json), slash-commands and hooks stay local. ---
-.claude/*
-!.claude/agents/
-# Root CLAUDE.md is now committed; per-library quickstarts remain tracked.
+# .claude/ (AI-agent config: rules, agents, hooks, local state) stays local.
+.claude/
+# Root CLAUDE.md is committed; per-library quickstarts remain tracked.
 !libraries/*/CLAUDE.md
 node_modules/
 *.sqlite
