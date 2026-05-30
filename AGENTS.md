@@ -59,9 +59,9 @@ docs/                         Mintlify docs site
 scripts/pr-validate.sh        Local mirror of PR-blocking CI
 ```
 
-Per-library quickstarts: `libraries/python/CLAUDE.md` and
-`libraries/typescript/CLAUDE.md` (local, not published — but worth reading if
-present in your checkout).
+Per-library quickstarts (committed alongside each SDK):
+`libraries/python/CLAUDE.md` and `libraries/typescript/CLAUDE.md` — read the one
+for the SDK you're touching.
 
 ## Commits & PRs
 

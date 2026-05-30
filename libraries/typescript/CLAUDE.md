@@ -1,6 +1,6 @@
 # TypeScript SDK — agent quickstart
 
-This file is the per-library guide for AI agents working in `libraries/typescript/`. For repo-wide rules, see the root `CLAUDE.md` and `.claude/rules/`.
+This file is the per-library guide for AI agents working in `libraries/typescript/`. For repo-wide rules, see [`AGENTS.md`](../../AGENTS.md) and [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 
 ## Layout
 
