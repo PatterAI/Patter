@@ -1635,13 +1635,12 @@ export class StreamHandler {
     // we've made to "help" Twilio (per-chunk sleep, mark back-pressure,
     // initial-fill burst, absolute-clock scheduling) introduced its own
     // jitter source: setTimeout drift, mark-echo RTT > playout window,
-    // or burst-then-stall patterns. The result the user heard as
-    // "scatti" / "differenza di frequenza" was the side effect of our
-    // pacing fighting the carrier clock, not the carrier itself.
+    // or burst-then-stall patterns — audible as choppy or warbled
+    // playout caused by our pacing fighting the carrier clock, not the
+    // carrier itself.
     //
-    // Mirror the pattern used by Twilio's own call-gpt reference sample
-    // and Pipecat's TwilioFrameSerializer: dump every 20 ms slice into
-    // the WebSocket back-to-back, return, let Twilio drain. For prewarm
+    // The stable approach: dump every 20 ms slice into the WebSocket
+    // back-to-back, return, and let Twilio drain. For prewarm
     // this is ~250 sendAudio calls in <50 ms for a 5 s greeting; the
     // WebSocket buffer absorbs them and the carrier plays at exactly
     // 50 frames/s with no further intervention from us. Barge-in still
