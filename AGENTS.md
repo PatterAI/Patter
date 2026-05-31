@@ -31,7 +31,7 @@ calls. It ships **two SDKs with full parity**: Python (`pip install getpatter`,
    Plivo, OpenAI, ElevenLabs, Deepgram, …) is expected and fine; copying a
    competitor SDK's lineage/headers is not.
 7. **Async everywhere.** All I/O is `async` (Python `asyncio`, TS Promises).
-   Logger: Python `logging.getLogger("patter")`, TS `getLogger()` — never
+   Logger: Python `logging.getLogger("getpatter")`, TS `getLogger()` — never
    `print()` / bare `console.*` in library code.
 
 ## Before opening a PR

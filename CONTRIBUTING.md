@@ -86,7 +86,7 @@ CI always runs the full unaltered suite, so these only affect local runs.
 ### Python
 - Follow PEP 8
 - Use type hints on all public methods
-- Use `logging.getLogger("patter")` — never `print()`
+- Use `logging.getLogger("getpatter")` — never `print()`
 - Frozen dataclasses for models
 - Async everywhere — no blocking I/O
 
@@ -114,4 +114,4 @@ Patter uses an **instance-based class pattern** (post-0.5.0). To add a new STT, 
 
 - Use the issue templates
 - Include SDK version, Node/Python version, OS
-- Enable debug logging: `logging.getLogger("patter").setLevel(logging.DEBUG)`
+- Enable debug logging: `logging.getLogger("getpatter").setLevel(logging.DEBUG)`

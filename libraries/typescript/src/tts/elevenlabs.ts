@@ -69,7 +69,7 @@ export class TTS extends _ElevenLabsTTS {
     // parent's ``_outputFormatExplicit`` flag to true and disable the
     // carrier-aware auto-flip in ``setTelephonyCarrier`` — the prewarm
     // path on Twilio would keep emitting PCM16 16 kHz and pay the
-    // client-side resample/encode that produced the "audio a scatti"
+    // client-side resample/encode that produced the "choppy audio"
     // user report. Leaving the field out lets the parent default to
     // PCM_16000 with the explicit-flag cleared so the carrier hook can
     // flip to ulaw_8000 at call time.
