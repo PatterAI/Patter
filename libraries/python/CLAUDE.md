@@ -14,19 +14,23 @@ libraries/python/
 └── getpatter/              # the published package (`pip install getpatter`)
     ├── __init__.py
     ├── client.py           # Patter entry point
+    ├── cli.py              # `getpatter` console-script entry point
+    ├── local_config.py     # LocalOptions + local-mode config
     ├── models.py           # public dataclasses (frozen=True)
     ├── exceptions.py       # PatterError + ErrorCode enum
     ├── pricing.py          # PricingUnit enum + provider price tables
     ├── server.py           # FastAPI app
     ├── stream_handler.py   # per-call orchestrator
-    ├── telephony/          # Twilio + Telnyx adapters (twilio.py / telnyx.py / common.py)
+    ├── telephony/          # Twilio + Telnyx + Plivo adapters (twilio.py / telnyx.py / plivo.py / common.py)
+    ├── carriers/           # carrier classes (twilio.py / telnyx.py / plivo.py)
     ├── audio/              # transcoding, pcm_mixer, background_audio
     ├── tools/              # tool_decorator, tool_executor
-    ├── providers/          # voice / LLM / STT / TTS providers
+    ├── providers/          # voice / LLM / STT / TTS provider adapters
     ├── services/           # llm_loop, metrics, sentence_chunker, text_transforms, ivr, ...
     ├── observability/      # event_bus + OTel tracing
+    ├── evals/ engines/ integrations/   # eval runner, engines, external integrations
     ├── dashboard/
-    ├── tts/ stt/           # public namespaces (env-var auto-resolve)
+    ├── llm/ tts/ stt/      # public provider namespaces (env-var auto-resolve)
     └── ...
 ```
 
@@ -45,7 +49,7 @@ pip install -e ".[dev]"                # editable install for development
 - pytest with `asyncio_mode = "auto"` — write `async def test_*`, no decorator needed.
 - Public dataclasses are `@dataclass(frozen=True)`. Tuples, not lists.
 - Async I/O everywhere. `httpx.AsyncClient`, `websockets.connect`. No `time.sleep`.
-- Logger: `logging.getLogger("patter")` — never `print()`.
+- Logger: `logging.getLogger("getpatter")` — never `print()`. Sub-namespaces like `getpatter.providers.deepgram_stt` are used per-module.
 - New config fields are optional with safe defaults (backward compat).
 - Authentic tests: mock only at paid/external boundary, tag `@pytest.mark.mocked`.
 
