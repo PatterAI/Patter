@@ -24,10 +24,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Patter repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Checkout patter-assets (private, xlsx lives here)
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           repository: PatterAI/patter-assets
           token: ${{ secrets.PATTER_ASSETS_TOKEN }}
