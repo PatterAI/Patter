@@ -84,6 +84,17 @@
   `libraries/python/getpatter/services/metrics.py`). The post-commit barge-in
   guard is untouched — the method no-ops once the turn is committed.
 
+### Security
+
+- **Bumped vulnerable transitive/runtime dependencies in the TypeScript SDK**
+  (`libraries/typescript/package-lock.json`). `ws` 8.20.0 → 8.21.0 closes an
+  uninitialised-memory disclosure (GHSA-58qx-3vcg-4xpx); `qs` 6.15.1 → 6.15.2
+  (pulled in by `express` / `body-parser`) closes a `qs.stringify` DoS
+  (GHSA-q8mj-m7cp-5q26); `brace-expansion` → 5.0.6 / 2.1.0 closes a regex DoS
+  (GHSA-jxxr-4gwj-5jf2). All within the existing semver ranges — no `package.json`
+  change, no public API change. `npm audit` now reports 0 vulnerabilities for the
+  shipped SDK.
+
 ## 0.6.3 (2026-05-29)
 
 ### Added
