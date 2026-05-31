@@ -87,7 +87,7 @@
   "devDependencies": {
     "@types/express": "^5.0.6",
     "@types/ws": "^8.5.0",
-    "@vitest/coverage-v8": "^3.2.4",
+    "@vitest/coverage-v8": "^4.1.7",
     "tsup": "^8.0.0",
     "tsx": "^4.21.0",
     "typescript": "^5.4.0",
