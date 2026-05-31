@@ -57,7 +57,7 @@ jobs:
 
       - name: Open or update docs-drift issue
         if: steps.drift.outcome == 'failure'
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             const fs = require('fs');
@@ -87,7 +87,7 @@ jobs:
 
       - name: Close docs-drift issue if clean
         if: steps.drift.outcome == 'success'
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             const { data: issues } = await github.rest.issues.listForRepo({
