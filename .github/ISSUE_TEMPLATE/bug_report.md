@@ -28,5 +28,5 @@ A clear description of the bug.
 
 ## Logs
 ```
-Paste relevant logs here (enable with logging.getLogger("patter").setLevel(logging.DEBUG))
+Paste relevant logs here (enable with logging.getLogger("getpatter").setLevel(logging.DEBUG))
 ```
