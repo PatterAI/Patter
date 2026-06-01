@@ -148,6 +148,39 @@ export interface ToolDefinition {
   readonly strict?: boolean;
 }
 
+/**
+ * Configuration for the built-in ``consult`` escalation tool.
+ *
+ * When set on an agent, Patter auto-injects a tool (default name
+ * ``consult_agent``) that the in-call agent can invoke mid-call to reach the
+ * caller's own back-office agent over HTTP for deeper reasoning, fresh
+ * information, or an action beyond the call. Patter keeps STT + LLM/voice +
+ * TTS + carrier; the back-office agent is consulted only on demand (never on
+ * the per-turn path). The tool POSTs ``{ request, call_id, caller, callee }``
+ * to {@link url}; the endpoint returns JSON with a ``reply`` / ``response`` /
+ * ``text`` string (or any JSON / plain text) and the agent speaks it.
+ *
+ * Injected in **Realtime** and **Pipeline** modes only — ElevenLabs ConvAI
+ * tools live on the ElevenLabs-hosted agent, so ``consult`` does not apply
+ * there (a warning is emitted if set with that provider).
+ */
+export interface ConsultConfig {
+  /** HTTP(S) endpoint Patter POSTs to. SSRF-validated at call start. */
+  readonly url: string;
+  /** Optional headers (e.g. an ``Authorization`` bearer). Never logged. */
+  readonly headers?: Readonly<Record<string, string>>;
+  /**
+   * Per-consult HTTP timeout in milliseconds. Higher than the generic
+   * webhook-tool default (10 000 ms) because a consult may run deeper
+   * reasoning. Default ``30000``.
+   */
+  readonly timeoutMs?: number;
+  /** Name the LLM sees for the tool. Default ``"consult_agent"``. */
+  readonly toolName?: string;
+  /** Description the LLM sees — tune to steer when the agent escalates. */
+  readonly description?: string;
+}
+
 // === Local mode ===
 
 /** Constructor options for `new Patter({...})` in local-server mode. */
@@ -377,6 +410,15 @@ export interface AgentOptions {
    * the discovered list process-wide.
    */
   readonly mcpServers?: ReadonlyArray<MCPServerConfig>;
+  /**
+   * Optional back-office "consult" escalation. When set, Patter auto-injects a
+   * ``consult_agent`` tool (Realtime + Pipeline modes) that the in-call agent
+   * can invoke to reach the caller's own orchestrator over HTTP for deeper
+   * reasoning / fresh info, then speak the reply. The orchestrator stays off
+   * the per-turn path — consulted only on demand. ``undefined`` (default)
+   * disables it. See {@link ConsultConfig}.
+   */
+  readonly consult?: ConsultConfig;
   /**
    * When ``true``, ship ``systemPrompt`` to the LLM verbatim. Default
    * (``false``) prepends a phone-friendly preamble that instructs the

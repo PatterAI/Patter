@@ -96,6 +96,64 @@ class PipelineHooks:
 
 
 @dataclass(frozen=True)
+class ConsultConfig:
+    """Configuration for the built-in ``consult`` escalation tool.
+
+    When set on an :class:`Agent`, Patter auto-injects a tool (default name
+    ``consult_agent``) that the in-call agent can invoke mid-call to reach the
+    caller's own back-office agent over HTTP for deeper reasoning, fresh
+    information, or an action beyond the call. Patter keeps STT + LLM/voice +
+    TTS + carrier; the back-office agent is consulted only on demand (it is
+    never on the per-turn path). The tool POSTs
+    ``{"request", "call_id", "caller", "callee"}`` to :attr:`url`; the endpoint
+    returns JSON with a ``reply`` / ``response`` / ``text`` string (or any JSON
+    / plain text) and the agent speaks it.
+
+    Injected in **Realtime** and **Pipeline** modes only. ElevenLabs ConvAI
+    tools live on the ElevenLabs-hosted agent, so ``consult`` does not apply
+    there (a warning is emitted if you set it with that provider).
+
+    Args:
+        url: HTTP(S) endpoint Patter POSTs to when the tool is invoked.
+            SSRF-validated at call start (private/loopback/link-local hosts and
+            non-HTTP schemes are rejected).
+        headers: Optional headers sent with the POST (e.g. an ``Authorization``
+            bearer for the orchestrator). Never logged.
+        timeout_s: Per-consult HTTP timeout in seconds. Higher than the generic
+            webhook-tool default (10 s) because a consult may run deeper
+            reasoning. Default ``30.0``.
+        tool_name: Name the LLM sees for the tool. Default ``"consult_agent"``.
+        description: Description the LLM sees — tune to steer when the agent
+            escalates.
+    """
+
+    url: str
+    headers: dict | None = None
+    timeout_s: float = 30.0
+    tool_name: str = "consult_agent"
+    description: str = (
+        "Consult your back-office agent for deeper reasoning, fresh "
+        "information, or actions beyond this call. Use when the caller asks "
+        "something you cannot answer directly."
+    )
+
+    def __post_init__(self) -> None:
+        from urllib.parse import urlparse
+
+        if not self.url:
+            raise ValueError("ConsultConfig requires a non-empty url")
+        parsed = urlparse(self.url)
+        if parsed.scheme not in ("https", "http"):
+            raise ValueError(
+                f"ConsultConfig url must be http(s), got {parsed.scheme!r}"
+            )
+        if not parsed.hostname:
+            raise ValueError("ConsultConfig url is missing a hostname")
+        if not self.tool_name:
+            raise ValueError("ConsultConfig requires a non-empty tool_name")
+
+
+@dataclass(frozen=True)
 class Agent:
     """Configuration for a local-mode voice AI agent.
 
@@ -155,6 +213,13 @@ class Agent:
     # ``tools/call``. Requires the optional ``mcp`` package — install
     # via ``pip install getpatter[mcp]``. ``None`` (default) disables MCP.
     mcp_servers: tuple | None = None
+    # Optional back-office "consult" escalation. When set, Patter auto-injects
+    # a ``consult_agent`` tool (Realtime + Pipeline modes) that the in-call
+    # agent can invoke to reach the caller's own orchestrator over HTTP for
+    # deeper reasoning / fresh info, then speak the reply. The orchestrator
+    # stays off the per-turn path — consulted only on demand. ``None`` (default)
+    # disables it. See :class:`ConsultConfig`.
+    consult: "ConsultConfig | None" = None
     # Minimum sustained voice (ms) before treating caller audio as a barge-in
     # and interrupting TTS. ``0`` disables barge-in entirely — useful on noisy
     # links (ngrok tunnels, speakerphone) where the agent can hear itself.

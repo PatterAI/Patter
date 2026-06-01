@@ -189,6 +189,32 @@ def _augment_with_builtin_handoff_tools(
     return out
 
 
+def _inject_consult_tool(agent):
+    """Return *agent* with the built-in ``consult`` tool merged into its tool
+    list when ``agent.consult`` is set; otherwise return *agent* unchanged.
+
+    Mirrors :meth:`_init_mcp_tools` — ``Agent`` is frozen, so a copy with the
+    merged tools is returned via :func:`dataclasses.replace`. Called from both
+    the Realtime and Pipeline start paths so the consult tool's schema reaches
+    the model and its handler reaches the ``ToolExecutor`` uniformly. Idempotent:
+    a no-op if a tool with the same name is already present.
+    """
+    consult = getattr(agent, "consult", None)
+    if consult is None:
+        return agent
+    from getpatter.tools.consult import build_consult_tool
+
+    consult_tool = build_consult_tool(consult)
+    existing = list(agent.tools or [])
+    if any(
+        isinstance(t, dict) and t.get("name") == consult_tool["name"] for t in existing
+    ):
+        return agent
+    import dataclasses
+
+    return dataclasses.replace(agent, tools=tuple(existing) + (consult_tool,))
+
+
 # ---------------------------------------------------------------------------
 # Audio sender protocol — abstracts Twilio vs Telnyx audio output
 # ---------------------------------------------------------------------------
@@ -998,6 +1024,9 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         # Failures are logged but not fatal — a dead MCP server should
         # not kill the entire call. Parity with TS ``initMcpTools``.
         await self._init_mcp_tools()
+        # Merge the built-in consult tool (if configured) so its schema reaches
+        # the Realtime session and its handler reaches the ToolExecutor.
+        self.agent = _inject_consult_tool(self.agent)
 
         agent_tools: list[dict] = []
         for t in self.agent.tools or []:
@@ -2470,6 +2499,9 @@ class PipelineStreamHandler(StreamHandler):
             # END_CALL_TOOL]``). Without this, pipeline-mode LLMs never see
             # the built-ins and can't initiate a handoff or hangup no matter
             # what the system prompt says.
+            # Merge the built-in consult tool (if configured) before the
+            # handoff built-ins so the pipeline LLM sees it too.
+            self.agent = _inject_consult_tool(self.agent)
             combined_tools = _augment_with_builtin_handoff_tools(
                 self.agent.tools,
                 transfer_fn=self._transfer_fn,

@@ -26,6 +26,7 @@ export type {
   CallEventHandler,
   PipelineMessageHandler,
   ToolDefinition,
+  ConsultConfig,
   PipelineHooks,
   HookContext,
 } from "./types";

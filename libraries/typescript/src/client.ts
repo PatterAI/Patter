@@ -489,6 +489,17 @@ export class Patter {
       }
     }
 
+    // The consult tool is injected only in Realtime and Pipeline modes;
+    // ElevenLabs ConvAI tools live on the ElevenLabs-hosted agent, so warn
+    // that the setting has no effect there.
+    if (working.consult && working.provider === 'elevenlabs_convai') {
+      getLogger().warn(
+        'consult is set but provider is ElevenLabs ConvAI; the consult tool ' +
+          'is only injected in Realtime and Pipeline modes and will be ignored ' +
+          'for this agent.',
+      );
+    }
+
     // Validate llm — must implement the LLMProvider interface (duck-typed on
     // ``.stream`` being a function).  Surface a clear error if the caller
     // passed a plain object literal by mistake.

@@ -1457,6 +1457,7 @@ class Patter:
         engine: Any = None,
         llm: LLMProvider | None = None,
         mcp_servers: list | None = None,
+        consult: ConsultConfig | None = None,
         prewarm_first_message: bool | None = None,
     ) -> Agent:
         """Create an ``Agent`` configuration.
@@ -1615,6 +1616,16 @@ class Patter:
         if prewarm_first_message is None:
             prewarm_first_message = False
 
+        # The consult tool is injected only in Realtime and Pipeline modes;
+        # ElevenLabs ConvAI tools live on the ElevenLabs-hosted agent, so warn
+        # that the setting will have no effect there.
+        if consult is not None and provider == "elevenlabs_convai":
+            logger.warning(
+                "consult is set but provider is ElevenLabs ConvAI; the consult "
+                "tool is only injected in Realtime and Pipeline modes and will "
+                "be ignored for this agent."
+            )
+
         return Agent(
             system_prompt=system_prompt,
             voice=voice,
@@ -1640,6 +1651,7 @@ class Patter:
             echo_cancellation=echo_cancellation,
             llm=llm,
             mcp_servers=tuple(mcp_servers) if mcp_servers is not None else None,
+            consult=consult,
             prewarm_first_message=prewarm_first_message,
             openai_realtime_reasoning_effort=openai_realtime_reasoning_effort,
             openai_realtime_input_audio_transcription_model=openai_realtime_input_audio_transcription_model,

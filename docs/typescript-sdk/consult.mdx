@@ -1,0 +1,97 @@
+---
+title: "Consult your agent"
+description: "Let an in-call Patter agent escalate to your own back-office agent over HTTP — the dispatch + consult pattern."
+---
+
+Patter conducts the call (speech-to-text, the voice agent, text-to-speech, and
+the carrier). The **consult** tool gives that in-call agent an on-demand bridge
+back to **your own agent** — reachable over HTTP — for deeper reasoning, fresh
+information, or an action beyond the call.
+
+This is the *dispatch + consult* pattern: your orchestrator (or any HTTP
+endpoint you host) stays **off the per-turn path**. It is consulted only when
+the in-call agent decides it needs help, so ordinary turns keep their low
+latency while hard turns can reach your full reasoning stack.
+
+## When to use it
+
+- The caller asks something the in-call agent can't answer from its prompt
+  (order status, account details, a policy lookup).
+- You already run an agent (e.g. an internal assistant) and want phone calls to
+  tap into it without putting it on every conversational turn.
+
+If instead you want **your LLM to drive every turn**, that is a different
+("brain-on-the-line") mode — consult is the lighter, lower-latency default.
+
+## Quickstart
+
+```ts
+import { Patter, type ConsultConfig } from 'getpatter';
+
+const phone = new Patter({ carrier: ... });
+
+const agent = phone.agent({
+  systemPrompt:
+    "You are front-desk support. If you can't answer directly, consult your back-office agent.",
+  stt: ...,            // any Patter STT (pipeline) — or use a Realtime engine
+  tts: ...,
+  consult: {
+    url: 'https://my-orchestrator.example.com/consult',
+    headers: { Authorization: `Bearer ${process.env.ORCHESTRATOR_TOKEN}` },
+    timeoutMs: 30_000,
+  },
+});
+
+await phone.serve(agent);
+```
+
+When `consult` is set, Patter auto-injects a `consult_agent` tool into the
+agent (Realtime and Pipeline modes). The model calls it with a single
+`request` string when it needs help.
+
+## The HTTP contract
+
+Patter POSTs JSON to your `url`:
+
+```json
+{
+  "request": "When does order 4815 ship?",
+  "call_id": "CA0000000000000000000000000000a001",
+  "caller": "+15555550100",
+  "callee": "+15555550199"
+}
+```
+
+Your endpoint returns JSON with a `reply` (or `response` / `text` / `result` /
+`answer` / `message`) string, which the agent speaks:
+
+```json
+{ "reply": "Order 4815 ships Tuesday by end of day." }
+```
+
+Plain text and other JSON shapes are accepted too (the raw body is spoken /
+serialized as a fallback).
+
+## `ConsultConfig`
+
+| Field | Default | Notes |
+|---|---|---|
+| `url` | — (required) | HTTP(S) endpoint. SSRF-validated at call start (private / loopback / link-local hosts and non-HTTP schemes are rejected). |
+| `headers` | `undefined` | Sent with every POST (e.g. an `Authorization` bearer). Never logged. |
+| `timeoutMs` | `30000` | Per-consult timeout — higher than the generic webhook-tool default (10 000 ms) because a consult may run deeper reasoning. |
+| `toolName` | `"consult_agent"` | The tool name the model sees. |
+| `description` | (sensible default) | Tune to steer *when* the agent escalates. |
+
+## Behaviour & limits
+
+- **Failure is graceful.** A timeout, non-2xx response, or unreachable endpoint
+  does not crash the turn — the agent speaks a short fallback line and carries
+  on.
+- **Security.** The URL is SSRF-validated; header values are never logged. The
+  URL is trusted SDK configuration (not caller-supplied).
+- **Mode support.** Injected in **Realtime** and **Pipeline** modes. ElevenLabs
+  ConvAI is **not** supported — its tools live on the ElevenLabs-hosted agent,
+  so a warning is emitted if you set `consult` with that provider.
+
+See the [Python version](/python-sdk/consult) for the same feature in
+`getpatter` for Python.

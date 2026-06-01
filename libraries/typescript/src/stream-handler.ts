@@ -24,6 +24,7 @@ import type { AgentOptions, Guardrail, HookContext, PipelineMessageHandler, Tool
 import type { MetricsStore } from './dashboard/store';
 import { getLogger } from './logger';
 import { validateTwilioSid, TRANSFER_CALL_TOOL, END_CALL_TOOL } from './server';
+import { buildConsultTool } from './consult';
 import type { ProviderPricing } from './pricing';
 import { SentenceChunker } from './sentence-chunker';
 import { PipelineHookExecutor } from './pipeline-hooks';
@@ -241,7 +242,7 @@ export interface StreamHandlerDeps {
    */
   readonly speechEvents?: import("./_speech-events").SpeechEvents;
   /** Build an AI adapter (OpenAI Realtime or ElevenLabs ConvAI). Injected to avoid circular imports. */
-  readonly buildAIAdapter: (resolvedPrompt: string) => AIAdapter;
+  readonly buildAIAdapter: (resolvedPrompt: string, tools?: readonly ToolDefinition[]) => AIAdapter;
   /** Sanitize untrusted key-value variables map. */
   readonly sanitizeVariables: (raw: Record<string, unknown>) => Record<string, string>;
   /** Replace {key} placeholders in a template string. */
@@ -1134,6 +1135,9 @@ export class StreamHandler {
     // server, ~50-200 ms total. Failures are logged but not fatal — a
     // dead MCP server should not kill the entire call.
     await this.initMcpTools();
+    // Merge the built-in consult tool (if configured) into the per-call tool
+    // list so it reaches both the Realtime adapter and the pipeline LLM loop.
+    this.injectConsultTool();
 
     if (provider === 'pipeline') {
       await this.initPipeline(resolvedPrompt);
@@ -1172,6 +1176,23 @@ export class StreamHandler {
     // the discovered tools via ``this.resolvedTools``.
     this.resolvedTools = [...(this.deps.agent.tools as ToolDefinition[] | undefined ?? []), ...discovered];
     getLogger().info(`MCP: merged ${discovered.length} tool(s) into agent`);
+  }
+
+  /**
+   * Merge the built-in ``consult`` tool into the per-call tool list when
+   * ``agent.consult`` is set, mirroring {@link initMcpTools}: the shared
+   * ``deps.agent`` is NOT mutated; the merged list is stored on
+   * ``this.resolvedTools`` so ``buildAIAdapter`` (Realtime) and the pipeline
+   * ``LLMLoop`` both see it. Idempotent — a no-op if a tool with the same name
+   * is already present.
+   */
+  private injectConsultTool(): void {
+    const consult = this.deps.agent.consult;
+    if (!consult) return;
+    const consultTool = buildConsultTool(consult);
+    const base = this.resolvedTools ?? ((this.deps.agent.tools as ToolDefinition[] | undefined) ?? []);
+    if (base.some((t) => t.name === consultTool.name)) return;
+    this.resolvedTools = [...base, consultTool];
   }
 
   /** Set the stream SID (Twilio only, called after parsing 'start' event). */
@@ -2685,7 +2706,9 @@ export class StreamHandler {
 
   private async initRealtimeAdapter(resolvedPrompt: string): Promise<void> {
     const label = this.deps.bridge.label;
-    this.adapter = this.deps.buildAIAdapter(resolvedPrompt);
+    // Pass the per-call resolved tool list (MCP + consult merges) so the
+    // Realtime session advertises them to the model, not just agent.tools.
+    this.adapter = this.deps.buildAIAdapter(resolvedPrompt, this.resolvedTools ?? undefined);
 
     // Try to adopt a Realtime WS parked during the ringing window.
     // When present we skip the cold ``adapter.connect()`` — the
