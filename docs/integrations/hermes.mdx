@@ -1,151 +1,281 @@
 ---
 title: "Hermes Agent"
-description: "Give your Hermes Agent a phone with Patter — install the skill in one line, configure your Twilio or Telnyx number, and your agent makes and receives calls."
+description: "Give your Hermes Agent a phone with Patter — connect the Patter MCP server so Hermes can place calls, or let an in-call Patter agent consult Hermes as its brain."
 icon: "phone"
 ---
 
-[Hermes Agent](https://github.com/NousResearch/hermes-agent) is a self-hosted AI assistant
-that grows with you through modular skills and persistent memory. Once you install the
-Patter skill, your Hermes Agent can place outbound calls, receive inbound calls, and use
-the full Patter SDK without any further setup on the Hermes side.
+[Hermes Agent](https://github.com/NousResearch/hermes-agent) is a self-hosted AI
+assistant that grows with you through modular skills and persistent memory. If you
+already run Hermes, Patter adds phone calling in two directions:
 
-## Install
+- **Direction A — Hermes places calls.** Connect [Patter](https://github.com/PatterAI/Patter)
+  as an MCP server and Hermes gains tools to dial out, read transcripts, end calls,
+  and inspect metrics.
+- **Direction B — Patter consults Hermes.** During a live call, a Patter agent can
+  reach back to Hermes for deeper reasoning, fresh information, or a decision the
+  in-call prompt can't make on its own.
 
-Patter skills work in every agent harness that consumes the
-[Anthropic Agent Skills](https://agentskills.io) standard — Hermes Agent included. Install
-with one command:
+Pick one direction or wire up both — they are independent.
 
-```bash
-# Install all five Patter skills
-npx skills add patterai/skills
+## Prerequisites
 
-# Or install just the one you need
-npx skills add patterai/skills --skill build-voice-agent
-```
-
-The CLI auto-detects Hermes Agent on your machine and creates symlinks from
-`~/.hermes/skills/` (or your `HERMES_HOME` override) into the canonical
-`~/.agents/skills/` directory. Restart your Hermes Agent and the agent will pick the
-skills up at session start.
-
-<Tip>
-  Pin to a specific Patter SDK version for reproducibility:
-  ```bash
-  npx skills add patterai/skills#v0.6.2 --skill build-voice-agent
-  ```
-</Tip>
-
-## Available skills
-
-| Skill | What it teaches the agent |
-|---|---|
-| [`setup-patter`](https://github.com/PatterAI/skills/tree/main/setup-patter) | Walk the user through installing Patter and obtaining provider/carrier API keys, with validation. |
-| [`build-voice-agent`](https://github.com/PatterAI/skills/tree/main/build-voice-agent) | Build a voice agent — pick between OpenAI Realtime / ElevenLabs ConvAI / STT→LLM→TTS Pipeline. |
-| [`configure-telephony`](https://github.com/PatterAI/skills/tree/main/configure-telephony) | Wire up Twilio or Telnyx — phone numbers, webhooks, tunnels, AMD, voicemail drop. |
-| [`add-tools-and-handoffs`](https://github.com/PatterAI/skills/tree/main/add-tools-and-handoffs) | Custom tools, `transfer_call`, `end_call`, output guardrails. |
-| [`inspect-calls-and-metrics`](https://github.com/PatterAI/skills/tree/main/inspect-calls-and-metrics) | Live dashboard, `CallMetrics`, cost tracking, CSV/JSON export. |
-
-Every skill ships full Python and TypeScript code examples side-by-side. Your Hermes
-Agent can pick the runtime that matches the rest of your project.
-
-## Use Patter as an MCP server (alternative path)
-
-If you want Hermes Agent to call Patter through the [Model Context Protocol](https://modelcontextprotocol.io)
-instead of (or in addition to) the skills, register the Patter MCP server with one
-command:
-
-<CodeGroup>
-
-```bash stdio
-hermes mcp install patter-voice '{
-  "command": "npx",
-  "args": ["-y", "getpatter-mcp"],
-  "env": {
-    "TWILIO_ACCOUNT_SID": "AC...",
-    "TWILIO_AUTH_TOKEN": "...",
-    "OPENAI_API_KEY": "sk-..."
-  }
-}'
-```
-
-```bash streamable-http
-hermes mcp install patter-voice '{
-  "url": "https://patter-mcp.yourdomain.com",
-  "transport": "streamable-http",
-  "headers": { "Authorization": "Bearer ..." }
-}'
-```
-
-</CodeGroup>
-
-The Patter MCP server is hosted at [`PatterAI/patter-mcp`](https://github.com/PatterAI/patter-mcp).
-Once registered, tools surface to your Hermes Agent under names like `patter-voice__make_call`,
-`patter-voice__get_transcript`, and `patter-voice__list_calls`.
-
-<Warning>
-  Allowlist outbound calls. By default, Hermes Agent may invoke MCP tools without
-  explicit approval. If you don't want your agent dialing arbitrary numbers without
-  confirmation, configure `tools.confirm: ["patter-voice__make_call"]` in your Hermes Agent
-  `~/.hermes/config.yaml`, or wrap the tool in a small plugin that gates it behind
-  user approval.
-</Warning>
-
-## Use as an optional plugin
-
-Hermes Agent supports plugin-based integrations. A Patter bundle — an
-`optional-mcps/patter-voice` manifest plus a bundled `patter-voice` skill — is
-proposed for the Hermes catalog in
-[NousResearch/hermes-agent#33937](https://github.com/NousResearch/hermes-agent/pull/33937).
-Once it is merged upstream, a single command installs both the MCP tools and
-the skill:
+Install the Patter SDK and the Patter MCP server:
 
 ```bash
-hermes plugin add patter-voice
+# Python SDK
+pip install getpatter
+
+# TypeScript SDK
+npm install getpatter
+
+# Patter MCP server (run it, or let Hermes launch it on demand)
+npx getpatter-mcp
 ```
 
-Until then, install Patter via the skills (`npx skills add patterai/skills`) or
-the MCP server path described above — both work today, with no upstream
-dependency.
+By default the MCP server speaks Streamable HTTP at `http://localhost:3000/mcp`.
+It can also run over stdio (see Direction A below). Provider and carrier keys are
+read from the environment: `OPENAI_API_KEY`, `ELEVENLABS_API_KEY`,
+`TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TELNYX_API_KEY`, and friends.
 
-## Quick start: outbound call from Hermes Agent
+---
 
-Once skills are installed and your provider/carrier keys are in `~/.hermes/.env`,
-ask your Hermes Agent something like:
+## Direction A — Hermes places calls via Patter
 
-> *"Call my plumber at +15550001234 and ask if they have time tomorrow morning.
-> Then text me the summary."*
+Hermes is a native [Model Context Protocol](https://modelcontextprotocol.io) client.
+Register the Patter MCP server under the top-level `mcp_servers` key in
+`~/.hermes/config.yaml`. The seven Patter tools then surface to Hermes:
+`make_call`, `call_third_party`, `get_calls`, `get_transcript`, `end_call`,
+`get_metrics`, and `configure_inbound` (plus a set of MCP resources).
 
-The agent loads `build-voice-agent` automatically (its description triggers on
-phrases like "call", "phone", "voicemail"), writes a small Python or TypeScript
-script using the Patter SDK, runs it, and reports the transcript back to you in
-the Hermes thread.
+### HTTP recipe
 
-If you'd prefer to skip the per-call SDK script and have the agent use the MCP
-server tools directly, ensure `patter-voice` is in your `tools.allow` list:
+Run the MCP server (`npx getpatter-mcp`) so it is listening on
+`http://localhost:3000/mcp`, then point Hermes at it:
 
 ```yaml
 # ~/.hermes/config.yaml
-tools:
-  allow:
-    - bundle-mcp
-    - patter-voice__*
+mcp_servers:
+  patter:
+    url: "http://localhost:3000/mcp"
+    # Raise the per-server timeout well above the 120s default so a long
+    # wait:true call (which blocks until the call ends) is not killed.
+    timeout: 600
+    tools:
+      include:
+        - make_call
+        - call_third_party
+        - get_calls
+        - get_transcript
+        - end_call
+        - get_metrics
+        - configure_inbound
 ```
+
+### stdio recipe
+
+Prefer to let Hermes spawn the server itself? Launch it over stdio with the
+`--stdio` flag and pass the provider keys through `env`:
+
+```yaml
+# ~/.hermes/config.yaml
+mcp_servers:
+  patter:
+    command: "npx"
+    args:
+      - "getpatter-mcp"
+      - "--stdio"
+    env:
+      OPENAI_API_KEY: "${OPENAI_API_KEY}"
+      ELEVENLABS_API_KEY: "${ELEVENLABS_API_KEY}"
+      TWILIO_ACCOUNT_SID: "${TWILIO_ACCOUNT_SID}"
+      TWILIO_AUTH_TOKEN: "${TWILIO_AUTH_TOKEN}"
+    tools:
+      include:
+        - make_call
+        - call_third_party
+        - get_calls
+        - get_transcript
+        - end_call
+        - get_metrics
+        - configure_inbound
+```
+
+<Warning>
+  **Raise the timeout for `wait:true` calls.** Hermes defaults its per-server MCP
+  timeout to 120 seconds. A phone call that runs `make_call` with `wait: true`
+  blocks until the call ends, which can easily exceed two minutes. Set
+  `timeout: 600` (ten minutes) on the `patter` server, or your long calls get cut
+  off mid-conversation and Hermes never receives the transcript.
+</Warning>
+
+### Example task
+
+Ask Hermes something like:
+
+> *"Call +15550001234 and ask whether they have an opening tomorrow morning.
+> Wait for the call to finish, then summarise what they said."*
+
+Hermes calls `make_call` with `wait: true`. The tool blocks until the call
+completes and returns the outcome plus the full transcript in one response, so
+Hermes can summarise without polling `get_transcript` separately:
+
+```json
+{
+  "name": "make_call",
+  "arguments": {
+    "to": "+15550001234",
+    "wait": true,
+    "agent": {
+      "system_prompt": "Ask whether they have an opening tomorrow morning."
+    }
+  }
+}
+```
+
+---
+
+## Direction B — Patter consults Hermes as the brain
+
+Here the roles flip: Patter runs the call (speech-to-text, the voice agent,
+text-to-speech, and the carrier) and, when the in-call agent needs help, it
+**consults Hermes** over HTTP. This is the *dispatch + consult* pattern described
+on the [Python consult page](/python-sdk/consult) and the
+[TypeScript consult page](/typescript-sdk/consult) — Hermes stays off the
+per-turn path and is only consulted when the in-call agent decides it needs to.
+
+### 1. Enable the Hermes API server
+
+Hermes exposes an OpenAI-compatible HTTP API. Enable it with environment
+variables; it listens on `127.0.0.1:8642` by default:
+
+```bash
+export API_SERVER_ENABLED=true
+export API_SERVER_KEY="choose-a-strong-key"
+```
+
+Hermes then serves `POST /v1/chat/completions` (and `POST /v1/runs` for async +
+SSE), returning the standard OpenAI shape with the answer in
+`choices[0].message.content`.
+
+### 2. Run a tiny adapter
+
+Patter's consult feature POSTs a body shaped like
+`{ "request": "...", "call_id": "...", "caller": "...", "callee": "..." }` and
+reads the reply back from a `reply` field (it also accepts `response` / `text` /
+`result` / `answer` / `message`). Hermes speaks OpenAI's chat-completions shape.
+A roughly 30-line adapter bridges the two: map `request` into an OpenAI
+`messages` array, forward to Hermes, and map `choices[0].message.content` back to
+`{ "reply": ... }`.
+
+```python
+# consult_adapter.py — bridges Patter consult -> Hermes chat completions
+import os
+import httpx
+from fastapi import FastAPI, Request
+
+app = FastAPI()
+
+HERMES_URL = os.environ["HERMES_API_URL"]          # e.g. http://hermes-host:8642
+HERMES_KEY = os.environ["API_SERVER_KEY"]
+
+@app.post("/consult")
+async def consult(req: Request) -> dict:
+    body = await req.json()
+    user_request = body.get("request", "")
+
+    payload = {
+        "model": "hermes",
+        "messages": [{"role": "user", "content": user_request}],
+    }
+    headers = {"Authorization": f"Bearer {HERMES_KEY}"}
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
+            f"{HERMES_URL}/v1/chat/completions",
+            json=payload,
+            headers=headers,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    reply = data["choices"][0]["message"]["content"]
+    return {"reply": reply}
+```
+
+### 3. Point Patter's consult URL at the adapter
+
+```python
+from getpatter import Patter, ConsultConfig
+
+phone = Patter(carrier=...)
+
+agent = phone.agent(
+    system_prompt="You are front-desk support. If you can't answer directly, "
+                  "consult your back-office agent.",
+    stt=...,
+    tts=...,
+    consult=ConsultConfig(
+        url="https://consult-adapter.example.com/consult",
+        headers={"Authorization": "Bearer ${ADAPTER_TOKEN}"},
+        timeout_s=30.0,
+    ),
+)
+
+phone.serve(agent)
+```
+
+When `consult` is set, Patter auto-injects a `consult_agent` tool into the agent
+(Realtime and Pipeline modes). The model calls it with a single `request` string,
+the adapter forwards that to Hermes, and the answer is spoken back to the caller.
+
+<Warning>
+  **Loopback / SSRF caveat.** By default Patter's consult URL validator rejects
+  loopback and private hosts (`127.0.0.1`, `localhost`, `10.x`, `172.16–31.x`,
+  `192.168.x`, link-local) as an SSRF guard, and the Hermes API server binds to
+  `127.0.0.1:8642`. When everything runs on one box, opt in with `allow_loopback`
+  (Python) / `allowLoopback` (TypeScript) so the consult URL can point at the local
+  adapter directly. The flag relaxes the loopback / private / link-local host checks
+  **for the consult URL only** — every other webhook path stays strict, and
+  non-HTTP(S) schemes are still rejected even with the flag on. Only enable it for a
+  URL you control; the consult URL is your own configuration, not caller-derived
+  input.
+
+  ```python
+  consult=ConsultConfig(
+      url="http://localhost:8000/consult",      # local adapter on loopback
+      headers={"Authorization": "Bearer ${ADAPTER_TOKEN}"},
+      timeout_s=30.0,
+      allow_loopback=True,
+  )
+  ```
+
+  ```ts
+  consult: {
+    url: 'http://localhost:8000/consult',       // local adapter on loopback
+    headers: { Authorization: `Bearer ${process.env.ADAPTER_TOKEN}` },
+    timeoutMs: 30_000,
+    allowLoopback: true,
+  }
+  ```
+
+  Prefer to keep the strict default? Expose the adapter on a routable interface or
+  hostname rather than `localhost`, and keep the adapter — not Hermes — as the public
+  hop. The adapter still reaches Hermes over loopback.
+</Warning>
 
 ## What's next
 
 - **Read the [Concepts](/concepts) page** to understand Patter's three modes
   (Realtime / ConvAI / Pipeline) and which one matches your latency / cost
   trade-off.
+- **Consult feature reference**: [Python](/python-sdk/consult) ·
+  [TypeScript](/typescript-sdk/consult).
 - **Get a phone number**: [Twilio console](https://console.twilio.com/us1/develop/phone-numbers/manage/incoming)
   or [Telnyx portal](https://portal.telnyx.com/#/app/numbers/my-numbers).
-- **Provision your provider keys**: the `setup-patter` skill walks the agent
-  (and you) through every provider dashboard, one at a time, with curl
-  validation for each key.
-- **Browse the skill content**: [https://github.com/PatterAI/skills](https://github.com/PatterAI/skills).
 
 ## Need help?
 
 - Patter SDK source: [https://github.com/PatterAI/Patter](https://github.com/PatterAI/Patter)
-- Patter Skills repository: [https://github.com/PatterAI/skills](https://github.com/PatterAI/skills)
+- Patter MCP server: [https://github.com/PatterAI/patter-mcp](https://github.com/PatterAI/patter-mcp)
 - Patter Discord: [https://discord.gg/patter](https://discord.gg/patter)
 - Hermes Agent docs: [https://github.com/NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)

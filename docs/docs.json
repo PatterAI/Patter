@@ -164,6 +164,7 @@
                     ]
                   },
                   "python-sdk/tools",
+                  "python-sdk/consult",
                   "python-sdk/guardrails",
                   "python-sdk/events",
                   "python-sdk/features"
@@ -296,6 +297,7 @@
                     ]
                   },
                   "typescript-sdk/tools",
+                  "typescript-sdk/consult",
                   "typescript-sdk/guardrails",
                   "typescript-sdk/events",
                   "typescript-sdk/features"

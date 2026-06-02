@@ -1,135 +1,300 @@
 ---
 title: "OpenClaw"
-description: "Give your OpenClaw agent a phone with Patter — install the skill in one line, configure your Twilio, Telnyx, or Plivo number, and your agent answers calls."
+description: "Give an OpenClaw agent a phone with Patter — connect patter-mcp as an MCP server to place calls, or point Patter consult at OpenClaw to drive hard turns mid-call."
 icon: "phone"
 ---
 
-[OpenClaw](https://openclaw.ai) is a self-hosted AI assistant gateway that lets one or
-more LLM-backed agents act on your behalf across WhatsApp, Telegram, Discord, iMessage,
-and more. Once you install the Patter skill, your OpenClaw agent can place outbound
-calls, receive inbound calls, and use the full Patter SDK without any further setup
-on the OpenClaw side.
+[OpenClaw](https://openclaw.ai) is a self-hosted AI assistant gateway: one or more
+LLM-backed agents act on your behalf across chat surfaces, and it ships a native
+[Model Context Protocol](https://modelcontextprotocol.io) client. This guide assumes you
+already run OpenClaw and want to add phone calling with Patter.
 
-## Install
+There are two directions, and they compose:
 
-Patter skills work in every agent harness that consumes the
-[Anthropic Agent Skills](https://agentskills.io) standard — OpenClaw included. Install
-with one command:
+- **Direction A — OpenClaw places calls via Patter.** Connect the `patter-mcp` server
+  so your OpenClaw agent can dial, wait for a call to finish, and read back the
+  transcript as MCP tools.
+- **Direction B — Patter consults OpenClaw mid-call.** Point Patter's `consult`
+  feature at a small adapter so an in-call Patter agent can escalate a hard turn to
+  your OpenClaw agent over HTTP.
+
+Pick either, or wire both for a full loop: OpenClaw starts the call, and the in-call
+agent calls back into OpenClaw when it needs deeper reasoning.
+
+## Prerequisites
+
+Install Patter and run the MCP server. Either SDK works — the MCP server is the same
+binary regardless of which SDK you build agents with.
 
 ```bash
-# Install all five Patter skills
-npx skills add patterai/skills
+# Python
+pip install getpatter
 
-# Or install just the one you need
-npx skills add patterai/skills --skill build-voice-agent
+# TypeScript
+npm install getpatter
 ```
 
-The CLI auto-detects OpenClaw on your machine and creates symlinks from
-`~/.openclaw/skills/` (or your `CLAWD_HOME` override) into the canonical
-`~/.agents/skills/` directory. Restart your Gateway and the agent will pick the
-skills up at session start.
+```bash
+# Run the Patter MCP server (Streamable HTTP on :3000 by default)
+npx getpatter-mcp
+```
 
-<Tip>
-  Pin to a specific Patter SDK version for reproducibility:
-  ```bash
-  npx skills add patterai/skills#v0.6.2 --skill build-voice-agent
-  ```
-</Tip>
+The server is hosted at [`PatterAI/patter-mcp`](https://github.com/PatterAI/patter-mcp)
+and listens on `http://localhost:3000/mcp`. Provider and carrier keys
+(`OPENAI_API_KEY`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TELNYX_API_KEY`, …) are
+read from the server's environment.
 
-## Available skills
+## Direction A — OpenClaw places calls via Patter
 
-| Skill | What it teaches the agent |
+OpenClaw reads MCP servers from `~/.openclaw/openclaw.json` (JSON5) under
+`mcp.servers.<name>`. Add a `patter` server using either transport below.
+
+### Option 1 — Streamable HTTP (server already running)
+
+This connects to the `npx getpatter-mcp` process from the prerequisites.
+
+```json5
+{
+  mcp: {
+    servers: {
+      patter: {
+        url: "http://localhost:3000/mcp",
+        transport: "streamable-http",
+        // Raise above the ~20s default — a phone call runs longer (see gotchas).
+        timeout: 120,
+        toolFilter: {
+          include: [
+            "make_call",
+            "call_third_party",
+            "get_calls",
+            "get_transcript",
+            "end_call",
+            "get_metrics",
+            "configure_inbound",
+          ],
+        },
+      },
+    },
+  },
+}
+```
+
+### Option 2 — stdio (OpenClaw launches the server)
+
+Let OpenClaw spawn the server itself over stdio. The `--stdio` flag switches the
+binary from its default HTTP transport to stdio.
+
+```json5
+{
+  mcp: {
+    servers: {
+      patter: {
+        command: "npx",
+        args: ["getpatter-mcp", "--stdio"],
+        timeout: 120,
+        toolFilter: {
+          include: [
+            "make_call",
+            "call_third_party",
+            "get_calls",
+            "get_transcript",
+            "end_call",
+            "get_metrics",
+            "configure_inbound",
+          ],
+        },
+      },
+    },
+  },
+}
+```
+
+### The seven tools
+
+| Tool | What it does |
 |---|---|
-| [`setup-patter`](https://github.com/PatterAI/skills/tree/main/setup-patter) | Walk the user through installing Patter and obtaining provider/carrier API keys, with validation. |
-| [`build-voice-agent`](https://github.com/PatterAI/skills/tree/main/build-voice-agent) | Build a voice agent — pick between OpenAI Realtime / ElevenLabs ConvAI / STT→LLM→TTS Pipeline. |
-| [`configure-telephony`](https://github.com/PatterAI/skills/tree/main/configure-telephony) | Wire up Twilio, Telnyx, or Plivo — phone numbers, webhooks, tunnels, AMD, voicemail drop. |
-| [`add-tools-and-handoffs`](https://github.com/PatterAI/skills/tree/main/add-tools-and-handoffs) | Custom tools, `transfer_call`, `end_call`, output guardrails. |
-| [`inspect-calls-and-metrics`](https://github.com/PatterAI/skills/tree/main/inspect-calls-and-metrics) | Live dashboard, `CallMetrics`, cost tracking, CSV/JSON export. |
+| `make_call` | Place an outbound call. With `wait: true` it blocks until the call ends and returns the outcome plus transcript. |
+| `call_third_party` | Bring a third party onto an existing call. |
+| `get_calls` | List recent calls and their status. |
+| `get_transcript` | Fetch the transcript for a call. |
+| `end_call` | Hang up an in-progress call. |
+| `get_metrics` | Read latency / token / cost metrics. |
+| `configure_inbound` | Configure how inbound calls are answered. |
 
-Every skill ships full Python and TypeScript code examples side-by-side. Your OpenClaw
-agent can pick the runtime that matches the rest of your project.
-
-## Use Patter as an MCP server (alternative path)
-
-If you want OpenClaw to call Patter through the [Model Context Protocol](https://modelcontextprotocol.io)
-instead of (or in addition to) the skills, register the Patter MCP server with one
-command:
-
-<CodeGroup>
-
-```bash stdio
-openclaw mcp set patter '{
-  "command": "npx",
-  "args": ["-y", "getpatter-mcp"],
-  "env": {
-    "TWILIO_ACCOUNT_SID": "AC...",
-    "TWILIO_AUTH_TOKEN": "...",
-    "OPENAI_API_KEY": "sk-..."
-  }
-}'
-```
-
-```bash streamable-http
-openclaw mcp set patter '{
-  "url": "https://patter-mcp.yourdomain.com",
-  "transport": "streamable-http",
-  "headers": { "Authorization": "Bearer ..." }
-}'
-```
-
-</CodeGroup>
-
-The Patter MCP server is hosted at [`PatterAI/patter-mcp`](https://github.com/PatterAI/patter-mcp).
-Once registered, tools surface to your OpenClaw agent under names like `patter__make_call`,
-`patter__get_transcript`, and `patter__list_calls`.
+### Two gotchas
 
 <Warning>
-  Allowlist outbound calls. OpenClaw's `before_tool_call.requireApproval` hook
-  applies to native plugins but **not** to MCP tools. If you don't want your agent
-  dialing arbitrary numbers without confirmation, configure
-  `tools.elevated: ["patter__make_call"]` in your OpenClaw `config.yaml`, or wrap
-  the tool in a small native plugin that gates it behind user approval.
+  **1. Raise the MCP timeout above the default.** OpenClaw's default per-server MCP
+  timeout is around 20 seconds. A phone call runs far longer than that, so a
+  `make_call` with `wait: true` gets killed before it can return. Set `timeout: 120`
+  (or higher for long calls) on the `patter` server, as shown above.
+
+  **2. Allowlist the MCP tool group in the sandbox.** MCP tools live under the
+  `bundle-mcp` group and must be explicitly allowed for the sandboxed agent.
+  Without this, the tools register but the agent cannot call them.
+
+  ```json5
+  {
+    tools: {
+      sandbox: {
+        tools: {
+          // Allow the whole MCP bundle…
+          alsoAllow: ["bundle-mcp"],
+          // …or scope to just the Patter tools:
+          // alsoAllow: ["patter__*"],
+        },
+      },
+    },
+  }
+  ```
 </Warning>
 
-## Quick start: outbound call from OpenClaw
+### Example: place a call and read the result
 
-Once skills are installed and your provider/carrier keys are in `~/.openclaw/.env`,
-ask your OpenClaw agent something like:
+Once the server is connected and allowlisted, ask your OpenClaw agent:
 
-> *"Call my plumber at +15550001234 and ask if they have time tomorrow morning.
-> Then text me the summary."*
+> *"Call the clinic at +15555550100 and ask whether they have any openings this
+> Friday afternoon. Wait for the call to finish and tell me what they said."*
 
-The agent loads `build-voice-agent` automatically (its description triggers on
-phrases like "call", "phone", "voicemail"), writes a small Python or TypeScript
-script using the Patter SDK, runs it, and reports the transcript back to you in
-the OpenClaw thread.
+The agent invokes `make_call` with `wait: true`. Patter dials, runs the
+conversation, and the tool returns the call outcome and full transcript in one
+response, which the agent summarizes back to you:
 
-If you'd prefer to skip the per-call SDK script and have the agent use the MCP
-server tools directly, ensure `patter` is in your `tools.allow` list:
-
-```yaml
-# ~/.openclaw/config.yaml
-tools:
-  allow:
-    - bundle-mcp
-    - patter__*
+```json
+{
+  "tool": "make_call",
+  "arguments": {
+    "to": "+15555550100",
+    "wait": true,
+    "objective": "Ask whether they have openings this Friday afternoon."
+  }
+}
 ```
+
+## Direction B — Patter consults OpenClaw mid-call
+
+In this direction Patter conducts the call (speech-to-text, the voice agent,
+text-to-speech, and the carrier) and OpenClaw stays off the per-turn path. When the
+in-call agent hits a turn it can't answer, Patter's `consult` tool POSTs the request to
+an HTTP endpoint you host, and speaks the reply. See the consult feature pages for the
+[Python SDK](/python-sdk/consult) and the [TypeScript SDK](/typescript-sdk/consult).
+
+OpenClaw exposes an OpenAI-compatible HTTP API at `POST /v1/chat/completions`. It is
+**disabled by default**; enable it in `~/.openclaw/openclaw.json`:
+
+```json5
+{
+  gateway: {
+    http: {
+      endpoints: {
+        chatCompletions: {
+          enabled: true,
+        },
+      },
+    },
+  },
+}
+```
+
+The `model` field on that endpoint names the agent target — use `"openclaw"`.
+
+### Point `consult.url` at a small adapter
+
+Patter's consult contract and OpenClaw's chat-completions shape are not identical, so a
+~30-line adapter sits in between. It maps Patter's `{ request, call_id, caller, callee }`
+body into an OpenAI `messages` array, and maps `choices[0].message.content` back into a
+`{ reply }` object that Patter speaks.
+
+```python
+# adapter.py — forwards Patter consult requests to OpenClaw
+from fastapi import FastAPI, Request
+import httpx
+
+app = FastAPI()
+
+OPENCLAW_URL = "http://openclaw-host:18789/v1/chat/completions"
+
+@app.post("/consult")
+async def consult(req: Request):
+    body = await req.json()
+    # Patter -> OpenAI chat-completions
+    payload = {
+        "model": "openclaw",
+        "messages": [{"role": "user", "content": body["request"]}],
+    }
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(OPENCLAW_URL, json=payload)
+        resp.raise_for_status()
+        content = resp.json()["choices"][0]["message"]["content"]
+    # OpenAI chat-completions -> Patter
+    return {"reply": content}
+```
+
+Then point Patter at the adapter:
+
+```python
+from getpatter import Patter, ConsultConfig
+
+phone = Patter(carrier=...)
+
+agent = phone.agent(
+    system_prompt="You are front-desk support. If you can't answer directly, "
+                  "consult your back-office agent.",
+    stt=...,
+    tts=...,
+    consult=ConsultConfig(
+        url="https://adapter.example.com/consult",
+        timeout_s=30.0,
+    ),
+)
+
+phone.serve(agent)
+```
+
+<Warning>
+  **Loopback / SSRF caveat.** By default Patter's consult URL validator rejects
+  loopback and private hosts (`127.0.0.1`, `localhost`, `10.x`, `172.16–31.x`,
+  `192.168.x`, link-local) as an SSRF guard, so `http://localhost/...` will not pass
+  out of the box. When the adapter runs on the same machine, opt in with
+  `allow_loopback` (Python) / `allowLoopback` (TypeScript). The flag relaxes the
+  loopback / private / link-local host checks **for the consult URL only** — every
+  other webhook path stays strict, and non-HTTP(S) schemes are still rejected even
+  with the flag on. Only enable it for a URL you control; the consult URL is your own
+  configuration, not caller-derived input.
+
+  ```python
+  # Python — point consult at a local adapter on loopback
+  consult=ConsultConfig(
+      url="http://localhost:8000/consult",
+      timeout_s=30.0,
+      allow_loopback=True,
+  )
+  ```
+
+  ```ts
+  // TypeScript — point consult at a local adapter on loopback
+  consult: {
+    url: 'http://localhost:8000/consult',
+    timeoutMs: 30_000,
+    allowLoopback: true,
+  }
+  ```
+
+  If you prefer to keep the strict default, bind the adapter to a routable interface
+  or hostname instead and give Patter that address.
+</Warning>
 
 ## What's next
 
-- **Read the [Concepts](/concepts) page** to understand Patter's three modes
-  (Realtime / ConvAI / Pipeline) and which one matches your latency / cost
-  trade-off.
+- **Consult feature**: [Python](/python-sdk/consult) · [TypeScript](/typescript-sdk/consult).
+- **Concepts**: read the [Concepts](/concepts) page to pick a mode
+  (Realtime / ConvAI / Pipeline) for the in-call agent.
 - **Get a phone number**: [Twilio console](https://console.twilio.com/us1/develop/phone-numbers/manage/incoming)
   or [Telnyx portal](https://portal.telnyx.com/#/app/numbers/my-numbers).
-- **Provision your provider keys**: the `setup-patter` skill walks the agent
-  (and you) through every provider dashboard, one at a time, with curl
-  validation for each key.
-- **Browse the skill content**: [https://github.com/PatterAI/skills](https://github.com/PatterAI/skills).
 
 ## Need help?
 
 - Patter SDK source: [https://github.com/PatterAI/Patter](https://github.com/PatterAI/Patter)
-- Patter Skills repository: [https://github.com/PatterAI/skills](https://github.com/PatterAI/skills)
+- Patter MCP server: [https://github.com/PatterAI/patter-mcp](https://github.com/PatterAI/patter-mcp)
 - Patter Discord: [https://discord.gg/patter](https://discord.gg/patter)
 - OpenClaw docs: [https://docs.openclaw.ai](https://docs.openclaw.ai)
