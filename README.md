@@ -360,3 +360,21 @@ Please open an issue before submitting large changes so we can discuss the appro
 ## License
 
 MIT — see [LICENSE](./LICENSE).
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=PatterAI%2FPatter&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=PatterAI/Patter&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=PatterAI/Patter&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=PatterAI/Patter&type=date&legend=top-left" />
+ </picture>
+</a>
+
+## Contributors
+
+Thanks to all our amazing contributors!
+
+<a href="https://github.com/PatterAI/Patter/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=PatterAI/Patter" />
+</a>
