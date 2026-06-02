@@ -22,6 +22,21 @@
   static `agent.tools` were). `libraries/python/getpatter/tools/consult.py`,
   `libraries/typescript/src/consult.ts`.
 
+- **`ConsultConfig.allow_loopback` / `allowLoopback` — opt-in to point
+  `consult` at a trusted local agent.** New optional flag (default `False` /
+  `undefined`) on `ConsultConfig`. The consult URL is SSRF-validated at build
+  time, which by default rejects loopback / private / link-local hosts. Set
+  `allow_loopback=True` (Python) / `allowLoopback: true` (TS) to relax those
+  host checks for the consult URL only — e.g. a back-office orchestrator on
+  `127.0.0.1`, `localhost`, or an RFC1918 private host. Non-HTTP(S) schemes are
+  still rejected even with the flag, and every other webhook path stays strict;
+  the relaxation is scoped to the developer-configured consult endpoint, which
+  is SDK-user config, not caller input. Cloud-metadata hostnames also become
+  reachable when opted in — only enable for URLs you control.
+  `libraries/python/getpatter/models.py`,
+  `libraries/python/getpatter/tools/tool_executor.py`,
+  `libraries/typescript/src/types.ts`, `libraries/typescript/src/server.ts`.
+
 - **Dashboard: Plivo carrier support in the UI.** The call dashboard now
   renders a Plivo `CarrierBadge` and maps Plivo calls across the cost,
   live-call, and metrics panels, alongside Twilio and Telnyx

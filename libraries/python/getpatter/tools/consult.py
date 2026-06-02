@@ -48,8 +48,14 @@ def build_consult_tool(config: "ConsultConfig") -> dict:
     ``transfer_call`` / ``end_call`` tools use — ``{name, description,
     parameters, handler}`` — so it merges into ``agent.tools`` and is dispatched
     by the existing ``ToolExecutor`` in both Realtime and Pipeline modes.
+
+    When ``config.allow_loopback`` is ``True`` the loopback / private / link-local
+    host checks are relaxed for this URL only (for trusted, developer-configured
+    local agents); the non-HTTP(S) scheme check still applies.
     """
-    _validate_webhook_url(config.url)  # raises on SSRF / bad scheme
+    _validate_webhook_url(
+        config.url, allow_loopback=config.allow_loopback
+    )  # raises on SSRF / bad scheme
 
     url = config.url
     headers = dict(config.headers or {})

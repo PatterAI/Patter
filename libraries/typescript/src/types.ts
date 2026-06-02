@@ -179,6 +179,23 @@ export interface ConsultConfig {
   readonly toolName?: string;
   /** Description the LLM sees — tune to steer when the agent escalates. */
   readonly description?: string;
+  /**
+   * Opt-in: allow {@link url} to point at a loopback / private / link-local
+   * host (e.g. a back-office agent on ``127.0.0.1`` or an RFC1918 LAN host).
+   *
+   * Default ``false`` (or ``undefined``) — the URL is SSRF-validated and
+   * loopback/private/link-local targets are rejected, preserving the strict
+   * default behaviour. Set ``true`` ONLY for a trusted, developer-configured
+   * local agent: the URL is your own config, not caller-derived input.
+   *
+   * Even when ``true``, non-HTTP(S) schemes (``file:``, ``javascript:`` …)
+   * are still rejected. Note: opting in also makes cloud-metadata hostnames
+   * (``metadata``, ``metadata.google.internal``, ``metadata.azure.com``) and
+   * the IMDS IP ``169.254.169.254`` reachable — an accepted tradeoff for a URL
+   * you control. Scopes ONLY to
+   * the consult tool; the generic webhook-tool path stays strict.
+   */
+  readonly allowLoopback?: boolean;
 }
 
 // === Local mode ===

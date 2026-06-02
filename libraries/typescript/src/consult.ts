@@ -43,7 +43,10 @@ const REPLY_KEYS = ['reply', 'response', 'text', 'result', 'answer', 'message'] 
  * by ``DefaultToolExecutor`` in both Realtime and Pipeline modes.
  */
 export function buildConsultTool(config: ConsultConfig): ToolDefinition {
-  validateWebhookUrl(config.url); // throws on SSRF / bad scheme
+  // SSRF guard at build time. ``allowLoopback`` (opt-in, default false) relaxes
+  // loopback/private/link-local targets for a trusted local back-office agent;
+  // the non-HTTP(S) scheme rejection is never relaxed.
+  validateWebhookUrl(config.url, config.allowLoopback ?? false); // throws on SSRF / bad scheme
 
   const url = config.url;
   const headers: Record<string, string> = { ...(config.headers ?? {}), 'Content-Type': 'application/json' };

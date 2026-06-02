@@ -56,6 +56,64 @@ def test_build_consult_tool_rejects_ssrf():
         build_consult_tool(ConsultConfig(url="http://169.254.169.254/consult"))
 
 
+def test_consult_config_allow_loopback_defaults_false():
+    # Opt-in flag is off by default → backward-compatible strict behaviour.
+    assert ConsultConfig(url="https://orchestrator.example.com").allow_loopback is False
+
+
+def test_build_consult_tool_rejects_loopback_by_default():
+    # Without the opt-in flag, a loopback URL is rejected by the real guard.
+    with pytest.raises(ValueError):
+        build_consult_tool(ConsultConfig(url="http://127.0.0.1:8642/consult"))
+    with pytest.raises(ValueError):
+        build_consult_tool(ConsultConfig(url="http://localhost:8642/consult"))
+
+
+def test_build_consult_tool_allows_loopback_ip_when_opted_in():
+    # allow_loopback=True exercises the REAL validator (no mock) and permits a
+    # developer-configured loopback IP — the tool builds successfully.
+    tool = build_consult_tool(
+        ConsultConfig(url="http://127.0.0.1:8642/consult", allow_loopback=True)
+    )
+    assert tool["name"] == "consult_agent"
+    assert callable(tool["handler"])
+
+
+def test_build_consult_tool_allows_localhost_when_opted_in():
+    tool = build_consult_tool(
+        ConsultConfig(url="http://localhost:8642/consult", allow_loopback=True)
+    )
+    assert callable(tool["handler"])
+
+
+def test_build_consult_tool_allows_rfc1918_private_when_opted_in():
+    # A private back-office host (RFC1918) is reachable when opted in.
+    tool = build_consult_tool(
+        ConsultConfig(url="http://10.0.0.5:8642/consult", allow_loopback=True)
+    )
+    assert callable(tool["handler"])
+
+
+def test_build_consult_tool_still_rejects_bad_scheme_when_opted_in():
+    # The non-HTTP(S) scheme rejection is ALWAYS enforced, even with the flag.
+    with pytest.raises(ValueError):
+        build_consult_tool(
+            ConsultConfig(url="ftp://127.0.0.1/consult", allow_loopback=True)
+        )
+
+
+def test_webhook_tool_path_stays_strict_by_default():
+    # The shared validator is used by the generic webhook-tool executor path,
+    # which must stay strict regardless of the consult opt-in. The default
+    # (no allow_loopback) still rejects loopback.
+    from getpatter.tools.tool_executor import _validate_webhook_url
+
+    with pytest.raises(ValueError):
+        _validate_webhook_url("http://127.0.0.1:8642/webhook")
+    with pytest.raises(ValueError):
+        _validate_webhook_url("http://localhost/webhook")
+
+
 def test_build_consult_tool_shape():
     tool = build_consult_tool(
         ConsultConfig(url="https://orchestrator.example.com/consult")
@@ -163,7 +221,11 @@ class _CapturingServer:
 def allow_loopback(monkeypatch):
     # Relax ONLY the SSRF guard so the consult handler can reach the
     # loopback-bound test server. The guard itself is tested separately.
-    monkeypatch.setattr(consult_mod, "_validate_webhook_url", lambda _url: None)
+    # (Signature mirrors the real ``_validate_webhook_url`` — it now accepts a
+    # keyword-only ``allow_loopback`` that ``build_consult_tool`` forwards.)
+    monkeypatch.setattr(
+        consult_mod, "_validate_webhook_url", lambda _url, *, allow_loopback=False: None
+    )
 
 
 @pytest.mark.integration

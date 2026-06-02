@@ -125,6 +125,17 @@ class ConsultConfig:
         tool_name: Name the LLM sees for the tool. Default ``"consult_agent"``.
         description: Description the LLM sees — tune to steer when the agent
             escalates.
+        allow_loopback: Opt-in escape hatch for pointing ``consult`` at a
+            **trusted, developer-configured local agent** (e.g. a back-office
+            orchestrator on ``127.0.0.1`` or an RFC1918 private host). Default
+            ``False`` keeps the strict SSRF guard (loopback / private /
+            link-local hosts rejected). When ``True``, those host checks are
+            relaxed for the consult URL only — non-HTTP(S) schemes are STILL
+            rejected, and every other webhook path stays strict. Because the
+            consult URL is SDK-user configuration (not caller input), relaxing
+            it is safe; note that cloud-metadata endpoints (hostnames and the
+            IMDS IP ``169.254.169.254``) also become reachable when opted in —
+            only enable this for URLs you control.
     """
 
     url: str
@@ -136,6 +147,7 @@ class ConsultConfig:
         "information, or actions beyond this call. Use when the caller asks "
         "something you cannot answer directly."
     )
+    allow_loopback: bool = False
 
     def __post_init__(self) -> None:
         from urllib.parse import urlparse

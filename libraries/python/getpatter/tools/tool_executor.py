@@ -117,7 +117,7 @@ _BLOCKED_HOSTNAMES = frozenset(
 )
 
 
-def _validate_webhook_url(url: str) -> None:
+def _validate_webhook_url(url: str, *, allow_loopback: bool = False) -> None:
     """Block SSRF — reject private IPs, loopback, non-HTTP(S) schemes.
 
     NOTE: This check is a best-effort filter.  DNS rebinding attacks can
@@ -125,6 +125,13 @@ def _validate_webhook_url(url: str) -> None:
     request time.  The real protection is that tool webhook URLs are
     supplied by the SDK user (not by callers), so they are trusted
     configuration values.  Do not expose this function to untrusted input.
+
+    ``allow_loopback`` (default ``False``) is an opt-in relaxation used ONLY by
+    the ``consult`` tool, where the orchestrator may legitimately live on a
+    trusted local/private host. When ``True``, the blocked-hostname check and
+    the private/loopback/link-local/reserved IP rejection are skipped — but the
+    non-HTTP(S) scheme rejection and the non-empty-hostname requirement still
+    apply. Every other caller leaves this ``False`` and stays strict.
     """
     parsed = urlparse(url)
     if parsed.scheme not in ("https", "http"):
@@ -132,30 +139,31 @@ def _validate_webhook_url(url: str) -> None:
     hostname = parsed.hostname or ""
     if not hostname:
         raise ValueError("Webhook URL is missing a hostname")
-    # Reject known-dangerous hostnames up front, before any IP parsing, so
-    # that aliases like `localhost` or cloud metadata endpoints are blocked
-    # even when they do not resolve to a literal IP in the URL string.
-    if hostname.lower() in _BLOCKED_HOSTNAMES:
-        raise ValueError(f"Webhook URL points to a blocked hostname: {hostname!r}")
-    # Block literal private/loopback IP addresses in the URL itself.
-    # We intentionally avoid blocking based on DNS resolution here because
-    # synchronous socket.gethostbyname() would block the async event loop.
-    try:
-        addr = ipaddress.ip_address(hostname)
-        if (
-            addr.is_private
-            or addr.is_loopback
-            or addr.is_link_local
-            or addr.is_reserved
-        ):
-            raise ValueError(
-                f"Webhook URL points to a private/reserved address: {hostname!r}"
-            )
-    except ValueError as exc:
-        # Re-raise only our own ValueError (private IP rejection), not the
-        # ip_address() parsing error which just means it's a hostname.
-        if "private" in str(exc) or "reserved" in str(exc):
-            raise
+    if not allow_loopback:
+        # Reject known-dangerous hostnames up front, before any IP parsing, so
+        # that aliases like `localhost` or cloud metadata endpoints are blocked
+        # even when they do not resolve to a literal IP in the URL string.
+        if hostname.lower() in _BLOCKED_HOSTNAMES:
+            raise ValueError(f"Webhook URL points to a blocked hostname: {hostname!r}")
+        # Block literal private/loopback IP addresses in the URL itself.
+        # We intentionally avoid blocking based on DNS resolution here because
+        # synchronous socket.gethostbyname() would block the async event loop.
+        try:
+            addr = ipaddress.ip_address(hostname)
+            if (
+                addr.is_private
+                or addr.is_loopback
+                or addr.is_link_local
+                or addr.is_reserved
+            ):
+                raise ValueError(
+                    f"Webhook URL points to a private/reserved address: {hostname!r}"
+                )
+        except ValueError as exc:
+            # Re-raise only our own ValueError (private IP rejection), not the
+            # ip_address() parsing error which just means it's a hostname.
+            if "private" in str(exc) or "reserved" in str(exc):
+                raise
 
 
 class ToolExecutor:

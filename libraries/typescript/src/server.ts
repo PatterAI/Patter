@@ -190,8 +190,19 @@ export function telnyxHangupOutcome(cause: string): CallOutcome | null {
  *
  * Mirrors Python's ``ipaddress.ip_address(...).is_private /
  * .is_loopback / .is_link_local / .is_reserved`` behaviour.
+ *
+ * URLs validated here are SDK-user config, not caller-derived input. When
+ * *allowLoopback* is ``true`` (opt-in, consult tool only) the loopback /
+ * private / link-local rejections AND the cloud-metadata hostname block are
+ * skipped, letting a developer point at a trusted local agent. The scheme
+ * check is NEVER relaxed — non-HTTP(S) URLs are always rejected. Every other
+ * caller relies on the strict default (``allowLoopback = false``).
+ *
+ * @param url            The webhook URL to validate.
+ * @param allowLoopback  Opt-in: permit loopback/private/link-local hosts
+ *                       (default ``false`` — strict SSRF guard).
  */
-export function validateWebhookUrl(url: string): void {
+export function validateWebhookUrl(url: string, allowLoopback = false): void {
   const parsed = new URL(url);
   if (!['http:', 'https:'].includes(parsed.protocol)) {
     throw new Error(`Invalid webhook URL scheme: ${parsed.protocol}`);
@@ -201,6 +212,15 @@ export function validateWebhookUrl(url: string): void {
   // hostname/IP comparisons (hex digits are case-insensitive in IPv6).
   const rawHost = parsed.hostname;
   const host = rawHost.replace(/^\[/, '').replace(/\]$/, '').toLowerCase();
+
+  // ``allowLoopback`` is an opt-in escape hatch for trusted, developer-
+  // configured local agents (the consult tool). It relaxes the loopback /
+  // private / link-local rejections below but NEVER the scheme check above —
+  // a developer-specified URL is still not allowed to be ``file:`` etc. Every
+  // other caller passes the strict default (``false``).
+  if (allowLoopback) {
+    return;
+  }
 
   // --- Blocked hostnames (case-insensitive, exact match) ------------------
   const BLOCKED_HOSTNAMES = new Set([

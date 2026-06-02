@@ -81,6 +81,37 @@ serialized as a fallback).
 | `timeout_s` | `30.0` | Per-consult timeout — higher than the generic webhook-tool default (10 s) because a consult may run deeper reasoning. |
 | `tool_name` | `"consult_agent"` | The tool name the model sees. |
 | `description` | (sensible default) | Tune to steer *when* the agent escalates. |
+| `allow_loopback` | `False` | Opt-in: permit a loopback / private / link-local `url` (e.g. a local back-office agent on `127.0.0.1` or an RFC1918 host). See [Pointing consult at a local agent](#pointing-consult-at-a-local-agent). |
+
+## Pointing consult at a local agent
+
+By default the consult URL is SSRF-validated and loopback / private / link-local
+targets are rejected — so `http://localhost:8000/consult` will not pass. When your
+back-office agent (or a thin adapter) runs on the same machine, set
+`allow_loopback=True` to relax that check:
+
+```python
+agent = phone.agent(
+    system_prompt="...",
+    consult=ConsultConfig(
+        url="http://localhost:8000/consult",   # local agent on loopback
+        timeout_s=30.0,
+        allow_loopback=True,
+    ),
+)
+```
+
+What the flag does:
+
+- **Scope.** Relaxes the loopback (`127.0.0.0/8`, `::1`, `localhost`), RFC1918
+  private (`10/8`, `172.16/12`, `192.168/16`), and link-local host checks **for the
+  consult URL only**. The generic webhook-tool validator path — which can be reached
+  by tool / LLM input — stays strict and is unaffected.
+- **Always enforced.** Non-HTTP(S) schemes (`file:`, `javascript:`, …) are rejected
+  even with the flag on.
+- **Why it is safe.** The consult URL is SDK-user configuration, not caller-derived
+  input. Cloud-metadata hostnames also become reachable when opted in — only enable
+  the flag for a URL you control.
 
 ## Behaviour & limits
 
@@ -88,7 +119,9 @@ serialized as a fallback).
   does not crash the turn — the agent speaks a short fallback line and carries
   on.
 - **Security.** The URL is SSRF-validated; header values are never logged. The
-  URL is trusted SDK configuration (not caller-supplied).
+  URL is trusted SDK configuration (not caller-supplied). To point consult at a
+  local agent, opt in with `allow_loopback=True` — see
+  [Pointing consult at a local agent](#pointing-consult-at-a-local-agent).
 - **Mode support.** Injected in **Realtime** and **Pipeline** modes. ElevenLabs
   ConvAI is **not** supported — its tools live on the ElevenLabs-hosted agent,
   so a warning is emitted if you set `consult` with that provider.
