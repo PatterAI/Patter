@@ -23,26 +23,20 @@ agent calls back into OpenClaw when it needs deeper reasoning.
 
 ## Prerequisites
 
-Install Patter and run the MCP server. Either SDK works — the MCP server is the same
-binary regardless of which SDK you build agents with.
+Patter's MCP server runs **locally** — it is not published to npm or PyPI. Clone and
+build it from [`PatterAI/patter-mcp`](https://github.com/PatterAI/patter-mcp):
 
 ```bash
-# Python
-pip install getpatter
-
-# TypeScript
-npm install getpatter
+git clone https://github.com/PatterAI/patter-mcp
+cd patter-mcp
+npm install
+npm run build
+npm start          # Streamable HTTP on http://localhost:3000/mcp
 ```
 
-```bash
-# Run the Patter MCP server (Streamable HTTP on :3000 by default)
-npx getpatter-mcp
-```
-
-The server is hosted at [`PatterAI/patter-mcp`](https://github.com/PatterAI/patter-mcp)
-and listens on `http://localhost:3000/mcp`. Provider and carrier keys
-(`OPENAI_API_KEY`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TELNYX_API_KEY`, …) are
-read from the server's environment.
+Provider and carrier keys (`OPENAI_API_KEY`, `TWILIO_ACCOUNT_SID`,
+`TWILIO_AUTH_TOKEN`, `TELNYX_API_KEY`, …) are read from the server's environment.
+See the [patter-mcp README](https://github.com/PatterAI/patter-mcp#readme) for full setup.
 
 ## Direction A — OpenClaw places calls via Patter
 
@@ -51,7 +45,7 @@ OpenClaw reads MCP servers from `~/.openclaw/openclaw.json` (JSON5) under
 
 ### Option 1 — Streamable HTTP (server already running)
 
-This connects to the `npx getpatter-mcp` process from the prerequisites.
+This connects to the locally-running `patter-mcp` server from the prerequisites (`npm start`).
 
 ```json5
 {
@@ -81,16 +75,17 @@ This connects to the `npx getpatter-mcp` process from the prerequisites.
 
 ### Option 2 — stdio (OpenClaw launches the server)
 
-Let OpenClaw spawn the server itself over stdio. The `--stdio` flag switches the
-binary from its default HTTP transport to stdio.
+Let OpenClaw spawn the server itself over stdio, pointing at your local build
+(`patter-mcp/dist/index.js` from the clone above). The `--stdio` flag switches it
+from the default HTTP transport to stdio.
 
 ```json5
 {
   mcp: {
     servers: {
       patter: {
-        command: "npx",
-        args: ["getpatter-mcp", "--stdio"],
+        command: "node",
+        args: ["/absolute/path/to/patter-mcp/dist/index.js", "--stdio"],
         timeout: 120,
         toolFilter: {
           include: [
