@@ -37,6 +37,43 @@
   `libraries/python/getpatter/tools/tool_executor.py`,
   `libraries/typescript/src/types.ts`, `libraries/typescript/src/server.ts`.
 
+- **Native OpenClaw / OpenAI-compatible `consult` target — connect the voice
+  layer to an OpenClaw agent with no hand-written adapter.**
+  `ConsultConfig.openclaw(agent=...)` (Python) / `openclawConsult(agent)` (TS)
+  point `consult` straight at an OpenClaw agent over its OpenAI-compatible
+  `POST /v1/chat/completions` gateway: the handler sends
+  `{model: "openclaw/<agent>", messages, user: call_id, stream: false}` and
+  speaks `choices[0].message.content`. Built on a generic
+  `OpenAICompatibleConsult` codec (`base_url` + `model` + optional `api_key` /
+  `api_key_env` / `session_header`), so the same primitive drives any
+  OpenAI-compatible gateway (vLLM, Ollama, Groq). The OpenClaw preset targets
+  the loopback gateway (`http://127.0.0.1:18789/v1`) by default, auto-enables
+  `allow_loopback` for that co-located gateway, reads the operator-grade bearer
+  from `OPENCLAW_API_KEY` (never logged), sends the call id as both
+  `x-openclaw-session-key` and the OpenAI `user` field (one OpenClaw session per
+  call), and attaches a default "let me check" reassurance filler plus a
+  consult-biased ("always consult for account facts; never answer them from
+  memory") tool description. `timeout_s` / `timeoutMs` keep the phone-safe 30 s
+  default. The generic `ConsultConfig(url=...)` webhook path is unchanged and
+  remains the escape hatch for custom mappings; exactly one of `url` /
+  `openai_compatible` must be set. A 404 from the gateway logs an actionable
+  hint to enable `gateway.http.endpoints.chatCompletions`.
+  `libraries/python/getpatter/models.py`,
+  `libraries/python/getpatter/tools/consult.py`,
+  `libraries/typescript/src/types.ts`, `libraries/typescript/src/consult.ts`.
+
+- **OpenClaw post-call notify (`on_call_end` → OpenClaw).** New
+  `openclaw_post_call_notifier(agent)` (Python) /
+  `openclawPostCallNotifier(agent)` (TS) returns an `on_call_end` callback that
+  POSTs the finished call's record (caller, dialed line, duration, transcript) to
+  the same scoped OpenClaw agent over its OpenAI-compatible gateway, keyed to the
+  call id (`user` + `x-openclaw-session-key`) so it lands in the SAME OpenClaw
+  session as the in-call `consult` turns — the brain keeps the record and can
+  follow up. Fire-and-forget: errors are logged by type only and never raised
+  into call teardown. Wire it on `serve(on_call_end=...)`.
+  `libraries/python/getpatter/tools/consult.py`,
+  `libraries/typescript/src/consult.ts`.
+
 - **Dashboard: Plivo carrier support in the UI.** The call dashboard now
   renders a Plivo `CarrierBadge` and maps Plivo calls across the cost,
   live-call, and metrics panels, alongside Twilio and Telnyx
@@ -64,6 +101,13 @@
   `agent()` helper already defaulted to `gpt-realtime-mini`).
 
 ### Fixed
+
+- **Realtime tool context now includes `callee` (TypeScript).** In Realtime
+  mode the TypeScript tool-dispatch context passed `{ call_id, caller }` only,
+  omitting `callee` (the dialed line) — Python Realtime and TypeScript Pipeline
+  already included it. Tools that use the dialed line (e.g. the OpenClaw consult
+  system message's "Line dialed: …", or post-call notify) now receive it in every
+  mode and both SDKs. `libraries/typescript/src/stream-handler.ts`.
 
 - **DeepFilterNet noise suppression was a silent no-op.** The resampler could
   never reach the 48 kHz the model requires, the error was swallowed, and raw

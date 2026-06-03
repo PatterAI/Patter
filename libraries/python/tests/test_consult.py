@@ -15,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from getpatter import Agent, ConsultConfig
+from getpatter import Agent, ConsultConfig, OpenAICompatibleConsult
 from getpatter.stream_handler import _inject_consult_tool
 from getpatter.tools import consult as consult_mod
 from getpatter.tools.consult import build_consult_tool
@@ -264,4 +264,154 @@ async def test_consult_handler_graceful_on_server_error(allow_loopback):
         tool = build_consult_tool(ConsultConfig(url=srv.url))
         result = await tool["handler"]({"request": "hi"}, {"call_id": "x"})
     # No exception bubbles to the call; the agent gets a spoken fallback.
+    assert "wasn't able to reach" in result.lower()
+
+
+# --------------------------------------------------------------------------
+# OpenClaw / OpenAI-compatible consult target (native, no adapter)
+# --------------------------------------------------------------------------
+
+
+def test_openclaw_preset_builds_namespaced_model_and_defaults():
+    c = ConsultConfig.openclaw("receptionist")
+    assert c.url is None
+    oc = c.openai_compatible
+    assert isinstance(oc, OpenAICompatibleConsult)
+    assert oc.model == "openclaw/receptionist"
+    assert oc.base_url == "http://127.0.0.1:18789/v1"
+    assert oc.api_key_env == "OPENCLAW_API_KEY"
+    assert oc.session_header == "x-openclaw-session-key"
+    # Loopback default → SSRF guard auto-relaxed for the co-located gateway.
+    assert c.allow_loopback is True
+    # Phone-safe default timeout, not regressed to a higher value.
+    assert c.timeout_s == 30.0
+    # Consult-biased ("substantive") description + a default reassurance filler.
+    assert "NEVER" in c.description and "account-specific" in c.description
+    assert isinstance(c.reassurance, str) and c.reassurance
+
+
+@pytest.mark.parametrize(
+    "agent, expected",
+    [
+        ("receptionist", "openclaw/receptionist"),
+        ("openclaw/roofing-ca", "openclaw/roofing-ca"),
+        ("openclaw:home-fl", "openclaw:home-fl"),
+        ("agent:desk-1", "agent:desk-1"),
+    ],
+)
+def test_openclaw_preset_agent_target_passthrough(agent, expected):
+    assert ConsultConfig.openclaw(agent).openai_compatible.model == expected
+
+
+@pytest.mark.parametrize("bad", ["", "has space", "a b", "drop;table", "x\n"])
+def test_openclaw_preset_rejects_unsafe_agent(bad):
+    with pytest.raises(ValueError):
+        ConsultConfig.openclaw(bad)
+
+
+def test_openclaw_preset_public_base_url_keeps_strict_ssrf():
+    c = ConsultConfig.openclaw("receptionist", base_url="https://gw.example.com/v1")
+    assert c.allow_loopback is False
+
+
+def test_openclaw_preset_allow_loopback_override():
+    assert ConsultConfig.openclaw("r", allow_loopback=False).allow_loopback is False
+
+
+def test_consult_config_requires_exactly_one_target():
+    with pytest.raises(ValueError, match="exactly one"):
+        ConsultConfig()
+    with pytest.raises(ValueError, match="exactly one"):
+        ConsultConfig(
+            url="https://x.example.com",
+            openai_compatible=OpenAICompatibleConsult(
+                base_url="https://gw.example.com/v1", model="openclaw/r"
+            ),
+        )
+
+
+def test_openai_compatible_validation():
+    with pytest.raises(ValueError):
+        OpenAICompatibleConsult(base_url="ftp://gw/v1", model="m")
+    with pytest.raises(ValueError):
+        OpenAICompatibleConsult(base_url="https://gw/v1", model="")
+
+
+def test_openclaw_reassurance_attached_to_tool():
+    tool = build_consult_tool(ConsultConfig.openclaw("receptionist"))
+    assert tool["reassurance"] == "Let me check on that for you, one moment."
+
+
+def test_url_path_has_no_reassurance_by_default():
+    tool = build_consult_tool(ConsultConfig(url="https://x.example.com/consult"))
+    assert "reassurance" not in tool
+
+
+def _openai_body(content: str) -> bytes:
+    return json.dumps(
+        {"choices": [{"message": {"role": "assistant", "content": content}}]}
+    ).encode()
+
+
+@pytest.mark.integration
+async def test_openclaw_handler_posts_chat_completions_and_speaks_content():
+    # Real local server; allow_loopback is auto-True for the loopback gateway, so
+    # the real SSRF validator (not a monkeypatch) permits it — fully authentic.
+    with _CapturingServer(body=_openai_body("You're set for Thursday at 10am.")) as srv:
+        cfg = ConsultConfig.openclaw(
+            "receptionist",
+            base_url=f"http://127.0.0.1:{srv.port}/v1",
+            api_key="op-secret",
+        )
+        tool = build_consult_tool(cfg)
+        result = await tool["handler"](
+            {"request": "Reschedule my roof inspection to Thursday"},
+            {"call_id": "CAxyz", "caller": "+15555550100", "callee": "+15555550199"},
+        )
+    assert result == "You're set for Thursday at 10am."
+    # Hit the OpenAI-compatible path, not the generic /consult webhook.
+    assert srv.last_path == "/v1/chat/completions"
+    assert srv.last_json["model"] == "openclaw/receptionist"
+    assert srv.last_json["stream"] is False
+    assert srv.last_json["user"] == "CAxyz"
+    assert [m["role"] for m in srv.last_json["messages"]] == ["system", "user"]
+    assert "Reschedule my roof inspection" in srv.last_json["messages"][1]["content"]
+    assert "+15555550100" in srv.last_json["messages"][0]["content"]
+    # Operator bearer + explicit deprecation-proof session header.
+    assert srv.last_headers.get("Authorization") == "Bearer op-secret"
+    assert srv.last_headers.get("x-openclaw-session-key") == "CAxyz"
+
+
+@pytest.mark.integration
+async def test_openclaw_handler_reads_api_key_from_env(monkeypatch):
+    monkeypatch.setenv("OPENCLAW_API_KEY", "env-op-key")
+    with _CapturingServer(body=_openai_body("ok")) as srv:
+        cfg = ConsultConfig.openclaw(
+            "receptionist", base_url=f"http://127.0.0.1:{srv.port}/v1"
+        )
+        await build_consult_tool(cfg)["handler"]({"request": "hi"}, {"call_id": "c1"})
+    assert srv.last_headers.get("Authorization") == "Bearer env-op-key"
+
+
+@pytest.mark.integration
+async def test_openclaw_handler_graceful_on_404():
+    with _CapturingServer(status=404, body=b"not found") as srv:
+        cfg = ConsultConfig.openclaw(
+            "receptionist", base_url=f"http://127.0.0.1:{srv.port}/v1"
+        )
+        result = await build_consult_tool(cfg)["handler"](
+            {"request": "hi"}, {"call_id": "c1"}
+        )
+    assert "wasn't able to reach" in result.lower()
+
+
+@pytest.mark.integration
+async def test_openclaw_handler_graceful_on_missing_choices():
+    with _CapturingServer(body=b'{"choices": []}') as srv:
+        cfg = ConsultConfig.openclaw(
+            "receptionist", base_url=f"http://127.0.0.1:{srv.port}/v1"
+        )
+        result = await build_consult_tool(cfg)["handler"](
+            {"request": "hi"}, {"call_id": "c1"}
+        )
     assert "wasn't able to reach" in result.lower()

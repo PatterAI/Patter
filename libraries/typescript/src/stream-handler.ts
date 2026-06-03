@@ -3343,6 +3343,7 @@ export class StreamHandler {
         {
           call_id: this.callId,
           caller: this.caller,
+          callee: this.callee,
         },
         onProgress,
       );
