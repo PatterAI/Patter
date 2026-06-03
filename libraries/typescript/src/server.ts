@@ -436,12 +436,27 @@ export function buildAIAdapter(config: LocalConfig, agent: AgentOptions, resolve
   // ``toolsOverride`` carries the per-call resolved tool list (MCP + consult
   // merges from the stream handler) so those tools are advertised to the
   // Realtime model; falls back to the static ``agent.tools``.
-  const agentTools = (toolsOverride ?? agent.tools)?.map((t) => ({
-    name: t.name,
-    description: t.description,
-    parameters: t.parameters,
-    strict: (t as { strict?: boolean }).strict,
-  })) ?? [];
+  //
+  // When ``toolCallPreambles`` is on AND a tool declares a ``reassurance``
+  // string, append it as a "Preamble sample phrases" hint to a COPY of that
+  // tool's description (never mutating the frozen agent/tool). This is an
+  // optional, non-breaking nicety — it gives the model a concrete sample
+  // opener for that specific slow tool.
+  const preamblesOn = Boolean((agent as { toolCallPreambles?: boolean | string }).toolCallPreambles);
+  const agentTools = (toolsOverride ?? agent.tools)?.map((t) => {
+    let description = t.description;
+    const reassurance = (t as { reassurance?: string | { message: string } }).reassurance;
+    const sample = typeof reassurance === 'string' ? reassurance : undefined;
+    if (preamblesOn && sample) {
+      description = `${description}\n\nPreamble sample phrases:\n- ${sample}`;
+    }
+    return {
+      name: t.name,
+      description,
+      parameters: t.parameters,
+      strict: (t as { strict?: boolean }).strict,
+    };
+  }) ?? [];
   const tools = [...agentTools, TRANSFER_CALL_TOOL, END_CALL_TOOL];
   const isOpenAIEngine = engine && (engine.kind === 'openai_realtime' || engine.kind === 'openai_realtime_2');
   const openaiKey = isOpenAIEngine ? engine.apiKey : (config.openaiKey ?? '');
@@ -457,6 +472,25 @@ export function buildAIAdapter(config: LocalConfig, agent: AgentOptions, resolve
     if (engine.inputAudioTranscriptionModel !== undefined) {
       adapterOptions.inputAudioTranscriptionModel = engine.inputAudioTranscriptionModel;
     }
+    if (engine.noiseReduction !== undefined) {
+      adapterOptions.noiseReduction = engine.noiseReduction;
+    }
+    if (engine.turnDetection !== undefined) {
+      adapterOptions.turnDetection = engine.turnDetection;
+    }
+  }
+  // Forward noise reduction and turn detection from the agent options (which
+  // already carry the merged engine-marker + agent() kwarg value via
+  // client.ts Patter.agent()). These override whatever the engine marker set.
+  const agentOpts = agent as {
+    openaiRealtimeNoiseReduction?: 'near_field' | 'far_field';
+    realtimeTurnDetection?: import('./types').RealtimeTurnDetection;
+  };
+  if (agentOpts.openaiRealtimeNoiseReduction !== undefined) {
+    adapterOptions.noiseReduction = agentOpts.openaiRealtimeNoiseReduction;
+  }
+  if (agentOpts.realtimeTurnDetection !== undefined) {
+    adapterOptions.turnDetection = agentOpts.realtimeTurnDetection;
   }
   // Dispatch to the GA-API adapter when the caller passed the
   // ``OpenAIRealtime2`` engine marker. Falls through to the v1-beta adapter

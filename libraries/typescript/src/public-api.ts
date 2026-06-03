@@ -74,6 +74,30 @@ export interface ToolOptions {
   handler?: ToolHandler;
   /** URL to POST to when the LLM invokes the tool. */
   webhookUrl?: string;
+  /**
+   * Optional reassurance filler the agent speaks while a slow tool call runs.
+   * Two forms:
+   *  - `string`: shorthand for `{ message: <string>, afterMs: 1500 }`.
+   *  - object: explicit `{ message, afterMs? }`.
+   * Currently honoured only in Realtime mode. Off by default.
+   *
+   * Mirrors Python `reassurance` on `Tool` / `tool()`.
+   */
+  reassurance?: string | { message: string; afterMs?: number };
+  /**
+   * Per-tool execution timeout in milliseconds, applied to BOTH the handler
+   * and webhook paths. `undefined` (default) uses the executor default
+   * (10 000 ms). Raise for long browser-automation / external-API tools
+   * (e.g. `60_000`). Clamped to a 300 000 ms ceiling by the executor.
+   *
+   * Mirrors Python `timeout_s` on `Tool` / `tool()`.
+   */
+  timeoutMs?: number;
+  /**
+   * Enable OpenAI strict mode for this tool's function schema. Mirrors
+   * Python `strict` on `Tool`. Off by default.
+   */
+  strict?: boolean;
 }
 
 /**
@@ -98,6 +122,17 @@ export class Tool implements ToolDefinition {
   readonly parameters: Record<string, unknown>;
   readonly handler?: ToolHandler;
   readonly webhookUrl?: string;
+  readonly reassurance?: string | Readonly<{ message: string; afterMs?: number }>;
+  /**
+   * Per-tool execution timeout in milliseconds. `undefined` uses the
+   * executor default (10 000 ms). Mirrors Python `timeout_s`.
+   */
+  readonly timeoutMs?: number;
+  /**
+   * Enable OpenAI strict mode for this tool's function schema. Off by
+   * default. Mirrors Python `strict` on `Tool`.
+   */
+  readonly strict?: boolean;
 
   constructor(opts: ToolOptions) {
     if (!opts.name) {
@@ -116,6 +151,9 @@ export class Tool implements ToolDefinition {
     this.parameters = opts.parameters ?? { type: "object", properties: {} };
     if (hasHandler) this.handler = opts.handler;
     if (hasWebhook) this.webhookUrl = opts.webhookUrl;
+    if (opts.reassurance !== undefined) this.reassurance = opts.reassurance;
+    if (opts.timeoutMs !== undefined) this.timeoutMs = opts.timeoutMs;
+    if (opts.strict !== undefined) this.strict = opts.strict;
   }
 }
 

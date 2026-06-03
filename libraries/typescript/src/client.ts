@@ -453,6 +453,12 @@ export class Patter {
           provider: 'openai_realtime',
           model: working.model ?? engine.model,
           voice: working.voice ?? engine.voice,
+          // Explicit agent() kwargs win over the engine marker value
+          // (same precedence as Python: explicit kwarg > engine > default).
+          openaiRealtimeNoiseReduction:
+            working.openaiRealtimeNoiseReduction ?? engine.noiseReduction,
+          realtimeTurnDetection:
+            working.realtimeTurnDetection ?? engine.turnDetection,
         };
         // Surface the engine's apiKey to local config so pipeline-mode
         // ``LLMLoop`` and Realtime adapter have a key when no onMessage is set.

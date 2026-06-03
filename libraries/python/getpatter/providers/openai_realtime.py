@@ -86,6 +86,52 @@ class OpenAIRealtimeVADType(StrEnum):
     SEMANTIC_VAD = "semantic_vad"
 
 
+def build_turn_detection(
+    turn_detection: Any,
+    *,
+    default_type: str,
+    default_silence_ms: int,
+    include_response_gating: bool,
+) -> dict[str, Any]:
+    """Build the ``turn_detection`` wire dict shared by the v1 and GA session
+    builders so the two paths never drift.
+
+    ``turn_detection`` is an optional :class:`getpatter.models.RealtimeTurnDetection`
+    (duck-typed — only its ``type`` / ``threshold`` / ``prefix_padding_ms`` /
+    ``silence_duration_ms`` / ``eagerness`` attributes are read). When ``None``
+    the adapter's current hardcoded defaults are emitted. ``semantic_vad`` omits
+    threshold / padding / silence (OpenAI rejects them) and emits ``eagerness``
+    only when set.
+
+    ``include_response_gating`` adds the GA-only client-gated
+    ``create_response`` / ``interrupt_response`` keys (always ``False`` — never
+    publicly tunable). The v1 shape omits them.
+    """
+    td = turn_detection
+    if td is not None and getattr(td, "type", "server_vad") == "semantic_vad":
+        detection: dict[str, Any] = {"type": "semantic_vad"}
+        eagerness = getattr(td, "eagerness", None)
+        if eagerness is not None:
+            detection["eagerness"] = eagerness
+    else:
+        td_type = getattr(td, "type", None) if td is not None else None
+        threshold = getattr(td, "threshold", None) if td is not None else None
+        prefix = getattr(td, "prefix_padding_ms", None) if td is not None else None
+        silence = getattr(td, "silence_duration_ms", None) if td is not None else None
+        detection = {
+            "type": td_type or default_type,
+            "threshold": threshold if threshold is not None else 0.5,
+            "prefix_padding_ms": prefix if prefix is not None else 300,
+            "silence_duration_ms": silence
+            if silence is not None
+            else default_silence_ms,
+        }
+    if include_response_gating:
+        detection["create_response"] = False
+        detection["interrupt_response"] = False
+    return detection
+
+
 class OpenAIRealtimeAdapter:
     """Bridges Twilio/Telnyx media stream to OpenAI Realtime API.
 
@@ -124,7 +170,23 @@ class OpenAIRealtimeAdapter:
         # unset (server default). OpenAI recommends ``"low"`` for production
         # voice flows — higher tiers add measurable per-turn latency.
         reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = None,
+        # Input noise reduction for speakerphone / conference audio. ``None``
+        # (default) omits the field (no reduction — today's behavior).
+        noise_reduction: Literal["near_field", "far_field"] | None = None,
+        # Turn-detection tuning. ``None`` (default) keeps the adapter's current
+        # hardcoded turn_detection. Typed ``Any`` to avoid importing
+        # ``RealtimeTurnDetection`` into the provider module (duck-typed at
+        # use: ``.type`` / ``.threshold`` / ``.eagerness`` / ...).
+        turn_detection: Any | None = None,
     ):
+        if noise_reduction is not None and noise_reduction not in (
+            "near_field",
+            "far_field",
+        ):
+            raise ValueError(
+                "noise_reduction must be 'near_field' or 'far_field', "
+                f"got {noise_reduction!r}"
+            )
         self.api_key = api_key
         self.model = model
         self.voice = voice
@@ -140,6 +202,8 @@ class OpenAIRealtimeAdapter:
         self.vad_type = vad_type
         self.silence_duration_ms = silence_duration_ms
         self.reasoning_effort = reasoning_effort
+        self.noise_reduction = noise_reduction
+        self.turn_detection = turn_detection
         self._ws: Any = None
         self._running = False
         # Track the assistant message currently being generated so we can
@@ -309,16 +373,24 @@ class OpenAIRealtimeAdapter:
             "voice": self.voice,
             "instructions": self.instructions
             or f"You are a helpful voice assistant. Respond in {self.language}. Be concise and natural.",
-            "turn_detection": {
-                "type": self.vad_type,
-                "threshold": 0.5,
-                "prefix_padding_ms": 300,
-                "silence_duration_ms": self.silence_duration_ms,
-            },
+            # v1 turn_detection carries NO create_response / interrupt_response
+            # keys (those are GA-only) — gating disabled here.
+            "turn_detection": build_turn_detection(
+                self.turn_detection,
+                default_type=self.vad_type,
+                default_silence_ms=self.silence_duration_ms,
+                include_response_gating=False,
+            ),
             "input_audio_transcription": {
                 "model": self.input_audio_transcription_model,
             },
         }
+        # v1 puts noise reduction at the TOP LEVEL of session (not nested under
+        # audio.input as the GA shape does). Omitted entirely when unset.
+        if self.noise_reduction is not None:
+            session_config["input_audio_noise_reduction"] = {
+                "type": self.noise_reduction
+            }
         if self.temperature is not None:
             session_config["temperature"] = self.temperature
         if self.max_response_output_tokens is not None:
@@ -750,6 +822,35 @@ class OpenAIRealtimeAdapter:
                             f"Say exactly the following sentence as your first turn "
                             f'and nothing else: "{text}"'
                         ),
+                    },
+                }
+            )
+        )
+
+    async def send_reassurance(self, text: str) -> None:
+        """Speak a short reassurance filler WITHOUT adding a ``role:user`` turn.
+
+        Same no-fake-turn shape as :meth:`send_first_message`: a bare
+        ``response.create`` carrying explicit ``instructions`` so the filler is
+        the assistant's own in-band audio. The reassurance scheduler in the
+        stream-handler routes here instead of :meth:`send_text` (which would
+        inject a phantom ``role:user`` item and corrupt the transcript).
+        Fillers must not imply success or failure.
+
+        The GA adapter overrides this with the ``output_modalities`` shape;
+        this v1-beta variant keeps the ``modalities`` key its own
+        :meth:`send_first_message` uses so the two no-fake-turn paths never
+        drift on this endpoint.
+        """
+        if self._ws is None:
+            return
+        await self._ws.send(
+            json.dumps(
+                {
+                    "type": "response.create",
+                    "response": {
+                        "modalities": ["audio", "text"],
+                        "instructions": f'Say exactly this and nothing else: "{text}"',
                     },
                 }
             )

@@ -9,6 +9,7 @@
 
 import WebSocket from 'ws';
 import { getLogger } from '../logger';
+import type { RealtimeTurnDetection } from '../types';
 
 /**
  * Supported OpenAI Realtime wire audio formats. See
@@ -119,6 +120,109 @@ export interface OpenAIRealtimeOptions {
    * Has no effect on models that don't support the `reasoning` field.
    */
   reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high';
+  /**
+   * Input noise reduction for speakerphone / conference audio. `undefined`
+   * (default) omits the field entirely (no reduction — today's behavior).
+   * `"far_field"` is recommended for phone / speakerphone calls;
+   * `"near_field"` for a handset close to the mouth.
+   *
+   * v1 wire shape: emitted at the top level of `session.update` as
+   * `input_audio_noise_reduction: { type }`. The GA adapter
+   * (`OpenAIRealtime2Adapter`) nests it under `audio.input` instead.
+   *
+   * Mirrors Python `noise_reduction` on `OpenAIRealtimeAdapter`.
+   */
+  noiseReduction?: 'near_field' | 'far_field';
+  /**
+   * Turn-detection tuning. `undefined` (default) keeps the adapter's current
+   * hardcoded `server_vad` / threshold `0.5` / silence 300 ms settings.
+   * Raise `threshold` or switch to `semantic_vad` with `eagerness: 'low'` to
+   * stop speakerphone / conference noise from triggering false barge-ins.
+   *
+   * Mirrors Python `turn_detection` on `OpenAIRealtimeAdapter` and
+   * `turn_detection` on the engine marker `engines.openai.Realtime`.
+   */
+  turnDetection?: RealtimeTurnDetection;
+}
+
+/**
+ * Validate a {@link RealtimeTurnDetection} at runtime.
+ *
+ * TypeScript's interface is compile-time only; a value arriving from JSON
+ * config, a plain-JS caller, or an `as` cast can still be malformed and would
+ * otherwise flow straight to the OpenAI `session.update` wire (where an
+ * out-of-set `type` silently falls into the `server_vad` branch). This rejects
+ * bad values cleanly, mirroring Python `RealtimeTurnDetection.__post_init__`
+ * so the two SDKs share the same error taxonomy.
+ */
+export function validateRealtimeTurnDetection(
+  td: RealtimeTurnDetection | undefined,
+): void {
+  if (td === undefined) return;
+  if (td.type !== undefined && td.type !== 'server_vad' && td.type !== 'semantic_vad') {
+    throw new Error(
+      `RealtimeTurnDetection.type must be 'server_vad' or 'semantic_vad', got ${JSON.stringify(td.type)}`,
+    );
+  }
+  if (
+    td.eagerness !== undefined &&
+    td.eagerness !== 'low' &&
+    td.eagerness !== 'medium' &&
+    td.eagerness !== 'high' &&
+    td.eagerness !== 'auto'
+  ) {
+    throw new Error(
+      `RealtimeTurnDetection.eagerness must be one of low|medium|high|auto, got ${JSON.stringify(td.eagerness)}`,
+    );
+  }
+  if (td.eagerness !== undefined && td.type !== 'semantic_vad') {
+    throw new Error(
+      "RealtimeTurnDetection.eagerness is only valid when type='semantic_vad'",
+    );
+  }
+}
+
+/**
+ * Build the `turn_detection` wire dict shared by the v1 and GA session
+ * builders so the two paths never drift.
+ *
+ * `td` is an optional {@link RealtimeTurnDetection}. When `undefined` the
+ * adapter's current hardcoded defaults are emitted. `semantic_vad` omits
+ * threshold / padding / silence (OpenAI rejects them) and emits `eagerness`
+ * only when set.
+ *
+ * `includeResponseGating` adds the GA-only client-gated `create_response` /
+ * `interrupt_response` keys (always `false` — never publicly tunable). The
+ * v1 shape omits them.
+ *
+ * Mirrors Python `build_turn_detection()` in `providers/openai_realtime.py`.
+ */
+export function buildTurnDetection(
+  td: RealtimeTurnDetection | undefined,
+  opts: {
+    defaultType: string;
+    defaultSilenceMs: number;
+    includeResponseGating: boolean;
+  },
+): Record<string, unknown> {
+  validateRealtimeTurnDetection(td);
+  let detection: Record<string, unknown>;
+  if (td?.type === 'semantic_vad') {
+    detection = { type: 'semantic_vad' };
+    if (td.eagerness !== undefined) detection.eagerness = td.eagerness;
+  } else {
+    detection = {
+      type: td?.type ?? opts.defaultType,
+      threshold: td?.threshold ?? 0.5,
+      prefix_padding_ms: td?.prefixPaddingMs ?? 300,
+      silence_duration_ms: td?.silenceDurationMs ?? opts.defaultSilenceMs,
+    };
+  }
+  if (opts.includeResponseGating) {
+    detection.create_response = false;
+    detection.interrupt_response = false;
+  }
+  return detection;
 }
 
 /** Realtime WebSocket adapter for OpenAI's `gpt-realtime` family. */
@@ -172,16 +276,22 @@ export class OpenAIRealtimeAdapter {
       output_audio_format: this.audioFormat,
       voice: this.voice,
       instructions: this.instructions || 'You are a helpful voice assistant. Be concise.',
-      turn_detection: {
-        type: this.options.vadType ?? OpenAIRealtimeVADType.SERVER_VAD,
-        threshold: 0.5,
-        prefix_padding_ms: 300,
-        silence_duration_ms: this.options.silenceDurationMs ?? 300,
-      },
+      // v1 turn_detection carries NO create_response / interrupt_response
+      // keys (those are GA-only) — gating disabled here.
+      turn_detection: buildTurnDetection(this.options.turnDetection, {
+        defaultType: this.options.vadType ?? OpenAIRealtimeVADType.SERVER_VAD,
+        defaultSilenceMs: this.options.silenceDurationMs ?? 300,
+        includeResponseGating: false,
+      }),
       input_audio_transcription: {
         model: this.options.inputAudioTranscriptionModel ?? OpenAITranscriptionModel.WHISPER_1,
       },
     };
+    // v1 puts noise reduction at the TOP LEVEL of session (not nested under
+    // audio.input as the GA shape does). Omitted entirely when unset.
+    if (this.options.noiseReduction !== undefined) {
+      config.input_audio_noise_reduction = { type: this.options.noiseReduction };
+    }
     if (this.options.temperature !== undefined) config.temperature = this.options.temperature;
     if (this.options.maxResponseOutputTokens !== undefined) {
       config.max_response_output_tokens = this.options.maxResponseOutputTokens;
@@ -683,6 +793,33 @@ export class OpenAIRealtimeAdapter {
       response: {
         modalities: ['audio', 'text'],
         instructions: `Say exactly the following sentence as your first turn and nothing else: "${text}"`,
+      },
+    }));
+  }
+
+  /**
+   * Speak a short reassurance filler WITHOUT injecting a `role:user` turn.
+   *
+   * Same no-fake-turn shape as {@link sendFirstMessage}: a bare
+   * `response.create` carrying explicit `instructions`, so the filler is the
+   * assistant's own in-band audio. The reassurance scheduler in the
+   * stream-handler routes here instead of {@link sendText} — which would emit
+   * a `conversation.item.create` with `role:'user'` and falsely show the
+   * caller saying "One moment." in the transcript. Fillers must not imply
+   * success or failure.
+   *
+   * Uses `modalities: ['audio', 'text']` (v1-beta shape). The GA subclass
+   * {@link OpenAIRealtime2Adapter} overrides this with `output_modalities`
+   * and re-injects `audio.output.voice` so the GA endpoint does not reject
+   * the request. Mirrors Python `OpenAIRealtimeAdapter.send_reassurance` in
+   * `providers/openai_realtime.py`.
+   */
+  async sendReassurance(text: string): Promise<void> {
+    this.ws?.send(JSON.stringify({
+      type: 'response.create',
+      response: {
+        modalities: ['audio', 'text'],
+        instructions: `Say exactly this and nothing else: "${text}"`,
       },
     }));
   }

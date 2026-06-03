@@ -40,6 +40,85 @@ import {
 type AIAdapter = OpenAIRealtimeAdapter | ElevenLabsConvAIAdapter;
 
 // ---------------------------------------------------------------------------
+// Tool-call preambles (OpenAI Realtime)
+// ---------------------------------------------------------------------------
+
+/**
+ * Default "# Preambles" guidance block prepended to the Realtime session
+ * `instructions` when `AgentOptions.toolCallPreambles` is `true`.
+ *
+ * Steers the model (most effectively `gpt-realtime-2`, where preambles are
+ * first-class) to speak ONE short, action-describing sentence immediately
+ * before a tool call that may take a moment — in its own voice — so the
+ * caller hears that work is happening during a slow (30-60 s) tool. The
+ * "Prefer" phrasings are OpenAI-approved action openers; the "Avoid" list
+ * blocks fillers that imply a result before the tool returns.
+ *
+ * MUST stay byte-identical to the Python `DEFAULT_TOOL_CALL_PREAMBLE_BLOCK`
+ * in `stream_handler.py` so the two SDKs steer the model the same way.
+ */
+export const DEFAULT_TOOL_CALL_PREAMBLE_BLOCK = `# Preambles
+
+Use short preambles only when they help the user understand that work is happening. A preamble is one short spoken update describing the action you are about to take — not hidden reasoning, and never a claim about the result.
+
+## When to use a preamble
+Use a preamble when:
+- you are about to call a tool that may take noticeable time;
+- you need to reason through a multi-step request;
+- you are checking records, availability, account state, or policy details;
+- you are preparing an escalation or handoff;
+- silence would make the assistant feel unresponsive.
+
+When a preamble is needed, output it immediately before the reasoning or tool call.
+
+## When to NOT use a preamble
+Do not use a preamble when:
+- the answer is direct and can be given immediately;
+- the user is only confirming, correcting, or declining something;
+- the audio is unclear and you need clarification instead;
+- the tool call is lightweight and the user would not benefit from an update.
+
+## Style
+- Keep it to one short sentence (two only before a high-impact action).
+- Vary the wording across turns; do not reuse the same opener.
+- Describe the action, not the internal reasoning.
+- Never imply success or failure before the tool returns.
+
+Prefer:
+- "I'll check that order now."
+- "I'll look up your appointment details."
+- "I'll verify that before we make any changes."
+- "I'll check the policy and then give you the next step."
+- "I'll pull that up so we can make sure it's the right account."
+
+Avoid:
+- "Let me think about that for a second."
+- "Please wait while I process your request."
+- "I'm going to use my tools now."
+- "Hmm..." / "One moment while I process that..."`;
+
+/**
+ * Prepend the "# Preambles" guidance block to a Realtime system prompt.
+ *
+ * - `knob` falsy (`undefined` / `false`) — returns `prompt` byte-identical
+ *   (today's behavior exactly).
+ * - `knob === true` — prepends {@link DEFAULT_TOOL_CALL_PREAMBLE_BLOCK}.
+ * - `knob` is a string — prepends that string verbatim as the full block
+ *   (override).
+ *
+ * Pure function: no mutation of the agent or any shared config. Mirrors
+ * Python `apply_tool_call_preambles()` in `stream_handler.py`.
+ */
+export function applyToolCallPreambles(
+  prompt: string,
+  knob: boolean | string | undefined,
+): string {
+  if (!knob) return prompt;
+  const block = typeof knob === 'string' ? knob : DEFAULT_TOOL_CALL_PREAMBLE_BLOCK;
+  return prompt ? `${block}\n\n${prompt}` : block;
+}
+
+// ---------------------------------------------------------------------------
 // Telephony bridge — abstracts Twilio vs Telnyx wire differences
 // ---------------------------------------------------------------------------
 
@@ -1142,7 +1221,13 @@ export class StreamHandler {
     if (provider === 'pipeline') {
       await this.initPipeline(resolvedPrompt);
     } else {
-      await this.initRealtimeAdapter(resolvedPrompt);
+      // Realtime modes: optionally prepend the "# Preambles" guidance block so
+      // the model speaks a short action sentence before a slow tool call. A
+      // falsy ``toolCallPreambles`` leaves the instructions byte-identical.
+      // Pipeline mode has its own phone preamble and is intentionally skipped.
+      await this.initRealtimeAdapter(
+        applyToolCallPreambles(resolvedPrompt, this.deps.agent.toolCallPreambles),
+      );
     }
   }
 
@@ -3313,7 +3398,17 @@ export class StreamHandler {
         reassuranceTimer = setTimeout(() => {
           // Fire-and-forget — caller is a setTimeout, can't await. Errors
           // are non-fatal: a missed reassurance is just a longer silence.
-          realtimeAdapter.sendText(msg).catch((e: unknown) => {
+          //
+          // Route through ``sendReassurance`` so the filler is the
+          // assistant's own in-band audio (a bare ``response.create`` with
+          // explicit instructions) and NOT a phantom ``role:user`` turn that
+          // would corrupt the transcript. Falls back to ``sendText`` only for
+          // older adapter builds lacking the dedicated method.
+          const fire =
+            typeof (realtimeAdapter as { sendReassurance?: unknown }).sendReassurance === 'function'
+              ? realtimeAdapter.sendReassurance(msg)
+              : realtimeAdapter.sendText(msg);
+          fire.catch((e: unknown) => {
             getLogger().warn(`Reassurance message failed for tool '${fc.name}': ${String(e)}`);
           });
         }, afterMs);

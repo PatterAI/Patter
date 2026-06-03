@@ -57,6 +57,7 @@ from getpatter.providers.openai_realtime import (
     OpenAIRealtimeAdapter,
     OpenAIRealtimeVADType,
     OpenAITranscriptionModel,
+    build_turn_detection,
 )
 
 logger = logging.getLogger("getpatter.openai_realtime_2")
@@ -105,6 +106,8 @@ class OpenAIRealtime2Adapter(OpenAIRealtimeAdapter):
       and decodes outbound PCM 24 kHz → mulaw 8 kHz in 20 ms slices.
     - :meth:`send_first_message` — uses ``output_modalities`` and re-injects
       ``audio.output.voice`` for the first response.create.
+    - :meth:`send_reassurance` — same GA-shape ``response.create`` as
+      ``send_first_message`` (no ``role:user`` item) for the slow-tool filler.
 
     Everything else (``cancel_response``, ``send_text``,
     ``send_function_result``, ``close``) is inherited unchanged.
@@ -149,38 +152,23 @@ class OpenAIRealtime2Adapter(OpenAIRealtimeAdapter):
                         "model": self.input_audio_transcription_model
                         or OpenAITranscriptionModel.WHISPER_1.value,
                     },
-                    # VAD threshold raised back to the OpenAI default (0.5)
-                    # on 2026-05-22. The earlier 0.1 tuning (motivated by
-                    # the upsampled telephony-band loss in high frequencies)
-                    # made the server VAD trigger on the carrier-loopback
-                    # echo of the agent's OWN outbound audio in PSTN no-AEC
-                    # scenarios. Combined with the default
-                    # ``turn_detection.create_response: true``, every phantom
-                    # ``speech_started`` ended a turn early and auto-created
-                    # a new response that the agent immediately spoke over,
-                    # leading to a runaway loop where the first message was
-                    # repeatedly cut and re-generated.
-                    "turn_detection": {
-                        "type": self.vad_type or OpenAIRealtimeVADType.SERVER_VAD.value,
-                        "threshold": 0.5,
-                        "prefix_padding_ms": 300,
-                        "silence_duration_ms": self.silence_duration_ms,
-                        # Defer ``response.create`` to the application: when
-                        # OpenAI's server VAD commits an
-                        # ``input_audio_buffer.committed`` segment that turns
-                        # out to be a Whisper hallucination on silence/echo,
-                        # auto-creating a response would generate a phantom
-                        # turn (the model reads the hallucinated text as user
-                        # input). Patter triggers ``response.create``
-                        # explicitly in the Realtime stream-handler AFTER
-                        # validating ``transcript_input`` against the
-                        # hallucination filter. Pair with
-                        # ``interrupt_response: false`` so server VAD also
-                        # leaves in-flight responses alone — barge-in is
-                        # gated client-side.
-                        "create_response": False,
-                        "interrupt_response": False,
-                    },
+                    # turn_detection is filled in below via the shared
+                    # ``build_turn_detection`` helper so the v1 and GA builders
+                    # never drift. When ``self.turn_detection`` is None the
+                    # helper emits the GA defaults documented below.
+                    #
+                    # VAD threshold defaults to the OpenAI default (0.5). The
+                    # earlier 0.1 tuning made the server VAD trigger on the
+                    # carrier-loopback echo of the agent's OWN outbound audio
+                    # in PSTN no-AEC scenarios.
+                    #
+                    # ``create_response`` / ``interrupt_response`` are pinned
+                    # ``False`` (never publicly tunable): Patter defers
+                    # ``response.create`` to the stream-handler AFTER validating
+                    # ``transcript_input`` against the hallucination filter, and
+                    # gates barge-in client-side. POINT 1b raises the threshold /
+                    # switches to semantic_vad eagerness='low' to reject
+                    # speakerphone noise WITHOUT touching this safety gating.
                 },
                 "output": {
                     "format": fmt,
@@ -190,6 +178,18 @@ class OpenAIRealtime2Adapter(OpenAIRealtimeAdapter):
             "instructions": self.instructions
             or f"You are a helpful voice assistant. Respond in {self.language}. Be concise and natural.",
         }
+        config["audio"]["input"]["turn_detection"] = build_turn_detection(
+            self.turn_detection,
+            default_type=self.vad_type or OpenAIRealtimeVADType.SERVER_VAD.value,
+            default_silence_ms=self.silence_duration_ms,
+            include_response_gating=True,
+        )
+        # GA nests noise reduction under audio.input (the v1 shape puts it at
+        # the top level). Omitted entirely when unset (today's behavior).
+        if self.noise_reduction is not None:
+            config["audio"]["input"]["input_audio_noise_reduction"] = {
+                "type": self.noise_reduction
+            }
         if self.temperature is not None:
             config["temperature"] = self.temperature
         if self.max_response_output_tokens is not None:
@@ -799,6 +799,36 @@ class OpenAIRealtime2Adapter(OpenAIRealtimeAdapter):
         # cost-tier ``gpt-realtime-mini`` rejects it as "Unsupported
         # option for this model". Forward the field only when the
         # caller explicitly configured it.
+        if self.reasoning_effort is not None:
+            response_body["reasoning"] = {"effort": self.reasoning_effort}
+        await self._ws.send(
+            json.dumps({"type": "response.create", "response": response_body})
+        )
+
+    async def send_reassurance(self, text: str) -> None:
+        """Speak a short reassurance filler WITHOUT adding a ``role:user`` turn.
+
+        GA-shape sibling of :meth:`send_first_message` (and override of the
+        base v1 :meth:`OpenAIRealtimeAdapter.send_reassurance`): a bare
+        ``response.create`` carrying explicit ``instructions`` so the filler is
+        the assistant's own in-band audio. No ``conversation.item.create`` with
+        ``role:"user"`` is emitted, so the transcript shows no phantom caller
+        line. The GA endpoint rejects ``response.modalities`` and does not
+        inherit ``audio.output.voice`` for an explicit ``response.create``, so
+        — exactly as in :meth:`send_first_message` — we send
+        ``output_modalities`` and re-inject the voice. Fillers must not imply
+        success or failure.
+        """
+        if self._ws is None:
+            return
+        response_body: dict[str, Any] = {
+            "output_modalities": ["audio"],
+            "audio": {"output": {"voice": self.voice}},
+            "instructions": f'Say exactly this and nothing else: "{text}"',
+        }
+        # ``reasoning.effort`` is only accepted by the flagship GA variants —
+        # forward it only when explicitly configured (mirrors
+        # ``send_first_message``).
         if self.reasoning_effort is not None:
             response_body["reasoning"] = {"effort": self.reasoning_effort}
         await self._ws.send(

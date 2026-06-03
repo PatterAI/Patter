@@ -19,6 +19,8 @@ Each tool is a dictionary with the following fields:
 | `parameters` | `dict` | Yes | JSON Schema defining the tool's input parameters. |
 | `webhook_url` | `str` | One of `webhook_url` or `handler` | URL that Patter POSTs to when the AI invokes this tool. |
 | `handler` | `Callable` | One of `webhook_url` or `handler` | Async or sync callable `(arguments, context) -> str | dict`. Runs in-process instead of making an HTTP call. |
+| `timeout_s` | `float \| None` | No | Per-tool execution timeout in seconds (default `None` → 10 s). Raise for long browser-automation / external-API tools. See [Per-tool timeout](#per-tool-timeout). |
+| `reassurance` | `str \| dict \| None` | No | Realtime-mode filler the agent speaks while the tool runs. See [Reassurance during long tool calls](#reassurance-during-long-tool-calls). |
 
 <Note>
   Every tool must have either a `webhook_url` or a `handler`. Providing neither raises a `ValueError`.
@@ -377,6 +379,91 @@ agent = phone.agent(
 
 <Note>
   Pipeline mode silently skips reassurance for now -- there is no clean injection point mid-turn. If you need it for a Pipeline agent, prefer an async-generator handler with a first `{"progress": ...}` yield.
+</Note>
+
+`reassurance` is also accepted by the `tool()` factory, so you can set it inline next to a per-tool `timeout_s` (see below) — `tool(name=..., handler=..., timeout_s=60.0, reassurance="One moment while I check that for you.")`.
+
+<Note>
+  The reassurance filler is spoken as the **agent's own line**, not as a fake caller turn. (Earlier builds injected the filler as a `role:"user"` conversation item, which made the transcript falsely show the caller saying "One moment." and could confuse the model. The filler now uses a dedicated assistant-attributed path.)
+</Note>
+
+For a more natural alternative on `gpt-realtime-2`, see [tool-call preambles](#tool-call-preambles) below — the model improvises its own short "let me check" line before the call instead of you scripting one per tool.
+
+---
+
+## Tool-call preambles
+
+Realtime modes only. On a reasoning Realtime model the cleanest way to bridge the silence before a slow tool call is to let the model **say what it's about to do, in its own voice** — "I'll check that order now." — rather than scripting a per-tool [`reassurance`](#reassurance-during-long-tool-calls) line. Set `tool_call_preambles=True` on the agent and Patter prepends a native `# Preambles` guidance block to the Realtime session instructions:
+
+```python
+from getpatter import OpenAIRealtime2, Patter
+
+agent = phone.agent(
+    system_prompt="You are a customer-support agent.",
+    engine=OpenAIRealtime2(),          # most effective on gpt-realtime-2
+    tools=[check_order_tool, lookup_account_tool],
+    tool_call_preambles=True,          # opt-in; default False = no prompt change
+)
+```
+
+The built-in block steers the model to:
+
+- speak **one short sentence** describing the action before a tool call that may take a moment (e.g. "I'll look up your appointment details.");
+- **vary the wording** across turns;
+- **skip** the preamble when it can answer immediately;
+- **never imply** success or failure before the tool returns.
+
+`tool_call_preambles` accepts three forms:
+
+| Value | Effect |
+| --- | --- |
+| `False` (default) | No change — `system_prompt` ships verbatim. |
+| `True` | Patter prepends the built-in `# Preambles` block. |
+| `str` | The string is used **verbatim** as the full block (override). |
+
+When a tool also carries a [`reassurance`](#reassurance-during-long-tool-calls) string, that phrase is surfaced to the model as a sample preamble in the tool's description, so your tone hints carry over.
+
+<Note>
+  Preambles are most effective on `gpt-realtime-2`, where they are a first-class default-on behaviour; the guidance block reinforces *when* to use one. This is a Realtime-modes knob — pipeline mode already prepends its own phone preamble and is unaffected.
+</Note>
+
+---
+
+## Per-tool timeout
+
+By default a tool call is aborted after **10 seconds**. Long browser-automation or external-API tools legitimately run 30-60 seconds — without a higher timeout they would be cut short and the model would receive a timeout error mid-call. Set `timeout_s` per tool to raise the ceiling:
+
+```python
+from getpatter import Patter, tool
+
+agent = phone.agent(
+    system_prompt="You are a research assistant.",
+    tools=[
+        tool(
+            name="run_browser_task",
+            description="Drive a headless browser to complete a multi-step task.",
+            parameters={
+                "type": "object",
+                "properties": {"task": {"type": "string"}},
+                "required": ["task"],
+            },
+            handler=browser_handler,
+            timeout_s=60.0,                       # allow up to 60s (was 10s)
+            reassurance="One moment while I check that for you.",
+        ),
+    ],
+)
+```
+
+- Applies to **both** the handler path and the webhook path.
+- `None` (default) keeps the existing 10 s behaviour — no change for tools that don't opt in.
+- Clamped to a **300 s** ceiling so a hung tool can't hold the turn forever.
+- A timeout is **terminal** — it is not retried (retrying would multiply the wait). The model receives `{"error": "...timed out...", "fallback": true}` so it can recover gracefully (e.g. "that's taking longer than expected, let me take your number and call you back").
+
+<Note>
+  The per-tool timeout governs **tool execution** only and is independent of the LLM provider's own stream ceiling.
+
+  The carrier media stream stays open across a long tool call — Twilio keeps the `<Connect><Stream>` WebSocket up for the whole call lifetime and keeps sending inbound media every ~20 ms even during silence, so a 30-60 s tool does **not** drop the leg. Pair `timeout_s` with `reassurance` (Realtime mode) so the filler keeps audio flowing and the line doesn't sound dead while the tool runs. The per-tool timeout — not the carrier — is what bounds a hung tool.
 </Note>
 
 ---

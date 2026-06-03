@@ -26,6 +26,7 @@ import {
   OpenAIRealtimeAdapter,
   OpenAIRealtimeVADType,
   OpenAITranscriptionModel,
+  buildTurnDetection,
 } from './openai-realtime';
 import {
   mulawToPcm16,
@@ -104,44 +105,34 @@ export class OpenAIRealtime2Adapter extends OpenAIRealtimeAdapter {
     // directions. mulaw / pcma are not honoured by the audio engine
     // even though the protocol accepts the MIME type (see class doc).
     const fmt = { type: 'audio/pcm', rate: 24000 };
+    // GA nests turn_detection and noise_reduction under audio.input.
+    // Use the shared buildTurnDetection helper (same as v1) with GA-only
+    // create_response / interrupt_response gating set to false:
+    //  - Defer ``response.create`` to the application (post hallucination
+    //    filter check) — server VAD auto-create would generate phantom turns
+    //    on silence/echo hallucinations.
+    //  - ``interrupt_response: false`` — barge-in is gated client-side.
+    const audioInput: Record<string, unknown> = {
+      format: fmt,
+      transcription: {
+        model: opts.inputAudioTranscriptionModel ?? OpenAITranscriptionModel.WHISPER_1,
+      },
+      turn_detection: buildTurnDetection(opts.turnDetection, {
+        defaultType: opts.vadType ?? OpenAIRealtimeVADType.SERVER_VAD,
+        defaultSilenceMs: opts.silenceDurationMs ?? 300,
+        includeResponseGating: true,
+      }),
+    };
+    // GA nests noise reduction under audio.input (v1 puts it at top level).
+    // Omitted entirely when unset (today's behavior).
+    if (opts.noiseReduction !== undefined) {
+      audioInput.input_audio_noise_reduction = { type: opts.noiseReduction };
+    }
     const config: Record<string, unknown> = {
       type: 'realtime',
       output_modalities: opts.modalities ?? ['audio'],
       audio: {
-        input: {
-          format: fmt,
-          transcription: {
-            model: opts.inputAudioTranscriptionModel ?? OpenAITranscriptionModel.WHISPER_1,
-          },
-          // VAD threshold raised back to the OpenAI default (0.5) on
-          // 2026-05-22. The earlier 0.1 tuning (motivated by the
-          // upsampled telephony-band loss in high frequencies) made the
-          // server VAD trigger on the carrier-loopback echo of the
-          // agent's OWN outbound audio in PSTN no-AEC scenarios.
-          // Combined with the default ``turn_detection.create_response:
-          // true``, every phantom ``speech_started`` ended a turn early
-          // and auto-created a new response that the agent immediately
-          // spoke over, leading to a runaway loop where the first
-          // message was repeatedly cut and re-generated.
-          turn_detection: {
-            type: opts.vadType ?? OpenAIRealtimeVADType.SERVER_VAD,
-            threshold: 0.5,
-            prefix_padding_ms: 300,
-            silence_duration_ms: opts.silenceDurationMs ?? 300,
-            // Defer ``response.create`` to the application: when OpenAI's
-            // server VAD commits an ``input_audio_buffer.committed`` segment
-            // that turns out to be a Whisper hallucination on silence/echo,
-            // auto-creating a response would generate a phantom turn (the
-            // model reads the hallucinated text as user input). Patter
-            // triggers ``response.create`` explicitly in the Realtime
-            // stream-handler AFTER validating ``transcript_input`` against
-            // the hallucination filter. Pair with ``interrupt_response:
-            // false`` so server VAD also leaves in-flight responses alone —
-            // barge-in is gated client-side.
-            create_response: false,
-            interrupt_response: false,
-          },
-        },
+        input: audioInput,
         output: {
           format: fmt,
           voice: this.voice,
@@ -611,5 +602,36 @@ export class OpenAIRealtime2Adapter extends OpenAIRealtimeAdapter {
       responseBody.reasoning = { effort: this.options.reasoningEffort };
     }
     this.ws?.send(JSON.stringify({ type: 'response.create', response: responseBody }));
+  }
+
+  /**
+   * Speak a short reassurance filler WITHOUT injecting a `role:user` turn.
+   *
+   * GA-shape sibling of {@link sendFirstMessage} (and override of the base v1
+   * {@link OpenAIRealtimeAdapter.sendReassurance}): a bare `response.create`
+   * carrying explicit `instructions` so the filler is the assistant's own
+   * in-band audio. No `conversation.item.create` with `role:"user"` is
+   * emitted, so the transcript shows no phantom caller line. The GA endpoint
+   * rejects `response.modalities` and does not inherit `audio.output.voice`
+   * for an explicit `response.create`, so — exactly as in
+   * {@link sendFirstMessage} — we send `output_modalities` and re-inject the
+   * voice. Fillers must not imply success or failure.
+   *
+   * Mirrors Python `OpenAIRealtime2Adapter.send_reassurance` in
+   * `providers/openai_realtime_2.py`.
+   */
+  override async sendReassurance(text: string): Promise<void> {
+    if (!this.ws) return;
+    const responseBody: Record<string, unknown> = {
+      output_modalities: ['audio'],
+      audio: { output: { voice: this.voice } },
+      instructions: `Say exactly this and nothing else: "${text}"`,
+    };
+    // ``reasoning.effort`` is only accepted by the flagship GA variants —
+    // forward it only when explicitly configured (mirrors sendFirstMessage).
+    if (this.options.reasoningEffort !== undefined) {
+      responseBody.reasoning = { effort: this.options.reasoningEffort };
+    }
+    this.ws.send(JSON.stringify({ type: 'response.create', response: responseBody }));
   }
 }

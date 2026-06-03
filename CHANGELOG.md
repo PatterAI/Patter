@@ -2,6 +2,89 @@
 
 ### Added
 
+- **OpenAI Realtime input noise reduction — stop speakerphone / room noise from
+  cutting the agent off.** New `noise_reduction` on the Realtime engine markers
+  (`engines.openai.Realtime(noise_reduction="far_field")` /
+  `engines.openai_realtime_2.Realtime2(...)` Python; `new Realtime({ noiseReduction:
+  "far_field" })` TS) and a matching `Patter.agent(openai_realtime_noise_reduction=
+  "far_field")` / `phone.agent({ openaiRealtimeNoiseReduction: "far_field" })`
+  field. On a speakerphone, mouse clicks, phone shifts, and background chatter
+  were being detected as the caller speaking and barging in over the agent;
+  enabling OpenAI's native `far_field` reduction (recommended for conference /
+  speakerphone audio; `near_field` for a close handset) filters that out before
+  VAD sees it. `None` / `undefined` (default) omits the field entirely — today's
+  behaviour, no reduction. The GA/v2 adapter nests it under
+  `session.audio.input.input_audio_noise_reduction`; the v1-beta adapter emits it
+  top-level — each at the correct path for that endpoint. Invalid values are
+  rejected with a clear error. `libraries/python/getpatter/providers/openai_realtime.py`
+  / `openai_realtime_2.py`, `libraries/typescript/src/providers/openai-realtime.ts`
+  / `openai-realtime-2.ts`.
+
+- **`RealtimeTurnDetection` — tune the Realtime VAD to reject false barge-in.**
+  New immutable config (`from getpatter import RealtimeTurnDetection` Python;
+  `RealtimeTurnDetection` interface TS) accepted by the Realtime engine markers
+  (`Realtime(turn_detection=...)` / `new Realtime({ turnDetection })`) and
+  `Patter.agent(realtime_turn_detection=...)` / `phone.agent({ realtimeTurnDetection })`.
+  Raise `threshold` (server_vad — higher rejects more background noise) or switch
+  to `type="semantic_vad"` with `eagerness="low"` so the model waits for the
+  caller to actually finish before treating audio as speech — the missing knob
+  for noisy speakerphone links. Each unset field falls back to the adapter's
+  current default (server_vad, threshold 0.5, prefix_padding_ms 300,
+  silence_duration_ms 300), so omitting it preserves today's behaviour exactly.
+  `semantic_vad` emits `{type, eagerness}` only. Patter keeps its client-gated
+  barge-in safety values (`create_response` / `interrupt_response` stay internal,
+  not exposed). `libraries/python/getpatter/models.py`,
+  `libraries/typescript/src/types.ts`.
+
+- **Per-tool execution timeout — long (30-60s) browser-automation / external-API
+  tools no longer drop the call at 10s.** New `timeout_s` on the Python `tool()`
+  factory and `Tool` dataclass (`tool(name=..., handler=..., timeout_s=60.0)`) and
+  `timeoutMs` on the TS `ToolDefinition` (`{ name, handler, timeoutMs: 60_000 }`).
+  Previously the tool executor aborted every tool at a hardcoded 10s, killing
+  slow tools mid-run; the per-tool value now governs both the handler await and
+  the webhook request (clamped to a 300s / 300_000ms ceiling). A timeout is
+  terminal — it is NOT retried (retrying would multiply the wait and stall the
+  turn) and returns a structured `{error, fallback: true}` so the model can
+  recover. Default `None` / `undefined` keeps the existing 10s behaviour. The
+  per-tool timeout governs tool execution and is independent of any LLM
+  provider's own stream ceiling. The carrier media stream stays open across the
+  whole tool call — Twilio keeps the WS up for the call lifetime — so a long tool
+  does not drop the leg; pair `timeout_s` with `reassurance` so the line doesn't
+  sound dead. `libraries/python/getpatter/tools/tool_executor.py` /
+  `services/llm_loop.py` / `_public_api.py`,
+  `libraries/typescript/src/llm-loop.ts` / `public-api.ts`.
+
+- **`reassurance` on the Python `tool()` factory — a verbal "one moment" while a
+  slow tool runs.** The `Tool` dataclass and `ToolDefinition` already carried
+  `reassurance`; it is now exposed on the Python `tool()` keyword factory and
+  decorator (`tool(name=..., handler=..., reassurance="One moment while I check
+  that for you.")`, or the dict form `{"message": str, "after_ms": int}`) for
+  parity with TS object-literal usage. Honoured in Realtime mode (the agent
+  speaks the filler if the tool hasn't returned within `after_ms`); pipeline-mode
+  injection remains out of scope. `libraries/python/getpatter/_public_api.py`,
+  `libraries/python/getpatter/client.py`.
+
+- **`tool_call_preambles` on `Patter.agent(...)` (Realtime modes) — the agent
+  speaks a short "let me check" line in its own voice before a slow tool call.**
+  Opt-in `bool | str` (default `False`) on `Patter.agent(tool_call_preambles=...)`
+  / `phone.agent({ toolCallPreambles })`. When `True`, Patter prepends a native
+  "# Preambles" guidance block to the OpenAI Realtime session `instructions` so
+  the reasoning model emits one short, action-describing sentence (e.g. "I'll
+  check that order now.") immediately before a tool call that may take a moment —
+  OpenAI's recommended, first-class UX for 30-60 s tools (most effective on
+  `gpt-realtime-2`, where preambles are default-on), with no API field and no
+  client-side timer. The block steers the model to vary wording, keep it to one
+  sentence, skip it when it can answer immediately, and never imply the result
+  before the tool returns. A `str` overrides the block verbatim. When a tool
+  also carries a `reassurance` string, that phrase is surfaced to the model as a
+  sample preamble in the tool's description. Default `False` leaves the prompt
+  byte-identical to prior releases; pipeline mode is unaffected (it has its own
+  phone preamble). `libraries/python/getpatter/models.py`,
+  `.../client.py`, `.../stream_handler.py` (`apply_tool_call_preambles`,
+  `DEFAULT_TOOL_CALL_PREAMBLE_BLOCK`),
+  `libraries/typescript/src/types.ts`, `.../stream-handler.ts`
+  (`applyToolCallPreambles`).
+
 - **Built-in `consult` escalation tool — give an in-call agent an on-demand
   bridge back to your own back-office agent.** New `ConsultConfig`
   (`getpatter` Python / TS) on `Patter.agent(consult=...)` /
@@ -65,6 +148,22 @@
 
 ### Fixed
 
+- **Reassurance filler no longer injects a phantom caller turn.** The slow-tool
+  reassurance filler (`tool(reassurance=...)`) previously fired
+  `conversation.item.create` with `role:"user"`, so the transcript falsely
+  showed the caller saying "One moment." and the fake user turn could confuse
+  the model. It now speaks via a dedicated assistant-attributed
+  `send_reassurance()` / `sendReassurance()` path — a bare `response.create`
+  with explicit instructions, no fake user item — matching how
+  `send_first_message` already makes the agent speak a verbatim line without a
+  `role:user` turn. The shared `send_text()` (used by guardrail replacement,
+  tool progress, and DTMF) is untouched. Early-cancel is preserved: nothing is
+  spoken if the tool returns before `after_ms`. On the GA adapter the filler
+  uses the GA-valid `output_modalities` + re-injected voice (the GA endpoint
+  rejects the v1 `modalities` key). `libraries/python/getpatter/providers/openai_realtime.py`
+  / `openai_realtime_2.py`, `.../stream_handler.py` (`_schedule_reassurance`),
+  `libraries/typescript/src/providers/openai-realtime.ts` / `openai-realtime-2.ts`,
+  `.../stream-handler.ts`.
 - **DeepFilterNet noise suppression was a silent no-op.** The resampler could
   never reach the 48 kHz the model requires, the error was swallowed, and raw
   audio passed through unsuppressed. Now resampled correctly

@@ -166,6 +166,61 @@ class ConsultConfig:
 
 
 @dataclass(frozen=True)
+class RealtimeTurnDetection:
+    """OpenAI Realtime turn-detection tuning.
+
+    Raise the VAD ``threshold`` (server_vad) or switch to ``semantic_vad`` with
+    ``eagerness='low'`` to stop speakerphone / conference-room noise (mouse
+    clicks, phone shifts, background chatter) from being mistaken for the
+    caller speaking and cutting the agent off.
+
+    Each unset field falls back to the adapter's current default (server_vad,
+    threshold ``0.5``, prefix_padding_ms ``300``, silence_duration_ms ``300``).
+    ``type='semantic_vad'`` emits ``{type, eagerness}`` only — OpenAI rejects
+    ``threshold`` / ``prefix_padding_ms`` / ``silence_duration_ms`` on the
+    semantic detector. ``create_response`` / ``interrupt_response`` are NOT
+    exposed (Patter keeps its client-gated barge-in safety values).
+
+    Args:
+        type: ``"server_vad"`` (default) or ``"semantic_vad"``.
+        threshold: server_vad only — 0..1, higher rejects more background
+            noise. ``None`` keeps the adapter default (0.5).
+        prefix_padding_ms: server_vad only. ``None`` keeps the default (300).
+        silence_duration_ms: server_vad only. ``None`` keeps the adapter
+            default.
+        eagerness: semantic_vad only — ``"low"`` lets the caller finish (least
+            likely to interrupt), through ``"high"`` / ``"auto"``.
+    """
+
+    type: str = "server_vad"
+    threshold: float | None = None
+    prefix_padding_ms: int | None = None
+    silence_duration_ms: int | None = None
+    eagerness: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.type not in ("server_vad", "semantic_vad"):
+            raise ValueError(
+                "RealtimeTurnDetection.type must be 'server_vad' or "
+                f"'semantic_vad', got {self.type!r}"
+            )
+        if self.eagerness is not None and self.eagerness not in (
+            "low",
+            "medium",
+            "high",
+            "auto",
+        ):
+            raise ValueError(
+                "RealtimeTurnDetection.eagerness must be one of "
+                f"low|medium|high|auto, got {self.eagerness!r}"
+            )
+        if self.eagerness is not None and self.type != "semantic_vad":
+            raise ValueError(
+                "RealtimeTurnDetection.eagerness is only valid when type='semantic_vad'"
+            )
+
+
+@dataclass(frozen=True)
 class Agent:
     """Configuration for a local-mode voice AI agent.
 
@@ -248,6 +303,15 @@ class Agent:
     # bullet lists, code blocks; numbers and dates spelled out; replies kept
     # short). Set to ``True`` to disable and ship ``system_prompt`` verbatim.
     disable_phone_preamble: bool = False
+    # When set, Patter prepends a native "# Preambles" guidance block to the
+    # Realtime session ``instructions`` so the model speaks one short,
+    # action-describing sentence ("I'll check that order now.") before a tool
+    # call that may take a moment. Most effective on ``gpt-realtime-2`` where
+    # preambles are first-class. ``False`` (default) leaves the prompt byte-
+    # identical to today. ``True`` prepends the built-in block. A ``str`` is
+    # used verbatim as the full block (override). Realtime modes only;
+    # pipeline mode already has its own phone preamble (see services/llm_loop).
+    tool_call_preambles: bool | str = False
     # Acoustic echo cancellation. When ``True`` (pipeline mode only) the
     # SDK instantiates an :class:`getpatter.audio.aec.NlmsEchoCanceller`
     # that subtracts the agent's own TTS bleed from the inbound mic
@@ -268,6 +332,16 @@ class Agent:
     # ``None`` (default) keeps the adapter default (``whisper-1``). Set to
     # e.g. ``"gpt-realtime-whisper"`` for low-latency transcript partials.
     openai_realtime_input_audio_transcription_model: str | None = None
+    # OpenAI Realtime — input noise reduction for speakerphone / conference
+    # audio. ``None`` (default) omits the field entirely (no reduction —
+    # today's behavior). ``"far_field"`` is recommended for phone /
+    # speakerphone calls; ``"near_field"`` for a handset close to the mouth.
+    openai_realtime_noise_reduction: Literal["near_field", "far_field"] | None = None
+    # OpenAI Realtime — turn-detection tuning (raise the VAD threshold to
+    # reject speakerphone noise, or switch to ``semantic_vad`` with
+    # ``eagerness='low'``). ``None`` (default) keeps the adapter's current
+    # hardcoded turn_detection. See :class:`RealtimeTurnDetection`.
+    realtime_turn_detection: "RealtimeTurnDetection | None" = None
     # Opt-in barge-in confirmation strategies (pipeline mode). With the
     # default empty tuple the SDK falls back to the legacy "interrupt
     # immediately on VAD speech_start" behaviour. When at least one

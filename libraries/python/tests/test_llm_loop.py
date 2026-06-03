@@ -131,6 +131,9 @@ async def test_tool_call_then_text():
         call_context={"call_id": "test"},
         webhook_url="",
         handler=tool["handler"],
+        # Per-tool timeout is forwarded for every dispatch; None when the tool
+        # declares no ``timeout_s`` (the executor then uses its 10s default).
+        tool_timeout_s=None,
     )
 
 

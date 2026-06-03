@@ -340,6 +340,45 @@ const agent = phone.agent({
   Pipeline mode silently skips reassurance for now -- there is no clean injection point mid-turn. If you need it for a Pipeline agent, prefer an `async function*` handler with a first `yield { progress: "..." }`.
 </Note>
 
+The filler is spoken as the assistant's own line — it does **not** add a fake caller turn to the transcript. (Earlier builds injected the filler as a `role:"user"` item, which made the transcript falsely show the caller saying "One moment." and could confuse the model. The filler now travels through a dedicated assistant-attributed path.) Keep the wording neutral — a good filler tells the caller you're working on it without implying the result, e.g. `"One moment."`, `"Let me check."`, `"Give me a moment."`.
+
+## Tool-call preambles
+
+Realtime mode only; most effective on `gpt-realtime-2`, where preambles are first-class. For tools that take a noticeable beat (30–60 s browser automation, external lookups), `toolCallPreambles` makes the model speak one short, action-describing sentence **in its own voice** immediately before the tool call — "I'll check that order now." — so the caller hears that work is happening. This is OpenAI's native, recommended UX for slow tools and is steered entirely through the session `instructions`; it is not a client-side timer.
+
+```typescript
+const agent = phone.agent({
+  systemPrompt: "You are an order-status assistant.",
+  engine: new OpenAIRealtime2({ apiKey: process.env.OPENAI_API_KEY! }),
+  toolCallPreambles: true, // prepend the built-in "# Preambles" guidance block
+  tools: [
+    {
+      name: "lookup_order",
+      description: "Look up an order by id.",
+      parameters: {
+        type: "object",
+        properties: { orderId: { type: "string" } },
+        required: ["orderId"],
+      },
+      webhookUrl: "https://api.example.com/orders/lookup",
+      // Optional: when toolCallPreambles is on, a tool's `reassurance` string
+      // is also surfaced to the model as a sample preamble phrase for THIS tool.
+      reassurance: "Let me pull up that order.",
+    },
+  ],
+});
+```
+
+| `toolCallPreambles` | Effect |
+|---------------------|--------|
+| `undefined` / `false` (default) | No change to the prompt — instructions stay byte-identical to prior releases. |
+| `true` | Patter prepends the built-in `# Preambles` guidance block (when to speak a preamble, when to stay silent, vary wording, never imply the result). |
+| `string` | Used verbatim as the full preamble block (house-style override). |
+
+<Note>
+  Preambles steer the model through the system prompt; they apply to Realtime modes only. Pipeline mode has its own phone-friendly preamble (see `disablePhonePreamble`). For a fallback that works on non-reasoning models, pair preambles with a tool's `reassurance` filler above.
+</Note>
+
 ---
 
 ## Retries & circuit breaker

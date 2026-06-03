@@ -78,6 +78,49 @@ export type MCPServerConfig =
       readonly name?: string;
     };
 
+/**
+ * OpenAI Realtime turn-detection tuning.
+ *
+ * Raise the VAD {@link threshold} (`server_vad`) or switch to
+ * `semantic_vad` with {@link eagerness} `'low'` to stop speakerphone /
+ * conference-room noise (mouse clicks, phone shifts, background chatter)
+ * from being mistaken for the caller speaking and cutting the agent off.
+ *
+ * Each unset field falls back to the adapter's current default
+ * (`server_vad`, threshold `0.5`, `prefixPaddingMs` `300`,
+ * `silenceDurationMs` `300`). `type === 'semantic_vad'` emits
+ * `{ type, eagerness }` only — OpenAI rejects `threshold` /
+ * `prefixPaddingMs` / `silenceDurationMs` on the semantic detector.
+ * `createResponse` / `interruptResponse` are NOT exposed (Patter keeps
+ * its client-gated barge-in safety values).
+ *
+ * Mirrors Python `RealtimeTurnDetection` dataclass in `models.py`.
+ */
+export interface RealtimeTurnDetection {
+  /** `"server_vad"` (default) or `"semantic_vad"`. */
+  readonly type?: 'server_vad' | 'semantic_vad';
+  /**
+   * `server_vad` only — 0..1, higher rejects more background noise.
+   * `undefined` keeps the adapter default (`0.5`).
+   */
+  readonly threshold?: number;
+  /**
+   * `server_vad` only — milliseconds of speech required before VAD
+   * triggers. `undefined` keeps the adapter default (`300`).
+   */
+  readonly prefixPaddingMs?: number;
+  /**
+   * `server_vad` only — trailing silence (ms) before the turn ends.
+   * `undefined` keeps the adapter default (`300`).
+   */
+  readonly silenceDurationMs?: number;
+  /**
+   * `semantic_vad` only — `"low"` lets the caller finish (least likely
+   * to interrupt), through `"high"` / `"auto"`.
+   */
+  readonly eagerness?: 'low' | 'medium' | 'high' | 'auto';
+}
+
 /** Internal shape of a tool definition (matches `Tool` from `public-api.ts`). */
 export interface ToolDefinition {
   readonly name: string;
@@ -146,6 +189,15 @@ export interface ToolDefinition {
    * malformed arguments (DB writes, payment, transfers).
    */
   readonly strict?: boolean;
+  /**
+   * Per-tool execution timeout in milliseconds, applied to BOTH the handler
+   * and webhook paths. `undefined` (default) uses the executor default
+   * (10 000 ms). Raise for long browser-automation / external-API tools
+   * (e.g. `60_000`). Clamped to a 300 000 ms ceiling by the executor.
+   *
+   * Mirrors Python's `timeout_s` on `Tool` / `tool()`.
+   */
+  readonly timeoutMs?: number;
 }
 
 /**
@@ -567,6 +619,53 @@ export interface AgentOptions {
    * currency, balanced delimiter, ellipsis).
    */
   readonly aggressiveFirstFlush?: boolean;
+  /**
+   * Input noise reduction for speakerphone / conference audio (OpenAI
+   * Realtime mode only). `undefined` (default) omits the field entirely
+   * (no reduction — today's behavior).
+   *
+   * - `"far_field"` — recommended for phone / speakerphone calls where
+   *   the mic is more than ~30 cm from the speaker.
+   * - `"near_field"` — for a handset held close to the mouth.
+   *
+   * v1 Realtime: emitted at the top level of `session.update` as
+   * `input_audio_noise_reduction: { type }`. GA Realtime (gpt-realtime-2):
+   * nested under `audio.input.input_audio_noise_reduction: { type }`.
+   *
+   * Mirrors Python `openai_realtime_noise_reduction` on `Patter.agent()` /
+   * `Agent` and `noise_reduction` on `engines.openai.Realtime`.
+   */
+  readonly openaiRealtimeNoiseReduction?: 'near_field' | 'far_field';
+  /**
+   * Turn-detection tuning for OpenAI Realtime mode. `undefined` (default)
+   * keeps the adapter's current hardcoded `server_vad` / threshold `0.5` /
+   * silence 300 ms settings.
+   *
+   * Raise {@link RealtimeTurnDetection.threshold} (`server_vad`) or switch
+   * to `semantic_vad` with `eagerness: 'low'` to stop speakerphone /
+   * conference noise from triggering false barge-ins.
+   *
+   * Mirrors Python `realtime_turn_detection` on `Patter.agent()` / `Agent`
+   * and `turn_detection` on `engines.openai.Realtime`.
+   */
+  readonly realtimeTurnDetection?: RealtimeTurnDetection;
+  /**
+   * When set, Patter prepends a native "# Preambles" guidance block to the
+   * OpenAI Realtime session `instructions` so the model speaks one short,
+   * action-describing sentence ("I'll check that order now.") before a tool
+   * call that may take a moment, in its own voice. Most effective on
+   * `gpt-realtime-2`, where preambles are first-class.
+   *
+   * - `undefined` / `false` (default) — no change to the prompt; the
+   *   instructions stay byte-identical to prior releases.
+   * - `true` — Patter prepends the built-in block.
+   * - `string` — used verbatim as the full preamble block (override).
+   *
+   * Realtime modes only; pipeline mode has its own phone preamble (see
+   * `disablePhonePreamble`). Mirrors Python `tool_call_preambles` on
+   * `Patter.agent()` / `Agent`.
+   */
+  readonly toolCallPreambles?: boolean | string;
 }
 
 /** Pipeline-mode message handler — given full turn context, returns the agent's reply. */

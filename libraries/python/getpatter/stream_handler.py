@@ -269,6 +269,71 @@ def resolve_agent_prompt(agent, custom_params: dict | None = None) -> str:
     return resolved
 
 
+# Native "# Preambles" guidance block prepended to the Realtime session
+# ``instructions`` when ``Agent.tool_call_preambles is True``. Steers the
+# reasoning model to speak one short, action-describing sentence in its own
+# voice immediately before a slow tool call. This is OpenAI's recommended,
+# first-class answer (most effective on ``gpt-realtime-2``) to the "let me
+# check while a slow tool runs" UX — no API field, no client timer.
+#
+# This literal MUST stay byte-identical to the TypeScript
+# ``DEFAULT_TOOL_CALL_PREAMBLE_BLOCK`` in ``stream-handler.ts`` (cross-SDK
+# parity). No trailing newline beyond the block content.
+DEFAULT_TOOL_CALL_PREAMBLE_BLOCK = """# Preambles
+
+Use short preambles only when they help the user understand that work is happening. A preamble is one short spoken update describing the action you are about to take — not hidden reasoning, and never a claim about the result.
+
+## When to use a preamble
+Use a preamble when:
+- you are about to call a tool that may take noticeable time;
+- you need to reason through a multi-step request;
+- you are checking records, availability, account state, or policy details;
+- you are preparing an escalation or handoff;
+- silence would make the assistant feel unresponsive.
+
+When a preamble is needed, output it immediately before the reasoning or tool call.
+
+## When to NOT use a preamble
+Do not use a preamble when:
+- the answer is direct and can be given immediately;
+- the user is only confirming, correcting, or declining something;
+- the audio is unclear and you need clarification instead;
+- the tool call is lightweight and the user would not benefit from an update.
+
+## Style
+- Keep it to one short sentence (two only before a high-impact action).
+- Vary the wording across turns; do not reuse the same opener.
+- Describe the action, not the internal reasoning.
+- Never imply success or failure before the tool returns.
+
+Prefer:
+- "I'll check that order now."
+- "I'll look up your appointment details."
+- "I'll verify that before we make any changes."
+- "I'll check the policy and then give you the next step."
+- "I'll pull that up so we can make sure it's the right account."
+
+Avoid:
+- "Let me think about that for a second."
+- "Please wait while I process your request."
+- "I'm going to use my tools now."
+- "Hmm..." / "One moment while I process that...\""""
+
+
+def apply_tool_call_preambles(prompt: str, knob: bool | str) -> str:
+    """Prepend the Preambles guidance block to a Realtime system prompt.
+
+    ``False`` returns ``prompt`` unchanged (byte-identical — same object).
+    ``True`` prepends the built-in :data:`DEFAULT_TOOL_CALL_PREAMBLE_BLOCK`.
+    A ``str`` is prepended verbatim (full override). Realtime modes only —
+    pipeline mode has its own phone preamble.
+    """
+    if not knob:
+        return prompt
+    block = knob if isinstance(knob, str) else DEFAULT_TOOL_CALL_PREAMBLE_BLOCK
+    return f"{block}\n\n{prompt}" if prompt else block
+
+
 def apply_call_overrides(agent, overrides: dict):
     """Return a new Agent with per-call config overrides applied."""
     from dataclasses import asdict
@@ -953,13 +1018,24 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
             return None
 
         adapter = self._adapter
-        if adapter is None or not hasattr(adapter, "send_text"):
+        if adapter is None or not (
+            hasattr(adapter, "send_reassurance") or hasattr(adapter, "send_text")
+        ):
             return None
 
         async def _fire() -> None:
             try:
                 await asyncio.sleep(after_ms / 1000.0)
-                await adapter.send_text(message)
+                # Speak the filler WITHOUT injecting a phantom ``role:user``
+                # turn. ``send_reassurance`` emits a bare ``response.create``
+                # (assistant-attributed, same no-fake-turn shape as
+                # ``send_first_message``); ``send_text`` would corrupt the
+                # transcript with a fake caller line. Fall back to
+                # ``send_text`` only for adapters lacking the new method.
+                if hasattr(adapter, "send_reassurance"):
+                    await adapter.send_reassurance(message)
+                else:
+                    await adapter.send_text(message)
             except asyncio.CancelledError:
                 # Tool returned before the grace window — nothing to do.
                 raise
@@ -1028,11 +1104,20 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         # the Realtime session and its handler reaches the ToolExecutor.
         self.agent = _inject_consult_tool(self.agent)
 
+        preambles_on = bool(getattr(self.agent, "tool_call_preambles", False))
         agent_tools: list[dict] = []
         for t in self.agent.tools or []:
+            description = t.get("description", "")
+            # Per-tool nicety: when preambles are on AND the tool carries a
+            # ``reassurance`` string, surface it to the model as a sample
+            # preamble phrasing on a COPY of the description (never mutate the
+            # frozen Agent / tool dict). Non-breaking and opt-in.
+            sample = t.get("reassurance")
+            if preambles_on and isinstance(sample, str) and sample:
+                description = f"{description}\n\nPreamble sample phrases:\n- {sample}"
             entry: dict = {
                 "name": t["name"],
-                "description": t.get("description", ""),
+                "description": description,
                 "parameters": t.get("parameters", {}),
             }
             # Propagate strict-mode opt-in to the OpenAI session.update
@@ -1050,7 +1135,10 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
             "api_key": self._openai_key,
             "model": self.agent.model,
             "voice": self.agent.voice,
-            "instructions": self.resolved_prompt,
+            "instructions": apply_tool_call_preambles(
+                self.resolved_prompt,
+                getattr(self.agent, "tool_call_preambles", False),
+            ),
             "language": self.agent.language,
             "tools": openai_tools,
             "audio_format": self._audio_format,
@@ -1063,6 +1151,15 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         )
         if transcription_model is not None:
             adapter_kwargs["input_audio_transcription_model"] = transcription_model
+        # Forward the speakerphone noise-reduction + turn-detection tuning
+        # knobs only when set, so the adapter's own defaults stay authoritative
+        # for users who don't pass them. (POINT 1a / 1b.)
+        noise_reduction = getattr(self.agent, "openai_realtime_noise_reduction", None)
+        if noise_reduction is not None:
+            adapter_kwargs["noise_reduction"] = noise_reduction
+        turn_detection = getattr(self.agent, "realtime_turn_detection", None)
+        if turn_detection is not None:
+            adapter_kwargs["turn_detection"] = turn_detection
         self._adapter = _adapter_cls(**adapter_kwargs)
 
         # Try to adopt a Realtime WebSocket parked during the ringing
@@ -1561,6 +1658,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                                     webhook_url=tool_def.get("webhook_url", ""),
                                     handler=tool_def.get("handler"),
                                     on_progress=_on_progress,
+                                    tool_timeout_s=tool_def.get("timeout_s"),
                                 )
                             finally:
                                 if reassurance_task is not None:

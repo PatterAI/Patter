@@ -66,6 +66,11 @@ class Tool:
     #: Currently honoured only in Realtime mode (``adapter.send_text``);
     #: pipeline mode silently ignores it. Off by default.
     reassurance: str | dict | None = None
+    #: Per-tool execution timeout in seconds, applied to BOTH the handler
+    #: and webhook paths. ``None`` (default) uses the executor default
+    #: (10 s). Raise for long browser-automation / external-API tools
+    #: (e.g. ``60.0``). Clamped to a 300 s ceiling by the executor.
+    timeout_s: float | None = None
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -89,6 +94,8 @@ def tool(
     parameters: dict | None = None,
     handler: Callable[..., Any] | None = None,
     webhook_url: str = "",
+    reassurance: str | dict | None = None,
+    timeout_s: float | None = None,
 ) -> Tool:
     """Create a :class:`Tool` instance.
 
@@ -115,6 +122,16 @@ def tool(
     Exactly one of ``handler`` or ``webhook_url`` must be provided in the
     keyword form. In decorator form the decorated function is used as the
     handler.
+
+    ``reassurance`` and ``timeout_s`` apply to both calling conventions:
+
+    * ``reassurance`` — a verbal "let me check / one moment" filler the agent
+      speaks while a slow tool runs (Realtime mode). ``str`` shorthand or
+      ``{"message": str, "after_ms": int}``.
+    * ``timeout_s`` — per-tool execution timeout in seconds (default ``None``
+      → executor 10s default). Raise for long browser-automation /
+      external-API tools, e.g. ``tool(name=..., handler=..., timeout_s=60.0,
+      reassurance="One moment while I check that for you.")``.
     """
     if fn is not None:
         # Decorator form: @tool on a typed callable.
@@ -129,6 +146,8 @@ def tool(
             description=legacy["description"],
             parameters=legacy["parameters"],
             handler=legacy["handler"],
+            reassurance=reassurance,
+            timeout_s=timeout_s,
         )
 
     # Keyword form: tool(name=..., handler=...) or tool(name=..., webhook_url=...).
@@ -140,6 +159,8 @@ def tool(
         parameters=parameters,
         handler=handler,
         webhook_url=webhook_url,
+        reassurance=reassurance,
+        timeout_s=timeout_s,
     )
 
 

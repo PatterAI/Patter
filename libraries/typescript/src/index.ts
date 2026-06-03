@@ -29,6 +29,7 @@ export type {
   ConsultConfig,
   PipelineHooks,
   HookContext,
+  RealtimeTurnDetection,
 } from "./types";
 // `Guardrail` is intentionally not re-exported from `./types` — the public
 // `Guardrail` identifier is the class from `./public-api` (exported below),
