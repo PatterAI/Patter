@@ -33,6 +33,26 @@ logger = logging.getLogger("getpatter")
 # are rejected to prevent OOM when the result is forwarded to OpenAI.
 _MAX_RESPONSE_BYTES = 1 * 1024 * 1024
 
+# Default per-tool execution timeout (seconds) when a tool does not declare its
+# own ``timeout_s``. Matches the shared ``httpx.AsyncClient(timeout=10.0)``
+# default constructed in ``ToolExecutor.__init__`` so behaviour is unchanged
+# for tools that don't opt in.
+_DEFAULT_TOOL_TIMEOUT_S = 10.0
+
+# Clamp ceiling for a per-tool timeout. A long browser-automation / external
+# API tool legitimately runs 30-60s, but an unbounded timeout would let a hung
+# tool hold the turn forever — cap it at 5 minutes.
+_MAX_TOOL_TIMEOUT_S = 300.0
+
+
+def _clamp_tool_timeout(tool_timeout_s: float | None) -> float | None:
+    """Return the effective per-tool timeout, clamped to a sane range, or
+    ``None`` when no per-tool timeout was supplied (the caller then uses the
+    existing default path)."""
+    if tool_timeout_s is None:
+        return None
+    return max(0.1, min(float(tool_timeout_s), _MAX_TOOL_TIMEOUT_S))
+
 
 def _backoff_delay_s(base_s: float, attempt: int) -> float:
     """Exponential backoff with cap + small jitter. Mirrors the TS
@@ -206,6 +226,7 @@ class ToolExecutor:
         webhook_url: str = "",
         handler: object = None,
         on_progress: Any | None = None,
+        tool_timeout_s: float | None = None,
     ) -> str:
         """Execute a tool and return the result as a JSON string.
 
@@ -213,6 +234,13 @@ class ToolExecutor:
         Otherwise, falls back to POSTing to *webhook_url*. Both paths
         get retry-with-exponential-backoff and circuit-breaker
         protection.
+
+        ``tool_timeout_s`` is the per-tool execution timeout in seconds. When
+        set it governs BOTH the handler await (via ``asyncio.wait_for``) and
+        the webhook POST (per-request override of the shared 10s client) — so
+        a long browser-automation / external-API tool (30-60s) is not cut at
+        the 10s default. ``None`` (default) keeps the existing 10s behaviour.
+        Clamped to a 300s ceiling.
         """
         # Reject early when the breaker is OPEN — returns a structured
         # fallback JSON so the model can recover instead of waiting.
@@ -227,6 +255,8 @@ class ToolExecutor:
                 }
             )
 
+        effective_timeout = _clamp_tool_timeout(tool_timeout_s)
+
         with start_span(
             SPAN_TOOL,
             {
@@ -239,11 +269,20 @@ class ToolExecutor:
         ):
             if handler is not None:
                 return await self._execute_handler(
-                    tool_name, arguments, call_context, handler, on_progress
+                    tool_name,
+                    arguments,
+                    call_context,
+                    handler,
+                    on_progress,
+                    timeout_s=effective_timeout,
                 )
             if webhook_url:
                 return await self._execute_webhook(
-                    tool_name, arguments, call_context, webhook_url
+                    tool_name,
+                    arguments,
+                    call_context,
+                    webhook_url,
+                    timeout_s=effective_timeout,
                 )
             return json.dumps(
                 {
@@ -259,6 +298,8 @@ class ToolExecutor:
         call_context: dict,
         handler: object,
         on_progress: Any | None = None,
+        *,
+        timeout_s: float | None = None,
     ) -> str:
         """Call a local Python function as a tool handler. Supports
         plain async functions AND async generators that yield
@@ -270,13 +311,30 @@ class ToolExecutor:
         total_attempts = self.MAX_RETRIES + 1
         for attempt in range(total_attempts):
             try:
-                result = await _invoke_handler(
-                    handler, arguments, call_context, on_progress
-                )
+                coro = _invoke_handler(handler, arguments, call_context, on_progress)
+                if timeout_s is not None:
+                    result = await asyncio.wait_for(coro, timeout_s)
+                else:
+                    result = await coro
                 self._breaker.record_success(tool_name)
                 if isinstance(result, str):
                     return result
                 return json.dumps(result)
+            except (asyncio.TimeoutError, TimeoutError):
+                # A timeout is terminal — do NOT retry (retrying would
+                # multiply the wait by ``total_attempts`` and stall the turn).
+                # Record one failure and surface a structured fallback so the
+                # model can recover gracefully.
+                logger.error(
+                    "Tool handler '%s' timed out after %ss", tool_name, timeout_s
+                )
+                self._breaker.record_failure(tool_name)
+                return json.dumps(
+                    {
+                        "error": f"Tool '{tool_name}' timed out after {timeout_s}s",
+                        "fallback": True,
+                    }
+                )
             except Exception as e:  # noqa: BLE001 - intentional broad catch
                 last_err = e
                 if attempt < total_attempts - 1:
@@ -303,6 +361,8 @@ class ToolExecutor:
         arguments: dict,
         call_context: dict,
         webhook_url: str,
+        *,
+        timeout_s: float | None = None,
     ) -> str:
         """POST to user webhook and return result as string for OpenAI.
 
@@ -310,8 +370,17 @@ class ToolExecutor:
         backoff before returning an error JSON with ``fallback=True``.
         Records success/failure on the per-tool circuit breaker so a
         flapping endpoint trips OPEN instead of being retried forever.
+
+        ``timeout_s`` overrides the shared client's fixed 10s timeout on a
+        per-request basis so a long external-API tool isn't cut at 10s.
+        ``None`` keeps the client default.
         """
         _validate_webhook_url(webhook_url)
+        # The shared ``httpx.AsyncClient`` is constructed with a fixed 10s
+        # timeout; pass a per-request override when the tool declared its own.
+        post_kwargs: dict[str, Any] = {}
+        if timeout_s is not None:
+            post_kwargs["timeout"] = timeout_s
         for attempt in range(self.MAX_RETRIES + 1):
             try:
                 response = await self._client.post(
@@ -324,6 +393,7 @@ class ToolExecutor:
                         "callee": call_context.get("callee", ""),
                         "attempt": attempt + 1,
                     },
+                    **post_kwargs,
                 )
                 response.raise_for_status()
                 content_length = len(response.content)

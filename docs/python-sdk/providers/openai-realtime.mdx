@@ -70,6 +70,21 @@ from getpatter.providers.openai_realtime import OpenAITranscriptionModel
 OpenAITranscriptionModel.GPT_REALTIME_WHISPER  # "gpt-realtime-whisper"
 ```
 
+## Speakerphone noise & turn detection
+
+The same `noise_reduction` and `turn_detection` knobs documented on the [OpenAI Realtime 2 page](/python-sdk/providers/openai-realtime-2#speakerphone-noise--false-barge-in) are accepted by `OpenAIRealtime(...)` too — they reach the beta adapter, which emits `input_audio_noise_reduction` at the top level of the session (the GA adapter nests it under `session.audio.input`):
+
+```python
+from getpatter import OpenAIRealtime, RealtimeTurnDetection
+
+engine = OpenAIRealtime(
+    noise_reduction="far_field",  # filter speakerphone / room noise
+    turn_detection=RealtimeTurnDetection(type="server_vad", threshold=0.6),
+)
+```
+
+`None` / omitting either field preserves today's behaviour exactly. See the [Realtime 2 reference](/python-sdk/providers/openai-realtime-2#speakerphone-noise--false-barge-in) for the full `RealtimeTurnDetection` field table.
+
 ## Worked example — `gpt-realtime-2` with low reasoning + streaming whisper
 
 Constructing the lower-level `OpenAIRealtimeAdapter` directly gives access to every field. This is what `OpenAIRealtime(engine=...)` builds under the hood; reach for it when you need `reasoning_effort` or a non-default transcription model.

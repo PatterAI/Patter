@@ -56,6 +56,8 @@ OpenAIRealtime2(
     model: str = "gpt-realtime-2",
     reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = None,
     input_audio_transcription_model: str | None = None,  # default: whisper-1
+    noise_reduction: Literal["near_field", "far_field"] | None = None,
+    turn_detection: RealtimeTurnDetection | None = None,
 )
 ```
 
@@ -75,6 +77,80 @@ When set, Patter injects `session.reasoning = { effort: ... }` into the GA `sess
 ### Streaming transcription
 
 Set `input_audio_transcription_model` to override `audio.input.transcription.model`. The same identifiers as the beta endpoint apply — see the [streaming-transcription table on the OpenAI Realtime page](/python-sdk/providers/openai-realtime#streaming-transcription) for the full list (`whisper-1`, `gpt-4o-mini-transcribe`, `gpt-4o-transcribe`, `gpt-realtime-whisper`).
+
+## Speakerphone noise & false barge-in
+
+On a speakerphone or in a noisy room, mouse clicks, the phone being picked up or set down, and background chatter can be mistaken for the caller speaking — the agent gets cut off mid-sentence. Two knobs fix this at the OpenAI VAD layer (no carrier-side change):
+
+### Input noise reduction
+
+```python
+agent = phone.agent(
+    engine=OpenAIRealtime2(noise_reduction="far_field"),
+    system_prompt="...",
+)
+```
+
+`noise_reduction` enables OpenAI's native input noise reduction:
+
+| Value | When to use |
+|-------|-------------|
+| `"far_field"` | **Recommended for phone / speakerphone / conference audio.** Filters room noise and distance. |
+| `"near_field"` | A handset held close to the mouth. |
+| `None` (default) | No reduction — today's behaviour, field omitted entirely. |
+
+The GA adapter nests it under `session.audio.input.input_audio_noise_reduction`.
+
+### Turn-detection tuning
+
+```python
+from getpatter import RealtimeTurnDetection
+
+# Raise the server_vad threshold so background noise doesn't trip it…
+agent = phone.agent(
+    engine=OpenAIRealtime2(
+        noise_reduction="far_field",
+        turn_detection=RealtimeTurnDetection(type="server_vad", threshold=0.6),
+    ),
+    system_prompt="...",
+)
+
+# …or switch to semantic_vad with eagerness="low" so the model waits for the
+# caller to actually finish before treating audio as speech.
+agent = phone.agent(
+    engine=OpenAIRealtime2(
+        turn_detection=RealtimeTurnDetection(type="semantic_vad", eagerness="low"),
+    ),
+    system_prompt="...",
+)
+```
+
+`RealtimeTurnDetection` is a frozen config. Each unset field falls back to the adapter default (`server_vad`, `threshold` 0.5, `prefix_padding_ms` 300, `silence_duration_ms` 300):
+
+| Field | Applies to | Notes |
+|-------|-----------|-------|
+| `type` | both | `"server_vad"` (default) or `"semantic_vad"`. |
+| `threshold` | server_vad | 0..1; higher rejects more background noise. |
+| `prefix_padding_ms` | server_vad | Padding before detected speech. |
+| `silence_duration_ms` | server_vad | Trailing silence before end-of-turn. |
+| `eagerness` | semantic_vad | `"low"` lets the caller finish (least likely to interrupt), through `"medium"` / `"high"` / `"auto"`. |
+
+`semantic_vad` emits `{type, eagerness}` only — OpenAI rejects threshold / padding / silence on the semantic detector. Both knobs are also exposed directly on `Patter.agent(openai_realtime_noise_reduction=..., realtime_turn_detection=...)`; an explicit `agent()` kwarg wins over the engine marker value.
+
+## Tool-call preambles
+
+`gpt-realtime-2` emits preambles by default — a short spoken line describing the action it's about to take ("I'll check that order now.") immediately before a slow tool call, in its own voice. Set `tool_call_preambles=True` on the agent to prepend a native `# Preambles` guidance block that reinforces *when* to use one:
+
+```python
+agent = phone.agent(
+    system_prompt="You are a customer-support agent.",
+    engine=OpenAIRealtime2(),
+    tools=[check_order_tool],
+    tool_call_preambles=True,
+)
+```
+
+This is the recommended UX for 30-60 s tools — the model bridges the silence itself, with no client-side timer. See [tool-call preambles](/python-sdk/tools#tool-call-preambles) for the value forms (`True` / `str` override) and how it interacts with per-tool `reassurance`.
 
 ## Audio path
 

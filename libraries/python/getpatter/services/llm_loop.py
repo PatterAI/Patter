@@ -188,12 +188,20 @@ class DefaultToolExecutor:
         call_context: dict,
         webhook_url: str = "",
         handler: Any = None,
+        tool_timeout_s: float | None = None,
     ) -> str:
         """Dispatch a tool call and return a JSON-stringifiable result.
 
         Errors are returned as JSON like
         ``{"error": "...", "fallback": True}`` rather than raised, so the
         LLM loop can surface them to the model and continue.
+
+        ``tool_timeout_s`` is the per-tool execution timeout in seconds. When
+        set it bounds BOTH the handler await and the webhook request so a long
+        external-API tool (30-60s) isn't cut at the 10s default. ``None`` keeps
+        the executor's ``request_timeout_s`` default. The per-tool timeout
+        governs tool execution and is independent of any LLM provider's own
+        ``stream()`` ceiling.
         """
         if self._breaker is not None and not self._breaker.allow(tool_name):
             retry_ms = int(self._breaker.time_until_half_open_ms(tool_name))
@@ -206,14 +214,42 @@ class DefaultToolExecutor:
                 }
             )
 
+        # Clamp to a sane ceiling; ``None`` -> use the configured default.
+        effective_timeout: float | None
+        if tool_timeout_s is not None:
+            effective_timeout = max(0.1, min(float(tool_timeout_s), 300.0))
+        else:
+            effective_timeout = None
+
         if handler is not None:
             try:
-                result = handler(arguments, call_context)
-                if asyncio.iscoroutine(result) or asyncio.isfuture(result):
-                    result = await result
+                result_or_coro = handler(arguments, call_context)
+                if asyncio.iscoroutine(result_or_coro) or asyncio.isfuture(
+                    result_or_coro
+                ):
+                    if effective_timeout is not None:
+                        result = await asyncio.wait_for(
+                            result_or_coro, effective_timeout
+                        )
+                    else:
+                        result = await result_or_coro
+                else:
+                    result = result_or_coro
                 if isinstance(result, str):
                     return result
                 return json.dumps(result)
+            except (asyncio.TimeoutError, TimeoutError):
+                logger.error(
+                    "Tool handler '%s' timed out after %ss",
+                    tool_name,
+                    effective_timeout,
+                )
+                return json.dumps(
+                    {
+                        "error": f"Tool '{tool_name}' timed out after {effective_timeout}s",
+                        "fallback": True,
+                    }
+                )
             except Exception as exc:  # noqa: BLE001 — surface every error
                 logger.error("Tool handler '%s' raised: %s", tool_name, exc)
                 return json.dumps(
@@ -225,7 +261,11 @@ class DefaultToolExecutor:
 
         if webhook_url:
             return await self._dispatch_webhook(
-                tool_name, arguments, call_context, webhook_url
+                tool_name,
+                arguments,
+                call_context,
+                webhook_url,
+                timeout_s=effective_timeout,
             )
 
         return json.dumps(
@@ -241,6 +281,8 @@ class DefaultToolExecutor:
         arguments: dict,
         call_context: dict,
         webhook_url: str,
+        *,
+        timeout_s: float | None = None,
     ) -> str:
         # Validate the URL up-front. Local import avoids a circular
         # dependency between ``services.llm_loop`` and ``server``.
@@ -265,7 +307,12 @@ class DefaultToolExecutor:
                 "patter.call.id": call_context.get("call_id", ""),
             },
         ):
-            async with httpx.AsyncClient(timeout=self._request_timeout_s) as client:
+            # Per-tool timeout overrides the executor default so a long
+            # external-API tool isn't cut at the 10s default.
+            client_timeout = (
+                timeout_s if timeout_s is not None else self._request_timeout_s
+            )
+            async with httpx.AsyncClient(timeout=client_timeout) as client:
                 for attempt in range(total_attempts):
                     try:
                         response = await client.post(
@@ -1065,10 +1112,19 @@ class LLMLoop:
     async def _execute_tool(
         self, tool_name: str, arguments: dict, call_context: dict
     ) -> str:
-        """Execute a tool via ToolExecutor."""
+        """Execute a tool via ToolExecutor.
+
+        Forwards the tool's per-tool ``timeout_s`` (when declared) so a long
+        browser-automation / external-API tool isn't cut at the 10s default.
+        The per-tool timeout governs tool *execution* only — it is independent
+        of any LLM provider's own ``stream()`` ceiling (Python providers honour
+        ``cancel_event`` and have no separate 30s tool-stream cap on the inline
+        path, so no further realignment is needed here).
+        """
         tool_def = self._tool_map.get(tool_name, {})
         handler = tool_def.get("handler")
         webhook_url = tool_def.get("webhook_url", "")
+        tool_timeout_s = tool_def.get("timeout_s")
 
         if self._tool_executor is not None:
             return await self._tool_executor.execute(
@@ -1077,6 +1133,7 @@ class LLMLoop:
                 call_context=call_context,
                 webhook_url=webhook_url,
                 handler=handler,
+                tool_timeout_s=tool_timeout_s,
             )
 
         return json.dumps({"error": f"No executor available for tool '{tool_name}'"})

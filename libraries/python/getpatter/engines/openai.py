@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    pass
 
 __all__ = ["Realtime"]
 
@@ -42,6 +45,14 @@ class Realtime:
     # ``"gpt-realtime-whisper"`` for low-latency partials, ``"gpt-4o-transcribe"``
     # for higher accuracy.
     input_audio_transcription_model: str | None = None
+    # Input noise reduction for speakerphone / conference audio. ``None``
+    # (default) omits the field (no reduction). ``"far_field"`` recommended
+    # for phone calls. Mirrors ``Patter.agent(openai_realtime_noise_reduction=)``.
+    noise_reduction: Literal["near_field", "far_field"] | None = None
+    # Turn-detection tuning (raise the VAD threshold to reject speakerphone
+    # noise, or switch to ``semantic_vad`` eagerness='low'). ``None`` (default)
+    # keeps the adapter's current turn_detection.
+    turn_detection: "RealtimeTurnDetection | None" = None
 
     def __post_init__(self) -> None:
         key = self.api_key or os.environ.get("OPENAI_API_KEY", "")

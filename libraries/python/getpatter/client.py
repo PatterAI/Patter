@@ -22,7 +22,7 @@ import logging
 import os
 import time
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 logger = logging.getLogger("getpatter")
 
@@ -35,7 +35,7 @@ from getpatter.services.llm_loop import LLMProvider
 if TYPE_CHECKING:  # pragma: no cover — typing only
     from getpatter._public_api import Tool
     from getpatter._speech_events import SpeechEventCallback
-    from getpatter.models import CallResult
+    from getpatter.models import CallResult, RealtimeTurnDetection
 
 
 # Maximum concurrent entries in the prewarm-first-message cache. Bounds
@@ -1459,6 +1459,10 @@ class Patter:
         mcp_servers: list | None = None,
         consult: ConsultConfig | None = None,
         prewarm_first_message: bool | None = None,
+        openai_realtime_noise_reduction: Literal["near_field", "far_field"]
+        | None = None,
+        realtime_turn_detection: "RealtimeTurnDetection | None" = None,
+        tool_call_preambles: bool | str = False,
     ) -> Agent:
         """Create an ``Agent`` configuration.
 
@@ -1487,6 +1491,15 @@ class Patter:
                 ``guardrail()`` factory). Responses matching a guardrail are
                 replaced before TTS.
             engine: ``OpenAIRealtime(...)`` or ``ElevenLabsConvAI(...)``.
+            tool_call_preambles: Realtime modes only. ``False`` (default) ships
+                ``system_prompt`` unchanged. ``True`` prepends a native
+                "# Preambles" guidance block so the model speaks one short,
+                action-describing sentence (e.g. "I'll check that order now.")
+                immediately before a slow tool call, in its own voice — the
+                recommended UX for 30-60 s tools. A ``str`` overrides the block
+                verbatim. Most effective on ``gpt-realtime-2``, where preambles
+                are first-class. Pipeline mode is unaffected (it already
+                prepends its own phone preamble).
         """
         # --- Validate llm= (runtime-checkable Protocol) ---
         if llm is not None and not isinstance(llm, LLMProvider):
@@ -1524,6 +1537,13 @@ class Patter:
                 openai_realtime_input_audio_transcription_model = engine_fields.get(
                     "input_audio_transcription_model"
                 )
+                # Explicit agent() kwargs win over the engine marker value.
+                if openai_realtime_noise_reduction is None:
+                    openai_realtime_noise_reduction = engine_fields.get(
+                        "noise_reduction"
+                    )
+                if realtime_turn_detection is None:
+                    realtime_turn_detection = engine_fields.get("turn_detection")
             elif engine_kind == "elevenlabs_convai":
                 elevenlabs_engine_key = engine_fields.get("api_key", "")
         elif stt is not None or tts is not None or llm is not None:
@@ -1655,6 +1675,9 @@ class Patter:
             prewarm_first_message=prewarm_first_message,
             openai_realtime_reasoning_effort=openai_realtime_reasoning_effort,
             openai_realtime_input_audio_transcription_model=openai_realtime_input_audio_transcription_model,
+            openai_realtime_noise_reduction=openai_realtime_noise_reduction,
+            realtime_turn_detection=realtime_turn_detection,
+            tool_call_preambles=tool_call_preambles,
         )
 
     @staticmethod
@@ -1671,6 +1694,8 @@ class Patter:
                 "model": engine.model,
                 "reasoning_effort": engine.reasoning_effort,
                 "input_audio_transcription_model": engine.input_audio_transcription_model,
+                "noise_reduction": engine.noise_reduction,
+                "turn_detection": engine.turn_detection,
             }
         if isinstance(engine, _Realtime):
             return "openai_realtime", {
@@ -1679,6 +1704,8 @@ class Patter:
                 "model": engine.model,
                 "reasoning_effort": engine.reasoning_effort,
                 "input_audio_transcription_model": engine.input_audio_transcription_model,
+                "noise_reduction": engine.noise_reduction,
+                "turn_detection": engine.turn_detection,
             }
         if isinstance(engine, _ConvAI):
             return "elevenlabs_convai", {
@@ -1727,6 +1754,12 @@ class Patter:
         reassurance = getattr(tool, "reassurance", None)
         if reassurance:
             out["reassurance"] = reassurance
+        # Propagate the per-tool execution timeout (seconds) so the executor
+        # uses it for both the handler and webhook paths instead of the 10s
+        # default. Present only when explicitly set (None → default path).
+        timeout_s = getattr(tool, "timeout_s", None)
+        if timeout_s is not None:
+            out["timeout_s"] = timeout_s
         return out
 
     @staticmethod

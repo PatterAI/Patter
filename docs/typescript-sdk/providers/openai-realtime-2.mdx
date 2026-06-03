@@ -74,6 +74,20 @@ When set, Patter injects `session.reasoning = { effort: ... }` into the GA `sess
 
 Set `inputAudioTranscriptionModel` to override `audio.input.transcription.model`. The same identifiers as the beta endpoint apply — see the [streaming-transcription table on the OpenAI Realtime page](/typescript-sdk/providers/openai-realtime#streaming-transcription) for the full list (`whisper-1`, `gpt-4o-mini-transcribe`, `gpt-4o-transcribe`, `gpt-realtime-whisper`).
 
+### Tool-call preambles
+
+`gpt-realtime-2` treats preambles as first-class — the model speaks a short action sentence before a tool call when steered to. Set `toolCallPreambles: true` on `phone.agent({ ... })` to prepend Patter's built-in `# Preambles` guidance block to the session `instructions`, so a slow tool no longer leaves the caller in silence:
+
+```typescript
+const agent = phone.agent({
+  systemPrompt: "...",
+  engine: new OpenAIRealtime2({ reasoningEffort: "low" }),
+  toolCallPreambles: true,
+});
+```
+
+`undefined` / `false` (default) leaves the instructions byte-identical; a `string` overrides the block verbatim. See [Tool-call preambles](/typescript-sdk/tools#tool-call-preambles) for the full behaviour and the per-tool sample-phrase nicety.
+
 ## Audio path
 
 The GA audio engine speaks PCM 24 kHz and silently drops mulaw frames. Patter handles the conversion transparently inside `OpenAIRealtime2Adapter`:

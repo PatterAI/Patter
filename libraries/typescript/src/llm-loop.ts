@@ -40,7 +40,45 @@ export interface LlmUsageRecorder {
 const DEFAULT_TOOL_MAX_RETRIES = 2;
 const DEFAULT_TOOL_RETRY_DELAY_MS = 500;
 const DEFAULT_TOOL_TIMEOUT_MS = 10_000;
+/** Ceiling for a per-tool timeout. Mirrors Python ``_MAX_TOOL_TIMEOUT_S = 300``. */
+const MAX_TOOL_TIMEOUT_MS = 300_000;
 const TOOL_MAX_RESPONSE_BYTES = 1 * 1024 * 1024;
+
+/**
+ * Sentinel for a per-tool handler timeout. Terminal — never retried.
+ *
+ * A dedicated class (rather than substring-matching the message) makes the
+ * terminal-vs-retryable decision robust: a user handler that happens to throw
+ * an error whose message contains "timed out" is NOT misclassified as the
+ * executor's own timeout. Mirrors Python `asyncio.TimeoutError` handling in
+ * `tool_executor.py`.
+ */
+class ToolTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ToolTimeoutError';
+  }
+}
+
+/**
+ * Resolve the effective per-tool timeout in milliseconds.
+ *
+ * - When the tool declares a ``timeoutMs`` (new feature), clamp it to
+ *   ``[100, 300_000]`` and use it for BOTH the handler await race and the
+ *   webhook ``AbortSignal.timeout`` — so a long browser-automation /
+ *   external-API tool isn't cut at the executor's 10 s default.
+ * - When ``timeoutMs`` is ``undefined``, fall back to ``defaultMs``
+ *   (the constructor-level ``requestTimeoutMs``).
+ *
+ * Mirrors Python ``_clamp_tool_timeout`` in ``tool_executor.py``.
+ */
+function resolveToolTimeoutMs(
+  toolTimeoutMs: number | undefined,
+  defaultMs: number,
+): number {
+  if (toolTimeoutMs === undefined) return defaultMs;
+  return Math.max(100, Math.min(toolTimeoutMs, MAX_TOOL_TIMEOUT_MS));
+}
 
 /**
  * Pluggable tool executor — mirrors the Python ``ToolExecutor`` in
@@ -195,6 +233,12 @@ export class DefaultToolExecutor implements ToolExecutor {
       });
     }
 
+    // Resolve per-tool timeout: tool.timeoutMs wins over constructor default.
+    const effectiveTimeoutMs = resolveToolTimeoutMs(
+      (toolDef as { timeoutMs?: number }).timeoutMs,
+      this.requestTimeoutMs,
+    );
+
     // Local handler — now retried with exponential backoff (parity with
     // the webhook path). Previously a single failure became a hard fault;
     // a transient DB blip would silently kill the turn.
@@ -202,11 +246,43 @@ export class DefaultToolExecutor implements ToolExecutor {
       const totalAttempts = this.maxRetries + 1;
       let lastErr: unknown = null;
       for (let attempt = 0; attempt < totalAttempts; attempt++) {
+        // Timer handle for the timeout race — cleared in `finally` so the
+        // losing setTimeout never lingers (a ref'd timer would keep the Node
+        // event loop alive up to the 5-min ceiling on every fast call).
+        // Mirrors Python asyncio.wait_for() which cancels its timer on settle.
+        let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
         try {
-          const result = await invokeHandler(toolDef.handler, args, callContext, onProgress);
+          // Wrap handler invocation in a timeout race so a hung handler
+          // doesn't stall the turn forever. A timeout is terminal — do NOT
+          // retry (multiplying wait by totalAttempts stalls the turn).
+          // Mirrors Python asyncio.wait_for() in _execute_handler().
+          const handlerPromise = invokeHandler(toolDef.handler, args, callContext, onProgress);
+          const result = await Promise.race([
+            handlerPromise,
+            new Promise<never>((_, reject) => {
+              timeoutTimer = setTimeout(
+                () =>
+                  reject(
+                    new ToolTimeoutError(
+                      `Tool handler '${toolDef.name}' timed out after ${effectiveTimeoutMs}ms`,
+                    ),
+                  ),
+                effectiveTimeoutMs,
+              );
+            }),
+          ]);
           this.breaker.recordSuccess(toolDef.name);
           return result;
         } catch (e) {
+          if (e instanceof ToolTimeoutError) {
+            // Timeout is terminal — do NOT retry.
+            getLogger().error(String(e));
+            this.breaker.recordFailure(toolDef.name);
+            return JSON.stringify({
+              error: String(e),
+              fallback: true,
+            });
+          }
           lastErr = e;
           if (attempt < totalAttempts - 1) {
             getLogger().warn(
@@ -214,6 +290,10 @@ export class DefaultToolExecutor implements ToolExecutor {
             );
             await new Promise<void>((r) => setTimeout(r, backoffDelayMs(this.retryDelayMs, attempt)));
           }
+        } finally {
+          // Clear the losing race timer so a resolved handler leaves no
+          // dangling timeout (parity with Python wait_for cleanup).
+          if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
         }
       }
       this.breaker.recordFailure(toolDef.name);
@@ -252,7 +332,10 @@ export class DefaultToolExecutor implements ToolExecutor {
                   ...callContext,
                   attempt: attempt + 1,
                 }),
-                signal: AbortSignal.timeout(this.requestTimeoutMs),
+                // Use per-tool timeout when set, otherwise fall back to
+                // the executor-level default. Mirrors Python's per-request
+                // ``timeout=`` override on httpx.AsyncClient.post().
+                signal: AbortSignal.timeout(effectiveTimeoutMs),
               });
               if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
               const result = JSON.stringify(await resp.json());

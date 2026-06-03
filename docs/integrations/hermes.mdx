@@ -19,23 +19,21 @@ Pick one direction or wire up both — they are independent.
 
 ## Prerequisites
 
-Install the Patter SDK and the Patter MCP server:
+Patter's MCP server runs **locally** — it is not published to npm or PyPI. Clone and
+build it from [`PatterAI/patter-mcp`](https://github.com/PatterAI/patter-mcp):
 
 ```bash
-# Python SDK
-pip install getpatter
-
-# TypeScript SDK
-npm install getpatter
-
-# Patter MCP server (run it, or let Hermes launch it on demand)
-npx getpatter-mcp
+git clone https://github.com/PatterAI/patter-mcp
+cd patter-mcp
+npm install
+npm run build
+npm start          # Streamable HTTP on http://localhost:3000/mcp
 ```
 
-By default the MCP server speaks Streamable HTTP at `http://localhost:3000/mcp`.
 It can also run over stdio (see Direction A below). Provider and carrier keys are
-read from the environment: `OPENAI_API_KEY`, `ELEVENLABS_API_KEY`,
+read from the server's environment: `OPENAI_API_KEY`, `ELEVENLABS_API_KEY`,
 `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TELNYX_API_KEY`, and friends.
+See the [patter-mcp README](https://github.com/PatterAI/patter-mcp#readme) for full setup.
 
 ---
 
@@ -49,8 +47,8 @@ Register the Patter MCP server under the top-level `mcp_servers` key in
 
 ### HTTP recipe
 
-Run the MCP server (`npx getpatter-mcp`) so it is listening on
-`http://localhost:3000/mcp`, then point Hermes at it:
+With the server running locally (`npm start`) on
+`http://localhost:3000/mcp`, point Hermes at it:
 
 ```yaml
 # ~/.hermes/config.yaml
@@ -73,16 +71,17 @@ mcp_servers:
 
 ### stdio recipe
 
-Prefer to let Hermes spawn the server itself? Launch it over stdio with the
-`--stdio` flag and pass the provider keys through `env`:
+Prefer to let Hermes spawn the server itself? Point it at your local build
+(`patter-mcp/dist/index.js` from the clone above) with the `--stdio` flag and pass
+the provider keys through `env`:
 
 ```yaml
 # ~/.hermes/config.yaml
 mcp_servers:
   patter:
-    command: "npx"
+    command: "node"
     args:
-      - "getpatter-mcp"
+      - "/absolute/path/to/patter-mcp/dist/index.js"
       - "--stdio"
     env:
       OPENAI_API_KEY: "${OPENAI_API_KEY}"

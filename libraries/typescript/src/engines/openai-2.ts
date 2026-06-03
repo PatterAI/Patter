@@ -7,6 +7,9 @@
  * `OpenAIRealtime2Adapter` when this marker is passed.
  */
 
+import type { RealtimeTurnDetection } from '../types';
+import { validateRealtimeTurnDetection } from '../providers/openai-realtime';
+
 /** Constructor options for the OpenAI `Realtime2` engine marker. */
 export interface Realtime2Options {
   /** API key. Falls back to OPENAI_API_KEY env var when omitted. */
@@ -27,6 +30,25 @@ export interface Realtime2Options {
    * low-latency transcript partials.
    */
   inputAudioTranscriptionModel?: string;
+  /**
+   * Input noise reduction for speakerphone / conference audio. `undefined`
+   * (default) omits the field (no reduction). `"far_field"` recommended for
+   * phone / speakerphone calls; `"near_field"` for a handset close to the
+   * mouth. On the GA endpoint this is nested under
+   * `audio.input.input_audio_noise_reduction: { type }`.
+   * Mirrors `openai_realtime_noise_reduction` on `Patter.agent()`.
+   */
+  noiseReduction?: 'near_field' | 'far_field';
+  /**
+   * Turn-detection tuning. `undefined` (default) keeps the adapter's
+   * current hardcoded `server_vad` / threshold `0.5` / silence 300 ms.
+   * Raise threshold or switch to `semantic_vad` eagerness `'low'` to stop
+   * speakerphone noise from triggering false barge-ins.
+   *
+   * Maps to `turn_detection` on the Python `engines.openai_realtime_2.Realtime2`
+   * marker; propagates to `realtimeTurnDetection` on `AgentOptions`.
+   */
+  turnDetection?: RealtimeTurnDetection;
 }
 
 /**
@@ -52,6 +74,8 @@ export class Realtime2 {
   readonly voice: string;
   readonly reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high';
   readonly inputAudioTranscriptionModel?: string;
+  readonly noiseReduction?: 'near_field' | 'far_field';
+  readonly turnDetection?: RealtimeTurnDetection;
 
   constructor(opts: Realtime2Options = {}) {
     const key = opts.apiKey ?? process.env.OPENAI_API_KEY;
@@ -61,10 +85,18 @@ export class Realtime2 {
           "set OPENAI_API_KEY in the environment.",
       );
     }
+    if (opts.noiseReduction !== undefined && opts.noiseReduction !== 'near_field' && opts.noiseReduction !== 'far_field') {
+      throw new Error(
+        `noiseReduction must be 'near_field' or 'far_field', got ${JSON.stringify(opts.noiseReduction)}`,
+      );
+    }
+    validateRealtimeTurnDetection(opts.turnDetection);
     this.apiKey = key;
     this.model = opts.model ?? "gpt-realtime-2";
     this.voice = opts.voice ?? "alloy";
     this.reasoningEffort = opts.reasoningEffort;
     this.inputAudioTranscriptionModel = opts.inputAudioTranscriptionModel;
+    this.noiseReduction = opts.noiseReduction;
+    this.turnDetection = opts.turnDetection;
   }
 }
