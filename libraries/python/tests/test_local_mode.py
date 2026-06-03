@@ -199,6 +199,7 @@ async def test_serve_calls_embedded_server():
             pricing=None,
             dashboard=True,
             dashboard_token="",
+            allow_insecure_dashboard=False,
         )
         mock_server.start.assert_called_once_with(port=9000)
 

@@ -695,6 +695,24 @@ export interface ServeOptions {
   readonly dashboard?: boolean;
   /** Bearer token for dashboard/API authentication. */
   readonly dashboardToken?: string;
+  /**
+   * When true, serve the dashboard (and the call-data `/api/*` routes)
+   * WITHOUT authentication even when the server is reachable beyond
+   * loopback (e.g. behind a tunnel or a public webhook URL). **NOT
+   * RECOMMENDED on a public network** — the dashboard exposes call
+   * transcripts and metadata (PII) to anyone who can reach the URL.
+   *
+   * Defaults to `false` (security). With the default, when the dashboard
+   * is enabled, `dashboardToken` is empty, AND the server is exposed
+   * beyond `127.0.0.1`, the dashboard + `/api/*` routes are NOT mounted
+   * (fail-closed). The carrier webhook, media-stream, and `/health`
+   * routes are unaffected — inbound/outbound calls keep working.
+   *
+   * To serve the dashboard safely on a public host, set `dashboardToken`
+   * instead. This flag is the deliberate escape hatch for the rare case
+   * where unauthenticated public exposure is intentional.
+   */
+  readonly allowInsecureDashboard?: boolean;
   /** Path to SQLite database for dashboard persistence (not used in TS yet). */
   readonly dashboardDb?: string;
   /** When true (default), persist dashboard data. */

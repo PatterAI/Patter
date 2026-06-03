@@ -276,6 +276,48 @@ export function validateWebhookUrl(url: string, allowLoopback = false): void {
 }
 
 /**
+ * Reduce a host value (bare hostname, ``host:port``, or a full URL) to its
+ * lowercase hostname with any IPv6 brackets stripped. Returns ``''`` when the
+ * input is empty. Used by the dashboard exposure check, which receives the
+ * carrier ``webhookUrl`` (already a bare host) and the ``PATTER_BIND_HOST``
+ * env var (a bare host or IP).
+ */
+export function extractHost(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  let host = trimmed.replace(/^[a-z]+:\/\//i, '').replace(/\/.*$/, '');
+  // Bracketed IPv6 literal, optionally with a trailing port: ``[::1]`` or
+  // ``[::1]:8000``. Take everything between the brackets and drop the port.
+  if (host.startsWith('[')) {
+    return host.slice(1).split(']', 1)[0].toLowerCase();
+  }
+  // Strip a trailing ``:port`` for IPv4 / hostname. A bare IPv6 literal
+  // (``::1``) has many colons and no port, so it must not be split.
+  if (!host.includes('::')) {
+    const lastColon = host.lastIndexOf(':');
+    if (lastColon !== -1 && /^\d+$/.test(host.slice(lastColon + 1))) {
+      host = host.slice(0, lastColon);
+    }
+  }
+  return host.toLowerCase();
+}
+
+/** True when ``host`` is a loopback indicator (127.0.0.0/8, localhost, ::1). */
+export function isLoopbackHost(value: string): boolean {
+  const host = extractHost(value);
+  if (!host) return false;
+  if (host === 'localhost' || host === 'ip6-localhost' || host === 'ip6-loopback') {
+    return true;
+  }
+  if (host === '::1' || host === '::ffff:127.0.0.1') return true;
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (v4) {
+    return parseInt(v4[1], 10) === 127; // 127.0.0.0/8
+  }
+  return false;
+}
+
+/**
  * Validate a Telnyx webhook request signature using Ed25519.
  *
  * Telnyx signs the raw request body with an Ed25519 private key and includes
@@ -809,6 +851,13 @@ const GRACEFUL_SHUTDOWN_TIMEOUT_MS = 10_000;
 export class EmbeddedServer {
   private server: HTTPServer | null = null;
   private wss: WebSocketServer | null = null;
+  /**
+   * Whether the dashboard + ``/api/*`` routes were actually mounted in
+   * ``start()``. False when the fail-closed gate refused to serve them on an
+   * exposed, unauthenticated bind — used so the startup banner does not
+   * advertise a dashboard URL that would 404.
+   */
+  private dashboardMounted = false;
   private twilioTokenWarningLogged = false;
   private telnyxSigWarningLogged = false;
   readonly metricsStore: MetricsStore;
@@ -908,6 +957,15 @@ export class EmbeddedServer {
     pricingOverrides?: Record<string, Record<string, unknown>>,
     private readonly dashboard: boolean = true,
     private readonly dashboardToken: string = '',
+    /**
+     * When true, force-serve the dashboard + `/api/*` routes without
+     * authentication even when the server is reachable beyond loopback
+     * (tunnel / public webhook URL / explicit non-loopback bind). Defaults
+     * to `false`: when the dashboard is enabled, the token is empty, and the
+     * server is exposed, the dashboard + API routes are NOT mounted
+     * (fail-closed) to avoid leaking call transcripts and metadata (PII).
+     */
+    private readonly allowInsecureDashboard: boolean = false,
   ) {
     this.metricsStore = new MetricsStore();
     this.pricing = mergePricing(pricingOverrides as Record<string, { unit?: string; price?: number }> | undefined);
@@ -1030,6 +1088,50 @@ export class EmbeddedServer {
     this.amdClass.clear();
   }
 
+  /**
+   * Decide whether this server is reachable beyond loopback (127.0.0.1).
+   *
+   * The dashboard serves call transcripts and metadata (PII), so before
+   * mounting it unauthenticated we must know whether anyone off-host can
+   * reach the port. Signals (in order):
+   *
+   *   (a)+(b) — a public webhook URL. ``client.ts`` resolves
+   *       ``config.webhookUrl`` to the live hostname for every serve path:
+   *       a cloudflared quick-tunnel host, a {@link StaticTunnel} hostname,
+   *       or an explicit ``webhookUrl``. A tunnel directive (signal a) and a
+   *       public webhook URL (signal b) therefore both surface here as a
+   *       non-loopback, non-private webhook host. This is the case that
+   *       matters for tunnels — the whole port (dashboard included) is
+   *       published on a public ``*.trycloudflare.com`` URL.
+   *
+   *   (c) — an EXPLICIT non-loopback bind override via ``PATTER_BIND_HOST``.
+   *       Node's ``http.Server.listen(port, host)`` defaults to 127.0.0.1
+   *       here (see ``start()``), so plain local dev is never flagged; only
+   *       an operator who set ``PATTER_BIND_HOST`` to e.g. ``0.0.0.0`` is.
+   *
+   * Only loopback webhook hosts (127.0.0.0/8, localhost, ::1) are treated as
+   * not-exposed. RFC1918 / LAN hosts ARE exposure — they are reachable by
+   * other machines on the network — matching the Python SDK's gate.
+   */
+  private isExposed(): boolean {
+    // Signal (c): explicit non-loopback bind override.
+    const bindOverride = process.env.PATTER_BIND_HOST;
+    if (bindOverride && !isLoopbackHost(bindOverride)) {
+      return true;
+    }
+    // Signals (a)+(b): a non-loopback webhook host (tunnel-assigned or
+    // explicit). Any host that is not loopback is reachable beyond
+    // 127.0.0.1 — including RFC1918 / LAN addresses, which every other
+    // device on the network can reach. Mirrors the Python SDK
+    // (``_dashboard_is_exposed``), the parity reference: it treats any
+    // non-loopback webhook_url as exposed, with no private-range carve-out.
+    const host = extractHost(this.config.webhookUrl ?? '');
+    if (host && !isLoopbackHost(host)) {
+      return true;
+    }
+    return false;
+  }
+
   /** Bind HTTP + WebSocket listeners on `port`, mount carrier webhooks and dashboard routes. */
   async start(port: number = 8000): Promise<void> {
     const webhookUrlPattern = /^[a-zA-Z0-9][a-zA-Z0-9.\-]+[a-zA-Z0-9]$/;
@@ -1095,10 +1197,38 @@ export class EmbeddedServer {
       res.json({ status: 'ok', mode: 'local' });
     });
 
-    // Mount dashboard and B2B API routes
+    // Mount dashboard and B2B API routes.
+    //
+    // FAIL-CLOSED: the dashboard + ``/api/*`` routes serve call transcripts
+    // and metadata (PII). If the dashboard is enabled, no auth token is set,
+    // AND the server is reachable beyond loopback (tunnel / public webhook /
+    // explicit non-loopback bind), refuse to mount them unless the operator
+    // has explicitly opted in with ``allowInsecureDashboard``. The carrier
+    // webhook + media-stream + ``/health`` routes below mount regardless, so
+    // inbound/outbound calls keep working — only the PII surface is gated.
     if (this.dashboard) {
-      mountDashboard(app, this.metricsStore, this.dashboardToken);
-      mountApi(app, this.metricsStore, this.dashboardToken);
+      const exposed = this.isExposed();
+      const unauthenticated = !this.dashboardToken;
+      if (unauthenticated && exposed && !this.allowInsecureDashboard) {
+        getLogger().error(
+          'Dashboard NOT served: it would be reachable beyond 127.0.0.1 without ' +
+            'authentication, exposing call transcripts and metadata (PII). Fix one of: ' +
+            '(1) set dashboardToken=<secret> to require auth, (2) set dashboard=false to ' +
+            'disable it on this host, or (3) set allowInsecureDashboard=true to ' +
+            'force-serve it unauthenticated (NOT recommended on a public network).',
+        );
+      } else {
+        if (unauthenticated && exposed && this.allowInsecureDashboard) {
+          getLogger().warn(
+            'Dashboard served WITHOUT authentication on a publicly-reachable bind ' +
+              '(allowInsecureDashboard=true). Call transcripts and metadata are ' +
+              'exposed to anyone who can reach this URL.',
+          );
+        }
+        mountDashboard(app, this.metricsStore, this.dashboardToken);
+        mountApi(app, this.metricsStore, this.dashboardToken);
+        this.dashboardMounted = true;
+      }
     }
 
     // Twilio statusCallback — captures ringing/no-answer/busy/failed
@@ -1783,7 +1913,7 @@ export class EmbeddedServer {
             'this model, otherwise the dashboard cost display will under-report.'
           );
         }
-        if (this.dashboard) {
+        if (this.dashboard && this.dashboardMounted) {
           console.log('\n──── Dashboard ─────────────────────────────────────');
           getLogger().info(`URL: http://127.0.0.1:${port}/`);
           if (!this.dashboardToken) {

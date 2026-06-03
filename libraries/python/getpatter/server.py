@@ -45,6 +45,60 @@ _BLOCKED_WEBHOOK_HOSTNAMES = frozenset(
 # Mirrors libraries/typescript/src/server.ts:1041 (MAX_WS_PER_IP = 10).
 MAX_WS_PER_IP = 10
 
+# Hosts that are loopback-only (not reachable from another machine). Used by
+# the fail-closed dashboard gate to decide whether the server is "exposed".
+# A non-empty ``webhook_url`` or ``PATTER_BIND_HOST`` whose hostname is NOT in
+# this set is treated as publicly reachable. Mirrors the TS counterpart.
+_LOOPBACK_HOSTS = frozenset(
+    {
+        "localhost",
+        "ip6-localhost",
+        "ip6-loopback",
+        "::1",
+        "::ffff:127.0.0.1",
+    }
+)
+
+
+def _is_loopback_host(host: str) -> bool:
+    """Return True when *host* refers to loopback only (not externally reachable).
+
+    Strips an optional scheme, ``[...]`` IPv6 brackets, and a trailing port,
+    then matches against :data:`_LOOPBACK_HOSTS` and the full ``127.0.0.0/8``
+    range. A ``webhook_url`` like ``"abc.trycloudflare.com"`` returns ``False``
+    (publicly reachable); ``"127.0.0.1:8000"`` returns ``True``. Mirrors the
+    TypeScript ``isLoopbackHost`` byte-for-byte so the exposure gate classifies
+    hosts identically across SDKs.
+    """
+    if not host:
+        return True
+    raw = host.strip()
+    # Drop scheme if present (webhook_url is normally bare hostname, but be safe)
+    if "://" in raw:
+        raw = raw.split("://", 1)[1]
+    # Drop any path / query
+    raw = raw.split("/", 1)[0]
+    raw = raw.lower()
+    # IPv6 in brackets, optionally with a port: ``[::1]:8000``
+    if raw.startswith("["):
+        inner = raw[1:].split("]", 1)[0]
+        return inner in _LOOPBACK_HOSTS
+    # Strip a trailing :port for IPv4 / hostname (a bare IPv6 has many colons)
+    if raw.count(":") == 1:
+        raw = raw.split(":", 1)[0]
+    if raw in _LOOPBACK_HOSTS:
+        return True
+    # The entire 127.0.0.0/8 block is loopback (RFC 1122), not just 127.0.0.1.
+    parts = raw.split(".")
+    if len(parts) == 4 and all(p.isdigit() for p in parts):
+        try:
+            octets = [int(p) for p in parts]
+        except ValueError:  # pragma: no cover - defensive
+            return False
+        if octets[0] == 127 and all(0 <= o <= 255 for o in octets):
+            return True
+    return False
+
 
 def validate_webhook_url(url: str) -> bool:
     """Return True when *url* is safe to fetch (SSRF protection).
@@ -319,6 +373,7 @@ class EmbeddedServer:
         pricing: dict | None = None,
         dashboard: bool = True,
         dashboard_token: str = "",
+        allow_insecure_dashboard: bool = False,
     ) -> None:
         self.config = config
         self.agent = agent
@@ -327,6 +382,13 @@ class EmbeddedServer:
         self.pricing = pricing
         self.dashboard = dashboard
         self.dashboard_token = dashboard_token
+        # Escape hatch for the fail-closed dashboard gate. When ``True``, the
+        # dashboard + call-data API routes are mounted even on a
+        # publicly-reachable bind without a ``dashboard_token`` (with a loud
+        # WARNING). Default ``False`` => fail closed: those routes are NOT
+        # mounted when the server would be reachable beyond loopback without
+        # auth. See ``_dashboard_is_exposed`` and the gate in ``_create_app``.
+        self.allow_insecure_dashboard = allow_insecure_dashboard
         self._server = None
         self._app = None
         self._active_connections: set[WebSocket] = set()
@@ -667,6 +729,37 @@ class EmbeddedServer:
 
         return _on_call_start, _on_call_end, _on_metrics
 
+    def _dashboard_is_exposed(self) -> bool:
+        """Return True when this server would be reachable beyond loopback.
+
+        Drives the fail-closed dashboard gate in :meth:`_create_app`. Returns
+        ``True`` if ANY of these signals holds:
+
+        (a)/(b) A public ``webhook_url`` is configured — set either explicitly
+            via ``Patter(webhook_url=...)`` or auto-assigned by a tunnel
+            (CloudflareTunnel / Ngrok / Static) in ``serve()``. Both collapse
+            to "``config.webhook_url`` is non-empty and not a loopback host",
+            which is the PARITY-CRITICAL signal shared with the TypeScript SDK.
+        (c) ``PATTER_BIND_HOST`` is EXPLICITLY set to a non-loopback host. The
+            default bind is ``127.0.0.1`` (loopback, safe); reading that
+            default never trips this signal, so normal local dev is unaffected.
+
+        Returns ``False`` for the local-dev path (loopback-only bind, no
+        tunnel, no public webhook_url) so that case keeps serving as before.
+        """
+        # Signals (a) + (b): a public webhook hostname (tunnel- or
+        # caller-assigned) means the whole port is reachable publicly.
+        webhook_url = getattr(self.config, "webhook_url", "") or ""
+        if webhook_url and not _is_loopback_host(webhook_url):
+            return True
+
+        # Signal (c): explicit non-loopback PATTER_BIND_HOST override only.
+        bind_host = os.environ.get("PATTER_BIND_HOST")
+        if bind_host is not None and not _is_loopback_host(bind_host):
+            return True
+
+        return False
+
     def _create_app(self):
         """Build the FastAPI application with webhook + stream routes."""
         from getpatter.telephony.plivo import (
@@ -709,11 +802,43 @@ class EmbeddedServer:
                         "Dashboard hydration failed: %s", exc
                     )
 
-            mount_dashboard(app, self._metrics_store, token=self.dashboard_token)
+            # --- Fail-closed dashboard gate ---
+            #
+            # The dashboard + call-data API expose call transcripts and
+            # metadata (PII). When the server would be reachable beyond
+            # loopback (a tunnel is active, or a public webhook_url / explicit
+            # non-loopback PATTER_BIND_HOST is set) AND no dashboard_token is
+            # configured, we refuse to mount those routes unless the operator
+            # has explicitly opted into allow_insecure_dashboard. The carrier
+            # webhook + media-stream + /health routes always mount, so calls
+            # keep working. Mirrors the TypeScript SDK.
+            is_exposed = self._dashboard_is_exposed()
+            unauthenticated = not self.dashboard_token
 
-            from getpatter.api_routes import mount_api
+            if is_exposed and unauthenticated and not self.allow_insecure_dashboard:
+                logger.error(
+                    "Dashboard NOT served: it would be reachable beyond "
+                    "127.0.0.1 without authentication, exposing call "
+                    "transcripts and metadata (PII). Fix one of: (1) set "
+                    "dashboard_token=<secret> to require auth, (2) set "
+                    "dashboard=False to disable it on this host, or (3) set "
+                    "allow_insecure_dashboard=True to force-serve it "
+                    "unauthenticated (NOT recommended on a public network)."
+                )
+            else:
+                if is_exposed and unauthenticated and self.allow_insecure_dashboard:
+                    logger.warning(
+                        "Dashboard served WITHOUT authentication on a "
+                        "publicly-reachable bind (allow_insecure_dashboard=True). "
+                        "Call transcripts and metadata are exposed to anyone "
+                        "who can reach this URL."
+                    )
 
-            mount_api(app, self._metrics_store, token=self.dashboard_token)
+                mount_dashboard(app, self._metrics_store, token=self.dashboard_token)
+
+                from getpatter.api_routes import mount_api
+
+                mount_api(app, self._metrics_store, token=self.dashboard_token)
 
         @app.get("/health")
         async def health():
@@ -1647,7 +1772,18 @@ class EmbeddedServer:
                 "under-report.",
                 sanitize_log_value(model),
             )
-        if self.dashboard:
+        # The detailed ERROR/WARNING about the fail-closed gate is emitted in
+        # ``_create_app`` (where the routes are actually mounted or skipped).
+        # Here we only show the friendly local-dev banner when the dashboard
+        # will in fact be served — i.e. NOT in the exposed+unauthenticated+
+        # not-allowed case where ``_create_app`` already refused to mount it.
+        _dashboard_blocked = (
+            self.dashboard
+            and not self.dashboard_token
+            and self._dashboard_is_exposed()
+            and not self.allow_insecure_dashboard
+        )
+        if self.dashboard and not _dashboard_blocked:
             logger.info(
                 "\n──── Dashboard ─────────────────────────────────────\n"
                 "URL: http://127.0.0.1:%s/\n"

@@ -1794,6 +1794,7 @@ class Patter:
         on_metrics: Callable[[dict], Awaitable[None]] | None = None,
         dashboard: bool = True,
         dashboard_token: str = "",
+        allow_insecure_dashboard: bool = False,
         tunnel: bool = False,
     ) -> None:
         """Start the embedded server for inbound calls.
@@ -1816,6 +1817,15 @@ class Patter:
                 at ``http://localhost:{port}/dashboard``.
             dashboard_token: Optional bearer token for dashboard authentication.
                 When set, all dashboard routes require this token.
+            allow_insecure_dashboard: When ``False`` (default, safe), the
+                embedded metrics dashboard and call-data ``/api/*`` routes are
+                NOT served if the server would be reachable beyond ``127.0.0.1``
+                (e.g. via a tunnel or a public ``webhook_url``) without a
+                ``dashboard_token`` — they expose call transcripts and metadata
+                (PII). Set ``True`` to force-serve them unauthenticated on a
+                publicly-reachable bind (NOT recommended on a public network).
+                Carrier webhooks and ``/health`` always mount, so calls keep
+                working regardless of this flag.
             tunnel: When ``True``, start a cloudflared tunnel automatically.
                 Requires ``cloudflared`` binary on PATH. Mutually exclusive
                 with ``webhook_url``.
@@ -1915,6 +1925,7 @@ class Patter:
             pricing=self._pricing,
             dashboard=dashboard,
             dashboard_token=dashboard_token,
+            allow_insecure_dashboard=allow_insecure_dashboard,
         )
         self._server.on_call_start = on_call_start
         self._server.on_call_end = on_call_end

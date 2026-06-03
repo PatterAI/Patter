@@ -724,6 +724,7 @@ export class Patter {
       opts.pricing,
       opts.dashboard ?? true,
       opts.dashboardToken ?? '',
+      opts.allowInsecureDashboard ?? false,
     );
     // Forward the prewarm-audio accessor so the per-call StreamHandler can
     // consume the pre-rendered first-message audio (if any) on ``start``.

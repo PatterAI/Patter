@@ -34,7 +34,15 @@ def _make_server(**overrides) -> EmbeddedServer:
         require_signature=False,
     )
     agent = make_agent()
-    defaults = dict(config=cfg, agent=agent, dashboard=False)
+    # ``webhook_url="test.ngrok.io"`` (kept for the webhook-signature tests)
+    # marks the server as exposed beyond loopback, which the fail-closed
+    # dashboard gate would otherwise refuse to serve unauthenticated. These
+    # route-mounting / auth tests assert the legacy mounted behaviour, so opt
+    # them into the explicit insecure-serve path. The gate itself is covered
+    # by tests/test_dashboard_fail_closed.py.
+    defaults = dict(
+        config=cfg, agent=agent, dashboard=False, allow_insecure_dashboard=True
+    )
     defaults.update(overrides)
     return EmbeddedServer(**defaults)
 

@@ -279,9 +279,17 @@ phone.serve(agent)
   or hostname instead and give Patter that address.
 </Warning>
 
+<Note>
+  **Deploying with a tunnel?** When you expose this stack to the internet, expose only the
+  carrier webhook path — keep the OpenClaw gateway and the consult adapter on loopback, and
+  secure the dashboard. See [Production Deployment](/dev-tools/production-deployment) for
+  named-tunnel ingress rules and dashboard hardening.
+</Note>
+
 ## What's next
 
 - **Consult feature**: [Python](/python-sdk/consult) · [TypeScript](/typescript-sdk/consult).
+- **Production deployment**: [securing the tunnel and dashboard](/dev-tools/production-deployment).
 - **Concepts**: read the [Concepts](/concepts) page to pick a mode
   (Realtime / ConvAI / Pipeline) for the in-call agent.
 - **Get a phone number**: [Twilio console](https://console.twilio.com/us1/develop/phone-numbers/manage/incoming)
