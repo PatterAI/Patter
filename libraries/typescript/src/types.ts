@@ -697,20 +697,22 @@ export interface ServeOptions {
   readonly dashboardToken?: string;
   /**
    * When true, serve the dashboard (and the call-data `/api/*` routes)
-   * WITHOUT authentication even when the server is reachable beyond
-   * loopback (e.g. behind a tunnel or a public webhook URL). **NOT
-   * RECOMMENDED on a public network** — the dashboard exposes call
-   * transcripts and metadata (PII) to anyone who can reach the URL.
+   * fully OPEN — WITHOUT authentication — even when the server is
+   * reachable beyond loopback (e.g. behind a tunnel or a public webhook
+   * URL). **NOT RECOMMENDED on a public network** — the dashboard exposes
+   * call transcripts and metadata (PII) to anyone who can reach the URL.
    *
    * Defaults to `false` (security). With the default, when the dashboard
    * is enabled, `dashboardToken` is empty, AND the server is exposed
-   * beyond `127.0.0.1`, the dashboard + `/api/*` routes are NOT mounted
-   * (fail-closed). The carrier webhook, media-stream, and `/health`
-   * routes are unaffected — inbound/outbound calls keep working.
+   * beyond `127.0.0.1`, the SDK auto-generates a one-time token and mounts
+   * the dashboard behind it (the startup banner prints the ready-to-use
+   * URL with `?token=...`). The dashboard is always available — it just
+   * requires the printed or configured token. Loopback-only local dev is
+   * unchanged: served open with no token.
    *
-   * To serve the dashboard safely on a public host, set `dashboardToken`
-   * instead. This flag is the deliberate escape hatch for the rare case
-   * where unauthenticated public exposure is intentional.
+   * For a stable token instead of the per-process auto-generated one, set
+   * `dashboardToken`. Set this flag only as the deliberate escape hatch
+   * for the rare case where unauthenticated public exposure is intentional.
    */
   readonly allowInsecureDashboard?: boolean;
   /** Path to SQLite database for dashboard persistence (not used in TS yet). */

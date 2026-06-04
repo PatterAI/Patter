@@ -852,12 +852,28 @@ export class EmbeddedServer {
   private server: HTTPServer | null = null;
   private wss: WebSocketServer | null = null;
   /**
-   * Whether the dashboard + ``/api/*`` routes were actually mounted in
-   * ``start()``. False when the fail-closed gate refused to serve them on an
-   * exposed, unauthenticated bind — used so the startup banner does not
-   * advertise a dashboard URL that would 404.
+   * Whether the dashboard + ``/api/*`` routes were mounted in ``start()``.
+   * The dashboard is now ALWAYS mounted when enabled (it never 404s): an
+   * exposed, token-less bind is protected with an auto-generated token
+   * rather than refused. This flag is therefore ``true`` whenever the
+   * dashboard is enabled — kept so the startup banner can gate on it.
    */
   private dashboardMounted = false;
+  /**
+   * The token actually in effect for the dashboard + ``/api/*`` routes,
+   * resolved in ``start()``. One of: the explicit ``dashboardToken`` if set;
+   * a freshly generated UUID when the bind is exposed and
+   * ``allowInsecureDashboard`` is ``false``; or ``''`` (OPEN) for loopback
+   * local dev and for an exposed bind with ``allowInsecureDashboard=true``.
+   * Read by the startup banner (to print the ready URL with ``?token=``) and
+   * by authentic tests (to authenticate).
+   */
+  private effectiveDashboardToken = '';
+
+  /** The token in effect for the dashboard, resolved at ``start()``. Empty string = served OPEN. */
+  get resolvedDashboardToken(): string {
+    return this.effectiveDashboardToken;
+  }
   private twilioTokenWarningLogged = false;
   private telnyxSigWarningLogged = false;
   readonly metricsStore: MetricsStore;
@@ -958,12 +974,16 @@ export class EmbeddedServer {
     private readonly dashboard: boolean = true,
     private readonly dashboardToken: string = '',
     /**
-     * When true, force-serve the dashboard + `/api/*` routes without
-     * authentication even when the server is reachable beyond loopback
-     * (tunnel / public webhook URL / explicit non-loopback bind). Defaults
-     * to `false`: when the dashboard is enabled, the token is empty, and the
-     * server is exposed, the dashboard + API routes are NOT mounted
-     * (fail-closed) to avoid leaking call transcripts and metadata (PII).
+     * Opt-out from the auto-generated dashboard token. When `false` (the
+     * default) and the dashboard is enabled with no explicit
+     * `dashboardToken` on a server reachable beyond loopback (tunnel /
+     * public webhook URL / explicit non-loopback bind), the SDK generates a
+     * one-time token and protects the dashboard + `/api/*` routes with it
+     * (the startup banner prints the ready-to-use URL including the token).
+     * Set this to `true` to serve the dashboard fully OPEN (no token) even
+     * when exposed — this leaks call transcripts and metadata (PII) to
+     * anyone who can reach the URL, so only enable it behind your own
+     * access control (Cloudflare Access, a tailnet, etc.).
      */
     private readonly allowInsecureDashboard: boolean = false,
   ) {
@@ -1199,36 +1219,47 @@ export class EmbeddedServer {
 
     // Mount dashboard and B2B API routes.
     //
-    // FAIL-CLOSED: the dashboard + ``/api/*`` routes serve call transcripts
-    // and metadata (PII). If the dashboard is enabled, no auth token is set,
-    // AND the server is reachable beyond loopback (tunnel / public webhook /
-    // explicit non-loopback bind), refuse to mount them unless the operator
-    // has explicitly opted in with ``allowInsecureDashboard``. The carrier
-    // webhook + media-stream + ``/health`` routes below mount regardless, so
-    // inbound/outbound calls keep working — only the PII surface is gated.
+    // The dashboard + ``/api/*`` routes serve call transcripts and metadata
+    // (PII). The dashboard is ALWAYS mounted when enabled (it never 404s) —
+    // we resolve an EFFECTIVE token first and protect the routes with it:
+    //
+    //   - explicit ``dashboardToken`` set        => use it (unchanged).
+    //   - exposed + NOT allowInsecureDashboard    => auto-generate a one-time
+    //                                                token (zero config) and
+    //                                                print the ready URL.
+    //   - exposed + allowInsecureDashboard        => OPEN (no token), warn.
+    //   - loopback-only, no token                 => OPEN (local-dev, unchanged).
     if (this.dashboard) {
       const exposed = this.isExposed();
-      const unauthenticated = !this.dashboardToken;
-      if (unauthenticated && exposed && !this.allowInsecureDashboard) {
-        getLogger().error(
-          'Dashboard NOT served: it would be reachable beyond 127.0.0.1 without ' +
-            'authentication, exposing call transcripts and metadata (PII). Fix one of: ' +
-            '(1) set dashboardToken=<secret> to require auth, (2) set dashboard=false to ' +
-            'disable it on this host, or (3) set allowInsecureDashboard=true to ' +
-            'force-serve it unauthenticated (NOT recommended on a public network).',
+      if (this.dashboardToken) {
+        // Explicit token — honour it as-is.
+        this.effectiveDashboardToken = this.dashboardToken;
+      } else if (exposed && !this.allowInsecureDashboard) {
+        // Exposed without a configured token: protect with a generated one.
+        this.effectiveDashboardToken = crypto.randomUUID();
+        getLogger().warn(
+          'Dashboard is reachable beyond 127.0.0.1 without a configured token; ' +
+            'protecting it with an auto-generated token. ' +
+            `Open: http://127.0.0.1:${port}/?token=${this.effectiveDashboardToken}  ` +
+            'Set dashboardToken for a stable token, or allowInsecureDashboard=true to ' +
+            'serve it open.',
+        );
+      } else if (exposed && this.allowInsecureDashboard) {
+        // Operator explicitly opted to serve the PII surface open.
+        this.effectiveDashboardToken = '';
+        getLogger().warn(
+          'Dashboard served WITHOUT authentication on a publicly-reachable bind ' +
+            '(allowInsecureDashboard=true). Call transcripts and metadata are ' +
+            'exposed to anyone who can reach this URL.',
         );
       } else {
-        if (unauthenticated && exposed && this.allowInsecureDashboard) {
-          getLogger().warn(
-            'Dashboard served WITHOUT authentication on a publicly-reachable bind ' +
-              '(allowInsecureDashboard=true). Call transcripts and metadata are ' +
-              'exposed to anyone who can reach this URL.',
-          );
-        }
-        mountDashboard(app, this.metricsStore, this.dashboardToken);
-        mountApi(app, this.metricsStore, this.dashboardToken);
-        this.dashboardMounted = true;
+        // Loopback-only, no token: open local-dev behaviour, unchanged. The
+        // friendly banner warning is emitted on listen (see below).
+        this.effectiveDashboardToken = '';
       }
+      mountDashboard(app, this.metricsStore, this.effectiveDashboardToken);
+      mountApi(app, this.metricsStore, this.effectiveDashboardToken);
+      this.dashboardMounted = true;
     }
 
     // Twilio statusCallback — captures ringing/no-answer/busy/failed
@@ -1914,16 +1945,23 @@ export class EmbeddedServer {
           );
         }
         if (this.dashboard && this.dashboardMounted) {
-          console.log('\n──── Dashboard ─────────────────────────────────────');
-          getLogger().info(`URL: http://127.0.0.1:${port}/`);
-          if (!this.dashboardToken) {
+          getLogger().info('──── Dashboard ─────────────────────────────────────');
+          if (this.effectiveDashboardToken) {
+            // A token (explicit or auto-generated) is in effect — print the
+            // ready-to-use URL so the operator can click straight in.
+            getLogger().info(
+              `URL: http://127.0.0.1:${port}/?token=${this.effectiveDashboardToken}`,
+            );
+          } else {
+            // Served OPEN (loopback local dev, or allowInsecureDashboard).
+            getLogger().info(`URL: http://127.0.0.1:${port}/`);
             getLogger().warn(
               'Dashboard is enabled without authentication. ' +
               'Set dashboardToken to protect call data. ' +
               'This is safe for local development but should not be exposed on a public network.'
             );
           }
-          console.log('────────────────────────────────────────────────────\n');
+          getLogger().info('────────────────────────────────────────────────────');
         }
         resolve();
       });

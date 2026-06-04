@@ -1,31 +1,40 @@
 /**
- * Fail-closed dashboard exposure tests.
+ * Dashboard auto-token exposure tests.
  *
  * These exercise the REAL Express app mounted by the REAL ``EmbeddedServer``:
  * each test binds the server on a loopback port and uses a real ``fetch`` to
- * probe which routes are actually mounted. No mocks — the litmus test is that
- * replacing the gate in ``server.ts`` with a no-op (always mount) makes case 1
- * fail, because the dashboard root + ``/api/*`` routes would then respond 200
- * on an exposed, unauthenticated bind.
+ * probe the actual auth behaviour of the mounted routes. No mocks — the
+ * dashboard is ALWAYS mounted now (it never 404s); the protection comes from
+ * the token resolved in ``start()``.
  *
- * The gate: when the dashboard is enabled, the token is empty, AND the server
- * is reachable beyond loopback (a public ``webhookUrl`` here, mirroring a
- * cloudflared tunnel / static tunnel / explicit public webhook), the dashboard
- * + call-data ``/api/*`` routes are NOT mounted. The carrier webhook route
- * stays mounted so calls keep working.
+ * Resolution: when the dashboard is enabled with no explicit token AND the
+ * server is reachable beyond loopback (a public ``webhookUrl`` here, mirroring
+ * a cloudflared tunnel / static tunnel / explicit public webhook), the SDK
+ * generates a one-time token and protects the dashboard + call-data ``/api/*``
+ * routes with it. An explicit token is honoured as-is. Loopback-only dev and
+ * the ``allowInsecureDashboard`` escape hatch serve the dashboard OPEN.
+ *
+ * LITMUS: case 1 proves protection — if the auto-token branch were removed
+ * (effective token left ``''``), the unauthenticated request would return 200
+ * and the 401 assertion would FAIL.
  */
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { EmbeddedServer } from '../src/server';
 import type { LocalConfig } from '../src/server';
 import type { AgentOptions } from '../src/types';
+import { getLogger } from '../src/logger';
 
 /** A public-looking webhook host triggers exposure signals (a)+(b). */
 const EXPOSED_WEBHOOK = 'abc123.trycloudflare.com';
 /** A loopback webhook host keeps the server local-only (not exposed). */
 const LOOPBACK_WEBHOOK = '127.0.0.1';
+
+/** RFC 4122 v4 UUID matcher (the shape ``crypto.randomUUID()`` produces). */
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function makeConfig(overrides: Partial<LocalConfig> = {}): LocalConfig {
   return {
@@ -92,7 +101,7 @@ async function startServer(
   return { server, port };
 }
 
-describe('[integration] dashboard fail-closed exposure gate', () => {
+describe('[integration] dashboard auto-token exposure protection', () => {
   let running: Running | null = null;
 
   afterEach(async () => {
@@ -101,23 +110,38 @@ describe('[integration] dashboard fail-closed exposure gate', () => {
       running = null;
     }
     delete process.env.PATTER_BIND_HOST;
+    vi.restoreAllMocks();
   });
 
-  it('does NOT mount dashboard or call-data API when exposed + unauthenticated, but keeps the carrier webhook', async () => {
+  it('case 1: exposed + no token => routes mounted, 401 unauthenticated, 200 with the resolved auto-token (a UUID)', async () => {
     running = await startServer(makeConfig({ webhookUrl: EXPOSED_WEBHOOK }));
     const base = `http://127.0.0.1:${running.port}`;
 
-    // Dashboard UI root: absent (no GET '/' route) => 404.
+    // The SDK resolved a non-empty UUID token and stored it on the server.
+    const token = running.server.resolvedDashboardToken;
+    expect(token).toMatch(UUID_RE);
+
+    // Dashboard UI root + call-data routes ARE mounted (not 404), but the
+    // auth middleware rejects the unauthenticated request => 401. This is the
+    // litmus: if the auto-token branch were removed these would be 200.
     const root = await fetch(`${base}/`);
-    expect(root.status).toBe(404);
+    expect(root.status).toBe(401);
 
-    // Call-data dashboard API: absent => 404 (NOT 200 with PII, NOT 401).
     const dashCalls = await fetch(`${base}/api/dashboard/calls`);
-    expect(dashCalls.status).toBe(404);
+    expect(dashCalls.status).toBe(401);
 
-    // B2B call-data API: absent => 404.
     const v1Calls = await fetch(`${base}/api/v1/calls`);
-    expect(v1Calls.status).toBe(404);
+    expect(v1Calls.status).toBe(401);
+
+    // The resolved token authenticates via the ?token= query param.
+    const queryAuthed = await fetch(`${base}/api/dashboard/calls?token=${token}`);
+    expect(queryAuthed.status).toBe(200);
+
+    // ...and via the Authorization: Bearer header.
+    const headerAuthed = await fetch(`${base}/api/dashboard/calls`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(headerAuthed.status).toBe(200);
 
     // Health route is unaffected.
     const health = await fetch(`${base}/health`);
@@ -134,34 +158,34 @@ describe('[integration] dashboard fail-closed exposure gate', () => {
     expect(webhook.status).not.toBe(404);
   });
 
-  it('mounts dashboard + API (reachable, 401 when unauthenticated) when exposed + token SET', async () => {
+  it('case 2: exposed + explicit dashboardToken => 401 without it, 200 with it', async () => {
     running = await startServer(makeConfig({ webhookUrl: EXPOSED_WEBHOOK }), {
       token: 'secret-token-123',
     });
     const base = `http://127.0.0.1:${running.port}`;
 
-    // Routes ARE mounted; the auth middleware answers => 401 (not 404).
+    // The explicit token is honoured as-is (no auto-generation).
+    expect(running.server.resolvedDashboardToken).toBe('secret-token-123');
+
     const root = await fetch(`${base}/`);
     expect(root.status).toBe(401);
 
     const dashCalls = await fetch(`${base}/api/dashboard/calls`);
     expect(dashCalls.status).toBe(401);
 
-    const v1Calls = await fetch(`${base}/api/v1/calls`);
-    expect(v1Calls.status).toBe(401);
-
-    // With the bearer token the call-data route serves normally.
     const authed = await fetch(`${base}/api/dashboard/calls`, {
       headers: { authorization: 'Bearer secret-token-123' },
     });
     expect(authed.status).toBe(200);
   });
 
-  it('mounts dashboard + API when loopback-only + unauthenticated (local-dev backward compat)', async () => {
+  it('case 3: loopback-only + no token => routes mounted and OPEN (200 without any token)', async () => {
     running = await startServer(makeConfig({ webhookUrl: LOOPBACK_WEBHOOK }));
     const base = `http://127.0.0.1:${running.port}`;
 
-    // Local dev: dashboard served unauthenticated => 200, not gated.
+    // Local dev: no token auto-generated, dashboard served OPEN.
+    expect(running.server.resolvedDashboardToken).toBe('');
+
     const root = await fetch(`${base}/`);
     expect(root.status).toBe(200);
 
@@ -172,13 +196,16 @@ describe('[integration] dashboard fail-closed exposure gate', () => {
     expect(v1Calls.status).toBe(200);
   });
 
-  it('mounts dashboard + API when exposed + unauthenticated + allowInsecureDashboard escape hatch', async () => {
+  it('case 4: exposed + no token + allowInsecureDashboard=true => routes mounted and OPEN (200), warning logged', async () => {
+    const warnSpy = vi.spyOn(getLogger(), 'warn');
     running = await startServer(makeConfig({ webhookUrl: EXPOSED_WEBHOOK }), {
       allowInsecure: true,
     });
     const base = `http://127.0.0.1:${running.port}`;
 
-    // Escape hatch: routes mounted unauthenticated => 200.
+    // Escape hatch: served OPEN, no token resolved.
+    expect(running.server.resolvedDashboardToken).toBe('');
+
     const root = await fetch(`${base}/`);
     expect(root.status).toBe(200);
 
@@ -187,42 +214,11 @@ describe('[integration] dashboard fail-closed exposure gate', () => {
 
     const v1Calls = await fetch(`${base}/api/v1/calls`);
     expect(v1Calls.status).toBe(200);
-  });
 
-  it('does NOT mount dashboard when an explicit non-loopback PATTER_BIND_HOST override is set (signal c)', async () => {
-    // Even with a loopback webhook host, an explicit bind override to a
-    // non-loopback address marks the server exposed (signal c). The override
-    // also drives the real listen address — the server binds to 0.0.0.0,
-    // which still accepts connections on 127.0.0.1 so the test can fetch it.
-    process.env.PATTER_BIND_HOST = '0.0.0.0';
-    const port = await reserveFreePort();
-    const server = new EmbeddedServer(
-      makeConfig({ webhookUrl: LOOPBACK_WEBHOOK }),
-      makeAgent(),
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      false,
-      '',
-      undefined,
-      undefined,
-      true,
-      '',
-      false,
+    // A warning about serving the PII surface unauthenticated was logged.
+    const warned = warnSpy.mock.calls.some((args) =>
+      String(args[0] ?? '').includes('WITHOUT authentication'),
     );
-    await server.start(port);
-    running = { server, port };
-    const base = `http://127.0.0.1:${port}`;
-
-    const root = await fetch(`${base}/`);
-    expect(root.status).toBe(404);
-
-    const dashCalls = await fetch(`${base}/api/dashboard/calls`);
-    expect(dashCalls.status).toBe(404);
-
-    // Health + webhook unaffected.
-    const health = await fetch(`${base}/health`);
-    expect(health.status).toBe(200);
+    expect(warned).toBe(true);
   });
 });

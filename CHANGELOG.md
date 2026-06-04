@@ -2,26 +2,25 @@
 
 ### Security
 
-- **⚠️ Behavior change — the built-in metrics dashboard now FAILS CLOSED when it
-  would be reachable beyond `127.0.0.1` without a token.** The embedded server
-  no longer mounts the dashboard UI *or* the `/api/*` call-data routes when ALL
-  of the following hold: the dashboard is enabled, no `dashboard_token` /
-  `dashboardToken` is set, AND the server is reachable off-host (a tunnel is
-  active, an explicit public `webhook_url` / `webhookUrl` is configured, or
-  `PATTER_BIND_HOST` is set to a non-loopback address). Those routes serve call
-  transcripts and metadata (PII), so previously this configuration silently
-  published them to anyone who could reach the URL — the SDK only emitted a
-  soft warning, a foot-gun that was easy to miss in a tunnelled demo or a
-  containerised deploy. The gate now refuses to serve them and logs an `error`
-  explaining how to fix it. Loopback-only local dev is unchanged (still served
-  unauthenticated); setting a token serves them behind auth as before. The
-  carrier webhook, media-stream, and `/health` routes always mount, so inbound
-  and outbound calls keep working — only the PII surface is gated.
-  - **Migration** (pick one): set `dashboard_token=<secret>` /
-    `dashboardToken: "<secret>"` to require auth (recommended); set
-    `dashboard=False` / `dashboard: false` to disable it on the exposed host;
-    or set `allow_insecure_dashboard=True` / `allowInsecureDashboard: true` to
-    keep the old unauthenticated-on-a-public-bind behavior (NOT recommended).
+- **The built-in metrics dashboard is now auto-protected with a generated token
+  when it would be reachable beyond `127.0.0.1`.** The dashboard UI and the
+  `/api/*` call-data routes serve call transcripts and metadata (PII).
+  Previously, when the dashboard was enabled with no `dashboard_token` /
+  `dashboardToken` on an off-host bind (a tunnel is active, an explicit public
+  `webhook_url` / `webhookUrl` is configured, or `PATTER_BIND_HOST` is set to a
+  non-loopback address), the SDK published those routes unauthenticated and only
+  emitted a soft warning — a foot-gun easy to miss in a tunnelled demo or a
+  containerised deploy. Now, in exactly that configuration, the SDK
+  auto-generates a one-time token, mounts the dashboard behind it, and prints
+  the ready-to-use URL (`http://127.0.0.1:<port>/?token=<token>`) in the startup
+  banner. The dashboard remains available with zero config — it is no longer
+  reachable unauthenticated by accident. This is **not a breaking change**: the
+  dashboard is still always served and inbound/outbound calls are unaffected
+  (the carrier webhook, media-stream, and `/health` routes always mount). The
+  token is per-process — set `dashboard_token` / `dashboardToken` for a stable
+  one across restarts. Loopback-only local dev is unchanged (still served open,
+  zero-friction); an explicit `dashboard_token` serves behind that token as
+  before.
   - `libraries/python/getpatter/server.py`,
     `libraries/typescript/src/server.ts`.
 
@@ -29,17 +28,18 @@
 
 - **`allow_insecure_dashboard` / `allowInsecureDashboard` escape hatch (opt-in,
   default off).** New optional config on `Patter(...)` (Python) and `serve(...)`
-  `ServeOptions` (TypeScript), defaulting to `False` / `false`. When the new
-  fail-closed dashboard gate (see Security above) would refuse to serve the
-  dashboard on a publicly-reachable bind without a token, setting this to `True`
-  / `true` force-serves the dashboard unauthenticated anyway and logs a
-  `warning` instead of blocking. This preserves the pre-change behavior for
+  `ServeOptions` (TypeScript), defaulting to `False` / `false`. When the
+  dashboard would be reachable beyond loopback without a configured token (see
+  Security above), the SDK auto-generates a token to protect it; setting this
+  flag to `True` / `true` instead serves the dashboard fully OPEN (no token,
+  unauthenticated) on that exposed bind and logs a `warning`. This is for
   operators who deliberately run the dashboard open behind their own network
-  controls (a tailnet, Cloudflare Access, an upstream auth proxy). It is NOT
-  recommended on a public network — prefer a `dashboard_token` /
-  `dashboardToken`. Backward compatible: existing callers that pass no token and
-  are loopback-only are unaffected; the flag only matters on an exposed bind.
-  `libraries/python/getpatter/client.py` /
+  controls (a tailnet, Cloudflare Access, an upstream auth proxy). It leaks call
+  transcripts and metadata (PII) to anyone who can reach the URL, so it is NOT
+  recommended on a public network — prefer the auto-generated token, or a stable
+  `dashboard_token` / `dashboardToken`. Backward compatible: existing callers
+  that pass no token and are loopback-only are unaffected; the flag only matters
+  on an exposed bind. `libraries/python/getpatter/client.py` /
   `libraries/python/getpatter/server.py`,
   `libraries/typescript/src/types.ts` /
   `libraries/typescript/src/client.ts` /

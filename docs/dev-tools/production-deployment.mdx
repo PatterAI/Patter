@@ -36,9 +36,11 @@ running:
   after-hours line that is down until someone notices is not a production line.
 - **It exposes the WHOLE port.** `cloudflared --url http://localhost:8000` publishes
   *everything* served on port 8000 to the public internet: the carrier webhook **and**
-  `/health` **and** the dashboard at `/` **and** every `/api/dashboard/*` route. If the
-  dashboard is on and unauthenticated (the default for local dev), your call transcripts
-  and metadata are one URL away from anyone who finds the hostname.
+  `/health` **and** the dashboard at `/` **and** every `/api/dashboard/*` route. The SDK
+  auto-protects an exposed dashboard with a generated token (see
+  [Dashboard hardening](#dashboard-hardening)), but leaving the whole port public still
+  exposes `/health` and the surface area unnecessarily — a named tunnel with ingress rules
+  publishes only the carrier paths.
 
 The fix for all three is a **named** Cloudflare tunnel with a config file you control.
 
@@ -71,22 +73,27 @@ cloudflared tunnel route dns patter-prod voice.example.com
 
 This is the part that closes the "whole port is public" hole. Cloudflare ingress rules are
 evaluated top to bottom; the **first** match wins, and the final catch-all decides what
-happens to everything else. Route **only** the carrier webhook path to the local port and
-return `404` for everything else, so `/health`, the dashboard, and `/api/*` are never
-reachable from the public hostname.
+happens to everything else. Route **only** the carrier's webhook **and** media-stream
+WebSocket paths to the local port and return `404` for everything else, so `/health`, the
+dashboard, and `/api/*` are never reachable from the public hostname.
 
-```yaml
+Patter mounts each carrier under its own prefix: the HTTP webhooks live under
+`/webhooks/<carrier>/...` and the media-stream WebSocket upgrade lives under
+`/ws/<carrier>/stream/...` (Twilio's stream is the bare `/ws/stream/...`). Allow **both**
+the webhook and the stream path — the regex below does that per carrier. Pick the block for
+the carrier you use; the previous `^/(twilio|telnyx|media-stream|webhooks/.*)$` example was
+wrong (it never matched the real `/ws/stream/...` upgrade and would drop the call at pickup).
+
+<CodeGroup>
+```yaml Twilio
 # ~/.cloudflared/config.yml
 tunnel: patter-prod
 credentials-file: /home/USERNAME/.cloudflared/TUNNEL_UUID.json
 
 ingress:
-  # Allow ONLY the carrier webhook + media-stream path through to the local server.
-  # Patter mounts the carrier routes under a stable prefix — point this at the
-  # exact path your carrier posts to (Twilio voice webhook / Telnyx Call Control /
-  # the media-stream WebSocket upgrade). Use a path that matches your deployment.
+  # Twilio: voice/status/recording/AMD webhooks + the media-stream WebSocket.
   - hostname: voice.example.com
-    path: ^/(twilio|telnyx|media-stream|webhooks/.*)$
+    path: ^/(webhooks/twilio/.*|ws/stream/.*)$
     service: http://localhost:8000
 
   # Everything else on this hostname is refused at the edge: /health, the
@@ -98,14 +105,54 @@ ingress:
   - service: http_status:404
 ```
 
+```yaml Telnyx
+# ~/.cloudflared/config.yml
+tunnel: patter-prod
+credentials-file: /home/USERNAME/.cloudflared/TUNNEL_UUID.json
+
+ingress:
+  # Telnyx: Call Control webhooks + the media-stream WebSocket.
+  - hostname: voice.example.com
+    path: ^/(webhooks/telnyx/.*|ws/telnyx/stream/.*)$
+    service: http://localhost:8000
+
+  # Everything else on this hostname is refused at the edge: /health, the
+  # dashboard at /, and every /api/dashboard/* route never reach the box.
+  - hostname: voice.example.com
+    service: http_status:404
+
+  # Required final catch-all for any other hostname.
+  - service: http_status:404
+```
+
+```yaml Plivo
+# ~/.cloudflared/config.yml
+tunnel: patter-prod
+credentials-file: /home/USERNAME/.cloudflared/TUNNEL_UUID.json
+
+ingress:
+  # Plivo: voice/status/AMD/transfer webhooks + the media-stream WebSocket.
+  - hostname: voice.example.com
+    path: ^/(webhooks/plivo/.*|ws/plivo/stream/.*)$
+    service: http://localhost:8000
+
+  # Everything else on this hostname is refused at the edge: /health, the
+  # dashboard at /, and every /api/dashboard/* route never reach the box.
+  - hostname: voice.example.com
+    service: http_status:404
+
+  # Required final catch-all for any other hostname.
+  - service: http_status:404
+```
+</CodeGroup>
+
 <Note>
-  **Match the path to your carrier and SDK version.** The exact webhook + media-stream
-  paths depend on which carrier you use and how Patter mounts them in your installed
-  version. Before going live, place one real test call with the catch-all `404` in place
-  and confirm the call connects *and* that requesting `https://voice.example.com/` returns
-  `404` (the dashboard must not load). Tighten the `path:` regex until only the carrier
-  paths get through. The placeholder hostname `voice.example.com` and the local port
-  `8000` are examples — use your own.
+  **Confirm against your installed version before going live.** The paths above match the
+  current routes (`/webhooks/<carrier>/...` for HTTP, `/ws/stream/...` for Twilio media and
+  `/ws/<carrier>/stream/...` for Telnyx/Plivo media). Place one real test call with the
+  catch-all `404` in place and confirm the call connects *and* that requesting
+  `https://voice.example.com/` returns `404` (the dashboard must not load). The placeholder
+  hostname `voice.example.com` and the local port `8000` are examples — use your own.
 </Note>
 
 ### 3. Run it as an always-on service
@@ -167,9 +214,12 @@ the equivalent `Static` tunnel marker if you prefer to express the hostname that
 ## Dashboard hardening
 
 The embedded dashboard serves **call transcripts and metadata — PII**. On an
-internet-reachable box it must never be served unauthenticated. Patter enforces this for
-you: the SDK **fails closed** when the dashboard would be reachable beyond `127.0.0.1`
-without a token. Pick one of the two safe postures below.
+internet-reachable box it must never be served unauthenticated. Patter protects this for
+you with **zero configuration**: when the dashboard would be reachable beyond `127.0.0.1`
+without a configured token, the SDK auto-generates a one-time token, mounts the dashboard
+behind it, and prints a ready-to-click URL (with `?token=...`) at startup. The dashboard
+stays available — it just requires the printed token. Pick one of the postures below to make
+that explicit and stable on a production box.
 
 ### Posture A — turn the dashboard off on the exposed box
 
@@ -189,11 +239,13 @@ await phone.serve(agent, { port: 8000, dashboard: false });
 
 ### Posture B — keep it, but require a token AND keep it private
 
-If you want the dashboard, set a strong `dashboard_token` / `dashboardToken` so every
-dashboard and `/api/dashboard/*` request must authenticate, **and** keep it off the public
-internet entirely. The ingress rules above already do the second part — the dashboard path
-returns `404` at the Cloudflare edge — but defence in depth means also requiring a token at
-the app, and reaching the dashboard only over
+An exposed dashboard is already token-protected by the auto-generated token, but that
+token rotates on every restart, so the URL you have to share changes each time. For a
+production box, set a strong `dashboard_token` / `dashboardToken` so the token is **stable**
+across restarts and every dashboard and `/api/dashboard/*` request authenticates against a
+secret you control. Keep the dashboard off the public internet entirely as well: the ingress
+rules above already do that — the dashboard path returns `404` at the Cloudflare edge — but
+defence in depth means also reaching the dashboard only over
 [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/applications/) or a
 private tailnet (e.g. [Tailscale](https://tailscale.com)) rather than the public hostname.
 
@@ -220,33 +272,38 @@ await phone.serve(agent, {
 
 Never hardcode the token — read it from an environment variable or a secret manager.
 
-### How the fail-closed behaviour works
+### How the auto-token behaviour works
 
 The SDK computes whether the server is **exposed** (a tunnel directive is active, a public
 `webhook_url` / `webhookUrl` is configured or was assigned by a tunnel, or the bind host
-was explicitly overridden to a non-loopback address). When the dashboard is on, the token
-is empty, **and** the server is exposed, the SDK does **not** mount the dashboard or the
-`/api/dashboard/*` (call-data) routes, and logs an error explaining how to fix it. The
-carrier webhook, media-stream, and `/health` routes still mount normally, so **calls keep
-working** — only the unauthenticated PII surface is withheld.
+was explicitly overridden to a non-loopback address). When the dashboard is on, no token is
+configured, **and** the server is exposed, the SDK generates a one-time token, mounts the
+dashboard and the `/api/dashboard/*` (call-data) routes behind it, logs a warning that it
+did so, and prints the ready-to-use URL with `?token=...` in the startup banner. The
+dashboard is **always available** — it just requires the printed (or configured) token when
+the box is exposed. On loopback-only local dev, nothing changes: no token is generated and
+the dashboard is served open.
 
 | Situation | What the SDK does |
 |---|---|
-| Loopback-only (local dev), dashboard on, no token | Dashboard served as today — unchanged. |
-| Token set | Dashboard + API mounted; requests must authenticate. |
+| Loopback-only (local dev), dashboard on, no token | Dashboard + API mounted **open** — unchanged. |
+| Token set (`dashboard_token` / `dashboardToken`) | Dashboard + API mounted; requests must authenticate with that token. |
 | Dashboard off | Nothing dashboard-related mounted. |
-| **Exposed, dashboard on, no token** | **Dashboard + API NOT mounted; error logged.** Calls still work. |
-| Exposed, dashboard on, no token, escape hatch on | Dashboard + API mounted unauthenticated; warning logged. |
+| **Exposed, dashboard on, no token** | **Dashboard + API mounted behind an auto-generated token; warning logged and the `?token=...` URL printed.** |
+| Exposed, dashboard on, no token, `allow_insecure_dashboard` on | Dashboard + API mounted **open**; warning logged. |
+
+In every case the carrier webhook, media-stream, and `/health` routes mount normally, so
+**calls keep working** regardless of the dashboard posture.
 
 ### The escape hatch (default off)
 
-If you understand the risk and still want to force-serve the dashboard unauthenticated on
-an exposed box (for example, you front it with Cloudflare Access at the edge and accept the
-app-level exposure), opt in explicitly with `allow_insecure_dashboard` (Python) /
+If you understand the risk and still want to serve the dashboard fully **open** (no token)
+on an exposed box — for example, you front it with Cloudflare Access at the edge and accept
+the app-level exposure — opt in explicitly with `allow_insecure_dashboard` (Python) /
 `allowInsecureDashboard` (TypeScript). It defaults to `False` / `false`; when enabled on an
-exposed box the SDK mounts the routes and logs a warning that transcripts and metadata are
-exposed to anyone who can reach the URL. This is **not recommended on a public network** —
-prefer Posture A or a token.
+exposed box the SDK skips the auto-generated token, mounts the routes unauthenticated, and
+logs a warning that transcripts and metadata are exposed to anyone who can reach the URL.
+This is **not recommended on a public network** — prefer Posture A or a token.
 
 <CodeGroup>
 ```python Python
@@ -286,9 +343,11 @@ for the full caveat.
 Run this once per client box before the line goes live. All five must pass:
 
 - [ ] **Dashboard is off or tokened.** Either `dashboard=False` / `dashboard: false`, **or**
-  a strong `dashboard_token` / `dashboardToken` is set from an environment variable. Confirm
-  an unauthenticated dashboard request returns `401` (token set) and the SDK logged no
-  fail-closed error.
+  a strong `dashboard_token` / `dashboardToken` is set from an environment variable so the
+  token is stable across restarts. (If you leave it unset on an exposed box the SDK still
+  auto-protects the dashboard with a generated token, but it rotates each restart.) Confirm
+  an unauthenticated dashboard request returns `401` and that `allow_insecure_dashboard` /
+  `allowInsecureDashboard` is **not** enabled unless you intend an open dashboard.
 - [ ] **The tunnel exposes only the webhook path.** Requesting `https://<hostname>/` and
   `https://<hostname>/api/dashboard/calls` returns `404` at the edge; only the carrier
   webhook + media-stream path reaches the local port. Verify with one real test call that

@@ -1,17 +1,18 @@
-"""Fail-closed dashboard gate — authentic real-app route-mounting tests.
+"""Auto-token dashboard protection — authentic real-app route tests.
 
 These tests build the REAL FastAPI application via ``EmbeddedServer._create_app``
 and drive it through the REAL Starlette ``TestClient`` (real ASGI routing, real
 route mounting, real auth dependency). Nothing under test is mocked — replacing
-the gate with a no-op (always mount) makes these tests fail, which is the
-litmus per ``.claude/rules/authentic-tests.md``.
+the auto-token branch with a no-op (leaving ``effective_token=""``) makes the
+exposed-default case answer 200 unauthenticated, which flips the protection
+assertion to a failure. That is the litmus per ``.claude/rules/authentic-tests.md``.
 
-The gate's purpose: when the embedded metrics dashboard + call-data API would be
-reachable beyond loopback (a tunnel / public ``webhook_url`` / explicit
-non-loopback ``PATTER_BIND_HOST``) without a ``dashboard_token``, the dashboard
-and ``/api/*`` call-data routes are NOT mounted (they expose call transcripts and
-metadata — PII). The carrier webhook + ``/health`` routes always mount so calls
-keep working. ``allow_insecure_dashboard=True`` is the explicit escape hatch.
+Behaviour: the dashboard + call-data API (call transcripts + metadata = PII) are
+ALWAYS mounted. When the server is reachable beyond loopback (a tunnel / public
+``webhook_url`` / explicit non-loopback ``PATTER_BIND_HOST``) without a configured
+``dashboard_token``, the SDK auto-generates a one-time token so the dashboard is
+available but protected with zero config. ``allow_insecure_dashboard=True`` is the
+explicit opt-out that serves it fully open. Loopback-only local dev stays open.
 """
 
 import pytest
@@ -58,24 +59,23 @@ def _config(webhook_url: str) -> LocalConfig:
     )
 
 
-def _build_app(
+def _make_server(
     webhook_url: str,
     *,
     dashboard: bool = True,
     dashboard_token: str = "",
     allow_insecure_dashboard: bool = False,
 ):
-    """Construct a real EmbeddedServer and return its real FastAPI app."""
+    """Construct a real EmbeddedServer (not yet built into an app)."""
     from getpatter.server import EmbeddedServer
 
-    server = EmbeddedServer(
+    return EmbeddedServer(
         config=_config(webhook_url),
         agent=_agent(),
         dashboard=dashboard,
         dashboard_token=dashboard_token,
         allow_insecure_dashboard=allow_insecure_dashboard,
     )
-    return server._create_app()
 
 
 def _route_paths(app) -> set[str]:
@@ -90,102 +90,168 @@ def _clear_bind_host(monkeypatch):
 
 @pytest.mark.skipif(not _has_fastapi, reason="fastapi not installed")
 @pytest.mark.integration
-class TestDashboardFailClosed:
-    """Real-app gate behaviour across the four spec'd scenarios."""
+class TestDashboardAutoToken:
+    """Auto-token protection behaviour across the four spec'd scenarios."""
 
-    # --- Case 1: exposed + dashboard on + token "" + default flag => gated ---
+    # --- Case 1: exposed + dashboard on + token "" + default flag ---
+    #
+    # The dashboard + call-data API ARE mounted, but protected by an
+    # auto-generated token: unauthenticated => 401, with the token => 200.
 
-    def test_exposed_unauthenticated_does_not_mount_dashboard_or_api(self):
-        app = _build_app(_PUBLIC_WEBHOOK)
+    def test_exposed_default_mounts_dashboard_and_api(self):
+        server = _make_server(_PUBLIC_WEBHOOK)
+        app = server._create_app()
         paths = _route_paths(app)
-        assert _DASHBOARD_ROOT not in paths
-        assert _DASHBOARD_API not in paths
-        assert _CALLDATA_API not in paths
+        assert _DASHBOARD_ROOT in paths
+        assert _DASHBOARD_API in paths
+        assert _CALLDATA_API in paths
 
-    def test_exposed_unauthenticated_still_mounts_carrier_webhook_and_health(self):
+    def test_exposed_default_still_mounts_carrier_webhook_and_health(self):
         # Calls MUST keep working: webhook + media + health always mount.
-        app = _build_app(_PUBLIC_WEBHOOK)
+        server = _make_server(_PUBLIC_WEBHOOK)
+        app = server._create_app()
         paths = _route_paths(app)
         assert _WEBHOOK_ROUTE in paths
         assert _HEALTH_ROUTE in paths
 
-    def test_exposed_unauthenticated_dashboard_and_api_return_404_over_http(self):
+    def test_exposed_default_resolves_nonempty_uuid_token(self):
+        import uuid
+
+        server = _make_server(_PUBLIC_WEBHOOK)
+        server._create_app()
+        token = server.effective_dashboard_token
+        assert token  # non-empty
+        # RFC 4122 v4 UUID with dashes — byte-for-byte the same shape the
+        # TypeScript SDK's crypto.randomUUID() emits (parity, blocking #1).
+        # 36 chars, version nibble 4; parse to prove it's a real UUID.
+        assert len(token) == 36
+        parsed = uuid.UUID(token)  # raises ValueError if not a valid UUID
+        assert parsed.version == 4
+        assert str(parsed) == token
+
+    def test_exposed_default_unauthenticated_request_is_401(self):
         from starlette.testclient import TestClient
 
-        client = TestClient(_build_app(_PUBLIC_WEBHOOK))
-        assert client.get(_DASHBOARD_ROOT).status_code == 404
-        assert client.get(_DASHBOARD_API).status_code == 404
-        assert client.get(_CALLDATA_API).status_code == 404
+        client = TestClient(_make_server(_PUBLIC_WEBHOOK)._create_app())
+        # LITMUS: with no auto-token these would be 200 — protection proof.
+        assert client.get(_DASHBOARD_ROOT).status_code == 401
+        assert client.get(_CALLDATA_API).status_code == 401
         # Health still answers so liveness probes / calls are unaffected.
         assert client.get(_HEALTH_ROUTE).status_code == 200
 
-    # --- Case 2: exposed + dashboard on + token SET => mounted, 401 ---
-
-    def test_exposed_with_token_mounts_dashboard_and_api(self):
-        app = _build_app(_PUBLIC_WEBHOOK, dashboard_token="s3cret")
-        paths = _route_paths(app)
-        assert _DASHBOARD_ROOT in paths
-        assert _DASHBOARD_API in paths
-        assert _CALLDATA_API in paths
-
-    def test_exposed_with_token_unauthenticated_request_is_401(self):
+    def test_exposed_default_authorized_with_query_token_succeeds(self):
         from starlette.testclient import TestClient
 
-        client = TestClient(_build_app(_PUBLIC_WEBHOOK, dashboard_token="s3cret"))
+        server = _make_server(_PUBLIC_WEBHOOK)
+        client = TestClient(server._create_app())
+        token = server.effective_dashboard_token
+        assert client.get(f"{_DASHBOARD_ROOT}?token={token}").status_code == 200
+        assert client.get(f"{_CALLDATA_API}?token={token}").status_code == 200
+
+    def test_exposed_default_authorized_with_bearer_header_succeeds(self):
+        from starlette.testclient import TestClient
+
+        server = _make_server(_PUBLIC_WEBHOOK)
+        client = TestClient(server._create_app())
+        token = server.effective_dashboard_token
+        ok = client.get(_CALLDATA_API, headers={"Authorization": f"Bearer {token}"})
+        assert ok.status_code == 200
+
+    # --- Case 2: exposed + explicit dashboard_token => mounted, 401/200 ---
+
+    def test_exposed_with_explicit_token_uses_it(self):
+        server = _make_server(_PUBLIC_WEBHOOK, dashboard_token="secret")
+        server._create_app()
+        assert server.effective_dashboard_token == "secret"
+
+    def test_exposed_with_explicit_token_unauthenticated_is_401(self):
+        from starlette.testclient import TestClient
+
+        client = TestClient(
+            _make_server(_PUBLIC_WEBHOOK, dashboard_token="secret")._create_app()
+        )
         assert client.get(_DASHBOARD_ROOT).status_code == 401
         assert client.get(_CALLDATA_API).status_code == 401
 
-    def test_exposed_with_token_authorized_request_succeeds(self):
+    def test_exposed_with_explicit_token_authorized_is_200(self):
         from starlette.testclient import TestClient
 
-        client = TestClient(_build_app(_PUBLIC_WEBHOOK, dashboard_token="s3cret"))
-        ok = client.get(_CALLDATA_API, headers={"Authorization": "Bearer s3cret"})
+        client = TestClient(
+            _make_server(_PUBLIC_WEBHOOK, dashboard_token="secret")._create_app()
+        )
+        ok = client.get(_CALLDATA_API, headers={"Authorization": "Bearer secret"})
         assert ok.status_code == 200
 
-    # --- Case 3: loopback-only + dashboard on + token "" => mounted ---
+    # --- Case 3: loopback-only + no token => mounted and OPEN (local dev) ---
 
-    def test_loopback_only_unauthenticated_mounts_dashboard_and_api(self):
-        # Local-dev path: backward compatible, still served unauthenticated.
-        app = _build_app(_LOOPBACK_WEBHOOK)
+    def test_loopback_only_mounts_dashboard_and_api(self):
+        server = _make_server(_LOOPBACK_WEBHOOK)
+        app = server._create_app()
         paths = _route_paths(app)
         assert _DASHBOARD_ROOT in paths
         assert _DASHBOARD_API in paths
         assert _CALLDATA_API in paths
 
-    def test_loopback_only_dashboard_and_api_reachable_over_http(self):
+    def test_loopback_only_is_open_no_autotoken(self):
+        # Zero-friction local dev: no token generated, served open.
+        server = _make_server(_LOOPBACK_WEBHOOK)
+        server._create_app()
+        assert server.effective_dashboard_token == ""
+
+    def test_loopback_only_reachable_unauthenticated_over_http(self):
         from starlette.testclient import TestClient
 
-        client = TestClient(_build_app(_LOOPBACK_WEBHOOK))
+        client = TestClient(_make_server(_LOOPBACK_WEBHOOK)._create_app())
         assert client.get(_DASHBOARD_ROOT).status_code == 200
         assert client.get(_CALLDATA_API).status_code == 200
 
-    def test_empty_webhook_url_local_dev_mounts_dashboard_and_api(self):
-        # No tunnel, no webhook_url at all (pure local dev) — still served.
-        app = _build_app("")
-        paths = _route_paths(app)
-        assert _DASHBOARD_ROOT in paths
-        assert _CALLDATA_API in paths
-
-    # --- Case 4: exposed + token "" + allow_insecure_dashboard=True => mounted ---
-
-    def test_exposed_with_escape_hatch_mounts_dashboard_and_api(self):
-        app = _build_app(_PUBLIC_WEBHOOK, allow_insecure_dashboard=True)
-        paths = _route_paths(app)
-        assert _DASHBOARD_ROOT in paths
-        assert _DASHBOARD_API in paths
-        assert _CALLDATA_API in paths
-
-    def test_exposed_with_escape_hatch_dashboard_reachable_over_http(self):
+    def test_empty_webhook_url_local_dev_is_open(self):
+        # No tunnel, no webhook_url at all (pure local dev) — open.
         from starlette.testclient import TestClient
 
-        client = TestClient(_build_app(_PUBLIC_WEBHOOK, allow_insecure_dashboard=True))
+        server = _make_server("")
+        client = TestClient(server._create_app())
+        assert server.effective_dashboard_token == ""
         assert client.get(_DASHBOARD_ROOT).status_code == 200
         assert client.get(_CALLDATA_API).status_code == 200
+
+    # --- Case 4: exposed + no token + allow_insecure_dashboard=True => OPEN ---
+
+    def test_exposed_insecure_optout_is_open(self):
+        server = _make_server(_PUBLIC_WEBHOOK, allow_insecure_dashboard=True)
+        server._create_app()
+        assert server.effective_dashboard_token == ""
+
+    def test_exposed_insecure_optout_reachable_unauthenticated_over_http(self):
+        from starlette.testclient import TestClient
+
+        client = TestClient(
+            _make_server(_PUBLIC_WEBHOOK, allow_insecure_dashboard=True)._create_app()
+        )
+        assert client.get(_DASHBOARD_ROOT).status_code == 200
+        assert client.get(_CALLDATA_API).status_code == 200
+
+    def test_exposed_insecure_optout_logs_warning(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="getpatter"):
+            _make_server(_PUBLIC_WEBHOOK, allow_insecure_dashboard=True)._create_app()
+        joined = " ".join(r.getMessage() for r in caplog.records)
+        assert "WITHOUT authentication" in joined
+        assert "allow_insecure_dashboard=True" in joined
+
+    def test_exposed_default_logs_autotoken_warning(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="getpatter"):
+            _make_server(_PUBLIC_WEBHOOK)._create_app()
+        joined = " ".join(r.getMessage() for r in caplog.records)
+        assert "auto-generated" in joined
 
     # --- dashboard=False disables everything regardless of exposure ---
 
     def test_dashboard_disabled_mounts_neither_but_keeps_webhook(self):
-        app = _build_app(_PUBLIC_WEBHOOK, dashboard=False)
+        app = _make_server(_PUBLIC_WEBHOOK, dashboard=False)._create_app()
         paths = _route_paths(app)
         assert _DASHBOARD_ROOT not in paths
         assert _CALLDATA_API not in paths
@@ -198,25 +264,28 @@ class TestDashboardFailClosed:
 class TestDashboardExposureSignalBindHost:
     """Signal (c): explicit non-loopback PATTER_BIND_HOST triggers exposure."""
 
-    def test_explicit_nonloopback_bind_host_gates_unauthenticated_dashboard(
-        self, monkeypatch
-    ):
+    def test_explicit_nonloopback_bind_host_protects_dashboard(self, monkeypatch):
         # Even with a loopback webhook_url, an explicit 0.0.0.0 bind exposes
-        # the port; the gate must fire.
-        monkeypatch.setenv("PATTER_BIND_HOST", "0.0.0.0")
-        app = _build_app(_LOOPBACK_WEBHOOK)
-        paths = _route_paths(app)
-        assert _DASHBOARD_ROOT not in paths
-        assert _CALLDATA_API not in paths
-        assert _WEBHOOK_ROUTE in paths
+        # the port; the dashboard mounts but is auto-token protected (401).
+        from starlette.testclient import TestClient
 
-    def test_explicit_loopback_bind_host_does_not_gate(self, monkeypatch):
+        monkeypatch.setenv("PATTER_BIND_HOST", "0.0.0.0")
+        server = _make_server(_LOOPBACK_WEBHOOK)
+        client = TestClient(server._create_app())
+        assert server.effective_dashboard_token  # auto-generated
+        assert client.get(_DASHBOARD_ROOT).status_code == 401
+        assert _WEBHOOK_ROUTE in _route_paths(server._create_app())
+
+    def test_explicit_loopback_bind_host_stays_open(self, monkeypatch):
         # Explicitly setting the loopback default must NOT trip exposure.
+        from starlette.testclient import TestClient
+
         monkeypatch.setenv("PATTER_BIND_HOST", "127.0.0.1")
-        app = _build_app(_LOOPBACK_WEBHOOK)
-        paths = _route_paths(app)
-        assert _DASHBOARD_ROOT in paths
-        assert _CALLDATA_API in paths
+        server = _make_server(_LOOPBACK_WEBHOOK)
+        client = TestClient(server._create_app())
+        assert server.effective_dashboard_token == ""
+        assert client.get(_DASHBOARD_ROOT).status_code == 200
+        assert client.get(_CALLDATA_API).status_code == 200
 
 
 @pytest.mark.unit

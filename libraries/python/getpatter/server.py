@@ -10,6 +10,7 @@ import os
 import re
 import signal
 import time
+import uuid
 from collections import defaultdict
 from urllib.parse import urlparse
 
@@ -24,7 +25,7 @@ from getpatter.services.call_log import (
     alog_turn,
     resolve_log_root,
 )
-from getpatter.utils.log_sanitize import sanitize_log_value
+from getpatter.utils.log_sanitize import mask_phone_number, sanitize_log_value
 
 logger = logging.getLogger("getpatter")
 
@@ -46,7 +47,7 @@ _BLOCKED_WEBHOOK_HOSTNAMES = frozenset(
 MAX_WS_PER_IP = 10
 
 # Hosts that are loopback-only (not reachable from another machine). Used by
-# the fail-closed dashboard gate to decide whether the server is "exposed".
+# the dashboard auto-token gate to decide whether the server is "exposed".
 # A non-empty ``webhook_url`` or ``PATTER_BIND_HOST`` whose hostname is NOT in
 # this set is treated as publicly reachable. Mirrors the TS counterpart.
 _LOOPBACK_HOSTS = frozenset(
@@ -382,13 +383,21 @@ class EmbeddedServer:
         self.pricing = pricing
         self.dashboard = dashboard
         self.dashboard_token = dashboard_token
-        # Escape hatch for the fail-closed dashboard gate. When ``True``, the
-        # dashboard + call-data API routes are mounted even on a
-        # publicly-reachable bind without a ``dashboard_token`` (with a loud
-        # WARNING). Default ``False`` => fail closed: those routes are NOT
-        # mounted when the server would be reachable beyond loopback without
-        # auth. See ``_dashboard_is_exposed`` and the gate in ``_create_app``.
+        # Opt-out from the auto-token protection. When ``True``, the dashboard +
+        # call-data API routes are served fully OPEN (no token) even on a
+        # publicly-reachable bind, with a loud WARNING. Default ``False`` =>
+        # when the server is reachable beyond loopback without a configured
+        # ``dashboard_token``, the SDK auto-generates a one-time token so the
+        # dashboard is always available but protected with zero config. See
+        # ``_dashboard_is_exposed`` and the token resolution in ``_create_app``.
         self.allow_insecure_dashboard = allow_insecure_dashboard
+        # The dashboard token actually in effect for this process — resolved in
+        # ``_create_app``: the configured ``dashboard_token`` when set, an
+        # auto-generated UUID when the bind is exposed and no token was given
+        # (unless ``allow_insecure_dashboard``), or ``""`` (OPEN) for loopback
+        # local-dev / the insecure opt-out. Read by the startup banner (to print
+        # the ready URL incl. ``?token=``) and by tests to authenticate.
+        self._effective_dashboard_token = ""
         self._server = None
         self._app = None
         self._active_connections: set[WebSocket] = set()
@@ -462,6 +471,19 @@ class EmbeddedServer:
         # Per-client-IP active WebSocket counter for DoS protection.
         # Mirrors TS server.ts:1042 (wsConnectionsByIp).
         self._ws_conn_counts: defaultdict[str, int] = defaultdict(int)
+
+    @property
+    def effective_dashboard_token(self) -> str:
+        """The dashboard token in effect for this process.
+
+        Resolved in :meth:`_create_app`. An empty string means the dashboard
+        is served OPEN (loopback-only local dev, or the
+        ``allow_insecure_dashboard`` opt-out); a non-empty value is required to
+        authenticate (the explicit ``dashboard_token`` or an auto-generated
+        one when the bind is exposed). Public mirror of the TypeScript SDK's
+        ``EmbeddedServer.resolvedDashboardToken`` getter — see sdk-parity.
+        """
+        return self._effective_dashboard_token
 
     # === Outbound completion registry (call(wait=True)) ===
 
@@ -732,7 +754,7 @@ class EmbeddedServer:
     def _dashboard_is_exposed(self) -> bool:
         """Return True when this server would be reachable beyond loopback.
 
-        Drives the fail-closed dashboard gate in :meth:`_create_app`. Returns
+        Drives the dashboard auto-token gate in :meth:`_create_app`. Returns
         ``True`` if ANY of these signals holds:
 
         (a)/(b) A public ``webhook_url`` is configured — set either explicitly
@@ -802,43 +824,57 @@ class EmbeddedServer:
                         "Dashboard hydration failed: %s", exc
                     )
 
-            # --- Fail-closed dashboard gate ---
+            # --- Resolve the effective dashboard token ---
             #
             # The dashboard + call-data API expose call transcripts and
-            # metadata (PII). When the server would be reachable beyond
-            # loopback (a tunnel is active, or a public webhook_url / explicit
-            # non-loopback PATTER_BIND_HOST is set) AND no dashboard_token is
-            # configured, we refuse to mount those routes unless the operator
-            # has explicitly opted into allow_insecure_dashboard. The carrier
-            # webhook + media-stream + /health routes always mount, so calls
-            # keep working. Mirrors the TypeScript SDK.
+            # metadata (PII). The dashboard is ALWAYS mounted; how it is
+            # protected depends on the bind exposure and config:
+            #
+            #   * explicit ``dashboard_token`` set       => use it (auth required)
+            #   * exposed + no token + NOT insecure      => auto-generate a
+            #       one-time UUID token (always available, zero-config protected)
+            #   * exposed + no token + insecure opt-out  => OPEN (no token), WARN
+            #   * loopback-only + no token               => OPEN (no token) —
+            #       unchanged zero-friction local-dev behaviour
+            #
+            # The carrier webhook + media-stream + /health routes always mount
+            # too, so calls keep working regardless. Mirrors the TypeScript SDK.
             is_exposed = self._dashboard_is_exposed()
-            unauthenticated = not self.dashboard_token
 
-            if is_exposed and unauthenticated and not self.allow_insecure_dashboard:
-                logger.error(
-                    "Dashboard NOT served: it would be reachable beyond "
-                    "127.0.0.1 without authentication, exposing call "
-                    "transcripts and metadata (PII). Fix one of: (1) set "
-                    "dashboard_token=<secret> to require auth, (2) set "
-                    "dashboard=False to disable it on this host, or (3) set "
-                    "allow_insecure_dashboard=True to force-serve it "
-                    "unauthenticated (NOT recommended on a public network)."
+            if self.dashboard_token:
+                effective_token = self.dashboard_token
+            elif is_exposed and not self.allow_insecure_dashboard:
+                # RFC 4122 v4 UUID with dashes (str(), not .hex) so the
+                # generated token is byte-for-byte the same shape as the
+                # TypeScript SDK's ``crypto.randomUUID()`` — see sdk-parity.
+                effective_token = str(uuid.uuid4())
+                logger.warning(
+                    "Dashboard is reachable beyond 127.0.0.1 without a "
+                    "configured token; protecting it with an auto-generated "
+                    "token. Set dashboard_token for a stable token, or "
+                    "allow_insecure_dashboard=true to serve it open. "
+                    "(The ready-to-use URL with the token is printed in the "
+                    "startup banner.)"
+                )
+            elif is_exposed and self.allow_insecure_dashboard:
+                effective_token = ""
+                logger.warning(
+                    "Dashboard served WITHOUT authentication on a "
+                    "publicly-reachable bind (allow_insecure_dashboard=True). "
+                    "Call transcripts and metadata are exposed to anyone "
+                    "who can reach this URL."
                 )
             else:
-                if is_exposed and unauthenticated and self.allow_insecure_dashboard:
-                    logger.warning(
-                        "Dashboard served WITHOUT authentication on a "
-                        "publicly-reachable bind (allow_insecure_dashboard=True). "
-                        "Call transcripts and metadata are exposed to anyone "
-                        "who can reach this URL."
-                    )
+                # Loopback-only, no token: open local-dev path (unchanged).
+                effective_token = ""
 
-                mount_dashboard(app, self._metrics_store, token=self.dashboard_token)
+            self._effective_dashboard_token = effective_token
 
-                from getpatter.api_routes import mount_api
+            mount_dashboard(app, self._metrics_store, token=effective_token)
 
-                mount_api(app, self._metrics_store, token=self.dashboard_token)
+            from getpatter.api_routes import mount_api
+
+            mount_api(app, self._metrics_store, token=effective_token)
 
         @app.get("/health")
         async def health():
@@ -1772,25 +1808,28 @@ class EmbeddedServer:
                 "under-report.",
                 sanitize_log_value(model),
             )
-        # The detailed ERROR/WARNING about the fail-closed gate is emitted in
-        # ``_create_app`` (where the routes are actually mounted or skipped).
-        # Here we only show the friendly local-dev banner when the dashboard
-        # will in fact be served — i.e. NOT in the exposed+unauthenticated+
-        # not-allowed case where ``_create_app`` already refused to mount it.
-        _dashboard_blocked = (
-            self.dashboard
-            and not self.dashboard_token
-            and self._dashboard_is_exposed()
-            and not self.allow_insecure_dashboard
-        )
-        if self.dashboard and not _dashboard_blocked:
-            logger.info(
-                "\n──── Dashboard ─────────────────────────────────────\n"
-                "URL: http://127.0.0.1:%s/\n"
-                "────────────────────────────────────────────────────\n",
-                port,
-            )
-            if not self.dashboard_token:
+        # The dashboard is always served (``_create_app`` resolved the
+        # effective token: explicit, auto-generated, or "" when open). Print a
+        # ready-to-click URL — with ``?token=`` when a token is in effect so the
+        # operator can open the protected dashboard directly, or the plain URL
+        # plus an unauthenticated warning when it is served open.
+        if self.dashboard:
+            token = self._effective_dashboard_token
+            if token:
+                logger.info(
+                    "\n──── Dashboard ─────────────────────────────────────\n"
+                    "URL: http://127.0.0.1:%s/?token=%s\n"
+                    "────────────────────────────────────────────────────\n",
+                    port,
+                    token,
+                )
+            else:
+                logger.info(
+                    "\n──── Dashboard ─────────────────────────────────────\n"
+                    "URL: http://127.0.0.1:%s/\n"
+                    "────────────────────────────────────────────────────\n",
+                    port,
+                )
                 logger.warning(
                     "Dashboard is enabled without authentication. "
                     "Set dashboard_token to protect call data. "
