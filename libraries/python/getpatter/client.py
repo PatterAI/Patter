@@ -1794,6 +1794,7 @@ class Patter:
         on_metrics: Callable[[dict], Awaitable[None]] | None = None,
         dashboard: bool = True,
         dashboard_token: str = "",
+        allow_insecure_dashboard: bool = False,
         tunnel: bool = False,
     ) -> None:
         """Start the embedded server for inbound calls.
@@ -1816,6 +1817,21 @@ class Patter:
                 at ``http://localhost:{port}/dashboard``.
             dashboard_token: Optional bearer token for dashboard authentication.
                 When set, all dashboard routes require this token.
+            allow_insecure_dashboard: Opt-out from the auto-token protection.
+                The embedded metrics dashboard and call-data ``/api/*`` routes
+                expose call transcripts and metadata (PII). With ``False``
+                (default, safe), when the server is reachable beyond
+                ``127.0.0.1`` (e.g. via a tunnel or a public ``webhook_url``)
+                without a configured ``dashboard_token``, the SDK
+                auto-generates a one-time token and mounts the dashboard behind
+                it — the startup banner prints the ready-to-use URL with
+                ``?token=...``. The dashboard is always available; it just
+                requires the printed or configured token. Set ``True`` to serve
+                the dashboard fully OPEN (unauthenticated) on a
+                publicly-reachable bind (NOT recommended on a public network).
+                Loopback-only local dev is unchanged: served open with no
+                token. Carrier webhooks and ``/health`` always mount, so calls
+                keep working regardless of this flag.
             tunnel: When ``True``, start a cloudflared tunnel automatically.
                 Requires ``cloudflared`` binary on PATH. Mutually exclusive
                 with ``webhook_url``.
@@ -1915,6 +1931,7 @@ class Patter:
             pricing=self._pricing,
             dashboard=dashboard,
             dashboard_token=dashboard_token,
+            allow_insecure_dashboard=allow_insecure_dashboard,
         )
         self._server.on_call_start = on_call_start
         self._server.on_call_end = on_call_end

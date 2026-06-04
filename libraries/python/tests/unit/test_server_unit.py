@@ -34,7 +34,15 @@ def _make_server(**overrides) -> EmbeddedServer:
         require_signature=False,
     )
     agent = make_agent()
-    defaults = dict(config=cfg, agent=agent, dashboard=False)
+    # ``webhook_url="test.ngrok.io"`` (kept for the webhook-signature tests)
+    # marks the server as exposed beyond loopback, which would otherwise make
+    # the SDK auto-generate a dashboard token to protect it. These route-mounting
+    # tests assert the open (unauthenticated) behaviour, so opt them into the
+    # explicit insecure-serve path so the dashboard stays open. The auto-token
+    # protection itself is covered by tests/test_dashboard_autotoken.py.
+    defaults = dict(
+        config=cfg, agent=agent, dashboard=False, allow_insecure_dashboard=True
+    )
     defaults.update(overrides)
     return EmbeddedServer(**defaults)
 

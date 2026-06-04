@@ -1,0 +1,369 @@
+---
+title: "Production Deployment"
+description: "Take a Patter agent from a dev quick-tunnel to a hardened, always-on box: a named Cloudflare tunnel with INGRESS rules, a locked-down dashboard, and a per-client go-live checklist."
+icon: "shield-check"
+---
+
+# Production Deployment
+
+The [built-in Cloudflare Quick Tunnel](/dev-tools/tunneling) is perfect for development and
+acceptance demos: one line of config and you have a public URL. It is **not** a production
+posture. This guide walks through the gap between "it works on my machine over a quick
+tunnel" and "it runs unattended on a client's box and exposes only what it should".
+
+Three things change when you go live:
+
+1. The tunnel becomes a **named** Cloudflare tunnel with a **stable** hostname, run as a
+   system service so it survives reboots and reconnects on its own.
+2. The tunnel's **ingress rules** route only the carrier webhook path to the local port —
+   everything else (`/health`, the dashboard, `/api/*`) returns `404` at the edge.
+3. The **dashboard** is either turned off or put behind authentication and a private
+   network, so call transcripts and metadata (PII) are never reachable unauthenticated.
+
+## Why the built-in quick tunnel is dev-only
+
+The built-in `CloudflareTunnel()` runs a Cloudflare *Quick Tunnel* (`cloudflared --url
+http://localhost:PORT`). It is the right tool to get going, and the wrong tool to leave
+running:
+
+- **The hostname rotates.** Every quick tunnel gets a fresh random
+  `*.trycloudflare.com` hostname. Restart the process — a crash, a deploy, a reboot — and
+  the hostname changes. Your carrier's voice webhook still points at the old, now-dead
+  hostname, so inbound calls silently fail until you re-point it. A production line cannot
+  depend on a hostname that changes on restart.
+- **There is no watchdog.** The quick tunnel lives and dies with your `serve()` process.
+  Nothing restarts it if the machine reboots overnight or the process is killed. An
+  after-hours line that is down until someone notices is not a production line.
+- **It exposes the WHOLE port.** `cloudflared --url http://localhost:8000` publishes
+  *everything* served on port 8000 to the public internet: the carrier webhook **and**
+  `/health` **and** the dashboard at `/` **and** every `/api/dashboard/*` route. The SDK
+  auto-protects an exposed dashboard with a generated token (see
+  [Dashboard hardening](#dashboard-hardening)), but leaving the whole port public still
+  exposes `/health` and the surface area unnecessarily — a named tunnel with ingress rules
+  publishes only the carrier paths.
+
+The fix for all three is a **named** Cloudflare tunnel with a config file you control.
+
+## Named Cloudflare tunnel with a stable hostname
+
+A named tunnel is tied to your Cloudflare account and a DNS record you own, so the
+hostname is **stable** across restarts. You point your carrier webhook at it once and
+never touch it again.
+
+### 1. Create the tunnel and route DNS
+
+You need a domain on Cloudflare (free plan is fine). Run these once on the box that will
+host the agent:
+
+```bash
+# Authenticate cloudflared with your Cloudflare account (opens a browser once).
+cloudflared tunnel login
+
+# Create a named tunnel. This writes a credentials JSON under ~/.cloudflared/.
+cloudflared tunnel create patter-prod
+
+# Route a stable hostname at the tunnel (replace with a subdomain you own).
+cloudflared tunnel route dns patter-prod voice.example.com
+```
+
+`cloudflared tunnel create` prints a tunnel UUID and the path to its credentials file
+(e.g. `~/.cloudflared/<UUID>.json`). You will reference both in the config below.
+
+### 2. Write a config.yml with INGRESS rules
+
+This is the part that closes the "whole port is public" hole. Cloudflare ingress rules are
+evaluated top to bottom; the **first** match wins, and the final catch-all decides what
+happens to everything else. Route **only** the carrier's webhook **and** media-stream
+WebSocket paths to the local port and return `404` for everything else, so `/health`, the
+dashboard, and `/api/*` are never reachable from the public hostname.
+
+Patter mounts each carrier under its own prefix: the HTTP webhooks live under
+`/webhooks/<carrier>/...` and the media-stream WebSocket upgrade lives under
+`/ws/<carrier>/stream/...` (Twilio's stream is the bare `/ws/stream/...`). Allow **both**
+the webhook and the stream path — the regex below does that per carrier. Pick the block for
+the carrier you use; the previous `^/(twilio|telnyx|media-stream|webhooks/.*)$` example was
+wrong (it never matched the real `/ws/stream/...` upgrade and would drop the call at pickup).
+
+<CodeGroup>
+```yaml Twilio
+# ~/.cloudflared/config.yml
+tunnel: patter-prod
+credentials-file: /home/USERNAME/.cloudflared/TUNNEL_UUID.json
+
+ingress:
+  # Twilio: voice/status/recording/AMD webhooks + the media-stream WebSocket.
+  - hostname: voice.example.com
+    path: ^/(webhooks/twilio/.*|ws/stream/.*)$
+    service: http://localhost:8000
+
+  # Everything else on this hostname is refused at the edge: /health, the
+  # dashboard at /, and every /api/dashboard/* route never reach the box.
+  - hostname: voice.example.com
+    service: http_status:404
+
+  # Required final catch-all for any other hostname.
+  - service: http_status:404
+```
+
+```yaml Telnyx
+# ~/.cloudflared/config.yml
+tunnel: patter-prod
+credentials-file: /home/USERNAME/.cloudflared/TUNNEL_UUID.json
+
+ingress:
+  # Telnyx: Call Control webhooks + the media-stream WebSocket.
+  - hostname: voice.example.com
+    path: ^/(webhooks/telnyx/.*|ws/telnyx/stream/.*)$
+    service: http://localhost:8000
+
+  # Everything else on this hostname is refused at the edge: /health, the
+  # dashboard at /, and every /api/dashboard/* route never reach the box.
+  - hostname: voice.example.com
+    service: http_status:404
+
+  # Required final catch-all for any other hostname.
+  - service: http_status:404
+```
+
+```yaml Plivo
+# ~/.cloudflared/config.yml
+tunnel: patter-prod
+credentials-file: /home/USERNAME/.cloudflared/TUNNEL_UUID.json
+
+ingress:
+  # Plivo: voice/status/AMD/transfer webhooks + the media-stream WebSocket.
+  - hostname: voice.example.com
+    path: ^/(webhooks/plivo/.*|ws/plivo/stream/.*)$
+    service: http://localhost:8000
+
+  # Everything else on this hostname is refused at the edge: /health, the
+  # dashboard at /, and every /api/dashboard/* route never reach the box.
+  - hostname: voice.example.com
+    service: http_status:404
+
+  # Required final catch-all for any other hostname.
+  - service: http_status:404
+```
+</CodeGroup>
+
+<Note>
+  **Confirm against your installed version before going live.** The paths above match the
+  current routes (`/webhooks/<carrier>/...` for HTTP, `/ws/stream/...` for Twilio media and
+  `/ws/<carrier>/stream/...` for Telnyx/Plivo media). Place one real test call with the
+  catch-all `404` in place and confirm the call connects *and* that requesting
+  `https://voice.example.com/` returns `404` (the dashboard must not load). The placeholder
+  hostname `voice.example.com` and the local port `8000` are examples — use your own.
+</Note>
+
+### 3. Run it as an always-on service
+
+The tunnel must outlive your shell, restart on reboot, and reconnect on its own. Install
+it as a system service. On macOS (a common per-client always-on box model — see the
+[OpenClaw integration](/integrations/openclaw)) that means a `launchd` service:
+
+```bash
+# Install cloudflared as a launchd service that runs the named tunnel on boot.
+# cloudflared reads ~/.cloudflared/config.yml for the tunnel + ingress rules.
+sudo cloudflared service install
+
+# Manage it like any launchd service:
+sudo launchctl list | grep cloudflared
+sudo launchctl kickstart -k system/com.cloudflare.cloudflared   # restart
+```
+
+On Linux, `sudo cloudflared service install` registers a `systemd` unit instead
+(`systemctl status cloudflared`, `systemctl restart cloudflared`). Either way you get
+always-on behaviour: the tunnel starts at boot, reconnects automatically if the edge
+connection drops, and is supervised by the OS rather than your `serve()` process.
+
+### 4. Point Patter at the stable hostname
+
+With the named tunnel running as a service, Patter should **not** manage a tunnel process
+itself. Pass the stable hostname as the webhook URL and let Patter skip process
+management:
+
+<CodeGroup>
+```python Python
+from getpatter import Patter, Twilio
+
+phone = Patter(
+    carrier=Twilio(),
+    phone_number="+15550001234",
+    webhook_url="voice.example.com",   # stable named-tunnel hostname; no tunnel= process
+)
+await phone.serve(agent, port=8000)
+```
+
+```typescript TypeScript
+import { Patter, Twilio } from "getpatter";
+
+const phone = new Patter({
+  carrier: new Twilio(),
+  phoneNumber: "+15550001234",
+  webhookUrl: "voice.example.com",     // stable named-tunnel hostname; no tunnel process
+});
+await phone.serve(agent, { port: 8000 });
+```
+</CodeGroup>
+
+Because the hostname is stable, your carrier's voice webhook stays valid across restarts —
+no re-pointing after a reboot or a deploy. See the
+[Static / user-managed tunnel](/dev-tools/tunneling#static-user-managed-tunnel) section for
+the equivalent `Static` tunnel marker if you prefer to express the hostname that way.
+
+## Dashboard hardening
+
+The embedded dashboard serves **call transcripts and metadata — PII**. On an
+internet-reachable box it must never be served unauthenticated. Patter protects this for
+you with **zero configuration**: when the dashboard would be reachable beyond `127.0.0.1`
+without a configured token, the SDK auto-generates a one-time token, mounts the dashboard
+behind it, and prints a ready-to-click URL (with `?token=...`) at startup. The dashboard
+stays available — it just requires the printed token. Pick one of the postures below to make
+that explicit and stable on a production box.
+
+### Posture A — turn the dashboard off on the exposed box
+
+If you do not need the dashboard on the production box (you can run the
+[standalone dashboard](/dev-tools/dashboard#standalone-dashboard) elsewhere, or just rely on
+[call logging](/python-sdk/call-logging)), disable it:
+
+<CodeGroup>
+```python Python
+await phone.serve(agent, port=8000, dashboard=False)
+```
+
+```typescript TypeScript
+await phone.serve(agent, { port: 8000, dashboard: false });
+```
+</CodeGroup>
+
+### Posture B — keep it, but require a token AND keep it private
+
+An exposed dashboard is already token-protected by the auto-generated token, but that
+token rotates on every restart, so the URL you have to share changes each time. For a
+production box, set a strong `dashboard_token` / `dashboardToken` so the token is **stable**
+across restarts and every dashboard and `/api/dashboard/*` request authenticates against a
+secret you control. Keep the dashboard off the public internet entirely as well: the ingress
+rules above already do that — the dashboard path returns `404` at the Cloudflare edge — but
+defence in depth means also reaching the dashboard only over
+[Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/applications/) or a
+private tailnet (e.g. [Tailscale](https://tailscale.com)) rather than the public hostname.
+
+<CodeGroup>
+```python Python
+import os
+
+await phone.serve(
+    agent,
+    port=8000,
+    dashboard=True,
+    dashboard_token=os.environ["PATTER_DASHBOARD_TOKEN"],   # strong secret from env
+)
+```
+
+```typescript TypeScript
+await phone.serve(agent, {
+  port: 8000,
+  dashboard: true,
+  dashboardToken: process.env.PATTER_DASHBOARD_TOKEN,        // strong secret from env
+});
+```
+</CodeGroup>
+
+Never hardcode the token — read it from an environment variable or a secret manager.
+
+### How the auto-token behaviour works
+
+The SDK computes whether the server is **exposed** (a tunnel directive is active, a public
+`webhook_url` / `webhookUrl` is configured or was assigned by a tunnel, or the bind host
+was explicitly overridden to a non-loopback address). When the dashboard is on, no token is
+configured, **and** the server is exposed, the SDK generates a one-time token, mounts the
+dashboard and the `/api/dashboard/*` (call-data) routes behind it, logs a warning that it
+did so, and prints the ready-to-use URL with `?token=...` in the startup banner. The
+dashboard is **always available** — it just requires the printed (or configured) token when
+the box is exposed. On loopback-only local dev, nothing changes: no token is generated and
+the dashboard is served open.
+
+| Situation | What the SDK does |
+|---|---|
+| Loopback-only (local dev), dashboard on, no token | Dashboard + API mounted **open** — unchanged. |
+| Token set (`dashboard_token` / `dashboardToken`) | Dashboard + API mounted; requests must authenticate with that token. |
+| Dashboard off | Nothing dashboard-related mounted. |
+| **Exposed, dashboard on, no token** | **Dashboard + API mounted behind an auto-generated token; warning logged and the `?token=...` URL printed.** |
+| Exposed, dashboard on, no token, `allow_insecure_dashboard` on | Dashboard + API mounted **open**; warning logged. |
+
+In every case the carrier webhook, media-stream, and `/health` routes mount normally, so
+**calls keep working** regardless of the dashboard posture.
+
+### The escape hatch (default off)
+
+If you understand the risk and still want to serve the dashboard fully **open** (no token)
+on an exposed box — for example, you front it with Cloudflare Access at the edge and accept
+the app-level exposure — opt in explicitly with `allow_insecure_dashboard` (Python) /
+`allowInsecureDashboard` (TypeScript). It defaults to `False` / `false`; when enabled on an
+exposed box the SDK skips the auto-generated token, mounts the routes unauthenticated, and
+logs a warning that transcripts and metadata are exposed to anyone who can reach the URL.
+This is **not recommended on a public network** — prefer Posture A or a token.
+
+<CodeGroup>
+```python Python
+# NOT recommended on a public network — serve the dashboard unauthenticated anyway.
+await phone.serve(
+    agent,
+    port=8000,
+    dashboard=True,
+    allow_insecure_dashboard=True,
+)
+```
+
+```typescript TypeScript
+// NOT recommended on a public network — serve the dashboard unauthenticated anyway.
+await phone.serve(agent, {
+  port: 8000,
+  dashboard: true,
+  allowInsecureDashboard: true,
+});
+```
+</CodeGroup>
+
+## Keep the OpenClaw gateway and consult on loopback
+
+If you run the [OpenClaw integration](/integrations/openclaw), keep the OpenClaw gateway's
+`/v1/chat/completions` endpoint and the consult adapter bound to **loopback** (the
+default). The only thing the named tunnel exposes is the carrier webhook path; the
+gateway, the consult adapter, and any MCP server stay private on `127.0.0.1` (or a private
+tailnet). Patter's consult URL validator rejects loopback by default — opt in with
+`allow_loopback` / `allowLoopback` for the consult URL only, which is your own
+configuration and not caller-derived. See the
+[OpenClaw loopback / SSRF note](/integrations/openclaw#direction-b--patter-consults-openclaw-mid-call)
+for the full caveat.
+
+## Per-client go-live acceptance checklist
+
+Run this once per client box before the line goes live. All five must pass:
+
+- [ ] **Dashboard is off or tokened.** Either `dashboard=False` / `dashboard: false`, **or**
+  a strong `dashboard_token` / `dashboardToken` is set from an environment variable so the
+  token is stable across restarts. (If you leave it unset on an exposed box the SDK still
+  auto-protects the dashboard with a generated token, but it rotates each restart.) Confirm
+  an unauthenticated dashboard request returns `401` and that `allow_insecure_dashboard` /
+  `allowInsecureDashboard` is **not** enabled unless you intend an open dashboard.
+- [ ] **The tunnel exposes only the webhook path.** Requesting `https://<hostname>/` and
+  `https://<hostname>/api/dashboard/calls` returns `404` at the edge; only the carrier
+  webhook + media-stream path reaches the local port. Verify with one real test call that
+  connects.
+- [ ] **The OpenClaw gateway and consult adapter are loopback-only.** `/v1/chat/completions`
+  and the consult adapter are bound to `127.0.0.1` (or a private tailnet) and are not
+  reachable from the public hostname.
+- [ ] **Webhook signature verification is on.** Twilio `X-Twilio-Signature` (or Telnyx
+  Ed25519) verification is enabled so the carrier webhook is fail-closed at the public
+  boundary.
+- [ ] **The tunnel is an always-on service.** `cloudflared` runs under `launchd` /
+  `systemd`, starts on boot, and reconnects on its own — not a foreground process tied to
+  your shell.
+
+## What's next
+
+- **Tunneling options**: [dev quick tunnel, static, and production](/dev-tools/tunneling).
+- **Dashboard**: [architecture, standalone mode, and API](/dev-tools/dashboard).
+- **OpenClaw integration**: [reference architecture and security model](/integrations/openclaw).

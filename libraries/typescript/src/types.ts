@@ -751,6 +751,26 @@ export interface ServeOptions {
   readonly dashboard?: boolean;
   /** Bearer token for dashboard/API authentication. */
   readonly dashboardToken?: string;
+  /**
+   * When true, serve the dashboard (and the call-data `/api/*` routes)
+   * fully OPEN — WITHOUT authentication — even when the server is
+   * reachable beyond loopback (e.g. behind a tunnel or a public webhook
+   * URL). **NOT RECOMMENDED on a public network** — the dashboard exposes
+   * call transcripts and metadata (PII) to anyone who can reach the URL.
+   *
+   * Defaults to `false` (security). With the default, when the dashboard
+   * is enabled, `dashboardToken` is empty, AND the server is exposed
+   * beyond `127.0.0.1`, the SDK auto-generates a one-time token and mounts
+   * the dashboard behind it (the startup banner prints the ready-to-use
+   * URL with `?token=...`). The dashboard is always available — it just
+   * requires the printed or configured token. Loopback-only local dev is
+   * unchanged: served open with no token.
+   *
+   * For a stable token instead of the per-process auto-generated one, set
+   * `dashboardToken`. Set this flag only as the deliberate escape hatch
+   * for the rare case where unauthenticated public exposure is intentional.
+   */
+  readonly allowInsecureDashboard?: boolean;
   /** Path to SQLite database for dashboard persistence (not used in TS yet). */
   readonly dashboardDb?: string;
   /** When true (default), persist dashboard data. */

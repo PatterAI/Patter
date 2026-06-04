@@ -74,7 +74,8 @@
             "icon": "wrench",
             "pages": [
               "dev-tools/dashboard",
-              "dev-tools/tunneling"
+              "dev-tools/tunneling",
+              "dev-tools/production-deployment"
             ]
           }
         ]

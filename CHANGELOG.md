@@ -1,6 +1,49 @@
 ## Unreleased
 
+### Security
+
+- **The built-in metrics dashboard is now auto-protected with a generated token
+  when it would be reachable beyond `127.0.0.1`.** The dashboard UI and the
+  `/api/*` call-data routes serve call transcripts and metadata (PII).
+  Previously, when the dashboard was enabled with no `dashboard_token` /
+  `dashboardToken` on an off-host bind (a tunnel is active, an explicit public
+  `webhook_url` / `webhookUrl` is configured, or `PATTER_BIND_HOST` is set to a
+  non-loopback address), the SDK published those routes unauthenticated and only
+  emitted a soft warning — a foot-gun easy to miss in a tunnelled demo or a
+  containerised deploy. Now, in exactly that configuration, the SDK
+  auto-generates a one-time token, mounts the dashboard behind it, and prints
+  the ready-to-use URL (`http://127.0.0.1:<port>/?token=<token>`) in the startup
+  banner. The dashboard remains available with zero config — it is no longer
+  reachable unauthenticated by accident. This is **not a breaking change**: the
+  dashboard is still always served and inbound/outbound calls are unaffected
+  (the carrier webhook, media-stream, and `/health` routes always mount). The
+  token is per-process — set `dashboard_token` / `dashboardToken` for a stable
+  one across restarts. Loopback-only local dev is unchanged (still served open,
+  zero-friction); an explicit `dashboard_token` serves behind that token as
+  before.
+  - `libraries/python/getpatter/server.py`,
+    `libraries/typescript/src/server.ts`.
+
 ### Added
+
+- **`allow_insecure_dashboard` / `allowInsecureDashboard` escape hatch (opt-in,
+  default off).** New optional config on `Patter(...)` (Python) and `serve(...)`
+  `ServeOptions` (TypeScript), defaulting to `False` / `false`. When the
+  dashboard would be reachable beyond loopback without a configured token (see
+  Security above), the SDK auto-generates a token to protect it; setting this
+  flag to `True` / `true` instead serves the dashboard fully OPEN (no token,
+  unauthenticated) on that exposed bind and logs a `warning`. This is for
+  operators who deliberately run the dashboard open behind their own network
+  controls (a tailnet, Cloudflare Access, an upstream auth proxy). It leaks call
+  transcripts and metadata (PII) to anyone who can reach the URL, so it is NOT
+  recommended on a public network — prefer the auto-generated token, or a stable
+  `dashboard_token` / `dashboardToken`. Backward compatible: existing callers
+  that pass no token and are loopback-only are unaffected; the flag only matters
+  on an exposed bind. `libraries/python/getpatter/client.py` /
+  `libraries/python/getpatter/server.py`,
+  `libraries/typescript/src/types.ts` /
+  `libraries/typescript/src/client.ts` /
+  `libraries/typescript/src/server.ts`.
 
 - **OpenAI Realtime input noise reduction — stop speakerphone / room noise from
   cutting the agent off.** New `noise_reduction` on the Realtime engine markers

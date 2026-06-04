@@ -460,6 +460,13 @@ await phone.serve(agent);
   or hostname instead and give Patter that address.
 </Warning>
 
+<Note>
+  **Deploying with a tunnel?** When you expose this stack to the internet, expose only the
+  carrier webhook path — keep the OpenClaw gateway and the consult adapter on loopback, and
+  secure the dashboard. See [Production Deployment](/dev-tools/production-deployment) for
+  named-tunnel ingress rules and dashboard hardening.
+</Note>
+
 ## Surviving long tool calls
 
 This is the part that breaks most voice + agent integrations: a tool / lookup that takes
@@ -754,6 +761,7 @@ scoped to one least-privileged agent that never exposes the master.
 - **Consult feature**: [Python](/python-sdk/consult) · [TypeScript](/typescript-sdk/consult).
 - **Long-running tools**: reassurance + streaming progress —
   [Python tools](/python-sdk/tools) · [TypeScript tools](/typescript-sdk/tools).
+- **Production deployment**: [securing the tunnel and dashboard](/dev-tools/production-deployment).
 - **Concepts**: read the [Concepts](/concepts) page to pick a mode
   (Realtime / Pipeline) for the in-call agent.
 - **Get a phone number**: [Twilio console](https://console.twilio.com/us1/develop/phone-numbers/manage/incoming)
