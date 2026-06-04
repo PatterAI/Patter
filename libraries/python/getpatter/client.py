@@ -1649,6 +1649,7 @@ class Patter:
     def _unpack_engine(engine: Any) -> tuple[str, dict]:
         """Convert an engine instance to ``(kind, {voice, model, api_key, agent_id})``."""
         from getpatter.engines.elevenlabs import ConvAI as _ConvAI
+        from getpatter.engines.gemini_live import GeminiLive as _GeminiLive
         from getpatter.engines.openai import Realtime as _Realtime
         from getpatter.engines.openai_realtime_2 import Realtime2 as _Realtime2
 
@@ -1674,9 +1675,19 @@ class Patter:
                 "agent_id": engine.agent_id,
                 "voice": engine.voice,
             }
+        if isinstance(engine, _GeminiLive):
+            return "gemini_live", {
+                "api_key": engine.api_key,
+                "voice": engine.voice,
+                "model": engine.model,
+                "input_sample_rate": engine.input_sample_rate,
+                "output_sample_rate": engine.output_sample_rate,
+                "response_modalities": engine.response_modalities,
+            }
         raise TypeError(
-            "engine= must be an OpenAIRealtime(...), OpenAIRealtime2(...), or "
-            f"ElevenLabsConvAI(...) instance, got {type(engine).__name__}"
+            "engine= must be an OpenAIRealtime(...), OpenAIRealtime2(...), "
+            "ElevenLabsConvAI(...), or GeminiLive(...) instance, got "
+            f"{type(engine).__name__}"
         )
 
     @staticmethod

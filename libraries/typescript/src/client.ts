@@ -598,7 +598,7 @@ export class Patter {
     }
 
     // Validate provider
-    const validProviders = ['openai_realtime', 'elevenlabs_convai', 'pipeline'] as const;
+    const validProviders = ['openai_realtime', 'elevenlabs_convai', 'gemini_live', 'pipeline'] as const;
     if (opts.agent.provider && !validProviders.includes(opts.agent.provider)) {
       throw new Error(`agent.provider must be one of: ${validProviders.join(', ')}`);
     }

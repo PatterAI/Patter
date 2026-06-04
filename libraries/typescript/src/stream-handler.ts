@@ -10,11 +10,12 @@
 import { WebSocket as WSWebSocket } from 'ws';
 import { OpenAIRealtimeAdapter } from './providers/openai-realtime';
 import { ElevenLabsConvAIAdapter } from './providers/elevenlabs-convai';
+import { GeminiLiveAdapter } from './providers/gemini-live';
 import { DeepgramSTT } from './providers/deepgram-stt';
 import { createTTS } from './provider-factory';
 import type { STTAdapter, TTSAdapter, STTTranscript } from './provider-factory';
 import { CallMetricsAccumulator } from './metrics';
-import { mulawToPcm16, pcm16ToMulaw, StatefulResampler, createResampler8kTo16k, createResampler16kTo8k } from './audio/transcoding';
+import { mulawToPcm16, pcm16ToMulaw, StatefulResampler, createResampler8kTo16k, createResampler16kTo8k, createResampler24kTo8k } from './audio/transcoding';
 import { LLMLoop } from './llm-loop';
 import { RemoteMessageHandler, isRemoteUrl, isWebSocketUrl } from './remote-message';
 import { createHistoryManager } from './handler-utils';
@@ -36,7 +37,7 @@ import {
   startSpan,
 } from './observability/tracing';
 
-type AIAdapter = OpenAIRealtimeAdapter | ElevenLabsConvAIAdapter;
+type AIAdapter = OpenAIRealtimeAdapter | ElevenLabsConvAIAdapter | GeminiLiveAdapter;
 
 // ---------------------------------------------------------------------------
 // Telephony bridge — abstracts Twilio vs Telnyx wire differences
@@ -836,6 +837,8 @@ export class StreamHandler {
   // Created lazily on first use; reset() on call end.
   private readonly inboundResampler: StatefulResampler = createResampler8kTo16k();
   private readonly outboundResampler: StatefulResampler = createResampler16kTo8k();
+  /** Lazy-init 24kHz→8kHz resampler for Gemini Live outbound audio. */
+  private geminiOutboundResampler: StatefulResampler | null = null;
 
   private readonly history: ReturnType<typeof createHistoryManager>;
   private readonly metricsAcc: CallMetricsAccumulator;
@@ -976,6 +979,12 @@ export class StreamHandler {
         this.deps.bridge.sendAudio(this.ws, mulaw.toString('base64'), this.streamSid);
       }
     } catch { /* best effort */ }
+
+    // Flush Gemini Live outbound resampler tail and discard
+    if (this.geminiOutboundResampler !== null) {
+      try { this.geminiOutboundResampler.flush(); } catch { /* best effort */ }
+      this.geminiOutboundResampler = null;
+    }
 
     // Flush any leftover TTS carry byte (rare: only when last chunk was odd-length)
     this.ttsByteCarry = null;
@@ -2748,6 +2757,10 @@ export class StreamHandler {
             ? (this.adapter as unknown as { sendFirstMessage: (t: string) => Promise<void> }).sendFirstMessage.bind(this.adapter)
             : this.adapter.sendText.bind(this.adapter);
         await sender(this.deps.agent.firstMessage);
+      } else if (this.adapter instanceof GeminiLiveAdapter) {
+        // Gemini Live: send firstMessage as a user-role text turn so the model
+        // responds with audio. sendText() wraps it in a user turn with turnComplete.
+        await this.adapter.sendText(this.deps.agent.firstMessage);
       }
       // ElevenLabs ConvAI sends firstMessage via connection config (handled in adapter.connect())
     }
@@ -2776,7 +2789,7 @@ export class StreamHandler {
     speech_started: async () => this.onAdapterSpeechInterrupt(),
     interruption: async () => this.onAdapterSpeechInterrupt(),
     function_call: async (eventData) => {
-      if (this.adapter instanceof OpenAIRealtimeAdapter) {
+      if (this.adapter instanceof OpenAIRealtimeAdapter || this.adapter instanceof GeminiLiveAdapter) {
         await this.handleFunctionCall(eventData as { call_id: string; name: string; arguments: string });
       }
     },
@@ -2879,7 +2892,17 @@ export class StreamHandler {
     // so the audio is already in the correct wire format — pass through untransformed.
     // Do NOT resample here: inboundResampler is 8k→16k for the STT inbound path;
     // reusing it on the outbound path corrupts both directions.
-    const outAudio = eventData;
+    // Gemini Live outputs PCM16 at 24 kHz — resample to 8 kHz and encode to mulaw
+    // so it matches the telephony wire format expected by Twilio/Telnyx.
+    let outAudio: Buffer;
+    if (this.adapter instanceof GeminiLiveAdapter) {
+      if (this.geminiOutboundResampler === null) {
+        this.geminiOutboundResampler = createResampler24kTo8k();
+      }
+      outAudio = pcm16ToMulaw(this.geminiOutboundResampler.process(eventData));
+    } else {
+      outAudio = eventData;
+    }
     this.deps.bridge.sendAudio(this.ws, outAudio.toString('base64'), this.streamSid);
     this.markFirstAudioSent();
     // Send mark for barge-in accuracy.

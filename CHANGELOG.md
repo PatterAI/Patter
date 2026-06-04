@@ -2,6 +2,7 @@
 
 ### Added
 
+- **Gemini Live engine (both SDKs).** Added `GeminiLive` engine marker to the Python and TypeScript SDKs, enabling native-audio streaming with Google's Gemini Live API. The engine uses PCM16 at 24 kHz output with resampling to 16 kHz for telephony compatibility. `getpatter` now exposes `GeminiLive` from the package root and `GeminiLiveStreamHandler` manages the WebSocket lifecycle, tool calls, and audio resampling in Python. The TypeScript SDK adds `GeminiLive` marker class in `src/engines/gemini.ts`, `buildAIAdapter` dispatch in `server.ts`, and stream-handler event wiring for `GeminiLiveAdapter`. Both SDKs support `provider='gemini_live'` with Twilio and Telnyx telephony bridges.
 - **Dashboard: Plivo carrier support in the UI.** The call dashboard now
   renders a Plivo `CarrierBadge` and maps Plivo calls across the cost,
   live-call, and metrics panels, alongside Twilio and Telnyx

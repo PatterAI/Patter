@@ -88,7 +88,11 @@ from getpatter.carriers.plivo import Carrier as Plivo
 from getpatter.engines.openai import Realtime as OpenAIRealtime
 from getpatter.engines.openai_realtime_2 import Realtime2 as OpenAIRealtime2
 from getpatter.engines.elevenlabs import ConvAI as ElevenLabsConvAI
+from getpatter.engines.gemini_live import GeminiLive as GeminiLiveEngine
 from getpatter.providers.openai_realtime_2 import OpenAIRealtime2Adapter
+
+# Alias to avoid shadowing the class name with the module import below.
+GeminiLive = GeminiLiveEngine
 
 # STT flat aliases — parity with libraries/typescript/src/index.ts.
 from getpatter.stt.deepgram import STT as DeepgramSTT
@@ -436,6 +440,7 @@ __all__ = [
     "OpenAIRealtime2",
     "OpenAIRealtime2Adapter",
     "ElevenLabsConvAI",
+    "GeminiLive",
     "DeepgramSTT",
     "WhisperSTT",
     "OpenAITranscribeSTT",

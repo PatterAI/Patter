@@ -18,6 +18,7 @@ from getpatter.utils.log_sanitize import mask_phone_number
 from getpatter.stream_handler import (
     AudioSender,
     ElevenLabsConvAIStreamHandler,
+    GeminiLiveStreamHandler,
     OpenAIRealtimeStreamHandler,
     PipelineStreamHandler,
     apply_call_overrides,
@@ -257,6 +258,7 @@ async def telnyx_stream_bridge(
     on_message=None,
     deepgram_key: str = "",
     elevenlabs_key: str = "",
+    gemini_key: str = "",
     telnyx_key: str = "",
     recording: bool = False,
     on_metrics=None,
@@ -300,6 +302,7 @@ async def telnyx_stream_bridge(
     handler: (
         OpenAIRealtimeStreamHandler
         | ElevenLabsConvAIStreamHandler
+        | GeminiLiveStreamHandler
         | PipelineStreamHandler
         | None
     ) = None
@@ -601,6 +604,23 @@ async def telnyx_stream_bridge(
                         on_transcript=on_transcript,
                         on_metrics=on_metrics,
                         transcript_entries=transcript_entries,
+                    )
+                elif provider == "gemini_live":
+                    handler = GeminiLiveStreamHandler(
+                        agent=agent,
+                        audio_sender=audio_sender,
+                        call_id=call_id_actual,
+                        caller=caller,
+                        callee=callee,
+                        resolved_prompt=resolved_prompt,
+                        metrics=metrics,
+                        gemini_key=gemini_key,
+                        transfer_fn=_telnyx_transfer,
+                        hangup_fn=_telnyx_hangup,
+                        on_transcript=on_transcript,
+                        on_metrics=on_metrics,
+                        transcript_entries=transcript_entries,
+                        audio_format="pcm16",
                     )
                 else:
                     handler = OpenAIRealtimeStreamHandler(

@@ -1871,6 +1871,337 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
 
 
 # ---------------------------------------------------------------------------
+# Gemini Live StreamHandler
+# ---------------------------------------------------------------------------
+
+
+class GeminiLiveStreamHandler(StreamHandler):
+    """Handles the gemini_live provider mode."""
+
+    def __init__(
+        self,
+        agent,
+        audio_sender: AudioSender,
+        call_id: str,
+        caller: str,
+        callee: str,
+        resolved_prompt: str,
+        metrics,
+        *,
+        gemini_key: str,
+        transfer_fn=None,
+        hangup_fn=None,
+        on_transcript=None,
+        on_metrics=None,
+        conversation_history: deque | None = None,
+        transcript_entries: deque | None = None,
+        audio_format: str = "pcm16",
+        speech_events=None,
+    ) -> None:
+        super().__init__(
+            agent=agent,
+            audio_sender=audio_sender,
+            call_id=call_id,
+            caller=caller,
+            callee=callee,
+            resolved_prompt=resolved_prompt,
+            metrics=metrics,
+            on_transcript=on_transcript,
+            on_metrics=on_metrics,
+            conversation_history=conversation_history,
+            transcript_entries=transcript_entries,
+            speech_events=speech_events,
+        )
+        self._gemini_key = gemini_key
+        self._transfer_fn = transfer_fn
+        self._hangup_fn = hangup_fn
+        self._audio_format = audio_format
+        self._adapter = None
+        # Gemini Live outputs PCM16 at 24 kHz; resample to 16 kHz for telephony.
+        self._resampler_24k_to_16k = None
+
+    async def _emit_tool_event(
+        self,
+        name: str,
+        args: dict | None,
+        result: str | None,
+    ) -> None:
+        args_text = json.dumps(args or {})
+        if result is None:
+            text = f"{name}({args_text})"
+        else:
+            displayed = result if len(result) <= 200 else result[:200] + "…"
+            text = f"{name}({args_text}) → {displayed}"
+        self.conversation_history.append(
+            {"role": "tool", "text": text, "timestamp": time.time()}
+        )
+        self.transcript_entries.append({"role": "tool", "text": text})
+        if self.on_transcript:
+            await self.on_transcript(
+                {
+                    "role": "tool",
+                    "text": text,
+                    "call_id": self.call_id,
+                    "tool_name": name,
+                    "tool_args": args or {},
+                    "tool_result": result,
+                }
+            )
+
+    async def start(self) -> None:
+        """Connect to Gemini Live, register tools, and begin event forwarding."""
+        from getpatter.providers.gemini_live import GeminiLiveAdapter  # type: ignore[import]
+
+        await self._init_mcp_tools()
+
+        agent_tools: list[dict] = []
+        for t in self.agent.tools or []:
+            agent_tools.append(
+                {
+                    "name": t["name"],
+                    "description": t.get("description", ""),
+                    "parameters": t.get("parameters", {}),
+                }
+            )
+        gemini_tools: list[dict] = agent_tools + [TRANSFER_CALL_TOOL, END_CALL_TOOL]
+
+        voice = self.agent.voice or "Puck"
+        model = self.agent.model or "gemini-2.5-flash-native-audio-preview-09-2025"
+
+        self._adapter = GeminiLiveAdapter(
+            api_key=self._gemini_key,
+            model=model,
+            voice=voice,
+            instructions=self.resolved_prompt,
+            language=self.agent.language,
+            tools=gemini_tools,
+        )
+
+        await self._adapter.connect()
+        logger.debug("Gemini Live connected")
+
+        if self.agent.first_message:
+            if self.metrics is not None:
+                self.metrics.start_turn()
+            await self._adapter.send_text(self.agent.first_message)
+
+        self._background_task = asyncio.create_task(self._forward_events())
+
+    async def _forward_events(self) -> None:
+        from getpatter.tools.tool_executor import ToolExecutor  # type: ignore[import]
+
+        tool_executor = ToolExecutor()
+        waiting_first_audio = True
+        current_agent_text = ""
+        try:
+            async for ev_type, ev_data in self._adapter.receive_events():
+                if ev_type == "audio":
+                    if self.metrics is not None and not self.metrics.turn_active:
+                        self.metrics.start_turn()
+                    if waiting_first_audio:
+                        if self.metrics is not None:
+                            self.metrics.record_tts_first_byte()
+                        await self._emit_agent_speech_started(engine="gemini_live")
+                        await self._emit_audio_out(tts_provider="gemini_live")
+                        waiting_first_audio = False
+                    # Resample Gemini's 24 kHz output to 16 kHz for telephony.
+                    if self._resampler_24k_to_16k is None:
+                        from getpatter.audio.transcoding import create_resampler_24k_to_16k
+
+                        self._resampler_24k_to_16k = create_resampler_24k_to_16k()
+                    audio_16k = self._resampler_24k_to_16k.process(ev_data)
+                    await self.audio_sender.send_audio(audio_16k)
+
+                elif ev_type == "transcript_output":
+                    if ev_data:
+                        response_text: str = ev_data
+                        await self._emit_llm_first_token(
+                            llm_provider="gemini_live",
+                            model=self.agent.model,
+                        )
+                        blocked, guard_name = evaluate_guardrails(self.agent, response_text)
+                        if blocked:
+                            replacement = get_guardrail_replacement(self.agent, guard_name)
+                            await self._adapter.send_text(replacement)
+                            current_agent_text = ""
+                        else:
+                            current_agent_text += response_text
+
+                elif ev_type == "response_done":
+                    if current_agent_text:
+                        text_to_flush = current_agent_text
+                        current_agent_text = ""
+                        self.conversation_history.append(
+                            {
+                                "role": "assistant",
+                                "text": text_to_flush,
+                                "timestamp": time.time(),
+                            }
+                        )
+                        self.transcript_entries.append(
+                            {"role": "assistant", "text": text_to_flush}
+                        )
+                        if self.on_transcript:
+                            await self.on_transcript(
+                                {
+                                    "role": "assistant",
+                                    "text": text_to_flush,
+                                    "call_id": self.call_id,
+                                    "history": list(self.conversation_history),
+                                }
+                            )
+                        if self.metrics is not None:
+                            turn = self.metrics.record_turn_complete(text_to_flush)
+                            await self._emit_turn_metrics(turn)
+                    elif self.metrics is not None and self.metrics.turn_active:
+                        self.metrics.record_turn_interrupted()
+                    if self._agent_turn_start_ms is not None:
+                        await self._emit_agent_speech_ended(interrupted=False)
+                    waiting_first_audio = True
+
+                elif ev_type == "speech_started":
+                    # Gemini's VAD detected user speech during model output (barge-in).
+                    await self.audio_sender.send_clear()
+                    if self.metrics is not None:
+                        self.metrics.record_turn_interrupted()
+                    if not waiting_first_audio:
+                        await self._emit_agent_speech_ended(interrupted=True)
+                    await self._emit_user_speech_started()
+                    waiting_first_audio = True
+                    current_agent_text = ""
+
+                elif ev_type == "function_call":
+                    func_data = ev_data
+                    func_name = func_data["name"]
+                    raw_args = func_data.get("arguments", "{}")
+                    try:
+                        args = (
+                            json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                        )
+                    except (json.JSONDecodeError, ValueError):
+                        logger.warning(
+                            "function_call %s: malformed JSON args, skipping", func_name
+                        )
+                        continue
+
+                    if func_name == "transfer_call":
+                        transfer_number = (args or {}).get("number", "")
+                        if not _validate_e164(transfer_number):
+                            logger.warning(
+                                "transfer_call rejected: invalid number %s",
+                                mask_phone_number(transfer_number),
+                            )
+                            rejection = json.dumps(
+                                {"error": "Invalid phone number format", "status": "rejected"}
+                            )
+                            await self._adapter.send_function_result(
+                                func_data["call_id"], rejection
+                            )
+                            await self._emit_tool_event("transfer_call", args, rejection)
+                            continue
+                        logger.debug(
+                            "Transferring call to %s", mask_phone_number(transfer_number)
+                        )
+                        result = json.dumps(
+                            {"status": "transferring", "to": transfer_number}
+                        )
+                        await self._adapter.send_function_result(func_data["call_id"], result)
+                        await self._emit_tool_event("transfer_call", args, result)
+                        if self._transfer_fn:
+                            await self._transfer_fn(transfer_number)
+                        if self.on_transcript:
+                            await self.on_transcript(
+                                {
+                                    "role": "system",
+                                    "text": f"Call transferred to {transfer_number}",
+                                    "call_id": self.call_id,
+                                }
+                            )
+                        return
+
+                    elif func_name == "end_call":
+                        reason = (args or {}).get("reason", "conversation_complete")
+                        logger.debug("Ending call: %s", reason)
+                        result = json.dumps({"status": "ending", "reason": reason})
+                        await self._adapter.send_function_result(func_data["call_id"], result)
+                        await self._emit_tool_event("end_call", args, result)
+                        if self._hangup_fn:
+                            await self._hangup_fn()
+                        if self.on_transcript:
+                            await self.on_transcript(
+                                {
+                                    "role": "system",
+                                    "text": f"Call ended: {reason}",
+                                    "call_id": self.call_id,
+                                }
+                            )
+                        return
+
+                    else:
+                        tool_def = next(
+                            (
+                                t
+                                for t in (self.agent.tools or [])
+                                if t["name"] == func_name
+                            ),
+                            None,
+                        )
+                        if tool_def and (
+                            tool_def.get("webhook_url") or tool_def.get("handler")
+                        ):
+                            await self._emit_tool_event(func_name, args, None)
+                            try:
+                                result = await tool_executor.execute(
+                                    tool_name=func_name,
+                                    arguments=args,
+                                    call_context={
+                                        "call_id": self.call_id,
+                                        "caller": self.caller,
+                                        "callee": self.callee,
+                                    },
+                                    webhook_url=tool_def.get("webhook_url", ""),
+                                    handler=tool_def.get("handler"),
+                                )
+                            except Exception as exc:
+                                logger.warning("Tool '%s' raised: %s", func_name, exc)
+                                result = json.dumps({"error": str(exc)})
+                            await self._adapter.send_function_result(
+                                func_data["call_id"], result
+                            )
+                            await self._emit_tool_event(func_name, args, result)
+        except Exception as exc:
+            logger.exception("Gemini Live forward error: %s", exc)
+
+    async def on_audio_received(self, audio_bytes: bytes) -> None:
+        """Forward decoded telephony audio (PCM16 16 kHz) to Gemini Live."""
+        if self._adapter is None:
+            return
+        await self._adapter.send_audio(audio_bytes)
+
+    async def on_dtmf(self, digit: str) -> None:
+        """Forward a DTMF keypress to the model as a synthetic user message."""
+        if self._adapter is not None:
+            await self._adapter.send_text(
+                f"The user pressed key {digit} on their phone keypad."
+            )
+
+    async def cleanup(self) -> None:
+        """Cancel the event-forward task and close the Gemini Live adapter."""
+        if self._background_task:
+            self._background_task.cancel()
+            try:
+                await self._background_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if self._adapter:
+            await self._adapter.close()
+        await self._close_mcp()
+        if self._resampler_24k_to_16k is not None:
+            self._resampler_24k_to_16k.flush()
+            self._resampler_24k_to_16k = None
+
+
+# ---------------------------------------------------------------------------
 # Pipeline StreamHandler (STT -> LLM -> TTS)
 # ---------------------------------------------------------------------------
 

@@ -16,6 +16,7 @@ from getpatter.stream_handler import (
     TRANSFER_CALL_TOOL,
     AudioSender,
     ElevenLabsConvAIStreamHandler,
+    GeminiLiveStreamHandler,
     OpenAIRealtimeStreamHandler,
     PipelineStreamHandler,
     apply_call_overrides,
@@ -235,6 +236,7 @@ async def twilio_stream_bridge(
     on_message=None,
     deepgram_key: str = "",
     elevenlabs_key: str = "",
+    gemini_key: str = "",
     twilio_sid: str = "",
     twilio_token: str = "",
     recording: bool = False,
@@ -284,6 +286,7 @@ async def twilio_stream_bridge(
     handler: (
         OpenAIRealtimeStreamHandler
         | ElevenLabsConvAIStreamHandler
+        | GeminiLiveStreamHandler
         | PipelineStreamHandler
         | None
     ) = None
@@ -505,6 +508,24 @@ async def twilio_stream_bridge(
                         on_metrics=on_metrics,
                         conversation_history=conversation_history,
                         transcript_entries=transcript_entries,
+                    )
+                elif provider == "gemini_live":
+                    handler = GeminiLiveStreamHandler(
+                        agent=agent,
+                        audio_sender=audio_sender,
+                        call_id=call_sid_actual,
+                        caller=caller,
+                        callee=callee,
+                        resolved_prompt=resolved_prompt,
+                        metrics=metrics,
+                        gemini_key=gemini_key,
+                        transfer_fn=_twilio_transfer,
+                        hangup_fn=_twilio_hangup,
+                        on_transcript=on_transcript,
+                        on_metrics=on_metrics,
+                        conversation_history=conversation_history,
+                        transcript_entries=transcript_entries,
+                        audio_format="pcm16",
                     )
                 else:
                     handler = OpenAIRealtimeStreamHandler(

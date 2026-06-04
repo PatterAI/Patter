@@ -10,6 +10,7 @@ import { WebSocketServer, WebSocket as WSWebSocket } from 'ws';
 import { OpenAIRealtimeAdapter } from './providers/openai-realtime';
 import { OpenAIRealtime2Adapter } from './providers/openai-realtime-2';
 import { ElevenLabsConvAIAdapter } from './providers/elevenlabs-convai';
+import { GeminiLiveAdapter } from './providers/gemini-live';
 import { PlivoAdapter, dropPlivoVoicemail } from './providers/plivo-adapter';
 import { PlivoBridge, classifyPlivoAmd, validatePlivoSignature } from './telephony/plivo';
 // Re-export so existing imports from './server' keep working after the
@@ -75,7 +76,7 @@ export interface LocalConfig {
   persistRoot?: string | null;
 }
 
-type AIAdapter = OpenAIRealtimeAdapter | ElevenLabsConvAIAdapter;
+type AIAdapter = OpenAIRealtimeAdapter | ElevenLabsConvAIAdapter | GeminiLiveAdapter;
 
 export const TRANSFER_CALL_TOOL = {
   name: 'transfer_call',
@@ -393,6 +394,25 @@ export function resolveVariables(template: string, variables: Record<string, str
  */
 export function buildAIAdapter(config: LocalConfig, agent: AgentOptions, resolvedPrompt?: string): AIAdapter {
   const engine = agent.engine;
+  if (agent.provider === 'gemini_live') {
+    if (!engine || engine.kind !== 'gemini_live') {
+      throw new Error(
+        "Gemini Live mode requires `agent.engine = new GeminiLive({...})`.",
+      );
+    }
+    const agentTools = agent.tools?.map((t) => ({
+      name: t.name,
+      description: t.description,
+      parameters: t.parameters,
+    })) ?? [];
+    return new GeminiLiveAdapter(engine.apiKey, {
+      model: agent.model ?? engine.model,
+      voice: agent.voice ?? engine.voice,
+      instructions: resolvedPrompt ?? agent.systemPrompt,
+      tools: [...agentTools, TRANSFER_CALL_TOOL, END_CALL_TOOL],
+      outputSampleRate: engine.outputSampleRate,
+    });
+  }
   if (agent.provider === 'elevenlabs_convai') {
     if (!engine || engine.kind !== 'elevenlabs_convai') {
       throw new Error(
@@ -433,6 +453,13 @@ export function buildAIAdapter(config: LocalConfig, agent: AgentOptions, resolve
     if (engine.inputAudioTranscriptionModel !== undefined) {
       adapterOptions.inputAudioTranscriptionModel = engine.inputAudioTranscriptionModel;
     }
+  }
+  // Guard: a GeminiLive engine without an explicit provider means misconfiguration.
+  if (engine && engine.kind === 'gemini_live') {
+    throw new Error(
+      "Gemini Live engine detected but provider is not set to 'gemini_live'. " +
+      "Pass provider: 'gemini_live' alongside engine: new GeminiLive({...}).",
+    );
   }
   // Dispatch to the GA-API adapter when the caller passed the
   // ``OpenAIRealtime2`` engine marker. Falls through to the v1-beta adapter

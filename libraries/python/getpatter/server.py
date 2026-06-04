@@ -984,6 +984,7 @@ class EmbeddedServer:
                     pricing=self.pricing,
                     report_only_initial_ttfb=self.config.report_only_initial_ttfb,
                     speech_events=getattr(self, "speech_events", None),
+                    gemini_key=self.config.gemini_key,
                 )
             finally:
                 self._active_connections.discard(websocket)
@@ -1266,6 +1267,7 @@ class EmbeddedServer:
                     on_metrics=_metrics,
                     pricing=self.pricing,
                     report_only_initial_ttfb=self.config.report_only_initial_ttfb,
+                    gemini_key=self.config.gemini_key,
                 )
             finally:
                 self._active_connections.discard(websocket)

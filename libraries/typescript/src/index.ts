@@ -218,6 +218,8 @@ export type { Realtime2Options as OpenAIRealtime2Options } from "./engines/opena
 export { OpenAIRealtime2Adapter } from "./providers/openai-realtime-2";
 export { ConvAI as ElevenLabsConvAI } from "./engines/elevenlabs";
 export type { ConvAIOptions as ElevenLabsConvAIOptions } from "./engines/elevenlabs";
+export { GeminiLive } from "./engines/gemini";
+export type { GeminiLiveOptions } from "./engines/gemini";
 
 // Tunnel markers.
 export { CloudflareTunnel, Ngrok, Static as StaticTunnel } from "./tunnels";

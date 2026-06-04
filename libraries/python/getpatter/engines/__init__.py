@@ -12,4 +12,4 @@ Usage::
 
 from __future__ import annotations
 
-__all__ = ["openai", "openai_realtime_2", "elevenlabs"]
+__all__ = ["openai", "openai_realtime_2", "elevenlabs", "gemini_live"]
