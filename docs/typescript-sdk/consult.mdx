@@ -76,12 +76,58 @@ serialized as a fallback).
 
 | Field | Default | Notes |
 |---|---|---|
-| `url` | — (required) | HTTP(S) endpoint. SSRF-validated at call start (private / loopback / link-local hosts and non-HTTP schemes are rejected). |
+| `url` | `undefined` | Generic webhook endpoint. SSRF-validated at call start. **Mutually exclusive** with `openaiCompatible` — set exactly one. |
+| `openaiCompatible` | `undefined` | Native OpenAI-compatible target (e.g. an OpenClaw agent) — no hand-written adapter. Use `openclawConsult(...)`. See [OpenClaw](#openclaw-native-target-no-adapter). |
 | `headers` | `undefined` | Sent with every POST (e.g. an `Authorization` bearer). Never logged. |
 | `timeoutMs` | `30000` | Per-consult timeout — higher than the generic webhook-tool default (10 000 ms) because a consult may run deeper reasoning. |
 | `toolName` | `"consult_agent"` | The tool name the model sees. |
 | `description` | (sensible default) | Tune to steer *when* the agent escalates. |
+| `reassurance` | `undefined` | Filler the agent speaks while the consult runs (Realtime mode only). The `openclawConsult` preset sets a sensible default. |
 | `allowLoopback` | `false` | Opt-in: permit a loopback / private / link-local `url` (e.g. a local back-office agent on `127.0.0.1` or an RFC1918 host). See [Pointing consult at a local agent](#pointing-consult-at-a-local-agent). |
+
+## OpenClaw (native target — no adapter)
+
+To consult an [OpenClaw](/integrations/openclaw) agent, skip the hand-written
+adapter entirely: `openclawConsult(...)` speaks OpenClaw's OpenAI-compatible
+`POST /v1/chat/completions` gateway directly.
+
+```ts
+import { openclawConsult } from 'getpatter';
+
+const agent = phone.agent({
+  engine: ...,                        // Realtime recommended — reassurance works there
+  systemPrompt: 'You are the after-hours receptionist...',
+  consult: openclawConsult('receptionist'),
+});
+```
+
+That one line targets `model="openclaw/receptionist"` on the local gateway,
+sends the call id as both the OpenAI `user` field and the `x-openclaw-session-key`
+header (one OpenClaw session per call), reads the operator-grade bearer from
+`OPENCLAW_API_KEY` (never logged), auto-enables `allowLoopback` for the
+co-located gateway, and attaches a "let me check" reassurance filler. Overridable
+options (`openclawConsult(agent, opts)`):
+
+| Option | Default | Notes |
+|---|---|---|
+| `agent` | — (required) | Agent id → `model="openclaw/<agent>"`. An already-namespaced target (`openclaw/x`, `agent:x`) passes through. Pass a **least-privileged** agent — selecting one is routing, not a security boundary. |
+| `baseUrl` | `http://127.0.0.1:18789/v1` | OpenClaw gateway (OpenAI-compatible base). |
+| `apiKey` | env `OPENCLAW_API_KEY` | Operator-grade bearer. Prefer the env var. |
+| `timeoutMs` | `30000` | Phone-safe. Don't raise above 30 s on a live call. |
+| `reassurance` | "Let me check on that for you, one moment." | Realtime-only filler. |
+
+**Enable the endpoint first.** Set
+`gateway.http.endpoints.chatCompletions.enabled = true` in
+`~/.openclaw/openclaw.json` and keep the gateway bound to loopback. A 404 from the
+endpoint means it is disabled (the consult logs an actionable hint). See the
+[OpenClaw integration guide](/integrations/openclaw) for agent scoping and
+deployment.
+
+Under the hood this is a generic `OpenAICompatibleConsult` codec (`baseUrl` +
+`model` + optional `apiKey` / `apiKeyEnv` / `sessionHeader`), so the same
+primitive drives any OpenAI-compatible gateway (vLLM, Ollama, Groq). The generic
+`{ url }` webhook path below stays the escape hatch for custom request/response
+mappings.
 
 ## Pointing consult at a local agent
 

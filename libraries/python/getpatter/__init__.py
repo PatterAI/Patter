@@ -44,6 +44,7 @@ from getpatter.models import (
     IncomingMessage,
     LatencyBreakdown,
     MachineDetectionResult,
+    OpenAICompatibleConsult,
     PipelineHooks,
     RealtimeTurnDetection,
     STTConfig,
@@ -246,6 +247,7 @@ from getpatter.audio.background_audio import (
     select_sound_from_list,
 )
 from getpatter.tools.tool_decorator import define_tool
+from getpatter.tools.consult import openclaw_post_call_notifier
 
 # Audio transcoding helpers — parity with the TypeScript ``transcoding``
 # module. Python ships ``create_resampler_24k_to_16k`` only (no eager
@@ -401,6 +403,8 @@ __all__ = [
     "CallOutcome",
     "CallResult",
     "ConsultConfig",
+    "OpenAICompatibleConsult",
+    "openclaw_post_call_notifier",
     "CostBreakdown",
     "Guardrail",
     "MachineDetectionResult",

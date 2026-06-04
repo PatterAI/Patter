@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, Literal
 
@@ -95,6 +96,105 @@ class PipelineHooks:
     after_synthesize: Callable | None = None
 
 
+# --- OpenAI-compatible consult target (OpenClaw / vLLM / Ollama / Groq …) -----
+
+# Default OpenClaw gateway base URL. The gateway binds to loopback by default and
+# serves the OpenAI-compatible endpoint at ``{base}/chat/completions``.
+_OPENCLAW_DEFAULT_BASE_URL = "http://127.0.0.1:18789/v1"
+_OPENCLAW_API_KEY_ENV = "OPENCLAW_API_KEY"
+# Explicit, deprecation-proof per-call session knob (the call id is also sent as
+# the OpenAI ``user`` field as a harmless secondary).
+_OPENCLAW_SESSION_HEADER = "x-openclaw-session-key"
+# Consult-biased ("substantive") default description: steer the agent to ALWAYS
+# consult for account-specific facts instead of answering from memory — the one
+# mitigation for a local LLM confabulating a real appointment/customer record.
+_OPENCLAW_DESCRIPTION = (
+    "Consult your OpenClaw agent for anything account-specific — appointments, "
+    "customer records, schedules, or actions in the back-office system. NEVER "
+    "state an appointment time, customer detail, or schedule fact from your own "
+    "memory; ALWAYS call this tool for those and read back what it returns."
+)
+_OPENCLAW_REASSURANCE = "Let me check on that for you, one moment."
+
+# Agent ids are interpolated into the model string and cross into the gateway, so
+# restrict to a safe set (letters, digits, and the separators OpenClaw accepts).
+_OPENCLAW_AGENT_RE = re.compile(r"^[A-Za-z0-9._:/-]+$")
+
+
+def _is_loopback_or_private_host(base_url: str) -> bool:
+    """True if *base_url*'s host is loopback / private / link-local.
+
+    Auto-enables ``allow_loopback`` for the OpenClaw preset, whose default
+    gateway lives on ``127.0.0.1`` (the intended co-located deployment). A public
+    hostname returns ``False`` so the strict SSRF guard is preserved.
+    """
+    import ipaddress
+    from urllib.parse import urlparse
+
+    host = (urlparse(base_url).hostname or "").lower()
+    if host in ("localhost", "0.0.0.0"):  # noqa: S104 — host check, not a bind
+        return True
+    if host.endswith(".local"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return ip.is_loopback or ip.is_private or ip.is_link_local
+
+
+@dataclass(frozen=True)
+class OpenAICompatibleConsult:
+    """Native :class:`ConsultConfig` target that speaks an OpenAI-compatible
+    ``/chat/completions`` endpoint directly — no hand-written adapter.
+
+    Lets ``consult`` reach an OpenClaw agent (or any OpenAI-compatible gateway:
+    vLLM, Ollama, Groq, …). The consult handler builds a standard chat-completions
+    request (``model`` + ``messages`` + ``user``) and speaks
+    ``choices[0].message.content``.
+
+    Prefer :meth:`ConsultConfig.openclaw` for the OpenClaw preset rather than
+    constructing this directly.
+
+    Args:
+        base_url: OpenAI-compatible base URL ending in ``/v1`` (the handler POSTs
+            to ``{base_url}/chat/completions``), e.g.
+            ``http://127.0.0.1:18789/v1``.
+        model: Model / agent target. For OpenClaw this is the namespaced agent id,
+            e.g. ``"openclaw/receptionist"``.
+        api_key: Bearer token. Prefer ``api_key_env`` so the secret stays out of
+            source. For OpenClaw this is an OPERATOR-grade credential — never
+            logged.
+        api_key_env: Environment variable to read the bearer from when ``api_key``
+            is not given (e.g. ``"OPENCLAW_API_KEY"``).
+        session_header: Optional header carrying the per-call session id (the call
+            id), e.g. ``"x-openclaw-session-key"``. The call id is also sent as the
+            OpenAI ``user`` field.
+    """
+
+    base_url: str
+    model: str
+    api_key: str | None = None
+    api_key_env: str | None = None
+    session_header: str | None = None
+
+    def __post_init__(self) -> None:
+        from urllib.parse import urlparse
+
+        if not self.base_url:
+            raise ValueError("OpenAICompatibleConsult requires a non-empty base_url")
+        parsed = urlparse(self.base_url)
+        if parsed.scheme not in ("https", "http"):
+            raise ValueError(
+                "OpenAICompatibleConsult base_url must be http(s), got "
+                f"{parsed.scheme!r}"
+            )
+        if not parsed.hostname:
+            raise ValueError("OpenAICompatibleConsult base_url is missing a hostname")
+        if not self.model:
+            raise ValueError("OpenAICompatibleConsult requires a non-empty model")
+
+
 @dataclass(frozen=True)
 class ConsultConfig:
     """Configuration for the built-in ``consult`` escalation tool.
@@ -136,9 +236,18 @@ class ConsultConfig:
             it is safe; note that cloud-metadata endpoints (hostnames and the
             IMDS IP ``169.254.169.254``) also become reachable when opted in —
             only enable this for URLs you control.
+        openai_compatible: Native target that speaks an OpenAI-compatible
+            ``/chat/completions`` endpoint directly (e.g. an OpenClaw agent) — no
+            hand-written adapter. Mutually exclusive with ``url``: set exactly one.
+            Use :meth:`ConsultConfig.openclaw` for the OpenClaw preset.
+        reassurance: Optional filler the agent speaks while the consult runs
+            (Realtime mode only) so a multi-second back-office call is not dead
+            air. ``None`` (default) plays no filler; the ``openclaw`` preset sets a
+            sensible default.
     """
 
-    url: str
+    url: str | None = None
+    openai_compatible: "OpenAICompatibleConsult | None" = None
     headers: dict | None = None
     timeout_s: float = 30.0
     tool_name: str = "consult_agent"
@@ -147,22 +256,86 @@ class ConsultConfig:
         "information, or actions beyond this call. Use when the caller asks "
         "something you cannot answer directly."
     )
+    reassurance: "str | dict | None" = None
     allow_loopback: bool = False
 
     def __post_init__(self) -> None:
         from urllib.parse import urlparse
 
-        if not self.url:
-            raise ValueError("ConsultConfig requires a non-empty url")
-        parsed = urlparse(self.url)
-        if parsed.scheme not in ("https", "http"):
+        # Exactly one target: the generic webhook url OR the native
+        # openai_compatible codec.
+        if (self.url is None) == (self.openai_compatible is None):
             raise ValueError(
-                f"ConsultConfig url must be http(s), got {parsed.scheme!r}"
+                "ConsultConfig requires exactly one of url or openai_compatible"
             )
-        if not parsed.hostname:
-            raise ValueError("ConsultConfig url is missing a hostname")
+        if self.url is not None:
+            if not self.url:
+                raise ValueError("ConsultConfig requires a non-empty url")
+            parsed = urlparse(self.url)
+            if parsed.scheme not in ("https", "http"):
+                raise ValueError(
+                    f"ConsultConfig url must be http(s), got {parsed.scheme!r}"
+                )
+            if not parsed.hostname:
+                raise ValueError("ConsultConfig url is missing a hostname")
         if not self.tool_name:
             raise ValueError("ConsultConfig requires a non-empty tool_name")
+
+    @classmethod
+    def openclaw(
+        cls,
+        agent: str,
+        *,
+        base_url: str = _OPENCLAW_DEFAULT_BASE_URL,
+        api_key: str | None = None,
+        timeout_s: float = 30.0,
+        tool_name: str = "consult_agent",
+        description: str | None = None,
+        reassurance: "str | dict | None" = _OPENCLAW_REASSURANCE,
+        headers: dict | None = None,
+        allow_loopback: bool | None = None,
+    ) -> "ConsultConfig":
+        """Consult a specific OpenClaw agent directly (no hand-written adapter).
+
+        ``agent`` is the OpenClaw agent id (e.g. ``"receptionist"``) → targets
+        ``model="openclaw/<agent>"``. An already-namespaced target
+        (``"openclaw/x"``, ``"openclaw:x"``, ``"agent:x"``) is passed through.
+
+        ``allow_loopback`` defaults to ``True`` when ``base_url`` is
+        loopback/private (the intended co-located deployment), so the SSRF guard
+        does not reject the local gateway. The OpenClaw gateway bearer is read
+        from ``api_key`` or the ``OPENCLAW_API_KEY`` env var (operator-grade —
+        never logged). Sized at the phone-safe ``timeout_s=30.0`` default; raise
+        only for batch-style agents, never above 30 s on a live call.
+
+        Requires OpenClaw's OpenAI-compatible endpoint to be enabled
+        (``gateway.http.endpoints.chatCompletions.enabled = true``) and the
+        gateway bound to loopback/private. Pass only a least-privileged agent id
+        — selecting an agent is routing, not a security boundary.
+        """
+        if not agent or not _OPENCLAW_AGENT_RE.fullmatch(agent):
+            raise ValueError(
+                "OpenClaw agent must be a non-empty id of letters, digits, and "
+                "._:/- only"
+            )
+        model = agent if (":" in agent or "/" in agent) else f"openclaw/{agent}"
+        if allow_loopback is None:
+            allow_loopback = _is_loopback_or_private_host(base_url)
+        return cls(
+            openai_compatible=OpenAICompatibleConsult(
+                base_url=base_url,
+                model=model,
+                api_key=api_key,
+                api_key_env=_OPENCLAW_API_KEY_ENV,
+                session_header=_OPENCLAW_SESSION_HEADER,
+            ),
+            timeout_s=timeout_s,
+            tool_name=tool_name,
+            description=description or _OPENCLAW_DESCRIPTION,
+            reassurance=reassurance,
+            headers=headers,
+            allow_loopback=allow_loopback,
+        )
 
 
 @dataclass(frozen=True)

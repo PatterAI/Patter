@@ -9,6 +9,7 @@ export type {
 } from "./_speech-events";
 export { defineTool } from "./tools/tool-decorator";
 export type { DefineToolInput, ParamSpec } from "./tools/tool-decorator";
+export { openclawConsult, openclawPostCallNotifier } from "./consult";
 export type { Logger } from "./logger";
 export { getLogger, setLogger } from "./logger";
 export type { CarrierKind } from "./types";
@@ -27,6 +28,7 @@ export type {
   PipelineMessageHandler,
   ToolDefinition,
   ConsultConfig,
+  OpenAICompatibleConsult,
   PipelineHooks,
   HookContext,
   RealtimeTurnDetection,

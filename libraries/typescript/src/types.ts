@@ -217,8 +217,19 @@ export interface ToolDefinition {
  * there (a warning is emitted if set with that provider).
  */
 export interface ConsultConfig {
-  /** HTTP(S) endpoint Patter POSTs to. SSRF-validated at call start. */
-  readonly url: string;
+  /**
+   * Generic webhook endpoint Patter POSTs ``{ request, call_id, caller, callee }``
+   * to. SSRF-validated at call start. Mutually exclusive with
+   * {@link openaiCompatible} — set exactly one.
+   */
+  readonly url?: string;
+  /**
+   * Native target that speaks an OpenAI-compatible ``/chat/completions``
+   * endpoint directly (e.g. an OpenClaw agent, or vLLM / Ollama / Groq) — no
+   * hand-written adapter. Mutually exclusive with {@link url}. Use
+   * {@link openclawConsult} for the OpenClaw preset.
+   */
+  readonly openaiCompatible?: OpenAICompatibleConsult;
   /** Optional headers (e.g. an ``Authorization`` bearer). Never logged. */
   readonly headers?: Readonly<Record<string, string>>;
   /**
@@ -231,6 +242,12 @@ export interface ConsultConfig {
   readonly toolName?: string;
   /** Description the LLM sees — tune to steer when the agent escalates. */
   readonly description?: string;
+  /**
+   * Optional filler the agent speaks while the consult runs (Realtime mode
+   * only) so a multi-second back-office call is not dead air. Omitted plays no
+   * filler; the {@link openclawConsult} preset sets a sensible default.
+   */
+  readonly reassurance?: string | Readonly<{ message: string; afterMs?: number }>;
   /**
    * Opt-in: allow {@link url} to point at a loopback / private / link-local
    * host (e.g. a back-office agent on ``127.0.0.1`` or an RFC1918 LAN host).
@@ -248,6 +265,45 @@ export interface ConsultConfig {
    * the consult tool; the generic webhook-tool path stays strict.
    */
   readonly allowLoopback?: boolean;
+}
+
+/**
+ * Native {@link ConsultConfig} target that speaks an OpenAI-compatible
+ * ``/chat/completions`` endpoint directly — no hand-written adapter.
+ *
+ * Lets ``consult`` reach an OpenClaw agent (or any OpenAI-compatible gateway:
+ * vLLM, Ollama, Groq, …). The consult handler builds a standard chat-completions
+ * request (``model`` + ``messages`` + ``user``) and speaks
+ * ``choices[0].message.content``. Prefer {@link openclawConsult} for the
+ * OpenClaw preset rather than constructing this directly.
+ */
+export interface OpenAICompatibleConsult {
+  /**
+   * OpenAI-compatible base URL ending in ``/v1`` (the handler POSTs to
+   * ``{baseUrl}/chat/completions``), e.g. ``http://127.0.0.1:18789/v1``.
+   */
+  readonly baseUrl: string;
+  /**
+   * Model / agent target. For OpenClaw this is the namespaced agent id, e.g.
+   * ``"openclaw/receptionist"``.
+   */
+  readonly model: string;
+  /**
+   * Bearer token. Prefer {@link apiKeyEnv} so the secret stays out of source.
+   * For OpenClaw this is an OPERATOR-grade credential — never logged.
+   */
+  readonly apiKey?: string;
+  /**
+   * Environment variable to read the bearer from when {@link apiKey} is not
+   * given (e.g. ``"OPENCLAW_API_KEY"``).
+   */
+  readonly apiKeyEnv?: string;
+  /**
+   * Optional header carrying the per-call session id (the call id), e.g.
+   * ``"x-openclaw-session-key"``. The call id is also sent as the OpenAI
+   * ``user`` field.
+   */
+  readonly sessionHeader?: string;
 }
 
 // === Local mode ===

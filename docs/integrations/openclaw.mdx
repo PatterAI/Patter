@@ -1,6 +1,6 @@
 ---
 title: "OpenClaw"
-description: "Give an OpenClaw agent a phone with Patter — connect patter-mcp as an MCP server to place calls, or point Patter consult at OpenClaw to drive hard turns mid-call."
+description: "Give an OpenClaw agent a phone with Patter — connect patter-mcp as an MCP server to place calls, or point Patter consult at one scoped OpenClaw receptionist agent to drive hard turns mid-call without dropping the line."
 icon: "phone"
 ---
 
@@ -9,17 +9,45 @@ LLM-backed agents act on your behalf across chat surfaces, and it ships a native
 [Model Context Protocol](https://modelcontextprotocol.io) client. This guide assumes you
 already run OpenClaw and want to add phone calling with Patter.
 
+## Patter is the inbound front door; OpenClaw is the brain
+
+The clearest way to think about this integration: **Patter owns the carrier leg and the
+voice, OpenClaw owns the reasoning and the business tools.** Patter terminates a real
+phone number, talks to the caller with low-latency speech, and only reaches back into a
+single scoped OpenClaw agent when it needs real data or an action.
+
+This split exists for a concrete reason. OpenClaw's native voice-call plugin is built for
+a personal assistant, not a public line: its voice `inboundPolicy` is **`allowlist`-only
+and disabled by default** — unknown callers are rejected unless their number is pre-listed.
+That is the right default for a private bot and the wrong one for an after-hours business
+line that *anyone* might call. Patter has no such restriction: it answers the carrier leg
+for **any** caller and verifies the carrier signature (`X-Twilio-Signature` for Twilio,
+Ed25519 for Telnyx) at the public boundary. The caller reaches the receptionist agent over
+the trusted operator-side gateway path instead. If today you forward calls around
+OpenClaw's allowlist with carrier tricks, that hack goes away.
+
 There are two directions, and they compose:
 
 - **Direction A — OpenClaw places calls via Patter.** Connect the `patter-mcp` server
   so your OpenClaw agent can dial, wait for a call to finish, and read back the
-  transcript as MCP tools.
+  transcript as MCP tools. Blocking-until-the-call-ends is the *desired* semantics here.
 - **Direction B — Patter consults OpenClaw mid-call.** Point Patter's `consult`
-  feature at a small adapter so an in-call Patter agent can escalate a hard turn to
-  your OpenClaw agent over HTTP.
+  feature at a small adapter so an in-call Patter agent can escalate a hard turn to one
+  specific OpenClaw agent over HTTP. This call must stay **fast** — it runs while the
+  caller waits on the line.
 
 Pick either, or wire both for a full loop: OpenClaw starts the call, and the in-call
 agent calls back into OpenClaw when it needs deeper reasoning.
+
+<Note>
+  **Which direction for what.** Direction A (`make_call` / `call_third_party` with
+  `wait: true`) is OpenClaw-initiated *outbound* — it correctly blocks for minutes while
+  the call runs, so raise the MCP timeout to cover the whole call. Direction B
+  (`consult`) is *in-call* escalation — the caller is on the line, so keep it fast and
+  push slow work down (see [Surviving long tool calls](#surviving-long-tool-calls)).
+  Don't hold a `consult` HTTP request open for 60 s of silence; don't expect a
+  `make_call` to return in 5 s.
+</Note>
 
 ## Prerequisites
 
@@ -54,17 +82,18 @@ This connects to the locally-running `patter-mcp` server from the prerequisites 
       patter: {
         url: "http://localhost:3000/mcp",
         transport: "streamable-http",
-        // Raise above the ~20s default — a phone call runs longer (see gotchas).
-        timeout: 120,
+        // A blocking `make_call` runs for the WHOLE call. Set this above the
+        // longest call you expect — 600 s (10 min), not the low default.
+        timeout: 600,
         toolFilter: {
+          // Scope to the phone-path tools. The voice flow does not need
+          // `configure_inbound` or `get_metrics` — leave them out.
           include: [
             "make_call",
             "call_third_party",
             "get_calls",
             "get_transcript",
             "end_call",
-            "get_metrics",
-            "configure_inbound",
           ],
         },
       },
@@ -94,8 +123,6 @@ from the default HTTP transport to stdio.
             "get_calls",
             "get_transcript",
             "end_call",
-            "get_metrics",
-            "configure_inbound",
           ],
         },
       },
@@ -116,24 +143,36 @@ from the default HTTP transport to stdio.
 | `get_metrics` | Read latency / token / cost metrics. |
 | `configure_inbound` | Configure how inbound calls are answered. |
 
+The `toolFilter.include` examples above narrow this to the five tools the phone path
+actually uses. `get_metrics` and `configure_inbound` are admin-ish surfaces — expose them
+only to an operator agent, not the voice path.
+
 ### Two gotchas
 
 <Warning>
-  **1. Raise the MCP timeout above the default.** OpenClaw's default per-server MCP
-  timeout is around 20 seconds. A phone call runs far longer than that, so a
-  `make_call` with `wait: true` gets killed before it can return. Set `timeout: 120`
-  (or higher for long calls) on the `patter` server, as shown above.
+  **1. Raise the MCP timeout to cover the WHOLE call — and verify it is honoured.**
+  A `make_call` with `wait: true` blocks until the call ends, so set the per-server
+  `timeout` well above the longest call you expect — `timeout: 600` (in seconds — ten
+  minutes) on the `patter` server. OpenClaw's docs don't publish a default for the
+  per-server MCP timeout, and an MCP client can impose its own read-timeout ceiling that
+  silently caps a long blocking call regardless of config — so after wiring, confirm the
+  per-server timeout is actually honoured by probing the server with
+  `openclaw mcp doctor patter --probe` (a live connection check) before going live.
+  (`openclaw mcp status --verbose` shows the resolved timeout but does not open a
+  connection.)
 
   **2. Allowlist the MCP tool group in the sandbox.** MCP tools live under the
   `bundle-mcp` group and must be explicitly allowed for the sandboxed agent.
-  Without this, the tools register but the agent cannot call them.
+  Without this, the tools register but the agent cannot call them. Use `alsoAllow`
+  (which *adds* to the active profile) rather than `allow` (which would turn the profile
+  into a strict allowlist and can hide built-ins).
 
   ```json5
   {
     tools: {
       sandbox: {
         tools: {
-          // Allow the whole MCP bundle…
+          // Add the whole MCP bundle to the active profile…
           alsoAllow: ["bundle-mcp"],
           // …or scope to just the Patter tools:
           // alsoAllow: ["patter__*"],
@@ -174,6 +213,10 @@ in-call agent hits a turn it can't answer, Patter's `consult` tool POSTs the req
 an HTTP endpoint you host, and speaks the reply. See the consult feature pages for the
 [Python SDK](/python-sdk/consult) and the [TypeScript SDK](/typescript-sdk/consult).
 
+This is the architecturally correct shape for an external brain on a voice call, and it
+is the inverse of the path that fails — see
+[Why this beats the custom-LLM path](#why-this-beats-the-custom-llm-path).
+
 OpenClaw exposes an OpenAI-compatible HTTP API at `POST /v1/chat/completions`. It is
 **disabled by default**; enable it in `~/.openclaw/openclaw.json`:
 
@@ -191,41 +234,155 @@ OpenClaw exposes an OpenAI-compatible HTTP API at `POST /v1/chat/completions`. I
 }
 ```
 
-The `model` field on that endpoint names the agent target — use `"openclaw"`.
+On that endpoint the OpenAI `model` field is overloaded to name the **agent target**, not
+a provider model — this is how you route the call to one specific agent (next section).
 
-### Point `consult.url` at a small adapter
+### Native target (recommended): no adapter
 
-Patter's consult contract and OpenClaw's chat-completions shape are not identical, so a
-~30-line adapter sits in between. It maps Patter's `{ request, call_id, caller, callee }`
-body into an OpenAI `messages` array, and maps `choices[0].message.content` back into a
-`{ reply }` object that Patter speaks.
+You don't need to host an adapter. Patter's `consult` speaks OpenClaw's
+`/v1/chat/completions` endpoint **natively** — point it at one scoped agent in a single
+line:
 
 ```python
-# adapter.py — forwards Patter consult requests to OpenClaw
+from getpatter import ConsultConfig
+
+agent = phone.agent(
+    engine=...,                       # Realtime recommended — reassurance works there
+    system_prompt="You are the after-hours receptionist...",
+    consult=ConsultConfig.openclaw("receptionist"),
+)
+```
+
+```ts
+import { openclawConsult } from 'getpatter';
+
+const agent = phone.agent({
+  engine: ...,
+  systemPrompt: 'You are the after-hours receptionist...',
+  consult: openclawConsult('receptionist'),
+});
+```
+
+That targets `model="openclaw/receptionist"` on the local gateway, sends the call id as
+the OpenAI `user` field + the `x-openclaw-session-key` header (one OpenClaw session per
+call), reads the operator-grade bearer from `OPENCLAW_API_KEY` (never logged), auto-enables
+loopback for the co-located gateway, and attaches a default "let me check" reassurance
+filler. Full reference + overridable defaults:
+[Python](/python-sdk/consult#openclaw-native-target-no-adapter) ·
+[TypeScript](/typescript-sdk/consult#openclaw-native-target-no-adapter).
+
+**Notify OpenClaw at call end.** Wire `openclaw_post_call_notifier("receptionist")`
+(Python) / `openclawPostCallNotifier('receptionist')` (TypeScript) on
+`serve(on_call_end=...)` to POST the finished call's record (caller, dialed line, duration,
+transcript) to the same agent and session, so the brain keeps the record and can follow up.
+
+The rest of this section explains the agent-target routing and security model the preset
+applies for you, plus a **hand-written adapter** — the escape hatch when you need a custom
+request/response mapping (e.g. a non-OpenClaw back office).
+
+### Route the call to a SPECIFIC OpenClaw agent (security isolation)
+
+The single most important configuration choice in this integration: **the voice path must
+target one explicit, least-privileged receptionist agent — never the default/master
+agent.**
+
+On `/v1/chat/completions`, the `model` field selects which OpenClaw agent answers:
+
+- `"openclaw"` or `"openclaw/default"` resolves to whatever the **default** agent is —
+  which can be your master / financial / admin agent, and can drift between environments.
+  **Do not use this from the voice path.**
+- `"openclaw/<receptionistAgentId>"` (commonly also accepted as `"openclaw:<id>"` /
+  `"agent:<id>"`) targets one named agent. This is what you want. The exact
+  agent-target syntax is OpenClaw-version-specific — confirm it against the
+  [OpenClaw docs](https://docs.openclaw.ai) before going live.
+
+Pin the explicit agent id in the adapter, one per client:
+
+```python
+# Per-client agent targeting — the voice path only ever names the receptionist.
+RECEPTIONIST_AGENT = "openclaw/receptionist-roofing-ca"   # roofing contractor, CA
+# RECEPTIONIST_AGENT = "openclaw/receptionist-homeauto-fl"  # home-automation, FL
+```
+
+<Warning>
+  **The gateway credential is gateway-wide — selecting an agent is NOT a sandbox.**
+  Treat `/v1/chat/completions` as an operator-grade surface: the bearer token / password
+  on the gateway authorises the *whole* gateway, and choosing
+  `model: "openclaw/receptionist"` picks the *persona*, not a security boundary. Real
+  isolation comes from three things, none of which is the `model` field:
+
+  1. **A dedicated least-privileged receptionist agent.** Model the receptionist as a
+     **top-level** `agents.list[]` entry with its own workspace and auth — *not* as a
+     sub-agent of the master (a sub-agent can fall back to the parent's credentials).
+     Give it a tight per-agent tool allow / deny: only the calendar + customer-DB tools it
+     needs, and explicitly deny exec / write / browser / gateway. Run it sandboxed.
+  2. **Per-client gateway separation.** One client = one machine = one OS user = one
+     gateway = one credential set. Never co-tenant two clients on one gateway. A
+     per-client Mac Mini gives you this for free (see
+     [Reference architecture](#reference-architecture-after-hours-receptionist-for-a-contractor)).
+  3. **Loopback / tailnet-only binding.** Set a strong auth credential on the gateway and
+     bind it to loopback (or a private tailnet); never expose `/v1/chat/completions` to
+     the public internet. When the adapter runs on the same machine, talking to the
+     gateway over `127.0.0.1` is the **intended** co-located deployment shape — see the
+     loopback note at the end of this section.
+
+  Verify before going live: list the agent's effective tools and confirm the receptionist
+  *can* reach the calendar / customer-DB tools and *cannot* reach exec / financial tools.
+</Warning>
+
+### Carry the agent id and per-call context into the adapter
+
+Patter's consult tool already sends `{ request, call_id, caller, callee }` on every
+escalation. Use them: forward the agent target, give the call one stable OpenClaw session,
+and pass the caller id so the receptionist can prefetch the customer record.
+
+```python
+# adapter.py — forwards Patter consult requests to ONE scoped OpenClaw agent
 from fastapi import FastAPI, Request
 import httpx
 
 app = FastAPI()
 
-OPENCLAW_URL = "http://openclaw-host:18789/v1/chat/completions"
+OPENCLAW_URL = "http://127.0.0.1:18789/v1/chat/completions"
+GATEWAY_TOKEN = "..."  # read from the environment in production, never hardcode
+
+# Pin the explicit, least-privileged receptionist agent — never the default/master.
+RECEPTIONIST_AGENT = "openclaw/receptionist-roofing-ca"
+
+# Give the consult HTTP request its own ceiling, above the in-call work it triggers.
+# 75–90 s covers a 30–60 s D-Tools lookup / browser-automation step plus margin.
+CONSULT_HTTP_TIMEOUT_S = 90.0
+
 
 @app.post("/consult")
 async def consult(req: Request):
     body = await req.json()
-    # Patter -> OpenAI chat-completions
     payload = {
-        "model": "openclaw",
+        "model": RECEPTIONIST_AGENT,
         "messages": [{"role": "user", "content": body["request"]}],
+        # One OpenClaw session per call gives multi-turn continuity. (Confirm the
+        # exact session-key field your OpenClaw build expects — the OpenAI `user`
+        # field or an `x-openclaw-session-key` header — against the OpenClaw docs.)
+        "user": body.get("call_id") or "patter-call",
     }
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(OPENCLAW_URL, json=payload)
+    headers = {"Authorization": f"Bearer {GATEWAY_TOKEN}"}
+    # Pass the caller id so the receptionist can prefetch the customer record.
+    if body.get("caller"):
+        headers["X-Patter-Caller"] = body["caller"]
+    async with httpx.AsyncClient(timeout=CONSULT_HTTP_TIMEOUT_S) as client:
+        resp = await client.post(OPENCLAW_URL, json=payload, headers=headers)
         resp.raise_for_status()
         content = resp.json()["choices"][0]["message"]["content"]
-    # OpenAI chat-completions -> Patter
-    return {"reply": content}
+    # Return a trimmed, spoken-ready string — not a raw API dump. A long reply
+    # bloats the voice context and slows the next turn.
+    reply = content.strip()
+    if len(reply) > 600:
+        reply = reply[:600].rsplit(".", 1)[0] + "."
+    return {"reply": reply}
 ```
 
-Then point Patter at the adapter:
+Then point Patter at the adapter. Set `timeout_s` to the **real** worst-case duration of
+the work the consult triggers — see [Surviving long tool calls](#surviving-long-tool-calls):
 
 ```python
 from getpatter import Patter, ConsultConfig
@@ -233,35 +390,59 @@ from getpatter import Patter, ConsultConfig
 phone = Patter(carrier=...)
 
 agent = phone.agent(
-    system_prompt="You are front-desk support. If you can't answer directly, "
-                  "consult your back-office agent.",
-    stt=...,
-    tts=...,
+    system_prompt=(
+        "You are the after-hours receptionist. If the caller asks about an "
+        "appointment, availability, or anything needing the customer record, "
+        "say a brief 'let me check on that, one moment' and then consult the "
+        "back-office agent."
+    ),
     consult=ConsultConfig(
         url="https://adapter.example.com/consult",
-        timeout_s=30.0,
+        # Above the worst-case OpenClaw turn (e.g. a 60 s browser-automation step).
+        timeout_s=90.0,
     ),
 )
 
 phone.serve(agent)
 ```
 
+```ts
+import { Patter } from 'getpatter';
+
+const phone = new Patter({ carrier: /* ... */ });
+
+const agent = phone.agent({
+  systemPrompt:
+    "You are the after-hours receptionist. If the caller asks about an " +
+    "appointment, availability, or anything needing the customer record, " +
+    "say a brief 'let me check on that, one moment' and then consult the " +
+    'back-office agent.',
+  consult: {
+    url: 'https://adapter.example.com/consult',
+    timeoutMs: 90_000, // above the worst-case OpenClaw turn
+  },
+});
+
+await phone.serve(agent);
+```
+
 <Warning>
   **Loopback / SSRF caveat.** By default Patter's consult URL validator rejects
   loopback and private hosts (`127.0.0.1`, `localhost`, `10.x`, `172.16–31.x`,
   `192.168.x`, link-local) as an SSRF guard, so `http://localhost/...` will not pass
-  out of the box. When the adapter runs on the same machine, opt in with
+  out of the box. When the adapter (and the OpenClaw gateway) run on the same machine —
+  the recommended co-located shape for this integration — opt in with
   `allow_loopback` (Python) / `allowLoopback` (TypeScript). The flag relaxes the
   loopback / private / link-local host checks **for the consult URL only** — every
   other webhook path stays strict, and non-HTTP(S) schemes are still rejected even
-  with the flag on. Only enable it for a URL you control; the consult URL is your own
-  configuration, not caller-derived input.
+  with the flag on. The consult URL is your own configuration, not caller-derived input,
+  so this is safe; it is the intended deployment for a single-box install.
 
   ```python
   # Python — point consult at a local adapter on loopback
   consult=ConsultConfig(
       url="http://localhost:8000/consult",
-      timeout_s=30.0,
+      timeout_s=90.0,
       allow_loopback=True,
   )
   ```
@@ -270,7 +451,7 @@ phone.serve(agent)
   // TypeScript — point consult at a local adapter on loopback
   consult: {
     url: 'http://localhost:8000/consult',
-    timeoutMs: 30_000,
+    timeoutMs: 90_000,
     allowLoopback: true,
   }
   ```
@@ -286,12 +467,303 @@ phone.serve(agent)
   named-tunnel ingress rules and dashboard hardening.
 </Note>
 
+## Surviving long tool calls
+
+This is the part that breaks most voice + agent integrations: a tool / lookup that takes
+30–60 s (a calendar reschedule, a customer-record fetch, a short browser-automation step)
+runs *while the caller is on the line*. Done wrong, the line goes silent and the call
+drops. Done right, the agent says "let me check, one moment", keeps talking naturally, and
+speaks the result when it returns.
+
+### The carrier won't drop you — your timeouts will
+
+Twilio and Telnyx media-stream WebSockets have no idle timeout: inbound audio frames keep
+flowing even during silence, and the stream only closes when the *call* ends. So a call
+that "dies during a long tool" is **never** the carrier — it's a timeout somewhere above
+it giving up. The fix is therefore two parts: (1) never go silent, and (2) raise every
+timeout in the chain so the shortest link is longer than the work.
+
+### Acknowledge, then keep the conversation alive
+
+Speak a filler the instant the long turn starts, then speak the result on return. Patter
+gives you two complementary, **Realtime-mode** primitives for this (today the consult /
+long-tool reassurance path is Realtime-only; in Pipeline mode the LLM generates the filler
+itself and there is no separate injection point yet):
+
+- **Reassurance** — a single filler line the agent speaks if a tool hasn't returned within
+  a grace window (default ~1.5 s), cancelled automatically if the tool returns earlier.
+- **Streaming progress** — write a tool handler as an async generator and `yield`
+  `{ "progress": "..." }` updates; each is spoken inline so the caller hears live status
+  ("still checking…") instead of dead air on a long lookup.
+
+See [Streaming progress from long-running tools](/python-sdk/tools#streaming-progress-from-long-running-tools)
+and [Reassurance during long tool calls](/python-sdk/tools#reassurance-during-long-tool-calls)
+([TypeScript](/typescript-sdk/tools)) for the full recipe. On the consult turn, lead the
+agent's behaviour with a reassurance line so the caller never hears a silent gap while the
+receptionist works.
+
+<Note>
+  **On OpenAI Realtime, always trigger a response after a tool result.** After you inject
+  a tool / consult result, the model does not automatically speak — the SDK sends the
+  follow-up response trigger for you on the built-in tool path, but if you build a custom
+  handler that defers a result, make sure the result is delivered through the SDK's tool
+  return so the agent actually speaks the answer instead of going mute.
+</Note>
+
+### The timeout ladder
+
+The call's tolerance for a long turn is the **shortest** link in this chain. Raise all of
+them together — a generous Patter timeout is wasted if OpenClaw gives up at 20 s:
+
+| Layer | Where | Set it to |
+|---|---|---|
+| Patter consult | `ConsultConfig.timeout_s` / `timeoutMs` (default 30 s) | `75–90 s` — above the worst-case OpenClaw turn |
+| Consult adapter HTTP | your adapter's HTTP client (the FastAPI example defaults to 30 s) | match the consult timeout (`90 s`) |
+| OpenClaw gateway | `/v1/chat/completions` request timeout | raised to cover the turn |
+| OpenClaw MCP (Direction A) | `mcp.servers.patter.timeout` (seconds) | `600 s` for blocking `make_call` |
+
+For the in-call `consult` path, `75–90 s` is the sweet spot: long enough for a 60 s
+browser-automation step plus margin, short enough that a truly stuck turn fails gracefully
+(the consult tool returns a spoken "I wasn't able to reach the system right now" rather
+than hanging the call).
+
+### Per-tool timeouts on custom tools (TypeScript)
+
+If you escalate via a custom `@tool` / `defineTool` rather than `consult`, the generic
+tool-execution timeout defaults to **10 s** — far too short for a 30–60 s job, and the
+literal cause of "the call died on the tool call". In TypeScript, raise it per tool with
+`timeoutMs` (clamped to a 300 s ceiling) and pair it with `reassurance`:
+
+```ts
+import { defineTool } from 'getpatter';
+
+const reschedule = defineTool({
+  name: 'reschedule_appointment',
+  description: 'Move an existing appointment to a new slot via the back-office API.',
+  parameters: {
+    type: 'object',
+    properties: { apptId: { type: 'string' }, newSlot: { type: 'string' } },
+    required: ['apptId', 'newSlot'],
+  },
+  // Raise above the 10 s default so a 30–60 s job isn't aborted mid-flight.
+  timeoutMs: 60_000,
+  // The caller hears this if the tool hasn't returned within the grace window.
+  reassurance: 'Let me move that for you — one moment.',
+  handler: async (args) => {
+    /* call the back-office API; may take 30–60 s */
+    return JSON.stringify({ status: 'rescheduled' });
+  },
+});
+```
+
+For the in-call escalation pattern, prefer `consult` (its `timeout_s` / `timeoutMs` is the
+equivalent knob and it already carries headers and the call context). When you only need to
+trigger work and the caller doesn't have to wait for the result, return quickly from the
+consult and let the receptionist offload the slow part to an OpenClaw sub-agent, so the
+HTTP request itself stays short.
+
+### Stay under provider ceilings — chunk, don't block silently
+
+Across the industry, voice platforms cap tool execution and recommend the same two moves:
+acknowledge before the tool runs, and chunk a long wait into spoken intervals rather than
+one silent block. The numbers vary (a 10 s generic default here, a 20 s default there, a
+120 s ceiling elsewhere), but the rule is constant: **set the ceiling above the work, and
+never let the line go silent for more than a few seconds.** Patter's reassurance +
+progress-streaming primitives are how you honour the second half of that rule; the timeout
+ladder above is the first half.
+
+## Noise on speakerphone
+
+Contractors call from job sites and offices on speakerphone, and tiny transients — a mouse
+move, a phone shifting on a desk — can false-trigger turn detection and cut the agent off
+mid-sentence. Noise robustness is three independent layers, tuned in order:
+
+1. **Clean the input signal** before the VAD sees it.
+2. **Raise the turn-start threshold** so transients don't count as the caller speaking.
+3. **Make barge-in less twitchy** so a brief noise doesn't abort the agent's playback.
+
+### Realtime mode (recommended for low-latency English)
+
+On the OpenAI Realtime engine, set **far-field** noise reduction and tune turn detection.
+In TypeScript these are first-class on the engine marker (and on the agent options):
+
+```ts
+import * as openai from 'getpatter/engines/openai';
+
+const engine = new openai.Realtime({
+  // Suppress room noise / clicks / phone shifts the VAD would treat as speech.
+  noiseReduction: 'far_field', // 'near_field' for a close-mic handset
+  turnDetection: {
+    type: 'server_vad',
+    threshold: 0.7,            // raise from 0.5 so transients don't trip speech-start
+    prefixPaddingMs: 300,
+    silenceDurationMs: 700,    // let a contractor pause mid-thought without being cut
+  },
+});
+```
+
+In Python today, set the trailing-silence and VAD type on the Realtime adapter, and use
+the agent-level levers below that exist in both SDKs (`barge_in_threshold_ms`,
+`echo_cancellation`). The first-class `far_field` / `threshold` engine-marker fields are
+the recommended preset for speakerphone callers; they ship with the noise-reduction /
+turn-detection work on the TypeScript engine marker — confirm your installed `getpatter`
+exposes `noiseReduction` / `turnDetection` before relying on them, and fall back to the
+universal levers below (which work in every release) otherwise.
+
+<Warning>
+  **Don't stack far-field noise reduction with `semantic_vad` on long calls.** With both
+  enabled, turn-detection latency can climb progressively over a multi-minute call (up to
+  ~a minute of delay after the ~5-minute mark). For an after-hours line where calls can run
+  long, prefer `server_vad` with a raised `threshold` (≈0.7–0.8) and longer
+  `silenceDurationMs` (≈600–800 ms) **alongside** `far_field` reduction — that gives most
+  of the noise robustness without the latency cliff. Pick one of {far-field + semantic_vad}
+  vs {far-field + tuned server_vad}; measure on a real call.
+</Warning>
+
+### Pipeline mode and the universal levers
+
+Two levers work in both SDKs regardless of mode and are your front line for the
+mouse-move cut-off:
+
+- **`barge_in_threshold_ms`** (`bargeInThresholdMs`) — minimum sustained voice before
+  caller audio counts as a barge-in. Default 300 ms; raise to ~500 ms on a noisy line so a
+  brief transient doesn't interrupt the agent. See
+  [Barge-in sensitivity](/python-sdk/features#barge-in-interruption-handling).
+- **`echo_cancellation`** (`echoCancellation`) — pipeline mode only; subtracts the agent's
+  own TTS bleed from the mic feed before VAD/STT see it. Strongly recommended for
+  speakerphone and dev-tunnel deployments where the agent can otherwise hear itself. See
+  [Echo cancellation](/python-sdk/features#echo-cancellation-nlms-aec).
+
+For the Pipeline path specifically, a Silero VAD with a raised activation threshold
+(~0.8) and a longer minimum silence (≈0.5–1.0 s) is the equivalent of the Realtime
+`server_vad` preset — see the Silero VAD provider docs.
+
+## Reference architecture: after-hours receptionist for a contractor
+
+This is the end-to-end shape for a contractor's after-hours line — anyone can call, the
+agent survives long lookups, and the voice path only ever touches one scoped agent.
+
+```
+Caller (any number, no allowlist)
+  │
+  ▼
+Twilio DID  ──  Patter verifies X-Twilio-Signature at the public boundary
+  │
+  ▼
+PATTER VOICE AGENT  (OpenAI Realtime: low-latency English, all-in-one, strong tool flow)
+  · far_field noise reduction + tuned server_vad (threshold ~0.7, silence ~700 ms)
+  · barge_in_threshold raised so a mouse-move never cuts the agent off
+  · Patter owns turn-taking + TTS locally — the brain is NEVER on the per-turn path
+  │
+  │  turn needs real data/action →  speak "let me check, one moment" (reassurance)
+  │                                  keep the media stream alive while the consult runs
+  ▼
+consult  →  local FastAPI adapter (loopback)  →  POST /v1/chat/completions
+            model = "openclaw/receptionist-roofing-ca"   ← ONE scoped agent, never default
+            user  = call_id                               ← one OpenClaw session per call
+            X-Patter-Caller = caller                      ← caller-ID prefetch
+  │
+  ▼
+OpenClaw RECEPTIONIST AGENT  (top-level agents.list[] entry, own auth, sandboxed)
+  · tools.allow = D-Tools Cloud calendar + customer-DB only
+  · tools.deny  = exec / write / browser / gateway
+  · offloads slow work (reschedule, browser automation) to scoped sub-agents
+  │
+  ▼
+Adapter returns a trimmed, spoken-ready reply  →  Patter SPEAKS the answer
+```
+
+Concretely, for a roofing contractor in CA:
+
+1. A homeowner calls the contractor's published number after hours. Patter answers — no
+   allowlist, any caller reaches the receptionist.
+2. The caller asks to reschedule Tuesday's roof inspection. The agent says *"Let me check
+   the calendar for you, one moment."*
+3. Patter's `consult` POSTs to the local adapter, which targets
+   `model: "openclaw/receptionist-roofing-ca"` with `user = call_id` and the caller id.
+4. The receptionist agent looks up the appointment in D-Tools Cloud (prefetched on the
+   caller-ID match), reschedules via the D-Tools API — offloading the slower browser step
+   to a scoped sub-agent so the consult returns promptly — and returns a short confirmation.
+5. The adapter trims the reply; Patter speaks *"You're all set — your roof inspection is
+   moved to Thursday at 10 a.m."* The voice path never touched the master / financial agent.
+
+### Production deployment
+
+Each client buys an always-on Mac Mini that stays powered in their office (or in your
+server room); you remote in to set it up. This hardware model gives you the isolation the
+security model needs for free: **one client = one machine = one OS user = one OpenClaw
+gateway = one credential set.** On that box you run, all co-located:
+
+- The Patter SDK serving the agent on the Twilio DID.
+- The OpenClaw gateway, bound to loopback with `/v1/chat/completions` enabled and a strong
+  auth credential — never exposed to the public internet.
+- Patter's `consult` pointed at the gateway over loopback — `ConsultConfig.openclaw(...)`
+  auto-enables `allow_loopback` (or a hand-written adapter on loopback for a custom mapping).
+- The receptionist agent (and the master agent, if any) as separate top-level
+  `agents.list[]` entries.
+
+**Tunnel: use a stable named tunnel, not the quick tunnel.** The carrier webhook needs a
+public URL to reach the box. Patter's built-in quick tunnel mints a *random*
+`*.trycloudflare.com` hostname that rotates on every restart/reboot — which breaks a
+carrier webhook pinned to a fixed URL. For an always-on deployment, run a **named
+Cloudflare Tunnel** with a stable per-client hostname (or your own production `webhook_url`
+behind a reverse proxy) and run `cloudflared` as a service (launchd) so it survives reboots
+and reconnects on drop. Pass it to Patter via the static-tunnel / `webhook_url` option, not
+the default quick tunnel.
+
+<Warning>
+  **Protect the box — the tunnel exposes more than the webhook.** A tunnel maps the whole
+  local server to its public hostname, so the dashboard and health / API routes are
+  reachable too. The carrier webhook itself is safe — Patter verifies the carrier signature
+  (`X-Twilio-Signature` / Telnyx Ed25519) and **fails closed**, so a random POST to the
+  public URL cannot drive a call. But the **dashboard serves call transcripts (PII) and
+  ships enabled with an empty token by default** (its auth fails open when the token is
+  empty). On an internet-reachable box you MUST either disable it (`dashboard=False` /
+  `dashboard: false`) or set a strong `dashboard_token` / `dashboardToken` and put it behind
+  Cloudflare Access. Never expose an unauthenticated dashboard on a public tunnel.
+</Warning>
+
+Everything else (gateway, consult, MCP) stays private on loopback / tailnet. Per-client
+acceptance gate before going live: confirm the receptionist's effective tool list *can*
+reach the calendar / customer-DB tools and *cannot* reach exec / financial tools, confirm
+the gateway is bound to loopback, confirm the dashboard is disabled or token-protected, and
+run one full long-tool-call end to end.
+
+## Why this beats the custom-LLM path
+
+If you previously tried wiring an external agent into a hosted voice platform as its
+"Custom LLM" — pointing the platform at an OpenAI-compatible `/v1/chat/completions`
+endpoint that *is* the brain — you likely hit big delays and dropped calls on anything
+that did a 30–60 s tool call. That topology puts the brain on the **critical
+conversational path of every turn**: the platform waits for the brain to finish reasoning
+*and run its tools* before it can say anything, and there is no clean "acknowledge now,
+finish the 60 s job, then continue" primitive. A long browser-automation step inside that
+turn starves the stream and the call dies.
+
+Patter inverts that:
+
+- **The brain is off the per-turn path.** Patter's local voice model owns turn-taking and
+  TTS and answers ordinary turns at low latency; OpenClaw is consulted *on demand* only,
+  via `consult` (Direction B) or reached as a tool (Direction A). The 30–60 s lookup never
+  blocks every turn — only the one turn that needs it, and that turn is covered by
+  reassurance + the timeout ladder so the line stays alive.
+- **Anyone can call.** Patter terminates the carrier leg for any caller and verifies the
+  carrier signature at the boundary. OpenClaw's native voice plugin can't front arbitrary
+  inbound (voice `inboundPolicy` is `allowlist`-only, disabled by default), so this removes
+  the allowlist wall and the call-forwarding hack entirely.
+
+The result hits every requirement at once: long tool calls survive, anyone can reach the
+line, speakerphone noise is tamed, the stack is low-latency English, and the voice layer is
+scoped to one least-privileged agent that never exposes the master.
+
 ## What's next
 
 - **Consult feature**: [Python](/python-sdk/consult) · [TypeScript](/typescript-sdk/consult).
+- **Long-running tools**: reassurance + streaming progress —
+  [Python tools](/python-sdk/tools) · [TypeScript tools](/typescript-sdk/tools).
 - **Production deployment**: [securing the tunnel and dashboard](/dev-tools/production-deployment).
 - **Concepts**: read the [Concepts](/concepts) page to pick a mode
-  (Realtime / ConvAI / Pipeline) for the in-call agent.
+  (Realtime / Pipeline) for the in-call agent.
 - **Get a phone number**: [Twilio console](https://console.twilio.com/us1/develop/phone-numbers/manage/incoming)
   or [Telnyx portal](https://portal.telnyx.com/#/app/numbers/my-numbers).
 
