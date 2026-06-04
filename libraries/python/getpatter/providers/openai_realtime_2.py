@@ -382,6 +382,41 @@ class OpenAIRealtime2Adapter(OpenAIRealtimeAdapter):
             self._running = False
             raise
 
+    def _warn_if_output_format_unexpected(self, data: dict) -> None:
+        """Log-only safety net for issue #154.
+
+        The GA server echoes the *effective* session config in
+        ``session.updated``. We request ``audio/pcm`` @ 24 kHz and transcode
+        PCM24->mulaw8 ourselves (see ``_transcode_outbound_pcm24_to_mulaw8``).
+        If a future GA schema change ever made the server return a different
+        output format, that transcode — which assumes PCM16-LE @ 24 kHz —
+        would silently corrupt audio, exactly the v1-beta failure mode #154
+        fixed. Warn so the drift surfaces in logs instead of as static. Never
+        gates audio.
+        """
+        session = data.get("session")
+        if not isinstance(session, dict):
+            return
+        audio = session.get("audio")
+        if not isinstance(audio, dict):
+            return
+        output = audio.get("output")
+        if not isinstance(output, dict):
+            return
+        fmt = output.get("format")
+        if not isinstance(fmt, dict):
+            return
+        rate = fmt.get("rate")
+        if fmt.get("type") != "audio/pcm" or rate not in (None, 24000):
+            logger.warning(
+                "OpenAI Realtime 2: server-echoed output format %s differs from "
+                "the requested audio/pcm@24000 — the outbound PCM24->mulaw8 "
+                "transcode assumes PCM16-LE 24 kHz, so carrier audio may be "
+                "garbled (issue #154). Informational only; audio is not gated "
+                "on this.",
+                fmt,
+            )
+
     async def _await_session_updated_ga(self) -> None:
         """Wait for ``session.updated``, raising on ``error`` events."""
         deadline = asyncio.get_event_loop().time() + self._SESSION_UPDATE_TIMEOUT
@@ -408,6 +443,7 @@ class OpenAIRealtime2Adapter(OpenAIRealtimeAdapter):
             except Exception:
                 continue
             if data.get("type") == "session.updated":
+                self._warn_if_output_format_unexpected(data)
                 return
             if data.get("type") == "error":
                 err = data.get("error") or {}

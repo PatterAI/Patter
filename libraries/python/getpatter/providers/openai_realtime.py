@@ -1,8 +1,16 @@
 """OpenAI Realtime API adapter — all-in-one STT + LLM + TTS over WebSocket.
 
-Used in ``stream_handler`` as the ``openai_realtime`` provider mode. Drives
-:class:`OpenAIRealtimeAdapter` which negotiates audio format, dispatches tool
-calls, and streams audio in both directions.
+Drives :class:`OpenAIRealtimeAdapter`, which negotiates audio format,
+dispatches tool calls, and streams audio in both directions.
+
+NOTE (issue #154): the ``openai_realtime`` provider mode no longer uses this
+adapter's standalone connect path for telephony. OpenAI deprecated the Beta
+Realtime API, so its flat ``output_audio_format: g711_ulaw`` session shape is
+ignored by GA models (the server falls back to PCM16 @ 24 kHz). ``stream_handler``
+routes BOTH ``openai_realtime`` and ``openai_realtime_2`` through
+:class:`~getpatter.providers.openai_realtime_2.OpenAIRealtime2Adapter` (GA
+session shape + internal PCM24->mulaw8 transcode). This class is retained as the
+shared base class that ``OpenAIRealtime2Adapter`` extends.
 """
 
 import asyncio

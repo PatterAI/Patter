@@ -253,6 +253,7 @@ export class OpenAIRealtime2Adapter extends OpenAIRealtimeAdapter {
           sessionCreated = true;
           ws.send(JSON.stringify({ type: 'session.update', session: this.buildGASessionConfig() }));
         } else if (msg.type === 'session.updated') {
+          this.warnIfOutputFormatUnexpected(msg);
           cleanup();
           resolve();
         } else if (msg.type === 'error') {
@@ -529,6 +530,35 @@ export class OpenAIRealtime2Adapter extends OpenAIRealtimeAdapter {
       out.writeInt16LE(Math.round((s0 + s1 * 2) / 3), i * 6 + 4);
     }
     return out;
+  }
+
+  /**
+   * Log-only safety net for issue #154. The GA server echoes the *effective*
+   * session config in `session.updated`; we request `audio/pcm` @ 24 kHz and
+   * transcode PCM24→mulaw8 ourselves (see
+   * `transcodeOutboundPcm24ToMulaw8Buffer`). If a future GA schema change ever
+   * made the server return a different output format, that transcode — which
+   * assumes PCM16-LE @ 24 kHz — would silently corrupt audio, exactly the
+   * v1-beta failure mode #154 fixed. Warn so the drift surfaces in logs instead
+   * of as static. Never gates audio.
+   */
+  private warnIfOutputFormatUnexpected(msg: unknown): void {
+    const fmt = (
+      msg as {
+        session?: { audio?: { output?: { format?: { type?: string; rate?: number } } } };
+      }
+    )?.session?.audio?.output?.format;
+    if (!fmt || typeof fmt !== 'object') return;
+    // `!= null` mirrors the Python helper's `rate not in (None, 24000)` — a
+    // missing/null rate is treated as acceptable in both SDKs.
+    if (fmt.type !== 'audio/pcm' || (fmt.rate != null && fmt.rate !== 24000)) {
+      getLogger().warn(
+        `OpenAI Realtime 2: server-echoed output format ${JSON.stringify(fmt)} ` +
+          'differs from the requested audio/pcm@24000 — the outbound ' +
+          'PCM24→mulaw8 transcode assumes PCM16-LE 24 kHz, so carrier audio may ' +
+          'be garbled (issue #154). Informational only; audio is not gated on this.',
+      );
+    }
   }
 
   /**

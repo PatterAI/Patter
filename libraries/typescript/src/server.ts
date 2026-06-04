@@ -492,12 +492,23 @@ export function buildAIAdapter(config: LocalConfig, agent: AgentOptions, resolve
   if (agentOpts.realtimeTurnDetection !== undefined) {
     adapterOptions.turnDetection = agentOpts.realtimeTurnDetection;
   }
-  // Dispatch to the GA-API adapter when the caller passed the
-  // ``OpenAIRealtime2`` engine marker. Falls through to the v1-beta adapter
-  // for ``OpenAIRealtime`` and the legacy no-engine code path.
-  const AdapterCtor = engine && engine.kind === 'openai_realtime_2'
-    ? OpenAIRealtime2Adapter
-    : OpenAIRealtimeAdapter;
+  // Both the v1 ``OpenAIRealtime()`` engine and the GA ``OpenAIRealtime2()``
+  // engine (plus the legacy no-engine OpenAI path) route through the GA
+  // adapter. OpenAI deprecated the Beta Realtime API: the legacy flat
+  // ``output_audio_format: g711_ulaw`` session shape is ignored by GA models
+  // (the v1 engine defaults to ``gpt-realtime-mini``, a GA model), which then
+  // fall back to PCM16 @ 24 kHz. The old v1-beta adapter forwarded those bytes
+  // to Twilio framed as 8 kHz mulaw, producing static + broken STT (issue
+  // #154). The GA adapter sends the nested
+  // ``audio.{input,output}.format = {type:'audio/pcm',rate:24000}`` shape and
+  // transcodes PCM24→mulaw8 internally, so the carrier always receives valid
+  // mulaw. Only the default model differs (carried on ``agent.model``:
+  // gpt-realtime-mini vs gpt-realtime-2). Mirrors the Python SDK, which already
+  // unified this routing in ``stream_handler.py``. ``OpenAIRealtimeAdapter``
+  // stays only as the shared base class — the GA adapter extends it, so the
+  // ``instanceof OpenAIRealtimeAdapter`` feature gates in the stream handler
+  // keep firing.
+  const AdapterCtor = OpenAIRealtime2Adapter;
   return new AdapterCtor(
     openaiKey,
     agent.model,

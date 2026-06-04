@@ -185,6 +185,29 @@
 
 ### Fixed
 
+- **Twilio + OpenAI Realtime (`OpenAIRealtime()` engine) garbled/static audio
+  on all models (TypeScript).** The TypeScript SDK still routed the
+  `openai_realtime` engine through the legacy v1-beta adapter, which sent the
+  deprecated flat `output_audio_format: g711_ulaw` session shape to the GA
+  Realtime endpoint. OpenAI's GA models (the v1 engine defaults to
+  `gpt-realtime-mini`) ignore the flat field and return PCM16 @ 24 kHz, which
+  Patter then forwarded to Twilio framed as 8 kHz mulaw — producing persistent
+  static and breaking inbound STT (the model transcribed the noise as random
+  text). Both the `openai_realtime` and `openai_realtime_2` engines now route
+  through the GA adapter (`OpenAIRealtime2Adapter`, selected in
+  `libraries/typescript/src/server.ts`), which sends the nested
+  `audio.{input,output}.format = { type: "audio/pcm", rate: 24000 }` shape and
+  transcodes PCM24→mulaw8 internally — matching the Python SDK, which already
+  unified this routing in `libraries/python/getpatter/stream_handler.py`. The
+  default model is unchanged (`gpt-realtime-mini` for `OpenAIRealtime`,
+  `gpt-realtime-2` for `OpenAIRealtime2`). Also added a log-only warning (both
+  SDKs) when the server-echoed effective output format differs from the
+  requested `audio/pcm` @ 24 kHz, so any future GA schema drift surfaces in
+  logs instead of as silent static. `libraries/typescript/src/server.ts`,
+  `libraries/typescript/src/stream-handler.ts`,
+  `libraries/typescript/src/providers/openai-realtime-2.ts`,
+  `libraries/python/getpatter/providers/openai_realtime_2.py`.
+
 - **Realtime tool context now includes `callee` (TypeScript).** In Realtime
   mode the TypeScript tool-dispatch context passed `{ call_id, caller }` only,
   omitting `callee` (the dialed line) — Python Realtime and TypeScript Pipeline

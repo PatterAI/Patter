@@ -1473,7 +1473,10 @@ export class StreamHandler {
         this.metricsAcc.addSttAudioBytes(pcm16k.length);
       }
     } else if (this.adapter) {
-      // OpenAI Realtime is configured for g711_ulaw so Twilio mulaw is fine.
+      // OpenAI Realtime (the GA adapter — used for both OpenAIRealtime and
+      // OpenAIRealtime2) overrides sendAudio to transcode Twilio's mulaw 8 kHz
+      // up to PCM-16 24 kHz internally, so the caller's raw mulaw bytes are
+      // forwarded untouched here.
       // ElevenLabs ConvAI defaults to PCM 16kHz — transcode Twilio mulaw
       // first. When ConvAI was constructed via ``ElevenLabsConvAIAdapter
       // .forTwilio(...)`` (or any path that sets ``inputAudioFormat
@@ -2982,11 +2985,15 @@ export class StreamHandler {
       // dispatcher's idempotency guard prevents double-fires.
       await this.emitAudioOut();
     }
-    // OpenAI Realtime outputs g711_ulaw 8 kHz (PCMU). Both Twilio and Telnyx
-    // are configured for PCMU/mulaw 8 kHz (Telnyx uses stream_bidirectional_codec=PCMU)
-    // so the audio is already in the correct wire format — pass through untransformed.
-    // Do NOT resample here: inboundResampler is 8k→16k for the STT inbound path;
-    // reusing it on the outbound path corrupts both directions.
+    // The GA Realtime adapter (used for both the ``OpenAIRealtime`` and
+    // ``OpenAIRealtime2`` engines) has ALREADY transcoded the model's PCM16
+    // 24 kHz output down to mulaw 8 kHz internally — see
+    // ``OpenAIRealtime2Adapter.translateGaAudioDelta``. Both Twilio and Telnyx
+    // expect PCMU/mulaw 8 kHz (Telnyx uses stream_bidirectional_codec=PCMU), so
+    // the bytes arriving here are already in the correct wire format — pass
+    // through untransformed. Do NOT resample here: inboundResampler is 8k→16k
+    // for the STT inbound path; reusing it on the outbound path corrupts both
+    // directions.
     const outAudio = eventData;
     this.deps.bridge.sendAudio(this.ws, outAudio.toString('base64'), this.streamSid);
     this.markFirstAudioSent();

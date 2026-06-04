@@ -3,8 +3,17 @@
  *
  * Wraps `wss://api.openai.com/v1/realtime` and exposes the unified
  * Patter realtime contract (`connect / sendAudio / onEvent / close`) on
- * {@link OpenAIRealtimeAdapter}. Audio negotiation defaults to
- * `g711_ulaw` so traffic flows through Twilio/Telnyx without transcoding.
+ * {@link OpenAIRealtimeAdapter}.
+ *
+ * NOTE (issue #154): this class is no longer instantiated directly for the
+ * telephony bridge. OpenAI deprecated the Beta Realtime API, so its flat
+ * `output_audio_format: g711_ulaw` session shape is ignored by GA models —
+ * the server falls back to PCM16 @ 24 kHz, which this adapter would forward to
+ * Twilio framed as 8 kHz mulaw (static + broken STT). `buildAIAdapter` in
+ * `server.ts` now routes BOTH the `OpenAIRealtime` and `OpenAIRealtime2`
+ * engines through {@link OpenAIRealtime2Adapter} (GA session shape + internal
+ * PCM24→mulaw8 transcode). This class is retained as the shared base class
+ * that `OpenAIRealtime2Adapter` extends.
  */
 
 import WebSocket from 'ws';
