@@ -87,19 +87,55 @@
     namespaced pass-through as the shipped `consult` OpenClaw preset; `base_url`
     defaults to `http://127.0.0.1:18789/v1`, api key from env `OPENCLAW_API_KEY`,
     `timeout` **120 s**.
-- **Per-call session continuity for the agent-runtime providers (opt-in).** When
-  `session_user_prefix` / `sessionUserPrefix` is set, each provider emits the
-  OpenAI `user` field as a stable `patter-call-<call_id>` so the runtime derives
-  exactly one session per phone call (Hermes and OpenClaw both key sessions off
-  `user`); an optional `session_header` / `sessionHeader` (the OpenClaw preset
-  defaults it to `x-openclaw-session-key`) carries the same id as a secondary.
-  The `HermesLLM` and `OpenClawLLM` presets enable this by default; the generic
-  provider leaves it **off** unless opted in. To make `call_id` reach the
-  provider, `LLMLoop.run` now threads it through to `provider.stream()` — Python
-  via a new optional `call_id` keyword on the `LLMProvider.stream` protocol,
-  TypeScript via a new optional `callId` field on `LLMStreamOptions`. Both are
-  additive and optional, so every existing provider is unaffected and continues
-  to behave identically. `libraries/python/getpatter/services/llm_loop.py`,
+- **Per-call session continuity for the agent-runtime providers (opt-in), now
+  with three decoupled signals.** Each runtime keys session continuity
+  differently, so `OpenAICompatibleLLM` exposes three independent, optional
+  signals — emit any subset:
+  - **`session_user_prefix` / `sessionUserPrefix`** → OpenAI `user` field as a
+    stable `{prefix}{call_id}` (value `patter-call-<call_id>` for the presets).
+    OpenClaw's gateway derives its session from `user`; Hermes uses it only for
+    upstream-log correlation.
+  - **`session_id_header` + `session_id_prefix` / `sessionIdHeader` +
+    `sessionIdPrefix`** → a per-call request header carrying
+    `{session_id_prefix}{call_id}`, for runtimes that key session/transcript
+    continuity off a header rather than `user`.
+  - **`session_key_header` + `session_key` / `sessionKeyHeader` +
+    `sessionKey`** → a *static* request header for long-term memory scoping
+    (value is the configured key, not the call id). Omitted unless the value is
+    set.
+
+  Each signal is gated independently and merged into the per-request headers;
+  when none are configured the request is byte-identical to the base provider
+  (no `user`, no extra headers). Preset wiring:
+  - **`HermesLLM`** — Hermes is stateless and keys continuity off **headers**:
+    `session_id_header="X-Hermes-Session-Id"`, `session_id_prefix="patter-call-"`
+    (so each call sends `X-Hermes-Session-Id: patter-call-<call_id>` by default).
+    A new optional `session_key` (Python) / `sessionKey` (TypeScript) constructor
+    arg, default `None` / `undefined`, opts into long-term memory scoping by
+    emitting `X-Hermes-Session-Key: <value>`. `session_user_prefix` is kept at
+    `patter-call-` for upstream-log correlation but does **not** drive the Hermes
+    session.
+  - **`OpenClawLLM`** — wire-identical to before: `session_user_prefix=
+    "patter-call-"` (OpenClaw's gateway keys off `user`) plus
+    `session_id_header="x-openclaw-session-key"` with `session_id_prefix=""` so
+    the header still carries the raw `call_id`. No memory-scope header.
+
+  The presets enable continuity by default; the generic provider leaves it
+  **off** unless opted in. To make `call_id` reach the provider, `LLMLoop.run`
+  threads it through to `provider.stream()` — Python via an optional `call_id`
+  keyword on the `LLMProvider.stream` protocol (the loop now introspects each
+  provider's `stream` signature and only passes `call_id` to providers that
+  accept it or take `**kwargs`, so a minimal custom provider that declares
+  neither is **not** broken), TypeScript via an optional `callId` field on
+  `LLMStreamOptions` (an extra options-object property a provider ignores is a
+  no-op). Both are additive and optional, so every existing provider is
+  unaffected. `libraries/python/getpatter/llm/openai_compatible.py`,
+  `libraries/python/getpatter/llm/hermes.py`,
+  `libraries/python/getpatter/llm/openclaw.py`,
+  `libraries/python/getpatter/services/llm_loop.py`,
+  `libraries/typescript/src/llm/openai-compatible.ts`,
+  `libraries/typescript/src/llm/hermes.ts`,
+  `libraries/typescript/src/llm/openclaw.ts`,
   `libraries/typescript/src/llm-loop.ts`.
 - **`allow_insecure_dashboard` / `allowInsecureDashboard` escape hatch (opt-in,
   default off).** New optional config on `Patter(...)` (Python) and `serve(...)`

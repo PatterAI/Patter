@@ -149,16 +149,94 @@ describe('[unit] OpenAICompatibleLLMProvider session continuity', () => {
     expect(body.user).toBeUndefined();
   });
 
-  it('sends the session header carrying the raw call id when configured', async () => {
+  it('emits the session-id header as `${prefix}${callId}` INDEPENDENT of sessionUserPrefix', async () => {
+    // No sessionUserPrefix → no user field, but the session-id header still fires.
+    const provider = new OpenAICompatibleLLMProvider({
+      baseUrl: 'http://127.0.0.1:9/v1',
+      model: 'm',
+      sessionIdHeader: 'X-Hermes-Session-Id',
+      sessionIdPrefix: 'patter-call-',
+    });
+    const { body, headers } = await drainBody(provider, 'abc');
+    expect(body.user).toBeUndefined();
+    expect(headers['X-Hermes-Session-Id']).toBe('patter-call-abc');
+  });
+
+  it('defaults the session-id prefix to "" (raw call id) when sessionIdPrefix unset', async () => {
+    const provider = new OpenAICompatibleLLMProvider({
+      baseUrl: 'http://127.0.0.1:9/v1',
+      model: 'm',
+      sessionIdHeader: 'x-openclaw-session-key',
+    });
+    const { headers } = await drainBody(provider, 'c2');
+    // Regression: wire-identical to the old session_header behaviour.
+    expect(headers['x-openclaw-session-key']).toBe('c2');
+  });
+
+  it('omits the session-id header when no callId is available', async () => {
+    const provider = new OpenAICompatibleLLMProvider({
+      baseUrl: 'http://127.0.0.1:9/v1',
+      model: 'm',
+      sessionIdHeader: 'X-Hermes-Session-Id',
+      sessionIdPrefix: 'patter-call-',
+    });
+    const { headers } = await drainBody(provider); // no callId
+    expect(headers['X-Hermes-Session-Id']).toBeUndefined();
+  });
+
+  it('emits a STATIC session-key header (value == sessionKey, no call-id interpolation)', async () => {
+    const provider = new OpenAICompatibleLLMProvider({
+      baseUrl: 'http://127.0.0.1:9/v1',
+      model: 'm',
+      sessionKeyHeader: 'X-Hermes-Session-Key',
+      sessionKey: 'mem-123',
+    });
+    // Independent of call id: present with AND without a callId, value unchanged.
+    const withCall = await drainBody(provider, 'abc');
+    expect(withCall.headers['X-Hermes-Session-Key']).toBe('mem-123');
+    const noCall = await drainBody(provider);
+    expect(noCall.headers['X-Hermes-Session-Key']).toBe('mem-123');
+  });
+
+  it('omits the session-key header when sessionKeyHeader set but sessionKey undefined (opt-in)', async () => {
+    const provider = new OpenAICompatibleLLMProvider({
+      baseUrl: 'http://127.0.0.1:9/v1',
+      model: 'm',
+      sessionKeyHeader: 'X-Hermes-Session-Key',
+    });
+    const { headers } = await drainBody(provider, 'abc');
+    expect(headers['X-Hermes-Session-Key']).toBeUndefined();
+  });
+
+  it('combines all three signals into one request, preserving extraHeaders (no clobber)', async () => {
     const provider = new OpenAICompatibleLLMProvider({
       baseUrl: 'http://127.0.0.1:9/v1',
       model: 'm',
       sessionUserPrefix: 'patter-call-',
-      sessionHeader: 'x-openclaw-session-key',
+      sessionIdHeader: 'X-Hermes-Session-Id',
+      sessionIdPrefix: 'patter-call-',
+      sessionKeyHeader: 'X-Hermes-Session-Key',
+      sessionKey: 'mem-123',
+      extraHeaders: { 'X-Foo': '1' },
     });
     const { body, headers } = await drainBody(provider, 'abc');
     expect(body.user).toBe('patter-call-abc');
-    expect(headers['x-openclaw-session-key']).toBe('abc');
+    expect(headers['X-Hermes-Session-Id']).toBe('patter-call-abc');
+    expect(headers['X-Hermes-Session-Key']).toBe('mem-123');
+    // Pre-existing headers survive alongside the session headers.
+    expect(headers['X-Foo']).toBe('1');
+    expect(headers['User-Agent']).toMatch(/^getpatter\//);
+  });
+
+  it('sends no user field and no session headers when none configured (byte-identical baseline)', async () => {
+    const provider = new OpenAICompatibleLLMProvider({
+      baseUrl: 'http://127.0.0.1:9/v1',
+      model: 'm',
+    });
+    const { body, headers } = await drainBody(provider, 'abc');
+    expect(body.user).toBeUndefined();
+    // Only the baseline headers — no session signals.
+    expect(Object.keys(headers).sort()).toEqual(['Content-Type', 'User-Agent']);
   });
 });
 
@@ -220,12 +298,13 @@ describe('[mocked] OpenAICompatibleLLMProvider streaming over the HTTP boundary'
     ) as unknown as typeof fetch;
   });
 
-  it('sends the user field + session header and normalises real SSE chunks', async () => {
+  it('sends the user field + session-id header on the wire and normalises real SSE chunks', async () => {
     const provider = new OpenAICompatibleLLMProvider({
       baseUrl: 'http://127.0.0.1:9/v1',
       model: 'm',
       sessionUserPrefix: 'patter-call-',
-      sessionHeader: 'x-openclaw-session-key',
+      sessionIdHeader: 'X-Hermes-Session-Id',
+      sessionIdPrefix: 'patter-call-',
     });
 
     const chunks: LLMChunk[] = [];
@@ -237,11 +316,11 @@ describe('[mocked] OpenAICompatibleLLMProvider streaming over the HTTP boundary'
       chunks.push(c);
     }
 
-    // The POST carried the session continuity signals.
+    // The POST carried the session continuity signals on the wire.
     const body = JSON.parse(captured!.init.body as string) as Record<string, unknown>;
     expect(body.user).toBe('patter-call-call-99');
     const headers = captured!.init.headers as Record<string, string>;
-    expect(headers['x-openclaw-session-key']).toBe('call-99');
+    expect(headers['X-Hermes-Session-Id']).toBe('patter-call-call-99');
 
     // Real SSE chunks normalised by the shared parser.
     const texts = chunks.filter((c) => c.type === 'text').map((c) => c.content);

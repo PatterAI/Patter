@@ -6,9 +6,13 @@
  * agent runtime so a user just writes ``phone.agent({ llm: new hermes.LLM() })``.
  *
  * Hermes runs tools / memory / skills internally before replying, so a single
- * conversation turn can take 30-90 s — hence the 120 s default timeout. It
- * keys sessions off the OpenAI ``user`` field, so the preset enables the
- * ``patter-call-`` session prefix to give one runtime session per phone call.
+ * conversation turn can take 30-90 s — hence the 120 s default timeout. Hermes
+ * is stateless and keys continuity off HEADERS, not the OpenAI ``user`` field:
+ * the preset sends ``X-Hermes-Session-Id: patter-call-<callId>`` on every turn
+ * for per-call session / transcript continuity (on by default), and optionally
+ * ``X-Hermes-Session-Key: <sessionKey>`` for long-term memory scoping when you
+ * pass ``sessionKey``. (It also still emits ``user=patter-call-<callId>`` for
+ * upstream-log correlation, but that is not what drives the session.)
  */
 import {
   OpenAICompatibleLLMProvider,
@@ -23,8 +27,14 @@ const DEFAULT_MODEL = 'hermes-agent';
 const API_KEY_ENV = 'API_SERVER_KEY';
 /** Env var Hermes reads its model id from. */
 const MODEL_ENV = 'API_SERVER_MODEL_NAME';
-/** Per-call session prefix → one Hermes session per phone call. */
+/** Per-call ``user`` prefix (upstream-log correlation; not the session driver). */
 const SESSION_USER_PREFIX = 'patter-call-';
+/** Header carrying the per-call session id (the primary continuity mechanism). */
+const SESSION_ID_HEADER = 'X-Hermes-Session-Id';
+/** Prefix for the session-id header value → ``X-Hermes-Session-Id: patter-call-<callId>``. */
+const SESSION_ID_PREFIX = 'patter-call-';
+/** Static header scoping long-term memory (sent only when ``sessionKey`` is set). */
+const SESSION_KEY_HEADER = 'X-Hermes-Session-Key';
 /** Default timeout (seconds): runtimes run tools before replying. */
 const DEFAULT_TIMEOUT_S = 120;
 
@@ -38,6 +48,12 @@ export interface HermesLLMOptions {
   model?: string;
   /** Per-request timeout in seconds. Default ``120``. */
   timeout?: number;
+  /**
+   * Long-term memory scope. When set, emits ``X-Hermes-Session-Key`` so Hermes
+   * scopes durable memory to this value across calls. ``undefined`` (default)
+   * means the header is not sent. Credential-grade — never logged.
+   */
+  sessionKey?: string;
   /** Extra headers merged after the SDK ``User-Agent``. */
   extraHeaders?: Record<string, string>;
   /** Sampling temperature [0, 2]. */
@@ -84,6 +100,10 @@ export class LLM extends OpenAICompatibleLLMProvider {
       model,
       timeout: opts.timeout ?? DEFAULT_TIMEOUT_S,
       sessionUserPrefix: SESSION_USER_PREFIX,
+      sessionIdHeader: SESSION_ID_HEADER,
+      sessionIdPrefix: SESSION_ID_PREFIX,
+      sessionKeyHeader: SESSION_KEY_HEADER,
+      sessionKey: opts.sessionKey,
       extraHeaders: opts.extraHeaders,
       temperature: opts.temperature,
       maxTokens: opts.maxTokens,

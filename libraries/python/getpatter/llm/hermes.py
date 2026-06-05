@@ -6,9 +6,13 @@ agent runtime. Patter is the voice shell (carrier + STT + turn-taking + TTS);
 Hermes is the brain on the line — each turn is one
 ``POST {base_url}/chat/completions`` against the local Hermes gateway.
 
-Hermes keys sessions off the OpenAI ``user`` field, so the per-call
-``session_user_prefix`` defaults to ``"patter-call-"`` — one phone call maps to
-one Hermes session.
+Hermes is stateless and keys continuity off HEADERS, not the OpenAI ``user``
+field. Patter sends ``X-Hermes-Session-Id: patter-call-<call_id>`` on every
+turn so one phone call maps to one Hermes session / transcript (on by default).
+For long-term memory scoping, set ``session_key`` to emit a static
+``X-Hermes-Session-Key`` header (off by default). The OpenAI ``user`` field is
+still sent (``patter-call-<call_id>``) as a harmless upstream-log correlation
+id, but it is not what drives the session.
 """
 
 from __future__ import annotations
@@ -23,6 +27,12 @@ __all__ = ["LLM"]
 # Hermes gateway default (loopback; operator-co-located deployment).
 _BASE_URL = "http://127.0.0.1:8642/v1"
 _DEFAULT_MODEL = "hermes-agent"
+
+# Hermes is stateless — continuity is carried in headers.
+_SESSION_USER_PREFIX = "patter-call-"
+_SESSION_ID_HEADER = "X-Hermes-Session-Id"
+_SESSION_ID_PREFIX = "patter-call-"
+_SESSION_KEY_HEADER = "X-Hermes-Session-Key"
 
 
 class LLM(OpenAICompatibleLLMProvider):
@@ -44,8 +54,16 @@ class LLM(OpenAICompatibleLLMProvider):
       a keyless local Hermes)
     * ``timeout`` → ``120.0`` s (runtimes run tools / memory / skills before
       replying, so turns can take 30-90 s)
-    * ``session_user_prefix`` → ``"patter-call-"`` (Hermes keys sessions off
-      the OpenAI ``user`` field)
+    * per-call continuity → ``X-Hermes-Session-Id: patter-call-<call_id>``
+      (always sent with a call id — the primary mechanism)
+    * long-term memory → ``X-Hermes-Session-Key: <session_key>`` (only sent
+      when ``session_key`` is configured)
+
+    Args:
+        session_key: Optional long-term memory scope. When set, every turn
+            emits ``X-Hermes-Session-Key: <session_key>`` so Hermes namespaces
+            persistent memory across calls. Credential-grade — never logged.
+            ``None`` (default) means the header is not sent.
     """
 
     provider_key: ClassVar[str] = "hermes"
@@ -57,6 +75,7 @@ class LLM(OpenAICompatibleLLMProvider):
         base_url: str = _BASE_URL,
         model: str | None = None,
         timeout: float = 120.0,
+        session_key: str | None = None,
         **kwargs,
     ) -> None:
         resolved_model = model or os.environ.get(
@@ -68,6 +87,10 @@ class LLM(OpenAICompatibleLLMProvider):
             model=resolved_model,
             api_key_env="API_SERVER_KEY",
             timeout=timeout,
-            session_user_prefix="patter-call-",
+            session_user_prefix=_SESSION_USER_PREFIX,
+            session_id_header=_SESSION_ID_HEADER,
+            session_id_prefix=_SESSION_ID_PREFIX,
+            session_key_header=_SESSION_KEY_HEADER,
+            session_key=session_key,
             **kwargs,
         )

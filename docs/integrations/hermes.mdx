@@ -64,10 +64,27 @@ timeout (the generic provider's 60 s, raised for the preset) instead of the shor
 used for raw inference providers — a turn that runs a tool isn't cut off mid-thought.
 
 <Note>
-  **Where the session lives.** Each phone call maps to **one** Hermes session. Patter
-  passes a stable per-call id as the OpenAI `user` field (`patter-call-<call_id>`), and
-  Hermes keys its session off `user` — so multi-turn memory inside a call works without
-  any extra wiring. This is on by default for `HermesLLM`.
+  **Where the session lives.** Hermes is **stateless** and keys continuity off
+  **HTTP headers**, not the OpenAI `user` field. Each phone call maps to **one** Hermes
+  session: Patter sends `X-Hermes-Session-Id: patter-call-<call_id>` on every turn, so
+  multi-turn session and transcript continuity inside a call works without any extra
+  wiring. This is on by default for `HermesLLM`.
+
+  For **long-term memory scoping** across calls, set `session_key` (Python) /
+  `sessionKey` (TypeScript) on `HermesLLM` — Patter then also sends
+  `X-Hermes-Session-Key: <your value>`, which tells Hermes which memory scope this
+  caller belongs to. It is **off by default** (no header sent) and is opt-in:
+
+  ```python
+  llm = HermesLLM(session_key="customer-42")   # scopes long-term memory to this caller
+  ```
+
+  ```ts
+  const llm = new HermesLLM({ sessionKey: 'customer-42' });
+  ```
+
+  (Patter also still sends `user=patter-call-<call_id>` for upstream-log correlation,
+  but that field is **not** what drives the Hermes session — the headers are.)
 </Note>
 
 ### Prerequisites for the voice shell

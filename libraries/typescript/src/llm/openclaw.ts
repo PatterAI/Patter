@@ -106,7 +106,11 @@ export class LLM extends OpenAICompatibleLLMProvider {
       model,
       timeout: opts.timeout ?? DEFAULT_TIMEOUT_S,
       sessionUserPrefix: SESSION_USER_PREFIX,
-      sessionHeader: SESSION_HEADER,
+      // Wire-identical to the prior behaviour: header value is the raw call id
+      // (empty prefix), and OpenClaw's gateway also derives the session from
+      // the ``user`` field above. No separate memory-scope header.
+      sessionIdHeader: SESSION_HEADER,
+      sessionIdPrefix: '',
       extraHeaders: opts.extraHeaders,
       temperature: opts.temperature,
       maxTokens: opts.maxTokens,

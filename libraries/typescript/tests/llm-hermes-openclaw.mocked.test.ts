@@ -55,15 +55,30 @@ async function inspectRequest(
 }
 
 describe('[unit] HermesLLM preset', () => {
-  it('defaults baseUrl, model, timeout (120 s) and the patter-call session prefix', async () => {
+  it('defaults baseUrl, model, timeout (120 s), the user prefix and X-Hermes-Session-Id header', async () => {
     const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
     const llm = new HermesLLM();
     expect(llm.model).toBe('hermes-agent');
-    const { url, body } = await inspectRequest(llm, 'c1');
+    const { url, body, headers } = await inspectRequest(llm, 'c1');
     expect(url).toBe('http://127.0.0.1:8642/v1/chat/completions');
     expect(body.model).toBe('hermes-agent');
-    expect(body.user).toBe('patter-call-c1'); // session prefix enabled by default
+    expect(body.user).toBe('patter-call-c1'); // upstream-log correlation, kept
+    // PRIMARY mechanism: per-call session id header, on by default.
+    expect(headers['X-Hermes-Session-Id']).toBe('patter-call-c1');
     expect(timeoutSpy).toHaveBeenCalledWith(120_000);
+  });
+
+  it('omits X-Hermes-Session-Key by default and emits it only when sessionKey is set', async () => {
+    // Default: no memory-scope header (opt-in).
+    const { headers: defaultHeaders } = await inspectRequest(new HermesLLM(), 'c1');
+    expect(defaultHeaders['X-Hermes-Session-Key']).toBeUndefined();
+
+    // Configured: the static memory-scope header is sent on the wire.
+    const scoped = new HermesLLM({ sessionKey: 'mem-123' });
+    const { headers: scopedHeaders } = await inspectRequest(scoped, 'c1');
+    expect(scopedHeaders['X-Hermes-Session-Key']).toBe('mem-123');
+    // Per-call session id still flows alongside the memory scope.
+    expect(scopedHeaders['X-Hermes-Session-Id']).toBe('patter-call-c1');
   });
 
   it('reads the model from API_SERVER_MODEL_NAME, with an explicit model still winning', () => {

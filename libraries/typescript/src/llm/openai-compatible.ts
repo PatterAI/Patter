@@ -24,12 +24,20 @@
  * - **Long timeout.** Agent runtimes execute tools / memory / skills before
  *   replying, so a turn can take 30-90 s. The default is 60 s here (the
  *   presets raise it to 120 s), REPLACING the base provider's hardcoded 30 s.
- * - **Session continuity.** When ``sessionUserPrefix`` is set, the OpenAI
- *   ``user`` field is emitted as ``` `${sessionUserPrefix}${callId}` ``` so
- *   the runtime derives one session per phone call (Hermes and OpenClaw both
- *   key sessions off ``user``). An optional ``sessionHeader`` carries the same
- *   id as a secondary signal. Both are OFF by default — fully backward
- *   compatible.
+ * - **Session continuity.** Three independent, opt-in signals — each gated on
+ *   its own config, none coupled to another:
+ *     - ``sessionUserPrefix`` → emits the OpenAI ``user`` field as
+ *       ``` `${sessionUserPrefix}${callId}` ```. Used by runtimes that derive
+ *       a session from ``user`` (e.g. OpenClaw's gateway).
+ *     - ``sessionIdHeader`` (+ optional ``sessionIdPrefix``) → emits a per-call
+ *       header carrying ``` `${sessionIdPrefix}${callId}` ``` for per-call
+ *       session / transcript continuity on stateless runtimes that key off
+ *       headers (e.g. Hermes' ``X-Hermes-Session-Id``).
+ *     - ``sessionKeyHeader`` (+ ``sessionKey``) → emits a STATIC header for
+ *       long-term memory scoping (e.g. Hermes' ``X-Hermes-Session-Key``); the
+ *       value is the raw ``sessionKey``, never interpolated with the call id.
+ *   All three are OFF by default — fully backward compatible. ``sessionKey`` is
+ *   a credential-grade memory scope and is NEVER logged.
  *
  * Keyless gateways (Ollama / vLLM / LM Studio accept no key) are supported:
  * the ``Authorization`` header is simply omitted from the request (sending a
@@ -82,15 +90,34 @@ export interface OpenAICompatibleLLMOptions {
   /**
    * When set, emits the OpenAI ``user`` field as
    * ``` `${sessionUserPrefix}${callId}` ``` for per-call session continuity.
-   * ``undefined`` (default) means no ``user`` field is sent.
+   * ``undefined`` (default) means no ``user`` field is sent. Independent of the
+   * session headers below.
    */
   sessionUserPrefix?: string;
   /**
-   * Optional header name carrying the per-call session id (the call id) as a
-   * secondary signal, e.g. ``"x-openclaw-session-key"``. ``undefined``
-   * (default) means off.
+   * Optional header NAME carrying a per-call session id, e.g.
+   * ``"X-Hermes-Session-Id"`` or ``"x-openclaw-session-key"``. When set AND a
+   * ``callId`` is available, the header VALUE is
+   * ``` `${sessionIdPrefix}${callId}` ```. ``undefined`` (default) means off.
    */
-  sessionHeader?: string;
+  sessionIdHeader?: string;
+  /**
+   * Prefix for the session-id header VALUE. Defaults to ``""`` (raw call id).
+   * Only meaningful when ``sessionIdHeader`` is set.
+   */
+  sessionIdPrefix?: string;
+  /**
+   * Optional STATIC header NAME for long-term memory scoping, e.g.
+   * ``"X-Hermes-Session-Key"``. Emitted with the raw ``sessionKey`` value (no
+   * call-id interpolation) only when BOTH ``sessionKeyHeader`` and
+   * ``sessionKey`` are set. ``undefined`` (default) means off.
+   */
+  sessionKeyHeader?: string;
+  /**
+   * Static value emitted in ``sessionKeyHeader``. Credential-grade memory
+   * scope — NEVER logged. ``undefined`` (default) means the header is omitted.
+   */
+  sessionKey?: string;
   /** Sampling temperature [0, 2]. */
   temperature?: number;
   /** Max tokens in the assistant response (sent as ``max_completion_tokens``). */
@@ -134,7 +161,10 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
   private readonly timeoutMs: number;
   private readonly extraHeaders?: Record<string, string>;
   private readonly sessionUserPrefix?: string;
-  private readonly sessionHeader?: string;
+  private readonly sessionIdHeader?: string;
+  private readonly sessionIdPrefix?: string;
+  private readonly sessionKeyHeader?: string;
+  private readonly sessionKey?: string;
   private readonly temperature?: number;
   private readonly maxTokens?: number;
   private readonly responseFormat?: Record<string, unknown>;
@@ -165,7 +195,10 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
     this.timeoutMs = (options.timeout ?? DEFAULT_TIMEOUT_S) * 1000;
     this.extraHeaders = options.extraHeaders;
     this.sessionUserPrefix = options.sessionUserPrefix;
-    this.sessionHeader = options.sessionHeader;
+    this.sessionIdHeader = options.sessionIdHeader;
+    this.sessionIdPrefix = options.sessionIdPrefix;
+    this.sessionKeyHeader = options.sessionKeyHeader;
+    this.sessionKey = options.sessionKey;
     this.temperature = options.temperature;
     this.maxTokens = options.maxTokens;
     this.responseFormat = options.responseFormat;
@@ -180,9 +213,15 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
 
   /**
    * Assemble the request headers. ``User-Agent`` is set first so any
-   * ``extraHeaders`` (and the per-call ``sessionHeader``) layer on top
-   * without silently dropping the SDK attribution, and the ``Authorization``
-   * header is only added when a key is present (keyless gateways omit it).
+   * ``extraHeaders`` (and the per-call session headers) layer on top without
+   * silently dropping the SDK attribution, and the ``Authorization`` header is
+   * only added when a key is present (keyless gateways omit it).
+   *
+   * The two session headers are emitted INDEPENDENTLY, each gated on its own
+   * config (decoupled from ``sessionUserPrefix`` and from each other):
+   *  - ``sessionIdHeader`` (+ ``callId``) → ``` `${sessionIdPrefix}${callId}` ```
+   *  - ``sessionKeyHeader`` (+ ``sessionKey``) → the static ``sessionKey`` value.
+   * ``sessionKey`` is a credential-grade memory scope and is never logged.
    */
   private buildHeaders(callId?: string): Record<string, string> {
     const headers: Record<string, string> = {
@@ -193,9 +232,15 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
     if (this.apiKey) {
       headers.Authorization = `Bearer ${this.apiKey}`;
     }
-    if (this.sessionUserPrefix !== undefined && callId && this.sessionHeader) {
-      // Carries the raw call id as a secondary session signal.
-      headers[this.sessionHeader] = callId;
+    if (this.sessionIdHeader && callId) {
+      // Per-call session id for session / transcript continuity.
+      headers[this.sessionIdHeader] = `${this.sessionIdPrefix ?? ''}${callId}`;
+    }
+    if (this.sessionKeyHeader && this.sessionKey) {
+      // Truthy check (not `!== undefined`): an empty-string session key is not
+      // a meaningful memory scope — treat it as unset rather than emitting a
+      // confusing empty header. Value is the raw key (never logged).
+      headers[this.sessionKeyHeader] = this.sessionKey;
     }
     return headers;
   }

@@ -59,8 +59,9 @@ class LLM(OpenAICompatibleLLMProvider):
     Defaults:
 
     * ``session_user_prefix`` → ``"patter-call-"``
-    * ``session_header`` → ``"x-openclaw-session-key"`` (OpenClaw keys sessions
-      off both the ``user`` field and this header)
+    * ``session_id_header`` → ``"x-openclaw-session-key"`` carrying the raw
+      ``call_id`` (``session_id_prefix=""``). OpenClaw keys sessions off both
+      the ``user`` field and this header.
     """
 
     provider_key: ClassVar[str] = "openclaw"
@@ -87,6 +88,7 @@ class LLM(OpenAICompatibleLLMProvider):
             api_key_env=_OPENCLAW_API_KEY_ENV,
             timeout=timeout,
             session_user_prefix="patter-call-",
-            session_header=_OPENCLAW_SESSION_HEADER,
+            session_id_header=_OPENCLAW_SESSION_HEADER,
+            session_id_prefix="",
             **kwargs,
         )

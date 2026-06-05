@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from getpatter.services.llm_loop import LLMLoop
+from getpatter.services.llm_loop import LLMLoop, _stream_accepts_call_id
 
 
 def _make_loop(provider) -> LLMLoop:
@@ -57,6 +57,22 @@ class _LegacyProvider:
         yield {"type": "text", "content": "legacy"}
 
 
+class _MinimalProvider:
+    """A minimal custom provider whose stream takes NO call_id and NO **kwargs.
+
+    This is the case the inspect.signature guard protects: the loop must NOT
+    pass call_id, or this raises ``TypeError: stream() got an unexpected
+    keyword argument 'call_id'``.
+    """
+
+    def __init__(self) -> None:
+        self.stream_called = False
+
+    async def stream(self, messages, tools=None, *, cancel_event=None):
+        self.stream_called = True
+        yield {"type": "text", "content": "minimal"}
+
+
 @pytest.mark.unit
 async def test_run_forwards_call_id_from_context_into_provider_stream() -> None:
     provider = _RecordingProvider()
@@ -96,3 +112,56 @@ async def test_legacy_provider_ignores_call_id_without_error() -> None:
     assert tokens == ["legacy"]
     # The loop did pass call_id; the legacy provider absorbed it via **kwargs.
     assert provider.seen_kwargs.get("call_id") == "abc"
+
+
+@pytest.mark.unit
+async def test_minimal_provider_without_call_id_param_runs_without_error() -> None:
+    """A custom provider whose stream lacks call_id AND **kwargs must still run
+    — the loop's signature guard skips call_id for it (no TypeError)."""
+    provider = _MinimalProvider()
+    loop = _make_loop(provider)
+
+    tokens = []
+    async for token in loop.run("Hi", [], {"call_id": "abc"}):
+        tokens.append(token)
+
+    assert provider.stream_called is True
+    assert tokens == ["minimal"]
+
+
+@pytest.mark.unit
+def test_signature_guard_classifies_providers() -> None:
+    """The introspection guard accepts providers that declare call_id or
+    **kwargs and rejects the minimal one — the load-bearing back-compat check."""
+    assert _stream_accepts_call_id(_RecordingProvider()) is True  # declares call_id
+    assert _stream_accepts_call_id(_LegacyProvider()) is True  # **kwargs
+    assert _stream_accepts_call_id(_MinimalProvider()) is False
+
+
+@pytest.mark.unit
+def test_signature_guard_defaults_to_no_call_id_when_uninspectable(monkeypatch) -> None:
+    """When ``inspect.signature`` cannot introspect a provider's ``stream``
+    (some C-level callables raise ValueError/TypeError), the guard catches it
+    and defaults to the safe no-call_id path rather than propagating.
+
+    Forces ``inspect.signature`` to raise so the ``except`` branch is actually
+    exercised — relying on a specific builtin being uninspectable is brittle
+    (e.g. ``range`` *is* inspectable on CPython 3.11+ via ``__text_signature__``).
+    """
+    import getpatter.services.llm_loop as _loop
+
+    def _raise(*_args, **_kwargs):
+        raise ValueError("no signature available")
+
+    monkeypatch.setattr(_loop.inspect, "signature", _raise)
+
+    class _Uninspectable:
+        # Declares call_id, but the forced signature() failure must still drive
+        # the guard into its except branch → conservative no-call_id path.
+        async def stream(
+            self, messages, tools=None, *, cancel_event=None, call_id=None
+        ):
+            yield {"type": "text", "content": ""}
+
+    # Must not raise, and must take the conservative (no call_id) path.
+    assert _stream_accepts_call_id(_Uninspectable()) is False

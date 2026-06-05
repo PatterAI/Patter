@@ -16,6 +16,7 @@ __all__ = [
 ]
 
 import asyncio
+import inspect
 import json
 import logging
 from dataclasses import dataclass
@@ -34,6 +35,40 @@ from typing import (
 from getpatter.observability.tracing import SPAN_LLM, SPAN_TOOL, start_span
 
 logger = logging.getLogger("getpatter")
+
+
+# Per-provider-TYPE memo of whether ``stream`` accepts a ``call_id`` keyword.
+# Built-in providers declare ``call_id`` (or ``**kwargs``) and hit the fast
+# path after the first call; a user's minimal custom provider whose ``stream``
+# is ``(self, messages, tools=None, *, cancel_event=None)`` is detected once and
+# called WITHOUT ``call_id`` thereafter — otherwise it would raise TypeError.
+_provider_accepts_call_id: dict[type, bool] = {}
+
+
+def _stream_accepts_call_id(provider: object) -> bool:
+    """Whether ``provider.stream`` tolerates a ``call_id`` keyword argument.
+
+    True when the signature declares a parameter named ``call_id`` OR accepts
+    ``**kwargs`` (``VAR_KEYWORD``). Cached per provider type to keep the hot
+    path cheap. Some callables (C-level, ``functools.partial`` without
+    ``__wrapped__``) refuse introspection — those default to ``False`` so the
+    safe no-``call_id`` path is taken rather than risking a new crash site.
+    """
+    provider_type = type(provider)
+    cached = _provider_accepts_call_id.get(provider_type)
+    if cached is not None:
+        return cached
+    accepts = False
+    try:
+        sig = inspect.signature(provider.stream)
+        for param in sig.parameters.values():
+            if param.name == "call_id" or param.kind is inspect.Parameter.VAR_KEYWORD:
+                accepts = True
+                break
+    except (ValueError, TypeError):  # pragma: no cover - exotic callables
+        accepts = False
+    _provider_accepts_call_id[provider_type] = accepts
+    return accepts
 
 
 # ---------------------------------------------------------------------------
@@ -926,12 +961,25 @@ class LLMLoop:
             _span_cm.__enter__()
             _span_exc_info: tuple = (None, None, None)
             try:
-                async for chunk in self._provider.stream(
-                    messages,
-                    self._openai_tools,
-                    cancel_event=cancel_event,
-                    call_id=call_context.get("call_id"),
-                ):
+                # Only thread ``call_id`` into providers whose ``stream``
+                # accepts it (or ``**kwargs``). A user's minimal custom provider
+                # with ``(messages, tools=None, *, cancel_event=None)`` would
+                # otherwise raise TypeError on the added keyword. ``cancel_event``
+                # predates this and every Protocol implementer tolerates it.
+                if _stream_accepts_call_id(self._provider):
+                    stream_iter = self._provider.stream(
+                        messages,
+                        self._openai_tools,
+                        cancel_event=cancel_event,
+                        call_id=call_context.get("call_id"),
+                    )
+                else:
+                    stream_iter = self._provider.stream(
+                        messages,
+                        self._openai_tools,
+                        cancel_event=cancel_event,
+                    )
+                async for chunk in stream_iter:
                     chunk_type = chunk.get("type")
 
                     if chunk_type == "text":

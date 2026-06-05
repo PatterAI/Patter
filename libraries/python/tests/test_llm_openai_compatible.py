@@ -105,16 +105,122 @@ def test_session_user_field_omitted_without_call_id() -> None:
 
 
 @pytest.mark.unit
-def test_session_header_emitted_as_per_call_extra_header() -> None:
+def test_session_id_header_emits_prefixed_value_independent_of_user() -> None:
+    """session_id_header + session_id_prefix produce
+    extra_headers[name]=f'{prefix}{call_id}' WITHOUT needing the user field."""
     provider = OpenAICompatibleLLMProvider(
         base_url="http://127.0.0.1:9/v1",
         model="m",
-        session_user_prefix="patter-call-",
-        session_header="x-openclaw-session-key",
+        # Note: no session_user_prefix — the header stands alone.
+        session_id_header="X-Hermes-Session-Id",
+        session_id_prefix="patter-call-",
     )
     kwargs = provider._build_completion_kwargs(
         [{"role": "user", "content": "hi"}], None, call_id="abc"
     )
+    assert kwargs["extra_headers"] == {"X-Hermes-Session-Id": "patter-call-abc"}
+    # Decoupled: no user field because session_user_prefix is unset.
+    assert "user" not in kwargs
+
+
+@pytest.mark.unit
+def test_session_key_header_emits_static_value_regardless_of_call_id() -> None:
+    """session_key_header + session_key emit a STATIC header (no call_id
+    interpolation), present even when no call_id is available."""
+    provider = OpenAICompatibleLLMProvider(
+        base_url="http://127.0.0.1:9/v1",
+        model="m",
+        session_key_header="X-Hermes-Session-Key",
+        session_key="mem-scope-123",
+    )
+    # No call_id at all — the memory-scope header is per-call-independent.
+    kwargs = provider._build_completion_kwargs(
+        [{"role": "user", "content": "hi"}], None, call_id=None
+    )
+    assert kwargs["extra_headers"] == {"X-Hermes-Session-Key": "mem-scope-123"}
+
+
+@pytest.mark.unit
+def test_session_key_header_without_value_is_omitted() -> None:
+    """session_key_header set but session_key None => header omitted (opt-in)."""
+    provider = OpenAICompatibleLLMProvider(
+        base_url="http://127.0.0.1:9/v1",
+        model="m",
+        session_key_header="X-Hermes-Session-Key",
+        # session_key intentionally unset.
+    )
+    kwargs = provider._build_completion_kwargs(
+        [{"role": "user", "content": "hi"}], None, call_id="abc"
+    )
+    assert "extra_headers" not in kwargs
+
+
+@pytest.mark.unit
+def test_all_three_signals_combine_without_clobbering_existing_headers() -> None:
+    """user + session_id_header + session_key_header merge into one
+    extra_headers dict that also preserves a pre-existing header."""
+    provider = OpenAICompatibleLLMProvider(
+        base_url="http://127.0.0.1:9/v1",
+        model="m",
+        session_user_prefix="patter-call-",
+        session_id_header="X-Hermes-Session-Id",
+        session_id_prefix="patter-call-",
+        session_key_header="X-Hermes-Session-Key",
+        session_key="mem-9",
+    )
+    # Simulate a pre-existing extra_headers on the kwargs (future-safe merge).
+    import getpatter.services.llm_loop as base_mod
+
+    orig = base_mod.OpenAILLMProvider._build_completion_kwargs
+
+    def _with_existing(self, messages, tools):
+        kw = orig(self, messages, tools)
+        kw["extra_headers"] = {"X-Pre": "keep"}
+        return kw
+
+    base_mod.OpenAILLMProvider._build_completion_kwargs = _with_existing
+    try:
+        kwargs = provider._build_completion_kwargs(
+            [{"role": "user", "content": "hi"}], None, call_id="abc"
+        )
+    finally:
+        base_mod.OpenAILLMProvider._build_completion_kwargs = orig
+
+    assert kwargs["user"] == "patter-call-abc"
+    assert kwargs["extra_headers"] == {
+        "X-Pre": "keep",
+        "X-Hermes-Session-Id": "patter-call-abc",
+        "X-Hermes-Session-Key": "mem-9",
+    }
+
+
+@pytest.mark.unit
+def test_no_session_signals_is_byte_identical_to_parent() -> None:
+    """None of the three signals set => no `user`, no `extra_headers`."""
+    provider = OpenAICompatibleLLMProvider(base_url="http://127.0.0.1:9/v1", model="m")
+    kwargs = provider._build_completion_kwargs(
+        [{"role": "user", "content": "hi"}], None, call_id="abc"
+    )
+    assert "user" not in kwargs
+    assert "extra_headers" not in kwargs
+
+
+@pytest.mark.unit
+def test_openclaw_shape_config_yields_raw_call_id_value() -> None:
+    """Regression: OpenClaw uses session_id_header with an empty prefix, so the
+    header value is the RAW call id — wire-identical to the old session_header
+    behaviour."""
+    provider = OpenAICompatibleLLMProvider(
+        base_url="http://127.0.0.1:9/v1",
+        model="m",
+        session_user_prefix="patter-call-",
+        session_id_header="x-openclaw-session-key",
+        session_id_prefix="",
+    )
+    kwargs = provider._build_completion_kwargs(
+        [{"role": "user", "content": "hi"}], None, call_id="abc"
+    )
+    assert kwargs["user"] == "patter-call-abc"
     assert kwargs["extra_headers"] == {"x-openclaw-session-key": "abc"}
 
 
@@ -240,6 +346,35 @@ async def test_stream_without_session_prefix_omits_user_on_the_wire() -> None:
         pass
 
     # Backward compatible: no `user` field unless the caller opts in.
+    assert "user" not in captured
+
+
+@pytest.mark.mocked
+async def test_stream_sends_session_id_header_on_the_wire() -> None:
+    """A provider configured with session_id_header puts the per-call header
+    onto the create() call via extra_headers — independent of the user field."""
+    provider = OpenAICompatibleLLMProvider(
+        base_url="http://127.0.0.1:9/v1",
+        model="m",
+        session_id_header="X-Hermes-Session-Id",
+        session_id_prefix="patter-call-",
+    )
+
+    captured: dict = {}
+
+    async def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _FakeStream([_Chunk(content="ok")])
+
+    provider._client.chat.completions.create = fake_create
+
+    async for _ in provider.stream(
+        [{"role": "user", "content": "hi"}], None, call_id="abc"
+    ):
+        pass
+
+    assert captured["extra_headers"] == {"X-Hermes-Session-Id": "patter-call-abc"}
+    # No user field — session_user_prefix unset.
     assert "user" not in captured
 
 

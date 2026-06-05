@@ -144,7 +144,6 @@ def _make_handler(*, llm_error_message: str | None, tts) -> PipelineStreamHandle
 
 
 @pytest.mark.mocked
-@pytest.mark.asyncio
 class TestFallbackSpokenOnError:
     async def test_fallback_line_is_synthesized_and_spoken(self) -> None:
         tts = _FakeTTS()
@@ -166,7 +165,6 @@ class TestFallbackSpokenOnError:
 
 
 @pytest.mark.mocked
-@pytest.mark.asyncio
 class TestNoFallbackWhenUnset:
     async def test_no_fallback_synthesized_when_field_is_none(self) -> None:
         tts = _FakeTTS()
@@ -198,7 +196,6 @@ class TestNoFallbackWhenUnset:
 
 
 @pytest.mark.mocked
-@pytest.mark.asyncio
 class TestFallbackGatedOnEmittedAudio:
     async def test_fallback_fires_when_partial_tokens_produced_no_audio(self) -> None:
         """Partial tokens buffered by the chunker but never synthesized → the
@@ -242,7 +239,6 @@ class TestFallbackGatedOnEmittedAudio:
 
 
 @pytest.mark.mocked
-@pytest.mark.asyncio
 class TestBargeInSuppressesFallback:
     async def test_fallback_not_spoken_when_not_speaking(self) -> None:
         tts = _FakeTTS()
@@ -271,7 +267,6 @@ class TestBargeInSuppressesFallback:
 
 
 @pytest.mark.mocked
-@pytest.mark.asyncio
 class TestExercisesRealSpeakPrimitive:
     async def test_fails_if_synthesize_sentence_is_not_real(self) -> None:
         tts = _FakeTTS()

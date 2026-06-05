@@ -45,6 +45,27 @@ class SignalOnlyProvider implements LLMProvider {
   }
 }
 
+/**
+ * The most minimal custom provider: a ``stream(messages, tools)`` that declares
+ * NO third ``opts`` parameter at all. Proves the loop's extra positional
+ * options arg silently no-ops in TS (unlike Python keyword args, which require
+ * an inspect.signature guard) — no guard code needed on the TS side.
+ */
+class NoOptsProvider implements LLMProvider {
+  static readonly providerKey = 'no_opts';
+  public callCount = 0;
+
+  // Intentionally omits the opts parameter — the loop still passes streamOpts
+  // as a third positional argument, which a generator ignoring it discards.
+  async *stream(
+    _messages: Array<Record<string, unknown>>,
+    _tools?: Array<Record<string, unknown>> | null,
+  ): AsyncGenerator<LLMChunk, void, unknown> {
+    this.callCount += 1;
+    yield { type: 'text', content: 'done' };
+  }
+}
+
 async function drain(gen: AsyncGenerator<string, void, unknown>): Promise<string> {
   let out = '';
   for await (const tok of gen) out += tok;
@@ -88,5 +109,17 @@ describe('[unit] LLMLoop call_id threading', () => {
     // Backward compatible: the provider runs to completion, reads only signal.
     expect(out).toBe('hello');
     expect(provider.sawAbort).toBe(false);
+  });
+
+  it('runs a minimal provider whose stream omits the opts param entirely (no guard needed)', async () => {
+    const provider = new NoOptsProvider();
+    const loop = new LLMLoop('', 'm', 'be helpful', null, provider);
+
+    // call_id is present, so the loop builds and passes streamOpts as the third
+    // positional arg. The provider's two-arg generator simply ignores it.
+    const out = await drain(loop.run('hi', [], { call_id: 'abc' }));
+
+    expect(out).toBe('done');
+    expect(provider.callCount).toBe(1);
   });
 });
