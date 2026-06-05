@@ -420,6 +420,18 @@ export interface LLMChunk {
  */
 export interface LLMStreamOptions {
   signal?: AbortSignal;
+  /**
+   * Stable per-call id (the same value the stream handler builds into
+   * ``callCtx.call_id``). Threaded through purely so session-aware providers
+   * — currently {@link OpenAICompatibleLLMProvider} and its Hermes / OpenClaw
+   * presets — can emit the OpenAI ``user`` field as ``patter-call-<callId>``,
+   * giving the upstream agent runtime one durable session per phone call.
+   *
+   * Additive and optional: every existing provider reads only ``signal`` and
+   * is unaffected. When unset (or when a provider has no session-continuity
+   * config) no ``user`` field is sent — fully backward compatible.
+   */
+  callId?: string;
 }
 
 /**
@@ -909,13 +921,25 @@ export class LLMLoop {
     const hasAfterLlmChunk = Boolean(hookExecutor?.hasAfterLlmChunk());
     const allEmittedText: string[] = [];
 
+    // Thread the stable per-call id into the provider stream options so
+    // session-aware providers (OpenAI-compatible / Hermes / OpenClaw) can
+    // emit the ``user`` field for one runtime session per phone call. Purely
+    // additive: providers that read only ``signal`` ignore it. Only spread a
+    // string call id — leave ``opts`` untouched otherwise so existing
+    // behaviour is byte-identical when no call id is present.
+    const callId = callContext.call_id;
+    const streamOpts: LLMStreamOptions | undefined =
+      typeof callId === 'string' && callId.length > 0
+        ? { ...opts, callId }
+        : opts;
+
     for (let iter = 0; iter < maxIterations; iter++) {
       const toolCallsAccumulated = new Map<number, ToolCallAccumulator>();
       const textParts: string[] = [];
       let hasToolCalls = false;
       let usageChunkReceived = false;
 
-      for await (const chunk of this.provider.stream(messages, this.openaiTools, opts)) {
+      for await (const chunk of this.provider.stream(messages, this.openaiTools, streamOpts)) {
         if (chunk.type === 'text' && chunk.content) {
           // Tier 1 — per-token sync transform. Cheap, no buffering.
           const content = hasAfterLlmChunk && hookExecutor

@@ -2776,6 +2776,27 @@ export class StreamHandler {
           // Fix 8: record turn as interrupted so it does not leak in metrics when
           // the LLM throws without emitting any text.
           this.metricsAcc.recordTurnInterrupted();
+          // Opt-in spoken fallback: speak the configured line iff no audio was
+          // emitted this turn (``!ttsFirstByteSent.value`` — no PCM chunk has
+          // reached the carrier, i.e. the caller heard SILENCE) and the agent
+          // still owns the floor (``this.isSpeaking``). Gated on emitted audio
+          // rather than received tokens, so a provider that streams partial
+          // tokens ('Let me check…') and then times out before a sentence
+          // boundary (the chunker buffered them, TTS never ran) still triggers
+          // the fallback. Reuses the normal per-sentence TTS primitive so the
+          // fallback is a regular turn utterance (barge-in honoured per chunk;
+          // closed by the ``finally`` ``endSpeakingWithGrace``). A non-empty
+          // string is required — unset / empty preserves today's
+          // silence-on-error behaviour. Self-synthesis failure must degrade to
+          // that silence, never crash the turn.
+          const fallback = this.deps.agent.llmErrorMessage;
+          if (fallback && !ttsFirstByteSent.value && this.isSpeaking) {
+            try {
+              await this.synthesizeSentence(fallback, hookExecutor, hookCtx, ttsFirstByteSent);
+            } catch (err) {
+              getLogger().error(`llmErrorMessage fallback synthesis failed (${label}):`, err);
+            }
+          }
         }
       }
 

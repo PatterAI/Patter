@@ -165,8 +165,12 @@ class AnthropicLLMProvider:
         tools: list[dict] | None = None,
         *,
         cancel_event: asyncio.Event | None = None,
+        call_id: str | None = None,
     ) -> AsyncIterator[dict]:
         """Stream chunks from Anthropic's Messages API.
+
+        ``call_id`` is accepted for protocol parity with session-aware
+        providers but ignored — Anthropic has no per-call session model.
 
         Translates OpenAI-style ``messages``/``tools`` to Anthropic's
         shape, then normalises the event stream back into the Patter

@@ -512,6 +512,18 @@ export interface AgentOptions {
    */
   readonly language?: string;
   readonly firstMessage?: string;
+  /**
+   * Opt-in spoken fallback for pipeline mode when the per-turn LLM stream
+   * throws (gateway-down / 120 s timeout) BEFORE any assistant text was
+   * spoken. Agent-runtime providers (Hermes / OpenClaw) run tools+memory
+   * internally so a turn can take 30-90 s; on failure the caller currently
+   * hears SILENCE then a silent turn-end. When set to a non-empty string,
+   * the SDK synthesizes and speaks this line through the normal TTS turn
+   * lifecycle (subject to barge-in). ``undefined`` (default) preserves
+   * today's behaviour: nothing is spoken on LLM error. Pipeline mode only.
+   * Mirrors Python ``llm_error_message`` on ``Patter.agent()`` / ``Agent``.
+   */
+  readonly llmErrorMessage?: string;
   /** Tool definitions — ``Tool`` class instances from ``getpatter``. */
   readonly tools?: ReadonlyArray<ToolInstance>;
   /**

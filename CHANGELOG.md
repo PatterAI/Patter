@@ -1,5 +1,33 @@
 ## Unreleased
 
+### Added
+
+- **`llm_error_message` / `llmErrorMessage` — opt-in spoken fallback when the
+  pipeline-mode LLM stream raises before any text is spoken.** Agent-runtime
+  providers (HermesLLM, OpenClawLLM, OpenAICompatibleLLM) may take 30-90 s to
+  complete a turn (tools, memory, skills); on gateway-down or timeout the caller
+  previously heard silence then a silent turn-end. Set
+  `llm_error_message="Sorry, I'm having trouble right now."` (Python) /
+  `llmErrorMessage: "Sorry, I'm having trouble right now."` (TypeScript) on the
+  agent to speak that line through the normal TTS path (subject to barge-in).
+  Four-part trigger condition: (1) a real LLM error (not a clean barge-in
+  abort), (2) zero assistant *audio* emitted this turn — gated on whether a PCM
+  chunk actually reached the carrier (`first_tts_chunk` / `ttsFirstByteSent`),
+  not on whether tokens were received, so a provider that streams partial tokens
+  ("Let me check…") and then times out before a sentence boundary (the chunker
+  buffered them, TTS never ran, the caller heard silence) still triggers the
+  fallback, while a turn that already spoke a full sentence does not double-speak,
+  (3) agent still owns the floor, (4) the field is set to a non-empty string.
+  `undefined` / `None` (default) preserves today's silence-on-error behaviour —
+  fully backward compatible. Pipeline mode only; Realtime and ConvAI surface
+  provider errors on their own audio path.
+  `libraries/python/getpatter/models.py` (`Agent.llm_error_message`),
+  `libraries/python/getpatter/client.py` (`Patter.agent(llm_error_message=...)`),
+  `libraries/python/getpatter/stream_handler.py`
+  (`PipelineStreamHandler._process_streaming_response` error branch),
+  `libraries/typescript/src/types.ts` (`AgentOptions.llmErrorMessage`),
+  `libraries/typescript/src/stream-handler.ts` (`runPipelineLlm` catch branch).
+
 ## 0.6.4 (2026-06-05)
 
 ### Security
@@ -28,6 +56,51 @@
 
 ### Added
 
+- **Patter as a voice shell in front of an agent runtime — three new
+  pipeline-mode LLM providers (`OpenAICompatibleLLM`, `HermesLLM`,
+  `OpenClawLLM`).** Drive a phone call where the LLM is an external,
+  OpenAI-compatible agent runtime reached at `POST {base_url}/chat/completions`:
+  Patter owns the carrier leg, STT, turn-taking / VAD / barge-in, and TTS, and
+  each conversation turn is answered by the runtime (which can run its own
+  tools, memory, and skills before replying). Used like any other pipeline LLM
+  — `phone.agent(llm=HermesLLM())` (Python) / `phone.agent({ llm: new
+  HermesLLM() })` (TypeScript).
+  - **`OpenAICompatibleLLM`** (Python `getpatter/llm/openai_compatible.py`,
+    TypeScript `src/llm/openai-compatible.ts`) — the generic provider for *any*
+    OpenAI-compatible chat endpoint: Hermes, OpenClaw, Ollama, vLLM, LM Studio,
+    or a custom gateway. `base_url` and `model` are required; `timeout` defaults
+    to **60 s** (configurable) so a runtime that runs tools mid-turn isn't cut
+    off — the base OpenAI provider's shorter ceiling is unchanged for raw
+    inference. Keyless local gateways (Ollama / vLLM / LM Studio) are supported:
+    pass no key and the request goes out without an `Authorization` header.
+    `extra_headers` / `extraHeaders` merge after the `getpatter/<version>`
+    User-Agent so it can't be silently clobbered.
+  - **`HermesLLM`** (Python `getpatter/llm/hermes.py`, TypeScript
+    `src/llm/hermes.ts`) — thin preset over `OpenAICompatibleLLM` for the Hermes
+    agent runtime: `base_url` defaults to `http://127.0.0.1:8642/v1`, `model` to
+    `hermes-agent` (env `API_SERVER_MODEL_NAME` fallback), api key from env
+    `API_SERVER_KEY`, `timeout` **120 s**.
+  - **`OpenClawLLM`** (Python `getpatter/llm/openclaw.py`, TypeScript
+    `src/llm/openclaw.ts`) — thin preset over `OpenAICompatibleLLM` for the
+    OpenClaw agent runtime: takes an `agent` id (e.g. `receptionist`), validated
+    and mapped to `model="openclaw/<agent>"` using the **same** charset rule and
+    namespaced pass-through as the shipped `consult` OpenClaw preset; `base_url`
+    defaults to `http://127.0.0.1:18789/v1`, api key from env `OPENCLAW_API_KEY`,
+    `timeout` **120 s**.
+- **Per-call session continuity for the agent-runtime providers (opt-in).** When
+  `session_user_prefix` / `sessionUserPrefix` is set, each provider emits the
+  OpenAI `user` field as a stable `patter-call-<call_id>` so the runtime derives
+  exactly one session per phone call (Hermes and OpenClaw both key sessions off
+  `user`); an optional `session_header` / `sessionHeader` (the OpenClaw preset
+  defaults it to `x-openclaw-session-key`) carries the same id as a secondary.
+  The `HermesLLM` and `OpenClawLLM` presets enable this by default; the generic
+  provider leaves it **off** unless opted in. To make `call_id` reach the
+  provider, `LLMLoop.run` now threads it through to `provider.stream()` — Python
+  via a new optional `call_id` keyword on the `LLMProvider.stream` protocol,
+  TypeScript via a new optional `callId` field on `LLMStreamOptions`. Both are
+  additive and optional, so every existing provider is unaffected and continues
+  to behave identically. `libraries/python/getpatter/services/llm_loop.py`,
+  `libraries/typescript/src/llm-loop.ts`.
 - **`allow_insecure_dashboard` / `allowInsecureDashboard` escape hatch (opt-in,
   default off).** New optional config on `Patter(...)` (Python) and `serve(...)`
   `ServeOptions` (TypeScript), defaulting to `False` / `false`. When the

@@ -3071,9 +3071,14 @@ class PipelineStreamHandler(StreamHandler):
                 if not self._is_speaking:
                     return False  # barge-in fired during the hook await
 
-                if first_tts_chunk[0] and self.metrics is not None:
-                    self.metrics.record_tts_first_byte()
+                if first_tts_chunk[0]:
+                    # Flip the per-turn "first PCM chunk emitted" flag BEFORE
+                    # the metrics branch so it is a reliable "audio reached the
+                    # carrier" signal even when ``self.metrics is None`` — the
+                    # llm_error_message fallback gate depends on it.
                     first_tts_chunk[0] = False
+                    if self.metrics is not None:
+                        self.metrics.record_tts_first_byte()
                     # Speech-event: per-turn first TTS audio chunk. Idempotent
                     # in the dispatcher; fires for the first sentence's first
                     # synthesized chunk per turn.
@@ -3189,6 +3194,29 @@ class PipelineStreamHandler(StreamHandler):
                 # does not leak an open turn when LLM throws mid-stream.
                 if self.metrics is not None and self.metrics.turn_active:
                     self.metrics.record_turn_interrupted()
+
+                # Opt-in spoken fallback: when the LLM stream raised BEFORE any
+                # assistant audio was emitted this turn and the agent configured
+                # a non-empty ``llm_error_message``, speak that line through the
+                # normal TTS turn lifecycle (subject to barge-in). Gated on
+                # ``first_tts_chunk[0]`` — still ``True`` means no PCM chunk has
+                # been sent to the carrier yet, i.e. the caller heard SILENCE —
+                # rather than on token receipt, so a provider that streams
+                # partial tokens ('Let me check…') and then times out before a
+                # sentence boundary (the chunker never produced a complete
+                # sentence, so TTS never ran) still triggers the fallback. Also
+                # gated on ``_is_speaking`` so a concurrent barge-in that flipped
+                # the floor does not get talked over. Wrapped in its own guard so
+                # a TTS outage on top of an LLM outage degrades to today's
+                # silence rather than raising out of the handler.
+                fallback = getattr(self.agent, "llm_error_message", None)
+                if fallback and first_tts_chunk[0] and self._is_speaking:
+                    try:
+                        await self._synthesize_sentence(
+                            fallback, hook_executor, hook_ctx, first_tts_chunk
+                        )
+                    except Exception:  # pragma: no cover - defensive
+                        logger.exception("llm_error_message fallback synthesis failed")
 
             if self.metrics is not None:
                 self.metrics.record_llm_complete()

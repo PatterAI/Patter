@@ -419,6 +419,16 @@ class Agent:
     model: str = "gpt-realtime-mini"
     language: str = "en"
     first_message: str = ""
+    # Opt-in spoken fallback for pipeline mode when the per-turn LLM stream
+    # raises (gateway-down / 120 s timeout) BEFORE any assistant text was
+    # spoken. Agent-runtime providers (Hermes / OpenClaw) run tools+memory
+    # internally so a turn can take 30-90 s; on failure the caller currently
+    # hears SILENCE then a silent turn-end. When set to a non-empty string,
+    # the SDK synthesizes and speaks this line through the normal TTS turn
+    # lifecycle (subject to barge-in). ``None`` (default) preserves today's
+    # behaviour: nothing is spoken on LLM error. Pipeline mode only —
+    # Realtime / ConvAI surface provider errors on their own audio path.
+    llm_error_message: str | None = None
     tools: tuple[dict, ...] | None = None
     provider: ProviderMode = "openai_realtime"
     stt: STTConfig | None = None  # which STT provider to use in pipeline mode

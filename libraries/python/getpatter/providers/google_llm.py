@@ -167,8 +167,12 @@ class GoogleLLMProvider:
         tools: list[dict] | None = None,
         *,
         cancel_event: asyncio.Event | None = None,
+        call_id: str | None = None,
     ) -> AsyncIterator[dict]:
         """Stream chunks from Gemini's ``generate_content_stream``.
+
+        ``call_id`` is accepted for protocol parity with session-aware
+        providers but ignored — Gemini has no per-call session model.
 
         ``cancel_event`` (set on barge-in by the stream handler) is checked
         between chunks and short-circuits the stream so the underlying

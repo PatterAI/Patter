@@ -404,6 +404,7 @@ class LLMProvider(Protocol):
         tools: list[dict] | None = None,
         *,
         cancel_event: asyncio.Event | None = None,
+        call_id: str | None = None,
     ) -> AsyncIterator[dict]:
         """Yield streaming chunks for the given messages and tools.
 
@@ -417,6 +418,12 @@ class LLMProvider(Protocol):
         interruption" symptom. Optional for backward compatibility;
         providers that don't honour it are still usable but the user-facing
         interrupt-then-respond loop will be slower.
+
+        ``call_id`` is the stable per-call identifier (optional). Agent-runtime
+        providers (Hermes / OpenClaw / any OpenAI-compatible gateway) thread it
+        into the OpenAI ``user`` field so the runtime derives one session per
+        phone call. Existing providers ignore it harmlessly — it is purely
+        additive and OFF unless a provider opts in via ``session_user_prefix``.
         """
         ...  # pragma: no cover
 
@@ -605,6 +612,7 @@ class OpenAILLMProvider:
         tools: list[dict] | None = None,
         *,
         cancel_event: asyncio.Event | None = None,
+        call_id: str | None = None,
     ) -> AsyncIterator[dict]:
         """Yield normalised chunks from OpenAI Chat Completions.
 
@@ -622,6 +630,12 @@ class OpenAILLMProvider:
         is checked between upstream chunks and short-circuits the stream
         immediately so the next user transcript is not blocked behind a
         long-running fetch.
+
+        ``call_id`` (optional) is accepted for protocol parity with
+        session-aware providers but ignored here — the base OpenAI provider
+        emits no per-call ``user`` field. Subclasses (e.g. the
+        OpenAI-compatible agent-runtime provider) override ``stream`` to thread
+        it into ``_build_completion_kwargs``.
         """
         kwargs = self._build_completion_kwargs(messages, tools)
         response = await self._client.chat.completions.create(**kwargs)
@@ -913,7 +927,10 @@ class LLMLoop:
             _span_exc_info: tuple = (None, None, None)
             try:
                 async for chunk in self._provider.stream(
-                    messages, self._openai_tools, cancel_event=cancel_event
+                    messages,
+                    self._openai_tools,
+                    cancel_event=cancel_event,
+                    call_id=call_context.get("call_id"),
                 ):
                     chunk_type = chunk.get("type")
 

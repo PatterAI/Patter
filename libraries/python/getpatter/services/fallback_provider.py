@@ -112,6 +112,7 @@ class FallbackLLMProvider:
         tools: list[dict] | None = None,
         *,
         cancel_event: asyncio.Event | None = None,
+        call_id: str | None = None,
     ) -> AsyncIterator[str]:
         """Stream only the text deltas, flattening the chunk envelope.
 
@@ -119,7 +120,9 @@ class FallbackLLMProvider:
         assistant's text output and don't need tool-call or done markers.
         Mirrors the TypeScript SDK's ``fallback.completeStream`` shape.
         """
-        async for chunk in self.stream(messages, tools, cancel_event=cancel_event):
+        async for chunk in self.stream(
+            messages, tools, cancel_event=cancel_event, call_id=call_id
+        ):
             if chunk.get("type") == "text":
                 yield chunk.get("content", "")
 
@@ -129,6 +132,7 @@ class FallbackLLMProvider:
         tools: list[dict] | None = None,
         *,
         cancel_event: asyncio.Event | None = None,
+        call_id: str | None = None,
     ) -> AsyncIterator[dict]:
         """Try providers in sequence, yielding chunks from the first that succeeds.
 
@@ -138,6 +142,10 @@ class FallbackLLMProvider:
         built-in LLM loop calls ``provider.stream(..., cancel_event=...)`` on
         every turn, and a fallback that dropped the kwarg would raise
         ``TypeError`` on the first turn.
+
+        ``call_id`` (optional, per-call session id) is forwarded the same way so
+        session-aware delegate providers (Hermes / OpenClaw / OpenAI-compatible)
+        still receive it when wrapped by the fallback.
         """
         errors: list[Exception] = []
 
@@ -148,6 +156,7 @@ class FallbackLLMProvider:
             available_only=True,
             errors=errors,
             cancel_event=cancel_event,
+            call_id=call_id,
         ):
             if isinstance(chunk, _Done):
                 return
@@ -163,6 +172,7 @@ class FallbackLLMProvider:
             available_only=False,
             errors=errors,
             cancel_event=cancel_event,
+            call_id=call_id,
         ):
             if isinstance(chunk, _Done):
                 return
@@ -185,6 +195,7 @@ class FallbackLLMProvider:
         available_only: bool,
         errors: list[Exception],
         cancel_event: asyncio.Event | None = None,
+        call_id: str | None = None,
     ) -> AsyncIterator[dict | _Done]:
         """Try each provider, yielding chunks or a _Done sentinel."""
         for i, provider in enumerate(self._providers):
@@ -202,7 +213,7 @@ class FallbackLLMProvider:
 
                     yielded_tokens = False
                     async for chunk in provider.stream(
-                        messages, tools, cancel_event=cancel_event
+                        messages, tools, cancel_event=cancel_event, call_id=call_id
                     ):
                         yield chunk
                         yielded_tokens = True
