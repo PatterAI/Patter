@@ -459,6 +459,9 @@ export class Patter {
             working.openaiRealtimeNoiseReduction ?? engine.noiseReduction,
           realtimeTurnDetection:
             working.realtimeTurnDetection ?? engine.turnDetection,
+          openaiRealtimeGateResponseOnTranscript:
+            working.openaiRealtimeGateResponseOnTranscript ??
+            engine.gateResponseOnTranscript,
         };
         // Surface the engine's apiKey to local config so pipeline-mode
         // ``LLMLoop`` and Realtime adapter have a key when no onMessage is set.

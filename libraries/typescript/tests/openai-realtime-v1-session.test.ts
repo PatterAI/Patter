@@ -65,4 +65,26 @@ describe('[unit] OpenAIRealtimeAdapter v1 turn detection', () => {
       silence_duration_ms: 300,
     });
   });
+
+  it('OMITS create_response / interrupt_response in DEFAULT (server-managed) mode — v1 server defaults are already true (issue #154)', () => {
+    const config = buildV1({});
+    const td = config.turn_detection as Record<string, unknown>;
+    // v1 carries no gating keys. The OpenAI v1 server defaults
+    // (create_response: true, interrupt_response: true) ARE the server-managed
+    // behaviour we want, so omitting is equivalent to sending true.
+    expect('create_response' in td).toBe(false);
+    expect('interrupt_response' in td).toBe(false);
+  });
+
+  it('STILL omits the gating keys even in legacy opt-out mode (v1 has no response-gating wire shape)', () => {
+    // gateResponseOnTranscript only affects the GA wire keys. On v1 the keys
+    // are never emitted; the stream handler reads the flag via
+    // getGateResponseOnTranscript() to decide the client-managed path. (Note:
+    // buildAIAdapter routes the v1 engine through the GA adapter for telephony;
+    // buildSessionConfig is exercised by warmup / parked-connection paths.)
+    const config = buildV1({ gateResponseOnTranscript: true });
+    const td = config.turn_detection as Record<string, unknown>;
+    expect('create_response' in td).toBe(false);
+    expect('interrupt_response' in td).toBe(false);
+  });
 });

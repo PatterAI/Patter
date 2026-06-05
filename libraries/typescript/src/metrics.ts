@@ -315,6 +315,17 @@ export class CallMetricsAccumulator {
    */
   private _endpointSignalMissingCount = 0;
 
+  /**
+   * Monotonic per-call turn counter. Reserved at turn OPEN
+   * (``onAdapterSpeechStopped`` / ``speech_stopped``) via
+   * ``reserveTurnIndex()`` and threaded through the buffering pipeline into
+   * ``recordTurnComplete`` / ``recordTurnInterrupted`` as ``preReservedIndex``.
+   * This makes ``turn_index`` stable under drops / interrupts (previously it
+   * was assigned at completion as ``this._turns.length``, which shifted when a
+   * turn was dropped). Parity with Python ``_next_turn_index``.
+   */
+  private _nextTurnIndex = 0;
+
   constructor(opts: {
     callId: string;
     providerMode: string;
@@ -395,6 +406,21 @@ export class CallMetricsAccumulator {
     this._turnCommittedAt = null;
     this._onUserTurnCompletedDelayMs = null;
     this._eventBus?.emit('turn_started', { callId: this.callId });
+  }
+
+  /**
+   * Reserve and return the next monotonic turn index.
+   *
+   * Called once per turn at the moment the turn OPENS (Realtime:
+   * ``onAdapterSpeechStopped``). The returned index is threaded through the
+   * buffering pipeline and handed back to ``recordTurnComplete`` /
+   * ``recordTurnInterrupted`` as ``preReservedIndex`` so the emitted
+   * ``turn_index`` matches the live per-line transcript ordering even when a
+   * turn is dropped or interrupted between open and close. Parity with Python
+   * ``reserve_turn_index``.
+   */
+  reserveTurnIndex(): number {
+    return this._nextTurnIndex++;
   }
 
   /**
@@ -606,11 +632,14 @@ export class CallMetricsAccumulator {
    * ``user_text=''``. The caller treats ``null`` as "nothing to emit";
    * ``emitTurnMetrics`` is already null-safe.
    */
-  recordTurnComplete(agentText: string): TurnMetrics | null {
+  recordTurnComplete(agentText: string, preReservedIndex?: number): TurnMetrics | null {
     if (this._turnAlreadyClosed) return null;
     const latency = this._computeTurnLatency();
     const turn: TurnMetrics = {
-      turn_index: this._turns.length,
+      // Use the pre-reserved index (stable across drops/interrupts) when the
+      // caller threaded one through; otherwise fall back to the append
+      // position for back-compat with callers that never reserved.
+      turn_index: preReservedIndex ?? this._turns.length,
       user_text: this._turnUserText,
       agent_text: agentText,
       latency,
@@ -644,12 +673,12 @@ export class CallMetricsAccumulator {
    * a future refactor that reorders the bargein + LLM-unwind paths)
    * from overwriting a turn that the complete path already emitted.
    */
-  recordTurnInterrupted(): TurnMetrics | null {
+  recordTurnInterrupted(preReservedIndex?: number): TurnMetrics | null {
     if (this._turnStart === null) return null;
     if (this._turnAlreadyClosed) return null;
     const latency = this._computeTurnLatency();
     const turn: TurnMetrics = {
-      turn_index: this._turns.length,
+      turn_index: preReservedIndex ?? this._turns.length,
       user_text: this._turnUserText,
       agent_text: '[interrupted]',
       latency,

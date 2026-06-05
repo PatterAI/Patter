@@ -242,6 +242,73 @@ class TestOpenAIRealtimeAdapterIO:
         adapter._ws.send.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_cancel_response_sends_truncate_then_cancel(self) -> None:
+        """Full client-managed cancel (legacy opt-out): exactly two frames —
+        ``conversation.item.truncate`` FIRST, then ``response.cancel``."""
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
+
+        adapter = OpenAIRealtimeAdapter(api_key="sk-test")
+        adapter._ws = AsyncMock()
+        adapter._current_response_item_id = "msg_test_002"
+        await adapter.cancel_response()
+        sent = [json.loads(c[0][0]) for c in adapter._ws.send.call_args_list]
+        types = [f["type"] for f in sent]
+        assert types == ["conversation.item.truncate", "response.cancel"]
+
+    @pytest.mark.asyncio
+    async def test_truncate_playback_sends_truncate_only_no_cancel(self) -> None:
+        """Server-managed barge-in: ``truncate_playback`` sends ONLY
+        ``conversation.item.truncate`` — never ``response.cancel`` (the server
+        owns the cancel via ``interrupt_response: true``)."""
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
+
+        adapter = OpenAIRealtimeAdapter(api_key="sk-test")
+        adapter._ws = AsyncMock()
+        adapter._current_response_item_id = "msg_test_003"
+        await adapter.truncate_playback()
+        sent = [json.loads(c[0][0]) for c in adapter._ws.send.call_args_list]
+        types = [f["type"] for f in sent]
+        assert types == ["conversation.item.truncate"]
+        assert "response.cancel" not in types
+        # Tracking is reset so a stale truncate can't re-fire.
+        assert adapter._current_response_item_id is None
+
+    @pytest.mark.asyncio
+    async def test_truncate_playback_noop_when_no_item_in_flight(self) -> None:
+        """No item in flight => no frame sent (idempotent across phantom VAD)."""
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
+
+        adapter = OpenAIRealtimeAdapter(api_key="sk-test")
+        adapter._ws = AsyncMock()
+        adapter._current_response_item_id = None
+        await adapter.truncate_playback()
+        adapter._ws.send.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_truncate_playback_audio_end_ms_capped_by_wall_clock(self) -> None:
+        """``audio_end_ms`` is bounded by wall-clock playback time, not by the
+        byte-derived generated total (OpenAI streams audio at 5-10x real-time,
+        so the byte counter overshoots what the caller actually heard)."""
+        import time as _time
+
+        from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
+
+        adapter = OpenAIRealtimeAdapter(api_key="sk-test")
+        adapter._ws = AsyncMock()
+        adapter._current_response_item_id = "msg_test_004"
+        # Generated total claims 60 s of audio ...
+        adapter._current_response_audio_ms = 60_000
+        # ... but the first chunk arrived only ~20 ms ago in wall-clock time.
+        adapter._current_response_first_audio_at = _time.monotonic() - 0.02
+        await adapter.truncate_playback()
+        sent = json.loads(adapter._ws.send.call_args_list[0][0][0])
+        assert sent["type"] == "conversation.item.truncate"
+        assert sent["item_id"] == "msg_test_004"
+        assert sent["content_index"] == 0
+        # Bounded to the wall-clock max, nowhere near the 60 s byte total.
+        assert 0 <= sent["audio_end_ms"] <= 2000
+
+    @pytest.mark.asyncio
     async def test_send_text_creates_item_and_triggers_response(self) -> None:
         from getpatter.providers.openai_realtime import OpenAIRealtimeAdapter
 

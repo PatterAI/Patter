@@ -78,9 +78,17 @@ When set, Patter injects `session.reasoning = { effort: ... }` into the GA `sess
 
 Set `input_audio_transcription_model` to override `audio.input.transcription.model`. The same identifiers as the beta endpoint apply — see the [streaming-transcription table on the OpenAI Realtime page](/python-sdk/providers/openai-realtime#streaming-transcription) for the full list (`whisper-1`, `gpt-4o-mini-transcribe`, `gpt-4o-transcribe`, `gpt-realtime-whisper`).
 
+## Server-managed turn-taking
+
+By default the GA adapter sets `create_response: true` and `interrupt_response: true` in `session.update.turn_detection`, so the **OpenAI server owns turn-taking end to end**: it runs VAD, decides end-of-turn, creates the response as soon as the caller stops speaking, and cancels its own response on barge-in. The input transcript (Whisper) is pure observability — it never gates or cancels the reply, so the transcription-model choice has no effect on reply latency.
+
+On Patter's WebSocket transport the client still clears the carrier playout buffer and sends `conversation.item.truncate` for the offset the caller actually heard (OpenAI auto-truncates only on WebRTC/SIP); it does not send a redundant `response.cancel`, run a client-side gate, or re-anchor turn metrics.
+
+To restore the legacy client-managed path, set `gate_response_on_transcript=True` on the engine marker (or `realtime_gate_response_on_transcript=True` on `Patter.agent(...)`): that emits `create_response: false` + `interrupt_response: false` and re-gates the reply on the transcript arriving — the escape hatch for no-AEC PSTN self-interruption.
+
 ## Speakerphone noise & false barge-in
 
-On a speakerphone or in a noisy room, mouse clicks, the phone being picked up or set down, and background chatter can be mistaken for the caller speaking — the agent gets cut off mid-sentence. Two knobs fix this at the OpenAI VAD layer (no carrier-side change):
+On a speakerphone or in a noisy room, mouse clicks, the phone being picked up or set down, and background chatter can be mistaken for the caller speaking — the agent gets cut off mid-sentence. Because turn-taking is server-managed, you tune false barge-ins at the OpenAI VAD layer (no carrier-side change), not with a client gate:
 
 ### Input noise reduction
 

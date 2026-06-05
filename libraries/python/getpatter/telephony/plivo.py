@@ -295,9 +295,7 @@ class PlivoAudioSender(AudioSender):
         if not filtered:
             logger.warning("Plivo send_dtmf: no valid digits in %r", digits)
             return
-        await self._ws.send_text(
-            json.dumps({"event": "sendDTMF", "dtmf": filtered})
-        )
+        await self._ws.send_text(json.dumps({"event": "sendDTMF", "dtmf": filtered}))
 
     async def flush(self) -> None:
         """Send any resampler tail bytes before closing the stream.
@@ -328,6 +326,7 @@ async def plivo_stream_bridge(
     webhook_host: str = "",
     recording: bool = False,
     on_metrics=None,
+    on_transcript_line=None,
     pricing: dict | None = None,
     report_only_initial_ttfb: bool = False,
     speech_events=None,
@@ -564,6 +563,7 @@ async def plivo_stream_bridge(
                         for_twilio=True,
                         on_transcript=on_transcript,
                         on_metrics=on_metrics,
+                        on_transcript_line=on_transcript_line,
                         conversation_history=conversation_history,
                         transcript_entries=transcript_entries,
                     )
@@ -581,6 +581,7 @@ async def plivo_stream_bridge(
                         hangup_fn=_plivo_hangup,
                         on_transcript=on_transcript,
                         on_metrics=on_metrics,
+                        on_transcript_line=on_transcript_line,
                         conversation_history=conversation_history,
                         transcript_entries=transcript_entries,
                         # Plivo media streams are g711 mulaw @ 8 kHz. Asking
@@ -616,9 +617,7 @@ async def plivo_stream_bridge(
             elif event == "playedStream":
                 # Checkpoint acknowledgement — the analogue of a Twilio mark.
                 mark_name = data.get("name", "")
-                if isinstance(
-                    getattr(handler, "audio_sender", None), PlivoAudioSender
-                ):
+                if isinstance(getattr(handler, "audio_sender", None), PlivoAudioSender):
                     handler.audio_sender.on_mark_confirmed(mark_name)
                 if handler is not None:
                     await handler.on_mark(mark_name)
@@ -638,9 +637,7 @@ async def plivo_stream_bridge(
                     )
 
             elif event in ("playFailed", "error"):
-                logger.warning(
-                    "Plivo %s: %s", event, data.get("reason", "unknown")
-                )
+                logger.warning("Plivo %s: %s", event, data.get("reason", "unknown"))
 
             elif event == "clearedAudio":
                 logger.debug("Plivo confirmed audio buffer cleared")
@@ -661,11 +658,7 @@ async def plivo_stream_bridge(
             await handler.cleanup()
 
         # --- Observability: emit patter.cost.telephony_minutes ---
-        if (
-            _call_start_monotonic is not None
-            and plivo_auth_id
-            and plivo_auth_token
-        ):
+        if _call_start_monotonic is not None and plivo_auth_id and plivo_auth_token:
             try:
                 from getpatter.providers.plivo_adapter import PlivoAdapter
 

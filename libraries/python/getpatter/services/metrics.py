@@ -71,6 +71,16 @@ class CallMetricsAccumulator:
         self._call_start = time.monotonic()
         self._turns: list[TurnMetrics] = []
 
+        # Monotonic per-call turn counter. ``reserve_turn_index`` hands out the
+        # next value when a turn OPENS (on the ``speech_stopped`` edge) so the
+        # stream handler can stamp the reserved index onto each transcript line
+        # the moment it is known — even before the turn completes. This keeps
+        # the dashboard transcript ordering stable (user line < assistant line)
+        # under drops / interrupts, where assigning ``turn_index`` only at
+        # completion (``len(self._turns)``) would be unstable. Parity with TS
+        # ``metrics.ts:_nextTurnIndex`` / ``reserveTurnIndex``.
+        self._next_turn_index = 0
+
         # --- Per-turn timing state ---
         self._turn_start: float | None = None
         self._stt_complete: float | None = None
@@ -233,6 +243,22 @@ class CallMetricsAccumulator:
         """
         if self._turn_start is None:
             self.start_turn()
+
+    def reserve_turn_index(self) -> int:
+        """Reserve and return the next monotonic turn index.
+
+        Called once per turn when the turn OPENS (Realtime ``speech_stopped``
+        edge) so the handler can stamp the reserved index onto each transcript
+        line as it becomes known — keeping dashboard ordering stable even when
+        the user line arrives after the assistant line. The reserved value is
+        later passed back to :meth:`record_turn_complete` /
+        :meth:`record_turn_interrupted` as ``pre_reserved_index`` so the
+        recorded ``turn_index`` matches the live transcript lines. Parity with
+        TS ``metrics.ts:reserveTurnIndex``.
+        """
+        result = self._next_turn_index
+        self._next_turn_index += 1
+        return result
 
     def anchor_user_speech_start(self) -> None:
         """Anchor the current turn at a legitimate VAD ``speech_start``.
@@ -420,7 +446,9 @@ class CallMetricsAccumulator:
         """
         self._bargein_stopped_at = ts if ts is not None else time.monotonic()
 
-    def record_turn_complete(self, agent_text: str) -> TurnMetrics | None:
+    def record_turn_complete(
+        self, agent_text: str, pre_reserved_index: int | None = None
+    ) -> TurnMetrics | None:
         """Finalize the current turn and return its metrics.
 
         Returns ``None`` when ``record_turn_interrupted`` has already
@@ -429,12 +457,23 @@ class CallMetricsAccumulator:
         logical turn and the second would otherwise push a phantom entry
         with ``user_text=''``. The caller treats ``None`` as "nothing to
         emit"; ``_emit_turn_metrics`` is already null-safe.
+
+        ``pre_reserved_index`` — when the handler reserved a turn index at
+        turn-open via :meth:`reserve_turn_index`, pass it here so the recorded
+        ``turn_index`` matches the live transcript lines that were stamped with
+        the same value. Defaults to ``len(self._turns)`` for back-compat with
+        callers that never reserve. Parity with TS
+        ``recordTurnComplete(text, preReservedIndex?)``.
         """
         if self._turn_already_closed:
             return None
         latency = self._compute_turn_latency()
         turn = TurnMetrics(
-            turn_index=len(self._turns),
+            turn_index=(
+                pre_reserved_index
+                if pre_reserved_index is not None
+                else len(self._turns)
+            ),
             user_text=self._turn_user_text,
             agent_text=agent_text,
             latency=latency,
@@ -462,7 +501,9 @@ class CallMetricsAccumulator:
         self._turn_already_closed = True
         return turn
 
-    def record_turn_interrupted(self) -> TurnMetrics | None:
+    def record_turn_interrupted(
+        self, pre_reserved_index: int | None = None
+    ) -> TurnMetrics | None:
         """Handle a barge-in / interrupted turn.
 
         Returns partial ``TurnMetrics`` if a turn was in progress, else
@@ -472,6 +513,11 @@ class CallMetricsAccumulator:
         order interruption (e.g. a future refactor that reorders the
         bargein + LLM-unwind paths) from overwriting a turn that the
         complete path already emitted.
+
+        ``pre_reserved_index`` — same semantics as
+        :meth:`record_turn_complete`; pass the value reserved at turn-open so
+        the interrupted turn carries the same stable index as its live
+        transcript lines. Defaults to ``len(self._turns)``.
         """
         if self._turn_start is None:
             return None
@@ -480,7 +526,11 @@ class CallMetricsAccumulator:
 
         latency = self._compute_turn_latency()
         turn = TurnMetrics(
-            turn_index=len(self._turns),
+            turn_index=(
+                pre_reserved_index
+                if pre_reserved_index is not None
+                else len(self._turns)
+            ),
             user_text=self._turn_user_text,
             agent_text="[interrupted]",
             latency=latency,

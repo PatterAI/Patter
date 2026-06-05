@@ -706,6 +706,25 @@ export interface AgentOptions {
    */
   readonly realtimeTurnDetection?: RealtimeTurnDetection;
   /**
+   * Gate the OpenAI Realtime model's response on the Whisper input
+   * transcript (legacy behavior). OpenAI Realtime mode only.
+   *
+   * - `false` / `undefined` (default) — the speech-to-speech model responds
+   *   as soon as the user stops speaking (`speech_stopped`), independently
+   *   of the Whisper transcription. The transcript becomes a pure
+   *   observability side-channel (dashboard / history / `onTranscript`) and
+   *   never gates, triggers, or cancels the response. Reclaims ~500 ms of
+   *   latency because the model no longer waits for Whisper.
+   * - `true` — restores the prior behavior where the response is requested
+   *   only after the Whisper `transcript_input` event arrives. Production
+   *   flows should keep the default; this is for callers that depended on
+   *   the old transcript-gated ordering.
+   *
+   * Mirrors Python `realtime_gate_response_on_transcript` on `Patter.agent()`
+   * / `Agent` and `gate_response_on_transcript` on `engines.openai.Realtime`.
+   */
+  readonly openaiRealtimeGateResponseOnTranscript?: boolean;
+  /**
    * When set, Patter prepends a native "# Preambles" guidance block to the
    * OpenAI Realtime session `instructions` so the model speaks one short,
    * action-describing sentence ("I'll check that order now.") before a tool

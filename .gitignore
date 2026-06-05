@@ -24,6 +24,9 @@ CLAUDE.md
 node_modules/
 *.sqlite
 *.log
+# Per-call logs/transcripts written by serve(callLogDir) — runtime artifacts
+# that contain caller PII (phone numbers, transcripts). Never commit.
+call-logs/
 .DS_Store
 settings.json
 .worktrees/

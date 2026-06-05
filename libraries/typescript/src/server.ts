@@ -520,6 +520,9 @@ export function buildAIAdapter(config: LocalConfig, agent: AgentOptions, resolve
     if (engine.turnDetection !== undefined) {
       adapterOptions.turnDetection = engine.turnDetection;
     }
+    if (engine.gateResponseOnTranscript !== undefined) {
+      adapterOptions.gateResponseOnTranscript = engine.gateResponseOnTranscript;
+    }
   }
   // Forward noise reduction and turn detection from the agent options (which
   // already carry the merged engine-marker + agent() kwarg value via
@@ -527,12 +530,17 @@ export function buildAIAdapter(config: LocalConfig, agent: AgentOptions, resolve
   const agentOpts = agent as {
     openaiRealtimeNoiseReduction?: 'near_field' | 'far_field';
     realtimeTurnDetection?: import('./types').RealtimeTurnDetection;
+    openaiRealtimeGateResponseOnTranscript?: boolean;
   };
   if (agentOpts.openaiRealtimeNoiseReduction !== undefined) {
     adapterOptions.noiseReduction = agentOpts.openaiRealtimeNoiseReduction;
   }
   if (agentOpts.realtimeTurnDetection !== undefined) {
     adapterOptions.turnDetection = agentOpts.realtimeTurnDetection;
+  }
+  if (agentOpts.openaiRealtimeGateResponseOnTranscript !== undefined) {
+    adapterOptions.gateResponseOnTranscript =
+      agentOpts.openaiRealtimeGateResponseOnTranscript;
   }
   // Both the v1 ``OpenAIRealtime()`` engine and the GA ``OpenAIRealtime2()``
   // engine (plus the legacy no-engine OpenAI path) route through the GA

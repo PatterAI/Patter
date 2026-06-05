@@ -260,6 +260,7 @@ async def telnyx_stream_bridge(
     telnyx_key: str = "",
     recording: bool = False,
     on_metrics=None,
+    on_transcript_line=None,
     pricing: dict | None = None,
     report_only_initial_ttfb: bool = False,
     patter_side: str = "uut",
@@ -600,6 +601,7 @@ async def telnyx_stream_bridge(
                         elevenlabs_key=elevenlabs_key,
                         on_transcript=on_transcript,
                         on_metrics=on_metrics,
+                        on_transcript_line=on_transcript_line,
                         transcript_entries=transcript_entries,
                     )
                 else:
@@ -616,6 +618,7 @@ async def telnyx_stream_bridge(
                         hangup_fn=_telnyx_hangup,
                         on_transcript=on_transcript,
                         on_metrics=on_metrics,
+                        on_transcript_line=on_transcript_line,
                         transcript_entries=transcript_entries,
                         # Telnyx Call Control media streams deliver PCMU
                         # 8 kHz (g711 mulaw) in both directions when

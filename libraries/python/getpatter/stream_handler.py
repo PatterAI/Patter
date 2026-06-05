@@ -69,54 +69,111 @@ MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN = MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN_AEC
 # Shared tool definitions injected into every agent
 # ---------------------------------------------------------------------------
 
-# Short words / phrases that Whisper (and, less often, Deepgram) routinely
-# emit when fed silence or TTS echo on mulaw 8 kHz. Dropping them as turns
-# prevents the caller from entering a feedback loop where every silent frame
-# triggers a new LLM+TTS turn. Parity with TS ``HALLUCINATIONS``.
+# Non-speech artifacts that Whisper (and, less often, Deepgram) routinely
+# emit when fed silence or TTS echo on mulaw 8 kHz. Issue #154: the filter is
+# now DISPLAY-ONLY — it no longer gates or cancels the model response (the GA
+# session sets ``create_response: True`` so the server replies independently of
+# the Whisper transcript). Because the only effect of a match is to DROP the
+# user's displayed transcript line (``record_stt_complete`` never fires →
+# empty ``user_text`` → the dashboard skips the user line), the set must NOT
+# contain real conversational words — dropping 'yes' / 'no' / 'okay' / 'right'
+# would silently delete legitimate user turns from the transcript. Keep ONLY
+# unambiguous non-speech artifacts: YouTube caption credits + sign-offs,
+# music / sound markers, and silence markers. Parity with TS ``HALLUCINATIONS``.
 #
-# Whisper-specific full-phrase hallucinations (the model's training set
-# was dominated by YouTube captions — on silence / echo it falls back to
-# the most common training-set closers). These fire HARD on PSTN echo
-# loopback when the agent's outbound audio bleeds into the input buffer
-# and the upstream VAD commits a "non-empty" segment to transcription.
-# Comparison happens against the lower-cased + stripped form, so add
+# Whisper was trained heavily on captioned video, so on silence / PSTN echo it
+# falls back to the most common caption credits + sign-offs. Curated from
+# widely-reported Whisper-on-silence outputs across the open-source ASR
+# community. Comparison happens against the lower-cased + stripped form, so add
 # the canonical lowercase spelling here.
 _STT_HALLUCINATIONS: frozenset[str] = frozenset(
     {
-        "you",
-        "thank you",
-        "thanks",
-        "yeah",
-        "yes",
-        "no",
-        "okay",
-        "ok",
-        "uh",
-        "um",
-        "mmm",
-        "hmm",
-        ".",
-        "bye",
-        "right",
-        "cool",
-        # Whisper YouTube-caption hallucinations
+        # Caption credits / sign-offs (YouTube training-set bias).
         "thank you for watching",
-        "thanks for watching",
         "thank you for watching!",
+        "thanks for watching",
         "thanks for watching!",
         "thank you so much for watching",
+        "thank you for watching please subscribe",
+        "thanks for watching please subscribe",
         "thanks for listening",
         "please subscribe",
+        "please subscribe to my channel",
+        "don't forget to subscribe",
+        "like and subscribe",
         "subscribe",
+        "subtitles by the amara.org community",
+        "subtitles by the amara org community",
+        "subtitles by",
+        "transcribed by",
+        "transcription by castingwords",
+        "the end",
+        "we'll see you next time",
+        "see you next time",
+        "bye bye",
+        # Music / sound markers.
         "music",
         "[music]",
+        "piano music",
+        "applause",
+        "[applause]",
         "♪",
+        # Silence markers.
         "[no audio]",
         "[silence]",
         "[blank_audio]",
         "(silence)",
     }
 )
+
+
+# Sentence-ending characters used to split multi-closer hallucination segments
+# ("We'll see you next time. Bye bye.") without importing ``re``.
+_SENTENCE_ENDERS = ".!?…。！？"
+
+
+def _is_stt_hallucination(text: str) -> bool:
+    """True when *text* is — or is composed entirely of — known STT
+    hallucinations.
+
+    Beyond an exact set lookup it (a) strips trailing punctuation, since Whisper
+    appends it ("Thank you.", "Bye bye.") and that alone defeats an exact match,
+    and (b) splits multi-closer segments ("We'll see you next time. Bye bye.")
+    on sentence boundaries, dropping the turn only when EVERY piece is a known
+    hallucination — so a real sentence that merely contains a filler word is
+    never falsely dropped. Parity with TS ``isSttHallucination``.
+    """
+    stripped = (text or "").strip().lower().rstrip(".,!?;:…。！？ ").strip()
+    if not stripped:
+        return True
+    if stripped in _STT_HALLUCINATIONS:
+        return True
+    pieces = stripped
+    for ch in _SENTENCE_ENDERS:
+        pieces = pieces.replace(ch, "\n")
+    parts = [p.strip() for p in pieces.split("\n") if p.strip()]
+    return len(parts) > 1 and all(p in _STT_HALLUCINATIONS for p in parts)
+
+
+def _summarize_realtime_error(ev_data: Any) -> str:
+    """Build a PII-free one-line summary of a Realtime ``error`` event.
+
+    Surfaces only the error ``type`` / ``code`` / ``message`` fields — never
+    audio or transcript bodies. Parity with TS ``onAdapterError``. Accepts
+    either a flat error dict (``{"type", "code", "message"}``) or a wrapper
+    (``{"error": {...}}``) and degrades gracefully on unexpected shapes.
+    """
+    err: Any = ev_data
+    if isinstance(ev_data, dict) and isinstance(ev_data.get("error"), dict):
+        err = ev_data["error"]
+    if isinstance(err, dict):
+        err_type = err.get("type")
+        err_code = err.get("code")
+        err_message = err.get("message")
+        return (
+            f"type={err_type} code={err_code} message={sanitize_log_value(err_message)}"
+        )
+    return f"message={sanitize_log_value(err)}"
 
 
 TRANSFER_CALL_TOOL: dict = {
@@ -582,6 +639,7 @@ class StreamHandler(ABC):
         on_transcript=None,
         on_message=None,
         on_metrics=None,
+        on_transcript_line=None,
         conversation_history: deque | None = None,
         transcript_entries: deque | None = None,
         speech_events: Any = None,
@@ -596,6 +654,22 @@ class StreamHandler(ABC):
         self.on_transcript = on_transcript
         self.on_message = on_message
         self.on_metrics = on_metrics
+        # FIX-5 (issue #154): live per-line transcript callback. Wired by the
+        # server to ``store.record_transcript_line`` so each user/assistant line
+        # is broadcast over SSE the moment it is known (keyed by the reserved
+        # turn index), letting the dashboard order lines by
+        # ``(turn_index, user<assistant)`` even when the user line arrives after
+        # the assistant line. ``None`` == no live-line emission (back-compat).
+        # Parity with TS handler's direct ``metricsStore.recordTranscriptLine``.
+        self.on_transcript_line = on_transcript_line
+        # FIX-5 (issue #154): monotonic turn index reserved at turn-open
+        # (``speech_stopped``) via ``metrics.reserve_turn_index``. Stamped onto
+        # every transcript line (user + assistant) so the dashboard can order
+        # lines by (turn_index, role) even when the user line arrives after the
+        # assistant line. ``None`` until the first turn opens. Lives on the base
+        # so every realtime-style subclass (OpenAI Realtime + ConvAI) shares it.
+        # Parity with TS ``currentTurnIndex``.
+        self._current_turn_index: int | None = None
         self.conversation_history: deque = conversation_history or deque(maxlen=200)
         self.transcript_entries: deque = transcript_entries or deque(maxlen=200)
         # Optional `SpeechEvents` dispatcher. When set, the handler emits
@@ -901,6 +975,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         hangup_fn=None,
         on_transcript=None,
         on_metrics=None,
+        on_transcript_line=None,
         conversation_history: deque | None = None,
         transcript_entries: deque | None = None,
         audio_format: str = "pcm16",
@@ -918,6 +993,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
             metrics=metrics,
             on_transcript=on_transcript,
             on_metrics=on_metrics,
+            on_transcript_line=on_transcript_line,
             conversation_history=conversation_history,
             transcript_entries=transcript_entries,
             speech_events=speech_events,
@@ -955,6 +1031,8 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         self._user_transcript_pending = False
         self._pending_assistant_turn: str | None = None
         self._pending_assistant_timer: asyncio.Task | None = None
+        # ``self._current_turn_index`` is initialised on the base
+        # ``StreamHandler.__init__`` (shared with the ConvAI handler).
 
     async def _flush_assistant_turn(self, text: str) -> None:
         """Push an assistant turn into history, fire ``on_transcript``, and
@@ -966,17 +1044,54 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         )
         self.transcript_entries.append({"role": "assistant", "text": text})
         if self.on_transcript:
+            # FIX-5: stamp the reserved turn index so the dashboard can order
+            # this assistant line relative to its user line by (turn_index,
+            # role) even when the lines arrive out of order.
             await self.on_transcript(
                 {
                     "role": "assistant",
                     "text": text,
                     "call_id": self.call_id,
+                    "turnIndex": self._current_turn_index,
                     "history": list(self.conversation_history),
                 }
             )
+        # FIX-5 (issue #154): emit the live assistant transcript line keyed by
+        # the same reserved turn index as its paired user line BEFORE the metrics
+        # turn is recorded, so the dashboard renders it as soon as it is known.
+        await self._emit_transcript_line("assistant", text)
         if self.metrics is not None:
-            turn = self.metrics.record_turn_complete(text)
+            # Pass the pre-reserved index so the recorded turn carries the same
+            # stable ``turn_index`` as the live transcript lines.
+            turn = self.metrics.record_turn_complete(
+                text, pre_reserved_index=self._current_turn_index
+            )
             await self._emit_turn_metrics(turn)
+
+    async def _emit_transcript_line(self, role: str, text: str) -> None:
+        """Emit a single live transcript line to the dashboard store.
+
+        FIX-5 (issue #154): fires ``on_transcript_line`` (wired by the server to
+        ``store.record_transcript_line``) with the reserved turn index so the
+        dashboard can order lines by ``(turn_index, user<assistant)``. No-op when
+        no callback is wired or no turn index has been reserved. Parity with TS
+        handler's direct ``metricsStore.recordTranscriptLine`` calls.
+        """
+        if self.on_transcript_line is None or self._current_turn_index is None:
+            return
+        if not text:
+            return
+        try:
+            await self.on_transcript_line(
+                {
+                    "call_id": self.call_id,
+                    "turnIndex": self._current_turn_index,
+                    "role": role,
+                    "text": text,
+                }
+            )
+        except Exception:  # pragma: no cover — observability must never break calls
+            logger.debug("on_transcript_line failed", exc_info=True)
 
     async def _assistant_buffer_timeout(self) -> None:
         """Fallback flush: if the user transcript never arrives, surface
@@ -1160,6 +1275,16 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         turn_detection = getattr(self.agent, "realtime_turn_detection", None)
         if turn_detection is not None:
             adapter_kwargs["turn_detection"] = turn_detection
+        # Response-decoupling flag (issue #154): when set, the stream-handler
+        # reads it back off the adapter to decide whether to fire
+        # ``response.create`` on speech-stop (default, decoupled) or wait for
+        # the Whisper transcript (legacy). Forward only when set so the
+        # adapter's own ``False`` default stays authoritative otherwise.
+        gate_response = getattr(
+            self.agent, "realtime_gate_response_on_transcript", None
+        )
+        if gate_response is not None:
+            adapter_kwargs["gate_response_on_transcript"] = gate_response
         self._adapter = _adapter_cls(**adapter_kwargs)
 
         # Try to adopt a Realtime WebSocket parked during the ringing
@@ -1302,11 +1427,34 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                     # noticeably later and understates end-to-end latency.
                     if self.metrics is not None and not self.metrics.turn_active:
                         self.metrics.start_turn()
+                    # FIX-5: reserve a monotonic turn index the moment the turn
+                    # opens so both the user line (on transcript_input) and the
+                    # assistant line (on flush) carry the same index, letting
+                    # the dashboard order them by (turn_index, role) even when
+                    # the user line lands after the assistant line.
+                    if self.metrics is not None:
+                        self._current_turn_index = self.metrics.reserve_turn_index()
                     waiting_first_audio = True
                     current_agent_text = ""
                     # Mark a user transcript is expected so response_done
                     # waits for it before pushing the assistant turn.
                     self._user_transcript_pending = True
+                    # Issue #154: decouple the model response from the Whisper
+                    # transcript. By DEFAULT the GA session sets
+                    # ``create_response: True`` (see _build_ga_session_config),
+                    # so the SERVER auto-creates the response when it commits the
+                    # user's audio buffer (``input_audio_buffer.committed``). The
+                    # e2e model replies immediately, in parallel with the Whisper
+                    # transcript — no ~500 ms transcript wait and no client-side
+                    # race against the commit. Patter therefore does NOT drive
+                    # ``response.create`` here. The Whisper transcript only
+                    # populates the displayed transcript / history /
+                    # ``on_transcript`` (pure observability); the hallucination
+                    # filter applies to DISPLAY only and never gates or cancels
+                    # the response. When ``gate_response_on_transcript`` is
+                    # ``True`` (opt-out, legacy) the GA session sets
+                    # ``create_response: False`` and the response is driven from
+                    # the ``transcript_input`` branch below.
                     # Speech-event: raw VAD trailing edge. EOU is committed
                     # later on `transcript_input` (Realtime emits it after
                     # input_audio_buffer.committed).
@@ -1321,16 +1469,27 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                     # "Thank you for watching." / "Thanks for watching." /
                     # "[music]" etc. — feeding those back to the LLM
                     # produces phantom user turns the caller never spoke.
-                    _ev_stripped = (
-                        (ev_data or "").strip().rstrip(".,!?;: ").strip().lower()
-                    )
-                    if _ev_stripped in _STT_HALLUCINATIONS or not _ev_stripped:
+                    if _is_stt_hallucination(ev_data or ""):
                         logger.info(
                             "Realtime transcript_input dropped (likely "
                             "Whisper hallucination on silence/echo): %r",
                             sanitize_log_value((ev_data or "")[:60]),
                         )
                         self._user_transcript_pending = False
+                        # FIX-1: flush any assistant turn that ``response_done``
+                        # buffered while waiting for this (now-dropped) user
+                        # transcript. Without this the buffered reply stalls
+                        # until the ~3 s ``_assistant_buffer_timeout`` fallback
+                        # fires, so the displayed reply lags and turns
+                        # interleave. Capture + null + cancel the timer BEFORE
+                        # flushing so a concurrent flush path can't double-emit.
+                        if self._pending_assistant_turn is not None:
+                            buffered = self._pending_assistant_turn
+                            self._pending_assistant_turn = None
+                            if self._pending_assistant_timer is not None:
+                                self._pending_assistant_timer.cancel()
+                                self._pending_assistant_timer = None
+                            await self._flush_assistant_turn(buffered)
                         continue
                     if self.metrics is not None:
                         # Fallback: start turn here if speech_stopped was missed
@@ -1352,28 +1511,50 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                     )
                     self.transcript_entries.append({"role": "user", "text": ev_data})
                     if self.on_transcript:
+                        # FIX-5: emit the live user line the moment it is known,
+                        # stamped with the reserved turn index so the dashboard
+                        # can place it ABOVE its assistant line even if that
+                        # line was already surfaced.
                         await self.on_transcript(
                             {
                                 "role": "user",
                                 "text": ev_data,
                                 "call_id": self.call_id,
+                                "turnIndex": self._current_turn_index,
                                 "history": list(self.conversation_history),
                             }
                         )
-                    # Drive the assistant response. The session config sets
+                    # FIX-5: emit the live user transcript line to the dashboard
+                    # store (via ``on_transcript_line`` → ``record_transcript_line``)
+                    # keyed by the reserved turn index, so the live pane renders
+                    # it the moment the filter accepts and can sort it above its
+                    # agent line. Parity with TS ``recordTranscriptLine``.
+                    await self._emit_transcript_line("user", ev_data)
+                    # Legacy transcript-gated response (issue #154 opt-out).
+                    # By default the response is already requested on
+                    # ``speech_stopped`` above (decoupled from Whisper), so we
+                    # do NOT request it here. Only when
+                    # ``gate_response_on_transcript`` is ``True`` does Patter
+                    # drive the response from this branch — AFTER the
+                    # hallucination filter accepts the transcript — restoring
+                    # the older behavior where the model waits for Whisper.
+                    # The session config still sets
                     # ``turn_detection.create_response: false`` so OpenAI's
-                    # server VAD no longer auto-creates a response on every
-                    # ``input_audio_buffer.committed`` — that path triggers
-                    # phantom assistant turns on Whisper-hallucinated input
-                    # ("Thank you for watching." etc.). Patter now requests
-                    # the response explicitly here, AFTER the
-                    # hallucination filter accepts the transcript above.
-                    request_response = getattr(self._adapter, "request_response", None)
-                    if callable(request_response):
-                        try:
-                            await request_response()
-                        except Exception as exc:  # noqa: BLE001
-                            logger.debug("Realtime request_response failed: %s", exc)
+                    # server VAD never auto-creates a response on its own.
+                    gate_response = getattr(
+                        self._adapter, "gate_response_on_transcript", False
+                    )
+                    if gate_response:
+                        request_response = getattr(
+                            self._adapter, "request_response", None
+                        )
+                        if callable(request_response):
+                            try:
+                                await request_response()
+                            except Exception as exc:  # noqa: BLE001
+                                logger.debug(
+                                    "Realtime request_response failed: %s", exc
+                                )
                     # User transcript landed — flush any assistant turn
                     # that was buffered waiting for it.
                     self._user_transcript_pending = False
@@ -1410,35 +1591,67 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                             current_agent_text += response_text
 
                 elif ev_type == "speech_started":
-                    # Gate the cancel/flush path with an anti-flicker window
-                    # similar to the pipeline mode. OpenAI's server VAD
-                    # fires ``speech_started`` on echo of the agent's own
-                    # audio in PSTN no-AEC scenarios (carrier loopback
-                    # feeds our outbound mulaw back into the input buffer).
-                    # Without this gate every phantom ``speech_started``
-                    # cancels the response — most visibly, the
-                    # firstMessage gets truncated mid-sentence.
+                    # OpenAI server VAD detected the caller starting to speak.
+                    # Behaviour splits on ``gate_response_on_transcript``:
                     #
-                    # ``OpenAIRealtimeStreamHandler`` doesn't carry the
-                    # full pipeline TTS-tracking state (no
-                    # ``_is_speaking`` / ``_first_audio_sent_at``), so
-                    # we use the adapter's own response-tracking
-                    # attributes as a proxy.
-                    response_started_at = getattr(
-                        self._adapter,
-                        "_current_response_first_audio_at",
-                        None,
+                    #  - DEFAULT (gate False — SERVER-MANAGED): the GA session
+                    #    sets ``interrupt_response: true``, so the OpenAI server
+                    #    owns the barge-in cancel. Patter does the WebSocket-only
+                    #    bookkeeping the server cannot do for us on this
+                    #    transport: clear the carrier playout buffer
+                    #    (``send_clear``) and truncate the in-flight item
+                    #    (``truncate_playback`` — the server auto-truncates only
+                    #    on WebRTC/SIP). It does NOT send ``response.cancel``
+                    #    (redundant — the server already cancels), does NOT run
+                    #    the MIN_AGENT_SPEAKING anti-flicker gate, and does NOT
+                    #    call ``record_bargein_detected`` / ``anchor_user_speech_start``
+                    #    (the engine turn stays anchored at ``speech_stopped`` —
+                    #    re-anchoring to user-speech-start inflated total_ms).
+                    #
+                    #  - LEGACY (gate True — CLIENT-MANAGED opt-out): the GA
+                    #    session sets ``interrupt_response: false`` and Patter
+                    #    drives the full client-side barge-in: the
+                    #    MIN_AGENT_SPEAKING anti-flicker gate (server VAD fires
+                    #    ``speech_started`` on echo of the agent's own audio in
+                    #    PSTN no-AEC scenarios), ``cancel_response`` (truncate +
+                    #    response.cancel), and the FIX-3 barge-in metrics.
+                    server_managed = not getattr(
+                        self._adapter, "gate_response_on_transcript", False
                     )
-                    if response_started_at is not None:
-                        elapsed = time.monotonic() - response_started_at
-                        if elapsed < MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN_NO_AEC:
-                            logger.info(
-                                "Realtime barge-in suppressed (response < gate, %.2fs)",
-                                elapsed,
-                            )
-                            continue
+                    if not server_managed:
+                        # Anti-flicker gate (legacy only). ``OpenAIRealtimeStreamHandler``
+                        # doesn't carry the full pipeline TTS-tracking state (no
+                        # ``_is_speaking`` / ``_first_audio_sent_at``), so we use
+                        # the adapter's own response-tracking attributes as a proxy.
+                        response_started_at = getattr(
+                            self._adapter,
+                            "_current_response_first_audio_at",
+                            None,
+                        )
+                        if response_started_at is not None:
+                            elapsed = time.monotonic() - response_started_at
+                            if elapsed < MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN_NO_AEC:
+                                logger.info(
+                                    "Realtime barge-in suppressed "
+                                    "(response < gate, %.2fs)",
+                                    elapsed,
+                                )
+                                continue
                     await self.audio_sender.send_clear()
-                    await self._adapter.cancel_response()
+                    if server_managed:
+                        # Server owns the cancel (interrupt_response=true). Only
+                        # the WebSocket-transport truncate is needed client-side.
+                        await self._adapter.truncate_playback()
+                    else:
+                        # FIX-3: stamp barge-in detection on the legacy interrupt
+                        # path (mirrors the pipeline path). Arms the post-barge-in
+                        # hygiene gate in _compute_turn_latency (``_last_bargein_at``
+                        # within 100 ms of the next ``_turn_start`` → drop
+                        # endpoint_ms / stt_ms). Stamp BEFORE cancel so the
+                        # detection timestamp is the true interrupt edge.
+                        if self.metrics is not None:
+                            self.metrics.record_bargein_detected()
+                        await self._adapter.cancel_response()
                     if self.metrics is not None:
                         self.metrics.record_turn_interrupted()
                     # Speech-event: user started speaking. If the agent was
@@ -1449,6 +1662,13 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                     if not waiting_first_audio:
                         await self._emit_agent_speech_ended(interrupted=True)
                     await self._emit_user_speech_started()
+                    # FIX-3: anchor the new turn at this VAD speech_start —
+                    # LEGACY (client-managed) path only. On the server-managed
+                    # path the engine turn deliberately stays anchored at
+                    # ``speech_stopped``; re-anchoring here would double-count
+                    # and inflate total_ms.
+                    if not server_managed and self.metrics is not None:
+                        self.metrics.anchor_user_speech_start()
                     waiting_first_audio = False
                     current_agent_text = ""
                     # Barge-in invalidates any buffered assistant turn —
@@ -1669,6 +1889,19 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                             # Emit follow-up event with result so timeline
                             # shows full call/return semantics.
                             await self._emit_tool_event(func_data["name"], args, result)
+
+                elif ev_type == "error":
+                    # FIX-4: surface provider-side Realtime ``error`` events.
+                    # The adapter yields these (e.g. session config rejected,
+                    # rate-limited, transient server error) but the loop
+                    # previously ignored them, so failures were invisible.
+                    # Log type/code/message ONLY (never audio/transcript
+                    # bodies) and continue — a single error frame must not
+                    # terminate the call. Parity with TS ``onAdapterError``.
+                    logger.warning(
+                        "OpenAI Realtime error event: %s",
+                        _summarize_realtime_error(ev_data),
+                    )
         except Exception as exc:
             logger.exception("OpenAI Realtime forward error: %s", exc)
 
@@ -1739,6 +1972,7 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
         for_twilio: bool = False,
         on_transcript=None,
         on_metrics=None,
+        on_transcript_line=None,
         conversation_history: deque | None = None,
         transcript_entries: deque | None = None,
         output_audio_format: str | None = None,
@@ -1754,6 +1988,7 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
             metrics=metrics,
             on_transcript=on_transcript,
             on_metrics=on_metrics,
+            on_transcript_line=on_transcript_line,
             conversation_history=conversation_history,
             transcript_entries=transcript_entries,
         )
@@ -1874,6 +2109,11 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
                     # not on transcript_input (which arrives later and understates latency).
                     if self.metrics is not None and not self.metrics.turn_active:
                         self.metrics.start_turn()
+                    # FIX-5: reserve a monotonic turn index at turn-open so the
+                    # user and assistant lines share a stable index for dashboard
+                    # ordering (parity with the GA loop).
+                    if self.metrics is not None:
+                        self._current_turn_index = self.metrics.reserve_turn_index()
                     waiting_first_audio = True
                     current_agent_text = ""
 
@@ -1895,9 +2135,12 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
                                 "role": "user",
                                 "text": ev_data,
                                 "call_id": self.call_id,
+                                "turnIndex": self._current_turn_index,
                                 "history": list(self.conversation_history),
                             }
                         )
+                    # FIX-5: live user line to the dashboard store.
+                    await self._emit_transcript_line("user", ev_data)
 
                 elif ev_type == "transcript_output":
                     if ev_data:
@@ -1934,11 +2177,19 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
                                     "role": "assistant",
                                     "text": current_agent_text,
                                     "call_id": self.call_id,
+                                    "turnIndex": self._current_turn_index,
                                     "history": list(self.conversation_history),
                                 }
                             )
+                        # FIX-5: live assistant line + stable pre-reserved index.
+                        await self._emit_transcript_line(
+                            "assistant", current_agent_text
+                        )
                         if self.metrics is not None:
-                            turn = self.metrics.record_turn_complete(current_agent_text)
+                            turn = self.metrics.record_turn_complete(
+                                current_agent_text,
+                                pre_reserved_index=self._current_turn_index,
+                            )
                             await self._emit_turn_metrics(turn)
                         current_agent_text = ""
                     elif self.metrics is not None and self.metrics.turn_active:
@@ -1953,6 +2204,15 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
                         self.metrics.record_turn_interrupted()
                     waiting_first_audio = False
                     current_agent_text = ""
+
+                elif ev_type == "error":
+                    # FIX-4: surface provider-side error events (parity with
+                    # the GA loop). Log type/code/message ONLY (no PII) and
+                    # continue — an error frame must not terminate the call.
+                    logger.warning(
+                        "ElevenLabs ConvAI error event: %s",
+                        _summarize_realtime_error(ev_data),
+                    )
         except Exception as exc:
             logger.exception("ElevenLabs ConvAI forward error: %s", exc)
 

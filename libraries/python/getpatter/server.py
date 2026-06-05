@@ -574,7 +574,7 @@ class EmbeddedServer:
             logger.warning("on_machine_detection callback threw: %s", exc)
 
     def _wrap_callbacks(self):
-        """Return (on_call_start, on_call_end, on_metrics) wrappers.
+        """Return (on_call_start, on_call_end, on_metrics, on_transcript_line) wrappers.
 
         Each wrapper feeds data into the dashboard store first, then calls
         the user-provided callback (if any).  Completed calls are also
@@ -749,7 +749,16 @@ class EmbeddedServer:
             if user_metrics is not None:
                 await user_metrics(data)
 
-        return _on_call_start, _on_call_end, _on_metrics
+        async def _on_transcript_line(data):
+            # FIX-5 (issue #154): feed the dashboard store's live per-line
+            # transcript path. The Realtime / ConvAI handler fires this the
+            # moment each user/assistant line is known (keyed by the reserved
+            # turn index) so the dashboard can render and re-order lines before
+            # the turn completes. Store-only — never user-facing.
+            if store is not None:
+                store.record_transcript_line(data)
+
+        return _on_call_start, _on_call_end, _on_metrics, _on_transcript_line
 
     def _dashboard_is_exposed(self) -> bool:
         """Return True when this server would be reachable beyond loopback.
@@ -1125,7 +1134,7 @@ class EmbeddedServer:
             self._ws_conn_counts[client_ip] += 1
             self._active_connections.add(websocket)
             try:
-                _start, _end, _metrics = self._wrap_callbacks()
+                _start, _end, _metrics, _transcript_line = self._wrap_callbacks()
                 await twilio_stream_bridge(
                     websocket=websocket,
                     agent=self.agent,
@@ -1142,6 +1151,7 @@ class EmbeddedServer:
                     twilio_token=self.config.twilio_token,
                     recording=self.recording,
                     on_metrics=_metrics,
+                    on_transcript_line=_transcript_line,
                     pricing=self.pricing,
                     report_only_initial_ttfb=self.config.report_only_initial_ttfb,
                     speech_events=getattr(self, "speech_events", None),
@@ -1409,7 +1419,7 @@ class EmbeddedServer:
             self._ws_conn_counts[client_ip] += 1
             self._active_connections.add(websocket)
             try:
-                _start, _end, _metrics = self._wrap_callbacks()
+                _start, _end, _metrics, _transcript_line = self._wrap_callbacks()
                 await telnyx_stream_bridge(
                     websocket=websocket,
                     agent=self.agent,
@@ -1425,6 +1435,7 @@ class EmbeddedServer:
                     telnyx_key=self.config.telnyx_key,
                     recording=self.recording,
                     on_metrics=_metrics,
+                    on_transcript_line=_transcript_line,
                     pricing=self.pricing,
                     report_only_initial_ttfb=self.config.report_only_initial_ttfb,
                 )
@@ -1645,7 +1656,7 @@ class EmbeddedServer:
             self._ws_conn_counts[client_ip] += 1
             self._active_connections.add(websocket)
             try:
-                _start, _end, _metrics = self._wrap_callbacks()
+                _start, _end, _metrics, _transcript_line = self._wrap_callbacks()
                 await plivo_stream_bridge(
                     websocket=websocket,
                     agent=self.agent,
@@ -1663,6 +1674,7 @@ class EmbeddedServer:
                     webhook_host=self.config.webhook_url,
                     recording=self.recording,
                     on_metrics=_metrics,
+                    on_transcript_line=_transcript_line,
                     pricing=self.pricing,
                     report_only_initial_ttfb=self.config.report_only_initial_ttfb,
                     speech_events=getattr(self, "speech_events", None),

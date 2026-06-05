@@ -127,6 +127,84 @@ class TestMetricsStore:
         active = store.get_active_calls()
         assert len(active[0]["turns"]) == 1
 
+    # --- FIX-5 (issue #154): live per-line transcript + (turn_index, role) dedup ---
+
+    def test_record_transcript_line_appends_and_publishes(self):
+        store = MetricsStore()
+        store.record_call_start({"call_id": "c1"})
+        store.record_transcript_line(
+            {
+                "call_id": "c1",
+                "turnIndex": 0,
+                "role": "user",
+                "text": "What time is it?",
+            }
+        )
+        active = store.get_active_calls()
+        transcript = active[0].get("transcript", [])
+        assert len(transcript) == 1
+        assert transcript[0]["role"] == "user"
+        assert transcript[0]["text"] == "What time is it?"
+        assert transcript[0]["turnIndex"] == 0
+
+    def test_record_transcript_line_ignores_bad_input(self):
+        store = MetricsStore()
+        store.record_call_start({"call_id": "c1"})
+        # Tool role rejected, empty text rejected, unknown call rejected.
+        store.record_transcript_line(
+            {"call_id": "c1", "turnIndex": 0, "role": "tool", "text": "x"}
+        )
+        store.record_transcript_line(
+            {"call_id": "c1", "turnIndex": 0, "role": "user", "text": ""}
+        )
+        store.record_transcript_line(
+            {"call_id": "nope", "turnIndex": 0, "role": "user", "text": "hi"}
+        )
+        active = store.get_active_calls()
+        assert active[0].get("transcript", []) == []
+
+    def test_record_turn_dedups_lines_already_emitted_live(self):
+        store = MetricsStore()
+        store.record_call_start({"call_id": "c1"})
+        # Live lines first (forward path), both on turn 0.
+        store.record_transcript_line(
+            {"call_id": "c1", "turnIndex": 0, "role": "user", "text": "Hello"}
+        )
+        store.record_transcript_line(
+            {"call_id": "c1", "turnIndex": 0, "role": "assistant", "text": "Hi there"}
+        )
+        # Metrics turn for the same index must NOT re-push the same lines.
+        turn = TurnMetrics(
+            turn_index=0,
+            user_text="Hello",
+            agent_text="Hi there",
+            latency=LatencyBreakdown(total_ms=100),
+        )
+        store.record_turn({"call_id": "c1", "turn": turn})
+        transcript = store.get_active_calls()[0]["transcript"]
+        assert len(transcript) == 2
+        assert [(e["role"], e["text"]) for e in transcript] == [
+            ("user", "Hello"),
+            ("assistant", "Hi there"),
+        ]
+
+    def test_record_turn_mirrors_when_no_live_line(self):
+        store = MetricsStore()
+        store.record_call_start({"call_id": "c1"})
+        turn = TurnMetrics(
+            turn_index=0,
+            user_text="Hello",
+            agent_text="Hi there",
+            latency=LatencyBreakdown(total_ms=100),
+        )
+        store.record_turn({"call_id": "c1", "turn": turn})
+        transcript = store.get_active_calls()[0]["transcript"]
+        assert len(transcript) == 2
+        assert transcript[0]["role"] == "user"
+        assert transcript[0]["turnIndex"] == 0
+        assert transcript[1]["role"] == "assistant"
+        assert transcript[1]["turnIndex"] == 0
+
     def test_aggregates_empty(self):
         store = MetricsStore()
         agg = store.get_aggregates()
@@ -363,7 +441,8 @@ class TestServerDashboardIntegration:
 
         server._metrics_store = MetricsStore()
 
-        start_cb, end_cb, metrics_cb = server._wrap_callbacks()
+        start_cb, end_cb, metrics_cb, transcript_line_cb = server._wrap_callbacks()
         assert callable(start_cb)
         assert callable(end_cb)
         assert callable(metrics_cb)
+        assert callable(transcript_line_cb)

@@ -1,5 +1,7 @@
 ## Unreleased
 
+## 0.6.4 (2026-06-05)
+
 ### Security
 
 - **The built-in metrics dashboard is now auto-protected with a generated token
@@ -74,10 +76,29 @@
   for noisy speakerphone links. Each unset field falls back to the adapter's
   current default (server_vad, threshold 0.5, prefix_padding_ms 300,
   silence_duration_ms 300), so omitting it preserves today's behaviour exactly.
-  `semantic_vad` emits `{type, eagerness}` only. Patter keeps its client-gated
-  barge-in safety values (`create_response` / `interrupt_response` stay internal,
-  not exposed). `libraries/python/getpatter/models.py`,
+  `semantic_vad` emits `{type, eagerness}` only. `create_response` /
+  `interrupt_response` are not exposed here — they are managed by Patter via the
+  `gate_response_on_transcript` / `gateResponseOnTranscript` flag (server-managed
+  by default; see Changed). `libraries/python/getpatter/models.py`,
   `libraries/typescript/src/types.ts`.
+
+- **`gate_response_on_transcript` / `gateResponseOnTranscript` opt-out (default
+  off) — restore the legacy client-managed Realtime turn-taking.** New optional
+  flag on the Realtime engine markers (`Realtime(gate_response_on_transcript=True)`
+  / `new Realtime({ gateResponseOnTranscript: true })`, plus the `Realtime2` /
+  GA marker) and on `Patter.agent(realtime_gate_response_on_transcript=...)` /
+  `phone.agent({ realtimeGateResponseOnTranscript })`. Default `False` /
+  `undefined` keeps the new server-managed behaviour (see Changed). Set it to
+  `True` to emit `create_response: false` + `interrupt_response: false`, which
+  re-gates the model response on the input transcript arriving and restores the
+  client-driven barge-in (anti-flicker `MIN_AGENT_SPEAKING` gate + client
+  `response.cancel` + barge-in metric anchoring) — the escape hatch for no-AEC
+  PSTN self-interruption, where the server VAD would otherwise barge-in on the
+  echo of the agent's own audio. `libraries/python/getpatter/models.py` /
+  `getpatter/engines/openai.py` / `openai_realtime_2.py` /
+  `getpatter/providers/openai_realtime.py`,
+  `libraries/typescript/src/types.ts` / `engines/openai.ts` / `engines/openai-2.ts`
+  / `providers/openai-realtime.ts`.
 
 - **Per-tool execution timeout — long (30-60s) browser-automation / external-API
   tools no longer drop the call at 10s.** New `timeout_s` on the Python `tool()`
@@ -215,6 +236,37 @@
 
 ### Changed
 
+- **End-to-end OpenAI Realtime turn-taking is now fully server-managed (lower
+  latency, correct barge-in).** For the `OpenAIRealtime` (v1) and
+  `OpenAIRealtime2` (GA) engines the OpenAI server now owns VAD, end-of-turn
+  detection, response creation, AND the barge-in cancel — Patter no longer
+  drives any of them client-side (`turn_detection.create_response` and
+  `interrupt_response` are both on by default). Two user-visible effects:
+  - **The agent replies as soon as the caller stops speaking**, driven by the
+    server's audio-buffer commit, instead of waiting ~500 ms for the Whisper
+    input transcript. The transcript is now pure observability (dashboard /
+    history / `on_transcript`); it never gates or cancels the response — so the
+    input-transcription model choice no longer affects reply latency, and a
+    Whisper hallucination can no longer suppress a real reply.
+  - **Barge-in is handled by the server.** When the caller talks over the
+    agent, the server cancels its own response. On Patter's WebSocket transport
+    the client still clears the carrier playout buffer and sends
+    `conversation.item.truncate` for the played offset (OpenAI only
+    auto-truncates on WebRTC/SIP), but the client-side anti-flicker
+    `MIN_AGENT_SPEAKING` gate, the manual `response.cancel`, and the barge-in
+    metric re-anchoring were removed from the engine path. The re-anchoring was
+    inflating `total_ms` (it re-anchored the turn to user-speech-start) and
+    caused a multi-second freeze after a barge-in; reported reply latency now
+    reflects the true server round-trip again.
+  Tune false barge-ins on noisy / no-AEC PSTN links with `RealtimeTurnDetection`
+  (raise `threshold`, or `semantic_vad` `eagerness="low"`) rather than a client
+  gate. **Not an API break** — no signature changed and the prior client-managed
+  path remains available via the opt-out flag (see Added). ElevenLabs ConvAI
+  (already server-managed — `sendClear` only) and Pipeline mode (client-owned
+  Silero VAD + barge-in) are unchanged.
+  `libraries/python/getpatter/providers/openai_realtime.py` / `openai_realtime_2.py`
+  / `stream_handler.py`, `libraries/typescript/src/providers/openai-realtime.ts`
+  / `openai-realtime-2.ts` / `stream-handler.ts`.
 - **Public config collections are now immutable.** `Agent.tools` / `guardrails`
   / `text_transforms` / `mcp_servers` and `Guardrail.blocked_terms` are tuples
   (Python, `frozen=True`) / `readonly` arrays (TypeScript). Code comparing these

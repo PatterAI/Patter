@@ -28,19 +28,19 @@ function audioInput(config: Record<string, unknown>): Record<string, unknown> {
 }
 
 describe('[unit] OpenAIRealtime2Adapter GA noise reduction', () => {
-  it("nests input_audio_noise_reduction under session.audio.input when set to 'far_field'", () => {
+  it("nests noise_reduction under session.audio.input when set to 'far_field'", () => {
     const config = buildGA({ noiseReduction: 'far_field' });
-    expect(audioInput(config).input_audio_noise_reduction).toEqual({ type: 'far_field' });
+    expect(audioInput(config).noise_reduction).toEqual({ type: 'far_field' });
   });
 
   it("accepts 'near_field'", () => {
     const config = buildGA({ noiseReduction: 'near_field' });
-    expect(audioInput(config).input_audio_noise_reduction).toEqual({ type: 'near_field' });
+    expect(audioInput(config).noise_reduction).toEqual({ type: 'near_field' });
   });
 
   it('OMITS the noise-reduction key entirely when unset (today behavior)', () => {
     const config = buildGA({});
-    expect('input_audio_noise_reduction' in audioInput(config)).toBe(false);
+    expect('noise_reduction' in audioInput(config)).toBe(false);
   });
 });
 
@@ -55,9 +55,10 @@ describe('[unit] OpenAIRealtime2Adapter GA turn detection', () => {
     expect(td.silence_duration_ms).toBe(500);
     // Unset prefix falls back to the adapter default.
     expect(td.prefix_padding_ms).toBe(300);
-    // Client-gated barge-in safety values stay false (never exposed).
-    expect(td.create_response).toBe(false);
-    expect(td.interrupt_response).toBe(false);
+    // Server-managed default (issue #154): the server owns response creation
+    // AND the barge-in cancel signal — both flags true.
+    expect(td.create_response).toBe(true);
+    expect(td.interrupt_response).toBe(true);
   });
 
   it('falls back each unset server_vad field to the current adapter default', () => {
@@ -76,9 +77,9 @@ describe('[unit] OpenAIRealtime2Adapter GA turn detection', () => {
     expect('threshold' in td).toBe(false);
     expect('prefix_padding_ms' in td).toBe(false);
     expect('silence_duration_ms' in td).toBe(false);
-    // Safety values still emitted.
-    expect(td.create_response).toBe(false);
-    expect(td.interrupt_response).toBe(false);
+    // Server-managed response-gating keys still emitted on semantic_vad.
+    expect(td.create_response).toBe(true);
+    expect(td.interrupt_response).toBe(true);
   });
 
   it('omits semantic_vad eagerness when not provided (server default applies)', () => {
@@ -90,7 +91,7 @@ describe('[unit] OpenAIRealtime2Adapter GA turn detection', () => {
 });
 
 describe('[unit] OpenAIRealtime2Adapter GA defaults unchanged (regression guard)', () => {
-  it('produces the exact pre-change turn_detection literal and no noise key when no knobs are set', () => {
+  it('produces the server-managed turn_detection literal and no noise key when no knobs are set', () => {
     const config = buildGA({});
     const td = audioInput(config).turn_detection as Record<string, unknown>;
     expect(td).toEqual({
@@ -98,10 +99,30 @@ describe('[unit] OpenAIRealtime2Adapter GA defaults unchanged (regression guard)
       threshold: 0.5,
       prefix_padding_ms: 300,
       silence_duration_ms: 300,
-      create_response: false,
-      interrupt_response: false,
+      // Server-managed default (issue #154): the server auto-creates the
+      // response on commit (create_response) AND owns the barge-in cancel
+      // (interrupt_response). The e2e model is not gated on the Whisper
+      // transcript and the client only sends sendClear + truncate on barge-in.
+      create_response: true,
+      interrupt_response: true,
     });
-    expect('input_audio_noise_reduction' in audioInput(config)).toBe(false);
+    expect('noise_reduction' in audioInput(config)).toBe(false);
+  });
+
+  it('legacy opt-out (gateResponseOnTranscript true) flips BOTH keys to false (client-managed)', () => {
+    const config = buildGA({ gateResponseOnTranscript: true });
+    const td = audioInput(config).turn_detection as Record<string, unknown>;
+    // Client-managed: Patter drives response.create after the hallucination
+    // filter and response.cancel on barge-in itself.
+    expect(td.create_response).toBe(false);
+    expect(td.interrupt_response).toBe(false);
+  });
+
+  it('default (gateResponseOnTranscript false explicit) sets BOTH keys true (server-managed)', () => {
+    const config = buildGA({ gateResponseOnTranscript: false });
+    const td = audioInput(config).turn_detection as Record<string, unknown>;
+    expect(td.create_response).toBe(true);
+    expect(td.interrupt_response).toBe(true);
   });
 
   it('honors a pre-existing silenceDurationMs option as the server_vad default', () => {

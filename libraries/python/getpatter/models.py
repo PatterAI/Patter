@@ -515,6 +515,19 @@ class Agent:
     # ``eagerness='low'``). ``None`` (default) keeps the adapter's current
     # hardcoded turn_detection. See :class:`RealtimeTurnDetection`.
     realtime_turn_detection: "RealtimeTurnDetection | None" = None
+    # OpenAI Realtime — gate the model response on the Whisper transcript
+    # arriving (legacy behavior). ``None``/``False`` (default) decouples the
+    # speech-to-speech response from Whisper: the model replies as soon as the
+    # user stops speaking (server ``input_audio_buffer.committed``) rather than
+    # waiting ~500 ms for the ``input_audio_transcription.completed`` event.
+    # The Whisper transcript then serves as pure observability — populating the
+    # dashboard / history / ``on_transcript`` only; it never triggers, gates, or
+    # cancels the response. The hallucination filter still drops phantom
+    # transcripts from the DISPLAYED transcript regardless of this flag. Set to
+    # ``True`` to restore the older transcript-gated path (production-recommended
+    # default is the decoupled behavior — it reclaims the ~500 ms Whisper wait).
+    # Realtime modes only; pipeline mode uses its own dedicated STT.
+    realtime_gate_response_on_transcript: bool | None = None
     # Opt-in barge-in confirmation strategies (pipeline mode). With the
     # default empty tuple the SDK falls back to the legacy "interrupt
     # immediately on VAD speech_start" behaviour. When at least one

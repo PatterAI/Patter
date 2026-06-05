@@ -36,7 +36,7 @@ export interface CallRecord {
    * ``canceled``, or ``webhook_error``.
    */
   readonly status?: string;
-  readonly transcript?: ReadonlyArray<{ readonly role: string; readonly text: string; readonly timestamp: number }>;
+  readonly transcript?: ReadonlyArray<{ readonly role: string; readonly text: string; readonly timestamp: number; readonly turnIndex?: number }>;
   readonly turns?: readonly unknown[];
   readonly metrics?: Record<string, unknown> | null;
   readonly [key: string]: unknown;
@@ -51,7 +51,7 @@ interface MutableCallRecord {
   started_at: number;
   ended_at?: number;
   status?: string;
-  transcript?: Array<{ role: string; text: string; timestamp: number }>;
+  transcript?: Array<{ role: string; text: string; timestamp: number; turnIndex?: number }>;
   turns?: unknown[];
   metrics?: Record<string, unknown> | null;
   [key: string]: unknown;
@@ -223,6 +223,50 @@ export class MetricsStore extends EventEmitter {
     this.publish('call_status', { call_id: callId, status, ...extra });
   }
 
+  /**
+   * Record a single transcript line (user/assistant) as it becomes known.
+   *
+   * FIX-5 (issue #154): the live forward path for the dashboard transcript.
+   * The Realtime stream handler calls this the moment each line is known — the
+   * user line right after the hallucination filter accepts it, the assistant
+   * line when its turn flushes — keyed by the monotonic ``turnIndex`` reserved
+   * at turn-open (``reserveTurnIndex``). Each line is appended to the active
+   * call's ``transcript`` array and broadcast over SSE as a ``transcript_line``
+   * event so the dashboard can render lines as they arrive and re-sort by
+   * ``(turnIndex, user<assistant)`` — making a late-arriving user line land
+   * ABOVE its agent line. ``recordTurn`` de-dups against the lines pushed here
+   * by ``(turnIndex, role)`` so the metrics path never double-pushes the same
+   * text. Parity with Python ``record_transcript_line``.
+   */
+  recordTranscriptLine(data: {
+    call_id: string;
+    turnIndex: number;
+    role: 'user' | 'assistant';
+    text: string;
+  }): void {
+    const callId = data.call_id || '';
+    const { role, text, turnIndex } = data;
+    if (!callId || (role !== 'user' && role !== 'assistant') || !text) return;
+
+    const active = this.activeCalls.get(callId);
+    if (active) {
+      if (!active.transcript) active.transcript = [];
+      active.transcript.push({
+        role,
+        text,
+        timestamp: Date.now() / 1000,
+        turnIndex,
+      });
+    }
+
+    this.publish('transcript_line', {
+      call_id: callId,
+      turnIndex,
+      role,
+      text,
+    });
+  }
+
   /** Append a single conversation turn to an active call and broadcast it via SSE. */
   recordTurn(data: Record<string, unknown>): void {
     const callId = (data.call_id as string) || '';
@@ -250,6 +294,7 @@ export class MetricsStore extends EventEmitter {
         user_text?: unknown;
         agent_text?: unknown;
         timestamp?: unknown;
+        turn_index?: unknown;
       };
       const userText =
         typeof turnRecord.user_text === 'string' ? turnRecord.user_text : '';
@@ -259,14 +304,28 @@ export class MetricsStore extends EventEmitter {
         typeof turnRecord.timestamp === 'number'
           ? turnRecord.timestamp
           : Date.now() / 1000;
-      if (userText.length > 0) {
-        active.transcript.push({ role: 'user', text: userText, timestamp: ts });
+      const turnIndex =
+        typeof turnRecord.turn_index === 'number'
+          ? turnRecord.turn_index
+          : undefined;
+      // FIX-5 (issue #154): de-dup against lines the Realtime path already
+      // pushed live via ``recordTranscriptLine``. When the same (turnIndex,
+      // role) is present we skip the text mirror — recordTurn stays
+      // metrics-only and never double-pushes a line already shown live.
+      const alreadyLive = (role: string): boolean =>
+        turnIndex !== undefined &&
+        (active.transcript ?? []).some(
+          (e) => e.turnIndex === turnIndex && e.role === role,
+        );
+      if (userText.length > 0 && !alreadyLive('user')) {
+        active.transcript.push({ role: 'user', text: userText, timestamp: ts, turnIndex });
       }
-      if (agentText.length > 0 && agentText !== '[interrupted]') {
+      if (agentText.length > 0 && agentText !== '[interrupted]' && !alreadyLive('assistant')) {
         active.transcript.push({
           role: 'assistant',
           text: agentText,
           timestamp: ts,
+          turnIndex,
         });
       }
     }

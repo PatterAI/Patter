@@ -1462,6 +1462,7 @@ class Patter:
         openai_realtime_noise_reduction: Literal["near_field", "far_field"]
         | None = None,
         realtime_turn_detection: "RealtimeTurnDetection | None" = None,
+        realtime_gate_response_on_transcript: bool | None = None,
         tool_call_preambles: bool | str = False,
     ) -> Agent:
         """Create an ``Agent`` configuration.
@@ -1544,6 +1545,10 @@ class Patter:
                     )
                 if realtime_turn_detection is None:
                     realtime_turn_detection = engine_fields.get("turn_detection")
+                if realtime_gate_response_on_transcript is None:
+                    realtime_gate_response_on_transcript = engine_fields.get(
+                        "gate_response_on_transcript"
+                    )
             elif engine_kind == "elevenlabs_convai":
                 elevenlabs_engine_key = engine_fields.get("api_key", "")
         elif stt is not None or tts is not None or llm is not None:
@@ -1677,6 +1682,7 @@ class Patter:
             openai_realtime_input_audio_transcription_model=openai_realtime_input_audio_transcription_model,
             openai_realtime_noise_reduction=openai_realtime_noise_reduction,
             realtime_turn_detection=realtime_turn_detection,
+            realtime_gate_response_on_transcript=realtime_gate_response_on_transcript,
             tool_call_preambles=tool_call_preambles,
         )
 
@@ -1696,6 +1702,7 @@ class Patter:
                 "input_audio_transcription_model": engine.input_audio_transcription_model,
                 "noise_reduction": engine.noise_reduction,
                 "turn_detection": engine.turn_detection,
+                "gate_response_on_transcript": engine.gate_response_on_transcript,
             }
         if isinstance(engine, _Realtime):
             return "openai_realtime", {
@@ -1706,6 +1713,7 @@ class Patter:
                 "input_audio_transcription_model": engine.input_audio_transcription_model,
                 "noise_reduction": engine.noise_reduction,
                 "turn_detection": engine.turn_detection,
+                "gate_response_on_transcript": engine.gate_response_on_transcript,
             }
         if isinstance(engine, _ConvAI):
             return "elevenlabs_convai", {

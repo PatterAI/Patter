@@ -121,7 +121,7 @@ async def test_call_wait_true_returns_answered_callresult() -> None:
     phone = _local_phone()
     agent = Agent(system_prompt="x", prewarm=False)
     server = _attach_real_server(phone, agent)
-    _, on_call_end, _ = server._wrap_callbacks()
+    _, on_call_end, _, _ = server._wrap_callbacks()
 
     with _patch_twilio("CA_answer"):
         task = asyncio.create_task(
@@ -158,7 +158,7 @@ async def test_call_wait_true_voicemail_when_amd_machine() -> None:
     phone = _local_phone()
     agent = Agent(system_prompt="x", prewarm=False)
     server = _attach_real_server(phone, agent)
-    _, on_call_end, _ = server._wrap_callbacks()
+    _, on_call_end, _, _ = server._wrap_callbacks()
 
     with _patch_twilio("CA_vm"):
         task = asyncio.create_task(

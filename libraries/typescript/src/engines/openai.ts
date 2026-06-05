@@ -47,6 +47,25 @@ export interface RealtimeOptions {
    * propagates to `realtimeTurnDetection` on `AgentOptions`.
    */
   turnDetection?: RealtimeTurnDetection;
+  /**
+   * Gate the model's response on the Whisper transcript (legacy behavior).
+   *
+   * `false` (default) — the speech-to-speech model responds as soon as the
+   * user stops speaking (on `speech_stopped`), independently of the Whisper
+   * input transcription. The transcript becomes a pure observability
+   * side-channel (dashboard / history / `onTranscript`) and never gates,
+   * triggers, or cancels the response. This reclaims ~500 ms of latency
+   * because the model no longer waits for Whisper.
+   *
+   * `true` — restores the prior behavior where the response is requested
+   * only after the Whisper `transcript_input` event arrives and passes the
+   * hallucination filter.
+   *
+   * Maps to `gate_response_on_transcript` on the Python
+   * `engines.openai.Realtime` marker; propagates to
+   * `openaiRealtimeGateResponseOnTranscript` on `AgentOptions`.
+   */
+  gateResponseOnTranscript?: boolean;
 }
 
 /**
@@ -73,6 +92,7 @@ export class Realtime {
   readonly inputAudioTranscriptionModel?: string;
   readonly noiseReduction?: 'near_field' | 'far_field';
   readonly turnDetection?: RealtimeTurnDetection;
+  readonly gateResponseOnTranscript?: boolean;
 
   constructor(opts: RealtimeOptions = {}) {
     const key = opts.apiKey ?? process.env.OPENAI_API_KEY;
@@ -95,5 +115,6 @@ export class Realtime {
     this.inputAudioTranscriptionModel = opts.inputAudioTranscriptionModel;
     this.noiseReduction = opts.noiseReduction;
     this.turnDetection = opts.turnDetection;
+    this.gateResponseOnTranscript = opts.gateResponseOnTranscript;
   }
 }
