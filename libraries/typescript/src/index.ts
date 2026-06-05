@@ -32,6 +32,7 @@ export type {
   PipelineHooks,
   HookContext,
   RealtimeTurnDetection,
+  SessionContext,
 } from "./types";
 // `Guardrail` is intentionally not re-exported from `./types` — the public
 // `Guardrail` identifier is the class from `./public-api` (exported below),
@@ -192,10 +193,22 @@ export type { GoogleLLMOptions } from "./llm/google";
 // OpenAI-compatible agent runtime / local inference gateway).
 export { LLM as OpenAICompatibleLLM, OpenAICompatibleLLMProvider } from "./llm/openai-compatible";
 export type { OpenAICompatibleLLMOptions } from "./llm/openai-compatible";
+export { hashCaller } from "./llm/openai-compatible";
 export { LLM as HermesLLM } from "./llm/hermes";
 export type { HermesLLMOptions } from "./llm/hermes";
 export { LLM as OpenClawLLM } from "./llm/openclaw";
 export type { OpenClawLLMOptions } from "./llm/openclaw";
+
+// Namespace objects mirroring the Python ``from getpatter.llm import hermes``
+// ergonomics: ``import { hermes } from 'getpatter'; new hermes.LLM()`` builds
+// the SAME class as the ``HermesLLM`` named export above. Provided alongside
+// (not instead of) the named exports.
+import { LLM as HermesLLMClass } from "./llm/hermes";
+import { LLM as OpenClawLLMClass } from "./llm/openclaw";
+import { LLM as OpenAICompatibleLLMClass } from "./llm/openai-compatible";
+export const hermes = Object.freeze({ LLM: HermesLLMClass });
+export const openclaw = Object.freeze({ LLM: OpenClawLLMClass });
+export const openaiCompatible = Object.freeze({ LLM: OpenAICompatibleLLMClass });
 
 // Voice Activity Detection (server-side) — Silero ONNX.
 export { SileroVAD } from "./providers/silero-vad";

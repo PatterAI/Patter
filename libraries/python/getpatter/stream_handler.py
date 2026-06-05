@@ -3105,6 +3105,70 @@ class PipelineStreamHandler(StreamHandler):
             self.audio_sender.reset_pcm_carry()
         return True
 
+    def _schedule_long_turn_filler(
+        self,
+        first_tts_chunk: list,
+        hook_executor: PipelineHookExecutor,
+        hook_ctx: HookContext,
+    ) -> "asyncio.Task | None":
+        """Spawn the opt-in long-turn filler task, or ``None`` when disabled.
+
+        Returns ``None`` (no task) when ``agent.long_turn_message`` is unset /
+        empty — the default, byte-identical to today's behaviour. Otherwise
+        returns a task that waits ``agent.long_turn_message_after_s`` seconds and
+        then, IFF no audio has reached the carrier this turn
+        (``first_tts_chunk[0]`` still ``True``) AND we still own the floor
+        (``self._is_speaking``), synthesizes the filler ONCE via
+        ``_synthesize_sentence``. Guards strictly on "no audio emitted yet" so it
+        cannot double-speak; self-synthesis failure degrades to silence.
+        """
+        message = getattr(self.agent, "long_turn_message", None)
+        if not message:
+            return None
+        after_s = getattr(self.agent, "long_turn_message_after_s", 4.0)
+
+        async def _filler() -> None:
+            try:
+                await asyncio.sleep(after_s)
+            except asyncio.CancelledError:
+                # Cancelled before firing (real audio started / turn ended).
+                raise
+            # Fire at most once, only if the caller still heard SILENCE this
+            # turn and we still hold the floor (no concurrent barge-in).
+            if first_tts_chunk[0] and self._is_speaking:
+                try:
+                    await self._synthesize_sentence(
+                        message, hook_executor, hook_ctx, first_tts_chunk
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # pragma: no cover - defensive
+                    logger.exception("long_turn_message filler synthesis failed")
+
+        return asyncio.create_task(_filler())
+
+    async def _cancel_long_turn_filler(
+        self, task: "asyncio.Task | None"
+    ) -> None:
+        """Cancel the long-turn filler task and await its teardown.
+
+        Idempotent and race-safe: a ``None`` / already-finished task is a no-op,
+        ``CancelledError`` from the cancel is suppressed, and any exception the
+        task raised before cancellation is swallowed (already logged inside the
+        task). Returns ``None`` so callers can reassign the handle in one line.
+        """
+        if task is None:
+            return None
+        if not task.done():
+            task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("long_turn_message filler task ended with error", exc_info=True)
+        return None
+
     async def _process_streaming_response(self, result, call_id: str) -> str:
         """Process a streaming (async generator) response through TTS with sentence chunking."""
         chunker = SentenceChunker(
@@ -3119,6 +3183,17 @@ class PipelineStreamHandler(StreamHandler):
         hooks = getattr(self.agent, "hooks", None)
         hook_executor = PipelineHookExecutor(hooks)
         hook_ctx = self._build_hook_context()
+
+        # Opt-in long-turn filler: when the turn is SLOW (agent runtime running
+        # tools/memory) and NO audio has reached the carrier yet, speak a short
+        # filler instead of dead silence. Distinct from ``llm_error_message``
+        # (that fires on an LLM ERROR; this fires on SLOWNESS). The task waits
+        # ``long_turn_message_after_s`` then, IFF still no audio this turn AND we
+        # still own the floor, synthesizes the filler ONCE. Cancelled the moment
+        # real audio is emitted, on the error branch, and in the finally.
+        long_turn_task = self._schedule_long_turn_filler(
+            first_tts_chunk, hook_executor, hook_ctx
+        )
 
         # Reset the per-turn LLM cancel event so a stale cancel from a
         # previous turn cannot terminate this stream prematurely.  The
@@ -3178,6 +3253,15 @@ class PipelineStreamHandler(StreamHandler):
                                 continue  # hook dropped this sentence
                             sentence = transformed
 
+                        # Real audio is about to be synthesized — cancel the
+                        # long-turn filler so it can never fire (or double-speak)
+                        # once the agent's own reply has started. Cancelling
+                        # before the await is race-safe: asyncio is single-
+                        # threaded, so the filler coroutine cannot interleave
+                        # between this cancel and the synthesis call.
+                        long_turn_task = await self._cancel_long_turn_filler(
+                            long_turn_task
+                        )
                         if not await self._synthesize_sentence(
                             sentence, hook_executor, hook_ctx, first_tts_chunk
                         ):
@@ -3190,6 +3274,9 @@ class PipelineStreamHandler(StreamHandler):
                 llm_error = True
                 chunker.reset()  # discard partial content on LLM error
                 logger.exception("LLM streaming error: %s", exc)
+                # The turn errored — stop the filler so it cannot speak over the
+                # (distinct) error fallback below.
+                long_turn_task = await self._cancel_long_turn_filler(long_turn_task)
                 # Close the active turn as interrupted so the metrics accumulator
                 # does not leak an open turn when LLM throws mid-stream.
                 if self.metrics is not None and self.metrics.turn_active:
@@ -3240,12 +3327,19 @@ class PipelineStreamHandler(StreamHandler):
                             continue
                         sentence = transformed
 
+                    # Real flushed audio about to play — cancel the filler.
+                    long_turn_task = await self._cancel_long_turn_filler(
+                        long_turn_task
+                    )
                     if not await self._synthesize_sentence(
                         sentence, hook_executor, hook_ctx, first_tts_chunk
                     ):
                         interrupted = True
                         break
         finally:
+            # Ensure the long-turn filler task never outlives the turn (clean
+            # cancellation, CancelledError suppressed inside the helper).
+            await self._cancel_long_turn_filler(long_turn_task)
             # Schedule the flip to idle. Keeps the speaking flag set during
             # the audio tail still playing on the carrier so STT echo on
             # the trailing samples doesn't look like a fresh user turn.

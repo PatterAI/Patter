@@ -489,6 +489,28 @@ export interface BackgroundAudioPlayer {
  *    (see ``Patter.agent()`` for the resolution).
  * 3. Otherwise, the AgentOptions default is used.
  */
+/**
+ * Per-call context handed to a ``sessionKeyFactory`` (see
+ * {@link OpenAICompatibleLLMOptions.sessionKeyFactory}).
+ *
+ * A session-aware LLM provider (e.g. the Hermes preset) can derive its
+ * memory-scope header value per call from this — most usefully from
+ * {@link SessionContext.callerHash}, a stable non-reversible hash of the
+ * caller, so one phone number maps to one durable memory namespace across calls
+ * WITHOUT the raw number ever being emitted or logged.
+ *
+ * All fields are optional: ``callId`` / ``caller`` / ``callee`` are present when
+ * the call provides them; ``callerHash`` is {@link hashCaller} of ``caller``
+ * (``undefined`` when there is no caller). The raw ``caller`` is carried here
+ * only so a factory CAN re-derive its own scope — it must never be put on the
+ * wire or logged beyond what already exists. Mirrors Python ``SessionContext``.
+ */
+export interface SessionContext {
+  readonly callId?: string;
+  readonly caller?: string;
+  readonly callee?: string;
+  readonly callerHash?: string;
+}
 /** Configuration for a local-mode voice AI agent (passed to `phone.agent({...})`). */
 export interface AgentOptions {
   readonly systemPrompt: string;
@@ -524,6 +546,26 @@ export interface AgentOptions {
    * Mirrors Python ``llm_error_message`` on ``Patter.agent()`` / ``Agent``.
    */
   readonly llmErrorMessage?: string;
+  /**
+   * Opt-in short filler spoken when an LLM turn is SLOW (e.g. an agent runtime
+   * running tools / memory) and no audio has reached the carrier yet — DISTINCT
+   * from ``llmErrorMessage`` (which fires on an ERROR; this fires on SLOWNESS).
+   * When set to a non-empty string and the turn has produced NO audio after
+   * ``longTurnMessageAfterS`` seconds, the SDK synthesizes this line ONCE
+   * through the normal TTS turn lifecycle (subject to barge-in) to fill the
+   * gap. It never fires once real audio has started this turn, and never
+   * double-speaks. ``undefined`` (default) keeps today's behaviour: nothing is
+   * spoken while a slow turn runs. Pipeline mode only. Mirrors Python
+   * ``long_turn_message`` on ``Patter.agent()`` / ``Agent``.
+   */
+  readonly longTurnMessage?: string;
+  /**
+   * Seconds to wait after the turn begins speaking before the
+   * ``longTurnMessage`` filler fires (only consulted when ``longTurnMessage``
+   * is set and no audio has reached the carrier yet). Default ``4.0``. Mirrors
+   * Python ``long_turn_message_after_s``.
+   */
+  readonly longTurnMessageAfterS?: number;
   /** Tool definitions — ``Tool`` class instances from ``getpatter``. */
   readonly tools?: ReadonlyArray<ToolInstance>;
   /**

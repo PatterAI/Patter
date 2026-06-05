@@ -45,8 +45,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import Any, AsyncIterator, ClassVar
+from typing import Any, AsyncIterator, Callable, ClassVar
 
+from getpatter.models import SessionContext, hash_caller
 from getpatter.services.llm_loop import OpenAILLMProvider
 
 __all__ = ["OpenAICompatibleLLMProvider", "LLM"]
@@ -101,6 +102,17 @@ class OpenAICompatibleLLMProvider(OpenAILLMProvider):
             credential-grade memory scope and is NEVER logged. ``None``
             (default) means the header is omitted even if
             ``session_key_header`` is set.
+        session_key_factory: Optional callable that derives the
+            ``session_key_header`` VALUE per call from a
+            :class:`getpatter.models.SessionContext` (carrying ``call_id`` /
+            ``caller`` / ``callee`` / ``caller_hash``). When set it takes
+            PRECEDENCE over the static ``session_key``: at request-build time
+            the factory is called and its return value is emitted in
+            ``session_key_header``. A falsy return (``None`` / ``""``) omits the
+            header for that call. The static ``session_key`` remains the simple
+            fallback used when no factory is configured. The returned value is a
+            credential-grade memory scope and is NEVER logged. ``None``
+            (default) means the static path is used.
         **kwargs: Sampling kwargs forwarded to :class:`OpenAILLMProvider`.
     """
 
@@ -121,6 +133,7 @@ class OpenAICompatibleLLMProvider(OpenAILLMProvider):
         session_id_prefix: str = "",
         session_key_header: str | None = None,
         session_key: str | None = None,
+        session_key_factory: Callable[[SessionContext], str | None] | None = None,
         **kwargs,
     ) -> None:
         try:
@@ -155,6 +168,9 @@ class OpenAICompatibleLLMProvider(OpenAILLMProvider):
         self._session_key_header = session_key_header
         # Credential-grade memory scope — never logged.
         self._session_key = session_key
+        # When set, derives the session_key_header value per call (caller-hash,
+        # etc.) and overrides the static session_key. Never logged.
+        self._session_key_factory = session_key_factory
 
     async def warmup(self) -> None:
         """Pre-call DNS / TLS warmup that omits ``Authorization`` for keyless gateways.
@@ -198,21 +214,50 @@ class OpenAICompatibleLLMProvider(OpenAILLMProvider):
         except Exception:  # pragma: no cover — defense in depth
             logger.debug("_record_completion_cost failed", exc_info=True)
 
+    def _resolve_session_key(
+        self,
+        *,
+        call_id: str | None,
+        caller: str | None,
+        callee: str | None,
+    ) -> str | None:
+        """Resolve the ``session_key_header`` VALUE for this call.
+
+        When a ``session_key_factory`` is configured it is called with a
+        :class:`SessionContext` (the raw ``caller`` plus its non-reversible
+        :func:`hash_caller`) and its return value wins — a falsy return omits
+        the header. Otherwise the static ``session_key`` is used. The result is
+        a credential-grade memory scope and is never logged.
+        """
+        if self._session_key_factory is not None:
+            ctx = SessionContext(
+                call_id=call_id,
+                caller=caller,
+                callee=callee,
+                caller_hash=hash_caller(caller),
+            )
+            return self._session_key_factory(ctx)
+        return self._session_key
+
     def _build_completion_kwargs(
         self,
         messages: list[dict],
         tools: list[dict] | None,
         *,
         call_id: str | None = None,
+        caller: str | None = None,
+        callee: str | None = None,
     ) -> dict[str, Any]:
         """Assemble ``chat.completions.create`` kwargs, adding session continuity.
 
         Extends the parent builder with up to three INDEPENDENT, opt-in
         session signals — the OpenAI ``user`` field, a per-call session-id
-        header, and a static memory-scope header. Each is gated separately, so
-        e.g. a runtime can take the per-call header without the ``user`` field.
-        Per-call signals require a ``call_id``; the memory-scope header does
-        not. When none applies the result is byte-identical to the parent
+        header, and a memory-scope header (static ``session_key`` OR a per-call
+        value from ``session_key_factory``). Each is gated separately, so e.g. a
+        runtime can take the per-call header without the ``user`` field.
+        Per-call ``user`` / session-id signals require a ``call_id``; the
+        memory-scope header does not (a factory may key off the caller hash
+        alone). When none applies the result is byte-identical to the parent
         (no ``user``, no ``extra_headers``).
         """
         kwargs = super()._build_completion_kwargs(messages, tools)
@@ -221,11 +266,16 @@ class OpenAICompatibleLLMProvider(OpenAILLMProvider):
             kwargs["user"] = f"{self._session_user_prefix}{call_id}"
         if self._session_id_header is not None and call_id:
             extra[self._session_id_header] = f"{self._session_id_prefix}{call_id}"
-        if self._session_key_header is not None and self._session_key:
+        if self._session_key_header is not None:
             # Truthy check (not ``is not None``): an empty-string session key is
             # not a meaningful memory scope — treat it as unset rather than
-            # emitting a confusing empty header on the wire.
-            extra[self._session_key_header] = self._session_key
+            # emitting a confusing empty header on the wire. The factory (when
+            # configured) takes precedence over the static session_key.
+            session_key_value = self._resolve_session_key(
+                call_id=call_id, caller=caller, callee=callee
+            )
+            if session_key_value:
+                extra[self._session_key_header] = session_key_value
         if extra:
             # Merge over any pre-existing extra_headers (the parent never sets
             # this today, but the spread keeps it future-safe and clobber-free).
@@ -239,15 +289,21 @@ class OpenAICompatibleLLMProvider(OpenAILLMProvider):
         *,
         cancel_event: asyncio.Event | None = None,
         call_id: str | None = None,
+        caller: str | None = None,
+        callee: str | None = None,
     ) -> AsyncIterator[dict]:
-        """Stream chunks, threading ``call_id`` into the session continuity fields.
+        """Stream chunks, threading per-call context into the session fields.
 
-        Mirrors :meth:`OpenAILLMProvider.stream` but routes ``call_id`` into
-        ``_build_completion_kwargs`` so the per-call ``user`` / session header
-        are emitted. ``call_id`` is optional — unset means the parent-identical
-        no-session path.
+        Mirrors :meth:`OpenAILLMProvider.stream` but routes ``call_id`` (plus
+        ``caller`` / ``callee`` when a ``session_key_factory`` needs them) into
+        ``_build_completion_kwargs`` so the per-call ``user`` / session headers
+        are emitted. All three are optional — unset means the parent-identical
+        no-session path. ``caller`` is used only to compute the session-key
+        scope (and its non-reversible hash); it is never logged here.
         """
-        kwargs = self._build_completion_kwargs(messages, tools, call_id=call_id)
+        kwargs = self._build_completion_kwargs(
+            messages, tools, call_id=call_id, caller=caller, callee=callee
+        )
         response = await self._client.chat.completions.create(**kwargs)
 
         last_usage = None

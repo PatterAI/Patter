@@ -1,5 +1,11 @@
 ## Unreleased
 
+### Added
+
+- **TypeScript namespace exports for the agent-LLM presets.** `import { hermes, openclaw, openaiCompatible } from "getpatter"` now works alongside the existing `HermesLLM` / `OpenClawLLM` / `OpenAICompatibleLLM` named exports, so `new hermes.LLM()` mirrors Python's `from getpatter.llm import hermes; hermes.LLM()`. `libraries/typescript/src/index.ts`.
+- **`session_key_factory` / `sessionKeyFactory` — per-call long-term memory scope from a caller hash.** `OpenAICompatibleLLM` (and `HermesLLM`) can derive the `X-Hermes-Session-Key` header per call from a `SessionContext` (`call_id` / `caller` / `callee` / `caller_hash`) instead of a static value, so an agent runtime can remember a caller across calls **without the raw phone number ever reaching the wire or the logs**. Shortcut `HermesLLM(session_key_from="caller_hash")` installs a default `patter-caller-<caller_hash>` factory (SHA-256, 16 hex chars). New public `SessionContext` + `hash_caller` / `hashCaller` helper. The factory takes precedence over the static `session_key`; a falsy return omits the header. The loop dispatch was generalised to thread `caller` / `callee` only to providers whose `stream()` declares them (or `**kwargs`), keeping built-in and minimal custom providers unchanged. `libraries/python/getpatter/models.py`, `.../llm/openai_compatible.py`, `.../llm/hermes.py`, `.../services/llm_loop.py` + TypeScript mirrors.
+- **`long_turn_message` / `longTurnMessage` — opt-in spoken filler during a slow turn.** When an LLM turn takes longer than `long_turn_message_after_s` (default 4 s) and no audio has reached the caller yet, Patter speaks a short configurable line (e.g. "One moment, let me check.") instead of dead silence — useful for agent runtimes (Hermes / OpenClaw) that run tools mid-turn. Distinct from `llm_error_message` (which fires on error): this fires on **slowness**, once per turn, gated on emitted audio so it never double-speaks. `None` / unset = off (no behaviour change). `libraries/python/getpatter/models.py`, `.../stream_handler.py`, `.../client.py` + TypeScript mirrors.
+
 ## 0.6.5 (2026-06-05)
 
 ### Added

@@ -44,15 +44,35 @@
  * ``Bearer EMPTY`` placeholder breaks some gateways).
  */
 
+import { createHash } from 'node:crypto';
 import type { LLMChunk, LLMProvider, LLMStreamOptions } from '../llm-loop';
 import { mergeAbortSignals } from '../llm-loop';
 import { parseOpenAISseStream } from '../providers/groq-llm';
 import { PatterConnectionError } from '../errors';
 import { getLogger } from '../logger';
+import type { SessionContext } from '../types';
 import { VERSION } from '../version';
 
 /** Default per-request timeout in seconds for the generic provider. */
 const DEFAULT_TIMEOUT_S = 60;
+
+/**
+ * Stable, non-reversible 16-char hash of a caller for session scoping.
+ *
+ * Used to derive a per-caller memory namespace (e.g. an agent runtime's session
+ * key) WITHOUT ever exposing the raw phone number — the call site keys cross-
+ * call memory off the hash, never the number itself. Returns the first 16 hex
+ * chars of the SHA-256 digest of the UTF-8 ``caller`` string, or ``undefined``
+ * when ``caller`` is undefined / empty. The 16-char (64-bit) truncation is
+ * plenty for namespacing while keeping the emitted header value compact; it is
+ * NOT a security primitive (a phone number has too little entropy to make the
+ * digest a secret) — its only job is to keep the raw number off the wire / out
+ * of logs. Mirrors Python ``hash_caller``.
+ */
+export function hashCaller(caller?: string): string | undefined {
+  if (!caller) return undefined;
+  return createHash('sha256').update(caller, 'utf8').digest('hex').slice(0, 16);
+}
 
 /** Constructor options for {@link OpenAICompatibleLLMProvider}. */
 export interface OpenAICompatibleLLMOptions {
@@ -118,6 +138,17 @@ export interface OpenAICompatibleLLMOptions {
    * scope — NEVER logged. ``undefined`` (default) means the header is omitted.
    */
   sessionKey?: string;
+  /**
+   * Optional callback that derives the ``sessionKeyHeader`` VALUE per call from
+   * a {@link SessionContext} (carrying ``callId`` / ``caller`` / ``callee`` /
+   * ``callerHash``). When set it takes PRECEDENCE over the static ``sessionKey``:
+   * at request-build time the factory is called and its return value is emitted
+   * in ``sessionKeyHeader``. A falsy return (``undefined`` / ``''``) omits the
+   * header for that call. The static ``sessionKey`` remains the simple fallback
+   * used when no factory is configured. The returned value is a credential-grade
+   * memory scope and is NEVER logged. Mirrors Python ``session_key_factory``.
+   */
+  sessionKeyFactory?: (ctx: SessionContext) => string | undefined;
   /** Sampling temperature [0, 2]. */
   temperature?: number;
   /** Max tokens in the assistant response (sent as ``max_completion_tokens``). */
@@ -165,6 +196,7 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
   private readonly sessionIdPrefix?: string;
   private readonly sessionKeyHeader?: string;
   private readonly sessionKey?: string;
+  private readonly sessionKeyFactory?: (ctx: SessionContext) => string | undefined;
   private readonly temperature?: number;
   private readonly maxTokens?: number;
   private readonly responseFormat?: Record<string, unknown>;
@@ -199,6 +231,7 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
     this.sessionIdPrefix = options.sessionIdPrefix;
     this.sessionKeyHeader = options.sessionKeyHeader;
     this.sessionKey = options.sessionKey;
+    this.sessionKeyFactory = options.sessionKeyFactory;
     this.temperature = options.temperature;
     this.maxTokens = options.maxTokens;
     this.responseFormat = options.responseFormat;
@@ -223,7 +256,11 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
    *  - ``sessionKeyHeader`` (+ ``sessionKey``) → the static ``sessionKey`` value.
    * ``sessionKey`` is a credential-grade memory scope and is never logged.
    */
-  private buildHeaders(callId?: string): Record<string, string> {
+  private buildHeaders(
+    callId?: string,
+    caller?: string,
+    callee?: string,
+  ): Record<string, string> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       'User-Agent': `getpatter/${VERSION}`,
@@ -236,13 +273,41 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
       // Per-call session id for session / transcript continuity.
       headers[this.sessionIdHeader] = `${this.sessionIdPrefix ?? ''}${callId}`;
     }
-    if (this.sessionKeyHeader && this.sessionKey) {
-      // Truthy check (not `!== undefined`): an empty-string session key is not
-      // a meaningful memory scope — treat it as unset rather than emitting a
-      // confusing empty header. Value is the raw key (never logged).
-      headers[this.sessionKeyHeader] = this.sessionKey;
+    if (this.sessionKeyHeader) {
+      // The factory (when configured) wins over the static sessionKey. Truthy
+      // check (not `!== undefined`): an empty-string scope is not meaningful —
+      // treat it as unset rather than emitting a confusing empty header. The
+      // value is credential-grade and never logged.
+      const sessionKeyValue = this.resolveSessionKey(callId, caller, callee);
+      if (sessionKeyValue) {
+        headers[this.sessionKeyHeader] = sessionKeyValue;
+      }
     }
     return headers;
+  }
+
+  /**
+   * Resolve the ``sessionKeyHeader`` VALUE for this call. When a
+   * ``sessionKeyFactory`` is configured it is called with a
+   * {@link SessionContext} (the raw ``caller`` plus its non-reversible
+   * {@link hashCaller}) and its return value wins — a falsy return omits the
+   * header. Otherwise the static ``sessionKey`` is used. Never logged.
+   */
+  private resolveSessionKey(
+    callId?: string,
+    caller?: string,
+    callee?: string,
+  ): string | undefined {
+    if (this.sessionKeyFactory) {
+      const ctx: SessionContext = {
+        callId,
+        caller,
+        callee,
+        callerHash: hashCaller(caller),
+      };
+      return this.sessionKeyFactory(ctx);
+    }
+    return this.sessionKey;
   }
 
   /**
@@ -308,11 +373,13 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
     opts?: LLMStreamOptions,
   ): AsyncGenerator<LLMChunk, void, unknown> {
     const callId = opts?.callId;
+    const caller = opts?.caller;
+    const callee = opts?.callee;
     const body = this.buildBody(messages, tools, callId);
 
     const response = await fetch(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
-      headers: this.buildHeaders(callId),
+      headers: this.buildHeaders(callId, caller, callee),
       body: JSON.stringify(body),
       signal: mergeAbortSignals(opts?.signal, AbortSignal.timeout(this.timeoutMs)),
     });

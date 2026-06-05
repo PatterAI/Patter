@@ -1441,6 +1441,8 @@ class Patter:
         language: str = "en",
         first_message: str = "",
         llm_error_message: str | None = None,
+        long_turn_message: str | None = None,
+        long_turn_message_after_s: float = 4.0,
         tools: list[Tool] | None = None,
         stt: STTProvider | None = None,
         tts: TTSProvider | None = None,
@@ -1482,6 +1484,15 @@ class Patter:
             model: OpenAI Realtime model ID.
             language: BCP-47 language code, e.g. ``"en"``.
             first_message: If set, the agent speaks this immediately on connect.
+            long_turn_message: Pipeline mode only. Opt-in short filler spoken
+                when a turn is SLOW (e.g. an agent runtime running tools) and no
+                audio has reached the carrier after
+                ``long_turn_message_after_s`` seconds — distinct from
+                ``llm_error_message`` (which fires on an error). ``None``
+                (default) keeps today's silence-while-thinking behaviour. Speaks
+                at most once per turn and never once real audio has started.
+            long_turn_message_after_s: Seconds to wait before the
+                ``long_turn_message`` filler fires. Default ``4.0``.
             tools: List of ``Tool`` instances (build with the ``tool()`` factory).
             stt: ``STTProvider`` instance for pipeline mode (e.g.
                 ``DeepgramSTT(api_key=...)``).
@@ -1659,6 +1670,8 @@ class Patter:
             language=language,
             first_message=first_message,
             llm_error_message=llm_error_message,
+            long_turn_message=long_turn_message,
+            long_turn_message_after_s=long_turn_message_after_s,
             tools=tuple(tools_out) if tools_out is not None else None,
             provider=provider,
             stt=stt_resolved,

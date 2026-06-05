@@ -2691,6 +2691,64 @@ export class StreamHandler {
   }
 
   /**
+   * Schedule the opt-in long-turn filler and return its async ``clear()``.
+   *
+   * When ``agent.longTurnMessage`` is unset / empty the returned clear is a
+   * no-op (byte-identical to today's behaviour). Otherwise a one-shot timer
+   * fires after ``agent.longTurnMessageAfterS`` seconds and, IFF no audio has
+   * reached the carrier this turn (``!ttsFirstByteSent.value``) AND we still own
+   * the floor (``this.isSpeaking``), synthesizes the filler ONCE via the same
+   * per-sentence TTS primitive every sentence uses.
+   *
+   * The returned ``clear()`` is **async**: it stops the timer AND, if the filler
+   * already started synthesizing (its ``setTimeout`` callback runs in a separate
+   * macro-task, so it can fire just before the first real sentence), AWAITS the
+   * in-flight synthesis so the filler audio can never interleave with the real
+   * sentence that follows. Idempotent; self-synthesis failure degrades to
+   * silence (never crashes the turn). The caller must clear on first real audio,
+   * on the error branch, and in the finally.
+   */
+  private scheduleLongTurnFiller(
+    ttsFirstByteSent: { value: boolean },
+    hookExecutor: PipelineHookExecutor,
+    hookCtx: HookContext,
+    label: string,
+  ): () => Promise<void> {
+    const message = this.deps.agent.longTurnMessage;
+    if (!message) return async () => {};
+    const afterS = this.deps.agent.longTurnMessageAfterS ?? 4.0;
+    let cancelled = false;
+    let inFlight: Promise<void> | null = null;
+    const timer = setTimeout(() => {
+      // Fire at most once, only if the caller still heard SILENCE this turn, we
+      // still hold the floor, and the turn has not already moved on.
+      if (cancelled || ttsFirstByteSent.value || !this.isSpeaking) return;
+      // Track the in-flight synthesis so clear() can await it — serializing the
+      // filler before the real sentence so their audio can never interleave.
+      inFlight = this.synthesizeSentence(
+        message,
+        hookExecutor,
+        hookCtx,
+        ttsFirstByteSent,
+      ).catch((err) => {
+        getLogger().error(
+          `longTurnMessage filler synthesis failed (${label}):`,
+          err,
+        );
+      });
+    }, Math.max(0, afterS * 1000));
+    return async () => {
+      cancelled = true;
+      clearTimeout(timer);
+      if (inFlight !== null) {
+        const pending = inFlight;
+        inFlight = null;
+        await pending;
+      }
+    };
+  }
+
+  /**
    * Streaming built-in LLM path with sentence chunking and per-sentence
    * guardrails/TTS. Returns the concatenated response text.
    */
@@ -2716,6 +2774,20 @@ export class StreamHandler {
     const llmSignal = this.llmAbort.signal;
     let llmError = false;
 
+    // Opt-in long-turn filler: when the turn is SLOW (agent runtime running
+    // tools/memory) and NO audio has reached the carrier yet, speak a short
+    // filler instead of dead silence. Distinct from ``llmErrorMessage`` (that
+    // fires on an LLM ERROR; this fires on SLOWNESS). The timer waits
+    // ``longTurnMessageAfterS`` then, IFF still no audio this turn AND we still
+    // own the floor, synthesizes the filler ONCE. Cleared the moment real audio
+    // is emitted, on the error branch, and in the finally.
+    const clearLongTurnFiller = this.scheduleLongTurnFiller(
+      ttsFirstByteSent,
+      hookExecutor,
+      hookCtx,
+      label,
+    );
+
     // Span lifetime: LLM dispatch → final token / TTS handoff. Always closed
     // in the ``finally`` block so an early throw cannot leak a span.
     const llmSpan = startSpan(SPAN_LLM, { 'patter.call.id': this.callId });
@@ -2736,6 +2808,9 @@ export class StreamHandler {
         if (transformed === null) return; // hook dropped this sentence
         sentenceText = transformed;
       }
+      // Real audio is about to play — cancel the long-turn filler so it can
+      // never fire (or double-speak) once the agent's own reply has started.
+      await clearLongTurnFiller();
       await this.synthesizeSentence(sentenceText, hookExecutor, hookCtx, ttsFirstByteSent);
     };
     let firstSentenceEmitted = false;
@@ -2769,6 +2844,9 @@ export class StreamHandler {
         // Treat AbortError as a clean barge-in cancellation, not an LLM error.
         const isAbort =
           (e as Error)?.name === 'AbortError' || llmSignal.aborted;
+        // The turn ended (error or clean abort) — stop the filler so it cannot
+        // speak over the error fallback below or after a barge-in.
+        await clearLongTurnFiller();
         if (!isAbort) {
           llmError = true;
           chunker.reset(); // discard partial content on LLM error
@@ -2810,6 +2888,9 @@ export class StreamHandler {
         }
       }
     } finally {
+      // Ensure the long-turn filler never outlives the turn (idempotent — a
+      // no-op when already cleared at the first real audio / error branch).
+      await clearLongTurnFiller();
       this.endSpeakingWithGrace();
       // Drop the per-turn abort controller so the next turn starts with a
       // fresh one and barge-ins on the next turn cannot accidentally fire

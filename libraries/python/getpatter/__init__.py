@@ -47,9 +47,11 @@ from getpatter.models import (
     OpenAICompatibleConsult,
     PipelineHooks,
     RealtimeTurnDetection,
+    SessionContext,
     STTConfig,
     TTSConfig,
     TurnMetrics,
+    hash_caller,
 )
 from getpatter.services.barge_in_strategies import (
     BargeInStrategy,
@@ -419,9 +421,11 @@ __all__ = [
     "LatencyBreakdown",
     "PipelineHooks",
     "RealtimeTurnDetection",
+    "SessionContext",
     "STTConfig",
     "TTSConfig",
     "TurnMetrics",
+    "hash_caller",
     "BargeInStrategy",
     "MinWordsStrategy",
     "evaluate_barge_in_strategies",

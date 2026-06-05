@@ -432,6 +432,17 @@ export interface LLMStreamOptions {
    * config) no ``user`` field is sent — fully backward compatible.
    */
   callId?: string;
+  /**
+   * Caller / callee for this turn (the same values the stream handler builds
+   * into ``callCtx.caller`` / ``callCtx.callee``). Threaded purely so a
+   * session-aware provider with a ``sessionKeyFactory`` can derive a per-caller
+   * memory scope from the NON-REVERSIBLE caller hash. Additive and optional:
+   * providers that read only ``signal`` / ``callId`` ignore them, and the raw
+   * ``caller`` is never logged. Mirrors the Python loop threading
+   * ``caller`` / ``callee`` into the provider's ``stream``.
+   */
+  caller?: string;
+  callee?: string;
 }
 
 /**
@@ -921,17 +932,30 @@ export class LLMLoop {
     const hasAfterLlmChunk = Boolean(hookExecutor?.hasAfterLlmChunk());
     const allEmittedText: string[] = [];
 
-    // Thread the stable per-call id into the provider stream options so
-    // session-aware providers (OpenAI-compatible / Hermes / OpenClaw) can
-    // emit the ``user`` field for one runtime session per phone call. Purely
-    // additive: providers that read only ``signal`` ignore it. Only spread a
-    // string call id — leave ``opts`` untouched otherwise so existing
-    // behaviour is byte-identical when no call id is present.
+    // Thread the stable per-call id (plus caller / callee for a
+    // sessionKeyFactory) into the provider stream options so session-aware
+    // providers (OpenAI-compatible / Hermes / OpenClaw) can emit the ``user``
+    // field / memory-scope header for one runtime session per phone call.
+    // Purely additive: providers that read only ``signal`` ignore them. Only
+    // build the augmented opts when at least one context value is a non-empty
+    // string — leave ``opts`` untouched otherwise so existing behaviour is
+    // byte-identical when no call context is present. The raw caller is never
+    // logged; a factory keys off its non-reversible hash.
     const callId = callContext.call_id;
-    const streamOpts: LLMStreamOptions | undefined =
-      typeof callId === 'string' && callId.length > 0
-        ? { ...opts, callId }
-        : opts;
+    const caller = callContext.caller;
+    const callee = callContext.callee;
+    const hasContext =
+      (typeof callId === 'string' && callId.length > 0) ||
+      (typeof caller === 'string' && caller.length > 0) ||
+      (typeof callee === 'string' && callee.length > 0);
+    const streamOpts: LLMStreamOptions | undefined = hasContext
+      ? {
+          ...opts,
+          ...(typeof callId === 'string' && callId.length > 0 ? { callId } : {}),
+          ...(typeof caller === 'string' && caller.length > 0 ? { caller } : {}),
+          ...(typeof callee === 'string' && callee.length > 0 ? { callee } : {}),
+        }
+      : opts;
 
     for (let iter = 0; iter < maxIterations; iter++) {
       const toolCallsAccumulated = new Map<number, ToolCallAccumulator>();
