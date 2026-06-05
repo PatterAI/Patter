@@ -19,7 +19,7 @@ Installation extras:
 See ``pyproject.toml`` and the top-level README for the full matrix.
 """
 
-__version__ = "0.6.4"
+__version__ = "0.6.5"
 
 from getpatter._speech_events import (
     AgentState,

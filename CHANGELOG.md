@@ -1,5 +1,7 @@
 ## Unreleased
 
+## 0.6.5 (2026-06-05)
+
 ### Added
 
 - **`llm_error_message` / `llmErrorMessage` — opt-in spoken fallback when the
