@@ -418,6 +418,17 @@ export class StreamHandler {
   private tts: TTSAdapter | null = null;
   private isSpeaking = false;
   /**
+   * True only while the post-TTS tail-grace window is pending: the agent has
+   * finished its turn but ``isSpeaking`` is still held for
+   * ``PATTER_TTS_TAIL_GRACE_MS`` to swallow the fading echo tail. A VAD
+   * ``speech_start`` (or a transcript) during this window is the user's NEXT
+   * turn, not a barge-in — there is nothing left to interrupt. Set by
+   * ``endSpeakingWithGrace``; cleared by ``beginSpeaking``, the grace flip,
+   * ``cancelSpeaking``, and ``endTailGraceForNewTurn``. Parity with Python
+   * ``_tail_grace_active``.
+   */
+  private tailGraceActive = false;
+  /**
    * Ring buffer of inbound PCM16 16 kHz frames captured while the agent
    * is speaking and the self-hearing guard is dropping audio. On
    * barge-in we flush this buffer to STT so Deepgram (or any other
@@ -615,6 +626,10 @@ export class StreamHandler {
     }
     this.speakingGeneration++;
     this.isSpeaking = true;
+    // A fresh turn is actively streaming — not in the post-TTS echo window.
+    // Clear the tail-grace flag so a VAD speech_start during this turn is
+    // treated as a real barge-in (not a new-turn rescue).
+    this.tailGraceActive = false;
     this.speakingStartedAt = Date.now();
     this.suppressedSpeechPending = false;
     // Stamp ``firstAudioSentAt`` synchronously for EVERY turn so the
@@ -670,6 +685,7 @@ export class StreamHandler {
   private cancelSpeaking(): void {
     this.speakingGeneration++; // invalidates pending grace timers
     this.isSpeaking = false;
+    this.tailGraceActive = false;
     this.speakingStartedAt = null;
     this.firstAudioSentAt = null;
     this.lastCancelAt = Date.now();
@@ -782,10 +798,16 @@ export class StreamHandler {
     if (grace > 0) {
       const gen = this.speakingGeneration;
       this.clearGraceTimer();
+      // The agent has finished pushing audio; ``isSpeaking`` is now held only
+      // to suppress the fading echo tail. Mark the tail-grace window so fast
+      // next-turn speech is rescued as a new turn rather than mis-detected as
+      // a barge-in.
+      this.tailGraceActive = true;
       this.graceTimer = setTimeout(() => {
         this.graceTimer = null;
         if (this.speakingGeneration === gen) {
           this.isSpeaking = false;
+          this.tailGraceActive = false;
           this.speakingStartedAt = null;
           this.firstAudioSentAt = null;
           this.clearPendingBargeIn();
@@ -806,6 +828,7 @@ export class StreamHandler {
       }, grace);
     } else {
       this.isSpeaking = false;
+      this.tailGraceActive = false;
       this.speakingStartedAt = null;
       this.firstAudioSentAt = null;
       this.clearPendingBargeIn();
@@ -816,6 +839,38 @@ export class StreamHandler {
       }
       this.resetVad();
     }
+  }
+
+  /**
+   * End the post-TTS tail-grace window because the user has begun their next
+   * turn. Unlike a barge-in, the agent's response already played out in full
+   * — there is nothing to cancel and no turn was interrupted. We flip the
+   * speaking flag off (bumping ``speakingGeneration`` so the scheduled grace
+   * timer no-ops), recover any leading audio the self-hearing guard captured
+   * into the ring (the user's first ~250 ms, which VAD needed before it could
+   * emit ``speech_start``), and let the live STT stream take over. We do NOT
+   * call ``sendClear``, ``recordBargeinDetected`` or ``recordTurnInterrupted``
+   * — none apply to a turn that completed normally.
+   *
+   * Without this, fast next-turn speech (humans reply in 200-700 ms, well
+   * inside the 1500 ms default grace) is withheld from STT and recorded as an
+   * empty ``[interrupted]`` turn, after which the agent goes silent for the
+   * rest of the call. Parity with Python ``_end_tail_grace_for_new_turn``.
+   */
+  private endTailGraceForNewTurn(): void {
+    this.isSpeaking = false;
+    this.tailGraceActive = false;
+    this.speakingStartedAt = null;
+    this.firstAudioSentAt = null;
+    this.speakingGeneration++; // invalidates the pending grace timer
+    this.clearGraceTimer();
+    this.clearPendingBargeIn();
+    void this.resetBargeInStrategies();
+    // Recover the user's leading words. Same rationale as the barge-in flush
+    // — but here it is the only audio recovery, since the agent already
+    // stopped and no new TTS will overwrite it.
+    this.suppressedSpeechPending = false;
+    this.flushInboundAudioRing();
   }
 
   private async resetBargeInStrategies(): Promise<void> {
@@ -1427,6 +1482,18 @@ export class StreamHandler {
             );
           }
           if (evt?.type === 'speech_start') {
+            // Tail-grace new-turn rescue: the agent already finished its turn
+            // and we are only in the post-TTS echo-guard window. A VAD
+            // speech_start here is the user's next turn, not a barge-in — end
+            // the grace so this utterance flows to STT as a clean new turn
+            // instead of being swallowed by the self-hearing guard or
+            // mislabelled as an empty ``[interrupted]`` turn (the multi-turn
+            // silence bug). After this ``isSpeaking`` is false, so the
+            // if/else below is a no-op and the frame falls through to STT.
+            // Parity with Python ``_end_tail_grace_for_new_turn``.
+            if (this.isSpeaking && this.tailGraceActive) {
+              this.endTailGraceForNewTurn();
+            }
             const phantomSuppressed = this.isSpeaking && !this.canBargeIn();
             if (phantomSuppressed) {
               // Within the per-turn warmup gate. With AEC on this is the
@@ -2518,6 +2585,15 @@ export class StreamHandler {
     isFinal?: boolean;
   }): Promise<boolean> {
     if (!transcript.text || !this.isSpeaking) return false;
+    if (this.tailGraceActive) {
+      // A transcript during the post-TTS tail grace is the next turn, not a
+      // barge-in (the agent already finished). End the grace and return
+      // WITHOUT cancelling — the same transcript then flows on to dispatch as
+      // a normal new turn. Closes the race where a transcript lands before
+      // the VAD speech_start rescue fires.
+      this.endTailGraceForNewTurn();
+      return false;
+    }
     if (!this.canBargeIn()) {
       getLogger().info(
         `Barge-in transcript suppressed (agent speaking < gate, aec=${this.aec ? 'on' : 'off'})`,
@@ -2560,6 +2636,12 @@ export class StreamHandler {
    */
   private handleBargeIn(transcript: { text?: string; isFinal?: boolean }): boolean {
     if (!transcript.text || !this.isSpeaking) return false;
+    if (this.tailGraceActive) {
+      // Tail-grace transcript = next turn, not a barge-in. End the grace and
+      // let the transcript dispatch normally (parity with the async path).
+      this.endTailGraceForNewTurn();
+      return false;
+    }
     if (this.bargeInStrategies.length === 0) {
       // Legacy synchronous path — preserve exact byte-for-byte behaviour
       // for users who haven't opted into the confirm pipeline.
