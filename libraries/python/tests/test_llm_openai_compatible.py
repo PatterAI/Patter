@@ -27,7 +27,10 @@ def test_openai_compatible_provider_points_client_at_base_url_with_timeout() -> 
     )
     # Real client carries the base URL and the long (non-default) timeout.
     assert _base_url_str(provider).startswith("http://127.0.0.1:9/v1")
-    assert provider._client.timeout == 120.0
+    # Long read budget for tool-running turns; connect bounded (~10 s) so a
+    # dead gateway fails fast instead of hanging the full read budget.
+    assert provider._client.timeout.read == 120.0
+    assert provider._client.timeout.connect == 10.0
     assert provider._model == "m"
     # Satisfies the LLMProvider protocol.
     assert isinstance(provider, LLMProvider)

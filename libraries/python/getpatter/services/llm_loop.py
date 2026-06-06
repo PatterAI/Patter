@@ -662,6 +662,55 @@ class OpenAILLMProvider:
             kwargs["max_completion_tokens"] = self._max_tokens
         return kwargs
 
+    async def _open_stream_with_cancel(self, kwargs: dict, cancel_event):
+        """Create the streaming completion, aborting promptly if ``cancel_event``
+        fires while awaiting — INCLUDING before the first SSE byte.
+
+        Agent runtimes (Hermes / OpenClaw) run tools/memory/skills for tens of
+        seconds before the first token; the ``create()`` await (and the first
+        ``__anext__``) would otherwise be unabortable, so a barge-in during
+        that window could not free the connection and the next user turn would
+        block behind it. Races ``create()`` against the cancel signal and
+        cancels the in-flight POST if the user interrupts first.
+
+        Returns the streaming response, or ``None`` if cancelled before the
+        response object existed.
+        """
+        if cancel_event is None:
+            return await self._client.chat.completions.create(**kwargs)
+        create_task = asyncio.ensure_future(
+            self._client.chat.completions.create(**kwargs)
+        )
+        cancel_task = asyncio.ensure_future(cancel_event.wait())
+        try:
+            await asyncio.wait(
+                {create_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+        finally:
+            cancel_task.cancel()
+        if not create_task.done():
+            # The caller interrupted before the upstream even responded —
+            # abort the in-flight POST so the socket is freed immediately.
+            create_task.cancel()
+            try:
+                await create_task
+            except BaseException:  # noqa: BLE001 - aborting in-flight request
+                pass
+            return None
+        return create_task.result()
+
+    @staticmethod
+    async def _abort_on_cancel(cancel_event, response) -> None:
+        """Close the streaming response the instant ``cancel_event`` fires so a
+        consumer parked on the first SSE byte unblocks immediately instead of
+        waiting out the read timeout. Best-effort; cancelled in the stream's
+        ``finally`` once the turn ends normally."""
+        try:
+            await cancel_event.wait()
+            await response.close()
+        except Exception:  # noqa: BLE001 - best-effort teardown
+            pass
+
     async def stream(
         self,
         messages: list[dict],
@@ -694,64 +743,88 @@ class OpenAILLMProvider:
         it into ``_build_completion_kwargs``.
         """
         kwargs = self._build_completion_kwargs(messages, tools)
-        response = await self._client.chat.completions.create(**kwargs)
+        response = await self._open_stream_with_cancel(kwargs, cancel_event)
+        if response is None:
+            # Cancelled before the first byte (barge-in during the agent
+            # runtime's pre-first-token tool window) — nothing to yield.
+            return
+        abort_watcher = (
+            asyncio.ensure_future(self._abort_on_cancel(cancel_event, response))
+            if cancel_event is not None
+            else None
+        )
 
         last_usage = None
-        async for chunk in response:
+        try:
+            async for chunk in response:
+                if cancel_event is not None and cancel_event.is_set():
+                    try:
+                        await response.close()
+                    except Exception:  # noqa: BLE001 - best-effort cleanup
+                        pass
+                    return
+                # Usage chunks have empty ``choices`` and a populated ``usage``.
+                usage = getattr(chunk, "usage", None)
+                if usage is not None:
+                    last_usage = usage
+
+                delta = chunk.choices[0].delta if chunk.choices else None
+                if delta is None:
+                    continue
+
+                if delta.content:
+                    yield {"type": "text", "content": delta.content}
+
+                if delta.tool_calls:
+                    for tc in delta.tool_calls:
+                        yield {
+                            "type": "tool_call",
+                            "index": tc.index,
+                            "id": tc.id,
+                            "name": tc.function.name if tc.function else None,
+                            "arguments": tc.function.arguments if tc.function else None,
+                        }
+
+            if last_usage is not None:
+                cache_read = 0
+                details = getattr(last_usage, "prompt_tokens_details", None)
+                if details is not None:
+                    cache_read = getattr(details, "cached_tokens", 0) or 0
+                # OpenAI's prompt_tokens is the TOTAL input (uncached + cached).
+                # Subtract cached so input_tokens represents only the uncached
+                # portion and calculate_llm_cost doesn't bill cached tokens at
+                # the full input rate (mirrors libraries/typescript/src/llm-loop.ts:296-305).
+                prompt_tokens = getattr(last_usage, "prompt_tokens", 0) or 0
+                uncached_input = max(0, prompt_tokens - cache_read)
+                completion_tokens = getattr(last_usage, "completion_tokens", 0) or 0
+                self._record_completion_cost(
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                )
+                yield {
+                    "type": "usage",
+                    "input_tokens": uncached_input,
+                    "output_tokens": completion_tokens,
+                    "cache_read_tokens": cache_read,
+                }
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # A read error AFTER the cancel watchdog closed the response is the
+            # expected clean stop on a (possibly pre-first-token) barge-in —
+            # swallow it so it is not surfaced as an LLM error (which would
+            # trip the spoken llm_error_message fallback). Any genuine upstream
+            # error (cancel_event not set) propagates unchanged.
             if cancel_event is not None and cancel_event.is_set():
-                # Best-effort cancel of the upstream stream so the underlying
-                # HTTP connection is freed instead of waiting for the server
-                # to close. ``response.close()`` is sync on AsyncOpenAI and
-                # may raise if the stream already ended — best-effort.
-                try:
-                    await response.close()
-                except Exception:  # noqa: BLE001 - best-effort cleanup
-                    pass
                 return
-            # Usage chunks have empty ``choices`` and a populated ``usage``.
-            usage = getattr(chunk, "usage", None)
-            if usage is not None:
-                last_usage = usage
-
-            delta = chunk.choices[0].delta if chunk.choices else None
-            if delta is None:
-                continue
-
-            if delta.content:
-                yield {"type": "text", "content": delta.content}
-
-            if delta.tool_calls:
-                for tc in delta.tool_calls:
-                    yield {
-                        "type": "tool_call",
-                        "index": tc.index,
-                        "id": tc.id,
-                        "name": tc.function.name if tc.function else None,
-                        "arguments": tc.function.arguments if tc.function else None,
-                    }
-
-        if last_usage is not None:
-            cache_read = 0
-            details = getattr(last_usage, "prompt_tokens_details", None)
-            if details is not None:
-                cache_read = getattr(details, "cached_tokens", 0) or 0
-            # OpenAI's prompt_tokens is the TOTAL input (uncached + cached).
-            # Subtract cached so input_tokens represents only the uncached
-            # portion and calculate_llm_cost doesn't bill cached tokens at
-            # the full input rate (mirrors libraries/typescript/src/llm-loop.ts:296-305).
-            prompt_tokens = getattr(last_usage, "prompt_tokens", 0) or 0
-            uncached_input = max(0, prompt_tokens - cache_read)
-            completion_tokens = getattr(last_usage, "completion_tokens", 0) or 0
-            self._record_completion_cost(
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-            )
-            yield {
-                "type": "usage",
-                "input_tokens": uncached_input,
-                "output_tokens": completion_tokens,
-                "cache_read_tokens": cache_read,
-            }
+            raise
+        finally:
+            if abort_watcher is not None:
+                abort_watcher.cancel()
+                try:
+                    await abort_watcher
+                except (asyncio.CancelledError, Exception):
+                    pass
 
     def _record_completion_cost(
         self, *, prompt_tokens: int, completion_tokens: int

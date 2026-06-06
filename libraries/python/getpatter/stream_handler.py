@@ -2347,6 +2347,27 @@ class PipelineStreamHandler(StreamHandler):
         # because ``agent`` is a frozen dataclass.
         self._auto_vad = None
         self._stt_task: asyncio.Task | None = None
+        # The in-flight turn dispatch (LLM + TTS) runs as a SINGLE tracked task
+        # so the STT receive loop keeps draining transcripts during a long
+        # (30-90 s) agent-runtime turn and can fire transcript-based barge-in
+        # against the LIVE turn. Exactly one is active at a time — the loop
+        # awaits the previous one to settle before launching the next, so
+        # conversation_history / metrics ordering is unchanged. None when idle.
+        self._dispatch_task: asyncio.Task | None = None
+        # Opt-in (default OFF): forward inbound audio to STT even while the
+        # agent is speaking, so the transcript barge-in path can receive a
+        # transcript on echo-masked PSTN links where the VAD never fires.
+        # ECHO RISK without AEC — see ``on_audio_received`` self-hearing guard.
+        self._forward_stt_while_speaking = os.environ.get(
+            "PATTER_FORWARD_STT_WHILE_SPEAKING", ""
+        ).strip().lower() in ("1", "true", "yes")
+        if self._forward_stt_while_speaking:
+            logger.warning(
+                "PATTER_FORWARD_STT_WHILE_SPEAKING=on: inbound audio is sent to "
+                "STT during TTS so transcript barge-in works on echo-masked "
+                "links. Without AEC the agent's own voice may be transcribed as "
+                "a phantom interruption — pair with agent.barge_in_strategies."
+            )
         self._is_speaking = False
         # True only while the post-TTS tail-grace window is pending: the
         # agent has finished its turn but ``_is_speaking`` is still held for
@@ -3690,14 +3711,58 @@ class PipelineStreamHandler(StreamHandler):
                         self.metrics.anchor_user_speech_start()
                     continue
 
-                await self._dispatch_turn(transcript.text)
+                # Decouple dispatch from the receive loop: run the turn as a
+                # SINGLE tracked task so the ``async for`` keeps draining
+                # transcripts during a long (30-90 s) agent-runtime turn and
+                # can fire transcript-based barge-in against the LIVE turn —
+                # the head-of-line-blocking fix. Settle the previous turn
+                # first so exactly one dispatch is in flight and the per-turn
+                # conversation_history / metrics ordering is preserved.
+                await self._await_dispatch_settle()
+                self._dispatch_task = asyncio.create_task(
+                    self._dispatch_turn(transcript.text)
+                )
 
         except Exception as exc:
             logger.exception("Pipeline STT loop error: %s", exc)
+        finally:
+            # Return only once the last dispatch fully settles, so callers and
+            # tests that inspect state right after ``await _stt_loop()`` still
+            # observe completed turn effects (the loop no longer blocks DURING
+            # a turn, but it does block until the FINAL turn is done).
+            await self._await_dispatch_settle()
+
+    async def _await_dispatch_settle(self) -> None:
+        """Await the in-flight turn dispatch to fully settle.
+
+        Called before launching the next turn (single-in-flight) and once
+        more when the STT loop exits. Two cases: the prior dispatch either
+        completed naturally (await is a no-op) or was cancelled by a barge-in
+        (await lets its ``finally`` — grace flip, LLM span close, ring reset,
+        history flush — run BEFORE the next turn's ``_begin_speaking``). Always
+        clears the handle so a backgrounded-task exception is retrieved (no
+        ``Task exception was never retrieved`` leak).
+        """
+        task = self._dispatch_task
+        if task is None:
+            return
+        try:
+            await task
+        except asyncio.CancelledError:  # pragma: no cover - teardown path
+            pass
+        except Exception as exc:  # pragma: no cover - already handled in dispatch
+            logger.debug("backgrounded dispatch raised: %s", exc)
+        finally:
+            # Only clear if it is still the task we awaited — a re-entrant
+            # launch could have replaced it (it cannot today: the loop is the
+            # sole launcher and awaits here first, but be defensive).
+            if self._dispatch_task is task:
+                self._dispatch_task = None
 
     async def _dispatch_turn(self, transcript_text: str) -> None:
         """Run the post-commit pipeline (record STT → afterTranscribe →
-        LLM dispatch → TTS → turn-complete) inline on the STT loop.
+        LLM dispatch → TTS → turn-complete) as a tracked background task so
+        the STT receive loop keeps draining transcripts during the turn.
         """
         # Reset the per-turn LLM cancel event BEFORE dispatch so a stale
         # cancel set by a previous turn's barge-in (``_do_cancel_for_barge_in``
@@ -4038,11 +4103,25 @@ class PipelineStreamHandler(StreamHandler):
                                     self.metrics.record_tts_stopped()
                                     self.metrics.record_turn_interrupted()
                                 self._is_speaking = False
+                                self._tail_grace_active = False
                                 self._speaking_started_at = None
                                 self._first_audio_sent_at = None
                                 self._speaking_generation += 1
                                 self._last_cancel_at = time.time()
                                 self._suppressed_speech_pending = False
+                                # Tear down the in-flight LLM stream too. The
+                                # consumption loop polls ``_llm_cancel_event``
+                                # per chunk, but a turn parked PRE-first-token
+                                # on a hung agent request never sees a chunk —
+                                # the provider cancel watchdog (see
+                                # ``OpenAICompatibleLLMProvider.stream``) closes
+                                # the request the instant this fires. Parity
+                                # with TS ``cancelSpeaking`` → ``llmAbort.abort``.
+                                cancel_event = getattr(
+                                    self, "_llm_cancel_event", None
+                                )
+                                if cancel_event is not None:
+                                    cancel_event.set()
                     if not phantom_suppressed and self.metrics is not None:
                         # Industry-standard pattern: every legitimate VAD speech_start
                         # re-anchors the turn timestamp pre-commit. This
@@ -4098,7 +4177,16 @@ class PipelineStreamHandler(StreamHandler):
                 # post-barge-in bleed-transcription entry.
                 if len(self._inbound_audio_ring) > 13:  # ~260 ms at 20 ms/frame
                     self._inbound_audio_ring.pop(0)
-                return
+                # Opt-in: also forward the frame to STT during TTS so the
+                # transcript barge-in path can receive a transcript on
+                # echo-masked links where the VAD never fires. The ring push
+                # above stays unconditional (leading-edge recovery preserved);
+                # only the early-return is gated. ECHO RISK without AEC — the
+                # agent's own voice may be transcribed as a phantom
+                # interruption; pair with agent.barge_in_strategies. Default
+                # OFF → byte-identical push-and-return.
+                if not self._forward_stt_while_speaking:
+                    return
 
         # before_send_to_stt hook — gate/transform the audio chunk before it
         # reaches the STT provider. Returning None drops the chunk (useful
@@ -4648,6 +4736,18 @@ class PipelineStreamHandler(StreamHandler):
                 _tts_cancel()
             except Exception:
                 pass
+        # Hard-cancel the backgrounded turn dispatch (teardown backstop) so no
+        # orphan task touches a finalized handler. The cancel_event.set() above
+        # lets a post-first-token turn break gracefully; the cancel covers a
+        # turn parked pre-first-token on a hung agent request.
+        _dispatch_task = getattr(self, "_dispatch_task", None)
+        if _dispatch_task is not None and not _dispatch_task.done():
+            _dispatch_task.cancel()
+            try:
+                await _dispatch_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._dispatch_task = None
         # Drop any pending barge-in timeout BEFORE we tear down metrics /
         # adapters. Without this, a call that ends while a barge-in is
         # pending leaves an asyncio.Task scheduled to fire

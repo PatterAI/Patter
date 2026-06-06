@@ -155,10 +155,17 @@ class OpenAICompatibleLLMProvider(OpenAILLMProvider):
         super().__init__(api_key=key or _EMPTY_KEY_SENTINEL, model=model, **kwargs)
 
         default_headers = {"User-Agent": self._user_agent, **(extra_headers or {})}
+        # Bound a connect that never lands (gateway down) to ~10 s while keeping
+        # the long read budget for tool-running turns. A scalar timeout would
+        # apply the full (120 s) ceiling to connect too, so a dead Hermes would
+        # hang the first turn for the full budget instead of failing fast.
+        import httpx as _httpx
+
+        _client_timeout: Any = _httpx.Timeout(timeout, connect=min(timeout, 10.0))
         self._client: Any = AsyncOpenAI(
             api_key=key or _EMPTY_KEY_SENTINEL,
             base_url=base_url,
-            timeout=timeout,
+            timeout=_client_timeout,
             default_headers=default_headers,
         )
 
@@ -304,58 +311,87 @@ class OpenAICompatibleLLMProvider(OpenAILLMProvider):
         kwargs = self._build_completion_kwargs(
             messages, tools, call_id=call_id, caller=caller, callee=callee
         )
-        response = await self._client.chat.completions.create(**kwargs)
+        # Agent runtimes run tools for tens of seconds before the first token;
+        # race create()/first-byte against the cancel signal + spawn a close()
+        # watchdog so a barge-in during that pre-first-token window aborts the
+        # request promptly instead of blocking the next turn (see base
+        # ``OpenAILLMProvider._open_stream_with_cancel`` / ``_abort_on_cancel``).
+        response = await self._open_stream_with_cancel(kwargs, cancel_event)
+        if response is None:
+            return
+        abort_watcher = (
+            asyncio.ensure_future(self._abort_on_cancel(cancel_event, response))
+            if cancel_event is not None
+            else None
+        )
 
         last_usage = None
-        async for chunk in response:
+        try:
+            async for chunk in response:
+                if cancel_event is not None and cancel_event.is_set():
+                    try:
+                        await response.close()
+                    except Exception:  # noqa: BLE001 - best-effort cleanup
+                        pass
+                    return
+                usage = getattr(chunk, "usage", None)
+                if usage is not None:
+                    last_usage = usage
+
+                delta = chunk.choices[0].delta if chunk.choices else None
+                if delta is None:
+                    continue
+
+                if delta.content:
+                    yield {"type": "text", "content": delta.content}
+
+                if delta.tool_calls:
+                    for tc in delta.tool_calls:
+                        yield {
+                            "type": "tool_call",
+                            "index": tc.index,
+                            "id": tc.id,
+                            "name": tc.function.name if tc.function else None,
+                            "arguments": tc.function.arguments if tc.function else None,
+                        }
+
+            if last_usage is not None:
+                cache_read = 0
+                details = getattr(last_usage, "prompt_tokens_details", None)
+                if details is not None:
+                    cache_read = getattr(details, "cached_tokens", 0) or 0
+                # Mirror OpenAILLMProvider.stream exactly: prompt_tokens is the
+                # TOTAL input (uncached + cached); subtract cached so input_tokens
+                # is the uncached portion and cost isn't double-billed.
+                prompt_tokens = getattr(last_usage, "prompt_tokens", 0) or 0
+                uncached_input = max(0, prompt_tokens - cache_read)
+                completion_tokens = getattr(last_usage, "completion_tokens", 0) or 0
+                self._record_completion_cost(
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                )
+                yield {
+                    "type": "usage",
+                    "input_tokens": uncached_input,
+                    "output_tokens": completion_tokens,
+                    "cache_read_tokens": cache_read,
+                }
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # close()-induced read error during a barge-in is a clean stop, not
+            # an LLM error — swallow when cancelling so llm_error_message does
+            # not fire. Genuine upstream errors (cancel not set) propagate.
             if cancel_event is not None and cancel_event.is_set():
-                try:
-                    await response.close()
-                except Exception:  # noqa: BLE001 - best-effort cleanup
-                    pass
                 return
-            usage = getattr(chunk, "usage", None)
-            if usage is not None:
-                last_usage = usage
-
-            delta = chunk.choices[0].delta if chunk.choices else None
-            if delta is None:
-                continue
-
-            if delta.content:
-                yield {"type": "text", "content": delta.content}
-
-            if delta.tool_calls:
-                for tc in delta.tool_calls:
-                    yield {
-                        "type": "tool_call",
-                        "index": tc.index,
-                        "id": tc.id,
-                        "name": tc.function.name if tc.function else None,
-                        "arguments": tc.function.arguments if tc.function else None,
-                    }
-
-        if last_usage is not None:
-            cache_read = 0
-            details = getattr(last_usage, "prompt_tokens_details", None)
-            if details is not None:
-                cache_read = getattr(details, "cached_tokens", 0) or 0
-            # Mirror OpenAILLMProvider.stream exactly: prompt_tokens is the
-            # TOTAL input (uncached + cached); subtract cached so input_tokens
-            # is the uncached portion and cost isn't double-billed.
-            prompt_tokens = getattr(last_usage, "prompt_tokens", 0) or 0
-            uncached_input = max(0, prompt_tokens - cache_read)
-            completion_tokens = getattr(last_usage, "completion_tokens", 0) or 0
-            self._record_completion_cost(
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-            )
-            yield {
-                "type": "usage",
-                "input_tokens": uncached_input,
-                "output_tokens": completion_tokens,
-                "cache_read_tokens": cache_read,
-            }
+            raise
+        finally:
+            if abort_watcher is not None:
+                abort_watcher.cancel()
+                try:
+                    await abort_watcher
+                except (asyncio.CancelledError, Exception):
+                    pass
 
 
 class LLM(OpenAICompatibleLLMProvider):

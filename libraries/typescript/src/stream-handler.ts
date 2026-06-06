@@ -1021,6 +1021,25 @@ export class StreamHandler {
   private maxDurationTimer: ReturnType<typeof setTimeout> | null = null;
   private transcriptProcessing = false;
   private transcriptQueue: STTTranscript[] = [];
+  /**
+   * The in-flight turn dispatch (LLM + TTS) runs as a SINGLE tracked promise
+   * so the transcript drain loop keeps running ``handleBargeIn`` against the
+   * LIVE turn during a long (30-90 s) agent-runtime response, instead of
+   * head-of-line-blocking on it. Exactly one is in flight: the launcher awaits
+   * the previous one to settle (fast — a barge-in already aborted it) before
+   * starting the next, preserving history/metrics ordering. Parity with
+   * Python ``_dispatch_task``.
+   */
+  private dispatchTask: Promise<void> | null = null;
+  /**
+   * Opt-in (default OFF): forward inbound audio to STT even while the agent is
+   * speaking, so the transcript barge-in path can receive a transcript on
+   * echo-masked PSTN links where the VAD never fires. ECHO RISK without AEC.
+   * Parity with Python ``_forward_stt_while_speaking``.
+   */
+  private readonly forwardSttWhileSpeaking = ['1', 'true', 'yes'].includes(
+    (process.env.PATTER_FORWARD_STT_WHILE_SPEAKING ?? '').trim().toLowerCase(),
+  );
   // Throttle state for back-to-back STT finals — see ``commitTranscript``.
   private lastCommitText = '';
   private lastCommitAt = 0;
@@ -1045,6 +1064,15 @@ export class StreamHandler {
     this.ws = ws;
     this.caller = caller;
     this.callee = callee;
+
+    if (this.forwardSttWhileSpeaking) {
+      getLogger().warn(
+        'PATTER_FORWARD_STT_WHILE_SPEAKING=on: inbound audio is sent to STT ' +
+          'during TTS so transcript barge-in works on echo-masked links. ' +
+          "Without AEC the agent's own voice may be transcribed as a phantom " +
+          'interruption — pair with agent.bargeInStrategies.',
+      );
+    }
 
     this.bargeInStrategies = (deps.agent.bargeInStrategies ?? []).slice();
     const confirmMs = deps.agent.bargeInConfirmMs;
@@ -1611,9 +1639,15 @@ export class StreamHandler {
           ) {
             this.inboundAudioRing.shift();
           }
+          // Opt-in: also forward the frame to STT during TTS so the transcript
+          // barge-in path can receive a transcript on echo-masked links where
+          // the VAD never fires. The ring push above stays unconditional
+          // (leading-edge recovery preserved); only the early-return is gated.
+          // ECHO RISK without AEC. Default OFF → byte-identical push-and-return.
+          if (!this.forwardSttWhileSpeaking) return;
+        } else if ((this.deps.agent.bargeInThresholdMs ?? 300) === 0) {
           return;
         }
-        if ((this.deps.agent.bargeInThresholdMs ?? 300) === 0) return;
       }
 
       // beforeSendToStt hook — gate/transform the audio chunk before it
@@ -1738,6 +1772,10 @@ export class StreamHandler {
     if (typeof ttsCancelable?.cancelActiveStream === 'function') {
       try { ttsCancelable.cancelActiveStream(); } catch { /* defensive */ }
     }
+    // Settle the backgrounded turn dispatch (the abort above unblocks it) so
+    // no in-flight LLM/TTS work touches adapters after they close. Parity with
+    // Python cleanup awaiting ``_dispatch_task``.
+    await this.dispatchTask?.catch(() => {});
     // Drop any pending barge-in timer BEFORE we tear down metrics /
     // adapters. Without this, a call that ends while a barge-in is
     // pending leaves a setTimeout scheduled to fire ``bargeInConfirmMs``
@@ -1775,6 +1813,9 @@ export class StreamHandler {
     if (typeof ttsCancelable?.cancelActiveStream === 'function') {
       try { ttsCancelable.cancelActiveStream(); } catch { /* defensive */ }
     }
+    // Settle the backgrounded turn dispatch before tearing down adapters
+    // (parity with handleStop / Python cleanup).
+    await this.dispatchTask?.catch(() => {});
     // See handleStop — drop pending barge-in timer before cleanup so a
     // dead handler can never fire a stale recordOverlapEnd callback.
     this.clearPendingBargeIn();
@@ -2493,84 +2534,114 @@ export class StreamHandler {
     // Push filtered text to history (after hook, so LLM sees redacted/modified text)
     this.history.push({ role: 'user', text: filteredTranscript, timestamp: Date.now() });
 
-    let responseText = '';
-
     // Wave6B: record that the transcript is being committed to the LLM.
     // onUserTurnCompleted hook is not yet wired in TS — record 0 delay so EOU can still emit.
     this.metricsAcc.recordOnUserTurnCompletedDelay(0);
     this.metricsAcc.recordTurnCommitted();
     closeEndpointSpan();
 
-    if (this.deps.onMessage && typeof this.deps.onMessage === 'function') {
-      try {
-        responseText = await this.deps.onMessage({
+    // Settle the previous turn first (single-in-flight). It is either already
+    // done, or this transcript's handleBargeIn above just aborted it — so this
+    // await is fast and does not head-of-line-block the drain loop in
+    // practice, while preserving strict per-turn history/metrics ordering.
+    await this.dispatchTask?.catch(() => {});
+    // Launch the turn as a tracked background task and RETURN immediately so
+    // the transcript drain loop keeps running handleBargeIn against this LIVE
+    // turn (the head-of-line-blocking fix). Parity with Python
+    // ``create_task(_dispatch_turn(...))``.
+    this.dispatchTask = this.dispatchTurn(filteredTranscript, hookExecutor, hookCtx, interrupted);
+  }
+
+  /**
+   * Post-commit turn body (LLM dispatch → TTS → turn-complete) run as a
+   * tracked background task so the transcript drain loop is not blocked for
+   * the whole (possibly 30-90 s) agent-runtime turn. A barge-in — transcript
+   * (now reachable mid-turn) or VAD — aborts the in-flight ``llmAbort`` and
+   * flips ``isSpeaking``, which the LLM/TTS loops here observe and break on.
+   * Parity with Python ``_dispatch_turn``.
+   */
+  private async dispatchTurn(
+    filteredTranscript: string,
+    hookExecutor: PipelineHookExecutor,
+    hookCtx: HookContext,
+    interrupted: boolean,
+  ): Promise<void> {
+    const label = this.deps.bridge.label;
+    let responseText = '';
+    try {
+      if (this.deps.onMessage && typeof this.deps.onMessage === 'function') {
+        try {
+          responseText = await this.deps.onMessage({
+            text: filteredTranscript,
+            call_id: this.callId,
+            caller: this.caller,
+            callee: this.callee,
+            history: [...this.history.entries],
+          });
+        } catch (e) {
+          getLogger().error(`onMessage error (${label}):`, e);
+          return;
+        }
+        if (!responseText) {
+          // Common misuse: onMessage was provided as an observer (returning void)
+          // but it actually replaces the built-in LLM loop. Warn loudly — the caller
+          // will hear no audio until the handler returns a non-empty string.
+          getLogger().warn(
+            `onMessage returned empty/void (${label}) — no TTS will play. ` +
+            `If you intended to observe transcripts, use onTranscript instead; ` +
+            `if you meant to answer via the built-in LLM, remove onMessage and pass openaiKey.`,
+          );
+        }
+      } else if (this.deps.onMessage && isRemoteUrl(this.deps.onMessage)) {
+        const msgData = {
           text: filteredTranscript,
           call_id: this.callId,
           caller: this.caller,
           callee: this.callee,
           history: [...this.history.entries],
-        });
-      } catch (e) {
-        getLogger().error(`onMessage error (${label}):`, e);
-        return;
-      }
-      if (!responseText) {
-        // Common misuse: onMessage was provided as an observer (returning void)
-        // but it actually replaces the built-in LLM loop. Warn loudly — the caller
-        // will hear no audio until the handler returns a non-empty string.
+        };
+        if (isWebSocketUrl(this.deps.onMessage)) {
+          await this.handleWebSocketResponse(msgData);
+          return;
+        }
+        try {
+          responseText = await this.deps.remoteHandler.callWebhook(this.deps.onMessage, msgData);
+        } catch (e) {
+          getLogger().error(`Webhook remote error (${label}):`, e);
+          return;
+        }
+      } else if (this.llmLoop) {
+        responseText = await this.runPipelineLlm(filteredTranscript, hookExecutor, hookCtx);
+      } else {
         getLogger().warn(
-          `onMessage returned empty/void (${label}) — no TTS will play. ` +
-          `If you intended to observe transcripts, use onTranscript instead; ` +
-          `if you meant to answer via the built-in LLM, remove onMessage and pass openaiKey.`,
+          `Pipeline (${label}) has no llm/onMessage handler — transcript ` +
+            `"${sanitizeLogValue(filteredTranscript.slice(0, 60))}" dropped. ` +
+            'Check that agent.llm or onMessage is configured.',
         );
-      }
-    } else if (this.deps.onMessage && isRemoteUrl(this.deps.onMessage)) {
-      const msgData = {
-        text: filteredTranscript,
-        call_id: this.callId,
-        caller: this.caller,
-        callee: this.callee,
-        history: [...this.history.entries],
-      };
-      if (isWebSocketUrl(this.deps.onMessage)) {
-        await this.handleWebSocketResponse(msgData);
         return;
       }
-      try {
-        responseText = await this.deps.remoteHandler.callWebhook(this.deps.onMessage, msgData);
-      } catch (e) {
-        getLogger().error(`Webhook remote error (${label}):`, e);
-        return;
+
+      if (!responseText) return;
+
+      if (this.llmLoop) {
+        await this.emitAssistantTranscript(responseText);
+        this.metricsAcc.recordTtsComplete(responseText);
+      } else {
+        interrupted = (await this.runRegularLlm(responseText, hookExecutor, hookCtx)) || interrupted;
+        // ``runRegularLlm`` returns the possibly-replaced text via side effect on
+        // history; recompute responseText from the last history entry for the
+        // turn-complete record.
+        responseText = this.history.entries[this.history.entries.length - 1]?.text ?? responseText;
       }
-    } else if (this.llmLoop) {
-      responseText = await this.runPipelineLlm(filteredTranscript, hookExecutor, hookCtx);
-    } else {
-      getLogger().warn(
-        `Pipeline (${label}) has no llm/onMessage handler — transcript ` +
-          `"${sanitizeLogValue(filteredTranscript.slice(0, 60))}" dropped. ` +
-          'Check that agent.llm or onMessage is configured.',
-      );
-      return;
-    }
 
-    if (!responseText) return;
-
-    if (this.llmLoop) {
-      await this.emitAssistantTranscript(responseText);
-      this.metricsAcc.recordTtsComplete(responseText);
-    } else {
-      interrupted = await this.runRegularLlm(responseText, hookExecutor, hookCtx) || interrupted;
-      // ``runRegularLlm`` returns the possibly-replaced text via side effect on
-      // history; recompute responseText from the last history entry for the
-      // turn-complete record.
-      responseText = this.history.entries[this.history.entries.length - 1]?.text ?? responseText;
-    }
-
-    // Skip turn-complete when barge-in already recorded the turn as
-    // interrupted — mirrors Python ``if not interrupted``. Prevents
-    // double-counting / turn-count inflation / polluting p95.
-    if (!interrupted) {
-      await this.emitTurnMetrics(this.metricsAcc.recordTurnComplete(responseText));
+      // Skip turn-complete when barge-in already recorded the turn as
+      // interrupted — mirrors Python ``if not interrupted``. Prevents
+      // double-counting / turn-count inflation / polluting p95.
+      if (!interrupted) {
+        await this.emitTurnMetrics(this.metricsAcc.recordTurnComplete(responseText));
+      }
+    } finally {
+      this.dispatchTask = null;
     }
   }
 

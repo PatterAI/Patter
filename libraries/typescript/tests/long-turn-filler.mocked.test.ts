@@ -214,6 +214,12 @@ describe('[mocked] pipeline long-turn filler (longTurnMessage)', () => {
     await vi.waitFor(() => expect(ttsCalls).toContain(FILLER), {
       timeout: 5000,
     });
+    // Dispatch now runs as a backgrounded task (so the STT loop can barge-in
+    // mid-turn) — await it so the real reply has been synthesized before we
+    // assert on the full TTS sequence.
+    await (handler as unknown as { dispatchTask: Promise<void> | null }).dispatchTask?.catch(
+      () => {},
+    );
     // The filler was spoken FIRST, then the real reply — exactly one filler.
     expect(ttsCalls.indexOf(FILLER)).toBe(0);
     expect(ttsCalls).toContain('Here is your answer.');
