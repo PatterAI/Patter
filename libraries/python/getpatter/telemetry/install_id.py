@@ -1,0 +1,71 @@
+"""Anonymous identifiers for telemetry.
+
+Two ids, both free of PII and never derived from hardware (MAC / hostname /
+serials — that would be fingerprinting):
+
+* :func:`run_id` — a fresh random id per process start. Lets us group the events
+  of a single run without correlating runs over time.
+* :func:`install_id` — a random UUID generated **once** and persisted to a small
+  local file, so the same install reports the same id across restarts. This is
+  the standard anonymous "install id" used by OSS tools (Homebrew, Next.js,
+  Astro) to count *active installs* — it is a random number, not tied to a person
+  or any identifying data, and it is only read/created on the telemetry-enabled
+  path (opting out never touches the filesystem). If the file cannot be written
+  (read-only FS, sandbox) we fall back to the per-process run id, so nothing ever
+  breaks.
+
+Mirrors ``libraries/typescript/src/telemetry/install-id.ts``.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import uuid
+from pathlib import Path
+
+_RUN_ID = uuid.uuid4().hex
+_HEX32 = re.compile(r"^[0-9a-f]{32}$")
+_install_id: str | None = None
+
+
+def run_id() -> str:
+    """Return this process's anonymous run id (stable for the process lifetime)."""
+    return _RUN_ID
+
+
+def _state_path() -> Path:
+    """Where the persisted install id lives (overridable for tests/sandboxes)."""
+    base = os.getenv("PATTER_TELEMETRY_STATE_DIR") or os.getenv("XDG_STATE_HOME")
+    root = Path(base) if base else Path.home() / ".getpatter"
+    return root / "install-id"
+
+
+def install_id() -> str:
+    """Return the persisted anonymous install id (random UUID, created once).
+
+    Best-effort and never raises: an unwritable filesystem degrades to the
+    per-process run id rather than failing telemetry.
+    """
+    global _install_id
+    if _install_id is not None:
+        return _install_id
+
+    path = _state_path()
+    try:
+        existing = path.read_text(encoding="utf-8").strip()
+        if _HEX32.match(existing):
+            _install_id = existing
+            return _install_id
+    except OSError:
+        pass
+
+    new_id = uuid.uuid4().hex
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(new_id, encoding="utf-8")
+        _install_id = new_id
+    except OSError:
+        # Read-only / sandboxed FS: fall back to the per-process id (not persisted).
+        _install_id = _RUN_ID
+    return _install_id

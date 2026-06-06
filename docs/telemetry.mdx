@@ -1,0 +1,104 @@
+---
+title: Anonymous telemetry
+description: What Patter's opt-out usage telemetry collects, and how to disable it.
+---
+
+Patter sends a small amount of **anonymous usage telemetry** so the maintainers can
+see how the SDK is used — which engines, providers, models, carriers, platforms,
+and versions are popular, plus coarse per-call latency, duration, and cost — and
+prioritise accordingly. It is **on by default** and designed to be invisible to
+your application and impossible to tie back to a person or a call.
+
+<Note>
+Telemetry **never** collects PII or call content. No phone numbers, transcripts,
+audio, prompts, tool arguments, API keys, customer identifiers, file paths,
+hostnames, or IP addresses are ever sent.
+</Note>
+
+## What is collected
+
+Each event is a small, flat JSON object with only coarse, low-cardinality fields:
+
+Common fields on every event:
+
+| Field | Example | Notes |
+| --- | --- | --- |
+| `event` | `sdk_initialized` | One of a fixed, small set of event names |
+| `sdk` / `sdk_version` | `python` / `0.6.3` | Language and SDK version |
+| `os` / `arch` | `linux` / `arm64` | OS family and CPU arch only |
+| `runtime` / `runtime_version` | `node` / `20.11` | Bucketed to `major.minor` |
+| `run_id` | random | A per-process random id, regenerated every run |
+| `install_id` | random | A random, anonymous install id persisted locally, to count active installs (no PII, no hardware) |
+| `ci` | `false` | Whether a CI/test environment was detected |
+
+Per-event dimensions (all are a closed enum or a coarse bucket — an off-list
+value is replaced with `other` before sending):
+
+| Event | Dimensions |
+| --- | --- |
+| `sdk_initialized` | `carrier` (twilio/telnyx/plivo/none), `tunnel` (static/configured/none) |
+| `feature_used` | `engine` (realtime/convai/pipeline), `provider` (vendor family), and for **pipeline** the composed stack: `stt_provider` / `tts_provider` / `llm_provider` (vendor) plus `stt_model` / `tts_model` / `llm_model` (e.g. `deepgram-nova-3`, `anthropic-claude-opus-4-8`). A fine-tuned, self-hosted, or custom model collapses to `{vendor}-other` — a custom model name is **never** sent |
+| `agent_configured` | `builtin_tool_count` (0–3), `custom_tool_count_bucket` (a range like `2_3` — **never the tool names**), `integration` (openclaw/mcp/hermes/other/none), `integration_kind` (consult/mcp/none), `mcp_server_count_bucket` |
+| `call_completed` | `outcome` (completed / error / no_answer / busy / failed), `error_code` (a closed code like `rate_limit` / `timeout` / `connection` — **never the error message**), `engine`, `provider`, `carrier`, `latency_ms` (whole milliseconds), `duration_seconds` (whole seconds), `cost_usd` (total call cost in USD) — sent once per call. **No call content, no per-call identifier.** |
+
+The `run_id` is a fresh random value on every process start (it groups one run's
+events). The `install_id` is a random UUID generated **once** and stored in a small
+local file (`~/.getpatter/install-id`) so the maintainers can count unique active
+installs over time — it is a random number, **not** tied to you or any PII, and is
+never derived from hardware (MAC address, hostname, serial numbers). Opting out
+never creates or reads this file. The collector drops the source IP on receipt.
+Custom tool names, custom integration endpoints, custom/fine-tuned model names, and
+any value not on a closed enum are **never** sent — only counts and coarse
+categories.
+
+## How to disable it
+
+Telemetry is opt-out. Any one of the following turns it off:
+
+```python Python
+# In code:
+phone = Patter(carrier=Twilio(...), phone_number="+15551234567", telemetry=False)
+```
+
+```ts TypeScript
+// In code:
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15551234567", telemetry: false });
+```
+
+Or via environment variables (these also work without touching code):
+
+| Variable | Effect |
+| --- | --- |
+| `PATTER_TELEMETRY_DISABLED=1` | Disable Patter telemetry |
+| `DO_NOT_TRACK=1` | Disable telemetry in Patter and every tool that honors the [DO_NOT_TRACK](https://donottrack.sh/) convention |
+
+Telemetry is also **automatically disabled** in CI and test runners (for example
+when `CI`, `GITHUB_ACTIONS`, `PYTEST_CURRENT_TEST`, or `VITEST` is set).
+
+## Inspect exactly what would be sent
+
+Set `PATTER_TELEMETRY_DEBUG=1` to print every event to stderr **without sending
+it**. This lets you audit precisely what would leave your machine:
+
+```bash
+PATTER_TELEMETRY_DEBUG=1 python app.py
+# [patter telemetry] {"event":"sdk_initialized","sdk":"python","sdk_version":"0.6.3",...}
+```
+
+## Send telemetry to your own collector
+
+Point Patter at any HTTP endpoint that accepts a JSON array of events:
+
+```bash
+export PATTER_TELEMETRY_ENDPOINT="https://telemetry.example.com/v1/ingest"
+```
+
+## Precedence
+
+When more than one signal is present, the first match wins:
+
+1. `DO_NOT_TRACK` set → **off**
+2. `PATTER_TELEMETRY_DISABLED` set → **off**
+3. `telemetry=False` in code → **off**
+4. CI / test environment detected → **off**
+5. otherwise → **on**

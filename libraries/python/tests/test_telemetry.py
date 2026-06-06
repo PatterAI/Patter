@@ -1,0 +1,720 @@
+"""Authentic tests for the anonymous telemetry client.
+
+A real local HTTP collector (stdlib ``http.server`` in a background thread)
+captures what the SDK actually sends over a real ``httpx`` POST. Only the
+CI/test *environment detection* is neutralised (so the enabled path can run
+inside pytest/CI) — the consent logic, buffer, payload builder, redaction, and
+network egress are all real.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import pytest
+
+from getpatter.telemetry import build_event, stack
+from getpatter.telemetry.client import TelemetryClient
+
+
+class _Collector:
+    """A real local HTTP server that records POSTed JSON bodies."""
+
+    def __init__(self) -> None:
+        self.requests: list[object] = []
+        self._server: ThreadingHTTPServer | None = None
+        self._thread: threading.Thread | None = None
+
+    @property
+    def url(self) -> str:
+        assert self._server is not None
+        host, port = self._server.server_address[0], self._server.server_address[1]
+        return f"http://127.0.0.1:{port}/v1/ingest"
+
+    @property
+    def events(self) -> list[dict]:
+        """Flattened list of every event across all received batches."""
+        out: list[dict] = []
+        for batch in self.requests:
+            if isinstance(batch, list):
+                out.extend(batch)
+        return out
+
+    def start(self) -> None:
+        collector = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802 (stdlib name)
+                length = int(self.headers.get("Content-Length", "0") or 0)
+                body = self.rfile.read(length)
+                try:
+                    collector.requests.append(json.loads(body))
+                except Exception:
+                    collector.requests.append(body)
+                self.send_response(204)
+                self.end_headers()
+
+            def log_message(self, *args: object) -> None:  # silence
+                pass
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        if self._server is not None:
+            self._server.shutdown()
+            self._server.server_close()
+
+
+@pytest.fixture
+def collector():
+    c = _Collector()
+    c.start()
+    yield c
+    c.stop()
+
+
+@pytest.fixture
+def enabled(monkeypatch):
+    """Neutralise CI/test detection and clear disablers → telemetry enabled."""
+    monkeypatch.setattr("getpatter.telemetry.consent.is_ci", lambda: False)
+    monkeypatch.setattr("getpatter.telemetry.consent.is_test", lambda: False)
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+    monkeypatch.delenv("PATTER_TELEMETRY_DISABLED", raising=False)
+    monkeypatch.delenv("PATTER_TELEMETRY_DEBUG", raising=False)
+    monkeypatch.delenv("PATTER_TELEMETRY_ENDPOINT", raising=False)
+
+
+async def _wait_for(collector: _Collector, n: int, timeout: float = 2.0) -> None:
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + timeout
+    while len(collector.events) < n and loop.time() < deadline:
+        await asyncio.sleep(0.01)
+
+
+# --- enabled path -----------------------------------------------------------
+
+
+async def test_event_reaches_collector_when_enabled(enabled, collector):
+    client = TelemetryClient(sdk_version="0.6.3", endpoint=collector.url)
+    assert client.enabled is True
+    client.record(
+        "feature_used", engine="realtime", provider="openai", carrier="twilio"
+    )
+    await _wait_for(collector, 1)
+    await client.aclose()
+
+    assert len(collector.events) == 1
+    event = collector.events[0]
+    assert event["event"] == "feature_used"
+    assert event["sdk"] == "python"
+    assert event["sdk_version"] == "0.6.3"
+    assert event["runtime"] == "cpython"
+    assert event["schema_version"] == 3
+    assert event["engine"] == "realtime"
+    assert event["provider"] == "openai"
+    assert event["carrier"] == "twilio"
+    assert isinstance(event["run_id"], str) and len(event["run_id"]) >= 16
+
+
+async def test_denylisted_dimensions_are_dropped(enabled, collector):
+    client = TelemetryClient(sdk_version="0.6.3", endpoint=collector.url)
+    # An allowed dimension plus several radioactive ones that must never ship.
+    client.record(
+        "feature_used",
+        engine="pipeline",
+        phone_number="+15551234567",
+        transcript="hello there, my SSN is ...",
+        api_key="sk-secret",
+        caller="+15557654321",
+    )
+    await _wait_for(collector, 1)
+    await client.aclose()
+
+    event = collector.events[0]
+    assert event["engine"] == "pipeline"
+    for forbidden in ("phone_number", "transcript", "api_key", "caller"):
+        assert forbidden not in event
+    # No value anywhere in the serialised payload leaks the secret/number.
+    blob = json.dumps(event)
+    assert "+1555" not in blob
+    assert "sk-secret" not in blob
+
+
+# --- disabled paths: zero egress -------------------------------------------
+
+
+async def test_disabled_by_do_not_track(enabled, collector, monkeypatch):
+    monkeypatch.setenv("DO_NOT_TRACK", "1")
+    client = TelemetryClient(sdk_version="0.6.3", endpoint=collector.url)
+    assert client.enabled is False
+    client.record("feature_used", engine="realtime")
+    await asyncio.sleep(0.1)
+    await client.aclose()
+    assert collector.events == []
+
+
+async def test_disabled_by_kill_switch(enabled, collector, monkeypatch):
+    monkeypatch.setenv("PATTER_TELEMETRY_DISABLED", "1")
+    client = TelemetryClient(sdk_version="0.6.3", endpoint=collector.url)
+    assert client.enabled is False
+    client.record("feature_used", engine="realtime")
+    await asyncio.sleep(0.1)
+    await client.aclose()
+    assert collector.events == []
+
+
+async def test_disabled_by_constructor_flag(enabled, collector):
+    client = TelemetryClient(sdk_version="0.6.3", flag=False, endpoint=collector.url)
+    assert client.enabled is False
+    client.record("feature_used", engine="realtime")
+    await asyncio.sleep(0.1)
+    await client.aclose()
+    assert collector.events == []
+
+
+async def test_disabled_in_ci(collector, monkeypatch):
+    # Don't use the `enabled` fixture: exercise the real CI detection.
+    monkeypatch.setattr("getpatter.telemetry.consent.is_test", lambda: False)
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+    monkeypatch.delenv("PATTER_TELEMETRY_DISABLED", raising=False)
+    monkeypatch.setenv("CI", "true")
+    client = TelemetryClient(sdk_version="0.6.3", endpoint=collector.url)
+    assert client.enabled is False
+    client.record("feature_used")
+    await asyncio.sleep(0.1)
+    await client.aclose()
+    assert collector.events == []
+
+
+# --- fail-safety ------------------------------------------------------------
+
+
+async def test_offline_collector_is_silent(enabled):
+    # Point at a closed port — record + flush must not raise; behaviour identical.
+    client = TelemetryClient(
+        sdk_version="0.6.3", endpoint="http://127.0.0.1:1/v1/ingest"
+    )
+    assert client.enabled is True
+    client.record("feature_used", engine="realtime")
+    await asyncio.sleep(0.1)
+    await client.aclose()  # must complete without raising
+
+
+async def test_record_never_raises_on_bad_event(enabled, collector):
+    client = TelemetryClient(sdk_version="0.6.3", endpoint=collector.url)
+    client.record("not_a_real_event")  # unknown event name — swallowed
+    await asyncio.sleep(0.1)
+    await client.aclose()
+    assert collector.events == []
+
+
+async def test_flush_sync_sends_buffered_events(enabled, collector):
+    # Exercises the synchronous atexit path (httpx.Client, not AsyncClient).
+    client = TelemetryClient(sdk_version="0.6.3", endpoint=collector.url)
+    client.record("sdk_initialized", engine="pipeline")
+    # Drain synchronously before the scheduled async flush runs.
+    client._flush_sync()
+    await _wait_for(collector, 1)
+    await client.aclose()
+
+    assert len(collector.events) == 1
+    assert collector.events[0]["event"] == "sdk_initialized"
+    assert collector.events[0]["engine"] == "pipeline"
+
+
+async def test_debug_prints_without_sending(enabled, collector, monkeypatch, capsys):
+    monkeypatch.setenv("PATTER_TELEMETRY_DEBUG", "1")
+    client = TelemetryClient(sdk_version="0.6.3", endpoint=collector.url)
+    client.record("sdk_initialized", engine="convai")
+    await asyncio.sleep(0.1)
+    await client.aclose()
+
+    assert collector.events == []  # nothing sent
+    err = capsys.readouterr().err
+    assert "[patter telemetry]" in err
+    assert "sdk_initialized" in err
+
+
+# --- unit -------------------------------------------------------------------
+
+
+def test_build_event_has_required_anonymous_fields():
+    event = build_event(
+        "sdk_initialized", sdk_version="1.2.3", dimensions={"engine": "realtime"}
+    )
+    assert event["event"] == "sdk_initialized"
+    assert event["sdk"] == "python"
+    assert event["sdk_version"] == "1.2.3"
+    assert event["runtime"] == "cpython"
+    assert event["os"] in {"linux", "darwin", "windows", "unknown"}
+    assert event["arch"] in {"x86_64", "arm64"} or isinstance(event["arch"], str)
+    assert "." in event["runtime_version"]  # major.minor, no patch
+    assert isinstance(event["ci"], bool)
+    assert event["engine"] == "realtime"
+
+
+def test_build_event_rejects_unknown_event():
+    with pytest.raises(ValueError):
+        build_event("definitely_not_an_event", sdk_version="1.0.0")
+
+
+def test_offlist_dimension_value_coerced_to_other():
+    # A raw custom value for an enum dimension must never reach the wire — the
+    # value allowlist coerces it to "other".
+    event = build_event(
+        "feature_used",
+        sdk_version="1.0.0",
+        dimensions={"provider": "AcmeSecretVendorLLM", "engine": "realtime"},
+    )
+    assert event["provider"] == "other"  # coerced
+    assert event["engine"] == "realtime"  # on-list, preserved
+    assert "AcmeSecretVendorLLM" not in json.dumps(event)
+
+
+def test_build_event_keeps_known_values():
+    event = build_event(
+        "feature_used",
+        sdk_version="1.0.0",
+        dimensions={"provider": "deepgram", "carrier": "telnyx"},
+    )
+    assert event["provider"] == "deepgram"
+    assert event["carrier"] == "telnyx"
+
+
+def test_engine_family_parity_logic():
+    # _telemetry_engine_family must mirror the TS telemetryEngineFamily exactly,
+    # including the provider-based branches (parity with the TS public option).
+    from getpatter.client import _telemetry_engine_family as fam
+
+    assert fam(None, None, None, None) == "realtime"
+    assert fam(None, "pipeline", None, None) == "pipeline"
+    assert fam(None, "elevenlabs_convai", None, None) == "convai"
+    assert fam(None, "openai_realtime", None, None) == "realtime"
+    assert fam(None, None, object(), None) == "pipeline"  # stt set -> pipeline
+
+    class _ConvAIEngine:
+        pass
+
+    assert fam(_ConvAIEngine(), None, None, None) == "convai"
+
+    class _SomeRealtimeEngine:
+        pass
+
+    assert fam(_SomeRealtimeEngine(), None, None, None) == "realtime"
+
+
+def test_telemetry_buckets():
+    from getpatter.client import (
+        _telemetry_bucket_custom_tools as bt,
+        _telemetry_bucket_mcp as bm,
+    )
+
+    assert [bt(n) for n in (0, 1, 2, 3, 4, 6, 7, 12, 13, 100)] == [
+        "0",
+        "1",
+        "2_3",
+        "2_3",
+        "4_6",
+        "4_6",
+        "7_12",
+        "7_12",
+        "13_plus",
+        "13_plus",
+    ]
+    assert [bm(n) for n in (0, 1, 2, 3, 4)] == ["0", "1", "2_3", "2_3", "4_plus"]
+
+
+def test_telemetry_provider_family():
+    from getpatter.client import _telemetry_provider_family as pf
+
+    assert pf("realtime") == "openai"
+    assert pf("convai") == "elevenlabs"
+    assert pf("pipeline") == "other"
+
+
+def test_telemetry_integration_detects_openclaw_without_leaking():
+    from getpatter.client import _telemetry_integration
+    from getpatter.models import ConsultConfig
+
+    consult = ConsultConfig.openclaw(agent="receptionist")
+    integration, kind, mcp = _telemetry_integration(consult, None)
+    assert integration == "openclaw"
+    assert kind == "consult"
+    assert mcp == "0"
+
+
+def test_telemetry_integration_custom_consult_collapses_to_other():
+    from getpatter.client import _telemetry_integration
+    from getpatter.models import ConsultConfig
+
+    # A custom consult endpoint must never leak its host — collapses to "other".
+    consult = ConsultConfig(url="https://my-secret-brand-orchestrator.example.com/x")
+    integration, kind, mcp = _telemetry_integration(consult, None)
+    assert integration == "other"
+    assert kind == "consult"
+
+
+def test_telemetry_integration_mcp_bucketed():
+    from getpatter.client import _telemetry_integration
+
+    integration, kind, mcp = _telemetry_integration(None, [object(), object()])
+    assert integration == "mcp"
+    assert kind == "mcp"
+    assert mcp == "2_3"
+
+
+async def test_call_completed_from_real_metrics(enabled, collector):
+    # Build a REAL CallMetrics and run the real record_call_completed helper +
+    # real client → real collector. Only the network boundary is local.
+    from getpatter.models import CallMetrics, CostBreakdown, LatencyBreakdown
+    from getpatter.telemetry.call_metrics import record_call_completed
+
+    metrics = CallMetrics(
+        call_id="CAtest",
+        duration_seconds=42.0,  # -> 10s_1m
+        turns=(),
+        cost=CostBreakdown(),
+        latency_avg=LatencyBreakdown(),
+        latency_p95=LatencyBreakdown(agent_response_ms=2500.0),  # -> 2s_5s
+        provider_mode="pipeline",
+        llm_provider="openai",
+        telephony_provider="twilio",
+    )
+    client = TelemetryClient(sdk_version="0.6.3", endpoint=collector.url)
+    record_call_completed(client, outcome="completed", metrics=metrics)
+    await _wait_for(collector, 1)
+    await client.aclose()
+
+    event = collector.events[0]
+    assert event["event"] == "call_completed"
+    assert event["outcome"] == "completed"
+    assert event["engine"] == "pipeline"
+    assert event["provider"] == "openai"
+    assert event["carrier"] == "twilio"
+    # Raw values now (not buckets): whole seconds / whole milliseconds.
+    assert event["duration_seconds"] == 42
+    assert event["latency_ms"] == 2500
+    # No cost field anywhere.
+    assert "cost" not in event
+    assert "$" not in json.dumps(event)
+
+
+async def test_call_completed_failed_outcome(enabled, collector):
+    # A non-connected failure: only outcome + carrier, no latency/duration.
+    from getpatter.telemetry.call_metrics import record_call_completed
+
+    client = TelemetryClient(sdk_version="0.6.3", endpoint=collector.url)
+    record_call_completed(client, outcome="no_answer", carrier="twilio")
+    await _wait_for(collector, 1)
+    await client.aclose()
+
+    event = collector.events[0]
+    assert event["event"] == "call_completed"
+    assert event["outcome"] == "no_answer"
+    assert event["carrier"] == "twilio"
+    assert "latency_ms" not in event
+    assert "duration_seconds" not in event
+
+
+def _telemetry_server(collector):
+    """A real EmbeddedServer with an enabled telemetry client → collector."""
+    from getpatter.local_config import LocalConfig
+    from getpatter.models import Agent
+    from getpatter.server import EmbeddedServer
+
+    config = LocalConfig(
+        telephony_provider="twilio",
+        twilio_sid="AC" + "a" * 32,
+        twilio_token="test-token",
+        openai_key="sk-test",
+        phone_number="+15550001234",
+        webhook_url="abc.ngrok.io",
+    )
+    server = EmbeddedServer(config=config, agent=Agent(system_prompt="Test"))
+    server._telemetry = TelemetryClient(sdk_version="0.6.3", endpoint=collector.url)
+    return server
+
+
+async def test_server_wiring_emits_call_completed(enabled, collector):
+    # Verify the REAL server call-end wrapper emits call_completed — not just the
+    # helper in isolation.
+    from getpatter.models import CallMetrics, CostBreakdown, LatencyBreakdown
+
+    server = _telemetry_server(collector)
+    _start, on_call_end, _metrics = server._wrap_callbacks()
+    metrics = CallMetrics(
+        call_id="CAx",
+        duration_seconds=73.0,
+        turns=(),
+        cost=CostBreakdown(),
+        latency_avg=LatencyBreakdown(),
+        latency_p95=LatencyBreakdown(agent_response_ms=1800.0),
+        provider_mode="pipeline",
+        llm_provider="openai",
+        telephony_provider="twilio",
+    )
+    await on_call_end({"call_id": "CAx", "metrics": metrics})
+    await _wait_for(collector, 1)
+    await server._telemetry.aclose()
+
+    event = next(x for x in collector.events if x["event"] == "call_completed")
+    assert event["outcome"] == "completed"
+    assert event["duration_seconds"] == 73
+    assert event["latency_ms"] == 1800
+
+
+async def test_server_wiring_emits_failed_outcome(enabled, collector):
+    # Verify the REAL terminal hook emits call_completed for a non-connected
+    # failure (no_answer), gated so connected calls don't double-emit.
+    server = _telemetry_server(collector)
+    server._resolve_completion("CAy", outcome="no_answer", status="no-answer")
+    await _wait_for(collector, 1)
+    await server._telemetry.aclose()
+
+    event = next(x for x in collector.events if x["event"] == "call_completed")
+    assert event["outcome"] == "no_answer"
+    assert event["carrier"] == "twilio"
+
+
+def test_call_completed_none_guarded():
+    from getpatter.telemetry.call_metrics import record_call_completed
+
+    # Must never raise on missing telemetry / metrics.
+    record_call_completed(None, outcome="completed")
+    record_call_completed(None, outcome="completed", metrics=object())
+
+
+def test_value_allowlist_coerces_new_dimensions():
+    event = build_event(
+        "agent_configured",
+        sdk_version="1.0.0",
+        dimensions={
+            "integration": "SomeCustomerBrand",  # off-list -> other
+            "integration_kind": "consult",
+            "custom_tool_count_bucket": "2_3",
+            "builtin_tool_count": 1,  # numeric passthrough
+        },
+    )
+    assert event["integration"] == "other"
+    assert event["integration_kind"] == "consult"
+    assert event["custom_tool_count_bucket"] == "2_3"
+    assert event["builtin_tool_count"] == 1
+    assert "SomeCustomerBrand" not in json.dumps(event)
+
+
+def test_metrics_record_error_maps_codes():
+    from getpatter.exceptions import RateLimitError
+    from getpatter.services.metrics import CallMetricsAccumulator
+
+    acc = CallMetricsAccumulator("CAx", "pipeline", "twilio")
+    acc.record_error(RateLimitError("provider 429"))
+    assert acc._error_code == "rate_limit"  # ErrorCode lowercased
+    acc.record_error(TimeoutError())
+    assert acc._error_code == "timeout"
+    acc.record_error(ValueError("boom"))  # non-Patter, non-timeout
+    assert acc._error_code == "other"
+    # The message text is never stored — only the code.
+    assert "boom" not in acc._error_code and "429" not in acc._error_code
+
+
+async def test_call_completed_error_code_flips_outcome(enabled, collector):
+    from getpatter.models import CallMetrics, CostBreakdown, LatencyBreakdown
+    from getpatter.telemetry.call_metrics import record_call_completed
+
+    metrics = CallMetrics(
+        call_id="CAx",
+        duration_seconds=12.0,
+        turns=(),
+        cost=CostBreakdown(),
+        latency_avg=LatencyBreakdown(),
+        latency_p95=LatencyBreakdown(agent_response_ms=900.0),
+        provider_mode="pipeline",
+        llm_provider="openai",
+        telephony_provider="twilio",
+        error_code="rate_limit",
+    )
+    client = TelemetryClient(sdk_version="0.6.3", endpoint=collector.url)
+    # _on_call_end always passes outcome="completed"; an error_code flips it.
+    record_call_completed(client, outcome="completed", metrics=metrics)
+    await _wait_for(collector, 1)
+    await client.aclose()
+
+    event = collector.events[0]
+    assert event["outcome"] == "error"
+    assert event["error_code"] == "rate_limit"
+    assert event["latency_ms"] == 900
+
+
+async def test_register_hermes_emits_integration(enabled, collector, monkeypatch):
+    # Real PatterTool.register_hermes against a fake Hermes registry → the wrapped
+    # Patter's telemetry emits feature_used{integration=hermes}.
+    from getpatter.integrations.patter_tool import PatterTool
+
+    class _FakePatter:
+        def __init__(self, tel):
+            self._telemetry = tel
+
+    class _FakeRegistry:
+        def register(self, **kw):
+            pass
+
+    client = TelemetryClient(sdk_version="0.6.3", endpoint=collector.url)
+    tool = PatterTool(phone=_FakePatter(client), agent={"system_prompt": "x"})
+    tool.register_hermes(_FakeRegistry())
+    await _wait_for(collector, 1)
+    await client.aclose()
+
+    event = next(e for e in collector.events if e["event"] == "agent_configured")
+    assert event["integration"] == "hermes"
+
+
+# --- Stack capture: carrier + STT + TTS + LLM vendor/model (schema v3) --------
+
+
+class _FakeProvider:
+    """Minimal stand-in for a provider adapter exposing provider_key + model."""
+
+    def __init__(self, provider_key: str, model: str) -> None:
+        self.provider_key = provider_key
+        self.model = model
+
+
+def test_model_token_known_models_normalize():
+    assert stack.model_token("deepgram", "nova-3") == "deepgram-nova-3"
+    assert stack.model_token("openai", "gpt-4o") == "openai-gpt-4o"
+    # underscores → hyphens; trailing release date stripped so date variants merge
+    assert (
+        stack.model_token("elevenlabs", "eleven_flash_v2_5")
+        == "elevenlabs-eleven-flash-v2-5"
+    )
+    assert (
+        stack.model_token("anthropic", "claude-haiku-4-5-20251001")
+        == "anthropic-claude-haiku-4-5"
+    )
+
+
+def test_model_token_pii_risky_coerced_to_vendor_other():
+    # Fine-tuned id (embeds an org name), self-hosted path, custom name, overlong, empty.
+    assert (
+        stack.model_token("openai", "ft:gpt-4o:acme-corp:custom:xZ9") == "openai-other"
+    )
+    assert stack.model_token("openai", "openclaw/agent-x") == "openai-other"
+    assert stack.model_token("openai", "my custom model") == "openai-other"
+    assert stack.model_token("openai", "x" * 50) == "openai-other"
+    assert stack.model_token("openai", "") == "openai-other"
+
+
+def test_vendor_of_aliases_and_unknown():
+    assert stack.vendor_of("cartesia_tts") == "cartesia"
+    assert stack.vendor_of("openai_tts") == "openai"
+    assert stack.vendor_of("elevenlabs_ws") == "elevenlabs"
+    assert stack.vendor_of("deepgram") == "deepgram"
+    assert stack.vendor_of("totally-unknown") == "other"
+    assert stack.vendor_of(None) == "other"
+
+
+def test_stack_dimensions_full_pipeline():
+    dims = stack.stack_dimensions(
+        _FakeProvider("deepgram", "nova-3"),
+        _FakeProvider("elevenlabs", "eleven_turbo_v2_5"),
+        _FakeProvider("anthropic", "claude-opus-4-8"),
+    )
+    assert dims == {
+        "stt_provider": "deepgram",
+        "stt_model": "deepgram-nova-3",
+        "tts_provider": "elevenlabs",
+        "tts_model": "elevenlabs-eleven-turbo-v2-5",
+        "llm_provider": "anthropic",
+        "llm_model": "anthropic-claude-opus-4-8",
+    }
+
+
+def test_stack_dimensions_omits_absent_layers():
+    dims = stack.stack_dimensions(None, None, _FakeProvider("openai", "gpt-4o"))
+    assert dims == {"llm_provider": "openai", "llm_model": "openai-gpt-4o"}
+
+
+def test_build_event_carries_stack_and_drops_forged_model():
+    ev = build_event(
+        "feature_used",
+        sdk_version="0.6.3",
+        dimensions={
+            "engine": "pipeline",
+            "stt_provider": "deepgram",
+            "stt_model": "deepgram-nova-3",
+            "llm_provider": "anthropic",
+            "llm_model": "anthropic-claude-opus-4-8",
+        },
+    )
+    assert ev["stt_provider"] == "deepgram"
+    assert ev["llm_model"] == "anthropic-claude-opus-4-8"
+    # An off-allowlist vendor is coerced to "other".
+    ev2 = build_event(
+        "feature_used", sdk_version="0.6.3", dimensions={"stt_provider": "nsa"}
+    )
+    assert ev2["stt_provider"] == "other"
+    # A forged model token that fails the safe-shape check is dropped entirely.
+    ev3 = build_event(
+        "feature_used", sdk_version="0.6.3", dimensions={"llm_model": "BAD/with:stuff"}
+    )
+    assert "llm_model" not in ev3
+
+
+# --- Persistent install id + per-call cost (schema v3) ------------------------
+
+
+def test_install_id_is_stable_anonymous_and_persisted(monkeypatch, tmp_path):
+    from getpatter.telemetry import install_id as iid
+
+    monkeypatch.setenv("PATTER_TELEMETRY_STATE_DIR", str(tmp_path))
+    iid._install_id = None  # reset the process cache
+    first = iid.install_id()
+    assert len(first) == 32 and all(c in "0123456789abcdef" for c in first)
+    assert iid.install_id() == first  # stable within the process
+    # Persisted to disk: a cold cache reads the same id back.
+    iid._install_id = None
+    assert iid.install_id() == first
+
+
+def test_build_event_includes_install_id_and_keeps_cost_as_float(monkeypatch, tmp_path):
+    from getpatter.telemetry import install_id as iid
+
+    monkeypatch.setenv("PATTER_TELEMETRY_STATE_DIR", str(tmp_path))
+    iid._install_id = None
+    ev = build_event(
+        "call_completed",
+        sdk_version="0.6.3",
+        dimensions={"outcome": "completed", "cost_usd": 0.0123},
+    )
+    assert len(str(ev["install_id"])) == 32
+    assert ev["cost_usd"] == 0.0123  # float preserved (cost is not rounded to int)
+
+
+async def test_call_completed_carries_cost(enabled, collector):
+    from getpatter.telemetry.call_metrics import record_call_completed
+
+    class _Cost:
+        total = 0.0456
+
+    class _Metrics:
+        provider_mode = "pipeline"
+        telephony_provider = "twilio"
+        duration_seconds = 42.0
+        latency_p95 = None
+        error_code = ""
+        cost = _Cost()
+        llm_provider = "anthropic"
+
+    client = TelemetryClient(sdk_version="0.6.3", endpoint=collector.url)
+    record_call_completed(client, outcome="completed", metrics=_Metrics())
+    await _wait_for(collector, 1)
+    await client.aclose()
+
+    event = next(e for e in collector.events if e["event"] == "call_completed")
+    assert event["cost_usd"] == 0.0456
+    assert event["duration_seconds"] == 42

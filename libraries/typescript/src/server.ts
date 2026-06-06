@@ -7,6 +7,8 @@ import crypto from 'node:crypto';
 import express from 'express';
 import { createServer, Server as HTTPServer } from 'http';
 import { WebSocketServer, WebSocket as WSWebSocket } from 'ws';
+import { recordCallCompleted } from './telemetry/call-metrics';
+import type { TelemetryClient } from './telemetry/client';
 import { OpenAIRealtimeAdapter } from './providers/openai-realtime';
 import { OpenAIRealtime2Adapter } from './providers/openai-realtime-2';
 import { ElevenLabsConvAIAdapter } from './providers/elevenlabs-convai';
@@ -877,6 +879,9 @@ export class EmbeddedServer {
   private twilioTokenWarningLogged = false;
   private telnyxSigWarningLogged = false;
   readonly metricsStore: MetricsStore;
+  /** Anonymous telemetry client, set by ``client.ts`` ``serve()``; emits the
+   * per-call ``call_completed`` event from the call-end path. */
+  telemetry?: TelemetryClient;
   private readonly pricing: ReturnType<typeof mergePricing>;
   private readonly remoteHandler = new RemoteMessageHandler();
   /**
@@ -1063,6 +1068,18 @@ export class EmbeddedServer {
     callId: string,
     args: { outcome: CallOutcome; status: string; data?: Record<string, unknown> },
   ): void {
+    // Anonymous telemetry for NON-CONNECTED failures (no_answer / busy / failed).
+    // Connected calls (answered / voicemail) emit ``call_completed`` from
+    // ``wrappedEnd`` instead, so they are excluded here to avoid a double count.
+    // Runs before the completion guard so it fires for every call, not only
+    // ``wait: true`` ones.
+    if (args.outcome === 'no_answer' || args.outcome === 'busy' || args.outcome === 'failed') {
+      recordCallCompleted(this.telemetry, {
+        outcome: args.outcome,
+        carrier: this.config.telephonyProvider,
+      });
+    }
+
     const entry = this.completions.get(callId);
     if (!entry || entry.done) return;
 
@@ -2139,6 +2156,9 @@ export class EmbeddedServer {
     };
 
     const wrappedEnd = async (data: Record<string, unknown>): Promise<void> => {
+      // Anonymous telemetry: per-call completion (engine/provider/carrier + raw
+      // duration/latency; no cost, no PII). Fail-safe and O(1).
+      recordCallCompleted(this.telemetry, { outcome: 'completed', metrics: data.metrics });
       if (logger.enabled) {
         const callId = typeof data.call_id === 'string' ? data.call_id : '';
         const metricsObj = (data.metrics ?? null) as
@@ -2246,6 +2266,7 @@ export class EmbeddedServer {
         }
       } catch (err) {
         getLogger().error('Stream handler error:', err);
+        handler.recordError(err); // coarse error code for call_completed telemetry
       }
     });
 
@@ -2324,6 +2345,7 @@ export class EmbeddedServer {
         }
       } catch (err) {
         getLogger().error('Stream handler error (Telnyx):', err);
+        handler.recordError(err); // coarse error code for call_completed telemetry
       }
     });
 
@@ -2388,6 +2410,7 @@ export class EmbeddedServer {
         }
       } catch (err) {
         getLogger().error('Stream handler error (Plivo):', err);
+        handler.recordError(err); // coarse error code for call_completed telemetry
       }
     });
 

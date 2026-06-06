@@ -1,0 +1,186 @@
+"""Telemetry event schema and allowlist enforcement.
+
+Only coarse, anonymous, low-cardinality fields ever leave the process. Two layers
+of defense run before any event is built:
+
+* **Key allowlist** (``ALLOWED_DIMENSIONS``) — a dimension whose key is not listed
+  is dropped.
+* **Value allowlist** (``DIMENSION_VALUES``) — for every enum dimension, a value
+  that is not on its closed set is coerced to ``"other"``. This makes a raw custom
+  tool name, custom integration id, or unexpected string **structurally
+  impossible** to emit, even from a buggy caller. The relay re-validates both
+  layers server-side as defense in depth.
+
+NEVER add a field that could carry PII or call content: phone numbers, call SIDs,
+transcripts, audio, prompts, tool arguments, API keys, customer identifiers, file
+paths, hostnames, IPs, or any free text. See ``docs/internal`` design plan.
+
+Bump ``SCHEMA_VERSION`` whenever the event/field/value set changes so the relay
+can apply version-appropriate validation.
+"""
+
+from __future__ import annotations
+
+import platform
+import re
+import sys
+from typing import Any
+
+from getpatter.telemetry.env import is_ci, is_test
+from getpatter.telemetry.install_id import install_id, run_id
+from getpatter.telemetry.stack import STACK_VENDORS
+
+SCHEMA_VERSION = 3
+
+# --- Event names (the only values the ``event`` field may take) -------------
+EVENT_SDK_INITIALIZED = "sdk_initialized"
+EVENT_FEATURE_USED = "feature_used"
+EVENT_AGENT_CONFIGURED = "agent_configured"
+EVENT_CALL_COMPLETED = "call_completed"
+
+_ALLOWED_EVENTS = frozenset(
+    {
+        EVENT_SDK_INITIALIZED,
+        EVENT_FEATURE_USED,
+        EVENT_AGENT_CONFIGURED,
+        EVENT_CALL_COMPLETED,
+    }
+)
+
+# Every enum dimension maps to its closed value set. Any value not in the set is
+# coerced to ``"other"`` inside :func:`build_event`. Keep this byte-for-byte
+# identical to ``DIMENSION_VALUES`` in the TypeScript ``events.ts``.
+DIMENSION_VALUES: dict[str, frozenset[str]] = {
+    "carrier": frozenset({"twilio", "telnyx", "plivo", "none"}),
+    "tunnel": frozenset({"static", "configured", "none"}),
+    "engine": frozenset({"realtime", "convai", "pipeline"}),
+    "provider": frozenset(
+        {
+            "openai",
+            "elevenlabs",
+            "deepgram",
+            "cartesia",
+            "cerebras",
+            "anthropic",
+            "google",
+            "whisper",
+            "other",
+        }
+    ),
+    # agent_configured dimensions
+    "custom_tool_count_bucket": frozenset({"0", "1", "2_3", "4_6", "7_12", "13_plus"}),
+    "integration": frozenset({"openclaw", "mcp", "hermes", "other", "none"}),
+    "integration_kind": frozenset({"consult", "mcp", "none"}),
+    "mcp_server_count_bucket": frozenset({"0", "1", "2_3", "4_plus"}),
+    # call_completed: the call's terminal outcome
+    "outcome": frozenset({"completed", "error", "no_answer", "busy", "failed"}),
+    # call_completed: the terminal error code (mirrors exceptions.ErrorCode, plus
+    # "other" for non-Patter errors). Never the error message.
+    "error_code": frozenset(
+        {
+            "config",
+            "connection",
+            "auth",
+            "timeout",
+            "rate_limit",
+            "webhook_verification",
+            "input_validation",
+            "provider_error",
+            "provision",
+            "internal",
+            "other",
+        }
+    ),
+    # feature_used (pipeline): per-layer vendor of the composed stack. A
+    # provider_key not on the closed allowlist collapses to "other"; an absent
+    # layer is simply omitted (the value set keeps "none" only as a safety token).
+    "stt_provider": STACK_VENDORS | {"none"},
+    "tts_provider": STACK_VENDORS | {"none"},
+    "llm_provider": STACK_VENDORS | {"none"},
+}
+
+# Dimensions that may accompany an event. Enum dimensions are the keys of
+# ``DIMENSION_VALUES``; numeric dimensions pass through as-is (no value coercion).
+# ``latency_ms`` (raw milliseconds) and ``duration_seconds`` (raw seconds) are
+# operational metrics — the coarse-bucket privacy posture (which exists for cost
+# and for names) does not apply to them, so they are sent at full resolution.
+_NUMERIC_DIMENSIONS = frozenset(
+    {"builtin_tool_count", "latency_ms", "duration_seconds", "cost_usd"}
+)
+# feature_used (pipeline): the sanitized per-layer model token, e.g.
+# ``deepgram-nova-3`` / ``anthropic-claude-haiku-4-5``. NOT a closed enum — the
+# token is produced by :func:`telemetry.stack.model_token`, which already coerces
+# anything that could carry PII (fine-tuned ids, self-hosted paths, custom names)
+# to ``"{vendor}-other"``. :func:`build_event` re-checks the shape as defense in
+# depth. The relay applies the same regex guard server-side.
+_STRING_DIMENSIONS = frozenset({"stt_model", "tts_model", "llm_model"})
+_MODEL_TOKEN_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{0,40}$")
+ALLOWED_DIMENSIONS = (
+    frozenset(DIMENSION_VALUES) | _NUMERIC_DIMENSIONS | _STRING_DIMENSIONS
+)
+
+
+def _os_family() -> str:
+    """Coarse OS family only — ``linux`` / ``darwin`` / ``windows``."""
+    return (platform.system() or "unknown").lower()
+
+
+def _arch() -> str:
+    machine = (platform.machine() or "unknown").lower()
+    if machine in {"x86_64", "amd64", "x64"}:
+        return "x86_64"
+    if machine in {"arm64", "aarch64"}:
+        return "arm64"
+    return "other"  # keep arch low-cardinality (no raw uname strings on the wire)
+
+
+def _runtime_version() -> str:
+    """Runtime version bucketed to ``major.minor`` (no patch — avoid fingerprinting)."""
+    return f"{sys.version_info.major}.{sys.version_info.minor}"
+
+
+def build_event(
+    name: str,
+    *,
+    sdk_version: str,
+    dimensions: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a telemetry event payload containing only allowlisted fields/values.
+
+    Raises ``ValueError`` for an unknown event name (a programmer error caught by
+    the caller, which swallows it). Unknown dimension keys are dropped; off-list
+    enum dimension values are coerced to ``"other"``.
+    """
+    if name not in _ALLOWED_EVENTS:
+        raise ValueError(f"unknown telemetry event: {name!r}")
+
+    event: dict[str, Any] = {
+        "event": name,
+        "schema_version": SCHEMA_VERSION,
+        "run_id": run_id(),
+        "install_id": install_id(),
+        "sdk": "python",
+        "sdk_version": sdk_version,
+        "os": _os_family(),
+        "arch": _arch(),
+        "runtime": "cpython",
+        "runtime_version": _runtime_version(),
+        "ci": is_ci() or is_test(),
+    }
+
+    for key, value in (dimensions or {}).items():
+        if key not in ALLOWED_DIMENSIONS or value is None:
+            continue
+        allowed_values = DIMENSION_VALUES.get(key)
+        if allowed_values is not None and value not in allowed_values:
+            value = "other"  # off-list enum value can never reach the wire raw
+        elif key in _STRING_DIMENSIONS:
+            # Sanitized model token: enforce the safe shape; drop anything else
+            # (the SDK normalizer already guarantees this, but never trust input).
+            if not (isinstance(value, str) and _MODEL_TOKEN_RE.match(value)):
+                continue
+        # Scalars only — no nested objects, no free-text payloads.
+        if isinstance(value, (str, bool, int, float)):
+            event[key] = value
+
+    return event

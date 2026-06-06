@@ -26,6 +26,54 @@
 
 ### Added
 
+- **Anonymous usage telemetry (opt-out, on by default).** Patter now sends a
+  small, anonymous, fail-safe usage event when the SDK is initialised and when
+  an engine family is first used, so the maintainers can see which engines,
+  providers, models, carriers, platforms, and SDK versions are in use — plus
+  coarse per-call latency, duration, and cost — and prioritise accordingly.
+  **No PII or call content is ever collected** — no phone numbers,
+  transcripts, audio, prompts, tool arguments, API keys, customer identifiers,
+  file paths, hostnames, or IPs; only coarse, low-cardinality facts (SDK version
+  and language, OS family, CPU arch, runtime version bucketed to major.minor,
+  and allowlisted dimensions like `engine`/`provider`/`carrier`). Two identifiers
+  are sent, both random and PII-free: a per-process `run_id` (regenerated each
+  run) and a persistent anonymous `install_id` — a random UUID stored locally
+  (`~/.getpatter/install-id`) to count active installs, never a hardware
+  fingerprint, never created when opted out. The collector drops the source IP.
+  Telemetry is
+  fire-and-forget with a bounded buffer, short timeouts, and swallow-all error
+  handling, so it can never block, slow, or break a live call, and behaves
+  identically when offline. It is **auto-disabled in CI and test runs**.
+  Disable it with `Patter(telemetry=False)` / `new Patter({ telemetry: false })`,
+  `PATTER_TELEMETRY_DISABLED=1`, or the cross-tool `DO_NOT_TRACK=1`; point it at
+  your own collector with `PATTER_TELEMETRY_ENDPOINT`; and inspect exactly what
+  would be sent without sending it via `PATTER_TELEMETRY_DEBUG=1`. New module
+  `libraries/python/getpatter/telemetry/` and `libraries/typescript/src/telemetry/`;
+  new optional `telemetry` field on `Patter(...)` / `LocalOptions`. Events:
+  `sdk_initialized` (carrier, tunnel), `feature_used` (engine + provider vendor
+  family, plus — for **pipeline** agents — the composed stack: `stt_provider` /
+  `tts_provider` / `llm_provider` and the sanitized `stt_model` / `tts_model` /
+  `llm_model`, e.g. `deepgram-nova-3` / `anthropic-claude-opus-4-8`, where a
+  fine-tuned / self-hosted / custom model collapses to `{vendor}-other` so a
+  custom model name is never sent), `agent_configured` (built-in vs custom tool
+  *counts* — never tool names — and the coarse integration category: `openclaw` /
+  `mcp` / `other` / hermes / none), and `call_completed` (one event per call with
+  the terminal `outcome` — completed / error / no_answer / busy / failed — an
+  `error_code` (a closed `ErrorCode` value such as `rate_limit` / `timeout` /
+  `connection`, **never the error message**), the engine/provider/carrier, and the
+  raw `latency_ms`, `duration_seconds`, and total `cost_usd`; no call content and
+  no per-call identifier). `CallMetrics` gains an `error_code` field and the
+  metrics accumulator a `record_error()` / `recordError()` method. A
+  second **value-level allowlist** coerces any off-list dimension value (e.g. a
+  custom tool or integration name) to `other`, making customer brands
+  structurally impossible to emit even from a buggy caller; the collector
+  re-validates the same allowlist server-side.
+- **`provider` option on `agent()` in the Python SDK** (`"openai_realtime"` /
+  `"elevenlabs_convai"` / `"pipeline"`), an explicit alternative to `engine=`
+  for selecting the AI mode. Optional with no default — existing callers are
+  unaffected. Closes a pre-existing parity gap: the TypeScript SDK already
+  exposed `provider` on `agent()`; Python did not, so the same logical agent
+  could not be expressed in both SDKs.
 - **`allow_insecure_dashboard` / `allowInsecureDashboard` escape hatch (opt-in,
   default off).** New optional config on `Patter(...)` (Python) and `serve(...)`
   `ServeOptions` (TypeScript), defaulting to `False` / `false`. When the

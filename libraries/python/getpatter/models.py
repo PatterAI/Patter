@@ -767,6 +767,10 @@ class CallMetrics:
     latency_p50: LatencyBreakdown = field(default_factory=LatencyBreakdown)
     latency_p90: LatencyBreakdown = field(default_factory=LatencyBreakdown)
     latency_p99: LatencyBreakdown = field(default_factory=LatencyBreakdown)
+    # Terminal error code when the call ended abnormally (one of the
+    # ``ErrorCode`` values, lowercased, or ``"other"``); empty for a clean call.
+    # Used by anonymous telemetry and surfaced for diagnostics. Never the message.
+    error_code: str = ""
 
 
 # Carrier-agnostic terminal outcomes for an outbound call. ``answered`` means a

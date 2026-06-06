@@ -49,6 +49,9 @@ import { resolveLogRoot } from "./services/call-log";
 import { validateAllToolSchemas } from "./tools/schema-validation";
 import type { ToolDefinition } from "./types";
 import { getLogger } from "./logger";
+import { TelemetryClient } from "./telemetry";
+import { stackDimensions } from "./telemetry/stack";
+import { VERSION } from "./version";
 import { SpeechEvents } from "./_speech-events";
 import type {
   ConversationStateSnapshot,
@@ -149,6 +152,85 @@ function closeParkedConnections(slot: ParkedProviderConnections): void {
   }
 }
 
+/** Coarse carrier family for telemetry: twilio | telnyx | plivo | none. */
+function carrierFamily(carrier: unknown): string {
+  if (carrier instanceof TwilioCarrier) return "twilio";
+  if (carrier instanceof TelnyxCarrier) return "telnyx";
+  if (carrier instanceof PlivoCarrier) return "plivo";
+  return "none";
+}
+
+/** Coarse engine family for telemetry: realtime | convai | pipeline. */
+function telemetryEngineFamily(opts: AgentOptions): string {
+  if (opts.engine) {
+    return opts.engine.constructor.name.toLowerCase().includes("convai")
+      ? "convai"
+      : "realtime";
+  }
+  if (opts.provider === "elevenlabs_convai") return "convai";
+  if (opts.provider === "pipeline") return "pipeline";
+  if (opts.provider === "openai_realtime") return "realtime";
+  if (opts.stt || opts.tts) return "pipeline";
+  return "realtime";
+}
+
+/** Coarse vendor family derived from the engine family: realtime -> openai,
+ * convai -> elevenlabs, pipeline -> other. */
+function telemetryProviderFamily(family: string): string {
+  if (family === "realtime") return "openai";
+  if (family === "convai") return "elevenlabs";
+  return "other";
+}
+
+/** Coarse bucket for the custom-tool count (never the names). */
+function telemetryBucketCustomTools(n: number): string {
+  if (n <= 0) return "0";
+  if (n === 1) return "1";
+  if (n <= 3) return "2_3";
+  if (n <= 6) return "4_6";
+  if (n <= 12) return "7_12";
+  return "13_plus";
+}
+
+/** Coarse bucket for the configured MCP-server count. */
+function telemetryBucketMcp(n: number): string {
+  if (n <= 0) return "0";
+  if (n === 1) return "1";
+  if (n <= 3) return "2_3";
+  return "4_plus";
+}
+
+/**
+ * Return the integration target for telemetry. OpenClaw is detected from a
+ * consult target on a discarded local copy — only the boolean result leaves;
+ * the raw model / baseUrl strings are never stored or emitted.
+ */
+function telemetryIntegration(opts: AgentOptions): {
+  integration: string;
+  integrationKind: string;
+  mcpBucket: string;
+} {
+  const nMcp = opts.mcpServers?.length ?? 0;
+  if (nMcp > 0) {
+    return { integration: "mcp", integrationKind: "mcp", mcpBucket: telemetryBucketMcp(nMcp) };
+  }
+  if (opts.consult) {
+    let isOpenclaw = false;
+    const oc = opts.consult.openaiCompatible;
+    if (oc) {
+      const model = oc.model ?? "";
+      const baseUrl = oc.baseUrl ?? "";
+      isOpenclaw = model.startsWith("openclaw/") || baseUrl.includes(":18789");
+    }
+    return {
+      integration: isOpenclaw ? "openclaw" : "other",
+      integrationKind: "consult",
+      mcpBucket: "0",
+    };
+  }
+  return { integration: "none", integrationKind: "none", mcpBucket: "0" };
+}
+
 /** Top-level SDK entry point — wraps a carrier + embedded server + agent loop. */
 export class Patter {
   private localConfig: ResolvedLocalConfig;
@@ -170,6 +252,15 @@ export class Patter {
    * ``Cannot use both tunnel: true and webhookUrl``.
    */
   private tunnelOwnsWebhookUrl = false;
+
+  /**
+   * Anonymous usage telemetry (opt-out, default ON). Separate from
+   * ``./observability`` (user-facing OTel). Fire-and-forget and fail-safe — it
+   * can never block or break a call. See ``./telemetry``.
+   */
+  private readonly telemetry: TelemetryClient;
+  private readonly telemetrySeenEngines = new Set<string>();
+  private readonly telemetrySeenAgentShapes = new Set<string>();
 
   /**
    * Pre-rendered first-message TTS audio per outbound call_id. Populated
@@ -409,6 +500,23 @@ export class Patter {
       persistRoot: resolvePersistRoot(options.persist),
     };
 
+    // --- Anonymous usage telemetry (opt-out, default ON) ---
+    // Separate from ./observability (user-facing OTel). Fail-safe fire-and-forget.
+    // Disable with PATTER_TELEMETRY_DISABLED=1, DO_NOT_TRACK=1, or telemetry: false.
+    this.telemetry = new TelemetryClient({
+      sdkVersion: VERSION,
+      flag: options.telemetry,
+    });
+    this.telemetry.record("sdk_initialized", {
+      carrier: carrierFamily(carrier),
+      tunnel:
+        tunnel instanceof StaticTunnel
+          ? "static"
+          : options.tunnel
+            ? "configured"
+            : "none",
+    });
+
     // Initialise the tunnel-ready deferred. If the caller already has a
     // static webhookUrl (or StaticTunnel hostname), resolve immediately —
     // there is no tunnel cold-start to wait on. Otherwise serve() will
@@ -438,6 +546,44 @@ export class Patter {
 
   /** Resolve user-supplied agent options against engine defaults and return the merged config. */
   agent(opts: AgentOptions): AgentOptions {
+    // Anonymous telemetry: engine family + the composed stack, deduped by the
+    // *whole* stack signature so a second agent with a different STT/TTS/LLM still
+    // records its composition.
+    const family = telemetryEngineFamily(opts);
+    const stack = stackDimensions(opts.stt, opts.tts, opts.llm);
+    const featureKey =
+      family +
+      "|" +
+      Object.entries(stack)
+        .sort()
+        .map(([k, v]) => `${k}=${v}`)
+        .join(",");
+    if (!this.telemetrySeenEngines.has(featureKey)) {
+      this.telemetrySeenEngines.add(featureKey);
+      this.telemetry.record("feature_used", {
+        engine: family,
+        provider: telemetryProviderFamily(family),
+        ...stack,
+      });
+    }
+    // agent_configured: tool counts + integration target (deduped per shape).
+    // Built-in tools and the consult tool are injected at call time, not here, so
+    // `opts.tools` holds only user tools at this point.
+    const builtin = opts.consult ? 1 : 0;
+    const customBucket = telemetryBucketCustomTools(opts.tools?.length ?? 0);
+    const { integration, integrationKind, mcpBucket } = telemetryIntegration(opts);
+    const shapeKey = [builtin, customBucket, integration, integrationKind, mcpBucket].join("|");
+    if (!this.telemetrySeenAgentShapes.has(shapeKey)) {
+      this.telemetrySeenAgentShapes.add(shapeKey);
+      this.telemetry.record("agent_configured", {
+        builtin_tool_count: builtin,
+        custom_tool_count_bucket: customBucket,
+        integration,
+        integration_kind: integrationKind,
+        mcp_server_count_bucket: mcpBucket,
+      });
+    }
+
     let working: AgentOptions = { ...opts };
 
     if (opts.engine) {
@@ -726,6 +872,9 @@ export class Patter {
       opts.dashboardToken ?? '',
       opts.allowInsecureDashboard ?? false,
     );
+    // Give the server the telemetry client so the per-call ``call_completed``
+    // event can be emitted from the call-end path.
+    this.embeddedServer.telemetry = this.telemetry;
     // Forward the prewarm-audio accessor so the per-call StreamHandler can
     // consume the pre-rendered first-message audio (if any) on ``start``.
     this.embeddedServer.popPrewarmAudio = this.popPrewarmAudio;
@@ -763,6 +912,8 @@ export class Patter {
       }
 
       this._readyResolve(webhookUrl);
+      // Server is up — ship any events buffered at construction.
+      this.telemetry.flushPending();
     } catch (err) {
       const e = err instanceof Error ? err : new Error(String(err));
       this._readyReject(e);
@@ -1644,6 +1795,10 @@ export class Patter {
    * entries leak across ``serve`` / ``disconnect`` cycles. See FIX #93.
    */
   async disconnect(): Promise<void> {
+    // Ship any telemetry buffered at construction/agent() before teardown.
+    // flushPending is cheap and keeps the instance reusable (no close).
+    this.telemetry.flushPending();
+
     // Clear pending TTL eviction timers and drain in-flight prewarm
     // synth tasks BEFORE tearing the server down so the synth tasks
     // observe a clean cancellation point and don't end up writing
