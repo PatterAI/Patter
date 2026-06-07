@@ -22,6 +22,7 @@ import * as path from 'node:path';
 
 const RUN_ID = randomUUID().replace(/-/g, '');
 const HEX32 = /^[0-9a-f]{32}$/;
+const VERSION_RE = /^[0-9][0-9a-z.+-]{0,31}$/;
 let cachedInstallId: string | null = null;
 
 /** This process's anonymous run id (stable for the process lifetime). */
@@ -63,4 +64,44 @@ export function installId(): string {
     cachedInstallId = RUN_ID;
   }
   return cachedInstallId;
+}
+
+function versionPath(): string {
+  return path.join(path.dirname(statePath()), 'version');
+}
+
+/**
+ * Return the last sdk_version this install reported ('' on first run), then
+ * record `current` for next time. Powers the upgrade funnel. Best-effort.
+ */
+export function previousVersion(current: string): string {
+  const p = versionPath();
+  let prev = '';
+  try {
+    prev = fs.readFileSync(p, 'utf8').trim();
+  } catch {
+    prev = '';
+  }
+  try {
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, current, 'utf8');
+  } catch {
+    /* read-only FS */
+  }
+  return VERSION_RE.test(prev) ? prev : '';
+}
+
+/** Coarse age of this install from the install-id file mtime (0/1_7/8_30/30_plus). */
+export function daysSinceInstallBucket(): string {
+  let mtimeMs: number;
+  try {
+    mtimeMs = fs.statSync(statePath()).mtimeMs;
+  } catch {
+    return '0';
+  }
+  const days = Math.max(0, Math.floor((Date.now() - mtimeMs) / 86_400_000));
+  if (days === 0) return '0';
+  if (days <= 7) return '1_7';
+  if (days <= 30) return '8_30';
+  return '30_plus';
 }

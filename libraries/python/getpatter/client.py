@@ -129,6 +129,36 @@ def _telemetry_tunnel_kind(directive: Any) -> str:
     return "static" if isinstance(directive, Static) else "configured"
 
 
+def _telemetry_environment_dims() -> dict[str, Any]:
+    """Anonymous deploy-shape + install-age dims for ``sdk_initialized``.
+
+    Presence-only env/file probes (never the value of an env var) + the upgrade
+    funnel. Wrapped so it can never break construction.
+    """
+    try:
+        from getpatter import __version__
+        from getpatter.telemetry import environment as _env
+        from getpatter.telemetry.install_id import (
+            days_since_install_bucket,
+            previous_version,
+        )
+
+        dims: dict[str, Any] = {
+            "invoked_by_agent": _env.invoked_by_agent(),
+            "container": _env.in_container(),
+            "serverless": _env.serverless(),
+            "cloud": _env.cloud(),
+            "package_manager": _env.package_manager(),
+            "days_since_install_bucket": days_since_install_bucket(),
+        }
+        prev = previous_version(__version__)
+        if prev:
+            dims["previous_sdk_version"] = prev
+        return dims
+    except Exception:
+        return {}
+
+
 def _telemetry_engine_family(
     engine: Any, provider: str | None, stt: Any, tts: Any
 ) -> str:
@@ -387,6 +417,7 @@ class Patter:
             "sdk_initialized",
             carrier=carrier_kind or "none",
             tunnel=_telemetry_tunnel_kind(self._tunnel_directive),
+            **_telemetry_environment_dims(),
         )
 
         self._server = None
@@ -1647,12 +1678,32 @@ class Patter:
         _integration, _integration_kind, _mcp_bucket = _telemetry_integration(
             consult, mcp_servers
         )
+        # Feature-adoption: read tuning from the agent() kwargs OR the engine
+        # object (the value isn't backfilled from the engine until later).
+        _nr = openai_realtime_noise_reduction or getattr(
+            engine, "noise_reduction", None
+        )
+        _noise_reduction = _nr if _nr in ("near_field", "far_field") else "none"
+        _td = realtime_turn_detection
+        if _td is None:
+            _td = getattr(engine, "turn_detection", None)
+        _turn_detection = "custom" if _td is not None else "none"
+        _preambles = bool(tool_call_preambles)
+        _per_tool_timeouts = isinstance(tools, (list, tuple)) and any(
+            getattr(t, "timeout_s", None) is not None for t in tools
+        )
+        _llm_fallback = llm is not None and "fallback" in type(llm).__name__.lower()
         _shape = (
             _builtin,
             _custom_bucket,
             _integration,
             _integration_kind,
             _mcp_bucket,
+            _noise_reduction,
+            _turn_detection,
+            _preambles,
+            _per_tool_timeouts,
+            _llm_fallback,
         )
         if _shape not in self._telemetry_seen_agent_shapes:
             self._telemetry_seen_agent_shapes.add(_shape)
@@ -1663,6 +1714,11 @@ class Patter:
                 integration=_integration,
                 integration_kind=_integration_kind,
                 mcp_server_count_bucket=_mcp_bucket,
+                noise_reduction=_noise_reduction,
+                turn_detection=_turn_detection,
+                preambles_used=_preambles,
+                per_tool_timeouts_set=_per_tool_timeouts,
+                llm_fallback_configured=_llm_fallback,
             )
 
         # --- Validate llm= (runtime-checkable Protocol) ---

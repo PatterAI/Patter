@@ -39,6 +39,15 @@ function carrierFamily(tp: unknown): string {
   return typeof tp === 'string' && tp ? tp.toLowerCase() : 'none';
 }
 
+function turnCountBucket(n: number): string {
+  if (n <= 0) return '0';
+  if (n === 1) return '1';
+  if (n <= 3) return '2_3';
+  if (n <= 6) return '4_6';
+  if (n <= 12) return '7_12';
+  return '13_plus';
+}
+
 function latencyMs(m: Metricsish): unknown {
   const p95 = m.latency_p95;
   if (p95 && typeof p95 === 'object') {
@@ -82,6 +91,9 @@ export function recordCallCompleted(
         if (typeof total === 'number' && Number.isFinite(total)) {
           dims.cost_usd = Math.max(0, Math.round(total * 10000) / 10000);
         }
+      }
+      if (Array.isArray(m.turns)) {
+        dims.turn_count_bucket = turnCountBucket(m.turns.length);
       }
       // A connected call that ended with a terminal error: surface the code and
       // flip the outcome to "error" (the value allowlist coerces unknowns to "other").

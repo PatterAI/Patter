@@ -50,19 +50,24 @@
   would be sent without sending it via `PATTER_TELEMETRY_DEBUG=1`. New module
   `libraries/python/getpatter/telemetry/` and `libraries/typescript/src/telemetry/`;
   new optional `telemetry` field on `Patter(...)` / `LocalOptions`. Events:
-  `sdk_initialized` (carrier, tunnel), `feature_used` (engine + provider vendor
+  `sdk_initialized` (carrier, tunnel, plus presence-only anonymous deploy-shape —
+  `invoked_by_agent` / `container` / `serverless` / `cloud` / `package_manager` /
+  `days_since_install_bucket` / `previous_sdk_version` for the upgrade funnel),
+  `feature_used` (engine + provider vendor
   family, plus — for **pipeline** agents — the composed stack: `stt_provider` /
   `tts_provider` / `llm_provider` and the sanitized `stt_model` / `tts_model` /
   `llm_model`, e.g. `deepgram-nova-3` / `anthropic-claude-opus-4-8`, where a
   fine-tuned / self-hosted / custom model collapses to `{vendor}-other` so a
   custom model name is never sent), `agent_configured` (built-in vs custom tool
-  *counts* — never tool names — and the coarse integration category: `openclaw` /
-  `mcp` / `other` / hermes / none), and `call_completed` (one event per call with
+  *counts* — never tool names — the coarse integration category: `openclaw` /
+  `mcp` / `other` / hermes / none, and feature-adoption flags `noise_reduction` /
+  `turn_detection` / `preambles_used` / `per_tool_timeouts_set` /
+  `llm_fallback_configured`), and `call_completed` (one event per call with
   the terminal `outcome` — completed / error / no_answer / busy / failed — an
   `error_code` (a closed `ErrorCode` value such as `rate_limit` / `timeout` /
   `connection`, **never the error message**), the engine/provider/carrier, and the
-  raw `latency_ms`, `duration_seconds`, and total `cost_usd`; no call content and
-  no per-call identifier). `CallMetrics` gains an `error_code` field and the
+  raw `latency_ms`, `duration_seconds`, total `cost_usd`, and `turn_count_bucket`;
+  no call content and no per-call identifier). `CallMetrics` gains an `error_code` field and the
   metrics accumulator a `record_error()` / `recordError()` method. A
   second **value-level allowlist** coerces any off-list dimension value (e.g. a
   custom tool or integration name) to `other`, making customer brands

@@ -114,7 +114,7 @@ async def test_event_reaches_collector_when_enabled(enabled, collector):
     assert event["sdk"] == "python"
     assert event["sdk_version"] == "0.6.3"
     assert event["runtime"] == "cpython"
-    assert event["schema_version"] == 3
+    assert event["schema_version"] == 4
     assert event["engine"] == "realtime"
     assert event["provider"] == "openai"
     assert event["carrier"] == "twilio"
@@ -718,3 +718,57 @@ async def test_call_completed_carries_cost(enabled, collector):
     event = next(e for e in collector.events if e["event"] == "call_completed")
     assert event["cost_usd"] == 0.0456
     assert event["duration_seconds"] == 42
+
+
+# --- Deploy-shape + feature-adoption + upgrade funnel (schema v4) -------------
+
+
+def test_environment_probes_return_allowlisted_values():
+    from getpatter.telemetry import environment as env
+    from getpatter.telemetry.events import DIMENSION_VALUES
+
+    assert env.invoked_by_agent() in DIMENSION_VALUES["invoked_by_agent"]
+    assert env.serverless() in DIMENSION_VALUES["serverless"]
+    assert env.cloud() in DIMENSION_VALUES["cloud"]
+    assert env.package_manager() in DIMENSION_VALUES["package_manager"]
+    assert isinstance(env.in_container(), bool)
+
+
+def test_version_funnel_and_days_bucket(monkeypatch, tmp_path):
+    from getpatter.telemetry import install_id as iid
+
+    monkeypatch.setenv("PATTER_TELEMETRY_STATE_DIR", str(tmp_path))
+    iid._install_id = None
+    iid.install_id()  # creates the install-id file (used for the days bucket)
+    assert iid.previous_version("0.6.3") == ""  # first run → no prior version
+    assert iid.previous_version("0.6.4") == "0.6.3"  # now sees the prior
+    assert iid.days_since_install_bucket() in {"0", "1_7", "8_30", "30_plus"}
+
+
+def test_build_event_v4_bool_enum_and_version_dims():
+    ev = build_event(
+        "agent_configured",
+        sdk_version="0.6.4",
+        dimensions={
+            "noise_reduction": "far_field",
+            "turn_detection": "custom",
+            "preambles_used": True,
+            "per_tool_timeouts_set": False,
+            "llm_fallback_configured": True,
+        },
+    )
+    assert ev["noise_reduction"] == "far_field"
+    assert ev["preambles_used"] is True and ev["per_tool_timeouts_set"] is False
+    # An off-list enum is coerced; a non-bool on a bool dim is dropped; a version passes.
+    ev2 = build_event(
+        "sdk_initialized",
+        sdk_version="0.6.4",
+        dimensions={
+            "cloud": "mars",
+            "container": "nope",
+            "previous_sdk_version": "0.6.3",
+        },
+    )
+    assert ev2["cloud"] == "other"
+    assert "container" not in ev2
+    assert ev2["previous_sdk_version"] == "0.6.3"

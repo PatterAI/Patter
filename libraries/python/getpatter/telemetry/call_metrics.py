@@ -46,6 +46,21 @@ def _carrier_family(telephony_provider: str | None) -> str:
     return str(telephony_provider).lower() if telephony_provider else "none"
 
 
+def _turn_count_bucket(n: int) -> str:
+    """Coarse bucket for the number of conversational turns in the call."""
+    if n <= 0:
+        return "0"
+    if n == 1:
+        return "1"
+    if n <= 3:
+        return "2_3"
+    if n <= 6:
+        return "4_6"
+    if n <= 12:
+        return "7_12"
+    return "13_plus"
+
+
 def _latency_ms(metrics: Any) -> float | None:
     p95 = getattr(metrics, "latency_p95", None)
     return getattr(p95, "agent_response_ms", None) if p95 is not None else None
@@ -87,6 +102,9 @@ def record_call_completed(
             cost_total = getattr(cost, "total", None) if cost is not None else None
             if cost_total is not None:
                 dims["cost_usd"] = max(0.0, round(float(cost_total), 4))
+            turns = getattr(metrics, "turns", None)
+            if turns is not None:
+                dims["turn_count_bucket"] = _turn_count_bucket(len(turns))
             # A connected call that ended with a terminal error: surface the code
             # and flip the outcome to "error" (the value allowlist coerces an
             # unknown code to "other").

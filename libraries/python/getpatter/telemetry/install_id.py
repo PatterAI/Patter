@@ -21,11 +21,13 @@ from __future__ import annotations
 
 import os
 import re
+import time
 import uuid
 from pathlib import Path
 
 _RUN_ID = uuid.uuid4().hex
 _HEX32 = re.compile(r"^[0-9a-f]{32}$")
+_VERSION_RE = re.compile(r"^[0-9][0-9a-z.+-]{0,31}$")
 _install_id: str | None = None
 
 
@@ -69,3 +71,40 @@ def install_id() -> str:
         # Read-only / sandboxed FS: fall back to the per-process id (not persisted).
         _install_id = _RUN_ID
     return _install_id
+
+
+def _version_path() -> Path:
+    return _state_path().parent / "version"
+
+
+def previous_version(current: str) -> str:
+    """Return the last sdk_version this install reported ("" on first run), then
+    record ``current`` for next time. Powers the upgrade funnel. Best-effort."""
+    path = _version_path()
+    prev = ""
+    try:
+        prev = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        prev = ""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(current, encoding="utf-8")
+    except OSError:
+        pass
+    return prev if _VERSION_RE.match(prev) else ""
+
+
+def days_since_install_bucket() -> str:
+    """Coarse age of this install, from the install-id file mtime (0/1_7/8_30/30_plus)."""
+    try:
+        mtime = _state_path().stat().st_mtime
+    except OSError:
+        return "0"
+    days = max(0, int((time.time() - mtime) / 86400))
+    if days == 0:
+        return "0"
+    if days <= 7:
+        return "1_7"
+    if days <= 30:
+        return "8_30"
+    return "30_plus"

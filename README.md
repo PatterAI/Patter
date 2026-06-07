@@ -110,6 +110,9 @@ await phone.serve(agent, tunnel=True)
 
 `tunnel: true` spawns a Cloudflare quick tunnel and points your number at it — ideal for local dev. For production, use a static `webhook_url` (or [ngrok](https://ngrok.com)); see [Tunneling](https://docs.getpatter.com).
 
+> [!NOTE]
+> Patter collects **anonymous, opt-out** usage telemetry (no PII, no call content, no transcripts) so the maintainers can see which engines, providers, models, and carriers people use and prioritise accordingly. Opt out anytime with `telemetry=False` / `telemetry: false`, or by setting `PATTER_TELEMETRY_DISABLED=1` or the standard `DO_NOT_TRACK=1`. It's auto-disabled in CI/test. See [Telemetry](https://docs.getpatter.com/telemetry) for exactly what is (and isn't) collected.
+
 ## Templates
 
 Each template is a self-contained repo — clone, add your `.env`, and run. Python and TypeScript both included.

@@ -30,7 +30,7 @@ from getpatter.telemetry.env import is_ci, is_test
 from getpatter.telemetry.install_id import install_id, run_id
 from getpatter.telemetry.stack import STACK_VENDORS
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # --- Event names (the only values the ``event`` field may take) -------------
 EVENT_SDK_INITIALIZED = "sdk_initialized"
@@ -97,6 +97,23 @@ DIMENSION_VALUES: dict[str, frozenset[str]] = {
     "stt_provider": STACK_VENDORS | {"none"},
     "tts_provider": STACK_VENDORS | {"none"},
     "llm_provider": STACK_VENDORS | {"none"},
+    # sdk_initialized: anonymous deploy-shape (presence-only env/file probes).
+    "invoked_by_agent": frozenset(
+        {"claude", "cursor", "copilot", "gemini", "windsurf", "other", "none"}
+    ),
+    "serverless": frozenset(
+        {"lambda", "cloud_run", "vercel", "azure_functions", "none"}
+    ),
+    "cloud": frozenset({"aws", "gcp", "azure", "fly", "none"}),
+    "package_manager": frozenset(
+        {"npm", "pnpm", "yarn", "bun", "pip", "uv", "poetry", "pipenv", "conda", "none"}
+    ),
+    "days_since_install_bucket": frozenset({"0", "1_7", "8_30", "30_plus"}),
+    # agent_configured: feature-adoption (Realtime tuning).
+    "noise_reduction": frozenset({"near_field", "far_field", "none"}),
+    "turn_detection": frozenset({"default", "custom", "none"}),
+    # call_completed: how many conversational turns the call had.
+    "turn_count_bucket": frozenset({"0", "1", "2_3", "4_6", "7_12", "13_plus"}),
 }
 
 # Dimensions that may accompany an event. Enum dimensions are the keys of
@@ -113,10 +130,22 @@ _NUMERIC_DIMENSIONS = frozenset(
 # anything that could carry PII (fine-tuned ids, self-hosted paths, custom names)
 # to ``"{vendor}-other"``. :func:`build_event` re-checks the shape as defense in
 # depth. The relay applies the same regex guard server-side.
-_STRING_DIMENSIONS = frozenset({"stt_model", "tts_model", "llm_model"})
+# String dimensions are validated by a safe-shape regex (not a closed enum):
+# the per-layer model tokens plus ``previous_sdk_version`` (a version string for
+# the upgrade funnel). The regex also matches versions like ``0.6.3``.
+_STRING_DIMENSIONS = frozenset(
+    {"stt_model", "tts_model", "llm_model", "previous_sdk_version"}
+)
 _MODEL_TOKEN_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{0,40}$")
+# Boolean dimensions: a feature is on/off. Kept only if the value is a real bool.
+_BOOL_DIMENSIONS = frozenset(
+    {"container", "preambles_used", "per_tool_timeouts_set", "llm_fallback_configured"}
+)
 ALLOWED_DIMENSIONS = (
-    frozenset(DIMENSION_VALUES) | _NUMERIC_DIMENSIONS | _STRING_DIMENSIONS
+    frozenset(DIMENSION_VALUES)
+    | _NUMERIC_DIMENSIONS
+    | _STRING_DIMENSIONS
+    | _BOOL_DIMENSIONS
 )
 
 
@@ -175,10 +204,12 @@ def build_event(
         if allowed_values is not None and value not in allowed_values:
             value = "other"  # off-list enum value can never reach the wire raw
         elif key in _STRING_DIMENSIONS:
-            # Sanitized model token: enforce the safe shape; drop anything else
-            # (the SDK normalizer already guarantees this, but never trust input).
+            # Sanitized model / version token: enforce the safe shape; drop
+            # anything else (the SDK already guarantees this, but never trust input).
             if not (isinstance(value, str) and _MODEL_TOKEN_RE.match(value)):
                 continue
+        elif key in _BOOL_DIMENSIONS and not isinstance(value, bool):
+            continue
         # Scalars only — no nested objects, no free-text payloads.
         if isinstance(value, (str, bool, int, float)):
             event[key] = value

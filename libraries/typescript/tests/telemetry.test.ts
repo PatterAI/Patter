@@ -21,6 +21,14 @@ process.env.PATTER_TELEMETRY_STATE_DIR =
 
 import { TelemetryClient, buildEvent, recordCallCompleted } from '../src/telemetry';
 import { stackDimensions, modelToken, vendorOf } from '../src/telemetry/stack';
+import { DIMENSION_VALUES } from '../src/telemetry/events';
+import {
+  invokedByAgent,
+  inContainer,
+  serverless,
+  cloud,
+  packageManager,
+} from '../src/telemetry/environment';
 import { EmbeddedServer } from '../src/server';
 import { CallMetricsAccumulator } from '../src/metrics';
 import { PatterTool } from '../src/integrations/patter-tool';
@@ -148,7 +156,7 @@ describe('[integration] telemetry — enabled path', () => {
     expect(event.sdk).toBe('typescript');
     expect(event.sdk_version).toBe('0.6.3');
     expect(event.runtime).toBe('node');
-    expect(event.schema_version).toBe(3);
+    expect(event.schema_version).toBe(4);
     expect(event.engine).toBe('realtime');
     expect(event.carrier).toBe('twilio');
     expect(typeof event.run_id).toBe('string');
@@ -595,5 +603,50 @@ describe('[unit] install id + per-call cost (schema v3)', () => {
     expect(id).toMatch(/^[0-9a-f]{32}$/);
     expect(mod.installId()).toBe(id); // stable within the process
     expect(fs.readFileSync(path.join(dir, 'install-id'), 'utf8').trim()).toBe(id);
+  });
+});
+
+describe('[unit] deploy-shape + upgrade funnel (schema v4)', () => {
+  it('env probes return allowlisted values', () => {
+    expect(DIMENSION_VALUES.invoked_by_agent.has(invokedByAgent())).toBe(true);
+    expect(DIMENSION_VALUES.serverless.has(serverless())).toBe(true);
+    expect(DIMENSION_VALUES.cloud.has(cloud())).toBe(true);
+    expect(DIMENSION_VALUES.package_manager.has(packageManager())).toBe(true);
+    expect(typeof inContainer()).toBe('boolean');
+  });
+
+  it('buildEvent keeps v4 bool/enum/version dims and drops bad ones', () => {
+    const ev = buildEvent('agent_configured', {
+      sdkVersion: '0.6.4',
+      dimensions: {
+        noise_reduction: 'far_field',
+        turn_detection: 'custom',
+        preambles_used: true,
+        per_tool_timeouts_set: false,
+        llm_fallback_configured: true,
+      },
+    });
+    expect(ev.noise_reduction).toBe('far_field');
+    expect(ev.preambles_used).toBe(true);
+    expect(ev.per_tool_timeouts_set).toBe(false);
+
+    const ev2 = buildEvent('sdk_initialized', {
+      sdkVersion: '0.6.4',
+      dimensions: { cloud: 'mars', container: 'nope', previous_sdk_version: '0.6.3' },
+    });
+    expect(ev2.cloud).toBe('other'); // off-list enum coerced
+    expect(ev2.container).toBeUndefined(); // non-bool dropped
+    expect(ev2.previous_sdk_version).toBe('0.6.3');
+  });
+
+  it('version funnel returns the prior version, then records current', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'patter-ver-'));
+    process.env.PATTER_TELEMETRY_STATE_DIR = dir;
+    vi.resetModules();
+    const mod = await import('../src/telemetry/install-id');
+    mod.installId();
+    expect(mod.previousVersion('0.6.3')).toBe(''); // first run
+    expect(mod.previousVersion('0.6.4')).toBe('0.6.3'); // now sees the prior
+    expect(['0', '1_7', '8_30', '30_plus']).toContain(mod.daysSinceInstallBucket());
   });
 });

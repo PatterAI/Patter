@@ -23,7 +23,7 @@ import { isCi, isTest } from './env';
 import { installId, runId } from './install-id';
 import { STACK_VENDORS } from './stack';
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 export const EVENT_SDK_INITIALIZED = 'sdk_initialized';
 export const EVENT_FEATURE_USED = 'feature_used';
@@ -85,6 +85,17 @@ export const DIMENSION_VALUES: Record<string, ReadonlySet<string>> = {
   stt_provider: new Set([...STACK_VENDORS, 'none']),
   tts_provider: new Set([...STACK_VENDORS, 'none']),
   llm_provider: new Set([...STACK_VENDORS, 'none']),
+  // sdk_initialized: anonymous deploy-shape (presence-only env/file probes).
+  invoked_by_agent: new Set(['claude', 'cursor', 'copilot', 'gemini', 'windsurf', 'other', 'none']),
+  serverless: new Set(['lambda', 'cloud_run', 'vercel', 'azure_functions', 'none']),
+  cloud: new Set(['aws', 'gcp', 'azure', 'fly', 'none']),
+  package_manager: new Set(['npm', 'pnpm', 'yarn', 'bun', 'pip', 'uv', 'poetry', 'pipenv', 'conda', 'none']),
+  days_since_install_bucket: new Set(['0', '1_7', '8_30', '30_plus']),
+  // agent_configured: feature-adoption (Realtime tuning).
+  noise_reduction: new Set(['near_field', 'far_field', 'none']),
+  turn_detection: new Set(['default', 'custom', 'none']),
+  // call_completed: how many conversational turns the call had.
+  turn_count_bucket: new Set(['0', '1', '2_3', '4_6', '7_12', '13_plus']),
 };
 
 // Numeric dimensions pass through without value coercion. latency_ms (whole ms)
@@ -99,12 +110,28 @@ const NUMERIC_DIMENSIONS = new Set<string>([
 // "deepgram-nova-3", "anthropic-claude-haiku-4-5"). NOT a closed enum — produced
 // by stack.modelToken, which already coerces anything PII-risky to
 // "{vendor}-other". buildEvent re-checks the shape; the relay mirrors it.
-const STRING_DIMENSIONS = new Set<string>(['stt_model', 'tts_model', 'llm_model']);
+// String dimensions are validated by a safe-shape regex (model tokens + the
+// `previous_sdk_version` version string for the upgrade funnel; the regex also
+// matches versions like `0.6.3`).
+const STRING_DIMENSIONS = new Set<string>([
+  'stt_model',
+  'tts_model',
+  'llm_model',
+  'previous_sdk_version',
+]);
 const MODEL_TOKEN_RE = /^[a-z0-9][a-z0-9.-]{0,40}$/;
+// Boolean dimensions: a feature is on/off. Kept only if the value is a real bool.
+const BOOL_DIMENSIONS = new Set<string>([
+  'container',
+  'preambles_used',
+  'per_tool_timeouts_set',
+  'llm_fallback_configured',
+]);
 const ALLOWED_DIMENSIONS = new Set<string>([
   ...Object.keys(DIMENSION_VALUES),
   ...NUMERIC_DIMENSIONS,
   ...STRING_DIMENSIONS,
+  ...BOOL_DIMENSIONS,
 ]);
 
 export type Scalar = string | number | boolean;
@@ -168,11 +195,13 @@ export function buildEvent(
     if (allowed && !(typeof value === 'string' && allowed.has(value))) {
       value = 'other'; // off-list enum value can never reach the wire raw
     } else if (STRING_DIMENSIONS.has(key)) {
-      // Sanitized model token: enforce the safe shape; drop anything else (the
-      // SDK normalizer already guarantees this, but never trust input).
+      // Sanitized model / version token: enforce the safe shape; drop anything
+      // else (the SDK already guarantees this, but never trust input).
       if (!(typeof value === 'string' && MODEL_TOKEN_RE.test(value))) {
         continue;
       }
+    } else if (BOOL_DIMENSIONS.has(key) && typeof value !== 'boolean') {
+      continue;
     }
     if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
       event[key] = value;

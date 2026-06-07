@@ -51,6 +51,14 @@ import type { ToolDefinition } from "./types";
 import { getLogger } from "./logger";
 import { TelemetryClient } from "./telemetry";
 import { stackDimensions } from "./telemetry/stack";
+import {
+  invokedByAgent,
+  inContainer,
+  serverless as detectServerless,
+  cloud as detectCloud,
+  packageManager,
+} from "./telemetry/environment";
+import { previousVersion, daysSinceInstallBucket } from "./telemetry/install-id";
 import { VERSION } from "./version";
 import { SpeechEvents } from "./_speech-events";
 import type {
@@ -229,6 +237,25 @@ function telemetryIntegration(opts: AgentOptions): {
     };
   }
   return { integration: "none", integrationKind: "none", mcpBucket: "0" };
+}
+
+/** Anonymous deploy-shape + install-age dims for `sdk_initialized` (presence-only). */
+function telemetryEnvironmentDims(): Record<string, string | boolean> {
+  try {
+    const dims: Record<string, string | boolean> = {
+      invoked_by_agent: invokedByAgent(),
+      container: inContainer(),
+      serverless: detectServerless(),
+      cloud: detectCloud(),
+      package_manager: packageManager(),
+      days_since_install_bucket: daysSinceInstallBucket(),
+    };
+    const prev = previousVersion(VERSION);
+    if (prev) dims.previous_sdk_version = prev;
+    return dims;
+  } catch {
+    return {};
+  }
 }
 
 /** Top-level SDK entry point — wraps a carrier + embedded server + agent loop. */
@@ -515,6 +542,7 @@ export class Patter {
           : options.tunnel
             ? "configured"
             : "none",
+      ...telemetryEnvironmentDims(),
     });
 
     // Initialise the tunnel-ready deferred. If the caller already has a
@@ -572,7 +600,33 @@ export class Patter {
     const builtin = opts.consult ? 1 : 0;
     const customBucket = telemetryBucketCustomTools(opts.tools?.length ?? 0);
     const { integration, integrationKind, mcpBucket } = telemetryIntegration(opts);
-    const shapeKey = [builtin, customBucket, integration, integrationKind, mcpBucket].join("|");
+    // Feature-adoption: read tuning from AgentOptions or the engine object.
+    const engineObj = opts.engine as
+      | { noiseReduction?: string; turnDetection?: unknown }
+      | undefined;
+    const nr = opts.openaiRealtimeNoiseReduction ?? engineObj?.noiseReduction;
+    const noiseReduction = nr === "near_field" || nr === "far_field" ? nr : "none";
+    const td = opts.realtimeTurnDetection ?? engineObj?.turnDetection;
+    const turnDetection = td != null ? "custom" : "none";
+    const preamblesUsed = Boolean(opts.toolCallPreambles);
+    const perToolTimeoutsSet =
+      Array.isArray(opts.tools) &&
+      opts.tools.some((t) => (t as { timeoutMs?: number }).timeoutMs !== undefined);
+    const llmFallbackConfigured =
+      typeof (opts.llm as { getAvailability?: unknown } | undefined)?.getAvailability ===
+      "function";
+    const shapeKey = [
+      builtin,
+      customBucket,
+      integration,
+      integrationKind,
+      mcpBucket,
+      noiseReduction,
+      turnDetection,
+      preamblesUsed,
+      perToolTimeoutsSet,
+      llmFallbackConfigured,
+    ].join("|");
     if (!this.telemetrySeenAgentShapes.has(shapeKey)) {
       this.telemetrySeenAgentShapes.add(shapeKey);
       this.telemetry.record("agent_configured", {
@@ -581,6 +635,11 @@ export class Patter {
         integration,
         integration_kind: integrationKind,
         mcp_server_count_bucket: mcpBucket,
+        noise_reduction: noiseReduction,
+        turn_detection: turnDetection,
+        preambles_used: preamblesUsed,
+        per_tool_timeouts_set: perToolTimeoutsSet,
+        llm_fallback_configured: llmFallbackConfigured,
       });
     }
 
