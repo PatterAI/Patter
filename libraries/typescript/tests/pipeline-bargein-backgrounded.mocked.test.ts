@@ -94,6 +94,30 @@ function makeParkUntilAbortProvider(aborted: { value: boolean }): LLMProvider {
   } as unknown as LLMProvider;
 }
 
+/** Captures the built messages (prompt) the first stream() call receives, then
+ * yields a quick reply — to assert the in-flight turn's prompt is built from a
+ * history SNAPSHOT and cannot be contaminated by a later transcript's push. */
+function makeMessageCapturingProvider(captured: {
+  messages?: Array<{ role: string; content: string }>;
+}): LLMProvider {
+  return {
+    model: 'agent-runtime-1',
+    async *stream(
+      messages: Array<Record<string, unknown>>,
+      _tools?: Array<Record<string, unknown>> | null,
+      _opts?: LLMStreamOptions,
+    ): AsyncGenerator<LLMChunk, void, unknown> {
+      if (!captured.messages) {
+        captured.messages = JSON.parse(JSON.stringify(messages)) as Array<{
+          role: string;
+          content: string;
+        }>;
+      }
+      yield { type: 'text', content: 'va bene. ' };
+    },
+  } as unknown as LLMProvider;
+}
+
 function makeDeps(bridge: TelephonyBridge, agentOverrides: Partial<AgentOptions>): StreamHandlerDeps {
   const mockTts = new (ElevenLabsTTS as unknown as new (k: string, v?: string) => {
     synthesizeStream: (t: string) => AsyncIterable<Buffer>;
@@ -184,4 +208,37 @@ describe('[mocked] pipeline backgrounded-dispatch barge-in', () => {
       (onHandler as unknown as { forwardSttWhileSpeaking: boolean }).forwardSttWhileSpeaking,
     ).toBe(true);
   });
+
+  it("a later transcript's history push does NOT contaminate the in-flight turn's prompt", async () => {
+    const stt = makeMockStt();
+    const bridge = makeTwilioBridge(stt);
+    const captured: { messages?: Array<{ role: string; content: string }> } = {};
+    const deps = makeDeps(bridge, {
+      llm: makeMessageCapturingProvider(captured) as unknown as AgentOptions['llm'],
+    });
+    const handler = new StreamHandler(deps, makeMockWs(), '+15551111111', '+15552222222');
+    await handler.handleCallStart('CA-bg-snapshot');
+
+    // Turn A is committed and its dispatch launched (backgrounded). emitTranscript
+    // resolves after the snapshot was captured at launch.
+    await stt.emitTranscript('domanda del turno A');
+    // Simulate a FOLLOWING transcript's user push landing on the drain loop while
+    // turn A is still in flight (the exact race the snapshot fix guards against).
+    (handler as unknown as { history: { push: (e: unknown) => void } }).history.push({
+      role: 'user',
+      text: 'TURNO B PIU TARDI',
+      timestamp: Date.now(),
+    });
+
+    await vi.waitFor(() => expect(captured.messages).toBeDefined(), { timeout: 3000 });
+    await (handler as unknown as { dispatchTask: Promise<void> | null }).dispatchTask?.catch(
+      () => {},
+    );
+
+    const contents = (captured.messages ?? []).map((m) => m.content);
+    // Turn A's prompt was built from the launch-time snapshot — the later push
+    // is absent. With the pre-fix LIVE array it would leak in.
+    expect(contents).toContain('domanda del turno A');
+    expect(contents).not.toContain('TURNO B PIU TARDI');
+  }, 10000);
 });

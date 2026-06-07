@@ -1032,6 +1032,15 @@ export class StreamHandler {
    */
   private dispatchTask: Promise<void> | null = null;
   /**
+   * Cap (ms) on how long teardown waits for the backgrounded dispatch to
+   * settle. JS promises are not cancellable, so a user-supplied ``onMessage``
+   * (which receives no AbortSignal) parked on a hung external call could block
+   * call cleanup indefinitely — `llmAbort.abort()` only unblocks the built-in
+   * LLM/TTS paths. We bound the WAIT (Python hard-cancels the task instead).
+   * 30 s matches the webhook ceiling.
+   */
+  private static readonly DISPATCH_SETTLE_TIMEOUT_MS = 30_000;
+  /**
    * Opt-in (default OFF): forward inbound audio to STT even while the agent is
    * speaking, so the transcript barge-in path can receive a transcript on
    * echo-masked PSTN links where the VAD never fires. ECHO RISK without AEC.
@@ -1752,6 +1761,27 @@ export class StreamHandler {
     }
   }
 
+  /**
+   * Await the backgrounded turn dispatch during teardown, but never block
+   * longer than ``DISPATCH_SETTLE_TIMEOUT_MS``. The earlier ``llmAbort.abort()``
+   * settles the built-in LLM/TTS paths immediately; the cap only bites a
+   * misbehaving user ``onMessage`` parked on a hung external call (JS promises
+   * can't be cancelled). No-op when nothing is in flight.
+   */
+  private async settleDispatchForTeardown(): Promise<void> {
+    if (!this.dispatchTask) return;
+    const settle = this.dispatchTask.catch(() => {});
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cap = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, StreamHandler.DISPATCH_SETTLE_TIMEOUT_MS);
+    });
+    try {
+      await Promise.race([settle, cap]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
   /** Handle call stop / stream end. */
   /** Handle a carrier-emitted `stop` event signalling the call has ended. */
   async handleStop(): Promise<void> {
@@ -1773,9 +1803,10 @@ export class StreamHandler {
       try { ttsCancelable.cancelActiveStream(); } catch { /* defensive */ }
     }
     // Settle the backgrounded turn dispatch (the abort above unblocks it) so
-    // no in-flight LLM/TTS work touches adapters after they close. Parity with
-    // Python cleanup awaiting ``_dispatch_task``.
-    await this.dispatchTask?.catch(() => {});
+    // no in-flight LLM/TTS work touches adapters after they close — bounded so
+    // a hung user onMessage cannot block teardown. Parity with Python cleanup
+    // hard-cancelling ``_dispatch_task``.
+    await this.settleDispatchForTeardown();
     // Drop any pending barge-in timer BEFORE we tear down metrics /
     // adapters. Without this, a call that ends while a barge-in is
     // pending leaves a setTimeout scheduled to fire ``bargeInConfirmMs``
@@ -1813,9 +1844,9 @@ export class StreamHandler {
     if (typeof ttsCancelable?.cancelActiveStream === 'function') {
       try { ttsCancelable.cancelActiveStream(); } catch { /* defensive */ }
     }
-    // Settle the backgrounded turn dispatch before tearing down adapters
-    // (parity with handleStop / Python cleanup).
-    await this.dispatchTask?.catch(() => {});
+    // Settle the backgrounded turn dispatch before tearing down adapters,
+    // bounded so a hung user onMessage cannot block teardown (see handleStop).
+    await this.settleDispatchForTeardown();
     // See handleStop — drop pending barge-in timer before cleanup so a
     // dead handler can never fire a stale recordOverlapEnd callback.
     this.clearPendingBargeIn();
@@ -2545,11 +2576,24 @@ export class StreamHandler {
     // await is fast and does not head-of-line-block the drain loop in
     // practice, while preserving strict per-turn history/metrics ordering.
     await this.dispatchTask?.catch(() => {});
+    // Snapshot history at launch — AFTER this turn's own user push above, BEFORE
+    // any later transcript can mutate it. The dispatch runs in the background,
+    // so passing the LIVE ``this.history.entries`` would let a following
+    // transcript's user push (which happens on the drain loop while this turn is
+    // in flight) contaminate this turn's LLM prompt. Mirrors Python's
+    // ``list(self.conversation_history)`` snapshot.
+    const historySnapshot = [...this.history.entries];
     // Launch the turn as a tracked background task and RETURN immediately so
     // the transcript drain loop keeps running handleBargeIn against this LIVE
     // turn (the head-of-line-blocking fix). Parity with Python
     // ``create_task(_dispatch_turn(...))``.
-    this.dispatchTask = this.dispatchTurn(filteredTranscript, hookExecutor, hookCtx, interrupted);
+    this.dispatchTask = this.dispatchTurn(
+      filteredTranscript,
+      hookExecutor,
+      hookCtx,
+      interrupted,
+      historySnapshot,
+    );
   }
 
   /**
@@ -2565,6 +2609,7 @@ export class StreamHandler {
     hookExecutor: PipelineHookExecutor,
     hookCtx: HookContext,
     interrupted: boolean,
+    historySnapshot: Array<{ role: string; text: string }>,
   ): Promise<void> {
     const label = this.deps.bridge.label;
     let responseText = '';
@@ -2576,7 +2621,7 @@ export class StreamHandler {
             call_id: this.callId,
             caller: this.caller,
             callee: this.callee,
-            history: [...this.history.entries],
+            history: historySnapshot,
           });
         } catch (e) {
           getLogger().error(`onMessage error (${label}):`, e);
@@ -2598,7 +2643,7 @@ export class StreamHandler {
           call_id: this.callId,
           caller: this.caller,
           callee: this.callee,
-          history: [...this.history.entries],
+          history: historySnapshot,
         };
         if (isWebSocketUrl(this.deps.onMessage)) {
           await this.handleWebSocketResponse(msgData);
@@ -2611,7 +2656,12 @@ export class StreamHandler {
           return;
         }
       } else if (this.llmLoop) {
-        responseText = await this.runPipelineLlm(filteredTranscript, hookExecutor, hookCtx);
+        responseText = await this.runPipelineLlm(
+          filteredTranscript,
+          hookExecutor,
+          hookCtx,
+          historySnapshot,
+        );
       } else {
         getLogger().warn(
           `Pipeline (${label}) has no llm/onMessage handler — transcript ` +
@@ -2909,6 +2959,7 @@ export class StreamHandler {
     filteredTranscript: string,
     hookExecutor: PipelineHookExecutor,
     hookCtx: HookContext,
+    historySnapshot: Array<{ role: string; text: string }>,
   ): Promise<string> {
     const label = this.deps.bridge.label;
     const callCtx = { call_id: this.callId, caller: this.caller, callee: this.callee };
@@ -2972,7 +3023,7 @@ export class StreamHandler {
       try {
         for await (const token of this.llmLoop!.run(
           filteredTranscript,
-          this.history.entries,
+          historySnapshot,
           callCtx,
           this.metricsAcc,
           hookExecutor,

@@ -686,6 +686,19 @@ class OpenAILLMProvider:
             await asyncio.wait(
                 {create_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED
             )
+        except asyncio.CancelledError:
+            # The containing dispatch task was hard-cancelled (cleanup /
+            # hangup teardown) while parked here pre-first-token.
+            # ``asyncio.wait`` does NOT cancel the futures it waits on, so abort
+            # the in-flight POST to free the Hermes/OpenClaw connection instead
+            # of orphaning it (which would later raise "Task exception was never
+            # retrieved" when the abandoned request errors).
+            create_task.cancel()
+            try:
+                await create_task
+            except BaseException:  # noqa: BLE001 - aborting in-flight request
+                pass
+            raise
         finally:
             cancel_task.cancel()
         if not create_task.done():

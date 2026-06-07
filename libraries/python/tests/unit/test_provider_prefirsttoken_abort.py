@@ -116,6 +116,46 @@ async def test_cancel_during_create_aborts_in_flight_post() -> None:
 
 @pytest.mark.mocked
 @pytest.mark.asyncio
+async def test_task_cancel_aborts_in_flight_create_no_orphan() -> None:
+    """When the containing dispatch task is hard-cancelled (cleanup / hangup)
+    while parked pre-first-token, the in-flight create() POST must be aborted —
+    not orphaned (which would later raise 'Task exception was never retrieved'
+    and leak the Hermes/OpenClaw connection)."""
+    provider = OpenAICompatibleLLMProvider(base_url="http://127.0.0.1:9/v1", model="m")
+    cancel = asyncio.Event()
+    create_started = asyncio.Event()
+    create_cancelled = {"value": False}
+
+    async def _never_returns(**_kwargs):
+        create_started.set()
+        try:
+            await asyncio.Event().wait()  # parks (server running tools)
+        except asyncio.CancelledError:
+            create_cancelled["value"] = True
+            raise
+
+    fake_client = MagicMock()
+    fake_client.chat.completions.create = _never_returns
+    provider._client = fake_client  # type: ignore[assignment]
+
+    async def _consume() -> None:
+        async for _chunk in provider.stream(
+            [{"role": "user", "content": "hi"}], cancel_event=cancel
+        ):
+            pass
+
+    task = asyncio.create_task(_consume())
+    await asyncio.wait_for(create_started.wait(), timeout=1.0)
+    # Simulate cleanup() hard-cancelling _dispatch_task while parked pre-create.
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0)  # let the abort propagate
+    assert create_cancelled["value"] is True
+
+
+@pytest.mark.mocked
+@pytest.mark.asyncio
 async def test_no_cancel_event_streams_normally() -> None:
     """Regression guard: with no cancel_event the watchdog is never spawned and
     a normal streamed response yields its text unchanged."""
