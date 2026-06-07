@@ -342,6 +342,45 @@ export function isSttHallucination(text: string): boolean {
   return pieces.length > 1 && pieces.every((p) => HALLUCINATIONS.has(p));
 }
 
+/** Fraction of a candidate's words that must appear in the agent's spoken text
+ * for it to count as the agent's own TTS echoing back. Mirrors Python
+ * ``_ECHO_WORD_OVERLAP_THRESHOLD``. */
+const ECHO_WORD_OVERLAP_THRESHOLD = 0.6;
+
+/** Lowercase, drop punctuation, collapse whitespace — for echo comparison. */
+export function normalizeForEcho(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/u, ' ')
+    .trim()
+    .replace(/\s+/gu, ' ');
+}
+
+/** True when ``candidate`` looks like a fragment of ``agentText`` — i.e. the
+ * agent's own TTS bleeding into STT (forwarded during TTS without effective
+ * AEC) rather than real caller speech. Substring OR high word-overlap.
+ * Mirrors Python ``_looks_like_echo``. */
+export function looksLikeEcho(candidate: string, agentText: string): boolean {
+  const a = normalizeForEcho(agentText);
+  const c = normalizeForEcho(candidate);
+  if (!a || !c) return false;
+  if (a.includes(c)) return true;
+  const words = c.split(' ').filter(Boolean);
+  if (words.length === 0) return false;
+  const agentWords = new Set(a.split(' '));
+  const overlap = words.filter((w) => agentWords.has(w)).length / words.length;
+  return overlap >= ECHO_WORD_OVERLAP_THRESHOLD;
+}
+
+/** True when two normalised finals are the same utterance double-emitted
+ * (identical, or one a substring of the other). Mirrors Python
+ * ``_is_near_duplicate``. */
+export function isNearDuplicate(a: string, b: string): boolean {
+  if (!a || !b) return false;
+  return a === b || a.includes(b) || b.includes(a);
+}
+
 // ---------------------------------------------------------------------------
 // StreamHandler context (immutable per-call configuration)
 // ---------------------------------------------------------------------------
@@ -650,6 +689,9 @@ export class StreamHandler {
     // Fresh turn — drop any stale pre-barge-in buffer from a previous turn
     // so we never replay yesterday's audio to STT.
     this.inboundAudioRing = [];
+    // Fresh turn — reset the echo-guard reference so barge-in checks compare
+    // against THIS turn's spoken text, not the last turn's.
+    this.currentAgentSpokenText = '';
     // Reset the VAD detector so the next user utterance triggers a clean
     // SILENCE→SPEECH transition. Without this, PSTN echo from the previous
     // turn can keep the detector's smoothed probability above the
@@ -1052,6 +1094,12 @@ export class StreamHandler {
   // Throttle state for back-to-back STT finals — see ``commitTranscript``.
   private lastCommitText = '';
   private lastCommitAt = 0;
+  /** The agent's spoken text for the CURRENT turn, accumulated as tokens stream.
+   * The echo guard rejects transcripts matching it (the agent's own TTS bleeding
+   * back into STT when audio is forwarded during TTS without effective AEC).
+   * Reset in ``beginSpeaking``; only consulted while ``forwardSttWhileSpeaking``.
+   * Parity with Python ``_current_agent_spoken_text``. */
+  private currentAgentSpokenText = '';
   // PCM16 byte-alignment carry for TTS streaming (pipeline mode).
   // HTTP streams from ElevenLabs / OpenAI / Cartesia can yield chunks of any
   // size, including odd byte counts. Silently dropping the trailing odd byte
@@ -2715,6 +2763,21 @@ export class StreamHandler {
       this.endTailGraceForNewTurn();
       return false;
     }
+    // Echo guard: when audio is forwarded to STT during TTS (no effective AEC),
+    // the agent's own voice can be transcribed and would barge in on itself.
+    // Drop transcripts that look like a fragment of what the agent is saying.
+    // Only under forwardSttWhileSpeaking, so the default VAD path is unaffected.
+    if (
+      this.forwardSttWhileSpeaking &&
+      looksLikeEcho(transcript.text, this.currentAgentSpokenText)
+    ) {
+      getLogger().info(
+        `Barge-in suppressed: transcript matches agent's own speech (echo) — ${sanitizeLogValue(
+          transcript.text.slice(0, 40),
+        )}`,
+      );
+      return false;
+    }
     if (!this.canBargeIn()) {
       getLogger().info(
         `Barge-in transcript suppressed (agent speaking < gate, aec=${this.aec ? 'on' : 'off'})`,
@@ -2761,6 +2824,19 @@ export class StreamHandler {
       // Tail-grace transcript = next turn, not a barge-in. End the grace and
       // let the transcript dispatch normally (parity with the async path).
       this.endTailGraceForNewTurn();
+      return false;
+    }
+    // Echo guard (parity with handleBargeInAsync) — never let the agent's own
+    // forwarded TTS echo barge in on itself.
+    if (
+      this.forwardSttWhileSpeaking &&
+      looksLikeEcho(transcript.text, this.currentAgentSpokenText)
+    ) {
+      getLogger().info(
+        `Barge-in suppressed: transcript matches agent's own speech (echo) — ${sanitizeLogValue(
+          transcript.text.slice(0, 40),
+        )}`,
+      );
       return false;
     }
     if (this.bargeInStrategies.length === 0) {
@@ -2876,15 +2952,34 @@ export class StreamHandler {
       getLogger().debug(`Dropped likely STT hallucination: ${sanitizeLogValue(normalised.slice(0, 40))}`);
       return false;
     }
+    // Echo guard: while the agent is still speaking (the forward-STT echo
+    // window), a transcript that matches the agent's own speech is its TTS
+    // bleeding back into STT, not a user turn. Gated on forwardSttWhileSpeaking
+    // + isSpeaking so a real post-turn reply (committed when idle) is never
+    // dropped, and the default VAD path is unaffected. Parity with Python.
+    if (
+      this.forwardSttWhileSpeaking &&
+      this.isSpeaking &&
+      looksLikeEcho(text, this.currentAgentSpokenText)
+    ) {
+      getLogger().debug(
+        `Dropped agent-echo transcript (not a user turn): ${sanitizeLogValue(normalised.slice(0, 40))}`,
+      );
+      return false;
+    }
     if (sinceLastMs < 2000 && normalised === this.lastCommitText) {
       getLogger().debug(
         `Dropped duplicate final transcript (${(sinceLastMs / 1000).toFixed(1)}s since last): ${sanitizeLogValue(normalised.slice(0, 40))}`,
       );
       return false;
     }
-    if (sinceLastMs < 500) {
+    // Back-to-back: drop a NEAR-DUPLICATE within 500 ms (Deepgram emitting
+    // speech_final then is_final for the SAME utterance). A genuinely DIFFERENT
+    // fast follow-up must NOT be swallowed — dropping it unconditionally left
+    // an empty [interrupted] turn before this fix. Parity with Python.
+    if (sinceLastMs < 500 && isNearDuplicate(normalised, this.lastCommitText)) {
       getLogger().debug(
-        `Dropped back-to-back final transcript (${(sinceLastMs / 1000).toFixed(2)}s since last): ${sanitizeLogValue(normalised.slice(0, 40))}`,
+        `Dropped back-to-back near-duplicate final (${(sinceLastMs / 1000).toFixed(2)}s since last): ${sanitizeLogValue(normalised.slice(0, 40))}`,
       );
       return false;
     }
@@ -3037,6 +3132,10 @@ export class StreamHandler {
           // Idempotent in the dispatcher.
           await this.emitLlmFirstToken();
           allParts.push(token);
+          // Keep the echo-guard reference current as the agent speaks, so a
+          // barge-in transcript mid-turn is compared against what the agent has
+          // said so far (echo lags the tokens). Parity with Python.
+          this.currentAgentSpokenText = allParts.join('');
           for (const sentence of chunker.push(token)) {
             if (!this.isSpeaking) break;
             await guardAndSpeak(sentence, !firstSentenceEmitted);
@@ -3106,7 +3205,16 @@ export class StreamHandler {
         // Swallow — span teardown should never crash the call path.
       }
     }
-    return allParts.join('');
+    const responseText = allParts.join('');
+    // Tag the spoken prefix with an ``[interrupted by caller]`` marker when the
+    // turn was cut short, so a stateful agent runtime (Hermes/OpenClaw) sees,
+    // next turn, that it was interrupted and what the caller actually heard —
+    // not an ungrounded full reply that pollutes its context. Parity with
+    // Python ``_process_streaming_response``.
+    if (llmSignal.aborted && responseText) {
+      return `${responseText} [interrupted by caller]`;
+    }
+    return responseText;
   }
 
   /**

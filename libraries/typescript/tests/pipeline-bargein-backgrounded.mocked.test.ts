@@ -73,9 +73,11 @@ function makeTwilioBridge(mockStt: ReturnType<typeof makeMockStt>): TelephonyBri
   } as unknown as TelephonyBridge;
 }
 
-/** Provider that parks until its turn is aborted — models a long Hermes turn
- * (tools running before the first token) that only ends on barge-in. */
+/** Provider whose FIRST turn parks until aborted (models a long Hermes turn
+ * that only ends on barge-in); any later turn replies quickly so the real
+ * follow-up — no longer swallowed by the back-to-back dedup — can complete. */
 function makeParkUntilAbortProvider(aborted: { value: boolean }): LLMProvider {
+  let calls = 0;
   return {
     model: 'agent-runtime-1',
     async *stream(
@@ -83,6 +85,11 @@ function makeParkUntilAbortProvider(aborted: { value: boolean }): LLMProvider {
       _tools?: Array<Record<string, unknown>> | null,
       opts?: LLMStreamOptions,
     ): AsyncGenerator<LLMChunk, void, unknown> {
+      calls += 1;
+      if (calls > 1) {
+        yield { type: 'text', content: 'va bene. ' };
+        return;
+      }
       const signal = opts?.signal;
       await new Promise<void>((resolve) => {
         if (signal?.aborted) return resolve();
@@ -176,15 +183,16 @@ describe('[mocked] pipeline backgrounded-dispatch barge-in', () => {
     await stt.emitTranscript('ferma per favore');
 
     // The in-flight turn was cancelled: the carrier buffer was cleared and the
-    // LLM stream's abort signal fired (turn torn down pre-first-token).
+    // LLM stream's abort signal fired (turn 1 torn down pre-first-token).
     await vi.waitFor(
       () => expect(bridge.sendClear as ReturnType<typeof vi.fn>).toHaveBeenCalled(),
       { timeout: 3000 },
     );
-    expect((handler as unknown as { isSpeaking: boolean }).isSpeaking).toBe(false);
     await vi.waitFor(() => expect(aborted.value).toBe(true), { timeout: 3000 });
 
-    // Settle the backgrounded dispatch before teardown.
+    // Settle the backgrounded dispatch before teardown. The real follow-up
+    // "ferma per favore" (different text, <0.5s) is NOT swallowed by the
+    // back-to-back dedup — it dispatches as turn 2 and replies.
     await (handler as unknown as { dispatchTask: Promise<void> | null }).dispatchTask?.catch(
       () => {},
     );

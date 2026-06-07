@@ -135,7 +135,11 @@ class TestTranscriptBargeInDuringInFlightTurn:
         # Turn 1's LLM stream observed the cancel (it was torn down, not left
         # running until the next turn).
         assert cancel_seen.is_set()
-        assert handler._is_speaking is False
+        # The REAL follow-up "ferma per favore" (different text, arriving <0.5s
+        # after turn 1) is NOT swallowed by the back-to-back dedup — it
+        # dispatches as a fresh turn (calls==2). Before the dedup fix it was
+        # dropped, leaving an empty [interrupted] turn and no reply.
+        assert handler._llm_loop.calls >= 2
 
 
 @pytest.mark.unit

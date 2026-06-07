@@ -131,6 +131,50 @@ _STT_HALLUCINATIONS: frozenset[str] = frozenset(
 # ("We'll see you next time. Bye bye.") without importing ``re``.
 _SENTENCE_ENDERS = ".!?…。！？"
 
+# Fraction of a candidate transcript's words that must appear in the agent's
+# in-flight spoken text for it to be treated as the agent's own TTS echoing
+# back (rather than real caller speech). 0.6 keeps real replies that merely
+# share a couple of words while catching garbled echo fragments. Language-
+# agnostic — unlike the English-only ``_STT_HALLUCINATIONS`` set.
+_ECHO_WORD_OVERLAP_THRESHOLD = 0.6
+
+
+def _normalize_for_echo(text: str) -> str:
+    """Lowercase, drop punctuation, collapse whitespace — for echo comparison."""
+    out = []
+    for ch in text.lower():
+        out.append(ch if (ch.isalnum() or ch.isspace()) else " ")
+    return " ".join("".join(out).split())
+
+
+def _looks_like_echo(candidate: str, agent_text: str) -> bool:
+    """True when ``candidate`` looks like a fragment of ``agent_text`` — i.e. the
+    agent's own TTS bleeding into STT (forwarded during TTS without effective
+    AEC) rather than real caller speech. Substring match OR high word-overlap.
+    """
+    a = _normalize_for_echo(agent_text)
+    c = _normalize_for_echo(candidate)
+    if not a or not c:
+        return False
+    if c in a:  # candidate is verbatim a fragment of what the agent said
+        return True
+    words = c.split()
+    if not words:
+        return False
+    agent_words = set(a.split())
+    overlap = sum(1 for w in words if w in agent_words) / len(words)
+    return overlap >= _ECHO_WORD_OVERLAP_THRESHOLD
+
+
+def _is_near_duplicate(a: str, b: str) -> bool:
+    """True when two normalised finals are the same utterance double-emitted
+    (identical, or one a substring of the other) — used to drop Deepgram's
+    ``speech_final``+``is_final`` back-to-back pair WITHOUT swallowing a
+    genuinely different utterance that merely arrives quickly."""
+    if not a or not b:
+        return False
+    return a == b or a in b or b in a
+
 
 def _is_stt_hallucination(text: str) -> bool:
     """True when *text* is — or is composed entirely of — known STT
@@ -2383,6 +2427,17 @@ class PipelineStreamHandler(StreamHandler):
         # a no-op; cancelling avoids leaving an idle ``asyncio.sleep`` task
         # per turn on long, fast-turn calls.
         self._grace_task: asyncio.Task | None = None
+        # The agent's spoken text for the CURRENT turn, accumulated as tokens
+        # stream. Used by the echo guard to reject the agent's own TTS bleeding
+        # back into STT (when audio is forwarded during TTS without effective
+        # AEC) so it never barges in or becomes a phantom user turn. Reset at
+        # ``_begin_speaking``; only consulted while ``_forward_stt_while_speaking``.
+        self._current_agent_spoken_text = ""
+        # Whether the last completed turn was cut short by a confirmed barge-in
+        # — set by ``_process_streaming_response`` so the spoken prefix is
+        # appended to history with an ``[interrupted by caller]`` marker (keeps
+        # a stateful agent runtime's context grounded in what was actually heard).
+        self._last_response_interrupted = False
         # Per-turn LLM cancel event. Recreated on every new turn before LLM
         # consumption so a stale cancel from a previous turn cannot terminate
         # the next stream prematurely. Initialized here so the STT loop's
@@ -3253,6 +3308,11 @@ class PipelineStreamHandler(StreamHandler):
                         interrupted = True
                         break
                     full_response_parts.append(token)
+                    # Keep the echo-guard reference current as the agent speaks,
+                    # so a barge-in transcript arriving mid-turn can be compared
+                    # against what the agent has said SO FAR (echo lags the
+                    # tokens, so this is already ahead of the bleed).
+                    self._current_agent_spoken_text = "".join(full_response_parts)
                     # Fix 5: record LLM first-token (TTFT).
                     if llm_first_token_sent[0] and self.metrics is not None:
                         self.metrics.record_llm_first_token()
@@ -3402,6 +3462,14 @@ class PipelineStreamHandler(StreamHandler):
                 self.metrics.record_tts_complete(response_text)
                 turn = self.metrics.record_turn_complete(response_text)
                 await self._emit_turn_metrics(turn, call_id=call_id)
+        # Tell the caller (``_dispatch_turn``) whether this turn was cut short so
+        # the spoken prefix is recorded in history WITH a marker. A stateful
+        # agent runtime (Hermes/OpenClaw) then sees, on the next turn, that it
+        # was interrupted and what the caller actually heard — instead of an
+        # ungrounded full reply that pollutes its context.
+        self._last_response_interrupted = interrupted
+        if interrupted and response_text:
+            response_text = f"{response_text} [interrupted by caller]"
         return response_text
 
     async def _process_regular_response(self, response_text: str, call_id: str) -> None:
@@ -3473,6 +3541,21 @@ class PipelineStreamHandler(StreamHandler):
             # normal new turn. Closes the race where a transcript lands
             # before the VAD speech_start rescue fires.
             await self._end_tail_grace_for_new_turn()
+            return
+        # Echo guard: when audio is forwarded to STT during TTS (no effective
+        # AEC), the agent's own voice can be transcribed and would otherwise
+        # barge in on itself. Drop any transcript that looks like a fragment of
+        # what the agent is currently saying. Only active under
+        # ``_forward_stt_while_speaking`` (the only path that feeds TTS audio to
+        # STT), so the default VAD path is unaffected. Mirrors TS ``handleBargeIn``.
+        if getattr(self, "_forward_stt_while_speaking", False) and _looks_like_echo(
+            transcript.text, getattr(self, "_current_agent_spoken_text", "")
+        ):
+            logger.info(
+                "Barge-in suppressed: transcript matches agent's own speech "
+                "(echo) — %r",
+                sanitize_log_value(transcript.text[:40]),
+            )
             return
         if not self._can_barge_in():
             aec_state = "on" if getattr(self, "_aec", None) is not None else "off"
@@ -3638,8 +3721,10 @@ class PipelineStreamHandler(StreamHandler):
 
         Mirrors TS ``commitTranscript``. Returns ``True`` if the transcript
         should be committed to a turn, ``False`` if it must be dropped.
-        Drop reasons: common hallucinations, duplicate within 2 s, or any
-        final within 500 ms of the previous one.
+        Drop reasons: common hallucinations, the agent's own TTS echo (when
+        forwarding audio to STT during TTS), exact duplicate within 2 s, or a
+        near-duplicate within 500 ms (the same utterance double-emitted) — a
+        genuinely different fast follow-up is NOT dropped.
         """
         now = time.time()
         normalised = text.strip().lower()
@@ -3649,6 +3734,19 @@ class PipelineStreamHandler(StreamHandler):
         if stripped in _STT_HALLUCINATIONS or stripped == "":
             logger.debug("Dropped likely STT hallucination: %r", normalised[:40])
             return False
+        # Echo guard: while the agent is still speaking (the forward-STT echo
+        # window), a transcript that matches the agent's own speech is its TTS
+        # bleeding back into STT, not a user turn. Gated on
+        # ``_forward_stt_while_speaking`` + ``_is_speaking`` so a real post-turn
+        # reply (committed when the agent is idle) is never dropped, and the
+        # default VAD path — which withholds audio during TTS — is unaffected.
+        if (
+            getattr(self, "_forward_stt_while_speaking", False)
+            and getattr(self, "_is_speaking", False)
+            and _looks_like_echo(text, getattr(self, "_current_agent_spoken_text", ""))
+        ):
+            logger.debug("Dropped agent-echo transcript (not a user turn): %r", normalised[:40])
+            return False
         if since_last < 2.0 and normalised == self._last_commit_text:
             logger.debug(
                 "Dropped duplicate final transcript (%.1fs since last): %r",
@@ -3656,9 +3754,14 @@ class PipelineStreamHandler(StreamHandler):
                 normalised[:40],
             )
             return False
-        if since_last < 0.5:
+        # Back-to-back: drop a NEAR-DUPLICATE within 0.5 s (Deepgram emitting
+        # ``speech_final`` then ``is_final`` for the SAME utterance). A
+        # genuinely DIFFERENT utterance arriving this fast (e.g. the real reply
+        # right after a suppressed phantom) must NOT be swallowed — dropping it
+        # unconditionally left an empty ``[interrupted]`` turn before this fix.
+        if since_last < 0.5 and _is_near_duplicate(normalised, self._last_commit_text):
             logger.debug(
-                "Dropped back-to-back final transcript (%.2fs since last): %r",
+                "Dropped back-to-back near-duplicate final (%.2fs since last): %r",
                 since_last,
                 normalised[:40],
             )
@@ -4271,6 +4374,9 @@ class PipelineStreamHandler(StreamHandler):
         # turn so we never replay yesterday's audio to STT.
         self._inbound_audio_ring = []
         self._suppressed_speech_pending = False
+        # Fresh turn — reset the echo-guard reference so this turn's barge-in
+        # checks compare against THIS turn's spoken text, not the last turn's.
+        self._current_agent_spoken_text = ""
         # Reset the VAD detector so the next user utterance triggers a clean
         # SILENCE→SPEECH transition. Without this, PSTN echo from the
         # previous turn can keep the smoothed probability above the
@@ -4295,10 +4401,11 @@ class PipelineStreamHandler(StreamHandler):
     def _can_barge_in(self) -> bool:
         """Whether barge-in is allowed to fire right now.
 
-        Gate length depends on whether AEC is active: 1 s with AEC
-        (covers filter warmup), 0.25 s without (anti-flicker only —
-        keeps PSTN barge-in responsive, since on PSTN AEC is a no-op
-        and there is no warmup to protect).
+        Gate length depends on whether AEC is active:
+        ``MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN_AEC`` with AEC (covers filter
+        warmup), ``MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN_NO_AEC`` (0.5 s) without
+        — an anti-flicker margin that keeps PSTN barge-in responsive while
+        rejecting the first burst of echo/noise before real speech.
 
         ``getattr`` is used so test fixtures that flip ``_is_speaking``
         directly (without going through ``_begin_speaking``) still
