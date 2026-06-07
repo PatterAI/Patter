@@ -347,6 +347,12 @@ export function isSttHallucination(text: string): boolean {
  * ``_ECHO_WORD_OVERLAP_THRESHOLD``. */
 const ECHO_WORD_OVERLAP_THRESHOLD = 0.6;
 
+/** Minimum word count before a candidate can be classified as echo — short
+ * caller replies that repeat the agent's offered words ("lunedì", "yes",
+ * "Monday at two") are legitimate answers, never echo. Mirrors Python
+ * ``_ECHO_MIN_CANDIDATE_WORDS``. */
+const ECHO_MIN_CANDIDATE_WORDS = 4;
+
 /** Lowercase, drop punctuation, collapse whitespace — for echo comparison. */
 export function normalizeForEcho(text: string): string {
   return text
@@ -365,9 +371,11 @@ export function looksLikeEcho(candidate: string, agentText: string): boolean {
   const a = normalizeForEcho(agentText);
   const c = normalizeForEcho(candidate);
   if (!a || !c) return false;
-  if (a.includes(c)) return true;
   const words = c.split(' ').filter(Boolean);
-  if (words.length === 0) return false;
+  // Never classify a short reply as echo — exempts single-word / few-word
+  // caller answers that legitimately repeat the agent's offered words.
+  if (words.length < ECHO_MIN_CANDIDATE_WORDS) return false;
+  if (a.includes(c)) return true;
   const agentWords = new Set(a.split(' '));
   const overlap = words.filter((w) => agentWords.has(w)).length / words.length;
   return overlap >= ECHO_WORD_OVERLAP_THRESHOLD;
@@ -378,7 +386,11 @@ export function looksLikeEcho(candidate: string, agentText: string): boolean {
  * ``_is_near_duplicate``. */
 export function isNearDuplicate(a: string, b: string): boolean {
   if (!a || !b) return false;
-  return a === b || a.includes(b) || b.includes(a);
+  if (a === b) return true;
+  const [shorter, longer] = a.length <= b.length ? [a, b] : [b, a];
+  // Word-boundary aware: a character infix ("no" in "nothing else") is NOT a
+  // duplicate; only a true word-prefix double-emit (speech_final+is_final) is.
+  return longer.startsWith(shorter + ' ');
 }
 
 // ---------------------------------------------------------------------------
@@ -2704,12 +2716,16 @@ export class StreamHandler {
           return;
         }
       } else if (this.llmLoop) {
-        responseText = await this.runPipelineLlm(
+        const llmResult = await this.runPipelineLlm(
           filteredTranscript,
           hookExecutor,
           hookCtx,
           historySnapshot,
         );
+        responseText = llmResult.text;
+        // OR in whether the LLM stream itself was cut short, in addition to a
+        // barge-in already seen by handleBargeIn at the top of this turn.
+        interrupted = interrupted || llmResult.interrupted;
       } else {
         getLogger().warn(
           `Pipeline (${label}) has no llm/onMessage handler — transcript ` +
@@ -2722,8 +2738,14 @@ export class StreamHandler {
       if (!responseText) return;
 
       if (this.llmLoop) {
-        await this.emitAssistantTranscript(responseText);
-        this.metricsAcc.recordTtsComplete(responseText);
+        // Marker goes to the history/transcript ONLY (so a stateful agent
+        // runtime sees it was interrupted); metrics use the PLAIN text and are
+        // gated on !interrupted — mirrors Python.
+        const spokenText = interrupted
+          ? `${responseText} [interrupted by caller]`
+          : responseText;
+        await this.emitAssistantTranscript(spokenText);
+        if (!interrupted) this.metricsAcc.recordTtsComplete(responseText);
       } else {
         interrupted = (await this.runRegularLlm(responseText, hookExecutor, hookCtx)) || interrupted;
         // ``runRegularLlm`` returns the possibly-replaced text via side effect on
@@ -3048,14 +3070,16 @@ export class StreamHandler {
 
   /**
    * Streaming built-in LLM path with sentence chunking and per-sentence
-   * guardrails/TTS. Returns the concatenated response text.
+   * guardrails/TTS. Returns the concatenated (plain) response text plus whether
+   * the turn was cut short by a barge-in — the caller applies the interrupted
+   * marker to history only, keeping metrics on the plain text.
    */
   private async runPipelineLlm(
     filteredTranscript: string,
     hookExecutor: PipelineHookExecutor,
     hookCtx: HookContext,
     historySnapshot: Array<{ role: string; text: string }>,
-  ): Promise<string> {
+  ): Promise<{ text: string; interrupted: boolean }> {
     const label = this.deps.bridge.label;
     const callCtx = { call_id: this.callId, caller: this.caller, callee: this.callee };
     const chunker = new SentenceChunker({
@@ -3205,16 +3229,13 @@ export class StreamHandler {
         // Swallow — span teardown should never crash the call path.
       }
     }
-    const responseText = allParts.join('');
-    // Tag the spoken prefix with an ``[interrupted by caller]`` marker when the
-    // turn was cut short, so a stateful agent runtime (Hermes/OpenClaw) sees,
-    // next turn, that it was interrupted and what the caller actually heard —
-    // not an ungrounded full reply that pollutes its context. Parity with
-    // Python ``_process_streaming_response``.
-    if (llmSignal.aborted && responseText) {
-      return `${responseText} [interrupted by caller]`;
-    }
-    return responseText;
+    // Return the PLAIN text plus whether the turn was cut short. The caller
+    // (dispatchTurn) records metrics on the plain text and applies the
+    // ``[interrupted by caller]`` marker only to the history/transcript, so
+    // metrics (TTS cost, turn-complete) are never polluted by the marker.
+    // Parity with Python, where metrics are recorded on the unmarked text
+    // inside ``_process_streaming_response`` before the marker is appended.
+    return { text: allParts.join(''), interrupted: llmSignal.aborted };
   }
 
   /**

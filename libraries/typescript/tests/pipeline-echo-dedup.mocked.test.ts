@@ -62,11 +62,21 @@ describe('[mocked] echo + dedup helpers', () => {
   it('normalizeForEcho strips punctuation and case', () => {
     expect(normalizeForEcho('Ciao, come VA?!')).toBe('ciao come va');
   });
-  it('looksLikeEcho: substring fragment is echo', () => {
-    expect(looksLikeEcho('una storia molto', 'Certo, ti racconto una storia molto lunga')).toBe(true);
+  it('looksLikeEcho: long substring fragment is echo', () => {
+    expect(
+      looksLikeEcho('ti racconto una storia molto', 'Certo, ti racconto una storia molto lunga'),
+    ).toBe(true);
   });
-  it('looksLikeEcho: high word overlap is echo', () => {
-    expect(looksLikeEcho("che tu l'hai", "che tu lo voglia o no, te l'ho già detto")).toBe(true);
+  it('looksLikeEcho: long high-word-overlap fragment is echo', () => {
+    expect(
+      looksLikeEcho('che tu lo voglia detto', "che tu lo voglia o no, te l'ho già detto"),
+    ).toBe(true);
+  });
+  it('looksLikeEcho: short answer repeating the agent is NOT echo', () => {
+    const agent = "preferisci lunedì o martedì per l'appuntamento";
+    expect(looksLikeEcho('lunedì', agent)).toBe(false);
+    expect(looksLikeEcho('monday at two', agent)).toBe(false);
+    expect(looksLikeEcho('sì va bene', agent)).toBe(false);
   });
   it('looksLikeEcho: unrelated user speech is not echo', () => {
     expect(looksLikeEcho('fermati dimmi solo interrotto', 'Sto bene grazie sono pronto ad aiutarti')).toBe(false);
@@ -88,21 +98,28 @@ describe('[mocked] commitTranscript echo + dedup', () => {
     h.forwardSttWhileSpeaking = true;
     h.isSpeaking = true;
     h.currentAgentSpokenText = 'ti racconto una storia lunga sul mare';
-    expect(h.commitTranscript('una storia lunga')).toBe(false);
+    expect(h.commitTranscript('ti racconto una storia lunga')).toBe(false);
   });
   it('does NOT drop echo when the flag is off (default)', () => {
     const h = makeHandler();
     h.forwardSttWhileSpeaking = false;
     h.isSpeaking = true;
     h.currentAgentSpokenText = 'ti racconto una storia lunga sul mare';
-    expect(h.commitTranscript('una storia lunga')).toBe(true);
+    expect(h.commitTranscript('ti racconto una storia lunga')).toBe(true);
   });
   it('does NOT drop when idle (post-turn user reply)', () => {
     const h = makeHandler();
     h.forwardSttWhileSpeaking = true;
     h.isSpeaking = false;
     h.currentAgentSpokenText = 'ti racconto una storia lunga sul mare';
-    expect(h.commitTranscript('una storia lunga')).toBe(true);
+    expect(h.commitTranscript('ti racconto una storia lunga')).toBe(true);
+  });
+  it('does NOT drop a short answer repeating the agent (false-positive guard)', () => {
+    const h = makeHandler();
+    h.forwardSttWhileSpeaking = true;
+    h.isSpeaking = true;
+    h.currentAgentSpokenText = "preferisci lunedì o martedì per l'appuntamento";
+    expect(h.commitTranscript('lunedì')).toBe(true);
   });
   it('keeps a different follow-up within 500ms (empty-[interrupted]-turn fix)', () => {
     const h = makeHandler();

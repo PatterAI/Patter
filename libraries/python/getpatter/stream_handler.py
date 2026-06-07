@@ -137,6 +137,12 @@ _SENTENCE_ENDERS = ".!?…。！？"
 # share a couple of words while catching garbled echo fragments. Language-
 # agnostic — unlike the English-only ``_STT_HALLUCINATIONS`` set.
 _ECHO_WORD_OVERLAP_THRESHOLD = 0.6
+# Minimum word count before a candidate can be classified as echo. Real TTS
+# bleed is a long, near-complete fragment of the agent's speech; a 1-3 word
+# caller reply that happens to repeat the agent's offered words ("lunedì",
+# "yes", "Monday at two") is a legitimate answer and must NEVER be dropped.
+# Short echo blips on a no-AEC link are left to AEC / barge_in_strategies.
+_ECHO_MIN_CANDIDATE_WORDS = 4
 
 
 def _normalize_for_echo(text: str) -> str:
@@ -156,11 +162,13 @@ def _looks_like_echo(candidate: str, agent_text: str) -> bool:
     c = _normalize_for_echo(candidate)
     if not a or not c:
         return False
-    if c in a:  # candidate is verbatim a fragment of what the agent said
-        return True
     words = c.split()
-    if not words:
+    # Never classify a short reply as echo — exempts single-word / few-word
+    # caller answers that legitimately repeat the agent's offered words.
+    if len(words) < _ECHO_MIN_CANDIDATE_WORDS:
         return False
+    if c in a:  # candidate is verbatim a long fragment of what the agent said
+        return True
     agent_words = set(a.split())
     overlap = sum(1 for w in words if w in agent_words) / len(words)
     return overlap >= _ECHO_WORD_OVERLAP_THRESHOLD
@@ -168,12 +176,17 @@ def _looks_like_echo(candidate: str, agent_text: str) -> bool:
 
 def _is_near_duplicate(a: str, b: str) -> bool:
     """True when two normalised finals are the same utterance double-emitted
-    (identical, or one a substring of the other) — used to drop Deepgram's
-    ``speech_final``+``is_final`` back-to-back pair WITHOUT swallowing a
-    genuinely different utterance that merely arrives quickly."""
+    (identical, or one a WORD-PREFIX of the other — Deepgram's
+    ``speech_final``+``is_final`` pair) — used to drop the back-to-back pair
+    WITHOUT swallowing a genuinely different utterance that merely arrives
+    quickly. Word-boundary aware so a character infix ("no" in "nothing
+    else") is NOT treated as a duplicate."""
     if not a or not b:
         return False
-    return a == b or a in b or b in a
+    if a == b:
+        return True
+    shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
+    return longer.startswith(shorter + " ")
 
 
 def _is_stt_hallucination(text: str) -> bool:

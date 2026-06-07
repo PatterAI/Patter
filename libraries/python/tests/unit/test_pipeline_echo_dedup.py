@@ -59,13 +59,22 @@ class TestEchoHelpers:
         assert _normalize_for_echo("Ciao, come VA?!") == "ciao come va"
 
     def test_substring_fragment_is_echo(self) -> None:
-        agent = "Certo, ti racconto una storia molto lunga sul mare"
-        assert _looks_like_echo("una storia molto", agent) is True
+        agent = "Certo, ti racconto una storia molto lunga sul mare aperto"
+        # A long (>=4 word) verbatim fragment of the agent's speech is echo.
+        assert _looks_like_echo("ti racconto una storia molto", agent) is True
 
     def test_high_word_overlap_is_echo(self) -> None:
-        agent = "che tu lo voglia o no, te l'ho già detto"
-        # garbled echo fragment whose words are mostly in the agent text
-        assert _looks_like_echo("che tu l'hai", agent) is True
+        agent = "che tu lo voglia o no, te l'ho già detto chiaramente"
+        # garbled >=4-word echo fragment whose words are mostly in the agent text
+        assert _looks_like_echo("che tu lo voglia detto", agent) is True
+
+    def test_short_answer_repeating_agent_is_not_echo(self) -> None:
+        # The key false-positive guard: a 1-3 word caller answer that picks one
+        # of the agent's offered words must NEVER be classified as echo.
+        agent = "preferisci lunedì o martedì per l'appuntamento"
+        assert _looks_like_echo("lunedì", agent) is False
+        assert _looks_like_echo("monday at two", agent) is False
+        assert _looks_like_echo("sì va bene", agent) is False
 
     def test_unrelated_user_speech_is_not_echo(self) -> None:
         agent = "Sto bene grazie, sono pronto ad aiutarti col tuo problema"
@@ -94,7 +103,7 @@ class TestCommitTranscriptEchoAndDedup:
         h._forward_stt_while_speaking = True
         h._is_speaking = True
         h._current_agent_spoken_text = "ti racconto una storia lunga sul mare"
-        assert h._commit_transcript("una storia lunga") is False
+        assert h._commit_transcript("ti racconto una storia lunga") is False
 
     def test_echo_not_dropped_when_flag_off(self) -> None:
         h = _make_handler()
@@ -103,14 +112,14 @@ class TestCommitTranscriptEchoAndDedup:
         h._current_agent_spoken_text = "ti racconto una storia lunga sul mare"
         # Flag off → echo guard inert → normal commit (real user could legitimately
         # echo words; we only filter under the forward-STT echo-prone config).
-        assert h._commit_transcript("una storia lunga") is True
+        assert h._commit_transcript("ti racconto una storia lunga") is True
 
     def test_echo_not_dropped_when_idle(self) -> None:
         h = _make_handler()
         h._forward_stt_while_speaking = True
         h._is_speaking = False  # post-turn user reply, not an echo window
         h._current_agent_spoken_text = "ti racconto una storia lunga sul mare"
-        assert h._commit_transcript("una storia lunga") is True
+        assert h._commit_transcript("ti racconto una storia lunga") is True
 
     def test_different_followup_within_500ms_not_dropped(self) -> None:
         h = _make_handler()
@@ -145,7 +154,9 @@ class TestHandleBargeInEchoGuard:
         h._can_barge_in = lambda: True  # type: ignore[assignment]
         h._current_agent_spoken_text = "ti racconto una storia lunga sul mare aperto"
 
-        await h._handle_barge_in(Transcript(text="una storia lunga", is_final=True, confidence=0.9))
+        await h._handle_barge_in(
+            Transcript(text="ti racconto una storia lunga", is_final=True, confidence=0.9)
+        )
 
         # No cancel: the agent's own echo must not interrupt it.
         h.audio_sender.send_clear.assert_not_awaited()
