@@ -208,3 +208,106 @@ class TestForwardSttWhileSpeakingFlag:
         # leading edge for flush-on-barge-in.
         assert handler._stt.send_audio.await_count == 2
         assert len(handler._inbound_audio_ring) == 2
+
+
+class _PassthroughAEC:
+    """Minimal AEC stand-in: marks the link as AEC-protected without altering audio."""
+
+    def process_near_end(self, pcm: bytes) -> bytes:
+        return pcm
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestForwardSttDeferredBargeIn:
+    """On a forward-STT link WITHOUT AEC, a VAD ``speech_start`` during TTS is
+    very often the agent's own echo. Cancelling on raw VAD energy self-interrupts
+    almost every turn (live Hermes "bene bene" → [interrupted] cascade). The fix
+    defers the cancel to a transcript that survives the echo guard.
+    """
+
+    def _speaking_handler(self, *, forward: bool, aec) -> PipelineStreamHandler:
+        handler = _make_handler()
+        handler._forward_stt_while_speaking = forward
+        handler._aec = aec
+        handler._barge_in_strategies = ()
+        handler._auto_vad = _ScriptedVAD([VADEvent(type="speech_start")])
+        handler._stt = AsyncMock()
+        handler._is_speaking = True
+        handler._tail_grace_active = False
+        handler._speaking_generation = 1
+        handler._speaking_started_at = time.time() - 2.0
+        handler._first_audio_sent_at = time.time() - 2.0
+        handler._inbound_audio_ring = []
+        handler._can_barge_in = lambda: True  # type: ignore[assignment]
+        return handler
+
+    async def test_no_aec_no_strategies_defers_to_pending(self) -> None:
+        """forward-STT + no AEC + no strategies → VAD speech_start goes PENDING,
+        does NOT cancel: the agent keeps talking until a real transcript confirms."""
+        handler = self._speaking_handler(forward=True, aec=None)
+
+        await handler.on_audio_received(_FRAME)
+
+        # Deferred: no cancel, agent still owns the floor, LLM stream untouched.
+        assert handler._is_speaking is True
+        assert handler._barge_in_pending_since is not None
+        handler.audio_sender.send_clear.assert_not_called()
+        assert handler._llm_cancel_event.is_set() is False
+        # Clean up the pending-timeout task so it doesn't outlive the test.
+        handler._clear_pending_barge_in()
+
+    async def test_with_aec_still_immediate_cancel(self) -> None:
+        """forward-STT + AEC ON → the canceller makes VAD trustworthy, so the
+        legacy immediate cancel is preserved (responsive barge-in)."""
+        handler = self._speaking_handler(forward=True, aec=_PassthroughAEC())
+
+        await handler.on_audio_received(_FRAME)
+
+        assert handler._is_speaking is False
+        assert handler._barge_in_pending_since is None
+        handler.audio_sender.send_clear.assert_awaited()
+        assert handler._llm_cancel_event.is_set() is True
+
+    async def test_pending_then_real_transcript_cancels(self) -> None:
+        """After a deferred (pending) VAD barge-in, a real (non-echo) transcript
+        confirms the cancel via the echo-guarded transcript path."""
+        handler = self._speaking_handler(forward=True, aec=None)
+        handler._current_agent_spoken_text = "sto bene grazie e tu come stai oggi"
+
+        await handler.on_audio_received(_FRAME)
+        assert handler._barge_in_pending_since is not None  # pending
+
+        # A genuinely different caller utterance (not the agent's own words).
+        await handler._handle_barge_in(
+            Transcript(
+                text="fermati e dimmi solo questo", is_final=True, confidence=0.9
+            )
+        )
+
+        assert handler._is_speaking is False
+        assert handler._barge_in_pending_since is None  # pending cleared on confirm
+        handler.audio_sender.send_clear.assert_awaited()
+        assert handler._llm_cancel_event.is_set() is True
+
+    async def test_pending_then_echo_transcript_does_not_cancel(self) -> None:
+        """An echo transcript (the agent's own forwarded TTS) must NOT confirm
+        the pending barge-in — the agent keeps talking."""
+        handler = self._speaking_handler(forward=True, aec=None)
+        handler._current_agent_spoken_text = "sto bene grazie e tu come stai oggi"
+
+        await handler.on_audio_received(_FRAME)
+        assert handler._barge_in_pending_since is not None  # pending
+
+        # Transcript is a fragment of what the agent is currently saying.
+        await handler._handle_barge_in(
+            Transcript(
+                text="sto bene grazie e tu come stai", is_final=True, confidence=0.9
+            )
+        )
+
+        # Echo guard dropped it — no cancel, still pending, agent still speaking.
+        assert handler._is_speaking is True
+        handler.audio_sender.send_clear.assert_not_called()
+        assert handler._llm_cancel_event.is_set() is False
+        handler._clear_pending_barge_in()

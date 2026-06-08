@@ -1615,7 +1615,21 @@ export class StreamHandler {
               // agent finishes naturally without a barge-in.
               this.suppressedSpeechPending = true;
             } else if (this.isSpeaking) {
-              if (this.bargeInStrategies.length > 0) {
+              // Defer the cancel to transcript confirmation — instead of
+              // firing on raw VAD energy — when EITHER opt-in
+              // ``bargeInStrategies`` are configured OR we forward STT during
+              // TTS WITHOUT AEC. On a no-AEC link a VAD ``speech_start`` here
+              // is very often the agent's OWN echo, and cancelling on it
+              // self-interrupts almost every turn (the "bene bene" →
+              // [interrupted] cascade). Deferring lets ``handleBargeIn`` run
+              // the echo guard on the resulting transcript and cancel only on
+              // real caller speech; the pending state times out after
+              // ``bargeInConfirmS`` so the agent resumes if nothing confirms.
+              // Parity with Python on_audio_received ``defer_cancel``.
+              const deferCancel =
+                this.bargeInStrategies.length > 0 ||
+                (this.forwardSttWhileSpeaking && !this.aec);
+              if (deferCancel) {
                 this.startPendingBargeIn();
                 this.metricsAcc.anchorUserSpeechStart();
                 return;

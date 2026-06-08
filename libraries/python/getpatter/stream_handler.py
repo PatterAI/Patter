@@ -3250,9 +3250,7 @@ class PipelineStreamHandler(StreamHandler):
 
         return asyncio.create_task(_filler())
 
-    async def _cancel_long_turn_filler(
-        self, task: "asyncio.Task | None"
-    ) -> None:
+    async def _cancel_long_turn_filler(self, task: "asyncio.Task | None") -> None:
         """Cancel the long-turn filler task and await its teardown.
 
         Idempotent and race-safe: a ``None`` / already-finished task is a no-op,
@@ -3269,7 +3267,9 @@ class PipelineStreamHandler(StreamHandler):
         except asyncio.CancelledError:
             pass
         except Exception:  # pragma: no cover - defensive
-            logger.debug("long_turn_message filler task ended with error", exc_info=True)
+            logger.debug(
+                "long_turn_message filler task ended with error", exc_info=True
+            )
         return None
 
     async def _process_streaming_response(self, result, call_id: str) -> str:
@@ -3438,9 +3438,7 @@ class PipelineStreamHandler(StreamHandler):
                         sentence = transformed
 
                     # Real flushed audio about to play — cancel the filler.
-                    long_turn_task = await self._cancel_long_turn_filler(
-                        long_turn_task
-                    )
+                    long_turn_task = await self._cancel_long_turn_filler(long_turn_task)
                     if not await self._synthesize_sentence(
                         sentence, hook_executor, hook_ctx, first_tts_chunk
                     ):
@@ -3758,7 +3756,9 @@ class PipelineStreamHandler(StreamHandler):
             and getattr(self, "_is_speaking", False)
             and _looks_like_echo(text, getattr(self, "_current_agent_spoken_text", ""))
         ):
-            logger.debug("Dropped agent-echo transcript (not a user turn): %r", normalised[:40])
+            logger.debug(
+                "Dropped agent-echo transcript (not a user turn): %r", normalised[:40]
+            )
             return False
         if since_last < 2.0 and normalised == self._last_commit_text:
             logger.debug(
@@ -4158,9 +4158,7 @@ class PipelineStreamHandler(StreamHandler):
                     # silence bug). After this ``_is_speaking`` is False, so
                     # the if/elif below is a no-op and the frame falls through
                     # to STT. Parity with TS ``endTailGraceForNewTurn``.
-                    if self._is_speaking and getattr(
-                        self, "_tail_grace_active", False
-                    ):
+                    if self._is_speaking and getattr(self, "_tail_grace_active", False):
                         await self._end_tail_grace_for_new_turn()
                     phantom_suppressed = self._is_speaking and not self._can_barge_in()
                     if phantom_suppressed:
@@ -4192,13 +4190,31 @@ class PipelineStreamHandler(StreamHandler):
                         # STT so the user's words are not silently lost.
                         self._suppressed_speech_pending = True
                     elif self._is_speaking:
-                        # Caller spoke over in-flight TTS. With opt-in
-                        # confirmation strategies the cancel is deferred
-                        # until at least one strategy approves the user's
-                        # transcript; otherwise we keep the legacy
-                        # "cancel immediately" path so existing users
-                        # see no behaviour change.
-                        if self._barge_in_strategies:
+                        # Caller spoke over in-flight TTS. The cancel is
+                        # DEFERRED to transcript confirmation — instead of
+                        # firing on raw VAD energy — when EITHER:
+                        #   (a) opt-in ``barge_in_strategies`` are configured
+                        #       (a strategy must approve the transcript), OR
+                        #   (b) we forward STT during TTS WITHOUT AEC. On a
+                        #       no-AEC link a VAD ``speech_start`` here is very
+                        #       often the agent's OWN TTS echo, not the caller;
+                        #       cancelling on it self-interrupts almost every
+                        #       turn (the "bene bene" → [interrupted] cascade
+                        #       seen on live Hermes/OpenClaw calls). Deferring
+                        #       lets ``_handle_barge_in`` run the echo guard on
+                        #       the resulting transcript and cancel only on real
+                        #       caller speech; if no transcript confirms within
+                        #       ``_barge_in_confirm_s`` the pending state times
+                        #       out and the agent resumes its sentence.
+                        # Otherwise (default VAD path, or forward-STT WITH AEC
+                        # where the canceller makes VAD trustworthy) the legacy
+                        # immediate cancel runs — existing users see no change.
+                        # Parity with TS speech_start ``deferCancel``.
+                        defer_cancel = bool(self._barge_in_strategies) or (
+                            getattr(self, "_forward_stt_while_speaking", False)
+                            and getattr(self, "_aec", None) is None
+                        )
+                        if defer_cancel:
                             await self._start_pending_barge_in()
                         else:
                             if self.metrics is not None:
@@ -4233,9 +4249,7 @@ class PipelineStreamHandler(StreamHandler):
                                 # ``OpenAICompatibleLLMProvider.stream``) closes
                                 # the request the instant this fires. Parity
                                 # with TS ``cancelSpeaking`` → ``llmAbort.abort``.
-                                cancel_event = getattr(
-                                    self, "_llm_cancel_event", None
-                                )
+                                cancel_event = getattr(self, "_llm_cancel_event", None)
                                 if cancel_event is not None:
                                     cancel_event.set()
                     if not phantom_suppressed and self.metrics is not None:
