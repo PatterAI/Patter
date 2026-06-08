@@ -30,19 +30,25 @@ from getpatter.telemetry.env import is_ci, is_test
 from getpatter.telemetry.install_id import install_id, run_id
 from getpatter.telemetry.stack import STACK_VENDORS
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # --- Event names (the only values the ``event`` field may take) -------------
 EVENT_SDK_INITIALIZED = "sdk_initialized"
+EVENT_FIRST_RUN = "first_run"
+EVENT_CLI_COMMAND = "cli_command"
 EVENT_FEATURE_USED = "feature_used"
 EVENT_AGENT_CONFIGURED = "agent_configured"
+EVENT_CALL_STARTED = "call_started"
 EVENT_CALL_COMPLETED = "call_completed"
 
 _ALLOWED_EVENTS = frozenset(
     {
         EVENT_SDK_INITIALIZED,
+        EVENT_FIRST_RUN,
+        EVENT_CLI_COMMAND,
         EVENT_FEATURE_USED,
         EVENT_AGENT_CONFIGURED,
+        EVENT_CALL_STARTED,
         EVENT_CALL_COMPLETED,
     }
 )
@@ -72,6 +78,10 @@ DIMENSION_VALUES: dict[str, frozenset[str]] = {
     "integration": frozenset({"openclaw", "mcp", "hermes", "other", "none"}),
     "integration_kind": frozenset({"consult", "mcp", "none"}),
     "mcp_server_count_bucket": frozenset({"0", "1", "2_3", "4_plus"}),
+    # call_started / call_completed: inbound vs outbound — a core usage split.
+    "direction": frozenset({"inbound", "outbound", "none"}),
+    # cli_command: which CLI subcommand was invoked (never args/flags values).
+    "cli_command": frozenset({"dashboard", "eval", "telemetry", "none", "other"}),
     # call_completed: the call's terminal outcome
     "outcome": frozenset({"completed", "error", "no_answer", "busy", "failed"}),
     # call_completed: the terminal error code (mirrors exceptions.ErrorCode, plus

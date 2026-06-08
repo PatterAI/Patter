@@ -25,7 +25,10 @@ from getpatter.telemetry.consent import is_enabled
 from getpatter.telemetry.events import (
     EVENT_AGENT_CONFIGURED,
     EVENT_CALL_COMPLETED,
+    EVENT_CALL_STARTED,
+    EVENT_CLI_COMMAND,
     EVENT_FEATURE_USED,
+    EVENT_FIRST_RUN,
     EVENT_SDK_INITIALIZED,
     SCHEMA_VERSION,
     build_event,
@@ -38,7 +41,10 @@ __all__ = [
     "build_event",
     "SCHEMA_VERSION",
     "EVENT_SDK_INITIALIZED",
+    "EVENT_FIRST_RUN",
+    "EVENT_CLI_COMMAND",
     "EVENT_FEATURE_USED",
     "EVENT_AGENT_CONFIGURED",
+    "EVENT_CALL_STARTED",
     "EVENT_CALL_COMPLETED",
 ]

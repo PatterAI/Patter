@@ -105,3 +105,66 @@ export function daysSinceInstallBucket(): string {
   if (days <= 30) return '8_30';
   return '30_plus';
 }
+
+function firstRunPath(): string {
+  return path.join(path.dirname(statePath()), 'first-run');
+}
+
+/**
+ * Return `true` exactly once per install — on the run that first marks it.
+ * Powers the `first_run` activation event. Idempotent: the first call writes a
+ * marker and returns `true`; later calls return `false`. Best-effort — an
+ * unwritable filesystem returns `false` (never emit `first_run` repeatedly).
+ * MUST only be called on the telemetry-enabled path (opting out never touches the
+ * filesystem). Mirrors `is_first_run` in `install_id.py`.
+ */
+export function isFirstRun(): boolean {
+  const p = firstRunPath();
+  try {
+    if (fs.existsSync(p)) return false;
+  } catch {
+    return false;
+  }
+  try {
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, '1', 'utf8');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function optOutPath(): string {
+  return path.join(path.dirname(statePath()), 'telemetry-disabled');
+}
+
+/**
+ * Whether a persisted opt-out marker exists (`getpatter telemetry disable`).
+ * Read-only — checking consent never writes. Mirrors `is_opted_out` in Python.
+ */
+export function isOptedOut(): boolean {
+  try {
+    return fs.existsSync(optOutPath());
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Create or remove the persisted opt-out marker. Used by the
+ * `getpatter telemetry disable/enable` CLI. Lets filesystem errors propagate so
+ * the CLI can report a failure. Mirrors `set_opt_out` in Python.
+ */
+export function setOptOut(disabled: boolean): void {
+  const p = optOutPath();
+  if (disabled) {
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, '1', 'utf8');
+  } else {
+    try {
+      fs.unlinkSync(p);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+  }
+}

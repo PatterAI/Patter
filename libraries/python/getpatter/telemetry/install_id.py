@@ -108,3 +108,61 @@ def days_since_install_bucket() -> str:
     if days <= 30:
         return "8_30"
     return "30_plus"
+
+
+def is_first_run() -> bool:
+    """Return ``True`` exactly once per install — on the run that first marks it.
+
+    Powers the ``first_run`` activation event. Idempotent: the first call (when no
+    marker exists) writes a marker and returns ``True``; every later call returns
+    ``False``. Best-effort and never raises — an unwritable filesystem returns
+    ``False`` (we simply never emit ``first_run`` rather than emitting it on every
+    run). MUST only be called on the telemetry-enabled path (opting out never
+    touches the filesystem). Mirrors ``isFirstRun`` in ``install-id.ts``.
+    """
+    path = _state_path().parent / "first-run"
+    try:
+        if path.exists():
+            return False
+    except OSError:
+        return False
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("1", encoding="utf-8")
+        return True
+    except OSError:
+        return False
+
+
+def _opt_out_path() -> Path:
+    return _state_path().parent / "telemetry-disabled"
+
+
+def is_opted_out() -> bool:
+    """Whether a persisted opt-out marker exists (``getpatter telemetry disable``).
+
+    Read-only — never writes, so checking consent never touches the filesystem.
+    Mirrors ``isOptedOut`` in ``install-id.ts``.
+    """
+    try:
+        return _opt_out_path().exists()
+    except OSError:
+        return False
+
+
+def set_opt_out(disabled: bool) -> None:
+    """Create or remove the persisted opt-out marker.
+
+    Used by the ``getpatter telemetry disable/enable`` CLI. Unlike the rest of this
+    module it lets filesystem errors propagate so the CLI can report a failure to
+    the user. Mirrors ``setOptOut`` in ``install-id.ts``.
+    """
+    path = _opt_out_path()
+    if disabled:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("1", encoding="utf-8")
+    else:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass

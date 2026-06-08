@@ -37,9 +37,12 @@ value is replaced with `other` before sending):
 | Event | Dimensions |
 | --- | --- |
 | `sdk_initialized` | `carrier` (twilio/telnyx/plivo/none), `tunnel` (static/configured/none), and anonymous deploy-shape (presence-only env/file probes — **never the value of an env var**): `invoked_by_agent` (claude/cursor/copilot/…/none), `container` (bool), `serverless` (lambda/cloud_run/vercel/azure_functions/none), `cloud` (aws/gcp/azure/fly/none), `package_manager`, `days_since_install_bucket`, and `previous_sdk_version` (for the upgrade funnel) |
+| `first_run` | Sent **once per install** (the run that creates the local state), to mark activation. Carries the same anonymous deploy-shape dimensions as `sdk_initialized`. Never sent if you have opted out (opting out never touches the filesystem) |
+| `cli_command` | `cli_command` — which `getpatter` CLI command was invoked (`dashboard` / `eval` / `telemetry` / `other`). **Only the command name** — never arguments or flag values. The `getpatter telemetry` control command never emits telemetry itself |
 | `feature_used` | `engine` (realtime/convai/pipeline), `provider` (vendor family), and for **pipeline** the composed stack: `stt_provider` / `tts_provider` / `llm_provider` (vendor) plus `stt_model` / `tts_model` / `llm_model` (e.g. `deepgram-nova-3`, `anthropic-claude-opus-4-8`). A fine-tuned, self-hosted, or custom model collapses to `{vendor}-other` — a custom model name is **never** sent |
 | `agent_configured` | `builtin_tool_count` (0–3), `custom_tool_count_bucket` (a range like `2_3` — **never the tool names**), `integration` (openclaw/mcp/hermes/other/none), `integration_kind` (consult/mcp/none), `mcp_server_count_bucket`, and feature-adoption flags: `noise_reduction` (near_field/far_field/none), `turn_detection` (default/custom/none), `preambles_used` (bool), `per_tool_timeouts_set` (bool), `llm_fallback_configured` (bool) |
-| `call_completed` | `outcome` (completed / error / no_answer / busy / failed), `error_code` (a closed code like `rate_limit` / `timeout` / `connection` — **never the error message**), `engine`, `provider`, `carrier`, `latency_ms` (whole milliseconds), `duration_seconds` (whole seconds), `cost_usd` (total call cost in USD), `turn_count_bucket` — sent once per call. **No call content, no per-call identifier.** |
+| `call_started` | Sent when a call connects (media stream begins), to pair with `call_completed` for a connect→complete funnel: `engine`, `provider`, `carrier`, and `direction` (inbound/outbound). No metrics exist yet at connect, so no latency/cost/duration |
+| `call_completed` | `outcome` (completed / error / no_answer / busy / failed), `direction` (inbound/outbound), `error_code` (a closed code like `rate_limit` / `timeout` / `connection` — **never the error message**), `engine`, `provider`, `carrier`, `latency_ms` (whole milliseconds), `duration_seconds` (whole seconds), `cost_usd` (total call cost in USD), `turn_count_bucket` — sent once per call. **No call content, no per-call identifier.** |
 
 The `run_id` is a fresh random value on every process start (it groups one run's
 events). The `install_id` is a random UUID generated **once** and stored in a small
@@ -63,6 +66,15 @@ phone = Patter(carrier=Twilio(...), phone_number="+15551234567", telemetry=False
 ```ts TypeScript
 // In code:
 const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15551234567", telemetry: false });
+```
+
+Or from the command line — a persisted, machine-level opt-out (parity with
+`next telemetry disable`):
+
+```bash
+getpatter telemetry disable   # persisted opt-out — no usage data is ever sent
+getpatter telemetry enable    # re-enable (opt-out model, on by default)
+getpatter telemetry status    # show the current state, endpoint, and how to audit
 ```
 
 Or via environment variables (these also work without touching code):
@@ -99,6 +111,7 @@ When more than one signal is present, the first match wins:
 
 1. `DO_NOT_TRACK` set → **off**
 2. `PATTER_TELEMETRY_DISABLED` set → **off**
-3. `telemetry=False` in code → **off**
-4. CI / test environment detected → **off**
-5. otherwise → **on**
+3. persisted opt-out marker present (`getpatter telemetry disable`) → **off**
+4. `telemetry=False` in code → **off**
+5. CI / test environment detected → **off**
+6. otherwise → **on**

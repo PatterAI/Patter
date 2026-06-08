@@ -8,14 +8,16 @@
  * Precedence (first match wins):
  *   1. DO_NOT_TRACK truthy            -> OFF  (cross-tool kill switch, always wins)
  *   2. PATTER_TELEMETRY_DISABLED      -> OFF  (Patter-specific kill switch)
- *   3. flag === false                 -> OFF  (explicit in-code opt-out)
- *   4. CI / test runner detected      -> OFF
- *   5. default                        -> ON
+ *   3. persisted opt-out marker       -> OFF  (`getpatter telemetry disable`)
+ *   4. flag === false                 -> OFF  (explicit in-code opt-out)
+ *   5. CI / test runner detected      -> OFF
+ *   6. default                        -> ON
  *
  * Mirrors `getpatter/telemetry/consent.py`.
  */
 
 import { isCi, isTest, isTruthy } from './env';
+import { isOptedOut } from './install-id';
 
 /**
  * Resolve telemetry enablement. `flag` is the value of the public
@@ -26,6 +28,9 @@ import { isCi, isTest, isTruthy } from './env';
 export function isEnabled(flag?: boolean): boolean {
   if (isTruthy(process.env.DO_NOT_TRACK)) return false;
   if (isTruthy(process.env.PATTER_TELEMETRY_DISABLED)) return false;
+  // Persisted, machine-level opt-out written by `getpatter telemetry disable`.
+  // Read-only — resolving consent never writes to the filesystem.
+  if (isOptedOut()) return false;
   if (flag === false) return false;
   if (isCi() || isTest()) return false;
   return true;

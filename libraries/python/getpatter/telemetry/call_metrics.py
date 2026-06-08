@@ -42,8 +42,26 @@ def _provider_from_metrics(metrics: Any) -> str:
     return "other"
 
 
+def _provider_from_mode(mode: str | None) -> str:
+    """Coarse provider family from the provider mode, for ``call_started`` (no
+    metrics yet). Pipeline's brain vendor isn't known cheaply at connect, so it
+    collapses to ``other`` (the value allowlist coerces anything off-list anyway)."""
+    if mode in ("openai_realtime", "openai_realtime_2"):
+        return "openai"
+    if mode == "elevenlabs_convai":
+        return "elevenlabs"
+    return "other"
+
+
 def _carrier_family(telephony_provider: str | None) -> str:
     return str(telephony_provider).lower() if telephony_provider else "none"
+
+
+def _direction(value: Any) -> str | None:
+    """Normalise the call direction to ``inbound`` / ``outbound``; omit if unknown
+    (rather than guessing a default that would bias the inbound/outbound split)."""
+    v = str(value).lower() if value else ""
+    return v if v in ("inbound", "outbound") else None
 
 
 def _turn_count_bucket(n: int) -> str:
@@ -66,12 +84,45 @@ def _latency_ms(metrics: Any) -> float | None:
     return getattr(p95, "agent_response_ms", None) if p95 is not None else None
 
 
+def record_call_started(
+    telemetry: Any,
+    *,
+    provider_mode: str | None = None,
+    telephony_provider: str | None = None,
+    direction: Any = None,
+) -> None:
+    """Emit a ``call_started`` event when a call connects (media stream begins).
+
+    Pairs with ``call_completed`` to give a connect→complete funnel and a
+    denominator for the failure rate, and carries the inbound/outbound split. No
+    metrics exist yet at connect, so only coarse engine/provider/carrier/direction
+    are recorded. Safe with ``telemetry=None``. Swallows everything.
+
+    Mirrors ``recordCallStarted`` in ``call-metrics.ts``.
+    """
+    if telemetry is None:
+        return
+    try:
+        dims: dict[str, Any] = {
+            "engine": _engine_from_mode(provider_mode),
+            "provider": _provider_from_mode(provider_mode),
+            "carrier": _carrier_family(telephony_provider),
+        }
+        d = _direction(direction)
+        if d is not None:
+            dims["direction"] = d
+        telemetry.record("call_started", **dims)
+    except Exception:
+        pass
+
+
 def record_call_completed(
     telemetry: Any,
     *,
     outcome: str,
     metrics: Any = None,
     carrier: str | None = None,
+    direction: Any = None,
 ) -> None:
     """Emit a ``call_completed`` event.
 
@@ -80,12 +131,16 @@ def record_call_completed(
     * Non-connected failures pass ``outcome`` in {no_answer, busy, failed} and a
       ``carrier`` (no metrics → latency/duration omitted).
 
-    Safe to call with ``telemetry=None``. Swallows everything.
+    ``direction`` (inbound/outbound) is recorded when known. Safe to call with
+    ``telemetry=None``. Swallows everything.
     """
     if telemetry is None:
         return
     try:
         dims: dict[str, Any] = {"outcome": outcome}
+        d = _direction(direction)
+        if d is not None:
+            dims["direction"] = d
         if metrics is not None:
             dims["engine"] = _engine_from_mode(getattr(metrics, "provider_mode", None))
             dims["provider"] = _provider_from_metrics(metrics)

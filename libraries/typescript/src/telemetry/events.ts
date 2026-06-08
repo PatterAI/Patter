@@ -23,17 +23,23 @@ import { isCi, isTest } from './env';
 import { installId, runId } from './install-id';
 import { STACK_VENDORS } from './stack';
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 export const EVENT_SDK_INITIALIZED = 'sdk_initialized';
+export const EVENT_FIRST_RUN = 'first_run';
+export const EVENT_CLI_COMMAND = 'cli_command';
 export const EVENT_FEATURE_USED = 'feature_used';
 export const EVENT_AGENT_CONFIGURED = 'agent_configured';
+export const EVENT_CALL_STARTED = 'call_started';
 export const EVENT_CALL_COMPLETED = 'call_completed';
 
 const ALLOWED_EVENTS = new Set<string>([
   EVENT_SDK_INITIALIZED,
+  EVENT_FIRST_RUN,
+  EVENT_CLI_COMMAND,
   EVENT_FEATURE_USED,
   EVENT_AGENT_CONFIGURED,
+  EVENT_CALL_STARTED,
   EVENT_CALL_COMPLETED,
 ]);
 
@@ -62,6 +68,10 @@ export const DIMENSION_VALUES: Record<string, ReadonlySet<string>> = {
   integration: new Set(['openclaw', 'mcp', 'hermes', 'other', 'none']),
   integration_kind: new Set(['consult', 'mcp', 'none']),
   mcp_server_count_bucket: new Set(['0', '1', '2_3', '4_plus']),
+  // call_started / call_completed: inbound vs outbound — a core usage split.
+  direction: new Set(['inbound', 'outbound', 'none']),
+  // cli_command: which CLI subcommand was invoked (never args/flags values).
+  cli_command: new Set(['dashboard', 'eval', 'telemetry', 'none', 'other']),
   // call_completed: the call's terminal outcome
   outcome: new Set(['completed', 'error', 'no_answer', 'busy', 'failed']),
   // call_completed: terminal error code (mirrors ErrorCode, plus "other"). Never

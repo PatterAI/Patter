@@ -20,9 +20,12 @@ export {
   buildEvent,
   SCHEMA_VERSION,
   EVENT_SDK_INITIALIZED,
+  EVENT_FIRST_RUN,
+  EVENT_CLI_COMMAND,
   EVENT_FEATURE_USED,
   EVENT_AGENT_CONFIGURED,
+  EVENT_CALL_STARTED,
   EVENT_CALL_COMPLETED,
 } from './events';
 export type { TelemetryEvent, Dimensions } from './events';
-export { recordCallCompleted } from './call-metrics';
+export { recordCallCompleted, recordCallStarted } from './call-metrics';

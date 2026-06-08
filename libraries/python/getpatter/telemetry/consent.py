@@ -8,9 +8,10 @@ Precedence (first match wins):
 
 1. ``DO_NOT_TRACK`` truthy            -> OFF  (cross-tool kill switch, always wins)
 2. ``PATTER_TELEMETRY_DISABLED``      -> OFF  (Patter-specific kill switch)
-3. ``flag`` is ``False``              -> OFF  (explicit in-code opt-out)
-4. CI / test runner detected          -> OFF
-5. default                            -> ON
+3. persisted opt-out marker present   -> OFF  (``getpatter telemetry disable``)
+4. ``flag`` is ``False``              -> OFF  (explicit in-code opt-out)
+5. CI / test runner detected          -> OFF
+6. default                            -> ON
 """
 
 from __future__ import annotations
@@ -18,6 +19,10 @@ from __future__ import annotations
 import os
 
 from getpatter.telemetry.env import is_ci, is_test, is_truthy
+
+# Top-level import (matches consent.ts). ``install_id`` depends only on the stdlib,
+# so there is no import cycle back to this module.
+from getpatter.telemetry.install_id import is_opted_out
 
 
 def is_enabled(flag: bool | None = None) -> bool:
@@ -31,6 +36,10 @@ def is_enabled(flag: bool | None = None) -> bool:
     if is_truthy(os.getenv("DO_NOT_TRACK")):
         return False
     if is_truthy(os.getenv("PATTER_TELEMETRY_DISABLED")):
+        return False
+    # Persisted, machine-level opt-out written by ``getpatter telemetry disable``.
+    # Read-only — resolving consent never writes to the filesystem.
+    if is_opted_out():
         return False
     if flag is False:
         return False

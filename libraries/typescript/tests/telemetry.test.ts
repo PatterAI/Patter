@@ -19,7 +19,13 @@ import * as path from 'node:path';
 process.env.PATTER_TELEMETRY_STATE_DIR =
   process.env.PATTER_TELEMETRY_STATE_DIR ?? fs.mkdtempSync(path.join(os.tmpdir(), 'patter-tel-'));
 
-import { TelemetryClient, buildEvent, recordCallCompleted } from '../src/telemetry';
+import {
+  TelemetryClient,
+  buildEvent,
+  recordCallCompleted,
+  recordCallStarted,
+  SCHEMA_VERSION,
+} from '../src/telemetry';
 import { stackDimensions, modelToken, vendorOf } from '../src/telemetry/stack';
 import { DIMENSION_VALUES } from '../src/telemetry/events';
 import {
@@ -156,7 +162,7 @@ describe('[integration] telemetry — enabled path', () => {
     expect(event.sdk).toBe('typescript');
     expect(event.sdk_version).toBe('0.6.3');
     expect(event.runtime).toBe('node');
-    expect(event.schema_version).toBe(4);
+    expect(event.schema_version).toBe(5);
     expect(event.engine).toBe('realtime');
     expect(event.carrier).toBe('twilio');
     expect(typeof event.run_id).toBe('string');
@@ -648,5 +654,94 @@ describe('[unit] deploy-shape + upgrade funnel (schema v4)', () => {
     expect(mod.previousVersion('0.6.3')).toBe(''); // first run
     expect(mod.previousVersion('0.6.4')).toBe('0.6.3'); // now sees the prior
     expect(['0', '1_7', '8_30', '30_plus']).toContain(mod.daysSinceInstallBucket());
+  });
+});
+
+describe('[unit] CLI usage + first-run + call funnel + opt-out (schema v5)', () => {
+  it('is on schema v5', () => {
+    expect(SCHEMA_VERSION).toBe(5);
+    expect(buildEvent('first_run', { sdkVersion: '0.6.5' }).schema_version).toBe(5);
+  });
+
+  it('buildEvent accepts the new events and coerces off-list values', () => {
+    const cli = buildEvent('cli_command', {
+      sdkVersion: '0.6.5',
+      dimensions: { cli_command: 'dashboard' },
+    });
+    expect(cli.event).toBe('cli_command');
+    expect(cli.cli_command).toBe('dashboard');
+    // An unknown command can never reach the wire raw.
+    expect(
+      buildEvent('cli_command', {
+        sdkVersion: '0.6.5',
+        dimensions: { cli_command: 'rm -rf /' },
+      }).cli_command,
+    ).toBe('other');
+
+    const started = buildEvent('call_started', {
+      sdkVersion: '0.6.5',
+      dimensions: { engine: 'pipeline', provider: 'other', carrier: 'telnyx', direction: 'outbound' },
+    });
+    expect(started.direction).toBe('outbound');
+    expect(
+      buildEvent('call_completed', {
+        sdkVersion: '0.6.5',
+        dimensions: { outcome: 'completed', direction: 'sideways' },
+      }).direction,
+    ).toBe('other');
+  });
+
+  it('recordCallStarted records engine/provider/carrier/direction, omitting unknown direction', () => {
+    const recorded: Array<{ name: string; dims?: Record<string, unknown> }> = [];
+    const sink = {
+      record: (name: string, dims?: Record<string, unknown>) => recorded.push({ name, dims }),
+    } as unknown as TelemetryClient;
+
+    recordCallStarted(sink, {
+      providerMode: 'openai_realtime',
+      telephonyProvider: 'Twilio',
+      direction: 'inbound',
+    });
+    expect(recorded[0].name).toBe('call_started');
+    expect(recorded[0].dims).toMatchObject({
+      engine: 'realtime',
+      provider: 'openai',
+      carrier: 'twilio',
+      direction: 'inbound',
+    });
+
+    recorded.length = 0;
+    recordCallStarted(sink, { providerMode: 'pipeline', direction: undefined });
+    expect(recorded[0].dims).not.toHaveProperty('direction');
+  });
+
+  it('recordCallCompleted carries direction when known', () => {
+    const recorded: Array<Record<string, unknown>> = [];
+    const sink = {
+      record: (_name: string, dims?: Record<string, unknown>) => recorded.push(dims ?? {}),
+    } as unknown as TelemetryClient;
+    recordCallCompleted(sink, { outcome: 'failed', carrier: 'telnyx', direction: 'outbound' });
+    expect(recorded[0].direction).toBe('outbound');
+  });
+
+  it('isFirstRun is idempotent and persisted opt-out disables consent', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'patter-v5-'));
+    process.env.PATTER_TELEMETRY_STATE_DIR = dir;
+    delete process.env.DO_NOT_TRACK;
+    delete process.env.PATTER_TELEMETRY_DISABLED;
+    vi.resetModules();
+    const iid = await import('../src/telemetry/install-id');
+    const consent = await import('../src/telemetry/consent');
+
+    expect(iid.isFirstRun()).toBe(true); // first call marks it
+    expect(iid.isFirstRun()).toBe(false); // every later call
+
+    // Persisted opt-out wins over the default-ON (CI-detection is below it, but in
+    // the vitest process isTest() is true, so assert via isOptedOut directly too).
+    iid.setOptOut(true);
+    expect(iid.isOptedOut()).toBe(true);
+    expect(consent.isEnabled()).toBe(false);
+    iid.setOptOut(false);
+    expect(iid.isOptedOut()).toBe(false);
   });
 });

@@ -73,6 +73,25 @@
   custom tool or integration name) to `other`, making customer brands
   structurally impossible to emit even from a buggy caller; the collector
   re-validates the same allowlist server-side.
+- **Telemetry parity with OSS CLIs — CLI usage, activation, and a call funnel
+  (schema v5).** Four more anonymous events round out the picture of how the SDK
+  is actually used, matching how best-in-class OSS tools (Next.js, Astro,
+  Homebrew) instrument themselves — still no PII, every field a coarse enum,
+  bucket, or bool. New events: `cli_command` (which `getpatter` CLI command ran —
+  the command *name* only, never arguments or flags; `dashboard` / `eval` /
+  `telemetry` / `other`), `first_run` (sent **once per install**, on the run that
+  creates the local state, to mark activation — carries the same anonymous
+  deploy-shape dimensions as `sdk_initialized`, and is never sent when opted out),
+  and `call_started` (emitted when a call connects, pairing with `call_completed`
+  for a connect→complete funnel and a failure-rate denominator). A new
+  `direction` dimension (inbound / outbound) is recorded on `call_started` and
+  `call_completed` — a core usage split that was previously invisible. New
+  **`getpatter telemetry status | disable | enable`** CLI command (parity with
+  `next telemetry disable`) writes a persisted, machine-level opt-out marker
+  (`~/.getpatter/telemetry-disabled`) honoured by the consent resolver; the
+  control command itself never emits telemetry, so disabling never phones home.
+  `libraries/python/getpatter/cli.py` / `telemetry/{events,consent,install_id,call_metrics}.py`
+  and the TypeScript mirrors; both SDKs verified byte-for-byte at parity.
 - **`provider` option on `agent()` in the Python SDK** (`"openai_realtime"` /
   `"elevenlabs_convai"` / `"pipeline"`), an explicit alternative to `engine=`
   for selecting the AI mode. Optional with no default — existing callers are

@@ -58,7 +58,7 @@ import {
   cloud as detectCloud,
   packageManager,
 } from "./telemetry/environment";
-import { previousVersion, daysSinceInstallBucket } from "./telemetry/install-id";
+import { previousVersion, daysSinceInstallBucket, isFirstRun } from "./telemetry/install-id";
 import { VERSION } from "./version";
 import { SpeechEvents } from "./_speech-events";
 import type {
@@ -534,7 +534,7 @@ export class Patter {
       sdkVersion: VERSION,
       flag: options.telemetry,
     });
-    this.telemetry.record("sdk_initialized", {
+    const initDims = {
       carrier: carrierFamily(carrier),
       tunnel:
         tunnel instanceof StaticTunnel
@@ -543,7 +543,18 @@ export class Patter {
             ? "configured"
             : "none",
       ...telemetryEnvironmentDims(),
-    });
+    };
+    // Activation marker: emit `first_run` once per install (the run that creates
+    // the install-id state). Gated on the enabled path so opting out never
+    // touches the filesystem; the deploy-shape dims mirror sdk_initialized.
+    if (this.telemetry.enabled) {
+      try {
+        if (isFirstRun()) this.telemetry.record("first_run", initDims);
+      } catch {
+        /* never let telemetry break construction */
+      }
+    }
+    this.telemetry.record("sdk_initialized", initDims);
 
     // Initialise the tunnel-ready deferred. If the caller already has a
     // static webhookUrl (or StaticTunnel hostname), resolve immediately —

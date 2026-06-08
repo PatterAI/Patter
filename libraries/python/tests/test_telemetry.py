@@ -79,14 +79,20 @@ def collector():
 
 
 @pytest.fixture
-def enabled(monkeypatch):
-    """Neutralise CI/test detection and clear disablers → telemetry enabled."""
+def enabled(monkeypatch, tmp_path):
+    """Neutralise CI/test detection, isolate the state dir, clear disablers → ON.
+
+    Pointing ``PATTER_TELEMETRY_STATE_DIR`` at a per-test tmp dir keeps the
+    install-id, first-run, opt-out, and version files off the developer's real
+    home directory (and any local ``getpatter telemetry disable`` marker).
+    """
     monkeypatch.setattr("getpatter.telemetry.consent.is_ci", lambda: False)
     monkeypatch.setattr("getpatter.telemetry.consent.is_test", lambda: False)
     monkeypatch.delenv("DO_NOT_TRACK", raising=False)
     monkeypatch.delenv("PATTER_TELEMETRY_DISABLED", raising=False)
     monkeypatch.delenv("PATTER_TELEMETRY_DEBUG", raising=False)
     monkeypatch.delenv("PATTER_TELEMETRY_ENDPOINT", raising=False)
+    monkeypatch.setenv("PATTER_TELEMETRY_STATE_DIR", str(tmp_path / "getpatter-state"))
 
 
 async def _wait_for(collector: _Collector, n: int, timeout: float = 2.0) -> None:
@@ -114,7 +120,7 @@ async def test_event_reaches_collector_when_enabled(enabled, collector):
     assert event["sdk"] == "python"
     assert event["sdk_version"] == "0.6.3"
     assert event["runtime"] == "cpython"
-    assert event["schema_version"] == 4
+    assert event["schema_version"] == 5
     assert event["engine"] == "realtime"
     assert event["provider"] == "openai"
     assert event["carrier"] == "twilio"
@@ -772,3 +778,122 @@ def test_build_event_v4_bool_enum_and_version_dims():
     assert ev2["cloud"] == "other"
     assert "container" not in ev2
     assert ev2["previous_sdk_version"] == "0.6.3"
+
+
+# --- CLI usage + first-run + call funnel + persisted opt-out (schema v5) ------
+
+
+def test_schema_version_is_5():
+    from getpatter.telemetry import SCHEMA_VERSION
+
+    assert SCHEMA_VERSION == 5
+    assert build_event("first_run", sdk_version="0.6.5")["schema_version"] == 5
+
+
+def test_build_event_v5_new_events_and_dims():
+    cli = build_event(
+        "cli_command", sdk_version="0.6.5", dimensions={"cli_command": "dashboard"}
+    )
+    assert cli["event"] == "cli_command" and cli["cli_command"] == "dashboard"
+    # An unknown command coerces to "other"; it can never reach the wire raw.
+    assert (
+        build_event(
+            "cli_command", sdk_version="0.6.5", dimensions={"cli_command": "rm -rf /"}
+        )["cli_command"]
+        == "other"
+    )
+    started = build_event(
+        "call_started",
+        sdk_version="0.6.5",
+        dimensions={
+            "engine": "pipeline",
+            "provider": "other",
+            "carrier": "telnyx",
+            "direction": "outbound",
+        },
+    )
+    assert started["direction"] == "outbound"
+    # Off-list direction is coerced to "other".
+    assert (
+        build_event(
+            "call_completed",
+            sdk_version="0.6.5",
+            dimensions={"outcome": "completed", "direction": "sideways"},
+        )["direction"]
+        == "other"
+    )
+
+
+async def test_call_started_event_reaches_collector(enabled, collector):
+    from getpatter.telemetry.call_metrics import record_call_started
+
+    client = TelemetryClient(sdk_version="0.6.5", endpoint=collector.url)
+    record_call_started(
+        client,
+        provider_mode="openai_realtime",
+        telephony_provider="Twilio",
+        direction="inbound",
+    )
+    await _wait_for(collector, 1)
+    await client.aclose()
+
+    event = next(e for e in collector.events if e["event"] == "call_started")
+    assert event["engine"] == "realtime"
+    assert event["provider"] == "openai"
+    assert event["carrier"] == "twilio"
+    assert event["direction"] == "inbound"
+
+
+def test_call_started_omits_unknown_direction():
+    """An unknown/absent direction is omitted, never guessed."""
+    from getpatter.telemetry import call_metrics as cm
+
+    recorded: list[tuple[str, dict]] = []
+
+    class _Sink:
+        def record(self, name, **dims):
+            recorded.append((name, dims))
+
+    cm.record_call_started(_Sink(), provider_mode="pipeline", direction=None)
+    assert recorded[0][0] == "call_started"
+    assert "direction" not in recorded[0][1]
+
+
+def test_direction_on_call_completed():
+    from getpatter.telemetry import call_metrics as cm
+
+    recorded: list[dict] = []
+
+    class _Sink:
+        def record(self, name, **dims):
+            recorded.append(dims)
+
+    cm.record_call_completed(_Sink(), outcome="failed", carrier="telnyx", direction="outbound")
+    assert recorded[0]["direction"] == "outbound"
+
+
+def test_is_first_run_is_idempotent(monkeypatch, tmp_path):
+    from getpatter.telemetry import install_id as iid
+
+    monkeypatch.setenv("PATTER_TELEMETRY_STATE_DIR", str(tmp_path))
+    assert iid.is_first_run() is True  # first call marks it
+    assert iid.is_first_run() is False  # every later call
+
+
+def test_persisted_opt_out_disables_consent(monkeypatch, tmp_path):
+    from getpatter.telemetry import install_id as iid
+    from getpatter.telemetry.consent import is_enabled
+
+    monkeypatch.setattr("getpatter.telemetry.consent.is_ci", lambda: False)
+    monkeypatch.setattr("getpatter.telemetry.consent.is_test", lambda: False)
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+    monkeypatch.delenv("PATTER_TELEMETRY_DISABLED", raising=False)
+    monkeypatch.setenv("PATTER_TELEMETRY_STATE_DIR", str(tmp_path))
+
+    assert is_enabled() is True
+    iid.set_opt_out(True)
+    assert iid.is_opted_out() is True
+    assert is_enabled() is False  # persisted marker wins over the default-ON
+    iid.set_opt_out(False)
+    assert iid.is_opted_out() is False
+    assert is_enabled() is True

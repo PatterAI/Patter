@@ -413,12 +413,23 @@ class Patter:
         self._telemetry = _build_telemetry_client(telemetry)
         self._telemetry_seen_engines: set[str] = set()
         self._telemetry_seen_agent_shapes: set[tuple] = set()
-        self._telemetry.record(
-            "sdk_initialized",
-            carrier=carrier_kind or "none",
-            tunnel=_telemetry_tunnel_kind(self._tunnel_directive),
+        _init_dims = {
+            "carrier": carrier_kind or "none",
+            "tunnel": _telemetry_tunnel_kind(self._tunnel_directive),
             **_telemetry_environment_dims(),
-        )
+        }
+        # Activation marker: emit ``first_run`` once per install (the run that
+        # creates the install-id state). Gated on the enabled path so opting out
+        # never touches the filesystem; the deploy-shape dims mirror sdk_initialized.
+        if getattr(self._telemetry, "enabled", False):
+            try:
+                from getpatter.telemetry.install_id import is_first_run
+
+                if is_first_run():
+                    self._telemetry.record("first_run", **_init_dims)
+            except Exception:
+                pass
+        self._telemetry.record("sdk_initialized", **_init_dims)
 
         self._server = None
         self._tunnel_handle = None

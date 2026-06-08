@@ -35,8 +35,24 @@ function providerFromMetrics(m: Metricsish): string {
   return 'other';
 }
 
+function providerFromMode(mode: unknown): string {
+  // Coarse provider family from the provider mode, for `call_started` (no metrics
+  // yet). Pipeline's brain vendor isn't known cheaply at connect, so it collapses
+  // to `other` (the value allowlist coerces anything off-list anyway).
+  if (mode === 'openai_realtime' || mode === 'openai_realtime_2') return 'openai';
+  if (mode === 'elevenlabs_convai') return 'elevenlabs';
+  return 'other';
+}
+
 function carrierFamily(tp: unknown): string {
   return typeof tp === 'string' && tp ? tp.toLowerCase() : 'none';
+}
+
+function direction(value: unknown): string | undefined {
+  // Normalise to inbound/outbound; omit if unknown rather than guessing a default
+  // that would bias the inbound/outbound split.
+  const v = typeof value === 'string' ? value.toLowerCase() : '';
+  return v === 'inbound' || v === 'outbound' ? v : undefined;
 }
 
 function turnCountBucket(n: number): string {
@@ -56,16 +72,50 @@ function latencyMs(m: Metricsish): unknown {
   return undefined;
 }
 
+export interface RecordCallStartedOptions {
+  readonly providerMode?: string;
+  readonly telephonyProvider?: string;
+  readonly direction?: unknown;
+}
+
+/**
+ * Emit a `call_started` event when a call connects (media stream begins). Pairs
+ * with `call_completed` for a connect→complete funnel and a failure-rate
+ * denominator, and carries the inbound/outbound split. No metrics exist yet at
+ * connect, so only coarse engine/provider/carrier/direction are recorded.
+ * Swallows everything. Mirrors `record_call_started` in `call_metrics.py`.
+ */
+export function recordCallStarted(
+  telemetry: TelemetryClient | undefined,
+  opts: RecordCallStartedOptions,
+): void {
+  if (!telemetry) return;
+  try {
+    const dims: Record<string, string> = {
+      engine: engineFromMode(opts.providerMode),
+      provider: providerFromMode(opts.providerMode),
+      carrier: carrierFamily(opts.telephonyProvider),
+    };
+    const d = direction(opts.direction);
+    if (d !== undefined) dims.direction = d;
+    telemetry.record('call_started', dims);
+  } catch {
+    /* swallow — telemetry is never load-bearing */
+  }
+}
+
 export interface RecordCallCompletedOptions {
   readonly outcome: string;
   readonly metrics?: unknown;
   readonly carrier?: string;
+  readonly direction?: unknown;
 }
 
 /**
  * Emit a `call_completed` event. Connected calls pass `metrics` +
  * `outcome: "completed"`; non-connected failures pass an `outcome` in
- * {no_answer, busy, failed} and a `carrier` (no metrics). Swallows everything.
+ * {no_answer, busy, failed} and a `carrier` (no metrics). `direction`
+ * (inbound/outbound) is recorded when known. Swallows everything.
  */
 export function recordCallCompleted(
   telemetry: TelemetryClient | undefined,
@@ -74,6 +124,8 @@ export function recordCallCompleted(
   if (!telemetry) return;
   try {
     const dims: Record<string, string | number> = { outcome: opts.outcome };
+    const d = direction(opts.direction);
+    if (d !== undefined) dims.direction = d;
     const metrics = opts.metrics;
     if (metrics && typeof metrics === 'object') {
       const m = metrics as Metricsish;

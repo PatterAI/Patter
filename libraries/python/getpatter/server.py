@@ -628,6 +628,20 @@ class EmbeddedServer:
         async def _on_call_start(data):
             if store is not None:
                 store.record_call_start(data)
+            # Anonymous telemetry: per-call start (engine/provider/carrier +
+            # inbound/outbound; no PII). Pairs with ``call_completed`` for a
+            # connect→complete funnel. Fail-safe and O(1).
+            try:
+                from getpatter.telemetry.call_metrics import record_call_started
+
+                record_call_started(
+                    getattr(self, "_telemetry", None),
+                    provider_mode=getattr(agent, "provider", None),
+                    telephony_provider=getattr(self.config, "telephony_provider", None),
+                    direction=data.get("direction"),
+                )
+            except Exception:
+                pass
             # Notify standalone dashboard so active calls appear immediately.
             # Fire-and-forget via ``asyncio.create_task`` so the call_start
             # fast path never blocks on dashboard responsiveness — even when
@@ -686,6 +700,7 @@ class EmbeddedServer:
                     getattr(self, "_telemetry", None),
                     outcome="completed",
                     metrics=data.get("metrics"),
+                    direction=data.get("direction"),
                 )
             except Exception:
                 pass

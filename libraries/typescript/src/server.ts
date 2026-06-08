@@ -7,7 +7,7 @@ import crypto from 'node:crypto';
 import express from 'express';
 import { createServer, Server as HTTPServer } from 'http';
 import { WebSocketServer, WebSocket as WSWebSocket } from 'ws';
-import { recordCallCompleted } from './telemetry/call-metrics';
+import { recordCallCompleted, recordCallStarted } from './telemetry/call-metrics';
 import type { TelemetryClient } from './telemetry/client';
 import { OpenAIRealtimeAdapter } from './providers/openai-realtime';
 import { OpenAIRealtime2Adapter } from './providers/openai-realtime-2';
@@ -2106,7 +2106,16 @@ export class EmbeddedServer {
     };
 
     const store = this.metricsStore;
+    const telemetry = this.telemetry;
     const wrappedStart = async (data: Record<string, unknown>): Promise<void> => {
+      // Anonymous telemetry: per-call start (engine/provider/carrier +
+      // inbound/outbound; no PII). Pairs with `call_completed` for a
+      // connect→complete funnel. Fail-safe and O(1).
+      recordCallStarted(telemetry, {
+        providerMode: agent.provider ?? undefined,
+        telephonyProvider: bridge.telephonyProvider,
+        direction: data.direction,
+      });
       if (logger.enabled) {
         const callId = typeof data.call_id === 'string' ? data.call_id : '';
         // For outbound calls the bridge has no caller/callee in the WS query
@@ -2158,7 +2167,11 @@ export class EmbeddedServer {
     const wrappedEnd = async (data: Record<string, unknown>): Promise<void> => {
       // Anonymous telemetry: per-call completion (engine/provider/carrier + raw
       // duration/latency; no cost, no PII). Fail-safe and O(1).
-      recordCallCompleted(this.telemetry, { outcome: 'completed', metrics: data.metrics });
+      recordCallCompleted(this.telemetry, {
+        outcome: 'completed',
+        metrics: data.metrics,
+        direction: data.direction,
+      });
       if (logger.enabled) {
         const callId = typeof data.call_id === 'string' ? data.call_id : '';
         const metricsObj = (data.metrics ?? null) as
