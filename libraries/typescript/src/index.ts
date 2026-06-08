@@ -188,6 +188,14 @@ export { LLM as CerebrasLLM } from "./llm/cerebras";
 export type { CerebrasLLMOptions } from "./llm/cerebras";
 export { LLM as GoogleLLM } from "./llm/google";
 export type { GoogleLLMOptions } from "./llm/google";
+// Agent-runtime LLM providers (Patter as the voice shell in front of an
+// OpenAI-compatible agent runtime / local inference gateway).
+export { LLM as OpenAICompatibleLLM, OpenAICompatibleLLMProvider } from "./llm/openai-compatible";
+export type { OpenAICompatibleLLMOptions } from "./llm/openai-compatible";
+export { LLM as HermesLLM } from "./llm/hermes";
+export type { HermesLLMOptions } from "./llm/hermes";
+export { LLM as OpenClawLLM } from "./llm/openclaw";
+export type { OpenClawLLMOptions } from "./llm/openclaw";
 
 // Voice Activity Detection (server-side) — Silero ONNX.
 export { SileroVAD } from "./providers/silero-vad";

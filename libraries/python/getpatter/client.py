@@ -1601,6 +1601,7 @@ class Patter:
         model: str = "gpt-realtime-mini",
         language: str = "en",
         first_message: str = "",
+        llm_error_message: str | None = None,
         tools: list[Tool] | None = None,
         stt: STTProvider | None = None,
         tts: TTSProvider | None = None,
@@ -1624,6 +1625,7 @@ class Patter:
         openai_realtime_noise_reduction: Literal["near_field", "far_field"]
         | None = None,
         realtime_turn_detection: "RealtimeTurnDetection | None" = None,
+        realtime_gate_response_on_transcript: bool | None = None,
         tool_call_preambles: bool | str = False,
     ) -> Agent:
         """Create an ``Agent`` configuration.
@@ -1791,6 +1793,10 @@ class Patter:
                     )
                 if realtime_turn_detection is None:
                     realtime_turn_detection = engine_fields.get("turn_detection")
+                if realtime_gate_response_on_transcript is None:
+                    realtime_gate_response_on_transcript = engine_fields.get(
+                        "gate_response_on_transcript"
+                    )
             elif engine_kind == "elevenlabs_convai":
                 elevenlabs_engine_key = engine_fields.get("api_key", "")
         elif provider is not None:
@@ -1903,6 +1909,7 @@ class Patter:
             model=model,
             language=language,
             first_message=first_message,
+            llm_error_message=llm_error_message,
             tools=tuple(tools_out) if tools_out is not None else None,
             provider=provider,
             stt=stt_resolved,
@@ -1928,6 +1935,7 @@ class Patter:
             openai_realtime_input_audio_transcription_model=openai_realtime_input_audio_transcription_model,
             openai_realtime_noise_reduction=openai_realtime_noise_reduction,
             realtime_turn_detection=realtime_turn_detection,
+            realtime_gate_response_on_transcript=realtime_gate_response_on_transcript,
             tool_call_preambles=tool_call_preambles,
         )
 
@@ -1947,6 +1955,7 @@ class Patter:
                 "input_audio_transcription_model": engine.input_audio_transcription_model,
                 "noise_reduction": engine.noise_reduction,
                 "turn_detection": engine.turn_detection,
+                "gate_response_on_transcript": engine.gate_response_on_transcript,
             }
         if isinstance(engine, _Realtime):
             return "openai_realtime", {
@@ -1957,6 +1966,7 @@ class Patter:
                 "input_audio_transcription_model": engine.input_audio_transcription_model,
                 "noise_reduction": engine.noise_reduction,
                 "turn_detection": engine.turn_detection,
+                "gate_response_on_transcript": engine.gate_response_on_transcript,
             }
         if isinstance(engine, _ConvAI):
             return "elevenlabs_convai", {

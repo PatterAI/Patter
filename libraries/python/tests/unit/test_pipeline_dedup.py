@@ -106,16 +106,23 @@ async def _run_loop(handler: PipelineStreamHandler) -> None:
 class TestHallucinationFilter:
     """Rule 1 — drop common Whisper / Deepgram filler words."""
 
-    async def test_drops_single_word_you(self) -> None:
+    async def test_keeps_single_word_you(self) -> None:
+        """Issue #154: the hallucination blocklist was narrowed to non-speech
+        artifacts only, so a real one-word 'you' now PASSES (dropping it deleted
+        legitimate user turns). The dedup / 500 ms throttle still guard against
+        the repeated-echo feedback loop BUG #22 was actually about."""
         stt = _StubSTT([Transcript(text="you", is_final=True, confidence=0.9)])
         on_transcript = AsyncMock()
         handler = _make_handler(stt, on_transcript)
 
         await _run_loop(handler)
 
-        on_transcript.assert_not_called()
+        on_transcript.assert_awaited_once()
+        assert on_transcript.await_args.args[0]["text"] == "you"
 
     async def test_drops_period_only(self) -> None:
+        """A punctuation-only final still strips to empty → dropped by the
+        empty check (independent of the blocklist)."""
         stt = _StubSTT([Transcript(text=".", is_final=True, confidence=0.8)])
         on_transcript = AsyncMock()
         handler = _make_handler(stt, on_transcript)
@@ -124,21 +131,25 @@ class TestHallucinationFilter:
 
         on_transcript.assert_not_called()
 
-    async def test_drops_thank_you_with_punctuation(self) -> None:
-        """Trailing punctuation/whitespace is stripped before the blacklist check."""
-        stt = _StubSTT(
-            [Transcript(text="Thank you.", is_final=True, confidence=0.8)]
-        )
+    async def test_keeps_thank_you_with_punctuation(self) -> None:
+        """Issue #154: 'Thank you.' is a real utterance and is no longer on the
+        narrowed blocklist, so it passes (trailing punctuation is still
+        stripped for normalisation)."""
+        stt = _StubSTT([Transcript(text="Thank you.", is_final=True, confidence=0.8)])
         on_transcript = AsyncMock()
         handler = _make_handler(stt, on_transcript)
 
         await _run_loop(handler)
 
-        on_transcript.assert_not_called()
+        on_transcript.assert_awaited_once()
+        assert on_transcript.await_args.args[0]["text"] == "Thank you."
 
-    async def test_drops_case_variants(self) -> None:
-        """Normalisation is case-insensitive."""
-        stt = _StubSTT([Transcript(text="YOU", is_final=True, confidence=0.9)])
+    async def test_drops_caption_credit_hallucination(self) -> None:
+        """A YouTube caption-credit hallucination (still on the narrowed
+        blocklist) is dropped — case-insensitively."""
+        stt = _StubSTT(
+            [Transcript(text="Thanks for watching!", is_final=True, confidence=0.9)]
+        )
         on_transcript = AsyncMock()
         handler = _make_handler(stt, on_transcript)
 
@@ -159,7 +170,11 @@ class TestHallucinationFilter:
     async def test_passes_legitimate_text(self) -> None:
         """A real utterance that is NOT on the blacklist must pass through."""
         stt = _StubSTT(
-            [Transcript(text="What's the weather today?", is_final=True, confidence=0.95)]
+            [
+                Transcript(
+                    text="What's the weather today?", is_final=True, confidence=0.95
+                )
+            ]
         )
         on_transcript = AsyncMock()
         handler = _make_handler(stt, on_transcript)
@@ -190,10 +205,12 @@ class TestDuplicateFilter:
             "getpatter.stream_handler.time.time",
             lambda: next(times),
         )
-        stt = _StubSTT([
-            Transcript(text="Hello there", is_final=True, confidence=0.9),
-            Transcript(text="Hello there", is_final=True, confidence=0.9),
-        ])
+        stt = _StubSTT(
+            [
+                Transcript(text="Hello there", is_final=True, confidence=0.9),
+                Transcript(text="Hello there", is_final=True, confidence=0.9),
+            ]
+        )
         on_transcript = AsyncMock()
         handler = _make_handler(stt, on_transcript)
 
@@ -211,10 +228,12 @@ class TestDuplicateFilter:
             "getpatter.stream_handler.time.time",
             lambda: next(times),
         )
-        stt = _StubSTT([
-            Transcript(text="Hello there", is_final=True, confidence=0.9),
-            Transcript(text="Hello there", is_final=True, confidence=0.9),
-        ])
+        stt = _StubSTT(
+            [
+                Transcript(text="Hello there", is_final=True, confidence=0.9),
+                Transcript(text="Hello there", is_final=True, confidence=0.9),
+            ]
+        )
         on_transcript = AsyncMock()
         handler = _make_handler(stt, on_transcript)
 
@@ -230,10 +249,12 @@ class TestDuplicateFilter:
             "getpatter.stream_handler.time.time",
             lambda: next(times),
         )
-        stt = _StubSTT([
-            Transcript(text="Book a table", is_final=True, confidence=0.9),
-            Transcript(text="  book a table  ", is_final=True, confidence=0.9),
-        ])
+        stt = _StubSTT(
+            [
+                Transcript(text="Book a table", is_final=True, confidence=0.9),
+                Transcript(text="  book a table  ", is_final=True, confidence=0.9),
+            ]
+        )
         on_transcript = AsyncMock()
         handler = _make_handler(stt, on_transcript)
 
@@ -262,10 +283,12 @@ class TestThrottleFilter:
             "getpatter.stream_handler.time.time",
             lambda: next(times),
         )
-        stt = _StubSTT([
-            Transcript(text="What time is it", is_final=True, confidence=0.9),
-            Transcript(text="Tell me the weather", is_final=True, confidence=0.9),
-        ])
+        stt = _StubSTT(
+            [
+                Transcript(text="What time is it", is_final=True, confidence=0.9),
+                Transcript(text="Tell me the weather", is_final=True, confidence=0.9),
+            ]
+        )
         on_transcript = AsyncMock()
         handler = _make_handler(stt, on_transcript)
 
@@ -274,19 +297,19 @@ class TestThrottleFilter:
         # Only the first should have been forwarded.
         assert on_transcript.await_count == 1
 
-    async def test_passes_after_500ms(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_passes_after_500ms(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Different text, 700 ms apart — legitimate second turn.
         times = iter([100.0, 100.7])
         monkeypatch.setattr(
             "getpatter.stream_handler.time.time",
             lambda: next(times),
         )
-        stt = _StubSTT([
-            Transcript(text="What time is it", is_final=True, confidence=0.9),
-            Transcript(text="Tell me the weather", is_final=True, confidence=0.9),
-        ])
+        stt = _StubSTT(
+            [
+                Transcript(text="What time is it", is_final=True, confidence=0.9),
+                Transcript(text="Tell me the weather", is_final=True, confidence=0.9),
+            ]
+        )
         on_transcript = AsyncMock()
         handler = _make_handler(stt, on_transcript)
 
@@ -306,10 +329,12 @@ class TestInterimTranscripts:
     """Non-final (interim) transcripts must never fire the turn pipeline."""
 
     async def test_interim_does_not_fire_on_transcript(self) -> None:
-        stt = _StubSTT([
-            Transcript(text="Hello", is_final=False, confidence=0.5),
-            Transcript(text="Hello world", is_final=False, confidence=0.6),
-        ])
+        stt = _StubSTT(
+            [
+                Transcript(text="Hello", is_final=False, confidence=0.5),
+                Transcript(text="Hello world", is_final=False, confidence=0.6),
+            ]
+        )
         on_transcript = AsyncMock()
         handler = _make_handler(stt, on_transcript)
 

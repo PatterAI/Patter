@@ -97,6 +97,63 @@ The GA audio engine speaks PCM 24 kHz and silently drops mulaw frames. Patter ha
 
 No caller-side change is required — both Twilio Media Streams (mulaw 8 kHz) and Telnyx Call Control (PCM 16 kHz / mulaw 8 kHz) work out of the box.
 
+## Speakerphone noise & false barge-in
+
+On a speakerphone or in a noisy room, mouse clicks, the phone being picked up or set down, and background chatter can be mistaken for the caller speaking — the agent gets cut off mid-sentence. Because turn-taking is [server-managed](#server-managed-turn-taking), you tune false barge-ins at the OpenAI VAD layer (no carrier-side change), not with a client gate.
+
+### Input noise reduction
+
+```typescript
+const agent = phone.agent({
+  engine: new OpenAIRealtime2({ noiseReduction: "far_field" }),
+  systemPrompt: "...",
+});
+```
+
+`noiseReduction` enables OpenAI's native input noise reduction:
+
+| Value | When to use |
+|-------|-------------|
+| `"far_field"` | **Recommended for phone / speakerphone / conference audio.** Filters room noise and distance. |
+| `"near_field"` | A handset held close to the mouth. |
+| `undefined` (default) | No reduction — today's behaviour, field omitted entirely. |
+
+The GA adapter nests it under `session.audio.input.input_audio_noise_reduction`.
+
+### Turn-detection tuning
+
+```typescript
+// Raise the server_vad threshold so background noise doesn't trip it…
+const agent = phone.agent({
+  engine: new OpenAIRealtime2({
+    noiseReduction: "far_field",
+    turnDetection: { type: "server_vad", threshold: 0.6 },
+  }),
+  systemPrompt: "...",
+});
+
+// …or switch to semantic_vad with eagerness "low" so the model waits for the
+// caller to actually finish before treating audio as speech.
+const agent = phone.agent({
+  engine: new OpenAIRealtime2({
+    turnDetection: { type: "semantic_vad", eagerness: "low" },
+  }),
+  systemPrompt: "...",
+});
+```
+
+`turnDetection` (`RealtimeTurnDetection`) is a `readonly` config. Each unset field falls back to the adapter default (`server_vad`, `threshold` 0.5, `prefixPaddingMs` 300, `silenceDurationMs` 300):
+
+| Field | Applies to | Notes |
+|-------|-----------|-------|
+| `type` | both | `"server_vad"` (default) or `"semantic_vad"`. |
+| `threshold` | server_vad | 0..1; higher rejects more background noise. |
+| `prefixPaddingMs` | server_vad | Padding before detected speech. |
+| `silenceDurationMs` | server_vad | Trailing silence before end-of-turn. |
+| `eagerness` | semantic_vad | `"low"` lets the caller finish (least likely to interrupt), through `"medium"` / `"high"` / `"auto"`. |
+
+`semantic_vad` emits `{type, eagerness}` only — OpenAI rejects threshold / padding / silence on the semantic detector. Both knobs are also exposed directly on `phone.agent({ openaiRealtimeNoiseReduction: ..., realtimeTurnDetection: ... })`; an explicit `agent()` option wins over the engine marker value.
+
 ## Direct adapter use
 
 `OpenAIRealtime2Adapter` is exported and may be constructed directly when you need to share connection state across calls or override low-level fields. The constructor signature is **positional** (inherited from `OpenAIRealtimeAdapter`):
@@ -128,9 +185,15 @@ const agent = phone.agent({
 
 The adapter extends `OpenAIRealtimeAdapter` and overrides `connect()`, `sendAudio()`, `receiveEvents()`, and `sendFirstMessage()` for the GA wire shape.
 
-### GA session config — `create_response: false` / `interrupt_response: false`
+### Server-managed turn-taking
 
-The GA adapter unconditionally pins both flags in `session.update.turn_detection`. Patter owns response creation (`response.create`) and barge-in cancellation explicitly so the hallucination filter and barge-in pipeline can decide per turn rather than letting the server VAD auto-trigger. This is why the GA adapter is required — the legacy beta endpoint did not expose these knobs in the same shape.
+By default the GA adapter sets both `create_response: true` and `interrupt_response: true` in `session.update.turn_detection`, so the **OpenAI server owns turn-taking end to end**: it runs VAD, decides end-of-turn, creates the response as soon as the caller stops speaking, and cancels its own response when the caller barges in. The input transcript (Whisper) is pure observability — it never gates or cancels the reply, so the transcription-model choice has no effect on reply latency.
+
+On Patter's WebSocket transport the client still does the bookkeeping the server cannot do for it: it clears the carrier playout buffer and sends `conversation.item.truncate` for the offset the caller actually heard (OpenAI auto-truncates only on WebRTC/SIP). It does **not** send a redundant `response.cancel`, run a client-side anti-flicker gate, or re-anchor turn metrics.
+
+**Tune false barge-ins** (speakerphone / no-AEC PSTN where the agent's own audio echoes into the input) with [`RealtimeTurnDetection`](#speakerphone-noise--false-barge-in) — raise `threshold` or switch to `semantic_vad` with `eagerness: "low"` — rather than a client gate.
+
+To restore the legacy client-managed path (Patter drives `response.create` / `response.cancel` and runs its own barge-in gate), set `gateResponseOnTranscript: true` on the engine marker or `realtimeGateResponseOnTranscript: true` on `phone.agent(...)`. That emits `create_response: false` + `interrupt_response: false` and re-gates the reply on the transcript arriving — the escape hatch for no-AEC self-interruption scenarios.
 
 ## Backward compatibility
 

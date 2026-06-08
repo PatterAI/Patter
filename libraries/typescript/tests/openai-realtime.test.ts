@@ -115,6 +115,101 @@ describe('OpenAIRealtimeAdapter', () => {
   });
 });
 
+/**
+ * truncate() / cancelResponse() split (issue #154). On the WebSocket transport
+ * the client must `conversation.item.truncate` on every barge-in (the server
+ * only auto-truncates on WebRTC/SIP). In server-managed mode it must NOT also
+ * send `response.cancel` (the server cancels). So `truncate()` sends ONLY the
+ * truncate; `cancelResponse()` sends BOTH.
+ */
+describe('[unit] OpenAIRealtimeAdapter truncate() / cancelResponse() split', () => {
+  /** Minimal real-EventEmitter WS double that records sent frames and lets us
+   *  feed upstream frames through the adapter's REAL message parser. */
+  function makeAdapterWithInFlightResponse(): {
+    adapter: OpenAIRealtimeAdapter;
+    sent: string[];
+  } {
+    const EventEmitter = require('events');
+    class WsStub extends EventEmitter {
+      static OPEN = 1;
+      readyState = 1;
+      OPEN = 1;
+      sent: string[] = [];
+      send(d: string): void {
+        this.sent.push(d);
+      }
+      close(): void {}
+      ping(): void {}
+    }
+    const ws = new WsStub();
+    const adapter = new OpenAIRealtimeAdapter('sk_test');
+    (adapter as unknown as { ws: typeof ws }).ws = ws;
+    // Arm the REAL message listener so the parser sets currentResponseItemId.
+    (adapter as unknown as { armHeartbeatAndListener(): void }).armHeartbeatAndListener();
+    // Real in-flight item + audio so truncate/cancel have something to bound.
+    ws.emit(
+      'message',
+      Buffer.from(JSON.stringify({ type: 'response.output_item.added', item: { id: 'it-42' } })),
+    );
+    ws.emit(
+      'message',
+      Buffer.from(
+        JSON.stringify({ type: 'response.audio.delta', delta: Buffer.alloc(1600).toString('base64') }),
+      ),
+    );
+    return { adapter, sent: ws.sent };
+  }
+
+  const typesOf = (sent: string[]): string[] =>
+    sent.map((s) => (JSON.parse(s) as { type: string }).type);
+
+  it('truncate() sends ONLY conversation.item.truncate (no response.cancel)', () => {
+    const { adapter, sent } = makeAdapterWithInFlightResponse();
+    adapter.truncate();
+    const types = typesOf(sent);
+    expect(types).toContain('conversation.item.truncate');
+    expect(types).not.toContain('response.cancel');
+    const trunc = JSON.parse(
+      sent.find((s) => (JSON.parse(s) as { type: string }).type === 'conversation.item.truncate')!,
+    ) as { item_id: string; content_index: number; audio_end_ms: number };
+    expect(trunc.item_id).toBe('it-42');
+    expect(trunc.content_index).toBe(0);
+    // Bounded, non-negative wall-clock-capped offset.
+    expect(trunc.audio_end_ms).toBeGreaterThanOrEqual(0);
+  });
+
+  it('cancelResponse() sends BOTH conversation.item.truncate AND response.cancel', () => {
+    const { adapter, sent } = makeAdapterWithInFlightResponse();
+    adapter.cancelResponse();
+    const types = typesOf(sent);
+    expect(types).toContain('conversation.item.truncate');
+    expect(types).toContain('response.cancel');
+    // truncate precedes the cancel.
+    expect(types.indexOf('conversation.item.truncate')).toBeLessThan(
+      types.indexOf('response.cancel'),
+    );
+  });
+
+  it('truncate() is a no-op (no frames) when no response is in flight', () => {
+    const adapter = new OpenAIRealtimeAdapter('sk_test');
+    const sent: string[] = [];
+    (adapter as unknown as { ws: { send: (d: string) => void; readyState: number } }).ws = {
+      send: (d: string) => sent.push(d),
+      readyState: 1,
+    };
+    adapter.truncate();
+    expect(sent).toHaveLength(0);
+  });
+
+  it('truncate() resets in-flight tracking so a second truncate is a no-op', () => {
+    const { adapter, sent } = makeAdapterWithInFlightResponse();
+    adapter.truncate();
+    const after = sent.length;
+    adapter.truncate();
+    expect(sent.length).toBe(after);
+  });
+});
+
 describe('OpenAIRealtime engine wrapper → OpenAIRealtimeAdapter forwarding', () => {
   /**
    * Regression: the high-level `OpenAIRealtime` engine wrapper accepts

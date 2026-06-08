@@ -1,8 +1,16 @@
 """OpenAI Realtime API adapter — all-in-one STT + LLM + TTS over WebSocket.
 
-Used in ``stream_handler`` as the ``openai_realtime`` provider mode. Drives
-:class:`OpenAIRealtimeAdapter` which negotiates audio format, dispatches tool
-calls, and streams audio in both directions.
+Drives :class:`OpenAIRealtimeAdapter`, which negotiates audio format,
+dispatches tool calls, and streams audio in both directions.
+
+NOTE (issue #154): the ``openai_realtime`` provider mode no longer uses this
+adapter's standalone connect path for telephony. OpenAI deprecated the Beta
+Realtime API, so its flat ``output_audio_format: g711_ulaw`` session shape is
+ignored by GA models (the server falls back to PCM16 @ 24 kHz). ``stream_handler``
+routes BOTH ``openai_realtime`` and ``openai_realtime_2`` through
+:class:`~getpatter.providers.openai_realtime_2.OpenAIRealtime2Adapter` (GA
+session shape + internal PCM24->mulaw8 transcode). This class is retained as the
+shared base class that ``OpenAIRealtime2Adapter`` extends.
 """
 
 import asyncio
@@ -92,6 +100,7 @@ def build_turn_detection(
     default_type: str,
     default_silence_ms: int,
     include_response_gating: bool,
+    gate_response_on_transcript: bool = False,
 ) -> dict[str, Any]:
     """Build the ``turn_detection`` wire dict shared by the v1 and GA session
     builders so the two paths never drift.
@@ -103,9 +112,26 @@ def build_turn_detection(
     threshold / padding / silence (OpenAI rejects them) and emits ``eagerness``
     only when set.
 
-    ``include_response_gating`` adds the GA-only client-gated
-    ``create_response`` / ``interrupt_response`` keys (always ``False`` — never
-    publicly tunable). The v1 shape omits them.
+    ``include_response_gating`` adds the GA-only ``create_response`` /
+    ``interrupt_response`` keys. The v1 shape omits them (the server's
+    true-defaults apply).
+
+    ``gate_response_on_transcript`` selects who owns turn-taking and is the
+    single switch both gating keys are tied to:
+
+    - ``False`` (DEFAULT — server-managed): ``create_response`` and
+      ``interrupt_response`` are BOTH ``True``. The OpenAI server owns VAD,
+      end-of-turn, response creation, and the barge-in cancel signal. On a
+      WebSocket transport the client still clears its playout buffer and sends
+      ``conversation.item.truncate`` on the server's ``speech_started`` — the
+      server does not auto-truncate over WebSocket — but it does NOT send
+      ``response.cancel`` (the server already cancels via ``interrupt_response``)
+      and it does NOT drive ``response.create``.
+    - ``True`` (OPT-OUT — legacy client-managed): both keys are ``False``. The
+      stream-handler drives ``response.create`` after the hallucination filter
+      and runs the full client-side barge-in path (``cancel_response`` +
+      MIN_AGENT_SPEAKING gate). This is the escape hatch for no-AEC PSTN
+      self-interruption.
     """
     td = turn_detection
     if td is not None and getattr(td, "type", "server_vad") == "semantic_vad":
@@ -127,8 +153,12 @@ def build_turn_detection(
             else default_silence_ms,
         }
     if include_response_gating:
-        detection["create_response"] = False
-        detection["interrupt_response"] = False
+        # Both keys are tied to the same switch: server-managed (the default,
+        # gate=False) => both True; client-managed legacy (gate=True) =>
+        # both False.
+        server_managed = not gate_response_on_transcript
+        detection["create_response"] = server_managed
+        detection["interrupt_response"] = server_managed
     return detection
 
 
@@ -178,6 +208,13 @@ class OpenAIRealtimeAdapter:
         # ``RealtimeTurnDetection`` into the provider module (duck-typed at
         # use: ``.type`` / ``.threshold`` / ``.eagerness`` / ...).
         turn_detection: Any | None = None,
+        # When ``True``, the stream-handler gates the model response on the
+        # Whisper ``input_audio_transcription.completed`` event (legacy
+        # behavior). ``None``/``False`` (default) decouples the response: the
+        # handler triggers ``response.create`` as soon as the user stops
+        # speaking, so the model no longer waits ~500 ms for Whisper. Read by
+        # the stream-handler off the adapter; the adapter itself does not gate.
+        gate_response_on_transcript: bool | None = None,
     ):
         if noise_reduction is not None and noise_reduction not in (
             "near_field",
@@ -204,6 +241,14 @@ class OpenAIRealtimeAdapter:
         self.reasoning_effort = reasoning_effort
         self.noise_reduction = noise_reduction
         self.turn_detection = turn_detection
+        # Decouple flag: ``False`` (default) means the stream-handler fires
+        # ``response.create`` on speech-stop (committed), NOT on the Whisper
+        # transcript. ``True`` restores the legacy transcript-gated path.
+        self.gate_response_on_transcript = (
+            gate_response_on_transcript
+            if gate_response_on_transcript is not None
+            else False
+        )
         self._ws: Any = None
         self._running = False
         # Track the assistant message currently being generated so we can
@@ -373,13 +418,18 @@ class OpenAIRealtimeAdapter:
             "voice": self.voice,
             "instructions": self.instructions
             or f"You are a helpful voice assistant. Respond in {self.language}. Be concise and natural.",
-            # v1 turn_detection carries NO create_response / interrupt_response
-            # keys (those are GA-only) — gating disabled here.
+            # v1 turn_detection OMITS the create_response / interrupt_response
+            # keys (those are GA-only on the wire). With them omitted the
+            # OpenAI server applies its true-defaults (both True) — i.e. the
+            # server-managed default. ``gate_response_on_transcript`` is still
+            # forwarded so the v1 builder shares the GA signature, but it only
+            # takes effect when ``include_response_gating`` is True.
             "turn_detection": build_turn_detection(
                 self.turn_detection,
                 default_type=self.vad_type,
                 default_silence_ms=self.silence_duration_ms,
                 include_response_gating=False,
+                gate_response_on_transcript=self.gate_response_on_transcript,
             ),
             "input_audio_transcription": {
                 "model": self.input_audio_transcription_model,
@@ -706,13 +756,22 @@ class OpenAIRealtimeAdapter:
         finally:
             self._running = False
 
-    async def cancel_response(self) -> None:
-        """Cancel current AI response and truncate the in-flight item.
+    async def truncate_playback(self) -> None:
+        """Truncate the in-flight assistant item to what the caller heard.
 
-        Required for clean barge-in: ``response.cancel`` alone leaves the
-        partially-generated assistant message on the transcript, which the
-        model replays on the next turn ("ghost text") — manifesting as
-        re-greetings and mid-sentence fragments after a barge-in storm.
+        Sends ONLY ``conversation.item.truncate`` (no ``response.cancel``).
+        This is the WebSocket-transport bookkeeping required on barge-in: per
+        OpenAI's docs the GA server auto-truncates only on WebRTC / SIP, so a
+        WebSocket client (Patter's ``wss://api.openai.com/v1/realtime``
+        transport) MUST send the truncate itself so the partially-generated
+        assistant message does not linger on the conversation as "ghost text"
+        the model replays next turn.
+
+        On the SERVER-MANAGED barge-in path (``interrupt_response: true``) this
+        is the ONLY adapter call: the server already cancels the response, so
+        sending ``response.cancel`` from the client would be redundant /
+        rejected. The legacy client-managed path uses
+        :meth:`cancel_response` (truncate + cancel) instead.
 
         ``audio_end_ms`` MUST reflect what the caller actually heard, not
         what the server generated. OpenAI streams audio at 5-10x real-time,
@@ -725,12 +784,8 @@ class OpenAIRealtimeAdapter:
         if self._ws is None:
             return
         if not self._current_response_item_id:
-            # No response in flight — nothing to cancel. OpenAI Realtime
-            # GA rejects unconditional ``response.cancel`` with
-            # ``response_cancel_not_active``, which surfaces as ERROR-level
-            # log spam on every phantom VAD ``speech_started`` (echo of
-            # agent audio, voicemail beep, line noise). Silent no-op here
-            # keeps the cancel idempotent across stale callers.
+            # No response in flight — nothing to truncate. Silent no-op keeps
+            # the call idempotent across stale callers / phantom barge-ins.
             return
         audio_end_ms = self._current_response_audio_ms
         if self._current_response_first_audio_at is not None:
@@ -753,15 +808,45 @@ class OpenAIRealtimeAdapter:
             )
         except Exception as exc:  # pragma: no cover
             logger.debug("conversation.item.truncate failed: %s", exc)
-        try:
-            await self._ws.send(json.dumps({"type": "response.cancel"}))
-        except Exception as exc:
-            logger.debug("response.cancel failed: %s", exc)
-        # Reset per-response tracking so subsequent audio chunks (post-cancel
+        # Reset per-response tracking so subsequent audio chunks (post-truncate
         # late frames) and the next response.create start clean.
         self._current_response_item_id = None
         self._current_response_audio_ms = 0
         self._current_response_first_audio_at = None
+
+    async def cancel_response(self) -> None:
+        """Cancel current AI response AND truncate the in-flight item.
+
+        Full client-managed barge-in: ``conversation.item.truncate`` (so the
+        partially-generated assistant message does not linger as "ghost text")
+        followed by ``response.cancel`` (so the server stops generating).
+
+        Used by the LEGACY opt-out path (``gate_response_on_transcript=True``,
+        ``interrupt_response: false``) and by explicit cancels (e.g. a blocked
+        guardrail rewrite). On the server-managed default path the handler
+        calls :meth:`truncate_playback` instead — the server owns the cancel
+        via ``interrupt_response: true`` and a client ``response.cancel`` would
+        be redundant.
+
+        Idempotent: when no response is in flight :meth:`truncate_playback`
+        no-ops and the ``response.cancel`` is skipped — OpenAI Realtime GA
+        rejects unconditional ``response.cancel`` with
+        ``response_cancel_not_active``, so guarding it here keeps phantom VAD
+        ``speech_started`` events (echo of agent audio, voicemail beep, line
+        noise) from spamming ERROR-level logs.
+        """
+        if self._ws is None:
+            return
+        if not self._current_response_item_id:
+            # No response in flight — nothing to cancel. Mirror the old guard
+            # so unconditional cancels stay no-ops (see docstring).
+            return
+        # Truncate first (resets the per-response tracking fields), then cancel.
+        await self.truncate_playback()
+        try:
+            await self._ws.send(json.dumps({"type": "response.cancel"}))
+        except Exception as exc:
+            logger.debug("response.cancel failed: %s", exc)
 
     async def send_text(self, text: str) -> None:
         """Send a text message to the AI (triggers a spoken response)."""

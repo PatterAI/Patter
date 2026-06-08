@@ -1,21 +1,275 @@
 ---
 title: "Hermes Agent"
-description: "Give your Hermes Agent a phone with Patter — connect the Patter MCP server so Hermes can place calls, or let an in-call Patter agent consult Hermes as its brain."
+description: "Give your Hermes Agent a phone with Patter — make Hermes the voice the caller talks to, connect the Patter MCP server so Hermes can place calls, or let an in-call Patter agent consult Hermes as its brain."
 icon: "phone"
 ---
 
 [Hermes Agent](https://github.com/NousResearch/hermes-agent) is a self-hosted AI
 assistant that grows with you through modular skills and persistent memory. If you
-already run Hermes, Patter adds phone calling in two directions:
+already run Hermes, Patter adds phone calling in three directions:
 
-- **Direction A — Hermes places calls.** Connect [Patter](https://github.com/PatterAI/Patter)
+- **Direction A — Patter is the voice shell, Hermes is the brain.** Patter answers the
+  phone — carrier, speech-to-text, turn-taking, barge-in, text-to-speech — and routes
+  every conversation turn to your Hermes agent as the LLM, using the new
+  [`HermesLLM`](#what-if-hermes-could-pick-up-the-phone) pipeline provider. **This is
+  the headline integration**; the rest of this page covers the other two directions.
+- **Direction B — Hermes places calls.** Connect [Patter](https://github.com/PatterAI/Patter)
   as an MCP server and Hermes gains tools to dial out, read transcripts, end calls,
   and inspect metrics.
-- **Direction B — Patter consults Hermes.** During a live call, a Patter agent can
-  reach back to Hermes for deeper reasoning, fresh information, or a decision the
+- **Direction C — Patter consults Hermes on demand.** During a live call, a Patter agent
+  can reach back to Hermes for deeper reasoning, fresh information, or a decision the
   in-call prompt can't make on its own.
 
-Pick one direction or wire up both — they are independent.
+Pick one direction or wire up several — they are independent.
+
+## What if Hermes could pick up the phone?
+
+You already have a Hermes agent with memory, skills, and tools. Direction A puts it on
+the end of a phone line: a caller dials your number, and they are *talking to Hermes* —
+not to a separate voice bot that occasionally asks Hermes for help. Patter is the **voice
+shell**: it owns everything that has to happen in real time (the carrier leg, transcribing
+the caller, deciding when a turn ends, handling barge-in, and speaking the reply), and for
+the one thing that requires intelligence — *what to say next* — it calls your Hermes agent.
+
+This is the same shape as wiring a custom LLM into a hosted voice platform, except **you
+own the voice layer** and run it next to Hermes. Because Hermes is reached over its
+OpenAI-compatible HTTP API (`POST /v1/chat/completions`), the new `HermesLLM` provider
+plugs straight into Patter's **pipeline mode** as the LLM stage.
+
+### Architecture
+
+```
+Caller (any number)
+  │
+  ▼
+Twilio / Telnyx DID  ──  Patter verifies the carrier signature at the public boundary
+  │
+  ▼
+PATTER VOICE SHELL  (pipeline mode)
+  · STT  — transcribes the caller
+  · turn-taking / VAD / barge-in  — decides when the caller is done
+  · TTS  — speaks Hermes's reply
+  │
+  │  each turn  →  HermesLLM  →  POST http://127.0.0.1:8642/v1/chat/completions
+  ▼
+HERMES AGENT RUNTIME  (tools · memory · skills run here, before it replies)
+  │
+  ▼
+reply text  →  Patter speaks it  →  back to the caller
+```
+
+Hermes runtimes execute tools, recall memory, and run skills *before* they answer, so a
+single turn can take **30–90 s**. That is why `HermesLLM` defaults to a **120 s** request
+timeout (the generic provider's 60 s, raised for the preset) instead of the short ceiling
+used for raw inference providers — a turn that runs a tool isn't cut off mid-thought.
+
+<Note>
+  **Where the session lives.** Hermes is **stateless** and keys continuity off
+  **HTTP headers**, not the OpenAI `user` field. Each phone call maps to **one** Hermes
+  session: Patter sends `X-Hermes-Session-Id: patter-call-<call_id>` on every turn, so
+  multi-turn session and transcript continuity inside a call works without any extra
+  wiring. This is on by default for `HermesLLM`.
+
+  For **long-term memory scoping** across calls, set `session_key` (Python) /
+  `sessionKey` (TypeScript) on `HermesLLM` — Patter then also sends
+  `X-Hermes-Session-Key: <your value>`, which tells Hermes which memory scope this
+  caller belongs to. It is **off by default** (no header sent) and is opt-in:
+
+  ```python
+  llm = HermesLLM(session_key="customer-42")   # scopes long-term memory to this caller
+  ```
+
+  ```ts
+  const llm = new HermesLLM({ sessionKey: 'customer-42' });
+  ```
+
+  (Patter also still sends `user=patter-call-<call_id>` for upstream-log correlation,
+  but that field is **not** what drives the Hermes session — the headers are.)
+</Note>
+
+### Prerequisites for the voice shell
+
+```bash
+# Python SDK
+pip install getpatter
+
+# TypeScript SDK
+npm install getpatter
+```
+
+You also need:
+
+- A running **Hermes agent runtime** with its OpenAI-compatible API server enabled
+  (next section).
+- A **phone number** from Twilio or Telnyx, and the matching carrier credentials.
+- An **STT** and a **TTS** provider for the pipeline (e.g. Deepgram STT + ElevenLabs TTS).
+  Patter handles the audio; Hermes only ever sees text.
+
+### Setting up the Hermes gateway
+
+Hermes exposes an OpenAI-compatible HTTP API. Enable it and bind it to loopback so only
+processes on the same machine — including Patter — can reach it:
+
+```bash
+export API_SERVER_ENABLED=true
+export API_SERVER_HOST=127.0.0.1          # loopback only — never expose to the internet
+export API_SERVER_PORT=8642               # the HermesLLM default base_url targets :8642
+export API_SERVER_KEY="choose-a-strong-key"
+export API_SERVER_MODEL_NAME="hermes-agent"   # the model id HermesLLM sends; optional
+```
+
+Start the gateway (per your Hermes install), then confirm it answers on loopback before
+wiring Patter to it:
+
+```bash
+curl -s http://127.0.0.1:8642/v1/models \
+  -H "Authorization: Bearer $API_SERVER_KEY"
+```
+
+A JSON list of models (including your `hermes-agent`) means the gateway is up. If `curl`
+hangs or refuses the connection, fix that before going further — Patter can't reach a
+gateway that isn't listening.
+
+<Note>
+  **`HermesLLM` reads these env vars for you.** With `API_SERVER_KEY` and
+  (optionally) `API_SERVER_MODEL_NAME` set, you can construct `HermesLLM()` with no
+  arguments — it defaults `base_url` to `http://127.0.0.1:8642/v1`, the api key from
+  `API_SERVER_KEY`, and the model from `API_SERVER_MODEL_NAME` (falling back to
+  `hermes-agent`).
+</Note>
+
+### Running Patter locally
+
+Build a pipeline-mode agent whose LLM is `HermesLLM`. Patter wraps the carrier, STT, and
+TTS around it; Hermes is the brain for every turn.
+
+#### Python example
+
+```python
+from getpatter import Patter, HermesLLM, DeepgramSTT, ElevenLabsTTS, Twilio
+
+phone = Patter(
+    carrier=Twilio(),                    # reads TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN
+    phone_number="+15550001234",
+)
+
+# Passing stt + tts (and no engine=) selects pipeline mode: STT -> LLM -> TTS.
+agent = phone.agent(
+    system_prompt=(
+        "You are the front desk. Keep replies short and speakable; "
+        "you have phone callers, not chat users."
+    ),
+    stt=DeepgramSTT(),                   # reads DEEPGRAM_API_KEY
+    llm=HermesLLM(),                     # base_url http://127.0.0.1:8642/v1, 120 s timeout
+    tts=ElevenLabsTTS(),                 # reads ELEVENLABS_API_KEY
+)
+
+phone.serve(agent)                       # listens for inbound calls
+```
+
+`HermesLLM()` with no arguments is the common case — every default comes from the env. To
+target a remote Hermes or pin a model explicitly:
+
+```python
+llm = HermesLLM(
+    base_url="http://hermes-host.internal:8642/v1",
+    model="hermes-agent",
+    api_key="...",          # or leave unset to read API_SERVER_KEY
+    timeout=120.0,          # raise further if your turns run long
+)
+```
+
+#### TypeScript example
+
+```ts
+import { Patter, HermesLLM, DeepgramSTT, ElevenLabsTTS, Twilio } from 'getpatter';
+
+const phone = new Patter({
+  carrier: new Twilio(),                 // reads TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN
+  phoneNumber: '+15550001234',
+});
+
+// Passing stt + tts (and no engine) selects pipeline mode: STT -> LLM -> TTS.
+const agent = phone.agent({
+  systemPrompt:
+    'You are the front desk. Keep replies short and speakable; ' +
+    'you have phone callers, not chat users.',
+  stt: new DeepgramSTT(),                // reads DEEPGRAM_API_KEY
+  llm: new HermesLLM(),                  // baseUrl http://127.0.0.1:8642/v1, 120 s timeout
+  tts: new ElevenLabsTTS(),              // reads ELEVENLABS_API_KEY
+});
+
+await phone.serve(agent);
+```
+
+To target a remote Hermes or pin a model explicitly:
+
+```ts
+const llm = new HermesLLM({
+  baseUrl: 'http://hermes-host.internal:8642/v1',
+  model: 'hermes-agent',
+  apiKey: process.env.API_SERVER_KEY,    // or omit to read it automatically
+  timeout: 120,                          // seconds; raise if turns run long
+});
+```
+
+### Connecting Twilio or Telnyx
+
+The voice shell answers a real phone number. `phone.serve(agent)` exposes a webhook that
+the carrier calls when a number rings; point your number's voice webhook at Patter's
+public URL.
+
+- **Local dev:** run Patter behind a tunnel (a stable `cloudflared` hostname is best — an
+  ephemeral quick-tunnel rotates its URL on every restart) and set that URL as the number's
+  voice webhook.
+- **Twilio:** in the [Twilio console](https://console.twilio.com/us1/develop/phone-numbers/manage/incoming),
+  set the number's "A call comes in" webhook to your Patter URL. Patter verifies
+  `X-Twilio-Signature` on every inbound request.
+- **Telnyx:** in the [Telnyx portal](https://portal.telnyx.com/#/app/numbers/my-numbers),
+  point the number's voice connection at your Patter URL. Patter verifies the Ed25519
+  signature.
+
+Only **Patter** is exposed to the carrier. Hermes stays on loopback (see Security notes).
+
+### Production deployment
+
+For an always-on line, run Patter and Hermes **on the same machine** and keep the gateway
+private:
+
+- Bind the Hermes gateway to `127.0.0.1:8642` (`API_SERVER_HOST=127.0.0.1`) — Patter
+  reaches it over loopback, so it never needs to be tunnelled or ngrok-exposed.
+- Expose **only** Patter's carrier webhook to the internet — via a stable production
+  webhook URL or a persistent `cloudflared` tunnel with a fixed hostname.
+- Set a strong `API_SERVER_KEY` even on loopback; defence in depth.
+- Pin the SDK version and your provider/carrier keys via environment variables, never in
+  source.
+
+### Security notes
+
+- **Hermes does not need to be on the public internet.** When Patter and Hermes run on the
+  same box, Patter reaches Hermes on `127.0.0.1:8642` — only Patter is exposed to the
+  carrier. This is **safer than the hosted custom-LLM path**, where your brain endpoint has
+  to be publicly reachable for the platform's cloud to call it. Here the brain stays
+  loopback-only and the only public surface is the carrier webhook, which verifies the
+  carrier signature at the boundary.
+- **Use a strong `API_SERVER_KEY`.** Even on loopback, set a real key; `HermesLLM` sends it
+  as a bearer token and Patter never logs it.
+- **Keep the prompt voice-safe.** Phone replies are spoken, not read — ask the agent for
+  short, plain sentences and no markdown, lists, or code blocks. Long replies bloat the
+  voice context and slow the next turn.
+- **PII and recording consent.** Calls may carry personal information; if you record or
+  store transcripts, follow your jurisdiction's consent rules (two-party-consent states,
+  GDPR, etc.). Treat transcripts as PII and don't log full caller numbers (Patter logs only
+  the last four digits by default).
+
+<Note>
+  **Generic OpenAI-compatible runtimes.** `HermesLLM` is a thin preset over the generic
+  `OpenAICompatibleLLM` provider, which drives *any* OpenAI-compatible chat endpoint —
+  Hermes, OpenClaw, Ollama, vLLM, LM Studio, or a custom gateway. To point the voice shell
+  at one of those instead, use `OpenAICompatibleLLM(base_url=..., model=...)` directly. See
+  the [OpenClaw page](/integrations/openclaw#openclaw-as-the-primary-llm-voice-shell) for
+  the OpenClaw preset and the generic-runtime note.
+</Note>
 
 ## Prerequisites
 
@@ -37,7 +291,7 @@ See the [patter-mcp README](https://github.com/PatterAI/patter-mcp#readme) for f
 
 ---
 
-## Direction A — Hermes places calls via Patter
+## Direction B — Hermes places calls via Patter
 
 Hermes is a native [Model Context Protocol](https://modelcontextprotocol.io) client.
 Register the Patter MCP server under the top-level `mcp_servers` key in
@@ -133,11 +387,13 @@ Hermes can summarise without polling `get_transcript` separately:
 
 ---
 
-## Direction B — Patter consults Hermes as the brain
+## Direction C — Patter consults Hermes on demand
 
-Here the roles flip: Patter runs the call (speech-to-text, the voice agent,
-text-to-speech, and the carrier) and, when the in-call agent needs help, it
-**consults Hermes** over HTTP. This is the *dispatch + consult* pattern described
+Here the roles are split differently: Patter runs the call with a *local* in-call agent and
+only reaches Hermes when that agent decides it needs help — it **consults Hermes** over
+HTTP. Use this when most turns are simple and only a few need Hermes's full reasoning;
+Direction A (above) routes *every* turn to Hermes. This is the *dispatch + consult* pattern
+described
 on the [Python consult page](/python-sdk/consult) and the
 [TypeScript consult page](/typescript-sdk/consult) — Hermes stays off the
 per-turn path and is only consulted when the in-call agent decides it needs to.
@@ -264,9 +520,13 @@ the adapter forwards that to Hermes, and the answer is spoken back to the caller
 
 ## What's next
 
-- **Read the [Concepts](/concepts) page** to understand Patter's three modes
-  (Realtime / ConvAI / Pipeline) and which one matches your latency / cost
-  trade-off.
+- **Read the [Concepts](/concepts) page** to understand Patter's voice modes
+  (Realtime end-to-end vs. Pipeline composed STT + LLM + TTS) — the voice shell
+  (Direction A) is a pipeline-mode agent with `HermesLLM` as the LLM stage.
+- **OpenClaw** runs the same way — see
+  [OpenClaw as the primary LLM](/integrations/openclaw#openclaw-as-the-primary-llm-voice-shell)
+  for the `OpenClawLLM` preset and the generic `OpenAICompatibleLLM` provider
+  (Ollama / vLLM / LM Studio).
 - **Consult feature reference**: [Python](/python-sdk/consult) ·
   [TypeScript](/typescript-sdk/consult).
 - **Get a phone number**: [Twilio console](https://console.twilio.com/us1/develop/phone-numbers/manage/incoming)

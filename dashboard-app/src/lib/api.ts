@@ -4,10 +4,53 @@
 //   - dev: Vite proxies /api/* to a local SDK server (see vite.config.ts).
 //   - prod: the SDK serves the bundled SPA from the same origin.
 
+/**
+ * Dashboard auth token (PR #153). When the SDK serves the dashboard behind a
+ * token (auto-generated on an exposed / tunnelled bind, or an explicit
+ * ``dashboardToken``), it reaches the SPA as ``?token=`` on the page URL. The
+ * SPA must echo it back on every data request — ``fetch`` via the
+ * ``Authorization: Bearer`` header, and ``EventSource`` (which cannot set
+ * headers) via the ``?token=`` query param. Without this the secured dashboard
+ * renders but every ``/api/dashboard/*`` request 401s and the UI shows no data.
+ */
+export function getDashboardToken(): string {
+  try {
+    return new URLSearchParams(window.location.search).get('token') ?? '';
+  } catch {
+    return '';
+  }
+}
+
+/** Append the dashboard token as a query param — for EventSource / links that cannot send headers. */
+export function withToken(path: string): string {
+  const token = getDashboardToken();
+  if (!token) return path;
+  const sep = path.includes('?') ? '&' : '?';
+  return `${path}${sep}token=${encodeURIComponent(token)}`;
+}
+
+/** Build fetch headers, adding ``Authorization: Bearer <token>`` when a dashboard token is present. */
+function authHeaders(extra?: Record<string, string>): Record<string, string> {
+  const token = getDashboardToken();
+  return {
+    Accept: 'application/json',
+    ...(extra ?? {}),
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  };
+}
+
 export interface TranscriptEntry {
   readonly role: string;
   readonly text: string;
   readonly timestamp: number;
+  /**
+   * Monotonic per-call turn index (FIX-5, issue #154). Present on lines
+   * emitted by the live ``transcript_line`` path and on ``recordTurn`` mirrors.
+   * Used by ``toUiTranscript`` to sort by (turnIndex, user<assistant) so a
+   * late-arriving user line lands ABOVE its agent line. ``undefined`` on
+   * legacy / hydrated rows that pre-date the field.
+   */
+  readonly turnIndex?: number;
 }
 
 export interface CallCost {
@@ -153,6 +196,7 @@ function parseTranscript(raw: unknown): readonly TranscriptEntry[] | undefined {
       role: asString(item.role),
       text: asString(item.text),
       timestamp: asNumber(item.timestamp),
+      turnIndex: asOptionalNumber(item.turnIndex),
     });
   }
   return entries;
@@ -224,7 +268,7 @@ function parseAggregates(raw: unknown): Aggregates {
 
 async function getJson(path: string): Promise<unknown> {
   const response = await fetch(path, {
-    headers: { Accept: 'application/json' },
+    headers: authHeaders(),
   });
   if (!response.ok) {
     throw new Error(`Request to ${path} failed with status ${response.status}`);
@@ -254,7 +298,7 @@ export async function fetchAggregates(): Promise<Aggregates> {
 export async function fetchCall(callId: string): Promise<CallRecord | null> {
   const url = `/api/dashboard/calls/${encodeURIComponent(callId)}`;
   const response = await fetch(url, {
-    headers: { Accept: 'application/json' },
+    headers: authHeaders(),
   });
   if (response.status === 404) return null;
   if (!response.ok) {
@@ -279,7 +323,7 @@ export async function deleteCalls(callIds: readonly string[]): Promise<string[]>
     const url = `/api/dashboard/calls/${encodeURIComponent(callIds[0])}`;
     const response = await fetch(url, {
       method: 'DELETE',
-      headers: { Accept: 'application/json' },
+      headers: authHeaders(),
     });
     if (!response.ok) {
       throw new Error(`DELETE ${url} failed with status ${response.status}`);
@@ -293,7 +337,7 @@ export async function deleteCalls(callIds: readonly string[]): Promise<string[]>
   }
   const response = await fetch('/api/dashboard/calls/delete', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ call_ids: callIds }),
   });
   if (!response.ok) {

@@ -195,11 +195,11 @@ describe('MetricsStore', () => {
     expect(active!.turns).toHaveLength(3);
     // Five entries: bot/Hello + user/Hi+bot/Howcan + user/joke+bot/Why
     expect(active!.transcript).toHaveLength(5);
-    expect(active!.transcript![0]).toEqual({ role: 'assistant', text: 'Hello!', timestamp: 1 });
-    expect(active!.transcript![1]).toEqual({ role: 'user', text: 'Hi there', timestamp: 2 });
-    expect(active!.transcript![2]).toEqual({ role: 'assistant', text: 'How can I help?', timestamp: 2 });
-    expect(active!.transcript![3]).toEqual({ role: 'user', text: 'Tell me a joke', timestamp: 3 });
-    expect(active!.transcript![4]).toEqual({ role: 'assistant', text: 'Why did the chicken…', timestamp: 3 });
+    expect(active!.transcript![0]).toEqual({ role: 'assistant', text: 'Hello!', timestamp: 1, turnIndex: 0 });
+    expect(active!.transcript![1]).toEqual({ role: 'user', text: 'Hi there', timestamp: 2, turnIndex: 1 });
+    expect(active!.transcript![2]).toEqual({ role: 'assistant', text: 'How can I help?', timestamp: 2, turnIndex: 1 });
+    expect(active!.transcript![3]).toEqual({ role: 'user', text: 'Tell me a joke', timestamp: 3, turnIndex: 2 });
+    expect(active!.transcript![4]).toEqual({ role: 'assistant', text: 'Why did the chicken…', timestamp: 3, turnIndex: 2 });
   });
 
   it("recordTurn skips '[interrupted]' agent_text and empty user_text from active.transcript", () => {
@@ -219,8 +219,8 @@ describe('MetricsStore', () => {
 
     const active = store.getActive('c1');
     expect(active!.transcript).toHaveLength(2);
-    expect(active!.transcript![0]).toEqual({ role: 'assistant', text: 'Greeting', timestamp: 1 });
-    expect(active!.transcript![1]).toEqual({ role: 'user', text: 'wait', timestamp: 2 });
+    expect(active!.transcript![0]).toEqual({ role: 'assistant', text: 'Greeting', timestamp: 1, turnIndex: 0 });
+    expect(active!.transcript![1]).toEqual({ role: 'user', text: 'wait', timestamp: 2, turnIndex: 1 });
   });
 
   // BUG 2 — completed entries preserve transcript and turns from the active
@@ -243,8 +243,8 @@ describe('MetricsStore', () => {
     // subsequent recordCallEnd.
     expect(completed!.turns).toHaveLength(1);
     expect(completed!.transcript).toHaveLength(2);
-    expect(completed!.transcript![0]).toEqual({ role: 'user', text: 'Hi', timestamp: 5 });
-    expect(completed!.transcript![1]).toEqual({ role: 'assistant', text: 'Hello', timestamp: 5 });
+    expect(completed!.transcript![0]).toEqual({ role: 'user', text: 'Hi', timestamp: 5, turnIndex: 0 });
+    expect(completed!.transcript![1]).toEqual({ role: 'assistant', text: 'Hello', timestamp: 5, turnIndex: 0 });
   });
 
   it("recordCallEnd preserves active turns and falls back to running transcript when data.transcript is empty", () => {
@@ -584,5 +584,65 @@ describe('MetricsStore — recordCallEnd does not duplicate after updateCallStat
     const now = Date.now() / 1000;
     const inWindow = store.getCallsInRange(now - 86_400, now + 60);
     expect(inWindow.map((c) => c.call_id)).toContain('CA-window');
+  });
+
+  // --- FIX-5 (issue #154): live per-line transcript + (turnIndex, role) dedup ---
+
+  it('recordTranscriptLine appends a live line to the active transcript and publishes SSE', () => {
+    const store = new MetricsStore();
+    const events: Array<{ type: string; data: Record<string, unknown> }> = [];
+    store.on('sse', (e) => events.push(e));
+    store.recordCallStart({ call_id: 'c1', caller: '+1111', callee: '+2222' });
+
+    store.recordTranscriptLine({ call_id: 'c1', turnIndex: 0, role: 'user', text: 'What time is it?' });
+
+    const active = store.getActive('c1');
+    expect(active?.transcript).toHaveLength(1);
+    expect(active?.transcript?.[0]).toMatchObject({ role: 'user', text: 'What time is it?', turnIndex: 0 });
+
+    const sse = events.find((e) => e.type === 'transcript_line');
+    expect(sse).toBeDefined();
+    expect(sse?.data).toMatchObject({ call_id: 'c1', turnIndex: 0, role: 'user', text: 'What time is it?' });
+  });
+
+  it('recordTranscriptLine ignores tool roles, empty text, and unknown calls', () => {
+    const store = new MetricsStore();
+    store.recordCallStart({ call_id: 'c1' });
+    store.recordTranscriptLine({ call_id: 'c1', turnIndex: 0, role: 'tool' as 'user', text: 'x' });
+    store.recordTranscriptLine({ call_id: 'c1', turnIndex: 0, role: 'user', text: '' });
+    store.recordTranscriptLine({ call_id: 'nope', turnIndex: 0, role: 'user', text: 'hi' });
+    expect(store.getActive('c1')?.transcript ?? []).toHaveLength(0);
+  });
+
+  it('recordTurn does NOT duplicate a line already emitted live by (turnIndex, role)', () => {
+    const store = new MetricsStore();
+    store.recordCallStart({ call_id: 'c1' });
+    // Live lines first (the forward path), both on turn 0.
+    store.recordTranscriptLine({ call_id: 'c1', turnIndex: 0, role: 'user', text: 'Hello' });
+    store.recordTranscriptLine({ call_id: 'c1', turnIndex: 0, role: 'assistant', text: 'Hi there' });
+    // Metrics turn for the same index arrives later — must not re-push.
+    store.recordTurn({
+      call_id: 'c1',
+      turn: { turn_index: 0, user_text: 'Hello', agent_text: 'Hi there' },
+    });
+    const transcript = store.getActive('c1')?.transcript ?? [];
+    expect(transcript).toHaveLength(2);
+    expect(transcript.map((e) => `${e.role}:${e.text}`)).toEqual([
+      'user:Hello',
+      'assistant:Hi there',
+    ]);
+  });
+
+  it('recordTurn still mirrors text when no live line was emitted for that turn', () => {
+    const store = new MetricsStore();
+    store.recordCallStart({ call_id: 'c1' });
+    store.recordTurn({
+      call_id: 'c1',
+      turn: { turn_index: 0, user_text: 'Hello', agent_text: 'Hi there' },
+    });
+    const transcript = store.getActive('c1')?.transcript ?? [];
+    expect(transcript).toHaveLength(2);
+    expect(transcript[0]).toMatchObject({ role: 'user', text: 'Hello', turnIndex: 0 });
+    expect(transcript[1]).toMatchObject({ role: 'assistant', text: 'Hi there', turnIndex: 0 });
   });
 });

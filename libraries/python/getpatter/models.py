@@ -419,6 +419,16 @@ class Agent:
     model: str = "gpt-realtime-mini"
     language: str = "en"
     first_message: str = ""
+    # Opt-in spoken fallback for pipeline mode when the per-turn LLM stream
+    # raises (gateway-down / 120 s timeout) BEFORE any assistant text was
+    # spoken. Agent-runtime providers (Hermes / OpenClaw) run tools+memory
+    # internally so a turn can take 30-90 s; on failure the caller currently
+    # hears SILENCE then a silent turn-end. When set to a non-empty string,
+    # the SDK synthesizes and speaks this line through the normal TTS turn
+    # lifecycle (subject to barge-in). ``None`` (default) preserves today's
+    # behaviour: nothing is spoken on LLM error. Pipeline mode only —
+    # Realtime / ConvAI surface provider errors on their own audio path.
+    llm_error_message: str | None = None
     tools: tuple[dict, ...] | None = None
     provider: ProviderMode = "openai_realtime"
     stt: STTConfig | None = None  # which STT provider to use in pipeline mode
@@ -515,6 +525,19 @@ class Agent:
     # ``eagerness='low'``). ``None`` (default) keeps the adapter's current
     # hardcoded turn_detection. See :class:`RealtimeTurnDetection`.
     realtime_turn_detection: "RealtimeTurnDetection | None" = None
+    # OpenAI Realtime — gate the model response on the Whisper transcript
+    # arriving (legacy behavior). ``None``/``False`` (default) decouples the
+    # speech-to-speech response from Whisper: the model replies as soon as the
+    # user stops speaking (server ``input_audio_buffer.committed``) rather than
+    # waiting ~500 ms for the ``input_audio_transcription.completed`` event.
+    # The Whisper transcript then serves as pure observability — populating the
+    # dashboard / history / ``on_transcript`` only; it never triggers, gates, or
+    # cancels the response. The hallucination filter still drops phantom
+    # transcripts from the DISPLAYED transcript regardless of this flag. Set to
+    # ``True`` to restore the older transcript-gated path (production-recommended
+    # default is the decoupled behavior — it reclaims the ~500 ms Whisper wait).
+    # Realtime modes only; pipeline mode uses its own dedicated STT.
+    realtime_gate_response_on_transcript: bool | None = None
     # Opt-in barge-in confirmation strategies (pipeline mode). With the
     # default empty tuple the SDK falls back to the legacy "interrupt
     # immediately on VAD speech_start" behaviour. When at least one

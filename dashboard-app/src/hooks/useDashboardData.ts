@@ -13,6 +13,7 @@ import {
   fetchActiveCalls,
   fetchAggregates,
   fetchCalls,
+  withToken,
   type Aggregates,
 } from '../lib/api';
 import type { Call } from '../lib/mappers';
@@ -138,7 +139,7 @@ export function useDashboardData(): DashboardData {
     closeEventSource();
     let source: EventSource;
     try {
-      source = new EventSource('/api/dashboard/events');
+      source = new EventSource(withToken('/api/dashboard/events'));
     } catch (err) {
       setError(describeError(err));
       scheduleReconnect();

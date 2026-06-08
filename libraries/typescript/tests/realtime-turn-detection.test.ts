@@ -91,16 +91,21 @@ describe('[unit] buildAIAdapter wires the knobs onto the adapter options', () =>
     expect(opts.noiseReduction).toBe('near_field');
   });
 
-  it('forwards agent.realtimeTurnDetection to the v1 adapter', () => {
+  it('routes the v1 OpenAIRealtime() engine through the GA adapter and still forwards realtimeTurnDetection (issue #154)', () => {
     const engine = new OpenAIRealtime({ apiKey: 'sk-test' });
     const agent: AgentOptions = {
       systemPrompt: 'You are helpful.',
       engine,
       realtimeTurnDetection: { type: 'semantic_vad', eagerness: 'low' },
     };
-    const adapter = buildAIAdapter(CONFIG, agent) as OpenAIRealtimeAdapter;
+    const adapter = buildAIAdapter(CONFIG, agent);
+    // Issue #154: the v1 OpenAIRealtime() engine now routes through the GA
+    // adapter (nested audio.{input,output}.format + internal PCM24→mulaw8
+    // transcode), mirroring the Python SDK. It still extends
+    // OpenAIRealtimeAdapter, so the stream-handler `instanceof` feature gates
+    // (barge-in, sendText, cancelResponse, …) keep firing.
+    expect(adapter).toBeInstanceOf(OpenAIRealtime2Adapter);
     expect(adapter).toBeInstanceOf(OpenAIRealtimeAdapter);
-    expect(adapter).not.toBeInstanceOf(OpenAIRealtime2Adapter);
     const opts = (adapter as unknown as { options: { turnDetection?: RealtimeTurnDetection } }).options;
     expect(opts.turnDetection).toEqual({ type: 'semantic_vad', eagerness: 'low' });
   });
@@ -175,5 +180,55 @@ describe('[unit] RealtimeTurnDetection runtime validation (parity with Python __
           turnDetection: { type: 'server_vad', threshold: 0.7 },
         }),
     ).not.toThrow();
+  });
+});
+
+describe('[unit] gateResponseOnTranscript decouples the model response from Whisper', () => {
+  it('OpenAIRealtime carries gateResponseOnTranscript', () => {
+    const engine = new OpenAIRealtime({ apiKey: 'sk-test', gateResponseOnTranscript: true });
+    expect(engine.gateResponseOnTranscript).toBe(true);
+  });
+
+  it('OpenAIRealtime2 carries gateResponseOnTranscript', () => {
+    const engine = new OpenAIRealtime2({ apiKey: 'sk-test', gateResponseOnTranscript: true });
+    expect(engine.gateResponseOnTranscript).toBe(true);
+  });
+
+  it('leaves gateResponseOnTranscript undefined by default (backward compat)', () => {
+    const engine = new OpenAIRealtime2({ apiKey: 'sk-test' });
+    expect(engine.gateResponseOnTranscript).toBeUndefined();
+  });
+
+  it('adapter defaults getGateResponseOnTranscript() to false (new decoupled behavior)', () => {
+    const engine = new OpenAIRealtime2({ apiKey: 'sk-test' });
+    const agent: AgentOptions = { systemPrompt: 'You are helpful.', engine };
+    const adapter = buildAIAdapter(CONFIG, agent) as OpenAIRealtime2Adapter;
+    expect(adapter.getGateResponseOnTranscript()).toBe(false);
+  });
+
+  it('forwards engine-level gateResponseOnTranscript=true to the adapter (legacy opt-in)', () => {
+    const engine = new OpenAIRealtime2({ apiKey: 'sk-test', gateResponseOnTranscript: true });
+    const agent: AgentOptions = { systemPrompt: 'You are helpful.', engine };
+    const adapter = buildAIAdapter(CONFIG, agent) as OpenAIRealtime2Adapter;
+    expect(adapter.getGateResponseOnTranscript()).toBe(true);
+  });
+
+  it('forwards the v1 OpenAIRealtime() engine flag through the GA adapter too', () => {
+    const engine = new OpenAIRealtime({ apiKey: 'sk-test', gateResponseOnTranscript: true });
+    const agent: AgentOptions = { systemPrompt: 'You are helpful.', engine };
+    const adapter = buildAIAdapter(CONFIG, agent) as OpenAIRealtime2Adapter;
+    expect(adapter).toBeInstanceOf(OpenAIRealtimeAdapter);
+    expect(adapter.getGateResponseOnTranscript()).toBe(true);
+  });
+
+  it('lets the agent override (openaiRealtimeGateResponseOnTranscript) win over the engine marker', () => {
+    const engine = new OpenAIRealtime2({ apiKey: 'sk-test', gateResponseOnTranscript: false });
+    const agent: AgentOptions = {
+      systemPrompt: 'You are helpful.',
+      engine,
+      openaiRealtimeGateResponseOnTranscript: true,
+    };
+    const adapter = buildAIAdapter(CONFIG, agent) as OpenAIRealtime2Adapter;
+    expect(adapter.getGateResponseOnTranscript()).toBe(true);
   });
 });

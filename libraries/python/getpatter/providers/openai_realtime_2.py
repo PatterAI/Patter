@@ -162,13 +162,14 @@ class OpenAIRealtime2Adapter(OpenAIRealtimeAdapter):
                     # carrier-loopback echo of the agent's OWN outbound audio
                     # in PSTN no-AEC scenarios.
                     #
-                    # ``create_response`` / ``interrupt_response`` are pinned
-                    # ``False`` (never publicly tunable): Patter defers
-                    # ``response.create`` to the stream-handler AFTER validating
-                    # ``transcript_input`` against the hallucination filter, and
-                    # gates barge-in client-side. POINT 1b raises the threshold /
-                    # switches to semantic_vad eagerness='low' to reject
-                    # speakerphone noise WITHOUT touching this safety gating.
+                    # ``create_response`` / ``interrupt_response`` are tied to
+                    # ``gate_response_on_transcript`` by ``build_turn_detection``:
+                    # DEFAULT (gate False) => both True (server-managed: the
+                    # server owns VAD, end-of-turn, response creation, and the
+                    # barge-in cancel signal); LEGACY (gate True) => both False
+                    # (client-managed). False barge-ins on speakerphone / PSTN
+                    # loopback are tuned via turn_detection.threshold (raise) or
+                    # semantic_vad eagerness='low' — NOT a client gate.
                 },
                 "output": {
                     "format": fmt,
@@ -178,18 +179,37 @@ class OpenAIRealtime2Adapter(OpenAIRealtimeAdapter):
             "instructions": self.instructions
             or f"You are a helpful voice assistant. Respond in {self.language}. Be concise and natural.",
         }
+        # turn_detection (issue #154 — server-managed turn-taking by default):
+        #  - DEFAULT (gate_response_on_transcript False): create_response=True
+        #    AND interrupt_response=True. The SERVER owns VAD, end-of-turn,
+        #    response creation (auto-created on input_audio_buffer.committed),
+        #    and the barge-in cancel signal. The e2e model replies immediately,
+        #    in parallel with the Whisper transcript — no ~500 ms transcript
+        #    wait. On this WebSocket transport the client still sends
+        #    conversation.item.truncate + send_clear on speech_started (the
+        #    server auto-truncates only on WebRTC/SIP), but it does NOT send
+        #    response.cancel and does NOT drive response.create.
+        #  - LEGACY (gate_response_on_transcript True): create_response=False
+        #    AND interrupt_response=False so the stream handler drives
+        #    response.create after the hallucination filter and runs the full
+        #    client-managed barge-in path (cancel_response + MIN_AGENT_SPEAKING
+        #    gate). Escape hatch for no-AEC PSTN self-interruption.
+        # Both keys are tied to the single switch inside build_turn_detection.
         config["audio"]["input"]["turn_detection"] = build_turn_detection(
             self.turn_detection,
             default_type=self.vad_type or OpenAIRealtimeVADType.SERVER_VAD.value,
             default_silence_ms=self.silence_duration_ms,
             include_response_gating=True,
+            gate_response_on_transcript=self.gate_response_on_transcript,
         )
-        # GA nests noise reduction under audio.input (the v1 shape puts it at
-        # the top level). Omitted entirely when unset (today's behavior).
+        # GA nests noise reduction under audio.input AND renames the key: the
+        # v1-beta ``input_audio_noise_reduction`` becomes ``noise_reduction``
+        # (same ``input_audio_`` → nested drop as format/transcription). Sending
+        # the v1 key makes the GA endpoint reject session.update with
+        # "Unknown parameter: 'session.audio.input.input_audio_noise_reduction'"
+        # and the call drops at pickup. Omitted entirely when unset.
         if self.noise_reduction is not None:
-            config["audio"]["input"]["input_audio_noise_reduction"] = {
-                "type": self.noise_reduction
-            }
+            config["audio"]["input"]["noise_reduction"] = {"type": self.noise_reduction}
         if self.temperature is not None:
             config["temperature"] = self.temperature
         if self.max_response_output_tokens is not None:
@@ -382,6 +402,41 @@ class OpenAIRealtime2Adapter(OpenAIRealtimeAdapter):
             self._running = False
             raise
 
+    def _warn_if_output_format_unexpected(self, data: dict) -> None:
+        """Log-only safety net for issue #154.
+
+        The GA server echoes the *effective* session config in
+        ``session.updated``. We request ``audio/pcm`` @ 24 kHz and transcode
+        PCM24->mulaw8 ourselves (see ``_transcode_outbound_pcm24_to_mulaw8``).
+        If a future GA schema change ever made the server return a different
+        output format, that transcode — which assumes PCM16-LE @ 24 kHz —
+        would silently corrupt audio, exactly the v1-beta failure mode #154
+        fixed. Warn so the drift surfaces in logs instead of as static. Never
+        gates audio.
+        """
+        session = data.get("session")
+        if not isinstance(session, dict):
+            return
+        audio = session.get("audio")
+        if not isinstance(audio, dict):
+            return
+        output = audio.get("output")
+        if not isinstance(output, dict):
+            return
+        fmt = output.get("format")
+        if not isinstance(fmt, dict):
+            return
+        rate = fmt.get("rate")
+        if fmt.get("type") != "audio/pcm" or rate not in (None, 24000):
+            logger.warning(
+                "OpenAI Realtime 2: server-echoed output format %s differs from "
+                "the requested audio/pcm@24000 — the outbound PCM24->mulaw8 "
+                "transcode assumes PCM16-LE 24 kHz, so carrier audio may be "
+                "garbled (issue #154). Informational only; audio is not gated "
+                "on this.",
+                fmt,
+            )
+
     async def _await_session_updated_ga(self) -> None:
         """Wait for ``session.updated``, raising on ``error`` events."""
         deadline = asyncio.get_event_loop().time() + self._SESSION_UPDATE_TIMEOUT
@@ -408,6 +463,7 @@ class OpenAIRealtime2Adapter(OpenAIRealtimeAdapter):
             except Exception:
                 continue
             if data.get("type") == "session.updated":
+                self._warn_if_output_format_unexpected(data)
                 return
             if data.get("type") == "error":
                 err = data.get("error") or {}

@@ -152,7 +152,7 @@ class TestWrapCallbacks:
         user_cb = AsyncMock()
         srv.on_call_start = user_cb
 
-        on_start, _, _ = srv._wrap_callbacks()
+        on_start, _, _, _ = srv._wrap_callbacks()
         await on_start({"call_id": "c1"})
 
         store.record_call_start.assert_called_once_with({"call_id": "c1"})
@@ -166,7 +166,7 @@ class TestWrapCallbacks:
         user_cb = AsyncMock()
         srv.on_call_end = user_cb
 
-        _, on_end, _ = srv._wrap_callbacks()
+        _, on_end, _, _ = srv._wrap_callbacks()
         data = {"call_id": "c1", "metrics": {"duration": 10}}
         await on_end(data)
 
@@ -181,7 +181,7 @@ class TestWrapCallbacks:
         user_cb = AsyncMock()
         srv.on_metrics = user_cb
 
-        _, _, on_metrics = srv._wrap_callbacks()
+        _, _, on_metrics, _ = srv._wrap_callbacks()
         await on_metrics({"turn": 1})
 
         store.record_turn.assert_called_once_with({"turn": 1})
@@ -194,7 +194,7 @@ class TestWrapCallbacks:
         user_cb = AsyncMock()
         srv.on_call_start = user_cb
 
-        on_start, _, _ = srv._wrap_callbacks()
+        on_start, _, _, _ = srv._wrap_callbacks()
         await on_start({"call_id": "c1"})
 
         user_cb.assert_awaited_once()
@@ -206,7 +206,7 @@ class TestWrapCallbacks:
         srv._metrics_store = store
         srv.on_call_start = None
 
-        on_start, _, _ = srv._wrap_callbacks()
+        on_start, _, _, _ = srv._wrap_callbacks()
         await on_start({"call_id": "c1"})
 
         store.record_call_start.assert_called_once()
@@ -242,7 +242,7 @@ class TestWrapCallbacks:
         # Real on-disk CallLogger so we can read back metadata.json.
         srv._call_logger = CallLogger(tmp_path)
 
-        on_start, _, _ = srv._wrap_callbacks()
+        on_start, _, _, _ = srv._wrap_callbacks()
         # Simulate the bridge's on_call_start payload for an outbound call:
         # the WS query string was empty so caller/callee are blank.
         await on_start(

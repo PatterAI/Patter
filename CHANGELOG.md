@@ -1,29 +1,5 @@
 ## Unreleased
 
-### Security
-
-- **The built-in metrics dashboard is now auto-protected with a generated token
-  when it would be reachable beyond `127.0.0.1`.** The dashboard UI and the
-  `/api/*` call-data routes serve call transcripts and metadata (PII).
-  Previously, when the dashboard was enabled with no `dashboard_token` /
-  `dashboardToken` on an off-host bind (a tunnel is active, an explicit public
-  `webhook_url` / `webhookUrl` is configured, or `PATTER_BIND_HOST` is set to a
-  non-loopback address), the SDK published those routes unauthenticated and only
-  emitted a soft warning — a foot-gun easy to miss in a tunnelled demo or a
-  containerised deploy. Now, in exactly that configuration, the SDK
-  auto-generates a one-time token, mounts the dashboard behind it, and prints
-  the ready-to-use URL (`http://127.0.0.1:<port>/?token=<token>`) in the startup
-  banner. The dashboard remains available with zero config — it is no longer
-  reachable unauthenticated by accident. This is **not a breaking change**: the
-  dashboard is still always served and inbound/outbound calls are unaffected
-  (the carrier webhook, media-stream, and `/health` routes always mount). The
-  token is per-process — set `dashboard_token` / `dashboardToken` for a stable
-  one across restarts. Loopback-only local dev is unchanged (still served open,
-  zero-friction); an explicit `dashboard_token` serves behind that token as
-  before.
-  - `libraries/python/getpatter/server.py`,
-    `libraries/typescript/src/server.ts`.
-
 ### Added
 
 - **Anonymous usage telemetry (opt-out, on by default).** Patter now sends a
@@ -92,12 +68,146 @@
   control command itself never emits telemetry, so disabling never phones home.
   `libraries/python/getpatter/cli.py` / `telemetry/{events,consent,install_id,call_metrics}.py`
   and the TypeScript mirrors; both SDKs verified byte-for-byte at parity.
-- **`provider` option on `agent()` in the Python SDK** (`"openai_realtime"` /
-  `"elevenlabs_convai"` / `"pipeline"`), an explicit alternative to `engine=`
-  for selecting the AI mode. Optional with no default — existing callers are
-  unaffected. Closes a pre-existing parity gap: the TypeScript SDK already
-  exposed `provider` on `agent()`; Python did not, so the same logical agent
-  could not be expressed in both SDKs.
+
+## 0.6.5 (2026-06-05)
+
+### Added
+
+- **`llm_error_message` / `llmErrorMessage` — opt-in spoken fallback when the
+  pipeline-mode LLM stream raises before any text is spoken.** Agent-runtime
+  providers (HermesLLM, OpenClawLLM, OpenAICompatibleLLM) may take 30-90 s to
+  complete a turn (tools, memory, skills); on gateway-down or timeout the caller
+  previously heard silence then a silent turn-end. Set
+  `llm_error_message="Sorry, I'm having trouble right now."` (Python) /
+  `llmErrorMessage: "Sorry, I'm having trouble right now."` (TypeScript) on the
+  agent to speak that line through the normal TTS path (subject to barge-in).
+  Four-part trigger condition: (1) a real LLM error (not a clean barge-in
+  abort), (2) zero assistant *audio* emitted this turn — gated on whether a PCM
+  chunk actually reached the carrier (`first_tts_chunk` / `ttsFirstByteSent`),
+  not on whether tokens were received, so a provider that streams partial tokens
+  ("Let me check…") and then times out before a sentence boundary (the chunker
+  buffered them, TTS never ran, the caller heard silence) still triggers the
+  fallback, while a turn that already spoke a full sentence does not double-speak,
+  (3) agent still owns the floor, (4) the field is set to a non-empty string.
+  `undefined` / `None` (default) preserves today's silence-on-error behaviour —
+  fully backward compatible. Pipeline mode only; Realtime and ConvAI surface
+  provider errors on their own audio path.
+  `libraries/python/getpatter/models.py` (`Agent.llm_error_message`),
+  `libraries/python/getpatter/client.py` (`Patter.agent(llm_error_message=...)`),
+  `libraries/python/getpatter/stream_handler.py`
+  (`PipelineStreamHandler._process_streaming_response` error branch),
+  `libraries/typescript/src/types.ts` (`AgentOptions.llmErrorMessage`),
+  `libraries/typescript/src/stream-handler.ts` (`runPipelineLlm` catch branch).
+
+## 0.6.4 (2026-06-05)
+
+### Security
+
+- **The built-in metrics dashboard is now auto-protected with a generated token
+  when it would be reachable beyond `127.0.0.1`.** The dashboard UI and the
+  `/api/*` call-data routes serve call transcripts and metadata (PII).
+  Previously, when the dashboard was enabled with no `dashboard_token` /
+  `dashboardToken` on an off-host bind (a tunnel is active, an explicit public
+  `webhook_url` / `webhookUrl` is configured, or `PATTER_BIND_HOST` is set to a
+  non-loopback address), the SDK published those routes unauthenticated and only
+  emitted a soft warning — a foot-gun easy to miss in a tunnelled demo or a
+  containerised deploy. Now, in exactly that configuration, the SDK
+  auto-generates a one-time token, mounts the dashboard behind it, and prints
+  the ready-to-use URL (`http://127.0.0.1:<port>/?token=<token>`) in the startup
+  banner. The dashboard remains available with zero config — it is no longer
+  reachable unauthenticated by accident. This is **not a breaking change**: the
+  dashboard is still always served and inbound/outbound calls are unaffected
+  (the carrier webhook, media-stream, and `/health` routes always mount). The
+  token is per-process — set `dashboard_token` / `dashboardToken` for a stable
+  one across restarts. Loopback-only local dev is unchanged (still served open,
+  zero-friction); an explicit `dashboard_token` serves behind that token as
+  before.
+  - `libraries/python/getpatter/server.py`,
+    `libraries/typescript/src/server.ts`.
+
+### Added
+
+- **Patter as a voice shell in front of an agent runtime — three new
+  pipeline-mode LLM providers (`OpenAICompatibleLLM`, `HermesLLM`,
+  `OpenClawLLM`).** Drive a phone call where the LLM is an external,
+  OpenAI-compatible agent runtime reached at `POST {base_url}/chat/completions`:
+  Patter owns the carrier leg, STT, turn-taking / VAD / barge-in, and TTS, and
+  each conversation turn is answered by the runtime (which can run its own
+  tools, memory, and skills before replying). Used like any other pipeline LLM
+  — `phone.agent(llm=HermesLLM())` (Python) / `phone.agent({ llm: new
+  HermesLLM() })` (TypeScript).
+  - **`OpenAICompatibleLLM`** (Python `getpatter/llm/openai_compatible.py`,
+    TypeScript `src/llm/openai-compatible.ts`) — the generic provider for *any*
+    OpenAI-compatible chat endpoint: Hermes, OpenClaw, Ollama, vLLM, LM Studio,
+    or a custom gateway. `base_url` and `model` are required; `timeout` defaults
+    to **60 s** (configurable) so a runtime that runs tools mid-turn isn't cut
+    off — the base OpenAI provider's shorter ceiling is unchanged for raw
+    inference. Keyless local gateways (Ollama / vLLM / LM Studio) are supported:
+    pass no key and the request goes out without an `Authorization` header.
+    `extra_headers` / `extraHeaders` merge after the `getpatter/<version>`
+    User-Agent so it can't be silently clobbered.
+  - **`HermesLLM`** (Python `getpatter/llm/hermes.py`, TypeScript
+    `src/llm/hermes.ts`) — thin preset over `OpenAICompatibleLLM` for the Hermes
+    agent runtime: `base_url` defaults to `http://127.0.0.1:8642/v1`, `model` to
+    `hermes-agent` (env `API_SERVER_MODEL_NAME` fallback), api key from env
+    `API_SERVER_KEY`, `timeout` **120 s**.
+  - **`OpenClawLLM`** (Python `getpatter/llm/openclaw.py`, TypeScript
+    `src/llm/openclaw.ts`) — thin preset over `OpenAICompatibleLLM` for the
+    OpenClaw agent runtime: takes an `agent` id (e.g. `receptionist`), validated
+    and mapped to `model="openclaw/<agent>"` using the **same** charset rule and
+    namespaced pass-through as the shipped `consult` OpenClaw preset; `base_url`
+    defaults to `http://127.0.0.1:18789/v1`, api key from env `OPENCLAW_API_KEY`,
+    `timeout` **120 s**.
+- **Per-call session continuity for the agent-runtime providers (opt-in), now
+  with three decoupled signals.** Each runtime keys session continuity
+  differently, so `OpenAICompatibleLLM` exposes three independent, optional
+  signals — emit any subset:
+  - **`session_user_prefix` / `sessionUserPrefix`** → OpenAI `user` field as a
+    stable `{prefix}{call_id}` (value `patter-call-<call_id>` for the presets).
+    OpenClaw's gateway derives its session from `user`; Hermes uses it only for
+    upstream-log correlation.
+  - **`session_id_header` + `session_id_prefix` / `sessionIdHeader` +
+    `sessionIdPrefix`** → a per-call request header carrying
+    `{session_id_prefix}{call_id}`, for runtimes that key session/transcript
+    continuity off a header rather than `user`.
+  - **`session_key_header` + `session_key` / `sessionKeyHeader` +
+    `sessionKey`** → a *static* request header for long-term memory scoping
+    (value is the configured key, not the call id). Omitted unless the value is
+    set.
+
+  Each signal is gated independently and merged into the per-request headers;
+  when none are configured the request is byte-identical to the base provider
+  (no `user`, no extra headers). Preset wiring:
+  - **`HermesLLM`** — Hermes is stateless and keys continuity off **headers**:
+    `session_id_header="X-Hermes-Session-Id"`, `session_id_prefix="patter-call-"`
+    (so each call sends `X-Hermes-Session-Id: patter-call-<call_id>` by default).
+    A new optional `session_key` (Python) / `sessionKey` (TypeScript) constructor
+    arg, default `None` / `undefined`, opts into long-term memory scoping by
+    emitting `X-Hermes-Session-Key: <value>`. `session_user_prefix` is kept at
+    `patter-call-` for upstream-log correlation but does **not** drive the Hermes
+    session.
+  - **`OpenClawLLM`** — wire-identical to before: `session_user_prefix=
+    "patter-call-"` (OpenClaw's gateway keys off `user`) plus
+    `session_id_header="x-openclaw-session-key"` with `session_id_prefix=""` so
+    the header still carries the raw `call_id`. No memory-scope header.
+
+  The presets enable continuity by default; the generic provider leaves it
+  **off** unless opted in. To make `call_id` reach the provider, `LLMLoop.run`
+  threads it through to `provider.stream()` — Python via an optional `call_id`
+  keyword on the `LLMProvider.stream` protocol (the loop now introspects each
+  provider's `stream` signature and only passes `call_id` to providers that
+  accept it or take `**kwargs`, so a minimal custom provider that declares
+  neither is **not** broken), TypeScript via an optional `callId` field on
+  `LLMStreamOptions` (an extra options-object property a provider ignores is a
+  no-op). Both are additive and optional, so every existing provider is
+  unaffected. `libraries/python/getpatter/llm/openai_compatible.py`,
+  `libraries/python/getpatter/llm/hermes.py`,
+  `libraries/python/getpatter/llm/openclaw.py`,
+  `libraries/python/getpatter/services/llm_loop.py`,
+  `libraries/typescript/src/llm/openai-compatible.ts`,
+  `libraries/typescript/src/llm/hermes.ts`,
+  `libraries/typescript/src/llm/openclaw.ts`,
+  `libraries/typescript/src/llm-loop.ts`.
 - **`allow_insecure_dashboard` / `allowInsecureDashboard` escape hatch (opt-in,
   default off).** New optional config on `Patter(...)` (Python) and `serve(...)`
   `ServeOptions` (TypeScript), defaulting to `False` / `false`. When the
@@ -146,10 +256,29 @@
   for noisy speakerphone links. Each unset field falls back to the adapter's
   current default (server_vad, threshold 0.5, prefix_padding_ms 300,
   silence_duration_ms 300), so omitting it preserves today's behaviour exactly.
-  `semantic_vad` emits `{type, eagerness}` only. Patter keeps its client-gated
-  barge-in safety values (`create_response` / `interrupt_response` stay internal,
-  not exposed). `libraries/python/getpatter/models.py`,
+  `semantic_vad` emits `{type, eagerness}` only. `create_response` /
+  `interrupt_response` are not exposed here — they are managed by Patter via the
+  `gate_response_on_transcript` / `gateResponseOnTranscript` flag (server-managed
+  by default; see Changed). `libraries/python/getpatter/models.py`,
   `libraries/typescript/src/types.ts`.
+
+- **`gate_response_on_transcript` / `gateResponseOnTranscript` opt-out (default
+  off) — restore the legacy client-managed Realtime turn-taking.** New optional
+  flag on the Realtime engine markers (`Realtime(gate_response_on_transcript=True)`
+  / `new Realtime({ gateResponseOnTranscript: true })`, plus the `Realtime2` /
+  GA marker) and on `Patter.agent(realtime_gate_response_on_transcript=...)` /
+  `phone.agent({ realtimeGateResponseOnTranscript })`. Default `False` /
+  `undefined` keeps the new server-managed behaviour (see Changed). Set it to
+  `True` to emit `create_response: false` + `interrupt_response: false`, which
+  re-gates the model response on the input transcript arriving and restores the
+  client-driven barge-in (anti-flicker `MIN_AGENT_SPEAKING` gate + client
+  `response.cancel` + barge-in metric anchoring) — the escape hatch for no-AEC
+  PSTN self-interruption, where the server VAD would otherwise barge-in on the
+  echo of the agent's own audio. `libraries/python/getpatter/models.py` /
+  `getpatter/engines/openai.py` / `openai_realtime_2.py` /
+  `getpatter/providers/openai_realtime.py`,
+  `libraries/typescript/src/types.ts` / `engines/openai.ts` / `engines/openai-2.ts`
+  / `providers/openai-realtime.ts`.
 
 - **Per-tool execution timeout — long (30-60s) browser-automation / external-API
   tools no longer drop the call at 10s.** New `timeout_s` on the Python `tool()`
@@ -287,6 +416,37 @@
 
 ### Changed
 
+- **End-to-end OpenAI Realtime turn-taking is now fully server-managed (lower
+  latency, correct barge-in).** For the `OpenAIRealtime` (v1) and
+  `OpenAIRealtime2` (GA) engines the OpenAI server now owns VAD, end-of-turn
+  detection, response creation, AND the barge-in cancel — Patter no longer
+  drives any of them client-side (`turn_detection.create_response` and
+  `interrupt_response` are both on by default). Two user-visible effects:
+  - **The agent replies as soon as the caller stops speaking**, driven by the
+    server's audio-buffer commit, instead of waiting ~500 ms for the Whisper
+    input transcript. The transcript is now pure observability (dashboard /
+    history / `on_transcript`); it never gates or cancels the response — so the
+    input-transcription model choice no longer affects reply latency, and a
+    Whisper hallucination can no longer suppress a real reply.
+  - **Barge-in is handled by the server.** When the caller talks over the
+    agent, the server cancels its own response. On Patter's WebSocket transport
+    the client still clears the carrier playout buffer and sends
+    `conversation.item.truncate` for the played offset (OpenAI only
+    auto-truncates on WebRTC/SIP), but the client-side anti-flicker
+    `MIN_AGENT_SPEAKING` gate, the manual `response.cancel`, and the barge-in
+    metric re-anchoring were removed from the engine path. The re-anchoring was
+    inflating `total_ms` (it re-anchored the turn to user-speech-start) and
+    caused a multi-second freeze after a barge-in; reported reply latency now
+    reflects the true server round-trip again.
+  Tune false barge-ins on noisy / no-AEC PSTN links with `RealtimeTurnDetection`
+  (raise `threshold`, or `semantic_vad` `eagerness="low"`) rather than a client
+  gate. **Not an API break** — no signature changed and the prior client-managed
+  path remains available via the opt-out flag (see Added). ElevenLabs ConvAI
+  (already server-managed — `sendClear` only) and Pipeline mode (client-owned
+  Silero VAD + barge-in) are unchanged.
+  `libraries/python/getpatter/providers/openai_realtime.py` / `openai_realtime_2.py`
+  / `stream_handler.py`, `libraries/typescript/src/providers/openai-realtime.ts`
+  / `openai-realtime-2.ts` / `stream-handler.ts`.
 - **Public config collections are now immutable.** `Agent.tools` / `guardrails`
   / `text_transforms` / `mcp_servers` and `Guardrail.blocked_terms` are tuples
   (Python, `frozen=True`) / `readonly` arrays (TypeScript). Code comparing these
@@ -299,6 +459,29 @@
   `agent()` helper already defaulted to `gpt-realtime-mini`).
 
 ### Fixed
+
+- **Twilio + OpenAI Realtime (`OpenAIRealtime()` engine) garbled/static audio
+  on all models (TypeScript).** The TypeScript SDK still routed the
+  `openai_realtime` engine through the legacy v1-beta adapter, which sent the
+  deprecated flat `output_audio_format: g711_ulaw` session shape to the GA
+  Realtime endpoint. OpenAI's GA models (the v1 engine defaults to
+  `gpt-realtime-mini`) ignore the flat field and return PCM16 @ 24 kHz, which
+  Patter then forwarded to Twilio framed as 8 kHz mulaw — producing persistent
+  static and breaking inbound STT (the model transcribed the noise as random
+  text). Both the `openai_realtime` and `openai_realtime_2` engines now route
+  through the GA adapter (`OpenAIRealtime2Adapter`, selected in
+  `libraries/typescript/src/server.ts`), which sends the nested
+  `audio.{input,output}.format = { type: "audio/pcm", rate: 24000 }` shape and
+  transcodes PCM24→mulaw8 internally — matching the Python SDK, which already
+  unified this routing in `libraries/python/getpatter/stream_handler.py`. The
+  default model is unchanged (`gpt-realtime-mini` for `OpenAIRealtime`,
+  `gpt-realtime-2` for `OpenAIRealtime2`). Also added a log-only warning (both
+  SDKs) when the server-echoed effective output format differs from the
+  requested `audio/pcm` @ 24 kHz, so any future GA schema drift surfaces in
+  logs instead of as silent static. `libraries/typescript/src/server.ts`,
+  `libraries/typescript/src/stream-handler.ts`,
+  `libraries/typescript/src/providers/openai-realtime-2.ts`,
+  `libraries/python/getpatter/providers/openai_realtime_2.py`.
 
 - **Realtime tool context now includes `callee` (TypeScript).** In Realtime
   mode the TypeScript tool-dispatch context passed `{ call_id, caller }` only,

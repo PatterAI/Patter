@@ -16,6 +16,7 @@ __all__ = [
 ]
 
 import asyncio
+import inspect
 import json
 import logging
 from dataclasses import dataclass
@@ -34,6 +35,40 @@ from typing import (
 from getpatter.observability.tracing import SPAN_LLM, SPAN_TOOL, start_span
 
 logger = logging.getLogger("getpatter")
+
+
+# Per-provider-TYPE memo of whether ``stream`` accepts a ``call_id`` keyword.
+# Built-in providers declare ``call_id`` (or ``**kwargs``) and hit the fast
+# path after the first call; a user's minimal custom provider whose ``stream``
+# is ``(self, messages, tools=None, *, cancel_event=None)`` is detected once and
+# called WITHOUT ``call_id`` thereafter — otherwise it would raise TypeError.
+_provider_accepts_call_id: dict[type, bool] = {}
+
+
+def _stream_accepts_call_id(provider: object) -> bool:
+    """Whether ``provider.stream`` tolerates a ``call_id`` keyword argument.
+
+    True when the signature declares a parameter named ``call_id`` OR accepts
+    ``**kwargs`` (``VAR_KEYWORD``). Cached per provider type to keep the hot
+    path cheap. Some callables (C-level, ``functools.partial`` without
+    ``__wrapped__``) refuse introspection — those default to ``False`` so the
+    safe no-``call_id`` path is taken rather than risking a new crash site.
+    """
+    provider_type = type(provider)
+    cached = _provider_accepts_call_id.get(provider_type)
+    if cached is not None:
+        return cached
+    accepts = False
+    try:
+        sig = inspect.signature(provider.stream)
+        for param in sig.parameters.values():
+            if param.name == "call_id" or param.kind is inspect.Parameter.VAR_KEYWORD:
+                accepts = True
+                break
+    except (ValueError, TypeError):  # pragma: no cover - exotic callables
+        accepts = False
+    _provider_accepts_call_id[provider_type] = accepts
+    return accepts
 
 
 # ---------------------------------------------------------------------------
@@ -404,6 +439,7 @@ class LLMProvider(Protocol):
         tools: list[dict] | None = None,
         *,
         cancel_event: asyncio.Event | None = None,
+        call_id: str | None = None,
     ) -> AsyncIterator[dict]:
         """Yield streaming chunks for the given messages and tools.
 
@@ -417,6 +453,12 @@ class LLMProvider(Protocol):
         interruption" symptom. Optional for backward compatibility;
         providers that don't honour it are still usable but the user-facing
         interrupt-then-respond loop will be slower.
+
+        ``call_id`` is the stable per-call identifier (optional). Agent-runtime
+        providers (Hermes / OpenClaw / any OpenAI-compatible gateway) thread it
+        into the OpenAI ``user`` field so the runtime derives one session per
+        phone call. Existing providers ignore it harmlessly — it is purely
+        additive and OFF unless a provider opts in via ``session_user_prefix``.
         """
         ...  # pragma: no cover
 
@@ -605,6 +647,7 @@ class OpenAILLMProvider:
         tools: list[dict] | None = None,
         *,
         cancel_event: asyncio.Event | None = None,
+        call_id: str | None = None,
     ) -> AsyncIterator[dict]:
         """Yield normalised chunks from OpenAI Chat Completions.
 
@@ -622,6 +665,12 @@ class OpenAILLMProvider:
         is checked between upstream chunks and short-circuits the stream
         immediately so the next user transcript is not blocked behind a
         long-running fetch.
+
+        ``call_id`` (optional) is accepted for protocol parity with
+        session-aware providers but ignored here — the base OpenAI provider
+        emits no per-call ``user`` field. Subclasses (e.g. the
+        OpenAI-compatible agent-runtime provider) override ``stream`` to thread
+        it into ``_build_completion_kwargs``.
         """
         kwargs = self._build_completion_kwargs(messages, tools)
         response = await self._client.chat.completions.create(**kwargs)
@@ -912,9 +961,25 @@ class LLMLoop:
             _span_cm.__enter__()
             _span_exc_info: tuple = (None, None, None)
             try:
-                async for chunk in self._provider.stream(
-                    messages, self._openai_tools, cancel_event=cancel_event
-                ):
+                # Only thread ``call_id`` into providers whose ``stream``
+                # accepts it (or ``**kwargs``). A user's minimal custom provider
+                # with ``(messages, tools=None, *, cancel_event=None)`` would
+                # otherwise raise TypeError on the added keyword. ``cancel_event``
+                # predates this and every Protocol implementer tolerates it.
+                if _stream_accepts_call_id(self._provider):
+                    stream_iter = self._provider.stream(
+                        messages,
+                        self._openai_tools,
+                        cancel_event=cancel_event,
+                        call_id=call_context.get("call_id"),
+                    )
+                else:
+                    stream_iter = self._provider.stream(
+                        messages,
+                        self._openai_tools,
+                        cancel_event=cancel_event,
+                    )
+                async for chunk in stream_iter:
                     chunk_type = chunk.get("type")
 
                     if chunk_type == "text":

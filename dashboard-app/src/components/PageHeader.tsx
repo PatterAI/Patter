@@ -1,4 +1,5 @@
 import { IconArrowDown } from './icons';
+import { withToken } from '../lib/api';
 
 const RANGES = ['1h', '24h', '7d', 'All'] as const;
 
@@ -14,7 +15,7 @@ export interface PageHeaderProps {
  */
 function downloadCsv(): void {
   const a = document.createElement('a');
-  a.href = '/api/dashboard/export/calls?format=csv';
+  a.href = withToken('/api/dashboard/export/calls?format=csv');
   a.download = 'patter_calls.csv';
   a.rel = 'noopener';
   document.body.appendChild(a);

@@ -259,11 +259,54 @@ export function toUiCall(record: CallRecord): Call {
   return call;
 }
 
+/** Sort rank for transcript ordering within a single turn: user before
+ *  assistant before tool. FIX-5 (issue #154): a late-arriving user line
+ *  carrying the same ``turnIndex`` as its agent reply must render ABOVE it. */
+function roleRank(role: string): number {
+  switch (role) {
+    case 'user':
+      return 0;
+    case 'assistant':
+      return 1;
+    default:
+      return 2; // tool / unknown
+  }
+}
+
+/**
+ * Order transcript entries by (turnIndex, role) so live lines that arrive
+ * out of order (the Realtime user transcript lands AFTER the agent reply)
+ * still render user → assistant within each turn. FIX-5 (issue #154).
+ *
+ * Entries without a ``turnIndex`` (legacy / hydrated rows) keep their original
+ * relative order — the sort is stable and only compares when BOTH entries
+ * carry a numeric index. This keeps pre-#154 transcripts byte-identical.
+ */
+function sortTranscript(
+  transcript: readonly NonNullable<CallRecord['transcript']>[number][],
+): NonNullable<CallRecord['transcript']>[number][] {
+  return transcript
+    .map((entry, i) => ({ entry, i }))
+    .sort((a, b) => {
+      const ai = a.entry.turnIndex;
+      const bi = b.entry.turnIndex;
+      // Only reorder when both carry an index; otherwise preserve insertion
+      // order (stable) so legacy rows are untouched.
+      if (typeof ai === 'number' && typeof bi === 'number') {
+        if (ai !== bi) return ai - bi;
+        const rr = roleRank(a.entry.role) - roleRank(b.entry.role);
+        if (rr !== 0) return rr;
+      }
+      return a.i - b.i;
+    })
+    .map(({ entry }) => entry);
+}
+
 export function toUiTranscript(record: CallRecord): TranscriptTurn[] {
   const transcript = record.transcript;
   if (transcript && transcript.length > 0) {
     const out: TranscriptTurn[] = [];
-    for (const entry of transcript) {
+    for (const entry of sortTranscript([...transcript])) {
       const text = entry.text;
       switch (entry.role) {
         case 'user':

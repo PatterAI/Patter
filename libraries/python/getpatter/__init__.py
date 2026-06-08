@@ -19,7 +19,7 @@ Installation extras:
 See ``pyproject.toml`` and the top-level README for the full matrix.
 """
 
-__version__ = "0.6.3"
+__version__ = "0.6.5"
 
 from getpatter._speech_events import (
     AgentState,
@@ -122,6 +122,12 @@ from getpatter.llm.anthropic import LLM as AnthropicLLM
 from getpatter.llm.groq import LLM as GroqLLM
 from getpatter.llm.cerebras import LLM as CerebrasLLM
 from getpatter.llm.google import LLM as GoogleLLM
+from getpatter.llm.openai_compatible import (
+    LLM as OpenAICompatibleLLM,
+    OpenAICompatibleLLMProvider,
+)
+from getpatter.llm.hermes import LLM as HermesLLM
+from getpatter.llm.openclaw import LLM as OpenClawLLM
 
 # Telephony adapters — surface for tests + advanced integrations that need
 # direct access to provider-specific APIs (e.g. custom webhook wiring).
@@ -464,6 +470,10 @@ __all__ = [
     "GroqLLM",
     "CerebrasLLM",
     "GoogleLLM",
+    "OpenAICompatibleLLM",
+    "OpenAICompatibleLLMProvider",
+    "HermesLLM",
+    "OpenClawLLM",
     "TwilioAdapter",
     "TelnyxAdapter",
     "PlivoAdapter",

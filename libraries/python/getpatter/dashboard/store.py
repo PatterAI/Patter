@@ -34,6 +34,8 @@ class MetricsStoreProtocol(Protocol):
 
     def record_turn(self, data: dict[str, Any]) -> None: ...
 
+    def record_transcript_line(self, data: dict[str, Any]) -> None: ...
+
     def record_call_initiated(self, data: dict[str, Any]) -> None: ...
 
     def update_call_status(self, call_id: str, status: str, **extra: Any) -> None: ...
@@ -237,6 +239,53 @@ class MetricsStore:
                         break
         self._publish("call_status", {"call_id": call_id, "status": status, **extra})
 
+    def record_transcript_line(self, data: dict[str, Any]) -> None:
+        """Record a single transcript line (user/assistant) as it becomes known.
+
+        FIX-5 (issue #154): the live forward path for the dashboard transcript.
+        The Realtime stream handler calls this the moment each line is known —
+        the user line right after the hallucination filter accepts it, the
+        assistant line when its turn flushes — keyed by the monotonic
+        ``turnIndex`` reserved at turn-open (``reserve_turn_index``). Each line
+        is appended to the active call's ``transcript`` array and broadcast over
+        SSE as a ``transcript_line`` event so the dashboard can render lines as
+        they arrive and re-sort by ``(turnIndex, user<assistant)`` — making a
+        late-arriving user line land ABOVE its agent line. ``record_turn``
+        de-dups against the lines pushed here by ``(turnIndex, role)`` so the
+        metrics path never double-pushes the same text.
+
+        ``data`` keys: ``call_id``, ``turnIndex`` (int), ``role``
+        (``"user"`` / ``"assistant"``), ``text`` (str). Parity with TS
+        ``recordTranscriptLine``.
+        """
+        call_id = data.get("call_id", "")
+        role = data.get("role", "")
+        text = data.get("text", "")
+        turn_index = data.get("turnIndex")
+        if not call_id or role not in ("user", "assistant") or not text:
+            return
+        line = {
+            "role": role,
+            "text": text,
+            "timestamp": time.time(),
+            "turnIndex": turn_index,
+        }
+        with self._lock:
+            active = self._active_calls.get(call_id)
+            if active is not None:
+                active.setdefault("transcript", [])
+                active["transcript"].append(line)
+        # Publish outside lock to avoid deadlock with subscribe/unsubscribe
+        self._publish(
+            "transcript_line",
+            {
+                "call_id": call_id,
+                "turnIndex": turn_index,
+                "role": role,
+                "text": text,
+            },
+        )
+
     def record_turn(self, data: dict[str, Any]) -> None:
         """Append a completed conversation turn to the active call (publishes ``turn_complete``)."""
         call_id = data.get("call_id", "")
@@ -248,6 +297,58 @@ class MetricsStore:
             active = self._active_calls.get(call_id)
             if active is not None:
                 active["turns"].append(turn_dict)
+                # FIX-5 (issue #154): mirror the round-trip text into the flat
+                # ``transcript`` array so the live pane has an accumulating
+                # history — but de-dup by ``(turnIndex, role)`` so a line the
+                # Realtime path already pushed live via ``record_transcript_line``
+                # is not duplicated. Parity with TS ``recordTurn``.
+                transcript = active.setdefault("transcript", [])
+                turn_index = (
+                    turn_dict.get("turn_index") if isinstance(turn_dict, dict) else None
+                )
+                user_text = (
+                    turn_dict.get("user_text", "")
+                    if isinstance(turn_dict, dict)
+                    else ""
+                )
+                agent_text = (
+                    turn_dict.get("agent_text", "")
+                    if isinstance(turn_dict, dict)
+                    else ""
+                )
+                ts = (
+                    turn_dict.get("timestamp") if isinstance(turn_dict, dict) else None
+                ) or time.time()
+
+                def _already_live(role: str) -> bool:
+                    return turn_index is not None and any(
+                        entry.get("turnIndex") == turn_index
+                        and entry.get("role") == role
+                        for entry in transcript
+                    )
+
+                if user_text and not _already_live("user"):
+                    transcript.append(
+                        {
+                            "role": "user",
+                            "text": user_text,
+                            "timestamp": ts,
+                            "turnIndex": turn_index,
+                        }
+                    )
+                if (
+                    agent_text
+                    and agent_text != "[interrupted]"
+                    and not _already_live("assistant")
+                ):
+                    transcript.append(
+                        {
+                            "role": "assistant",
+                            "text": agent_text,
+                            "timestamp": ts,
+                            "turnIndex": turn_index,
+                        }
+                    )
         # Publish outside lock to avoid deadlock with subscribe/unsubscribe
         self._publish("turn_complete", {"call_id": call_id, "turn": turn_dict})
 

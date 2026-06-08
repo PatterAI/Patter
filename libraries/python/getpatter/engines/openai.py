@@ -7,7 +7,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
-    pass
+    # Imported for the ``turn_detection`` forward-reference annotation only.
+    # ``RealtimeTurnDetection`` validates itself in its own ``__post_init__``
+    # (models.py) so no construction-time validation is needed on the marker —
+    # the value is already validated before it reaches us.
+    from getpatter.models import RealtimeTurnDetection
 
 __all__ = ["Realtime"]
 
@@ -53,6 +57,13 @@ class Realtime:
     # noise, or switch to ``semantic_vad`` eagerness='low'). ``None`` (default)
     # keeps the adapter's current turn_detection.
     turn_detection: "RealtimeTurnDetection | None" = None
+    # When ``True``, gate the model response on the Whisper transcript
+    # arriving (legacy behavior). ``None``/``False`` (default) decouples the
+    # response: the model replies as soon as the user stops speaking
+    # (``input_audio_buffer.committed``), so it no longer waits ~500 ms for
+    # Whisper. The transcript becomes pure observability (dashboard / history /
+    # ``on_transcript``). Mirrors ``Patter.agent(realtime_gate_response_on_transcript=)``.
+    gate_response_on_transcript: bool | None = None
 
     def __post_init__(self) -> None:
         key = self.api_key or os.environ.get("OPENAI_API_KEY", "")

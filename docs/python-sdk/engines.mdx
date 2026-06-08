@@ -40,6 +40,15 @@ async def main():
 asyncio.run(main())
 ```
 
+<Note>
+**Telephony audio.** Over Twilio/Telnyx the `OpenAIRealtime` engine routes
+through the same GA-compatible adapter as [`OpenAIRealtime2`](#openairealtime2):
+it negotiates PCM-16-LE @ 24 kHz with OpenAI and transcodes to/from the
+carrier's mulaw 8 kHz internally. Current OpenAI Realtime models return PCM16 @
+24 kHz regardless of a legacy `g711_ulaw` request, so Patter standardises on PCM
+and converts on the carrier leg — you don't configure anything.
+</Note>
+
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `api_key` | `str` | `""` | OpenAI API key. Reads from `OPENAI_API_KEY` when empty. |

@@ -524,6 +524,18 @@ export interface AgentOptions {
    */
   readonly language?: string;
   readonly firstMessage?: string;
+  /**
+   * Opt-in spoken fallback for pipeline mode when the per-turn LLM stream
+   * throws (gateway-down / 120 s timeout) BEFORE any assistant text was
+   * spoken. Agent-runtime providers (Hermes / OpenClaw) run tools+memory
+   * internally so a turn can take 30-90 s; on failure the caller currently
+   * hears SILENCE then a silent turn-end. When set to a non-empty string,
+   * the SDK synthesizes and speaks this line through the normal TTS turn
+   * lifecycle (subject to barge-in). ``undefined`` (default) preserves
+   * today's behaviour: nothing is spoken on LLM error. Pipeline mode only.
+   * Mirrors Python ``llm_error_message`` on ``Patter.agent()`` / ``Agent``.
+   */
+  readonly llmErrorMessage?: string;
   /** Tool definitions — ``Tool`` class instances from ``getpatter``. */
   readonly tools?: ReadonlyArray<ToolInstance>;
   /**
@@ -717,6 +729,25 @@ export interface AgentOptions {
    * and `turn_detection` on `engines.openai.Realtime`.
    */
   readonly realtimeTurnDetection?: RealtimeTurnDetection;
+  /**
+   * Gate the OpenAI Realtime model's response on the Whisper input
+   * transcript (legacy behavior). OpenAI Realtime mode only.
+   *
+   * - `false` / `undefined` (default) — the speech-to-speech model responds
+   *   as soon as the user stops speaking (`speech_stopped`), independently
+   *   of the Whisper transcription. The transcript becomes a pure
+   *   observability side-channel (dashboard / history / `onTranscript`) and
+   *   never gates, triggers, or cancels the response. Reclaims ~500 ms of
+   *   latency because the model no longer waits for Whisper.
+   * - `true` — restores the prior behavior where the response is requested
+   *   only after the Whisper `transcript_input` event arrives. Production
+   *   flows should keep the default; this is for callers that depended on
+   *   the old transcript-gated ordering.
+   *
+   * Mirrors Python `realtime_gate_response_on_transcript` on `Patter.agent()`
+   * / `Agent` and `gate_response_on_transcript` on `engines.openai.Realtime`.
+   */
+  readonly openaiRealtimeGateResponseOnTranscript?: boolean;
   /**
    * When set, Patter prepends a native "# Preambles" guidance block to the
    * OpenAI Realtime session `instructions` so the model speaks one short,

@@ -106,27 +106,46 @@ export class OpenAIRealtime2Adapter extends OpenAIRealtimeAdapter {
     // even though the protocol accepts the MIME type (see class doc).
     const fmt = { type: 'audio/pcm', rate: 24000 };
     // GA nests turn_detection and noise_reduction under audio.input.
-    // Use the shared buildTurnDetection helper (same as v1) with GA-only
-    // create_response / interrupt_response gating set to false:
-    //  - Defer ``response.create`` to the application (post hallucination
-    //    filter check) — server VAD auto-create would generate phantom turns
-    //    on silence/echo hallucinations.
-    //  - ``interrupt_response: false`` — barge-in is gated client-side.
     const audioInput: Record<string, unknown> = {
       format: fmt,
       transcription: {
         model: opts.inputAudioTranscriptionModel ?? OpenAITranscriptionModel.WHISPER_1,
       },
+      // Response creation + barge-in cancellation (issue #154 — hand
+      // turn-taking to the server by default):
+      //  - DEFAULT (`gateResponseOnTranscript` false → SERVER-MANAGED):
+      //    `create_response: true` lets the SERVER auto-create the response
+      //    when it commits the user's audio buffer
+      //    (`input_audio_buffer.committed`). `interrupt_response: true` lets the
+      //    SERVER cancel the in-flight response on its own VAD `speech_started`.
+      //    The e2e model replies immediately, in parallel with the Whisper
+      //    transcript — no transcript wait (~500 ms reclaimed), no client-side
+      //    race. On a WebSocket transport the client STILL must clear the
+      //    carrier buffer (`sendClear`) and `conversation.item.truncate` the
+      //    played offset on barge-in (the server only auto-truncates on
+      //    WebRTC/SIP), but it does NOT send `response.cancel`. Whisper is
+      //    display-only — it can never trigger / gate / cancel the response.
+      //  - LEGACY (`gateResponseOnTranscript` true → CLIENT-MANAGED opt-out):
+      //    `create_response: false` + `interrupt_response: false` so the stream
+      //    handler drives `response.create` (after the hallucination filter)
+      //    and `response.cancel` (on barge-in) itself. Escape hatch for no-AEC
+      //    PSTN self-interruption. Both keys are tied to the same switch inside
+      //    `buildTurnDetection`.
       turn_detection: buildTurnDetection(opts.turnDetection, {
         defaultType: opts.vadType ?? OpenAIRealtimeVADType.SERVER_VAD,
         defaultSilenceMs: opts.silenceDurationMs ?? 300,
         includeResponseGating: true,
+        gateResponseOnTranscript: this.getGateResponseOnTranscript(),
       }),
     };
-    // GA nests noise reduction under audio.input (v1 puts it at top level).
-    // Omitted entirely when unset (today's behavior).
+    // GA nests noise reduction under audio.input AND renames the key: the
+    // v1-beta ``input_audio_noise_reduction`` becomes ``noise_reduction`` (same
+    // ``input_audio_`` → nested drop as format/transcription). Sending the v1
+    // key here makes the GA endpoint reject session.update with
+    // "Unknown parameter: 'session.audio.input.input_audio_noise_reduction'"
+    // and the call drops at pickup. Omitted entirely when unset (today's behavior).
     if (opts.noiseReduction !== undefined) {
-      audioInput.input_audio_noise_reduction = { type: opts.noiseReduction };
+      audioInput.noise_reduction = { type: opts.noiseReduction };
     }
     const config: Record<string, unknown> = {
       type: 'realtime',
@@ -253,6 +272,7 @@ export class OpenAIRealtime2Adapter extends OpenAIRealtimeAdapter {
           sessionCreated = true;
           ws.send(JSON.stringify({ type: 'session.update', session: this.buildGASessionConfig() }));
         } else if (msg.type === 'session.updated') {
+          this.warnIfOutputFormatUnexpected(msg);
           cleanup();
           resolve();
         } else if (msg.type === 'error') {
@@ -529,6 +549,35 @@ export class OpenAIRealtime2Adapter extends OpenAIRealtimeAdapter {
       out.writeInt16LE(Math.round((s0 + s1 * 2) / 3), i * 6 + 4);
     }
     return out;
+  }
+
+  /**
+   * Log-only safety net for issue #154. The GA server echoes the *effective*
+   * session config in `session.updated`; we request `audio/pcm` @ 24 kHz and
+   * transcode PCM24→mulaw8 ourselves (see
+   * `transcodeOutboundPcm24ToMulaw8Buffer`). If a future GA schema change ever
+   * made the server return a different output format, that transcode — which
+   * assumes PCM16-LE @ 24 kHz — would silently corrupt audio, exactly the
+   * v1-beta failure mode #154 fixed. Warn so the drift surfaces in logs instead
+   * of as static. Never gates audio.
+   */
+  private warnIfOutputFormatUnexpected(msg: unknown): void {
+    const fmt = (
+      msg as {
+        session?: { audio?: { output?: { format?: { type?: string; rate?: number } } } };
+      }
+    )?.session?.audio?.output?.format;
+    if (!fmt || typeof fmt !== 'object') return;
+    // `!= null` mirrors the Python helper's `rate not in (None, 24000)` — a
+    // missing/null rate is treated as acceptable in both SDKs.
+    if (fmt.type !== 'audio/pcm' || (fmt.rate != null && fmt.rate !== 24000)) {
+      getLogger().warn(
+        `OpenAI Realtime 2: server-echoed output format ${JSON.stringify(fmt)} ` +
+          'differs from the requested audio/pcm@24000 — the outbound ' +
+          'PCM24→mulaw8 transcode assumes PCM16-LE 24 kHz, so carrier audio may ' +
+          'be garbled (issue #154). Informational only; audio is not gated on this.',
+      );
+    }
   }
 
   /**

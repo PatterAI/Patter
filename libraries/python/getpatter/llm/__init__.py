@@ -20,4 +20,7 @@ __all__ = [
     "groq",
     "cerebras",
     "google",
+    "openai_compatible",
+    "hermes",
+    "openclaw",
 ]

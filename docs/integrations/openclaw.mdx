@@ -26,7 +26,7 @@ Ed25519 for Telnyx) at the public boundary. The caller reaches the receptionist 
 the trusted operator-side gateway path instead. If today you forward calls around
 OpenClaw's allowlist with carrier tricks, that hack goes away.
 
-There are two directions, and they compose:
+There are three directions, and they compose:
 
 - **Direction A — OpenClaw places calls via Patter.** Connect the `patter-mcp` server
   so your OpenClaw agent can dial, wait for a call to finish, and read back the
@@ -35,9 +35,13 @@ There are two directions, and they compose:
   feature at a small adapter so an in-call Patter agent can escalate a hard turn to one
   specific OpenClaw agent over HTTP. This call must stay **fast** — it runs while the
   caller waits on the line.
+- **Direction C — OpenClaw *is* the in-call LLM (voice shell).** Patter answers the
+  carrier leg and drives speech, and routes **every** turn to one scoped OpenClaw agent as
+  the LLM, using the new [`OpenClawLLM`](#openclaw-as-the-primary-llm-voice-shell) pipeline
+  provider. No adapter; the caller is talking to OpenClaw the whole time.
 
-Pick either, or wire both for a full loop: OpenClaw starts the call, and the in-call
-agent calls back into OpenClaw when it needs deeper reasoning.
+Pick one, or wire several for a full loop: OpenClaw starts the call, and an in-call agent
+calls back into OpenClaw when it needs deeper reasoning.
 
 <Note>
   **Which direction for what.** Direction A (`make_call` / `call_third_party` with
@@ -65,6 +69,149 @@ npm start          # Streamable HTTP on http://localhost:3000/mcp
 Provider and carrier keys (`OPENAI_API_KEY`, `TWILIO_ACCOUNT_SID`,
 `TWILIO_AUTH_TOKEN`, `TELNYX_API_KEY`, …) are read from the server's environment.
 See the [patter-mcp README](https://github.com/PatterAI/patter-mcp#readme) for full setup.
+
+For the voice-shell direction (Direction C) you only need the SDK — no MCP server:
+
+```bash
+pip install getpatter   # Python
+npm install getpatter   # TypeScript
+```
+
+## OpenClaw as the primary LLM (voice shell)
+
+In Direction C, OpenClaw is not consulted *on demand* — it **is** the in-call LLM. Patter
+owns the carrier leg and speech (STT, turn-taking, barge-in, TTS) and routes every turn to
+one scoped OpenClaw agent through the new `OpenClawLLM` pipeline provider. The caller is
+talking to OpenClaw the whole call. Use this when most turns need the agent's full
+reasoning; use [Direction B](#direction-b-patter-consults-openclaw-mid-call) instead when a
+*local* in-call agent handles ordinary turns and only escalates the hard ones.
+
+`OpenClawLLM` aligns byte-for-byte with the shipped `consult` OpenClaw preset
+([`ConsultConfig.openclaw`](#native-target-recommended-no-adapter)): same gateway base url
+(`http://127.0.0.1:18789/v1`), same `OPENCLAW_API_KEY` env var, same
+`model="openclaw/<agent>"` agent-target convention and id charset rule, and the same
+`x-openclaw-session-key` session header. The only difference is the timeout default: the
+LLM provider defaults to **120 s** (the runtime *is* the per-turn brain) where the consult
+preset defaults to a phone-safe 30 s (the runtime is an on-demand escalation).
+
+### Enable the gateway and pick the agent
+
+Enable OpenClaw's OpenAI-compatible endpoint (it is **disabled by default**) in
+`~/.openclaw/openclaw.json`, and bind the gateway to loopback with a strong auth credential
+— exactly as in [Direction B](#direction-b-patter-consults-openclaw-mid-call):
+
+```json5
+{
+  gateway: {
+    http: {
+      endpoints: {
+        chatCompletions: {
+          enabled: true,
+        },
+      },
+    },
+  },
+}
+```
+
+Then point `OpenClawLLM` at **one explicit, least-privileged receptionist agent** — never
+the default / master agent. The `agent` id is validated and mapped to
+`model="openclaw/<agent>"`; an already-namespaced id (`openclaw/x`, `openclaw:x`,
+`agent:x`) is passed through unchanged, identical to the consult preset.
+
+#### Python example
+
+```python
+from getpatter import Patter, OpenClawLLM, DeepgramSTT, ElevenLabsTTS, Twilio
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
+# stt + tts (and no engine=) selects pipeline mode: STT -> LLM -> TTS.
+agent = phone.agent(
+    system_prompt="You are the after-hours receptionist. Keep replies short and spoken.",
+    stt=DeepgramSTT(),
+    llm=OpenClawLLM(agent="receptionist"),     # -> model "openclaw/receptionist"
+    tts=ElevenLabsTTS(),
+)
+
+phone.serve(agent)
+```
+
+`OpenClawLLM(agent="receptionist")` reads the operator-grade bearer from `OPENCLAW_API_KEY`
+(never logged), targets `http://127.0.0.1:18789/v1`, and sends the call id as both the
+OpenAI `user` field (`patter-call-<call_id>`) and the `x-openclaw-session-key` header — one
+OpenClaw session per phone call. Override any default explicitly:
+
+```python
+llm = OpenClawLLM(
+    agent="openclaw/receptionist-roofing-ca",  # already-namespaced id passes through
+    base_url="http://127.0.0.1:18789/v1",
+    api_key="...",                             # or leave unset to read OPENCLAW_API_KEY
+    timeout=120.0,
+)
+```
+
+#### TypeScript example
+
+```ts
+import { Patter, OpenClawLLM, DeepgramSTT, ElevenLabsTTS, Twilio } from 'getpatter';
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: '+15550001234' });
+
+// stt + tts (and no engine) selects pipeline mode: STT -> LLM -> TTS.
+const agent = phone.agent({
+  systemPrompt: 'You are the after-hours receptionist. Keep replies short and spoken.',
+  stt: new DeepgramSTT(),
+  llm: new OpenClawLLM({ agent: 'receptionist' }), // -> model "openclaw/receptionist"
+  tts: new ElevenLabsTTS(),
+});
+
+await phone.serve(agent);
+```
+
+<Warning>
+  **Target one scoped agent, never the default.** The gateway credential authorises the
+  *whole* gateway — choosing `agent: "receptionist"` picks the persona, not a security
+  boundary. Model the receptionist as a **top-level**, sandboxed, least-privileged agent
+  with its own tool allow/deny, bind the gateway to loopback with a strong credential, and
+  keep one gateway per client. The full isolation model is in
+  [Route the call to a SPECIFIC OpenClaw agent](#route-the-call-to-a-specific-openclaw-agent-security-isolation)
+  below — it applies identically whether OpenClaw is reached as the primary LLM
+  (Direction C) or via `consult` (Direction B).
+</Warning>
+
+<Note>
+  **Generic OpenAI-compatible runtimes (Ollama / vLLM / LM Studio).** `OpenClawLLM` is a
+  thin preset over the generic `OpenAICompatibleLLM` provider, which drives *any*
+  OpenAI-compatible chat endpoint. To put a local model server on the phone instead of
+  OpenClaw, use it directly:
+
+  ```python
+  from getpatter import OpenAICompatibleLLM
+
+  # Ollama (keyless local gateway — no api key needed)
+  llm = OpenAICompatibleLLM(
+      base_url="http://127.0.0.1:11434/v1",
+      model="llama3.1",
+  )
+  ```
+
+  ```ts
+  import { OpenAICompatibleLLM } from 'getpatter';
+
+  // vLLM / LM Studio (keyless local gateway)
+  const llm = new OpenAICompatibleLLM({
+    baseUrl: 'http://127.0.0.1:8000/v1',
+    model: 'my-model',
+  });
+  ```
+
+  `base_url` and `model` are required; `timeout` defaults to **60 s**. Keyless gateways
+  send no `Authorization` header. For a remote endpoint that needs a key, pass `api_key` or
+  set `api_key_env` to the env var holding it. See the [Hermes page](/integrations/hermes)
+  for the full voice-shell walkthrough (carrier setup, security notes, production
+  deployment) — it applies to any of these runtimes.
+</Note>
 
 ## Direction A — OpenClaw places calls via Patter
 

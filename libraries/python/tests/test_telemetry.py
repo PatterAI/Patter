@@ -452,7 +452,7 @@ async def test_server_wiring_emits_call_completed(enabled, collector):
     from getpatter.models import CallMetrics, CostBreakdown, LatencyBreakdown
 
     server = _telemetry_server(collector)
-    _start, on_call_end, _metrics = server._wrap_callbacks()
+    _start, on_call_end, _metrics, _transcript = server._wrap_callbacks()
     metrics = CallMetrics(
         call_id="CAx",
         duration_seconds=73.0,

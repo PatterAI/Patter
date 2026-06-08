@@ -239,6 +239,7 @@ async def twilio_stream_bridge(
     twilio_token: str = "",
     recording: bool = False,
     on_metrics=None,
+    on_transcript_line=None,
     pricing: dict | None = None,
     report_only_initial_ttfb: bool = False,
     speech_events=None,
@@ -503,6 +504,7 @@ async def twilio_stream_bridge(
                         for_twilio=True,
                         on_transcript=on_transcript,
                         on_metrics=on_metrics,
+                        on_transcript_line=on_transcript_line,
                         conversation_history=conversation_history,
                         transcript_entries=transcript_entries,
                     )
@@ -520,6 +522,7 @@ async def twilio_stream_bridge(
                         hangup_fn=_twilio_hangup,
                         on_transcript=on_transcript,
                         on_metrics=on_metrics,
+                        on_transcript_line=on_transcript_line,
                         conversation_history=conversation_history,
                         transcript_entries=transcript_entries,
                         # Twilio media streams are g711 mulaw @ 8 kHz. Asking

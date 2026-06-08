@@ -250,6 +250,7 @@ class CerebrasLLMProvider(OpenAILLMProvider):
         tools: list[dict] | None = None,
         *,
         cancel_event: asyncio.Event | None = None,
+        call_id: str | None = None,
     ) -> AsyncIterator[dict]:
         """Stream from Cerebras, delegating SSE consumption to the parent.
 
@@ -259,10 +260,14 @@ class CerebrasLLMProvider(OpenAILLMProvider):
         the generator returns silently — voice pipelines treat LLM provider
         failures as recoverable (the call continues; the user just hears no
         LLM response), so raising would be a behavioural change.
+
+        ``call_id`` is accepted for protocol parity and forwarded to the
+        parent (which ignores it — Cerebras is a raw-inference provider with
+        no per-call session model).
         """
         try:
             async for chunk in super().stream(
-                messages, tools, cancel_event=cancel_event
+                messages, tools, cancel_event=cancel_event, call_id=call_id
             ):
                 yield chunk
         except Exception as exc:

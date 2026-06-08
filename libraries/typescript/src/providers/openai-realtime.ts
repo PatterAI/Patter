@@ -3,8 +3,17 @@
  *
  * Wraps `wss://api.openai.com/v1/realtime` and exposes the unified
  * Patter realtime contract (`connect / sendAudio / onEvent / close`) on
- * {@link OpenAIRealtimeAdapter}. Audio negotiation defaults to
- * `g711_ulaw` so traffic flows through Twilio/Telnyx without transcoding.
+ * {@link OpenAIRealtimeAdapter}.
+ *
+ * NOTE (issue #154): this class is no longer instantiated directly for the
+ * telephony bridge. OpenAI deprecated the Beta Realtime API, so its flat
+ * `output_audio_format: g711_ulaw` session shape is ignored by GA models —
+ * the server falls back to PCM16 @ 24 kHz, which this adapter would forward to
+ * Twilio framed as 8 kHz mulaw (static + broken STT). `buildAIAdapter` in
+ * `server.ts` now routes BOTH the `OpenAIRealtime` and `OpenAIRealtime2`
+ * engines through {@link OpenAIRealtime2Adapter} (GA session shape + internal
+ * PCM24→mulaw8 transcode). This class is retained as the shared base class
+ * that `OpenAIRealtime2Adapter` extends.
  */
 
 import WebSocket from 'ws';
@@ -143,6 +152,23 @@ export interface OpenAIRealtimeOptions {
    * `turn_detection` on the engine marker `engines.openai.Realtime`.
    */
   turnDetection?: RealtimeTurnDetection;
+  /**
+   * Gate the model's response on the Whisper transcript (legacy behavior).
+   *
+   * `false` (default) — the stream handler requests the response on
+   * `speech_stopped`, independently of the Whisper `transcript_input` event.
+   * The transcript is display-only (dashboard / history / `onTranscript`).
+   * `true` — the stream handler requests the response only after the
+   * `transcript_input` event passes the hallucination filter (prior
+   * behavior).
+   *
+   * The adapter itself does not act on this flag — it is read by the stream
+   * handler via {@link OpenAIRealtimeAdapter.getGateResponseOnTranscript} to
+   * decide WHEN to call {@link OpenAIRealtimeAdapter.requestResponse}.
+   *
+   * Mirrors Python `gate_response_on_transcript` on `OpenAIRealtimeAdapter`.
+   */
+  gateResponseOnTranscript?: boolean;
 }
 
 /**
@@ -191,9 +217,22 @@ export function validateRealtimeTurnDetection(
  * threshold / padding / silence (OpenAI rejects them) and emits `eagerness`
  * only when set.
  *
- * `includeResponseGating` adds the GA-only client-gated `create_response` /
- * `interrupt_response` keys (always `false` — never publicly tunable). The
- * v1 shape omits them.
+ * `includeResponseGating` adds the GA-only `create_response` /
+ * `interrupt_response` keys. The v1 shape omits them — on v1 the server's
+ * own defaults (`create_response: true`, `interrupt_response: true`) apply,
+ * which is exactly the server-managed behaviour we want by default, so
+ * sending nothing is equivalent to sending `true`.
+ *
+ * When `includeResponseGating` is true the two keys are tied to
+ * `gateResponseOnTranscript` (issue #154):
+ *   - `gateResponseOnTranscript === false` (DEFAULT, server-managed) →
+ *     `create_response: true` + `interrupt_response: true`. The server owns
+ *     VAD, end-of-turn, response creation AND the barge-in cancel signal.
+ *   - `gateResponseOnTranscript === true` (legacy / client-managed opt-out) →
+ *     `create_response: false` + `interrupt_response: false`. Patter drives
+ *     `response.create` (after the hallucination filter) and `response.cancel`
+ *     (on barge-in) itself — the escape hatch for no-AEC PSTN
+ *     self-interruption.
  *
  * Mirrors Python `build_turn_detection()` in `providers/openai_realtime.py`.
  */
@@ -203,6 +242,7 @@ export function buildTurnDetection(
     defaultType: string;
     defaultSilenceMs: number;
     includeResponseGating: boolean;
+    gateResponseOnTranscript?: boolean;
   },
 ): Record<string, unknown> {
   validateRealtimeTurnDetection(td);
@@ -219,8 +259,11 @@ export function buildTurnDetection(
     };
   }
   if (opts.includeResponseGating) {
-    detection.create_response = false;
-    detection.interrupt_response = false;
+    // Server-managed by default: both true when the gate is off. Inverted so
+    // the absence of the gate flag yields the OpenAI server defaults.
+    const serverManaged = !(opts.gateResponseOnTranscript ?? false);
+    detection.create_response = serverManaged;
+    detection.interrupt_response = serverManaged;
   }
   return detection;
 }
@@ -249,6 +292,12 @@ export class OpenAIRealtimeAdapter {
   // could have produced, which is what the user actually heard.
   private currentResponseFirstAudioAt: number | null = null;
   protected readonly options: OpenAIRealtimeOptions;
+  // When true, the stream handler waits for the Whisper ``transcript_input``
+  // event before requesting the model response (legacy behavior). When false
+  // (default) the response is requested on ``speech_stopped`` and the
+  // transcript is display-only. Read by the stream handler via
+  // ``getGateResponseOnTranscript()``.
+  private readonly gateResponseOnTranscript: boolean;
 
   constructor(
     protected readonly apiKey: string,
@@ -263,6 +312,19 @@ export class OpenAIRealtimeAdapter {
     options: OpenAIRealtimeOptions = {},
   ) {
     this.options = options;
+    this.gateResponseOnTranscript = options.gateResponseOnTranscript ?? false;
+  }
+
+  /**
+   * Whether the stream handler should gate the model response on the Whisper
+   * transcript (legacy) or fire it on `speech_stopped` (default, decoupled).
+   *
+   * `false` (default) — the response is requested on `speech_stopped`,
+   * independently of Whisper. `true` — the response is requested only after
+   * `transcript_input` passes the hallucination filter.
+   */
+  getGateResponseOnTranscript(): boolean {
+    return this.gateResponseOnTranscript;
   }
 
   /**
@@ -277,11 +339,17 @@ export class OpenAIRealtimeAdapter {
       voice: this.voice,
       instructions: this.instructions || 'You are a helpful voice assistant. Be concise.',
       // v1 turn_detection carries NO create_response / interrupt_response
-      // keys (those are GA-only) — gating disabled here.
+      // keys. The v1 server defaults (`create_response: true`,
+      // `interrupt_response: true`) ARE the server-managed behaviour we want by
+      // default, so omitting them is equivalent to sending `true` — gating
+      // disabled here. `gateResponseOnTranscript` is still threaded through for
+      // symmetry with the GA builder, but has no wire effect while
+      // includeResponseGating is false.
       turn_detection: buildTurnDetection(this.options.turnDetection, {
         defaultType: this.options.vadType ?? OpenAIRealtimeVADType.SERVER_VAD,
         defaultSilenceMs: this.options.silenceDurationMs ?? 300,
         includeResponseGating: false,
+        gateResponseOnTranscript: this.gateResponseOnTranscript,
       }),
       input_audio_transcription: {
         model: this.options.inputAudioTranscriptionModel ?? OpenAITranscriptionModel.WHISPER_1,
@@ -703,28 +771,36 @@ export class OpenAIRealtimeAdapter {
     });
   }
 
-  /** Truncate the in-flight assistant turn and cancel the active response.
+  /** Truncate the in-flight assistant turn's playback offset on the server.
+   *
+   * Sends ONLY ``conversation.item.truncate`` — no ``response.cancel``. This
+   * is the half of barge-in handling that a WebSocket transport MUST always
+   * perform: per OpenAI's docs, the GA server auto-truncates on barge-in only
+   * over WebRTC / SIP; on the WebSocket transport the client is responsible
+   * for telling the server how much of the assistant turn was actually heard.
+   * In server-managed mode (``interrupt_response: true``) the server already
+   * cancels the response itself, so issuing ``response.cancel`` here would be
+   * redundant / rejected — call this method, not {@link cancelResponse}.
    *
    * ``audio_end_ms`` MUST reflect what the caller actually heard, not what
    * the server generated. OpenAI streams audio at 5-10x real-time, so the
    * byte-derived counter overstates playback whenever the consumer cleared
-   * its playout buffer (e.g. ``send_clear``) before the audio reached the
+   * its playout buffer (e.g. ``sendClear``) before the audio reached the
    * speaker. We bound the truncate point by wall-clock time since the first
    * chunk of this response — that's the physical maximum a 1x real-time
    * playback could have produced. Without this cap, OpenAI keeps the full
    * generated assistant text on the transcript, and the model replays /
    * resumes from it on the next turn — manifesting as re-greetings and
    * mid-sentence fragments after a barge-in storm.
+   *
+   * No-op when no response is in flight, keeping it idempotent across stale
+   * callers. Resets per-response tracking so post-truncate late frames and
+   * the next response start clean.
    */
-  cancelResponse(): void {
+  truncate(): void {
     if (!this.ws) return;
     if (!this.currentResponseItemId) {
-      // No response in flight — nothing to cancel. OpenAI Realtime GA
-      // rejects an unconditional ``response.cancel`` with
-      // ``response_cancel_not_active``, which surfaces as ERROR-level
-      // log spam on every phantom VAD ``speech_started`` (echo of
-      // agent audio, voicemail beep, line noise). Silent no-op here
-      // keeps the cancel idempotent across stale callers.
+      // No response in flight — nothing to truncate.
       return;
     }
     let audioEndMs = this.currentResponseAudioMs;
@@ -742,12 +818,41 @@ export class OpenAIRealtimeAdapter {
     } catch (err) {
       getLogger().debug?.(`conversation.item.truncate failed: ${String(err)}`);
     }
-    this.ws.send(JSON.stringify({ type: 'response.cancel' }));
-    // Reset per-response tracking so any post-cancel late frames and the
+    // Reset per-response tracking so any post-truncate late frames and the
     // next response.create start clean.
     this.currentResponseItemId = null;
     this.currentResponseAudioMs = 0;
     this.currentResponseFirstAudioAt = null;
+  }
+
+  /** Truncate the in-flight assistant turn AND cancel the active response.
+   *
+   * Sends BOTH ``conversation.item.truncate`` (the played-offset bookkeeping)
+   * AND ``response.cancel``. Use this on the LEGACY client-managed barge-in
+   * path (``gateResponseOnTranscript`` true → ``interrupt_response: false``,
+   * so the server does NOT cancel for us) and for explicit cancels driven by
+   * Patter (e.g. on transfer / hangup). In server-managed mode call
+   * {@link truncate} instead — the server already cancels the response, and an
+   * extra ``response.cancel`` would be redundant / rejected.
+   *
+   * Truncation bounding semantics are identical to {@link truncate}; see its
+   * doc comment for the ``audio_end_ms`` wall-clock cap rationale.
+   */
+  cancelResponse(): void {
+    if (!this.ws) return;
+    // No response in flight — nothing to cancel. OpenAI Realtime GA rejects an
+    // unconditional ``response.cancel`` with ``response_cancel_not_active``,
+    // which surfaces as ERROR-level log spam on every phantom VAD
+    // ``speech_started`` (echo of agent audio, voicemail beep, line noise).
+    // ``truncate`` already no-ops when there is no in-flight item; mirror that
+    // guard here so we never emit a bare ``response.cancel``.
+    if (!this.currentResponseItemId) {
+      return;
+    }
+    // Truncate first (emits conversation.item.truncate and resets tracking),
+    // then send the explicit cancel.
+    this.truncate();
+    this.ws.send(JSON.stringify({ type: 'response.cancel' }));
   }
 
   /** Inject a user text turn and request a new response. */

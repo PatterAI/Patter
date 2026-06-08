@@ -268,26 +268,79 @@ export function augmentWithBuiltinHandoffTools(
  * Comparison happens against the lower-cased + stripped form.
  */
 const HALLUCINATIONS = new Set([
-  'you', 'thank you', 'thanks', 'yeah', 'yes', 'no',
-  'okay', 'ok', 'uh', 'um', 'mmm', 'hmm', '.', 'bye',
-  'right', 'cool',
-  // Whisper YouTube-caption hallucinations
+  // Issue #154: the hallucination filter is now DISPLAY-ONLY — it no longer
+  // gates response creation (the server drives the response on
+  // ``input_audio_buffer.committed`` by default). Dropping a phrase here
+  // therefore deletes the user's transcript line (recordSttComplete never
+  // fires → empty user_text → dashboard skips the user line). So this set is
+  // restricted to genuine NON-SPEECH artefacts that Whisper emits on
+  // silence / TTS echo, NOT real conversational words. Standalone words like
+  // 'yes', 'no', 'okay', 'right', 'you', 'thanks' were REMOVED — they are
+  // legitimate user replies and must reach the transcript. Parity with
+  // Python ``_STT_HALLUCINATIONS``.
+  //
+  // Whisper caption / training-set hallucinations. Whisper was trained heavily
+  // on captioned video, so on silence / PSTN echo it falls back to the most
+  // common caption credits + sign-offs. Curated from widely-reported
+  // Whisper-on-silence outputs across the open-source ASR community.
   'thank you for watching',
   'thanks for watching',
   'thank you for watching!',
   'thanks for watching!',
   'thank you so much for watching',
+  'thank you for watching please subscribe',
+  'thanks for watching please subscribe',
   'thanks for listening',
+  "we'll see you next time",
+  'see you next time',
+  'bye bye',
   'please subscribe',
+  'please subscribe to my channel',
+  "don't forget to subscribe",
+  'like and subscribe',
   'subscribe',
+  'subtitles by the amara.org community',
+  'subtitles by the amara org community',
+  'subtitles by',
+  'transcribed by',
+  'transcription by castingwords',
+  'the end',
+  // Music / sound markers.
   'music',
   '[music]',
+  'piano music',
+  'applause',
+  '[applause]',
   '♪',
+  // Silence markers.
   '[no audio]',
   '[silence]',
   '[blank_audio]',
   '(silence)',
 ]);
+
+/**
+ * True when `text` is — or is composed entirely of — known STT hallucinations.
+ * Beyond an exact set lookup it (a) strips trailing punctuation, since Whisper
+ * appends it ("Thank you.", "Bye bye.") and that alone defeats an exact match,
+ * and (b) splits multi-closer segments ("We'll see you next time. Bye bye.")
+ * on sentence boundaries, dropping the turn only when EVERY piece is a known
+ * hallucination — so a real sentence that merely contains a filler word is
+ * never falsely dropped. Parity with Python ``_is_stt_hallucination``.
+ *
+ * Exported for unit tests (issue #154 narrowed the blocklist to display-only
+ * non-speech artefacts); not part of the public package surface.
+ */
+export function isSttHallucination(text: string): boolean {
+  const stripped = text.trim().toLowerCase().replace(/[.,!?;:…。！？\s]+$/u, '').trim();
+  if (stripped === '') return true;
+  if (HALLUCINATIONS.has(stripped)) return true;
+  const pieces = stripped
+    .split(/[.!?…。！？]+/u)
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
+  return pieces.length > 1 && pieces.every((p) => HALLUCINATIONS.has(p));
+}
 
 // ---------------------------------------------------------------------------
 // StreamHandler context (immutable per-call configuration)
@@ -892,6 +945,17 @@ export class StreamHandler {
   private pendingAssistantTurn: string | null = null;
   private pendingAssistantTimer: ReturnType<typeof setTimeout> | null = null;
   /**
+   * Reserved monotonic turn index for the in-flight Realtime turn (issue
+   * #154, fix 5/6). Reserved in ``onAdapterSpeechStopped`` via
+   * ``metricsAcc.reserveTurnIndex()`` the moment the turn OPENS, then threaded
+   * through to the live per-line transcript events (``recordTranscriptLine``)
+   * and into ``recordTurnComplete`` / ``recordTurnInterrupted`` so the
+   * dashboard can sort a late-arriving user line ABOVE its agent line by
+   * ``(turnIndex, role)``. ``null`` until the first turn opens. Parity with
+   * Python ``_current_turn_index``.
+   */
+  private currentTurnIndex: number | null = null;
+  /**
    * Hard cap on how long we wait for the user transcript before flushing
    * the buffered assistant turn alone. 3 s covers OpenAI Whisper's typical
    * 200-800 ms post-response delay with substantial headroom for slow
@@ -1011,6 +1075,37 @@ export class StreamHandler {
    * streaming/regular LLM, WebSocket remote, Realtime response_done) so the
    * payload shape lives in one place.
    */
+  /**
+   * Emit a live per-line transcript event to the dashboard store (issue #154,
+   * fix 5). Routed through a single helper so the call shape lives in one
+   * place. ``recordTranscriptLine`` appends the line to the active call's
+   * transcript and publishes a ``transcript_line`` SSE event; the dashboard
+   * sorts by (turnIndex, user<assistant) so a late user line lands above its
+   * agent line. No-op when no turn index has been reserved yet.
+   */
+  private emitTranscriptLine(role: 'user' | 'assistant', text: string): void {
+    if (this.currentTurnIndex === null) return;
+    // ``recordTranscriptLine`` is the canonical dashboard-store API for live
+    // per-line transcript events (added to ``MetricsStore`` for issue #154).
+    // Narrow to the exact contract here so the call site documents the shape
+    // the store must satisfy; the runtime call dispatches to the real method.
+    (
+      this.deps.metricsStore as unknown as {
+        recordTranscriptLine: (data: {
+          call_id: string;
+          turnIndex: number;
+          role: 'user' | 'assistant';
+          text: string;
+        }) => void;
+      }
+    ).recordTranscriptLine({
+      call_id: this.callId,
+      turnIndex: this.currentTurnIndex,
+      role,
+      text,
+    });
+  }
+
   private async emitTurnMetrics(turn: unknown): Promise<void> {
     if (turn == null) return;
     this.deps.metricsStore.recordTurn({ call_id: this.callId, turn });
@@ -1486,7 +1581,10 @@ export class StreamHandler {
         this.metricsAcc.addSttAudioBytes(pcm16k.length);
       }
     } else if (this.adapter) {
-      // OpenAI Realtime is configured for g711_ulaw so Twilio mulaw is fine.
+      // OpenAI Realtime (the GA adapter — used for both OpenAIRealtime and
+      // OpenAIRealtime2) overrides sendAudio to transcode Twilio's mulaw 8 kHz
+      // up to PCM-16 24 kHz internally, so the caller's raw mulaw bytes are
+      // forwarded untouched here.
       // ElevenLabs ConvAI defaults to PCM 16kHz — transcode Twilio mulaw
       // first. When ConvAI was constructed via ``ElevenLabsConvAIAdapter
       // .forTwilio(...)`` (or any path that sets ``inputAudioFormat
@@ -2691,6 +2789,27 @@ export class StreamHandler {
           // Fix 8: record turn as interrupted so it does not leak in metrics when
           // the LLM throws without emitting any text.
           this.metricsAcc.recordTurnInterrupted();
+          // Opt-in spoken fallback: speak the configured line iff no audio was
+          // emitted this turn (``!ttsFirstByteSent.value`` — no PCM chunk has
+          // reached the carrier, i.e. the caller heard SILENCE) and the agent
+          // still owns the floor (``this.isSpeaking``). Gated on emitted audio
+          // rather than received tokens, so a provider that streams partial
+          // tokens ('Let me check…') and then times out before a sentence
+          // boundary (the chunker buffered them, TTS never ran) still triggers
+          // the fallback. Reuses the normal per-sentence TTS primitive so the
+          // fallback is a regular turn utterance (barge-in honoured per chunk;
+          // closed by the ``finally`` ``endSpeakingWithGrace``). A non-empty
+          // string is required — unset / empty preserves today's
+          // silence-on-error behaviour. Self-synthesis failure must degrade to
+          // that silence, never crash the turn.
+          const fallback = this.deps.agent.llmErrorMessage;
+          if (fallback && !ttsFirstByteSent.value && this.isSpeaking) {
+            try {
+              await this.synthesizeSentence(fallback, hookExecutor, hookCtx, ttsFirstByteSent);
+            } catch (err) {
+              getLogger().error(`llmErrorMessage fallback synthesis failed (${label}):`, err);
+            }
+          }
         }
       }
 
@@ -2896,6 +3015,7 @@ export class StreamHandler {
     response_done: async (eventData) => this.onAdapterResponseDone(eventData as Record<string, unknown> | null),
     speech_started: async () => this.onAdapterSpeechInterrupt(),
     interruption: async () => this.onAdapterSpeechInterrupt(),
+    error: async (eventData) => this.onAdapterError(eventData),
     function_call: async (eventData) => {
       if (this.adapter instanceof OpenAIRealtimeAdapter) {
         await this.handleFunctionCall(eventData as { call_id: string; name: string; arguments: string });
@@ -2995,11 +3115,15 @@ export class StreamHandler {
       // dispatcher's idempotency guard prevents double-fires.
       await this.emitAudioOut();
     }
-    // OpenAI Realtime outputs g711_ulaw 8 kHz (PCMU). Both Twilio and Telnyx
-    // are configured for PCMU/mulaw 8 kHz (Telnyx uses stream_bidirectional_codec=PCMU)
-    // so the audio is already in the correct wire format — pass through untransformed.
-    // Do NOT resample here: inboundResampler is 8k→16k for the STT inbound path;
-    // reusing it on the outbound path corrupts both directions.
+    // The GA Realtime adapter (used for both the ``OpenAIRealtime`` and
+    // ``OpenAIRealtime2`` engines) has ALREADY transcoded the model's PCM16
+    // 24 kHz output down to mulaw 8 kHz internally — see
+    // ``OpenAIRealtime2Adapter.translateGaAudioDelta``. Both Twilio and Telnyx
+    // expect PCMU/mulaw 8 kHz (Telnyx uses stream_bidirectional_codec=PCMU), so
+    // the bytes arriving here are already in the correct wire format — pass
+    // through untransformed. Do NOT resample here: inboundResampler is 8k→16k
+    // for the STT inbound path; reusing it on the outbound path corrupts both
+    // directions.
     const outAudio = eventData;
     this.deps.bridge.sendAudio(this.ws, outAudio.toString('base64'), this.streamSid);
     this.markFirstAudioSent();
@@ -3016,10 +3140,28 @@ export class StreamHandler {
     if (!this.metricsAcc.turnActive) this.metricsAcc.startTurn();
     this.currentAgentText = '';
     this.responseAudioStarted = false;
+    // Reserve the monotonic turn index at the moment the turn OPENS (issue
+    // #154, fix 5/6). Threaded through the buffering pipeline into the live
+    // per-line transcript events and into recordTurnComplete /
+    // recordTurnInterrupted so turn_index is stable under drops/interrupts and
+    // the dashboard can sort a late user line above its agent line.
+    this.currentTurnIndex = this.metricsAcc.reserveTurnIndex();
     // Mark that a user transcript is expected so the assistant's
     // forthcoming `response.done` event waits for it before being
     // pushed into history. See `userTranscriptPending` doc comment.
     this.userTranscriptPending = true;
+    // Response creation (issue #154 — decoupled from Whisper):
+    //  - DEFAULT: the GA session sets ``create_response: true``, so the SERVER
+    //    auto-creates the response when it commits the user's audio buffer
+    //    (``input_audio_buffer.committed``). Patter does NOT drive
+    //    ``response.create`` here — firing on speech_stopped raced the
+    //    server-side commit (the model generated before the user's audio was a
+    //    conversation item → empty / no reply). Letting the server create it on
+    //    commit reclaims the ~500 ms Whisper wait AND avoids that race, while
+    //    keeping Whisper entirely off the response path.
+    //  - LEGACY (``gateResponseOnTranscript`` true): the GA session sets
+    //    ``create_response: false`` and the response is driven from
+    //    ``onAdapterTranscriptInput`` after the hallucination filter.
     // Speech-event: raw VAD trailing edge. EOU commit happens later on
     // ``transcript_input`` (Realtime emits it after
     // input_audio_buffer.committed).
@@ -3032,23 +3174,49 @@ export class StreamHandler {
     // YouTube-caption closer). These fire on PSTN echo loopback — committing
     // them to the LLM would create phantom user turns the caller never spoke.
     // Parity with Python stream_handler.py `transcript_input` branch.
-    const stripped = inputText.trim().toLowerCase();
-    if (HALLUCINATIONS.has(stripped) || stripped === '') {
+    if (isSttHallucination(inputText)) {
       getLogger().debug(
         `Realtime transcript_input dropped (likely Whisper hallucination on silence/echo): ${sanitizeLogValue(inputText.slice(0, 60))}`,
       );
       this.userTranscriptPending = false;
+      // FIX-1 (issue #154, CRITICAL): the assistant reply for this turn may
+      // already be buffered (response.done fired first and parked it on the
+      // REALTIME_USER_TRANSCRIPT_WAIT_MS fallback timer waiting for a user
+      // transcript that will now never arrive). Without flushing here the
+      // reply stalls ~3 s and turns interleave. Capture the buffered turn,
+      // null it, cancel the timer, and flush immediately before returning.
+      if (this.pendingAssistantTurn !== null) {
+        const buffered = this.pendingAssistantTurn;
+        this.pendingAssistantTurn = null;
+        if (this.pendingAssistantTimer) {
+          clearTimeout(this.pendingAssistantTimer);
+          this.pendingAssistantTimer = null;
+        }
+        await this.flushAssistantTurn(buffered);
+      }
       return;
     }
     getLogger().debug(`User (${this.deps.bridge.label}): ${sanitizeLogValue(inputText)}`);
     this.history.push({ role: 'user', text: inputText, timestamp: Date.now() });
-    // Hallucination filter accepted — drive response.create explicitly now
-    // that server VAD is configured with create_response: false. Without
-    // this call the model never generates a reply (the server no longer
-    // auto-creates a response on input_audio_buffer.committed). Parity with
-    // Python stream_handler.py which calls
-    // ``await self._adapter.request_response()`` at this point.
-    if (this.adapter instanceof OpenAIRealtimeAdapter) {
+    // FIX-5 (issue #154): emit the live user transcript line the moment it is
+    // known and accepted by the filter, keyed by the reserved turn index. The
+    // dashboard sorts the active transcript by (turnIndex, user<assistant) so
+    // a late user line still renders ABOVE its agent line. recordTurn (metrics
+    // path) de-dups by (turnIndex, role) so this does not double-push.
+    this.emitTranscriptLine('user', inputText);
+    // Response trigger — LEGACY path only. By default the response was already
+    // requested on ``speech_stopped`` (see ``onAdapterSpeechStopped``), so the
+    // transcript here is display-only and must NOT drive a second
+    // ``response.create``. When ``gateResponseOnTranscript`` is true the
+    // response was deliberately deferred to this point: the server VAD is
+    // configured with ``create_response: false``, so drive it explicitly now
+    // that the hallucination filter has accepted the transcript. Parity with
+    // Python stream_handler.py which gates ``request_response()`` on the same
+    // flag.
+    if (
+      this.adapter instanceof OpenAIRealtimeAdapter &&
+      this.adapter.getGateResponseOnTranscript()
+    ) {
       void this.adapter.requestResponse().catch((err) =>
         getLogger().debug(`Realtime requestResponse failed: ${String(err)}`),
       );
@@ -3105,8 +3273,16 @@ export class StreamHandler {
         history: [...this.history.entries],
       });
     }
+    // FIX-5 (issue #154): emit the live assistant transcript line keyed by the
+    // same reserved turn index as its paired user line. The dashboard sorts by
+    // (turnIndex, user<assistant) so the agent reply always renders below its
+    // user line even when the user line arrived late.
+    const reservedIndex = this.currentTurnIndex;
+    this.emitTranscriptLine('assistant', text);
     this.responseAudioStarted = false;
-    await this.emitTurnMetrics(this.metricsAcc.recordTurnComplete(text));
+    await this.emitTurnMetrics(
+      this.metricsAcc.recordTurnComplete(text, reservedIndex ?? undefined),
+    );
   }
 
   /**
@@ -3246,16 +3422,46 @@ export class StreamHandler {
   }
 
   private async onAdapterSpeechInterrupt(): Promise<void> {
-    // Gate the cancel/flush path with an anti-flicker window similar to
-    // the pipeline mode. OpenAI's server VAD fires ``speech_started`` on
-    // echo of the agent's own audio in PSTN no-AEC scenarios (carrier
-    // loopback feeds our outbound mulaw back into the input buffer).
-    // Without this gate every phantom ``speech_started`` cancels the
-    // response — most visibly, the firstMessage gets truncated
-    // mid-sentence. The Realtime adapter manages its own TTS span so
-    // ``isSpeaking`` (a pipeline-only flag) stays false; consult the
-    // adapter's own response-tracking timestamp as a proxy.
-    if (this.adapter instanceof OpenAIRealtimeAdapter) {
+    // This handler is SHARED by two engine adapter events via the dispatch
+    // table: OpenAI Realtime's ``speech_started`` and ElevenLabs ConvAI's
+    // ``interruption``. The behaviour forks on the adapter type AND, for the
+    // OpenAI engine, on whether turn-taking is server-managed (default) or
+    // client-managed (legacy opt-out, ``gateResponseOnTranscript`` true).
+    //
+    //   - OpenAI engine, SERVER-MANAGED (DEFAULT): the GA session sets
+    //     ``create_response: true`` + ``interrupt_response: true`` — the server
+    //     owns VAD, end-of-turn, response creation AND the barge-in cancel.
+    //     We do NOT run the anti-flicker gate, do NOT send ``response.cancel``,
+    //     and do NOT re-anchor turn metrics (those were a mis-fix that inflated
+    //     ``total_ms`` by re-anchoring the engine turn to user-speech-start).
+    //     On a WebSocket transport the client STILL must clear the carrier
+    //     buffer and truncate the played offset — the server only auto-truncates
+    //     on WebRTC/SIP. So: ``sendClear`` + ``truncate()`` only.
+    //   - OpenAI engine, CLIENT-MANAGED (legacy opt-out): the session sets
+    //     ``interrupt_response: false`` so the server does NOT cancel for us.
+    //     Keep the full legacy path — anti-flicker gate, full ``cancelResponse``
+    //     (truncate + ``response.cancel``), ``recordBargeinDetected`` +
+    //     ``anchorUserSpeechStart``.
+    //   - ConvAI: server-managed by ElevenLabs — ``sendClear`` only. No
+    //     truncate / cancel concept (ConvAI has no item tracking) and no engine
+    //     barge-in metrics. Unchanged from prior behaviour.
+    const isEngine = this.adapter instanceof OpenAIRealtimeAdapter;
+    const clientManaged =
+      isEngine &&
+      (this.adapter as OpenAIRealtimeAdapter).getGateResponseOnTranscript();
+
+    // Anti-flicker gate — LEGACY client-managed path only. OpenAI's server VAD
+    // fires ``speech_started`` on echo of the agent's own audio in PSTN no-AEC
+    // scenarios (carrier loopback feeds our outbound mulaw back into the input
+    // buffer). Without this gate every phantom ``speech_started`` cancels the
+    // response — most visibly, the firstMessage gets truncated mid-sentence. In
+    // server-managed mode the SERVER applies its own VAD threshold /
+    // ``interrupt_response`` policy, so the client gate is removed (false
+    // barge-ins are tuned via ``turn_detection.threshold`` / ``semantic_vad``
+    // eagerness instead). The Realtime adapter manages its own TTS span so
+    // ``isSpeaking`` (a pipeline-only flag) stays false; consult the adapter's
+    // own response-tracking timestamp as a proxy.
+    if (clientManaged) {
       const startedAt = (
         this.adapter as unknown as { currentResponseFirstAudioAt: number | null }
       ).currentResponseFirstAudioAt;
@@ -3270,7 +3476,26 @@ export class StreamHandler {
       }
     }
     this.deps.bridge.sendClear(this.ws, this.streamSid);
-    if (this.adapter instanceof OpenAIRealtimeAdapter) this.adapter.cancelResponse();
+    if (clientManaged) {
+      // LEGACY client-managed barge-in. Stamp barge-in detection (mirrors the
+      // pipeline path) so the post-barge-in hygiene gate in _computeTurnLatency
+      // (keyed on _lastBargeinAt within 100 ms of _turnStart) fires, then send
+      // the FULL cancel (truncate + response.cancel) because
+      // ``interrupt_response: false`` means the server won't cancel for us.
+      this.metricsAcc.recordBargeinDetected();
+      (this.adapter as OpenAIRealtimeAdapter).cancelResponse();
+    } else if (isEngine) {
+      // SERVER-MANAGED barge-in. ``interrupt_response: true`` → the server
+      // already cancelled the response on its own ``speech_started``; sending
+      // ``response.cancel`` would be redundant / rejected. We only owe the
+      // server the WebSocket-transport obligations: the carrier buffer is
+      // cleared above and we truncate the played offset here so phantom
+      // assistant text doesn't linger on the conversation. NO gate, NO
+      // recordBargeinDetected, NO anchorUserSpeechStart (the engine turn stays
+      // anchored at speech_stopped).
+      (this.adapter as OpenAIRealtimeAdapter).truncate();
+    }
+    // ConvAI (and any non-engine adapter): sendClear only, already done above.
     this.metricsAcc.recordTurnInterrupted();
     // Speech-event: user started speaking. If the agent was mid-turn this
     // is a barge-in — close the agent turn as interrupted before flagging
@@ -3280,6 +3505,16 @@ export class StreamHandler {
       await this.emitAgentSpeechEnded(true);
     }
     await this.emitUserSpeechStarted();
+    // FIX-3 (issue #154) — LEGACY client-managed path only: re-anchor the next
+    // turn to the legitimate VAD speech_start, mirroring the pipeline path.
+    // This pairs with recordBargeinDetected above so the post-barge-in hygiene
+    // gate has a correct _turnStart to compare against. In server-managed mode
+    // the engine turn must stay anchored at speech_stopped — re-anchoring here
+    // inflated/grew total_ms (it re-anchored the engine turn to
+    // user-speech-start).
+    if (clientManaged) {
+      this.metricsAcc.anchorUserSpeechStart();
+    }
     this.currentAgentText = '';
     this.responseAudioStarted = false;
     // A barge-in invalidates any buffered assistant turn — the user
@@ -3291,6 +3526,33 @@ export class StreamHandler {
       this.pendingAssistantTimer = null;
     }
     this.userTranscriptPending = false;
+  }
+
+  /**
+   * Handle a Realtime ``error`` event (issue #154, fix 4).
+   *
+   * Both Realtime providers dispatch ``('error', …)`` for server-side errors,
+   * non-normal socket closes, and socket errors, but the stream handler
+   * previously had no entry for it in the dispatch table so these were
+   * silently swallowed. We surface them at WARN level with ONLY the error
+   * envelope fields (``type`` / ``code`` / ``message``) — never any audio or
+   * transcript body, to avoid logging PII. The call is NOT terminated: the
+   * provider decides whether to recover, and many of these (e.g. a transient
+   * ``input_audio_buffer_commit_empty``) are non-fatal. Parity with the
+   * Python ``elif ev_type == 'error'`` branches.
+   */
+  private async onAdapterError(eventData: unknown): Promise<void> {
+    const err = (eventData ?? {}) as {
+      type?: unknown;
+      code?: unknown;
+      message?: unknown;
+    };
+    const type = typeof err.type === 'string' ? err.type : 'unknown';
+    const code = typeof err.code === 'string' ? err.code : '';
+    const message = typeof err.message === 'string' ? err.message : '';
+    getLogger().warn(
+      `Realtime error (${this.deps.bridge.label}) type=${type} code=${code} message=${sanitizeLogValue(message)}`,
+    );
   }
 
   /**

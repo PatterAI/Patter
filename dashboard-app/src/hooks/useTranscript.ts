@@ -23,7 +23,7 @@
 //     to reason about ordering or de-duplication on the client.
 
 import { useEffect, useRef, useState } from 'react';
-import { fetchCall } from '../lib/api';
+import { fetchCall, withToken } from '../lib/api';
 import { toUiTranscript, type TranscriptTurn } from '../lib/mappers';
 
 const LIVE_POLL_MS = 2_000;
@@ -86,10 +86,22 @@ export function useTranscript(
     };
 
     try {
-      source = new EventSource('/api/dashboard/events');
-      // ``turn_complete`` is the live-call signal; refetching keeps the pane
-      // in sync as turns accumulate.
+      source = new EventSource(withToken('/api/dashboard/events'));
+      // ``turn_complete`` is the per-round-trip metrics signal; refetching
+      // keeps the pane in sync as turns accumulate.
       source.addEventListener('turn_complete', (ev) => {
+        if (!isForThisCall(ev)) return;
+        void load();
+      });
+      // ``transcript_line`` (FIX-5, issue #154) is the live per-line signal —
+      // the Realtime handler emits one the moment each user/assistant line is
+      // known, BEFORE the turn completes. Refetching pulls the line (the call
+      // detail endpoint already merges it into the active record's
+      // ``transcript``); ``toUiTranscript`` then re-sorts by
+      // (turnIndex, user<assistant) so a late user line lands above its agent
+      // line. This makes the user utterance appear immediately rather than
+      // only on turn completion.
+      source.addEventListener('transcript_line', (ev) => {
         if (!isForThisCall(ev)) return;
         void load();
       });
