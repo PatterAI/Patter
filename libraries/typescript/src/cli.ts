@@ -45,11 +45,12 @@ function printEvalStub(): void {
 
 function printHermesStub(): void {
   console.log(
-    'The Hermes setup wizard (doctor / setup / attach-number) lives in the\n' +
-      'Python CLI today. Use it from the Python SDK:\n\n' +
+    'The Hermes wizard (doctor / setup / test / trace / diagnose /\n' +
+      'attach-number) lives in the Python CLI today. Use it from the Python SDK:\n\n' +
       '  pip install getpatter\n' +
       '  patter hermes doctor\n' +
-      '  patter hermes setup\n\n' +
+      '  patter hermes setup\n' +
+      '  patter hermes test\n\n' +
       'The HermesLLM provider itself is fully available in this TypeScript SDK\n' +
       "(import { HermesLLM } from 'getpatter'). See\n" +
       'https://docs.getpatter.com/integrations/hermes for docs.',

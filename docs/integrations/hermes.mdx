@@ -202,6 +202,25 @@ patter hermes numbers       # list the numbers on your Twilio account
 patter hermes attach-number +15551234567 --url https://<your-tunnel>/calls/inbound
 ```
 
+To go from a freshly enabled gateway to a verified one in a single run, add
+`--start-gateway` — `setup` then runs `hermes gateway start` and waits for `/v1/models` to
+answer before continuing. Before placing a real call, run the end-to-end acceptance check,
+which sends an actual chat turn through the gateway (with the Hermes session header) and
+confirms your providers are ready:
+
+```bash
+patter hermes test          # /v1/models + a real /v1/chat/completions turn + provider keys
+```
+
+When a call misbehaves, point Patter's per-call log (`PATTER_LOG_DIR`) at the tracer to see
+exactly which stage broke — carrier → STT → Hermes → TTS — with a latency breakdown and a
+one-line verdict:
+
+```bash
+patter hermes trace         # latest call's pipeline stages + stt/llm/tts latency
+patter hermes diagnose      # e.g. "Hermes replied but no audio — TTS stage" + the fix
+```
+
 These commands live in the Python SDK today; the `HermesLLM` provider itself is available
 in both the Python and TypeScript SDKs.
 

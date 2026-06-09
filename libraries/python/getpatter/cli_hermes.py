@@ -653,6 +653,15 @@ def cmd_setup(args: argparse.Namespace) -> int:
     if loaded:
         print("Loaded env from: " + ", ".join(str(p) for p in loaded))
 
+    # 1b. Optionally start the gateway and wait for readiness — completes the
+    #     enable → start → verify cycle so the preflight sees a live gateway.
+    if getattr(args, "start_gateway", False) and not getattr(args, "no_network", False):
+        base_url = _hermes_base_url(getattr(args, "base_url", None))
+        key = gateway_key or os.environ.get("API_SERVER_KEY", "")
+        if _start_gateway():
+            _wait_for_gateway(base_url, key)
+        print()
+
     # 2. Preflight.
     print("Checking your environment…")
     sections = _run_doctor(args)
@@ -718,6 +727,111 @@ def cmd_setup(args: argparse.Namespace) -> int:
     return 1 if failures else 0
 
 
+def _chat_turn_check(base_url: str, key: str, model: str, prompt: str) -> Check:
+    """Send one ``/chat/completions`` turn with Hermes session headers."""
+    import time
+
+    try:
+        import httpx
+    except ImportError:  # pragma: no cover
+        return Check(SKIP, "Chat turn", "httpx not installed")
+    headers = {
+        "Content-Type": "application/json",
+        # Mirror HermesLLM: per-call continuity is carried in headers.
+        "X-Hermes-Session-Id": "patter-cli-test",
+    }
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
+    }
+    start = time.monotonic()
+    try:
+        resp = httpx.post(
+            f"{base_url}/chat/completions", json=payload, headers=headers, timeout=120.0
+        )
+    except Exception as exc:  # noqa: BLE001
+        return Check(FAIL, "Chat turn", str(exc), "patter hermes doctor")
+    elapsed = int((time.monotonic() - start) * 1000)
+    if resp.status_code != 200:
+        return Check(
+            FAIL,
+            "Chat turn",
+            f"HTTP {resp.status_code}: {resp.text[:160]}",
+            "check the model name and API_SERVER_KEY",
+        )
+    try:
+        content = resp.json()["choices"][0]["message"]["content"]
+    except Exception:  # noqa: BLE001
+        return Check(FAIL, "Chat turn", "200 but no choices[0].message.content")
+    snippet = " ".join((content or "").split())[:60]
+    if not snippet:
+        return Check(WARN, "Chat turn", f"empty reply ({elapsed} ms)")
+    return Check(OK, "Chat turn", f'{elapsed} ms — "{snippet}…"')
+
+
+def cmd_test(args: argparse.Namespace) -> int:
+    """End-to-end acceptance: gateway + a real chat turn + provider readiness."""
+    loaded = _apply_env(args)
+    base_url = _hermes_base_url(getattr(args, "base_url", None))
+    hermes_cfg = _read_hermes_config()
+    key = os.environ.get("API_SERVER_KEY", "") or hermes_cfg.get("API_SERVER_KEY", "")
+    model = os.environ.get("API_SERVER_MODEL_NAME") or hermes_cfg.get(
+        "API_SERVER_MODEL_NAME", "hermes-agent"
+    )
+
+    sec = Section("Hermes acceptance")
+    status, body, err = _get_json(
+        f"{base_url}/models",
+        headers={"Authorization": f"Bearer {key}"} if key else None,
+    )
+    if status == 200:
+        sec.checks.append(Check(OK, "Gateway reachable", base_url))
+        ids = _model_ids(body)
+        sec.checks.append(
+            Check(OK, "Model available", model)
+            if model in ids
+            else Check(WARN, "Model not found", f"{model!r} not in {sorted(ids)[:5]}")
+        )
+        sec.checks.append(
+            _chat_turn_check(base_url, key, model, getattr(args, "prompt", None) or
+                             "Reply with one short spoken sentence to confirm you are online.")
+        )
+    else:
+        detail = f"HTTP {status}" if status else (err or "no response")
+        sec.checks.append(
+            Check(FAIL, "Gateway reachable", f"{base_url} — {detail}", "patter hermes doctor")
+        )
+
+    # HermesLLM + provider readiness (so a green `test` means a real call can run).
+    try:
+        from getpatter import HermesLLM
+
+        HermesLLM()
+        sec.checks.append(Check(OK, "HermesLLM constructible"))
+    except Exception as exc:  # noqa: BLE001
+        sec.checks.append(Check(FAIL, "HermesLLM construction failed", str(exc)))
+    sec.checks.append(_env_key("DEEPGRAM_API_KEY", "Deepgram STT"))
+    sec.checks.append(_env_key("ELEVENLABS_API_KEY", "ElevenLabs TTS"))
+
+    report = _sections_to_dict([sec])
+    if getattr(args, "json", False):
+        report["loaded_env_files"] = [str(p) for p in loaded]
+        print(json.dumps(report, indent=2))
+    else:
+        if loaded:
+            print("Loaded env from: " + ", ".join(str(p) for p in loaded))
+        _print_sections([sec])
+        print()
+        if report["failures"]:
+            print(f"{report['failures']} blocker(s) — fix before calling.")
+        else:
+            print("Acceptance passed — Hermes is answering and providers are ready.")
+    return 1 if report["failures"] else 0
+
+
 def cmd_attach_number(args: argparse.Namespace) -> int:
     return _attach_number(args.number, args.url, args.status_callback)
 
@@ -759,6 +873,238 @@ def cmd_numbers(args: argparse.Namespace) -> int:
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# Call trace / diagnose (reads the on-disk call log; see services/call_log.py)
+# ──────────────────────────────────────────────────────────────────────────
+def _call_log_root(override: str | None) -> Path | None:
+    from getpatter.services.call_log import resolve_log_root
+
+    return resolve_log_root(override)
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    rows: list[dict] = []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return rows
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return rows
+
+
+def _find_call_dir(root: Path, call: str | None) -> Path | None:
+    """Locate a call directory under ``<root>/calls`` (newest if ``call`` is None)."""
+    if call:
+        direct = Path(call)
+        if (direct / "metadata.json").exists():
+            return direct
+        matches = list(root.glob(f"calls/**/{call}/metadata.json"))
+        return matches[0].parent if matches else None
+    metas = list(root.glob("calls/**/metadata.json"))
+    if not metas:
+        return None
+    newest = max(metas, key=lambda p: p.stat().st_mtime)
+    return newest.parent
+
+
+def _load_call(call_dir: Path) -> dict:
+    meta: dict = {}
+    try:
+        meta = json.loads((call_dir / "metadata.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        pass
+    return {
+        "dir": call_dir,
+        "metadata": meta,
+        "turns": _read_jsonl(call_dir / "transcript.jsonl"),
+        "events": _read_jsonl(call_dir / "events.jsonl"),
+    }
+
+
+def _turn_latency(turn: dict) -> dict:
+    lat = turn.get("latency")
+    return lat if isinstance(lat, dict) else {}
+
+
+def _classify_stages(call: dict) -> list[tuple[str, str, str]]:
+    """Return ``(stage, status, detail)`` for each pipeline stage of one call."""
+    meta = call["metadata"]
+    turns = call["turns"]
+    events = call["events"]
+
+    def any_turn(pred) -> bool:
+        return any(pred(t) for t in turns)
+
+    has_stt = any_turn(lambda t: bool(t.get("user_text"))) or any_turn(
+        lambda t: (t.get("stt_audio_seconds") or 0) > 0
+    )
+    has_llm = any_turn(lambda t: bool(t.get("agent_text"))) or any_turn(
+        lambda t: (_turn_latency(t).get("llm_ms") or 0) > 0
+    )
+    has_tts = any_turn(lambda t: (t.get("tts_characters") or 0) > 0) or any_turn(
+        lambda t: (_turn_latency(t).get("tts_ms") or 0) > 0
+    )
+    bargeins = sum(1 for e in events if e.get("type") == "barge_in")
+    errors = [e for e in events if e.get("type") == "error"]
+
+    out: list[tuple[str, str, str]] = []
+    provider = meta.get("telephony_provider") or "?"
+    out.append(
+        (
+            "Call reached Patter",
+            OK if meta else FAIL,
+            f"{meta.get('direction', '?')} via {provider}, status={meta.get('status', '?')}"
+            if meta
+            else "no metadata.json",
+        )
+    )
+    out.append(
+        ("Caller transcribed (STT)", OK if has_stt else FAIL, f"{len(turns)} turn(s)")
+    )
+    out.append(("Hermes replied (LLM)", OK if has_llm else FAIL, ""))
+    out.append(("Spoken back (TTS)", OK if has_tts else FAIL, ""))
+    out.append(
+        (
+            "Barge-in",
+            OK if bargeins else SKIP,
+            f"{bargeins} event(s)" if bargeins else "none recorded",
+        )
+    )
+    if errors or meta.get("error"):
+        detail = meta.get("error") or errors[0].get("data", {})
+        out.append(("Errors", WARN, str(detail)[:120]))
+    return out
+
+
+def _latency_summary(turns: list[dict]) -> str:
+    keys = ("stt_ms", "llm_ttft_ms", "llm_ms", "tts_ms", "total_ms")
+    sums: dict[str, float] = {k: 0.0 for k in keys}
+    counts: dict[str, int] = {k: 0 for k in keys}
+    for t in turns:
+        lat = _turn_latency(t)
+        for k in keys:
+            v = lat.get(k)
+            if isinstance(v, (int, float)) and v > 0:
+                sums[k] += v
+                counts[k] += 1
+    parts = [
+        f"{k}={int(sums[k] / counts[k])}ms" for k in keys if counts[k]
+    ]
+    return "  ".join(parts) if parts else "no latency recorded"
+
+
+def _diagnose_verdict(call: dict) -> tuple[str, str]:
+    """Decision tree → ``(verdict, suggested_fix)`` for the first broken stage."""
+    stages = {name: status for name, status, _ in _classify_stages(call)}
+    if stages.get("Call reached Patter") == FAIL:
+        return (
+            "No call record — the carrier webhook never reached Patter.",
+            "Check the number's voice webhook (patter hermes attach-number) and "
+            "that the tunnel was up.",
+        )
+    if stages.get("Caller transcribed (STT)") == FAIL:
+        return (
+            "Audio reached Patter but produced no transcript — STT/VAD stage.",
+            "Check DEEPGRAM_API_KEY, the STT language/model, and that media streamed.",
+        )
+    if stages.get("Hermes replied (LLM)") == FAIL:
+        return (
+            "Transcript captured but Hermes never replied — gateway/LLM stage.",
+            "Run `patter hermes test`; check the gateway is up and the key matches.",
+        )
+    if stages.get("Spoken back (TTS)") == FAIL:
+        return (
+            "Hermes replied but no audio was synthesized — TTS stage.",
+            "Check ELEVENLABS_API_KEY and use REST transport on PSTN "
+            "(PATTER_ELEVENLABS_TRANSPORT=rest).",
+        )
+    return ("Pipeline looks healthy end-to-end.", "")
+
+
+def _resolve_trace_call(args: argparse.Namespace) -> tuple[Path | None, str]:
+    """Shared resolution for trace/diagnose. Returns ``(call_dir, error_msg)``."""
+    root = _call_log_root(getattr(args, "log_dir", None))
+    if root is None:
+        return None, (
+            "Call logging is off. Set PATTER_LOG_DIR (or pass --log-dir) so Patter "
+            "writes per-call logs, then place a call and retry."
+        )
+    call_dir = _find_call_dir(root, getattr(args, "call", None))
+    if call_dir is None:
+        which = getattr(args, "call", None) or "any call"
+        return None, f"No call log found for {which} under {root}/calls."
+    return call_dir, ""
+
+
+def cmd_trace(args: argparse.Namespace) -> int:
+    _apply_env(args)
+    call_dir, errmsg = _resolve_trace_call(args)
+    if call_dir is None:
+        print(errmsg, file=sys.stderr)
+        return 2
+    call = _load_call(call_dir)
+    stages = _classify_stages(call)
+    if getattr(args, "json", False):
+        print(
+            json.dumps(
+                {
+                    "call_id": call["metadata"].get("call_id"),
+                    "dir": str(call_dir),
+                    "stages": [
+                        {"stage": n, "status": s, "detail": d} for n, s, d in stages
+                    ],
+                    "latency": _latency_summary(call["turns"]),
+                },
+                indent=2,
+            )
+        )
+        return 0
+    meta = call["metadata"]
+    print(f"Call {meta.get('call_id', call_dir.name)}  ({call_dir})")
+    for name, status, detail in stages:
+        sym = _color(_SYMBOL.get(status, "?"), status)
+        line = f"  {sym} {name}"
+        if detail:
+            line += f": {detail}"
+        print(line)
+    print(f"\n  latency: {_latency_summary(call['turns'])}")
+    return 0
+
+
+def cmd_diagnose(args: argparse.Namespace) -> int:
+    _apply_env(args)
+    call_dir, errmsg = _resolve_trace_call(args)
+    if call_dir is None:
+        print(errmsg, file=sys.stderr)
+        return 2
+    call = _load_call(call_dir)
+    verdict, fix = _diagnose_verdict(call)
+    if getattr(args, "json", False):
+        print(
+            json.dumps(
+                {
+                    "call_id": call["metadata"].get("call_id"),
+                    "verdict": verdict,
+                    "fix": fix,
+                },
+                indent=2,
+            )
+        )
+        return 0
+    print(f"Call {call['metadata'].get('call_id', call_dir.name)}")
+    print(f"  {verdict}")
+    if fix:
+        print(f"  fix: {fix}")
+    return 0
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # Hermes gateway enablement (the one step that writes to ~/.hermes)
 # ──────────────────────────────────────────────────────────────────────────
 def _enable_hermes_gateway() -> str:
@@ -796,6 +1142,56 @@ def _enable_hermes_gateway() -> str:
             "settings take effect."
         )
     return key
+
+
+def _start_gateway() -> bool:
+    """Start the Hermes gateway via the CLI. Returns True on success.
+
+    Patter does not own the service — this is a convenience that shells out to
+    ``hermes gateway start`` when the CLI is available.
+    """
+    if not shutil.which("hermes"):
+        print(
+            "Cannot start the gateway: hermes CLI not found. Start it your usual "
+            "way, then re-run with --no-network skipped to verify."
+        )
+        return False
+    import subprocess
+
+    print("Starting the Hermes gateway (hermes gateway start)…")
+    try:
+        proc = subprocess.run(
+            ["hermes", "gateway", "start"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"Could not start the gateway: {exc}")
+        return False
+    if proc.returncode == 0:
+        return True
+    print((proc.stderr or proc.stdout or "").strip()[:300])
+    return False
+
+
+def _wait_for_gateway(
+    base_url: str, key: str, *, timeout: float = 60.0, interval: float = 2.0
+) -> bool:
+    """Poll ``{base_url}/models`` until it answers 200 or the timeout elapses."""
+    import time
+
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
+    deadline = time.monotonic() + timeout
+    print(f"Waiting for the gateway at {base_url} (up to {int(timeout)}s)…")
+    while time.monotonic() < deadline:
+        status, _body, _err = _get_json(f"{base_url}/models", headers=headers, timeout=3.0)
+        if status == 200:
+            print("✓ Gateway is ready.")
+            return True
+        time.sleep(interval)
+    print("✗ Gateway did not become ready in time.")
+    return False
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -930,11 +1326,37 @@ def build_hermes_parser(subparsers: argparse._SubParsersAction) -> argparse.Argu
         help="Write API_SERVER_ENABLED=true (+ key) to ~/.hermes/.env (backed up)",
     )
     setup.add_argument(
+        "--start-gateway",
+        action="store_true",
+        help="Run `hermes gateway start` and wait for /v1/models readiness",
+    )
+    setup.add_argument(
         "--env-file", action="append", default=None, help="dotenv file(s) to load"
     )
     setup.add_argument(
         "--no-env-file", action="store_true", help="Do not autoload any .env file"
     )
+
+    test = hsub.add_parser("test", help="Acceptance: gateway + a real chat turn + providers")
+    test.add_argument("--base-url", default=None, help="Hermes gateway base URL")
+    test.add_argument("--prompt", default=None, help="Prompt to send for the chat turn")
+    test.add_argument("--json", action="store_true", help="Machine-readable output")
+    test.add_argument("--env-file", action="append", default=None, help="dotenv file(s)")
+    test.add_argument("--no-env-file", action="store_true", help="Do not autoload .env")
+
+    trace = hsub.add_parser("trace", help="Show the pipeline stages of a logged call")
+    trace.add_argument("call", nargs="?", default=None, help="call_id or dir (default: latest)")
+    trace.add_argument("--log-dir", default=None, help="Call log root (else PATTER_LOG_DIR)")
+    trace.add_argument("--json", action="store_true", help="Machine-readable output")
+    trace.add_argument("--env-file", action="append", default=None, help="dotenv file(s)")
+    trace.add_argument("--no-env-file", action="store_true", help="Do not autoload .env")
+
+    diagnose = hsub.add_parser("diagnose", help="Classify where a logged call broke")
+    diagnose.add_argument("call", nargs="?", default=None, help="call_id or dir (default: latest)")
+    diagnose.add_argument("--log-dir", default=None, help="Call log root (else PATTER_LOG_DIR)")
+    diagnose.add_argument("--json", action="store_true", help="Machine-readable output")
+    diagnose.add_argument("--env-file", action="append", default=None, help="dotenv file(s)")
+    diagnose.add_argument("--no-env-file", action="store_true", help="Do not autoload .env")
 
     attach = hsub.add_parser("attach-number", help="Point a Twilio number at your Patter URL")
     attach.add_argument("number", help="Phone number in E.164 (e.g. +15551234567)")
@@ -952,12 +1374,19 @@ def dispatch_hermes(args: argparse.Namespace) -> int:
         return cmd_doctor(args)
     if command == "setup":
         return cmd_setup(args)
+    if command == "test":
+        return cmd_test(args)
+    if command == "trace":
+        return cmd_trace(args)
+    if command == "diagnose":
+        return cmd_diagnose(args)
     if command == "attach-number":
         return cmd_attach_number(args)
     if command == "numbers":
         return cmd_numbers(args)
     print(
-        "Usage: patter hermes {doctor|setup|attach-number|numbers}\n"
+        "Usage: patter hermes "
+        "{doctor|setup|test|trace|diagnose|attach-number|numbers}\n"
         "Try:   patter hermes doctor",
         file=sys.stderr,
     )

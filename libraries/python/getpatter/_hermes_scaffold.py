@@ -94,6 +94,8 @@ PATTER_PHONE_NUMBER=+15551234567
 PATTER_LANGUAGE=en
 # REST is the safer default for a first PSTN demo; set to ws for streaming.
 PATTER_ELEVENLABS_TRANSPORT=rest
+# Per-call logs — enables `patter hermes trace` / `patter hermes diagnose`.
+PATTER_LOG_DIR=./patter-logs
 
 # ── Twilio carrier ────────────────────────────────────────────────────
 TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
@@ -157,6 +159,22 @@ Now call your number and talk to Hermes.
 
 ```bash
 python scripts/test_outbound_call.py +15557654321
+```
+
+## Debug a call
+
+With `PATTER_LOG_DIR` set (see `.env`), Patter writes a per-call log. After a
+call, inspect what happened stage by stage, or get a one-line verdict:
+
+```bash
+patter hermes trace        # latest call: carrier → STT → Hermes → TTS + latency
+patter hermes diagnose     # "Hermes replied but no audio — TTS stage" + fix
+```
+
+Before placing a call at all, confirm the brain answers and providers are ready:
+
+```bash
+patter hermes test         # /v1/models + a real chat turn + provider keys
 ```
 
 ## Why Patter instead of a hosted custom-LLM voice agent?

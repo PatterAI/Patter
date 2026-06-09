@@ -300,3 +300,183 @@ def test_parser_wires_subcommands() -> None:
     assert ns.hermes_command == "attach-number"
     assert ns.number == "+15551234567"
     assert ns.url == "https://x/y"
+
+
+def test_parser_wires_test_trace_diagnose() -> None:
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command")
+    cli_hermes.build_hermes_parser(sub)
+    for name in ("test", "trace", "diagnose"):
+        ns = parser.parse_args(["hermes", name])
+        assert ns.hermes_command == name
+
+
+# ── gateway lifecycle ────────────────────────────────────────────────────────
+def test_start_gateway_no_cli(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli_hermes.shutil, "which", lambda _n: None)
+    assert cli_hermes._start_gateway() is False
+    assert "hermes CLI not found" in capsys.readouterr().out
+
+
+def test_start_gateway_success(monkeypatch) -> None:
+    monkeypatch.setattr(cli_hermes.shutil, "which", lambda _n: "/usr/bin/hermes")
+
+    class Proc:
+        returncode = 0
+        stdout = "started"
+        stderr = ""
+
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: Proc())
+    assert cli_hermes._start_gateway() is True
+
+
+def test_wait_for_gateway_ready(monkeypatch) -> None:
+    monkeypatch.setattr(cli_hermes, "_get_json", lambda *a, **k: (200, {}, ""))
+    assert cli_hermes._wait_for_gateway("http://x/v1", "k", timeout=1, interval=0.01) is True
+
+
+def test_wait_for_gateway_times_out(monkeypatch) -> None:
+    monkeypatch.setattr(cli_hermes, "_get_json", lambda *a, **k: (None, None, "down"))
+    assert (
+        cli_hermes._wait_for_gateway("http://x/v1", "k", timeout=0.05, interval=0.01)
+        is False
+    )
+
+
+# ── acceptance test command ──────────────────────────────────────────────────
+def test_chat_turn_check_ok(monkeypatch) -> None:
+    class Resp:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"choices": [{"message": {"content": "Hi there"}}]}
+
+    monkeypatch.setattr("httpx.post", lambda *a, **k: Resp())
+    c = cli_hermes._chat_turn_check("http://x/v1", "k", "hermes-agent", "hi")
+    assert c.status == cli_hermes.OK
+    assert "Hi there" in c.detail
+
+
+def test_chat_turn_check_http_error(monkeypatch) -> None:
+    class Resp:
+        status_code = 500
+        text = "boom"
+
+    monkeypatch.setattr("httpx.post", lambda *a, **k: Resp())
+    c = cli_hermes._chat_turn_check("http://x/v1", "k", "m", "hi")
+    assert c.status == cli_hermes.FAIL
+
+
+def test_cmd_test_passes_when_gateway_and_turn_ok(monkeypatch, capsys) -> None:
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg")
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "el")
+    monkeypatch.setattr(
+        cli_hermes, "_get_json", lambda *a, **k: (200, {"data": [{"id": "hermes-agent"}]}, "")
+    )
+    monkeypatch.setattr(
+        cli_hermes,
+        "_chat_turn_check",
+        lambda *a, **k: cli_hermes.Check(cli_hermes.OK, "Chat turn", "120 ms"),
+    )
+    args = argparse.Namespace(
+        base_url=None, prompt=None, json=True, env_file=None, no_env_file=True
+    )
+    assert cli_hermes.cmd_test(args) == 0
+    assert '"failures": 0' in capsys.readouterr().out
+
+
+# ── trace / diagnose ─────────────────────────────────────────────────────────
+def _make_call(root: Path, call_id: str, *, meta: dict, turns: list[dict], events=None):
+    d = root / "calls" / "2026" / "06" / "09" / call_id
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "metadata.json").write_text(
+        __import__("json").dumps({"call_id": call_id, **meta}), encoding="utf-8"
+    )
+    (d / "transcript.jsonl").write_text(
+        "\n".join(__import__("json").dumps(t) for t in turns), encoding="utf-8"
+    )
+    if events:
+        (d / "events.jsonl").write_text(
+            "\n".join(__import__("json").dumps(e) for e in events), encoding="utf-8"
+        )
+    return d
+
+
+def test_find_call_dir_latest_and_by_id(tmp_path: Path) -> None:
+    _make_call(tmp_path, "CA1", meta={"status": "x"}, turns=[{"user_text": "a"}])
+    d2 = _make_call(tmp_path, "CA2", meta={"status": "x"}, turns=[{"user_text": "b"}])
+    # latest by mtime is CA2
+    assert cli_hermes._find_call_dir(tmp_path, None) == d2
+    assert cli_hermes._find_call_dir(tmp_path, "CA1").name == "CA1"
+    assert cli_hermes._find_call_dir(tmp_path, "nope") is None
+
+
+def test_classify_stages_healthy(tmp_path: Path) -> None:
+    d = _make_call(
+        tmp_path,
+        "CA",
+        meta={"status": "completed", "telephony_provider": "twilio"},
+        turns=[{"user_text": "hi", "agent_text": "hello", "tts_characters": 10}],
+        events=[{"type": "barge_in", "data": {}}],
+    )
+    stages = {n: s for n, s, _ in cli_hermes._classify_stages(cli_hermes._load_call(d))}
+    assert stages["Caller transcribed (STT)"] == cli_hermes.OK
+    assert stages["Hermes replied (LLM)"] == cli_hermes.OK
+    assert stages["Spoken back (TTS)"] == cli_hermes.OK
+
+
+def test_diagnose_tts_stage(tmp_path: Path) -> None:
+    d = _make_call(
+        tmp_path,
+        "CA",
+        meta={"status": "completed"},
+        turns=[{"user_text": "hi", "agent_text": "hello", "tts_characters": 0}],
+    )
+    verdict, fix = cli_hermes._diagnose_verdict(cli_hermes._load_call(d))
+    assert "TTS" in verdict
+    assert "ELEVENLABS_API_KEY" in fix
+
+
+def test_diagnose_llm_stage(tmp_path: Path) -> None:
+    d = _make_call(
+        tmp_path,
+        "CA",
+        meta={"status": "completed"},
+        turns=[{"user_text": "hi", "agent_text": "", "tts_characters": 0}],
+    )
+    verdict, _fix = cli_hermes._diagnose_verdict(cli_hermes._load_call(d))
+    assert "Hermes never replied" in verdict
+
+
+def test_diagnose_stt_stage(tmp_path: Path) -> None:
+    d = _make_call(
+        tmp_path, "CA", meta={"status": "completed"}, turns=[{"user_text": ""}]
+    )
+    verdict, _fix = cli_hermes._diagnose_verdict(cli_hermes._load_call(d))
+    assert "no transcript" in verdict
+
+
+def test_trace_no_log_dir(monkeypatch) -> None:
+    monkeypatch.delenv("PATTER_LOG_DIR", raising=False)
+    args = argparse.Namespace(
+        call=None, log_dir=None, json=False, env_file=None, no_env_file=True
+    )
+    assert cli_hermes.cmd_trace(args) == 2
+
+
+def test_trace_json_output(tmp_path: Path, monkeypatch, capsys) -> None:
+    _make_call(
+        tmp_path,
+        "CA",
+        meta={"status": "completed", "telephony_provider": "twilio"},
+        turns=[{"user_text": "hi", "agent_text": "yo", "tts_characters": 3,
+                "latency": {"llm_ttft_ms": 1000, "total_ms": 1500}}],
+    )
+    args = argparse.Namespace(
+        call=None, log_dir=str(tmp_path), json=True, env_file=None, no_env_file=True
+    )
+    assert cli_hermes.cmd_trace(args) == 0
+    out = capsys.readouterr().out
+    assert '"call_id": "CA"' in out
+    assert "llm_ttft_ms" in out
