@@ -139,6 +139,9 @@ export interface CallMetrics {
   readonly stt_model?: string;
   readonly tts_model?: string;
   readonly llm_model?: string;
+  /** Terminal error code when the call ended abnormally (a lowercased ErrorCode
+   * value or "other"); empty/absent for a clean call. Never the message. */
+  readonly error_code?: string;
 }
 
 // ---- CallControl interface ----
@@ -219,6 +222,9 @@ export class CallMetricsAccumulator {
   readonly realtimeModel: string;
 
   private readonly _pricing: Record<string, ProviderPricing>;
+  // Terminal error code (lowercased ErrorCode value or "other"); set by
+  // recordError when the call ends abnormally. Empty for a clean call.
+  private _errorCode = '';
   private readonly _callStart: number;
   private readonly _turns: TurnMetrics[] = []; // mutable internal array; immutable when exposed via TurnMetrics[] → readonly TurnMetrics[]
 
@@ -942,10 +948,45 @@ export class CallMetricsAccumulator {
       stt_model: this.sttModel,
       tts_model: this.ttsModel,
       llm_model: this._llmModel,
+      error_code: this._errorCode,
     };
 
     this._eventBus?.emit('call_ended', { callId: this.callId, metrics });
     return metrics;
+  }
+
+  /**
+   * Record the call's terminal error as a coarse, anonymous code. Stores the
+   * PatterError `.code` lowercased; maps common timeout/connection errors; falls
+   * back to "other". Never stores the message. Last write wins.
+   */
+  recordError(err: unknown): void {
+    const code = (err as { code?: unknown })?.code;
+    const name = (err as { name?: unknown })?.name;
+    // Node connection errors carry a string `.code` like ECONNREFUSED/ECONNRESET;
+    // map them to "connection" so the distribution matches Python's
+    // `isinstance(exc, ConnectionError)` branch. Checked first so these don't fall
+    // into the generic `.code.toLowerCase()` (which would yield "econnrefused").
+    const sys = typeof code === 'string' ? code : '';
+    if (
+      sys.startsWith('ECONN') ||
+      sys === 'EHOSTUNREACH' ||
+      sys === 'ENETUNREACH' ||
+      sys === 'EPIPE'
+    ) {
+      this._errorCode = 'connection';
+      return;
+    }
+    // PatterError carries a `.code` enum value (e.g. "RATE_LIMIT").
+    if (typeof code === 'string' && code) {
+      this._errorCode = code.toLowerCase();
+      return;
+    }
+    if (name === 'TimeoutError' || name === 'AbortError') {
+      this._errorCode = 'timeout';
+    } else {
+      this._errorCode = 'other';
+    }
   }
 
   /** Return the cost breakdown for the call so far without ending it. */

@@ -5,6 +5,72 @@
 - **TypeScript namespace exports for the agent-LLM presets.** `import { hermes, openclaw, openaiCompatible } from "getpatter"` now works alongside the existing `HermesLLM` / `OpenClawLLM` / `OpenAICompatibleLLM` named exports, so `new hermes.LLM()` mirrors Python's `from getpatter.llm import hermes; hermes.LLM()`. `libraries/typescript/src/index.ts`.
 - **`session_key_factory` / `sessionKeyFactory` — per-call long-term memory scope from a caller hash.** `OpenAICompatibleLLM` (and `HermesLLM`) can derive the `X-Hermes-Session-Key` header per call from a `SessionContext` (`call_id` / `caller` / `callee` / `caller_hash`) instead of a static value, so an agent runtime can remember a caller across calls **without the raw phone number ever reaching the wire or the logs**. Shortcut `HermesLLM(session_key_from="caller_hash")` installs a default `patter-caller-<caller_hash>` factory (SHA-256, 16 hex chars). New public `SessionContext` + `hash_caller` / `hashCaller` helper. The factory takes precedence over the static `session_key`; a falsy return omits the header. The loop dispatch was generalised to thread `caller` / `callee` only to providers whose `stream()` declares them (or `**kwargs`), keeping built-in and minimal custom providers unchanged. `libraries/python/getpatter/models.py`, `.../llm/openai_compatible.py`, `.../llm/hermes.py`, `.../services/llm_loop.py` + TypeScript mirrors.
 - **`long_turn_message` / `longTurnMessage` — opt-in spoken filler during a slow turn.** When an LLM turn takes longer than `long_turn_message_after_s` (default 4 s) and no audio has reached the caller yet, Patter speaks a short configurable line (e.g. "One moment, let me check.") instead of dead silence — useful for agent runtimes (Hermes / OpenClaw) that run tools mid-turn. Distinct from `llm_error_message` (which fires on error): this fires on **slowness**, once per turn, gated on emitted audio so it never double-speaks. `None` / unset = off (no behaviour change). `libraries/python/getpatter/models.py`, `.../stream_handler.py`, `.../client.py` + TypeScript mirrors.
+- **Anonymous usage telemetry (opt-out, on by default).** Patter now sends a
+  small, anonymous, fail-safe usage event when the SDK is initialised and when
+  an engine family is first used, so the maintainers can see which engines,
+  providers, models, carriers, platforms, and SDK versions are in use — plus
+  coarse per-call latency, duration, and cost — and prioritise accordingly.
+  **No PII or call content is ever collected** — no phone numbers,
+  transcripts, audio, prompts, tool arguments, API keys, customer identifiers,
+  file paths, hostnames, or IPs; only coarse, low-cardinality facts (SDK version
+  and language, OS family, CPU arch, runtime version bucketed to major.minor,
+  and allowlisted dimensions like `engine`/`provider`/`carrier`). Two identifiers
+  are sent, both random and PII-free: a per-process `run_id` (regenerated each
+  run) and a persistent anonymous `install_id` — a random UUID stored locally
+  (`~/.getpatter/install-id`) to count active installs, never a hardware
+  fingerprint, never created when opted out. The collector drops the source IP.
+  Telemetry is
+  fire-and-forget with a bounded buffer, short timeouts, and swallow-all error
+  handling, so it can never block, slow, or break a live call, and behaves
+  identically when offline. It is **auto-disabled in CI and test runs**.
+  Disable it with `Patter(telemetry=False)` / `new Patter({ telemetry: false })`,
+  `PATTER_TELEMETRY_DISABLED=1`, or the cross-tool `DO_NOT_TRACK=1`; point it at
+  your own collector with `PATTER_TELEMETRY_ENDPOINT`; and inspect exactly what
+  would be sent without sending it via `PATTER_TELEMETRY_DEBUG=1`. New module
+  `libraries/python/getpatter/telemetry/` and `libraries/typescript/src/telemetry/`;
+  new optional `telemetry` field on `Patter(...)` / `LocalOptions`. Events:
+  `sdk_initialized` (carrier, tunnel, plus presence-only anonymous deploy-shape —
+  `invoked_by_agent` / `container` / `serverless` / `cloud` / `package_manager` /
+  `days_since_install_bucket` / `previous_sdk_version` for the upgrade funnel),
+  `feature_used` (engine + provider vendor
+  family, plus — for **pipeline** agents — the composed stack: `stt_provider` /
+  `tts_provider` / `llm_provider` and the sanitized `stt_model` / `tts_model` /
+  `llm_model`, e.g. `deepgram-nova-3` / `anthropic-claude-opus-4-8`, where a
+  fine-tuned / self-hosted / custom model collapses to `{vendor}-other` so a
+  custom model name is never sent), `agent_configured` (built-in vs custom tool
+  *counts* — never tool names — the coarse integration category: `openclaw` /
+  `mcp` / `other` / hermes / none, and feature-adoption flags `noise_reduction` /
+  `turn_detection` / `preambles_used` / `per_tool_timeouts_set` /
+  `llm_fallback_configured`), and `call_completed` (one event per call with
+  the terminal `outcome` — completed / error / no_answer / busy / failed — an
+  `error_code` (a closed `ErrorCode` value such as `rate_limit` / `timeout` /
+  `connection`, **never the error message**), the engine/provider/carrier, and the
+  raw `latency_ms`, `duration_seconds`, total `cost_usd`, and `turn_count_bucket`;
+  no call content and no per-call identifier). `CallMetrics` gains an `error_code` field and the
+  metrics accumulator a `record_error()` / `recordError()` method. A
+  second **value-level allowlist** coerces any off-list dimension value (e.g. a
+  custom tool or integration name) to `other`, making customer brands
+  structurally impossible to emit even from a buggy caller; the collector
+  re-validates the same allowlist server-side.
+- **Telemetry parity with OSS CLIs — CLI usage, activation, and a call funnel
+  (schema v5).** Four more anonymous events round out the picture of how the SDK
+  is actually used, matching how best-in-class OSS tools (Next.js, Astro,
+  Homebrew) instrument themselves — still no PII, every field a coarse enum,
+  bucket, or bool. New events: `cli_command` (which `getpatter` CLI command ran —
+  the command *name* only, never arguments or flags; `dashboard` / `eval` /
+  `telemetry` / `other`), `first_run` (sent **once per install**, on the run that
+  creates the local state, to mark activation — carries the same anonymous
+  deploy-shape dimensions as `sdk_initialized`, and is never sent when opted out),
+  and `call_started` (emitted when a call connects, pairing with `call_completed`
+  for a connect→complete funnel and a failure-rate denominator). A new
+  `direction` dimension (inbound / outbound) is recorded on `call_started` and
+  `call_completed` — a core usage split that was previously invisible. New
+  **`getpatter telemetry status | disable | enable`** CLI command (parity with
+  `next telemetry disable`) writes a persisted, machine-level opt-out marker
+  (`~/.getpatter/telemetry-disabled`) honoured by the consent resolver; the
+  control command itself never emits telemetry, so disabling never phones home.
+  `libraries/python/getpatter/cli.py` / `telemetry/{events,consent,install_id,call_metrics}.py`
+  and the TypeScript mirrors; both SDKs verified byte-for-byte at parity.
 
 ### Fixed
 

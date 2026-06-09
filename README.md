@@ -110,6 +110,12 @@ await phone.serve(agent, tunnel=True)
 
 `tunnel: true` spawns a Cloudflare quick tunnel and points your number at it — ideal for local dev. For production, use a static `webhook_url` (or [ngrok](https://ngrok.com)); see [Tunneling](https://docs.getpatter.com).
 
+## Telemetry
+
+> **Note** Patter collects anonymous, opt-out usage data (SDK version, bucketed provider/model and call facts) to help us prioritise — never call content, prompts, phone numbers, keys, or free text.
+>
+> Opt out any time: `Patter(telemetry=False)` (`new Patter({ telemetry: false })`), `getpatter telemetry disable`, or `PATTER_TELEMETRY_DISABLED=1` (also honours `DO_NOT_TRACK=1`); auto-off in CI/tests. Inspect without sending: `PATTER_TELEMETRY_DEBUG=1`. Full details: [Telemetry](https://docs.getpatter.com/telemetry).
+
 ## Templates
 
 Each template is a self-contained repo — clone, add your `.env`, and run. Python and TypeScript both included.
@@ -131,12 +137,6 @@ cd patter-inbound-agent
 cp .env.example .env    # fill in your keys
 cd python && pip install -r requirements.txt && python main.py
 ```
-
-## Telemetry
-
-> **Note** Patter collects anonymous, opt-out usage data (SDK version, bucketed provider/model and call facts) to help us prioritise — never call content, prompts, phone numbers, keys, or free text.
->
-> Opt out any time: `Patter(telemetry=False)` (`new Patter({ telemetry: false })`) or `PATTER_TELEMETRY_DISABLED=1` (also honours `DO_NOT_TRACK=1`); auto-off in CI/tests. Full details: [Telemetry](https://docs.getpatter.com/telemetry).
 
 ## Star History
 

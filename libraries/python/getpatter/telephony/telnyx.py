@@ -701,6 +701,13 @@ async def telnyx_stream_bridge(
 
     except Exception as exc:
         logger.exception("Stream error: %s", exc)
+        # Record the terminal error code on the metrics so call telemetry and the
+        # dashboard can attribute the failure (code only, never the message).
+        if metrics is not None:
+            try:
+                metrics.record_error(exc)
+            except Exception:
+                pass
     finally:
         # Best-effort recording stop — only if recording was requested and
         # the call is still active. Telnyx auto-stops on hangup so errors

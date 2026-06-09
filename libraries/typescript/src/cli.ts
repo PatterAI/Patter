@@ -5,7 +5,8 @@
  *
  * Usage:
  *   npx getpatter dashboard [--port 8000]
- *   npx getpatter eval          (stub — evals are Python-only today)
+ *   npx getpatter eval                        (stub — evals are Python-only today)
+ *   npx getpatter telemetry [status|disable|enable]
  */
 
 import { createServer } from 'node:http';
@@ -14,6 +15,74 @@ import { MetricsStore } from './dashboard/store';
 import { mountDashboard, mountApi } from './dashboard/routes';
 import { getLogger } from './logger';
 import { showBanner } from './banner';
+import { VERSION } from './version';
+import { TelemetryClient, DEFAULT_ENDPOINT } from './telemetry/client';
+import { isEnabled } from './telemetry/consent';
+import { isOptedOut, setOptOut } from './telemetry/install-id';
+
+/**
+ * Record which CLI command was invoked (the name only — never args/flags), then
+ * flush. `process.exit()` skips the client's `beforeExit` flush hook, so we flush
+ * explicitly here, bounded so the CLI stays snappy even when the collector is
+ * unreachable. Best-effort and fail-safe — never blocks or breaks the CLI.
+ */
+async function emitCliCommand(command: string): Promise<void> {
+  try {
+    const client = new TelemetryClient({ sdkVersion: VERSION });
+    client.record('cli_command', { cli_command: command });
+    const timeout = new Promise<void>((resolve) => {
+      const t = setTimeout(resolve, 600);
+      (t as { unref?: () => void }).unref?.();
+    });
+    await Promise.race([client.close(), timeout]);
+  } catch {
+    /* best-effort — never break the CLI */
+  }
+}
+
+/**
+ * Implement `getpatter telemetry status|disable|enable` (parity with
+ * `next telemetry`). Persists a machine-level opt-out marker read by consent.
+ */
+function runTelemetryCommand(action: string | undefined): number {
+  const act = action ?? 'status';
+  if (act === 'disable') {
+    try {
+      setOptOut(true);
+    } catch (err) {
+      console.log(`Could not write the opt-out marker: ${String(err)}`);
+      return 1;
+    }
+    console.log('Anonymous telemetry disabled. No usage data will be sent.');
+    return 0;
+  }
+  if (act === 'enable') {
+    try {
+      setOptOut(false);
+    } catch (err) {
+      console.log(`Could not remove the opt-out marker: ${String(err)}`);
+      return 1;
+    }
+    console.log('Anonymous telemetry re-enabled (opt-out model, on by default).');
+    return 0;
+  }
+  if (act !== 'status') {
+    console.log('Usage: getpatter telemetry [status|disable|enable]');
+    return 1;
+  }
+  const endpoint = process.env.PATTER_TELEMETRY_ENDPOINT || DEFAULT_ENDPOINT;
+  console.log(`Anonymous usage telemetry: ${isEnabled() ? 'ENABLED' : 'DISABLED'}`);
+  if (isOptedOut()) {
+    console.log('  Opted out via: getpatter telemetry disable (persisted marker)');
+  }
+  console.log(`  Endpoint: ${endpoint}`);
+  console.log('  Inspect what would be sent (prints, sends nothing): PATTER_TELEMETRY_DEBUG=1');
+  console.log(
+    '  Disable: getpatter telemetry disable  |  DO_NOT_TRACK=1  |  PATTER_TELEMETRY_DISABLED=1',
+  );
+  console.log('  Details: https://docs.getpatter.com/telemetry');
+  return 0;
+}
 
 function parseArgs(argv: string[]): { port: number } {
   const args = argv.slice(2);
@@ -59,7 +128,15 @@ function printHermesStub(): void {
 
 async function main(): Promise<void> {
   const command = process.argv[2];
+
+  // Telemetry control command — never emits telemetry itself (disabling must not
+  // phone home on the very invocation that opts the user out).
+  if (command === 'telemetry') {
+    process.exit(runTelemetryCommand(process.argv[3]));
+  }
+
   if (command === 'eval') {
+    await emitCliCommand('eval');
     printEvalStub();
     process.exit(0);
   }
@@ -68,11 +145,15 @@ async function main(): Promise<void> {
     process.exit(0);
   }
   if (command !== 'dashboard') {
+    await emitCliCommand(command ? 'other' : 'none');
     console.log('Usage: getpatter dashboard [--port 8000]');
     console.log('       getpatter eval          (stub — use Python SDK for evals)');
     console.log('       getpatter hermes        (stub — use Python SDK for the wizard)');
+    console.log('       getpatter telemetry [status|disable|enable]');
     process.exit(command ? 1 : 0);
   }
+
+  await emitCliCommand('dashboard');
 
   const { port } = parseArgs(process.argv);
 

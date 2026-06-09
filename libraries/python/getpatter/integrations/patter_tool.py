@@ -189,6 +189,23 @@ class PatterTool:
             schema=self.hermes_schema(),
             handler=handler,
         )
+        # Anonymous telemetry: Patter is being exposed as a tool to a Hermes agent.
+        # Emit on ``agent_configured`` (where ``integration`` is a native dimension,
+        # alongside openclaw/mcp) with the full shape so it does not create a second
+        # ``feature_used`` shape.
+        try:
+            tel = getattr(self._phone, "_telemetry", None)
+            if tel is not None:
+                tel.record(
+                    "agent_configured",
+                    builtin_tool_count=0,
+                    custom_tool_count_bucket="0",
+                    integration="hermes",
+                    integration_kind="none",
+                    mcp_server_count_bucket="0",
+                )
+        except Exception:
+            pass
 
     # --- Lifecycle ---------------------------------------------------------
 

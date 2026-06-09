@@ -1533,6 +1533,19 @@ export class StreamHandler {
     this.streamSid = sid;
   }
 
+  /**
+   * Record a terminal/processing error as a coarse, anonymous code on the call
+   * metrics (code only, never the message). Surfaced via `call_completed`
+   * telemetry. Safe to call with any value; last write wins.
+   */
+  recordError(err: unknown): void {
+    try {
+      this.metricsAcc.recordError(err);
+    } catch {
+      /* never let error-recording throw */
+    }
+  }
+
   /** Handle an incoming audio chunk (already decoded from base64). */
   /** Forward inbound audio bytes to the AI adapter and (in pipeline mode) the STT provider. */
   async handleAudio(audioBuffer: Buffer): Promise<void> {

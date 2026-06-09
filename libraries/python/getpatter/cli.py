@@ -32,12 +32,32 @@ def main() -> None:
 
     build_eval_parser(subparsers)
 
-    # patter hermes {doctor|setup|attach-number|numbers}
+    # patter hermes {doctor|setup|test|trace|diagnose|attach-number|numbers}
     from getpatter.cli_hermes import build_hermes_parser, dispatch_hermes
 
     build_hermes_parser(subparsers)
 
+    # patter telemetry [status|disable|enable]
+    tel = subparsers.add_parser(
+        "telemetry",
+        help="Manage anonymous usage telemetry (status / disable / enable)",
+    )
+    tel.add_argument(
+        "action",
+        nargs="?",
+        choices=["status", "disable", "enable"],
+        default="status",
+        help="status (default), disable, or enable",
+    )
+
     args = parser.parse_args()
+
+    # The telemetry control command never emits telemetry itself — disabling must
+    # not phone home on the very invocation that opts the user out.
+    if args.command == "telemetry":
+        sys.exit(_run_telemetry_command(args.action))
+
+    _emit_cli_command(args.command)
 
     if args.command == "dashboard":
         asyncio.run(_run_dashboard(args.port))
@@ -48,6 +68,70 @@ def main() -> None:
     else:
         parser.print_help()
         sys.exit(1)
+
+
+def _emit_cli_command(command: str | None) -> None:
+    """Record which CLI command was invoked (the name only — never args/flags).
+
+    Builds a standalone telemetry client; the buffered event ships via the
+    process-exit flush (immediate for short commands, on Ctrl+C for the dashboard).
+    Best-effort and fail-safe — never blocks or breaks the CLI.
+    """
+    try:
+        from getpatter import __version__
+        from getpatter.telemetry import TelemetryClient
+
+        TelemetryClient(sdk_version=__version__).record(
+            "cli_command", cli_command=command or "none"
+        )
+    except Exception:
+        pass
+
+
+def _run_telemetry_command(action: str) -> int:
+    """Implement ``patter telemetry status|disable|enable`` (parity with
+    ``next telemetry``). Persists a machine-level opt-out marker read by consent."""
+    import os
+
+    from getpatter.telemetry.client import DEFAULT_ENDPOINT
+    from getpatter.telemetry.consent import is_enabled
+    from getpatter.telemetry.install_id import is_opted_out, set_opt_out
+
+    if action == "disable":
+        try:
+            set_opt_out(True)
+        except OSError as exc:
+            print(f"Could not write the opt-out marker: {exc}")
+            return 1
+        print("Anonymous telemetry disabled. No usage data will be sent.")
+        return 0
+    if action == "enable":
+        try:
+            set_opt_out(False)
+        except OSError as exc:
+            print(f"Could not remove the opt-out marker: {exc}")
+            return 1
+        print("Anonymous telemetry re-enabled (opt-out model, on by default).")
+        return 0
+
+    # status
+    endpoint = os.getenv("PATTER_TELEMETRY_ENDPOINT") or DEFAULT_ENDPOINT
+    print(
+        f"Anonymous usage telemetry: {'ENABLED' if is_enabled() else 'DISABLED'}"
+    )
+    if is_opted_out():
+        print("  Opted out via: getpatter telemetry disable (persisted marker)")
+    print(f"  Endpoint: {endpoint}")
+    print(
+        "  Inspect what would be sent (prints, sends nothing): "
+        "PATTER_TELEMETRY_DEBUG=1"
+    )
+    print(
+        "  Disable: getpatter telemetry disable  |  DO_NOT_TRACK=1  |  "
+        "PATTER_TELEMETRY_DISABLED=1"
+    )
+    print("  Details: https://docs.getpatter.com/telemetry")
+    return 0
 
 
 async def _run_dashboard(port: int) -> None:
