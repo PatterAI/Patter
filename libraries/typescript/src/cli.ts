@@ -43,15 +43,33 @@ function printEvalStub(): void {
   );
 }
 
+function printHermesStub(): void {
+  console.log(
+    'The Hermes setup wizard (doctor / setup / attach-number) lives in the\n' +
+      'Python CLI today. Use it from the Python SDK:\n\n' +
+      '  pip install getpatter\n' +
+      '  patter hermes doctor\n' +
+      '  patter hermes setup\n\n' +
+      'The HermesLLM provider itself is fully available in this TypeScript SDK\n' +
+      "(import { HermesLLM } from 'getpatter'). See\n" +
+      'https://docs.getpatter.com/integrations/hermes for docs.',
+  );
+}
+
 async function main(): Promise<void> {
   const command = process.argv[2];
   if (command === 'eval') {
     printEvalStub();
     process.exit(0);
   }
+  if (command === 'hermes') {
+    printHermesStub();
+    process.exit(0);
+  }
   if (command !== 'dashboard') {
     console.log('Usage: getpatter dashboard [--port 8000]');
     console.log('       getpatter eval          (stub — use Python SDK for evals)');
+    console.log('       getpatter hermes        (stub — use Python SDK for the wizard)');
     process.exit(command ? 1 : 0);
   }
 

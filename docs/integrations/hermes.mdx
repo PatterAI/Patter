@@ -164,6 +164,34 @@ gateway that isn't listening.
   `hermes-agent`).
 </Note>
 
+### Zero-config setup (Python)
+
+If you'd rather not wire it up by hand, the Python CLI scaffolds a ready-to-run project,
+checks your environment, and can point your Twilio number at Patter:
+
+```bash
+pip install getpatter
+
+patter hermes doctor        # preflight: gateway, providers, carrier — with fixes
+patter hermes setup         # scaffold ./hermes-phone-agent (app.py, .env, scripts)
+```
+
+`patter hermes doctor` probes the Hermes gateway (`/v1/models`), confirms `HermesLLM` is
+constructible, checks your Deepgram / ElevenLabs / Twilio credentials, and prints a
+suggested fix for anything missing (`--no-network` skips live probes, `--json` for
+machine-readable output). `patter hermes setup` writes the same starter project shown in
+[`examples/hermes-phone-agent`](https://github.com/PatterAI/Patter/tree/main/examples/hermes-phone-agent)
+and, given `--number` and `--url`, attaches the Twilio webhook for you. To wire an existing
+number on its own:
+
+```bash
+patter hermes numbers       # list the numbers on your Twilio account
+patter hermes attach-number +15551234567 --url https://<your-tunnel>/calls/inbound
+```
+
+These commands live in the Python SDK today; the `HermesLLM` provider itself is available
+in both the Python and TypeScript SDKs.
+
 ### Running Patter locally
 
 Build a pipeline-mode agent whose LLM is `HermesLLM`. Patter wraps the carrier, STT, and

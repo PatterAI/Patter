@@ -32,12 +32,19 @@ def main() -> None:
 
     build_eval_parser(subparsers)
 
+    # patter hermes {doctor|setup|attach-number|numbers}
+    from getpatter.cli_hermes import build_hermes_parser, dispatch_hermes
+
+    build_hermes_parser(subparsers)
+
     args = parser.parse_args()
 
     if args.command == "dashboard":
         asyncio.run(_run_dashboard(args.port))
     elif args.command == "eval":
         sys.exit(dispatch_eval(args))
+    elif args.command == "hermes":
+        sys.exit(dispatch_hermes(args))
     else:
         parser.print_help()
         sys.exit(1)
