@@ -362,6 +362,18 @@ export interface LocalOptions {
    * used via ``phone.agent({ engine: new OpenAIRealtime({ apiKey }) })``.
    */
   readonly openaiKey?: string;
+  /**
+   * Anonymous usage telemetry (opt-out, **on by default**). Lets the Patter
+   * maintainers see coarse, anonymous usage (engines/providers/carriers, OS,
+   * SDK version) — never PII or call content. Fire-and-forget and fail-safe.
+   *
+   * - omitted / ``true``: enabled (unless disabled by ``PATTER_TELEMETRY_DISABLED=1``,
+   *   ``DO_NOT_TRACK=1``, or a CI/test environment).
+   * - ``false``: opt out in code.
+   *
+   * Inspect-without-send with ``PATTER_TELEMETRY_DEBUG=1``. See the telemetry docs.
+   */
+  readonly telemetry?: boolean;
 }
 
 /** Internal shape of a guardrail (matches `Guardrail` class from `public-api.ts`). */

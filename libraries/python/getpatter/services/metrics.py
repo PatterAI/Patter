@@ -135,6 +135,10 @@ class CallMetricsAccumulator:
         self._llm_provider_name: str = llm_provider
         self._llm_model: str = ""
 
+        # Terminal error code (lowercased ErrorCode value or "other"); set by
+        # ``record_error`` when the call ends abnormally. Empty for a clean call.
+        self._error_code: str = ""
+
         # --- EventBus integration (additive; does not replace callbacks) ---
         self._event_bus: EventBus | None = None
 
@@ -808,6 +812,7 @@ class CallMetricsAccumulator:
             stt_model=self.stt_model,
             tts_model=self.tts_model,
             llm_model=self._llm_model,
+            error_code=self._error_code,
         )
 
         if self._event_bus is not None:
@@ -816,6 +821,23 @@ class CallMetricsAccumulator:
             )
 
         return result
+
+    def record_error(self, exc: BaseException) -> None:
+        """Record the call's terminal error as a coarse, anonymous code.
+
+        Stores ``exc.code`` (a :class:`~getpatter.exceptions.ErrorCode`) lowercased
+        for a ``PatterError``; maps common stdlib timeouts/connection errors; falls
+        back to ``"other"``. Never stores the message. Last write wins.
+        """
+        code = getattr(exc, "code", None)
+        if code is not None:
+            self._error_code = str(getattr(code, "value", code)).lower()
+        elif isinstance(exc, TimeoutError):  # asyncio.TimeoutError aliases this (3.11+)
+            self._error_code = "timeout"
+        elif isinstance(exc, ConnectionError):
+            self._error_code = "connection"
+        else:
+            self._error_code = "other"
 
     def get_cost_so_far(self) -> CostBreakdown:
         """Return current accumulated cost (for real-time ``on_metrics``)."""

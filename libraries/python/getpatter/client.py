@@ -108,6 +108,140 @@ def _resolve_persist_root(persist: bool | str | None) -> str | None:
     return str(result) if result is not None else None
 
 
+def _build_telemetry_client(flag: bool | None) -> Any:
+    """Construct the anonymous telemetry client (always safe; no-op when disabled)."""
+    from getpatter import __version__
+    from getpatter.telemetry import TelemetryClient
+
+    return TelemetryClient(sdk_version=__version__, flag=flag)
+
+
+def _telemetry_tunnel_kind(directive: Any) -> str:
+    """Coarse tunnel kind for telemetry: static | configured | none.
+
+    Mirrors the TypeScript SDK exactly (Static -> static, any other tunnel ->
+    configured, no tunnel -> none).
+    """
+    if directive is None:
+        return "none"
+    from getpatter.tunnels import Static
+
+    return "static" if isinstance(directive, Static) else "configured"
+
+
+def _telemetry_environment_dims() -> dict[str, Any]:
+    """Anonymous deploy-shape + install-age dims for ``sdk_initialized``.
+
+    Presence-only env/file probes (never the value of an env var) + the upgrade
+    funnel. Wrapped so it can never break construction.
+    """
+    try:
+        from getpatter import __version__
+        from getpatter.telemetry import environment as _env
+        from getpatter.telemetry.install_id import (
+            days_since_install_bucket,
+            previous_version,
+        )
+
+        dims: dict[str, Any] = {
+            "invoked_by_agent": _env.invoked_by_agent(),
+            "container": _env.in_container(),
+            "serverless": _env.serverless(),
+            "cloud": _env.cloud(),
+            "package_manager": _env.package_manager(),
+            "days_since_install_bucket": days_since_install_bucket(),
+        }
+        prev = previous_version(__version__)
+        if prev:
+            dims["previous_sdk_version"] = prev
+        return dims
+    except Exception:
+        return {}
+
+
+def _telemetry_engine_family(
+    engine: Any, provider: str | None, stt: Any, tts: Any
+) -> str:
+    """Coarse engine family for telemetry: realtime | convai | pipeline.
+
+    Mirrors the TypeScript ``telemetryEngineFamily`` exactly so the same logical
+    agent yields the same value in both SDKs.
+    """
+    if engine is not None:
+        name = type(engine).__name__.lower()
+        return "convai" if "convai" in name else "realtime"
+    if provider == "elevenlabs_convai":
+        return "convai"
+    if provider == "pipeline":
+        return "pipeline"
+    if provider == "openai_realtime":
+        return "realtime"
+    if stt is not None or tts is not None:
+        return "pipeline"
+    return "realtime"
+
+
+def _telemetry_provider_family(family: str) -> str:
+    """Coarse vendor family derived from the engine family: realtime -> openai,
+    convai -> elevenlabs, pipeline -> other.
+
+    Mirrors the TS ``telemetryProviderFamily``. The per-vendor pipeline provider
+    is intentionally not introspected (would rely on minifiable class names).
+    """
+    if family == "realtime":
+        return "openai"
+    if family == "convai":
+        return "elevenlabs"
+    return "other"
+
+
+def _telemetry_bucket_custom_tools(n: int) -> str:
+    """Coarse bucket for the custom-tool count (never the names)."""
+    if n <= 0:
+        return "0"
+    if n == 1:
+        return "1"
+    if n <= 3:
+        return "2_3"
+    if n <= 6:
+        return "4_6"
+    if n <= 12:
+        return "7_12"
+    return "13_plus"
+
+
+def _telemetry_bucket_mcp(n: int) -> str:
+    """Coarse bucket for the configured MCP-server count."""
+    if n <= 0:
+        return "0"
+    if n == 1:
+        return "1"
+    if n <= 3:
+        return "2_3"
+    return "4_plus"
+
+
+def _telemetry_integration(consult: Any, mcp_servers: Any) -> tuple[str, str, str]:
+    """Return ``(integration, integration_kind, mcp_server_count_bucket)``.
+
+    OpenClaw is detected from a consult target on a **discarded local copy** —
+    only the boolean result leaves; the raw model / base_url strings (which can
+    embed a customer's brand or endpoint) are never stored or emitted.
+    """
+    n_mcp = len(mcp_servers) if mcp_servers else 0
+    if n_mcp > 0:
+        return "mcp", "mcp", _telemetry_bucket_mcp(n_mcp)
+    if consult is not None:
+        is_openclaw = False
+        oc = getattr(consult, "openai_compatible", None)
+        if oc is not None:
+            model = getattr(oc, "model", "") or ""
+            base_url = getattr(oc, "base_url", "") or ""
+            is_openclaw = model.startswith("openclaw/") or ":18789" in base_url
+        return ("openclaw" if is_openclaw else "other"), "consult", "0"
+    return "none", "none", "0"
+
+
 def _close_parked_slot(slot: dict[str, Any]) -> None:
     """Close every parked socket inside a parked-connections slot.
 
@@ -199,6 +333,7 @@ class Patter:
         tunnel: Any = None,
         pricing: dict | None = None,
         persist: bool | str | None = None,
+        telemetry: bool | None = None,
         **kwargs: Any,
     ) -> None:
         # --- Reject cloud-mode kwargs explicitly ---
@@ -270,6 +405,32 @@ class Patter:
             webhook_url=webhook_url,
             persist_root=_resolve_persist_root(persist),
         )
+
+        # --- Anonymous usage telemetry (opt-out, default ON) ---
+        # Separate from getpatter.observability (user-facing OTel). Fire-and-forget
+        # and fail-safe: it can never block or break a call. Disable with
+        # PATTER_TELEMETRY_DISABLED=1, DO_NOT_TRACK=1, or telemetry=False.
+        self._telemetry = _build_telemetry_client(telemetry)
+        self._telemetry_seen_engines: set[str] = set()
+        self._telemetry_seen_agent_shapes: set[tuple] = set()
+        _init_dims = {
+            "carrier": carrier_kind or "none",
+            "tunnel": _telemetry_tunnel_kind(self._tunnel_directive),
+            **_telemetry_environment_dims(),
+        }
+        # Activation marker: emit ``first_run`` once per install (the run that
+        # creates the install-id state). Gated on the enabled path so opting out
+        # never touches the filesystem; the deploy-shape dims mirror sdk_initialized.
+        if getattr(self._telemetry, "enabled", False):
+            try:
+                from getpatter.telemetry.install_id import is_first_run
+
+                if is_first_run():
+                    self._telemetry.record("first_run", **_init_dims)
+            except Exception:
+                pass
+        self._telemetry.record("sdk_initialized", **_init_dims)
+
         self._server = None
         self._tunnel_handle = None
         # Observability — set by _attach_span_exporter, default safe.
@@ -1458,6 +1619,7 @@ class Patter:
         disable_phone_preamble: bool = False,
         echo_cancellation: bool = False,
         engine: Any = None,
+        provider: str | None = None,
         llm: LLMProvider | None = None,
         mcp_servers: list | None = None,
         consult: ConsultConfig | None = None,
@@ -1514,12 +1676,97 @@ class Patter:
                 are first-class. Pipeline mode is unaffected (it already
                 prepends its own phone preamble).
         """
+        # --- Anonymous telemetry: engine family + the composed stack, deduped ---
+        # Deduped by the *whole* stack signature (not just the engine family) so a
+        # second agent with a different STT/TTS/LLM still records its composition.
+        from getpatter.telemetry.stack import stack_dimensions
+
+        _family = _telemetry_engine_family(engine, provider, stt, tts)
+        _stack = stack_dimensions(stt, tts, llm)
+        _feature_key = (
+            _family + "|" + ",".join(f"{k}={v}" for k, v in sorted(_stack.items()))
+        )
+        if _feature_key not in self._telemetry_seen_engines:
+            self._telemetry_seen_engines.add(_feature_key)
+            self._telemetry.record(
+                "feature_used",
+                engine=_family,
+                provider=_telemetry_provider_family(_family),
+                **_stack,
+            )
+        # agent_configured: tool counts + integration target (deduped per shape).
+        # Built-in tools (transfer_call/end_call) and the consult tool are injected
+        # at call time, NOT here, so at this point ``tools`` holds only user tools.
+        _builtin = 1 if consult is not None else 0
+        _custom_bucket = _telemetry_bucket_custom_tools(len(tools) if tools else 0)
+        _integration, _integration_kind, _mcp_bucket = _telemetry_integration(
+            consult, mcp_servers
+        )
+        # Feature-adoption: read tuning from the agent() kwargs OR the engine
+        # object (the value isn't backfilled from the engine until later).
+        _nr = openai_realtime_noise_reduction or getattr(
+            engine, "noise_reduction", None
+        )
+        _noise_reduction = _nr if _nr in ("near_field", "far_field") else "none"
+        _td = realtime_turn_detection
+        if _td is None:
+            _td = getattr(engine, "turn_detection", None)
+        _turn_detection = "custom" if _td is not None else "none"
+        _preambles = bool(tool_call_preambles)
+        _per_tool_timeouts = isinstance(tools, (list, tuple)) and any(
+            getattr(t, "timeout_s", None) is not None for t in tools
+        )
+        _llm_fallback = llm is not None and "fallback" in type(llm).__name__.lower()
+        _shape = (
+            _builtin,
+            _custom_bucket,
+            _integration,
+            _integration_kind,
+            _mcp_bucket,
+            _noise_reduction,
+            _turn_detection,
+            _preambles,
+            _per_tool_timeouts,
+            _llm_fallback,
+        )
+        if _shape not in self._telemetry_seen_agent_shapes:
+            self._telemetry_seen_agent_shapes.add(_shape)
+            self._telemetry.record(
+                "agent_configured",
+                builtin_tool_count=_builtin,
+                custom_tool_count_bucket=_custom_bucket,
+                integration=_integration,
+                integration_kind=_integration_kind,
+                mcp_server_count_bucket=_mcp_bucket,
+                noise_reduction=_noise_reduction,
+                turn_detection=_turn_detection,
+                preambles_used=_preambles,
+                per_tool_timeouts_set=_per_tool_timeouts,
+                llm_fallback_configured=_llm_fallback,
+            )
+
         # --- Validate llm= (runtime-checkable Protocol) ---
         if llm is not None and not isinstance(llm, LLMProvider):
             raise TypeError(
                 "llm must be an LLMProvider instance (e.g. AnthropicLLM(api_key=...)) "
                 f"or None; got {type(llm).__name__}"
             )
+
+        # --- Validate provider= (parity with the TypeScript SDK) ---
+        # ``provider`` is an explicit alternative to ``engine`` for selecting the
+        # AI mode. Optional and default ``None`` — existing callers are unaffected.
+        if provider is not None:
+            if engine is not None:
+                raise ValueError(
+                    "Cannot pass both engine= and provider=. Use one (engine is preferred)."
+                )
+            _valid_providers = ("openai_realtime", "elevenlabs_convai", "pipeline")
+            if provider not in _valid_providers:
+                raise ValueError(
+                    "provider must be one of: "
+                    + ", ".join(_valid_providers)
+                    + f". Got: {provider!r}"
+                )
 
         # --- Engine dispatch ---
         openai_engine_key: str = ""
@@ -1563,6 +1810,10 @@ class Patter:
                     )
             elif engine_kind == "elevenlabs_convai":
                 elevenlabs_engine_key = engine_fields.get("api_key", "")
+        elif provider is not None:
+            # User explicitly selected the mode via provider= (TS parity); the
+            # value was validated above. Keep it as the resolved mode.
+            pass
         elif stt is not None or tts is not None or llm is not None:
             provider = "pipeline"
         else:
@@ -1961,6 +2212,9 @@ class Patter:
         self._server.on_transcript = on_transcript
         self._server.on_message = on_message
         self._server.on_metrics = on_metrics
+        # Give the server the telemetry client so the per-call ``call_completed``
+        # event can be emitted from the call-end path.
+        self._server._telemetry = self._telemetry
         # Forward the Patter-level SpeechEvents dispatcher so the per-call
         # StreamHandler can fire turn-taking edges into observers attached
         # via ``phone.on_user_speech_started`` etc. Without this the SDK's
@@ -2024,6 +2278,8 @@ class Patter:
                 await _wait_for_tunnel_publicly_reachable(config.webhook_url)
 
             self._resolve_ready(config.webhook_url)
+            # A loop is running now — ship any events buffered at construction.
+            self._telemetry.flush_pending()
         except BaseException as exc:
             self._reject_ready(exc)
             serve_task.cancel()
@@ -2130,6 +2386,11 @@ class Patter:
         teardown, and stale entries leak across ``serve`` /
         ``disconnect`` cycles. See FIX #93.
         """
+        # Ship any telemetry buffered at construction/agent() before teardown.
+        # flush_pending is cheap and keeps the instance reusable (no close), so a
+        # subsequent serve() still emits.
+        self._telemetry.flush_pending()
+
         # Cancel and drain any in-flight prewarm work BEFORE tearing the
         # server down so the synth tasks see a clean cancellation point
         # and don't end up writing bytes to a cache we're about to drop.

@@ -172,6 +172,7 @@ export class PatterTool {
   private readonly maxDurationSec: number;
   private readonly recording: boolean;
   private started = false;
+  private hermesTelemetryEmitted = false;
   /** Cached in-progress (or completed) start promise so concurrent execute()
    *  callers all await the same boot sequence instead of each racing into
    *  phone.serve(). Reset to null on failure so callers can retry after a
@@ -359,6 +360,28 @@ export class PatterTool {
    * the same wire contract.
    */
   hermesHandler(): (args: PatterToolExecuteArgs) => Promise<string> {
+    // Anonymous telemetry: Patter is being exposed as a tool to a Hermes agent.
+    if (!this.hermesTelemetryEmitted) {
+      this.hermesTelemetryEmitted = true;
+      try {
+        const tel = (
+          this.phone as unknown as {
+            telemetry?: { record(name: string, dims?: Record<string, unknown>): void };
+          }
+        ).telemetry;
+        // Emit on agent_configured (where `integration` is a native dimension)
+        // with the full shape so it does not create a second feature_used shape.
+        tel?.record('agent_configured', {
+          builtin_tool_count: 0,
+          custom_tool_count_bucket: '0',
+          integration: 'hermes',
+          integration_kind: 'none',
+          mcp_server_count_bucket: '0',
+        });
+      } catch {
+        /* ignore — telemetry never breaks integration */
+      }
+    }
     return async (args: PatterToolExecuteArgs) => {
       try {
         const result = await this.execute(args);

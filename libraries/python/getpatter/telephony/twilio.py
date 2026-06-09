@@ -590,6 +590,13 @@ async def twilio_stream_bridge(
 
     except Exception as exc:
         logger.exception("Stream error: %s", exc)
+        # Record the terminal error code on the metrics so call telemetry and the
+        # dashboard can attribute the failure (code only, never the message).
+        if metrics is not None:
+            try:
+                metrics.record_error(exc)
+            except Exception:
+                pass
     finally:
         # Flush resampler tail before tearing down — drains any carry bytes so
         # the last audio frame isn't clipped on graceful shutdown.
