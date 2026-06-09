@@ -337,6 +337,86 @@ describe('StreamHandler — handleStop / handleWsClose drops pending barge-in ti
   });
 });
 
+/** Scripted VAD: returns queued events frame-by-frame, then silence. */
+function makeScriptedVad(events: Array<{ type: string } | null>) {
+  const queue = [...events];
+  return {
+    async processFrame(): Promise<{ type: string } | null> {
+      return queue.shift() ?? null;
+    },
+    async close(): Promise<void> {},
+    reset(): void {},
+  };
+}
+
+describe('StreamHandler — forward-STT-without-AEC defers VAD-energy barge-in (Hermes/OpenClaw)', () => {
+  beforeEach(() => {
+    // Real timers — handleAudio races the VAD promise against a 25 ms timeout.
+    vi.useRealTimers();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete process.env.PATTER_FORWARD_STT_WHILE_SPEAKING;
+  });
+
+  interface HandleAudioPriv {
+    isSpeaking: boolean;
+    bargeInPendingSince: number | null;
+    forwardSttWhileSpeaking: boolean;
+    aec: unknown;
+    autoVad: unknown;
+    stt: unknown;
+    inboundAudioRing: Buffer[];
+    canBargeIn: () => boolean;
+    clearPendingBargeIn: () => void;
+  }
+
+  function armForwardStt(
+    h: StreamHandler,
+    aec: unknown,
+  ): HandleAudioPriv {
+    armSpeakingState(h);
+    const p = h as unknown as HandleAudioPriv;
+    p.stt = { sendAudio: vi.fn() };
+    p.autoVad = makeScriptedVad([{ type: 'speech_start' }]);
+    p.forwardSttWhileSpeaking = true;
+    p.aec = aec;
+    p.inboundAudioRing = [];
+    p.canBargeIn = () => true;
+    return p;
+  }
+
+  it('no AEC + no strategies → VAD speech_start DEFERS to pending (no immediate cancel)', async () => {
+    const deps = makeDeps([]); // legacy config — no opt-in strategies
+    const h = new StreamHandler(deps, makeMockWs(), '+1', '+2');
+    const p = armForwardStt(h, null);
+
+    await h.handleAudio(Buffer.alloc(160)); // 20 ms mulaw frame
+
+    // Deferred: the agent keeps the floor; the cancel waits for a transcript
+    // that survives the echo guard (the "bene bene" → [interrupted] fix).
+    expect(p.isSpeaking).toBe(true);
+    expect(p.bargeInPendingSince).not.toBeNull();
+    expect(deps.bridge.sendClear).not.toHaveBeenCalled();
+    p.clearPendingBargeIn();
+  });
+
+  it('AEC ON → VAD speech_start still cancels immediately (canceller makes VAD trustworthy)', async () => {
+    const deps = makeDeps([]);
+    const h = new StreamHandler(deps, makeMockWs(), '+1', '+2');
+    const p = armForwardStt(h, {
+      processNearEnd: (b: Buffer) => b,
+      pushFarEnd: () => {},
+    });
+
+    await h.handleAudio(Buffer.alloc(160));
+
+    expect(p.isSpeaking).toBe(false);
+    expect(p.bargeInPendingSince).toBeNull();
+    expect(deps.bridge.sendClear).toHaveBeenCalled();
+  });
+});
+
 describe('MinWordsStrategy threshold parity (TS↔Py)', () => {
   it.each([2, 3, 5])(
     'agent stays talking below threshold and cancels at threshold (minWords=%i)',

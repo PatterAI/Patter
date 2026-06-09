@@ -272,12 +272,41 @@ class TestDuplicateFilter:
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestThrottleFilter:
-    """Rule 3 — drop ANY final that lands within 500 ms of the last turn."""
+    """Rule 3 — drop a NEAR-DUPLICATE final within 500 ms (Deepgram emitting
+    ``speech_final`` then ``is_final`` for the same utterance). A genuinely
+    DIFFERENT fast follow-up must NOT be swallowed (the empty-[interrupted]-turn
+    fix)."""
 
-    async def test_drops_back_to_back_under_500ms(
+    async def test_drops_back_to_back_near_duplicate_under_500ms(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Different text but only 0.2 s apart — treated as STT over-firing.
+        # Same utterance double-emitted 0.2 s apart (the second a superset of the
+        # first) — real STT over-firing, still de-duplicated.
+        times = iter([100.0, 100.2])
+        monkeypatch.setattr(
+            "getpatter.stream_handler.time.time",
+            lambda: next(times),
+        )
+        stt = _StubSTT(
+            [
+                Transcript(text="What time is it", is_final=True, confidence=0.9),
+                Transcript(text="What time is it now", is_final=True, confidence=0.9),
+            ]
+        )
+        on_transcript = AsyncMock()
+        handler = _make_handler(stt, on_transcript)
+
+        await _run_loop(handler)
+
+        # Only the first should have been forwarded (near-duplicate dropped).
+        assert on_transcript.await_count == 1
+
+    async def test_keeps_different_followup_under_500ms(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Two genuinely DIFFERENT utterances 0.2 s apart are NOT over-firing —
+        # both must be kept (before the fix the second was silently dropped,
+        # leaving an empty [interrupted] turn).
         times = iter([100.0, 100.2])
         monkeypatch.setattr(
             "getpatter.stream_handler.time.time",
@@ -294,8 +323,7 @@ class TestThrottleFilter:
 
         await _run_loop(handler)
 
-        # Only the first should have been forwarded.
-        assert on_transcript.await_count == 1
+        assert on_transcript.await_count == 2
 
     async def test_passes_after_500ms(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Different text, 700 ms apart — legitimate second turn.

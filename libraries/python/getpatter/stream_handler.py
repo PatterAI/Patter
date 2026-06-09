@@ -131,6 +131,63 @@ _STT_HALLUCINATIONS: frozenset[str] = frozenset(
 # ("We'll see you next time. Bye bye.") without importing ``re``.
 _SENTENCE_ENDERS = ".!?…。！？"
 
+# Fraction of a candidate transcript's words that must appear in the agent's
+# in-flight spoken text for it to be treated as the agent's own TTS echoing
+# back (rather than real caller speech). 0.6 keeps real replies that merely
+# share a couple of words while catching garbled echo fragments. Language-
+# agnostic — unlike the English-only ``_STT_HALLUCINATIONS`` set.
+_ECHO_WORD_OVERLAP_THRESHOLD = 0.6
+# Minimum word count before a candidate can be classified as echo. Real TTS
+# bleed is a long, near-complete fragment of the agent's speech; a 1-3 word
+# caller reply that happens to repeat the agent's offered words ("lunedì",
+# "yes", "Monday at two") is a legitimate answer and must NEVER be dropped.
+# Short echo blips on a no-AEC link are left to AEC / barge_in_strategies.
+_ECHO_MIN_CANDIDATE_WORDS = 4
+
+
+def _normalize_for_echo(text: str) -> str:
+    """Lowercase, drop punctuation, collapse whitespace — for echo comparison."""
+    out = []
+    for ch in text.lower():
+        out.append(ch if (ch.isalnum() or ch.isspace()) else " ")
+    return " ".join("".join(out).split())
+
+
+def _looks_like_echo(candidate: str, agent_text: str) -> bool:
+    """True when ``candidate`` looks like a fragment of ``agent_text`` — i.e. the
+    agent's own TTS bleeding into STT (forwarded during TTS without effective
+    AEC) rather than real caller speech. Substring match OR high word-overlap.
+    """
+    a = _normalize_for_echo(agent_text)
+    c = _normalize_for_echo(candidate)
+    if not a or not c:
+        return False
+    words = c.split()
+    # Never classify a short reply as echo — exempts single-word / few-word
+    # caller answers that legitimately repeat the agent's offered words.
+    if len(words) < _ECHO_MIN_CANDIDATE_WORDS:
+        return False
+    if c in a:  # candidate is verbatim a long fragment of what the agent said
+        return True
+    agent_words = set(a.split())
+    overlap = sum(1 for w in words if w in agent_words) / len(words)
+    return overlap >= _ECHO_WORD_OVERLAP_THRESHOLD
+
+
+def _is_near_duplicate(a: str, b: str) -> bool:
+    """True when two normalised finals are the same utterance double-emitted
+    (identical, or one a WORD-PREFIX of the other — Deepgram's
+    ``speech_final``+``is_final`` pair) — used to drop the back-to-back pair
+    WITHOUT swallowing a genuinely different utterance that merely arrives
+    quickly. Word-boundary aware so a character infix ("no" in "nothing
+    else") is NOT treated as a duplicate."""
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
+    return longer.startswith(shorter + " ")
+
 
 def _is_stt_hallucination(text: str) -> bool:
     """True when *text* is — or is composed entirely of — known STT
@@ -2347,6 +2404,27 @@ class PipelineStreamHandler(StreamHandler):
         # because ``agent`` is a frozen dataclass.
         self._auto_vad = None
         self._stt_task: asyncio.Task | None = None
+        # The in-flight turn dispatch (LLM + TTS) runs as a SINGLE tracked task
+        # so the STT receive loop keeps draining transcripts during a long
+        # (30-90 s) agent-runtime turn and can fire transcript-based barge-in
+        # against the LIVE turn. Exactly one is active at a time — the loop
+        # awaits the previous one to settle before launching the next, so
+        # conversation_history / metrics ordering is unchanged. None when idle.
+        self._dispatch_task: asyncio.Task | None = None
+        # Opt-in (default OFF): forward inbound audio to STT even while the
+        # agent is speaking, so the transcript barge-in path can receive a
+        # transcript on echo-masked PSTN links where the VAD never fires.
+        # ECHO RISK without AEC — see ``on_audio_received`` self-hearing guard.
+        self._forward_stt_while_speaking = os.environ.get(
+            "PATTER_FORWARD_STT_WHILE_SPEAKING", ""
+        ).strip().lower() in ("1", "true", "yes")
+        if self._forward_stt_while_speaking:
+            logger.warning(
+                "PATTER_FORWARD_STT_WHILE_SPEAKING=on: inbound audio is sent to "
+                "STT during TTS so transcript barge-in works on echo-masked "
+                "links. Without AEC the agent's own voice may be transcribed as "
+                "a phantom interruption — pair with agent.barge_in_strategies."
+            )
         self._is_speaking = False
         # True only while the post-TTS tail-grace window is pending: the
         # agent has finished its turn but ``_is_speaking`` is still held for
@@ -2362,6 +2440,17 @@ class PipelineStreamHandler(StreamHandler):
         # a no-op; cancelling avoids leaving an idle ``asyncio.sleep`` task
         # per turn on long, fast-turn calls.
         self._grace_task: asyncio.Task | None = None
+        # The agent's spoken text for the CURRENT turn, accumulated as tokens
+        # stream. Used by the echo guard to reject the agent's own TTS bleeding
+        # back into STT (when audio is forwarded during TTS without effective
+        # AEC) so it never barges in or becomes a phantom user turn. Reset at
+        # ``_begin_speaking``; only consulted while ``_forward_stt_while_speaking``.
+        self._current_agent_spoken_text = ""
+        # Whether the last completed turn was cut short by a confirmed barge-in
+        # — set by ``_process_streaming_response`` so the spoken prefix is
+        # appended to history with an ``[interrupted by caller]`` marker (keeps
+        # a stateful agent runtime's context grounded in what was actually heard).
+        self._last_response_interrupted = False
         # Per-turn LLM cancel event. Recreated on every new turn before LLM
         # consumption so a stale cancel from a previous turn cannot terminate
         # the next stream prematurely. Initialized here so the STT loop's
@@ -3161,9 +3250,7 @@ class PipelineStreamHandler(StreamHandler):
 
         return asyncio.create_task(_filler())
 
-    async def _cancel_long_turn_filler(
-        self, task: "asyncio.Task | None"
-    ) -> None:
+    async def _cancel_long_turn_filler(self, task: "asyncio.Task | None") -> None:
         """Cancel the long-turn filler task and await its teardown.
 
         Idempotent and race-safe: a ``None`` / already-finished task is a no-op,
@@ -3180,7 +3267,9 @@ class PipelineStreamHandler(StreamHandler):
         except asyncio.CancelledError:
             pass
         except Exception:  # pragma: no cover - defensive
-            logger.debug("long_turn_message filler task ended with error", exc_info=True)
+            logger.debug(
+                "long_turn_message filler task ended with error", exc_info=True
+            )
         return None
 
     async def _process_streaming_response(self, result, call_id: str) -> str:
@@ -3232,6 +3321,11 @@ class PipelineStreamHandler(StreamHandler):
                         interrupted = True
                         break
                     full_response_parts.append(token)
+                    # Keep the echo-guard reference current as the agent speaks,
+                    # so a barge-in transcript arriving mid-turn can be compared
+                    # against what the agent has said SO FAR (echo lags the
+                    # tokens, so this is already ahead of the bleed).
+                    self._current_agent_spoken_text = "".join(full_response_parts)
                     # Fix 5: record LLM first-token (TTFT).
                     if llm_first_token_sent[0] and self.metrics is not None:
                         self.metrics.record_llm_first_token()
@@ -3344,9 +3438,7 @@ class PipelineStreamHandler(StreamHandler):
                         sentence = transformed
 
                     # Real flushed audio about to play — cancel the filler.
-                    long_turn_task = await self._cancel_long_turn_filler(
-                        long_turn_task
-                    )
+                    long_turn_task = await self._cancel_long_turn_filler(long_turn_task)
                     if not await self._synthesize_sentence(
                         sentence, hook_executor, hook_ctx, first_tts_chunk
                     ):
@@ -3381,6 +3473,14 @@ class PipelineStreamHandler(StreamHandler):
                 self.metrics.record_tts_complete(response_text)
                 turn = self.metrics.record_turn_complete(response_text)
                 await self._emit_turn_metrics(turn, call_id=call_id)
+        # Tell the caller (``_dispatch_turn``) whether this turn was cut short so
+        # the spoken prefix is recorded in history WITH a marker. A stateful
+        # agent runtime (Hermes/OpenClaw) then sees, on the next turn, that it
+        # was interrupted and what the caller actually heard — instead of an
+        # ungrounded full reply that pollutes its context.
+        self._last_response_interrupted = interrupted
+        if interrupted and response_text:
+            response_text = f"{response_text} [interrupted by caller]"
         return response_text
 
     async def _process_regular_response(self, response_text: str, call_id: str) -> None:
@@ -3452,6 +3552,21 @@ class PipelineStreamHandler(StreamHandler):
             # normal new turn. Closes the race where a transcript lands
             # before the VAD speech_start rescue fires.
             await self._end_tail_grace_for_new_turn()
+            return
+        # Echo guard: when audio is forwarded to STT during TTS (no effective
+        # AEC), the agent's own voice can be transcribed and would otherwise
+        # barge in on itself. Drop any transcript that looks like a fragment of
+        # what the agent is currently saying. Only active under
+        # ``_forward_stt_while_speaking`` (the only path that feeds TTS audio to
+        # STT), so the default VAD path is unaffected. Mirrors TS ``handleBargeIn``.
+        if getattr(self, "_forward_stt_while_speaking", False) and _looks_like_echo(
+            transcript.text, getattr(self, "_current_agent_spoken_text", "")
+        ):
+            logger.info(
+                "Barge-in suppressed: transcript matches agent's own speech "
+                "(echo) — %r",
+                sanitize_log_value(transcript.text[:40]),
+            )
             return
         if not self._can_barge_in():
             aec_state = "on" if getattr(self, "_aec", None) is not None else "off"
@@ -3617,8 +3732,10 @@ class PipelineStreamHandler(StreamHandler):
 
         Mirrors TS ``commitTranscript``. Returns ``True`` if the transcript
         should be committed to a turn, ``False`` if it must be dropped.
-        Drop reasons: common hallucinations, duplicate within 2 s, or any
-        final within 500 ms of the previous one.
+        Drop reasons: common hallucinations, the agent's own TTS echo (when
+        forwarding audio to STT during TTS), exact duplicate within 2 s, or a
+        near-duplicate within 500 ms (the same utterance double-emitted) — a
+        genuinely different fast follow-up is NOT dropped.
         """
         now = time.time()
         normalised = text.strip().lower()
@@ -3628,6 +3745,21 @@ class PipelineStreamHandler(StreamHandler):
         if stripped in _STT_HALLUCINATIONS or stripped == "":
             logger.debug("Dropped likely STT hallucination: %r", normalised[:40])
             return False
+        # Echo guard: while the agent is still speaking (the forward-STT echo
+        # window), a transcript that matches the agent's own speech is its TTS
+        # bleeding back into STT, not a user turn. Gated on
+        # ``_forward_stt_while_speaking`` + ``_is_speaking`` so a real post-turn
+        # reply (committed when the agent is idle) is never dropped, and the
+        # default VAD path — which withholds audio during TTS — is unaffected.
+        if (
+            getattr(self, "_forward_stt_while_speaking", False)
+            and getattr(self, "_is_speaking", False)
+            and _looks_like_echo(text, getattr(self, "_current_agent_spoken_text", ""))
+        ):
+            logger.debug(
+                "Dropped agent-echo transcript (not a user turn): %r", normalised[:40]
+            )
+            return False
         if since_last < 2.0 and normalised == self._last_commit_text:
             logger.debug(
                 "Dropped duplicate final transcript (%.1fs since last): %r",
@@ -3635,9 +3767,14 @@ class PipelineStreamHandler(StreamHandler):
                 normalised[:40],
             )
             return False
-        if since_last < 0.5:
+        # Back-to-back: drop a NEAR-DUPLICATE within 0.5 s (Deepgram emitting
+        # ``speech_final`` then ``is_final`` for the SAME utterance). A
+        # genuinely DIFFERENT utterance arriving this fast (e.g. the real reply
+        # right after a suppressed phantom) must NOT be swallowed — dropping it
+        # unconditionally left an empty ``[interrupted]`` turn before this fix.
+        if since_last < 0.5 and _is_near_duplicate(normalised, self._last_commit_text):
             logger.debug(
-                "Dropped back-to-back final transcript (%.2fs since last): %r",
+                "Dropped back-to-back near-duplicate final (%.2fs since last): %r",
                 since_last,
                 normalised[:40],
             )
@@ -3690,14 +3827,58 @@ class PipelineStreamHandler(StreamHandler):
                         self.metrics.anchor_user_speech_start()
                     continue
 
-                await self._dispatch_turn(transcript.text)
+                # Decouple dispatch from the receive loop: run the turn as a
+                # SINGLE tracked task so the ``async for`` keeps draining
+                # transcripts during a long (30-90 s) agent-runtime turn and
+                # can fire transcript-based barge-in against the LIVE turn —
+                # the head-of-line-blocking fix. Settle the previous turn
+                # first so exactly one dispatch is in flight and the per-turn
+                # conversation_history / metrics ordering is preserved.
+                await self._await_dispatch_settle()
+                self._dispatch_task = asyncio.create_task(
+                    self._dispatch_turn(transcript.text)
+                )
 
         except Exception as exc:
             logger.exception("Pipeline STT loop error: %s", exc)
+        finally:
+            # Return only once the last dispatch fully settles, so callers and
+            # tests that inspect state right after ``await _stt_loop()`` still
+            # observe completed turn effects (the loop no longer blocks DURING
+            # a turn, but it does block until the FINAL turn is done).
+            await self._await_dispatch_settle()
+
+    async def _await_dispatch_settle(self) -> None:
+        """Await the in-flight turn dispatch to fully settle.
+
+        Called before launching the next turn (single-in-flight) and once
+        more when the STT loop exits. Two cases: the prior dispatch either
+        completed naturally (await is a no-op) or was cancelled by a barge-in
+        (await lets its ``finally`` — grace flip, LLM span close, ring reset,
+        history flush — run BEFORE the next turn's ``_begin_speaking``). Always
+        clears the handle so a backgrounded-task exception is retrieved (no
+        ``Task exception was never retrieved`` leak).
+        """
+        task = self._dispatch_task
+        if task is None:
+            return
+        try:
+            await task
+        except asyncio.CancelledError:  # pragma: no cover - teardown path
+            pass
+        except Exception as exc:  # pragma: no cover - already handled in dispatch
+            logger.debug("backgrounded dispatch raised: %s", exc)
+        finally:
+            # Only clear if it is still the task we awaited — a re-entrant
+            # launch could have replaced it (it cannot today: the loop is the
+            # sole launcher and awaits here first, but be defensive).
+            if self._dispatch_task is task:
+                self._dispatch_task = None
 
     async def _dispatch_turn(self, transcript_text: str) -> None:
         """Run the post-commit pipeline (record STT → afterTranscribe →
-        LLM dispatch → TTS → turn-complete) inline on the STT loop.
+        LLM dispatch → TTS → turn-complete) as a tracked background task so
+        the STT receive loop keeps draining transcripts during the turn.
         """
         # Reset the per-turn LLM cancel event BEFORE dispatch so a stale
         # cancel set by a previous turn's barge-in (``_do_cancel_for_barge_in``
@@ -3977,9 +4158,7 @@ class PipelineStreamHandler(StreamHandler):
                     # silence bug). After this ``_is_speaking`` is False, so
                     # the if/elif below is a no-op and the frame falls through
                     # to STT. Parity with TS ``endTailGraceForNewTurn``.
-                    if self._is_speaking and getattr(
-                        self, "_tail_grace_active", False
-                    ):
+                    if self._is_speaking and getattr(self, "_tail_grace_active", False):
                         await self._end_tail_grace_for_new_turn()
                     phantom_suppressed = self._is_speaking and not self._can_barge_in()
                     if phantom_suppressed:
@@ -4011,13 +4190,31 @@ class PipelineStreamHandler(StreamHandler):
                         # STT so the user's words are not silently lost.
                         self._suppressed_speech_pending = True
                     elif self._is_speaking:
-                        # Caller spoke over in-flight TTS. With opt-in
-                        # confirmation strategies the cancel is deferred
-                        # until at least one strategy approves the user's
-                        # transcript; otherwise we keep the legacy
-                        # "cancel immediately" path so existing users
-                        # see no behaviour change.
-                        if self._barge_in_strategies:
+                        # Caller spoke over in-flight TTS. The cancel is
+                        # DEFERRED to transcript confirmation — instead of
+                        # firing on raw VAD energy — when EITHER:
+                        #   (a) opt-in ``barge_in_strategies`` are configured
+                        #       (a strategy must approve the transcript), OR
+                        #   (b) we forward STT during TTS WITHOUT AEC. On a
+                        #       no-AEC link a VAD ``speech_start`` here is very
+                        #       often the agent's OWN TTS echo, not the caller;
+                        #       cancelling on it self-interrupts almost every
+                        #       turn (the "bene bene" → [interrupted] cascade
+                        #       seen on live Hermes/OpenClaw calls). Deferring
+                        #       lets ``_handle_barge_in`` run the echo guard on
+                        #       the resulting transcript and cancel only on real
+                        #       caller speech; if no transcript confirms within
+                        #       ``_barge_in_confirm_s`` the pending state times
+                        #       out and the agent resumes its sentence.
+                        # Otherwise (default VAD path, or forward-STT WITH AEC
+                        # where the canceller makes VAD trustworthy) the legacy
+                        # immediate cancel runs — existing users see no change.
+                        # Parity with TS speech_start ``deferCancel``.
+                        defer_cancel = bool(self._barge_in_strategies) or (
+                            getattr(self, "_forward_stt_while_speaking", False)
+                            and getattr(self, "_aec", None) is None
+                        )
+                        if defer_cancel:
                             await self._start_pending_barge_in()
                         else:
                             if self.metrics is not None:
@@ -4038,11 +4235,23 @@ class PipelineStreamHandler(StreamHandler):
                                     self.metrics.record_tts_stopped()
                                     self.metrics.record_turn_interrupted()
                                 self._is_speaking = False
+                                self._tail_grace_active = False
                                 self._speaking_started_at = None
                                 self._first_audio_sent_at = None
                                 self._speaking_generation += 1
                                 self._last_cancel_at = time.time()
                                 self._suppressed_speech_pending = False
+                                # Tear down the in-flight LLM stream too. The
+                                # consumption loop polls ``_llm_cancel_event``
+                                # per chunk, but a turn parked PRE-first-token
+                                # on a hung agent request never sees a chunk —
+                                # the provider cancel watchdog (see
+                                # ``OpenAICompatibleLLMProvider.stream``) closes
+                                # the request the instant this fires. Parity
+                                # with TS ``cancelSpeaking`` → ``llmAbort.abort``.
+                                cancel_event = getattr(self, "_llm_cancel_event", None)
+                                if cancel_event is not None:
+                                    cancel_event.set()
                     if not phantom_suppressed and self.metrics is not None:
                         # Industry-standard pattern: every legitimate VAD speech_start
                         # re-anchors the turn timestamp pre-commit. This
@@ -4098,7 +4307,16 @@ class PipelineStreamHandler(StreamHandler):
                 # post-barge-in bleed-transcription entry.
                 if len(self._inbound_audio_ring) > 13:  # ~260 ms at 20 ms/frame
                     self._inbound_audio_ring.pop(0)
-                return
+                # Opt-in: also forward the frame to STT during TTS so the
+                # transcript barge-in path can receive a transcript on
+                # echo-masked links where the VAD never fires. The ring push
+                # above stays unconditional (leading-edge recovery preserved);
+                # only the early-return is gated. ECHO RISK without AEC — the
+                # agent's own voice may be transcribed as a phantom
+                # interruption; pair with agent.barge_in_strategies. Default
+                # OFF → byte-identical push-and-return.
+                if not self._forward_stt_while_speaking:
+                    return
 
         # before_send_to_stt hook — gate/transform the audio chunk before it
         # reaches the STT provider. Returning None drops the chunk (useful
@@ -4183,6 +4401,9 @@ class PipelineStreamHandler(StreamHandler):
         # turn so we never replay yesterday's audio to STT.
         self._inbound_audio_ring = []
         self._suppressed_speech_pending = False
+        # Fresh turn — reset the echo-guard reference so this turn's barge-in
+        # checks compare against THIS turn's spoken text, not the last turn's.
+        self._current_agent_spoken_text = ""
         # Reset the VAD detector so the next user utterance triggers a clean
         # SILENCE→SPEECH transition. Without this, PSTN echo from the
         # previous turn can keep the smoothed probability above the
@@ -4207,10 +4428,11 @@ class PipelineStreamHandler(StreamHandler):
     def _can_barge_in(self) -> bool:
         """Whether barge-in is allowed to fire right now.
 
-        Gate length depends on whether AEC is active: 1 s with AEC
-        (covers filter warmup), 0.25 s without (anti-flicker only —
-        keeps PSTN barge-in responsive, since on PSTN AEC is a no-op
-        and there is no warmup to protect).
+        Gate length depends on whether AEC is active:
+        ``MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN_AEC`` with AEC (covers filter
+        warmup), ``MIN_AGENT_SPEAKING_S_BEFORE_BARGE_IN_NO_AEC`` (0.5 s) without
+        — an anti-flicker margin that keeps PSTN barge-in responsive while
+        rejecting the first burst of echo/noise before real speech.
 
         ``getattr`` is used so test fixtures that flip ``_is_speaking``
         directly (without going through ``_begin_speaking``) still
@@ -4648,6 +4870,18 @@ class PipelineStreamHandler(StreamHandler):
                 _tts_cancel()
             except Exception:
                 pass
+        # Hard-cancel the backgrounded turn dispatch (teardown backstop) so no
+        # orphan task touches a finalized handler. The cancel_event.set() above
+        # lets a post-first-token turn break gracefully; the cancel covers a
+        # turn parked pre-first-token on a hung agent request.
+        _dispatch_task = getattr(self, "_dispatch_task", None)
+        if _dispatch_task is not None and not _dispatch_task.done():
+            _dispatch_task.cancel()
+            try:
+                await _dispatch_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._dispatch_task = None
         # Drop any pending barge-in timeout BEFORE we tear down metrics /
         # adapters. Without this, a call that ends while a barge-in is
         # pending leaves an asyncio.Task scheduled to fire

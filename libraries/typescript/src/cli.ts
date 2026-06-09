@@ -112,6 +112,34 @@ function printEvalStub(): void {
   );
 }
 
+function printHermesStub(): void {
+  console.log(
+    'The Hermes wizard (doctor / setup / test / trace / diagnose /\n' +
+      'attach-number) lives in the Python CLI today. Use it from the Python SDK:\n\n' +
+      '  pip install getpatter\n' +
+      '  patter hermes doctor\n' +
+      '  patter hermes setup\n' +
+      '  patter hermes test\n\n' +
+      'The HermesLLM provider itself is fully available in this TypeScript SDK\n' +
+      "(import { HermesLLM } from 'getpatter'). See\n" +
+      'https://docs.getpatter.com/integrations/hermes for docs.',
+  );
+}
+
+function printOpenClawStub(): void {
+  console.log(
+    'The OpenClaw wizard (doctor / setup / test / call / agents /\n' +
+      'attach-number) lives in the Python CLI today. Use it from the Python SDK:\n\n' +
+      '  pip install getpatter\n' +
+      '  patter openclaw setup --enable-openclaw --agent receptionist  # inbound\n' +
+      '  patter openclaw setup --mode outbound --agent sales           # outbound\n' +
+      '  patter openclaw doctor\n\n' +
+      'The OpenClawLLM provider itself is fully available in this TypeScript SDK\n' +
+      "(import { OpenClawLLM } from 'getpatter'). See\n" +
+      'https://docs.getpatter.com/integrations/openclaw for docs.',
+  );
+}
+
 async function main(): Promise<void> {
   const command = process.argv[2];
 
@@ -126,10 +154,20 @@ async function main(): Promise<void> {
     printEvalStub();
     process.exit(0);
   }
+  if (command === 'hermes') {
+    printHermesStub();
+    process.exit(0);
+  }
+  if (command === 'openclaw') {
+    printOpenClawStub();
+    process.exit(0);
+  }
   if (command !== 'dashboard') {
     await emitCliCommand(command ? 'other' : 'none');
     console.log('Usage: getpatter dashboard [--port 8000]');
     console.log('       getpatter eval          (stub — use Python SDK for evals)');
+    console.log('       getpatter hermes        (stub — use Python SDK for the wizard)');
+    console.log('       getpatter openclaw      (stub — use Python SDK for the wizard)');
     console.log('       getpatter telemetry [status|disable|enable]');
     process.exit(command ? 1 : 0);
   }

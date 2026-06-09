@@ -342,6 +342,57 @@ export function isSttHallucination(text: string): boolean {
   return pieces.length > 1 && pieces.every((p) => HALLUCINATIONS.has(p));
 }
 
+/** Fraction of a candidate's words that must appear in the agent's spoken text
+ * for it to count as the agent's own TTS echoing back. Mirrors Python
+ * ``_ECHO_WORD_OVERLAP_THRESHOLD``. */
+const ECHO_WORD_OVERLAP_THRESHOLD = 0.6;
+
+/** Minimum word count before a candidate can be classified as echo — short
+ * caller replies that repeat the agent's offered words ("lunedì", "yes",
+ * "Monday at two") are legitimate answers, never echo. Mirrors Python
+ * ``_ECHO_MIN_CANDIDATE_WORDS``. */
+const ECHO_MIN_CANDIDATE_WORDS = 4;
+
+/** Lowercase, drop punctuation, collapse whitespace — for echo comparison. */
+export function normalizeForEcho(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/u, ' ')
+    .trim()
+    .replace(/\s+/gu, ' ');
+}
+
+/** True when ``candidate`` looks like a fragment of ``agentText`` — i.e. the
+ * agent's own TTS bleeding into STT (forwarded during TTS without effective
+ * AEC) rather than real caller speech. Substring OR high word-overlap.
+ * Mirrors Python ``_looks_like_echo``. */
+export function looksLikeEcho(candidate: string, agentText: string): boolean {
+  const a = normalizeForEcho(agentText);
+  const c = normalizeForEcho(candidate);
+  if (!a || !c) return false;
+  const words = c.split(' ').filter(Boolean);
+  // Never classify a short reply as echo — exempts single-word / few-word
+  // caller answers that legitimately repeat the agent's offered words.
+  if (words.length < ECHO_MIN_CANDIDATE_WORDS) return false;
+  if (a.includes(c)) return true;
+  const agentWords = new Set(a.split(' '));
+  const overlap = words.filter((w) => agentWords.has(w)).length / words.length;
+  return overlap >= ECHO_WORD_OVERLAP_THRESHOLD;
+}
+
+/** True when two normalised finals are the same utterance double-emitted
+ * (identical, or one a substring of the other). Mirrors Python
+ * ``_is_near_duplicate``. */
+export function isNearDuplicate(a: string, b: string): boolean {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const [shorter, longer] = a.length <= b.length ? [a, b] : [b, a];
+  // Word-boundary aware: a character infix ("no" in "nothing else") is NOT a
+  // duplicate; only a true word-prefix double-emit (speech_final+is_final) is.
+  return longer.startsWith(shorter + ' ');
+}
+
 // ---------------------------------------------------------------------------
 // StreamHandler context (immutable per-call configuration)
 // ---------------------------------------------------------------------------
@@ -650,6 +701,9 @@ export class StreamHandler {
     // Fresh turn — drop any stale pre-barge-in buffer from a previous turn
     // so we never replay yesterday's audio to STT.
     this.inboundAudioRing = [];
+    // Fresh turn — reset the echo-guard reference so barge-in checks compare
+    // against THIS turn's spoken text, not the last turn's.
+    this.currentAgentSpokenText = '';
     // Reset the VAD detector so the next user utterance triggers a clean
     // SILENCE→SPEECH transition. Without this, PSTN echo from the previous
     // turn can keep the detector's smoothed probability above the
@@ -1021,9 +1075,43 @@ export class StreamHandler {
   private maxDurationTimer: ReturnType<typeof setTimeout> | null = null;
   private transcriptProcessing = false;
   private transcriptQueue: STTTranscript[] = [];
+  /**
+   * The in-flight turn dispatch (LLM + TTS) runs as a SINGLE tracked promise
+   * so the transcript drain loop keeps running ``handleBargeIn`` against the
+   * LIVE turn during a long (30-90 s) agent-runtime response, instead of
+   * head-of-line-blocking on it. Exactly one is in flight: the launcher awaits
+   * the previous one to settle (fast — a barge-in already aborted it) before
+   * starting the next, preserving history/metrics ordering. Parity with
+   * Python ``_dispatch_task``.
+   */
+  private dispatchTask: Promise<void> | null = null;
+  /**
+   * Cap (ms) on how long teardown waits for the backgrounded dispatch to
+   * settle. JS promises are not cancellable, so a user-supplied ``onMessage``
+   * (which receives no AbortSignal) parked on a hung external call could block
+   * call cleanup indefinitely — `llmAbort.abort()` only unblocks the built-in
+   * LLM/TTS paths. We bound the WAIT (Python hard-cancels the task instead).
+   * 30 s matches the webhook ceiling.
+   */
+  private static readonly DISPATCH_SETTLE_TIMEOUT_MS = 30_000;
+  /**
+   * Opt-in (default OFF): forward inbound audio to STT even while the agent is
+   * speaking, so the transcript barge-in path can receive a transcript on
+   * echo-masked PSTN links where the VAD never fires. ECHO RISK without AEC.
+   * Parity with Python ``_forward_stt_while_speaking``.
+   */
+  private readonly forwardSttWhileSpeaking = ['1', 'true', 'yes'].includes(
+    (process.env.PATTER_FORWARD_STT_WHILE_SPEAKING ?? '').trim().toLowerCase(),
+  );
   // Throttle state for back-to-back STT finals — see ``commitTranscript``.
   private lastCommitText = '';
   private lastCommitAt = 0;
+  /** The agent's spoken text for the CURRENT turn, accumulated as tokens stream.
+   * The echo guard rejects transcripts matching it (the agent's own TTS bleeding
+   * back into STT when audio is forwarded during TTS without effective AEC).
+   * Reset in ``beginSpeaking``; only consulted while ``forwardSttWhileSpeaking``.
+   * Parity with Python ``_current_agent_spoken_text``. */
+  private currentAgentSpokenText = '';
   // PCM16 byte-alignment carry for TTS streaming (pipeline mode).
   // HTTP streams from ElevenLabs / OpenAI / Cartesia can yield chunks of any
   // size, including odd byte counts. Silently dropping the trailing odd byte
@@ -1045,6 +1133,15 @@ export class StreamHandler {
     this.ws = ws;
     this.caller = caller;
     this.callee = callee;
+
+    if (this.forwardSttWhileSpeaking) {
+      getLogger().warn(
+        'PATTER_FORWARD_STT_WHILE_SPEAKING=on: inbound audio is sent to STT ' +
+          'during TTS so transcript barge-in works on echo-masked links. ' +
+          "Without AEC the agent's own voice may be transcribed as a phantom " +
+          'interruption — pair with agent.bargeInStrategies.',
+      );
+    }
 
     this.bargeInStrategies = (deps.agent.bargeInStrategies ?? []).slice();
     const confirmMs = deps.agent.bargeInConfirmMs;
@@ -1531,7 +1628,21 @@ export class StreamHandler {
               // agent finishes naturally without a barge-in.
               this.suppressedSpeechPending = true;
             } else if (this.isSpeaking) {
-              if (this.bargeInStrategies.length > 0) {
+              // Defer the cancel to transcript confirmation — instead of
+              // firing on raw VAD energy — when EITHER opt-in
+              // ``bargeInStrategies`` are configured OR we forward STT during
+              // TTS WITHOUT AEC. On a no-AEC link a VAD ``speech_start`` here
+              // is very often the agent's OWN echo, and cancelling on it
+              // self-interrupts almost every turn (the "bene bene" →
+              // [interrupted] cascade). Deferring lets ``handleBargeIn`` run
+              // the echo guard on the resulting transcript and cancel only on
+              // real caller speech; the pending state times out after
+              // ``bargeInConfirmS`` so the agent resumes if nothing confirms.
+              // Parity with Python on_audio_received ``defer_cancel``.
+              const deferCancel =
+                this.bargeInStrategies.length > 0 ||
+                (this.forwardSttWhileSpeaking && !this.aec);
+              if (deferCancel) {
                 this.startPendingBargeIn();
                 this.metricsAcc.anchorUserSpeechStart();
                 return;
@@ -1624,9 +1735,15 @@ export class StreamHandler {
           ) {
             this.inboundAudioRing.shift();
           }
+          // Opt-in: also forward the frame to STT during TTS so the transcript
+          // barge-in path can receive a transcript on echo-masked links where
+          // the VAD never fires. The ring push above stays unconditional
+          // (leading-edge recovery preserved); only the early-return is gated.
+          // ECHO RISK without AEC. Default OFF → byte-identical push-and-return.
+          if (!this.forwardSttWhileSpeaking) return;
+        } else if ((this.deps.agent.bargeInThresholdMs ?? 300) === 0) {
           return;
         }
-        if ((this.deps.agent.bargeInThresholdMs ?? 300) === 0) return;
       }
 
       // beforeSendToStt hook — gate/transform the audio chunk before it
@@ -1731,6 +1848,27 @@ export class StreamHandler {
     }
   }
 
+  /**
+   * Await the backgrounded turn dispatch during teardown, but never block
+   * longer than ``DISPATCH_SETTLE_TIMEOUT_MS``. The earlier ``llmAbort.abort()``
+   * settles the built-in LLM/TTS paths immediately; the cap only bites a
+   * misbehaving user ``onMessage`` parked on a hung external call (JS promises
+   * can't be cancelled). No-op when nothing is in flight.
+   */
+  private async settleDispatchForTeardown(): Promise<void> {
+    if (!this.dispatchTask) return;
+    const settle = this.dispatchTask.catch(() => {});
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cap = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, StreamHandler.DISPATCH_SETTLE_TIMEOUT_MS);
+    });
+    try {
+      await Promise.race([settle, cap]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
   /** Handle call stop / stream end. */
   /** Handle a carrier-emitted `stop` event signalling the call has ended. */
   async handleStop(): Promise<void> {
@@ -1751,6 +1889,11 @@ export class StreamHandler {
     if (typeof ttsCancelable?.cancelActiveStream === 'function') {
       try { ttsCancelable.cancelActiveStream(); } catch { /* defensive */ }
     }
+    // Settle the backgrounded turn dispatch (the abort above unblocks it) so
+    // no in-flight LLM/TTS work touches adapters after they close — bounded so
+    // a hung user onMessage cannot block teardown. Parity with Python cleanup
+    // hard-cancelling ``_dispatch_task``.
+    await this.settleDispatchForTeardown();
     // Drop any pending barge-in timer BEFORE we tear down metrics /
     // adapters. Without this, a call that ends while a barge-in is
     // pending leaves a setTimeout scheduled to fire ``bargeInConfirmMs``
@@ -1788,6 +1931,9 @@ export class StreamHandler {
     if (typeof ttsCancelable?.cancelActiveStream === 'function') {
       try { ttsCancelable.cancelActiveStream(); } catch { /* defensive */ }
     }
+    // Settle the backgrounded turn dispatch before tearing down adapters,
+    // bounded so a hung user onMessage cannot block teardown (see handleStop).
+    await this.settleDispatchForTeardown();
     // See handleStop — drop pending barge-in timer before cleanup so a
     // dead handler can never fire a stale recordOverlapEnd callback.
     this.clearPendingBargeIn();
@@ -2506,84 +2652,143 @@ export class StreamHandler {
     // Push filtered text to history (after hook, so LLM sees redacted/modified text)
     this.history.push({ role: 'user', text: filteredTranscript, timestamp: Date.now() });
 
-    let responseText = '';
-
     // Wave6B: record that the transcript is being committed to the LLM.
     // onUserTurnCompleted hook is not yet wired in TS — record 0 delay so EOU can still emit.
     this.metricsAcc.recordOnUserTurnCompletedDelay(0);
     this.metricsAcc.recordTurnCommitted();
     closeEndpointSpan();
 
-    if (this.deps.onMessage && typeof this.deps.onMessage === 'function') {
-      try {
-        responseText = await this.deps.onMessage({
+    // Settle the previous turn first (single-in-flight). It is either already
+    // done, or this transcript's handleBargeIn above just aborted it — so this
+    // await is fast and does not head-of-line-block the drain loop in
+    // practice, while preserving strict per-turn history/metrics ordering.
+    await this.dispatchTask?.catch(() => {});
+    // Snapshot history at launch — AFTER this turn's own user push above, BEFORE
+    // any later transcript can mutate it. The dispatch runs in the background,
+    // so passing the LIVE ``this.history.entries`` would let a following
+    // transcript's user push (which happens on the drain loop while this turn is
+    // in flight) contaminate this turn's LLM prompt. Mirrors Python's
+    // ``list(self.conversation_history)`` snapshot.
+    const historySnapshot = [...this.history.entries];
+    // Launch the turn as a tracked background task and RETURN immediately so
+    // the transcript drain loop keeps running handleBargeIn against this LIVE
+    // turn (the head-of-line-blocking fix). Parity with Python
+    // ``create_task(_dispatch_turn(...))``.
+    this.dispatchTask = this.dispatchTurn(
+      filteredTranscript,
+      hookExecutor,
+      hookCtx,
+      interrupted,
+      historySnapshot,
+    );
+  }
+
+  /**
+   * Post-commit turn body (LLM dispatch → TTS → turn-complete) run as a
+   * tracked background task so the transcript drain loop is not blocked for
+   * the whole (possibly 30-90 s) agent-runtime turn. A barge-in — transcript
+   * (now reachable mid-turn) or VAD — aborts the in-flight ``llmAbort`` and
+   * flips ``isSpeaking``, which the LLM/TTS loops here observe and break on.
+   * Parity with Python ``_dispatch_turn``.
+   */
+  private async dispatchTurn(
+    filteredTranscript: string,
+    hookExecutor: PipelineHookExecutor,
+    hookCtx: HookContext,
+    interrupted: boolean,
+    historySnapshot: Array<{ role: string; text: string }>,
+  ): Promise<void> {
+    const label = this.deps.bridge.label;
+    let responseText = '';
+    try {
+      if (this.deps.onMessage && typeof this.deps.onMessage === 'function') {
+        try {
+          responseText = await this.deps.onMessage({
+            text: filteredTranscript,
+            call_id: this.callId,
+            caller: this.caller,
+            callee: this.callee,
+            history: historySnapshot,
+          });
+        } catch (e) {
+          getLogger().error(`onMessage error (${label}):`, e);
+          return;
+        }
+        if (!responseText) {
+          // Common misuse: onMessage was provided as an observer (returning void)
+          // but it actually replaces the built-in LLM loop. Warn loudly — the caller
+          // will hear no audio until the handler returns a non-empty string.
+          getLogger().warn(
+            `onMessage returned empty/void (${label}) — no TTS will play. ` +
+            `If you intended to observe transcripts, use onTranscript instead; ` +
+            `if you meant to answer via the built-in LLM, remove onMessage and pass openaiKey.`,
+          );
+        }
+      } else if (this.deps.onMessage && isRemoteUrl(this.deps.onMessage)) {
+        const msgData = {
           text: filteredTranscript,
           call_id: this.callId,
           caller: this.caller,
           callee: this.callee,
-          history: [...this.history.entries],
-        });
-      } catch (e) {
-        getLogger().error(`onMessage error (${label}):`, e);
-        return;
-      }
-      if (!responseText) {
-        // Common misuse: onMessage was provided as an observer (returning void)
-        // but it actually replaces the built-in LLM loop. Warn loudly — the caller
-        // will hear no audio until the handler returns a non-empty string.
-        getLogger().warn(
-          `onMessage returned empty/void (${label}) — no TTS will play. ` +
-          `If you intended to observe transcripts, use onTranscript instead; ` +
-          `if you meant to answer via the built-in LLM, remove onMessage and pass openaiKey.`,
+          history: historySnapshot,
+        };
+        if (isWebSocketUrl(this.deps.onMessage)) {
+          await this.handleWebSocketResponse(msgData);
+          return;
+        }
+        try {
+          responseText = await this.deps.remoteHandler.callWebhook(this.deps.onMessage, msgData);
+        } catch (e) {
+          getLogger().error(`Webhook remote error (${label}):`, e);
+          return;
+        }
+      } else if (this.llmLoop) {
+        const llmResult = await this.runPipelineLlm(
+          filteredTranscript,
+          hookExecutor,
+          hookCtx,
+          historySnapshot,
         );
-      }
-    } else if (this.deps.onMessage && isRemoteUrl(this.deps.onMessage)) {
-      const msgData = {
-        text: filteredTranscript,
-        call_id: this.callId,
-        caller: this.caller,
-        callee: this.callee,
-        history: [...this.history.entries],
-      };
-      if (isWebSocketUrl(this.deps.onMessage)) {
-        await this.handleWebSocketResponse(msgData);
+        responseText = llmResult.text;
+        // OR in whether the LLM stream itself was cut short, in addition to a
+        // barge-in already seen by handleBargeIn at the top of this turn.
+        interrupted = interrupted || llmResult.interrupted;
+      } else {
+        getLogger().warn(
+          `Pipeline (${label}) has no llm/onMessage handler — transcript ` +
+            `"${sanitizeLogValue(filteredTranscript.slice(0, 60))}" dropped. ` +
+            'Check that agent.llm or onMessage is configured.',
+        );
         return;
       }
-      try {
-        responseText = await this.deps.remoteHandler.callWebhook(this.deps.onMessage, msgData);
-      } catch (e) {
-        getLogger().error(`Webhook remote error (${label}):`, e);
-        return;
+
+      if (!responseText) return;
+
+      if (this.llmLoop) {
+        // Marker goes to the history/transcript ONLY (so a stateful agent
+        // runtime sees it was interrupted); metrics use the PLAIN text and are
+        // gated on !interrupted — mirrors Python.
+        const spokenText = interrupted
+          ? `${responseText} [interrupted by caller]`
+          : responseText;
+        await this.emitAssistantTranscript(spokenText);
+        if (!interrupted) this.metricsAcc.recordTtsComplete(responseText);
+      } else {
+        interrupted = (await this.runRegularLlm(responseText, hookExecutor, hookCtx)) || interrupted;
+        // ``runRegularLlm`` returns the possibly-replaced text via side effect on
+        // history; recompute responseText from the last history entry for the
+        // turn-complete record.
+        responseText = this.history.entries[this.history.entries.length - 1]?.text ?? responseText;
       }
-    } else if (this.llmLoop) {
-      responseText = await this.runPipelineLlm(filteredTranscript, hookExecutor, hookCtx);
-    } else {
-      getLogger().warn(
-        `Pipeline (${label}) has no llm/onMessage handler — transcript ` +
-          `"${sanitizeLogValue(filteredTranscript.slice(0, 60))}" dropped. ` +
-          'Check that agent.llm or onMessage is configured.',
-      );
-      return;
-    }
 
-    if (!responseText) return;
-
-    if (this.llmLoop) {
-      await this.emitAssistantTranscript(responseText);
-      this.metricsAcc.recordTtsComplete(responseText);
-    } else {
-      interrupted = await this.runRegularLlm(responseText, hookExecutor, hookCtx) || interrupted;
-      // ``runRegularLlm`` returns the possibly-replaced text via side effect on
-      // history; recompute responseText from the last history entry for the
-      // turn-complete record.
-      responseText = this.history.entries[this.history.entries.length - 1]?.text ?? responseText;
-    }
-
-    // Skip turn-complete when barge-in already recorded the turn as
-    // interrupted — mirrors Python ``if not interrupted``. Prevents
-    // double-counting / turn-count inflation / polluting p95.
-    if (!interrupted) {
-      await this.emitTurnMetrics(this.metricsAcc.recordTurnComplete(responseText));
+      // Skip turn-complete when barge-in already recorded the turn as
+      // interrupted — mirrors Python ``if not interrupted``. Prevents
+      // double-counting / turn-count inflation / polluting p95.
+      if (!interrupted) {
+        await this.emitTurnMetrics(this.metricsAcc.recordTurnComplete(responseText));
+      }
+    } finally {
+      this.dispatchTask = null;
     }
   }
 
@@ -2605,6 +2810,21 @@ export class StreamHandler {
       // a normal new turn. Closes the race where a transcript lands before
       // the VAD speech_start rescue fires.
       this.endTailGraceForNewTurn();
+      return false;
+    }
+    // Echo guard: when audio is forwarded to STT during TTS (no effective AEC),
+    // the agent's own voice can be transcribed and would barge in on itself.
+    // Drop transcripts that look like a fragment of what the agent is saying.
+    // Only under forwardSttWhileSpeaking, so the default VAD path is unaffected.
+    if (
+      this.forwardSttWhileSpeaking &&
+      looksLikeEcho(transcript.text, this.currentAgentSpokenText)
+    ) {
+      getLogger().info(
+        `Barge-in suppressed: transcript matches agent's own speech (echo) — ${sanitizeLogValue(
+          transcript.text.slice(0, 40),
+        )}`,
+      );
       return false;
     }
     if (!this.canBargeIn()) {
@@ -2653,6 +2873,19 @@ export class StreamHandler {
       // Tail-grace transcript = next turn, not a barge-in. End the grace and
       // let the transcript dispatch normally (parity with the async path).
       this.endTailGraceForNewTurn();
+      return false;
+    }
+    // Echo guard (parity with handleBargeInAsync) — never let the agent's own
+    // forwarded TTS echo barge in on itself.
+    if (
+      this.forwardSttWhileSpeaking &&
+      looksLikeEcho(transcript.text, this.currentAgentSpokenText)
+    ) {
+      getLogger().info(
+        `Barge-in suppressed: transcript matches agent's own speech (echo) — ${sanitizeLogValue(
+          transcript.text.slice(0, 40),
+        )}`,
+      );
       return false;
     }
     if (this.bargeInStrategies.length === 0) {
@@ -2768,15 +3001,34 @@ export class StreamHandler {
       getLogger().debug(`Dropped likely STT hallucination: ${sanitizeLogValue(normalised.slice(0, 40))}`);
       return false;
     }
+    // Echo guard: while the agent is still speaking (the forward-STT echo
+    // window), a transcript that matches the agent's own speech is its TTS
+    // bleeding back into STT, not a user turn. Gated on forwardSttWhileSpeaking
+    // + isSpeaking so a real post-turn reply (committed when idle) is never
+    // dropped, and the default VAD path is unaffected. Parity with Python.
+    if (
+      this.forwardSttWhileSpeaking &&
+      this.isSpeaking &&
+      looksLikeEcho(text, this.currentAgentSpokenText)
+    ) {
+      getLogger().debug(
+        `Dropped agent-echo transcript (not a user turn): ${sanitizeLogValue(normalised.slice(0, 40))}`,
+      );
+      return false;
+    }
     if (sinceLastMs < 2000 && normalised === this.lastCommitText) {
       getLogger().debug(
         `Dropped duplicate final transcript (${(sinceLastMs / 1000).toFixed(1)}s since last): ${sanitizeLogValue(normalised.slice(0, 40))}`,
       );
       return false;
     }
-    if (sinceLastMs < 500) {
+    // Back-to-back: drop a NEAR-DUPLICATE within 500 ms (Deepgram emitting
+    // speech_final then is_final for the SAME utterance). A genuinely DIFFERENT
+    // fast follow-up must NOT be swallowed — dropping it unconditionally left
+    // an empty [interrupted] turn before this fix. Parity with Python.
+    if (sinceLastMs < 500 && isNearDuplicate(normalised, this.lastCommitText)) {
       getLogger().debug(
-        `Dropped back-to-back final transcript (${(sinceLastMs / 1000).toFixed(2)}s since last): ${sanitizeLogValue(normalised.slice(0, 40))}`,
+        `Dropped back-to-back near-duplicate final (${(sinceLastMs / 1000).toFixed(2)}s since last): ${sanitizeLogValue(normalised.slice(0, 40))}`,
       );
       return false;
     }
@@ -2845,13 +3097,16 @@ export class StreamHandler {
 
   /**
    * Streaming built-in LLM path with sentence chunking and per-sentence
-   * guardrails/TTS. Returns the concatenated response text.
+   * guardrails/TTS. Returns the concatenated (plain) response text plus whether
+   * the turn was cut short by a barge-in — the caller applies the interrupted
+   * marker to history only, keeping metrics on the plain text.
    */
   private async runPipelineLlm(
     filteredTranscript: string,
     hookExecutor: PipelineHookExecutor,
     hookCtx: HookContext,
-  ): Promise<string> {
+    historySnapshot: Array<{ role: string; text: string }>,
+  ): Promise<{ text: string; interrupted: boolean }> {
     const label = this.deps.bridge.label;
     const callCtx = { call_id: this.callId, caller: this.caller, callee: this.callee };
     const chunker = new SentenceChunker({
@@ -2914,7 +3169,7 @@ export class StreamHandler {
       try {
         for await (const token of this.llmLoop!.run(
           filteredTranscript,
-          this.history.entries,
+          historySnapshot,
           callCtx,
           this.metricsAcc,
           hookExecutor,
@@ -2928,6 +3183,10 @@ export class StreamHandler {
           // Idempotent in the dispatcher.
           await this.emitLlmFirstToken();
           allParts.push(token);
+          // Keep the echo-guard reference current as the agent speaks, so a
+          // barge-in transcript mid-turn is compared against what the agent has
+          // said so far (echo lags the tokens). Parity with Python.
+          this.currentAgentSpokenText = allParts.join('');
           for (const sentence of chunker.push(token)) {
             if (!this.isSpeaking) break;
             await guardAndSpeak(sentence, !firstSentenceEmitted);
@@ -2997,7 +3256,13 @@ export class StreamHandler {
         // Swallow — span teardown should never crash the call path.
       }
     }
-    return allParts.join('');
+    // Return the PLAIN text plus whether the turn was cut short. The caller
+    // (dispatchTurn) records metrics on the plain text and applies the
+    // ``[interrupted by caller]`` marker only to the history/transcript, so
+    // metrics (TTS cost, turn-complete) are never polluted by the marker.
+    // Parity with Python, where metrics are recorded on the unmarked text
+    // inside ``_process_streaming_response`` before the marker is appended.
+    return { text: allParts.join(''), interrupted: llmSignal.aborted };
   }
 
   /**

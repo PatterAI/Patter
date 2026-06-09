@@ -164,6 +164,66 @@ gateway that isn't listening.
   `hermes-agent`).
 </Note>
 
+### Zero-config setup (Python)
+
+If you'd rather not wire it up by hand, the Python CLI scaffolds a ready-to-run project,
+checks your environment, and can point your Twilio number at Patter:
+
+```bash
+pip install getpatter
+
+patter hermes doctor        # preflight: gateway, providers, carrier — with fixes
+patter hermes setup         # scaffold ./hermes-phone-agent (app.py, .env, scripts)
+```
+
+`patter hermes doctor` reads your Hermes config directly — it autoloads `~/.hermes/.env`
+and the nearest project `.env`, reports whether `API_SERVER_ENABLED` is set and which
+gateway port is configured, runs `hermes gateway status` when the CLI is present, then
+probes the gateway (`/v1/models`), confirms `HermesLLM` is constructible, and checks your
+Deepgram / ElevenLabs / Twilio credentials — printing a suggested fix for anything missing
+(`--no-network` skips live probes, `--json` for machine-readable output, `--env-file` /
+`--no-env-file` to control autoloading).
+
+`patter hermes setup` writes the same starter project shown in
+[`examples/hermes-phone-agent`](https://github.com/PatterAI/Patter/tree/main/examples/hermes-phone-agent)
+and can also wire the two ends together for you:
+
+- `--enable-hermes` writes `API_SERVER_ENABLED=true` (and generates an `API_SERVER_KEY` if
+  absent) into `~/.hermes/.env`, backing the file up first — then reminds you to restart the
+  gateway. The same key is mirrored into the project `.env` so Patter and Hermes agree (a
+  mismatch is a 401 at call time).
+- `--generate-key` puts a strong `API_SERVER_KEY` into the project `.env`.
+- `--number` + `--url` attach the Twilio webhook in the same run.
+
+To wire an existing number on its own:
+
+```bash
+patter hermes numbers       # list the numbers on your Twilio account
+patter hermes attach-number +15551234567 --url https://<your-tunnel>/calls/inbound
+```
+
+To go from a freshly enabled gateway to a verified one in a single run, add
+`--start-gateway` — `setup` then runs `hermes gateway start` and waits for `/v1/models` to
+answer before continuing. Before placing a real call, run the end-to-end acceptance check,
+which sends an actual chat turn through the gateway (with the Hermes session header) and
+confirms your providers are ready:
+
+```bash
+patter hermes test          # /v1/models + a real /v1/chat/completions turn + provider keys
+```
+
+When a call misbehaves, point Patter's per-call log (`PATTER_LOG_DIR`) at the tracer to see
+exactly which stage broke — carrier → STT → Hermes → TTS — with a latency breakdown and a
+one-line verdict:
+
+```bash
+patter hermes trace         # latest call's pipeline stages + stt/llm/tts latency
+patter hermes diagnose      # e.g. "Hermes replied but no audio — TTS stage" + the fix
+```
+
+These commands live in the Python SDK today; the `HermesLLM` provider itself is available
+in both the Python and TypeScript SDKs.
+
 ### Running Patter locally
 
 Build a pipeline-mode agent whose LLM is `HermesLLM`. Patter wraps the carrier, STT, and

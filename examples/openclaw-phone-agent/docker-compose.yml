@@ -1,0 +1,15 @@
+# Patter + OpenClaw on one box. OpenClaw stays on loopback; only Patter is exposed.
+#
+# Start your OpenClaw gateway on the host first (loopback 127.0.0.1:18789, with
+# chatCompletions enabled), then `docker compose up`. The container shares the
+# host network so Patter can reach the gateway on 127.0.0.1:18789.
+services:
+  receptionist:
+    image: python:3.12-slim
+    working_dir: /app
+    env_file: .env
+    network_mode: host          # so Patter reaches OpenClaw on 127.0.0.1:18789
+    restart: unless-stopped     # 24/7 — restart on crash/boot
+    volumes:
+      - .:/app
+    command: sh -c "pip install --quiet getpatter && python app.py"

@@ -33,7 +33,8 @@ def test_hermes_defaults_base_url_model_timeout(monkeypatch) -> None:
     llm = hermes.LLM()
     assert _base_url_str(llm).startswith("http://127.0.0.1:8642/v1")
     assert llm._model == "hermes-agent"
-    assert llm._client.timeout == 120.0
+    assert llm._client.timeout.read == 120.0
+    assert llm._client.timeout.connect == 10.0
     # Hermes is stateless and keys continuity off HEADERS:
     #   X-Hermes-Session-Id (per call) + optional X-Hermes-Session-Key (memory).
     assert llm._session_user_prefix == "patter-call-"
@@ -113,7 +114,8 @@ def test_openclaw_defaults_match_consult_preset(monkeypatch) -> None:
     assert llm._session_user_prefix == "patter-call-"
     # OpenClaw has no separate memory-scope header.
     assert llm._session_key_header is None
-    assert llm._client.timeout == 120.0
+    assert llm._client.timeout.read == 120.0
+    assert llm._client.timeout.connect == 10.0
     assert llm.provider_key == "openclaw"
 
 

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Patter OpenClaw receptionist — launchd agent (macOS always-on Mac Mini model).
+     Edit the WorkingDirectory + interpreter for your box, then:
+       cp deploy/com.patter.receptionist.plist ~/Library/LaunchAgents/
+       launchctl load -w ~/Library/LaunchAgents/com.patter.receptionist.plist -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.patter.receptionist</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/env</string>
+    <string>python</string>
+    <string>app.py</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/patter/openclaw-phone-agent</string>
+  <key>KeepAlive</key><true/>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>/Users/patter/openclaw-phone-agent/patter.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/patter/openclaw-phone-agent/patter.err.log</string>
+</dict>
+</plist>

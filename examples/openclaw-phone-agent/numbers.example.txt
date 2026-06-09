@@ -1,0 +1,5 @@
+# Outbound dialer call list — one E.164 number per line.
+# Lines starting with # are ignored. Honour consent / do-not-call lists before
+# adding anyone here, and disclose the caller is an AI at the start of the call.
++15557654321
++15557654322

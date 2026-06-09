@@ -1,0 +1,14 @@
+# Patter + Hermes on one box. Hermes stays on loopback; only Patter is exposed.
+#
+# This runs the Patter voice shell in a container that shares the host network
+# so it can reach the Hermes gateway on 127.0.0.1:8642. Start your Hermes
+# gateway on the host first (see the Hermes docs), then `docker compose up`.
+services:
+  patter:
+    image: python:3.12-slim
+    working_dir: /app
+    env_file: .env
+    network_mode: host          # so Patter reaches Hermes on 127.0.0.1:8642
+    volumes:
+      - .:/app
+    command: sh -c "pip install --quiet getpatter && python app.py"
