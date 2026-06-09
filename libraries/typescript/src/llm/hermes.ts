@@ -14,6 +14,7 @@
  * pass ``sessionKey``. (It also still emits ``user=patter-call-<callId>`` for
  * upstream-log correlation, but that is not what drives the session.)
  */
+import type { SessionContext } from '../types';
 import {
   OpenAICompatibleLLMProvider,
   type OpenAICompatibleLLMOptions,
@@ -49,11 +50,28 @@ export interface HermesLLMOptions {
   /** Per-request timeout in seconds. Default ``120``. */
   timeout?: number;
   /**
-   * Long-term memory scope. When set, emits ``X-Hermes-Session-Key`` so Hermes
-   * scopes durable memory to this value across calls. ``undefined`` (default)
-   * means the header is not sent. Credential-grade — never logged.
+   * Static long-term memory scope. When set, emits ``X-Hermes-Session-Key`` so
+   * Hermes scopes durable memory to this value across calls. ``undefined``
+   * (default) means the header is not sent. Credential-grade — never logged.
    */
   sessionKey?: string;
+  /**
+   * Convenience selector for a built-in per-call key derivation. Set to
+   * ``'caller_hash'`` to derive the session key per call as
+   * ``` `patter-caller-${ctx.callerHash}` ``` (a stable, non-reversible hash of
+   * the caller — never the raw number), enabling per-caller cross-call memory.
+   * ``undefined`` (default) uses the static ``sessionKey`` path. Ignored when
+   * ``sessionKeyFactory`` is given explicitly. Mirrors Python
+   * ``session_key_from``.
+   */
+  sessionKeyFrom?: 'caller_hash';
+  /**
+   * Custom callback deriving the ``X-Hermes-Session-Key`` value per call from a
+   * {@link SessionContext}. Takes precedence over both ``sessionKey`` and
+   * ``sessionKeyFrom``. A falsy return omits the header for that call.
+   * Credential-grade — never logged. Mirrors Python ``session_key_factory``.
+   */
+  sessionKeyFactory?: (ctx: SessionContext) => string | undefined;
   /** Extra headers merged after the SDK ``User-Agent``. */
   extraHeaders?: Record<string, string>;
   /** Sampling temperature [0, 2]. */
@@ -93,6 +111,26 @@ export class LLM extends OpenAICompatibleLLMProvider {
 
   constructor(opts: HermesLLMOptions = {}) {
     const model = opts.model ?? process.env[MODEL_ENV] ?? DEFAULT_MODEL;
+    // ``sessionKeyFrom: 'caller_hash'`` installs a default factory that scopes
+    // durable memory per caller via the non-reversible caller hash (never the
+    // raw number). An explicit ``sessionKeyFactory`` always wins over it.
+    let sessionKeyFactory = opts.sessionKeyFactory;
+    if (!sessionKeyFactory && opts.sessionKeyFrom === 'caller_hash') {
+      sessionKeyFactory = (ctx: SessionContext): string | undefined =>
+        ctx.callerHash ? `patter-caller-${ctx.callerHash}` : undefined;
+    } else if (
+      opts.sessionKeyFrom !== undefined &&
+      opts.sessionKeyFrom !== 'caller_hash'
+    ) {
+      // Runtime validation for non-TypeScript / dynamic-JS / JSON callers — the
+      // literal type already catches this at compile time. Mirrors Python's
+      // ValueError so a misconfigured key derivation fails loudly, not silently.
+      throw new Error(
+        `sessionKeyFrom must be 'caller_hash' or undefined, got ${JSON.stringify(
+          opts.sessionKeyFrom,
+        )}`,
+      );
+    }
     const options: OpenAICompatibleLLMOptions = {
       apiKey: opts.apiKey,
       apiKeyEnv: API_KEY_ENV,
@@ -104,6 +142,7 @@ export class LLM extends OpenAICompatibleLLMProvider {
       sessionIdPrefix: SESSION_ID_PREFIX,
       sessionKeyHeader: SESSION_KEY_HEADER,
       sessionKey: opts.sessionKey,
+      sessionKeyFactory,
       extraHeaders: opts.extraHeaders,
       temperature: opts.temperature,
       maxTokens: opts.maxTokens,

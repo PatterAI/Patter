@@ -10,6 +10,7 @@ All public configs are frozen dataclasses for immutability — see
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
 from dataclasses import dataclass, field
@@ -393,6 +394,47 @@ class RealtimeTurnDetection:
             )
 
 
+def hash_caller(caller: str | None) -> str | None:
+    """Stable, non-reversible 16-char hash of a caller for session scoping.
+
+    Used to derive a per-caller memory namespace (e.g. an agent runtime's
+    session key) WITHOUT ever exposing the raw phone number — the call site
+    keys cross-call memory off the hash, never the number itself. Returns the
+    first 16 hex chars of the SHA-256 digest of the UTF-8 ``caller`` string, or
+    ``None`` when ``caller`` is ``None`` / empty (no caller → no scope). The
+    16-char (64-bit) truncation is plenty for namespacing while keeping the
+    emitted header value compact; it is NOT a security primitive (a phone
+    number has too little entropy to make the digest a secret) — its only job
+    is to avoid putting the raw number on the wire / in logs.
+    """
+    if not caller:
+        return None
+    return hashlib.sha256(caller.encode("utf-8")).hexdigest()[:16]
+
+
+@dataclass(frozen=True)
+class SessionContext:
+    """Per-call context handed to a ``session_key_factory``.
+
+    A session-aware LLM provider (e.g. :class:`getpatter.llm.hermes.LLM`) can
+    derive its memory-scope header value per call from this — most usefully
+    from :attr:`caller_hash`, a stable non-reversible hash of the caller, so
+    one phone number maps to one durable memory namespace across calls without
+    the raw number ever being emitted or logged.
+
+    All fields are optional: ``call_id`` / ``caller`` / ``callee`` are present
+    when the call provides them; ``caller_hash`` is :func:`hash_caller` of
+    ``caller`` (``None`` when there is no caller). The raw ``caller`` is carried
+    here only so a factory CAN re-derive its own scope — it must never be put on
+    the wire or logged beyond what already exists.
+    """
+
+    call_id: str | None = None
+    caller: str | None = None
+    callee: str | None = None
+    caller_hash: str | None = None
+
+
 @dataclass(frozen=True)
 class Agent:
     """Configuration for a local-mode voice AI agent.
@@ -429,6 +471,22 @@ class Agent:
     # behaviour: nothing is spoken on LLM error. Pipeline mode only —
     # Realtime / ConvAI surface provider errors on their own audio path.
     llm_error_message: str | None = None
+    # Opt-in spoken filler for pipeline mode when an LLM turn is SLOW (distinct
+    # from ``llm_error_message``, which fires on an ERROR). Agent-runtime
+    # providers (Hermes / OpenClaw) run tools / memory / skills internally, so a
+    # turn can take many seconds before the first word is spoken — the caller
+    # hears dead silence. When set to a non-empty string and the turn has
+    # produced NO audio after ``long_turn_message_after_s`` seconds, the SDK
+    # synthesizes this line ONCE through the normal TTS turn lifecycle (subject
+    # to barge-in) to fill the gap. It never fires once real audio has started
+    # this turn, and never double-speaks. ``None`` (default) keeps today's
+    # behaviour: nothing is spoken while a slow turn runs. Pipeline mode only.
+    long_turn_message: str | None = None
+    # Seconds to wait after the turn begins speaking before the
+    # ``long_turn_message`` filler fires (only consulted when
+    # ``long_turn_message`` is set and no audio has reached the carrier yet).
+    # Default ``4.0`` s.
+    long_turn_message_after_s: float = 4.0
     tools: tuple[dict, ...] | None = None
     provider: ProviderMode = "openai_realtime"
     stt: STTConfig | None = None  # which STT provider to use in pipeline mode

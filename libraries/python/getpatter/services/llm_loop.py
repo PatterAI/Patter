@@ -37,38 +37,59 @@ from getpatter.observability.tracing import SPAN_LLM, SPAN_TOOL, start_span
 logger = logging.getLogger("getpatter")
 
 
-# Per-provider-TYPE memo of whether ``stream`` accepts a ``call_id`` keyword.
+# Per-call-context kwargs the loop MAY thread into ``provider.stream`` — but
+# only those the provider's signature actually declares (or absorbs via
+# ``**kwargs``). ``call_id`` predates ``caller`` / ``callee``: a provider that
+# only declares ``call_id`` (every built-in before the session_key_factory
+# feature) keeps getting just ``call_id`` and is unaffected by the additions.
+_CALL_CONTEXT_STREAM_KWARGS = ("call_id", "caller", "callee")
+
+# Per-provider-TYPE memo of which call-context kwargs ``stream`` accepts.
 # Built-in providers declare ``call_id`` (or ``**kwargs``) and hit the fast
 # path after the first call; a user's minimal custom provider whose ``stream``
 # is ``(self, messages, tools=None, *, cancel_event=None)`` is detected once and
-# called WITHOUT ``call_id`` thereafter — otherwise it would raise TypeError.
-_provider_accepts_call_id: dict[type, bool] = {}
+# called WITHOUT any of these thereafter — otherwise it would raise TypeError.
+_provider_accepted_stream_kwargs: dict[type, frozenset[str]] = {}
+
+
+def _stream_accepted_context_kwargs(provider: object) -> frozenset[str]:
+    """Which of :data:`_CALL_CONTEXT_STREAM_KWARGS` ``provider.stream`` tolerates.
+
+    A name is accepted when the signature declares a parameter of that name OR
+    the signature accepts ``**kwargs`` (``VAR_KEYWORD``), in which case ALL of
+    them are accepted. Cached per provider type to keep the hot path cheap. Some
+    callables (C-level, ``functools.partial`` without ``__wrapped__``) refuse
+    introspection — those default to the empty set so the safe no-context path
+    is taken rather than risking a new crash site.
+    """
+    provider_type = type(provider)
+    cached = _provider_accepted_stream_kwargs.get(provider_type)
+    if cached is not None:
+        return cached
+    accepted: set[str] = set()
+    try:
+        sig = inspect.signature(provider.stream)
+        for param in sig.parameters.values():
+            if param.kind is inspect.Parameter.VAR_KEYWORD:
+                accepted = set(_CALL_CONTEXT_STREAM_KWARGS)
+                break
+            if param.name in _CALL_CONTEXT_STREAM_KWARGS:
+                accepted.add(param.name)
+    except (ValueError, TypeError):  # pragma: no cover - exotic callables
+        accepted = set()
+    result = frozenset(accepted)
+    _provider_accepted_stream_kwargs[provider_type] = result
+    return result
 
 
 def _stream_accepts_call_id(provider: object) -> bool:
     """Whether ``provider.stream`` tolerates a ``call_id`` keyword argument.
 
-    True when the signature declares a parameter named ``call_id`` OR accepts
-    ``**kwargs`` (``VAR_KEYWORD``). Cached per provider type to keep the hot
-    path cheap. Some callables (C-level, ``functools.partial`` without
-    ``__wrapped__``) refuse introspection — those default to ``False`` so the
-    safe no-``call_id`` path is taken rather than risking a new crash site.
+    Back-compat shim around :func:`_stream_accepted_context_kwargs` (some tests
+    and external callers still reference this). True when ``call_id`` is among
+    the accepted call-context kwargs.
     """
-    provider_type = type(provider)
-    cached = _provider_accepts_call_id.get(provider_type)
-    if cached is not None:
-        return cached
-    accepts = False
-    try:
-        sig = inspect.signature(provider.stream)
-        for param in sig.parameters.values():
-            if param.name == "call_id" or param.kind is inspect.Parameter.VAR_KEYWORD:
-                accepts = True
-                break
-    except (ValueError, TypeError):  # pragma: no cover - exotic callables
-        accepts = False
-    _provider_accepts_call_id[provider_type] = accepts
-    return accepts
+    return "call_id" in _stream_accepted_context_kwargs(provider)
 
 
 # ---------------------------------------------------------------------------
@@ -961,24 +982,32 @@ class LLMLoop:
             _span_cm.__enter__()
             _span_exc_info: tuple = (None, None, None)
             try:
-                # Only thread ``call_id`` into providers whose ``stream``
-                # accepts it (or ``**kwargs``). A user's minimal custom provider
-                # with ``(messages, tools=None, *, cancel_event=None)`` would
-                # otherwise raise TypeError on the added keyword. ``cancel_event``
-                # predates this and every Protocol implementer tolerates it.
-                if _stream_accepts_call_id(self._provider):
-                    stream_iter = self._provider.stream(
-                        messages,
-                        self._openai_tools,
-                        cancel_event=cancel_event,
-                        call_id=call_context.get("call_id"),
-                    )
-                else:
-                    stream_iter = self._provider.stream(
-                        messages,
-                        self._openai_tools,
-                        cancel_event=cancel_event,
-                    )
+                # Thread only the per-call context kwargs the provider's
+                # ``stream`` actually declares (or absorbs via ``**kwargs``). A
+                # provider that declares just ``call_id`` keeps getting only
+                # ``call_id``; one that also declares ``caller`` / ``callee``
+                # (e.g. the OpenAI-compatible provider with a session_key_factory)
+                # gets those too; a minimal custom provider with neither gets
+                # none. Each value is only included when present in
+                # ``call_context``. ``cancel_event`` predates this and every
+                # Protocol implementer tolerates it.
+                accepted = _stream_accepted_context_kwargs(self._provider)
+                context_kwargs = {
+                    name: call_context[name]
+                    for name in _CALL_CONTEXT_STREAM_KWARGS
+                    if name in accepted and name in call_context
+                }
+                # ``call_id`` is threaded even when absent (value None) to
+                # preserve the prior contract where a session-aware provider was
+                # always handed ``call_id=<value-or-None>``.
+                if "call_id" in accepted and "call_id" not in context_kwargs:
+                    context_kwargs["call_id"] = call_context.get("call_id")
+                stream_iter = self._provider.stream(
+                    messages,
+                    self._openai_tools,
+                    cancel_event=cancel_event,
+                    **context_kwargs,
+                )
                 async for chunk in stream_iter:
                     chunk_type = chunk.get("type")
 

@@ -2348,6 +2348,20 @@ class PipelineStreamHandler(StreamHandler):
         self._auto_vad = None
         self._stt_task: asyncio.Task | None = None
         self._is_speaking = False
+        # True only while the post-TTS tail-grace window is pending: the
+        # agent has finished its turn but ``_is_speaking`` is still held for
+        # ``PATTER_TTS_TAIL_GRACE_MS`` to swallow the fading echo tail. A VAD
+        # ``speech_start`` (or a transcript) during this window is the user's
+        # NEXT turn, not a barge-in — there is nothing left to interrupt. Set
+        # by ``_end_speaking_with_grace``; cleared by ``_begin_speaking``, the
+        # grace flip, barge-in cancels, and ``_end_tail_grace_for_new_turn``.
+        self._tail_grace_active = False
+        # Handle to the scheduled grace-flip task so it can be cancelled
+        # (parity with TS ``clearGraceTimer``) — at most one pending at a
+        # time. The ``_speaking_generation`` guard already makes a stale flip
+        # a no-op; cancelling avoids leaving an idle ``asyncio.sleep`` task
+        # per turn on long, fast-turn calls.
+        self._grace_task: asyncio.Task | None = None
         # Per-turn LLM cancel event. Recreated on every new turn before LLM
         # consumption so a stale cancel from a previous turn cannot terminate
         # the next stream prematurely. Initialized here so the STT loop's
@@ -3105,6 +3119,70 @@ class PipelineStreamHandler(StreamHandler):
             self.audio_sender.reset_pcm_carry()
         return True
 
+    def _schedule_long_turn_filler(
+        self,
+        first_tts_chunk: list,
+        hook_executor: PipelineHookExecutor,
+        hook_ctx: HookContext,
+    ) -> "asyncio.Task | None":
+        """Spawn the opt-in long-turn filler task, or ``None`` when disabled.
+
+        Returns ``None`` (no task) when ``agent.long_turn_message`` is unset /
+        empty — the default, byte-identical to today's behaviour. Otherwise
+        returns a task that waits ``agent.long_turn_message_after_s`` seconds and
+        then, IFF no audio has reached the carrier this turn
+        (``first_tts_chunk[0]`` still ``True``) AND we still own the floor
+        (``self._is_speaking``), synthesizes the filler ONCE via
+        ``_synthesize_sentence``. Guards strictly on "no audio emitted yet" so it
+        cannot double-speak; self-synthesis failure degrades to silence.
+        """
+        message = getattr(self.agent, "long_turn_message", None)
+        if not message:
+            return None
+        after_s = getattr(self.agent, "long_turn_message_after_s", 4.0)
+
+        async def _filler() -> None:
+            try:
+                await asyncio.sleep(after_s)
+            except asyncio.CancelledError:
+                # Cancelled before firing (real audio started / turn ended).
+                raise
+            # Fire at most once, only if the caller still heard SILENCE this
+            # turn and we still hold the floor (no concurrent barge-in).
+            if first_tts_chunk[0] and self._is_speaking:
+                try:
+                    await self._synthesize_sentence(
+                        message, hook_executor, hook_ctx, first_tts_chunk
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # pragma: no cover - defensive
+                    logger.exception("long_turn_message filler synthesis failed")
+
+        return asyncio.create_task(_filler())
+
+    async def _cancel_long_turn_filler(
+        self, task: "asyncio.Task | None"
+    ) -> None:
+        """Cancel the long-turn filler task and await its teardown.
+
+        Idempotent and race-safe: a ``None`` / already-finished task is a no-op,
+        ``CancelledError`` from the cancel is suppressed, and any exception the
+        task raised before cancellation is swallowed (already logged inside the
+        task). Returns ``None`` so callers can reassign the handle in one line.
+        """
+        if task is None:
+            return None
+        if not task.done():
+            task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("long_turn_message filler task ended with error", exc_info=True)
+        return None
+
     async def _process_streaming_response(self, result, call_id: str) -> str:
         """Process a streaming (async generator) response through TTS with sentence chunking."""
         chunker = SentenceChunker(
@@ -3120,12 +3198,25 @@ class PipelineStreamHandler(StreamHandler):
         hook_executor = PipelineHookExecutor(hooks)
         hook_ctx = self._build_hook_context()
 
-        # Reset the per-turn LLM cancel event so a stale cancel from a
-        # previous turn cannot terminate this stream prematurely.  The
-        # event is *set* by ``_handle_barge_in`` to break out of the
-        # consumption loop and close the generator (which propagates
-        # cancellation into the LLM provider's HTTP/WS connection).
-        self._llm_cancel_event = asyncio.Event()
+        # Opt-in long-turn filler: when the turn is SLOW (agent runtime running
+        # tools/memory) and NO audio has reached the carrier yet, speak a short
+        # filler instead of dead silence. Distinct from ``llm_error_message``
+        # (that fires on an LLM ERROR; this fires on SLOWNESS). The task waits
+        # ``long_turn_message_after_s`` then, IFF still no audio this turn AND we
+        # still own the floor, synthesizes the filler ONCE. Cancelled the moment
+        # real audio is emitted, on the error branch, and in the finally.
+        long_turn_task = self._schedule_long_turn_filler(
+            first_tts_chunk, hook_executor, hook_ctx
+        )
+
+        # NOTE: the per-turn ``_llm_cancel_event`` is reset at the TOP of
+        # ``_dispatch_turn`` (before ``LLMLoop.run`` is handed the event), not
+        # here. Recreating it at this point — after ``run`` already captured
+        # the previous reference — used to leave the generator bound to a
+        # different event object than the consumption loop reads, and left a
+        # barge-in's set event leaking into the next turn. The event is *set*
+        # by ``_handle_barge_in`` to break out of the loop below and close the
+        # generator (propagating cancellation into the provider connection).
 
         interrupted = False
         llm_error = False
@@ -3178,6 +3269,15 @@ class PipelineStreamHandler(StreamHandler):
                                 continue  # hook dropped this sentence
                             sentence = transformed
 
+                        # Real audio is about to be synthesized — cancel the
+                        # long-turn filler so it can never fire (or double-speak)
+                        # once the agent's own reply has started. Cancelling
+                        # before the await is race-safe: asyncio is single-
+                        # threaded, so the filler coroutine cannot interleave
+                        # between this cancel and the synthesis call.
+                        long_turn_task = await self._cancel_long_turn_filler(
+                            long_turn_task
+                        )
                         if not await self._synthesize_sentence(
                             sentence, hook_executor, hook_ctx, first_tts_chunk
                         ):
@@ -3190,6 +3290,9 @@ class PipelineStreamHandler(StreamHandler):
                 llm_error = True
                 chunker.reset()  # discard partial content on LLM error
                 logger.exception("LLM streaming error: %s", exc)
+                # The turn errored — stop the filler so it cannot speak over the
+                # (distinct) error fallback below.
+                long_turn_task = await self._cancel_long_turn_filler(long_turn_task)
                 # Close the active turn as interrupted so the metrics accumulator
                 # does not leak an open turn when LLM throws mid-stream.
                 if self.metrics is not None and self.metrics.turn_active:
@@ -3240,12 +3343,19 @@ class PipelineStreamHandler(StreamHandler):
                             continue
                         sentence = transformed
 
+                    # Real flushed audio about to play — cancel the filler.
+                    long_turn_task = await self._cancel_long_turn_filler(
+                        long_turn_task
+                    )
                     if not await self._synthesize_sentence(
                         sentence, hook_executor, hook_ctx, first_tts_chunk
                     ):
                         interrupted = True
                         break
         finally:
+            # Ensure the long-turn filler task never outlives the turn (clean
+            # cancellation, CancelledError suppressed inside the helper).
+            await self._cancel_long_turn_filler(long_turn_task)
             # Schedule the flip to idle. Keeps the speaking flag set during
             # the audio tail still playing on the carrier so STT echo on
             # the trailing samples doesn't look like a fresh user turn.
@@ -3332,6 +3442,17 @@ class PipelineStreamHandler(StreamHandler):
         """
         if not (transcript.text and self._is_speaking):
             return
+        # Defensive ``getattr`` — test fixtures build the handler via
+        # ``object.__new__`` and skip ``__init__`` (no tail-grace state).
+        if getattr(self, "_tail_grace_active", False):
+            # A transcript arriving during the post-TTS tail grace is the
+            # next turn, not a barge-in (the agent already finished). End the
+            # grace and return WITHOUT cancelling — the same transcript then
+            # flows on to ``_commit_transcript``/``_dispatch_turn`` as a
+            # normal new turn. Closes the race where a transcript lands
+            # before the VAD speech_start rescue fires.
+            await self._end_tail_grace_for_new_turn()
+            return
         if not self._can_barge_in():
             aec_state = "on" if getattr(self, "_aec", None) is not None else "off"
             logger.info(
@@ -3393,6 +3514,7 @@ class PipelineStreamHandler(StreamHandler):
             {"patter.call.id": self.call_id},
         ):
             self._is_speaking = False
+            self._tail_grace_active = False
             self._speaking_started_at = None
             self._first_audio_sent_at = None
             self._last_cancel_at = time.time()
@@ -3577,6 +3699,18 @@ class PipelineStreamHandler(StreamHandler):
         """Run the post-commit pipeline (record STT → afterTranscribe →
         LLM dispatch → TTS → turn-complete) inline on the STT loop.
         """
+        # Reset the per-turn LLM cancel event BEFORE dispatch so a stale
+        # cancel set by a previous turn's barge-in (``_do_cancel_for_barge_in``
+        # calls ``cancel_event.set()``) cannot terminate this turn's LLM
+        # stream the instant it starts. This must happen before
+        # ``self._llm_loop.run(..., cancel_event=self._llm_cancel_event)`` is
+        # handed the event — recreating it later (inside
+        # ``_process_streaming_response``) was too late: ``run`` had already
+        # captured the set event, so the next turn after any barge-in went
+        # silent. Parity with TS, which allocates a fresh ``AbortController``
+        # per turn in ``runPipelineLlm``.
+        self._llm_cancel_event = asyncio.Event()
+
         # Record one STT span per final transcript turn. The span is
         # short-lived (just the attribute set) because STT is
         # streaming — we do not re-wrap the long-lived iterator.
@@ -3833,6 +3967,20 @@ class PipelineStreamHandler(StreamHandler):
                 vad_event = None
             if vad_event is not None:
                 if vad_event.type == "speech_start":
+                    # Tail-grace new-turn rescue: the agent already finished
+                    # its turn and we are only in the post-TTS echo-guard
+                    # window. A VAD speech_start here is the user's next turn,
+                    # not a barge-in — end the grace synchronously so this
+                    # utterance flows to STT as a clean new turn instead of
+                    # being swallowed by the self-hearing guard or mislabelled
+                    # as an empty ``[interrupted]`` turn (the multi-turn
+                    # silence bug). After this ``_is_speaking`` is False, so
+                    # the if/elif below is a no-op and the frame falls through
+                    # to STT. Parity with TS ``endTailGraceForNewTurn``.
+                    if self._is_speaking and getattr(
+                        self, "_tail_grace_active", False
+                    ):
+                        await self._end_tail_grace_for_new_turn()
                     phantom_suppressed = self._is_speaking and not self._can_barge_in()
                     if phantom_suppressed:
                         # Within the per-turn warmup gate. With AEC on
@@ -4013,6 +4161,10 @@ class PipelineStreamHandler(StreamHandler):
                 await asyncio.sleep(remaining)
         self._speaking_generation += 1
         self._is_speaking = True
+        # A fresh turn is actively streaming — not in the post-TTS echo
+        # window. Clear the tail-grace flag so a VAD speech_start during this
+        # turn is treated as a real barge-in (not a new-turn rescue).
+        self._tail_grace_active = False
         self._speaking_started_at = time.time()
         # Stamp ``_first_audio_sent_at`` synchronously for EVERY turn so the
         # ``_can_barge_in()`` gate (250 ms anti-flicker for PSTN no-AEC) runs
@@ -4113,6 +4265,7 @@ class PipelineStreamHandler(StreamHandler):
         # ``_begin_speaking()``.
         if grace_ms <= 0:
             self._is_speaking = False
+            self._tail_grace_active = False
             self._speaking_started_at = None
             self._first_audio_sent_at = None
             self._clear_pending_barge_in()
@@ -4124,6 +4277,14 @@ class PipelineStreamHandler(StreamHandler):
             return
 
         gen = self._speaking_generation
+        # The agent has finished pushing audio; we now hold ``_is_speaking``
+        # only to suppress the fading echo tail. Mark this as the tail-grace
+        # window so fast next-turn speech is rescued as a new turn rather
+        # than mis-detected as a barge-in.
+        self._tail_grace_active = True
+        # Cancel any still-pending flip from a previous turn so at most one
+        # grace task is ever in flight (parity with TS ``clearGraceTimer``).
+        self._clear_grace_task()
 
         async def _flip_after_grace() -> None:
             try:
@@ -4132,6 +4293,7 @@ class PipelineStreamHandler(StreamHandler):
                 # newer turn would have bumped ``_speaking_generation``.
                 if self._speaking_generation == gen:
                     self._is_speaking = False
+                    self._tail_grace_active = False
                     self._speaking_started_at = None
                     self._first_audio_sent_at = None
                     self._clear_pending_barge_in()
@@ -4148,7 +4310,52 @@ class PipelineStreamHandler(StreamHandler):
             except Exception as exc:  # pragma: no cover - defensive
                 logger.debug("tts grace flip failed: %s", exc)
 
-        asyncio.create_task(_flip_after_grace())
+        self._grace_task = asyncio.create_task(_flip_after_grace())
+
+    def _clear_grace_task(self) -> None:
+        """Cancel the pending grace-flip task, if any. Idempotent; safe from
+        test fixtures built via ``object.__new__`` (no ``__init__``)."""
+        task = getattr(self, "_grace_task", None)
+        if task is not None and not task.done():
+            task.cancel()
+        self._grace_task = None
+
+    async def _end_tail_grace_for_new_turn(self) -> None:
+        """End the post-TTS tail-grace window because the user has begun
+        their next turn.
+
+        Unlike a barge-in, the agent's response already played out in full —
+        there is nothing to cancel and no turn was interrupted. We flip the
+        speaking flag off (bumping ``_speaking_generation`` so the scheduled
+        grace-flip task no-ops), recover any leading audio the self-hearing
+        guard captured into the ring (the user's first ~250 ms, which VAD
+        needed before it could emit ``speech_start``), and let the live STT
+        stream take over. Crucially we do NOT call ``send_clear``,
+        ``record_bargein_detected`` or ``record_turn_interrupted`` — none of
+        those apply to a turn that completed normally.
+
+        Without this, fast next-turn speech (humans reply in 200-700 ms, well
+        inside the 1500 ms default grace) is withheld from STT and recorded
+        as an empty ``[interrupted]`` turn, after which the agent goes silent
+        for the rest of the call.
+        """
+        self._is_speaking = False
+        self._tail_grace_active = False
+        self._speaking_started_at = None
+        self._first_audio_sent_at = None
+        # Invalidate the pending grace-flip task scheduled by
+        # ``_end_speaking_with_grace`` so it cannot later flip state on a turn
+        # that has already moved on (bump the generation AND cancel the task —
+        # parity with TS ``clearGraceTimer``).
+        self._speaking_generation += 1
+        self._clear_grace_task()
+        self._clear_pending_barge_in()
+        await self._reset_barge_in_strategies()
+        # Recover the user's leading words. Same rationale as the barge-in
+        # flush — but here it is the only audio recovery, since the agent
+        # already stopped and no new TTS will overwrite it.
+        self._suppressed_speech_pending = False
+        await self._flush_inbound_audio_ring()
 
     async def _reset_barge_in_strategies(self) -> None:
         if not self._barge_in_strategies:
@@ -4450,6 +4657,9 @@ class PipelineStreamHandler(StreamHandler):
         # spurious overlap_end events. Idempotent: safe to call when no
         # pending state exists.
         self._clear_pending_barge_in()
+        # Cancel any pending tail-grace flip task so it does not sleep past
+        # teardown and touch a finalised handler.
+        self._clear_grace_task()
         # Resolve every pending firstMessage mark future before tearing
         # down adapters. Without this, a call that ends abnormally mid
         # firstMessage (carrier WS drop, hangup during the paced sender)

@@ -63,6 +63,23 @@ single turn can take **30–90 s**. That is why `HermesLLM` defaults to a **120 
 timeout (the generic provider's 60 s, raised for the preset) instead of the short ceiling
 used for raw inference providers — a turn that runs a tool isn't cut off mid-thought.
 
+Because a tool-running turn can leave the caller in **silence** for several seconds, the
+agent supports an opt-in spoken **filler**: set `long_turn_message` / `longTurnMessage`
+(with `long_turn_message_after_s` / `longTurnMessageAfterS`, default 4 s) and Patter speaks
+a short line if no audio has reached the caller yet by then. It fires once per turn, only
+on slowness, and never overlaps the real reply. (A separate `llm_error_message` /
+`llmErrorMessage` covers the gateway-down / timeout **error** case.)
+
+```python
+agent = phone.agent(
+    stt=DeepgramSTT(),
+    llm=HermesLLM(),
+    tts=ElevenLabsTTS(),
+    long_turn_message="One moment, let me check that.",
+    long_turn_message_after_s=4,
+)
+```
+
 <Note>
   **Where the session lives.** Hermes is **stateless** and keys continuity off
   **HTTP headers**, not the OpenAI `user` field. Each phone call maps to **one** Hermes
@@ -82,6 +99,15 @@ used for raw inference providers — a turn that runs a tool isn't cut off mid-t
   ```ts
   const llm = new HermesLLM({ sessionKey: 'customer-42' });
   ```
+
+  For **per-caller memory without storing the raw phone number**, derive the key from a
+  caller hash instead of a static value — `HermesLLM(session_key_from="caller_hash")` /
+  `new HermesLLM({ sessionKeyFrom: 'caller_hash' })` emits
+  `X-Hermes-Session-Key: patter-caller-<hash>` (SHA-256, 16 hex chars), so Hermes
+  remembers a caller across calls while the raw number never reaches the wire or the
+  logs. For a custom scheme, pass `session_key_factory` / `sessionKeyFactory`, a callback
+  that receives a `SessionContext` (`call_id` / `caller` / `callee` / `caller_hash`) and
+  returns the scope value (a falsy return omits the header for that call).
 
   (Patter also still sends `user=patter-call-<call_id>` for upstream-log correlation,
   but that field is **not** what drives the Hermes session — the headers are.)

@@ -18,9 +18,10 @@ id, but it is not what drives the session.
 from __future__ import annotations
 
 import os
-from typing import ClassVar
+from typing import Callable, ClassVar
 
 from getpatter.llm.openai_compatible import OpenAICompatibleLLMProvider
+from getpatter.models import SessionContext
 
 __all__ = ["LLM"]
 
@@ -57,13 +58,26 @@ class LLM(OpenAICompatibleLLMProvider):
     * per-call continuity → ``X-Hermes-Session-Id: patter-call-<call_id>``
       (always sent with a call id — the primary mechanism)
     * long-term memory → ``X-Hermes-Session-Key: <session_key>`` (only sent
-      when ``session_key`` is configured)
+      when ``session_key`` / ``session_key_from`` / ``session_key_factory`` is
+      configured)
 
     Args:
-        session_key: Optional long-term memory scope. When set, every turn
-            emits ``X-Hermes-Session-Key: <session_key>`` so Hermes namespaces
-            persistent memory across calls. Credential-grade — never logged.
-            ``None`` (default) means the header is not sent.
+        session_key: Optional STATIC long-term memory scope. When set, every
+            turn emits ``X-Hermes-Session-Key: <session_key>`` so Hermes
+            namespaces persistent memory across calls. Credential-grade — never
+            logged. ``None`` (default) means the header is not sent.
+        session_key_from: Convenience selector for a built-in per-call key
+            derivation. Set to ``"caller_hash"`` to derive the session key per
+            call as ``f"patter-caller-{ctx.caller_hash}"`` (a stable,
+            non-reversible hash of the caller — never the raw number), enabling
+            per-caller cross-call memory. ``None`` (default) uses the static
+            ``session_key`` path. Ignored when ``session_key_factory`` is given
+            explicitly.
+        session_key_factory: Custom callable deriving the
+            ``X-Hermes-Session-Key`` value per call from a
+            :class:`getpatter.models.SessionContext`. Takes precedence over both
+            ``session_key`` and ``session_key_from``. A falsy return omits the
+            header for that call. Credential-grade — never logged.
     """
 
     provider_key: ClassVar[str] = "hermes"
@@ -76,11 +90,28 @@ class LLM(OpenAICompatibleLLMProvider):
         model: str | None = None,
         timeout: float = 120.0,
         session_key: str | None = None,
+        session_key_from: str | None = None,
+        session_key_factory: Callable[[SessionContext], str | None] | None = None,
         **kwargs,
     ) -> None:
         resolved_model = model or os.environ.get(
             "API_SERVER_MODEL_NAME", _DEFAULT_MODEL
         )
+        # ``session_key_from="caller_hash"`` installs a default factory that
+        # scopes durable memory per caller via the non-reversible caller hash
+        # (never the raw number). An explicit ``session_key_factory`` always
+        # wins over this convenience selector.
+        if session_key_factory is None and session_key_from == "caller_hash":
+            session_key_factory = (
+                lambda ctx: f"patter-caller-{ctx.caller_hash}"
+                if ctx.caller_hash
+                else None
+            )
+        elif session_key_from is not None and session_key_from != "caller_hash":
+            raise ValueError(
+                "session_key_from must be 'caller_hash' or None, "
+                f"got {session_key_from!r}"
+            )
         super().__init__(
             api_key=api_key,
             base_url=base_url,
@@ -92,5 +123,6 @@ class LLM(OpenAICompatibleLLMProvider):
             session_id_prefix=_SESSION_ID_PREFIX,
             session_key_header=_SESSION_KEY_HEADER,
             session_key=session_key,
+            session_key_factory=session_key_factory,
             **kwargs,
         )

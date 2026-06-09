@@ -418,6 +418,17 @@ export class StreamHandler {
   private tts: TTSAdapter | null = null;
   private isSpeaking = false;
   /**
+   * True only while the post-TTS tail-grace window is pending: the agent has
+   * finished its turn but ``isSpeaking`` is still held for
+   * ``PATTER_TTS_TAIL_GRACE_MS`` to swallow the fading echo tail. A VAD
+   * ``speech_start`` (or a transcript) during this window is the user's NEXT
+   * turn, not a barge-in — there is nothing left to interrupt. Set by
+   * ``endSpeakingWithGrace``; cleared by ``beginSpeaking``, the grace flip,
+   * ``cancelSpeaking``, and ``endTailGraceForNewTurn``. Parity with Python
+   * ``_tail_grace_active``.
+   */
+  private tailGraceActive = false;
+  /**
    * Ring buffer of inbound PCM16 16 kHz frames captured while the agent
    * is speaking and the self-hearing guard is dropping audio. On
    * barge-in we flush this buffer to STT so Deepgram (or any other
@@ -615,6 +626,10 @@ export class StreamHandler {
     }
     this.speakingGeneration++;
     this.isSpeaking = true;
+    // A fresh turn is actively streaming — not in the post-TTS echo window.
+    // Clear the tail-grace flag so a VAD speech_start during this turn is
+    // treated as a real barge-in (not a new-turn rescue).
+    this.tailGraceActive = false;
     this.speakingStartedAt = Date.now();
     this.suppressedSpeechPending = false;
     // Stamp ``firstAudioSentAt`` synchronously for EVERY turn so the
@@ -670,6 +685,7 @@ export class StreamHandler {
   private cancelSpeaking(): void {
     this.speakingGeneration++; // invalidates pending grace timers
     this.isSpeaking = false;
+    this.tailGraceActive = false;
     this.speakingStartedAt = null;
     this.firstAudioSentAt = null;
     this.lastCancelAt = Date.now();
@@ -782,10 +798,16 @@ export class StreamHandler {
     if (grace > 0) {
       const gen = this.speakingGeneration;
       this.clearGraceTimer();
+      // The agent has finished pushing audio; ``isSpeaking`` is now held only
+      // to suppress the fading echo tail. Mark the tail-grace window so fast
+      // next-turn speech is rescued as a new turn rather than mis-detected as
+      // a barge-in.
+      this.tailGraceActive = true;
       this.graceTimer = setTimeout(() => {
         this.graceTimer = null;
         if (this.speakingGeneration === gen) {
           this.isSpeaking = false;
+          this.tailGraceActive = false;
           this.speakingStartedAt = null;
           this.firstAudioSentAt = null;
           this.clearPendingBargeIn();
@@ -806,6 +828,7 @@ export class StreamHandler {
       }, grace);
     } else {
       this.isSpeaking = false;
+      this.tailGraceActive = false;
       this.speakingStartedAt = null;
       this.firstAudioSentAt = null;
       this.clearPendingBargeIn();
@@ -816,6 +839,38 @@ export class StreamHandler {
       }
       this.resetVad();
     }
+  }
+
+  /**
+   * End the post-TTS tail-grace window because the user has begun their next
+   * turn. Unlike a barge-in, the agent's response already played out in full
+   * — there is nothing to cancel and no turn was interrupted. We flip the
+   * speaking flag off (bumping ``speakingGeneration`` so the scheduled grace
+   * timer no-ops), recover any leading audio the self-hearing guard captured
+   * into the ring (the user's first ~250 ms, which VAD needed before it could
+   * emit ``speech_start``), and let the live STT stream take over. We do NOT
+   * call ``sendClear``, ``recordBargeinDetected`` or ``recordTurnInterrupted``
+   * — none apply to a turn that completed normally.
+   *
+   * Without this, fast next-turn speech (humans reply in 200-700 ms, well
+   * inside the 1500 ms default grace) is withheld from STT and recorded as an
+   * empty ``[interrupted]`` turn, after which the agent goes silent for the
+   * rest of the call. Parity with Python ``_end_tail_grace_for_new_turn``.
+   */
+  private endTailGraceForNewTurn(): void {
+    this.isSpeaking = false;
+    this.tailGraceActive = false;
+    this.speakingStartedAt = null;
+    this.firstAudioSentAt = null;
+    this.speakingGeneration++; // invalidates the pending grace timer
+    this.clearGraceTimer();
+    this.clearPendingBargeIn();
+    void this.resetBargeInStrategies();
+    // Recover the user's leading words. Same rationale as the barge-in flush
+    // — but here it is the only audio recovery, since the agent already
+    // stopped and no new TTS will overwrite it.
+    this.suppressedSpeechPending = false;
+    this.flushInboundAudioRing();
   }
 
   private async resetBargeInStrategies(): Promise<void> {
@@ -1440,6 +1495,18 @@ export class StreamHandler {
             );
           }
           if (evt?.type === 'speech_start') {
+            // Tail-grace new-turn rescue: the agent already finished its turn
+            // and we are only in the post-TTS echo-guard window. A VAD
+            // speech_start here is the user's next turn, not a barge-in — end
+            // the grace so this utterance flows to STT as a clean new turn
+            // instead of being swallowed by the self-hearing guard or
+            // mislabelled as an empty ``[interrupted]`` turn (the multi-turn
+            // silence bug). After this ``isSpeaking`` is false, so the
+            // if/else below is a no-op and the frame falls through to STT.
+            // Parity with Python ``_end_tail_grace_for_new_turn``.
+            if (this.isSpeaking && this.tailGraceActive) {
+              this.endTailGraceForNewTurn();
+            }
             const phantomSuppressed = this.isSpeaking && !this.canBargeIn();
             if (phantomSuppressed) {
               // Within the per-turn warmup gate. With AEC on this is the
@@ -2531,6 +2598,15 @@ export class StreamHandler {
     isFinal?: boolean;
   }): Promise<boolean> {
     if (!transcript.text || !this.isSpeaking) return false;
+    if (this.tailGraceActive) {
+      // A transcript during the post-TTS tail grace is the next turn, not a
+      // barge-in (the agent already finished). End the grace and return
+      // WITHOUT cancelling — the same transcript then flows on to dispatch as
+      // a normal new turn. Closes the race where a transcript lands before
+      // the VAD speech_start rescue fires.
+      this.endTailGraceForNewTurn();
+      return false;
+    }
     if (!this.canBargeIn()) {
       getLogger().info(
         `Barge-in transcript suppressed (agent speaking < gate, aec=${this.aec ? 'on' : 'off'})`,
@@ -2573,6 +2649,12 @@ export class StreamHandler {
    */
   private handleBargeIn(transcript: { text?: string; isFinal?: boolean }): boolean {
     if (!transcript.text || !this.isSpeaking) return false;
+    if (this.tailGraceActive) {
+      // Tail-grace transcript = next turn, not a barge-in. End the grace and
+      // let the transcript dispatch normally (parity with the async path).
+      this.endTailGraceForNewTurn();
+      return false;
+    }
     if (this.bargeInStrategies.length === 0) {
       // Legacy synchronous path — preserve exact byte-for-byte behaviour
       // for users who haven't opted into the confirm pipeline.
@@ -2704,6 +2786,64 @@ export class StreamHandler {
   }
 
   /**
+   * Schedule the opt-in long-turn filler and return its async ``clear()``.
+   *
+   * When ``agent.longTurnMessage`` is unset / empty the returned clear is a
+   * no-op (byte-identical to today's behaviour). Otherwise a one-shot timer
+   * fires after ``agent.longTurnMessageAfterS`` seconds and, IFF no audio has
+   * reached the carrier this turn (``!ttsFirstByteSent.value``) AND we still own
+   * the floor (``this.isSpeaking``), synthesizes the filler ONCE via the same
+   * per-sentence TTS primitive every sentence uses.
+   *
+   * The returned ``clear()`` is **async**: it stops the timer AND, if the filler
+   * already started synthesizing (its ``setTimeout`` callback runs in a separate
+   * macro-task, so it can fire just before the first real sentence), AWAITS the
+   * in-flight synthesis so the filler audio can never interleave with the real
+   * sentence that follows. Idempotent; self-synthesis failure degrades to
+   * silence (never crashes the turn). The caller must clear on first real audio,
+   * on the error branch, and in the finally.
+   */
+  private scheduleLongTurnFiller(
+    ttsFirstByteSent: { value: boolean },
+    hookExecutor: PipelineHookExecutor,
+    hookCtx: HookContext,
+    label: string,
+  ): () => Promise<void> {
+    const message = this.deps.agent.longTurnMessage;
+    if (!message) return async () => {};
+    const afterS = this.deps.agent.longTurnMessageAfterS ?? 4.0;
+    let cancelled = false;
+    let inFlight: Promise<void> | null = null;
+    const timer = setTimeout(() => {
+      // Fire at most once, only if the caller still heard SILENCE this turn, we
+      // still hold the floor, and the turn has not already moved on.
+      if (cancelled || ttsFirstByteSent.value || !this.isSpeaking) return;
+      // Track the in-flight synthesis so clear() can await it — serializing the
+      // filler before the real sentence so their audio can never interleave.
+      inFlight = this.synthesizeSentence(
+        message,
+        hookExecutor,
+        hookCtx,
+        ttsFirstByteSent,
+      ).catch((err) => {
+        getLogger().error(
+          `longTurnMessage filler synthesis failed (${label}):`,
+          err,
+        );
+      });
+    }, Math.max(0, afterS * 1000));
+    return async () => {
+      cancelled = true;
+      clearTimeout(timer);
+      if (inFlight !== null) {
+        const pending = inFlight;
+        inFlight = null;
+        await pending;
+      }
+    };
+  }
+
+  /**
    * Streaming built-in LLM path with sentence chunking and per-sentence
    * guardrails/TTS. Returns the concatenated response text.
    */
@@ -2729,6 +2869,20 @@ export class StreamHandler {
     const llmSignal = this.llmAbort.signal;
     let llmError = false;
 
+    // Opt-in long-turn filler: when the turn is SLOW (agent runtime running
+    // tools/memory) and NO audio has reached the carrier yet, speak a short
+    // filler instead of dead silence. Distinct from ``llmErrorMessage`` (that
+    // fires on an LLM ERROR; this fires on SLOWNESS). The timer waits
+    // ``longTurnMessageAfterS`` then, IFF still no audio this turn AND we still
+    // own the floor, synthesizes the filler ONCE. Cleared the moment real audio
+    // is emitted, on the error branch, and in the finally.
+    const clearLongTurnFiller = this.scheduleLongTurnFiller(
+      ttsFirstByteSent,
+      hookExecutor,
+      hookCtx,
+      label,
+    );
+
     // Span lifetime: LLM dispatch → final token / TTS handoff. Always closed
     // in the ``finally`` block so an early throw cannot leak a span.
     const llmSpan = startSpan(SPAN_LLM, { 'patter.call.id': this.callId });
@@ -2749,6 +2903,9 @@ export class StreamHandler {
         if (transformed === null) return; // hook dropped this sentence
         sentenceText = transformed;
       }
+      // Real audio is about to play — cancel the long-turn filler so it can
+      // never fire (or double-speak) once the agent's own reply has started.
+      await clearLongTurnFiller();
       await this.synthesizeSentence(sentenceText, hookExecutor, hookCtx, ttsFirstByteSent);
     };
     let firstSentenceEmitted = false;
@@ -2782,6 +2939,9 @@ export class StreamHandler {
         // Treat AbortError as a clean barge-in cancellation, not an LLM error.
         const isAbort =
           (e as Error)?.name === 'AbortError' || llmSignal.aborted;
+        // The turn ended (error or clean abort) — stop the filler so it cannot
+        // speak over the error fallback below or after a barge-in.
+        await clearLongTurnFiller();
         if (!isAbort) {
           llmError = true;
           chunker.reset(); // discard partial content on LLM error
@@ -2823,6 +2983,9 @@ export class StreamHandler {
         }
       }
     } finally {
+      // Ensure the long-turn filler never outlives the turn (idempotent — a
+      // no-op when already cleared at the first real audio / error branch).
+      await clearLongTurnFiller();
       this.endSpeakingWithGrace();
       // Drop the per-turn abort controller so the next turn starts with a
       // fresh one and barge-ins on the next turn cannot accidentally fire
