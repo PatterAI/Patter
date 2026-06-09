@@ -110,6 +110,29 @@ await phone.serve(agent, tunnel=True)
 
 `tunnel: true` spawns a Cloudflare quick tunnel and points your number at it — ideal for local dev. For production, use a static `webhook_url` (or [ngrok](https://ngrok.com)); see [Tunneling](https://docs.getpatter.com).
 
+## Anonymous Telemetry
+
+Patter collects **completely anonymous**, **opt-out** usage telemetry so the maintainers can see how the SDK is used in aggregate — which engines, providers, models, and carriers people choose — and prioritise accordingly. It is on by default, following the open-source norm (Next.js, Astro, Homebrew). **No data we collect is personally identifiable**, and none of it ever contains call content.
+
+**What we collect** (coarse and bucketed):
+
+- SDK version, language (Python/TS), OS family, CPU arch, and runtime version.
+- A random anonymous install id (a UUID, not tied to you) and a per-run id, plus the upgrade funnel (previous → current version) and a first-run activation marker.
+- Deploy shape: container / serverless / cloud / package-manager presence, and whether an AI coding agent invoked the SDK.
+- The composed stack — provider vendor and a sanitized model token per layer (e.g. `anthropic-claude-haiku-4-5`, `deepgram-nova-3`).
+- Agent shape: bucketed tool counts, integration category, and which coarse features are enabled.
+- CLI commands invoked (the command name only) and per-call facts: inbound vs outbound, outcome, error code (the code, never the message), duration, latency, cost, and a bucketed turn count.
+
+**What we never collect:** phone numbers, transcripts, audio, prompts, tool arguments, API keys, customer identifiers, IPs (dropped at the collector), hostnames, file paths, or any free text. Custom or self-hosted model names and custom tool names are structurally impossible to send — they collapse to a vendor bucket or `other` before anything leaves the process.
+
+**Opt out** anytime — any one of:
+
+- `Patter(telemetry=False)` / `new Patter({ telemetry: false })`
+- `getpatter telemetry disable` (persisted; re-enable with `getpatter telemetry enable`)
+- `PATTER_TELEMETRY_DISABLED=1`, or the cross-tool standard `DO_NOT_TRACK=1`
+
+It is auto-disabled in CI and test runs. **Inspect exactly what would be sent, without sending it:** set `PATTER_TELEMETRY_DEBUG=1` (prints each event to stderr and sends nothing), or run `getpatter telemetry status`. Full details: [Telemetry](https://docs.getpatter.com/telemetry).
+
 ## Templates
 
 Each template is a self-contained repo — clone, add your `.env`, and run. Python and TypeScript both included.

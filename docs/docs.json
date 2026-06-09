@@ -178,7 +178,8 @@
                   "python-sdk/metrics",
                   "python-sdk/dashboard",
                   "python-sdk/call-logging",
-                  "python-sdk/tracing"
+                  "python-sdk/tracing",
+                  "telemetry"
                 ]
               },
               {
@@ -311,7 +312,8 @@
                   "typescript-sdk/metrics",
                   "typescript-sdk/dashboard",
                   "typescript-sdk/call-logging",
-                  "typescript-sdk/tracing"
+                  "typescript-sdk/tracing",
+                  "telemetry"
                 ]
               },
               {
