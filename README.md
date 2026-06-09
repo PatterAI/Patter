@@ -132,6 +132,12 @@ cp .env.example .env    # fill in your keys
 cd python && pip install -r requirements.txt && python main.py
 ```
 
+## Telemetry
+
+> **Note** Patter collects anonymous, opt-out usage data (SDK version, bucketed provider/model and call facts) to help us prioritise — never call content, prompts, phone numbers, keys, or free text.
+>
+> Opt out any time: `Patter(telemetry=False)` (`new Patter({ telemetry: false })`) or `PATTER_TELEMETRY_DISABLED=1` (also honours `DO_NOT_TRACK=1`); auto-off in CI/tests. Full details: [Telemetry](https://docs.getpatter.com/telemetry).
+
 ## Star History
 
 <a href="https://www.star-history.com/?repos=PatterAI%2FPatter&type=date&legend=top-left">
