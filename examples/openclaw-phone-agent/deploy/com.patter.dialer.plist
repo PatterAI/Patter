@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Patter OpenClaw outbound dialer — launchd agent (macOS).
+     Edit the WorkingDirectory + interpreter, then:
+       cp deploy/com.patter.dialer.plist ~/Library/LaunchAgents/
+       launchctl load -w ~/Library/LaunchAgents/com.patter.dialer.plist -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.patter.dialer</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/env</string>
+    <string>python</string>
+    <string>dialer.py</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/patter/openclaw-phone-agent</string>
+  <key>KeepAlive</key><true/>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>/Users/patter/openclaw-phone-agent/dialer.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/patter/openclaw-phone-agent/dialer.err.log</string>
+</dict>
+</plist>

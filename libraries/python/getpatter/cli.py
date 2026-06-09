@@ -37,6 +37,11 @@ def main() -> None:
 
     build_hermes_parser(subparsers)
 
+    # patter openclaw {doctor|setup|test|call|agents|attach-number|numbers}
+    from getpatter.cli_openclaw import build_openclaw_parser, dispatch_openclaw
+
+    build_openclaw_parser(subparsers)
+
     # patter telemetry [status|disable|enable]
     tel = subparsers.add_parser(
         "telemetry",
@@ -65,6 +70,8 @@ def main() -> None:
         sys.exit(dispatch_eval(args))
     elif args.command == "hermes":
         sys.exit(dispatch_hermes(args))
+    elif args.command == "openclaw":
+        sys.exit(dispatch_openclaw(args))
     else:
         parser.print_help()
         sys.exit(1)

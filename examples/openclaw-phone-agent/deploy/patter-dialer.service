@@ -1,0 +1,22 @@
+# Patter OpenClaw outbound dialer — 24/7 AI-sales (systemd).
+#
+# Edit User= and the paths, then install as a system or --user service (see the
+# receptionist unit for the two install paths). The dialer is a supervised
+# long-running loop; Restart=always brings it back after a crash or reboot.
+[Unit]
+Description=Patter OpenClaw outbound dialer (outbound 24/7)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=patter
+WorkingDirectory=/home/patter/openclaw-phone-agent
+EnvironmentFile=/home/patter/openclaw-phone-agent/.env
+ExecStart=/usr/bin/env python dialer.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

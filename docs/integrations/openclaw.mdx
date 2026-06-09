@@ -38,7 +38,9 @@ There are three directions, and they compose:
 - **Direction C — OpenClaw *is* the in-call LLM (voice shell).** Patter answers the
   carrier leg and drives speech, and routes **every** turn to one scoped OpenClaw agent as
   the LLM, using the new [`OpenClawLLM`](#openclaw-as-the-primary-llm-voice-shell) pipeline
-  provider. No adapter; the caller is talking to OpenClaw the whole time.
+  provider. No adapter; the caller is talking to OpenClaw the whole time. Stand it up in one
+  command with the [`patter openclaw`](#zero-config-cli-patter-openclaw) wizard — an inbound
+  receptionist *or* an outbound dialer, both driven by the same scoped agent.
 
 Pick one, or wire several for a full loop: OpenClaw starts the call, and an in-call agent
 calls back into OpenClaw when it needs deeper reasoning.
@@ -93,6 +95,55 @@ reasoning; use [Direction B](#direction-b-patter-consults-openclaw-mid-call) ins
 `x-openclaw-session-key` session header. The only difference is the timeout default: the
 LLM provider defaults to **120 s** (the runtime *is* the per-turn brain) where the consult
 preset defaults to a phone-safe 30 s (the runtime is an on-demand escalation).
+
+### Zero-config CLI (`patter openclaw`)
+
+The fastest path is the `patter openclaw` wizard. It scaffolds a runnable
+`openclaw-phone-agent` project, enables the gateway's OpenAI-compatible endpoint
+(disabled by default — backed up first), and, for inbound, wires the Twilio
+webhook. Because OpenClaw is multi-agent, the wizard lists the agents your
+gateway serves and **warns if you point the phone at the default / master
+agent**. The same scoped agent powers both directions — Patter answers inbound
+(`app.py` → `phone.serve`) and dials outbound (`dialer.py` → `phone.call`):
+
+<CodeGroup>
+```bash Inbound receptionist
+pip install getpatter
+
+# Scaffold + flip gateway.http.endpoints.chatCompletions.enabled=true (backed up):
+patter openclaw setup --mode inbound --agent receptionist --enable-openclaw
+
+patter openclaw doctor        # lists agents; checks gateway, providers, security
+cd openclaw-phone-agent
+python scripts/test_text_turn.py "say hello"   # smoke-test the agent (no call)
+python app.py                                  # answer inbound calls
+patter openclaw attach-number "$PATTER_PHONE_NUMBER" --url https://<tunnel>/calls/inbound
+```
+
+```bash Outbound AI-sales dialer
+pip install getpatter
+patter openclaw setup --mode outbound --agent sales --enable-openclaw
+cd openclaw-phone-agent
+# edit numbers.txt (one E.164 per line), then:
+python scripts/test_outbound_call.py +15557654321   # one test call
+python dialer.py                                     # the supervised 24/7 dialer loop
+```
+</CodeGroup>
+
+`patter openclaw doctor` runs preflight across the gateway (is the endpoint
+enabled? which agents are served? is your `--agent` one of them — and *not* the
+default/master?), the Patter providers, the carrier, and a day-1 **security**
+posture (loopback bind, a strong `OPENCLAW_API_KEY`, a scoped agent, plus
+tool-policy and AI-disclosure / data-residency reminders). `patter openclaw test`
+adds a real `/v1/chat/completions` turn; `patter openclaw agents` just lists the
+roster.
+
+The scaffold ships `deploy/` units (systemd + launchd) so `app.py` / `dialer.py`
+run **24/7 under the OS service supervisor**, alongside the OpenClaw gateway
+daemon and a stable named tunnel — see
+[Production deployment](/dev-tools/production-deployment) for the always-on box
+model. The rest of this section is what the wizard automates, if you prefer to
+wire it by hand.
 
 ### Enable the gateway and pick the agent
 

@@ -1,0 +1,25 @@
+# Patter OpenClaw receptionist — 24/7 inbound voice line (systemd).
+#
+# As a SYSTEM service: edit User= and the paths, then
+#   sudo cp deploy/patter-receptionist.service /etc/systemd/system/
+#   sudo systemctl enable --now patter-receptionist
+# As a USER service (no root): cp to ~/.config/systemd/user/, then
+#   loginctl enable-linger "$USER"   # run without a login session
+#   systemctl --user enable --now patter-receptionist
+[Unit]
+Description=Patter OpenClaw receptionist (inbound 24/7)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=patter
+WorkingDirectory=/home/patter/openclaw-phone-agent
+EnvironmentFile=/home/patter/openclaw-phone-agent/.env
+ExecStart=/usr/bin/env python app.py
+Restart=always
+RestartSec=3
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
