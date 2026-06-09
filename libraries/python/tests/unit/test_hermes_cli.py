@@ -7,9 +7,8 @@ real Hermes gateway or Twilio account is touched.
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
-
-import pytest
 
 from getpatter import _hermes_scaffold, cli_hermes
 
@@ -171,6 +170,125 @@ def test_attach_number_unknown_number(monkeypatch, capsys) -> None:
 def test_dispatch_unknown_subcommand_returns_usage() -> None:
     args = argparse.Namespace(hermes_command=None)
     assert cli_hermes.dispatch_hermes(args) == 2
+
+
+# ── env / config helpers ────────────────────────────────────────────────────
+def test_parse_env_file_handles_quotes_export_comments(tmp_path: Path) -> None:
+    p = tmp_path / ".env"
+    p.write_text(
+        "# comment\n"
+        "\n"
+        "export API_SERVER_KEY='secret'\n"
+        'PATTER_LANGUAGE="it"\n'
+        "BARE=value\n"
+        "NOEQUALS\n",
+        encoding="utf-8",
+    )
+    parsed = cli_hermes._parse_env_file(p)
+    assert parsed == {
+        "API_SERVER_KEY": "secret",
+        "PATTER_LANGUAGE": "it",
+        "BARE": "value",
+    }
+
+
+def test_parse_env_file_missing_returns_empty(tmp_path: Path) -> None:
+    assert cli_hermes._parse_env_file(tmp_path / "nope.env") == {}
+
+
+def test_upsert_env_file_replaces_and_appends(tmp_path: Path) -> None:
+    p = tmp_path / ".env"
+    p.write_text("# header\nAPI_SERVER_PORT=8642\nKEEP=me\n", encoding="utf-8")
+    cli_hermes._upsert_env_file(p, {"API_SERVER_PORT": "9000", "NEW": "x"})
+    text = p.read_text(encoding="utf-8")
+    assert "# header" in text  # comments preserved
+    assert "KEEP=me" in text
+    assert "API_SERVER_PORT=9000" in text
+    assert "API_SERVER_PORT=8642" not in text
+    assert "NEW=x" in text
+
+
+def test_upsert_env_file_creates_when_missing(tmp_path: Path) -> None:
+    p = tmp_path / "sub" / ".env"
+    cli_hermes._upsert_env_file(p, {"A": "1"})
+    assert p.read_text(encoding="utf-8").strip() == "A=1"
+
+
+def test_load_env_files_does_not_override_existing(tmp_path: Path, monkeypatch) -> None:
+    p = tmp_path / ".env"
+    p.write_text("FOO=fromfile\nBAR=baz\n", encoding="utf-8")
+    monkeypatch.setenv("FOO", "fromenv")
+    monkeypatch.delenv("BAR", raising=False)
+    applied = cli_hermes._load_env_files([p])
+    assert applied == [p]
+    assert os.environ["FOO"] == "fromenv"  # not overridden
+    assert os.environ["BAR"] == "baz"  # newly loaded
+
+
+def test_read_hermes_config_env_overrides_yaml(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "api_server:\n  enabled: true\n  port: 8642\n  key: fromyaml\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text("API_SERVER_KEY=fromenv\n", encoding="utf-8")
+    cfg = cli_hermes._read_hermes_config()
+    assert cfg["API_SERVER_ENABLED"] == "True"
+    assert cfg["API_SERVER_PORT"] == "8642"
+    assert cfg["API_SERVER_KEY"] == "fromenv"  # .env wins
+
+
+def test_read_hermes_config_absent_home(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "missing"))
+    assert cli_hermes._read_hermes_config() == {}
+
+
+def test_enable_hermes_gateway_writes_and_backs_up(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    env_path = tmp_path / ".env"
+    env_path.write_text("API_SERVER_PORT=8642\n", encoding="utf-8")
+    key = cli_hermes._enable_hermes_gateway()
+    assert (tmp_path / ".env.bak").exists()
+    parsed = cli_hermes._parse_env_file(env_path)
+    assert parsed["API_SERVER_ENABLED"] == "true"
+    assert parsed["API_SERVER_KEY"] == key  # returned key matches what was written
+    assert parsed["API_SERVER_PORT"] == "8642"  # preserved
+
+
+def test_enable_hermes_gateway_keeps_existing_key(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / ".env").write_text("API_SERVER_KEY=keepme\n", encoding="utf-8")
+    key = cli_hermes._enable_hermes_gateway()
+    assert key == "keepme"
+
+
+# ── severity + autoload integration ──────────────────────────────────────────
+def test_cli_missing_and_gateway_down_is_failure(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "missing"))
+    monkeypatch.setattr(cli_hermes.shutil, "which", lambda _name: None)
+    monkeypatch.setattr("httpx.get", lambda *a, **k: (_ for _ in ()).throw(OSError("refused")))
+    sec = cli_hermes._check_hermes("http://127.0.0.1:8642/v1", network=True)
+    by_label = {c.label: c.status for c in sec.checks}
+    assert by_label["CLI not found"] == cli_hermes.FAIL
+    assert by_label["Gateway unreachable"] == cli_hermes.FAIL
+
+
+def test_doctor_autoloads_env_file(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)
+    env = tmp_path / ".env"
+    env.write_text("DEEPGRAM_API_KEY=dg-from-file\n", encoding="utf-8")
+    args = argparse.Namespace(
+        base_url=None,
+        no_network=True,
+        json=True,
+        env_file=[str(env)],
+        no_env_file=False,
+    )
+    cli_hermes.cmd_doctor(args)
+    assert os.environ.get("DEEPGRAM_API_KEY") == "dg-from-file"
+    out = capsys.readouterr().out
+    assert "dg-from-file" not in out  # secrets aren't echoed
+    assert str(env) in out  # but the loaded path is reported
 
 
 def test_parser_wires_subcommands() -> None:

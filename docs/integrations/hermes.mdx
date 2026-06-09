@@ -176,13 +176,26 @@ patter hermes doctor        # preflight: gateway, providers, carrier — with fi
 patter hermes setup         # scaffold ./hermes-phone-agent (app.py, .env, scripts)
 ```
 
-`patter hermes doctor` probes the Hermes gateway (`/v1/models`), confirms `HermesLLM` is
-constructible, checks your Deepgram / ElevenLabs / Twilio credentials, and prints a
-suggested fix for anything missing (`--no-network` skips live probes, `--json` for
-machine-readable output). `patter hermes setup` writes the same starter project shown in
+`patter hermes doctor` reads your Hermes config directly — it autoloads `~/.hermes/.env`
+and the nearest project `.env`, reports whether `API_SERVER_ENABLED` is set and which
+gateway port is configured, runs `hermes gateway status` when the CLI is present, then
+probes the gateway (`/v1/models`), confirms `HermesLLM` is constructible, and checks your
+Deepgram / ElevenLabs / Twilio credentials — printing a suggested fix for anything missing
+(`--no-network` skips live probes, `--json` for machine-readable output, `--env-file` /
+`--no-env-file` to control autoloading).
+
+`patter hermes setup` writes the same starter project shown in
 [`examples/hermes-phone-agent`](https://github.com/PatterAI/Patter/tree/main/examples/hermes-phone-agent)
-and, given `--number` and `--url`, attaches the Twilio webhook for you. To wire an existing
-number on its own:
+and can also wire the two ends together for you:
+
+- `--enable-hermes` writes `API_SERVER_ENABLED=true` (and generates an `API_SERVER_KEY` if
+  absent) into `~/.hermes/.env`, backing the file up first — then reminds you to restart the
+  gateway. The same key is mirrored into the project `.env` so Patter and Hermes agree (a
+  mismatch is a 401 at call time).
+- `--generate-key` puts a strong `API_SERVER_KEY` into the project `.env`.
+- `--number` + `--url` attach the Twilio webhook in the same run.
+
+To wire an existing number on its own:
 
 ```bash
 patter hermes numbers       # list the numbers on your Twilio account

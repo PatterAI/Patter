@@ -92,24 +92,224 @@ def _get_json(url: str, *, headers: dict | None = None, timeout: float = 4.0):
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# .env / Hermes config helpers
+# ──────────────────────────────────────────────────────────────────────────
+def _parse_env_file(path: Path) -> dict[str, str]:
+    """Parse a ``KEY=VALUE`` dotenv file. Ignores blanks, comments, ``export``.
+
+    Surrounding single/double quotes are stripped. Returns an empty dict if the
+    file is missing or unreadable.
+    """
+    out: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return out
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].lstrip()
+        key, _, val = line.partition("=")
+        key = key.strip()
+        val = val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+            val = val[1:-1]
+        if key:
+            out[key] = val
+    return out
+
+
+def _hermes_home() -> Path:
+    """Hermes config dir — ``$HERMES_HOME`` or ``~/.hermes`` (override for tests)."""
+    override = os.environ.get("HERMES_HOME")
+    return Path(override) if override else Path.home() / ".hermes"
+
+
+def _read_hermes_config() -> dict[str, str]:
+    """Read Hermes ``api_server`` settings from ``~/.hermes/.env`` and
+    ``~/.hermes/config.yaml``.
+
+    Returns a flat dict that may include ``API_SERVER_ENABLED``,
+    ``API_SERVER_KEY``, ``API_SERVER_HOST``, ``API_SERVER_PORT``, and
+    ``API_SERVER_MODEL_NAME``. The ``.env`` file wins over ``config.yaml``.
+    Returns an empty dict when ``~/.hermes`` is absent.
+    """
+    home = _hermes_home()
+    if not home.exists():
+        return {}
+    cfg: dict[str, str] = {}
+    yaml_path = home / "config.yaml"
+    if yaml_path.exists():
+        try:
+            import yaml
+
+            data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+            api = data.get("api_server") if isinstance(data, dict) else None
+            if isinstance(api, dict):
+                _map = {
+                    "enabled": "API_SERVER_ENABLED",
+                    "key": "API_SERVER_KEY",
+                    "host": "API_SERVER_HOST",
+                    "port": "API_SERVER_PORT",
+                    "model_name": "API_SERVER_MODEL_NAME",
+                }
+                for src, dst in _map.items():
+                    if src in api and api[src] is not None:
+                        cfg[dst] = str(api[src])
+        except Exception:  # noqa: BLE001 - malformed yaml shouldn't crash doctor
+            pass
+    cfg.update(_parse_env_file(home / ".env"))  # .env overrides config.yaml
+    return cfg
+
+
+def _env_files_to_load(
+    explicit: list[str] | None, *, project_dir: Path | None
+) -> list[Path]:
+    """Resolve which dotenv files to autoload, in increasing priority order."""
+    if explicit:
+        return [Path(p) for p in explicit]
+    chain: list[Path] = [_hermes_home() / ".env"]
+    if project_dir is not None:
+        chain.append(project_dir / ".env")
+    chain.append(Path.cwd() / ".env")
+    return chain
+
+
+def _load_env_files(paths: list[Path], *, override: bool = False) -> list[Path]:
+    """Load dotenv files into ``os.environ``. Returns the files actually applied.
+
+    Later paths win over earlier ones. Existing ``os.environ`` values are kept
+    unless ``override`` is set.
+    """
+    applied: list[Path] = []
+    for path in paths:
+        values = _parse_env_file(path)
+        if not values:
+            continue
+        for key, val in values.items():
+            if override or key not in os.environ:
+                os.environ[key] = val
+        applied.append(path)
+    return applied
+
+
+def _upsert_env_file(path: Path, updates: dict[str, str]) -> None:
+    """Set ``KEY=VALUE`` pairs in a dotenv file, preserving other lines.
+
+    Existing keys are replaced in place; new keys are appended. Creates the file
+    (and parent dir) if missing.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    remaining = dict(updates)
+    for i, raw in enumerate(lines):
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key = stripped.split("=", 1)[0].strip()
+        if key.startswith("export "):
+            key = key[len("export ") :].strip()
+        if key in remaining:
+            lines[i] = f"{key}={remaining.pop(key)}"
+    for key, val in remaining.items():
+        lines.append(f"{key}={val}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _generate_key() -> str:
+    """A strong, URL-safe API key."""
+    import secrets
+
+    return secrets.token_urlsafe(32)
+
+
+def _hermes_gateway_status() -> Check | None:
+    """Best-effort ``hermes gateway status`` probe. ``None`` if CLI absent."""
+    if not shutil.which("hermes"):
+        return None
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ["hermes", "gateway", "status"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+    except Exception:  # noqa: BLE001 - missing subcommand / timeout
+        return None
+    if proc.returncode == 0:
+        first = (proc.stdout or proc.stderr or "").strip().splitlines()
+        return Check(OK, "Gateway service", first[0] if first else "status ok")
+    return Check(
+        WARN,
+        "Gateway service",
+        "hermes gateway status reported a problem",
+        "hermes gateway start",
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # Check groups
 # ──────────────────────────────────────────────────────────────────────────
 def _check_hermes(base_url: str, *, network: bool) -> Section:
     sec = Section("Hermes")
+    have_cli = bool(shutil.which("hermes"))
+    hermes_cfg = _read_hermes_config()
+    home = _hermes_home()
 
-    if shutil.which("hermes"):
+    # CLI presence (severity finalised at the end once we know gateway state).
+    if have_cli:
         sec.checks.append(Check(OK, "CLI found", "hermes on PATH"))
     else:
         sec.checks.append(
             Check(
                 WARN,
                 "CLI not found",
-                "optional — only the gateway is required",
+                "optional when the gateway is already running",
                 "install Hermes: https://github.com/NousResearch/hermes-agent",
             )
         )
 
-    key = os.environ.get("API_SERVER_KEY", "")
+    # Hermes-side config (~/.hermes/.env + config.yaml), read directly.
+    if hermes_cfg:
+        enabled = hermes_cfg.get("API_SERVER_ENABLED", "").lower()
+        if enabled in ("true", "1", "yes"):
+            sec.checks.append(
+                Check(OK, "API server enabled", f"API_SERVER_ENABLED=true in {home}")
+            )
+        elif enabled:
+            sec.checks.append(
+                Check(
+                    WARN,
+                    "API server disabled",
+                    f"API_SERVER_ENABLED={enabled!r} in {home}",
+                    "patter hermes setup --enable-hermes",
+                )
+            )
+        else:
+            sec.checks.append(
+                Check(
+                    WARN,
+                    "API server flag absent",
+                    f"API_SERVER_ENABLED not set in {home}",
+                    "patter hermes setup --enable-hermes",
+                )
+            )
+    else:
+        sec.checks.append(
+            Check(SKIP, "Hermes config", f"no {home} directory found")
+        )
+
+    # Gateway service status via the CLI (best-effort).
+    gw_status = _hermes_gateway_status()
+    if gw_status is not None:
+        sec.checks.append(gw_status)
+
+    # A key may live in the process env or in ~/.hermes — accept either.
+    key = os.environ.get("API_SERVER_KEY", "") or hermes_cfg.get("API_SERVER_KEY", "")
     if key:
         sec.checks.append(Check(OK, "API_SERVER_KEY set"))
     else:
@@ -118,7 +318,7 @@ def _check_hermes(base_url: str, *, network: bool) -> Section:
                 WARN,
                 "API_SERVER_KEY not set",
                 "keyless local gateways work, but a key is recommended",
-                'export API_SERVER_KEY="choose-a-strong-key"',
+                "patter hermes setup --generate-key",
             )
         )
 
@@ -130,7 +330,9 @@ def _check_hermes(base_url: str, *, network: bool) -> Section:
     status, body, err = _get_json(f"{base_url}/models", headers=headers)
     if status == 200:
         sec.checks.append(Check(OK, "Gateway reachable", base_url))
-        want = os.environ.get("API_SERVER_MODEL_NAME", "hermes-agent")
+        want = os.environ.get("API_SERVER_MODEL_NAME") or hermes_cfg.get(
+            "API_SERVER_MODEL_NAME", "hermes-agent"
+        )
         ids = _model_ids(body)
         if want in ids:
             sec.checks.append(Check(OK, "Model available", want))
@@ -140,7 +342,7 @@ def _check_hermes(base_url: str, *, network: bool) -> Section:
                     WARN,
                     "Model not found",
                     f"{want!r} missing; saw {', '.join(sorted(ids)[:5])}",
-                    f'set API_SERVER_MODEL_NAME to one of the served models',
+                    "set API_SERVER_MODEL_NAME to one of the served models",
                 )
             )
         else:
@@ -158,15 +360,26 @@ def _check_hermes(base_url: str, *, network: bool) -> Section:
         )
     else:
         detail = f"HTTP {status}" if status else (err or "no response")
+        # Gateway down with no CLI to start it is a hard stop — promote the
+        # CLI-not-found note to a failure so the verdict isn't a soft warning.
+        fix = (
+            "hermes gateway start"
+            if have_cli
+            else "install Hermes + start the gateway (API_SERVER_ENABLED=true)"
+        )
         sec.checks.append(
             Check(
                 FAIL,
                 "Gateway unreachable",
                 f"{base_url} — {detail}",
-                "enable + start the gateway (API_SERVER_ENABLED=true), "
-                "or pass --base-url",
+                fix + ", or pass --base-url",
             )
         )
+        if not have_cli:
+            for c in sec.checks:
+                if c.label == "CLI not found":
+                    c.status = FAIL
+                    c.detail = "and the gateway is unreachable"
     return sec
 
 
@@ -388,12 +601,24 @@ def _run_doctor(args: argparse.Namespace) -> list[Section]:
 # ──────────────────────────────────────────────────────────────────────────
 # Subcommands
 # ──────────────────────────────────────────────────────────────────────────
+def _apply_env(args: argparse.Namespace, *, project_dir: Path | None = None) -> list[Path]:
+    """Autoload dotenv files for a command unless ``--no-env-file`` was passed."""
+    if getattr(args, "no_env_file", False):
+        return []
+    paths = _env_files_to_load(getattr(args, "env_file", None), project_dir=project_dir)
+    return _load_env_files(paths)
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
+    loaded = _apply_env(args)
     sections = _run_doctor(args)
     report = _sections_to_dict(sections)
     if getattr(args, "json", False):
+        report["loaded_env_files"] = [str(p) for p in loaded]
         print(json.dumps(report, indent=2))
     else:
+        if loaded:
+            print("Loaded env from: " + ", ".join(str(p) for p in loaded))
         _print_sections(sections)
         print()
         if report["failures"]:
@@ -416,14 +641,26 @@ def cmd_setup(args: argparse.Namespace) -> int:
 
     print(f"Patter + Hermes setup\n  project: {target}\n")
 
-    # 1. Preflight.
+    # 0. Optionally enable the Hermes API server in ~/.hermes/.env. This is the
+    #    one step that writes to your Hermes install — explicit opt-in, backed up.
+    gateway_key = ""
+    if getattr(args, "enable_hermes", False):
+        gateway_key = _enable_hermes_gateway()
+        print()
+
+    # 1. Load any existing env (project .env, ~/.hermes/.env) for the preflight.
+    loaded = _apply_env(args, project_dir=target)
+    if loaded:
+        print("Loaded env from: " + ", ".join(str(p) for p in loaded))
+
+    # 2. Preflight.
     print("Checking your environment…")
     sections = _run_doctor(args)
     _print_sections(sections)
     failures = sum(1 for s in sections for c in s.checks if c.status == FAIL)
     print()
 
-    # 2. Scaffold the project.
+    # 3. Scaffold the project.
     if interactive and not _confirm(f"Scaffold the project into {target}?"):
         print("Skipped scaffolding.")
     else:
@@ -441,9 +678,22 @@ def cmd_setup(args: argparse.Namespace) -> int:
                 encoding="utf-8",
             )
             print("  + .env (from .env.example — fill in your keys)")
+        # Put an API_SERVER_KEY into the project .env. When we just enabled the
+        # gateway, reuse ITS key so Patter and Hermes agree (a mismatch is a 401
+        # at call time); otherwise generate a fresh one on --generate-key.
+        if gateway_key:
+            _upsert_env_file(env_path, {"API_SERVER_KEY": gateway_key})
+            print("  + API_SERVER_KEY in .env (matches the gateway key)")
+        elif getattr(args, "generate_key", False):
+            existing = _parse_env_file(env_path).get("API_SERVER_KEY", "")
+            if existing and existing != "choose-a-strong-key" and not args.force:
+                print("  · API_SERVER_KEY already set (use --force to regenerate)")
+            else:
+                _upsert_env_file(env_path, {"API_SERVER_KEY": _generate_key()})
+                print("  + API_SERVER_KEY generated in .env")
     print()
 
-    # 3. Optionally attach a Twilio number.
+    # 4. Optionally attach a Twilio number.
     if args.number and args.url:
         print(f"Attaching {args.number} → {args.url}")
         rc = _attach_number(args.number, args.url, args.status_callback)
@@ -455,7 +705,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
             "webhook, or run `patter hermes attach-number` later."
         )
 
-    # 4. Next steps.
+    # 5. Next steps.
     print("\nNext steps:")
     print(f"  cd {target}")
     print("  # edit .env with your keys")
@@ -506,6 +756,46 @@ def cmd_numbers(args: argparse.Namespace) -> int:
         url = r.get("voice_url", "") or "(no voice webhook)"
         print(f"  {num}  →  {url}")
     return 0
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Hermes gateway enablement (the one step that writes to ~/.hermes)
+# ──────────────────────────────────────────────────────────────────────────
+def _enable_hermes_gateway() -> str:
+    """Write ``API_SERVER_ENABLED=true`` (+ a key if absent) to ``~/.hermes/.env``.
+
+    Backs the file up to ``.env.bak`` first. Prints what it changed and reminds
+    the operator to (re)start the gateway — Patter does not manage the service.
+    Returns the gateway's ``API_SERVER_KEY`` (existing or freshly generated) so
+    the caller can keep the project ``.env`` in sync with it.
+    """
+    home = _hermes_home()
+    env_path = home / ".env"
+    existing = _parse_env_file(env_path)
+
+    if env_path.exists():
+        backup = env_path.parent / (env_path.name + ".bak")
+        backup.write_text(env_path.read_text(encoding="utf-8"), encoding="utf-8")
+        print(f"Backed up {env_path} → {backup}")
+
+    updates: dict[str, str] = {"API_SERVER_ENABLED": "true"}
+    key = existing.get("API_SERVER_KEY", "")
+    if not key:
+        key = _generate_key()
+        updates["API_SERVER_KEY"] = key
+    _upsert_env_file(env_path, updates)
+
+    print(f"✓ API_SERVER_ENABLED=true written to {env_path}")
+    if "API_SERVER_KEY" in updates:
+        print("✓ API_SERVER_KEY generated for the gateway")
+    if shutil.which("hermes"):
+        print("Now (re)start the gateway:  hermes gateway start")
+    else:
+        print(
+            "Hermes CLI not found — start the gateway your usual way so the new "
+            "settings take effect."
+        )
+    return key
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -610,6 +900,15 @@ def build_hermes_parser(subparsers: argparse._SubParsersAction) -> argparse.Argu
     doctor.add_argument("--base-url", default=None, help="Hermes gateway base URL")
     doctor.add_argument("--no-network", action="store_true", help="Skip live probes")
     doctor.add_argument("--json", action="store_true", help="Machine-readable output")
+    doctor.add_argument(
+        "--env-file",
+        action="append",
+        default=None,
+        help="dotenv file(s) to load (repeatable; default: ~/.hermes/.env + ./.env)",
+    )
+    doctor.add_argument(
+        "--no-env-file", action="store_true", help="Do not autoload any .env file"
+    )
 
     setup = hsub.add_parser("setup", help="Scaffold a hermes-phone-agent project")
     setup.add_argument("--dir", default="hermes-phone-agent", help="Target directory")
@@ -620,6 +919,22 @@ def build_hermes_parser(subparsers: argparse._SubParsersAction) -> argparse.Argu
     setup.add_argument("--status-callback", default=None, help="Twilio status callback URL")
     setup.add_argument("--base-url", default=None, help="Hermes gateway base URL")
     setup.add_argument("--no-network", action="store_true", help="Skip live probes")
+    setup.add_argument(
+        "--generate-key",
+        action="store_true",
+        help="Generate a strong API_SERVER_KEY into the project .env",
+    )
+    setup.add_argument(
+        "--enable-hermes",
+        action="store_true",
+        help="Write API_SERVER_ENABLED=true (+ key) to ~/.hermes/.env (backed up)",
+    )
+    setup.add_argument(
+        "--env-file", action="append", default=None, help="dotenv file(s) to load"
+    )
+    setup.add_argument(
+        "--no-env-file", action="store_true", help="Do not autoload any .env file"
+    )
 
     attach = hsub.add_parser("attach-number", help="Point a Twilio number at your Patter URL")
     attach.add_argument("number", help="Phone number in E.164 (e.g. +15551234567)")
