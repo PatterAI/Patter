@@ -184,8 +184,13 @@ export class NlmsEchoCanceller {
    * rate — same shape as what we hand off to the audio sender before the
    * carrier-specific transcode.
    */
+  /** Far-end staleness window (ms): beyond this, processNearEnd passes through. */
+  private static readonly FAR_STALE_MS = 250;
+  private lastFarPushAt: number | null = null;
+
   pushFarEnd(pcm: Buffer): void {
     if (pcm.length === 0) return;
+    this.lastFarPushAt = Date.now();
     const samples = int16BufferToFloat32(pcm);
     const n = samples.length;
     const bufLen = this.farBuf.length;
@@ -219,6 +224,14 @@ export class NlmsEchoCanceller {
   processNearEnd(pcm: Buffer): Buffer {
     if (pcm.length === 0) return pcm;
     if (this.farFilled < this.taps) return pcm;
+    // Pass-through on a STALE reference: the far ring only advances on
+    // pushFarEnd, so while the agent is silent the "most recent" window
+    // stays frozen at the tail of the last TTS — convolving that into every
+    // user frame superimposed the same ~50 ms waveform repeatedly (audible
+    // buzz) exactly when there is no echo to cancel. Mirrors Python.
+    if (this.lastFarPushAt === null || Date.now() - this.lastFarPushAt > NlmsEchoCanceller.FAR_STALE_MS) {
+      return pcm;
+    }
 
     const near = int16BufferToFloat32(pcm);
     const cleaned = this.blockNlms(near);
@@ -283,7 +296,12 @@ export class NlmsEchoCanceller {
       const a = Math.abs(near[i]);
       if (a > nearMax) nearMax = a;
     }
-    const doubleTalk = farMax > 1e-6 ? nearMax > this.rho * farMax : false;
+    // Freeze adaptation when the far reference is effectively silent: the
+    // old 1e-6 floor (-120 dBFS) kept adapting against TTS fade-outs with a
+    // near-zero norm, blowing the weights up against user speech. 1e-3 ≈
+    // -60 dBFS. Mirrors Python.
+    if (farMax <= 1e-3) return near;
+    const doubleTalk = nearMax > this.rho * farMax;
     if (doubleTalk) this.doubleTalkFrames += 1;
 
     const out = new Float32Array(near.length);

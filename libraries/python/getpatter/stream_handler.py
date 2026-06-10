@@ -981,6 +981,42 @@ class StreamHandler(ABC):
     async def cleanup(self) -> None:
         """Close provider connections and cancel background tasks."""
 
+    # Safety: auto-hangup ceiling to prevent runaway billing on calls that
+    # never receive a carrier stop (mirrors TS MAX_CALL_DURATION_MS = 1 h).
+    _MAX_CALL_DURATION_S: float = 60 * 60
+
+    def _arm_max_call_watchdog(self) -> None:
+        """Start the 1-hour auto-hangup watchdog (idempotent).
+
+        TS has had this guard since early on; Python calls without a carrier
+        stop event could previously run (and bill) forever.
+        """
+        existing = getattr(self, "_max_call_watchdog", None)
+        if existing is not None and not existing.done():
+            return
+
+        async def _watchdog() -> None:
+            await asyncio.sleep(self._MAX_CALL_DURATION_S)
+            logger.warning(
+                "Call %s hit max duration (%d min) — terminating",
+                self.call_id,
+                int(self._MAX_CALL_DURATION_S / 60),
+            )
+            hangup = getattr(self, "_hangup_fn", None)
+            if hangup is not None:
+                try:
+                    await hangup()
+                except Exception as exc:  # noqa: BLE001 - best effort
+                    logger.debug("max-duration hangup failed: %s", exc)
+
+        self._max_call_watchdog = asyncio.create_task(_watchdog())
+
+    def _cancel_max_call_watchdog(self) -> None:
+        task = getattr(self, "_max_call_watchdog", None)
+        if task is not None and not task.done():
+            task.cancel()
+        self._max_call_watchdog = None
+
 
     async def _safe_on_transcript(self, payload: dict) -> None:
         """Invoke the user's ``on_transcript`` with exception containment.
@@ -1300,6 +1336,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
 
     async def start(self) -> None:
         """Connect to OpenAI Realtime, register tools, and begin event forwarding."""
+        self._arm_max_call_watchdog()
         # Both ``openai_realtime`` and ``openai_realtime_2`` engines now
         # route through the GA-compatible ``OpenAIRealtime2Adapter`` —
         # OpenAI deprecated the Beta Realtime API on 2026-05, returning
@@ -2094,6 +2131,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
 
     async def cleanup(self) -> None:
         """Cancel the event-forward task and close the OpenAI Realtime adapter."""
+        self._cancel_max_call_watchdog()
         if self._pending_assistant_timer is not None:
             self._pending_assistant_timer.cancel()
             self._pending_assistant_timer = None
@@ -2176,6 +2214,7 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
 
     async def start(self) -> None:
         """Connect to the ElevenLabs ConvAI agent and begin event forwarding."""
+        self._arm_max_call_watchdog()
         from getpatter.providers.elevenlabs_convai import (
             ElevenLabsConvAIAdapter,  # type: ignore[import]
         )
@@ -2407,6 +2446,7 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
 
     async def cleanup(self) -> None:
         """Cancel the event-forward task and close the ConvAI adapter."""
+        self._cancel_max_call_watchdog()
         if self._background_task:
             self._background_task.cancel()
             try:
@@ -2713,6 +2753,7 @@ class PipelineStreamHandler(StreamHandler):
 
     async def start(self) -> None:
         """Initialize STT/TTS providers, hooks, and start the STT receive loop."""
+        self._arm_max_call_watchdog()
         from getpatter.models import CallControl
 
         # Create STT. Pipeline mode always transcodes Twilio mulaw 8 kHz →
@@ -5366,6 +5407,7 @@ class PipelineStreamHandler(StreamHandler):
 
     async def cleanup(self) -> None:
         """Cancel the STT loop and close STT/TTS/remote-message adapters."""
+        self._cancel_max_call_watchdog()
         # Abort any in-flight LLM stream and close any in-flight TTS WS so
         # the run_pipeline_llm / synthesize awaits unblock immediately
         # instead of waiting up to 30 s for their own watchdog timers.
