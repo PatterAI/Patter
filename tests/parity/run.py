@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -20,6 +21,8 @@ from typing import Any
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
+
+os.environ.setdefault("PATTER_TELEMETRY_DISABLED", "1")
 
 PARITY_DIR = Path(__file__).parent
 SCENARIOS_DIR = PARITY_DIR / "scenarios"
@@ -30,7 +33,7 @@ PROJECT_ROOT = PARITY_DIR.parent.parent
 # Add SDK to sys.path so we can import it
 # ---------------------------------------------------------------------------
 
-SDK_PATH = PROJECT_ROOT / "sdk"
+SDK_PATH = PROJECT_ROOT / "libraries" / "python"
 sys.path.insert(0, str(SDK_PATH))
 
 
@@ -40,40 +43,35 @@ sys.path.insert(0, str(SDK_PATH))
 
 
 def run_python_call_init(scenario: dict) -> dict:
-    """Test Patter client mode detection."""
-    from patter.client import Patter
+    """Test Patter client construction (modern carrier-object API).
+
+    Cloud mode and the DEFAULT_*_URL constants were removed from the SDK —
+    both runners report "removed" so the parity contract still holds.
+    """
+    from getpatter import Twilio
+    from getpatter.client import Patter
 
     results: dict[str, str] = {}
 
     for case in scenario["input"]["kwargs"]["cases"]:
         try:
-            params = case["params"]
+            params = case.get("params", {})
             if case["name"] == "cloud_mode":
-                client = Patter(api_key=params["api_key"])
-                results[case["name"]] = "cloud" if client._mode != "local" else "unknown"
-            elif case["name"] == "local_mode_explicit":
+                results[case["name"]] = "removed"
+            elif case["name"] in ("local_mode_explicit", "local_mode_auto_detect"):
                 client = Patter(
-                    mode="local",
-                    twilio_sid=params["twilio_sid"],
-                    twilio_token=params["twilio_token"],
+                    carrier=Twilio(
+                        account_sid=params["twilio_sid"],
+                        auth_token=params["twilio_token"],
+                    ),
                     phone_number=params["phone_number"],
                     webhook_url=params["webhook_url"],
                 )
-                results[case["name"]] = "local" if client._mode == "local" else "unknown"
-            elif case["name"] == "local_mode_auto_detect":
-                client = Patter(
-                    twilio_sid=params["twilio_sid"],
-                    twilio_token=params["twilio_token"],
-                    phone_number=params["phone_number"],
-                    webhook_url=params["webhook_url"],
+                results[case["name"]] = (
+                    "local" if client._local_config is not None else "unknown"
                 )
-                results[case["name"]] = "local" if client._mode == "local" else "unknown"
-            elif case["name"] == "default_backend_url":
-                from patter.client import DEFAULT_BACKEND_URL
-                results[case["name"]] = DEFAULT_BACKEND_URL
-            elif case["name"] == "default_rest_url":
-                from patter.client import DEFAULT_REST_URL
-                results[case["name"]] = DEFAULT_REST_URL
+            elif case["name"] in ("default_backend_url", "default_rest_url"):
+                results[case["name"]] = "removed"
         except Exception as e:
             results[case["name"]] = f"error: {e}"
 
@@ -96,7 +94,7 @@ def run_python_audio_frame(scenario: dict) -> dict:
 
 def run_python_llm_turn(scenario: dict) -> dict:
     """Test LLM loop configuration values."""
-    from patter.services.llm_loop import LLMLoop
+    from getpatter.services.llm_loop import LLMLoop
 
     results: dict[str, Any] = {}
 
@@ -120,13 +118,13 @@ def run_python_llm_turn(scenario: dict) -> dict:
 
 def run_python_metric_record(scenario: dict) -> dict:
     """Test metrics accumulator cost calculations."""
-    from patter.pricing import (
+    from getpatter.pricing import (
         calculate_stt_cost,
         calculate_telephony_cost,
         calculate_tts_cost,
         merge_pricing,
     )
-    from patter.pricing import DEFAULT_PRICING
+    from getpatter.pricing import DEFAULT_PRICING
 
     init_params = scenario["input"]["kwargs"]["init"]
     turns = scenario["input"]["kwargs"]["turns"]
@@ -160,7 +158,7 @@ def run_python_metric_record(scenario: dict) -> dict:
 
 def run_python_store_pubsub(scenario: dict) -> dict:
     """Test MetricsStore defaults and eviction."""
-    from patter.dashboard.store import MetricsStore
+    from getpatter.dashboard.store import MetricsStore
 
     results: dict[str, Any] = {}
 
@@ -185,7 +183,7 @@ def run_python_store_pubsub(scenario: dict) -> dict:
 
 def run_python_tool_webhook(scenario: dict) -> dict:
     """Test tool executor configuration values."""
-    from patter.services.tool_executor import ToolExecutor
+    from getpatter.tools.tool_executor import ToolExecutor
 
     return {
         "total_attempts": ToolExecutor.MAX_RETRIES + 1,  # 2 + 1 = 3
@@ -209,7 +207,7 @@ def run_python_model_e164(scenario: dict) -> dict:
 
 def run_python_call_status_enum(scenario: dict) -> dict:
     """Test error class hierarchy."""
-    from patter.exceptions import (
+    from getpatter.exceptions import (
         AuthenticationError,
         PatterConnectionError,
         PatterError,
@@ -242,16 +240,18 @@ def run_python_call_status_enum(scenario: dict) -> dict:
 
 
 def run_python_voice_mode_enum(scenario: dict) -> dict:
-    """Test valid voice mode values."""
-    from patter.client import Patter
+    """Test valid voice mode values against the modern agent() API."""
+    from getpatter import Twilio
+    from getpatter.client import Patter
+    from getpatter.providers import deepgram, elevenlabs
 
     client = Patter(
-        mode="local",
-        twilio_sid="ACtest000000000000000000000000000",
-        twilio_token="test_token",
+        carrier=Twilio(
+            account_sid="ACtest000000000000000000000000000",
+            auth_token="test_token",
+        ),
         phone_number="+15551234567",
         webhook_url="test.ngrok.io",
-        openai_key="sk-test-key",
     )
 
     expected_modes = ["openai_realtime", "elevenlabs_convai", "pipeline"]
@@ -261,12 +261,12 @@ def run_python_voice_mode_enum(scenario: dict) -> dict:
         try:
             extra: dict[str, Any] = {}
             if mode == "pipeline":
-                extra["stt"] = Patter.deepgram(api_key="dg_test")
-                extra["tts"] = Patter.elevenlabs(api_key="el_test")
+                extra["stt"] = deepgram(api_key="dg_test")
+                extra["tts"] = elevenlabs(api_key="el_test")
             client.agent(system_prompt="Test", provider=mode, **extra)
             results[mode] = "accepted"
-        except Exception as e:
-            results[mode] = f"rejected: {e}"
+        except Exception:
+            results[mode] = "rejected"
 
     # Test invalid mode
     try:
@@ -281,6 +281,13 @@ def run_python_voice_mode_enum(scenario: dict) -> dict:
 # ---------------------------------------------------------------------------
 # Python dispatch
 # ---------------------------------------------------------------------------
+
+# Scenarios with a dedicated standalone runner (richer xfail semantics than
+# the generic comparator). ``run.py`` shells out to them and maps the exit
+# code to PASS/FAIL.
+STANDALONE_RUNNERS: dict[str, Path] = {
+    "sentence_chunker": PARITY_DIR / "sentence_chunker_parity.py",
+}
 
 PYTHON_RUNNERS: dict[str, Any] = {
     "call_init": run_python_call_init,
@@ -313,7 +320,10 @@ def run_ts_scenario(scenario_path: Path) -> dict | None:
         if result.returncode != 0:
             stderr = result.stderr.strip()
             return {"error": f"TS shim exited {result.returncode}: {stderr}"}
-        return json.loads(result.stdout.strip())
+        # Parse the LAST stdout line: SDK construction may print banners
+        # before the shim's JSON result.
+        lines = [ln for ln in result.stdout.strip().splitlines() if ln.strip()]
+        return json.loads(lines[-1]) if lines else {"error": "TS shim produced no output"}
     except subprocess.TimeoutExpired:
         return {"error": "TS shim timed out (30s)"}
     except json.JSONDecodeError as e:
@@ -400,6 +410,26 @@ def main() -> int:
         total += 1
 
         print(f"\n[{scenario_id}] {scenario['description']}")
+
+        # --- Delegated standalone runners ---
+        standalone = STANDALONE_RUNNERS.get(scenario_id)
+        if standalone is not None:
+            proc = subprocess.run(
+                [sys.executable, str(standalone)],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                cwd=str(PROJECT_ROOT),
+            )
+            tail = (proc.stdout.strip().splitlines() or [""])[-1]
+            if proc.returncode == 0:
+                print(f"  PASS (standalone: {tail})")
+                results_table.append((scenario_id, "PASS", tail))
+                passed += 1
+            else:
+                print(f"  FAIL (standalone: {tail})")
+                results_table.append((scenario_id, "FAIL", tail))
+            continue
 
         # --- Run Python ---
         runner = PYTHON_RUNNERS.get(scenario_id)

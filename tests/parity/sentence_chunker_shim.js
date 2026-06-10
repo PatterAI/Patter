@@ -6,7 +6,7 @@
  * Writes JSON to stdout: ["sentence1", "sentence2", ...]
  * On error: { "error": "message" } and exits non-zero.
  *
- * Requires sdk-ts/dist/index.js to exist (run `npm --prefix sdk-ts run build`).
+ * Requires sdk-ts/dist/index.js to exist (run `npm --prefix libraries/typescript run build`).
  */
 
 const fs = require('fs');
@@ -28,14 +28,14 @@ function main() {
     process.exit(1);
   }
 
-  const sdkPath = path.resolve(__dirname, '../../sdk-ts/dist/index.js');
+  const sdkPath = path.resolve(__dirname, '../../libraries/typescript/dist/index.js');
   let sdk;
   try {
     sdk = require(sdkPath);
   } catch (e) {
     process.stdout.write(
       JSON.stringify({
-        error: `cannot load sdk-ts dist (${e.message}); run: npm --prefix sdk-ts run build`,
+        error: `cannot load the TS dist (${e.message}); run: npm --prefix libraries/typescript run build`,
       }),
     );
     process.exit(1);
@@ -43,7 +43,7 @@ function main() {
 
   const SentenceChunker = sdk.SentenceChunker;
   if (typeof SentenceChunker !== 'function') {
-    process.stdout.write(JSON.stringify({ error: 'SentenceChunker not exported from sdk-ts' }));
+    process.stdout.write(JSON.stringify({ error: 'SentenceChunker not exported from the TS SDK' }));
     process.exit(1);
   }
 

@@ -111,6 +111,9 @@ describe('phone.agent({ engine })', () => {
       carrier: new Twilio({ accountSid: 'AC', authToken: 'tok' }),
       phoneNumber: '+15550001234',
       webhookUrl: 'abc.example.com',
+      // agent() now fails fast on a missing OpenAI key in realtime mode
+      // (parity with Python) — give the tests an explicit stub key.
+      openaiKey: 'sk-test',
     });
   }
 
@@ -157,6 +160,9 @@ describe('phone.agent({ stt / tts })', () => {
       carrier: new Twilio({ accountSid: 'AC', authToken: 'tok' }),
       phoneNumber: '+15550001234',
       webhookUrl: 'abc.example.com',
+      // agent() fails fast on a missing OpenAI key in realtime mode
+      // (parity with Python) — give the tests an explicit stub key.
+      openaiKey: 'sk-test',
     });
   }
 
@@ -194,6 +200,9 @@ describe('phone.agent({ tools / guardrails })', () => {
       carrier: new Twilio({ accountSid: 'AC', authToken: 'tok' }),
       phoneNumber: '+15550001234',
       webhookUrl: 'abc.example.com',
+      // agent() fails fast on a missing OpenAI key in realtime mode
+      // (parity with Python) — give the tests an explicit stub key.
+      openaiKey: 'sk-test',
     });
   }
 

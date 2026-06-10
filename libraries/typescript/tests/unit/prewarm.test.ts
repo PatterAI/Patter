@@ -40,6 +40,9 @@ function makePatter(): Patter {
     carrier: new Twilio({ accountSid: 'ACtest000000000000000000000000000', authToken: 'tok' }),
     phoneNumber: '+15551234567',
     webhookUrl: 'example.test',
+    // agent() now fails fast on a missing OpenAI key in realtime mode
+    // (parity with Python) — give the tests an explicit stub key.
+    openaiKey: 'sk-test',
   });
 }
 

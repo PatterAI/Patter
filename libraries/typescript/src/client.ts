@@ -717,6 +717,22 @@ export class Patter {
       }
     }
 
+    // Fail fast on a missing OpenAI key for Realtime mode — Python validates
+    // here too; deferring to call time produced a dead call instead of a
+    // clear construction-time error (caught by the cross-SDK parity suite).
+    if (
+      working.provider === 'openai_realtime' &&
+      !working.engine &&
+      !this.localConfig.openaiKey &&
+      !process.env.OPENAI_API_KEY
+    ) {
+      throw new Error(
+        "OpenAI Realtime mode requires an OpenAI API key. Pass " +
+          "engine: new OpenAIRealtime({ apiKey: 'sk-...' }) or set " +
+          'OPENAI_API_KEY in the environment.',
+      );
+    }
+
     // The consult tool is injected only in Realtime and Pipeline modes;
     // ElevenLabs ConvAI tools live on the ElevenLabs-hosted agent, so warn
     // that the setting has no effect there.

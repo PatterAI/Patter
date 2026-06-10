@@ -86,7 +86,10 @@ describe('[mocked] ElevenLabsConvAIAdapter', () => {
     expect(initMsg.conversation_config_override.agent?.first_message).toBe('Hello!');
   });
 
-  it('connect() includes agent.language from constructor default', async () => {
+  it('connect() sends NO overrides by default (ElevenLabs rejects unconfigured overrides)', async () => {
+    // The old hardcoded 'it' default forced every ConvAI conversation to
+    // Italian (or failed initiation when overrides weren't enabled in the
+    // agent's security settings). Overrides are now opt-in only.
     const adapter = new ElevenLabsConvAIAdapter('el_key');
 
     const connectPromise = adapter.connect();
@@ -95,11 +98,11 @@ describe('[mocked] ElevenLabsConvAIAdapter', () => {
     await connectPromise;
 
     const initMsg = JSON.parse(instance.sent[0]) as {
-      conversation_config_override: { agent?: { language?: string; first_message?: string } };
+      type: string;
+      conversation_config_override?: { agent?: { language?: string; first_message?: string } };
     };
-    // Default language is plumbed through (previously stored but never sent).
-    expect(initMsg.conversation_config_override.agent?.language).toBe('it');
-    expect(initMsg.conversation_config_override.agent?.first_message).toBeUndefined();
+    expect(initMsg.type).toBe('conversation_initiation_client_data');
+    expect(initMsg.conversation_config_override).toBeUndefined();
   });
 
   it('sendAudio() sends user_audio_chunk payload', async () => {

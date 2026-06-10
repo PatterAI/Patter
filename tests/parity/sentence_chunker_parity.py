@@ -13,7 +13,7 @@ clears it once the regression is fixed. Cases marked ``regression: true`` are
 real bugs to fix; cases marked ``quirk: true`` are accepted by-design.
 
 Self-contained — does NOT depend on the main parity runner. The TS shim
-requires ``sdk-ts/dist/index.js`` (run ``npm --prefix sdk-ts run build`` first).
+requires ``libraries/typescript/dist/index.js`` (run ``npm --prefix libraries/typescript run build`` first).
 
 Usage:
     python3 tests/parity/sentence_chunker_parity.py
@@ -35,7 +35,7 @@ SCENARIO_FILE = PARITY_DIR / "scenarios" / "sentence_chunker.json"
 TS_SHIM = PARITY_DIR / "sentence_chunker_shim.js"
 PROJECT_ROOT = PARITY_DIR.parent.parent
 
-sys.path.insert(0, str(PROJECT_ROOT / "sdk-py"))
+sys.path.insert(0, str(PROJECT_ROOT / "libraries" / "python"))
 
 
 def run_python_case(tokens: list[str]) -> list[str]:
