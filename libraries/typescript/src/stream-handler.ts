@@ -409,7 +409,16 @@ export interface StreamHandlerDeps {
   readonly metricsStore: MetricsStore;
   readonly pricing: Record<string, Partial<ProviderPricing>> | null;
   readonly remoteHandler: RemoteMessageHandler;
-  readonly onCallStart?: (data: Record<string, unknown>) => Promise<void>;
+  /**
+   * Per-call start callback. A returned object is treated as PER-CALL AGENT
+   * OVERRIDES (snake_case keys: system_prompt, voice, model, language,
+   * first_message, provider, tools, variables) — parity with Python's
+   * ``apply_call_overrides``. Return nothing for the legacy observe-only
+   * behaviour.
+   */
+  readonly onCallStart?: (
+    data: Record<string, unknown>,
+  ) => Promise<void | Record<string, unknown> | undefined> | void | Record<string, unknown>;
   readonly onCallEnd?: (data: Record<string, unknown>) => Promise<void>;
   readonly onTranscript?: (data: Record<string, unknown>) => Promise<void>;
   readonly onMessage?: PipelineMessageHandler | string;
@@ -1591,7 +1600,7 @@ export class StreamHandler {
       // phone.call() the store has direction='outbound', otherwise inbound.
       const direction =
         this.deps.metricsStore.getActive(callId)?.direction ?? 'inbound';
-      await this.deps.onCallStart({
+      const overrides = await this.deps.onCallStart({
         call_id: callId,
         caller: this.caller,
         callee: this.callee,
@@ -1599,6 +1608,12 @@ export class StreamHandler {
         telephony_provider: this.deps.bridge.telephonyProvider,
         ...(Object.keys(customParams).length > 0 ? { custom_params: customParams } : {}),
       });
+      // Dynamic per-call configuration: Python applied a returned dict via
+      // apply_call_overrides since 0.5.x; TS typed the callback void and
+      // silently ignored the result.
+      if (overrides && typeof overrides === 'object') {
+        this.applyCallOverrides(overrides as Record<string, unknown>);
+      }
     }
 
     await this.startRecordingIfRequested(callId);
@@ -2036,6 +2051,45 @@ export class StreamHandler {
       await Promise.race([settle, cap]);
     } finally {
       if (timer) clearTimeout(timer);
+    }
+  }
+
+
+  /**
+   * Apply per-call agent overrides returned by ``onCallStart``. snake_case
+   * keys mirror the Python payload contract (``apply_call_overrides``);
+   * ``stt_config``/``tts_config`` dicts are Python-only (TS agents carry
+   * adapter instances, not configs) and are ignored here with a warning.
+   * The deps object is per-handler, so swapping its ``agent`` is call-local.
+   */
+  private applyCallOverrides(overrides: Record<string, unknown>): void {
+    const next: Record<string, unknown> = { ...this.deps.agent };
+    const applied: string[] = [];
+    const map: Record<string, string> = {
+      system_prompt: 'systemPrompt',
+      voice: 'voice',
+      model: 'model',
+      language: 'language',
+      first_message: 'firstMessage',
+      provider: 'provider',
+      tools: 'tools',
+      variables: 'variables',
+    };
+    for (const [key, field] of Object.entries(map)) {
+      if (key in overrides) {
+        next[field] = overrides[key];
+        applied.push(key);
+      }
+    }
+    if ('stt_config' in overrides || 'tts_config' in overrides) {
+      getLogger().warn(
+        'onCallStart overrides: stt_config/tts_config are Python-only (TS agents ' +
+          'carry adapter instances) — ignored.',
+      );
+    }
+    if (applied.length > 0) {
+      (this.deps as { agent: AgentOptions }).agent = next as unknown as AgentOptions;
+      getLogger().debug(`Per-call config overrides applied: ${applied.join(', ')}`);
     }
   }
 

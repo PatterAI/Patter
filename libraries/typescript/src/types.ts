@@ -818,7 +818,15 @@ export interface ServeOptions {
   readonly port?: number;
   /** When true, start a cloudflared tunnel automatically (requires `cloudflared` npm package). */
   readonly tunnel?: boolean;
-  readonly onCallStart?: (data: Record<string, unknown>) => Promise<void>;
+  /**
+   * Called when a call's media stream starts. Returning an object applies
+   * PER-CALL AGENT OVERRIDES (snake_case keys: system_prompt, voice, model,
+   * language, first_message, provider, tools, variables) — parity with the
+   * Python SDK. Return nothing to just observe.
+   */
+  readonly onCallStart?: (
+    data: Record<string, unknown>,
+  ) => Promise<void | Record<string, unknown> | undefined> | void | Record<string, unknown>;
   readonly onCallEnd?: (data: Record<string, unknown>) => Promise<void>;
   readonly onTranscript?: (data: Record<string, unknown>) => Promise<void>;
   /** Pipeline mode only — called with the user's transcript; return value is spoken.
@@ -909,6 +917,13 @@ export interface MachineDetectionResult {
 export interface LocalCallOptions {
   readonly to: string;
   readonly agent: AgentOptions;
+  /**
+   * Per-call greeting override — what the AI says when the callee answers.
+   * Overrides ``agent.firstMessage`` for this call only (prewarm synthesis
+   * and the stream handler both read the overridden value). Parity with
+   * Python ``call(first_message=...)``.
+   */
+  readonly firstMessage?: string;
   /**
    * Enable answering-machine detection. **Defaults to ``true``** — the SDK
    * asks Twilio (``MachineDetection=DetectMessageEnd`` + Async AMD) or

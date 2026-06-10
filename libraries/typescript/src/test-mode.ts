@@ -18,7 +18,9 @@ export class TestSession {
     agent: AgentOptions;
     openaiKey?: string;
     onMessage?: PipelineMessageHandler;
-    onCallStart?: (data: Record<string, unknown>) => Promise<void>;
+    onCallStart?: (
+    data: Record<string, unknown>,
+  ) => Promise<void | Record<string, unknown> | undefined> | void | Record<string, unknown>;
     onCallEnd?: (data: Record<string, unknown>) => Promise<void>;
   }): Promise<void> {
     const { agent, openaiKey, onMessage, onCallStart, onCallEnd } = opts;

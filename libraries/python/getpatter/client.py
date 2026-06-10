@@ -831,6 +831,14 @@ class Patter:
         """
         if not agent:
             raise PatterConnectionError("call() requires the agent parameter.")
+        if first_message:
+            # Per-call greeting override — the parameter was documented but
+            # never referenced in the body. The Agent is a frozen dataclass,
+            # so build a per-call copy: prewarm synthesis, the WS bridge and
+            # the stream handler all read agent.first_message from here on.
+            from dataclasses import replace as _dc_replace
+
+            agent = _dc_replace(agent, first_message=first_message)
         from getpatter.telephony.common import _validate_e164
 
         if not isinstance(to, str) or not _validate_e164(to):

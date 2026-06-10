@@ -1022,7 +1022,9 @@ export class EmbeddedServer {
   constructor(
     private readonly config: LocalConfig,
     private readonly agent: AgentOptions,
-    public onCallStart?: (data: Record<string, unknown>) => Promise<void>,
+    public onCallStart?: (
+      data: Record<string, unknown>,
+    ) => Promise<void | Record<string, unknown> | undefined> | void | Record<string, unknown>,
     public onCallEnd?: (data: Record<string, unknown>) => Promise<void>,
     public onTranscript?: (data: Record<string, unknown>) => Promise<void>,
     public onMessage?: PipelineMessageHandler | string,
@@ -2305,7 +2307,9 @@ export class EmbeddedServer {
 
     const store = this.metricsStore;
     const telemetry = this.telemetry;
-    const wrappedStart = async (data: Record<string, unknown>): Promise<void> => {
+    const wrappedStart = async (
+      data: Record<string, unknown>,
+    ): Promise<void | Record<string, unknown> | undefined> => {
       // Anonymous telemetry: per-call start (engine/provider/carrier +
       // inbound/outbound; no PII). Pairs with `call_completed` for a
       // connect→complete funnel. Fail-safe and O(1).
@@ -2345,7 +2349,10 @@ export class EmbeddedServer {
           })
           .catch((err) => getLogger().error(`call_log start error: ${String(err)}`));
       }
-      if (userStart) await userStart(data);
+      // FORWARD the user's return value — it carries per-call agent
+      // overrides (see StreamHandler.applyCallOverrides). The old void
+      // wrapper swallowed it, so overrides only worked in Python.
+      if (userStart) return (await userStart(data)) as void | Record<string, unknown> | undefined;
     };
 
     const wrappedMetrics = async (data: Record<string, unknown>): Promise<void> => {

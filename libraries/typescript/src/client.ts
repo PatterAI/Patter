@@ -130,20 +130,21 @@ export interface ResolvedLocalConfig {
  *  - ``persist === false`` → ``null`` (force off, even if env var is set)
  *  - ``persist === true`` → platform default (``resolveLogRoot('auto')``)
  *  - ``persist`` is a string → exactly that path (after ``~`` expansion)
- *  - ``persist === undefined`` → fall back to ``PATTER_LOG_DIR`` env var,
- *    or ``null`` if the env is also unset (preserves the prior opt-in
- *    behaviour where persistence required setting the env explicitly)
+ *  - ``persist === undefined`` → ``PATTER_LOG_DIR`` env var if set, else the
+ *    platform default (``resolveLogRoot('auto')``). Persistence is ON by
+ *    default since 0.6.2 — both SDKs' docs state it and the dashboard's
+ *    hydrate path requires on-disk records to survive restarts; this
+ *    function had regressed to opt-in, silently diverging from Python.
  */
 function resolvePersistRoot(persist: boolean | string | undefined): string | null {
   if (persist === false) return null;
   if (persist === true) return resolveLogRoot('auto');
   if (typeof persist === 'string') return resolveLogRoot(persist);
-  // Restore opt-in semantics: when `persist` is omitted and PATTER_LOG_DIR
-  // is not set, return null (no disk writes). This preserves the documented
-  // backward-compatible default in LocalOptions.persist JSDoc.
   const envRoot = resolveLogRoot();
   if (envRoot !== null) return envRoot;
-  return null;
+  // No explicit persist + no env var → platform default so the dashboard
+  // hydrate path always has something to read (parity with Python).
+  return resolveLogRoot('auto');
 }
 
 /** Close every parked socket inside a ``ParkedProviderConnections`` slot. */
@@ -1504,6 +1505,15 @@ export class Patter {
   async call(options: LocalCallOptions): Promise<CallResult | void> {
     if (!options.to) {
       throw new Error("'to' phone number is required");
+    }
+    if (options.firstMessage) {
+      // Per-call greeting override: prewarm synthesis and the stream
+      // handler read agent.firstMessage, so rebuild the options with a
+      // per-call agent copy. Parity with Python call(first_message=...).
+      options = {
+        ...options,
+        agent: { ...options.agent, firstMessage: options.firstMessage },
+      };
     }
     if (!/^\+[1-9]\d{6,14}$/.test(options.to)) {
       throw new Error("'to' must be E.164 format (+<country><digits>). Got value with invalid format.");
