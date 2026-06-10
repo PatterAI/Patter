@@ -186,7 +186,10 @@ async function main(): Promise<void> {
   console.log('  Waiting for calls…  Press Ctrl+C to stop.\n');
 
   const app = express();
-  app.use(express.json());
+  // Long calls carry multi-hundred-entry transcripts + per-turn metrics in
+  // the call-end ingest; express's default 100 kB cap rejected them with a
+  // 413 and the call silently vanished from the standalone dashboard.
+  app.use(express.json({ limit: '5mb' }));
 
   mountDashboard(app, store);
   mountApi(app, store);
@@ -215,10 +218,15 @@ async function main(): Promise<void> {
       res.json({ ok: true, call_id: callId, event: 'initiated' });
       return;
     }
-    store.recordCallStart(data);
     if (data.ended_at) {
+      // Finished-call ingest: do NOT replay it as a fresh call_start — that
+      // published a spurious live event and stamped started_at = ingest-time
+      // (rows rendered with start ≈ end). Mirrors the Python CLI.
       store.recordCallEnd(data, (data.metrics as Record<string, unknown>) ?? null);
+      res.json({ ok: true, call_id: callId, event: 'ended' });
+      return;
     }
+    store.recordCallStart(data);
     res.json({ ok: true, call_id: callId });
   });
 

@@ -1678,6 +1678,23 @@ export class EmbeddedServer {
               outcome: noMediaOutcome,
               status: hangupCause,
             });
+            // Terminal-ize the pre-registered dashboard row: a no-media
+            // hangup (busy / no-answer / rejected) never reaches
+            // recordCallEnd, so without this the call stayed in the active
+            // set forever (phantom live row, inflated active_calls).
+            try {
+              const statusMap: Record<string, string> = {
+                no_answer: 'no-answer',
+                busy: 'busy',
+                failed: 'failed',
+              };
+              this.metricsStore.updateCallStatus(
+                hangupCallId,
+                statusMap[noMediaOutcome] ?? 'failed',
+              );
+            } catch (err) {
+              getLogger().debug(`updateCallStatus threw: ${String(err)}`);
+            }
           }
         }
         return res.status(200).send();

@@ -192,9 +192,13 @@ async def _run_dashboard(port: int) -> None:
         if status == "initiated":
             store.record_call_initiated(data)
             return {"ok": True, "call_id": call_id, "event": "initiated"}
-        store.record_call_start(data)
         if data.get("ended_at"):
+            # Finished-call ingest: do NOT replay it as a fresh call_start —
+            # that published a spurious live event and stamped
+            # ``started_at = ingest-time`` (rows rendered with start ≈ end).
             store.record_call_end(data, metrics=data.get("metrics"))
+            return {"ok": True, "call_id": call_id, "event": "ended"}
+        store.record_call_start(data)
         return {"ok": True, "call_id": call_id}
 
     # Suppress Uvicorn's startup banner (we have our own)

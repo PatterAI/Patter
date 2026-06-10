@@ -1429,6 +1429,25 @@ class EmbeddedServer:
                                 outcome=no_media_outcome,
                                 status=hangup_cause,
                             )
+                            # Terminal-ize the pre-registered dashboard row:
+                            # a no-media hangup (busy / no-answer / rejected)
+                            # never reaches record_call_end, so without this
+                            # the call stayed in the active set forever
+                            # (phantom live row, inflated active_calls).
+                            if self._metrics_store is not None:
+                                try:
+                                    self._metrics_store.update_call_status(
+                                        call_control_id,
+                                        {
+                                            "no_answer": "no-answer",
+                                            "busy": "busy",
+                                            "failed": "failed",
+                                        }.get(no_media_outcome, "failed"),
+                                    )
+                                except Exception as exc:  # noqa: BLE001
+                                    logger.debug(
+                                        "update_call_status raised: %s", exc
+                                    )
                 elif event_type == "call.recording.saved":
                     # Telnyx Call Control recording completion — produced
                     # when a ``record_start`` action is followed by a

@@ -171,7 +171,19 @@ export class MetricsStore extends EventEmitter {
    */
   updateCallStatus(callId: string, status: string, extra: Record<string, unknown> = {}): void {
     if (!callId || !status) return;
-    const TERMINAL = new Set(['completed', 'no-answer', 'busy', 'failed', 'canceled', 'webhook_error']);
+    // ``timeout``/``cancel``: Plivo's status webhook forwards these raw
+    // statuses for unanswered/cancelled dials; without them the row stayed
+    // in the active set forever (phantom live call, slow leak).
+    const TERMINAL = new Set([
+      'completed',
+      'no-answer',
+      'busy',
+      'failed',
+      'canceled',
+      'timeout',
+      'cancel',
+      'webhook_error',
+    ]);
     const active = this.activeCalls.get(callId);
     if (active) {
       active.status = status;
@@ -391,6 +403,15 @@ export class MetricsStore extends EventEmitter {
         : existing?.turns && existing.turns.length > 0
           ? existing.turns
           : undefined;
+    // No prior record (standalone-dashboard ingest of a finished call):
+    // derive started_at from the payload or the metrics duration so the row
+    // doesn't render with start ≈ end. Mirrors the Python store.
+    const endedAtS = Date.now() / 1000;
+    const payloadStarted = (data.started_at as number) || 0;
+    const durationSeconds =
+      ((metrics as { duration_seconds?: number } | null)?.duration_seconds) ?? 0;
+    const derivedStart =
+      payloadStarted || (durationSeconds > 0 ? endedAtS - durationSeconds : 0);
     const entry: MutableCallRecord = {
       call_id: callId,
       caller:
@@ -408,8 +429,8 @@ export class MetricsStore extends EventEmitter {
         existing?.direction ||
         (data.direction as string) ||
         'inbound',
-      started_at: active?.started_at || existing?.started_at || 0,
-      ended_at: Date.now() / 1000,
+      started_at: active?.started_at || existing?.started_at || derivedStart,
+      ended_at: endedAtS,
       transcript: resolvedTranscript,
       ...(resolvedTurns ? { turns: resolvedTurns } : {}),
       status: resolvedStatus,
