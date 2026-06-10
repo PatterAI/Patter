@@ -807,7 +807,14 @@ async def telnyx_stream_bridge(
                         "callee": callee,
                         "ended_at": time.time(),
                         "transcript": list(transcript_entries),
-                        "conversation_history": list(conversation_history),
+                        # The Telnyx bridge doesn't keep its own history deque
+                        # (Twilio/Plivo do) — read the handler's so the
+                        # on_call_end payload shape matches across carriers.
+                        "conversation_history": list(
+                            getattr(handler, "conversation_history", None) or []
+                        )
+                        if handler is not None
+                        else [],
                         "metrics": call_metrics,
                     }
                 )
