@@ -436,4 +436,11 @@ def _to_anthropic_messages(messages: list[dict]) -> tuple[str, list[dict]]:
                 out.append({"role": "user", "content": [block]})
             continue
 
+    # The Messages API requires the first message to use the ``user`` role.
+    # Voice agents almost always open with ``first_message``, so history
+    # starts with an assistant greeting — prepend a synthetic user turn so
+    # every turn of the call doesn't 400.
+    if out and out[0]["role"] == "assistant":
+        out.insert(0, {"role": "user", "content": "(call connected)"})
+
     return "\n\n".join(system_parts), out

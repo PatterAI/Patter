@@ -148,6 +148,14 @@ class ChatContext:
         else:
             self._items = list(self._items[-max_messages:]) if max_messages > 0 else []
 
+        # Drop leading orphan tool results: a ``role="tool"`` message whose
+        # paired assistant ``tool_calls`` turn was truncated away is a
+        # guaranteed 400 on the OpenAI API (bare tool_call_id with no
+        # preceding tool_calls message).
+        start = 1 if (self._items and self._items[0].role == "system") else 0
+        while len(self._items) > start and self._items[start].role == "tool":
+            del self._items[start]
+
     # ------------------------------------------------------------------
     # Provider format conversion
     # ------------------------------------------------------------------
@@ -177,6 +185,15 @@ class ChatContext:
             if msg.role == "system":
                 if system is None:
                     system = msg.content
+                continue
+            if msg.role == "tool":
+                # The Anthropic Messages API only accepts user/assistant
+                # roles; a passed-through ``tool`` entry is a guaranteed 400.
+                # Fold the result into a user turn instead so the content
+                # survives the conversion.
+                messages.append(
+                    {"role": "user", "content": f"[tool result] {msg.content}"}
+                )
                 continue
             messages.append({"role": msg.role, "content": msg.content})
 

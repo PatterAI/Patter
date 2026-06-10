@@ -15,7 +15,10 @@ import logging
 from typing import AsyncIterator
 
 from getpatter.exceptions import PatterError
-from getpatter.services.llm_loop import LLMProvider
+from getpatter.services.llm_loop import (
+    LLMProvider,
+    _stream_accepted_context_kwargs,
+)
 
 logger = logging.getLogger("getpatter")
 
@@ -121,7 +124,12 @@ class FallbackLLMProvider:
         Mirrors the TypeScript SDK's ``fallback.completeStream`` shape.
         """
         async for chunk in self.stream(
-            messages, tools, cancel_event=cancel_event, call_id=call_id
+            messages,
+            tools,
+            cancel_event=cancel_event,
+            call_id=call_id,
+            caller=caller,
+            callee=callee,
         ):
             if chunk.get("type") == "text":
                 yield chunk.get("content", "")
@@ -133,6 +141,8 @@ class FallbackLLMProvider:
         *,
         cancel_event: asyncio.Event | None = None,
         call_id: str | None = None,
+        caller: str | None = None,
+        callee: str | None = None,
     ) -> AsyncIterator[dict]:
         """Try providers in sequence, yielding chunks from the first that succeeds.
 
@@ -157,6 +167,8 @@ class FallbackLLMProvider:
             errors=errors,
             cancel_event=cancel_event,
             call_id=call_id,
+            caller=caller,
+            callee=callee,
         ):
             if isinstance(chunk, _Done):
                 return
@@ -173,6 +185,8 @@ class FallbackLLMProvider:
             errors=errors,
             cancel_event=cancel_event,
             call_id=call_id,
+            caller=caller,
+            callee=callee,
         ):
             if isinstance(chunk, _Done):
                 return
@@ -196,6 +210,8 @@ class FallbackLLMProvider:
         errors: list[Exception],
         cancel_event: asyncio.Event | None = None,
         call_id: str | None = None,
+        caller: str | None = None,
+        callee: str | None = None,
     ) -> AsyncIterator[dict | _Done]:
         """Try each provider, yielding chunks or a _Done sentinel."""
         for i, provider in enumerate(self._providers):
@@ -212,8 +228,24 @@ class FallbackLLMProvider:
                     )
 
                     yielded_tokens = False
+                    # Only thread the per-call context kwargs the delegate's
+                    # ``stream`` actually declares (or absorbs via **kwargs):
+                    # a minimal custom provider without ``call_id`` would
+                    # otherwise raise TypeError on every attempt and flap
+                    # between unavailable and recovered forever. Session-aware
+                    # delegates (Hermes caller_hash et al.) need caller/callee.
+                    accepted = _stream_accepted_context_kwargs(provider)
+                    ctx_kwargs = {
+                        k: v
+                        for k, v in (
+                            ("call_id", call_id),
+                            ("caller", caller),
+                            ("callee", callee),
+                        )
+                        if k in accepted
+                    }
                     async for chunk in provider.stream(
-                        messages, tools, cancel_event=cancel_event, call_id=call_id
+                        messages, tools, cancel_event=cancel_event, **ctx_kwargs
                     ):
                         yield chunk
                         yielded_tokens = True

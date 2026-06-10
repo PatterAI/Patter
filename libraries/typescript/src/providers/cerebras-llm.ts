@@ -15,7 +15,11 @@
  */
 
 import type { LLMChunk, LLMProvider, LLMStreamOptions } from "../llm-loop";
-import { mergeAbortSignals } from "../llm-loop";
+import {
+  mergeAbortSignals,
+  createStreamIdleWatchdog,
+  LLM_STREAM_IDLE_TIMEOUT_MS,
+} from "../llm-loop";
 import { getLogger } from '../logger';
 import { PatterError, PatterConnectionError } from '../errors';
 import { VERSION } from '../version';
@@ -215,17 +219,32 @@ export class CerebrasLLMProvider implements LLMProvider {
     let lastStatus = 0;
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      // Idle watchdog (re-armed per chunk) instead of a whole-stream
+      // ceiling — see llm-loop.ts createStreamIdleWatchdog.
+      const idle = createStreamIdleWatchdog();
       const response = await fetch(`${this.baseUrl}/chat/completions`, {
         method: 'POST',
         headers,
         body: payload,
-        signal: mergeAbortSignals(opts?.signal, AbortSignal.timeout(30_000)),
+        signal: mergeAbortSignals(opts?.signal, idle.signal),
       });
 
       if (response.ok) {
-        yield* parseOpenAISseStream(response);
+        try {
+          yield* parseOpenAISseStream(response, idle.touch);
+        } catch (err) {
+          if (idle.fired && !opts?.signal?.aborted) {
+            throw new PatterConnectionError(
+              `Cerebras stream idle timeout — no data for ${LLM_STREAM_IDLE_TIMEOUT_MS / 1000}s`,
+            );
+          }
+          throw err;
+        } finally {
+          idle.clear();
+        }
         return;
       }
+      idle.clear();
 
       lastStatus = response.status;
       lastErrText = await response.text().catch(() => '');

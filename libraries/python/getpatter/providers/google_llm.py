@@ -249,18 +249,22 @@ class GoogleLLMProvider:
         if last_usage is not None:
             prompt_tokens = getattr(last_usage, "prompt_token_count", 0) or 0
             completion_tokens = getattr(last_usage, "candidates_token_count", 0) or 0
+            cached_tokens = (
+                getattr(last_usage, "cached_content_token_count", 0) or 0
+            )
             self._record_completion_cost(
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
             )
+            # ``prompt_token_count`` INCLUDES the cached portion; the usage
+            # chunk contract bills ``input_tokens`` at the full input rate and
+            # ``cache_read_tokens`` at the cache rate, so subtract to avoid
+            # double-billing cached tokens (mirrors the OpenAI providers).
             yield {
                 "type": "usage",
-                "input_tokens": prompt_tokens,
+                "input_tokens": max(0, prompt_tokens - cached_tokens),
                 "output_tokens": completion_tokens,
-                "cache_read_tokens": getattr(
-                    last_usage, "cached_content_token_count", 0
-                )
-                or 0,
+                "cache_read_tokens": cached_tokens,
             }
 
         yield {"type": "done"}
@@ -320,6 +324,11 @@ def _to_gemini_contents(messages: list[dict]) -> tuple[str, list[Any]]:
 
     system_parts: list[str] = []
     contents: list[types.Content] = []
+    # tool_call_id → function name, harvested from assistant turns so the
+    # paired FunctionResponse can carry the real function name. Gemini
+    # requires ``FunctionResponse.name`` to match ``FunctionCall.name``;
+    # the tool message itself only carries the call id.
+    fn_name_by_call_id: dict[str, str] = {}
 
     for msg in messages:
         role = msg.get("role")
@@ -350,6 +359,8 @@ def _to_gemini_contents(messages: list[dict]) -> tuple[str, list[Any]]:
                     args = json.loads(fn.get("arguments", "") or "{}")
                 except json.JSONDecodeError:
                     args = {}
+                if tc.get("id") and fn.get("name"):
+                    fn_name_by_call_id[tc["id"]] = fn["name"]
                 parts.append(
                     types.Part(
                         function_call=types.FunctionCall(
@@ -379,7 +390,9 @@ def _to_gemini_contents(messages: list[dict]) -> tuple[str, list[Any]]:
                     parts=[
                         types.Part(
                             function_response=types.FunctionResponse(
-                                name=msg.get("name", "") or tool_call_id,
+                                name=msg.get("name", "")
+                                or fn_name_by_call_id.get(tool_call_id, "")
+                                or tool_call_id,
                                 response=response_dict,
                                 id=tool_call_id or None,
                             )
@@ -417,5 +430,14 @@ def _to_gemini_contents(messages: list[dict]) -> tuple[str, list[Any]]:
             )
         else:
             merged.append(entry)
+
+    # Gemini expects the first content to be a user turn. Voice agents almost
+    # always open with ``first_message`` (an assistant/model greeting) —
+    # prepend a synthetic user turn so stricter backends don't 400.
+    if merged and merged[0].role == "model":
+        merged.insert(
+            0,
+            types.Content(role="user", parts=[types.Part(text="(call connected)")]),
+        )
 
     return "\n\n".join(system_parts), merged

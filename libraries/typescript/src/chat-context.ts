@@ -164,6 +164,15 @@ export class ChatContext {
     } else {
       this.items = maxMessages > 0 ? [...this.items.slice(-maxMessages)] : [];
     }
+
+    // Drop leading orphan tool results: a ``role: "tool"`` message whose
+    // paired assistant ``tool_calls`` turn was truncated away is a guaranteed
+    // 400 on the OpenAI API (bare tool_call_id with no preceding tool_calls
+    // message). Mirrors Python ``ChatContext.truncate``.
+    const start = this.items.length > 0 && this.items[0].role === "system" ? 1 : 0;
+    while (this.items.length > start && this.items[start].role === "tool") {
+      this.items.splice(start, 1);
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -201,6 +210,13 @@ export class ChatContext {
         if (system === undefined) {
           system = msg.content;
         }
+        continue;
+      }
+      if (msg.role === "tool") {
+        // The Anthropic Messages API only accepts user/assistant roles; a
+        // passed-through ``tool`` entry is a guaranteed 400. Fold the result
+        // into a user turn instead so the content survives the conversion.
+        messages.push({ role: "user", content: `[tool result] ${msg.content}` });
         continue;
       }
       messages.push({ role: msg.role, content: msg.content });

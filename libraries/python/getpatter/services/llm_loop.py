@@ -1216,6 +1216,16 @@ class LLMLoop:
                         self._usage_missing_count,
                     )
 
+            # Barge-in guard: every provider returns *cleanly* when
+            # ``cancel_event`` fires mid-stream, which can leave
+            # ``tool_calls_accumulated`` holding truncated JSON. Executing
+            # those calls would fire real side effects (transfer, hangup,
+            # booking) with empty/wrong arguments after the caller already
+            # interrupted — so bail out before tool dispatch. (TS is immune:
+            # the aborted fetch throws out of ``run()``.)
+            if cancel_event is not None and cancel_event.is_set():
+                return
+
             # If no tool calls, we're done
             if not has_tool_calls:
                 if has_after_llm_response:
@@ -1253,12 +1263,30 @@ class LLMLoop:
                 try:
                     arguments = json.loads(tc_data["function"]["arguments"])
                 except json.JSONDecodeError as _je:
+                    # Malformed argument JSON (truncated stream, model error).
+                    # Do NOT execute with guessed arguments — a side-effecting
+                    # tool (transfer, SMS, booking) must never fire with an
+                    # empty payload. Answer the model with an error envelope
+                    # instead, preserving tool_call_id pairing.
                     logger.warning(
-                        "Tool '%s' returned malformed arguments JSON (falling back to {}): %s",
+                        "Tool '%s' received malformed arguments JSON (skipping execution): %s",
                         tool_name,
                         _je,
                     )
-                    arguments = {}
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc_data["id"],
+                            "content": json.dumps(
+                                {
+                                    "error": "Tool arguments were not valid JSON; "
+                                    "the call was not executed. Retry with "
+                                    "well-formed arguments.",
+                                }
+                            ),
+                        }
+                    )
+                    continue
 
                 result = await self._execute_tool(tool_name, arguments, call_context)
                 messages.append(

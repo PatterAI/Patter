@@ -2821,8 +2821,12 @@ export class StreamHandler {
       return;
     }
 
-    // Push filtered text to history (after hook, so LLM sees redacted/modified text)
-    this.history.push({ role: 'user', text: filteredTranscript, timestamp: Date.now() });
+    // Push filtered text to history (after hook, so LLM sees redacted/modified text).
+    // Keep the reference: the LLM snapshot below must EXCLUDE this entry —
+    // ``LLMLoop.buildMessages`` replays history and then appends the current
+    // user text itself, so including it here sent the utterance twice per turn.
+    const ownUserEntry = { role: 'user', text: filteredTranscript, timestamp: Date.now() };
+    this.history.push(ownUserEntry);
 
     // Wave6B: record that the transcript is being committed to the LLM.
     // onUserTurnCompleted hook is not yet wired in TS — record 0 delay so EOU can still emit.
@@ -2835,13 +2839,12 @@ export class StreamHandler {
     // await is fast and does not head-of-line-block the drain loop in
     // practice, while preserving strict per-turn history/metrics ordering.
     await this.dispatchTask?.catch(() => {});
-    // Snapshot history at launch — AFTER this turn's own user push above, BEFORE
-    // any later transcript can mutate it. The dispatch runs in the background,
-    // so passing the LIVE ``this.history.entries`` would let a following
-    // transcript's user push (which happens on the drain loop while this turn is
-    // in flight) contaminate this turn's LLM prompt. Mirrors Python's
-    // ``list(self.conversation_history)`` snapshot.
-    const historySnapshot = [...this.history.entries];
+    // Snapshot history at launch — AFTER the previous turn's settle above (so
+    // its assistant entry is included), BEFORE any later transcript can mutate
+    // it, and WITHOUT this turn's own user entry (buildMessages appends the
+    // current user text itself — see ownUserEntry above). Mirrors Python's
+    // pre-append ``list(self.conversation_history)`` snapshot.
+    const historySnapshot = this.history.entries.filter((e) => e !== ownUserEntry);
     // Launch the turn as a tracked background task and RETURN immediately so
     // the transcript drain loop keeps running handleBargeIn against this LIVE
     // turn (the head-of-line-blocking fix). Parity with Python

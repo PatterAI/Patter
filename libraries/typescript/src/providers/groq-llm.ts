@@ -8,7 +8,11 @@
  */
 
 import type { LLMChunk, LLMProvider, LLMStreamOptions } from "../llm-loop";
-import { mergeAbortSignals } from "../llm-loop";
+import {
+  mergeAbortSignals,
+  createStreamIdleWatchdog,
+  LLM_STREAM_IDLE_TIMEOUT_MS,
+} from "../llm-loop";
 import { getLogger } from '../logger';
 import { VERSION } from '../version';
 import { PatterConnectionError } from '../errors';
@@ -140,6 +144,9 @@ export class GroqLLMProvider implements LLMProvider {
     if (this.stop !== undefined) body.stop = this.stop;
     if (tools) body.tools = tools;
 
+    // Idle watchdog (re-armed per chunk) instead of a whole-stream ceiling —
+    // see llm-loop.ts createStreamIdleWatchdog.
+    const idle = createStreamIdleWatchdog();
     const response = await fetch(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
@@ -148,7 +155,7 @@ export class GroqLLMProvider implements LLMProvider {
         'User-Agent': `getpatter/${VERSION}`,
       },
       body: JSON.stringify(body),
-      signal: mergeAbortSignals(opts?.signal, AbortSignal.timeout(30_000)),
+      signal: mergeAbortSignals(opts?.signal, idle.signal),
     });
 
     if (!response.ok) {
@@ -163,7 +170,18 @@ export class GroqLLMProvider implements LLMProvider {
       );
     }
 
-    yield* parseOpenAISseStream(response);
+    try {
+      yield* parseOpenAISseStream(response, idle.touch);
+    } catch (err) {
+      if (idle.fired && !opts?.signal?.aborted) {
+        throw new PatterConnectionError(
+          `Groq stream idle timeout — no data for ${LLM_STREAM_IDLE_TIMEOUT_MS / 1000}s`,
+        );
+      }
+      throw err;
+    } finally {
+      idle.clear();
+    }
   }
 }
 
@@ -179,6 +197,7 @@ export class GroqLLMProvider implements LLMProvider {
  */
 export async function* parseOpenAISseStream(
   response: Response,
+  onRead?: () => void,
 ): AsyncGenerator<LLMChunk, void, unknown> {
   const reader = response.body?.getReader();
   if (!reader) return;
@@ -189,6 +208,7 @@ export async function* parseOpenAISseStream(
   try {
     while (true) {
       const { done, value } = await reader.read();
+      onRead?.();
       if (done) break;
 
       buffer += decoder.decode(value, { stream: true });
@@ -235,9 +255,12 @@ export async function* parseOpenAISseStream(
         const usage = chunk.usage ?? chunk.x_groq?.usage;
         if (usage) {
           const cached = chunk.usage?.prompt_tokens_details?.cached_tokens ?? 0;
+          // ``prompt_tokens`` includes the cached portion — subtract so cached
+          // tokens aren't billed at both the input AND cache-read rate
+          // (mirrors OpenAILLMProvider and the Python providers).
           yield {
             type: 'usage',
-            inputTokens: usage.prompt_tokens,
+            inputTokens: Math.max(0, (usage.prompt_tokens ?? 0) - cached),
             outputTokens: usage.completion_tokens,
             cacheReadInputTokens: cached,
           };

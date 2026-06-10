@@ -4098,6 +4098,11 @@ class PipelineStreamHandler(StreamHandler):
             and self.conversation_history[-1].get("text") == transcript_text
         ):
             self.conversation_history.pop()
+        # Snapshot history BEFORE appending the current turn:
+        # ``LLMLoop._build_messages`` replays the given history and then
+        # appends ``user_text`` itself, so including the current turn here
+        # sent the user's utterance to the model twice on every turn.
+        history_snapshot = list(self.conversation_history)
         self.conversation_history.append(
             {"role": "user", "text": filtered_text, "timestamp": _turn_ts}
         )
@@ -4114,7 +4119,7 @@ class PipelineStreamHandler(StreamHandler):
             _close_endpoint_span()
             result = self._llm_loop.run(
                 filtered_text,
-                list(self.conversation_history),
+                history_snapshot,
                 call_ctx,
                 hook_executor=hook_executor,
                 hook_ctx=hook_ctx,

@@ -480,6 +480,48 @@ export function mergeAbortSignals(
   return controller.signal;
 }
 
+/** Default idle window for streaming LLM reads (no data for this long → abort). */
+export const LLM_STREAM_IDLE_TIMEOUT_MS = 30_000;
+
+/**
+ * Idle watchdog for streaming LLM reads. Aborts only when NO data has
+ * arrived for ``ms`` — call ``touch()`` on every chunk to re-arm. Replaces
+ * the previous fixed 30 s whole-stream ceiling, which chopped any turn that
+ * streamed longer than 30 s mid-utterance (long answers, slow models,
+ * tool-heavy iterations) and surfaced as an AbortError that the pipeline
+ * misclassified as a clean barge-in (so no spoken error fallback fired).
+ * Python providers have no whole-stream ceiling either, so this also
+ * restores behavioral parity.
+ */
+export function createStreamIdleWatchdog(ms: number = LLM_STREAM_IDLE_TIMEOUT_MS): {
+  readonly signal: AbortSignal;
+  touch(): void;
+  clear(): void;
+  readonly fired: boolean;
+} {
+  const controller = new AbortController();
+  let fired = false;
+  const onIdle = () => {
+    fired = true;
+    controller.abort();
+  };
+  let timer: ReturnType<typeof setTimeout> = setTimeout(onIdle, ms);
+  return {
+    signal: controller.signal,
+    touch(): void {
+      if (fired) return;
+      clearTimeout(timer);
+      timer = setTimeout(onIdle, ms);
+    },
+    clear(): void {
+      clearTimeout(timer);
+    },
+    get fired(): boolean {
+      return fired;
+    },
+  };
+}
+
 export interface LLMProvider {
   stream(
     messages: Array<Record<string, unknown>>,
@@ -627,11 +669,12 @@ export class OpenAILLMProvider implements LLMProvider {
       body.tools = tools;
     }
 
-    // Combine the caller's per-turn cancel signal (barge-in) with our
-    // 30 s ceiling. ``AbortSignal.any`` aborts as soon as ANY input
-    // signal fires, so a barge-in that arrives mid-fetch tears the
-    // connection down immediately instead of waiting for the timeout.
-    const signal = mergeAbortSignals(opts?.signal, AbortSignal.timeout(30_000));
+    // Combine the caller's per-turn cancel signal (barge-in) with an IDLE
+    // watchdog (re-armed on every chunk). ``AbortSignal.any`` aborts as soon
+    // as ANY input signal fires, so a barge-in that arrives mid-fetch tears
+    // the connection down immediately instead of waiting for the timeout.
+    const idle = createStreamIdleWatchdog();
+    const signal = mergeAbortSignals(opts?.signal, idle.signal);
     const response = await fetch(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
@@ -662,6 +705,7 @@ export class OpenAILLMProvider implements LLMProvider {
     try {
       while (true) {
         const { done, value } = await reader.read();
+        idle.touch();
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
@@ -733,7 +777,19 @@ export class OpenAILLMProvider implements LLMProvider {
           }
         }
       }
+    } catch (err) {
+      // Distinguish the idle watchdog from a caller abort (barge-in): the
+      // pipeline treats AbortError as a clean cancel and stays silent, so a
+      // genuine stall must surface as a connection error to trigger the LLM
+      // fallback chain / spoken error message.
+      if (idle.fired && !opts?.signal?.aborted) {
+        throw new PatterConnectionError(
+          `LLM stream idle timeout — no data for ${LLM_STREAM_IDLE_TIMEOUT_MS / 1000}s`,
+        );
+      }
+      throw err;
     } finally {
+      idle.clear();
       reader.cancel().catch(() => {});
     }
   }

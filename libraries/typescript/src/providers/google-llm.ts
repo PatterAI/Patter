@@ -17,7 +17,11 @@
  */
 
 import type { LLMChunk, LLMProvider, LLMStreamOptions } from "../llm-loop";
-import { mergeAbortSignals } from "../llm-loop";
+import {
+  mergeAbortSignals,
+  createStreamIdleWatchdog,
+  LLM_STREAM_IDLE_TIMEOUT_MS,
+} from "../llm-loop";
 import { getLogger } from '../logger';
 import { PatterConnectionError } from '../errors';
 
@@ -138,11 +142,14 @@ export class GoogleLLMProvider implements LLMProvider {
       `${this.baseUrl}/models/${encodeURIComponent(this.model)}:streamGenerateContent?alt=sse` +
       `&key=${encodeURIComponent(this.apiKey)}`;
 
+    // Idle watchdog (re-armed per chunk) instead of a whole-stream ceiling —
+    // see llm-loop.ts createStreamIdleWatchdog.
+    const idle = createStreamIdleWatchdog();
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-      signal: mergeAbortSignals(opts?.signal, AbortSignal.timeout(30_000)),
+      signal: mergeAbortSignals(opts?.signal, idle.signal),
     });
 
     if (!response.ok) {
@@ -170,6 +177,7 @@ export class GoogleLLMProvider implements LLMProvider {
     try {
       while (true) {
         const { done, value } = await reader.read();
+        idle.touch();
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
@@ -228,16 +236,29 @@ export class GoogleLLMProvider implements LLMProvider {
           }
         }
       }
+    } catch (err) {
+      if (idle.fired && !opts?.signal?.aborted) {
+        throw new PatterConnectionError(
+          `Gemini stream idle timeout — no data for ${LLM_STREAM_IDLE_TIMEOUT_MS / 1000}s`,
+        );
+      }
+      throw err;
     } finally {
+      idle.clear();
       reader.cancel().catch(() => {});
     }
 
     if (lastUsage) {
+      // ``promptTokenCount`` INCLUDES the cached portion; the usage chunk
+      // contract bills ``inputTokens`` at the full input rate and
+      // ``cacheReadInputTokens`` at the cache rate, so subtract to avoid
+      // double-billing cached tokens (mirrors the OpenAI providers).
+      const cached = lastUsage.cachedContentTokenCount ?? 0;
       yield {
         type: 'usage',
-        inputTokens: lastUsage.promptTokenCount,
+        inputTokens: Math.max(0, (lastUsage.promptTokenCount ?? 0) - cached),
         outputTokens: lastUsage.candidatesTokenCount,
-        cacheReadInputTokens: lastUsage.cachedContentTokenCount ?? 0,
+        cacheReadInputTokens: cached,
       };
     }
 
@@ -278,6 +299,11 @@ function toGeminiContents(
 ): { systemInstruction: string; contents: GeminiContent[] } {
   const systemParts: string[] = [];
   const contents: GeminiContent[] = [];
+  // tool_call_id → function name, harvested from assistant turns so the
+  // paired functionResponse can carry the real function name (Gemini requires
+  // FunctionResponse.name to match FunctionCall.name; tool messages only
+  // carry the call id). Mirrors the Python provider.
+  const fnNameByCallId = new Map<string, string>();
 
   for (const rawMsg of messages as OpenAIStyleMessage[]) {
     const role = rawMsg.role;
@@ -309,6 +335,7 @@ function toGeminiContents(
         } catch {
           args = {};
         }
+        if (tc.id && tc.function?.name) fnNameByCallId.set(tc.id, tc.function.name);
         parts.push({
           functionCall: {
             name: tc.function?.name ?? '',
@@ -342,7 +369,11 @@ function toGeminiContents(
         parts: [
           {
             functionResponse: {
-              name: rawMsg.name ?? rawMsg.tool_call_id ?? '',
+              name:
+                rawMsg.name ??
+                fnNameByCallId.get(rawMsg.tool_call_id ?? '') ??
+                rawMsg.tool_call_id ??
+                '',
               response,
               id: rawMsg.tool_call_id,
             },
@@ -368,6 +399,13 @@ function toGeminiContents(
     } else {
       merged.push(entry);
     }
+  }
+
+  // Gemini expects the first content to be a user turn. Voice agents almost
+  // always open with ``firstMessage`` (a model greeting) — prepend a
+  // synthetic user turn so stricter backends don't 400. Mirrors Python.
+  if (merged.length > 0 && merged[0].role === 'model') {
+    merged.unshift({ role: 'user', parts: [{ text: '(call connected)' }] });
   }
 
   return { systemInstruction: systemParts.join('\n\n'), contents: merged };

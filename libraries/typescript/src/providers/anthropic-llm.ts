@@ -19,7 +19,11 @@
  */
 
 import type { LLMChunk, LLMProvider, LLMStreamOptions } from "../llm-loop";
-import { mergeAbortSignals } from "../llm-loop";
+import {
+  mergeAbortSignals,
+  createStreamIdleWatchdog,
+  LLM_STREAM_IDLE_TIMEOUT_MS,
+} from "../llm-loop";
 import { getLogger } from '../logger';
 import { PatterConnectionError } from '../errors';
 
@@ -214,11 +218,15 @@ export class AnthropicLLMProvider implements LLMProvider {
       headers['anthropic-beta'] = PROMPT_CACHING_BETA;
     }
 
+    // Idle watchdog (re-armed per chunk) instead of a whole-stream ceiling:
+    // a 30 s total cap chopped long turns mid-utterance and the resulting
+    // AbortError was misclassified as a clean barge-in upstream.
+    const idle = createStreamIdleWatchdog();
     const response = await fetch(this.url, {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
-      signal: mergeAbortSignals(opts?.signal, AbortSignal.timeout(30_000)),
+      signal: mergeAbortSignals(opts?.signal, idle.signal),
     });
 
     if (!response.ok) {
@@ -252,6 +260,7 @@ export class AnthropicLLMProvider implements LLMProvider {
     try {
       while (true) {
         const { done, value } = await reader.read();
+        idle.touch();
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
@@ -282,6 +291,22 @@ export class AnthropicLLMProvider implements LLMProvider {
             event = JSON.parse(data);
           } catch {
             continue;
+          }
+
+          // Anthropic streams can deliver an in-band error event (e.g.
+          // overloaded_error) before closing. Without this branch the stream
+          // ends as if it completed — truncated reply, no failover, no
+          // spoken llmErrorMessage. (The Python provider is safe: the
+          // official SDK raises.)
+          if (event.type === 'error') {
+            const errPayload = (event as unknown as { error?: { type?: string; message?: string } })
+              .error;
+            const detail = `${errPayload?.type ?? 'unknown'}: ${errPayload?.message ?? ''}`.slice(
+              0,
+              200,
+            );
+            getLogger().error(`Anthropic in-stream error event: ${detail}`);
+            throw new PatterConnectionError(`Anthropic stream error — ${detail}`);
           }
 
           // Capture input + prompt-cache token counts from the opening message event.
@@ -336,7 +361,15 @@ export class AnthropicLLMProvider implements LLMProvider {
           }
         }
       }
+    } catch (err) {
+      if (idle.fired && !opts?.signal?.aborted) {
+        throw new PatterConnectionError(
+          `Anthropic stream idle timeout — no data for ${LLM_STREAM_IDLE_TIMEOUT_MS / 1000}s`,
+        );
+      }
+      throw err;
     } finally {
+      idle.clear();
       reader.cancel().catch(() => {});
     }
 
@@ -458,6 +491,14 @@ function toAnthropicMessages(
       }
       continue;
     }
+  }
+
+  // The Messages API requires the first message to use the ``user`` role.
+  // Voice agents almost always open with ``firstMessage``, so history starts
+  // with an assistant greeting — prepend a synthetic user turn so every turn
+  // of the call doesn't 400. Mirrors the Python provider.
+  if (out.length > 0 && out[0].role === 'assistant') {
+    out.unshift({ role: 'user', content: '(call connected)' });
   }
 
   return { system: systemParts.join('\n\n'), messages: out };

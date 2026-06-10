@@ -46,7 +46,7 @@
 
 import { createHash } from 'node:crypto';
 import type { LLMChunk, LLMProvider, LLMStreamOptions } from '../llm-loop';
-import { mergeAbortSignals } from '../llm-loop';
+import { mergeAbortSignals, createStreamIdleWatchdog } from '../llm-loop';
 import { parseOpenAISseStream } from '../providers/groq-llm';
 import { PatterConnectionError } from '../errors';
 import { getLogger } from '../logger';
@@ -409,11 +409,16 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
     const callee = opts?.callee;
     const body = this.buildBody(messages, tools, callId);
 
+    // Idle watchdog with the configured window (re-armed per chunk):
+    // agent runtimes legitimately think for a long time before the first
+    // token, and long streamed replies must not be chopped at a fixed
+    // whole-stream ceiling. The window still bounds pre-first-byte time.
+    const idle = createStreamIdleWatchdog(this.timeoutMs);
     const response = await fetch(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: this.buildHeaders(callId, caller, callee),
       body: JSON.stringify(body),
-      signal: mergeAbortSignals(opts?.signal, AbortSignal.timeout(this.timeoutMs)),
+      signal: mergeAbortSignals(opts?.signal, idle.signal),
     });
 
     if (!response.ok) {
@@ -429,7 +434,18 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
       );
     }
 
-    yield* parseOpenAISseStream(response);
+    try {
+      yield* parseOpenAISseStream(response, idle.touch);
+    } catch (err) {
+      if (idle.fired && !opts?.signal?.aborted) {
+        throw new PatterConnectionError(
+          `LLM stream idle timeout — no data for ${Math.round(this.timeoutMs / 1000)}s`,
+        );
+      }
+      throw err;
+    } finally {
+      idle.clear();
+    }
   }
 }
 
