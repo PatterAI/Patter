@@ -4329,7 +4329,10 @@ export class StreamHandler {
           startMs: this.turnPlaybackTotalMs,
         });
       }
-      if (this.aec) this.aec.pushFarEnd(chunk);
+      // Far-end tap mirrors the direct send path: SKIPPED on the
+      // carrier-native fast path where these are mulaw wire bytes that
+      // would corrupt the int16-PCM-16k AEC reference.
+      if (this.aec && !this.ttsOutputFormatNativeForCarrier) this.aec.pushFarEnd(chunk);
       const encoded = this.encodePipelineAudio(chunk);
       this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
       this.trackOutboundPlayback(chunk.length);
@@ -4716,7 +4719,10 @@ export class StreamHandler {
       this.metricsAcc.recordTtsFirstByte();
       await this.emitAudioOut();
     }
-    if (this.aec) {
+    // Far-end tap mirrors the direct send path: SKIPPED on the
+    // carrier-native fast path where these are mulaw wire bytes that
+    // would corrupt the int16-PCM-16k AEC reference.
+    if (this.aec && !this.ttsOutputFormatNativeForCarrier) {
       this.aec.pushFarEnd(processedAudio);
     }
     const encoded = this.encodePipelineAudio(processedAudio);
