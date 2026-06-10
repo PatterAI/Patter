@@ -178,6 +178,15 @@ class CallMetricsAccumulator:
         # observable cost matches TS metrics.ts behaviour.
         self._total_llm_cost: float = 0.0
 
+        # --- Preemptive-generation counters (pipeline mode, opt-in) ---
+        # Hits = speculative turns released on a matching final transcript;
+        # misses = speculations started but discarded (mismatched final,
+        # barge-in, replaced by a newer interim, buffer overflow). Surfaced
+        # on the final CallMetrics. Parity with TS ``_preemptiveHits`` /
+        # ``_preemptiveMisses``.
+        self._preemptive_hits: int = 0
+        self._preemptive_misses: int = 0
+
     # ---- EventBus attachment ----
 
     def attach_event_bus(self, bus: "EventBus") -> None:
@@ -766,6 +775,17 @@ class CallMetricsAccumulator:
             cache_write_tokens=cache_write_tokens,
         )
 
+    def record_preemptive_hit(self) -> None:
+        """Count a preemptive (speculative) turn RELEASED on a matching final
+        transcript — the buffered LLM+TTS work became the real turn."""
+        self._preemptive_hits += 1
+
+    def record_preemptive_miss(self) -> None:
+        """Count a preemptive (speculative) turn that was started but
+        discarded without release (mismatched final, barge-in during
+        speculation, replaced by a newer interim, or buffer overflow)."""
+        self._preemptive_misses += 1
+
     def set_actual_telephony_cost(self, cost: float) -> None:
         """Set the actual telephony cost from the provider API (post-call).
 
@@ -826,6 +846,8 @@ class CallMetricsAccumulator:
             tts_model=self.tts_model,
             llm_model=self._llm_model,
             error_code=self._error_code,
+            preemptive_hits=self._preemptive_hits,
+            preemptive_misses=self._preemptive_misses,
         )
 
         if self._event_bus is not None:

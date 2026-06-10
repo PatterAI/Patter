@@ -213,6 +213,108 @@ def _is_stt_hallucination(text: str) -> bool:
     return len(parts) > 1 and all(p in _STT_HALLUCINATIONS for p in parts)
 
 
+def _ends_with_sentence_final_punct(text: str) -> bool:
+    """True when *text* (whitespace-stripped) ends with sentence-final
+    punctuation — the fast-path confidence signal for preemptive generation.
+    Parity with TS ``endsWithSentenceFinalPunct``."""
+    stripped = (text or "").rstrip()
+    return bool(stripped) and stripped[-1] in _SENTENCE_ENDERS
+
+
+def _speculation_matches(interim: str, final: str) -> bool:
+    """Whether a committed FINAL transcript matches the INTERIM a speculative
+    turn was generated from, i.e. the speculation can be released.
+
+    Both sides are normalized via :func:`_normalize_for_echo` (lowercase,
+    punctuation stripped, whitespace collapsed), so a final that merely adds
+    trailing punctuation / capitalization to the interim still matches.
+    Parity with TS ``speculationMatches``.
+    """
+    a = _normalize_for_echo(interim)
+    b = _normalize_for_echo(final)
+    return bool(a) and a == b
+
+
+#: Hard cap (seconds of playout) on TTS audio buffered by a speculative turn.
+#: Overflow aborts the speculation — an unbounded buffer on a long LLM reply
+#: would hold tens of MB per call. ~15 s covers any reasonable spoken reply
+#: prefix while the user finishes their utterance. Parity with TS
+#: ``PREEMPTIVE_MAX_BUFFER_MS``.
+_PREEMPTIVE_MAX_BUFFER_S = 15.0
+
+
+class _SpeculativeTurn:
+    """In-flight PREEMPTIVE GENERATION state for one speculated user turn.
+
+    Created by ``PipelineStreamHandler._start_speculation`` on a confident
+    interim transcript. The owning task runs the LLM + sentence-chunked TTS
+    but HOLDS all audio in ``buffered`` until the final transcript commits:
+
+    * release (final matches): ``released=True`` + ``release_event`` set —
+      the task flushes ``buffered`` to the carrier and continues live; it IS
+      the real turn from then on (history/metrics recorded by the releaser
+      and the task).
+    * discard (mismatch / barge-in / replaced / overflow / teardown):
+      ``cancel_event`` set — the task unwinds without ever touching the
+      carrier, conversation history, or per-turn metrics.
+
+    Mirrors TS ``SpeculativeTurn``.
+    """
+
+    __slots__ = (
+        "interim_text",
+        "norm_text",
+        "cancel_event",
+        "release_event",
+        "released",
+        "flushed",
+        "failed",
+        "interrupted",
+        "final_text",
+        "buffered",
+        "buffered_bytes",
+        "response_parts",
+        "first_tts_chunk",
+        "llm_first_token_recorded",
+        "task",
+    )
+
+    def __init__(self, interim_text: str) -> None:
+        self.interim_text = interim_text
+        self.norm_text = _normalize_for_echo(interim_text)
+        # Per-speculation LLM cancel signal (same machinery the live path
+        # hands to ``LLMLoop.run``). On release this becomes the handler's
+        # ``_llm_cancel_event`` so the existing barge-in cancel paths reach
+        # the speculative stream.
+        self.cancel_event: asyncio.Event = asyncio.Event()
+        # Set once the commit-time decision is known (either way); the task
+        # parks on it when generation finishes before the final commits.
+        self.release_event: asyncio.Event = asyncio.Event()
+        self.released = False
+        # True once buffered audio has been flushed to the carrier (release).
+        self.flushed = False
+        # True when the speculation can no longer be released (LLM error,
+        # buffer overflow, internal failure) — the commit path must dispatch
+        # normally.
+        self.failed = False
+        # Barge-in after release cut the live continuation short.
+        self.interrupted = False
+        # Stamped at release with the committed final transcript.
+        self.final_text = ""
+        # Per-sentence audio held until release: (sentence_text, chunks).
+        # The chunks list is registered BEFORE synthesis so a mid-sentence
+        # release flushes the partial sentence too.
+        self.buffered: list[tuple[str, list[bytes]]] = []
+        self.buffered_bytes = 0
+        self.response_parts: list[str] = []
+        # Same single-element-list flag shape ``_synthesize_sentence`` uses,
+        # shared across the buffered flush and the live continuation so the
+        # per-turn first-byte metric stays idempotent.
+        self.first_tts_chunk: list[bool] = [True]
+        self.llm_first_token_recorded = False
+        self.task: asyncio.Task | None = None
+
+
 def _summarize_realtime_error(ev_data: Any) -> str:
     """Build a PII-free one-line summary of a Realtime ``error`` event.
 
@@ -2920,6 +3022,32 @@ class PipelineStreamHandler(StreamHandler):
         # → base64, no resample/encode). Parity with TS
         # ``StreamHandler.ttsOutputFormatNativeForCarrier``.
         self._tts_output_format_native_for_carrier: bool = False
+        # --- PREEMPTIVE GENERATION (opt-in, built-in LLM loop only) ---
+        # When enabled, a confident INTERIM transcript starts a speculative
+        # LLM+TTS dispatch whose audio is HELD in memory; the final
+        # transcript's commit either releases it (matching text — the
+        # already-generated audio flushes immediately) or discards it and
+        # dispatches normally. See ``_note_interim_transcript`` /
+        # ``_try_release_speculation``. Parity with TS ``preemptiveEnabled``.
+        self._preemptive_enabled: bool = bool(
+            getattr(agent, "preemptive_generation", False)
+        )
+        try:
+            self._preemptive_min_stable_s: float = max(
+                0.0, float(getattr(agent, "preemptive_min_stable_ms", 300)) / 1000.0
+            )
+        except (TypeError, ValueError):
+            self._preemptive_min_stable_s = 0.3
+        # The single in-flight speculation (at most one). ``None`` when idle,
+        # when discarded, or once released (a released speculation becomes
+        # the live turn tracked by ``_dispatch_task`` instead).
+        self._speculation: _SpeculativeTurn | None = None
+        # Interim-stability tracking: normalized text of the newest interim
+        # plus the one-shot watcher that starts a speculation once the text
+        # has been unchanged for ``_preemptive_min_stable_s``.
+        self._interim_norm: str = ""
+        self._interim_text: str = ""
+        self._interim_stable_task: asyncio.Task | None = None
 
     async def start(self) -> None:
         """Initialize STT/TTS providers, hooks, and start the STT receive loop."""
@@ -4727,6 +4855,11 @@ class PipelineStreamHandler(StreamHandler):
                 if not (
                     (transcript.is_final or transcript.speech_final) and transcript.text
                 ):
+                    # PREEMPTIVE GENERATION: a confident interim may start a
+                    # speculative LLM+TTS dispatch (audio held until the final
+                    # commits). No-op unless ``agent.preemptive_generation``.
+                    if transcript.text:
+                        await self._note_interim_transcript(transcript.text)
                     continue
                 if not self._commit_transcript(transcript.text):
                     # Final transcript dropped (dedup / hallucination /
@@ -4740,6 +4873,11 @@ class PipelineStreamHandler(StreamHandler):
                         self.metrics.anchor_user_speech_start()
                     continue
 
+                # A final transcript committed — interim-stability tracking
+                # for this utterance is over (prevents a stale stability
+                # watcher from speculating on the just-answered utterance).
+                self._reset_interim_tracking()
+
                 # Decouple dispatch from the receive loop: run the turn as a
                 # SINGLE tracked task so the ``async for`` keeps draining
                 # transcripts during a long (30-90 s) agent-runtime turn and
@@ -4748,6 +4886,13 @@ class PipelineStreamHandler(StreamHandler):
                 # first so exactly one dispatch is in flight and the per-turn
                 # conversation_history / metrics ordering is preserved.
                 await self._await_dispatch_settle()
+                # PREEMPTIVE GENERATION: when a speculative turn matching this
+                # final is in flight, RELEASE it (its task becomes the live
+                # dispatch) instead of starting a fresh one; a mismatch
+                # discards the speculation and falls through to the normal
+                # dispatch below.
+                if await self._try_release_speculation(transcript.text):
+                    continue
                 self._dispatch_task = asyncio.create_task(
                     self._dispatch_turn(transcript.text)
                 )
@@ -4755,6 +4900,11 @@ class PipelineStreamHandler(StreamHandler):
         except Exception as exc:
             logger.exception("Pipeline STT loop error: %s", exc)
         finally:
+            # No more transcripts can arrive — a still-pending speculation
+            # will never see its final, so tear it down (teardown, not a
+            # miss) before settling the last dispatch.
+            self._reset_interim_tracking()
+            await self._abort_speculation(reason="stt_loop_end", count_miss=False)
             # Return only once the last dispatch fully settles, so callers and
             # tests that inspect state right after ``await _stt_loop()`` still
             # observe completed turn effects (the loop no longer blocks DURING
@@ -4797,6 +4947,719 @@ class PipelineStreamHandler(StreamHandler):
             # sole launcher and awaits here first, but be defensive).
             if self._dispatch_task is task:
                 self._dispatch_task = None
+
+    # ------------------------------------------------------------------
+    # PREEMPTIVE GENERATION (opt-in) — speculative dispatch on a confident
+    # interim transcript; commit-or-discard at end of utterance. Mirrors TS
+    # ``noteInterimTranscript`` / ``tryReleaseSpeculation`` and LiveKit's
+    # ``preemptive_generation``.
+    # ------------------------------------------------------------------
+
+    def _can_speculate(self) -> bool:
+        """Whether a speculative dispatch may start right now.
+
+        Built-in LLM loop only (an ``on_message`` handler may have external
+        side effects per invocation, so it is never run speculatively), and
+        only while the agent is idle: not speaking (an interim during agent
+        speech is barge-in material, not a next turn) and no turn dispatch
+        in flight (single-in-flight contract).
+        """
+        if not getattr(self, "_preemptive_enabled", False):
+            return False
+        if self.on_message is not None or self._llm_loop is None:
+            return False
+        if self._is_speaking:
+            return False
+        dispatch = self._dispatch_task
+        return dispatch is None or dispatch.done()
+
+    def _speculation_input_ok(self, text: str) -> bool:
+        """Read-only mirror of the :meth:`_commit_transcript` filters.
+
+        A candidate interim must pass the same hallucination / echo /
+        duplicate checks a final would face at commit time — otherwise we
+        would speculate on text whose final is guaranteed to be dropped.
+        Unlike ``_commit_transcript`` this NEVER mutates the dedup state.
+        """
+        normalised = text.strip().lower()
+        stripped = normalised.rstrip(".,!?;: ").strip()
+        if stripped in _STT_HALLUCINATIONS or stripped == "":
+            return False
+        if (
+            getattr(self, "_forward_stt_while_speaking", False)
+            and getattr(self, "_is_speaking", False)
+            and _looks_like_echo(text, getattr(self, "_current_agent_spoken_text", ""))
+        ):
+            return False
+        # The matching final would be dropped as a duplicate at commit time.
+        since_last = time.time() - self._last_commit_at
+        if since_last < 2.0 and normalised == self._last_commit_text:
+            return False
+        return True
+
+    async def _note_interim_transcript(self, text: str) -> None:
+        """Track an interim transcript and start a speculation when it
+        qualifies: (a) it ends with sentence-final punctuation (immediate),
+        or (b) it has been unchanged for ``preemptive_min_stable_ms``
+        (one-shot stability watcher). No-op when preemptive generation is
+        disabled or the handler cannot speculate right now."""
+        if not getattr(self, "_preemptive_enabled", False):
+            return
+        norm = _normalize_for_echo(text)
+        if not norm:
+            return
+        spec = self._speculation
+        if spec is not None and spec.norm_text == norm and not spec.failed:
+            return  # already speculating on this exact utterance
+        if not self._can_speculate():
+            self._cancel_interim_stability_task()
+            self._interim_norm = ""
+            return
+        if not self._speculation_input_ok(text):
+            return
+        if _ends_with_sentence_final_punct(text):
+            # High-confidence interim — speculate immediately (replacing any
+            # stale speculation on older text).
+            self._cancel_interim_stability_task()
+            self._interim_norm = norm
+            self._interim_text = text
+            await self._start_speculation(text)
+            return
+        if norm != self._interim_norm:
+            # Text changed — restart the stability window.
+            self._interim_norm = norm
+            self._interim_text = text
+            self._cancel_interim_stability_task()
+            if self._preemptive_min_stable_s <= 0:
+                await self._start_speculation(text)
+                return
+            self._interim_stable_task = asyncio.create_task(
+                self._interim_stability_watch(norm)
+            )
+
+    async def _interim_stability_watch(self, norm: str) -> None:
+        """One-shot watcher: after ``preemptive_min_stable_ms`` of the interim
+        text being unchanged, start the speculation (re-validating every gate
+        — the world may have moved on while we slept)."""
+        try:
+            await asyncio.sleep(self._preemptive_min_stable_s)
+        except asyncio.CancelledError:
+            return
+        if self._interim_norm != norm:
+            return  # a newer interim superseded this one
+        spec = self._speculation
+        if spec is not None and spec.norm_text == norm and not spec.failed:
+            return
+        if not self._can_speculate() or not self._speculation_input_ok(
+            self._interim_text
+        ):
+            return
+        try:
+            await self._start_speculation(self._interim_text)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("Preemptive: stability-triggered speculation failed")
+
+    def _cancel_interim_stability_task(self) -> None:
+        """Cancel the pending interim-stability watcher, if any. Idempotent;
+        safe from fixtures built via ``object.__new__`` (no ``__init__``)."""
+        task = getattr(self, "_interim_stable_task", None)
+        if task is not None and not task.done():
+            task.cancel()
+        self._interim_stable_task = None
+
+    def _reset_interim_tracking(self) -> None:
+        """Drop interim-stability state — called once a final commits (the
+        utterance is decided) and on teardown."""
+        self._cancel_interim_stability_task()
+        self._interim_norm = ""
+        self._interim_text = ""
+
+    async def _start_speculation(self, interim_text: str) -> None:
+        """Launch a speculative dispatch for ``interim_text``, replacing (and
+        counting as a miss) any previous speculation on different text."""
+        await self._abort_speculation(reason="replaced_by_newer_interim")
+        spec = _SpeculativeTurn(interim_text)
+        self._speculation = spec
+        spec.task = asyncio.create_task(self._run_speculative_dispatch(spec))
+        logger.debug(
+            "Preemptive: speculation started on interim %r",
+            sanitize_log_value(interim_text[:60]),
+        )
+
+    async def _abort_speculation(
+        self, *, reason: str, count_miss: bool = True
+    ) -> None:
+        """Discard the current speculation (if any): signal cancel, await the
+        task's unwind (bounded), and count a miss unless this is teardown.
+        The speculative task never touched history / carrier / per-turn
+        metrics, so there is nothing to roll back. Idempotent."""
+        spec = getattr(self, "_speculation", None)
+        if spec is None:
+            return
+        # Deregister synchronously so a concurrent commit cannot release a
+        # speculation that is already being torn down.
+        self._speculation = None
+        spec.failed = True
+        spec.cancel_event.set()
+        # Wake a task parked on the commit decision; ``released`` stays False
+        # so it unwinds as a discard.
+        spec.release_event.set()
+        task = spec.task
+        if task is not None and not task.done():
+            try:
+                await asyncio.wait_for(task, timeout=5.0)
+            except asyncio.TimeoutError:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            except (asyncio.CancelledError, Exception):  # pragma: no cover
+                pass
+        if (
+            count_miss
+            and self.metrics is not None
+            and hasattr(self.metrics, "record_preemptive_miss")
+        ):
+            self.metrics.record_preemptive_miss()
+        logger.debug("Preemptive: speculation discarded (%s)", reason)
+
+    def _fail_speculation_inline(self, spec: _SpeculativeTurn, reason: str) -> None:
+        """Self-abort from WITHIN the speculative task (LLM error, buffer
+        overflow, afterTranscribe veto). Marks the speculation unreleasable
+        and deregisters it so the commit path dispatches normally. Never
+        awaits (the caller IS the task)."""
+        spec.failed = True
+        spec.cancel_event.set()
+        spec.release_event.set()
+        if self._speculation is spec:
+            self._speculation = None
+        if self.metrics is not None and hasattr(
+            self.metrics, "record_preemptive_miss"
+        ):
+            self.metrics.record_preemptive_miss()
+        logger.debug("Preemptive: speculation failed (%s)", reason)
+
+    async def _try_release_speculation(self, final_text: str) -> bool:
+        """Commit-time decision for the in-flight speculation.
+
+        Returns ``True`` when the speculation was RELEASED — the caller must
+        NOT dispatch a normal turn (the speculative task is now the live
+        turn, tracked via ``_dispatch_task``). Returns ``False`` when there
+        was no usable speculation (none in flight, failed, or mismatched —
+        the mismatch is discarded here) and the normal dispatch must run.
+
+        On release, all commit-point bookkeeping the normal path performs in
+        ``_dispatch_turn`` happens HERE — metrics anchors (so TTFT/latency
+        reflect user-perceived timing from the REAL final-transcript commit),
+        the conversation-history user push (final transcript text), and the
+        ``on_transcript`` callback — exactly once per turn.
+        """
+        spec = getattr(self, "_speculation", None)
+        if spec is None:
+            return False
+        if (
+            spec.failed
+            or spec.cancel_event.is_set()
+            or not _speculation_matches(spec.interim_text, final_text)
+        ):
+            await self._abort_speculation(reason="final_mismatch")
+            return False
+
+        # ---- RELEASE ----
+        self._speculation = None
+        spec.final_text = final_text
+        # Point the live cancel machinery at the speculative stream so the
+        # existing barge-in paths (``_do_cancel_for_barge_in`` and the VAD
+        # legacy cancel, which set ``self._llm_cancel_event``) tear it down
+        # exactly like a normal turn's stream.
+        self._llm_cancel_event = spec.cancel_event
+
+        if self.metrics is not None:
+            if hasattr(self.metrics, "record_preemptive_hit"):
+                self.metrics.record_preemptive_hit()
+            self.metrics.start_turn_if_idle()
+            self.metrics.record_vad_stop()
+            self.metrics.record_stt_complete(final_text)
+            self.metrics.record_stt_final_timestamp()
+        with start_span(
+            SPAN_STT,
+            {
+                "getpatter.stt.text_len": len(final_text),
+                "patter.call.id": self.call_id,
+            },
+        ):
+            pass
+        logger.debug("User: %s", sanitize_log_value(final_text))
+
+        # History/transcript record the FINAL transcript text as the user
+        # message (the LLM consumed the matching interim — normalized-equal
+        # by definition of the release gate).
+        self.transcript_entries.append({"role": "user", "text": final_text})
+        self.conversation_history.append(
+            {"role": "user", "text": final_text, "timestamp": self._last_commit_at}
+        )
+        if self.on_transcript:
+            await self.on_transcript(
+                {
+                    "role": "user",
+                    "text": final_text,
+                    "call_id": self.call_id,
+                    "history": list(self.conversation_history),
+                }
+            )
+        if self.metrics is not None:
+            self.metrics.record_on_user_turn_completed_delay(0.0)
+            self.metrics.record_turn_committed()
+
+        spec.released = True
+        spec.release_event.set()
+        # The speculative task is now the live turn — single-in-flight
+        # semantics keep holding through ``_await_dispatch_settle``.
+        self._dispatch_task = spec.task
+        logger.info(
+            "Preemptive: speculation RELEASED on matching final %r",
+            sanitize_log_value(final_text[:60]),
+        )
+        return True
+
+    def _spec_buffer_seconds(self, spec: _SpeculativeTurn) -> float:
+        """Playout duration of the audio a speculation has buffered so far.
+        Same bytes-per-second model as ``_track_outbound_playback``."""
+        bytes_per_s = (
+            8_000.0
+            if getattr(self.audio_sender, "_input_is_mulaw_8k", False)
+            else 32_000.0
+        )
+        return spec.buffered_bytes / bytes_per_s
+
+    async def _spec_send_chunk(
+        self, spec: _SpeculativeTurn, processed_audio: bytes
+    ) -> None:
+        """Push one (already hook-processed) audio chunk of a RELEASED
+        speculation to the carrier — the same per-chunk bookkeeping
+        ``_synthesize_sentence`` performs on the live path."""
+        if spec.first_tts_chunk[0]:
+            spec.first_tts_chunk[0] = False
+            if self.metrics is not None:
+                self.metrics.record_tts_first_byte()
+            await self._emit_audio_out()
+        if self._event_bus is not None:
+            self._event_bus.emit("tts_chunk", {"bytes": len(processed_audio)})
+        if self._aec is not None:
+            self._aec.push_far_end(processed_audio)
+        await self.audio_sender.send_audio(processed_audio)
+        self._track_outbound_playback(len(processed_audio))
+        self._mark_first_audio_sent()
+
+    async def _spec_ensure_flushed(self, spec: _SpeculativeTurn) -> None:
+        """Idempotent release flush: take the floor (``_begin_speaking``),
+        stamp the post-commit LLM markers, and stream every buffered sentence
+        to the carrier in order. After this the speculative task continues as
+        a plain live turn. No-op until the speculation is released."""
+        if spec.flushed or not spec.released:
+            return
+        spec.flushed = True
+        await self._begin_speaking()
+        # Post-commit metric markers: the user-perceived TTFT for a released
+        # speculation is "final commit → audio", so the first-token /
+        # first-sentence stamps are recorded NOW (post ``record_turn_
+        # committed``) rather than back when the speculative stream actually
+        # produced them.
+        if spec.response_parts:
+            if self.metrics is not None and not spec.llm_first_token_recorded:
+                self.metrics.record_llm_first_token()
+            if not spec.llm_first_token_recorded:
+                spec.llm_first_token_recorded = True
+                await self._emit_llm_first_token(
+                    llm_provider=self._infer_llm_provider(),
+                    model=self.agent.model,
+                )
+            # Echo-guard reference for barge-in comparisons during the live
+            # continuation (``_begin_speaking`` reset it).
+            self._current_agent_spoken_text = "".join(spec.response_parts)
+        if spec.buffered and self.metrics is not None:
+            self.metrics.record_llm_first_sentence()
+        for sentence_text, chunks in spec.buffered:
+            if not chunks:
+                continue
+            # Per-sentence carry reset, mirroring ``_synthesize_sentence``.
+            self.audio_sender.reset_pcm_carry()
+            record_segment = True
+            for audio in chunks:
+                if not self._is_speaking:
+                    # Barge-in landed mid-flush — stop exactly like the live
+                    # sentence loop would.
+                    spec.interrupted = True
+                    spec.buffered = []
+                    return
+                if record_segment:
+                    self._turn_spoken_segments.append(
+                        (sentence_text, self._turn_playback_total_s)
+                    )
+                    record_segment = False
+                await self._spec_send_chunk(spec, audio)
+            self.audio_sender.reset_pcm_carry()
+        spec.buffered = []  # release the held memory
+
+    async def _spec_synthesize_buffered(
+        self,
+        spec: _SpeculativeTurn,
+        sentence: str,
+        hook_executor: PipelineHookExecutor,
+        hook_ctx: HookContext,
+    ) -> bool:
+        """Synthesize one sentence of an UNRELEASED speculation, holding the
+        audio in ``spec.buffered``. Transitions to live sending mid-sentence
+        the moment the release lands. Returns ``False`` when the speculation
+        must stop (cancelled, overflow, or barge-in after a mid-sentence
+        release)."""
+        if self._tts is None:
+            # No TTS configured — nothing audible to hold; still track the
+            # sentence so the released turn records it (parity with the live
+            # path, which is also silent without TTS).
+            spec.buffered.append((sentence, []))
+            return True
+
+        transformed = sentence
+        text_transforms = getattr(self.agent, "text_transforms", None)
+        if text_transforms:
+            for fn in text_transforms:
+                transformed = fn(transformed)
+        processed = await hook_executor.run_before_synthesize(transformed, hook_ctx)
+        if processed is None:
+            return True  # hook skipped this sentence
+
+        chunks: list[bytes] = []
+        # Register BEFORE synthesis so a mid-sentence release flushes the
+        # partial chunks collected so far in order.
+        spec.buffered.append((processed, chunks))
+        _tts_span = start_span(
+            SPAN_TTS,
+            {
+                "getpatter.tts.text_len": len(processed),
+                "patter.call.id": self.call_id,
+            },
+        )
+        _tts_span.__enter__()
+        gen = self._tts.synthesize(processed)
+        try:
+            async for audio_chunk in gen:
+                if spec.cancel_event.is_set() and not spec.released:
+                    return False
+                processed_audio = await hook_executor.run_after_synthesize(
+                    audio_chunk, processed, hook_ctx
+                )
+                if processed_audio is None:
+                    continue
+                if spec.released and not spec.flushed:
+                    # The final committed while this sentence was mid-synth —
+                    # flush everything buffered (including this sentence's
+                    # earlier chunks) and continue live below.
+                    await self._spec_ensure_flushed(spec)
+                if spec.flushed:
+                    if not self._is_speaking:
+                        spec.interrupted = True
+                        return False
+                    await self._spec_send_chunk(spec, processed_audio)
+                else:
+                    chunks.append(processed_audio)
+                    spec.buffered_bytes += len(processed_audio)
+                    if self._spec_buffer_seconds(spec) > _PREEMPTIVE_MAX_BUFFER_S:
+                        self._fail_speculation_inline(spec, "buffer_overflow")
+                        return False
+        finally:
+            await gen.aclose()
+            _tts_span.__exit__(None, None, None)
+        return True
+
+    async def _spec_speak_sentence(
+        self,
+        spec: _SpeculativeTurn,
+        sentence: str,
+        hook_executor: PipelineHookExecutor,
+        hook_ctx: HookContext,
+    ) -> bool:
+        """Guardrails + tier-2 hook + synthesis for one speculative sentence
+        — buffered pre-release, live post-release (same transforms either
+        way). Returns ``False`` when the turn must stop."""
+        blocked, guard_name = evaluate_guardrails(self.agent, sentence)
+        if blocked:
+            sentence = get_guardrail_replacement(self.agent, guard_name)
+        if hook_executor.has_after_llm_sentence():
+            transformed = await hook_executor.run_after_llm_sentence(
+                sentence, hook_ctx
+            )
+            if transformed is None:
+                return True  # hook dropped this sentence
+            sentence = transformed
+        if spec.released:
+            await self._spec_ensure_flushed(spec)
+            if not self._is_speaking:
+                spec.interrupted = True
+                return False
+            if (
+                self.metrics is not None
+                and spec.first_tts_chunk[0]
+                and not spec.buffered
+            ):
+                # First sentence of the turn is being synthesized live
+                # (nothing was buffered pre-release) — stamp the boundary the
+                # streaming path stamps via ``record_llm_first_sentence``.
+                self.metrics.record_llm_first_sentence()
+            ok = await self._synthesize_sentence(
+                sentence, hook_executor, hook_ctx, spec.first_tts_chunk
+            )
+            if not ok:
+                spec.interrupted = True
+            return ok
+        return await self._spec_synthesize_buffered(
+            spec, sentence, hook_executor, hook_ctx
+        )
+
+    async def _finish_released_speculation(
+        self, spec: _SpeculativeTurn, *, llm_error: bool
+    ) -> None:
+        """Turn-complete bookkeeping for a RELEASED speculation — mirrors the
+        tail of ``_process_streaming_response`` + ``_dispatch_turn`` (metrics
+        turn record, interrupted heard-prefix marker, assistant history
+        entry). Runs exactly once, after all audio was sent/cancelled."""
+        response_text = "".join(spec.response_parts)
+        interrupted = spec.interrupted
+        if not interrupted and not llm_error and response_text:
+            if self.metrics is not None:
+                self.metrics.record_tts_complete(response_text)
+                turn = self.metrics.record_turn_complete(response_text)
+                await self._emit_turn_metrics(turn, call_id=self.call_id)
+        self._last_response_interrupted = interrupted
+        if interrupted and response_text:
+            heard = self._heard_response_prefix()
+            if heard is not None:
+                heard_text, _heard_everything = heard
+                response_text = (
+                    f"{heard_text} [interrupted by caller]"
+                    if heard_text
+                    else "[interrupted by caller]"
+                )
+            else:
+                response_text = f"{response_text} [interrupted by caller]"
+        if response_text:
+            await self._emit_assistant_transcript(response_text)
+
+    async def _run_speculative_dispatch(self, spec: _SpeculativeTurn) -> None:
+        """Body of one speculative turn: LLM stream → sentence chunking →
+        buffered TTS, then commit-or-discard.
+
+        Until release this task is side-effect free outside ``spec`` itself
+        — no conversation-history writes, no carrier audio, no per-turn
+        metrics (LLM token usage/cost IS recorded by ``LLMLoop``: the tokens
+        were genuinely consumed either way). After release it behaves
+        exactly like a live ``_dispatch_turn`` body.
+        """
+        result = None
+        llm_error = False
+        stopped = False
+        try:
+            hooks = getattr(self.agent, "hooks", None)
+            hook_executor = PipelineHookExecutor(hooks)
+            hook_ctx = self._build_hook_context()
+
+            # afterTranscribe gates/edits the text the LLM sees — same as a
+            # normal dispatch. A veto means the matching final would be
+            # vetoed too; fail the speculation and let the commit path run
+            # the hook again on the real final.
+            filtered_text = await hook_executor.run_after_transcribe(
+                spec.interim_text, hook_ctx
+            )
+            if filtered_text is None:
+                self._fail_speculation_inline(spec, "after_transcribe_veto")
+                return
+
+            # Prompt parity with ``_dispatch_turn``: snapshot history and
+            # append the (filtered) user entry to the SNAPSHOT only — the
+            # shared conversation_history is committed at release time.
+            snapshot = list(self.conversation_history)
+            snapshot.append(
+                {"role": "user", "text": filtered_text, "timestamp": time.time()}
+            )
+            call_ctx = {
+                "call_id": self.call_id,
+                "caller": self.caller,
+                "callee": self.callee,
+            }
+            chunker = SentenceChunker(
+                aggressive_first_flush=getattr(
+                    self.agent, "aggressive_first_flush", False
+                ),
+                language=getattr(self.agent, "language", "en"),
+            )
+            result = self._llm_loop.run(
+                filtered_text,
+                snapshot,
+                call_ctx,
+                hook_executor=hook_executor,
+                hook_ctx=hook_ctx,
+                cancel_event=spec.cancel_event,
+            )
+            try:
+                token_iter = result.__aiter__()
+                while True:
+                    next_token = asyncio.ensure_future(token_iter.__anext__())
+                    # Pre-release: race the next token against the commit
+                    # decision so buffered audio flushes the MOMENT the final
+                    # commits — even while the LLM is silent between tokens
+                    # (agent-runtime LLMs can pause for seconds mid-stream).
+                    while not next_token.done() and not spec.released:
+                        if spec.cancel_event.is_set():
+                            break
+                        release_wait = asyncio.ensure_future(
+                            spec.release_event.wait()
+                        )
+                        try:
+                            await asyncio.wait(
+                                {next_token, release_wait},
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                        finally:
+                            release_wait.cancel()
+                            try:
+                                await release_wait
+                            except (asyncio.CancelledError, Exception):
+                                pass
+                        if (
+                            spec.released
+                            and not spec.flushed
+                            and not spec.cancel_event.is_set()
+                        ):
+                            await self._spec_ensure_flushed(spec)
+                    if spec.cancel_event.is_set():
+                        # Aborted (pre-release discard) or barge-in cancelled
+                        # (post-release) — abandon the pending token fetch.
+                        if not next_token.done():
+                            next_token.cancel()
+                        try:
+                            await next_token
+                        except (
+                            StopAsyncIteration,
+                            asyncio.CancelledError,
+                            Exception,
+                        ):
+                            pass
+                        if spec.released:
+                            spec.interrupted = True
+                        stopped = True
+                        break
+                    try:
+                        token = await next_token
+                    except StopAsyncIteration:
+                        break
+                    spec.response_parts.append(token)
+                    if spec.released:
+                        # Flush as soon as the release is observed — never
+                        # hold already-synthesized audio while waiting for
+                        # the next sentence boundary.
+                        if not spec.flushed:
+                            await self._spec_ensure_flushed(spec)
+                        # Live continuation — keep the echo-guard reference
+                        # and user-perceived TTFT current.
+                        self._current_agent_spoken_text = "".join(
+                            spec.response_parts
+                        )
+                        if not spec.llm_first_token_recorded:
+                            spec.llm_first_token_recorded = True
+                            if self.metrics is not None:
+                                self.metrics.record_llm_first_token()
+                            await self._emit_llm_first_token(
+                                llm_provider=self._infer_llm_provider(),
+                                model=self.agent.model,
+                            )
+                    for sentence in chunker.push(token):
+                        if not await self._spec_speak_sentence(
+                            spec, sentence, hook_executor, hook_ctx
+                        ):
+                            stopped = True
+                            break
+                    if stopped:
+                        break
+            except Exception as exc:
+                if spec.cancel_event.is_set() and not spec.released:
+                    return  # torn down mid-stream by an abort — silent
+                llm_error = True
+                chunker.reset()
+                logger.exception(
+                    "Preemptive: LLM streaming error during speculation: %s", exc
+                )
+                if not spec.released:
+                    # Unreleased — fail silently; the final dispatches
+                    # normally (and gets its own, live, error handling).
+                    self._fail_speculation_inline(spec, "llm_error")
+                    return
+                # Released — the turn is live: mirror the live error path.
+                if self.metrics is not None and self.metrics.turn_active:
+                    self.metrics.record_turn_interrupted()
+                fallback = getattr(self.agent, "llm_error_message", None)
+                if fallback and spec.first_tts_chunk[0] and self._is_speaking:
+                    try:
+                        await self._synthesize_sentence(
+                            fallback,
+                            hook_executor,
+                            hook_ctx,
+                            spec.first_tts_chunk,
+                            record_segment=False,
+                        )
+                    except Exception:  # pragma: no cover - defensive
+                        logger.exception(
+                            "llm_error_message fallback synthesis failed"
+                        )
+
+            if not llm_error and not stopped:
+                for sentence in chunker.flush():
+                    if not await self._spec_speak_sentence(
+                        spec, sentence, hook_executor, hook_ctx
+                    ):
+                        stopped = True
+                        break
+
+            if not spec.released:
+                if spec.cancel_event.is_set() or spec.failed:
+                    return  # aborted pre-release — unwind silently
+                # Generation finished before the final committed — park and
+                # hold the audio until the commit decision lands.
+                await spec.release_event.wait()
+                if not spec.released:
+                    return  # discarded
+
+            # Released: flush anything still held (covers "LLM finished
+            # before the final committed" — the common case), then run the
+            # turn-complete bookkeeping. ``_end_speaking_with_grace`` pairs
+            # with the ``_begin_speaking`` inside the flush.
+            try:
+                if not spec.interrupted and not llm_error:
+                    await self._spec_ensure_flushed(spec)
+            finally:
+                if spec.flushed:
+                    await self._end_speaking_with_grace()
+            if self.metrics is not None:
+                self.metrics.record_llm_complete()
+            await self._finish_released_speculation(spec, llm_error=llm_error)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Preemptive: speculative dispatch failed")
+            if not spec.released:
+                self._fail_speculation_inline(spec, "exception")
+            elif spec.flushed and self._is_speaking:
+                # Never leave the floor held on an unexpected released-path
+                # failure.
+                await self._end_speaking_with_grace()
+        finally:
+            if result is not None and hasattr(result, "aclose"):
+                try:
+                    await result.aclose()
+                except Exception:  # pragma: no cover - defensive
+                    pass
+            if self._speculation is spec:
+                self._speculation = None
 
     async def _dispatch_turn(self, transcript_text: str) -> None:
         """Run the post-commit pipeline (record STT → afterTranscribe →
@@ -5230,6 +6093,17 @@ class PipelineStreamHandler(StreamHandler):
                         # plus the original "phantom during warmup gate"
                         # vulnerability. No-op once the turn is committed.
                         self.metrics.anchor_user_speech_start()
+                    # PREEMPTIVE GENERATION: the user resumed speaking while a
+                    # speculative turn was buffering — the interim it was
+                    # generated from is stale, so abort silently (nothing was
+                    # audible; the next confident interim re-speculates). A
+                    # RELEASED speculation is no longer registered here — it
+                    # is the live turn and the barge-in paths above own it.
+                    if (
+                        not self._is_speaking
+                        and getattr(self, "_speculation", None) is not None
+                    ):
+                        await self._abort_speculation(reason="user_speech_resumed")
                 elif vad_event.type == "speech_end":
                     # Speech-event: user stop edge (pipeline-mode parity with
                     # realtime). No-op without a dispatcher.
@@ -6205,6 +7079,16 @@ class PipelineStreamHandler(StreamHandler):
             except (asyncio.CancelledError, Exception):
                 pass
             self._stt_task = None
+        # PREEMPTIVE GENERATION: stop the interim-stability watcher and tear
+        # down any in-flight speculation (teardown — not a miss) before
+        # adapters close underneath it. Runs AFTER the STT loop cancel so no
+        # spawn source (STT interim / stability watcher) can re-register a
+        # speculation while the abort is awaited.
+        self._cancel_interim_stability_task()
+        try:
+            await self._abort_speculation(reason="cleanup", count_miss=False)
+        except Exception:  # pragma: no cover - teardown must never raise
+            logger.debug("speculation cleanup failed", exc_info=True)
         # Hard-cancel the backgrounded turn dispatch (teardown backstop) so no
         # orphan task touches a finalized handler. The cancel_event.set() above
         # lets a post-first-token turn break gracefully; the cancel covers a

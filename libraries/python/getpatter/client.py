@@ -1702,6 +1702,8 @@ class Patter:
         realtime_turn_detection: "RealtimeTurnDetection | None" = None,
         realtime_gate_response_on_transcript: bool | None = None,
         tool_call_preambles: bool | str = False,
+        preemptive_generation: bool = False,
+        preemptive_min_stable_ms: int = 300,
     ) -> Agent:
         """Create an ``Agent`` configuration.
 
@@ -1728,6 +1730,15 @@ class Patter:
                 at most once per turn and never once real audio has started.
             long_turn_message_after_s: Seconds to wait before the
                 ``long_turn_message`` filler fires. Default ``4.0``.
+            preemptive_generation: Pipeline mode (built-in LLM loop) only.
+                When ``True``, start the LLM + TTS early on a confident
+                INTERIM transcript and hold the audio; release it the moment
+                the matching final transcript commits (big latency win), or
+                discard silently and re-dispatch when the final differs.
+                Default ``False``.
+            preemptive_min_stable_ms: How long (ms) a non-punctuated interim
+                transcript must remain unchanged before it qualifies for
+                preemptive generation. Default ``300``.
             tools: List of ``Tool`` instances (build with the ``tool()`` factory).
             stt: ``STTProvider`` instance for pipeline mode (e.g.
                 ``DeepgramSTT(api_key=...)``).
@@ -2023,6 +2034,8 @@ class Patter:
             realtime_turn_detection=realtime_turn_detection,
             realtime_gate_response_on_transcript=realtime_gate_response_on_transcript,
             tool_call_preambles=tool_call_preambles,
+            preemptive_generation=preemptive_generation,
+            preemptive_min_stable_ms=preemptive_min_stable_ms,
         )
 
     @staticmethod

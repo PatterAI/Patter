@@ -668,6 +668,25 @@ class Agent:
     # ``Patter.call`` refuses to spawn the prewarm task and emits a WARN
     # when ``provider != "pipeline"``.
     prewarm_first_message: bool = False
+    # PREEMPTIVE GENERATION (pipeline mode, built-in LLM loop only; opt-in).
+    # When ``True`` the SDK starts the LLM — and sentence-chunked TTS
+    # synthesis — EARLY on a confident INTERIM transcript (one that ends with
+    # sentence-final punctuation, or that has been unchanged for
+    # ``preemptive_min_stable_ms``), holding all synthesized audio in memory.
+    # When the FINAL transcript commits: if it matches the speculated interim
+    # (normalized — case/punctuation/whitespace-insensitive) the buffered
+    # audio is RELEASED to the carrier immediately (the LLM+TTS latency was
+    # paid during the user's own end-of-utterance silence); if it differs,
+    # the speculation is discarded silently and the turn dispatches normally
+    # on the final. History and metrics record exactly one turn either way.
+    # Same pattern as LiveKit Agents' ``preemptive_generation``. Default
+    # ``False`` — every turn waits for the final transcript, as today.
+    preemptive_generation: bool = False
+    # Interim-stability window (ms) for preemptive generation: an interim
+    # transcript that does NOT end with sentence-final punctuation qualifies
+    # for speculation only once it has remained unchanged for this long.
+    # Only consulted when ``preemptive_generation=True``. Default 300.
+    preemptive_min_stable_ms: int = 300
 
 
 @dataclass(frozen=True)
@@ -872,6 +891,14 @@ class CallMetrics:
     # ``ErrorCode`` values, lowercased, or ``"other"``); empty for a clean call.
     # Used by anonymous telemetry and surfaced for diagnostics. Never the message.
     error_code: str = ""
+    # PREEMPTIVE GENERATION counters (pipeline mode, only non-zero when
+    # ``Agent.preemptive_generation=True``). ``preemptive_hits`` counts
+    # speculative turns released on a matching final transcript (latency
+    # win); ``preemptive_misses`` counts speculations started but discarded
+    # (mismatched final, barge-in, replaced by a newer interim, or buffer
+    # overflow) — i.e. wasted LLM/TTS spend.
+    preemptive_hits: int = 0
+    preemptive_misses: int = 0
 
 
 # Carrier-agnostic terminal outcomes for an outbound call. ``answered`` means a
