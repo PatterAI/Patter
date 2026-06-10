@@ -964,6 +964,7 @@ export class Patter {
       opts.dashboard ?? true,
       opts.dashboardToken ?? '',
       opts.allowInsecureDashboard ?? false,
+      opts.localRecording ?? false,
     );
     // Give the server the telemetry client so the per-call ``call_completed``
     // event can be emitted from the call-end path.

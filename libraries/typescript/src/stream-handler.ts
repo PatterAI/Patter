@@ -513,6 +513,17 @@ export interface StreamHandlerDeps {
   readonly onMessage?: PipelineMessageHandler | string;
   readonly onMetrics?: (data: Record<string, unknown>) => Promise<void>;
   readonly recording: boolean;
+  /**
+   * Optional factory returning a carrier-neutral local call recorder for
+   * ``callId`` (wired by ``EmbeddedServer.makeLocalRecorder`` when
+   * ``serve({ localRecording })`` is on). Returning ``null`` / leaving the
+   * field unset keeps every recording tap a no-op. The handler owns the
+   * recorder lifetime: created in ``handleCallStart``, finalized in
+   * ``fireCallEnd`` (every teardown path funnels there).
+   */
+  readonly makeLocalRecorder?: (
+    callId: string,
+  ) => import('./audio/call-recorder').LocalCallRecorder | null;
   /** When true, only the first TTFB per call is forwarded to the event bus. Default false. */
   readonly reportOnlyInitialTtfb?: boolean;
   /**
@@ -619,6 +630,16 @@ export class StreamHandler {
    * headset deployments that don't have TTS bleed.
    */
   private aec: import('./audio/aec').NlmsEchoCanceller | null = null;
+  /**
+   * Carrier-neutral local call recorder (stereo WAV; left=caller,
+   * right=agent). Created in ``handleCallStart`` via
+   * ``deps.makeLocalRecorder`` when ``serve({ localRecording })`` is on;
+   * ``null`` keeps every tap a no-op. Finalized (header patched, file
+   * closed) in ``fireCallEnd`` — both ``handleStop`` and ``handleWsClose``
+   * funnel there, so abnormal teardown still yields a parseable file.
+   * Parity with Python ``StreamHandler.local_recorder``.
+   */
+  private localRecorder: import('./audio/call-recorder').LocalCallRecorder | null = null;
   /**
    * Monotonic counter incremented on every TTS-start. The grace timer
    * scheduled by ``endSpeakingWithGrace`` only flips ``isSpeaking=false``
@@ -1905,6 +1926,18 @@ export class StreamHandler {
 
     await this.startRecordingIfRequested(callId);
 
+    // Carrier-neutral local recording — created BEFORE the adapter /
+    // pipeline init so the firstMessage TTS is captured. Independent of the
+    // carrier-side `recording` flag above (both can be on). The factory
+    // returns null when `localRecording` is off or setup failed.
+    if (this.deps.makeLocalRecorder) {
+      try {
+        this.localRecorder = this.deps.makeLocalRecorder(callId);
+      } catch (e) {
+        getLogger().warn(`Local recorder setup failed: ${String(e)}`);
+      }
+    }
+
     // Resolve dynamic variables in system prompt
     const agentVars = this.deps.sanitizeVariables(this.deps.agent.variables ?? {});
     const safeCustomParams = this.deps.sanitizeVariables(customParams);
@@ -2009,6 +2042,19 @@ export class StreamHandler {
   /** Handle an incoming audio chunk (already decoded from base64). */
   /** Forward inbound audio bytes to the AI adapter and (in pipeline mode) the STT provider. */
   async handleAudio(audioBuffer: Buffer): Promise<void> {
+    // Local-recording tap (caller side) — BEFORE every engine-mode branch
+    // and guard below, so the caller channel has no gaps while STT / the
+    // realtime adapter are still connecting or frames are dropped during
+    // TTS. The wire codec comes from the bridge: μ-law 8 kHz carriers
+    // (Twilio, Plivo, Telnyx-PCMU) say ``ulaw_8000``; the recorder decodes
+    // to PCM16 16 kHz internally. Parity with the Python handlers'
+    // ``on_audio_received`` taps.
+    if (this.localRecorder) {
+      this.localRecorder.addCallerAudio(
+        audioBuffer,
+        this.deps.bridge.inputWireFormat === 'pcm_16000' ? 'pcm16_16k' : 'mulaw_8k',
+      );
+    }
     const provider = this.deps.agent.provider ?? 'openai_realtime';
     if (provider === 'pipeline' && this.stt) {
       // Decode (mulaw 8 kHz → PCM16) → stateful 8k→16k resample → AEC
@@ -2742,6 +2788,22 @@ export class StreamHandler {
    * streaming TTS providers never byte-swap the PCM16 samples downstream.
    */
   private encodePipelineAudio(audioChunk: Buffer): string {
+    // Local-recording tap (agent side, pipeline mode) — this method is the
+    // single chokepoint every outbound pipeline chunk passes through
+    // (firstMessage, prewarm, per-sentence TTS). Unlike the AEC far-end
+    // taps (which must skip non-PCM bytes), the recording tap DECODES on
+    // the carrier-native fast path: μ-law 8 kHz on Twilio/Plivo, PCM16
+    // 16 kHz on Telnyx-native and the default transcode path. Parity with
+    // Python ``_tap_pipeline_agent_audio``.
+    if (this.localRecorder) {
+      this.localRecorder.addAgentAudio(
+        audioChunk,
+        this.ttsOutputFormatNativeForCarrier &&
+          this.deps.bridge.telephonyProvider !== 'telnyx'
+          ? 'mulaw_8k'
+          : 'pcm16_16k',
+      );
+    }
     // Carrier-native fast path: when the TTS adapter is configured to
     // emit ``ulaw_8000`` (Twilio wire codec) the bytes coming in are
     // already in the format Twilio expects. Skip the 16 kHz → 8 kHz
@@ -5654,6 +5716,20 @@ export class StreamHandler {
     // through untransformed. Do NOT resample here: inboundResampler is 8k→16k
     // for the STT inbound path; reusing it on the outbound path corrupts both
     // directions.
+    //
+    // Local-recording tap (agent side, Realtime / ConvAI). Per the comment
+    // above the Realtime bytes are μ-law 8 kHz; ConvAI emits μ-law only
+    // when ``ulaw_8000`` was negotiated (``forTwilio`` / ``forTelnyx``),
+    // else PCM16 16 kHz. The recorder decodes to PCM16 16 kHz internally.
+    if (this.localRecorder) {
+      const convaiPcm =
+        this.adapter instanceof ElevenLabsConvAIAdapter &&
+        this.adapter.outputAudioFormat !== 'ulaw_8000';
+      this.localRecorder.addAgentAudio(
+        eventData,
+        convaiPcm ? 'pcm16_16k' : 'mulaw_8k',
+      );
+    }
     const outAudio = eventData;
     this.deps.bridge.sendAudio(this.ws, outAudio.toString('base64'), this.streamSid);
     this.markFirstAudioSent();
@@ -6353,6 +6429,21 @@ export class StreamHandler {
       this.mcpManager = null;
     }
 
+    // Finalize the carrier-neutral local recording (if any): drain the
+    // agent FIFO, flush the write buffer, patch the WAV header, close the
+    // file. Idempotent + exception-safe — both ``handleStop`` and
+    // ``handleWsClose`` funnel here, so abnormal teardown (carrier WS
+    // drop) still yields a parseable file. Done BEFORE the cost queries
+    // below so the WAV is finalized promptly even when those take seconds.
+    let recordingPath: string | null = null;
+    if (this.localRecorder) {
+      try {
+        recordingPath = this.localRecorder.close();
+      } catch (err) {
+        getLogger().debug(`Local recorder close failed: ${String(err)}`);
+      }
+    }
+
     await this.deps.bridge.queryTelephonyCost(this.metricsAcc, this.callId);
 
     // Deepgram cost query — pull the key off the adapter when STT is a
@@ -6372,6 +6463,11 @@ export class StreamHandler {
       ended_at: Date.now() / 1000,
       transcript: [...this.history.entries],
       metrics: finalMetrics as unknown as Record<string, unknown>,
+      // Surface the local recording path when local recording was active
+      // for this call (``null`` when the recorder broke mid-call); the key
+      // is absent entirely when the feature is off. Parity with the Python
+      // bridges' ``recording_path`` handling.
+      ...(this.localRecorder ? { recording_path: recordingPath } : {}),
     };
 
     // Single INFO line per call-end — duration, turns, cost, latency.

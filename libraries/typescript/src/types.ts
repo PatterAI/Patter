@@ -927,6 +927,19 @@ export interface ServeOptions {
   readonly onMetrics?: (data: Record<string, unknown>) => Promise<void>;
   /** When true, record calls via the Twilio Recordings API. */
   readonly recording?: boolean;
+  /**
+   * Carrier-neutral local call recording. When `true`, the SDK records each
+   * call at the transport as an interleaved stereo WAV — left channel =
+   * caller, right channel = agent — at 16 kHz PCM16, written incrementally
+   * to `<call_log_dir>/recording.wav` when call logging (`persist` /
+   * `PATTER_LOG_DIR`) is enabled, else to `./recordings/<call_id>.wav`.
+   * Pass a directory string to choose where the WAVs go. Works on every
+   * carrier (Twilio, Telnyx, Plivo) and every engine mode; independent of
+   * the carrier-side `recording` flag (both can be on). The final path is
+   * surfaced as `recording_path` in the `onCallEnd` payload and in the
+   * call-log metadata. Default `false`.
+   */
+  readonly localRecording?: boolean | string;
   /** If set, spoken as a voicemail message when AMD detects a machine. */
   readonly voicemailMessage?: string;
   /** Custom pricing overrides for cost calculation. */

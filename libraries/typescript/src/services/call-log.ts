@@ -170,6 +170,12 @@ export interface CallEndInput {
   readonly latency?: Record<string, unknown> | null;
   readonly status?: string;
   readonly error?: string | null;
+  /**
+   * Path of the local recording WAV when `localRecording` was active for
+   * the call. Persisted as an extra `recording_path` field; omitted
+   * entirely otherwise so existing metadata shapes are unchanged.
+   */
+  readonly recordingPath?: string | null;
 }
 
 /** Single turn record appended to `transcript.jsonl`. */
@@ -213,7 +219,13 @@ export class CallLogger {
     return this.root !== null;
   }
 
-  private callDir(callId: string, startedAtSeconds?: number): string | null {
+  /**
+   * Per-call directory for ``callId`` (created lazily by the write paths),
+   * or ``null`` when logging is disabled. Public so call artifacts written
+   * by other components — e.g. the local recording WAV — land next to
+   * ``metadata.json``. Mirrors Python ``CallLogger.call_dir``.
+   */
+  callDir(callId: string, startedAtSeconds?: number): string | null {
     if (this.root === null) return null;
     const ms = startedAtSeconds !== undefined ? startedAtSeconds * 1000 : Date.now();
     const dt = new Date(ms);
@@ -339,6 +351,7 @@ export class CallLogger {
       cost: input.cost ?? null,
       latency: input.latency ?? null,
       error: input.error ?? null,
+      ...(input.recordingPath != null ? { recording_path: input.recordingPath } : {}),
     };
     try {
       await atomicWriteJson(metadataPath, merged);

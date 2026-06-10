@@ -4,6 +4,7 @@
  */
 
 import crypto from 'node:crypto';
+import * as nodePath from 'node:path';
 import express from 'express';
 import { createServer, Server as HTTPServer } from 'http';
 import { WebSocketServer, WebSocket as WSWebSocket } from 'ws';
@@ -38,6 +39,7 @@ import type {
 } from './types';
 import type { CallMetrics, CostBreakdown } from './metrics';
 import { CallLogger, resolveLogRoot } from './services/call-log';
+import { LocalCallRecorder } from './audio/call-recorder';
 
 /** Resolved configuration consumed by `EmbeddedServer` (carrier credentials, webhook URL, etc.). */
 export interface LocalConfig {
@@ -1047,6 +1049,15 @@ export class EmbeddedServer {
      * access control (Cloudflare Access, a tailnet, etc.).
      */
     private readonly allowInsecureDashboard: boolean = false,
+    /**
+     * Carrier-neutral local stereo recording (left=caller, right=agent).
+     * `false` (default) = off; `true` = write `recording.wav` into the
+     * per-call log directory (or `./recordings` when call logging is
+     * disabled); a string = explicit directory for the WAV files.
+     * Independent of the carrier-side `recording` flag — both may be on.
+     * Appended last to keep existing positional constructor callers stable.
+     */
+    private readonly localRecording: boolean | string = false,
   ) {
     this.metricsStore = new MetricsStore();
     this.pricing = mergePricing(pricingOverrides as Record<string, { unit?: string; price?: number }> | undefined);
@@ -2247,6 +2258,40 @@ export class EmbeddedServer {
   // Stream handler helpers
   // ---------------------------------------------------------------------------
 
+  /**
+   * Build a `LocalCallRecorder` for `callId`, or `null`.
+   *
+   * Resolution (mirrors Python `EmbeddedServer.create_local_recorder`):
+   *
+   * 1. `localRecording` falsy → `null` (feature off, default).
+   * 2. `localRecording` is a directory string → `<dir>/<call_id>.wav`.
+   * 3. call logging enabled → `<call_log_dir>/recording.wav` (next to
+   *    `metadata.json` / `transcript.jsonl`).
+   * 4. fallback → `./recordings/<call_id>.wav` under the CWD.
+   *
+   * Never throws: any setup failure (unwritable dir, …) logs a warning and
+   * returns `null` so the call proceeds unrecorded.
+   */
+  makeLocalRecorder(callId: string): LocalCallRecorder | null {
+    if (!this.localRecording) return null;
+    try {
+      const safeId = sanitizeLogValue(callId, 64).replace(/\//g, '_') || 'unknown';
+      let target: string;
+      if (typeof this.localRecording === 'string') {
+        target = nodePath.join(this.localRecording, `${safeId}.wav`);
+      } else {
+        const callDir = this.callLogger.enabled ? this.callLogger.callDir(callId) : null;
+        target = callDir !== null
+          ? nodePath.join(callDir, 'recording.wav')
+          : nodePath.join('recordings', `${safeId}.wav`);
+      }
+      return new LocalCallRecorder(target);
+    } catch (err) {
+      getLogger().warn(`Local recording disabled for ${sanitizeLogValue(callId)}: ${String(err)}`);
+      return null;
+    }
+  }
+
   /** Build the shared StreamHandlerDeps for the current server configuration. */
   private buildStreamHandlerDeps(bridge: TelephonyBridge): import('./stream-handler').StreamHandlerDeps {
     const [wrappedStart, wrappedMetrics, wrappedEnd, wrappedTranscript] =
@@ -2264,6 +2309,7 @@ export class EmbeddedServer {
       onMessage: this.onMessage,
       onMetrics: wrappedMetrics,
       recording: this.recording,
+      makeLocalRecorder: (callId: string) => this.makeLocalRecorder(callId),
       buildAIAdapter: (resolvedPrompt: string, toolsOverride?: readonly ToolDefinition[]) =>
         buildAIAdapter(this.config, this.agent, resolvedPrompt, toolsOverride),
       sanitizeVariables,
@@ -2447,6 +2493,10 @@ export class EmbeddedServer {
             cost: metricsObj?.cost ?? null,
             latency,
             error: errorCode || null,
+            // Present only when local recording was active for the call
+            // (set by StreamHandler.fireCallEnd on the payload).
+            recordingPath:
+              typeof data.recording_path === 'string' ? data.recording_path : null,
           })
           .catch((err) => getLogger().error(`call_log end error: ${String(err)}`));
       }

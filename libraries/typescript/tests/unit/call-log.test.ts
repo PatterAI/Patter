@@ -204,4 +204,86 @@ describe('CallLogger (enabled)', () => {
     expect(parsed.status).toBe('error');
     expect(parsed.error).toBe('boom');
   });
+
+  it('persists recording_path when local recording was active', async () => {
+    const logger = new CallLogger(tmp);
+    await logger.logCallStart('c1', {});
+    await logger.logCallEnd('c1', {
+      durationSeconds: 5,
+      recordingPath: '/tmp/calls/c1/recording.wav',
+    });
+    const parsed = JSON.parse(
+      fs.readFileSync(findFile(tmp, 'metadata.json')!, 'utf8'),
+    ) as Record<string, unknown>;
+    expect(parsed.recording_path).toBe('/tmp/calls/c1/recording.wav');
+  });
+
+  it('omits recording_path entirely when absent', async () => {
+    const logger = new CallLogger(tmp);
+    await logger.logCallStart('c1', {});
+    await logger.logCallEnd('c1', { durationSeconds: 5 });
+    const parsed = JSON.parse(
+      fs.readFileSync(findFile(tmp, 'metadata.json')!, 'utf8'),
+    ) as Record<string, unknown>;
+    expect('recording_path' in parsed).toBe(false);
+  });
+
+  it('exposes callDir so call artifacts (recording WAV) land next to metadata.json', async () => {
+    const logger = new CallLogger(tmp);
+    await logger.logCallStart('c1', {});
+    const dir = logger.callDir('c1');
+    expect(dir).not.toBeNull();
+    expect(fs.existsSync(path.join(dir!, 'metadata.json'))).toBe(true);
+    // Disabled logger → null.
+    expect(new CallLogger(null).callDir('c1')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Retention sweep
+// ---------------------------------------------------------------------------
+
+describe('CallLogger retention sweep', () => {
+  let tmp: string;
+  const originalEnv = { ...process.env };
+
+  beforeEach(() => {
+    tmp = mkTmp();
+  });
+
+  afterEach(() => {
+    rmTree(tmp);
+    process.env = { ...originalEnv };
+  });
+
+  function sweep(logger: CallLogger): Promise<void> {
+    return (logger as unknown as { sweepOldDays(): Promise<void> }).sweepOldDays();
+  }
+
+  it('removes old day dirs INCLUDING local recordings', async () => {
+    // The local recording WAV lives inside the per-call directory, so the
+    // retention sweep that removes aged day-directories deletes recordings
+    // too — no separate retention policy needed.
+    process.env.PATTER_LOG_RETENTION_DAYS = '7';
+    const logger = new CallLogger(tmp);
+    const oldDir = path.join(tmp, 'calls', '2000', '01', '15', 'old-call');
+    fs.mkdirSync(oldDir, { recursive: true });
+    fs.writeFileSync(path.join(oldDir, 'metadata.json'), '{}');
+    fs.writeFileSync(path.join(oldDir, 'transcript.jsonl'), '');
+    const recording = path.join(oldDir, 'recording.wav');
+    fs.writeFileSync(recording, Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(40)]));
+    await sweep(logger);
+    expect(fs.existsSync(recording)).toBe(false);
+    expect(fs.existsSync(oldDir)).toBe(false);
+  });
+
+  it('keeps everything when retention is 0', async () => {
+    process.env.PATTER_LOG_RETENTION_DAYS = '0';
+    const logger = new CallLogger(tmp);
+    const oldDir = path.join(tmp, 'calls', '2000', '01', '15', 'old-call');
+    fs.mkdirSync(oldDir, { recursive: true });
+    fs.writeFileSync(path.join(oldDir, 'recording.wav'), 'RIFF');
+    await sweep(logger);
+    expect(fs.existsSync(path.join(oldDir, 'recording.wav'))).toBe(true);
+  });
 });

@@ -277,6 +277,15 @@ export {
   createResampler24kTo8k,
 } from "./audio/transcoding";
 export type { StatefulResamplerOptions } from "./audio/transcoding";
+// Carrier-neutral local call recording (stereo WAV: left=caller, right=agent).
+// Enabled via `serve({ localRecording })`; exported for programmatic use,
+// matching Python's importable `getpatter.audio.call_recorder` module.
+export {
+  LocalCallRecorder,
+  RECORDING_SAMPLE_RATE,
+  AGENT_BACKLOG_CAP_S,
+} from "./audio/call-recorder";
+export type { RecorderEncoding } from "./audio/call-recorder";
 export { startTunnel } from "./tunnel";
 export type { TunnelHandle } from "./tunnel";
 export { ChatContext } from "./chat-context";
