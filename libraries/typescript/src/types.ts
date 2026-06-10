@@ -695,10 +695,32 @@ export interface AgentOptions {
   /**
    * Maximum time (ms) to wait for at least one strategy to confirm a
    * pending barge-in before discarding the pending state and resuming
-   * TTS. Only consulted when ``bargeInStrategies`` is non-empty.
+   * TTS. Consulted when ``bargeInStrategies`` is non-empty AND as the
+   * false-interruption window for ``bargeInMode: 'pause_resume'``.
    * Default: 1500.
    */
   readonly bargeInConfirmMs?: number;
+  /**
+   * How a VAD ``speech_start`` during the agent's turn is handled
+   * (pipeline mode):
+   *
+   * - ``'cancel'`` (default): today's behaviour — the in-flight turn is
+   *   cancelled immediately (or marked pending when
+   *   ``bargeInStrategies`` are configured).
+   * - ``'pause_resume'`` (LiveKit-style false-interruption handling):
+   *   output is PAUSED immediately — the carrier buffer is cleared and
+   *   no further TTS audio is sent — while the LLM stream and the TTS
+   *   provider stream stay alive (tokens buffer as sentences,
+   *   synthesized audio queues in memory, both bounded). If a committed
+   *   final transcript confirms the interruption within
+   *   ``bargeInConfirmMs`` the turn is cancelled exactly as in
+   *   ``'cancel'`` mode; if the window expires with no transcript (a
+   *   cough, line noise) the agent RESUMES from the first sentence the
+   *   caller had not fully heard, re-sending retained audio without
+   *   re-billing TTS, and the event is recorded as a false interruption
+   *   (a backchannel — not an interruption — in metrics).
+   */
+  readonly bargeInMode?: 'cancel' | 'pause_resume';
   /**
    * When ``true`` (default), ``Patter.call`` warms up the STT, TTS, and
    * LLM provider connections in parallel with the carrier-side

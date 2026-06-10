@@ -25,7 +25,11 @@ export type PatterEventType =
   | 'transcript_final'
   | 'llm_chunk'
   | 'tts_chunk'
-  | 'tool_call_started';
+  | 'tool_call_started'
+  // Pause-and-resume (bargeInMode: 'pause_resume'): a pause that no
+  // transcript confirmed resumed from the unheard tail. Payload:
+  // ``{ resumedSentences: number }``. Mirrors the Python emit.
+  | 'false_interruption';
 
 type Listener<T = unknown> = (payload: T) => void | Promise<void>;
 

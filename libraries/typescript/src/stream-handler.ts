@@ -607,8 +607,77 @@ export class StreamHandler {
   /** Wall-clock (ms) when the current pending barge-in started, or
    * ``null`` if no barge-in is pending. */
   private bargeInPendingSince: number | null = null;
-  /** Timer that fires the pending-barge-in timeout. */
+  /** Timer that fires the pending-barge-in timeout. In
+   * ``bargeInMode: 'pause_resume'`` this same handle holds the
+   * false-interruption resume timer. */
   private bargeInPendingTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Pause-and-resume false-interruption handling (opt-in
+   * ``agent.bargeInMode: 'pause_resume'``; default ``'cancel'`` keeps
+   * today's behaviour byte-identical). LiveKit-style: PAUSE output on
+   * VAD speech_start (carrier cleared, sends gated on ``outputPaused``),
+   * KILL on a committed final transcript within ``bargeInConfirmMs``,
+   * RESUME from the first not-fully-heard sentence otherwise. Mirrors
+   * Python ``_barge_in_mode`` / ``_output_paused``.
+   */
+  private readonly bargeInMode: 'cancel' | 'pause_resume';
+  /** True while output is paused: ``synthesizeSentence`` queues chunks
+   * into per-sentence retention entries instead of sending, and the LLM
+   * loops buffer whole sentences as text. */
+  private outputPaused = false;
+  /** Per-pause decision latch — resolved when the pause resolves
+   * (resume, kill, or teardown) so loop-side waiters can proceed. */
+  private pauseDecision: { promise: Promise<void>; resolve: () => void } | null =
+    null;
+  /** Sentences produced by the LLM while paused (text, pre-guardrail).
+   * Spoken in order on resume; discarded on kill. Bounded by
+   * ``PAUSE_MAX_BUFFERED_SENTENCES`` — overflow degrades to a full
+   * cancel so memory stays bounded against a runaway stream. */
+  private pausedSentences: string[] = [];
+  /**
+   * Per-turn retained sentence audio (pause_resume mode only): one entry
+   * per response sentence holding every TTS chunk produced for it.
+   * ``sent`` counts chunks actually delivered to the carrier — the
+   * resume path resets it to 0 for the unheard tail and re-sends from
+   * memory (no TTS re-billing). Index-aligned with
+   * ``turnSpokenSegments`` for the stamped prefix. Bounded by
+   * ``PAUSE_RESUME_MAX_RETAINED_S``.
+   */
+  private turnSentenceAudio: Array<{
+    text: string;
+    chunks: Buffer[];
+    sent: number;
+  }> = [];
+  private pauseRetainedBytes = 0;
+  /** Set when the retained-audio cap was exceeded while NOT paused (very
+   * long carrier backlog): retention is released and pause_resume falls
+   * back to legacy cancel for the rest of the turn. Reset at
+   * ``beginSpeaking``. */
+  private pauseResumeOverflowed = false;
+  /** Sentence index (into ``turnSpokenSegments`` / ``turnSentenceAudio``)
+   * of the first sentence the caller had NOT fully heard at pause time —
+   * the resume offset. Sentence granularity: the partially-played
+   * sentence is replayed from its start (natural-sounding repair) rather
+   * than resumed mid-word. */
+  private pauseResumeIndex = 0;
+  /** False until the turn body finishes pushing audio (the
+   * ``endSpeakingWithGrace`` call in its finally). The resume path uses
+   * it to decide whether the #164 grace machinery must be re-armed for
+   * the re-sent tail (post-complete pause) or whether the still-running
+   * turn body will arm it itself. */
+  private turnOutputDone = false;
+  /** Cap on sentences buffered as text while output is paused. A pause
+   * lasts at most ``bargeInConfirmMs`` (1.5 s default) so this is
+   * generous; overflow degrades to a full cancel. Mirrors Python
+   * ``_PAUSE_MAX_BUFFERED_SENTENCES``. */
+  private static readonly PAUSE_MAX_BUFFERED_SENTENCES = 32;
+  /** Cap (seconds of playout) on retained per-sentence TTS audio — both
+   * the already-sent tail kept for re-send and chunks queued while
+   * paused. 15 s ≈ 480 KB of PCM16 @ 16 kHz per concurrent call.
+   * Overflow while paused → degrade to full cancel; overflow while
+   * speaking → release retention and fall back to legacy cancel for the
+   * rest of the turn. Mirrors Python ``_PAUSE_RESUME_MAX_RETAINED_S``. */
+  private static readonly PAUSE_RESUME_MAX_RETAINED_S = 15;
   /**
    * Set to true when a VAD ``speech_start`` was suppressed by the
    * anti-echo gate during the current agent turn.  Cleared on
@@ -746,6 +815,15 @@ export class StreamHandler {
     // Fresh turn — reset the heard-prefix playback timeline.
     this.turnPlaybackTotalMs = 0;
     this.turnSpokenSegments = [];
+    // Fresh turn — drop any pause-and-resume state and retained audio from
+    // the previous turn (a paused turn can never reach here — the
+    // pause-decision wait resolves before the turn ends — but be
+    // defensive) and re-enable retention after an overflow.
+    this.discardPauseState();
+    this.pauseResumeOverflowed = false;
+    // False until the turn body finishes pushing audio — see
+    // ``resumeAfterFalseInterruption``.
+    this.turnOutputDone = false;
     // Reset the VAD detector so the next user utterance triggers a clean
     // SILENCE→SPEECH transition. Without this, PSTN echo from the previous
     // turn can keep the detector's smoothed probability above the
@@ -855,7 +933,11 @@ export class StreamHandler {
   private maybeTruncateCompletedTurnHistory(): void {
     if (this.dispatchTask !== null) return; // turn still in flight
     const remainingMs = this.playbackBufferedUntil - Date.now();
-    if (remainingMs <= 0) return;
+    // Pause-and-resume froze the playback bookkeeping at pause time
+    // (cursor snapped to 0, total rewound to the heard offset), so a kill
+    // while paused has no live backlog — the frozen heard prefix below is
+    // still the right input for the rewrite.
+    if (remainingMs <= 0 && !this.outputPaused) return;
     const heard = this.heardResponsePrefix();
     if (heard === null || heard.heardEverything) return;
     this.rewriteLastAssistantEntry(
@@ -970,6 +1052,10 @@ export class StreamHandler {
     // Speech-event: agent stop edge (clean turn end). Fire-and-forget —
     // this method is synchronous by design.
     void this.emitAgentSpeechEnded(false).catch(() => {});
+    // The turn body has finished pushing audio — from here on, a
+    // pause-resume cycle owns re-arming the grace machinery (see
+    // ``resumeAfterFalseInterruption``).
+    this.turnOutputDone = true;
     const rawGrace = process.env.PATTER_TTS_TAIL_GRACE_MS;
     const parsedGrace = rawGrace !== undefined ? Number(rawGrace) : NaN;
     const grace = (rawGrace !== undefined && Number.isFinite(parsedGrace))
@@ -1007,6 +1093,10 @@ export class StreamHandler {
             this.speakingStartedAt = null;
             this.firstAudioSentAt = null;
             this.clearPendingBargeIn();
+            // Hygiene: a turn that ended while paused (only reachable via
+            // the LLM-error path — normal turns wait out the pause
+            // decision) must not leak its pause buffers into idle time.
+            this.discardPauseState();
             void this.resetBargeInStrategies();
             // If VAD detected speech during the agent's turn but it was
             // gate-suppressed (agent hadn't been speaking long enough for
@@ -1049,6 +1139,9 @@ export class StreamHandler {
       this.speakingStartedAt = null;
       this.firstAudioSentAt = null;
       this.clearPendingBargeIn();
+      // See the grace-flip branch — drop any pause state a turn that
+      // errored mid-pause left behind.
+      this.discardPauseState();
       void this.resetBargeInStrategies();
       if (this.suppressedSpeechPending) {
         this.suppressedSpeechPending = false;
@@ -1085,6 +1178,8 @@ export class StreamHandler {
     this.speakingGeneration++; // invalidates the pending grace timer
     this.clearGraceTimer();
     this.clearPendingBargeIn();
+    // The next turn owns the floor — any stale pause state is void.
+    this.discardPauseState();
     void this.resetBargeInStrategies();
     // Recover the user's leading words. Same rationale as the barge-in flush
     // — but here it is the only audio recovery, since the agent already
@@ -1333,6 +1428,11 @@ export class StreamHandler {
       typeof confirmMs === 'number' && Number.isFinite(confirmMs) && confirmMs > 0
         ? confirmMs
         : 1500;
+    const mode = deps.agent.bargeInMode ?? 'cancel';
+    if (mode !== 'cancel' && mode !== 'pause_resume') {
+      getLogger().warn(`Unknown bargeInMode ${String(mode)} — falling back to 'cancel'`);
+    }
+    this.bargeInMode = mode === 'pause_resume' ? 'pause_resume' : 'cancel';
 
     this.history = createHistoryManager(200);
 
@@ -1812,6 +1912,21 @@ export class StreamHandler {
               // STT so the speech isn't silently discarded when the
               // agent finishes naturally without a barge-in.
               this.suppressedSpeechPending = true;
+            } else if (this.isSpeaking && this.shouldPauseForBargeIn()) {
+              // PAUSE-AND-RESUME (opt-in ``bargeInMode: 'pause_resume'``):
+              // output pauses immediately — the carrier buffer is cleared
+              // so the agent goes silent within one frame — but nothing is
+              // cancelled. A committed final transcript within
+              // ``bargeInConfirmMs`` kills the turn via ``handleBargeIn`` →
+              // ``runBargeInCancel``; otherwise the resume timer replays
+              // from the first not-fully-heard sentence. Takes precedence
+              // over the deferCancel paths below — it is strictly safer
+              // (output stops immediately AND a false positive is
+              // recoverable). The frame falls through to STT below (paused
+              // output makes the line echo-quiet) so the confirm window
+              // can actually hear the user. Parity with Python
+              // ``_start_pause_resume``.
+              this.startPauseResume();
             } else if (this.isSpeaking) {
               // Defer the cancel to transcript confirmation — instead of
               // firing on raw VAD energy — when EITHER opt-in
@@ -1921,7 +2036,11 @@ export class StreamHandler {
       // buffer, short interruptions ("stop") never produced a
       // transcript and the agent kept talking; long ones produced
       // truncated transcripts and the agent answered to fragments.
-      if (this.isSpeaking) {
+      // Pause-and-resume: while output is PAUSED the line is echo-quiet
+      // (no TTS is playing), so frames flow straight to STT — the confirm
+      // window depends on STT hearing the user. ``startPauseResume``
+      // already flushed the ring's leading edge when the pause began.
+      if (this.isSpeaking && !this.outputPaused) {
         if (frame.vadConfigured) {
           this.inboundAudioRing.push(pcm16k);
           if (
@@ -2142,6 +2261,10 @@ export class StreamHandler {
     // metrics object — a slow leak in long-running servers and a race
     // producing spurious overlap_end events. Idempotent.
     this.clearPendingBargeIn();
+    // Drop pause-and-resume buffers and wake any pause-decision waiter so
+    // a call ending mid-pause cannot strand a loop awaiting the (now
+    // cancelled) resume timer.
+    this.discardPauseState();
     // Resolve every pending firstMessage mark waiter before tearing the
     // adapter down. A call that ends mid firstMessage (carrier stop
     // arriving before the paced sender finished) would otherwise leak
@@ -2178,6 +2301,9 @@ export class StreamHandler {
     // See handleStop — drop pending barge-in timer before cleanup so a
     // dead handler can never fire a stale recordOverlapEnd callback.
     this.clearPendingBargeIn();
+    // See handleStop — drop pause-and-resume state so a dead handler can
+    // never strand a pause-decision waiter or replay stale audio.
+    this.discardPauseState();
     // See handleStop — drain pending firstMessage marks so an abnormal
     // carrier WS drop during the paced sender cannot leak unresolved
     // promises owned by the send loop, and reset the counter.
@@ -2783,6 +2909,12 @@ export class StreamHandler {
     if (processedText === null) return;
 
     this.resetTtsCarry();
+    // Pause-and-resume retention: in ``bargeInMode: 'pause_resume'`` every
+    // chunk of a RESPONSE sentence is kept in a per-sentence entry so a
+    // paused turn can re-send the cleared-but-unheard tail at resume time
+    // without re-billing TTS. ``null`` (legacy mode / filler audio /
+    // post-overflow) keeps the direct send path byte-identical to today.
+    let retainEntry = recordSegment ? this.beginRetainedSentence(processedText) : null;
     try {
       for await (const chunk of this.tts.synthesizeStream(processedText)) {
         if (!this.isSpeaking) break;
@@ -2798,11 +2930,44 @@ export class StreamHandler {
         if (processedAudio === null) continue;
         if (!this.isSpeaking) break;
 
-        if (!ttsFirstByteSent.value) {
+        if (!ttsFirstByteSent.value && !this.outputPaused) {
+          // While the pause gate holds the chunk in memory it has NOT
+          // reached the carrier — the flag (and the audio_out speech
+          // event) waits for the first post-resume chunk.
           ttsFirstByteSent.value = true;
           this.metricsAcc.recordTtsFirstByte();
           // Speech-event: per-turn first TTS audio chunk.
           await this.emitAudioOut();
+        }
+        // Pause-and-resume retention path: the chunk is appended to the
+        // sentence's entry; while paused it stays queued, while speaking
+        // it is drained (sent) immediately. Segment stamping / AEC tap /
+        // playback tracking live in ``drainSentenceEntry`` so they fire at
+        // SEND time, not at synthesis time.
+        if (retainEntry !== null && this.pauseResumeOverflowed) {
+          retainEntry = null; // retention released mid-sentence
+        }
+        if (retainEntry !== null) {
+          if (this.retainPauseChunk(retainEntry, processedAudio)) {
+            if (!this.outputPaused) {
+              this.drainSentenceEntry(retainEntry);
+              if (!this.isSpeaking) break; // cancel raced the drain
+            }
+            continue;
+          }
+          if (!this.isSpeaking) break; // paused overflow degraded to cancel
+          // Overflow while speaking: retention released — fall through to
+          // the direct send path for this chunk and the rest of the turn.
+          // The sentence keeps its already stamped segment (if any); the
+          // inline stamp below is skipped to avoid a duplicate.
+          retainEntry = null;
+          recordSegment = false;
+        }
+        if (this.outputPaused) {
+          // Paused with no retention entry (filler / error-fallback
+          // audio): drop the chunk — replaying moment-filling audio after
+          // a pause is pointless.
+          continue;
         }
         // Far-end tap for the echo canceller. On the default path
         // ``processedAudio`` is the exact PCM 16 kHz Buffer the carrier-side
@@ -3124,6 +3289,7 @@ export class StreamHandler {
   private async handleBargeInAsync(transcript: {
     text?: string;
     isFinal?: boolean;
+    speechFinal?: boolean;
   }): Promise<boolean> {
     if (!transcript.text || !this.isSpeaking) return false;
     if (this.tailGraceActive) {
@@ -3138,9 +3304,12 @@ export class StreamHandler {
     // Echo guard: when audio is forwarded to STT during TTS (no effective AEC),
     // the agent's own voice can be transcribed and would barge in on itself.
     // Drop transcripts that look like a fragment of what the agent is saying.
-    // Only under forwardSttWhileSpeaking, so the default VAD path is unaffected.
+    // Active under forwardSttWhileSpeaking AND while output is paused
+    // (pause_resume forwards mic audio to STT during the confirm window and
+    // the just-cleared audio's PSTN echo tail can lag into it), so the
+    // default VAD path is unaffected.
     if (
-      this.forwardSttWhileSpeaking &&
+      (this.forwardSttWhileSpeaking || this.outputPaused) &&
       looksLikeEcho(transcript.text, this.currentAgentSpokenText)
     ) {
       getLogger().info(
@@ -3153,6 +3322,19 @@ export class StreamHandler {
     if (!this.canBargeIn()) {
       getLogger().info(
         `Barge-in transcript suppressed (agent speaking < gate, aec=${this.aec ? 'on' : 'off'})`,
+      );
+      return false;
+    }
+    // Pause-and-resume: while output is paused, only a committed FINAL
+    // transcript (non-hallucination, non-duplicate) may confirm the kill —
+    // interims and noise wait for the resume timer instead. The confirming
+    // transcript then continues through the strategy/legacy decision below
+    // exactly as today.
+    if (this.outputPaused && !this.passesPausedKillFilters(transcript)) {
+      getLogger().debug(
+        `Paused turn: transcript ${sanitizeLogValue(
+          transcript.text.slice(0, 40),
+        )} cannot confirm the kill (interim/hallucination/duplicate) — awaiting resume timer`,
       );
       return false;
     }
@@ -3190,16 +3372,23 @@ export class StreamHandler {
    * floating promise — non-confirmed transcripts simply skip the cancel
    * and the legacy boolean return is meaningless under that opt-in path.
    */
-  private handleBargeIn(transcript: { text?: string; isFinal?: boolean }): boolean {
+  private handleBargeIn(transcript: {
+    text?: string;
+    isFinal?: boolean;
+    speechFinal?: boolean;
+  }): boolean {
     if (!transcript.text || !this.isSpeaking) return false;
     // Echo guard FIRST — before the tail-grace rescue: the grace window
     // (~1.5 s after TTS) is exactly when the agent's final-sentence echo
     // arrives via STT. Running the rescue first treated that echo as "the
     // next turn", flipped isSpeaking off, and commitTranscript's
     // isSpeaking-gated echo check could no longer fire — the agent answered
-    // its own words as a phantom user turn. Mirrors the Python fix.
+    // its own words as a phantom user turn. Mirrors the Python fix. Also
+    // active while output is PAUSED (pause_resume forwards mic audio during
+    // the confirm window and the just-cleared audio's echo tail can lag
+    // into it).
     if (
-      this.forwardSttWhileSpeaking &&
+      (this.forwardSttWhileSpeaking || this.outputPaused) &&
       looksLikeEcho(transcript.text, this.currentAgentSpokenText)
     ) {
       getLogger().info(
@@ -3213,6 +3402,15 @@ export class StreamHandler {
       // Tail-grace transcript = next turn, not a barge-in. End the grace and
       // let the transcript dispatch normally (parity with the async path).
       this.endTailGraceForNewTurn();
+      return false;
+    }
+    // Pause-and-resume final-only gate (parity with handleBargeInAsync).
+    if (this.outputPaused && !this.passesPausedKillFilters(transcript)) {
+      getLogger().debug(
+        `Paused turn: transcript ${sanitizeLogValue(
+          transcript.text.slice(0, 40),
+        )} cannot confirm the kill (interim/hallucination/duplicate) — awaiting resume timer`,
+      );
       return false;
     }
     if (this.bargeInStrategies.length === 0) {
@@ -3261,8 +3459,13 @@ export class StreamHandler {
     const bargeinSpan = startSpan(SPAN_BARGEIN, { 'patter.call.id': this.callId });
     try {
       // Post-complete barge-in during the buffered tail — rewrite history to
-      // the heard prefix BEFORE cancelSpeaking resets the playback cursor.
+      // the heard prefix BEFORE cancelSpeaking resets the playback cursor
+      // (or, for a paused turn, while the frozen pause cursor still holds).
       this.maybeTruncateCompletedTurnHistory();
+      // Pause-and-resume: a kill while paused discards the held buffers
+      // (queued sentences + retained audio) and wakes any pause-decision
+      // waiter, which then observes the interrupt.
+      this.discardPauseState();
       this.cancelSpeaking();
       try {
         this.deps.bridge.sendClear(this.ws, this.streamSid);
@@ -3315,6 +3518,356 @@ export class StreamHandler {
     this.bargeInPendingSince = null;
   }
 
+  // ---------------------------------------------------------------------------
+  // Pause-and-resume false-interruption handling (bargeInMode: 'pause_resume').
+  // LiveKit-style: PAUSE output on VAD speech_start, KILL on a committed final
+  // transcript within the confirm window, RESUME from the first
+  // not-fully-heard sentence otherwise. Mirrors Python `_start_pause_resume`.
+  // ---------------------------------------------------------------------------
+
+  /** Retained-audio cap in bytes for the active TTS chunk format (mirrors
+   * the bytes-per-ms logic of ``trackOutboundPlayback``). */
+  private pauseRetainedCapBytes(): number {
+    const bytesPerMs =
+      this.ttsOutputFormatNativeForCarrier &&
+      this.deps.bridge.telephonyProvider !== 'telnyx'
+        ? 8
+        : 32;
+    return StreamHandler.PAUSE_RESUME_MAX_RETAINED_S * 1000 * bytesPerMs;
+  }
+
+  /**
+   * Whether a VAD ``speech_start`` during the agent's turn should take the
+   * pause-and-resume path instead of cancel/pending. Requires
+   * ``bargeInMode: 'pause_resume'`` AND resumable state: a dispatch in
+   * flight (the sentence/TTS loops honour the pause gate) or retained
+   * sentence audio from a just-completed turn still playing out of the
+   * carrier buffer. The firstMessage paced sender keeps today's
+   * immediate-cancel behaviour (its prewarm-bytes path has no retained
+   * sentences to resume from — known limitation).
+   */
+  private shouldPauseForBargeIn(): boolean {
+    if (this.bargeInMode !== 'pause_resume') return false;
+    if (this.pauseResumeOverflowed) return false;
+    if (this.outputPaused) return true; // already paused — stay on the path
+    if (this.dispatchTask !== null) return true;
+    return this.turnSentenceAudio.length > 0;
+  }
+
+  /**
+   * Resume offset at SENTENCE granularity: the first sentence (into
+   * ``turnSpokenSegments`` / ``turnSentenceAudio``) whose playback had NOT
+   * completed when the pause landed — computed from the #164
+   * playback-cursor bookkeeping (``heard = totalPushed - carrierBacklog``).
+   * Granularity choice: the partially-played sentence is replayed from its
+   * start (mark/clear bookkeeping is per-sentence and a clipped sentence
+   * restarted at its boundary sounds like a natural repair), rather than
+   * resumed mid-word at a byte offset.
+   */
+  private computePauseResumePoint(): { index: number; heardMs: number } {
+    const segments = this.turnSpokenSegments;
+    const totalMs = this.turnPlaybackTotalMs;
+    const remainingMs = Math.max(0, this.playbackBufferedUntil - Date.now());
+    const heardMs = Math.max(0, totalMs - remainingMs);
+    let index = segments.length;
+    for (let i = segments.length - 1; i >= 0; i--) {
+      const endMs = i + 1 < segments.length ? segments[i + 1].startMs : totalMs;
+      if (endMs > heardMs + 1e-6) index = i;
+      else break;
+    }
+    return { index, heardMs };
+  }
+
+  /**
+   * PAUSE the agent's output on a VAD ``speech_start`` (pause_resume
+   * mode): gate further sends on ``outputPaused``, ``sendClear`` the
+   * carrier so queued audio stops quickly, and schedule the
+   * false-interruption resume timer. The LLM stream and the TTS provider
+   * stream are deliberately NOT cancelled — tokens keep buffering as
+   * sentences and synthesized audio queues in memory (both bounded) so a
+   * resume can pick up seamlessly.
+   */
+  private startPauseResume(): void {
+    if (this.outputPaused) return;
+    // Anchor the overlap window exactly like ``startPendingBargeIn`` so a
+    // kill records detection_delay from VAD-T1 (never restarted).
+    if (this.bargeInPendingSince === null) {
+      this.bargeInPendingSince = Date.now();
+      this.metricsAcc.recordOverlapStart();
+    }
+    // A stale strategy-pending timer is superseded by the pause timer.
+    if (this.bargeInPendingTimer !== null) {
+      clearTimeout(this.bargeInPendingTimer);
+      this.bargeInPendingTimer = null;
+    }
+    this.outputPaused = true;
+    let resolveFn: () => void = () => undefined;
+    const promise = new Promise<void>((resolve) => {
+      resolveFn = resolve;
+    });
+    this.pauseDecision = { promise, resolve: resolveFn };
+    // Freeze the playback bookkeeping at the heard offset: the clear below
+    // drops the carrier backlog, so anything pushed beyond the heard cursor
+    // is void. A kill that follows then computes the heard prefix from this
+    // frozen state; a resume re-advances it as the tail is re-sent.
+    const { index, heardMs } = this.computePauseResumePoint();
+    this.pauseResumeIndex = index;
+    this.turnPlaybackTotalMs = heardMs;
+    this.playbackBufferedUntil = 0;
+    // The phase-1 grace wait (carrier backlog) is void after the clear;
+    // resume re-arms it for the re-sent tail.
+    this.clearGraceTimer();
+    this.drainPendingMarks();
+    getLogger().info(
+      `Barge-in PAUSE (VAD speech_start during TTS); resuming from sentence ` +
+        `${index} unless a transcript confirms within ${this.bargeInConfirmMs}ms`,
+    );
+    try {
+      this.deps.bridge.sendClear(this.ws, this.streamSid);
+    } catch (err) {
+      getLogger().debug(`sendClear during pause failed: ${String(err)}`);
+    }
+    // Output is silent from here — flush the self-hearing ring so STT
+    // receives the user's leading words and can produce the confirming
+    // transcript (or nothing, for a cough). ``handleAudio`` forwards
+    // subsequent frames to STT while paused for the same reason.
+    this.flushInboundAudioRing();
+    this.bargeInPendingTimer = setTimeout(() => {
+      this.bargeInPendingTimer = null;
+      if (!this.outputPaused) return;
+      this.resumeAfterFalseInterruption();
+    }, this.bargeInConfirmMs);
+  }
+
+  /**
+   * RESUME output after a pause that no transcript confirmed. Re-sends the
+   * cleared-but-unheard tail from the retained sentence audio (sentence
+   * granularity, no TTS re-billing), unpauses the live send path, and
+   * records the event as a FALSE interruption: the overlap closes via
+   * ``recordOverlapEnd(false)`` (the backchannel counter — the
+   * interruption count is NOT incremented) and the turn is never marked
+   * interrupted.
+   */
+  private resumeAfterFalseInterruption(): void {
+    if (!this.outputPaused) return;
+    const entries = this.turnSentenceAudio;
+    const idx = Math.max(0, Math.min(this.pauseResumeIndex, entries.length));
+    const tail = entries.slice(idx);
+    // Drop the stale segment stamps of the sentences about to be replayed
+    // — the replay re-stamps them at their new positions on the
+    // (frozen-then-resumed) playback timeline, so a later barge-in still
+    // maps to an accurate heard prefix without duplicates.
+    this.turnSpokenSegments.splice(idx);
+    for (const entry of tail) entry.sent = 0;
+    // False interruption — the backchannel path. Mirrors the pending
+    // barge-in timeout.
+    this.metricsAcc.recordOverlapEnd(false);
+    this.metricsAcc.anchorUserSpeechStart();
+    this.bargeInPendingSince = null;
+    getLogger().info(
+      `False interruption: no confirming transcript within ` +
+        `${this.bargeInConfirmMs}ms — resuming ${tail.length} retained sentence(s)`,
+    );
+    this._eventBus.emit('false_interruption', { resumedSentences: tail.length });
+    // Re-send the unheard tail BEFORE unpausing so the in-flight synthesis
+    // (which queues while paused) cannot interleave a newer chunk ahead of
+    // the replayed audio.
+    for (const entry of tail) {
+      if (!this.isSpeaking) break;
+      // Sentence boundary — drop any stale PCM16 alignment carry, the same
+      // contract ``synthesizeSentence`` keeps per sentence.
+      this.resetTtsCarry();
+      this.drainSentenceEntry(entry, true);
+    }
+    this.outputPaused = false;
+    // Close the unpause race: a chunk queued between the last drain and the
+    // flag flip would otherwise wait for the next live chunk.
+    if (tail.length > 0 && this.isSpeaking) {
+      this.drainSentenceEntry(tail[tail.length - 1], true);
+    }
+    const decision = this.pauseDecision;
+    this.pauseDecision = null;
+    if (decision) decision.resolve();
+    // Post-complete turn (carrier was draining the buffered tail when the
+    // pause landed): the turn body already finished pushing — its grace
+    // timer was cancelled at pause time — so re-arm the grace machinery for
+    // the re-sent backlog: phase-1 hold keeps barge-in armed for the whole
+    // audible window, exactly as #164. A turn still in flight arms it
+    // itself in its ``finally``.
+    if (this.turnOutputDone && this.isSpeaking) {
+      this.endSpeakingWithGrace();
+    }
+  }
+
+  /** Drop all pause-and-resume state (flags + buffers) and wake any
+   * pause-decision waiter. Used by the kill path, fresh turns, and
+   * teardown. Idempotent. */
+  private discardPauseState(): void {
+    this.outputPaused = false;
+    this.pauseResumeIndex = 0;
+    this.pausedSentences = [];
+    this.turnSentenceAudio = [];
+    this.pauseRetainedBytes = 0;
+    const decision = this.pauseDecision;
+    this.pauseDecision = null;
+    if (decision) decision.resolve();
+  }
+
+  /** Block until the in-flight pause resolves. ``true`` → resumed (keep
+   * speaking); ``false`` → killed (turn interrupted). Bounded: fails open
+   * past the confirm window plus margin (the resume timer guarantees a
+   * decision; the margin covers teardown races). Mirrors Python
+   * ``_await_pause_decision``. */
+  private async awaitPauseDecision(): Promise<boolean> {
+    while (this.outputPaused && this.isSpeaking) {
+      const decision = this.pauseDecision;
+      if (decision === null) break;
+      const timedOut = await new Promise<boolean>((resolve) => {
+        const timer = setTimeout(
+          () => resolve(true),
+          this.bargeInConfirmMs + 5000,
+        );
+        void decision.promise.then(() => {
+          clearTimeout(timer);
+          resolve(false);
+        });
+      });
+      if (timedOut) {
+        getLogger().debug('pause decision wait timed out — failing open');
+        break;
+      }
+    }
+    return this.isSpeaking;
+  }
+
+  /** While paused, buffer ``sentence`` (pre-guardrail text) for the resume
+   * drain and return ``true``; return ``false`` when not paused (caller
+   * synthesizes normally). Overflow degrades to a full cancel — the
+   * bounded buffer is a memory-safety valve, not a speech queue. */
+  private bufferSentenceIfPaused(sentence: string): boolean {
+    if (!this.outputPaused) return false;
+    if (this.pausedSentences.length >= StreamHandler.PAUSE_MAX_BUFFERED_SENTENCES) {
+      getLogger().warn(
+        `pause_resume sentence buffer overflow (${this.pausedSentences.length}) — degrading to full cancel`,
+      );
+      this.runBargeInCancel('<pause_resume sentence-buffer overflow>');
+      return true; // handled; the loop observes !isSpeaking next
+    }
+    this.pausedSentences.push(sentence);
+    return true;
+  }
+
+  /** Pop-and-return every sentence buffered during the pause. */
+  private releasePausedSentences(): string[] {
+    if (this.pausedSentences.length === 0) return [];
+    const out = this.pausedSentences;
+    this.pausedSentences = [];
+    return out;
+  }
+
+  /** Open a retention entry for a response sentence (pause_resume mode
+   * only — returns ``null`` otherwise, keeping the legacy send path
+   * byte-identical). Filler / error-fallback audio is never retained
+   * (``recordSegment=false`` callers skip this). */
+  private beginRetainedSentence(
+    text: string,
+  ): { text: string; chunks: Buffer[]; sent: number } | null {
+    if (this.bargeInMode !== 'pause_resume') return null;
+    if (this.pauseResumeOverflowed) return null;
+    const entry = { text, chunks: [] as Buffer[], sent: 0 };
+    this.turnSentenceAudio.push(entry);
+    return entry;
+  }
+
+  /** Append ``chunk`` to the sentence's retention entry, enforcing the
+   * retained-audio cap. Returns ``true`` when retained; ``false`` on
+   * overflow (paused → the turn was just killed; speaking → retention was
+   * released and the caller falls back to direct sends). */
+  private retainPauseChunk(
+    entry: { text: string; chunks: Buffer[]; sent: number },
+    chunk: Buffer,
+  ): boolean {
+    entry.chunks.push(chunk);
+    this.pauseRetainedBytes += chunk.length;
+    if (this.pauseRetainedBytes <= this.pauseRetainedCapBytes()) return true;
+    if (this.outputPaused) {
+      getLogger().warn(
+        `pause_resume retained-audio cap (${StreamHandler.PAUSE_RESUME_MAX_RETAINED_S}s) ` +
+          'exceeded while paused — degrading to full cancel',
+      );
+      this.runBargeInCancel('<pause_resume audio-buffer overflow>');
+    } else {
+      getLogger().info(
+        `pause_resume retained-audio cap (${StreamHandler.PAUSE_RESUME_MAX_RETAINED_S}s) ` +
+          'exceeded — disabling pause-resume for this turn (legacy cancel applies)',
+      );
+      this.pauseResumeOverflowed = true;
+      this.pauseRetainedBytes = 0;
+      for (const e of this.turnSentenceAudio) {
+        e.chunks = [];
+        e.sent = 0;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Send every not-yet-sent chunk of a retention entry to the carrier
+   * (claim-then-send so concurrent drains can never double-send). Stamps
+   * the sentence's heard-prefix segment at its first sent chunk — a replay
+   * (``sent`` reset to 0) re-stamps at the new timeline position.
+   * ``force=true`` bypasses the pause gate (resume path only).
+   */
+  private drainSentenceEntry(
+    entry: { text: string; chunks: Buffer[]; sent: number },
+    force = false,
+  ): void {
+    while (entry.sent < entry.chunks.length) {
+      if (!this.isSpeaking) return;
+      if (this.outputPaused && !force) return;
+      const idx = entry.sent;
+      entry.sent = idx + 1;
+      const chunk = entry.chunks[idx];
+      if (idx === 0) {
+        this.turnSpokenSegments.push({
+          text: entry.text,
+          startMs: this.turnPlaybackTotalMs,
+        });
+      }
+      if (this.aec) this.aec.pushFarEnd(chunk);
+      const encoded = this.encodePipelineAudio(chunk);
+      this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
+      this.trackOutboundPlayback(chunk.length);
+      this.markFirstAudioSent();
+    }
+  }
+
+  /** Whether a transcript may KILL a paused turn: it must be a committed
+   * FINAL (interims cannot confirm), not a known STT hallucination, and
+   * not a duplicate of the last committed utterance — the same filter
+   * family ``commitTranscript`` applies, evaluated without consuming its
+   * dedup state (the transcript still flows on to ``commitTranscript`` to
+   * become the user's next turn). */
+  private passesPausedKillFilters(transcript: {
+    text?: string;
+    isFinal?: boolean;
+    speechFinal?: boolean;
+  }): boolean {
+    if (transcript.isFinal !== true && transcript.speechFinal !== true) {
+      return false;
+    }
+    const normalised = (transcript.text ?? '').trim().toLowerCase();
+    const stripped = normalised.replace(/[.,!?;: ]+$/, '').trim();
+    if (HALLUCINATIONS.has(stripped) || stripped === '') return false;
+    if (
+      normalised === this.lastCommitText &&
+      Date.now() - this.lastCommitAt < 2000
+    ) {
+      return false;
+    }
+    return true;
+  }
+
   /**
    * Dedup + throttle + hallucination filter for final STT transcripts.
    * Mirrors ``PipelineStreamHandler._stt_loop`` on the Python side.
@@ -3334,12 +3887,14 @@ export class StreamHandler {
       return false;
     }
     // Echo guard: while the agent is still speaking (the forward-STT echo
-    // window), a transcript that matches the agent's own speech is its TTS
-    // bleeding back into STT, not a user turn. Gated on forwardSttWhileSpeaking
-    // + isSpeaking so a real post-turn reply (committed when idle) is never
-    // dropped, and the default VAD path is unaffected. Parity with Python.
+    // window — or a pause_resume confirm window, which forwards mic audio
+    // to STT while the agent formally holds the floor), a transcript that
+    // matches the agent's own speech is its TTS bleeding back into STT,
+    // not a user turn. Gated on isSpeaking so a real post-turn reply
+    // (committed when idle) is never dropped, and the default VAD path is
+    // unaffected. Parity with Python.
     if (
-      this.forwardSttWhileSpeaking &&
+      (this.forwardSttWhileSpeaking || this.outputPaused) &&
       this.isSpeaking &&
       looksLikeEcho(text, this.currentAgentSpokenText)
     ) {
@@ -3522,8 +4077,20 @@ export class StreamHandler {
           // barge-in transcript mid-turn is compared against what the agent has
           // said so far (echo lags the tokens). Parity with Python.
           this.currentAgentSpokenText = allParts.join('');
-          for (const sentence of chunker.push(token)) {
+          let sentences = chunker.push(token);
+          // pause_resume: a resume may have fired between tokens — speak
+          // the sentences buffered during the pause FIRST so the reply
+          // stays in order.
+          if (!this.outputPaused) {
+            const released = this.releasePausedSentences();
+            if (released.length > 0) sentences = [...released, ...sentences];
+          }
+          for (const sentence of sentences) {
             if (!this.isSpeaking) break;
+            // pause_resume: while output is paused, buffer the sentence
+            // (bounded) — spoken on resume, discarded on kill. Keeps
+            // consuming LLM tokens either way.
+            if (this.bufferSentenceIfPaused(sentence)) continue;
             await guardAndSpeak(sentence, !firstSentenceEmitted);
             firstSentenceEmitted = true;
           }
@@ -3571,11 +4138,25 @@ export class StreamHandler {
 
       this.metricsAcc.recordLlmComplete(); // record BEFORE TTS flush, not after
 
+      // The outer loop exists for pause_resume: the turn must not end
+      // while a pause decision is outstanding — buffered sentences are
+      // spoken on resume; a kill aborts the turn. Each wait is bounded by
+      // the confirm window (the resume timer guarantees a decision), and
+      // legacy mode never pauses so the loop runs exactly once —
+      // byte-identical behaviour. Mirrors Python.
       if (!llmError && this.isSpeaking) {
-        for (const sentence of chunker.flush()) {
+        let pendingSentences = chunker.flush();
+        for (;;) {
+          for (const sentence of pendingSentences) {
+            if (!this.isSpeaking) break;
+            if (this.bufferSentenceIfPaused(sentence)) continue;
+            await guardAndSpeak(sentence, !firstSentenceEmitted);
+            firstSentenceEmitted = true;
+          }
           if (!this.isSpeaking) break;
-          await guardAndSpeak(sentence, !firstSentenceEmitted);
-          firstSentenceEmitted = true;
+          if (!this.outputPaused && this.pausedSentences.length === 0) break;
+          if (!(await this.awaitPauseDecision())) break;
+          pendingSentences = this.releasePausedSentences();
         }
       }
     } finally {
@@ -3633,17 +4214,32 @@ export class StreamHandler {
     let interrupted = false;
 
     try {
-      for (const sentence of sentences) {
-        if (!this.isSpeaking) { interrupted = true; break; }
-        let sentenceText = sentence;
-        // Tier 2 — apply per-sentence after_llm hook on non-streaming
-        // path too (parity with the streaming path's guardAndSpeak).
-        if (hookExecutor.hasAfterLlmSentence()) {
-          const transformed = await hookExecutor.runAfterLlmSentence(sentenceText, hookCtx);
-          if (transformed === null) continue; // hook dropped this sentence
-          sentenceText = transformed;
+      // Outer loop mirrors ``runPipelineLlm``: in pause_resume mode the
+      // turn waits out an in-flight pause decision (buffered sentences
+      // speak on resume, a kill marks interrupted); legacy mode never
+      // pauses → single pass.
+      let pendingSentences: readonly string[] = sentences;
+      for (;;) {
+        for (const sentence of pendingSentences) {
+          if (!this.isSpeaking) { interrupted = true; break; }
+          if (this.bufferSentenceIfPaused(sentence)) continue;
+          let sentenceText = sentence;
+          // Tier 2 — apply per-sentence after_llm hook on non-streaming
+          // path too (parity with the streaming path's guardAndSpeak).
+          if (hookExecutor.hasAfterLlmSentence()) {
+            const transformed = await hookExecutor.runAfterLlmSentence(sentenceText, hookCtx);
+            if (transformed === null) continue; // hook dropped this sentence
+            sentenceText = transformed;
+          }
+          await this.synthesizeSentence(sentenceText, hookExecutor, hookCtx, ttsFirstByteSent);
         }
-        await this.synthesizeSentence(sentenceText, hookExecutor, hookCtx, ttsFirstByteSent);
+        if (interrupted) break;
+        if (!this.outputPaused && this.pausedSentences.length === 0) break;
+        if (!(await this.awaitPauseDecision())) {
+          interrupted = true;
+          break;
+        }
+        pendingSentences = this.releasePausedSentences();
       }
     } finally {
       this.endSpeakingWithGrace();
