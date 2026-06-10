@@ -28,6 +28,7 @@ import { buildConsultTool } from './consult';
 import type { ProviderPricing } from './pricing';
 import { SentenceChunker } from './sentence-chunker';
 import { PipelineHookExecutor } from './pipeline-hooks';
+import { InputProcessingChain } from './services/input-chain';
 import { EventBus } from './observability/event-bus';
 import type { PatterEventType } from './observability/event-bus';
 import {
@@ -516,8 +517,6 @@ export class StreamHandler {
    * dashboard / pricing rows.
    */
   private llmProviderTag: string = "openai";
-  /** Set to true after a VAD error to suppress log spam for the rest of the call. */
-  private vadDisabled = false;
   /**
    * Auto-loaded SileroVAD when ``agent.vad`` is undefined. Populated by
    * ``initPipeline`` and queried alongside ``agent.vad`` on every audio frame.
@@ -1109,7 +1108,7 @@ export class StreamHandler {
    */
   private resetVad(): void {
     const activeVad = this.deps.agent.vad ?? this.autoVad;
-    if (!activeVad || this.vadDisabled) return;
+    if (!activeVad || this.inputChain.isVadDisabled()) return;
     try {
       const ret = activeVad.reset?.();
       if (ret instanceof Promise) {
@@ -1292,6 +1291,22 @@ export class StreamHandler {
   // Created lazily on first use; reset() on call end.
   private readonly inboundResampler: StatefulResampler = createResampler8kTo16k();
   private readonly outboundResampler: StatefulResampler = createResampler16kTo8k();
+  /**
+   * Inbound audio processing chain: decode (mulaw→PCM16) → stateful 8k→16k
+   * resample → AEC near-end → ``agent.audioFilter`` → VAD (slice 1 of the
+   * pipeline-stages decomposition — docs/architecture/pipeline-stages.md).
+   * Shares ``inboundResampler`` so ``flushResamplers`` keeps draining the
+   * tail on call close; AEC / filter / VAD are late-bound getters because
+   * ``initPipeline`` (and the unit suites) install ``aec`` / ``autoVad``
+   * after construction. Owns the per-call VAD error kill switch that
+   * previously lived here as ``vadDisabled``.
+   */
+  private readonly inputChain: InputProcessingChain = new InputProcessingChain({
+    resampler: this.inboundResampler,
+    getAec: () => this.aec,
+    getAudioFilter: () => this.deps.agent.audioFilter,
+    getVad: () => this.deps.agent.vad ?? this.autoVad,
+  });
 
   private readonly history: ReturnType<typeof createHistoryManager>;
   private readonly metricsAcc: CallMetricsAccumulator;
@@ -1729,18 +1744,15 @@ export class StreamHandler {
   async handleAudio(audioBuffer: Buffer): Promise<void> {
     const provider = this.deps.agent.provider ?? 'openai_realtime';
     if (provider === 'pipeline' && this.stt) {
-      // Both Twilio and Telnyx (with default streaming_start PCMU bidirectional)
-      // deliver mulaw 8 kHz — always transcode to PCM16 16 kHz before STT.
-      const pcm8k = mulawToPcm16(audioBuffer);
-      let pcm16k = this.inboundResampler.process(pcm8k);
-
-      // Acoustic echo cancellation — subtract estimated TTS bleed from the
-      // mic stream before VAD/STT see it. Pass-through until the canceller
-      // has enough far-end history to fill its filter window (~128 ms),
-      // then converges over the next 0.5–2 s of TTS-only frames.
-      if (this.aec) {
-        pcm16k = this.aec.processNearEnd(pcm16k);
-      }
+      // Decode (mulaw 8 kHz → PCM16) → stateful 8k→16k resample → AEC
+      // near-end → ``agent.audioFilter`` → VAD all live in the
+      // ``InputProcessingChain`` (slice 1 of the pipeline-stages
+      // decomposition — docs/architecture/pipeline-stages.md). The chain
+      // returns the processed frame plus at most one VAD event; everything
+      // downstream (VAD-event handling, self-hearing gate, ring buffer,
+      // ``beforeSendToStt`` hook, STT feed) stays here for this slice.
+      const frame = await this.inputChain.process(audioBuffer);
+      const pcm16k = frame.pcm16k;
 
       // External VAD (e.g. Silero) when configured. Drives:
       //  - Self-hearing avoidance: while the agent is speaking we DO NOT pipe
@@ -1750,18 +1762,9 @@ export class StreamHandler {
       //    interruption (no waiting for STT to emit a transcript).
       //  - Endpointing-free STT: no need to wait for Deepgram's silence
       //    timeout — we already know when the user is talking.
-      const activeVad = this.deps.agent.vad ?? this.autoVad;
-      if (activeVad && !this.vadDisabled) {
+      if (frame.vadConfigured) {
         try {
-          // H4: protect hot path against slow ONNX inference — if VAD takes
-          // longer than 25 ms, treat the frame as silent and continue.
-          const vadPromise = activeVad.processFrame(pcm16k, 16000);
-          let vadTimeoutId: ReturnType<typeof setTimeout>;
-          const timeoutPromise = new Promise<null>((resolve) => {
-            vadTimeoutId = setTimeout(() => resolve(null), 25);
-          });
-          const evt = await Promise.race([vadPromise, timeoutPromise]);
-          clearTimeout(vadTimeoutId!);
+          const evt = frame.vadEvent;
           if (evt) {
             // INFO-level log so the user can see VAD activity in the standard
             // server output without flipping debug logging.
@@ -1894,8 +1897,11 @@ export class StreamHandler {
             }
           }
         } catch (err) {
-          // Disable VAD for the rest of the call to avoid log spam on repeated failures.
-          this.vadDisabled = true;
+          // Disable VAD for the rest of the call to avoid log spam on
+          // repeated failures. Inference failures are already handled inside
+          // the chain; this preserves the pre-extraction semantics where a
+          // throw from the EVENT-HANDLING path above also disabled VAD.
+          this.inputChain.disableVad();
           getLogger().warn(`VAD processFrame failed — disabling VAD for this call: ${String(err)}`);
         }
       }
@@ -1916,7 +1922,7 @@ export class StreamHandler {
       // transcript and the agent kept talking; long ones produced
       // truncated transcripts and the agent answered to fragments.
       if (this.isSpeaking) {
-        if (this.deps.agent.vad ?? this.autoVad) {
+        if (frame.vadConfigured) {
           this.inboundAudioRing.push(pcm16k);
           if (
             this.inboundAudioRing.length > StreamHandler.INBOUND_AUDIO_RING_FRAMES

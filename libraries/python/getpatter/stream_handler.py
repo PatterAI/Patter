@@ -33,6 +33,7 @@ from getpatter.observability.tracing import (
     SPAN_TTS,
     start_span,
 )
+from getpatter.services.input_chain import InputProcessingChain
 from getpatter.services.pipeline_hooks import PipelineHookExecutor
 from getpatter.services.sentence_chunker import SentenceChunker
 from getpatter.telephony.common import (
@@ -2840,8 +2841,13 @@ class PipelineStreamHandler(StreamHandler):
         # Throttle state for back-to-back STT finals — see ``_commit_transcript``.
         self._last_commit_text: str = ""
         self._last_commit_at: float = 0.0
-        # Per-handler StatefulResampler for mulaw 8 kHz -> PCM16 16 kHz transcoding.
-        self._resampler_8k_to_16k = None
+        # Inbound audio processing chain: decode (mulaw->PCM16) -> stateful
+        # 8k->16k resample -> AEC near-end -> ``agent.audio_filter`` -> VAD.
+        # Lazily constructed on the first media frame (slice 1 of the
+        # pipeline-stages decomposition — docs/architecture/pipeline-stages.md);
+        # owns the per-handler StatefulResampler previously held in
+        # ``_resampler_8k_to_16k``.
+        self._input_chain: InputProcessingChain | None = None
         # FIFO of outstanding Twilio marks the SDK has sent but not yet seen
         # echoed back. Used by the firstMessage paced sender to bound the
         # carrier-side buffer depth — without this the loop pushed the entire
@@ -4490,39 +4496,33 @@ class PipelineStreamHandler(StreamHandler):
         # Inbound PCMU 8 kHz (Twilio always, Telnyx when streaming_start
         # negotiated PCMU bidirectional) must be decoded to PCM16 and
         # up-sampled to 16 kHz before hitting STT adapters configured for
-        # linear16 @ 16 kHz.
-        if self._input_is_mulaw_8k:
-            from getpatter.audio.transcoding import mulaw_to_pcm16
+        # linear16 @ 16 kHz. Decode -> stateful resample -> AEC near-end ->
+        # ``agent.audio_filter`` -> VAD all live in the
+        # ``InputProcessingChain`` (slice 1 of the pipeline-stages
+        # decomposition — docs/architecture/pipeline-stages.md). Lazily
+        # constructed (mirrors the old lazy resampler) with late-bound
+        # getters so ``start()`` — and test fixtures — can install
+        # ``_aec`` / ``_auto_vad`` after the chain already exists.
+        chain = getattr(self, "_input_chain", None)
+        if chain is None:
+            chain = InputProcessingChain(
+                input_is_mulaw_8k=self._input_is_mulaw_8k,
+                get_aec=lambda: getattr(self, "_aec", None),
+                get_audio_filter=lambda: getattr(self.agent, "audio_filter", None),
+                get_vad=lambda: getattr(self.agent, "vad", None)
+                or getattr(self, "_auto_vad", None),
+            )
+            self._input_chain = chain
+        frame = await chain.process(audio_bytes)
+        pcm = frame.pcm
 
-            # Use per-handler StatefulResampler to preserve ratecv filter state
-            # across audio chunks (prevents boundary artefacts at STT input).
-            if self._resampler_8k_to_16k is None:
-                from getpatter.audio.transcoding import create_resampler_8k_to_16k
-
-                self._resampler_8k_to_16k = create_resampler_8k_to_16k()
-            pcm = self._resampler_8k_to_16k.process(mulaw_to_pcm16(audio_bytes))
-        else:
-            pcm = audio_bytes
-
-        # ---- AEC ---- subtract estimated TTS bleed before VAD/STT see it.
-        # Pass-through until the canceller has enough far-end history to
-        # fill its filter window (~128 ms), then converges over the next
-        # 0.5–2 s of TTS-only frames.
-        if self._aec is not None:
-            pcm = self._aec.process_near_end(pcm)
-
-        # ---- VAD wiring (Fix 8) ----
-        # Optional ``agent.vad`` (or auto-loaded SileroVAD when the user
-        # didn't pass one) runs *before* STT so we can react to speech_start
+        # ---- VAD event handling (Fix 8) ----
+        # The chain fed the (AEC'd, filtered) frame to ``agent.vad`` (or the
+        # auto-loaded SileroVAD) *before* STT so we can react to speech_start
         # with immediate barge-in (clearing the carrier audio buffer) rather
         # than waiting for the STT engine's slower endpoint.
-        vad = getattr(self.agent, "vad", None) or self._auto_vad
-        if vad is not None:
-            try:
-                vad_event = await vad.process_frame(pcm, 16000)
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.debug("VAD process_frame failed: %s", exc)
-                vad_event = None
+        if frame.vad_configured:
+            vad_event = frame.vad_event
             if vad_event is not None:
                 if vad_event.type == "speech_start":
                     # Speech-event: the seven-event public API never fired in
@@ -5645,10 +5645,14 @@ class PipelineStreamHandler(StreamHandler):
             await self._close_mcp()
         except Exception as _exc:  # noqa: BLE001 - teardown must continue
             logger.debug("MCP close failed: %s", _exc)
-        # Flush and discard the inbound resampler tail on cleanup.
-        if self._resampler_8k_to_16k is not None:
-            self._resampler_8k_to_16k.flush()
-            self._resampler_8k_to_16k = None
+        # Flush and discard the inbound resampler tail on cleanup (owned by
+        # the input processing chain since slice 1 of the pipeline-stages
+        # decomposition). ``getattr`` so test fixtures built via
+        # ``object.__new__`` (no ``__init__``) stay safe.
+        chain = getattr(self, "_input_chain", None)
+        if chain is not None:
+            chain.flush()
+            self._input_chain = None
 
     @property
     def stt(self):

@@ -74,6 +74,13 @@ class KrispVivaFilter(AudioFilter):
         self._noise_suppression_level: int = noise_suppression_level
         self._sample_rate: int | None = None
         self._frame_duration_ms: int = frame_duration_ms
+        # Internal re-framing buffer: Krisp sessions process EXACTLY
+        # ``frame_duration_ms`` of audio per call, but the pipeline pushes
+        # whatever the carrier delivers (typically 20 ms frames). Input is
+        # accumulated here and processed in ``frame_duration_ms`` sub-frames;
+        # any remainder is carried into the next call instead of raising a
+        # frame-size mismatch. Cleared on sample-rate change and ``close()``.
+        self._pending: bytes = b""
 
         try:
             KrispSDKManager.acquire()
@@ -150,6 +157,15 @@ class KrispVivaFilter(AudioFilter):
 
         Intended to be called via ``asyncio.to_thread`` from :meth:`process`
         so the event loop is never blocked by the native DSP pipeline.
+
+        Input of any size is accepted: it is re-framed internally into the
+        ``frame_duration_ms`` sub-frames the Krisp session requires. When the
+        accumulated audio is not an exact multiple of the Krisp frame size,
+        the remainder is buffered for the next call and the returned bytes
+        are correspondingly shorter (possibly ``b""`` for a sub-frame input)
+        — with the pipeline's standard 20 ms telephony frames and the default
+        10 ms Krisp frame this never happens and output length equals input
+        length.
         """
         try:
             import numpy as np  # local import keeps numpy optional
@@ -158,19 +174,36 @@ class KrispVivaFilter(AudioFilter):
                 "numpy is required for KrispVivaFilter: pip install numpy"
             ) from e
 
-        # Lazy session re-creation if sample rate changed mid-call.
+        # Lazy session re-creation if sample rate changed mid-call. Buffered
+        # audio from the previous rate is meaningless at the new one — drop it.
         if self._session is None or self._sample_rate != sample_rate:
             self._create_session(sample_rate)
+            self._pending = b""
 
         expected_samples = int((sample_rate * self._frame_duration_ms) / 1000)
-        audio_samples = np.frombuffer(pcm_chunk, dtype=np.int16)
-        if len(audio_samples) != expected_samples:
-            raise ValueError(
-                f"Frame size mismatch: expected {expected_samples} samples "
-                f"({self._frame_duration_ms}ms @ {sample_rate}Hz), "
-                f"got {len(audio_samples)} samples"
-            )
+        frame_bytes = expected_samples * 2  # int16 mono
 
+        data = self._pending + pcm_chunk if self._pending else pcm_chunk
+        if len(data) < frame_bytes:
+            self._pending = data
+            return b""
+        emit_len = (len(data) // frame_bytes) * frame_bytes
+        self._pending = data[emit_len:]
+
+        out = bytearray()
+        for offset in range(0, emit_len, frame_bytes):
+            frame = data[offset : offset + frame_bytes]
+            out += self._filter_frame(
+                np.frombuffer(frame, dtype=np.int16), frame
+            )
+        return bytes(out)
+
+    def _filter_frame(self, audio_samples: Any, frame: bytes) -> bytes:
+        """Run ONE exact-size frame through the Krisp session.
+
+        Falls back to the original ``frame`` bytes on empty / mismatched /
+        failing SDK output so the call audio path is never broken.
+        """
         try:
             filtered_samples = self._session.process(
                 audio_samples, self._noise_suppression_level
@@ -178,19 +211,19 @@ class KrispVivaFilter(AudioFilter):
 
             if filtered_samples is None or len(filtered_samples) == 0:
                 logger.warning("Krisp returned empty output, using original audio")
-                return pcm_chunk
+                return frame
             if len(filtered_samples) != len(audio_samples):
                 logger.warning(
                     "Krisp output size mismatch: expected %s, got %s, using original",
                     len(audio_samples),
                     len(filtered_samples),
                 )
-                return pcm_chunk
+                return frame
 
             return bytes(filtered_samples.tobytes())
         except Exception as e:
             logger.error("Error processing Krisp frame: %s", e)
-            return pcm_chunk
+            return frame
 
     async def process(self, pcm_chunk: bytes, sample_rate: int) -> bytes:
         """Run the PCM chunk through Krisp and return the filtered bytes.
@@ -226,6 +259,7 @@ class KrispVivaFilter(AudioFilter):
 
     async def close(self) -> None:
         """Release the Krisp session and decrement the SDK refcount."""
+        self._pending = b""
         if self._session is not None:
             self._session = None
         if self._sdk_acquired:
