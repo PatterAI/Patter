@@ -555,6 +555,21 @@ export class StreamHandler {
    */
   private firstAudioSentAt: number | null = null;
   /**
+   * Estimated wall-clock (ms) when the LAST audio byte pushed to the carrier
+   * finishes PLAYING on the phone. The pipeline pushes TTS audio as fast as
+   * the provider synthesizes it (no pacing) and the carrier buffers + plays
+   * at realtime, so "we finished pushing" and "the caller finished hearing"
+   * can diverge by tens of seconds — especially with agent-runtime LLMs
+   * (Hermes/OpenClaw) that deliver a long reply all at once after a thinking
+   * pause. ``endSpeakingWithGrace`` holds ``isSpeaking=true`` (with
+   * ``tailGraceActive=false``) until this cursor passes, so a barge-in during
+   * the audible backlog still takes the cancel path (``sendClear`` drops the
+   * carrier buffer) instead of being treated as a calm next turn. Advanced by
+   * ``trackOutboundPlayback``; reset by ``cancelSpeaking`` (the buffer is
+   * cleared) and ``endTailGraceForNewTurn``.
+   */
+  private playbackBufferedUntil = 0;
+  /**
    * Optional barge-in confirmation strategies. With an empty array the
    * SDK falls back to the legacy "cancel on first VAD speech_start"
    * behaviour. With one or more strategies, a VAD speech_start during
@@ -730,6 +745,28 @@ export class StreamHandler {
   }
 
   /**
+   * Advance ``playbackBufferedUntil`` by the playout duration of an outbound
+   * TTS chunk. ``numBytes`` is the size of the chunk BEFORE carrier encoding
+   * (the same buffer handed to ``encodePipelineAudio``): PCM16 @ 16 kHz in
+   * the default path (32 bytes/ms), or the carrier's native μ-law @ 8 kHz
+   * (8 bytes/ms) when the TTS adapter emits wire format directly
+   * (``ttsOutputFormatNativeForCarrier`` — Twilio/Plivo ``ulaw_8000``;
+   * Telnyx native is ``pcm_16000`` so it stays at 32 bytes/ms).
+   */
+  private trackOutboundPlayback(numBytes: number): void {
+    if (numBytes <= 0) return;
+    const bytesPerMs =
+      this.ttsOutputFormatNativeForCarrier &&
+      this.deps.bridge.telephonyProvider !== 'telnyx'
+        ? 8
+        : 32;
+    const now = Date.now();
+    const base =
+      this.playbackBufferedUntil > now ? this.playbackBufferedUntil : now;
+    this.playbackBufferedUntil = base + numBytes / bytesPerMs;
+  }
+
+  /**
    * Atomically end speaking AND invalidate any pending grace timer.
    * Use instead of ``this.isSpeaking = false`` at barge-in sites.
    *
@@ -744,6 +781,10 @@ export class StreamHandler {
     this.firstAudioSentAt = null;
     this.lastCancelAt = Date.now();
     this.suppressedSpeechPending = false;
+    // The barge-in paths that call this also ``sendClear`` the carrier —
+    // whatever audio was buffered ahead is dropped, so the playback cursor
+    // snaps back to "nothing pending".
+    this.playbackBufferedUntil = 0;
     // Drain any firstMessage mark waiters so a loop blocked on
     // ``waitForMarkWindow`` exits on the next tick and observes
     // ``!isSpeaking``. Without this the loop would stay blocked until
@@ -852,34 +893,56 @@ export class StreamHandler {
     if (grace > 0) {
       const gen = this.speakingGeneration;
       this.clearGraceTimer();
-      // The agent has finished pushing audio; ``isSpeaking`` is now held only
-      // to suppress the fading echo tail. Mark the tail-grace window so fast
-      // next-turn speech is rescued as a new turn rather than mis-detected as
-      // a barge-in.
-      this.tailGraceActive = true;
-      this.graceTimer = setTimeout(() => {
-        this.graceTimer = null;
-        if (this.speakingGeneration === gen) {
-          this.isSpeaking = false;
-          this.tailGraceActive = false;
-          this.speakingStartedAt = null;
-          this.firstAudioSentAt = null;
-          this.clearPendingBargeIn();
-          void this.resetBargeInStrategies();
-          // If VAD detected speech during the agent's turn but it was
-          // gate-suppressed (agent hadn't been speaking long enough for
-          // barge-in to fire), flush the ring buffer to STT now so the
-          // user's words aren't silently lost.
-          if (this.suppressedSpeechPending) {
-            this.suppressedSpeechPending = false;
-            this.flushInboundAudioRing();
+      const startTailGrace = (): void => {
+        // The carrier has (estimatedly) finished playing everything we
+        // pushed; ``isSpeaking`` is now held only to suppress the fading
+        // echo tail. Mark the tail-grace window so fast next-turn speech is
+        // rescued as a new turn rather than mis-detected as a barge-in.
+        this.tailGraceActive = true;
+        this.graceTimer = setTimeout(() => {
+          this.graceTimer = null;
+          if (this.speakingGeneration === gen) {
+            this.isSpeaking = false;
+            this.tailGraceActive = false;
+            this.speakingStartedAt = null;
+            this.firstAudioSentAt = null;
+            this.clearPendingBargeIn();
+            void this.resetBargeInStrategies();
+            // If VAD detected speech during the agent's turn but it was
+            // gate-suppressed (agent hadn't been speaking long enough for
+            // barge-in to fire), flush the ring buffer to STT now so the
+            // user's words aren't silently lost.
+            if (this.suppressedSpeechPending) {
+              this.suppressedSpeechPending = false;
+              this.flushInboundAudioRing();
+            }
+            // Reset VAD so any stuck SPEECH state from echo / loopback during
+            // the agent's turn does not block the next user utterance from
+            // emitting ``speech_start``.
+            this.resetVad();
           }
-          // Reset VAD so any stuck SPEECH state from echo / loopback during
-          // the agent's turn does not block the next user utterance from
-          // emitting ``speech_start``.
-          this.resetVad();
-        }
-      }, grace);
+        }, grace);
+      };
+      // Phase 1 — the carrier is still PLAYING audio we already pushed.
+      // Agent-runtime LLMs (Hermes/OpenClaw) deliver the whole reply at
+      // once, TTS outruns realtime, and the carrier buffers tens of seconds
+      // of audio that keeps playing long after this method runs. For that
+      // whole audible window the agent IS still speaking from the caller's
+      // perspective: keep ``isSpeaking=true`` with ``tailGraceActive=false``
+      // so VAD/transcript barge-in takes the cancel path (``sendClear``
+      // drops the carrier buffer) instead of the next-turn rescue — without
+      // this, "the agent detects the interruption but keeps talking".
+      // A barge-in meanwhile bumps ``speakingGeneration`` (cancelSpeaking),
+      // which no-ops this timer. Phase 2 — the existing echo-tail grace.
+      const bufferedMs = Math.max(0, this.playbackBufferedUntil - Date.now());
+      if (bufferedMs <= 0) {
+        startTailGrace();
+      } else {
+        this.graceTimer = setTimeout(() => {
+          this.graceTimer = null;
+          if (this.speakingGeneration === gen) startTailGrace();
+        }, bufferedMs);
+      }
     } else {
       this.isSpeaking = false;
       this.tailGraceActive = false;
@@ -916,6 +979,9 @@ export class StreamHandler {
     this.tailGraceActive = false;
     this.speakingStartedAt = null;
     this.firstAudioSentAt = null;
+    // Tail grace only starts after the playback cursor drained (phase 1 of
+    // ``endSpeakingWithGrace``), so there is no carrier backlog left here.
+    this.playbackBufferedUntil = 0;
     this.speakingGeneration++; // invalidates the pending grace timer
     this.clearGraceTimer();
     this.clearPendingBargeIn();
@@ -2540,6 +2606,7 @@ export class StreamHandler {
         }
         const encoded = this.encodePipelineAudio(processedAudio);
         this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
+        this.trackOutboundPlayback(processedAudio.length);
         this.markFirstAudioSent();
       }
     } catch (e) {

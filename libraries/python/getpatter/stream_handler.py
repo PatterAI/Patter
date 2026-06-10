@@ -2474,6 +2474,22 @@ class PipelineStreamHandler(StreamHandler):
         # before any audio went out, exit the TTS loop on
         # ``_is_speaking=False``, and silently drop the agent's first turn.
         self._first_audio_sent_at: float | None = None
+        # Estimated wall-clock (``time.time()`` units) when the LAST audio
+        # byte pushed to the carrier finishes PLAYING on the phone. The
+        # pipeline pushes TTS audio as fast as the provider synthesizes it
+        # (no pacing) while the carrier buffers + plays at realtime, so "we
+        # finished pushing" and "the caller finished hearing" can diverge by
+        # tens of seconds — especially with agent-runtime LLMs (Hermes /
+        # OpenClaw) that deliver a long reply all at once after a thinking
+        # pause. ``_end_speaking_with_grace`` holds ``_is_speaking=True``
+        # (with ``_tail_grace_active=False``) until this cursor passes, so a
+        # barge-in during the audible backlog still takes the cancel path
+        # (``send_clear`` drops the carrier buffer) instead of being treated
+        # as a calm next turn. Advanced by ``_track_outbound_playback``;
+        # reset by the barge-in cancel paths and
+        # ``_end_tail_grace_for_new_turn``. Mirrors TS
+        # ``playbackBufferedUntil``.
+        self._playback_buffered_until: float = 0.0
         # Optional barge-in confirmation strategies (see
         # ``getpatter.services.barge_in_strategies``). With an empty tuple
         # the SDK uses the legacy "cancel on first VAD speech_start"
@@ -3202,6 +3218,7 @@ class PipelineStreamHandler(StreamHandler):
                 if self._aec is not None:
                     self._aec.push_far_end(processed_audio)
                 await self.audio_sender.send_audio(processed_audio)
+                self._track_outbound_playback(len(processed_audio))
                 self._mark_first_audio_sent()
         finally:
             await gen.aclose()
@@ -3636,6 +3653,12 @@ class PipelineStreamHandler(StreamHandler):
             self._speaking_started_at = None
             self._first_audio_sent_at = None
             self._last_cancel_at = time.time()
+            # The ``send_clear`` below drops whatever the carrier had
+            # buffered ahead — snap the playback cursor back and kill any
+            # pending grace task so its phase-1 wait (carrier backlog) /
+            # tail-grace flag cannot fire against the cancelled turn.
+            self._playback_buffered_until = 0.0
+            self._clear_grace_task()
             # Unblock any firstMessage paced-send loop that's sitting in
             # ``_wait_for_mark_window`` — without this the loop keeps
             # awaiting echoes for up to ``_MARK_AWAIT_TIMEOUT_S`` per
@@ -4244,6 +4267,10 @@ class PipelineStreamHandler(StreamHandler):
                                 self._speaking_generation += 1
                                 self._last_cancel_at = time.time()
                                 self._suppressed_speech_pending = False
+                                # ``send_clear`` above dropped the carrier's
+                                # buffered audio — reset the playback cursor.
+                                self._playback_buffered_until = 0.0
+                                self._clear_grace_task()
                                 # Tear down the in-flight LLM stream too. The
                                 # consumption loop polls ``_llm_cancel_event``
                                 # per chunk, but a turn parked PRE-first-token
@@ -4427,6 +4454,30 @@ class PipelineStreamHandler(StreamHandler):
         if self._first_audio_sent_at is None:
             self._first_audio_sent_at = time.time()
 
+    def _track_outbound_playback(self, num_bytes: int) -> None:
+        """Advance ``_playback_buffered_until`` by the playout duration of an
+        outbound TTS chunk.
+
+        ``num_bytes`` is the chunk size BEFORE carrier encoding (the exact
+        buffer handed to ``audio_sender.send_audio``): PCM16 @ 16 kHz in the
+        default path (32 bytes/ms), or the carrier's native μ-law @ 8 kHz
+        (8 bytes/ms) when the TTS adapter emits wire format directly
+        (``audio_sender._input_is_mulaw_8k`` — Twilio/Plivo ``ulaw_8000``;
+        Telnyx native is PCM16 16 kHz so it stays at 32 bytes/ms). Mirrors TS
+        ``trackOutboundPlayback``.
+        """
+        if num_bytes <= 0:
+            return
+        bytes_per_s = (
+            8_000.0
+            if getattr(self.audio_sender, "_input_is_mulaw_8k", False)
+            else 32_000.0
+        )
+        now = time.time()
+        buffered_until = getattr(self, "_playback_buffered_until", 0.0)
+        base = buffered_until if buffered_until > now else now
+        self._playback_buffered_until = base + (num_bytes / bytes_per_s)
+
     def _can_barge_in(self) -> bool:
         """Whether barge-in is allowed to fire right now.
 
@@ -4471,6 +4522,12 @@ class PipelineStreamHandler(StreamHandler):
         ``PATTER_TTS_TAIL_GRACE_MS`` (default 1500 ms) — keeps the flag set
         while the trailing audio actually plays out. Setting the env var to
         ``0`` keeps the legacy synchronous behaviour for tests / soak runs.
+
+        When the carrier still holds an audio backlog we pushed faster than
+        realtime (``_playback_buffered_until`` in the future), the grace is
+        preceded by a phase-1 wait that keeps the agent formally "speaking"
+        — with barge-in armed — for the whole audible window. See the inline
+        comments below.
         """
         try:
             grace_ms = int(os.environ.get("PATTER_TTS_TAIL_GRACE_MS", "1500"))
@@ -4501,17 +4558,47 @@ class PipelineStreamHandler(StreamHandler):
             return
 
         gen = self._speaking_generation
-        # The agent has finished pushing audio; we now hold ``_is_speaking``
-        # only to suppress the fading echo tail. Mark this as the tail-grace
-        # window so fast next-turn speech is rescued as a new turn rather
-        # than mis-detected as a barge-in.
-        self._tail_grace_active = True
         # Cancel any still-pending flip from a previous turn so at most one
         # grace task is ever in flight (parity with TS ``clearGraceTimer``).
         self._clear_grace_task()
+        # Phase 1 — the carrier is still PLAYING audio we already pushed.
+        # Agent-runtime LLMs (Hermes/OpenClaw) deliver the whole reply at
+        # once, TTS outruns realtime, and the carrier buffers tens of
+        # seconds of audio that keeps playing long after this method runs.
+        # For that whole audible window the agent IS still speaking from the
+        # caller's perspective: keep ``_is_speaking=True`` with
+        # ``_tail_grace_active=False`` so VAD/transcript barge-in takes the
+        # cancel path (``send_clear`` drops the carrier buffer) instead of
+        # the next-turn rescue — without this, "the agent detects the
+        # interruption but keeps talking". A barge-in meanwhile cancels this
+        # task (``_clear_grace_task`` in the cancel paths). With no backlog
+        # (token-paced LLMs) the tail grace starts immediately, exactly as
+        # before. Phase 2 — the existing echo-tail grace.
+        buffered_s = getattr(self, "_playback_buffered_until", 0.0) - time.time()
+        if buffered_s <= 0:
+            # The agent has finished pushing audio and the carrier played it
+            # out; ``_is_speaking`` is now held only to suppress the fading
+            # echo tail. Mark this as the tail-grace window so fast next-turn
+            # speech is rescued as a new turn rather than mis-detected as a
+            # barge-in.
+            self._tail_grace_active = True
 
         async def _flip_after_grace() -> None:
             try:
+                # Phase 1: wait out the estimated carrier-side backlog.
+                while True:
+                    remaining = (
+                        getattr(self, "_playback_buffered_until", 0.0) - time.time()
+                    )
+                    if remaining <= 0:
+                        break
+                    await asyncio.sleep(remaining)
+                    if self._speaking_generation != gen:
+                        return
+                if self._speaking_generation != gen:
+                    return
+                # Phase 2: the echo-tail grace window.
+                self._tail_grace_active = True
                 await asyncio.sleep(grace_ms / 1000)
                 # Only reset if no newer turn started while we slept; a
                 # newer turn would have bumped ``_speaking_generation``.
@@ -4567,6 +4654,9 @@ class PipelineStreamHandler(StreamHandler):
         self._tail_grace_active = False
         self._speaking_started_at = None
         self._first_audio_sent_at = None
+        # Tail grace only starts after the playback cursor drained (phase 1
+        # of ``_end_speaking_with_grace``), so no carrier backlog is left.
+        self._playback_buffered_until = 0.0
         # Invalidate the pending grace-flip task scheduled by
         # ``_end_speaking_with_grace`` so it cannot later flip state on a turn
         # that has already moved on (bump the generation AND cancel the task —
