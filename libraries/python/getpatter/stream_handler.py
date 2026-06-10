@@ -2401,6 +2401,13 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
                         self.metrics.record_turn_interrupted()
                     waiting_first_audio = True
 
+                elif ev_type == "function_call":
+                    # ElevenLabs CLIENT tool invocation. Route through the
+                    # same tool lookup/executor as the other engines — the
+                    # ElevenLabs agent must ALWAYS get a client_tool_result
+                    # (silence stalls it until the provider-side timeout).
+                    await self._handle_convai_client_tool(ev_data or {})
+
                 elif ev_type == "interruption":
                     await self.audio_sender.send_clear()
                     if self.metrics is not None:
@@ -2418,6 +2425,109 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
                     )
         except Exception as exc:
             logger.exception("ElevenLabs ConvAI forward error: %s", exc)
+
+    async def _handle_convai_client_tool(self, func_data: dict) -> None:
+        """Execute an ElevenLabs ``client_tool_call`` and answer it.
+
+        Tools are matched against ``agent.tools`` (plus the built-in
+        ``transfer_call``/``end_call`` names so an ElevenLabs agent that
+        declares them as client tools reaches the carrier helpers). Every
+        path sends a ``client_tool_result`` — including unknown tools and
+        execution errors — because a missing result stalls the ElevenLabs
+        agent until its own tool timeout.
+        """
+        from getpatter.tools.tool_executor import ToolExecutor
+
+        call_id = str(func_data.get("call_id", "") or "")
+        name = str(func_data.get("name", "") or "")
+        arguments = func_data.get("arguments") or {}
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except (json.JSONDecodeError, ValueError):
+                arguments = {}
+
+        async def _respond(result: str, *, is_error: bool = False) -> None:
+            sender = getattr(self._adapter, "send_client_tool_result", None)
+            if callable(sender):
+                try:
+                    await sender(call_id, result, is_error=is_error)
+                except Exception as exc:  # noqa: BLE001 - keep the loop alive
+                    logger.warning("client_tool_result send failed: %s", exc)
+
+        # Built-ins first: transfer_call / end_call declared as ElevenLabs
+        # client tools route to the carrier helpers.
+        if name == "transfer_call":
+            number = str(arguments.get("number", "") or "")
+            if not _validate_e164(number):
+                await _respond(
+                    json.dumps(
+                        {"error": "Invalid phone number format", "status": "rejected"}
+                    ),
+                    is_error=True,
+                )
+                return
+            if self._transfer_fn is not None:
+                await self._transfer_fn(number)
+                await _respond(f"Transferring to {number}")
+            else:
+                await _respond(
+                    json.dumps({"error": "transfer not available"}), is_error=True
+                )
+            return
+        if name == "end_call":
+            await _respond("Call ended")
+            if self._hangup_fn is not None:
+                await self._hangup_fn()
+            return
+
+        tool_def = next(
+            (t for t in (self.agent.tools or []) if t.get("name") == name),
+            None,
+        )
+        if not tool_def or not (
+            tool_def.get("webhook_url") or tool_def.get("handler")
+        ):
+            logger.warning(
+                "ConvAI client_tool_call for unregistered tool '%s'", name
+            )
+            await _respond(
+                json.dumps(
+                    {"error": f"Tool '{name}' is not registered", "fallback": True}
+                ),
+                is_error=True,
+            )
+            return
+
+        await self._emit_tool_event(name, arguments, None)
+        executor = ToolExecutor()
+        try:
+            result = await executor.execute(
+                tool_name=name,
+                arguments=arguments,
+                call_context={
+                    "call_id": self.call_id,
+                    "caller": self.caller,
+                    "callee": self.callee,
+                },
+                webhook_url=tool_def.get("webhook_url", ""),
+                handler=tool_def.get("handler"),
+                tool_timeout_s=tool_def.get("timeout_s"),
+            )
+        except Exception as exc:  # noqa: BLE001 - always answer the agent
+            logger.exception("ConvAI client tool '%s' failed: %s", name, exc)
+            await _respond(
+                json.dumps({"error": str(exc)[:200], "fallback": True}),
+                is_error=True,
+            )
+            return
+        finally:
+            try:
+                await executor.close()
+            except Exception:  # noqa: BLE001 - best-effort cleanup
+                pass
+        await _respond(result)
+        await self._emit_tool_event(name, arguments, result)
 
     async def on_audio_received(self, audio_bytes: bytes) -> None:
         """Forward decoded telephony audio to ConvAI (μ-law fast-path or resampled PCM16)."""

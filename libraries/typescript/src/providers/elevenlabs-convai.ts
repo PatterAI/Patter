@@ -407,6 +407,24 @@ export class ElevenLabsConvAIAdapter {
       return;
     }
 
+    if (msgType === 'client_tool_call') {
+      // The ElevenLabs agent invoked a CLIENT tool — previously unhandled,
+      // so configured client tools stalled until the provider-side timeout.
+      // Surface as the shared function_call event so the stream handler
+      // routes it through the tool executor. Mirrors Python.
+      const tool = (parsed['client_tool_call'] ?? {}) as {
+        tool_call_id?: string;
+        tool_name?: string;
+        parameters?: Record<string, unknown>;
+      };
+      this.safeInvoke('function_call', {
+        call_id: tool.tool_call_id ?? '',
+        name: tool.tool_name ?? '',
+        arguments: tool.parameters ?? {},
+      });
+      return;
+    }
+
     if (msgType === 'error') {
       const errText =
         (parsed['message'] as string | undefined) ??
@@ -416,6 +434,19 @@ export class ElevenLabsConvAIAdapter {
       this.safeInvoke('error', errText);
       return;
     }
+  }
+
+  /** Answer a ``client_tool_call`` from the ElevenLabs agent. */
+  sendClientToolResult(toolCallId: string, result: string, isError = false): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.ws.send(
+      JSON.stringify({
+        type: 'client_tool_result',
+        tool_call_id: toolCallId,
+        result,
+        is_error: isError,
+      }),
+    );
   }
 
   /** Send a caller-side audio chunk to ConvAI as a base64 `user_audio_chunk`. */

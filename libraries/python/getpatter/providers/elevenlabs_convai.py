@@ -250,6 +250,23 @@ class ElevenLabsConvAIAdapter:
         self._events = asyncio.Queue()
         self._reader_task = asyncio.create_task(self._read_loop())
 
+    async def send_client_tool_result(
+        self, tool_call_id: str, result: str, *, is_error: bool = False
+    ) -> None:
+        """Answer a ``client_tool_call`` from the ElevenLabs agent."""
+        if self._ws is None:
+            return
+        await self._ws.send(
+            json.dumps(
+                {
+                    "type": "client_tool_result",
+                    "tool_call_id": tool_call_id,
+                    "result": result,
+                    "is_error": is_error,
+                }
+            )
+        )
+
     async def send_audio(self, audio_bytes: bytes) -> None:
         """Send user audio to ElevenLabs.
 
@@ -379,6 +396,25 @@ class ElevenLabsConvAIAdapter:
                 if msg_type == "interruption":
                     await self._finalize_agent_turn()
                     await self._events.put(("interruption", None))
+                    continue
+
+                if msg_type == "client_tool_call":
+                    # The ElevenLabs agent invoked a CLIENT tool — previously
+                    # unhandled, so configured client tools stalled until the
+                    # provider-side timeout and reported failure. Surface it
+                    # as the shared function_call event so the stream handler
+                    # routes it through the tool executor.
+                    tool = data.get("client_tool_call") or {}
+                    await self._events.put(
+                        (
+                            "function_call",
+                            {
+                                "call_id": tool.get("tool_call_id", ""),
+                                "name": tool.get("tool_name", ""),
+                                "arguments": tool.get("parameters", {}) or {},
+                            },
+                        )
+                    )
                     continue
 
                 if msg_type == "error":

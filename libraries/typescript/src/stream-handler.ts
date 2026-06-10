@@ -3783,6 +3783,10 @@ export class StreamHandler {
     function_call: async (eventData) => {
       if (this.adapter instanceof OpenAIRealtimeAdapter) {
         await this.handleFunctionCall(eventData as { call_id: string; name: string; arguments: string });
+      } else if (this.adapter instanceof ElevenLabsConvAIAdapter) {
+        await this.handleConvAIClientTool(
+          eventData as { call_id: string; name: string; arguments: Record<string, unknown> },
+        );
       }
     },
   };
@@ -4345,6 +4349,76 @@ export class StreamHandler {
         tool_args: args,
         tool_result: result,
       });
+    }
+  }
+
+
+  /**
+   * Execute an ElevenLabs ``client_tool_call`` and ALWAYS answer it — a
+   * missing client_tool_result stalls the ElevenLabs agent until its own
+   * tool timeout. transfer_call/end_call declared as ElevenLabs client
+   * tools route to the carrier helpers. Mirrors Python
+   * ``_handle_convai_client_tool``.
+   */
+  private async handleConvAIClientTool(fc: {
+    call_id: string;
+    name: string;
+    arguments: Record<string, unknown>;
+  }): Promise<void> {
+    const adapter = this.adapter as ElevenLabsConvAIAdapter;
+    const respond = (result: string, isError = false): void => {
+      try {
+        adapter.sendClientToolResult(fc.call_id, result, isError);
+      } catch (err) {
+        getLogger().warn(`client_tool_result send failed: ${String(err)}`);
+      }
+    };
+    const args = fc.arguments ?? {};
+
+    if (fc.name === 'transfer_call') {
+      const number = String((args as { number?: unknown }).number ?? '');
+      if (!/^\+[1-9]\d{6,14}$/.test(number)) {
+        respond(JSON.stringify({ error: 'Invalid phone number format', status: 'rejected' }), true);
+        return;
+      }
+      try {
+        await this.deps.bridge.transferCall(this.callId, number);
+        respond(`Transferring to ${number}`);
+      } catch (err) {
+        respond(JSON.stringify({ error: String(err).slice(0, 200) }), true);
+      }
+      return;
+    }
+    if (fc.name === 'end_call') {
+      respond('Call ended');
+      try {
+        await this.deps.bridge.endCall(this.callId, this.ws);
+      } catch (err) {
+        getLogger().warn(`end_call failed: ${String(err)}`);
+      }
+      return;
+    }
+
+    const tools = (this.resolvedTools ?? this.deps.agent.tools ?? []) as ToolDefinition[];
+    const toolDef = tools.find((t) => t.name === fc.name);
+    if (!toolDef || (!toolDef.webhookUrl && !toolDef.handler)) {
+      getLogger().warn(`ConvAI client_tool_call for unregistered tool '${fc.name}'`);
+      respond(JSON.stringify({ error: `Tool '${fc.name}' is not registered`, fallback: true }), true);
+      return;
+    }
+
+    try {
+      const executor = new DefaultToolExecutor();
+      const result = await executor.execute(toolDef, args, {
+        call_id: this.callId,
+        caller: this.caller,
+        callee: this.callee,
+      });
+      respond(result);
+      this.recordToolCall(fc.name, args, result);
+    } catch (err) {
+      getLogger().error(`ConvAI client tool '${fc.name}' failed: ${String(err)}`);
+      respond(JSON.stringify({ error: String(err).slice(0, 200), fallback: true }), true);
     }
   }
 
