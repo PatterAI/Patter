@@ -394,6 +394,94 @@ export function isNearDuplicate(a: string, b: string): boolean {
   return longer.startsWith(shorter + ' ');
 }
 
+/** Sentence-ending characters shared with the hallucination splitter — also
+ * the fast-path confidence signal for preemptive generation. Mirrors Python
+ * ``_SENTENCE_ENDERS``. */
+const SENTENCE_ENDERS = '.!?…。！？';
+
+/** True when `text` (whitespace-trimmed) ends with sentence-final punctuation.
+ * Mirrors Python ``_ends_with_sentence_final_punct``. */
+export function endsWithSentenceFinalPunct(text: string): boolean {
+  const stripped = (text ?? '').trimEnd();
+  return stripped.length > 0 && SENTENCE_ENDERS.includes(stripped[stripped.length - 1]);
+}
+
+/**
+ * Whether a committed FINAL transcript matches the INTERIM a speculative turn
+ * was generated from, i.e. the speculation can be released. Both sides are
+ * normalized via {@link normalizeForEcho} (lowercase, punctuation stripped,
+ * whitespace collapsed), so a final that merely adds trailing punctuation /
+ * capitalization to the interim still matches. Mirrors Python
+ * ``_speculation_matches``.
+ */
+export function speculationMatches(interim: string, final: string): boolean {
+  const a = normalizeForEcho(interim);
+  const b = normalizeForEcho(final);
+  return a.length > 0 && a === b;
+}
+
+/**
+ * In-flight PREEMPTIVE GENERATION state for one speculated user turn.
+ *
+ * Created by `StreamHandler.startSpeculation` on a confident interim
+ * transcript. The owning task runs the LLM + sentence-chunked TTS but HOLDS
+ * all audio in `buffered` until the final transcript commits:
+ *
+ * - release (final matches): `released=true` + `signalDecision()` — the task
+ *   flushes `buffered` to the carrier and continues live; it IS the real
+ *   turn from then on (history/metrics recorded by the releaser + task).
+ * - discard (mismatch / barge-in / replaced / overflow / teardown): the
+ *   abort signal fires — the task unwinds without ever touching the carrier,
+ *   conversation history, or per-turn metrics.
+ *
+ * Mirrors Python ``_SpeculativeTurn``.
+ */
+class SpeculativeTurn {
+  readonly interimText: string;
+  readonly normText: string;
+  /** Per-speculation LLM cancel signal (same machinery the live path hands
+   * to `llmLoop.run`). On release this becomes the handler's `llmAbort` so
+   * the existing barge-in cancel paths reach the speculative stream. */
+  readonly abort = new AbortController();
+  released = false;
+  /** True once buffered audio has been flushed to the carrier (release). */
+  flushed = false;
+  /** True when the speculation can no longer be released (LLM error, buffer
+   * overflow, internal failure) — the commit path must dispatch normally. */
+  failed = false;
+  /** Barge-in after release cut the live continuation short. */
+  interrupted = false;
+  /** Stamped at release with the committed final transcript. */
+  finalText = '';
+  /** Per-sentence audio held until release. The chunks array is registered
+   * BEFORE synthesis so a mid-sentence release flushes the partial too. */
+  buffered: Array<{ text: string; chunks: Buffer[] }> = [];
+  bufferedBytes = 0;
+  responseParts: string[] = [];
+  /** Same flag shape `synthesizeSentence` uses, shared across the buffered
+   * flush and the live continuation so the per-turn first-byte metric stays
+   * idempotent. */
+  readonly ttsFirstByteSent = { value: false };
+  llmFirstTokenRecorded = false;
+  task: Promise<void> | null = null;
+  /** Resolves once the commit-time decision is known (either way); the task
+   * parks on it when generation finishes before the final commits. */
+  readonly decision: Promise<void>;
+  private decisionResolve!: () => void;
+
+  constructor(interimText: string) {
+    this.interimText = interimText;
+    this.normText = normalizeForEcho(interimText);
+    this.decision = new Promise<void>((resolve) => {
+      this.decisionResolve = resolve;
+    });
+  }
+
+  signalDecision(): void {
+    this.decisionResolve();
+  }
+}
+
 // ---------------------------------------------------------------------------
 // StreamHandler context (immutable per-call configuration)
 // ---------------------------------------------------------------------------
@@ -1369,6 +1457,29 @@ export class StreamHandler {
   // Throttle state for back-to-back STT finals — see ``commitTranscript``.
   private lastCommitText = '';
   private lastCommitAt = 0;
+  // --- PREEMPTIVE GENERATION (opt-in, built-in LLM loop only) ---
+  // When enabled, a confident INTERIM transcript starts a speculative
+  // LLM+TTS dispatch whose audio is HELD in memory; the final transcript's
+  // commit either releases it (matching text — the already-generated audio
+  // flushes immediately) or discards it and dispatches normally. See
+  // ``noteInterimTranscript`` / ``tryReleaseSpeculation``. Parity with
+  // Python ``_preemptive_enabled``.
+  private readonly preemptiveEnabled: boolean;
+  private readonly preemptiveMinStableMs: number;
+  /** The single in-flight speculation (at most one). ``null`` when idle,
+   * when discarded, or once released (a released speculation becomes the
+   * live turn tracked by ``dispatchTask`` instead). */
+  private speculation: SpeculativeTurn | null = null;
+  // Interim-stability tracking: normalized text of the newest interim plus
+  // the one-shot timer that starts a speculation once the text has been
+  // unchanged for ``preemptiveMinStableMs``.
+  private interimNorm = '';
+  private interimText = '';
+  private interimStableTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Hard cap (ms of playout) on TTS audio buffered by a speculative turn.
+   * Overflow aborts the speculation. Parity with Python
+   * ``_PREEMPTIVE_MAX_BUFFER_S``. */
+  private static readonly PREEMPTIVE_MAX_BUFFER_MS = 15_000;
   /** The agent's spoken text for the CURRENT turn, accumulated as tokens stream.
    * The echo guard rejects transcripts matching it (the agent's own TTS bleeding
    * back into STT when audio is forwarded during TTS without effective AEC).
@@ -1433,6 +1544,12 @@ export class StreamHandler {
       getLogger().warn(`Unknown bargeInMode ${String(mode)} — falling back to 'cancel'`);
     }
     this.bargeInMode = mode === 'pause_resume' ? 'pause_resume' : 'cancel';
+    this.preemptiveEnabled = deps.agent.preemptiveGeneration ?? false;
+    const stableMs = deps.agent.preemptiveMinStableMs;
+    this.preemptiveMinStableMs =
+      typeof stableMs === 'number' && Number.isFinite(stableMs) && stableMs >= 0
+        ? stableMs
+        : 300;
 
     this.history = createHistoryManager(200);
 
@@ -1989,6 +2106,15 @@ export class StreamHandler {
               // original phantom-during-warmup-gate vulnerability.
               this.metricsAcc.anchorUserSpeechStart();
             }
+            // PREEMPTIVE GENERATION: the user resumed speaking while a
+            // speculative turn was buffering — the interim it was generated
+            // from is stale, so abort silently (nothing was audible; the
+            // next confident interim re-speculates). A RELEASED speculation
+            // is no longer registered here — it is the live turn and the
+            // barge-in paths above own it.
+            if (!this.isSpeaking && this.speculation !== null) {
+              await this.abortSpeculation('user_speech_resumed');
+            }
           } else if (evt?.type === 'speech_end') {
             // Speech-event: user stop edge (pipeline parity with realtime).
             await this.emitUserSpeechEnded();
@@ -2249,6 +2375,11 @@ export class StreamHandler {
     if (typeof ttsCancelable?.cancelActiveStream === 'function') {
       try { ttsCancelable.cancelActiveStream(); } catch { /* defensive */ }
     }
+    // PREEMPTIVE GENERATION: stop the interim-stability timer and tear down
+    // any in-flight speculation (teardown — not a miss) before adapters
+    // close underneath it.
+    this.clearInterimStabilityTimer();
+    await this.abortSpeculation('teardown', false);
     // Settle the backgrounded turn dispatch (the abort above unblocks it) so
     // no in-flight LLM/TTS work touches adapters after they close — bounded so
     // a hung user onMessage cannot block teardown. Parity with Python cleanup
@@ -2295,6 +2426,9 @@ export class StreamHandler {
     if (typeof ttsCancelable?.cancelActiveStream === 'function') {
       try { ttsCancelable.cancelActiveStream(); } catch { /* defensive */ }
     }
+    // See handleStop — tear down any in-flight speculation (not a miss).
+    this.clearInterimStabilityTimer();
+    await this.abortSpeculation('teardown', false);
     // Settle the backgrounded turn dispatch before tearing down adapters,
     // bounded so a hung user onMessage cannot block teardown (see handleStop).
     await this.settleDispatchForTeardown();
@@ -3040,7 +3174,18 @@ export class StreamHandler {
       this.metricsAcc.recordVadStop();
     }
 
-    if (!transcript.isFinal || !transcript.text) return;
+    if (!transcript.isFinal || !transcript.text) {
+      // PREEMPTIVE GENERATION: a confident interim may start a speculative
+      // LLM+TTS dispatch (audio held until the final commits). No-op unless
+      // ``agent.preemptiveGeneration``. Awaited so successive interims on the
+      // transcript drain loop are processed strictly in order (replacing a
+      // speculation fully aborts the old one before the new one starts) —
+      // parity with Python's awaited ``_note_interim_transcript``.
+      if (transcript.text && !transcript.isFinal) {
+        await this.noteInterimTranscript(transcript.text);
+      }
+      return;
+    }
     if (!this.commitTranscript(transcript.text)) {
       // Final transcript dropped (dedup / hallucination / back-to-back).
       // Any VAD ``speech_end`` that fired during this dropped utterance
@@ -3059,12 +3204,23 @@ export class StreamHandler {
     );
     getLogger().debug(`User (${label} pipeline): ${sanitizeLogValue(transcript.text)}`);
 
+    // A final transcript committed — interim-stability tracking for this
+    // utterance is over (prevents a stale stability timer from speculating
+    // on the just-answered utterance).
+    this.resetInterimTracking();
+
     // Safety net: startTurnIfIdle() was already called above on first partial
     // text; this second call is a no-op in the normal path but guards code paths
     // (e.g. tests) that pass a final transcript without any preceding partial.
     this.metricsAcc.startTurnIfIdle();
     this.metricsAcc.recordSttComplete(transcript.text);
     this.metricsAcc.recordSttFinalTimestamp();
+
+    // PREEMPTIVE GENERATION: when a speculative turn matching this final is
+    // in flight, RELEASE it (its task becomes the live dispatch) instead of
+    // starting a fresh one; a mismatch discards the speculation here and
+    // falls through to the normal dispatch below.
+    if (await this.tryReleaseSpeculation(transcript.text)) return;
 
     // Endpoint span — silence-detected → LLM-dispatch window. The matching
     // ``end()`` lives below right before ``recordTurnCommitted``. We use a
@@ -3922,6 +4078,685 @@ export class StreamHandler {
     this.lastCommitText = normalised;
     this.lastCommitAt = now;
     return true;
+  }
+
+  // ---------------------------------------------------------------------------
+  // PREEMPTIVE GENERATION (opt-in) — speculative dispatch on a confident
+  // interim transcript; commit-or-discard at end of utterance. Mirrors Python
+  // ``_note_interim_transcript`` / ``_try_release_speculation`` and LiveKit's
+  // ``preemptive_generation``.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Whether a speculative dispatch may start right now. Built-in LLM loop
+   * only (an ``onMessage`` handler may have external side effects per
+   * invocation, so it is never run speculatively), and only while the agent
+   * is idle: not speaking (an interim during agent speech is barge-in
+   * material, not a next turn) and no turn dispatch in flight
+   * (single-in-flight contract). Parity with Python ``_can_speculate``.
+   */
+  private canSpeculate(): boolean {
+    if (!this.preemptiveEnabled) return false;
+    if (this.deps.onMessage || !this.llmLoop) return false;
+    if (this.isSpeaking) return false;
+    return this.dispatchTask === null;
+  }
+
+  /**
+   * Read-only mirror of the ``commitTranscript`` filters: a candidate
+   * interim must pass the same hallucination / echo / duplicate checks a
+   * final would face at commit time — otherwise we would speculate on text
+   * whose final is guaranteed to be dropped. Never mutates the dedup state.
+   * Parity with Python ``_speculation_input_ok``.
+   */
+  private speculationInputOk(text: string): boolean {
+    const normalised = text.trim().toLowerCase();
+    const stripped = normalised.replace(/[.,!?;: ]+$/, '').trim();
+    if (HALLUCINATIONS.has(stripped) || stripped === '') return false;
+    if (
+      this.forwardSttWhileSpeaking &&
+      this.isSpeaking &&
+      looksLikeEcho(text, this.currentAgentSpokenText)
+    ) {
+      return false;
+    }
+    // The matching final would be dropped as a duplicate at commit time.
+    const sinceLastMs = Date.now() - this.lastCommitAt;
+    if (sinceLastMs < 2000 && normalised === this.lastCommitText) return false;
+    return true;
+  }
+
+  /**
+   * Track an interim transcript and start a speculation when it qualifies:
+   * (a) it ends with sentence-final punctuation (immediate), or (b) it has
+   * been unchanged for ``preemptiveMinStableMs`` (one-shot stability timer).
+   * No-op when preemptive generation is disabled or the handler cannot
+   * speculate right now. Parity with Python ``_note_interim_transcript``.
+   */
+  private async noteInterimTranscript(text: string): Promise<void> {
+    if (!this.preemptiveEnabled) return;
+    const norm = normalizeForEcho(text);
+    if (!norm) return;
+    const spec = this.speculation;
+    if (spec !== null && spec.normText === norm && !spec.failed) {
+      return; // already speculating on this exact utterance
+    }
+    if (!this.canSpeculate()) {
+      this.clearInterimStabilityTimer();
+      this.interimNorm = '';
+      return;
+    }
+    if (!this.speculationInputOk(text)) return;
+    if (endsWithSentenceFinalPunct(text)) {
+      // High-confidence interim — speculate immediately (replacing any
+      // stale speculation on older text). Awaited so the replaced
+      // speculation is fully unwound before the new one registers.
+      this.clearInterimStabilityTimer();
+      this.interimNorm = norm;
+      this.interimText = text;
+      await this.startSpeculation(text).catch((err) =>
+        getLogger().debug(`startSpeculation threw: ${String(err)}`),
+      );
+      return;
+    }
+    if (norm !== this.interimNorm) {
+      // Text changed — restart the stability window.
+      this.interimNorm = norm;
+      this.interimText = text;
+      this.clearInterimStabilityTimer();
+      if (this.preemptiveMinStableMs <= 0) {
+        await this.startSpeculation(text).catch((err) =>
+          getLogger().debug(`startSpeculation threw: ${String(err)}`),
+        );
+        return;
+      }
+      this.interimStableTimer = setTimeout(() => {
+        this.interimStableTimer = null;
+        if (this.interimNorm !== norm) return; // a newer interim superseded it
+        const current = this.speculation;
+        if (current !== null && current.normText === norm && !current.failed) return;
+        if (!this.canSpeculate() || !this.speculationInputOk(this.interimText)) return;
+        void this.startSpeculation(this.interimText).catch((err) =>
+          getLogger().debug(`stability-triggered speculation threw: ${String(err)}`),
+        );
+      }, this.preemptiveMinStableMs);
+    }
+  }
+
+  /** Cancel the pending interim-stability timer, if any. Idempotent. */
+  private clearInterimStabilityTimer(): void {
+    if (this.interimStableTimer !== null) {
+      clearTimeout(this.interimStableTimer);
+      this.interimStableTimer = null;
+    }
+  }
+
+  /** Drop interim-stability state — called once a final commits (the
+   * utterance is decided) and on teardown. */
+  private resetInterimTracking(): void {
+    this.clearInterimStabilityTimer();
+    this.interimNorm = '';
+    this.interimText = '';
+  }
+
+  /**
+   * Launch a speculative dispatch for ``interimText``, replacing (and
+   * counting as a miss) any previous speculation on different text. The
+   * task's rejection handler is attached at creation (same contract as
+   * ``dispatchTask``). Parity with Python ``_start_speculation``.
+   */
+  private async startSpeculation(interimText: string): Promise<void> {
+    await this.abortSpeculation('replaced_by_newer_interim');
+    if (this.speculation !== null) {
+      // A concurrent path (stability timer vs. drain loop) registered a
+      // NEWER speculation while we awaited the old one's unwind — keep it.
+      // Overwriting here would orphan its task parked on the commit
+      // decision forever. Parity with Python ``_start_speculation``.
+      return;
+    }
+    const spec = new SpeculativeTurn(interimText);
+    this.speculation = spec;
+    spec.task = this.runSpeculativeDispatch(spec).catch((err) => {
+      getLogger().error('Preemptive: speculative dispatch rejected:', err);
+    });
+    getLogger().debug(
+      `Preemptive: speculation started on interim ${sanitizeLogValue(interimText.slice(0, 60))}`,
+    );
+  }
+
+  /**
+   * Discard the current speculation (if any): signal abort, await the task's
+   * unwind (bounded — JS promises are not cancellable, so a provider that
+   * ignores the signal must not block the caller), and count a miss unless
+   * this is teardown. The speculative task never touched history / carrier /
+   * per-turn metrics, so there is nothing to roll back. Idempotent. Parity
+   * with Python ``_abort_speculation``.
+   */
+  private async abortSpeculation(reason: string, countMiss = true): Promise<void> {
+    const spec = this.speculation;
+    if (spec === null) return;
+    // Deregister synchronously so a concurrent commit cannot release a
+    // speculation that is already being torn down.
+    this.speculation = null;
+    spec.failed = true;
+    try {
+      spec.abort.abort();
+    } catch {
+      // Defensive — abort() throws nothing in modern runtimes.
+    }
+    // Wake a task parked on the commit decision; ``released`` stays false so
+    // it unwinds as a discard.
+    spec.signalDecision();
+    if (spec.task) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const cap = new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, 5_000);
+      });
+      try {
+        await Promise.race([spec.task.catch(() => {}), cap]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }
+    if (countMiss) this.metricsAcc.recordPreemptiveMiss();
+    getLogger().debug(`Preemptive: speculation discarded (${reason})`);
+  }
+
+  /**
+   * Self-abort from WITHIN the speculative task (LLM error, buffer overflow,
+   * afterTranscribe veto). Marks the speculation unreleasable and
+   * deregisters it so the commit path dispatches normally. Never awaits (the
+   * caller IS the task). Parity with Python ``_fail_speculation_inline``.
+   */
+  private failSpeculationInline(spec: SpeculativeTurn, reason: string): void {
+    spec.failed = true;
+    try {
+      spec.abort.abort();
+    } catch {
+      // Defensive.
+    }
+    spec.signalDecision();
+    if (this.speculation === spec) this.speculation = null;
+    this.metricsAcc.recordPreemptiveMiss();
+    getLogger().debug(`Preemptive: speculation failed (${reason})`);
+  }
+
+  /**
+   * Commit-time decision for the in-flight speculation. Returns ``true``
+   * when the speculation was RELEASED — the caller must NOT dispatch a
+   * normal turn (the speculative task is now the live turn, tracked via
+   * ``dispatchTask``). Returns ``false`` when there was no usable
+   * speculation (none in flight, failed, or mismatched — the mismatch is
+   * discarded here) and the normal dispatch must run.
+   *
+   * On release, the commit-point bookkeeping the normal path performs in
+   * ``processTranscript`` happens HERE — the ``onTranscript`` callback, the
+   * conversation-history user push (final transcript text), and the
+   * turn-committed metric anchors (so TTFT/latency reflect user-perceived
+   * timing from the REAL final-transcript commit) — exactly once per turn.
+   * Parity with Python ``_try_release_speculation``.
+   */
+  private async tryReleaseSpeculation(finalText: string): Promise<boolean> {
+    const spec = this.speculation;
+    if (spec === null) return false;
+    if (
+      spec.failed ||
+      spec.abort.signal.aborted ||
+      !speculationMatches(spec.interimText, finalText)
+    ) {
+      await this.abortSpeculation('final_mismatch');
+      return false;
+    }
+
+    // ---- RELEASE ----
+    this.speculation = null;
+    spec.finalText = finalText;
+    // Point the live cancel machinery at the speculative stream so the
+    // existing barge-in paths (``cancelSpeaking`` aborts ``llmAbort``) tear
+    // it down exactly like a normal turn's stream.
+    this.llmAbort = spec.abort;
+    this.metricsAcc.recordPreemptiveHit();
+    getLogger().debug(`User (${this.deps.bridge.label} pipeline): ${sanitizeLogValue(finalText)}`);
+
+    if (this.deps.onTranscript) {
+      await this.deps.onTranscript({
+        role: 'user',
+        text: finalText,
+        call_id: this.callId,
+        history: [...this.history.entries],
+      });
+    }
+    // History/transcript record the FINAL transcript text as the user
+    // message (the LLM consumed the matching interim — normalized-equal by
+    // definition of the release gate).
+    this.history.push({ role: 'user', text: finalText, timestamp: Date.now() });
+    this.metricsAcc.recordOnUserTurnCompletedDelay(0);
+    this.metricsAcc.recordTurnCommitted();
+
+    // Settle the previous turn first (single-in-flight) — fast no-op, a
+    // speculation can only have started while no dispatch was in flight.
+    await this.dispatchTask?.catch(() => {});
+    spec.released = true;
+    spec.signalDecision();
+    // The speculative task is now the live turn.
+    this.dispatchTask = spec.task;
+    getLogger().info(
+      `Preemptive: speculation RELEASED on matching final ${sanitizeLogValue(finalText.slice(0, 60))}`,
+    );
+    return true;
+  }
+
+  /** Playout duration (ms) of the audio a speculation has buffered so far.
+   * Same bytes-per-ms model as ``trackOutboundPlayback``. */
+  private specBufferMs(spec: SpeculativeTurn): number {
+    const bytesPerMs =
+      this.ttsOutputFormatNativeForCarrier &&
+      this.deps.bridge.telephonyProvider !== 'telnyx'
+        ? 8
+        : 32;
+    return spec.bufferedBytes / bytesPerMs;
+  }
+
+  /** Push one (already hook-processed) audio chunk of a RELEASED speculation
+   * to the carrier — the same per-chunk bookkeeping ``synthesizeSentence``
+   * performs on the live path. */
+  private async specSendChunk(spec: SpeculativeTurn, processedAudio: Buffer): Promise<void> {
+    if (!spec.ttsFirstByteSent.value) {
+      spec.ttsFirstByteSent.value = true;
+      this.metricsAcc.recordTtsFirstByte();
+      await this.emitAudioOut();
+    }
+    if (this.aec) {
+      this.aec.pushFarEnd(processedAudio);
+    }
+    const encoded = this.encodePipelineAudio(processedAudio);
+    this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
+    this.trackOutboundPlayback(processedAudio.length);
+    this.markFirstAudioSent();
+  }
+
+  /**
+   * Idempotent release flush: take the floor (``beginSpeaking``), stamp the
+   * post-commit LLM markers, and stream every buffered sentence to the
+   * carrier in order. After this the speculative task continues as a plain
+   * live turn. No-op until the speculation is released. Parity with Python
+   * ``_spec_ensure_flushed``.
+   */
+  private async specEnsureFlushed(spec: SpeculativeTurn): Promise<void> {
+    if (spec.flushed || !spec.released) return;
+    spec.flushed = true;
+    await this.beginSpeaking();
+    // Post-commit metric markers: the user-perceived TTFT for a released
+    // speculation is "final commit → audio", so the first-token /
+    // first-sentence stamps are recorded NOW (after ``recordTurnCommitted``)
+    // rather than back when the speculative stream actually produced them.
+    if (spec.responseParts.length > 0) {
+      if (!spec.llmFirstTokenRecorded) {
+        spec.llmFirstTokenRecorded = true;
+        this.metricsAcc.recordLlmFirstToken();
+        await this.emitLlmFirstToken();
+      }
+      // Echo-guard reference for barge-in comparisons during the live
+      // continuation (``beginSpeaking`` reset it).
+      this.currentAgentSpokenText = spec.responseParts.join('');
+    }
+    if (spec.buffered.length > 0) {
+      this.metricsAcc.recordLlmFirstSentenceComplete();
+    }
+    for (const { text, chunks } of spec.buffered) {
+      if (chunks.length === 0) continue;
+      // Per-sentence carry reset, mirroring ``synthesizeSentence``.
+      this.resetTtsCarry();
+      let recordSegment = true;
+      for (const audio of chunks) {
+        if (!this.isSpeaking) {
+          // Barge-in landed mid-flush — stop exactly like the live
+          // sentence loop would.
+          spec.interrupted = true;
+          spec.buffered = [];
+          return;
+        }
+        if (recordSegment) {
+          this.turnSpokenSegments.push({ text, startMs: this.turnPlaybackTotalMs });
+          recordSegment = false;
+        }
+        await this.specSendChunk(spec, audio);
+      }
+      this.resetTtsCarry();
+    }
+    spec.buffered = []; // release the held memory
+  }
+
+  /**
+   * Synthesize one sentence of an UNRELEASED speculation, holding the audio
+   * in ``spec.buffered``. Transitions to live sending mid-sentence the
+   * moment the release lands. Returns ``false`` when the speculation must
+   * stop (aborted, overflow, or barge-in after a mid-sentence release).
+   * Parity with Python ``_spec_synthesize_buffered``.
+   */
+  private async specSynthesizeBuffered(
+    spec: SpeculativeTurn,
+    sentence: string,
+    hookExecutor: PipelineHookExecutor,
+    hookCtx: HookContext,
+  ): Promise<boolean> {
+    if (!this.tts) {
+      // No TTS configured — nothing audible to hold; still track the
+      // sentence so the released turn records it (parity with the live
+      // path, which is also silent without TTS).
+      spec.buffered.push({ text: sentence, chunks: [] });
+      return true;
+    }
+    let transformed = sentence;
+    for (const fn of this.deps.agent.textTransforms ?? []) {
+      transformed = fn(transformed);
+    }
+    const processedText = await hookExecutor.runBeforeSynthesize(transformed, hookCtx);
+    if (processedText === null) return true; // hook skipped this sentence
+
+    const chunks: Buffer[] = [];
+    // Register BEFORE synthesis so a mid-sentence release flushes the
+    // partial chunks collected so far in order.
+    spec.buffered.push({ text: processedText, chunks });
+    try {
+      for await (const chunk of this.tts.synthesizeStream(processedText)) {
+        if (spec.abort.signal.aborted && !spec.released) return false;
+        const processedAudio = await hookExecutor.runAfterSynthesize(chunk, processedText, hookCtx);
+        if (processedAudio === null) continue;
+        if (spec.released && !spec.flushed) {
+          // The final committed while this sentence was mid-synth — flush
+          // everything buffered (including this sentence's earlier chunks)
+          // and continue live below.
+          await this.specEnsureFlushed(spec);
+        }
+        if (spec.flushed) {
+          if (!this.isSpeaking) {
+            spec.interrupted = true;
+            return false;
+          }
+          await this.specSendChunk(spec, processedAudio);
+        } else {
+          chunks.push(processedAudio);
+          spec.bufferedBytes += processedAudio.length;
+          if (this.specBufferMs(spec) > StreamHandler.PREEMPTIVE_MAX_BUFFER_MS) {
+            this.failSpeculationInline(spec, 'buffer_overflow');
+            return false;
+          }
+        }
+      }
+    } catch (e) {
+      // Mirror the live path: a TTS error never crashes the turn.
+      getLogger().error(`TTS streaming error during speculation (${this.deps.bridge.label}):`, e);
+    }
+    return true;
+  }
+
+  /**
+   * Guardrails + tier-2 hook + synthesis for one speculative sentence —
+   * buffered pre-release, live post-release (same transforms either way).
+   * Returns ``false`` when the turn must stop. Parity with Python
+   * ``_spec_speak_sentence``.
+   */
+  private async specSpeakSentence(
+    spec: SpeculativeTurn,
+    sentence: string,
+    hookExecutor: PipelineHookExecutor,
+    hookCtx: HookContext,
+  ): Promise<boolean> {
+    const guard = checkGuardrails(sentence, this.deps.agent.guardrails);
+    let sentenceText = guard
+      ? (guard.replacement ?? "I'm sorry, I can't respond to that.")
+      : sentence;
+    if (hookExecutor.hasAfterLlmSentence()) {
+      const transformed = await hookExecutor.runAfterLlmSentence(sentenceText, hookCtx);
+      if (transformed === null) return true; // hook dropped this sentence
+      sentenceText = transformed;
+    }
+    if (spec.released) {
+      await this.specEnsureFlushed(spec);
+      if (!this.isSpeaking) {
+        spec.interrupted = true;
+        return false;
+      }
+      if (!spec.ttsFirstByteSent.value && spec.buffered.length === 0) {
+        // First sentence of the turn is being synthesized live (nothing was
+        // buffered pre-release) — stamp the boundary the streaming path
+        // stamps via ``recordLlmFirstSentenceComplete``.
+        this.metricsAcc.recordLlmFirstSentenceComplete();
+      }
+      await this.synthesizeSentence(sentenceText, hookExecutor, hookCtx, spec.ttsFirstByteSent);
+      if (!this.isSpeaking) {
+        spec.interrupted = true;
+        return false;
+      }
+      return true;
+    }
+    return this.specSynthesizeBuffered(spec, sentenceText, hookExecutor, hookCtx);
+  }
+
+  /**
+   * Turn-complete bookkeeping for a RELEASED speculation — mirrors the tail
+   * of ``runPipelineLlm`` + ``dispatchTurn`` (metrics turn record,
+   * interrupted heard-prefix marker, assistant history entry). Runs exactly
+   * once, after all audio was sent/cancelled. Parity with Python
+   * ``_finish_released_speculation``.
+   */
+  private async finishReleasedSpeculation(spec: SpeculativeTurn, llmError: boolean): Promise<void> {
+    const responseText = spec.responseParts.join('');
+    const interrupted = spec.interrupted;
+    let spokenText = responseText;
+    if (interrupted && responseText) {
+      const heard = this.heardResponsePrefix();
+      spokenText =
+        heard === null
+          ? `${responseText} [interrupted by caller]`
+          : heard.text
+            ? `${heard.text} [interrupted by caller]`
+            : '[interrupted by caller]';
+    }
+    if (spokenText) await this.emitAssistantTranscript(spokenText);
+    if (!interrupted && !llmError && responseText) {
+      this.metricsAcc.recordTtsComplete(responseText);
+      await this.emitTurnMetrics(this.metricsAcc.recordTurnComplete(responseText));
+    }
+  }
+
+  /**
+   * Body of one speculative turn: LLM stream → sentence chunking → buffered
+   * TTS, then commit-or-discard.
+   *
+   * Until release this task is side-effect free outside ``spec`` itself —
+   * no conversation-history writes, no carrier audio, no per-turn metrics
+   * (LLM token usage/cost IS recorded by ``LLMLoop``: the tokens were
+   * genuinely consumed either way). After release it behaves exactly like a
+   * live ``dispatchTurn`` body. Parity with Python
+   * ``_run_speculative_dispatch``.
+   */
+  private async runSpeculativeDispatch(spec: SpeculativeTurn): Promise<void> {
+    let llmError = false;
+    let stopped = false;
+    let tokenIter: AsyncIterator<string, void, unknown> | null = null;
+    const chunker = new SentenceChunker({
+      aggressiveFirstFlush: this.deps.agent.aggressiveFirstFlush ?? false,
+      language: this.deps.agent.language,
+    });
+    try {
+      const hookExecutor = new PipelineHookExecutor(this.deps.agent.hooks);
+      const hookCtx = this.buildHookContext();
+
+      // afterTranscribe gates/edits the text the LLM sees — same as a normal
+      // dispatch. A veto means the matching final would be vetoed too; fail
+      // the speculation and let the commit path run the hook again on the
+      // real final.
+      const filteredText = await hookExecutor.runAfterTranscribe(spec.interimText, hookCtx);
+      if (filteredText === null) {
+        this.failSpeculationInline(spec, 'after_transcribe_veto');
+        return;
+      }
+
+      // Prompt parity with ``processTranscript``: snapshot history and
+      // append the (filtered) user entry to the SNAPSHOT only — the shared
+      // history is committed at release time.
+      const snapshot = [
+        ...this.history.entries,
+        { role: 'user', text: filteredText, timestamp: Date.now() },
+      ];
+      const callCtx = { call_id: this.callId, caller: this.caller, callee: this.callee };
+      tokenIter = this.llmLoop!.run(
+        filteredText,
+        snapshot,
+        callCtx,
+        this.metricsAcc,
+        hookExecutor,
+        hookCtx,
+        { signal: spec.abort.signal },
+      )[Symbol.asyncIterator]();
+
+      try {
+        while (true) {
+          const nextToken = tokenIter.next();
+          let raced: IteratorResult<string, void> | null = null;
+          // Pre-release: race the next token against the commit decision so
+          // buffered audio flushes the MOMENT the final commits — even while
+          // the LLM is silent between tokens (agent-runtime LLMs can pause
+          // for seconds mid-stream).
+          while (raced === null && !spec.released && !spec.abort.signal.aborted) {
+            const DECIDED = {};
+            const winner = await Promise.race([
+              nextToken,
+              spec.decision.then(() => DECIDED as unknown),
+            ]);
+            if (winner === DECIDED) {
+              if (spec.released && !spec.flushed && !spec.abort.signal.aborted) {
+                await this.specEnsureFlushed(spec);
+              }
+              if (!spec.released) break; // discarded — abort path below
+            } else {
+              raced = winner as IteratorResult<string, void>;
+            }
+          }
+          if (spec.abort.signal.aborted) {
+            // Aborted (pre-release discard) or barge-in cancelled
+            // (post-release) — abandon the pending token fetch safely.
+            void Promise.resolve(nextToken).catch(() => {});
+            if (spec.released) spec.interrupted = true;
+            stopped = true;
+            break;
+          }
+          const result = raced ?? (await nextToken);
+          if (result.done) break;
+          const token = result.value;
+          spec.responseParts.push(token);
+          if (spec.released) {
+            // Flush as soon as the release is observed — never hold
+            // already-synthesized audio while waiting for the next sentence
+            // boundary.
+            if (!spec.flushed) await this.specEnsureFlushed(spec);
+            // Live continuation — keep the echo-guard reference and
+            // user-perceived TTFT current.
+            this.currentAgentSpokenText = spec.responseParts.join('');
+            if (!spec.llmFirstTokenRecorded) {
+              spec.llmFirstTokenRecorded = true;
+              this.metricsAcc.recordLlmFirstToken();
+              await this.emitLlmFirstToken();
+            }
+          }
+          for (const sentence of chunker.push(token)) {
+            if (!(await this.specSpeakSentence(spec, sentence, hookExecutor, hookCtx))) {
+              stopped = true;
+              break;
+            }
+          }
+          if (stopped) break;
+        }
+      } catch (e) {
+        const isAbort = (e as Error)?.name === 'AbortError' || spec.abort.signal.aborted;
+        if (isAbort && !spec.released) return; // torn down by an abort — silent
+        if (isAbort) {
+          spec.interrupted = true;
+          stopped = true;
+        } else {
+          llmError = true;
+          chunker.reset();
+          getLogger().error(
+            `Preemptive: LLM streaming error during speculation (${this.deps.bridge.label}):`,
+            e,
+          );
+          if (!spec.released) {
+            // Unreleased — fail silently; the final dispatches normally
+            // (and gets its own, live, error handling).
+            this.failSpeculationInline(spec, 'llm_error');
+            return;
+          }
+          // Released — the turn is live: mirror the live error path.
+          this.metricsAcc.recordTurnInterrupted();
+          const fallback = this.deps.agent.llmErrorMessage;
+          if (fallback && !spec.ttsFirstByteSent.value && this.isSpeaking) {
+            try {
+              await this.synthesizeSentence(fallback, hookExecutor, hookCtx, spec.ttsFirstByteSent, false);
+            } catch (err) {
+              getLogger().error('llmErrorMessage fallback synthesis failed:', err);
+            }
+          }
+        }
+      }
+
+      if (!llmError && !stopped) {
+        for (const sentence of chunker.flush()) {
+          if (!(await this.specSpeakSentence(spec, sentence, hookExecutor, hookCtx))) {
+            stopped = true;
+            break;
+          }
+        }
+      }
+
+      if (!spec.released) {
+        if (spec.abort.signal.aborted || spec.failed) return; // pre-release discard
+        // Generation finished before the final committed — park and hold
+        // the audio until the commit decision lands.
+        await spec.decision;
+        if (!spec.released) return; // discarded
+      }
+
+      // Released: flush anything still held (covers "LLM finished before
+      // the final committed" — the common case), then run the turn-complete
+      // bookkeeping. ``endSpeakingWithGrace`` pairs with the
+      // ``beginSpeaking`` inside the flush.
+      try {
+        if (!spec.interrupted && !llmError) {
+          await this.specEnsureFlushed(spec);
+        }
+      } finally {
+        if (spec.flushed) this.endSpeakingWithGrace();
+      }
+      this.metricsAcc.recordLlmComplete();
+      await this.finishReleasedSpeculation(spec, llmError);
+    } catch (e) {
+      getLogger().error('Preemptive: speculative dispatch failed:', e);
+      if (!spec.released) {
+        this.failSpeculationInline(spec, 'exception');
+      } else if (spec.flushed && this.isSpeaking) {
+        // Never leave the floor held on an unexpected released-path failure.
+        this.endSpeakingWithGrace();
+      }
+    } finally {
+      // Close the LLM generator so the provider connection is freed even on
+      // an early unwind (parity with Python ``result.aclose()``).
+      try {
+        void tokenIter?.return?.();
+      } catch {
+        // Best-effort.
+      }
+      if (this.llmAbort === spec.abort) this.llmAbort = null;
+      if (this.speculation === spec) this.speculation = null;
+      // A RELEASED speculation became the live turn (``dispatchTask``) — on
+      // completion it must clear the handle exactly like ``dispatchTurn``'s
+      // ``finally`` does, or ``canSpeculate()`` (which requires
+      // ``dispatchTask === null``) would stay false for the REST OF THE
+      // CALL after the first hit. Python is immune (``_can_speculate``
+      // accepts ``dispatch.done()``); the TS convention is null-on-done.
+      if (this.dispatchTask === spec.task) this.dispatchTask = null;
+    }
   }
 
   /**

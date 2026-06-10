@@ -764,6 +764,31 @@ export interface AgentOptions {
    */
   readonly aggressiveFirstFlush?: boolean;
   /**
+   * PREEMPTIVE GENERATION (pipeline mode, built-in LLM loop only; opt-in).
+   * When ``true`` the SDK starts the LLM — and sentence-chunked TTS
+   * synthesis — EARLY on a confident INTERIM transcript (one that ends with
+   * sentence-final punctuation, or that has been unchanged for
+   * ``preemptiveMinStableMs``), holding all synthesized audio in memory.
+   * When the FINAL transcript commits: if it matches the speculated interim
+   * (normalized — case/punctuation/whitespace-insensitive) the buffered
+   * audio is RELEASED to the carrier immediately (the LLM+TTS latency was
+   * paid during the user's own end-of-utterance silence); if it differs,
+   * the speculation is discarded silently and the turn dispatches normally
+   * on the final. History and metrics record exactly one turn either way.
+   * Same pattern as LiveKit Agents' ``preemptive_generation``. Default:
+   * ``false`` — every turn waits for the final transcript, as today.
+   * Mirrors Python ``preemptive_generation``.
+   */
+  readonly preemptiveGeneration?: boolean;
+  /**
+   * Interim-stability window (ms) for preemptive generation: an interim
+   * transcript that does NOT end with sentence-final punctuation qualifies
+   * for speculation only once it has remained unchanged for this long.
+   * Only consulted when ``preemptiveGeneration`` is true. Default: 300.
+   * Mirrors Python ``preemptive_min_stable_ms``.
+   */
+  readonly preemptiveMinStableMs?: number;
+  /**
    * Input noise reduction for speakerphone / conference audio (OpenAI
    * Realtime mode only). `undefined` (default) omits the field entirely
    * (no reduction — today's behavior).

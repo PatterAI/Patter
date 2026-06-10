@@ -142,6 +142,15 @@ export interface CallMetrics {
   /** Terminal error code when the call ended abnormally (a lowercased ErrorCode
    * value or "other"); empty/absent for a clean call. Never the message. */
   readonly error_code?: string;
+  /** PREEMPTIVE GENERATION counters (pipeline mode, only non-zero when
+   * `agent.preemptiveGeneration` is true). `preemptive_hits` counts
+   * speculative turns released on a matching final transcript (latency win);
+   * `preemptive_misses` counts speculations started but discarded
+   * (mismatched final, barge-in, replaced by a newer interim, buffer
+   * overflow) — i.e. wasted LLM/TTS spend. Mirrors Python
+   * `CallMetrics.preemptive_hits` / `preemptive_misses`. */
+  readonly preemptive_hits?: number;
+  readonly preemptive_misses?: number;
 }
 
 // ---- CallControl interface ----
@@ -277,6 +286,13 @@ export class CallMetricsAccumulator {
   private _actualSttCost: number | null = null;
   // Fix 10: accumulated LLM token cost for non-Realtime pipeline mode.
   private _totalLlmCost = 0;
+  // PREEMPTIVE GENERATION counters (pipeline mode, opt-in). Hits =
+  // speculative turns released on a matching final transcript; misses =
+  // speculations started but discarded (mismatched final, barge-in,
+  // replaced by a newer interim, buffer overflow). Surfaced on the final
+  // CallMetrics. Parity with Python `_preemptive_hits` / `_preemptive_misses`.
+  private _preemptiveHits = 0;
+  private _preemptiveMisses = 0;
   // Last LLM model identifier from a recordLlmUsage call — emitted on
   // CallMetrics.llm_model so the dashboard cost panel can display
   // "Cerebras gpt-oss-120b" instead of just "Cerebras".
@@ -874,6 +890,19 @@ export class CallMetricsAccumulator {
     );
   }
 
+  /** Count a preemptive (speculative) turn RELEASED on a matching final
+   * transcript — the buffered LLM+TTS work became the real turn. */
+  recordPreemptiveHit(): void {
+    this._preemptiveHits += 1;
+  }
+
+  /** Count a preemptive (speculative) turn started but discarded without
+   * release (mismatched final, barge-in during speculation, replaced by a
+   * newer interim, or buffer overflow). */
+  recordPreemptiveMiss(): void {
+    this._preemptiveMisses += 1;
+  }
+
   /** Override the carrier-billed telephony cost (e.g. exact value reported via Twilio API). */
   setActualTelephonyCost(cost: number): void {
     this._actualTelephonyCost = cost;
@@ -957,6 +986,8 @@ export class CallMetricsAccumulator {
       tts_model: this.ttsModel,
       llm_model: this._llmModel,
       error_code: this._errorCode,
+      preemptive_hits: this._preemptiveHits,
+      preemptive_misses: this._preemptiveMisses,
     };
 
     this._eventBus?.emit('call_ended', { callId: this.callId, metrics });
