@@ -172,7 +172,11 @@ export class SpeechmaticsSTT {
   private readonly domain: string | undefined;
   private readonly outputLocale: string | undefined;
 
+  /** Construction args replayed by clone(). */
+  private readonly patterCtorArgs: unknown[];
+
   constructor(apiKey: string, options: SpeechmaticsSTTOptions = {}) {
+    this.patterCtorArgs = [apiKey, options];
     if (!apiKey) {
       throw new Error('Speechmatics apiKey is required');
     }
@@ -261,6 +265,17 @@ export class SpeechmaticsSTT {
   }
 
   /** Open the streaming WebSocket and send the `StartRecognition` frame. */
+
+  /**
+   * Fresh adapter built with this instance's construction arguments —
+   * called per call by the stream handler so concurrent calls never share
+   * connection state (sockets/queues; cross-call transcript bleed).
+   */
+  clone(): this {
+    const ctor = this.constructor as new (...args: unknown[]) => this;
+    return new ctor(...this.patterCtorArgs);
+  }
+
   async connect(): Promise<void> {
     if (this.ws !== null) return;
 

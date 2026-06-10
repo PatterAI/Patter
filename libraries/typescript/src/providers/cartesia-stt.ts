@@ -100,10 +100,14 @@ export class CartesiaSTT {
    */
   public requestId: string | null = null;
 
+  /** Construction args replayed by clone(). */
+  private readonly patterCtorArgs: unknown[];
+
   constructor(
     private readonly apiKey: string,
     private readonly options: CartesiaSTTOptions = {},
   ) {
+    this.patterCtorArgs = [apiKey, options];
     if (!apiKey) {
       throw new Error('CartesiaSTT requires a non-empty apiKey');
     }
@@ -230,6 +234,17 @@ export class CartesiaSTT {
   }
 
   /** Open the streaming WebSocket and arm message + keepalive handlers. */
+
+  /**
+   * Fresh adapter built with this instance's construction arguments —
+   * called per call by the stream handler so concurrent calls never share
+   * connection state (sockets/queues; cross-call transcript bleed).
+   */
+  clone(): this {
+    const ctor = this.constructor as new (...args: unknown[]) => this;
+    return new ctor(...this.patterCtorArgs);
+  }
+
   async connect(): Promise<void> {
     const url = this.buildWsUrl();
     this.ws = new WebSocket(url, {

@@ -145,7 +145,11 @@ export class SonioxSTT {
   private readonly clientReferenceId?: string;
   private readonly baseUrl: string;
 
+  /** Construction args replayed by clone(). */
+  private readonly patterCtorArgs: unknown[];
+
   constructor(apiKey: string, options: SonioxSTTOptions = {}) {
+    this.patterCtorArgs = [apiKey, options];
     if (!apiKey) {
       throw new Error('Soniox apiKey is required');
     }
@@ -198,6 +202,17 @@ export class SonioxSTT {
   }
 
   /** Open the streaming WebSocket and send the initial config payload. */
+
+  /**
+   * Fresh adapter built with this instance's construction arguments —
+   * called per call by the stream handler so concurrent calls never share
+   * connection state (sockets/queues; cross-call transcript bleed).
+   */
+  clone(): this {
+    const ctor = this.constructor as new (...args: unknown[]) => this;
+    return new ctor(...this.patterCtorArgs);
+  }
+
   async connect(): Promise<void> {
     // Reset the accumulator so reconnection after close() does not carry
     // stale final.text across streams.

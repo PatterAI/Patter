@@ -156,8 +156,11 @@ class TestSTTTTSDispatch:
                 tts="elevenlabs",
             )
 
-    def test_stt_provider_bypasses_config_resolution(self) -> None:
-        """An STTProvider instance must flow through untouched to downstream dispatch."""
+    def test_stt_provider_is_cloned_per_call(self) -> None:
+        """An STTProvider instance is CLONED per call (same type/config,
+        fresh connection state) — sharing one stateful adapter across
+        concurrent calls bled transcripts between callers. TTS instances
+        still flow through untouched."""
         from getpatter.telephony.common import (
             _create_stt_from_config,
             _create_tts_from_config,
@@ -165,7 +168,12 @@ class TestSTTTTSDispatch:
 
         stt = deepgram_stt.STT(api_key="dg_bypass")
         tts = elevenlabs_tts.TTS(api_key="el_bypass")
-        assert _create_stt_from_config(stt) is stt
+        resolved = _create_stt_from_config(stt)
+        assert resolved is not stt
+        assert type(resolved) is type(stt)
+        assert resolved.api_key == stt.api_key
+        # Two calls → two distinct adapters.
+        assert _create_stt_from_config(stt) is not resolved
         assert _create_tts_from_config(tts) is tts
 
 

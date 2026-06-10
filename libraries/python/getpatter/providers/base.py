@@ -49,6 +49,53 @@ class Transcript:
 class STTProvider(ABC):
     """Abstract base class for streaming speech-to-text providers."""
 
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        """Capture constructor arguments so :meth:`clone` works generically.
+
+        STT adapters are stateful per-connection objects, but the documented
+        usage pattern hands ONE instance to ONE agent served for MANY calls —
+        concurrent calls then share a socket/queue and corrupt each other
+        (cross-call transcript bleed). The stream handlers clone the
+        configured instance per call via :meth:`clone`; this hook wraps every
+        subclass ``__init__`` to record the ORIGINAL construction arguments
+        (outermost call wins through inheritance chains) with zero
+        per-provider code.
+        """
+        super().__init_subclass__(**kwargs)
+        original_init = cls.__dict__.get("__init__")
+        if original_init is None or getattr(
+            original_init, "_patter_captures_ctor", False
+        ):
+            return
+
+        import functools
+
+        @functools.wraps(original_init)
+        def _capturing_init(self, *args, **kw):  # type: ignore[no-untyped-def]
+            if not hasattr(self, "_patter_ctor_args"):
+                self._patter_ctor_args = (args, dict(kw))
+            original_init(self, *args, **kw)
+
+        _capturing_init._patter_captures_ctor = True  # type: ignore[attr-defined]
+        cls.__init__ = _capturing_init  # type: ignore[method-assign]
+
+    def clone(self) -> "STTProvider":
+        """Return a FRESH adapter built with this instance's constructor args.
+
+        Called by the stream handlers so every call gets its own connection
+        state. Subclasses with non-replayable constructor arguments may
+        override. Raises ``TypeError`` if construction arguments were never
+        captured (e.g. an instance built via ``object.__new__``).
+        """
+        captured = getattr(self, "_patter_ctor_args", None)
+        if captured is None:
+            raise TypeError(
+                f"{type(self).__name__}.clone(): constructor arguments were "
+                "not captured; override clone() for this adapter."
+            )
+        args, kw = captured
+        return type(self)(*args, **kw)
+
     @abstractmethod
     async def connect(self) -> None:
         """Open the provider connection (WebSocket, gRPC, etc.)."""

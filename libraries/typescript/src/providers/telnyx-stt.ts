@@ -77,13 +77,29 @@ export class TelnyxSTT {
   private callbacks: Set<TranscriptCallback> = new Set();
   private headerSent = false;
 
+  /** Construction args replayed by clone(). */
+  private readonly patterCtorArgs: unknown[];
+
   constructor(
     private readonly apiKey: string,
     private readonly language: string = 'en',
     private readonly transcriptionEngine: TelnyxTranscriptionEngine = 'telnyx',
     private readonly sampleRate: number = DEFAULT_SAMPLE_RATE,
     private readonly baseUrl: string = TELNYX_STT_WS_URL,
-  ) {}
+  ) {
+    this.patterCtorArgs = [apiKey, language, transcriptionEngine, sampleRate, baseUrl];
+  }
+
+  /**
+   * Fresh adapter built with this instance's construction arguments —
+   * called per call by the stream handler so concurrent calls never share
+   * connection state (sockets/queues; cross-call transcript bleed).
+   */
+  clone(): this {
+    const ctor = this.constructor as new (...args: unknown[]) => this;
+    return new ctor(...this.patterCtorArgs);
+  }
+
 
   /** Open the streaming WebSocket and arm message handlers. */
   async connect(): Promise<void> {
