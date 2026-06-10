@@ -19,6 +19,7 @@
 import type { LLMChunk, LLMProvider, LLMStreamOptions } from "../llm-loop";
 import { mergeAbortSignals } from "../llm-loop";
 import { getLogger } from '../logger';
+import { PatterConnectionError } from '../errors';
 
 /** Known Google Gemini chat models. */
 export const GoogleModel = {
@@ -146,8 +147,14 @@ export class GoogleLLMProvider implements LLMProvider {
 
     if (!response.ok) {
       const errText = await response.text();
-      getLogger().error(`Gemini API error: ${response.status} ${errText}`);
-      return;
+      // Cap the logged/thrown body — provider 401 bodies have been observed to
+      // embed the rejected API-key prefix, which would otherwise land in logs.
+      getLogger().error(`Gemini API error: ${response.status} ${errText.slice(0, 200)}`);
+      // Throw (don't return silently) so the LLM fallback chain fails over and
+      // the spoken error fallback can fire — a silent return looks like success.
+      throw new PatterConnectionError(
+        `Gemini API returned ${response.status}: ${errText.slice(0, 200)}`,
+      );
     }
 
     const reader = response.body?.getReader();

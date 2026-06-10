@@ -11,6 +11,7 @@ import type { LLMChunk, LLMProvider, LLMStreamOptions } from "../llm-loop";
 import { mergeAbortSignals } from "../llm-loop";
 import { getLogger } from '../logger';
 import { VERSION } from '../version';
+import { PatterConnectionError } from '../errors';
 
 const GROQ_BASE_URL = 'https://api.groq.com/openai/v1';
 
@@ -152,8 +153,14 @@ export class GroqLLMProvider implements LLMProvider {
 
     if (!response.ok) {
       const errText = await response.text();
-      getLogger().error(`Groq API error: ${response.status} ${errText}`);
-      return;
+      // Cap the logged/thrown body — provider 401 bodies have been observed to
+      // embed the rejected API-key prefix, which would otherwise land in logs.
+      getLogger().error(`Groq API error: ${response.status} ${errText.slice(0, 200)}`);
+      // Throw (don't return silently) so the LLM fallback chain fails over and
+      // the spoken error fallback can fire — a silent return looks like success.
+      throw new PatterConnectionError(
+        `Groq API returned ${response.status}: ${errText.slice(0, 200)}`,
+      );
     }
 
     yield* parseOpenAISseStream(response);

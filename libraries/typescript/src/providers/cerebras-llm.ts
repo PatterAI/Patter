@@ -17,7 +17,7 @@
 import type { LLMChunk, LLMProvider, LLMStreamOptions } from "../llm-loop";
 import { mergeAbortSignals } from "../llm-loop";
 import { getLogger } from '../logger';
-import { PatterError } from '../errors';
+import { PatterError, PatterConnectionError } from '../errors';
 import { VERSION } from '../version';
 import { parseOpenAISseStream } from './groq-llm';
 
@@ -241,15 +241,17 @@ export class CerebrasLLMProvider implements LLMProvider {
               `Override via \`new CerebrasLLM({ model: '<id>' })\` and list ` +
               `tier-available ids with \`GET ${this.baseUrl}/models\` ` +
               `(common: llama3.1-8b, qwen-3-235b-a22b-instruct-2507, llama-3.3-70b on paid). ` +
-              `Raw response: ${lastErrText}`,
+              `Raw response: ${lastErrText.slice(0, 200)}`,
           );
         } else {
-          getLogger().error(`Cerebras API error: ${response.status} ${lastErrText}`);
+          getLogger().error(`Cerebras API error: ${response.status} ${lastErrText.slice(0, 200)}`);
         }
-        // Voice pipelines treat LLM provider failures as recoverable —
-        // return silently so the call continues without an LLM response
-        // rather than crashing the whole pipeline.
-        return;
+        // Throw (don't return silently) so the LLM fallback chain can fail over
+        // to the next provider and the spoken error fallback can fire — a silent
+        // return looks like success and leaves the caller in dead air.
+        throw new PatterConnectionError(
+          `Cerebras API returned ${response.status}: ${lastErrText.slice(0, 200)}`,
+        );
       }
 
       const advisoryMs = parseRateLimitResetMs(response.headers);
