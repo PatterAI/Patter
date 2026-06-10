@@ -22,20 +22,31 @@ import logging
 import os
 import time
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 
 logger = logging.getLogger("getpatter")
 
 from getpatter.exceptions import PatterConnectionError
 from getpatter.local_config import LocalConfig
-from getpatter.models import Agent, Guardrail, MachineDetectionResult
-from getpatter.providers.base import STTProvider, TTSProvider
+from getpatter.models import (
+    Agent,
+    CallResult,
+    ConsultConfig,
+    Guardrail,
+    MachineDetectionResult,
+    PipelineHooks,
+    RealtimeTurnDetection,
+)
+from getpatter.providers.base import (
+    AudioFilter,
+    BackgroundAudioPlayer,
+    STTProvider,
+    TTSProvider,
+    VADProvider,
+)
 from getpatter.services.llm_loop import LLMProvider
-
-if TYPE_CHECKING:  # pragma: no cover — typing only
-    from getpatter._public_api import Tool
-    from getpatter._speech_events import SpeechEventCallback
-    from getpatter.models import CallResult, RealtimeTurnDetection
+from getpatter._public_api import Tool
+from getpatter._speech_events import SpeechEventCallback
 
 
 # Maximum concurrent entries in the prewarm-first-message cache. Bounds

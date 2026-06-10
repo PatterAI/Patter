@@ -13,8 +13,10 @@ from __future__ import annotations
 
 __all__ = [
     "elevenlabs",
+    "elevenlabs_ws",
     "openai",
     "cartesia",
     "rime",
     "lmnt",
+    "inworld",
 ]

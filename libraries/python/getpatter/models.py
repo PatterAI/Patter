@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Callable, Literal
 
 if TYPE_CHECKING:
     from getpatter.providers.base import AudioFilter, BackgroundAudioPlayer, VADProvider
+    from getpatter.services.barge_in_strategies import BargeInStrategy
     from getpatter.services.llm_loop import LLMProvider
 
 logger = logging.getLogger("getpatter")

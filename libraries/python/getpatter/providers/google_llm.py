@@ -17,7 +17,7 @@ import json
 import logging
 import os
 from enum import StrEnum
-from typing import ClassVar, Any, AsyncIterator
+from typing import ClassVar, Any, AsyncIterator, Union
 
 logger = logging.getLogger("getpatter")
 
@@ -145,7 +145,6 @@ class GoogleLLMProvider:
         for a probe.
         """
         try:
-            api_key = getattr(self._client, "_api_client", None)
             # google-genai's Client doesn't expose the API key once it has
             # constructed its inner http client; fall back to env var.
             key = os.environ.get("GOOGLE_API_KEY") or ""
@@ -229,14 +228,14 @@ class GoogleLLMProvider:
                 function_call = getattr(part, "function_call", None)
                 if function_call:
                     args = getattr(function_call, "args", {}) or {}
-                    call_id = (
+                    fn_call_id = (
                         getattr(function_call, "id", None)
                         or f"gemini_call_{next_index}"
                     )
                     yield {
                         "type": "tool_call",
                         "index": next_index,
-                        "id": call_id,
+                        "id": fn_call_id,
                         "name": getattr(function_call, "name", "") or "",
                         "arguments": json.dumps(args),
                     }
