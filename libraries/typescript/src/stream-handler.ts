@@ -4960,7 +4960,9 @@ export class StreamHandler {
     hookExecutor: PipelineHookExecutor,
     hookCtx: HookContext,
   ): Promise<boolean> {
-    const guard = checkGuardrails(sentence, this.deps.agent.guardrails);
+    // ``currentAgent`` (not deps.agent) so a mid-call handoff's guardrails
+    // apply to speculative sentences too.
+    const guard = checkGuardrails(sentence, this.currentAgent.guardrails);
     let sentenceText = guard
       ? (guard.replacement ?? "I'm sorry, I can't respond to that.")
       : sentence;
