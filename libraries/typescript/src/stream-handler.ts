@@ -3490,13 +3490,19 @@ export class StreamHandler {
     // Semantic turn detection (opt-in): a committed transcript supersedes
     // any in-flight hold (the STT endpointed on its own), and the per-turn
     // rolling window restarts so the next turn is scored on its own audio.
-    // The stamped EOU trigger is consumed by the single EOS emission in
-    // ``emitUserSpeechEos`` below — emitting here too would double-fire the
-    // event now that pipeline mode wires it unconditionally.
     if (this.deps.agent.turnDetector) {
       this.cancelSemanticHold();
       this.resetSemanticWindow();
     }
+    // Speech-event: end-of-utterance committed (pipeline analogue of
+    // Realtime's input_audio_buffer.committed, which fires at the server
+    // commit signal regardless of what the app does with the text). Fires
+    // HERE — at transcript commit, before the hook veto and the
+    // handler-availability checks — so both the onMessage and built-in LLM
+    // paths (and discarded orphan turns) advance the dispatcher's turn
+    // index. The helper consumes the semantic detector's stamped trigger
+    // when one is configured. Mirrors Python ``_dispatch_turn``.
+    await this.emitUserSpeechEos(transcript.text);
 
     // Endpoint span — silence-detected → LLM-dispatch window. The matching
     // ``end()`` lives below right before ``recordTurnCommitted``. We use a
@@ -3551,11 +3557,6 @@ export class StreamHandler {
     // onUserTurnCompleted hook is not yet wired in TS — record 0 delay so EOU can still emit.
     this.metricsAcc.recordOnUserTurnCompletedDelay(0);
     this.metricsAcc.recordTurnCommitted();
-    // Speech-event: end-of-utterance committed (pipeline analogue of
-    // Realtime's input_audio_buffer.committed). Advances the dispatcher's
-    // turn index so per-turn llm_token/audio_out gating works beyond the
-    // first turn. Mirrors Python.
-    await this.emitUserSpeechEos(filteredTranscript);
     closeEndpointSpan();
 
     // Settle the previous turn first (single-in-flight). It is either already

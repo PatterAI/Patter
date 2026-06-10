@@ -5781,13 +5781,34 @@ class PipelineStreamHandler(StreamHandler):
         # Semantic turn detection (opt-in): a committed transcript
         # supersedes any in-flight hold (the STT endpointed on its own), and
         # the per-turn rolling window restarts so the next turn is scored on
-        # its own audio. The stamped EOU trigger is consumed by the single
-        # EOS emission next to ``record_turn_committed`` below — emitting
-        # here too would double-fire the event now that pipeline mode wires
-        # it unconditionally.
+        # its own audio.
         if self._turn_detector is not None:
             self._cancel_semantic_hold()
             self._reset_semantic_window()
+        # Speech-event: end-of-utterance committed (pipeline analogue of
+        # Realtime's input_audio_buffer.committed, which fires at the server
+        # commit signal regardless of what the app does with the text).
+        # Fires HERE — at transcript commit, before the hook veto and the
+        # handler-availability checks — so both the on_message and built-in
+        # LLM paths (and discarded orphan turns) advance the dispatcher's
+        # turn index. With a semantic detector configured, consume the
+        # trigger its finalize path stamped (``semantic_turn_detector`` when
+        # the model approved the commit) — single consumption point so the
+        # event fires exactly once per committed turn. Otherwise the trigger
+        # reflects how this commit was driven: local VAD silence when a VAD
+        # is active, else the STT provider's own endpointing.
+        if self._turn_detector is not None:
+            _eou_trigger = self._last_eou_trigger
+            self._last_eou_trigger = EouTrigger.VAD_SILENCE
+        else:
+            _eou_trigger = (
+                "vad_silence"
+                if (getattr(self.agent, "vad", None) or self._auto_vad) is not None
+                else "manual_commit"
+            )
+        await self._emit_user_speech_eos(
+            trigger=_eou_trigger, transcript_so_far=transcript_text
+        )
 
         # Endpoint span — silence-detected → LLM-dispatch window. Open
         # here (right after VAD stop / final transcript is recorded)
@@ -5900,30 +5921,6 @@ class PipelineStreamHandler(StreamHandler):
             }
             if self.metrics is not None:
                 self.metrics.record_turn_committed()
-            # Speech-event: end-of-utterance committed (pipeline analogue of
-            # Realtime's input_audio_buffer.committed). Advances the
-            # dispatcher's turn index so per-turn llm_token/audio_out gating
-            # works beyond the first turn. With a semantic detector
-            # configured, consume the trigger its finalize path stamped
-            # (``semantic_turn_detector`` when the model approved the
-            # commit) — single consumption point so the event fires exactly
-            # once per committed turn. Otherwise the trigger reflects how
-            # this commit was driven: local VAD silence when a VAD is
-            # active, else the STT provider's own endpointing.
-            if getattr(self, "_turn_detector", None) is not None:
-                _eou_trigger = self._last_eou_trigger
-                self._last_eou_trigger = EouTrigger.VAD_SILENCE
-            else:
-                _eou_trigger = (
-                    "vad_silence"
-                    if (getattr(self.agent, "vad", None) or self._auto_vad)
-                    is not None
-                    else "manual_commit"
-                )
-            await self._emit_user_speech_eos(
-                trigger=_eou_trigger,
-                transcript_so_far=filtered_text,
-            )
             _close_endpoint_span()
             result = self._llm_loop.run(
                 filtered_text,

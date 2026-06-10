@@ -416,9 +416,11 @@ async def test_dispatch_turn_fires_eos_with_vad_silence_when_model_never_agreed(
     assert captured[0]["trigger"] == "vad_silence"
 
 
-async def test_dispatch_turn_without_detector_fires_no_eos() -> None:
-    """Default path: pipeline mode never fired EOS speech events before this
-    feature — keep it that way when no detector is configured."""
+async def test_dispatch_turn_without_detector_fires_eos_with_vad_silence() -> None:
+    """Default path: pipeline mode emits the committed-EOS speech event
+    unconditionally (wired alongside the other speech edges); without a
+    detector the trigger reflects the active VAD's silence endpointing —
+    never the semantic trigger."""
     handler = _make_handler(vad_events=[_speech_end()])
 
     captured: list[dict] = []
@@ -429,7 +431,8 @@ async def test_dispatch_turn_without_detector_fires_no_eos() -> None:
     await handler.on_audio_received(FRAME)
     await handler._dispatch_turn("ciao")
 
-    assert captured == []
+    assert len(captured) == 1
+    assert captured[0]["trigger"] == "vad_silence"
 
 
 async def test_committed_transcript_supersedes_active_hold() -> None:

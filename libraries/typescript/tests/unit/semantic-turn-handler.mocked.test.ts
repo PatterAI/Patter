@@ -477,7 +477,11 @@ describe('StreamHandler — semantic turn detection (opt-in)', () => {
     expect(captured[0].trigger).toBe('vad_silence');
   });
 
-  it('fires no EOS speech event on the default path (no detector)', async () => {
+  it('fires EOS with vad_silence on the default path (no detector)', async () => {
+    // Pipeline mode emits the committed-EOS speech event unconditionally
+    // (wired alongside the other speech edges); without a detector the
+    // trigger reflects the active VAD's silence endpointing — never the
+    // semantic trigger.
     const speechEvents = new SpeechEvents();
     const captured: Array<Record<string, unknown>> = [];
     speechEvents.onUserSpeechEos = (payload) => {
@@ -491,7 +495,8 @@ describe('StreamHandler — semantic turn detection (opt-in)', () => {
     await handler.handleAudio(mulawFrame());
     await priv.processTranscript({ text: 'plain pipeline turn', isFinal: true });
 
-    expect(captured).toHaveLength(0);
+    expect(captured).toHaveLength(1);
+    expect(captured[0].trigger).toBe('vad_silence');
   });
 
   it('a committed transcript supersedes an active hold', async () => {
