@@ -335,6 +335,11 @@ export function isLoopbackHost(value: string): boolean {
  * @param toleranceSec Maximum age of the request in seconds (default 300)
  * @returns true if valid, false otherwise
  */
+// Maximum tolerated clock skew for a Telnyx webhook timestamp that is in the
+// FUTURE relative to the local clock. Must match Python server.py
+// ``_TELNYX_FUTURE_SKEW_MS`` (SDK parity).
+const TELNYX_FUTURE_SKEW_MS = 30_000;
+
 function validateTelnyxSignature(
   rawBody: string,
   signature: string,
@@ -354,7 +359,12 @@ function validateTelnyxSignature(
     if (!Number.isFinite(ts)) return false;
     const tsMs = ts < 1e12 ? ts * 1000 : ts;
     const ageMs = Date.now() - tsMs;
-    if (ageMs < 0 || ageMs > toleranceSec * 1000) return false;
+    // Past-dated timestamps get the standard anti-replay tolerance. Future
+    // timestamps are tolerated only up to a small clock-skew allowance
+    // (local clock a touch behind Telnyx) — rejecting ALL future values
+    // (the previous behaviour) drops legitimate webhooks on hosts whose
+    // clock lags by even a second. Mirrors Python ``_TELNYX_FUTURE_SKEW_MS``.
+    if (ageMs > toleranceSec * 1000 || ageMs < -TELNYX_FUTURE_SKEW_MS) return false;
 
     const payload = `${timestamp}|${rawBody}`;
     const keyBuffer = Buffer.from(publicKey, 'base64');
@@ -434,7 +444,14 @@ export function sanitizeVariables(raw: Record<string, unknown>): Record<string, 
   for (const key of Object.keys(raw)) {
     if (BLOCKED_KEYS.has(key)) continue;
     const val = raw[key];
-    safe[key] = typeof val === 'string' ? val : String(val ?? '');
+    // Strip control characters and cap length — caller-supplied values
+    // (carrier custom params) are interpolated into the system prompt, so a
+    // newline-bearing value could append adversarial prompt lines. Mirrors
+    // Python ``_sanitize_variable_value`` (same regex, same 500-char cap).
+    safe[key] = (typeof val === 'string' ? val : String(val ?? ''))
+      // eslint-disable-next-line no-control-regex
+      .replace(/[\x00-\x1f\x7f]/g, '')
+      .slice(0, 500);
   }
   return safe;
 }
@@ -2282,7 +2299,9 @@ export class EmbeddedServer {
           await handler.handleCallStart(callSid, customParameters);
         } else if (event === 'media') {
           const payload = data.media?.payload ?? '';
-          handler.handleAudio(Buffer.from(payload, 'base64'));
+          // ``await`` keeps a rejection inside the outer try/catch — un-awaited
+          // it becomes an unhandled rejection that kills the process (Node 15+).
+          await handler.handleAudio(Buffer.from(payload, 'base64'));
         } else if (event === 'mark') {
           // Twilio confirms playback of a previously sent audio chunk.
           // Forward the mark name so barge-in heuristics can compare it
@@ -2363,7 +2382,9 @@ export class EmbeddedServer {
           if (track !== 'inbound') return;
           const audioChunk = data.media?.payload ?? '';
           if (!audioChunk) return;
-          handler.handleAudio(Buffer.from(audioChunk, 'base64'));
+          // ``await`` keeps a rejection inside the outer try/catch — un-awaited
+          // it becomes an unhandled rejection that kills the process (Node 15+).
+          await handler.handleAudio(Buffer.from(audioChunk, 'base64'));
         } else if (event === 'dtmf') {
           const digit = String(data.dtmf?.digit ?? '').trim();
           if (digit) {
@@ -2382,6 +2403,9 @@ export class EmbeddedServer {
     });
 
     ws.on('close', async () => {
+      // Mirrors the Twilio/Plivo close handlers — without the delete the
+      // entry survives the call and the Map grows for the server's lifetime.
+      this.activeCallIds.delete(ws);
       await handler.handleWsClose();
     });
   }
@@ -2427,7 +2451,9 @@ export class EmbeddedServer {
           await handler.handleCallStart(callId);
         } else if (event === 'media') {
           const payload = data.media?.payload ?? '';
-          if (payload) handler.handleAudio(Buffer.from(payload, 'base64'));
+          // ``await`` keeps a rejection inside the outer try/catch — un-awaited
+          // it becomes an unhandled rejection that kills the process (Node 15+).
+          if (payload) await handler.handleAudio(Buffer.from(payload, 'base64'));
         } else if (event === 'playedStream') {
           // Checkpoint acknowledgement — the analogue of a Twilio mark.
           const markName = String(data.name ?? '');

@@ -200,18 +200,23 @@ class TestTwilioAudioSender:
         assert payload["event"] == "clear"
         assert payload["streamSid"] == "MZ_test"
 
-    async def test_send_mark_increments_count(self) -> None:
+    async def test_send_mark_passes_caller_name_through(self) -> None:
+        """The wire name must be the caller-supplied one: Twilio echoes it
+        back verbatim and ``StreamHandler.on_mark`` resolves the pending
+        waiter by that exact name. A locally generated substitute (the old
+        ``audio_N`` behaviour) made every first-message waiter miss its echo
+        and burn the full mark-await timeout."""
         ws = AsyncMock()
         ws.send_text = AsyncMock()
         sender = TwilioAudioSender(ws, stream_sid="MZ_test")
 
-        await sender.send_mark("m1")
+        await sender.send_mark("fm_1")
         payload1 = json.loads(ws.send_text.call_args[0][0])
-        assert payload1["mark"]["name"] == "audio_1"
+        assert payload1["mark"]["name"] == "fm_1"
 
-        await sender.send_mark("m2")
+        await sender.send_mark("fm_2")
         payload2 = json.loads(ws.send_text.call_args[0][0])
-        assert payload2["mark"]["name"] == "audio_2"
+        assert payload2["mark"]["name"] == "fm_2"
 
     def test_on_mark_confirmed(self) -> None:
         ws = AsyncMock()

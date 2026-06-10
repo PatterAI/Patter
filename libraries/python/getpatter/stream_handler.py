@@ -2515,7 +2515,10 @@ class PipelineStreamHandler(StreamHandler):
         # ``speech_start``. Each frame is 20 ms × 32 bytes (16 kHz ×
         # 16-bit mono) ≈ 640 bytes; capped to 30 frames ≈ 600 ms ≈
         # ~19 KB per concurrent call.
-        self._inbound_audio_ring: list[bytes] = []
+        # ``deque(maxlen=...)`` evicts the oldest frame in O(1) on append —
+        # a plain list with ``pop(0)`` is O(n) and this runs per media frame
+        # (~50/s) while the agent speaks. Cap rationale at the append site.
+        self._inbound_audio_ring: deque[bytes] = deque(maxlen=13)
         # True when VAD fired ``speech_start`` during the agent's turn but
         # the barge-in gate suppressed it. The grace-timer flip drains the
         # ring buffer to STT so the user's words are not silently discarded.
@@ -4296,17 +4299,16 @@ class PipelineStreamHandler(StreamHandler):
             # agent kept talking; long ones produced truncated
             # transcripts and the agent answered to fragments.
             if self._is_speaking:
-                self._inbound_audio_ring.append(pcm)
-                # Cap to ~250 ms (matching SileroVAD ``min_speech_duration``)
-                # so the post-barge-in replay only recovers the VAD-missed
-                # leading edge of the user's speech, not ~350 ms of
-                # pre-speech silence/agent-bleed. On PSTN (where AEC is a
+                # The deque's ``maxlen=13`` (~260 ms at 20 ms/frame, matching
+                # SileroVAD ``min_speech_duration``) evicts the oldest frame
+                # on append, so the post-barge-in replay only recovers the
+                # VAD-missed leading edge of the user's speech, not ~350 ms
+                # of pre-speech silence/agent-bleed. On PSTN (where AEC is a
                 # no-op) Deepgram trained on English transcribes that
                 # bleed as English garbage and commits it to the LLM as
                 # a phantom user transcript. See BUGS.md 2026-05-05
                 # post-barge-in bleed-transcription entry.
-                if len(self._inbound_audio_ring) > 13:  # ~260 ms at 20 ms/frame
-                    self._inbound_audio_ring.pop(0)
+                self._inbound_audio_ring.append(pcm)
                 # Opt-in: also forward the frame to STT during TTS so the
                 # transcript barge-in path can receive a transcript on
                 # echo-masked links where the VAD never fires. The ring push
@@ -4399,7 +4401,7 @@ class PipelineStreamHandler(StreamHandler):
         self._first_audio_sent_at = time.time()
         # Fresh turn — drop any stale pre-barge-in buffer from a previous
         # turn so we never replay yesterday's audio to STT.
-        self._inbound_audio_ring = []
+        self._inbound_audio_ring.clear()
         self._suppressed_speech_pending = False
         # Fresh turn — reset the echo-guard reference so this turn's barge-in
         # checks compare against THIS turn's spoken text, not the last turn's.
@@ -4620,12 +4622,15 @@ class PipelineStreamHandler(StreamHandler):
         if self._stt is None or not self._inbound_audio_ring:
             return
         replayed = len(self._inbound_audio_ring)
-        for buf in self._inbound_audio_ring:
+        # Snapshot before the awaits below — a concurrent media frame could
+        # otherwise mutate the deque mid-iteration (RuntimeError).
+        frames = list(self._inbound_audio_ring)
+        self._inbound_audio_ring.clear()
+        for buf in frames:
             try:
                 await self._stt.send_audio(buf)
             except Exception as exc:
                 logger.debug("send_audio replay failed: %s", exc)
-        self._inbound_audio_ring = []
         logger.debug(
             "Flushed %d pre-turn-end frame(s) (~%d ms) to STT",
             replayed,
@@ -4705,8 +4710,7 @@ class PipelineStreamHandler(StreamHandler):
             return None
         self._first_message_mark_counter += 1
         mark_name = f"fm_{self._first_message_mark_counter}"
-        loop = asyncio.get_event_loop()
-        fut: asyncio.Future[None] = loop.create_future()
+        fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         self._pending_marks.append((mark_name, fut))
         try:
             await self.audio_sender.send_mark(mark_name)

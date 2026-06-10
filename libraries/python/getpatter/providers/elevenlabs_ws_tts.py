@@ -234,6 +234,12 @@ class ElevenLabsWebSocketTTS(TTSProvider):
         # ``None`` when no synthesis is in progress.
         # Parity with TS ``ElevenLabsWebSocketTTS.activeStreamWs``.
         self._active_stream_ws: object = None
+        # Event loop the in-flight synthesis runs on, captured alongside
+        # ``_active_stream_ws``. ``cancel_active_stream`` may be invoked
+        # from sync context / another thread, where
+        # ``asyncio.get_running_loop()`` is unavailable and the deprecated
+        # ``get_event_loop()`` raises on Python 3.12+.
+        self._stream_loop: object = None
 
     @property
     def api_key(self) -> str:
@@ -369,18 +375,32 @@ class ElevenLabsWebSocketTTS(TTSProvider):
         if ws is None:
             return
         self._active_stream_ws = None
+        loop = self._stream_loop
+        self._stream_loop = None
         try:
             # ``websockets`` connection objects are asyncio-aware; close()
-            # schedules the close on the running event loop.  We fire-and-
+            # must run on the loop the stream was opened on. We fire-and-
             # forget here because cancel_active_stream is called from sync
-            # context (signal handler / barge-in cancel path).
-            import asyncio
-
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop.call_soon_threadsafe(
-                    lambda: asyncio.ensure_future(ws.close())  # type: ignore[attr-defined]
+            # context (signal handler / barge-in cancel path), possibly from
+            # a different thread — hence ``call_soon_threadsafe`` against the
+            # loop captured at stream start rather than the deprecated
+            # ``asyncio.get_event_loop()`` (which raises on 3.12+ when no
+            # loop is current on the calling thread).
+            def _schedule_close() -> None:
+                task = asyncio.get_running_loop().create_task(
+                    ws.close()  # type: ignore[attr-defined]
                 )
+                task.add_done_callback(_log_close_failure)
+
+            def _log_close_failure(task: asyncio.Task) -> None:
+                if task.cancelled():
+                    return
+                exc = task.exception()
+                if exc is not None:
+                    logger.debug("ElevenLabs WS close failed: %s", exc)
+
+            if loop is not None and not loop.is_closed():  # type: ignore[attr-defined]
+                loop.call_soon_threadsafe(_schedule_close)  # type: ignore[attr-defined]
             else:
                 asyncio.run(ws.close())  # type: ignore[attr-defined]
         except Exception:
@@ -498,6 +518,7 @@ class ElevenLabsWebSocketTTS(TTSProvider):
             # force-close it and unblock the ``await ws.recv()`` below.
             # Parity with TS ``ElevenLabsWebSocketTTS.activeStreamWs``.
             self._active_stream_ws = ws
+            self._stream_loop = asyncio.get_running_loop()
 
             while True:
                 try:
@@ -566,6 +587,7 @@ class ElevenLabsWebSocketTTS(TTSProvider):
             # local binding and the close below is idempotent.
             if self._active_stream_ws is ws:
                 self._active_stream_ws = None
+                self._stream_loop = None
             # Best-effort: tell the server to stop synthesising any
             # buffered text the consumer is no longer interested in.
             # Failure to send is non-fatal — the socket close below

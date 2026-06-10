@@ -1328,6 +1328,14 @@ class LLMLoop:
             text = entry.get("text", "")
             if role == "assistant":
                 messages.append({"role": "assistant", "content": text})
+            elif role == "tool":
+                # Tool entries in conversation history are display/dashboard
+                # artefacts. Replaying them as ``role: "tool"`` would 400 on
+                # the OpenAI API (no paired assistant ``tool_calls`` message),
+                # and replaying them as ``role: "user"`` fabricates user turns
+                # containing raw tool JSON. Skip them: the tool RESULT is
+                # already reflected in the assistant's following reply.
+                continue
             else:
                 messages.append({"role": "user", "content": text})
 

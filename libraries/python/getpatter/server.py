@@ -221,6 +221,12 @@ def _telnyx_hangup_outcome(cause: str) -> str | None:
     return None
 
 
+# Maximum tolerated clock skew for a Telnyx webhook timestamp that is in the
+# FUTURE relative to the local clock. Must match TS server.ts
+# ``TELNYX_FUTURE_SKEW_MS`` (SDK parity).
+_TELNYX_FUTURE_SKEW_MS = 30_000
+
+
 def _validate_telnyx_signature(
     raw_body: bytes,
     signature: str,
@@ -247,10 +253,11 @@ def _validate_telnyx_signature(
     ts_ms = ts * 1000 if ts < 1_000_000_000_000 else ts
     now_ms = int(time.time() * 1000)
     age_ms = now_ms - ts_ms
-    # ``abs`` tolerates small negative skew (timestamp slightly ahead of the
-    # local clock when the webhook host is a touch behind Telnyx) while still
-    # enforcing the ±tolerance anti-replay window.
-    if abs(age_ms) > tolerance_sec * 1000:
+    # Past-dated timestamps get the standard anti-replay tolerance. Future
+    # timestamps are tolerated only up to a small clock-skew allowance
+    # (webhook host a touch behind Telnyx) — a full ±tolerance window would
+    # double the replay surface. Mirrors the TS ``validateTelnyxSignature``.
+    if age_ms > tolerance_sec * 1000 or age_ms < -_TELNYX_FUTURE_SKEW_MS:
         return False
     try:
         from cryptography.exceptions import InvalidSignature

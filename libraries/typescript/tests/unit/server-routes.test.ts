@@ -454,6 +454,103 @@ describe('Telnyx Ed25519 signature validation', () => {
       await server.stop();
     }
   });
+
+  it('rejects a Telnyx timestamp too far in the future (>30s skew)', async () => {
+    const server = new EmbeddedServer(
+      makeConfig({
+        telephonyProvider: 'telnyx',
+        telnyxKey: 'KEY_test',
+        telnyxConnectionId: 'conn_test',
+        telnyxPublicKey: pubKeyBase64,
+      }),
+      makeAgent(),
+      undefined, undefined, undefined, undefined, false, '', undefined, undefined, false,
+    );
+
+    const port = await getFreePort();
+    await server.start(port);
+
+    try {
+      const rawBody = JSON.stringify({ data: { event_type: 'call.initiated', payload: {} } });
+      // 120 seconds in the future — beyond any plausible clock skew. Accepting
+      // it would widen the anti-replay window (pre-issued signatures).
+      const futureTimestamp = String(Math.floor(Date.now() / 1000) + 120);
+      const signature = signTelnyxPayload(futureTimestamp, rawBody);
+
+      const resp = await fetch(`http://127.0.0.1:${port}/webhooks/telnyx/voice`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'telnyx-signature-ed25519': signature,
+          'telnyx-timestamp': futureTimestamp,
+        },
+        body: rawBody,
+      });
+
+      expect(resp.status).toBe(403);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it('accepts a Telnyx timestamp slightly in the future (≤30s clock skew)', async () => {
+    const server = new EmbeddedServer(
+      makeConfig({
+        telephonyProvider: 'telnyx',
+        telnyxKey: 'KEY_test',
+        telnyxConnectionId: 'conn_test',
+        telnyxPublicKey: pubKeyBase64,
+      }),
+      makeAgent(),
+      undefined, undefined, undefined, undefined, false, '', undefined, undefined, false,
+    );
+
+    const port = await getFreePort();
+    await server.start(port);
+
+    try {
+      // Intercept outbound Telnyx API calls so they don't fail on missing credentials.
+      const originalFetch = globalThis.fetch;
+      const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+        async (input: string | URL | Request, init?: RequestInit) => {
+          const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+          if (url.includes('api.telnyx.com')) {
+            return { ok: true, status: 200, json: async () => ({ data: {} }), text: async () => '' } as Response;
+          }
+          return originalFetch(input, init);
+        },
+      );
+
+      try {
+        const rawBody = JSON.stringify({
+          data: {
+            event_type: 'call.initiated',
+            payload: { call_control_id: 'ctrl-skew-test', from: '+15551111111', to: '+15552222222' },
+          },
+        });
+        // 10 seconds in the future — a webhook host whose clock lags Telnyx
+        // by a few seconds is a legitimate, common deployment condition.
+        const skewedTimestamp = String(Math.floor(Date.now() / 1000) + 10);
+        const signature = signTelnyxPayload(skewedTimestamp, rawBody);
+
+        const resp = await fetch(`http://127.0.0.1:${port}/webhooks/telnyx/voice`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'telnyx-signature-ed25519': signature,
+            'telnyx-timestamp': skewedTimestamp,
+          },
+          body: rawBody,
+        });
+
+        expect(resp.status).toBe(200);
+      } finally {
+        spy.mockRestore();
+      }
+    } finally {
+      await server.stop();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -45,6 +45,36 @@ describe('LLMLoop', () => {
     expect((messages[3] as { content: string }).content).toBe('How are you?');
   });
 
+  it('buildMessages skips tool history entries', () => {
+    // Tool entries in conversation history are display/dashboard artefacts.
+    // Replaying them as role 'tool' would 400 on the OpenAI API (no paired
+    // assistant tool_calls message); the old behaviour replayed them as
+    // fabricated 'user' turns containing raw tool JSON.
+    const loop = new LLMLoop(
+      'sk-test',
+      'gpt-4o-mini',
+      'System prompt.',
+      undefined,
+      undefined,
+      true, // disablePhonePreamble — keep verbatim for this assertion
+    );
+    const messages = (loop as unknown as { buildMessages: (h: Array<{ role: string; text: string }>, t: string) => unknown[] }).buildMessages(
+      [
+        { role: 'user', text: 'Transfer me' },
+        { role: 'tool', text: 'transfer_call → {"ok": true}' },
+        { role: 'assistant', text: 'Transferring you now.' },
+      ],
+      'Thanks',
+    );
+
+    expect(messages).toEqual([
+      { role: 'system', content: 'System prompt.' },
+      { role: 'user', content: 'Transfer me' },
+      { role: 'assistant', content: 'Transferring you now.' },
+      { role: 'user', content: 'Thanks' },
+    ]);
+  });
+
   it('prepends default phone preamble when not disabled', async () => {
     const { DEFAULT_PHONE_PREAMBLE } = await import('../src/llm-loop');
     const loop = new LLMLoop('sk-test', 'gpt-4o-mini', 'You are helpful.');

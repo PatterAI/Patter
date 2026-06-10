@@ -55,16 +55,18 @@ async def test_send_clear_emits_clear_audio_with_stream_id():
     assert ws.sent[-1] == {"event": "clearAudio", "streamId": "stream-xyz"}
 
 
-async def test_send_mark_emits_checkpoint():
+async def test_send_mark_emits_checkpoint_with_caller_name():
+    """Plivo acks a checkpoint with the same name — the caller-supplied name
+    must go on the wire verbatim so the ack can be matched back."""
     from getpatter.telephony.plivo import PlivoAudioSender
 
     ws = FakeWS()
     sender = PlivoAudioSender(ws, "stream-xyz", input_is_mulaw_8k=True)
-    await sender.send_mark("ignored")
+    await sender.send_mark("fm_7")
     msg = ws.sent[-1]
     assert msg["event"] == "checkpoint"
     assert msg["streamId"] == "stream-xyz"
-    assert msg["name"] == "audio_1"
+    assert msg["name"] == "fm_7"
 
 
 async def test_send_dtmf_filters_invalid_and_emits_send_dtmf():
@@ -137,7 +139,9 @@ def test_validate_plivo_signature_accepts_valid_post_with_params():
     url, nonce, token = "https://h/webhooks/plivo/voice", "n", "tok"
     params = {"CallUUID": "CU1", "From": "+15551112222", "To": "+15553334444"}
     sig = _v3_sig(url, nonce, token, params)
-    assert _validate_plivo_signature(url, nonce, sig, token, params=params, method="POST")
+    assert _validate_plivo_signature(
+        url, nonce, sig, token, params=params, method="POST"
+    )
 
 
 def test_validate_plivo_signature_post_without_params_falls_back_to_url_nonce():
@@ -174,9 +178,7 @@ def test_validate_plivo_signature_supports_rotation():
 
     url, nonce, token = "https://h/webhooks/plivo/voice", "n", "tok"
     good = _v3_sig(url, nonce, token)
-    assert _validate_plivo_signature(
-        url, nonce, f"oldsig, {good}", token, method="GET"
-    )
+    assert _validate_plivo_signature(url, nonce, f"oldsig, {good}", token, method="GET")
 
 
 def test_validate_plivo_signature_requires_all_inputs():
@@ -220,7 +222,10 @@ def test_classify_plivo_amd(raw, expected):
 @pytest.mark.parametrize(
     "raw,expected",
     [
-        ('{"userId": "12345", "sessionId": "abc"}', {"userId": "12345", "sessionId": "abc"}),
+        (
+            '{"userId": "12345", "sessionId": "abc"}',
+            {"userId": "12345", "sessionId": "abc"},
+        ),
         ("{X-PH-name: Amal, X-PH-k: true}", {"X-PH-name": "Amal", "X-PH-k": "true"}),
         ("userId=12345;sessionId=abc", {"userId": "12345", "sessionId": "abc"}),
         ("agentUuid=xxx,name=Amal", {"agentUuid": "xxx", "name": "Amal"}),
@@ -261,7 +266,10 @@ async def test_initiate_call_builds_answer_url_payload():
     finally:
         await adapter.close()
     assert rid == "req-1"
-    path, kwargs = adapter._client.post.call_args[0][0], adapter._client.post.call_args.kwargs
+    path, kwargs = (
+        adapter._client.post.call_args[0][0],
+        adapter._client.post.call_args.kwargs,
+    )
     assert path == "/Call/"
     body = kwargs["json"]
     assert body["answer_url"] == "https://h/webhooks/plivo/voice"
@@ -398,7 +406,9 @@ async def test_bridge_media_and_playedstream_and_dtmf(
     audio = b"\xff" * 160
     messages = [
         _start_message(),
-        json.dumps({"event": "media", "media": {"payload": base64.b64encode(audio).decode()}}),
+        json.dumps(
+            {"event": "media", "media": {"payload": base64.b64encode(audio).decode()}}
+        ),
         json.dumps({"event": "playedStream", "name": "audio_1"}),
         json.dumps({"event": "dtmf", "dtmf": {"digit": "7"}}),
         json.dumps({"event": "stop"}),
