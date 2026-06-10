@@ -194,6 +194,10 @@ export type { GoogleLLMOptions } from "./llm/google";
 export { LLM as OpenAICompatibleLLM, OpenAICompatibleLLMProvider } from "./llm/openai-compatible";
 export type { OpenAICompatibleLLMOptions } from "./llm/openai-compatible";
 export { hashCaller } from "./llm/openai-compatible";
+// Canonical "Custom LLM" name for the generic engine — works with Hermes,
+// OpenClaw, Ollama/vLLM/LM Studio, or any OpenAI-compatible service.
+export { LLM as CustomLLM } from "./llm/custom";
+export type { CustomLLMOptions } from "./llm/custom";
 export { LLM as HermesLLM } from "./llm/hermes";
 export type { HermesLLMOptions } from "./llm/hermes";
 export { LLM as OpenClawLLM } from "./llm/openclaw";
@@ -206,9 +210,11 @@ export type { OpenClawLLMOptions } from "./llm/openclaw";
 import { LLM as HermesLLMClass } from "./llm/hermes";
 import { LLM as OpenClawLLMClass } from "./llm/openclaw";
 import { LLM as OpenAICompatibleLLMClass } from "./llm/openai-compatible";
+import { LLM as CustomLLMClass } from "./llm/custom";
 export const hermes = Object.freeze({ LLM: HermesLLMClass });
 export const openclaw = Object.freeze({ LLM: OpenClawLLMClass });
 export const openaiCompatible = Object.freeze({ LLM: OpenAICompatibleLLMClass });
+export const custom = Object.freeze({ LLM: CustomLLMClass });
 
 // Voice Activity Detection (server-side) — Silero ONNX.
 export { SileroVAD } from "./providers/silero-vad";

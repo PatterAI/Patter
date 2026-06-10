@@ -21,6 +21,7 @@ __all__ = [
     "cerebras",
     "google",
     "openai_compatible",
+    "custom",
     "hermes",
     "openclaw",
 ]

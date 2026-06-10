@@ -142,6 +142,42 @@ llm = google.LLM(vertexai=True, project="my-gcp-project", location="us-central1"
 
 Install: `pip install 'getpatter[google]'`.
 
+### CustomLLM (any OpenAI-compatible endpoint)
+
+The industry-standard "Custom LLM" pattern: point Patter's pipeline at **any** endpoint that speaks the OpenAI Chat Completions protocol (SSE streaming, optional tool calls). One provider covers:
+
+- **agent runtimes** — [Hermes](/integrations/hermes) and [OpenClaw](/integrations/openclaw) presets (`HermesLLM`, `OpenClawLLM`) subclass this same engine with the right defaults baked in; prefer them when they exist,
+- **local inference gateways** — Ollama, vLLM, LM Studio (keyless OK),
+- **your own service** implementing `/chat/completions`.
+
+```python
+from getpatter import CustomLLM                    # flat
+from getpatter.llm import custom                   # namespaced
+
+# Your own agent service:
+llm = CustomLLM(
+    base_url="http://127.0.0.1:9000/v1",
+    model="my-agent",
+    api_key_env="MY_AGENT_KEY",
+    timeout=120.0,                                  # agent runtimes run tools before replying
+)
+
+# Keyless local gateway (Ollama / vLLM / LM Studio):
+llm = custom.LLM(base_url="http://127.0.0.1:11434/v1", model="llama3.1")
+
+# Session continuity on a runtime that scopes sessions/memory by header:
+llm = CustomLLM(
+    base_url="http://127.0.0.1:9000/v1",
+    model="my-agent",
+    session_id_header="X-My-Session-Id",            # value = <prefix><call_id>
+    session_id_prefix="patter-call-",
+    session_key_header="X-My-Memory-Key",
+    session_key_from="caller_hash",                 # per-caller memory: patter-caller-<hash>
+)
+```
+
+`CustomLLM` is the canonical name for the generic engine also exported as `OpenAICompatibleLLM` — both construct the same class. Barge-in cancellation (including the pre-first-token abort for slow agent runtimes), the long-turn filler (`long_turn_message`), the spoken error fallback (`llm_error_message`), and usage-based cost attribution all work unchanged. All OpenAI-style sampling kwargs are forwarded.
+
 ## Custom LLM via `on_message`
 
 For cases the five built-in providers don't cover — multi-model routing, local `llama.cpp`, an internal gateway, caching layers — drop `llm=` and plug an async `on_message` callback instead:

@@ -97,21 +97,9 @@ class LLM(OpenAICompatibleLLMProvider):
         resolved_model = model or os.environ.get(
             "API_SERVER_MODEL_NAME", _DEFAULT_MODEL
         )
-        # ``session_key_from="caller_hash"`` installs a default factory that
-        # scopes durable memory per caller via the non-reversible caller hash
-        # (never the raw number). An explicit ``session_key_factory`` always
-        # wins over this convenience selector.
-        if session_key_factory is None and session_key_from == "caller_hash":
-            session_key_factory = (
-                lambda ctx: f"patter-caller-{ctx.caller_hash}"
-                if ctx.caller_hash
-                else None
-            )
-        elif session_key_from is not None and session_key_from != "caller_hash":
-            raise ValueError(
-                "session_key_from must be 'caller_hash' or None, "
-                f"got {session_key_from!r}"
-            )
+        # ``session_key_from`` / ``session_key_factory`` resolution (the
+        # "caller_hash" selector, factory precedence, validation) lives in the
+        # generic OpenAICompatibleLLMProvider — this preset just forwards.
         super().__init__(
             api_key=api_key,
             base_url=base_url,
@@ -123,6 +111,7 @@ class LLM(OpenAICompatibleLLMProvider):
             session_id_prefix=_SESSION_ID_PREFIX,
             session_key_header=_SESSION_KEY_HEADER,
             session_key=session_key,
+            session_key_from=session_key_from,
             session_key_factory=session_key_factory,
             **kwargs,
         )
