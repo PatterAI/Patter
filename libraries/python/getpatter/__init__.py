@@ -128,6 +128,7 @@ from getpatter.llm.openai_compatible import (
     LLM as OpenAICompatibleLLM,
     OpenAICompatibleLLMProvider,
 )
+from getpatter.llm.custom import LLM as CustomLLM
 from getpatter.llm.hermes import LLM as HermesLLM
 from getpatter.llm.openclaw import LLM as OpenClawLLM
 
@@ -476,6 +477,7 @@ __all__ = [
     "GoogleLLM",
     "OpenAICompatibleLLM",
     "OpenAICompatibleLLMProvider",
+    "CustomLLM",
     "HermesLLM",
     "OpenClawLLM",
     "TwilioAdapter",

@@ -111,26 +111,9 @@ export class LLM extends OpenAICompatibleLLMProvider {
 
   constructor(opts: HermesLLMOptions = {}) {
     const model = opts.model ?? process.env[MODEL_ENV] ?? DEFAULT_MODEL;
-    // ``sessionKeyFrom: 'caller_hash'`` installs a default factory that scopes
-    // durable memory per caller via the non-reversible caller hash (never the
-    // raw number). An explicit ``sessionKeyFactory`` always wins over it.
-    let sessionKeyFactory = opts.sessionKeyFactory;
-    if (!sessionKeyFactory && opts.sessionKeyFrom === 'caller_hash') {
-      sessionKeyFactory = (ctx: SessionContext): string | undefined =>
-        ctx.callerHash ? `patter-caller-${ctx.callerHash}` : undefined;
-    } else if (
-      opts.sessionKeyFrom !== undefined &&
-      opts.sessionKeyFrom !== 'caller_hash'
-    ) {
-      // Runtime validation for non-TypeScript / dynamic-JS / JSON callers — the
-      // literal type already catches this at compile time. Mirrors Python's
-      // ValueError so a misconfigured key derivation fails loudly, not silently.
-      throw new Error(
-        `sessionKeyFrom must be 'caller_hash' or undefined, got ${JSON.stringify(
-          opts.sessionKeyFrom,
-        )}`,
-      );
-    }
+    // ``sessionKeyFrom`` / ``sessionKeyFactory`` resolution (the
+    // 'caller_hash' selector, factory precedence, validation) lives in the
+    // generic OpenAICompatibleLLMProvider — this preset just forwards.
     const options: OpenAICompatibleLLMOptions = {
       apiKey: opts.apiKey,
       apiKeyEnv: API_KEY_ENV,
@@ -142,7 +125,8 @@ export class LLM extends OpenAICompatibleLLMProvider {
       sessionIdPrefix: SESSION_ID_PREFIX,
       sessionKeyHeader: SESSION_KEY_HEADER,
       sessionKey: opts.sessionKey,
-      sessionKeyFactory,
+      sessionKeyFrom: opts.sessionKeyFrom,
+      sessionKeyFactory: opts.sessionKeyFactory,
       extraHeaders: opts.extraHeaders,
       temperature: opts.temperature,
       maxTokens: opts.maxTokens,

@@ -149,6 +149,17 @@ export interface OpenAICompatibleLLMOptions {
    * memory scope and is NEVER logged. Mirrors Python ``session_key_factory``.
    */
   sessionKeyFactory?: (ctx: SessionContext) => string | undefined;
+  /**
+   * Convenience selector for a built-in per-call key derivation (requires
+   * ``sessionKeyHeader``). Set to ``'caller_hash'`` to derive the session key
+   * per call as ``` `patter-caller-${ctx.callerHash}` ``` (a stable,
+   * non-reversible hash of the caller — never the raw number), enabling
+   * per-caller cross-call memory on any runtime that scopes memory by header.
+   * ``undefined`` (default) uses the static ``sessionKey`` path. Ignored when
+   * ``sessionKeyFactory`` is given explicitly. Same semantics as the Hermes
+   * preset's selector; mirrors Python ``session_key_from``.
+   */
+  sessionKeyFrom?: 'caller_hash';
   /** Sampling temperature [0, 2]. */
   temperature?: number;
   /** Max tokens in the assistant response (sent as ``max_completion_tokens``). */
@@ -231,7 +242,28 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
     this.sessionIdPrefix = options.sessionIdPrefix;
     this.sessionKeyHeader = options.sessionKeyHeader;
     this.sessionKey = options.sessionKey;
-    this.sessionKeyFactory = options.sessionKeyFactory;
+    // ``sessionKeyFrom: 'caller_hash'`` installs a default factory that scopes
+    // durable memory per caller via the non-reversible caller hash (never the
+    // raw number). An explicit ``sessionKeyFactory`` always wins over this
+    // convenience selector. Same logic as the Hermes preset.
+    let sessionKeyFactory = options.sessionKeyFactory;
+    if (!sessionKeyFactory && options.sessionKeyFrom === 'caller_hash') {
+      sessionKeyFactory = (ctx: SessionContext): string | undefined =>
+        ctx.callerHash ? `patter-caller-${ctx.callerHash}` : undefined;
+    } else if (
+      options.sessionKeyFrom !== undefined &&
+      options.sessionKeyFrom !== 'caller_hash'
+    ) {
+      // Runtime validation for non-TypeScript / dynamic-JS / JSON callers —
+      // the literal type already catches this at compile time. Mirrors
+      // Python's ValueError so a misconfigured key derivation fails loudly.
+      throw new Error(
+        `sessionKeyFrom must be 'caller_hash' or undefined, got ${JSON.stringify(
+          options.sessionKeyFrom,
+        )}`,
+      );
+    }
+    this.sessionKeyFactory = sessionKeyFactory;
     this.temperature = options.temperature;
     this.maxTokens = options.maxTokens;
     this.responseFormat = options.responseFormat;

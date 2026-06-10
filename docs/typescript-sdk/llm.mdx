@@ -122,6 +122,41 @@ const llm = new GoogleLLM();                              // reads GEMINI_API_KE
 const llm2 = new GoogleLLM({ apiKey: "AIza...", model: "gemini-2.5-flash" });
 ```
 
+### CustomLLM (any OpenAI-compatible endpoint)
+
+The industry-standard "Custom LLM" pattern: point Patter's pipeline at **any** endpoint that speaks the OpenAI Chat Completions protocol (SSE streaming, optional tool calls). One provider covers:
+
+- **agent runtimes** — [Hermes](/integrations/hermes) and [OpenClaw](/integrations/openclaw) presets (`HermesLLM`, `OpenClawLLM`) subclass this same engine with the right defaults baked in; prefer them when they exist,
+- **local inference gateways** — Ollama, vLLM, LM Studio (keyless OK),
+- **your own service** implementing `/chat/completions`.
+
+```typescript
+import { CustomLLM, custom } from "getpatter";            // named + namespace
+
+// Your own agent service:
+const llm = new CustomLLM({
+  baseUrl: "http://127.0.0.1:9000/v1",
+  model: "my-agent",
+  apiKeyEnv: "MY_AGENT_KEY",
+  timeout: 120,                                           // agent runtimes run tools before replying
+});
+
+// Keyless local gateway (Ollama / vLLM / LM Studio):
+const llm2 = new custom.LLM({ baseUrl: "http://127.0.0.1:11434/v1", model: "llama3.1" });
+
+// Session continuity on a runtime that scopes sessions/memory by header:
+const llm3 = new CustomLLM({
+  baseUrl: "http://127.0.0.1:9000/v1",
+  model: "my-agent",
+  sessionIdHeader: "X-My-Session-Id",                     // value = `${prefix}${callId}`
+  sessionIdPrefix: "patter-call-",
+  sessionKeyHeader: "X-My-Memory-Key",
+  sessionKeyFrom: "caller_hash",                          // per-caller memory: patter-caller-<hash>
+});
+```
+
+`CustomLLM` is the canonical name for the generic engine also exported as `OpenAICompatibleLLM` — both construct the same class. Barge-in cancellation (including the pre-first-token abort for slow agent runtimes), the long-turn filler (`longTurnMessage`), the spoken error fallback (`llmErrorMessage`), and usage-based cost attribution all work unchanged. All OpenAI-style sampling options are forwarded.
+
 ## Custom LLM via `onMessage`
 
 For cases the five built-in providers don't cover — multi-model routing, local inference, an internal gateway, caching layers — drop `llm` and plug an async `onMessage` callback instead:
