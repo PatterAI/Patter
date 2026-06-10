@@ -12,8 +12,9 @@ Installation extras:
   small).
 * Optional provider extras (``anthropic``, ``groq``, ``cerebras``, ``google``,
   ``gemini-live``, ``ultravox``, ``speechmatics``, ``assemblyai``, ``cartesia``,
-  ``soniox``, ``rime``, ``lmnt``, ``telnyx-ai``, ``silero``, ``krisp``,
-  ``deepfilternet``, ``ivr``, ``background-audio``, ``evals``, ``tracing``) —
+  ``soniox``, ``rime``, ``lmnt``, ``telnyx-ai``, ``silero``,
+  ``turn-detector``, ``krisp``, ``deepfilternet``, ``ivr``,
+  ``background-audio``, ``evals``, ``tracing``) —
   install only the ones matching the provider your agent uses.
 
 See ``pyproject.toml`` and the top-level README for the full matrix.
@@ -161,6 +162,13 @@ def __getattr__(name):
         from getpatter.providers import silero_onnx as _silero_onnx
 
         return getattr(_silero_onnx, name)
+    # Semantic turn detection — opt-in (needs the ``turn-detector`` extra:
+    # numpy + onnxruntime, plus a smart-turn-v3 ONNX file downloaded from
+    # https://huggingface.co/pipecat-ai/smart-turn-v3).
+    if name in {"SmartTurnDetector", "SmartTurnProviderTag"}:
+        from getpatter.providers import smart_turn as _smart_turn
+
+        return getattr(_smart_turn, name)
     raise AttributeError(f"module 'getpatter' has no attribute {name!r}")
 
 
@@ -486,6 +494,7 @@ __all__ = [
     "TelnyxSTT",
     "TelnyxTTS",
     "SileroVAD",
+    "SmartTurnDetector",
     "init_tracing",
     "start_span",
     "SPAN_CALL",

@@ -1685,6 +1685,8 @@ class Patter:
         hooks: PipelineHooks | None = None,
         text_transforms: list[Callable] | None = None,
         vad: VADProvider | None = None,
+        turn_detector: "TurnDetectorProvider | None" = None,
+        max_semantic_hold_ms: int = 1200,
         audio_filter: AudioFilter | None = None,
         background_audio: BackgroundAudioPlayer | None = None,
         barge_in_threshold_ms: int = 300,
@@ -2018,6 +2020,8 @@ class Patter:
                 tuple(text_transforms) if text_transforms is not None else None
             ),
             vad=vad,
+            turn_detector=turn_detector,
+            max_semantic_hold_ms=max_semantic_hold_ms,
             audio_filter=audio_filter,
             background_audio=background_audio,
             barge_in_threshold_ms=barge_in_threshold_ms,

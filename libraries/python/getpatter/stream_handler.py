@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     pass
 
+from getpatter._speech_events import EouTrigger
 from getpatter.models import HookContext
 from getpatter.observability.tracing import (
     SPAN_BARGEIN,
@@ -3048,6 +3049,52 @@ class PipelineStreamHandler(StreamHandler):
         self._interim_norm: str = ""
         self._interim_text: str = ""
         self._interim_stable_task: asyncio.Task | None = None
+        # ---- Semantic turn detection (opt-in via ``agent.turn_detector``) ----
+        # When a detector is configured, a VAD ``speech_end`` no longer
+        # finalizes STT immediately: the detector scores the rolling window
+        # below and the finalize is deferred (held) while it predicts
+        # "incomplete", bounded by ``agent.max_semantic_hold_ms``. With the
+        # default ``turn_detector=None`` every line below is dormant and the
+        # speech_end path is byte-identical to previous releases.
+        self._turn_detector = getattr(agent, "turn_detector", None)
+        try:
+            self._max_semantic_hold_ms: int = max(
+                0, int(getattr(agent, "max_semantic_hold_ms", 1200))
+            )
+        except (TypeError, ValueError):
+            self._max_semantic_hold_ms = 1200
+        # Rolling buffer of post-decode PCM16 16 kHz frames — the last ~8 s
+        # (256 000 bytes) the detector consumes per prediction. Only
+        # appended when a detector is configured; cleared on turn commit.
+        self._semantic_audio_ring: deque[bytes] = deque()
+        self._semantic_audio_ring_bytes: int = 0
+        # True while a sub-threshold prediction is holding the finalize
+        # open. Resolved by: a follow-up prediction crossing the threshold,
+        # a VAD ``speech_start`` (user resumed — hold moot), the hard cap,
+        # or a committed transcript (STT endpointed on its own).
+        self._semantic_hold_active: bool = False
+        # ``time.monotonic()`` deadline for the hard cap, None when idle.
+        self._semantic_hold_deadline: float | None = None
+        # Generation counter — invalidates the wall-clock backstop task when
+        # the hold it was scheduled for has already been resolved/cancelled.
+        self._semantic_hold_generation: int = 0
+        # Wall-clock backstop: finalizes at the cap even if inbound audio
+        # stalls entirely (the frame-driven poll below then never runs).
+        self._semantic_hold_task: asyncio.Task | None = None
+        # Bytes of audio accumulated since the last prediction while
+        # holding — re-polls every ``_SEMANTIC_POLL_MS`` of silence.
+        self._semantic_poll_pending_bytes: int = 0
+        # Set on the FIRST detector failure: semantic endpointing is then
+        # disabled for the remainder of the call (one clear warning, plain
+        # VAD-silence behavior) instead of warning per turn against a
+        # permanently broken model. Mirrors TS ``turnDetectorFailed`` and
+        # the existing ``vadDisabled`` fail-once pattern.
+        self._semantic_detector_failed: bool = False
+        # EOU trigger for the NEXT committed turn (``EouTrigger.VAD_SILENCE``
+        # | ``EouTrigger.SEMANTIC_TURN_DETECTOR``). Stamped by the semantic
+        # finalize paths, consumed (and reset) by ``_dispatch_turn``.
+        # Mirrors TS ``lastEouTrigger``.
+        self._last_eou_trigger: str = EouTrigger.VAD_SILENCE
 
     async def start(self) -> None:
         """Initialize STT/TTS providers, hooks, and start the STT receive loop."""
@@ -5218,6 +5265,25 @@ class PipelineStreamHandler(StreamHandler):
         if self.metrics is not None:
             self.metrics.record_on_user_turn_completed_delay(0.0)
             self.metrics.record_turn_committed()
+        # Released turns bypass ``_dispatch_turn``: perform its semantic
+        # turn-detection commit bookkeeping here too, EOS event included, so
+        # combining ``preemptive_generation`` with ``turn_detector`` neither
+        # leaks a stale stamped trigger into the next turn nor skips the
+        # committed-EOS speech event.
+        if getattr(self, "_turn_detector", None) is not None:
+            self._cancel_semantic_hold()
+            self._reset_semantic_window()
+            _eou_trigger = self._last_eou_trigger
+            self._last_eou_trigger = EouTrigger.VAD_SILENCE
+        else:
+            _eou_trigger = (
+                "vad_silence"
+                if (getattr(self.agent, "vad", None) or self._auto_vad) is not None
+                else "manual_commit"
+            )
+        await self._emit_user_speech_eos(
+            trigger=_eou_trigger, transcript_so_far=final_text
+        )
 
         spec.released = True
         spec.release_event.set()
@@ -5712,6 +5778,17 @@ class PipelineStreamHandler(StreamHandler):
             self.metrics.record_stt_complete(transcript_text)
             self.metrics.record_stt_final_timestamp()
 
+        # Semantic turn detection (opt-in): a committed transcript
+        # supersedes any in-flight hold (the STT endpointed on its own), and
+        # the per-turn rolling window restarts so the next turn is scored on
+        # its own audio. The stamped EOU trigger is consumed by the single
+        # EOS emission next to ``record_turn_committed`` below — emitting
+        # here too would double-fire the event now that pipeline mode wires
+        # it unconditionally.
+        if self._turn_detector is not None:
+            self._cancel_semantic_hold()
+            self._reset_semantic_window()
+
         # Endpoint span — silence-detected → LLM-dispatch window. Open
         # here (right after VAD stop / final transcript is recorded)
         # and close it just before ``record_turn_committed`` below.
@@ -5826,16 +5903,25 @@ class PipelineStreamHandler(StreamHandler):
             # Speech-event: end-of-utterance committed (pipeline analogue of
             # Realtime's input_audio_buffer.committed). Advances the
             # dispatcher's turn index so per-turn llm_token/audio_out gating
-            # works beyond the first turn. Trigger reflects how this commit
-            # was driven: local VAD silence when a VAD is active, otherwise
-            # the STT provider's own endpointing.
-            await self._emit_user_speech_eos(
-                trigger=(
+            # works beyond the first turn. With a semantic detector
+            # configured, consume the trigger its finalize path stamped
+            # (``semantic_turn_detector`` when the model approved the
+            # commit) — single consumption point so the event fires exactly
+            # once per committed turn. Otherwise the trigger reflects how
+            # this commit was driven: local VAD silence when a VAD is
+            # active, else the STT provider's own endpointing.
+            if getattr(self, "_turn_detector", None) is not None:
+                _eou_trigger = self._last_eou_trigger
+                self._last_eou_trigger = EouTrigger.VAD_SILENCE
+            else:
+                _eou_trigger = (
                     "vad_silence"
                     if (getattr(self.agent, "vad", None) or self._auto_vad)
                     is not None
                     else "manual_commit"
-                ),
+                )
+            await self._emit_user_speech_eos(
+                trigger=_eou_trigger,
                 transcript_so_far=filtered_text,
             )
             _close_endpoint_span()
@@ -5950,6 +6036,15 @@ class PipelineStreamHandler(StreamHandler):
         frame = await chain.process(audio_bytes)
         pcm = frame.pcm
 
+        # ---- Semantic turn detection: rolling audio window ----
+        # Keep the last ~8 s of post-chain (decoded, AEC'd, filtered) PCM16
+        # 16 kHz so the detector can score the caller's current turn on the
+        # VAD speech_end edge. Zero cost when no ``agent.turn_detector`` is
+        # configured (or after the detector failed and semantic endpointing
+        # was disabled).
+        if self._turn_detector is not None and not self._semantic_detector_failed:
+            self._semantic_buffer_append(pcm)
+
         # ---- VAD event handling (Fix 8) ----
         # The chain fed the (AEC'd, filtered) frame to ``agent.vad`` (or the
         # auto-loaded SileroVAD) *before* STT so we can react to speech_start
@@ -5963,6 +6058,12 @@ class PipelineStreamHandler(StreamHandler):
                     # pipeline mode (only realtime emitted) — wire the user
                     # start edge here. No-op without a dispatcher.
                     await self._emit_user_speech_started()
+                    # The user resumed speaking — an active semantic hold
+                    # (detector judged the previous pause mid-turn) is proven
+                    # right; drop it so the utterance keeps accumulating and
+                    # the next speech_end re-evaluates from scratch.
+                    if self._turn_detector is not None:
+                        self._cancel_semantic_hold()
                     # Tail-grace new-turn rescue: the agent already finished
                     # its turn and we are only in the post-TTS echo-guard
                     # window. A VAD speech_start here is the user's next turn,
@@ -6117,23 +6218,42 @@ class PipelineStreamHandler(StreamHandler):
                     await self._emit_user_speech_ended()
                     if self.metrics is not None:
                         self.metrics.record_vad_stop()
-                    # The SDK's VAD has detected end-of-speech earlier
-                    # and more reliably than the provider's own
-                    # endpointing on PSTN (Deepgram natural-pause
-                    # endpointing can run 1-6 s before it emits a
-                    # final). Ask the provider to finalise the
-                    # in-flight utterance NOW so the next turn can
-                    # dispatch immediately. ``getattr`` so STT
-                    # adapters that don't implement it (Whisper-class
-                    # one-shot transcribers) simply skip.
-                    finalize = getattr(self._stt, "finalize", None)
-                    if callable(finalize):
-                        try:
-                            ret = finalize()
-                            if asyncio.iscoroutine(ret):
-                                await ret
-                        except Exception as exc:  # pragma: no cover - defensive
-                            logger.debug("STT finalize threw: %s", exc)
+                    if (
+                        self._turn_detector is not None
+                        and not self._semantic_detector_failed
+                    ):
+                        # Semantic turn detection (opt-in): defer the STT
+                        # finalize until the end-of-utterance model agrees
+                        # the caller is done — or hold for at most
+                        # ``max_semantic_hold_ms`` while it predicts
+                        # "incomplete" (mid-sentence pause). The default
+                        # ``turn_detector=None`` path below is unchanged,
+                        # and a failed detector permanently rejoins it.
+                        await self._semantic_eou_check()
+                    else:
+                        # The SDK's VAD has detected end-of-speech earlier
+                        # and more reliably than the provider's own
+                        # endpointing on PSTN (Deepgram natural-pause
+                        # endpointing can run 1-6 s before it emits a
+                        # final). Ask the provider to finalise the
+                        # in-flight utterance NOW so the next turn can
+                        # dispatch immediately.
+                        await self._finalize_stt_for_eou()
+
+            # Semantic hold poll: while the detector is holding the turn
+            # open, every additional silent frame advances the audio clock —
+            # re-score after each ``_SEMANTIC_POLL_MS`` window of silence and
+            # force the finalize once the hard cap is reached. Frames that
+            # carried a VAD transition are skipped: a ``speech_start`` just
+            # cancelled the hold, and on the ``speech_end`` frame itself the
+            # detector already scored this audio (the silence window starts
+            # AFTER the decision point).
+            if (
+                self._turn_detector is not None
+                and self._semantic_hold_active
+                and vad_event is None
+            ):
+                await self._poll_semantic_hold(len(pcm))
 
             # Self-hearing guard: while the agent is speaking, don't pass
             # caller audio to STT — VAD already gave us authoritative
@@ -6219,6 +6339,202 @@ class PipelineStreamHandler(StreamHandler):
             # post-resample) so the byte count matches the configured
             # STT format.
             self.metrics.add_stt_audio_bytes(len(pcm))
+
+    # ---------------------------------------------------------------
+    # Semantic turn detection (opt-in via ``agent.turn_detector``)
+    # ---------------------------------------------------------------
+
+    # Rolling-window byte budget: the last 8 s of PCM16 @ 16 kHz — exactly
+    # the maximum context smart-turn v3 consumes per prediction (256 000 B
+    # per concurrent call, only when a detector is configured).
+    _SEMANTIC_WINDOW_MAX_BYTES: int = 16000 * 2 * 8
+    # While a hold is active, re-score after each additional silence window
+    # of this many milliseconds of inbound audio (~10 frames at 20 ms/frame).
+    _SEMANTIC_POLL_MS: int = 200
+
+    def _semantic_buffer_append(self, pcm: bytes) -> None:
+        """Append a post-decode PCM16-16k frame to the rolling 8 s window."""
+        if not pcm:
+            return
+        self._semantic_audio_ring.append(pcm)
+        self._semantic_audio_ring_bytes += len(pcm)
+        while (
+            self._semantic_audio_ring_bytes > self._SEMANTIC_WINDOW_MAX_BYTES
+            and self._semantic_audio_ring
+        ):
+            dropped = self._semantic_audio_ring.popleft()
+            self._semantic_audio_ring_bytes -= len(dropped)
+
+    def _semantic_window_bytes(self) -> bytes:
+        """Concatenate the rolling window for one detector prediction."""
+        return b"".join(self._semantic_audio_ring)
+
+    def _reset_semantic_window(self) -> None:
+        """Drop the rolling window — called when a turn commits so the next
+        turn's window contains only its own audio (mirrors the reference
+        smart-turn integrations, which score per-turn audio)."""
+        self._semantic_audio_ring.clear()
+        self._semantic_audio_ring_bytes = 0
+
+    async def _semantic_eou_check(self) -> None:
+        """Score the rolling window; finalize, or hold for more silence.
+
+        Fail-open AND fail-once: the first detector error falls back to the
+        legacy immediate finalize (``vad_silence`` trigger) and disables
+        semantic endpointing for the remainder of the call — a broken model
+        must never stall a live phone call, and a permanently broken one
+        (onnxruntime missing/incompatible, model file gone) must produce a
+        single clear warning, not one per turn.
+        """
+        detector = self._turn_detector
+        if detector is None:
+            return
+        try:
+            probability = float(
+                await detector.predict(self._semantic_window_bytes())
+            )
+        except Exception as exc:
+            self._semantic_detector_failed = True
+            logger.warning(
+                "Semantic turn detector failed — disabling it for this call "
+                "and falling back to plain VAD-silence endpointing: %s",
+                exc,
+            )
+            self._cancel_semantic_hold()
+            # The rolling window is dead weight now that the detector is
+            # disabled — release the up-to-8 s of buffered PCM immediately.
+            self._reset_semantic_window()
+            self._last_eou_trigger = EouTrigger.VAD_SILENCE
+            await self._finalize_stt_for_eou()
+            return
+
+        threshold = float(getattr(detector, "threshold", 0.5))
+        if probability >= threshold:
+            logger.debug(
+                "Semantic turn detector: end of turn (p=%.3f >= %.2f)",
+                probability,
+                threshold,
+            )
+            self._cancel_semantic_hold()
+            self._last_eou_trigger = EouTrigger.SEMANTIC_TURN_DETECTOR
+            await self._finalize_stt_for_eou()
+        elif not self._semantic_hold_active:
+            logger.debug(
+                "Semantic turn detector: holding turn open (p=%.3f < %.2f)",
+                probability,
+                threshold,
+            )
+            self._begin_semantic_hold()
+        # else: already holding — stay held; the frame-driven poll (or the
+        # wall-clock backstop) schedules the next decision.
+
+    def _begin_semantic_hold(self) -> None:
+        """Arm the hold state + the wall-clock backstop for the hard cap."""
+        self._semantic_hold_active = True
+        self._semantic_hold_deadline = (
+            time.monotonic() + self._max_semantic_hold_ms / 1000.0
+        )
+        self._semantic_poll_pending_bytes = 0
+        self._semantic_hold_generation += 1
+        generation = self._semantic_hold_generation
+        delay_s = self._max_semantic_hold_ms / 1000.0
+        try:
+            self._semantic_hold_task = asyncio.create_task(
+                self._semantic_hold_backstop(generation, delay_s)
+            )
+        except RuntimeError:  # pragma: no cover — no running loop
+            self._semantic_hold_task = None
+
+    def _cancel_semantic_hold(self) -> None:
+        """Drop the hold (and its backstop task) without finalizing.
+
+        Idempotent, and safe on partially-constructed handlers (teardown
+        paths run against ``object.__new__`` instances in unit tests) where
+        the semantic state attributes were never initialized.
+        """
+        if not getattr(self, "_semantic_hold_active", False):
+            return
+        self._semantic_hold_active = False
+        self._semantic_hold_deadline = None
+        self._semantic_poll_pending_bytes = 0
+        self._semantic_hold_generation += 1
+        task = self._semantic_hold_task
+        self._semantic_hold_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _poll_semantic_hold(self, frame_bytes: int) -> None:
+        """Advance the audio clock of an active hold by one inbound frame.
+
+        Finalizes (``vad_silence``) once the hard cap is reached; otherwise
+        re-runs the detector after each additional ``_SEMANTIC_POLL_MS`` of
+        silence so a model that flips to "complete" with more trailing
+        silence commits the turn as ``semantic_turn_detector``.
+        """
+        deadline = self._semantic_hold_deadline
+        if deadline is not None and time.monotonic() >= deadline:
+            await self._resolve_semantic_hold_cap()
+            return
+        self._semantic_poll_pending_bytes += frame_bytes
+        poll_bytes = int(16000 * 2 * (self._SEMANTIC_POLL_MS / 1000.0))
+        if self._semantic_poll_pending_bytes < poll_bytes:
+            return
+        self._semantic_poll_pending_bytes = 0
+        await self._semantic_eou_check()
+
+    async def _semantic_hold_backstop(self, generation: int, delay_s: float) -> None:
+        """Wall-clock cap enforcement — runs even if inbound audio stalls.
+
+        Generation-guarded (mirrors the grace-flip pattern): a hold resolved
+        before the timer fires invalidates this task, so it can never
+        finalize a later turn's utterance.
+        """
+        try:
+            await asyncio.sleep(delay_s)
+        except asyncio.CancelledError:  # pragma: no cover — cancelled hold
+            return
+        if (
+            generation != self._semantic_hold_generation
+            or not self._semantic_hold_active
+        ):
+            return
+        # Detach the handle BEFORE resolving so _cancel_semantic_hold (called
+        # inside the resolve) does not cancel the currently-running task.
+        self._semantic_hold_task = None
+        await self._resolve_semantic_hold_cap()
+
+    async def _resolve_semantic_hold_cap(self) -> None:
+        """Hard cap reached: finalize anyway so the turn can never hang.
+
+        The semantic model never agreed, so the commit reason is the
+        accumulated silence — the EOU trigger stays ``vad_silence``.
+        """
+        if not self._semantic_hold_active:
+            return
+        logger.debug(
+            "Semantic hold cap reached (%d ms) — finalizing on VAD silence",
+            self._max_semantic_hold_ms,
+        )
+        self._cancel_semantic_hold()
+        self._last_eou_trigger = EouTrigger.VAD_SILENCE
+        await self._finalize_stt_for_eou()
+
+    async def _finalize_stt_for_eou(self) -> None:
+        """Ask the STT provider to finalize the in-flight utterance NOW.
+
+        ``getattr`` so STT adapters that don't implement it (Whisper-class
+        one-shot transcribers) simply skip. Extracted verbatim from the VAD
+        ``speech_end`` branch so the default path stays byte-identical and
+        the semantic turn-detector paths reuse it.
+        """
+        finalize = getattr(self._stt, "finalize", None)
+        if callable(finalize):
+            try:
+                ret = finalize()
+                if asyncio.iscoroutine(ret):
+                    await ret
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug("STT finalize threw: %s", exc)
 
     # ---------------------------------------------------------------
     # TTS speaking state helpers (Fix 9)
@@ -7121,6 +7437,10 @@ class PipelineStreamHandler(StreamHandler):
         # so a call ending mid-pause cannot strand a loop awaiting the
         # (now cancelled) resume timer.
         self._discard_pause_state()
+        # Drop any active semantic-turn hold so its wall-clock backstop task
+        # cannot fire after teardown and call ``stt.finalize`` on a closed
+        # adapter. Idempotent; no-op when no ``turn_detector`` is configured.
+        self._cancel_semantic_hold()
         # Cancel any pending tail-grace flip task so it does not sleep past
         # teardown and touch a finalised handler.
         self._clear_grace_task()

@@ -774,6 +774,47 @@ export class StreamHandler {
    * so the user's speech is not silently discarded.
    */
   private suppressedSpeechPending = false;
+  // ---- Semantic turn detection (opt-in via ``agent.turnDetector``) ----
+  // When a detector is configured, a VAD ``speech_end`` no longer
+  // finalizes STT immediately: the detector scores the rolling window
+  // below and the finalize is deferred (held) while it predicts
+  // "incomplete", bounded by ``agent.maxSemanticHoldMs``. With the
+  // default ``turnDetector`` unset every field below is dormant and the
+  // speech_end path is byte-identical to previous releases. Parity with
+  // Python ``_semantic_*`` state on ``PipelineStreamHandler``.
+  /** Rolling window byte budget: the last 8 s of PCM16 @ 16 kHz. */
+  private static readonly SEMANTIC_WINDOW_MAX_BYTES = 16000 * 2 * 8;
+  /** Re-score cadence while holding: one prediction per this much silence. */
+  private static readonly SEMANTIC_POLL_MS = 200;
+  /** Rolling buffer of post-decode PCM16-16k frames (bounded to 8 s). */
+  private semanticAudioRing: Buffer[] = [];
+  private semanticAudioRingBytes = 0;
+  /** True while a sub-threshold prediction is holding the finalize open. */
+  private semanticHoldActive = false;
+  /** Wall-clock (ms) deadline for the hard cap, null when idle. */
+  private semanticHoldDeadlineMs: number | null = null;
+  /** Invalidates the backstop timer once its hold has been resolved. */
+  private semanticHoldGeneration = 0;
+  /** Wall-clock backstop — finalizes at the cap even if audio stalls. */
+  private semanticHoldTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Bytes accumulated since the last prediction while holding. */
+  private semanticPollPendingBytes = 0;
+  /**
+   * Set on the FIRST detector failure: semantic endpointing is then
+   * disabled for the remainder of the call (one clear warning, plain
+   * VAD-silence behavior) instead of warning per turn against a
+   * permanently broken model. Mirrors Python ``_semantic_detector_failed``
+   * and the existing ``vadDisabled`` fail-once pattern.
+   */
+  private turnDetectorFailed = false;
+  /**
+   * EOU trigger for the NEXT committed turn. Stamped by the semantic
+   * finalize paths, consumed (and reset) on transcript commit. Parity
+   * with Python ``_last_eou_trigger``.
+   */
+  private lastEouTrigger: import('./_speech-events').EouTrigger = 'vad_silence';
+  /** Hard cap (ms) a semantic hold may defer the finalize. */
+  private readonly maxSemanticHoldMs: number = 1200;
   /**
    * Minimum wall-clock duration (ms) the agent must have been speaking
    * before barge-in is allowed to fire when AEC is active. Covers the
@@ -1551,6 +1592,15 @@ export class StreamHandler {
         ? stableMs
         : 300;
 
+    // Semantic turn detection hard cap (only consulted when
+    // ``agent.turnDetector`` is configured). Parity with Python
+    // ``max_semantic_hold_ms`` (default 1200 ms).
+    const holdMs = deps.agent.maxSemanticHoldMs;
+    this.maxSemanticHoldMs =
+      typeof holdMs === 'number' && Number.isFinite(holdMs) && holdMs >= 0
+        ? holdMs
+        : 1200;
+
     this.history = createHistoryManager(200);
 
     // v0.5.0+: ``agent.stt`` / ``agent.tts`` are always STTAdapter / TTSAdapter
@@ -1971,6 +2021,15 @@ export class StreamHandler {
       const frame = await this.inputChain.process(audioBuffer);
       const pcm16k = frame.pcm16k;
 
+      // Semantic turn detection: keep the last ~8 s of post-decode PCM16
+      // 16 kHz so the detector can score the caller's current turn on the
+      // VAD speech_end edge. Zero cost when no ``agent.turnDetector`` is
+      // configured (or after the detector failed and semantic endpointing
+      // was disabled). Parity with Python ``_semantic_buffer_append``.
+      if (this.deps.agent.turnDetector && !this.turnDetectorFailed) {
+        this.semanticBufferAppend(pcm16k);
+      }
+
       // External VAD (e.g. Silero) when configured. Drives:
       //  - Self-hearing avoidance: while the agent is speaking we DO NOT pipe
       //    audio to STT, so STT can't transcribe the agent's own TTS feeding
@@ -1994,6 +2053,13 @@ export class StreamHandler {
             // pipeline mode (only realtime emitted) — wire the user start
             // edge here. No-op without a dispatcher.
             await this.emitUserSpeechStarted();
+            // The user resumed speaking — an active semantic hold (the
+            // turn detector judged the previous pause mid-turn) is proven
+            // right; drop it so the utterance keeps accumulating and the
+            // next speech_end re-evaluates from scratch.
+            if (this.deps.agent.turnDetector) {
+              this.cancelSemanticHold();
+            }
             // Tail-grace new-turn rescue: the agent already finished its turn
             // and we are only in the post-TTS echo-guard window. A VAD
             // speech_start here is the user's next turn, not a barge-in — end
@@ -2119,23 +2185,36 @@ export class StreamHandler {
             // Speech-event: user stop edge (pipeline parity with realtime).
             await this.emitUserSpeechEnded();
             this.metricsAcc.recordVadStop();
-            // The SDK's VAD has detected end-of-speech earlier and more
-            // reliably than the provider's own endpointing on PSTN
-            // (Deepgram's natural-pause endpointing can run 1-6 s before
-            // it emits a final). Ask the provider to finalise the
-            // in-flight utterance NOW so the next turn can dispatch
-            // immediately. Optional chained — Whisper-class adapters
-            // that don't support per-utterance finalisation simply skip.
-            try {
-              const ret = this.stt?.finalize?.();
-              if (ret instanceof Promise) {
-                ret.catch((err) =>
-                  getLogger().debug(`STT finalize threw: ${String(err)}`),
-                );
-              }
-            } catch (err) {
-              getLogger().debug(`STT finalize threw: ${String(err)}`);
+            if (this.deps.agent.turnDetector && !this.turnDetectorFailed) {
+              // Semantic turn detection (opt-in): defer the STT finalize
+              // until the end-of-utterance model agrees the caller is done
+              // — or hold for at most ``maxSemanticHoldMs`` while it
+              // predicts "incomplete" (mid-sentence pause). The default
+              // ``turnDetector``-unset path below is unchanged, and a
+              // failed detector permanently rejoins it.
+              await this.semanticEouCheck();
+            } else {
+              // The SDK's VAD has detected end-of-speech earlier and more
+              // reliably than the provider's own endpointing on PSTN
+              // (Deepgram's natural-pause endpointing can run 1-6 s before
+              // it emits a final). Ask the provider to finalise the
+              // in-flight utterance NOW so the next turn can dispatch
+              // immediately.
+              this.finalizeSttForEou();
             }
+          }
+
+          // Semantic hold poll: while the detector is holding the turn
+          // open, every additional silent frame advances the audio clock —
+          // re-score after each ``SEMANTIC_POLL_MS`` window of silence and
+          // force the finalize once the hard cap is reached. Frames that
+          // carried a VAD transition are skipped: a ``speech_start`` just
+          // cancelled the hold, and on the ``speech_end`` frame itself the
+          // detector already scored this audio (the silence window starts
+          // AFTER the decision point). Parity with Python
+          // ``_poll_semantic_hold``.
+          if (this.deps.agent.turnDetector && this.semanticHoldActive && !evt) {
+            await this.pollSemanticHold(pcm16k.length);
           }
         } catch (err) {
           // Disable VAD for the rest of the call to avoid log spam on
@@ -2357,6 +2436,185 @@ export class StreamHandler {
 
   /** Handle call stop / stream end. */
   /** Handle a carrier-emitted `stop` event signalling the call has ended. */
+  // ---------------------------------------------------------------------------
+  // Semantic turn detection (opt-in via ``agent.turnDetector``)
+  // Parity with Python ``PipelineStreamHandler._semantic_*`` helpers.
+  // ---------------------------------------------------------------------------
+
+  /** Append a post-decode PCM16-16k frame to the rolling 8 s window. */
+  private semanticBufferAppend(pcm16k: Buffer): void {
+    if (pcm16k.length === 0) return;
+    this.semanticAudioRing.push(pcm16k);
+    this.semanticAudioRingBytes += pcm16k.length;
+    while (
+      this.semanticAudioRingBytes > StreamHandler.SEMANTIC_WINDOW_MAX_BYTES &&
+      this.semanticAudioRing.length > 0
+    ) {
+      const dropped = this.semanticAudioRing.shift();
+      if (dropped) this.semanticAudioRingBytes -= dropped.length;
+    }
+  }
+
+  /** Concatenate the rolling window for one detector prediction. */
+  private semanticWindowBytes(): Buffer {
+    return Buffer.concat(this.semanticAudioRing);
+  }
+
+  /**
+   * Drop the rolling window — called when a turn commits so the next
+   * turn's window contains only its own audio (mirrors the reference
+   * smart-turn integrations, which score per-turn audio).
+   */
+  private resetSemanticWindow(): void {
+    this.semanticAudioRing = [];
+    this.semanticAudioRingBytes = 0;
+  }
+
+  /**
+   * Score the rolling window; finalize, or hold for more silence.
+   *
+   * Fail-open AND fail-once: the first detector error falls back to the
+   * legacy immediate finalize (``vad_silence`` trigger) and disables
+   * semantic endpointing for the remainder of the call — a broken model
+   * must never stall a live phone call, and a permanently broken one
+   * (onnxruntime-node missing/incompatible, model file gone) must produce
+   * a single clear warning, not one per turn.
+   */
+  private async semanticEouCheck(): Promise<void> {
+    const detector = this.deps.agent.turnDetector;
+    if (!detector) return;
+    let probability: number;
+    try {
+      probability = await detector.predict(this.semanticWindowBytes());
+    } catch (err) {
+      this.turnDetectorFailed = true;
+      getLogger().warn(
+        'Semantic turn detector failed — disabling it for this call and ' +
+          `falling back to plain VAD-silence endpointing: ${String(err)}`,
+      );
+      this.cancelSemanticHold();
+      // The rolling window is dead weight now that the detector is
+      // disabled — release the up-to-8 s of buffered PCM immediately.
+      this.resetSemanticWindow();
+      this.lastEouTrigger = 'vad_silence';
+      this.finalizeSttForEou();
+      return;
+    }
+
+    const threshold = detector.threshold ?? 0.5;
+    if (probability >= threshold) {
+      getLogger().debug(
+        `Semantic turn detector: end of turn (p=${probability.toFixed(3)} >= ${threshold})`,
+      );
+      this.cancelSemanticHold();
+      this.lastEouTrigger = 'semantic_turn_detector';
+      this.finalizeSttForEou();
+    } else if (!this.semanticHoldActive) {
+      getLogger().debug(
+        `Semantic turn detector: holding turn open (p=${probability.toFixed(3)} < ${threshold})`,
+      );
+      this.beginSemanticHold();
+    }
+    // else: already holding — stay held; the frame-driven poll (or the
+    // wall-clock backstop) schedules the next decision.
+  }
+
+  /** Arm the hold state + the wall-clock backstop for the hard cap. */
+  private beginSemanticHold(): void {
+    this.semanticHoldActive = true;
+    this.semanticHoldDeadlineMs = Date.now() + this.maxSemanticHoldMs;
+    this.semanticPollPendingBytes = 0;
+    this.semanticHoldGeneration += 1;
+    const generation = this.semanticHoldGeneration;
+    // Wall-clock cap enforcement — runs even if inbound audio stalls
+    // entirely (the frame-driven poll then never runs). Generation-guarded
+    // (mirrors the grace-timer pattern): a hold resolved before the timer
+    // fires invalidates it, so it can never finalize a later utterance.
+    this.semanticHoldTimer = setTimeout(() => {
+      this.semanticHoldTimer = null;
+      if (generation !== this.semanticHoldGeneration || !this.semanticHoldActive) {
+        return;
+      }
+      this.resolveSemanticHoldCap();
+    }, this.maxSemanticHoldMs);
+  }
+
+  /** Drop the hold (and its backstop timer) without finalizing. Idempotent. */
+  private cancelSemanticHold(): void {
+    if (!this.semanticHoldActive) {
+      // Includes teardown on a handler that never held — keep the timer
+      // clear anyway (defensive; it is always null here in practice).
+      if (this.semanticHoldTimer !== null) {
+        clearTimeout(this.semanticHoldTimer);
+        this.semanticHoldTimer = null;
+      }
+      return;
+    }
+    this.semanticHoldActive = false;
+    this.semanticHoldDeadlineMs = null;
+    this.semanticPollPendingBytes = 0;
+    this.semanticHoldGeneration += 1;
+    if (this.semanticHoldTimer !== null) {
+      clearTimeout(this.semanticHoldTimer);
+      this.semanticHoldTimer = null;
+    }
+  }
+
+  /**
+   * Advance the audio clock of an active hold by one inbound frame.
+   *
+   * Finalizes (``vad_silence``) once the hard cap is reached; otherwise
+   * re-runs the detector after each additional ``SEMANTIC_POLL_MS`` of
+   * silence so a model that flips to "complete" with more trailing
+   * silence commits the turn as ``semantic_turn_detector``.
+   */
+  private async pollSemanticHold(frameBytes: number): Promise<void> {
+    if (this.semanticHoldDeadlineMs !== null && Date.now() >= this.semanticHoldDeadlineMs) {
+      this.resolveSemanticHoldCap();
+      return;
+    }
+    this.semanticPollPendingBytes += frameBytes;
+    const pollBytes = Math.floor(16000 * 2 * (StreamHandler.SEMANTIC_POLL_MS / 1000));
+    if (this.semanticPollPendingBytes < pollBytes) return;
+    this.semanticPollPendingBytes = 0;
+    await this.semanticEouCheck();
+  }
+
+  /**
+   * Hard cap reached: finalize anyway so the turn can never hang. The
+   * semantic model never agreed, so the commit reason is the accumulated
+   * silence — the EOU trigger stays ``vad_silence``.
+   */
+  private resolveSemanticHoldCap(): void {
+    if (!this.semanticHoldActive) return;
+    getLogger().debug(
+      `Semantic hold cap reached (${this.maxSemanticHoldMs} ms) — finalizing on VAD silence`,
+    );
+    this.cancelSemanticHold();
+    this.lastEouTrigger = 'vad_silence';
+    this.finalizeSttForEou();
+  }
+
+  /**
+   * Ask the STT provider to finalize the in-flight utterance NOW.
+   * Optional chained — Whisper-class adapters that don't support
+   * per-utterance finalisation simply skip. Extracted verbatim from the
+   * VAD ``speech_end`` branch so the default path stays byte-identical
+   * and the semantic turn-detector paths reuse it.
+   */
+  private finalizeSttForEou(): void {
+    try {
+      const ret = this.stt?.finalize?.();
+      if (ret instanceof Promise) {
+        ret.catch((err) =>
+          getLogger().debug(`STT finalize threw: ${String(err)}`),
+        );
+      }
+    } catch (err) {
+      getLogger().debug(`STT finalize threw: ${String(err)}`);
+    }
+  }
+
   async handleStop(): Promise<void> {
     // Abort any in-flight LLM stream and close any in-flight TTS WS so
     // the runPipelineLlm / synthesizeStream awaits unblock immediately
@@ -2396,6 +2654,10 @@ export class StreamHandler {
     // a call ending mid-pause cannot strand a loop awaiting the (now
     // cancelled) resume timer.
     this.discardPauseState();
+    // Drop any active semantic-turn hold so its wall-clock backstop timer
+    // cannot fire after teardown and call ``stt.finalize`` on a closed
+    // adapter. Idempotent; no-op when no ``turnDetector`` is configured.
+    this.cancelSemanticHold();
     // Resolve every pending firstMessage mark waiter before tearing the
     // adapter down. A call that ends mid firstMessage (carrier stop
     // arriving before the paced sender finished) would otherwise leak
@@ -2438,6 +2700,9 @@ export class StreamHandler {
     // See handleStop — drop pause-and-resume state so a dead handler can
     // never strand a pause-decision waiter or replay stale audio.
     this.discardPauseState();
+    // See handleStop — drop any active semantic-turn hold so its backstop
+    // timer cannot fire ``stt.finalize`` against a torn-down adapter.
+    this.cancelSemanticHold();
     // See handleStop — drain pending firstMessage marks so an abnormal
     // carrier WS drop during the paced sender cannot leak unresolved
     // promises owned by the send loop, and reset the counter.
@@ -3221,6 +3486,17 @@ export class StreamHandler {
     // starting a fresh one; a mismatch discards the speculation here and
     // falls through to the normal dispatch below.
     if (await this.tryReleaseSpeculation(transcript.text)) return;
+
+    // Semantic turn detection (opt-in): a committed transcript supersedes
+    // any in-flight hold (the STT endpointed on its own), and the per-turn
+    // rolling window restarts so the next turn is scored on its own audio.
+    // The stamped EOU trigger is consumed by the single EOS emission in
+    // ``emitUserSpeechEos`` below — emitting here too would double-fire the
+    // event now that pipeline mode wires it unconditionally.
+    if (this.deps.agent.turnDetector) {
+      this.cancelSemanticHold();
+      this.resetSemanticWindow();
+    }
 
     // Endpoint span — silence-detected → LLM-dispatch window. The matching
     // ``end()`` lives below right before ``recordTurnCommitted``. We use a
@@ -4332,6 +4608,17 @@ export class StreamHandler {
     this.history.push({ role: 'user', text: finalText, timestamp: Date.now() });
     this.metricsAcc.recordOnUserTurnCompletedDelay(0);
     this.metricsAcc.recordTurnCommitted();
+    // Released turns return before processTranscript's commit bookkeeping:
+    // perform the semantic turn-detection cleanup and the committed-EOS
+    // speech event here too, so combining ``preemptiveGeneration`` with
+    // ``turnDetector`` neither leaks a stale stamped trigger into the next
+    // turn nor skips the EOS event. Parity with Python
+    // ``_try_release_speculation``.
+    if (this.deps.agent.turnDetector) {
+      this.cancelSemanticHold();
+      this.resetSemanticWindow();
+    }
+    await this.emitUserSpeechEos(finalText);
 
     // Settle the previous turn first (single-in-flight) — fast no-op, a
     // speculation can only have started while no dispatch was in flight.
@@ -5270,10 +5557,29 @@ export class StreamHandler {
     });
   }
 
-  private async emitUserSpeechEos(transcriptSoFar?: string): Promise<void> {
+  private async emitUserSpeechEos(
+    transcriptSoFar?: string,
+    trigger?: import('./_speech-events').EouTrigger,
+  ): Promise<void> {
     if (!this.deps.speechEvents) return;
+    let resolved = trigger;
+    if (resolved === undefined) {
+      if (this.deps.agent.turnDetector) {
+        // Consume the EOU trigger stamped by the semantic finalize paths
+        // (``semantic_turn_detector`` when the model approved the commit,
+        // ``vad_silence`` otherwise). Single consumption point so the
+        // event fires exactly once per committed turn.
+        resolved = this.lastEouTrigger;
+        this.lastEouTrigger = 'vad_silence';
+      } else {
+        // No detector: reflect how this commit was driven — local VAD
+        // silence when a VAD is active, otherwise the STT provider's own
+        // endpointing. Parity with Python ``_dispatch_turn``.
+        resolved = (this.deps.agent.vad ?? this.autoVad) ? 'vad_silence' : 'manual_commit';
+      }
+    }
     await this.deps.speechEvents.fireUserSpeechEos({
-      trigger: "vad_silence",
+      trigger: resolved,
       transcriptSoFar,
     });
   }
@@ -5454,7 +5760,8 @@ export class StreamHandler {
     // Speech-event: end-of-utterance committed (Realtime mode emits this
     // on ``input_audio_buffer.committed``, the canonical "user finished"
     // signal). Advances `turnIdx` and arms first-token / first-audio.
-    await this.emitUserSpeechEos(inputText);
+    // Explicit trigger: the OpenAI server VAD drove this commit.
+    await this.emitUserSpeechEos(inputText, 'vad_silence');
     // Marks ASR as complete — exposes a stt_ms bucket in Realtime mode
     // distinct from the llm+tts portion. Parity with Python handler.
     this.metricsAcc.recordSttComplete(inputText);

@@ -160,7 +160,14 @@ function classifyOnnxError(err: unknown): 'missing' | 'binding' | 'api-drift' | 
   return 'unknown';
 }
 
-async function loadOnnxRuntime(): Promise<OnnxRuntime> {
+/**
+ * Resolve the optional `onnxruntime-node` dependency with descriptive,
+ * failure-mode-specific errors. Shared by {@link SileroVAD} and the
+ * smart-turn semantic turn detector (`providers/smart-turn.ts`);
+ * `feature` names the caller in the error text.
+ * @internal
+ */
+export async function loadOnnxRuntime(feature = 'SileroVAD'): Promise<OnnxRuntime> {
   let firstErr: unknown;
   // 1. Plain dynamic import — works when onnxruntime-node is hoisted to a
   //    node_modules folder Node's resolver can find from the running script.
@@ -190,22 +197,22 @@ async function loadOnnxRuntime(): Promise<OnnxRuntime> {
     let header: string;
     let remedy: string;
     if (importClass === 'missing' && requireClass === 'missing') {
-      header = 'SileroVAD requires the "onnxruntime-node" package — it is not installed.';
+      header = `${feature} requires the "onnxruntime-node" package — it is not installed.`;
       remedy = '  Install:  npm install onnxruntime-node@~1.18.0\n\n' +
-        '  (~210 MB. Only needed when you actually use SileroVAD in pipeline mode.)';
+        `  (~210 MB. Only needed when you actually use ${feature} in pipeline mode.)`;
     } else if (importClass === 'api-drift' || requireClass === 'api-drift') {
-      header = 'SileroVAD found onnxruntime-node but the installed version uses an API the SDK does not support.';
+      header = `${feature} found onnxruntime-node but the installed version uses an API the SDK does not support.`;
       remedy = '  Patter is currently tested against onnxruntime-node 1.18.x.\n\n' +
         '  Fix:  npm install onnxruntime-node@~1.18.0\n\n' +
         '  Versions 1.24+ removed `listSupportedBackends` from the public surface — track\n' +
         '  https://github.com/PatterAI/Patter/issues for the SDK update that targets 1.24.';
     } else if (importClass === 'binding' || requireClass === 'binding') {
-      header = 'SileroVAD found onnxruntime-node but the native binding for this platform is missing.';
+      header = `${feature} found onnxruntime-node but the native binding for this platform is missing.`;
       remedy = '  Common cause on macOS x86_64: the prebuilt bin/ layout drifted between releases.\n\n' +
         '  Fix:  npm install onnxruntime-node@~1.18.0\n\n' +
         '  Or rebuild from source:  npm rebuild onnxruntime-node';
     } else {
-      header = 'SileroVAD requires the "onnxruntime-node" package, which could not be resolved.';
+      header = `${feature} requires the "onnxruntime-node" package, which could not be resolved.`;
       remedy = '  Install:  npm install onnxruntime-node@~1.18.0\n\n' +
         '  This is an optional peer dependency of getpatter (~210 MB).';
     }

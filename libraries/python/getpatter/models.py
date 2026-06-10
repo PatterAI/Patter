@@ -17,7 +17,12 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, Literal
 
 if TYPE_CHECKING:
-    from getpatter.providers.base import AudioFilter, BackgroundAudioPlayer, VADProvider
+    from getpatter.providers.base import (
+        AudioFilter,
+        BackgroundAudioPlayer,
+        TurnDetectorProvider,
+        VADProvider,
+    )
     from getpatter.services.barge_in_strategies import BargeInStrategy
     from getpatter.services.llm_loop import LLMProvider
 
@@ -505,6 +510,23 @@ class Agent:
     vad: "VADProvider | None" = (
         None  # Optional server-side VAD (e.g., Silero) — pipeline mode only
     )
+    # Opt-in semantic end-of-utterance model (e.g.
+    # ``SmartTurnDetector.load()`` — pipecat-ai smart-turn v3, ONNX).
+    # Pipeline mode only. When set, a VAD ``speech_end`` no longer finalizes
+    # the STT utterance immediately: the detector scores the last ~8 s of
+    # caller audio and the turn is committed only once the end-of-turn
+    # probability reaches ``turn_detector.threshold`` (the EOU trigger is
+    # then stamped ``semantic_turn_detector``). While the model says
+    # "incomplete" the handler re-polls on subsequent silence, bounded by
+    # ``max_semantic_hold_ms``. ``None`` (default) keeps today's pure
+    # VAD-silence endpointing byte-identical.
+    turn_detector: "TurnDetectorProvider | None" = None
+    # Hard cap (ms) on how long the semantic turn detector may hold a turn
+    # open past the VAD ``speech_end`` before the SDK finalizes anyway (with
+    # the ``vad_silence`` trigger), so a turn can never hang on a model that
+    # keeps predicting "incomplete". Only consulted when ``turn_detector``
+    # is set. Default 1200 ms.
+    max_semantic_hold_ms: int = 1200
     audio_filter: "AudioFilter | None" = (
         None  # Optional pre-STT audio filter (noise cancel) — pipeline mode only
     )

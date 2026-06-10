@@ -250,6 +250,40 @@ class VADProvider(ABC):
         return None
 
 
+# === Semantic turn detection (end-of-utterance) ===
+
+
+class TurnDetectorProvider(ABC):
+    """Semantic end-of-utterance (turn) detector.
+
+    Predicts whether the caller has FINISHED their turn — as opposed to a
+    VAD, which only reports whether they are currently producing sound.
+    Implementations include :class:`~getpatter.providers.smart_turn.SmartTurnDetector`
+    (pipecat-ai smart-turn v3, ONNX). Used by :class:`~getpatter.models.Agent`
+    via the ``turn_detector`` field; integrated in ``PipelineStreamHandler``
+    on the VAD ``speech_end`` edge to defer the STT finalize until the model
+    agrees the turn is complete (bounded by ``Agent.max_semantic_hold_ms``).
+    """
+
+    @property
+    @abstractmethod
+    def threshold(self) -> float:
+        """End-of-turn probability at/above which the turn is complete."""
+
+    @abstractmethod
+    async def predict(self, pcm16_16k_window: bytes) -> float:
+        """Return the end-of-turn probability in ``[0, 1]`` for the window.
+
+        ``pcm16_16k_window`` is mono int16 little-endian PCM at 16 kHz
+        covering the most recent seconds of caller audio (the handler
+        keeps a rolling ~8 s buffer).
+        """
+
+    @abstractmethod
+    async def close(self) -> None:
+        """Release any model or backend resources held by the detector."""
+
+
 # === Audio filter (noise cancellation, gain, EQ) ===
 
 

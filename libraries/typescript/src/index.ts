@@ -220,6 +220,13 @@ export const custom = Object.freeze({ LLM: CustomLLMClass });
 export { SileroVAD } from "./providers/silero-vad";
 export type { SileroVADOptions, SileroSampleRate } from "./providers/silero-vad";
 
+// Semantic turn detection (end-of-utterance) — pipecat-ai smart-turn v3,
+// ONNX. Opt-in via ``agent.turnDetector``; the model file is NOT bundled —
+// download from https://huggingface.co/pipecat-ai/smart-turn-v3 and set
+// PATTER_SMART_TURN_MODEL (or pass ``modelPath``).
+export { SmartTurnDetector, SMART_TURN_MODEL_ENV_VAR } from "./providers/smart-turn";
+export type { SmartTurnDetectorOptions } from "./providers/smart-turn";
+
 // Noise-suppression audio filters (opt-in, plug into ``agent.audioFilter``).
 // DeepFilterNet — community ONNX, no license required.
 export { DeepFilterNetFilter } from "./providers/deepfilternet-filter";

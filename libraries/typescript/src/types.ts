@@ -475,6 +475,30 @@ export interface VADProvider {
   reset?(): Promise<void> | void;
 }
 
+/**
+ * Semantic end-of-utterance (turn) detector.
+ *
+ * Predicts whether the caller has FINISHED their turn — as opposed to a
+ * VAD, which only reports whether they are currently producing sound.
+ * Implementations include `SmartTurnDetector` (pipecat-ai smart-turn v3,
+ * ONNX). Used via `Agent.turnDetector`; integrated in the pipeline stream
+ * handler on the VAD `speech_end` edge to defer the STT finalize until the
+ * model agrees the turn is complete (bounded by `Agent.maxSemanticHoldMs`).
+ * Mirror of the Python `TurnDetectorProvider` ABC.
+ */
+export interface TurnDetectorProvider {
+  /** End-of-turn probability at/above which the turn is complete. */
+  readonly threshold: number;
+  /**
+   * Return the end-of-turn probability in `[0, 1]` for the window.
+   * `pcm16Window` is mono int16 little-endian PCM at 16 kHz covering the
+   * most recent seconds of caller audio (the handler keeps a rolling
+   * ~8 s buffer).
+   */
+  predict(pcm16Window: Buffer): Promise<number>;
+  close(): Promise<void>;
+}
+
 /** Pre-STT audio filter — noise cancellation, gain, EQ. */
 export interface AudioFilter {
   process(pcmChunk: Buffer, sampleRate: number): Promise<Buffer>;
@@ -664,6 +688,26 @@ export interface AgentOptions {
   readonly textTransforms?: ReadonlyArray<(text: string) => string>;
   /** Optional server-side VAD (e.g., Silero). Pipeline mode only. */
   readonly vad?: VADProvider;
+  /**
+   * Opt-in semantic end-of-utterance model (e.g. `SmartTurnDetector.load()`
+   * — pipecat-ai smart-turn v3, ONNX). Pipeline mode only. When set, a VAD
+   * `speech_end` no longer finalizes the STT utterance immediately: the
+   * detector scores the last ~8 s of caller audio and the turn is committed
+   * only once the end-of-turn probability reaches `turnDetector.threshold`
+   * (the EOU trigger is then stamped `semantic_turn_detector`). While the
+   * model says "incomplete" the handler re-polls on subsequent silence,
+   * bounded by `maxSemanticHoldMs`. Undefined (default) keeps today's pure
+   * VAD-silence endpointing byte-identical.
+   */
+  readonly turnDetector?: TurnDetectorProvider;
+  /**
+   * Hard cap (ms) on how long the semantic turn detector may hold a turn
+   * open past the VAD `speech_end` before the SDK finalizes anyway (with
+   * the `vad_silence` trigger), so a turn can never hang on a model that
+   * keeps predicting "incomplete". Only consulted when `turnDetector` is
+   * set. Default 1200 ms.
+   */
+  readonly maxSemanticHoldMs?: number;
   /** Optional pre-STT audio filter (noise cancellation). Pipeline mode only. */
   readonly audioFilter?: AudioFilter;
   /** Optional background audio mixer (hold music, thinking cues). Pipeline mode only. */

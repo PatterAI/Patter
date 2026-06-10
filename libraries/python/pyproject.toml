@@ -76,6 +76,14 @@ silero = [
     "onnxruntime>=1.18",
     "numpy>=1.26",
 ]
+# Semantic turn detection (smart-turn v3 end-of-utterance model). Same
+# native deps as ``silero``; the ONNX weights are NOT bundled — download
+# from https://huggingface.co/pipecat-ai/smart-turn-v3 and set
+# PATTER_SMART_TURN_MODEL (or pass model_path= to SmartTurnDetector.load).
+turn-detector = [
+    "onnxruntime>=1.18",
+    "numpy>=1.26",
+]
 # Krisp VIVA is a proprietary SDK (krisp-audio). Users must install it
 # separately and provide KRISP_VIVA_SDK_LICENSE_KEY + KRISP_VIVA_FILTER_MODEL_PATH.
 krisp = [
