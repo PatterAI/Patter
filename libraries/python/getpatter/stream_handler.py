@@ -5112,8 +5112,9 @@ class PipelineStreamHandler(StreamHandler):
         carrier's wire codec — meaning no client-side resample/transcode is
         needed in ``TwilioAudioSender.send_audio``.
 
-        Twilio expects ``ulaw_8000``; Telnyx expects ``pcm_16000``. Anything
-        else goes through the normal resample-and-encode path.
+        Every carrier wire here is μ-law 8 kHz — the SDK's own
+        ``streaming_start`` pins Telnyx to PCMU (the old ``pcm_16000``
+        expectation shipped raw PCM16 onto the μ-law wire: static).
 
         Parity with TS ``StreamHandler.isTtsOutputFormatNativeForCarrier``.
         """
@@ -5122,12 +5123,7 @@ class PipelineStreamHandler(StreamHandler):
         fmt = getattr(self._tts, "output_format", None)
         if not isinstance(fmt, str):
             return False
-        carrier = "twilio" if self._for_twilio else "telnyx"
-        if carrier == "twilio":
-            return fmt == "ulaw_8000"
-        if carrier == "telnyx":
-            return fmt == "pcm_16000"
-        return False
+        return fmt == "ulaw_8000"
 
     # 40 ms @ 16 kHz mono PCM16 = 1280 bytes. Sized to mirror the smallest
     # live-TTS chunk boundary so cancel granularity (mark/clear bookkeeping)

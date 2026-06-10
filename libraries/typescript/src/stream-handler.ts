@@ -2174,14 +2174,14 @@ export class StreamHandler {
     const fmt = (this.tts as { outputFormat?: string }).outputFormat;
     if (typeof fmt !== 'string') return false;
     const carrier = this.deps.bridge.telephonyProvider;
-    if (carrier === 'twilio') return fmt === 'ulaw_8000';
-    if (carrier === 'telnyx') return fmt === 'pcm_16000';
-    // Plivo streams μ-law 8 kHz (same wire codec as Twilio). The ElevenLabs
-    // adapter auto-selects ``ulaw_8000`` for Plivo, so when the TTS output is
-    // already μ-law the pipeline must bypass the PCM resample/re-encode path —
-    // otherwise the already-encoded bytes are mangled into static. Mirrors the
-    // Python ``for_twilio`` handling, which already covers Plivo.
-    if (carrier === 'plivo') return fmt === 'ulaw_8000';
+    // Every supported carrier wire is μ-law 8 kHz — the SDK's own
+    // ``streaming_start`` pins Telnyx to PCMU (the old 'pcm_16000'
+    // expectation shipped raw PCM16 onto the μ-law wire: static). When the
+    // TTS output is already μ-law the pipeline must bypass the PCM
+    // resample/re-encode path — otherwise the encoded bytes are mangled.
+    if (carrier === 'twilio' || carrier === 'telnyx' || carrier === 'plivo') {
+      return fmt === 'ulaw_8000';
+    }
     return false;
   }
 

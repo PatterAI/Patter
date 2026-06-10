@@ -117,7 +117,9 @@ interface ElevenLabsWsMessage {
  */
 const CARRIER_NATIVE_FORMAT: Readonly<Record<string, string>> = {
   twilio: 'ulaw_8000',
-  telnyx: 'pcm_16000',
+  // The SDK's streaming_start pins the Telnyx wire to PCMU/μ-law @ 8 kHz —
+  // 'pcm_16000' here shipped raw PCM16 onto a μ-law wire (static).
+  telnyx: 'ulaw_8000',
   // Plivo streams mulaw 8 kHz (we pin contentType in the answer XML).
   plivo: 'ulaw_8000',
 };
@@ -278,11 +280,11 @@ export class ElevenLabsWebSocketTTS implements TTSAdapter {
     });
   }
 
-  /** Pre-configured for Telnyx (`pcm_16000`). */
+  /** Pre-configured for Telnyx (μ-law 8 kHz wire). */
   static forTelnyx(opts: Omit<ElevenLabsWebSocketTTSOptions, 'outputFormat'>): ElevenLabsWebSocketTTS {
     return new ElevenLabsWebSocketTTS({
       ...opts,
-      outputFormat: 'pcm_16000',
+      outputFormat: 'ulaw_8000',
     });
   }
 

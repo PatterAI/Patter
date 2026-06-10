@@ -71,7 +71,9 @@ const VOICE_ID_PATTERN = /^[A-Za-z0-9]{20}$/;
  * ``_CARRIER_NATIVE_FORMAT`` dict. */
 const CARRIER_NATIVE_FORMAT: Readonly<Record<string, ElevenLabsOutputFormat>> = {
   twilio: 'ulaw_8000',
-  telnyx: 'pcm_16000',
+  // The SDK's streaming_start pins the Telnyx wire to PCMU/μ-law @ 8 kHz —
+  // 'pcm_16000' here shipped raw PCM16 onto a μ-law wire (static).
+  telnyx: 'ulaw_8000',
   // Plivo streams mulaw 8 kHz (we pin contentType in the answer XML).
   plivo: 'ulaw_8000',
 };
@@ -173,7 +175,7 @@ export interface ElevenLabsTTSOptions {
  *   ElevenLabs to produce μ-law directly skips that step (saves
  *   ~30–80 ms first-byte plus per-frame CPU and avoids any resampling
  *   aliasing).
- * - {@link ElevenLabsTTS.forTelnyx} emits `pcm_16000`. Telnyx negotiates
+ * - {@link ElevenLabsTTS.forTelnyx} emits `ulaw_8000`. The SDK pins Telnyx to PCMU;
  *   L16/16000 on its bidirectional media WebSocket, so 16 kHz PCM is
  *   already the format used end-to-end and no transcoding happens.
  *   ElevenLabs *also* supports `ulaw_8000` if your Telnyx profile is
@@ -303,13 +305,9 @@ export class ElevenLabsTTS {
   /**
    * Construct an instance pre-configured for Telnyx bidirectional media.
    *
-   * Telnyx's default media-streaming codec is L16 PCM @ 16 kHz, which
-   * matches our default Telnyx handler. We pick `pcm_16000` so the audio
-   * flows end-to-end with zero resampling or transcoding.
-   *
-   * Trade-off: if your Telnyx profile is pinned to PCMU/8000 (μ-law),
-   * construct `ElevenLabsTTS` directly with `outputFormat: 'ulaw_8000'`
-   * — Telnyx supports that natively too.
+   * The SDK's ``streaming_start`` pins the Telnyx wire to PCMU/μ-law @
+   * 8 kHz (stream_bidirectional_codec=PCMU), so μ-law output flows
+   * end-to-end with zero resampling or transcoding.
    */
   static forTelnyx(
     apiKey: string,
@@ -317,7 +315,7 @@ export class ElevenLabsTTS {
   ): ElevenLabsTTS {
     return new ElevenLabsTTS(apiKey, {
       ...options,
-      outputFormat: ElevenLabsOutputFormat.PCM_16000,
+      outputFormat: ElevenLabsOutputFormat.ULAW_8000,
     });
   }
 

@@ -66,8 +66,9 @@ class TestConstruction:
         }
 
     def test_for_telnyx_default(self) -> None:
+        # The SDK's streaming_start pins the Telnyx wire to PCMU/μ-law 8 kHz.
         tts = ElevenLabsWebSocketTTS.for_telnyx(api_key="k")
-        assert tts.output_format == "pcm_16000"
+        assert tts.output_format == "ulaw_8000"
 
     def test_for_twilio_custom_voice_settings(self) -> None:
         tts = ElevenLabsWebSocketTTS.for_twilio(
@@ -284,10 +285,12 @@ class TestCarrierAutoFlip:
         url = tts._build_url()
         assert "output_format=ulaw_8000" in url
 
-    def test_telnyx_carrier_keeps_pcm_16000(self) -> None:
+    def test_telnyx_carrier_flips_to_ulaw_8000(self) -> None:
+        # PCMU wire (see streaming_start) — the old pcm_16000 expectation
+        # shipped raw PCM16 onto a μ-law wire.
         tts = ElevenLabsWebSocketTTS(api_key="k")
         tts.set_telephony_carrier("telnyx")
-        assert tts.output_format == "pcm_16000"
+        assert tts.output_format == "ulaw_8000"
 
     def test_explicit_format_is_respected_over_carrier_hint(self) -> None:
         # User explicitly chose pcm_16000 — Twilio carrier hint must NOT
