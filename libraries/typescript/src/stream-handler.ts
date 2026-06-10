@@ -555,6 +555,35 @@ export class StreamHandler {
    */
   private firstAudioSentAt: number | null = null;
   /**
+   * Estimated wall-clock (ms) when the LAST audio byte pushed to the carrier
+   * finishes PLAYING on the phone. The pipeline pushes TTS audio as fast as
+   * the provider synthesizes it (no pacing) and the carrier buffers + plays
+   * at realtime, so "we finished pushing" and "the caller finished hearing"
+   * can diverge by tens of seconds — especially with agent-runtime LLMs
+   * (Hermes/OpenClaw) that deliver a long reply all at once after a thinking
+   * pause. ``endSpeakingWithGrace`` holds ``isSpeaking=true`` (with
+   * ``tailGraceActive=false``) until this cursor passes, so a barge-in during
+   * the audible backlog still takes the cancel path (``sendClear`` drops the
+   * carrier buffer) instead of being treated as a calm next turn. Advanced by
+   * ``trackOutboundPlayback``; reset by ``cancelSpeaking`` (the buffer is
+   * cleared) and ``endTailGraceForNewTurn``.
+   */
+  private playbackBufferedUntil = 0;
+  /**
+   * Per-turn playback timeline used to estimate the response prefix the
+   * caller actually HEARD when a barge-in lands. ``turnPlaybackTotalMs``
+   * accumulates the playout duration of every chunk pushed this turn
+   * (including filler audio, which keeps the timeline aligned);
+   * ``turnSpokenSegments`` records ``{text, startMs}`` for each RESPONSE
+   * sentence at its first audible chunk (filler / error-fallback audio
+   * advances the clock but adds no segment). ``heard = total - backlog``
+   * then maps to a sentence-granular prefix — see ``heardResponsePrefix``.
+   * Both reset at ``beginSpeaking``. Mirrors Python
+   * ``_turn_playback_total_s`` / ``_turn_spoken_segments``.
+   */
+  private turnPlaybackTotalMs = 0;
+  private turnSpokenSegments: Array<{ readonly text: string; readonly startMs: number }> = [];
+  /**
    * Optional barge-in confirmation strategies. With an empty array the
    * SDK falls back to the legacy "cancel on first VAD speech_start"
    * behaviour. With one or more strategies, a VAD speech_start during
@@ -704,6 +733,9 @@ export class StreamHandler {
     // Fresh turn — reset the echo-guard reference so barge-in checks compare
     // against THIS turn's spoken text, not the last turn's.
     this.currentAgentSpokenText = '';
+    // Fresh turn — reset the heard-prefix playback timeline.
+    this.turnPlaybackTotalMs = 0;
+    this.turnSpokenSegments = [];
     // Reset the VAD detector so the next user utterance triggers a clean
     // SILENCE→SPEECH transition. Without this, PSTN echo from the previous
     // turn can keep the detector's smoothed probability above the
@@ -730,6 +762,98 @@ export class StreamHandler {
   }
 
   /**
+   * Advance ``playbackBufferedUntil`` by the playout duration of an outbound
+   * TTS chunk. ``numBytes`` is the size of the chunk BEFORE carrier encoding
+   * (the same buffer handed to ``encodePipelineAudio``): PCM16 @ 16 kHz in
+   * the default path (32 bytes/ms), or the carrier's native μ-law @ 8 kHz
+   * (8 bytes/ms) when the TTS adapter emits wire format directly
+   * (``ttsOutputFormatNativeForCarrier`` — Twilio/Plivo ``ulaw_8000``;
+   * Telnyx native is ``pcm_16000`` so it stays at 32 bytes/ms).
+   */
+  private trackOutboundPlayback(numBytes: number): void {
+    if (numBytes <= 0) return;
+    const bytesPerMs =
+      this.ttsOutputFormatNativeForCarrier &&
+      this.deps.bridge.telephonyProvider !== 'telnyx'
+        ? 8
+        : 32;
+    const now = Date.now();
+    const chunkMs = numBytes / bytesPerMs;
+    const base =
+      this.playbackBufferedUntil > now ? this.playbackBufferedUntil : now;
+    this.playbackBufferedUntil = base + chunkMs;
+    // Per-turn playout total — the time axis for the heard-prefix estimate
+    // (see ``heardResponsePrefix``). Reset at ``beginSpeaking``.
+    this.turnPlaybackTotalMs += chunkMs;
+  }
+
+  /**
+   * Estimate the response prefix the caller actually HEARD this turn.
+   *
+   * The pipeline pushes audio faster than realtime, so at barge-in time
+   * ``heard = totalPushed - carrierBacklog`` ms of audio have actually
+   * played. Mapped at sentence granularity against ``turnSpokenSegments``:
+   * a sentence counts as heard once its playback has STARTED
+   * (``startMs <= heardMs``), so the sentence playing at the moment of
+   * interruption is included.
+   *
+   * Returns ``null`` when no segments were tracked this turn (nothing
+   * synthesized through the tracked path — callers fall back to the legacy
+   * full-text behaviour). Mirrors Python ``_heard_response_prefix``.
+   */
+  private heardResponsePrefix(): { text: string; heardEverything: boolean } | null {
+    if (this.turnSpokenSegments.length === 0) return null;
+    const remainingMs = Math.max(0, this.playbackBufferedUntil - Date.now());
+    const heardMs = Math.max(0, this.turnPlaybackTotalMs - remainingMs);
+    const heard = this.turnSpokenSegments.filter((s) => s.startMs <= heardMs);
+    return {
+      text: heard.map((s) => s.text).join(' '),
+      heardEverything: heard.length === this.turnSpokenSegments.length,
+    };
+  }
+
+  /**
+   * Replace the text of the most recent assistant entry in the conversation
+   * history. No-op when the last entry is not an assistant turn (e.g. the
+   * caller's next turn was already committed).
+   */
+  private rewriteLastAssistantEntry(text: string): void {
+    const entries = this.history.entries;
+    const last = entries[entries.length - 1];
+    if (last && last.role === 'assistant') {
+      entries[entries.length - 1] = { ...last, text };
+    }
+  }
+
+  /**
+   * LiveKit-style "heard prefix" semantics for a barge-in that lands AFTER
+   * the turn completed, while the carrier is still playing the buffered
+   * tail.
+   *
+   * The completed turn already recorded its FULL reply in history, but the
+   * caller only heard part of it before interrupting — a stateful agent
+   * runtime (Hermes / OpenClaw) would otherwise "remember saying" things
+   * the caller never heard. Rewrites the last assistant entry to the heard
+   * prefix + ``[interrupted by caller]``.
+   *
+   * MUST run BEFORE ``cancelSpeaking`` resets ``playbackBufferedUntil``
+   * (the backlog is the heard-prefix input). No-op when a turn is still in
+   * flight (the streaming path applies its own marker), when there is no
+   * backlog, or when everything was already heard. Mirrors Python
+   * ``_maybe_truncate_completed_turn_history``.
+   */
+  private maybeTruncateCompletedTurnHistory(): void {
+    if (this.dispatchTask !== null) return; // turn still in flight
+    const remainingMs = this.playbackBufferedUntil - Date.now();
+    if (remainingMs <= 0) return;
+    const heard = this.heardResponsePrefix();
+    if (heard === null || heard.heardEverything) return;
+    this.rewriteLastAssistantEntry(
+      heard.text ? `${heard.text} [interrupted by caller]` : '[interrupted by caller]',
+    );
+  }
+
+  /**
    * Atomically end speaking AND invalidate any pending grace timer.
    * Use instead of ``this.isSpeaking = false`` at barge-in sites.
    *
@@ -744,6 +868,10 @@ export class StreamHandler {
     this.firstAudioSentAt = null;
     this.lastCancelAt = Date.now();
     this.suppressedSpeechPending = false;
+    // The barge-in paths that call this also ``sendClear`` the carrier —
+    // whatever audio was buffered ahead is dropped, so the playback cursor
+    // snaps back to "nothing pending".
+    this.playbackBufferedUntil = 0;
     // Drain any firstMessage mark waiters so a loop blocked on
     // ``waitForMarkWindow`` exits on the next tick and observes
     // ``!isSpeaking``. Without this the loop would stay blocked until
@@ -852,34 +980,56 @@ export class StreamHandler {
     if (grace > 0) {
       const gen = this.speakingGeneration;
       this.clearGraceTimer();
-      // The agent has finished pushing audio; ``isSpeaking`` is now held only
-      // to suppress the fading echo tail. Mark the tail-grace window so fast
-      // next-turn speech is rescued as a new turn rather than mis-detected as
-      // a barge-in.
-      this.tailGraceActive = true;
-      this.graceTimer = setTimeout(() => {
-        this.graceTimer = null;
-        if (this.speakingGeneration === gen) {
-          this.isSpeaking = false;
-          this.tailGraceActive = false;
-          this.speakingStartedAt = null;
-          this.firstAudioSentAt = null;
-          this.clearPendingBargeIn();
-          void this.resetBargeInStrategies();
-          // If VAD detected speech during the agent's turn but it was
-          // gate-suppressed (agent hadn't been speaking long enough for
-          // barge-in to fire), flush the ring buffer to STT now so the
-          // user's words aren't silently lost.
-          if (this.suppressedSpeechPending) {
-            this.suppressedSpeechPending = false;
-            this.flushInboundAudioRing();
+      const startTailGrace = (): void => {
+        // The carrier has (estimatedly) finished playing everything we
+        // pushed; ``isSpeaking`` is now held only to suppress the fading
+        // echo tail. Mark the tail-grace window so fast next-turn speech is
+        // rescued as a new turn rather than mis-detected as a barge-in.
+        this.tailGraceActive = true;
+        this.graceTimer = setTimeout(() => {
+          this.graceTimer = null;
+          if (this.speakingGeneration === gen) {
+            this.isSpeaking = false;
+            this.tailGraceActive = false;
+            this.speakingStartedAt = null;
+            this.firstAudioSentAt = null;
+            this.clearPendingBargeIn();
+            void this.resetBargeInStrategies();
+            // If VAD detected speech during the agent's turn but it was
+            // gate-suppressed (agent hadn't been speaking long enough for
+            // barge-in to fire), flush the ring buffer to STT now so the
+            // user's words aren't silently lost.
+            if (this.suppressedSpeechPending) {
+              this.suppressedSpeechPending = false;
+              this.flushInboundAudioRing();
+            }
+            // Reset VAD so any stuck SPEECH state from echo / loopback during
+            // the agent's turn does not block the next user utterance from
+            // emitting ``speech_start``.
+            this.resetVad();
           }
-          // Reset VAD so any stuck SPEECH state from echo / loopback during
-          // the agent's turn does not block the next user utterance from
-          // emitting ``speech_start``.
-          this.resetVad();
-        }
-      }, grace);
+        }, grace);
+      };
+      // Phase 1 — the carrier is still PLAYING audio we already pushed.
+      // Agent-runtime LLMs (Hermes/OpenClaw) deliver the whole reply at
+      // once, TTS outruns realtime, and the carrier buffers tens of seconds
+      // of audio that keeps playing long after this method runs. For that
+      // whole audible window the agent IS still speaking from the caller's
+      // perspective: keep ``isSpeaking=true`` with ``tailGraceActive=false``
+      // so VAD/transcript barge-in takes the cancel path (``sendClear``
+      // drops the carrier buffer) instead of the next-turn rescue — without
+      // this, "the agent detects the interruption but keeps talking".
+      // A barge-in meanwhile bumps ``speakingGeneration`` (cancelSpeaking),
+      // which no-ops this timer. Phase 2 — the existing echo-tail grace.
+      const bufferedMs = Math.max(0, this.playbackBufferedUntil - Date.now());
+      if (bufferedMs <= 0) {
+        startTailGrace();
+      } else {
+        this.graceTimer = setTimeout(() => {
+          this.graceTimer = null;
+          if (this.speakingGeneration === gen) startTailGrace();
+        }, bufferedMs);
+      }
     } else {
       this.isSpeaking = false;
       this.tailGraceActive = false;
@@ -916,6 +1066,9 @@ export class StreamHandler {
     this.tailGraceActive = false;
     this.speakingStartedAt = null;
     this.firstAudioSentAt = null;
+    // Tail grace only starts after the playback cursor drained (phase 1 of
+    // ``endSpeakingWithGrace``), so there is no carrier backlog left here.
+    this.playbackBufferedUntil = 0;
     this.speakingGeneration++; // invalidates the pending grace timer
     this.clearGraceTimer();
     this.clearPendingBargeIn();
@@ -1652,6 +1805,10 @@ export class StreamHandler {
               this.metricsAcc.recordBargeinDetected();
               const bargeinSpan = startSpan(SPAN_BARGEIN, { 'patter.call.id': this.callId });
               try {
+                // Post-complete barge-in during the buffered tail — rewrite
+                // history to the heard prefix BEFORE cancelSpeaking resets
+                // the playback cursor.
+                this.maybeTruncateCompletedTurnHistory();
                 this.cancelSpeaking();
                 try {
                   this.deps.bridge.sendClear(this.ws, this.streamSid);
@@ -2492,7 +2649,11 @@ export class StreamHandler {
     hookExecutor: PipelineHookExecutor,
     hookCtx: HookContext,
     ttsFirstByteSent: { value: boolean },
+    recordSegment = true,
   ): Promise<void> {
+    // ``recordSegment=false`` (filler / error-fallback audio) advances the
+    // playback clock without adding a heard-prefix segment — that audio is
+    // not part of the LLM's reply. See ``heardResponsePrefix``.
     if (!this.tts || !this.isSpeaking) return;
 
     // Apply text transforms before the beforeSynthesize hook
@@ -2538,8 +2699,19 @@ export class StreamHandler {
         if (this.aec) {
           this.aec.pushFarEnd(processedAudio);
         }
+        if (recordSegment) {
+          // First audible chunk of this sentence — stamp its start on the
+          // per-turn playback timeline so a barge-in can estimate the heard
+          // prefix at sentence granularity.
+          this.turnSpokenSegments.push({
+            text: processedText,
+            startMs: this.turnPlaybackTotalMs,
+          });
+          recordSegment = false;
+        }
         const encoded = this.encodePipelineAudio(processedAudio);
         this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
+        this.trackOutboundPlayback(processedAudio.length);
         this.markFirstAudioSent();
       }
     } catch (e) {
@@ -2768,9 +2940,23 @@ export class StreamHandler {
         // Marker goes to the history/transcript ONLY (so a stateful agent
         // runtime sees it was interrupted); metrics use the PLAIN text and are
         // gated on !interrupted — mirrors Python.
-        const spokenText = interrupted
-          ? `${responseText} [interrupted by caller]`
-          : responseText;
+        let spokenText = responseText;
+        if (interrupted) {
+          // Truncate to what the caller actually HEARD, not everything the
+          // LLM generated — an agent-runtime LLM delivers the full reply at
+          // once, so by barge-in time ``responseText`` can hold tens of
+          // seconds of text the caller never listened to. Falls back to the
+          // legacy full-text marker when no playback segments were tracked
+          // (e.g. no TTS configured). Mirrors Python
+          // ``_process_streaming_response``.
+          const heard = this.heardResponsePrefix();
+          spokenText =
+            heard === null
+              ? `${responseText} [interrupted by caller]`
+              : heard.text
+                ? `${heard.text} [interrupted by caller]`
+                : '[interrupted by caller]';
+        }
         await this.emitAssistantTranscript(spokenText);
         if (!interrupted) this.metricsAcc.recordTtsComplete(responseText);
       } else {
@@ -2931,6 +3117,9 @@ export class StreamHandler {
     this.metricsAcc.recordBargeinDetected();
     const bargeinSpan = startSpan(SPAN_BARGEIN, { 'patter.call.id': this.callId });
     try {
+      // Post-complete barge-in during the buffered tail — rewrite history to
+      // the heard prefix BEFORE cancelSpeaking resets the playback cursor.
+      this.maybeTruncateCompletedTurnHistory();
       this.cancelSpeaking();
       try {
         this.deps.bridge.sendClear(this.ws, this.streamSid);
@@ -3072,11 +3261,14 @@ export class StreamHandler {
       if (cancelled || ttsFirstByteSent.value || !this.isSpeaking) return;
       // Track the in-flight synthesis so clear() can await it — serializing the
       // filler before the real sentence so their audio can never interleave.
+      // Filler audio is not part of the LLM's reply — advance the playback
+      // clock without a heard-prefix segment (recordSegment=false).
       inFlight = this.synthesizeSentence(
         message,
         hookExecutor,
         hookCtx,
         ttsFirstByteSent,
+        false,
       ).catch((err) => {
         getLogger().error(
           `longTurnMessage filler synthesis failed (${label}):`,
@@ -3224,7 +3416,9 @@ export class StreamHandler {
           const fallback = this.deps.agent.llmErrorMessage;
           if (fallback && !ttsFirstByteSent.value && this.isSpeaking) {
             try {
-              await this.synthesizeSentence(fallback, hookExecutor, hookCtx, ttsFirstByteSent);
+              // Error-fallback audio is not part of the LLM's reply — no
+              // heard-prefix segment (recordSegment=false).
+              await this.synthesizeSentence(fallback, hookExecutor, hookCtx, ttsFirstByteSent, false);
             } catch (err) {
               getLogger().error(`llmErrorMessage fallback synthesis failed (${label}):`, err);
             }
