@@ -140,8 +140,12 @@ Transfers the current call to another phone number. The AI decides when to trigg
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `number` | `str` | Phone number to transfer to (E.164 format). |
+| `mode` | `str` | Optional. `"cold"` (default) redirects the caller immediately — the historical blind transfer. `"warm"` puts the caller on hold music, dials the human agent, speaks the `summary` to them, then bridges everyone together. Warm mode is implemented on **Twilio** today; Telnyx and Plivo return a clear error envelope (the AI keeps the call) instead of silently falling back to a blind redirect. |
+| `summary` | `str` | Optional, warm mode only. One or two sentences announced to the human agent before the caller is bridged (who is calling and what they need). |
 
 The AI might say: *"Let me transfer you to our billing department."* and then invoke `transfer_call` with the appropriate number.
+
+Warm transfers are also available programmatically: `await control.transfer("+1555...", mode="warm", summary="Mario needs help with order 12.")`.
 
 ### end_call
 
@@ -150,6 +154,26 @@ Ends the current call programmatically.
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `reason` | `str` | Reason for ending the call (logged in the transcript). |
+
+### handoff_to
+
+Injected **only** when the agent is built with `handoffs={...}` — a registry of named target agents:
+
+```python
+billing = phone.agent(system_prompt="You are the billing specialist.", engine=engine, tools=[...])
+triage = phone.agent(
+    system_prompt="You answer first and route the caller.",
+    engine=engine,
+    handoffs={"billing": billing},
+)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `name` | `str` | Name of the target agent (schema-constrained to the configured registry keys). |
+| `reason` | `str` | Optional. Brief reason for the handoff (recorded in the transcript). |
+
+Calling it swaps the **live call** to the target agent's system prompt, tools, variables, guardrails, and onward `handoffs` — conversation history is preserved and a `[handoff]` system line is recorded in the transcript. Works in Realtime mode (via a mid-session `session.update`) and Pipeline mode (the next LLM turn runs as the target agent). Audio infrastructure established at call start (STT/TTS/engine connection — and therefore the voice on engines that cannot switch voice mid-session) is retained. Unknown names return an error envelope to the model, never silence.
 
 ---
 

@@ -147,6 +147,19 @@ Transfers the current call to another phone number. The AI model invokes this wh
 
 The SDK uses the Twilio REST API to redirect the call to the target number.
 
+Pass `mode: "warm"` (plus an optional `summary`) for a **warm transfer**: the caller is parked on hold music, the human agent is dialed and hears the summary, then the two are bridged and the AI drops out. Warm mode is implemented on **Twilio** today; Telnyx and Plivo return a clear `{ error }` envelope (the AI keeps the call) instead of silently falling back to a blind redirect. `mode: "cold"` (the default when omitted) keeps the historical blind-transfer behaviour byte-identical.
+
+```json
+{
+  "name": "transfer_call",
+  "parameters": {
+    "number": "+15559876543",
+    "mode": "warm",
+    "summary": "Mario needs help with order 12."
+  }
+}
+```
+
 ### end_call
 
 Ends the current call. The AI model invokes this when the conversation is complete or the caller says goodbye.
@@ -159,6 +172,31 @@ Ends the current call. The AI model invokes this when the conversation is comple
   }
 }
 ```
+
+### handoff_to
+
+Injected **only** when the agent is built with `handoffs: {...}` — a registry of named target agents:
+
+```typescript
+const billing = phone.agent({ systemPrompt: "You are the billing specialist.", engine, tools: [...] });
+const triage = phone.agent({
+  systemPrompt: "You answer first and route the caller.",
+  engine,
+  handoffs: { billing },
+});
+```
+
+```json
+{
+  "name": "handoff_to",
+  "parameters": {
+    "name": "billing",
+    "reason": "invoice question"
+  }
+}
+```
+
+Calling it swaps the **live call** to the target agent's system prompt, tools, variables, guardrails, and onward `handoffs` — conversation history is preserved and a `[handoff]` system line is recorded in the transcript. Works in Realtime mode (via a mid-session `session.update`) and Pipeline mode (the next LLM turn runs as the target agent). Audio infrastructure established at call start (STT/TTS/engine connection — and therefore the voice on engines that cannot switch voice mid-session) is retained. Unknown names return an error envelope to the model, never silence.
 
 ## In-Process Handlers
 
