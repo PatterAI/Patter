@@ -533,3 +533,33 @@ class TestAbortPaths:
         await handler.cleanup()
         assert handler._speculation is None
         metrics.record_preemptive_miss.assert_not_called()
+
+    async def test_concurrent_start_keeps_newer_speculation(self) -> None:
+        """A speculation registered while ``_start_speculation`` awaits the
+        old one's unwind must win over the awaiting (older-text) one —
+        overwriting it would orphan the newer task parked on its commit
+        decision forever (held audio + open LLM stream, no miss counted)."""
+        handler = _make_handler(llm=_ParkUntilCancelLLM())
+        await handler._note_interim_transcript("la prima frase?")
+        first = handler._speculation
+        assert first is not None
+
+        # Replace FIRST with "seconda"; while that replacement awaits FIRST's
+        # task unwind, a newer interim ("terza") registers concurrently — the
+        # same interleaving the stability watcher can produce against the
+        # STT loop.
+        replace_task = asyncio.create_task(
+            handler._start_speculation("la seconda frase?")
+        )
+        await asyncio.sleep(0)  # replacement deregisters FIRST, parks on its unwind
+        assert handler._speculation is None
+        await handler._note_interim_transcript("la terza frase?")
+        newest = handler._speculation
+        assert newest is not None
+        assert newest.interim_text == "la terza frase?"
+
+        await asyncio.wait_for(replace_task, timeout=3.0)
+        # The resuming replacement yielded to the newer registration instead
+        # of overwriting it.
+        assert handler._speculation is newest
+        await _settle(handler)

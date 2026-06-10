@@ -5078,6 +5078,13 @@ class PipelineStreamHandler(StreamHandler):
         """Launch a speculative dispatch for ``interim_text``, replacing (and
         counting as a miss) any previous speculation on different text."""
         await self._abort_speculation(reason="replaced_by_newer_interim")
+        if self._speculation is not None:
+            # A concurrent path (the stability watcher vs. the STT loop)
+            # registered a NEWER speculation while we awaited the old one's
+            # unwind — keep it. Overwriting here would orphan its task parked
+            # on the commit decision forever (held audio + an open LLM
+            # stream, never aborted, never counted as a miss).
+            return
         spec = _SpeculativeTurn(interim_text)
         self._speculation = spec
         spec.task = asyncio.create_task(self._run_speculative_dispatch(spec))
