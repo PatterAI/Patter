@@ -14,6 +14,7 @@ import { OpenAIRealtimeAdapter } from './providers/openai-realtime';
 import { OpenAIRealtime2Adapter } from './providers/openai-realtime-2';
 import { ElevenLabsConvAIAdapter } from './providers/elevenlabs-convai';
 import { PlivoAdapter, dropPlivoVoicemail } from './providers/plivo-adapter';
+import { TwilioAdapter } from './providers/twilio-adapter';
 import { PlivoBridge, classifyPlivoAmd, validatePlivoSignature } from './telephony/plivo';
 // Re-export so existing imports from './server' keep working after the
 // extraction of PlivoBridge into ./telephony/plivo.
@@ -25,7 +26,7 @@ import { mergePricing } from './pricing';
 import { MetricsStore } from './dashboard/store';
 import { mountDashboard, mountApi } from './dashboard/routes';
 import { RemoteMessageHandler } from './remote-message';
-import { StreamHandler, sanitizeLogValue } from './stream-handler';
+import { StreamHandler, sanitizeLogValue, buildHandoffTool } from './stream-handler';
 import { getLogger } from './logger';
 import type { TelephonyBridge } from './stream-handler';
 import type {
@@ -36,6 +37,8 @@ import type {
   CarrierKind,
   CallOutcome,
   CallResult,
+  TransferCallOptions,
+  TransferCallResult,
 } from './types';
 import type { CallMetrics, CostBreakdown } from './metrics';
 import { CallLogger, resolveLogRoot } from './services/call-log';
@@ -92,6 +95,22 @@ export const TRANSFER_CALL_TOOL = {
         type: 'string',
         description: 'Phone number to transfer to (E.164 format)',
       },
+      mode: {
+        type: 'string',
+        enum: ['cold', 'warm'],
+        description:
+          "Transfer mode. 'cold' (default) redirects the caller " +
+          "immediately. 'warm' puts the caller on hold music, dials " +
+          'the human agent, announces the summary to them, then ' +
+          'bridges everyone together.',
+      },
+      summary: {
+        type: 'string',
+        description:
+          'Warm mode only — one or two sentences announced to the ' +
+          'human agent before the caller is bridged (who is calling ' +
+          'and what they need).',
+      },
     },
     required: ['number'],
   },
@@ -121,6 +140,26 @@ function xmlEscape(s: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&apos;');
+}
+
+/**
+ * Spoken to the caller when the warm-transfer target leg could not be dialed
+ * after the caller was already parked in the conference (the AI media stream
+ * is gone at that point, so a graceful goodbye beats infinite hold music).
+ * Mirrors the Python `_WARM_TRANSFER_FAILED_MESSAGE`.
+ */
+const WARM_TRANSFER_FAILED_MESSAGE =
+  'Sorry, no one is available to take your call right now. Goodbye.';
+
+/**
+ * Deterministic, per-call conference name for a Twilio warm transfer.
+ *
+ * `callSid` is validated upstream (34-char Twilio SID), so the name is safe
+ * for both TwiML attributes and REST URLs. Mirrors the Python
+ * `warm_transfer_conference_name`.
+ */
+export function warmTransferConferenceName(callSid: string): string {
+  return `patter-warm-${callSid}`;
 }
 
 /**
@@ -538,7 +577,16 @@ export function buildAIAdapter(config: LocalConfig, agent: AgentOptions, resolve
       strict: (t as { strict?: boolean }).strict,
     };
   }) ?? [];
-  const tools = [...agentTools, TRANSFER_CALL_TOOL, END_CALL_TOOL];
+  const tools: Array<{ name: string; description: string; parameters: Record<string, unknown>; strict?: boolean }> =
+    [...agentTools, TRANSFER_CALL_TOOL, END_CALL_TOOL];
+  // Multi-agent handoff: advertise the built-in ``handoff_to`` tool when the
+  // agent has handoff targets configured. Dispatched by the stream handler
+  // (see ``handleHandoffFunctionCall``). Mirrors the Python Realtime
+  // ``start()`` tool construction.
+  const handoffNames = agent.handoffs ? Object.keys(agent.handoffs) : [];
+  if (handoffNames.length > 0) {
+    tools.push(buildHandoffTool(handoffNames));
+  }
   const isOpenAIEngine = engine && (engine.kind === 'openai_realtime' || engine.kind === 'openai_realtime_2');
   const openaiKey = isOpenAIEngine ? engine.apiKey : (config.openaiKey ?? '');
   // Forward optional engine-level Realtime knobs so the high-level
@@ -614,7 +662,7 @@ export function buildAIAdapter(config: LocalConfig, agent: AgentOptions, resolve
 // ---------------------------------------------------------------------------
 
 /** Twilio-specific telephony bridge. */
-class TwilioBridge implements TelephonyBridge {
+export class TwilioBridge implements TelephonyBridge {
   readonly label = 'Twilio';
   readonly telephonyProvider = 'twilio' as const;
   readonly inputWireFormat = 'ulaw_8000' as const;
@@ -633,7 +681,19 @@ class TwilioBridge implements TelephonyBridge {
     ws.send(JSON.stringify({ event: 'clear', streamSid }));
   }
 
-  async transferCall(callId: string, toNumber: string): Promise<void> {
+  async transferCall(
+    callId: string,
+    toNumber: string,
+    options?: TransferCallOptions,
+  ): Promise<TransferCallResult | void> {
+    if (options?.mode === 'warm') {
+      // Conference-based warm transfer: park the caller on hold, dial the
+      // human with the announced summary, bridge on answer. The AI media
+      // stream ends when the caller's TwiML is replaced. Returns a result /
+      // error envelope (never throws). Mirrors Python `twilio_warm_transfer`.
+      return this.warmTransfer(callId, toNumber, options.summary ?? '');
+    }
+    // Cold mode: byte-identical to the historical blind redirect.
     if (this.config.twilioSid && this.config.twilioToken && callId) {
       if (!validateTwilioSid(callId)) {
         getLogger().warn(`TwilioBridge.transferCall rejected: invalid CallSid ${JSON.stringify(callId)}`);
@@ -655,6 +715,137 @@ class TwilioBridge implements TelephonyBridge {
       });
       getLogger().info(`Call transferred to ${toNumber}`);
     }
+  }
+
+  /**
+   * Execute the Twilio conference-based WARM transfer REST sequence.
+   *
+   * 1. Redirect the caller's live call into a named conference
+   *    (`startConferenceOnEnter=false` → the caller hears Twilio's default
+   *    hold music). This replaces the `<Connect><Stream>` TwiML, so Twilio
+   *    tears down the AI media stream automatically — the "AI leg" ends here.
+   * 2. Dial the human agent (`Calls.json` create) with TwiML that first
+   *    speaks `summary` (`<Say>`), then joins the same conference with
+   *    `startConferenceOnEnter=true` — bridging caller and human.
+   *
+   * When `config.webhookUrl` is set, conference lifecycle events are posted
+   * to `/webhooks/twilio/conference` and the target leg's terminal status to
+   * `/webhooks/twilio/warm-status?caller_call_sid=...` (which gracefully
+   * releases a caller stuck on hold when the human never answers).
+   *
+   * Returns `{ status: 'transferring', mode: 'warm', ... }` on success or an
+   * `{ error }` envelope on validation/REST failure. Never throws. Mirrors
+   * the Python `twilio_warm_transfer` sequence and envelopes exactly.
+   */
+  private async warmTransfer(
+    callId: string,
+    toNumber: string,
+    summary: string,
+  ): Promise<TransferCallResult> {
+    const E164_RE = /^\+[1-9]\d{6,14}$/;
+    if (!E164_RE.test(toNumber)) {
+      getLogger().warn(`warm transfer rejected: invalid number ${JSON.stringify(toNumber)}`);
+      return { error: 'Invalid phone number format', status: 'rejected' };
+    }
+    if (!this.config.twilioSid || !this.config.twilioToken || !callId) {
+      return { error: 'warm transfer not available: missing Twilio credentials' };
+    }
+    if (!validateTwilioSid(callId)) {
+      getLogger().warn(`warm transfer skipped: invalid CallSid ${JSON.stringify(callId)}`);
+      return { error: 'warm transfer not available: invalid CallSid' };
+    }
+    // Twilio requires a verified / Twilio-owned From for the new leg.
+    const fromNumber = this.config.phoneNumber ?? '';
+    if (!E164_RE.test(fromNumber)) {
+      getLogger().warn(`warm transfer rejected: no valid From number (got ${JSON.stringify(fromNumber)})`);
+      return { error: 'warm transfer not available: no valid agent number to dial from' };
+    }
+
+    const conference = warmTransferConferenceName(callId);
+    const webhookHost = this.config.webhookUrl ?? '';
+    const conferenceCallback = webhookHost
+      ? `https://${webhookHost}/webhooks/twilio/conference`
+      : '';
+    const callerTwiml = TwilioAdapter.generateWarmTransferCallerTwiml(conference, conferenceCallback);
+    const targetTwiml = TwilioAdapter.generateWarmTransferTargetTwiml(conference, summary);
+
+    const apiBase = `https://api.twilio.com/2010-04-01/Accounts/${this.config.twilioSid}`;
+    const authHeader = `Basic ${Buffer.from(`${this.config.twilioSid}:${this.config.twilioToken}`).toString('base64')}`;
+
+    // Step 1 — park the caller in the conference (replaces the media stream
+    // TwiML; the AI leg ends with it).
+    try {
+      const resp = await fetch(`${apiBase}/Calls/${callId}.json`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Authorization': authHeader,
+        },
+        body: new URLSearchParams({ Twiml: callerTwiml }).toString(),
+      });
+      if (resp.status >= 400) {
+        getLogger().warn(`warm transfer: conference redirect failed (HTTP ${resp.status})`);
+        return { error: 'warm transfer failed: could not place caller on hold' };
+      }
+    } catch (err) {
+      getLogger().warn(`warm transfer: conference redirect failed: ${(err as Error)?.message ?? err}`);
+      return { error: 'warm transfer failed: could not place caller on hold' };
+    }
+
+    // Step 2 — dial the human agent into the conference with the
+    // announcement leg.
+    const dialData: Record<string, string> = {
+      To: toNumber,
+      From: fromNumber,
+      Twiml: targetTwiml,
+    };
+    if (webhookHost) {
+      dialData.StatusCallback =
+        `https://${webhookHost}/webhooks/twilio/warm-status` +
+        `?caller_call_sid=${encodeURIComponent(callId)}`;
+      dialData.StatusCallbackEvent = 'completed';
+    }
+    let dialFailed = false;
+    try {
+      const resp = await fetch(`${apiBase}/Calls.json`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Authorization': authHeader,
+        },
+        body: new URLSearchParams(dialData).toString(),
+      });
+      dialFailed = resp.status >= 400;
+      if (dialFailed) {
+        getLogger().warn(`warm transfer: target dial failed (HTTP ${resp.status})`);
+      }
+    } catch (err) {
+      getLogger().warn(`warm transfer: target dial failed: ${(err as Error)?.message ?? err}`);
+      dialFailed = true;
+    }
+
+    if (dialFailed) {
+      // The caller is already parked on hold and the AI stream is gone —
+      // release them gracefully instead of leaving infinite hold music.
+      try {
+        await fetch(`${apiBase}/Calls/${callId}.json`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Authorization': authHeader,
+          },
+          body: new URLSearchParams({
+            Twiml: `<Response><Say>${xmlEscape(WARM_TRANSFER_FAILED_MESSAGE)}</Say><Hangup/></Response>`,
+          }).toString(),
+        });
+      } catch (err) {
+        getLogger().warn(`warm transfer: caller recovery failed: ${(err as Error)?.message ?? err}`);
+      }
+      return { error: 'warm transfer failed: could not dial the transfer target' };
+    }
+
+    getLogger().info(`Warm transfer started: caller parked in ${conference}, dialing ${toNumber}`);
+    return { status: 'transferring', mode: 'warm', to: toNumber, conference };
   }
 
   async endCall(callId: string, _ws: WSWebSocket): Promise<void> {
@@ -766,7 +957,21 @@ export class TelnyxBridge implements TelephonyBridge {
     ws.send(JSON.stringify({ event: 'clear' }));
   }
 
-  async transferCall(callId: string, toNumber: string): Promise<void> {
+  async transferCall(
+    callId: string,
+    toNumber: string,
+    options?: TransferCallOptions,
+  ): Promise<TransferCallResult | void> {
+    // ``mode: 'warm'`` is NOT yet implemented on Telnyx — the Call Control
+    // conference flow requires a second outbound leg (connection_id +
+    // answer-webhook coordination) that the bridge does not plumb today. A
+    // clear error envelope is returned so the agent keeps the call instead
+    // of silently degrading to a blind redirect. Mirrors the Python
+    // ``_telnyx_transfer`` behaviour.
+    if (options?.mode === 'warm') {
+      getLogger().warn('warm transfer requested but not yet supported on telnyx');
+      return { error: 'warm transfer not yet supported on telnyx' };
+    }
     if (!isValidTelnyxTransferTarget(toNumber)) {
       getLogger().warn(`TelnyxBridge.transferCall rejected: invalid target ${JSON.stringify(toNumber)}`);
       return;
@@ -1571,6 +1776,95 @@ export class EmbeddedServer {
         }
       }
 
+      res.status(204).send();
+    });
+
+    app.post('/webhooks/twilio/conference', (req, res) => {
+      // Conference lifecycle events for warm transfers (start / end / join /
+      // leave). Observability-only: logged and acknowledged. Signature-
+      // validated exactly like every other Twilio webhook — fail-closed.
+      if (this.config.twilioToken) {
+        const signature = (req.headers['x-twilio-signature'] as string) || '';
+        const url = `https://${this.config.webhookUrl}${req.originalUrl}`;
+        const params = (req.body ?? {}) as Record<string, string>;
+        if (!validateTwilioSignature(url, params, signature, this.config.twilioToken)) {
+          res.status(403).send('Invalid signature');
+          return;
+        }
+      } else if (this.config.requireSignature !== false) {
+        getLogger().error('Twilio webhook rejected: twilioToken not configured and requireSignature is not false');
+        res.status(503).send('Webhook signature required');
+        return;
+      }
+      const body = (req.body ?? {}) as Record<string, string>;
+      getLogger().info(
+        `Twilio conference event ${sanitizeLogValue(body['StatusCallbackEvent'] ?? '')} ` +
+          `for ${sanitizeLogValue(body['FriendlyName'] ?? '')} ` +
+          `(conference=${sanitizeLogValue(body['ConferenceSid'] ?? '')}, ` +
+          `call=${sanitizeLogValue(body['CallSid'] ?? '')})`,
+      );
+      res.status(204).send();
+    });
+
+    app.post('/webhooks/twilio/warm-status', async (req, res) => {
+      // Terminal status of the warm-transfer TARGET leg (the human agent
+      // dialed into the conference). When that leg never connects (busy /
+      // no-answer / failed / canceled) the caller is parked on hold with the
+      // AI stream already gone — release them gracefully. Signature-
+      // validated exactly like every other Twilio webhook — fail-closed.
+      if (this.config.twilioToken) {
+        const signature = (req.headers['x-twilio-signature'] as string) || '';
+        const url = `https://${this.config.webhookUrl}${req.originalUrl}`;
+        const params = (req.body ?? {}) as Record<string, string>;
+        if (!validateTwilioSignature(url, params, signature, this.config.twilioToken)) {
+          res.status(403).send('Invalid signature');
+          return;
+        }
+      } else if (this.config.requireSignature !== false) {
+        getLogger().error('Twilio webhook rejected: twilioToken not configured and requireSignature is not false');
+        res.status(503).send('Webhook signature required');
+        return;
+      }
+      const body = (req.body ?? {}) as Record<string, string>;
+      const callStatus = body['CallStatus'] ?? '';
+      const callerCallSid = typeof req.query.caller_call_sid === 'string' ? req.query.caller_call_sid : '';
+      getLogger().info(
+        `Twilio warm-transfer target status ${sanitizeLogValue(callStatus)} ` +
+          `(caller leg ${sanitizeLogValue(callerCallSid)})`,
+      );
+      if (['busy', 'no-answer', 'failed', 'canceled'].includes(callStatus)) {
+        if (!validateTwilioSid(callerCallSid)) {
+          getLogger().warn(
+            `warm-status callback: invalid caller_call_sid ${JSON.stringify(sanitizeLogValue(callerCallSid))}, ignoring`,
+          );
+          res.status(204).send();
+          return;
+        }
+        if (this.config.twilioSid && this.config.twilioToken) {
+          const twiml = `<Response><Say>${xmlEscape(WARM_TRANSFER_FAILED_MESSAGE)}</Say><Hangup/></Response>`;
+          try {
+            await fetch(
+              `https://api.twilio.com/2010-04-01/Accounts/${this.config.twilioSid}/Calls/${callerCallSid}.json`,
+              {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/x-www-form-urlencoded',
+                  'Authorization': `Basic ${Buffer.from(`${this.config.twilioSid}:${this.config.twilioToken}`).toString('base64')}`,
+                },
+                body: new URLSearchParams({ Twiml: twiml }).toString(),
+                signal: AbortSignal.timeout(10_000),
+              },
+            );
+            getLogger().info(
+              `Warm transfer target unreachable (${sanitizeLogValue(callStatus)}) — released caller ${sanitizeLogValue(callerCallSid)}`,
+            );
+          } catch (err) {
+            getLogger().warn(
+              `Could not release caller after failed warm transfer: ${sanitizeLogValue(String(err))}`,
+            );
+          }
+        }
+      }
       res.status(204).send();
     });
 

@@ -21,6 +21,7 @@ import type {
   ProcessingMetrics,
   TTFBMetrics,
 } from './observability/metric-types';
+import type { TransferCallOptions, TransferCallResult } from './types';
 
 // ---- Data types ----
 
@@ -157,8 +158,17 @@ export interface CallMetrics {
 
 /** Programmatic control surface for a live call (transfer, hangup, DTMF). */
 export interface CallControl {
-  /** Transfer the call to a different number or SIP URI. */
-  transfer(number: string): Promise<void>;
+  /**
+   * Transfer the call to a different number or SIP URI.
+   *
+   * `options.mode === 'warm'` requests a hold-announce-bridge warm transfer
+   * (Twilio only for now); omitted / `'cold'` runs the historical blind
+   * redirect byte-identically. Warm mode resolves a
+   * {@link TransferCallResult} envelope (`{ error }` when unsupported or
+   * failed — the call keeps running); cold mode may resolve `void` (legacy
+   * contract). Mirrors Python `CallControl.transfer(number, mode=, summary=)`.
+   */
+  transfer(number: string, options?: TransferCallOptions): Promise<TransferCallResult | void>;
   /** Hang up the call. */
   hangup(): Promise<void>;
   /**

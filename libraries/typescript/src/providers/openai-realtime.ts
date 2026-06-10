@@ -303,8 +303,11 @@ export class OpenAIRealtimeAdapter {
     protected readonly apiKey: string,
     protected readonly model: string = OpenAIRealtimeModel.GPT_REALTIME_MINI,
     protected readonly voice: string = OpenAIVoice.ALLOY,
-    protected readonly instructions: string = '',
-    protected readonly tools?: Array<{ name: string; description: string; parameters: Record<string, unknown>; strict?: boolean }>,
+    // ``instructions`` / ``tools`` are mutable (not readonly): a mid-session
+    // multi-agent handoff swaps them via ``updateSession`` so reconnect /
+    // warmup paths rebuild the session with the post-handoff config.
+    protected instructions: string = '',
+    protected tools?: Array<{ name: string; description: string; parameters: Record<string, unknown>; strict?: boolean }>,
     // Audio wire format negotiated with OpenAI Realtime. Mirrors the Python
     // ``audio_format`` kwarg. Default ``g711_ulaw`` matches the Twilio/Telnyx
     // inbound codec so audio flows through without transcoding.
@@ -940,6 +943,58 @@ export class OpenAIRealtimeAdapter {
       item: { type: 'function_call_output', call_id: callId, output: result },
     }));
     this.ws?.send(JSON.stringify({ type: 'response.create' }));
+  }
+
+  /**
+   * Build the partial `session` body for a mid-session swap.
+   *
+   * v1-beta wire shape: flat `{ instructions, tools }`. The GA adapter
+   * overrides this to add the mandatory `"type": "realtime"` envelope.
+   * OpenAI merges partial `session.update` payloads server-side, so only the
+   * swapped fields are sent — audio formats, VAD tuning, and voice are
+   * untouched. Mirrors Python `_build_session_update_patch`.
+   */
+  protected buildSessionUpdatePatch(
+    instructions: string | undefined,
+    tools: Array<{ name: string; description: string; parameters: Record<string, unknown>; strict?: boolean }> | undefined,
+  ): Record<string, unknown> {
+    const session: Record<string, unknown> = {};
+    if (instructions !== undefined) session.instructions = instructions;
+    if (tools !== undefined) {
+      session.tools = tools.map((t) => {
+        const def: Record<string, unknown> = {
+          type: 'function',
+          name: t.name,
+          description: t.description,
+          parameters: t.parameters,
+        };
+        if (t.strict === true) def.strict = true;
+        return def;
+      });
+    }
+    return session;
+  }
+
+  /**
+   * Apply a mid-session `instructions` / `tools` swap (multi-agent handoff).
+   *
+   * Sends a partial `session.update` carrying only the supplied fields and
+   * records them on the adapter so reconnect/warmup paths rebuild the
+   * session with the post-handoff config. Voice is intentionally NOT
+   * updatable here — OpenAI Realtime rejects a voice change once the session
+   * has produced audio, so the session keeps the voice established at call
+   * start (documented limitation). Mirrors Python
+   * `OpenAIRealtimeAdapter.update_session`.
+   */
+  async updateSession(update: {
+    instructions?: string;
+    tools?: Array<{ name: string; description: string; parameters: Record<string, unknown>; strict?: boolean }>;
+  }): Promise<void> {
+    if (update.instructions !== undefined) this.instructions = update.instructions;
+    if (update.tools !== undefined) this.tools = update.tools;
+    const session = this.buildSessionUpdatePatch(update.instructions, update.tools);
+    if (Object.keys(session).length === 0 || !this.ws) return;
+    this.ws.send(JSON.stringify({ type: 'session.update', session }));
   }
 
   /** Stop the heartbeat, drop listeners, and close the Realtime WebSocket. */

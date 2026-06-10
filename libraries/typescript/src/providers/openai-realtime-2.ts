@@ -189,6 +189,24 @@ export class OpenAIRealtime2Adapter extends OpenAIRealtimeAdapter {
   }
 
   /**
+   * GA-shape partial `session.update` body for a mid-session swap.
+   *
+   * Identical to the base v1 patch plus the mandatory `"type": "realtime"`
+   * discriminator — the GA endpoint rejects a `session.update` without it.
+   * Used by {@link OpenAIRealtimeAdapter.updateSession} (inherited unchanged)
+   * for the multi-agent `handoff_to` flow. Mirrors the Python
+   * `OpenAIRealtime2Adapter._build_session_update_patch`.
+   */
+  protected override buildSessionUpdatePatch(
+    instructions: string | undefined,
+    tools: Array<{ name: string; description: string; parameters: Record<string, unknown>; strict?: boolean }> | undefined,
+  ): Record<string, unknown> {
+    const session = super.buildSessionUpdatePatch(instructions, tools);
+    if (Object.keys(session).length > 0) session.type = 'realtime';
+    return session;
+  }
+
+  /**
    * Open the Realtime WebSocket against the GA endpoint and apply the GA
    * session configuration. Header `OpenAI-Beta: realtime=v1` is OMITTED
    * (the GA endpoint rejects it). Wire shape uses nested `audio.{input,

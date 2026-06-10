@@ -33,6 +33,8 @@ export type {
   HookContext,
   RealtimeTurnDetection,
   SessionContext,
+  TransferCallOptions,
+  TransferCallResult,
 } from "./types";
 // `Guardrail` is intentionally not re-exported from `./types` — the public
 // `Guardrail` identifier is the class from `./public-api` (exported below),

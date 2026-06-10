@@ -306,6 +306,44 @@ export interface OpenAICompatibleConsult {
   readonly sessionHeader?: string;
 }
 
+/**
+ * Options for a call transfer initiated via the built-in `transfer_call`
+ * tool or `TelephonyBridge.transferCall`.
+ *
+ * Mirrors Python's `mode` / `summary` keywords on the per-carrier transfer
+ * functions.
+ */
+export interface TransferCallOptions {
+  /**
+   * `'cold'` (default) redirects the caller immediately — byte-identical to
+   * the historical blind transfer. `'warm'` puts the caller on hold music,
+   * dials the target with an announced {@link summary}, then bridges the two
+   * together (Twilio only for now; other carriers return an error envelope).
+   */
+  readonly mode?: 'cold' | 'warm';
+  /**
+   * Warm mode only — one or two sentences announced to the human agent
+   * before the caller is bridged (who is calling and what they need).
+   */
+  readonly summary?: string;
+}
+
+/**
+ * Result of a transfer attempt. Cold transfers may resolve `void` (legacy
+ * contract); warm transfers resolve a result envelope —
+ * `{ status: 'transferring', mode: 'warm', ... }` on success or
+ * `{ error: ... }` when warm transfer is unsupported on the carrier or the
+ * carrier REST sequence failed (the call keeps running in that case).
+ */
+export interface TransferCallResult {
+  readonly status?: string;
+  readonly mode?: 'cold' | 'warm';
+  readonly to?: string;
+  /** Per-call conference name (Twilio warm transfers). */
+  readonly conference?: string;
+  readonly error?: string;
+}
+
 // === Local mode ===
 
 /** Constructor options for `new Patter({...})` in local-server mode. */
@@ -634,6 +672,18 @@ export interface AgentOptions {
    * disables it. See {@link ConsultConfig}.
    */
   readonly consult?: ConsultConfig;
+  /**
+   * Multi-agent handoff targets: ``{ name: agentOptions }``. When set, Patter
+   * auto-injects a built-in ``handoff_to(name, reason?)`` tool (Realtime +
+   * Pipeline modes); calling it swaps the CURRENT call to the target agent's
+   * configuration mid-call — system prompt, tools, variables, guardrails,
+   * and onward ``handoffs`` are taken from the target. Audio infrastructure
+   * established at call start (STT/TTS/engine connection — and therefore
+   * voice on engines that cannot switch voice mid-session) is retained.
+   * Chained handoffs follow the TARGET's own ``handoffs`` map. ``undefined``
+   * (default) disables the tool. Mirrors Python ``Agent.handoffs``.
+   */
+  readonly handoffs?: Readonly<Record<string, AgentOptions>>;
   /**
    * When ``true``, ship ``systemPrompt`` to the LLM verbatim. Default
    * (``false``) prepends a phone-friendly preamble that instructs the

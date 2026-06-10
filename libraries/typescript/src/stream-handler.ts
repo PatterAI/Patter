@@ -20,7 +20,7 @@ import { RemoteMessageHandler, isRemoteUrl, isWebSocketUrl } from './remote-mess
 import { createHistoryManager } from './handler-utils';
 import { DefaultToolExecutor } from './llm-loop';
 import { MCPManager } from './tools/mcp-client';
-import type { AgentOptions, Guardrail, HookContext, PipelineMessageHandler, ToolDefinition, VADProvider, CarrierKind } from './types';
+import type { AgentOptions, Guardrail, HookContext, PipelineMessageHandler, ToolDefinition, TransferCallOptions, TransferCallResult, VADProvider, CarrierKind } from './types';
 import type { MetricsStore } from './dashboard/store';
 import { getLogger } from './logger';
 import { validateTwilioSid, TRANSFER_CALL_TOOL, END_CALL_TOOL } from './server';
@@ -143,8 +143,14 @@ export interface TelephonyBridge {
   /** Send a clear/interrupt event to stop audio playback. */
   sendClear(ws: WSWebSocket, streamSid: string): void;
 
-  /** Transfer the call to a different number or SIP URI via provider API. */
-  transferCall(callId: string, toNumber: string): Promise<void>;
+  /** Transfer the call to a different number or SIP URI via provider API.
+   *  ``options.mode === 'warm'`` requests a hold-announce-bridge warm
+   *  transfer (Twilio only for now); the default / omitted options run the
+   *  historical cold (blind) redirect byte-identically. Returns a
+   *  {@link TransferCallResult} envelope for warm mode (``{ error }`` when
+   *  unsupported / failed — the call keeps running); cold mode may resolve
+   *  ``void`` (legacy contract). */
+  transferCall(callId: string, toNumber: string, options?: TransferCallOptions): Promise<TransferCallResult | void>;
   /** Hang up the call via provider API. */
   endCall(callId: string, ws: WSWebSocket): Promise<void>;
   /** Send DTMF digits to the caller. Carriers using REST (Telnyx) ignore
@@ -222,7 +228,7 @@ function isValidE164(number: string): boolean {
 export function augmentWithBuiltinHandoffTools(
   userTools: ToolDefinition[] | null | undefined,
   callbacks: {
-    transferCall?: (number: string) => Promise<void>;
+    transferCall?: (number: string, options?: TransferCallOptions) => Promise<TransferCallResult | void>;
     endCall?: (reason: string) => Promise<void>;
   },
 ): ToolDefinition[] {
@@ -233,9 +239,25 @@ export function augmentWithBuiltinHandoffTools(
       ...TRANSFER_CALL_TOOL,
       handler: async (args: Record<string, unknown>): Promise<string> => {
         const number = typeof args.number === 'string' ? args.number : '';
+        const mode = typeof args.mode === 'string' && args.mode ? args.mode : 'cold';
+        const summary = typeof args.summary === 'string' ? args.summary : '';
+        if (mode !== 'cold' && mode !== 'warm') {
+          return JSON.stringify({
+            error: `Invalid transfer mode '${mode}' — use 'cold' or 'warm'`,
+            status: 'rejected',
+          });
+        }
         if (!isValidE164(number)) {
           return JSON.stringify({ error: 'Invalid phone number format', status: 'rejected' });
         }
+        if (mode === 'warm') {
+          const outcome = await transferCall(number, { mode: 'warm', summary });
+          if (outcome && typeof outcome === 'object') {
+            return JSON.stringify(outcome);
+          }
+          return JSON.stringify({ status: 'transferring', mode: 'warm', to: number });
+        }
+        // Cold mode: byte-identical to the historical behaviour.
         await transferCall(number);
         return JSON.stringify({ status: 'transferring', to: number });
       },
@@ -253,6 +275,86 @@ export function augmentWithBuiltinHandoffTools(
     });
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Multi-agent handoff — built-in handoff_to tool
+// ---------------------------------------------------------------------------
+
+/** Name of the built-in multi-agent handoff tool injected when
+ *  `AgentOptions.handoffs` is configured. */
+export const HANDOFF_TOOL_NAME = 'handoff_to';
+
+/**
+ * Build the `handoff_to` tool schema for the given target-agent names.
+ *
+ * The names are surfaced both as a JSON-schema `enum` (so the model can only
+ * pick a configured target) and in the description. Sorted for a
+ * deterministic schema. Parity with Python `build_handoff_tool`.
+ */
+export function buildHandoffTool(handoffNames: readonly string[]): {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+} {
+  const names = [...handoffNames].map(String).sort();
+  return {
+    name: HANDOFF_TOOL_NAME,
+    description:
+      'Hand the conversation off to another specialized agent. The call ' +
+      "continues seamlessly with the new agent's instructions and tools. " +
+      'Available agents: ' + names.join(', '),
+    parameters: {
+      type: 'object',
+      properties: {
+        name: {
+          type: 'string',
+          enum: names,
+          description: 'Name of the agent to hand the conversation to',
+        },
+        reason: {
+          type: 'string',
+          description: 'Brief reason for the handoff',
+        },
+      },
+      required: ['name'],
+    },
+  };
+}
+
+/**
+ * Return a copy of `current` with the LLM-visible configuration of the
+ * handoff `target` applied.
+ *
+ * Only conversational config swaps: `systemPrompt`, `tools`, `variables`,
+ * `guardrails`, `textTransforms`, `consult`, `handoffs` (so chained handoffs
+ * follow the target's own map), `disablePhonePreamble` and
+ * `toolCallPreambles`. Live audio infrastructure established at call start —
+ * STT/TTS/VAD instances, engine connection, carrier codec settings, and
+ * therefore the voice on engines that cannot switch voice mid-session — is
+ * intentionally retained from `current`. Parity with Python
+ * `_apply_handoff_target`.
+ */
+export function applyHandoffTarget(current: AgentOptions, target: AgentOptions): AgentOptions {
+  return {
+    ...current,
+    systemPrompt: target.systemPrompt,
+    tools: target.tools,
+    variables: target.variables,
+    guardrails: target.guardrails,
+    textTransforms: target.textTransforms,
+    consult: target.consult,
+    handoffs: target.handoffs,
+    disablePhonePreamble: target.disablePhonePreamble,
+    toolCallPreambles: target.toolCallPreambles,
+  };
+}
+
+/** Render the system-style transcript line recording a handoff. */
+export function handoffHistoryText(name: string, reason: string): string {
+  let text = `[handoff] Conversation handed to agent '${name}'`;
+  if (reason) text += ` — ${reason}`;
+  return text;
 }
 
 /**
@@ -1421,6 +1523,15 @@ export class StreamHandler {
    * should read ``this.resolvedTools ?? this.deps.agent.tools``.
    */
   private resolvedTools: ToolDefinition[] | null = null;
+  /**
+   * Per-call effective agent configuration. Starts as ``deps.agent`` and is
+   * REPLACED (never mutated — ``AgentOptions`` is shared and readonly) by a
+   * multi-agent ``handoff_to`` so the rest of the call runs with the target
+   * agent's LLM-visible config (system prompt, tools, variables, guardrails,
+   * text transforms, onward handoffs). Parity with the Python handler's
+   * ``self.agent`` swap.
+   */
+  private currentAgent: AgentOptions;
   private llmLoop: LLMLoop | null = null;
   /**
    * Per-call tool executor — provides retry-with-exponential-backoff and a
@@ -1585,6 +1696,7 @@ export class StreamHandler {
     this.ws = ws;
     this.caller = caller;
     this.callee = callee;
+    this.currentAgent = deps.agent;
 
     if (this.forwardSttWhileSpeaking) {
       getLogger().warn(
@@ -3267,18 +3379,13 @@ export class StreamHandler {
       }
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const providerModel = (this.deps.agent.llm as any)?.model ?? '';
-      // Inject the built-in transfer_call / end_call tools — parity with the
-      // Realtime path which injects them at `server.ts` and dispatches via
-      // the bridge in this file's tool dispatcher. Without this, pipeline-mode
-      // LLMs never see the built-ins and can't initiate a handoff or hangup
-      // no matter what the system prompt says.
-      const augmentedTools = augmentWithBuiltinHandoffTools(
-        (this.resolvedTools ?? this.deps.agent.tools) as ToolDefinition[] | null | undefined,
-        {
-          transferCall: (number) => this.deps.bridge.transferCall(this.callId, number),
-          endCall: () => this.deps.bridge.endCall(this.callId, this.ws),
-        },
-      );
+      // Inject the built-in transfer_call / end_call tools (and handoff_to
+      // when `agent.handoffs` is configured) — parity with the Realtime path
+      // which injects them at `server.ts` and dispatches via the bridge in
+      // this file's tool dispatcher. Without this, pipeline-mode LLMs never
+      // see the built-ins and can't initiate a handoff or hangup no matter
+      // what the system prompt says.
+      const augmentedTools = this.buildPipelineLlmTools();
       this.llmLoop = new LLMLoop(
         '', // apiKey unused when llmProvider is supplied
         providerModel, // propagate so calculateLlmCost can match the price row
@@ -3294,13 +3401,7 @@ export class StreamHandler {
     } else if (!this.deps.onMessage && this.deps.config.openaiKey) {
       let llmModel = this.deps.agent.model || 'gpt-4o-mini';
       if (llmModel.includes('realtime')) llmModel = 'gpt-4o-mini';
-      const augmentedTools = augmentWithBuiltinHandoffTools(
-        (this.resolvedTools ?? this.deps.agent.tools) as ToolDefinition[] | null | undefined,
-        {
-          transferCall: (number) => this.deps.bridge.transferCall(this.callId, number),
-          endCall: () => this.deps.bridge.endCall(this.callId, this.ws),
-        },
-      );
+      const augmentedTools = this.buildPipelineLlmTools();
       this.llmLoop = new LLMLoop(
         this.deps.config.openaiKey,
         llmModel,
@@ -3358,7 +3459,7 @@ export class StreamHandler {
 
     // Apply text transforms before the beforeSynthesize hook
     let transformed = sentence;
-    const transforms = this.deps.agent.textTransforms;
+    const transforms = this.currentAgent.textTransforms;
     if (transforms) {
       for (const fn of transforms) {
         transformed = fn(transformed);
@@ -5226,7 +5327,7 @@ export class StreamHandler {
     const guardAndSpeak = async (sentence: string, isFirst: boolean): Promise<void> => {
       // Fix 3/5: record first-sentence boundary before synthesizing first sentence.
       if (isFirst) this.metricsAcc.recordLlmFirstSentenceComplete();
-      const guard = checkGuardrails(sentence, this.deps.agent.guardrails);
+      const guard = checkGuardrails(sentence, this.currentAgent.guardrails);
       let sentenceText = guard
         ? (guard.replacement ?? "I'm sorry, I can't respond to that.")
         : sentence;
@@ -5384,7 +5485,7 @@ export class StreamHandler {
     hookExecutor: PipelineHookExecutor,
     hookCtx: HookContext,
   ): Promise<{ interrupted: boolean; finalText: string }> {
-    const guard = checkGuardrails(responseText, this.deps.agent.guardrails);
+    const guard = checkGuardrails(responseText, this.currentAgent.guardrails);
     let text = responseText;
     if (guard) {
       getLogger().debug(`Guardrail '${guard.name}' triggered (pipeline)`);
@@ -5970,7 +6071,7 @@ export class StreamHandler {
     // — guarded by `firstTokenForTurn`. The provider tag matches the
     // engine that produced the transcript (Realtime or ConvAI).
     await this.emitLlmFirstToken();
-    const triggered = checkGuardrails(outputText, this.deps.agent.guardrails);
+    const triggered = checkGuardrails(outputText, this.currentAgent.guardrails);
     if (triggered) {
       getLogger().debug(`Guardrail '${triggered.name}' triggered`);
       if (this.adapter instanceof OpenAIRealtimeAdapter) {
@@ -6271,18 +6372,49 @@ export class StreamHandler {
     const adapter = this.adapter as OpenAIRealtimeAdapter;
 
     if (fc.name === 'transfer_call') {
-      let transferArgs: { number?: string };
+      let transferArgs: { number?: string; mode?: string; summary?: string };
       try {
-        transferArgs = JSON.parse(fc.arguments || '{}') as { number?: string };
+        transferArgs = JSON.parse(fc.arguments || '{}') as { number?: string; mode?: string; summary?: string };
       } catch {
         transferArgs = {};
       }
       const transferTo = transferArgs.number ?? '';
+      const transferMode = transferArgs.mode || 'cold';
+      const transferSummary = transferArgs.summary ?? '';
+      if (transferMode !== 'cold' && transferMode !== 'warm') {
+        const rejection = JSON.stringify({
+          error: `Invalid transfer mode '${transferMode}' — use 'cold' or 'warm'`,
+          status: 'rejected',
+        });
+        await adapter.sendFunctionResult(fc.call_id, rejection);
+        await this.emitToolEvent('transfer_call', transferArgs, rejection);
+        return;
+      }
       if (!isValidE164(transferTo)) {
         getLogger().warn(`transfer_call rejected (${this.deps.bridge.label}): invalid number ${JSON.stringify(transferTo)}`);
         const rejection = JSON.stringify({ error: 'Invalid phone number format', status: 'rejected' });
         await adapter.sendFunctionResult(fc.call_id, rejection);
         await this.emitToolEvent('transfer_call', transferArgs, rejection);
+        return;
+      }
+      if (transferMode === 'warm') {
+        // Warm transfer: run the carrier sequence FIRST so an unsupported
+        // carrier / REST failure surfaces an error envelope and the AI keeps
+        // the call instead of going dark. Parity with the Python handler.
+        const outcome = await this.deps.bridge.transferCall(this.callId, transferTo, {
+          mode: 'warm',
+          summary: transferSummary,
+        });
+        const resultObj: TransferCallResult =
+          outcome && typeof outcome === 'object'
+            ? outcome
+            : { status: 'transferring', mode: 'warm', to: transferTo };
+        const result = JSON.stringify(resultObj);
+        await adapter.sendFunctionResult(fc.call_id, result);
+        await this.emitToolEvent('transfer_call', transferArgs, result);
+        if (!resultObj.error && this.deps.onTranscript) {
+          await this.deps.onTranscript({ role: 'system', text: `Call transferred (warm) to ${transferTo}`, call_id: this.callId });
+        }
         return;
       }
       getLogger().debug(`Transferring call to ${transferTo}`);
@@ -6312,6 +6444,11 @@ export class StreamHandler {
       if (this.deps.onTranscript) {
         await this.deps.onTranscript({ role: 'system', text: `Call ended: ${reason}`, call_id: this.callId });
       }
+      return;
+    }
+
+    if (fc.name === HANDOFF_TOOL_NAME && this.currentAgent.handoffs) {
+      await this.handleHandoffFunctionCall(fc);
       return;
     }
 
@@ -6407,6 +6544,196 @@ export class StreamHandler {
     // Emit a follow-up event with the result so the dashboard timeline
     // shows both invocation and outcome.
     await this.emitToolEvent(fc.name, parsedArgs, result);
+  }
+
+  /**
+   * The effective per-call tool list for the CURRENT agent: target tools plus
+   * the built-in consult tool when configured (deduped by name). Used after a
+   * handoff to rebuild `resolvedTools`.
+   */
+  private effectiveToolsForCurrentAgent(): ToolDefinition[] {
+    const effective = [...((this.currentAgent.tools as ToolDefinition[] | undefined) ?? [])];
+    if (this.currentAgent.consult) {
+      const consultTool = buildConsultTool(this.currentAgent.consult);
+      if (!effective.some((t) => t.name === consultTool.name)) {
+        effective.push(consultTool);
+      }
+    }
+    return effective;
+  }
+
+  /**
+   * Dispatch the built-in `handoff_to` tool on the Realtime path.
+   *
+   * Swaps the live session to the target agent's configuration via a
+   * mid-session `session.update` (new `instructions` + `tools`), updates
+   * `currentAgent` / `resolvedTools` so subsequent tool dispatch resolves
+   * against the target's tool list, and records a system-style history entry
+   * so transcripts show the handoff. ALWAYS sends a function result — an
+   * unknown name / malformed args produce an error envelope, never silence
+   * (a missing function result would wedge the model).
+   *
+   * Voice is intentionally NOT swapped: OpenAI Realtime rejects a voice
+   * change once the session has produced audio, so the session keeps the
+   * voice established at call start (documented limitation; an info log is
+   * emitted when the target requested a different voice). Parity with the
+   * Python `_handle_handoff_function_call`.
+   */
+  private async handleHandoffFunctionCall(fc: { call_id: string; name: string; arguments: string }): Promise<void> {
+    const adapter = this.adapter as OpenAIRealtimeAdapter;
+    let args: { name?: string; reason?: string } | null;
+    try {
+      args = JSON.parse(fc.arguments || '{}') as { name?: string; reason?: string };
+    } catch {
+      args = null;
+    }
+    if (!args || typeof args !== 'object') {
+      const result = JSON.stringify({ error: 'Malformed handoff_to arguments', status: 'rejected' });
+      await adapter.sendFunctionResult(fc.call_id, result);
+      await this.emitToolEvent(HANDOFF_TOOL_NAME, {}, result);
+      return;
+    }
+    const name = typeof args.name === 'string' ? args.name : '';
+    const reason = typeof args.reason === 'string' ? args.reason : '';
+    const handoffs = this.currentAgent.handoffs ?? {};
+    const target = handoffs[name];
+    if (!target) {
+      const result = JSON.stringify({
+        error: `Unknown handoff agent '${name}'`,
+        available: Object.keys(handoffs).sort(),
+      });
+      await adapter.sendFunctionResult(fc.call_id, result);
+      await this.emitToolEvent(HANDOFF_TOOL_NAME, args, result);
+      return;
+    }
+
+    if (target.voice && target.voice !== this.currentAgent.voice) {
+      getLogger().info(
+        `handoff_to '${name}': voice change is not supported mid-session on ` +
+          'OpenAI Realtime — keeping the current voice.',
+      );
+    }
+
+    this.currentAgent = applyHandoffTarget(this.currentAgent, target);
+    const effective = this.effectiveToolsForCurrentAgent();
+    this.resolvedTools = effective;
+
+    // Build the new wire tool list: target tools + built-ins (+ onward
+    // handoff tool when the target has its own handoff map). Mirrors the
+    // construction in `buildAIAdapter`.
+    const wireTools: Array<{ name: string; description: string; parameters: Record<string, unknown>; strict?: boolean }> = effective.map((t) => {
+      const entry: { name: string; description: string; parameters: Record<string, unknown>; strict?: boolean } = {
+        name: t.name,
+        description: t.description ?? '',
+        parameters: (t.parameters ?? {}) as Record<string, unknown>,
+      };
+      if ((t as { strict?: boolean }).strict === true) entry.strict = true;
+      return entry;
+    });
+    wireTools.push(TRANSFER_CALL_TOOL, END_CALL_TOOL);
+    const onwardHandoffs = this.currentAgent.handoffs;
+    if (onwardHandoffs && Object.keys(onwardHandoffs).length > 0) {
+      wireTools.push(buildHandoffTool(Object.keys(onwardHandoffs)));
+    }
+
+    const vars = this.deps.sanitizeVariables({ ...(this.currentAgent.variables ?? {}) });
+    const resolvedPrompt = this.deps.resolveVariables(this.currentAgent.systemPrompt, vars);
+    const newInstructions = applyToolCallPreambles(
+      resolvedPrompt,
+      (this.currentAgent as { toolCallPreambles?: boolean | string }).toolCallPreambles,
+    );
+
+    // session.update FIRST, then the function result — the result triggers
+    // the next `response.create`, which must already run under the new
+    // instructions so the model replies as the target agent.
+    await adapter.updateSession({ instructions: newInstructions, tools: wireTools });
+
+    const handoffText = handoffHistoryText(name, reason);
+    this.history.push({ role: 'system', text: handoffText, timestamp: Date.now() });
+    if (this.deps.onTranscript) {
+      await this.deps.onTranscript({ role: 'system', text: handoffText, call_id: this.callId });
+    }
+
+    const result = JSON.stringify({ status: 'handed_off', to: name });
+    await adapter.sendFunctionResult(fc.call_id, result);
+    await this.emitToolEvent(HANDOFF_TOOL_NAME, args, result);
+  }
+
+  /**
+   * Swap the live pipeline call to the named handoff target agent.
+   *
+   * Updates `currentAgent` (the shared `AgentOptions` is never mutated),
+   * swaps the LLM loop's system prompt + tool list so the NEXT turn runs as
+   * the target agent, and appends a system-style history entry recording the
+   * handoff. ALWAYS returns a tool-result string — an unknown name produces
+   * an error envelope, never silence.
+   *
+   * Live audio infrastructure (STT/TTS/VAD instances — and therefore the
+   * speaking voice) established at call start is intentionally retained:
+   * swapping a connected TTS provider mid-call is not supported in v1.
+   * Parity with the Python `_perform_handoff`.
+   */
+  private async performHandoff(name: string, reason: string): Promise<string> {
+    const handoffs = this.currentAgent.handoffs ?? {};
+    const target = handoffs[name];
+    if (!target) {
+      return JSON.stringify({
+        error: `Unknown handoff agent '${name}'`,
+        available: Object.keys(handoffs).sort(),
+      });
+    }
+    if (target.voice && target.voice !== this.currentAgent.voice) {
+      getLogger().info(
+        `handoff_to '${name}': voice change is not supported mid-call in ` +
+          'pipeline mode (the TTS adapter is already connected) — keeping the current voice.',
+      );
+    }
+    this.currentAgent = applyHandoffTarget(this.currentAgent, target);
+    this.resolvedTools = this.effectiveToolsForCurrentAgent();
+    const vars = this.deps.sanitizeVariables({ ...(this.currentAgent.variables ?? {}) });
+    const resolvedPrompt = this.deps.resolveVariables(this.currentAgent.systemPrompt, vars);
+    if (this.llmLoop) {
+      this.llmLoop.updateAgent({
+        systemPrompt: resolvedPrompt,
+        tools: this.buildPipelineLlmTools(),
+        disablePhonePreamble: this.currentAgent.disablePhonePreamble ?? false,
+      });
+    }
+    const handoffText = handoffHistoryText(name, reason);
+    this.history.push({ role: 'system', text: handoffText, timestamp: Date.now() });
+    if (this.deps.onTranscript) {
+      await this.deps.onTranscript({ role: 'system', text: handoffText, call_id: this.callId });
+    }
+    return JSON.stringify({ status: 'handed_off', to: name });
+  }
+
+  /**
+   * Build the full pipeline tool list for the CURRENT agent: user tools +
+   * built-in `transfer_call` / `end_call` + the `handoff_to` tool when
+   * handoff targets are configured. Re-invoked after a handoff so the LLM
+   * loop advertises the target agent's tools (including its onward handoff
+   * map). Parity with the Python `_build_combined_pipeline_tools`.
+   */
+  private buildPipelineLlmTools(): ToolDefinition[] {
+    const augmented = augmentWithBuiltinHandoffTools(
+      (this.resolvedTools ?? this.currentAgent.tools) as ToolDefinition[] | null | undefined,
+      {
+        transferCall: (number, options) => this.deps.bridge.transferCall(this.callId, number, options),
+        endCall: () => this.deps.bridge.endCall(this.callId, this.ws),
+      },
+    );
+    const handoffs = this.currentAgent.handoffs;
+    if (handoffs && Object.keys(handoffs).length > 0) {
+      augmented.push({
+        ...buildHandoffTool(Object.keys(handoffs)),
+        handler: async (args: Record<string, unknown>): Promise<string> =>
+          this.performHandoff(
+            typeof args.name === 'string' ? args.name : '',
+            typeof args.reason === 'string' ? args.reason : '',
+          ),
+      });
+    }
+    return augmented;
   }
 
   // ---------------------------------------------------------------------------

@@ -11,6 +11,16 @@ import { getLogger } from '../logger';
 
 const TWILIO_API_BASE = 'https://api.twilio.com/2010-04-01';
 
+/** Escape a string for safe inclusion in TwiML attribute / text content. */
+function twimlEscape(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
 /** Constructor options for {@link TwilioAdapter}. */
 export interface TwilioAdapterOptions {
   /** Optional Twilio edge region (e.g. ``ie1`` for Ireland). */
@@ -234,6 +244,57 @@ export class TwilioAdapter {
       }
     }
     return `<?xml version="1.0" encoding="UTF-8"?><Response><Connect><Stream url="${escapedUrl}">${paramTags}</Stream></Connect></Response>`;
+  }
+
+  /**
+   * TwiML that parks the CALLER leg in the warm-transfer conference.
+   *
+   * `startConferenceOnEnter="false"` keeps the caller on Twilio's default
+   * hold music until a participant with `startConferenceOnEnter="true"` (the
+   * human agent) joins; `endConferenceOnExit="true"` tears the conference
+   * down if the caller hangs up while waiting. When `statusCallbackUrl` is
+   * provided, conference lifecycle events (start / end / join / leave) are
+   * posted there for observability.
+   *
+   * Mirrors the Python adapter's `generate_warm_transfer_caller_twiml`.
+   */
+  static generateWarmTransferCallerTwiml(
+    conferenceName: string,
+    statusCallbackUrl = '',
+  ): string {
+    const esc = twimlEscape;
+    const callbackAttrs = statusCallbackUrl
+      ? ` statusCallback="${esc(statusCallbackUrl)}" statusCallbackEvent="start end join leave"`
+      : '';
+    return (
+      '<?xml version="1.0" encoding="UTF-8"?><Response><Dial>' +
+      `<Conference startConferenceOnEnter="false" endConferenceOnExit="true"${callbackAttrs}>` +
+      `${esc(conferenceName)}</Conference></Dial></Response>`
+    );
+  }
+
+  /**
+   * TwiML executed on the TARGET (human agent) leg of a warm transfer.
+   *
+   * Speaks the agent-provided handoff `summary` first (skipped when empty),
+   * then joins the conference with `startConferenceOnEnter="true"` — which
+   * starts the conference, stops the caller's hold music, and bridges the
+   * two. `endConferenceOnExit="true"` ends the conference (and therefore the
+   * caller leg) when the human agent hangs up.
+   *
+   * Mirrors the Python adapter's `generate_warm_transfer_target_twiml`.
+   */
+  static generateWarmTransferTargetTwiml(
+    conferenceName: string,
+    summary = '',
+  ): string {
+    const esc = twimlEscape;
+    const say = summary ? `<Say>${esc(summary)}</Say>` : '';
+    return (
+      `<?xml version="1.0" encoding="UTF-8"?><Response>${say}<Dial>` +
+      '<Conference startConferenceOnEnter="true" endConferenceOnExit="true">' +
+      `${esc(conferenceName)}</Conference></Dial></Response>`
+    );
   }
 
   /** Force-complete an in-progress call. */

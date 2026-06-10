@@ -745,6 +745,43 @@ export class Patter {
       );
     }
 
+    // Validate handoffs (multi-agent handoff targets). Mirrors Python
+    // ``Patter.agent`` validation: a plain ``{ name: agentOptions }`` record
+    // with non-empty string names and agent-shaped values.
+    if (working.handoffs !== undefined) {
+      if (
+        typeof working.handoffs !== 'object' ||
+        working.handoffs === null ||
+        Array.isArray(working.handoffs)
+      ) {
+        throw new TypeError(
+          'handoffs must be an object of { name: agentOptions }, got ' +
+            `${Array.isArray(working.handoffs) ? 'array' : typeof working.handoffs}.`,
+        );
+      }
+      for (const [hName, hAgent] of Object.entries(working.handoffs)) {
+        if (!hName) {
+          throw new Error(
+            'handoffs keys must be non-empty strings (the names the LLM ' +
+              'passes to handoff_to).',
+          );
+        }
+        if (typeof hAgent !== 'object' || hAgent === null || Array.isArray(hAgent)) {
+          throw new TypeError(
+            `handoffs['${hName}'] must be an agent options object (build with ` +
+              `phone.agent({...})), got ${Array.isArray(hAgent) ? 'array' : typeof hAgent}.`,
+          );
+        }
+      }
+      if (working.provider === 'elevenlabs_convai') {
+        getLogger().warn(
+          'handoffs is set but provider is ElevenLabs ConvAI; the handoff_to ' +
+            'tool is only injected in Realtime and Pipeline modes and will be ' +
+            'ignored for this agent.',
+        );
+      }
+    }
+
     // Validate llm — must implement the LLMProvider interface (duck-typed on
     // ``.stream`` being a function).  Surface a clear error if the caller
     // passed a plain object literal by mistake.
