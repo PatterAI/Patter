@@ -956,6 +956,7 @@ export class Patter {
     // ``start`` instead of paying the cold-handshake on first turn.
     this.embeddedServer.popPrewarmedConnections = this.popPrewarmedConnections;
     this.embeddedServer.aliasPrewarm = this.aliasPrewarm;
+    this.embeddedServer.speechEvents = this.speechEvents;
     // Forward the waste-recorder so the carrier status / hangup webhook
     // handlers can evict the cache when a call terminates before the
     // media stream starts (no-answer, busy, failed, canceled, or AMD

@@ -63,7 +63,12 @@ class ScheduleHandle:
 # on any subsequent loop (e.g. a new pytest-asyncio test, or an app that
 # recreates the loop on reload). Keying on id(loop) avoids that footgun while
 # keeping the "shared scheduler per loop" ergonomics.
-_schedulers_by_loop: dict[int, Any] = {}
+# Value is ``(loop, scheduler)``: ``id()`` of a garbage-collected loop can be
+# reallocated to a NEW loop, in which case the staleness check below would
+# probe the new (healthy) loop and hand back a scheduler bound to the dead
+# one. Storing the loop reference lets us compare identity directly (and
+# keeps the keyed loop alive, making the id stable).
+_schedulers_by_loop: dict[int, tuple[Any, Any]] = {}
 
 
 def _get_scheduler() -> Any:
@@ -74,11 +79,13 @@ def _get_scheduler() -> Any:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
-    existing = _schedulers_by_loop.get(id(loop))
-    if existing is not None:
+    entry = _schedulers_by_loop.get(id(loop))
+    if entry is not None:
+        cached_loop, existing = entry
         # If the loop was torn down under us (e.g. pytest-asyncio finished a
-        # test), drop the stale entry and build a fresh scheduler.
-        if getattr(loop, "is_closed", lambda: False)():
+        # test) or the id was reallocated to a different loop, drop the stale
+        # entry and build a fresh scheduler.
+        if cached_loop is not loop or getattr(loop, "is_closed", lambda: False)():
             _schedulers_by_loop.pop(id(loop), None)
         else:
             return existing
@@ -97,13 +104,13 @@ def _get_scheduler() -> Any:
         # APScheduler 4.x removed the event_loop kwarg; it picks the running loop automatically.
         scheduler = AsyncIOScheduler()
     scheduler.start()
-    _schedulers_by_loop[id(loop)] = scheduler
+    _schedulers_by_loop[id(loop)] = (loop, scheduler)
     return scheduler
 
 
 def reset_for_tests() -> None:
     """Tear down every cached scheduler. Call from test teardown to avoid state bleed."""
-    for sched in list(_schedulers_by_loop.values()):
+    for _loop, sched in list(_schedulers_by_loop.values()):
         try:
             sched.shutdown(wait=False)
         except Exception:  # pragma: no cover

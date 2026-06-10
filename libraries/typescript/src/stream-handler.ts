@@ -2485,6 +2485,11 @@ export class StreamHandler {
       // and without an early anchor the firstMessage is uninterruptible
       // during that window.
       await this.beginSpeaking(true);
+      // Echo-guard reference: beginSpeaking resets it, and only the
+      // streaming-LLM path repopulated it — under forward-STT-while-speaking
+      // the echo of the GREETING (the highest-echo window of the call)
+      // compared against an empty string and confirmed a phantom barge-in.
+      this.currentAgentSpokenText = this.deps.agent.firstMessage;
       let firstChunkSent = false;
       this.resetTtsCarry();
       // Check the prewarm cache first. When ``Patter.call`` was made
@@ -2802,12 +2807,19 @@ export class StreamHandler {
     };
 
     if (this.deps.onTranscript) {
-      await this.deps.onTranscript({
-        role: 'user',
-        text: transcript.text,
-        call_id: this.callId,
-        history: [...this.history.entries],
-      });
+      try {
+        await this.deps.onTranscript({
+          role: 'user',
+          text: transcript.text,
+          call_id: this.callId,
+          history: [...this.history.entries],
+        });
+      } catch (err) {
+        // Observer callbacks must never break the pipeline: a raise here
+        // propagated into the STT adapter's un-awaited emit loop and became
+        // a process-killing unhandled rejection.
+        getLogger().error(`onTranscript callback failed: ${String(err)}`);
+      }
     }
 
     // --- afterTranscribe hook ---
@@ -2849,13 +2861,19 @@ export class StreamHandler {
     // the transcript drain loop keeps running handleBargeIn against this LIVE
     // turn (the head-of-line-blocking fix). Parity with Python
     // ``create_task(_dispatch_turn(...))``.
+    // Attach the catch AT CREATION: dispatchTurn has try/finally only, and
+    // the next turn's ``await this.dispatchTask?.catch(...)`` attaches a
+    // handler far too late for Node's unhandled-rejection check — a throwing
+    // user onTranscript/onMetrics inside the turn killed the process.
     this.dispatchTask = this.dispatchTurn(
       filteredTranscript,
       hookExecutor,
       hookCtx,
       interrupted,
       historySnapshot,
-    );
+    ).catch((err) => {
+      getLogger().error(`LLM dispatch turn failed: ${String(err)}`);
+    });
   }
 
   /**
@@ -2963,11 +2981,12 @@ export class StreamHandler {
         await this.emitAssistantTranscript(spokenText);
         if (!interrupted) this.metricsAcc.recordTtsComplete(responseText);
       } else {
-        interrupted = (await this.runRegularLlm(responseText, hookExecutor, hookCtx)) || interrupted;
-        // ``runRegularLlm`` returns the possibly-replaced text via side effect on
-        // history; recompute responseText from the last history entry for the
-        // turn-complete record.
-        responseText = this.history.entries[this.history.entries.length - 1]?.text ?? responseText;
+        // ``runRegularLlm`` returns the possibly-replaced text directly —
+        // re-reading ``history[-1]`` raced a concurrently committed user
+        // turn and recorded the USER's text as this turn's completion.
+        const regular = await this.runRegularLlm(responseText, hookExecutor, hookCtx);
+        interrupted = regular.interrupted || interrupted;
+        responseText = regular.finalText;
       }
 
       // Skip turn-complete when barge-in already recorded the turn as
@@ -3058,14 +3077,12 @@ export class StreamHandler {
    */
   private handleBargeIn(transcript: { text?: string; isFinal?: boolean }): boolean {
     if (!transcript.text || !this.isSpeaking) return false;
-    if (this.tailGraceActive) {
-      // Tail-grace transcript = next turn, not a barge-in. End the grace and
-      // let the transcript dispatch normally (parity with the async path).
-      this.endTailGraceForNewTurn();
-      return false;
-    }
-    // Echo guard (parity with handleBargeInAsync) — never let the agent's own
-    // forwarded TTS echo barge in on itself.
+    // Echo guard FIRST — before the tail-grace rescue: the grace window
+    // (~1.5 s after TTS) is exactly when the agent's final-sentence echo
+    // arrives via STT. Running the rescue first treated that echo as "the
+    // next turn", flipped isSpeaking off, and commitTranscript's
+    // isSpeaking-gated echo check could no longer fire — the agent answered
+    // its own words as a phantom user turn. Mirrors the Python fix.
     if (
       this.forwardSttWhileSpeaking &&
       looksLikeEcho(transcript.text, this.currentAgentSpokenText)
@@ -3075,6 +3092,12 @@ export class StreamHandler {
           transcript.text.slice(0, 40),
         )}`,
       );
+      return false;
+    }
+    if (this.tailGraceActive) {
+      // Tail-grace transcript = next turn, not a barge-in. End the grace and
+      // let the transcript dispatch normally (parity with the async path).
+      this.endTailGraceForNewTurn();
       return false;
     }
     if (this.bargeInStrategies.length === 0) {
@@ -3471,7 +3494,7 @@ export class StreamHandler {
     responseText: string,
     hookExecutor: PipelineHookExecutor,
     hookCtx: HookContext,
-  ): Promise<boolean> {
+  ): Promise<{ interrupted: boolean; finalText: string }> {
     const guard = checkGuardrails(responseText, this.deps.agent.guardrails);
     let text = responseText;
     if (guard) {
@@ -3481,6 +3504,10 @@ export class StreamHandler {
 
     this.metricsAcc.recordLlmComplete();
     await this.emitAssistantTranscript(text);
+    // Echo-guard reference: only the streaming path populated it, so the
+    // echo of non-streaming replies compared against an empty string under
+    // forward-STT-while-speaking and committed as a phantom user turn.
+    this.currentAgentSpokenText = text;
 
     const chunker = new SentenceChunker();
     const sentences = [...chunker.push(text), ...chunker.flush()];
@@ -3506,7 +3533,7 @@ export class StreamHandler {
     }
 
     if (!interrupted) this.metricsAcc.recordTtsComplete(text);
-    return interrupted;
+    return { interrupted, finalText: text };
   }
 
   /** Handle streaming WebSocket remote response with TTS. */
@@ -3516,9 +3543,23 @@ export class StreamHandler {
     this.metricsAcc.recordLlmComplete();
     await this.beginSpeaking();
     let wsTtsStarted = false;
+    let interrupted = false;
     try {
       for await (const chunk of this.deps.remoteHandler.callWebSocket(onMessage, msgData)) {
+        // Honour barge-in at the OUTER loop too: only breaking the inner
+        // audio loop kept consuming the remote stream and STARTED A FRESH
+        // TTS SYNTHESIS PER CHUNK after the caller interrupted — billed
+        // audio nobody hears, and the next user turn queued behind the
+        // remote stream's end.
+        if (!this.isSpeaking) {
+          interrupted = true;
+          break;
+        }
         parts.push(chunk);
+        // Echo-guard reference: without it, the echo of WS-remote replies
+        // compared against an empty string under forward-STT-while-speaking
+        // and committed as a phantom user turn.
+        this.currentAgentSpokenText = parts.join('');
         if (this.tts) {
           this.resetTtsCarry();
           for await (const audioChunk of this.tts.synthesizeStream(chunk)) {
@@ -3537,8 +3578,13 @@ export class StreamHandler {
       this.resetTtsCarry();
     }
     const responseText = parts.join('');
-    this.metricsAcc.recordTtsComplete(responseText);
-    await this.emitTurnMetrics(this.metricsAcc.recordTurnComplete(responseText));
+    if (!interrupted) {
+      // Gate billing/turn-complete on a clean finish like the other paths —
+      // recordTtsComplete on an interrupted turn billed full characters for
+      // audio the caller never heard.
+      this.metricsAcc.recordTtsComplete(responseText);
+      await this.emitTurnMetrics(this.metricsAcc.recordTurnComplete(responseText));
+    }
     if (responseText) await this.emitAssistantTranscript(responseText);
   }
 
@@ -4421,7 +4467,13 @@ export class StreamHandler {
       notifyDashboard(callEndData);
     } catch { /* ignore */ }
     if (this.deps.onCallEnd) {
-      await this.deps.onCallEnd(callEndData);
+      try {
+        await this.deps.onCallEnd(callEndData);
+      } catch (err) {
+        // On the ws 'close' path nothing upstream catches — a throwing user
+        // callback became an unhandled rejection that killed the process.
+        getLogger().error(`onCallEnd callback failed: ${String(err)}`);
+      }
     }
   }
 }

@@ -91,18 +91,26 @@ describe('configureTwilioNumber', () => {
 });
 
 describe('configureTelnyxNumber', () => {
-  it('PATCHes /phone_numbers/{number} with connection_id', async () => {
+  it('PATCHes the base /phone_numbers/{number} with connection_id, then /voice with settings', async () => {
     const calls = mockFetch(() => new Response('{}', { status: 200 }));
 
     await configureTelnyxNumber('tk_live', '100200', '+15550001234');
 
-    expect(calls).toHaveLength(1);
+    // connection_id lives on the BASE endpoint — the /voice sub-resource
+    // silently ignores it (the old single-PATCH 'succeeded' without ever
+    // linking the number to the Call Control app).
+    expect(calls).toHaveLength(2);
     expect(calls[0].url).toBe(
-      `https://api.telnyx.com/v2/phone_numbers/${encodeURIComponent('+15550001234')}/voice`,
+      `https://api.telnyx.com/v2/phone_numbers/${encodeURIComponent('+15550001234')}`,
     );
     expect(calls[0].init?.method).toBe('PATCH');
     expect(JSON.parse(calls[0].init?.body as string)).toEqual({
       connection_id: '100200',
+    });
+    expect(calls[1].url).toBe(
+      `https://api.telnyx.com/v2/phone_numbers/${encodeURIComponent('+15550001234')}/voice`,
+    );
+    expect(JSON.parse(calls[1].init?.body as string)).toEqual({
       tech_prefix_enabled: false,
     });
   });
@@ -152,7 +160,9 @@ describe('autoConfigureCarrier', () => {
       webhookHost: 'abc.trycloudflare.com',
     });
 
-    expect(calls).toHaveLength(1);
+    // Two PATCHes: base endpoint (connection_id) + /voice (settings).
+    expect(calls).toHaveLength(2);
     expect(calls[0].url).toContain('/phone_numbers/');
+    expect(calls[1].url).toContain('/voice');
   });
 });

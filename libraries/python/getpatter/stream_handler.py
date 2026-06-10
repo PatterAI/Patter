@@ -289,8 +289,21 @@ def _augment_with_builtin_handoff_tools(
 
         async def _transfer_handler(arguments: dict, call_context: dict) -> str:
             number = (arguments or {}).get("number", "")
+            # Validate BEFORE attempting the transfer: the carrier helpers
+            # silently no-op on a non-E.164 target, so the old path told the
+            # LLM "Transferring to 555-1234" while nothing happened and the
+            # call sat in limbo. Mirrors the realtime path's rejection
+            # envelope and the TS pipeline.
+            if not _validate_e164(number):
+                logger.warning(
+                    "transfer_call rejected: invalid number %s",
+                    mask_phone_number(number),
+                )
+                return json.dumps(
+                    {"error": "Invalid phone number format", "status": "rejected"}
+                )
             await transfer_fn(number)
-            return f"Transferring to {number}" if number else "Transfer rejected"
+            return f"Transferring to {number}"
 
         out.append({**TRANSFER_CALL_TOOL, "handler": _transfer_handler})
     if hangup_fn is not None:
@@ -450,11 +463,6 @@ def apply_tool_call_preambles(prompt: str, knob: bool | str) -> str:
 
 def apply_call_overrides(agent, overrides: dict):
     """Return a new Agent with per-call config overrides applied."""
-    from dataclasses import asdict
-
-    from getpatter.models import (
-        Agent as _Agent,
-    )
     from getpatter.models import (
         STTConfig as _STTCfg,
     )
@@ -482,9 +490,15 @@ def apply_call_overrides(agent, overrides: dict):
     if "variables" in overrides:
         fields["variables"] = overrides["variables"]
     if fields:
-        base = {k: v for k, v in asdict(agent).items() if k not in fields}
-        base.update(fields)
-        agent = _Agent(**base)
+        # ``dataclasses.replace`` — NOT an asdict() round-trip: asdict
+        # recursively converted nested configs (STTConfig/TTSConfig/
+        # PipelineHooks) into plain dicts and deep-copied live provider/VAD
+        # objects holding sockets and ONNX sessions, so ANY per-call
+        # override crashed the call later with AttributeError on the
+        # dict-ified config.
+        from dataclasses import replace as _dc_replace
+
+        agent = _dc_replace(agent, **fields)
         logger.debug("Per-call config overrides applied: %s", list(fields.keys()))
     return agent
 
@@ -727,8 +741,16 @@ class StreamHandler(ABC):
         # so every realtime-style subclass (OpenAI Realtime + ConvAI) shares it.
         # Parity with TS ``currentTurnIndex``.
         self._current_turn_index: int | None = None
-        self.conversation_history: deque = conversation_history or deque(maxlen=200)
-        self.transcript_entries: deque = transcript_entries or deque(maxlen=200)
+        # ``is not None`` — NOT ``or``: the bridges pass freshly-created EMPTY
+        # deques (falsy!), so ``or`` silently allocated private replacements
+        # and the bridge-side deques stayed empty forever — every
+        # ``on_call_end`` payload carried an empty transcript/history.
+        self.conversation_history: deque = (
+            conversation_history if conversation_history is not None else deque(maxlen=200)
+        )
+        self.transcript_entries: deque = (
+            transcript_entries if transcript_entries is not None else deque(maxlen=200)
+        )
         # Optional `SpeechEvents` dispatcher. When set, the handler emits
         # turn-taking edges (VAD start/stop, EOU commit, agent first/last
         # wire chunk) as the call progresses. None == prior behaviour.
@@ -959,6 +981,31 @@ class StreamHandler(ABC):
     async def cleanup(self) -> None:
         """Close provider connections and cancel background tasks."""
 
+
+    async def _safe_on_transcript(self, payload: dict) -> None:
+        """Invoke the user's ``on_transcript`` with exception containment.
+
+        A raise from user code inside the realtime event-forwarding loop
+        permanently killed it — inbound audio kept flowing to the provider
+        while nothing came back (zombie call). Observer callbacks must never
+        break the pipeline.
+        """
+        if not self.on_transcript:
+            return
+        try:
+            await self.on_transcript(payload)
+        except Exception:  # noqa: BLE001 - user callback containment
+            logger.exception("on_transcript callback failed")
+
+    async def _safe_on_metrics(self, payload: dict) -> None:
+        """Invoke the user's ``on_metrics`` with exception containment."""
+        if not self.on_metrics:
+            return
+        try:
+            await self.on_metrics(payload)
+        except Exception:  # noqa: BLE001 - user callback containment
+            logger.exception("on_metrics callback failed")
+
     async def _emit_turn_metrics(self, turn, *, call_id: str | None = None) -> None:
         """Emit a completed turn to the user-supplied on_metrics callback.
 
@@ -990,7 +1037,7 @@ class StreamHandler(ABC):
 
         if not self.on_metrics or turn is None or self.metrics is None:
             return
-        await self.on_metrics(
+        await self._safe_on_metrics(
             {
                 "call_id": call_id if call_id is not None else self.call_id,
                 "turn": turn,
@@ -1104,7 +1151,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
             # FIX-5: stamp the reserved turn index so the dashboard can order
             # this assistant line relative to its user line by (turn_index,
             # role) even when the lines arrive out of order.
-            await self.on_transcript(
+            await self._safe_on_transcript(
                 {
                     "role": "assistant",
                     "text": text,
@@ -1240,7 +1287,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         )
         self.transcript_entries.append({"role": "tool", "text": text})
         if self.on_transcript:
-            await self.on_transcript(
+            await self._safe_on_transcript(
                 {
                     "role": "tool",
                     "text": text,
@@ -1572,7 +1619,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                         # stamped with the reserved turn index so the dashboard
                         # can place it ABOVE its assistant line even if that
                         # line was already surfaced.
-                        await self.on_transcript(
+                        await self._safe_on_transcript(
                             {
                                 "role": "user",
                                 "text": ev_data,
@@ -1633,15 +1680,38 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                             llm_provider="openai_realtime",
                             model=self.agent.model,
                         )
+                        # Evaluate on the ACCUMULATED text: per-delta checks
+                        # never matched a blocked term split across deltas.
                         blocked, guard_name = evaluate_guardrails(
-                            self.agent, response_text
+                            self.agent, current_agent_text + response_text
                         )
                         if blocked:
                             await self._adapter.cancel_response()
+                            # Drop the blocked sentence's audio already queued
+                            # at the carrier — cancel_response alone let it
+                            # play out in full.
+                            try:
+                                await self.audio_sender.send_clear()
+                            except Exception as exc:  # noqa: BLE001
+                                logger.debug(
+                                    "send_clear on guardrail block failed: %s", exc
+                                )
                             replacement = get_guardrail_replacement(
                                 self.agent, guard_name
                             )
-                            await self._adapter.send_text(replacement)
+                            # Speak the replacement as the ASSISTANT's own
+                            # response (instructed response.create) —
+                            # ``send_text`` injected it as a phantom
+                            # ``role:user`` turn, so the model REPLIED to
+                            # "I can't respond to that" as if the caller had
+                            # said it.
+                            send_re = getattr(
+                                self._adapter, "send_reassurance", None
+                            )
+                            if callable(send_re):
+                                await send_re(replacement)
+                            else:
+                                await self._adapter.send_text(replacement)
                             current_agent_text = ""
                         else:
                             # Accumulate deltas — push single entry on response_done
@@ -1834,7 +1904,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                         if self._transfer_fn:
                             await self._transfer_fn(transfer_number)
                         if self.on_transcript:
-                            await self.on_transcript(
+                            await self._safe_on_transcript(
                                 {
                                     "role": "system",
                                     "text": f"Call transferred to {transfer_number}",
@@ -1866,7 +1936,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                         if self._hangup_fn:
                             await self._hangup_fn()
                         if self.on_transcript:
-                            await self.on_transcript(
+                            await self._safe_on_transcript(
                                 {
                                     "role": "system",
                                     "text": f"Call ended: {reason}",
@@ -1893,8 +1963,24 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                                     args = json.loads(args)
                                 except (json.JSONDecodeError, ValueError):
                                     logger.warning(
-                                        "function_call %s: malformed JSON args, skipping",
+                                        "function_call %s: malformed JSON args",
                                         func_data["name"],
+                                    )
+                                    # A skipped call leaves a dangling
+                                    # function_call item — the model waits
+                                    # for an output that never comes (dead
+                                    # air). Answer with an error envelope
+                                    # instead. Mirrors TS.
+                                    await self._adapter.send_function_result(
+                                        func_data["call_id"],
+                                        json.dumps(
+                                            {
+                                                "error": "Tool arguments were not "
+                                                "valid JSON; the call was not "
+                                                "executed.",
+                                                "fallback": True,
+                                            }
+                                        ),
                                     )
                                     continue
                             # Surface the invocation BEFORE execution so the
@@ -1946,6 +2032,27 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                             # Emit follow-up event with result so timeline
                             # shows full call/return semantics.
                             await self._emit_tool_event(func_data["name"], args, result)
+                        else:
+                            # Unknown (hallucinated) tool name, or a
+                            # schema-only tool with neither webhook nor
+                            # handler: ALWAYS answer the function_call —
+                            # silence left a dangling item and the tool turn
+                            # never completed (dead air). Mirrors TS.
+                            logger.warning(
+                                "function_call for unregistered tool '%s' — "
+                                "returning error envelope",
+                                func_data.get("name", ""),
+                            )
+                            await self._adapter.send_function_result(
+                                func_data["call_id"],
+                                json.dumps(
+                                    {
+                                        "error": f"Tool '{func_data.get('name', '')}' "
+                                        "is not registered",
+                                        "fallback": True,
+                                    }
+                                ),
+                            )
 
                 elif ev_type == "error":
                     # FIX-4: surface provider-side Realtime ``error`` events.
@@ -2187,7 +2294,7 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
                     )
                     self.transcript_entries.append({"role": "user", "text": ev_data})
                     if self.on_transcript:
-                        await self.on_transcript(
+                        await self._safe_on_transcript(
                             {
                                 "role": "user",
                                 "text": ev_data,
@@ -2229,7 +2336,7 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
                             {"role": "assistant", "text": current_agent_text}
                         )
                         if self.on_transcript:
-                            await self.on_transcript(
+                            await self._safe_on_transcript(
                                 {
                                     "role": "assistant",
                                     "text": current_agent_text,
@@ -2929,6 +3036,22 @@ class PipelineStreamHandler(StreamHandler):
                 # buffer accumulated during the intro is flushed and
                 # the next user utterance is recognised cleanly.
                 await self._end_speaking_with_grace()
+            if first_chunk_sent:
+                # History append must NOT depend on metrics being enabled:
+                # with ``metrics=None`` the greeting was absent from LLM
+                # context (the model could re-greet) and from transcripts.
+                self.conversation_history.append(
+                    {
+                        "role": "assistant",
+                        "text": self.agent.first_message,
+                        "timestamp": time.time(),
+                    }
+                )
+                # Echo-guard reference: under forward-STT-while-speaking the
+                # guard compared echoes against an EMPTY reference during the
+                # greeting (the highest-echo window of the call) and treated
+                # the agent's own first words as a user barge-in.
+                self._current_agent_spoken_text = self.agent.first_message
             if first_chunk_sent and self.metrics is not None:
                 # Bill the firstMessage TTS characters — they were synthesised
                 # at ElevenLabs (or the configured TTS provider) and the
@@ -2940,13 +3063,6 @@ class PipelineStreamHandler(StreamHandler):
                 # canonical accumulator entry point for TTS char billing.
                 self.metrics.record_tts_complete(self.agent.first_message)
                 turn = self.metrics.record_turn_complete(self.agent.first_message)
-                self.conversation_history.append(
-                    {
-                        "role": "assistant",
-                        "text": self.agent.first_message,
-                        "timestamp": time.time(),
-                    }
-                )
                 await self._emit_turn_metrics(turn)
 
         # CallControl for pipeline mode
@@ -2992,6 +3108,11 @@ class PipelineStreamHandler(StreamHandler):
             # END_CALL_TOOL]``). Without this, pipeline-mode LLMs never see
             # the built-ins and can't initiate a handoff or hangup no matter
             # what the system prompt says.
+            # Discover MCP tools BEFORE building the tool list: pipeline
+            # mode silently ignored ``agent.mcp_servers`` (only the realtime
+            # handler called this), despite the documented mode-agnostic
+            # contract. No-op without configured servers.
+            await self._init_mcp_tools()
             # Merge the built-in consult tool (if configured) before the
             # handoff built-ins so the pipeline LLM sees it too.
             self.agent = _inject_consult_tool(self.agent)
@@ -3043,7 +3164,7 @@ class PipelineStreamHandler(StreamHandler):
                 # closed WS and end the call.
                 if self._hangup_fn is not None:
                     try:
-                        await self._hangup_fn(self.call_id)
+                        await self._hangup_fn()
                     except Exception:
                         pass
                 return
@@ -3073,7 +3194,7 @@ class PipelineStreamHandler(StreamHandler):
         )
         self.transcript_entries.append({"role": "assistant", "text": text})
         if self.on_transcript is not None:
-            await self.on_transcript(
+            await self._safe_on_transcript(
                 {
                     "role": "assistant",
                     "text": text,
@@ -3114,7 +3235,7 @@ class PipelineStreamHandler(StreamHandler):
         )
         self.transcript_entries.append({"role": "tool", "text": call_text})
         if self.on_transcript is not None:
-            await self.on_transcript(
+            await self._safe_on_transcript(
                 {
                     "role": "tool",
                     "text": call_text,
@@ -3136,7 +3257,7 @@ class PipelineStreamHandler(StreamHandler):
             )
             self.transcript_entries.append({"role": "tool", "text": res_text})
             if self.on_transcript is not None:
-                await self.on_transcript(
+                await self._safe_on_transcript(
                     {
                         "role": "tool",
                         "text": res_text,
@@ -3576,6 +3697,11 @@ class PipelineStreamHandler(StreamHandler):
             response_text = get_guardrail_replacement(self.agent, guard_name)
 
         await self._emit_assistant_transcript(response_text)
+        # Echo-guard reference: only the streaming path populated it, so
+        # under forward-STT-while-speaking the echo of non-streaming
+        # (on_message / webhook) replies compared against an empty string
+        # and was committed as a phantom user turn.
+        self._current_agent_spoken_text = response_text
         # Use sentence chunking + hooks for consistent behavior with streaming path
         hooks = getattr(self.agent, "hooks", None)
         hook_executor = PipelineHookExecutor(hooks)
@@ -3621,6 +3747,54 @@ class PipelineStreamHandler(StreamHandler):
         """
         if not (transcript.text and self._is_speaking):
             return
+        # Echo guard FIRST — before the tail-grace rescue: the grace window
+        # (the ~1.5 s after TTS ends) is exactly when the agent's
+        # final-sentence echo arrives via STT. Running the rescue first
+        # treated that echo as "the next turn", flipped speaking state off,
+        # and the downstream isSpeaking-gated echo check could no longer
+        # fire — the agent answered its own words as a phantom user turn.
+        # Only active under ``_forward_stt_while_speaking`` (the only path
+        # that feeds TTS audio to STT). Mirrors TS ``handleBargeIn``.
+        if getattr(self, "_forward_stt_while_speaking", False) and _looks_like_echo(
+            transcript.text, getattr(self, "_current_agent_spoken_text", "")
+        ):
+            logger.info(
+                "Barge-in suppressed: transcript matches agent's own speech "
+                "(echo) — %r",
+                sanitize_log_value(transcript.text[:40]),
+            )
+            return
+        # Near-duplicate / hallucination guard BEFORE cancelling: Deepgram
+        # yields both the speech_final and a later is_final frame for the
+        # same utterance — the twin arriving up to 2 s after dispatch found
+        # the agent speaking, cancelled its brand-new turn, and was THEN
+        # dropped as a duplicate by _commit_transcript (agent went silent
+        # for the turn). Apply the same filters here, with the commit
+        # window semantics (exact dup ≤2 s, near-dup ≤0.5 s).
+        _normalised = transcript.text.strip().lower()
+        _since_last = time.time() - getattr(self, "_last_commit_at", 0.0)
+        if _is_stt_hallucination(_normalised):
+            logger.debug(
+                "Barge-in skipped: STT hallucination %r",
+                sanitize_log_value(transcript.text[:40]),
+            )
+            return
+        if _since_last < 2.0 and _normalised == getattr(
+            self, "_last_commit_text", ""
+        ):
+            logger.debug(
+                "Barge-in skipped: duplicate of just-committed transcript %r",
+                sanitize_log_value(transcript.text[:40]),
+            )
+            return
+        if _since_last < 0.5 and _is_near_duplicate(
+            _normalised, getattr(self, "_last_commit_text", "")
+        ):
+            logger.debug(
+                "Barge-in skipped: near-duplicate of just-committed transcript %r",
+                sanitize_log_value(transcript.text[:40]),
+            )
+            return
         # Defensive ``getattr`` — test fixtures build the handler via
         # ``object.__new__`` and skip ``__init__`` (no tail-grace state).
         if getattr(self, "_tail_grace_active", False):
@@ -3631,21 +3805,6 @@ class PipelineStreamHandler(StreamHandler):
             # normal new turn. Closes the race where a transcript lands
             # before the VAD speech_start rescue fires.
             await self._end_tail_grace_for_new_turn()
-            return
-        # Echo guard: when audio is forwarded to STT during TTS (no effective
-        # AEC), the agent's own voice can be transcribed and would otherwise
-        # barge in on itself. Drop any transcript that looks like a fragment of
-        # what the agent is currently saying. Only active under
-        # ``_forward_stt_while_speaking`` (the only path that feeds TTS audio to
-        # STT), so the default VAD path is unaffected. Mirrors TS ``handleBargeIn``.
-        if getattr(self, "_forward_stt_while_speaking", False) and _looks_like_echo(
-            transcript.text, getattr(self, "_current_agent_spoken_text", "")
-        ):
-            logger.info(
-                "Barge-in suppressed: transcript matches agent's own speech "
-                "(echo) — %r",
-                sanitize_log_value(transcript.text[:40]),
-            )
             return
         if not self._can_barge_in():
             aec_state = "on" if getattr(self, "_aec", None) is not None else "off"
@@ -3756,6 +3915,13 @@ class PipelineStreamHandler(StreamHandler):
                 await self.audio_sender.send_clear()
             except Exception as exc:
                 logger.debug("send_clear during barge-in failed: %s", exc)
+            # Replay the self-hearing ring so the words the user spoke
+            # BEFORE the confirming transcript reach STT (the models.py
+            # contract for confirmed barge-ins promised this flush).
+            try:
+                await self._flush_inbound_audio_ring()
+            except Exception as exc:  # noqa: BLE001 - best-effort replay
+                logger.debug("barge-in ring flush failed: %s", exc)
             if self.metrics is not None:
                 self.metrics.record_tts_stopped()
                 self.metrics.record_turn_interrupted()
@@ -3780,6 +3946,13 @@ class PipelineStreamHandler(StreamHandler):
         logger.info(
             "Barge-in PENDING (VAD speech_start during TTS); awaiting strategy confirmation"
         )
+        # Replay the ring NOW: the strategies confirm on transcripts, so STT
+        # must see the user's leading words while the pending window runs
+        # (on_audio_received also forwards live frames while pending).
+        try:
+            await self._flush_inbound_audio_ring()
+        except Exception as exc:  # noqa: BLE001 - best-effort replay
+            logger.debug("pending barge-in ring flush failed: %s", exc)
         try:
             self._barge_in_pending_task = asyncio.create_task(
                 self._pending_barge_in_timeout()
@@ -3955,9 +4128,19 @@ class PipelineStreamHandler(StreamHandler):
         try:
             await task
         except asyncio.CancelledError:  # pragma: no cover - teardown path
-            pass
-        except Exception as exc:  # pragma: no cover - already handled in dispatch
-            logger.debug("backgrounded dispatch raised: %s", exc)
+            # Re-raise when WE are the one being cancelled (STT-loop
+            # teardown): swallowing it here defeated the cancelling task's
+            # own cleanup and let a racing transcript respawn a dispatch
+            # that survived teardown.
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise
+        except Exception as exc:
+            # NOT debug: _dispatch_turn's on_message path has no internal
+            # handler — webhook raise_for_status / 30 s read timeouts / user
+            # exceptions all surface here, and at DEBUG the caller heard
+            # silence while operators saw nothing.
+            logger.exception("LLM dispatch turn failed: %s", exc)
         finally:
             # Only clear if it is still the task we awaited — a re-entrant
             # launch could have replaced it (it cannot today: the loop is the
@@ -4044,7 +4227,7 @@ class PipelineStreamHandler(StreamHandler):
         )
 
         if self.on_transcript:
-            await self.on_transcript(
+            await self._safe_on_transcript(
                 {
                     "role": "user",
                     "text": transcript_text,
@@ -4417,7 +4600,16 @@ class PipelineStreamHandler(StreamHandler):
                 # agent's own voice may be transcribed as a phantom
                 # interruption; pair with agent.barge_in_strategies. Default
                 # OFF → byte-identical push-and-return.
-                if not self._forward_stt_while_speaking:
+                #
+                # ALSO forward while a strategy barge-in is PENDING: the
+                # strategies are consulted on transcripts, but with audio
+                # withheld from STT no transcript could ever arrive — the
+                # pending state always timed out and barge-in was
+                # structurally impossible with strategies configured.
+                _pending = (
+                    getattr(self, "_barge_in_pending_since", None) is not None
+                )
+                if not self._forward_stt_while_speaking and not _pending:
                     return
 
         # before_send_to_stt hook — gate/transform the audio chunk before it
@@ -4432,7 +4624,19 @@ class PipelineStreamHandler(StreamHandler):
                 return
             pcm = processed
 
-        await self._stt.send_audio(pcm)
+        try:
+            await self._stt.send_audio(pcm)
+        except Exception as _exc:  # noqa: BLE001 - degrade, don't kill the call
+            # A dropped STT WebSocket used to propagate out of the carrier
+            # read loop and tear the whole call down as "Stream error".
+            # Degrade to dropped frames (rate-limited log) like TS; the STT
+            # loop's own error path handles recovery/escalation.
+            now = time.time()
+            last = getattr(self, "_stt_send_error_logged_at", 0.0)
+            if now - last > 5.0:
+                self._stt_send_error_logged_at = now
+                logger.warning("STT send_audio failed (dropping frames): %s", _exc)
+            return
         if self.metrics is not None:
             # Count bytes that actually reach the STT adapter. When the
             # input is mulaw 8 kHz (Twilio / Telnyx PCMU), ``audio_bytes``
@@ -5097,10 +5301,18 @@ class PipelineStreamHandler(StreamHandler):
             # ``initial_fill_complete`` flag) to prevent batch-ACK bursts
             # from draining the buffer → crackling.
             if mark_awaitable is None or initial_fill_complete:
-                playout_ms = max(
-                    1,
-                    len(chunk) // self._PCM16_16K_BYTES_PER_MS,
+                # Derive the byte rate from the active output format: on the
+                # carrier-native path the prewarm cache holds mulaw 8 kHz
+                # (8 B/ms, not 32) — pacing those bytes at the PCM16-16k rate
+                # delivered 4x faster than playout, re-opening the barge-in
+                # flush window the pacing exists to bound. Mirrors the TS
+                # ``bytesPerMs`` selection.
+                bytes_per_ms = (
+                    8
+                    if getattr(self, "_tts_output_format_native_for_carrier", False)
+                    else self._PCM16_16K_BYTES_PER_MS
                 )
+                playout_ms = max(1, len(chunk) // bytes_per_ms)
                 await asyncio.sleep(playout_ms / 1000.0)
         return first_chunk_sent
 
@@ -5122,6 +5334,18 @@ class PipelineStreamHandler(StreamHandler):
                 _tts_cancel()
             except Exception:
                 pass
+        # Cancel the STT consumer FIRST: while cleanup awaited the cancelled
+        # dispatch task, the still-alive STT loop (blocked in
+        # ``_await_dispatch_settle`` on that same task) could wake first and
+        # respawn a fresh dispatch with a fresh cancel_event — an orphan turn
+        # running LLM + TTS against closed adapters after teardown.
+        if self._stt_task:
+            self._stt_task.cancel()
+            try:
+                await self._stt_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._stt_task = None
         # Hard-cancel the backgrounded turn dispatch (teardown backstop) so no
         # orphan task touches a finalized handler. The cancel_event.set() above
         # lets a post-first-token turn break gracefully; the cancel covers a
@@ -5158,18 +5382,28 @@ class PipelineStreamHandler(StreamHandler):
         # See ``_send_paced_first_message_bytes`` for the per-send reset
         # that protects the within-call path.
         self._first_message_mark_counter = 0
-        if self._stt_task:
-            self._stt_task.cancel()
-            try:
-                await self._stt_task
-            except (asyncio.CancelledError, Exception):
-                pass
+        # Per-resource guards: one raising close used to skip every later
+        # close (leaked TTS/remote sockets on an STT close failure).
         if self._stt is not None:
-            await self._stt.close()
+            try:
+                await self._stt.close()
+            except Exception as _exc:  # noqa: BLE001 - teardown must continue
+                logger.warning("STT close failed: %s", _exc)
         if self._tts is not None:
-            await self._tts.close()
+            try:
+                await self._tts.close()
+            except Exception as _exc:  # noqa: BLE001 - teardown must continue
+                logger.warning("TTS close failed: %s", _exc)
         if self._remote_handler is not None:
-            await self._remote_handler.close()
+            try:
+                await self._remote_handler.close()
+            except Exception as _exc:  # noqa: BLE001 - teardown must continue
+                logger.warning("Remote-message close failed: %s", _exc)
+        # Close MCP sessions opened by _init_mcp_tools (pipeline mode).
+        try:
+            await self._close_mcp()
+        except Exception as _exc:  # noqa: BLE001 - teardown must continue
+            logger.debug("MCP close failed: %s", _exc)
         # Flush and discard the inbound resampler tail on cleanup.
         if self._resampler_8k_to_16k is not None:
             self._resampler_8k_to_16k.flush()

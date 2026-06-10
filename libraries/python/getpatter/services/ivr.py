@@ -186,9 +186,13 @@ class TfidfLoopDetector:
             return False
 
         doc_similarity = cosine_similarity(doc_matrix)
-        last_row = doc_similarity[-1][:-1]
+        # Compare the newest chunk to its IMMEDIATE predecessor only:
+        # ``max(last_row)`` over the whole window counted similarity to ANY
+        # earlier chunk as "consecutive", so alternating prompts (A/B/A/B —
+        # a normal two-question IVR) false-fired the loop detector.
+        prev_similarity = doc_similarity[-1][-2] if doc_matrix.shape[0] > 1 else 0.0
 
-        if last_row.size > 0 and np.max(last_row) > self._similarity_threshold:
+        if prev_similarity > self._similarity_threshold:
             self._consecutive_similar += 1
         else:
             self._consecutive_similar = 0

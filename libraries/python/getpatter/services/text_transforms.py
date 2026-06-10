@@ -28,7 +28,10 @@ _ITALIC_UNDER = re.compile(r"(?<!\w)_(.+?)_(?!\w)")
 _BLOCK_QUOTE = re.compile(r"^>\s+", re.MULTILINE)
 _LIST_UNORDERED = re.compile(r"^[-*]\s+", re.MULTILINE)
 _LIST_ORDERED = re.compile(r"^\d+\.\s+", re.MULTILINE)
-_HTML_TAG = re.compile(r"</?[^>]+(>|$)")
+# Require a tag-like token and a CLOSING ``>``: the old ``(>|$)`` ate all
+# prose after a bare ``<`` ("the price is <$50 for two" lost everything
+# from ``<`` to end-of-line).
+_HTML_TAG = re.compile(r"</?[A-Za-z][^<>]*>")
 _BLANK_LINES = re.compile(r"\n{3,}")
 
 

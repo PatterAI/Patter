@@ -1112,6 +1112,13 @@ export class LLMLoop {
         }
       }
 
+      // Barge-in guard: when the caller's abort signal fired mid-stream the
+      // accumulated tool-call JSON can be truncated — executing those calls
+      // would fire real side effects (transfer, SMS, booking) with wrong
+      // arguments after the user already interrupted. Bail out before tool
+      // dispatch (mirrors the Python llm_loop cancel_event check).
+      if (opts?.signal?.aborted) return;
+
       if (!hasToolCalls) {
         if (hasAfterLlmResponse && hookExecutor && hookCtx) {
           const finalText = allEmittedText.join('');
@@ -1140,6 +1147,10 @@ export class LLMLoop {
       messages.push(assistantMsg);
 
       for (const tcData of assistantMsg.tool_calls!) {
+        // Stop between tools when a barge-in aborted the turn — the
+        // remaining (and current) executions would run against a cancelled
+        // turn and block the next committed transcript behind them.
+        if (opts?.signal?.aborted) return;
         const toolName = tcData.function.name;
         let args: Record<string, unknown>;
         try {

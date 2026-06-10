@@ -119,14 +119,26 @@ export function scheduleCron(cron: string, callback: JobCallback): ScheduleHandl
 
 /** Schedule ``callback`` once at the given date. */
 export function scheduleOnce(at: Date, callback: JobCallback): ScheduleHandle {
-  const delayMs = at.getTime() - Date.now();
   let cancelled = false;
   let done = false;
-  const timer = setTimeout(() => {
-    if (cancelled) return;
-    done = true;
-    wrapCallback(callback)();
-  }, Math.max(0, delayMs));
+  // Node clamps setTimeout delays > 2^31-1 ms (~24.8 days) to 1 ms with a
+  // TimeoutOverflowWarning — a far-future job fired IMMEDIATELY. Chain
+  // bounded waits until the target time is inside the representable range.
+  const MAX_TIMEOUT_MS = 2_147_483_647;
+  let timer: ReturnType<typeof setTimeout>;
+  const arm = (): void => {
+    const remaining = at.getTime() - Date.now();
+    if (remaining > MAX_TIMEOUT_MS) {
+      timer = setTimeout(arm, MAX_TIMEOUT_MS);
+      return;
+    }
+    timer = setTimeout(() => {
+      if (cancelled) return;
+      done = true;
+      wrapCallback(callback)();
+    }, Math.max(0, remaining));
+  };
+  arm();
 
   return {
     jobId: `once-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,

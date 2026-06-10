@@ -1127,6 +1127,15 @@ export class EmbeddedServer {
   /** Optional client-bound hook to re-key prewarm caches (see aliasCallId). */
   public aliasPrewarm: ((oldId: string, newId: string) => void) | undefined;
 
+  /**
+   * Client-bound SpeechEvents dispatcher. Threaded into every
+   * StreamHandler's deps — without this binding the public
+   * onUserSpeechStarted/.../onAudioOut API never fired on any real served
+   * call (only unit tests passed it). Mirrors Python's
+   * ``speech_events=...`` forwarding in server.py.
+   */
+  public speechEvents: import('./_speech-events').SpeechEvents | undefined;
+
   /** Drop a registered completion (e.g. on a backstop timeout) without resolving it. */
   deleteCompletion(callId: string): void {
     this.completions.delete(callId);
@@ -2249,6 +2258,7 @@ export class EmbeddedServer {
       resolveVariables,
       popPrewarmAudio: this.popPrewarmAudio,
       popPrewarmedConnections: this.popPrewarmedConnections,
+      speechEvents: this.speechEvents,
     };
   }
 
