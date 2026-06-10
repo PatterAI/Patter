@@ -601,6 +601,12 @@ async def telnyx_stream_bridge(
                         resolved_prompt=resolved_prompt,
                         metrics=metrics,
                         elevenlabs_key=elevenlabs_key,
+                        # Telnyx negotiates PCMU @ 8 kHz on streaming_start
+                        # (see the webhook handler) — same wire format as
+                        # Twilio. Without this flag the handler fed the
+                        # caller's mulaw bytes to ConvAI as if they were
+                        # PCM16 @ 16 kHz: garbled audio in both directions.
+                        for_twilio=True,
                         on_transcript=on_transcript,
                         on_metrics=on_metrics,
                         on_transcript_line=on_transcript_line,

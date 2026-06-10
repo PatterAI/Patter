@@ -730,8 +730,12 @@ export class OpenAIRealtimeAdapter {
       } else if (t === 'response.audio_transcript.delta') {
         dispatch('transcript_output', data.delta);
       } else if (t === 'response.content_part.added' || t === 'response.output_item.added') {
+        // Skip function_call items — truncating one on barge-in makes the
+        // server reject with an error event (which, pre-fix, also tore the
+        // GA socket down via the leaked setup listener).
+        const itemType = (data.item as { type?: string } | undefined)?.type;
         const itemId = data.item?.id ?? data.item_id ?? null;
-        if (itemId) {
+        if (itemId && (itemType === undefined || itemType === 'message')) {
           this.currentResponseItemId = itemId;
           this.currentResponseAudioMs = 0;
           this.currentResponseFirstAudioAt = null;

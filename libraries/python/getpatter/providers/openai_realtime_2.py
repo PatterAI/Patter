@@ -211,7 +211,14 @@ class OpenAIRealtime2Adapter(OpenAIRealtimeAdapter):
         if self.noise_reduction is not None:
             config["audio"]["input"]["noise_reduction"] = {"type": self.noise_reduction}
         if self.temperature is not None:
-            config["temperature"] = self.temperature
+            # The GA session.update schema removed ``temperature``; sending
+            # it makes the server reject the update with an error event and
+            # the call fails at pickup. Warn-and-skip instead.
+            logger.warning(
+                "OpenAI Realtime GA does not accept 'temperature' — ignoring "
+                "the configured value %.2f",
+                self.temperature,
+            )
         if self.max_response_output_tokens is not None:
             config["max_output_tokens"] = self.max_response_output_tokens
         if self.tool_choice is not None:
@@ -792,8 +799,12 @@ class OpenAIRealtime2Adapter(OpenAIRealtimeAdapter):
             "response.output_item.added",
         ):
             item = data.get("item") or {}
+            # Skip function_call items — truncating one on barge-in makes
+            # the server reject with an error event. (item may be absent on
+            # content_part.added; those are always message parts.)
+            item_type = item.get("type")
             item_id = item.get("id") or data.get("item_id")
-            if item_id:
+            if item_id and item_type in (None, "message"):
                 self._current_response_item_id = item_id
                 self._current_response_audio_ms = 0
                 self._current_response_first_audio_at = None

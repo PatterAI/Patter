@@ -696,9 +696,14 @@ class OpenAIRealtimeAdapter:
                 ):
                     # Capture the in-flight assistant item id so we can
                     # truncate it precisely on barge-in.
+                    # ``output_item.added`` also fires for function_call
+                    # items; truncating one of those on barge-in makes the
+                    # server reject with an error event. Only track
+                    # message items (the audio-bearing kind).
                     item = data.get("item") or {}
+                    item_type = item.get("type")
                     item_id = item.get("id") or data.get("item_id")
-                    if item_id:
+                    if item_id and item_type in (None, "message"):
                         self._current_response_item_id = item_id
                         self._current_response_audio_ms = 0
                         self._current_response_first_audio_at = None

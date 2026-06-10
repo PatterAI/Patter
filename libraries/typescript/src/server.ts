@@ -490,12 +490,21 @@ export function buildAIAdapter(config: LocalConfig, agent: AgentOptions, resolve
         "ElevenLabs ConvAI mode requires `agent.engine = new ElevenLabsConvAI({...})`.",
       );
     }
-    return new ElevenLabsConvAIAdapter(
-      engine.apiKey,
-      engine.agentId,
-      agent.voice ?? 'EXAVITQu4vr4xnSDxMaL',
-      agent.firstMessage ?? '',
-    );
+    // Options form with carrier-native formats: the positional form sent
+    // no tts.output_format override, so ConvAI streamed its server default
+    // (PCM16 @16 kHz) onto a mulaw-8kHz carrier wire — loud static unless
+    // the user happened to set ulaw_8000 in the ElevenLabs dashboard. All
+    // three carriers negotiate mulaw 8 kHz here (Telnyx via PCMU).
+    return new ElevenLabsConvAIAdapter({
+      apiKey: engine.apiKey,
+      agentId: engine.agentId,
+      // Only the engine's explicit voice — agent.voice defaults to the
+      // OpenAI voice name 'alloy', which is not an ElevenLabs voice_id.
+      voiceId: engine.voice,
+      firstMessage: agent.firstMessage ?? '',
+      outputAudioFormat: 'ulaw_8000',
+      inputAudioFormat: 'ulaw_8000',
+    });
   }
   // Always inject transfer_call and end_call system tools alongside agent-defined tools.
   // ``strict`` is propagated when the user opts in — Patter does not flip it on

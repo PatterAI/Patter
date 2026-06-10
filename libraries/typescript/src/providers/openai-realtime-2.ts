@@ -159,7 +159,13 @@ export class OpenAIRealtime2Adapter extends OpenAIRealtimeAdapter {
       },
       instructions: this.instructions || 'You are a helpful voice assistant. Be concise.',
     };
-    if (opts.temperature !== undefined) config.temperature = opts.temperature;
+    if (opts.temperature !== undefined) {
+      // The GA session.update schema removed ``temperature``; sending it
+      // makes the server reject the update and the call fails at pickup.
+      getLogger().warn(
+        `OpenAI Realtime GA does not accept 'temperature' — ignoring ${opts.temperature}`,
+      );
+    }
     if (opts.maxResponseOutputTokens !== undefined) {
       config.max_output_tokens = opts.maxResponseOutputTokens;
     }
@@ -215,8 +221,31 @@ export class OpenAIRealtime2Adapter extends OpenAIRealtimeAdapter {
     // bytes forwarded to Twilio/Telnyx.
     const wsRef = this.ws as unknown as {
       on: (event: string, handler: (...args: unknown[]) => void) => unknown;
+      off: (event: string, handler: (...args: unknown[]) => void) => unknown;
     };
     const originalOn = wsRef.on.bind(this.ws);
+    const originalOff = wsRef.off.bind(this.ws);
+    // handler → wrapped translation map: removeListener matches by IDENTITY,
+    // so without patching ``off`` to translate, ``ws.off('message',
+    // onSetupMessage)`` removed nothing — the setup listener stayed attached
+    // for the whole call and its 'error' branch ran ``ws.close()`` on the
+    // FIRST benign mid-call error frame (commit-empty, truncate-too-short,
+    // conversation_already_has_active_response), tearing the live engine
+    // socket down.
+    const wrappedByHandler = new Map<
+      (...args: unknown[]) => void,
+      (...args: unknown[]) => void
+    >();
+    wsRef.off = (event: string, handler: (...args: unknown[]) => void): unknown => {
+      if (event === 'message') {
+        const wrapped = wrappedByHandler.get(handler);
+        if (wrapped) {
+          wrappedByHandler.delete(handler);
+          return originalOff(event, wrapped);
+        }
+      }
+      return originalOff(event, handler);
+    };
     wsRef.on = (event: string, handler: (...args: unknown[]) => void): unknown => {
       if (event !== 'message') return originalOn(event, handler);
       const wrapped = (raw: unknown, ...rest: unknown[]): void => {
@@ -252,6 +281,7 @@ export class OpenAIRealtime2Adapter extends OpenAIRealtimeAdapter {
         }
         handler(raw, ...rest);
       };
+      wrappedByHandler.set(handler, wrapped);
       return originalOn(event, wrapped);
     };
 
@@ -261,6 +291,7 @@ export class OpenAIRealtime2Adapter extends OpenAIRealtimeAdapter {
       const ws = this.ws!;
 
       const onSetupMessage = (raw: Buffer | string): void => {
+        if (settled) return; // defensive: never touch a live session post-setup
         let msg: { type: string; error?: { message?: string } };
         try {
           msg = JSON.parse(raw.toString()) as { type: string; error?: { message?: string } };
