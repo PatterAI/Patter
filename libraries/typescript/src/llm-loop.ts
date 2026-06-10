@@ -644,7 +644,10 @@ export class OpenAILLMProvider implements LLMProvider {
 
     if (!response.ok) {
       const errText = await response.text();
-      getLogger().error(`LLM API error: ${response.status} ${errText}`);
+      // Cap the logged body like the thrown message — provider 401 bodies
+      // have been observed to embed the rejected API-key prefix, and the
+      // full text would otherwise land in operator logs.
+      getLogger().error(`LLM API error: ${response.status} ${errText.slice(0, 200)}`);
       throw new PatterConnectionError(
         `LLM API returned ${response.status}: ${errText.slice(0, 200)}`,
       );
@@ -1135,6 +1138,13 @@ export class LLMLoop {
     ];
 
     for (const entry of history) {
+      // Tool entries in conversation history are display/dashboard
+      // artefacts. Replaying them as ``role: 'tool'`` would 400 on the
+      // OpenAI API (no paired assistant ``tool_calls`` message), and
+      // replaying them as ``role: 'user'`` fabricates user turns containing
+      // raw tool JSON. Skip them: the tool RESULT is already reflected in
+      // the assistant's following reply. Mirrors Python ``_build_messages``.
+      if (entry.role === 'tool') continue;
       messages.push({
         role: entry.role === 'assistant' ? 'assistant' : 'user',
         content: entry.text,

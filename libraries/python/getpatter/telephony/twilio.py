@@ -181,15 +181,21 @@ class TwilioAudioSender(AudioSender):
         )
 
     async def send_mark(self, mark_name: str) -> None:
-        """Send a Twilio media-stream mark frame to track playback completion."""
+        """Send a Twilio media-stream mark frame to track playback completion.
+
+        The caller-supplied name goes on the wire verbatim: Twilio echoes the
+        exact name back, and ``StreamHandler.on_mark`` resolves the matching
+        ``_pending_marks`` waiter by that name. Substituting a locally
+        generated name here would make every waiter miss its echo and fall
+        back to the timeout path.
+        """
         self._chunk_count += 1
-        actual_name = f"audio_{self._chunk_count}"
         await self._ws.send_text(
             json.dumps(
                 {
                     "event": "mark",
                     "streamSid": self._stream_sid,
-                    "mark": {"name": actual_name},
+                    "mark": {"name": mark_name},
                 }
             )
         )

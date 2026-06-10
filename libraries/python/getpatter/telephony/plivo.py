@@ -269,15 +269,16 @@ class PlivoAudioSender(AudioSender):
         Plivo acknowledges with a ``playedStream`` event carrying the same
         name once all audio queued before the checkpoint has played out —
         the analogue of Twilio's mark protocol that gates pacing / barge-in.
+        The caller-supplied name goes on the wire verbatim so the ack can be
+        matched back to the waiter that sent it.
         """
         self._chunk_count += 1
-        actual_name = f"audio_{self._chunk_count}"
         await self._ws.send_text(
             json.dumps(
                 {
                     "event": "checkpoint",
                     "streamId": self._stream_id,
-                    "name": actual_name,
+                    "name": mark_name,
                 }
             )
         )

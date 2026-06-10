@@ -1412,3 +1412,84 @@ class TestWebSocketPerIpCap:
         if remaining <= 0:
             server._ws_conn_counts.pop(ip, None)
         assert ip not in server._ws_conn_counts
+
+
+class TestTelnyxSignatureAntiReplay:
+    """Direct tests of ``_validate_telnyx_signature`` with a real Ed25519
+    keypair — the anti-replay window must reject stale AND far-future
+    timestamps while tolerating small clock skew (parity with TS
+    ``validateTelnyxSignature``)."""
+
+    @pytest.fixture()
+    def keypair(self):
+        pytest.importorskip("cryptography")
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+            Ed25519PrivateKey,
+        )
+
+        import base64
+
+        priv = Ed25519PrivateKey.generate()
+        pub_der = priv.public_key().public_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        return priv, base64.b64encode(pub_der).decode("ascii")
+
+    @staticmethod
+    def _sign(priv, timestamp: str, body: bytes) -> str:
+        import base64
+
+        return base64.b64encode(
+            priv.sign(timestamp.encode("utf-8") + b"|" + body)
+        ).decode("ascii")
+
+    def test_accepts_fresh_timestamp(self, keypair) -> None:
+        import time
+
+        from getpatter.server import _validate_telnyx_signature
+
+        priv, pub = keypair
+        body = b'{"data": {}}'
+        ts = str(int(time.time()))
+        assert _validate_telnyx_signature(body, self._sign(priv, ts, body), ts, pub)
+
+    def test_rejects_stale_timestamp(self, keypair) -> None:
+        import time
+
+        from getpatter.server import _validate_telnyx_signature
+
+        priv, pub = keypair
+        body = b'{"data": {}}'
+        ts = str(int(time.time()) - 400)  # beyond the 300s tolerance
+        assert not _validate_telnyx_signature(
+            body, self._sign(priv, ts, body), ts, pub
+        )
+
+    def test_rejects_far_future_timestamp(self, keypair) -> None:
+        """A timestamp minutes in the FUTURE widens the replay window for
+        pre-issued signatures. The old ``abs(age_ms)`` check accepted up to
+        +300s; only a small clock-skew allowance is legitimate."""
+        import time
+
+        from getpatter.server import _validate_telnyx_signature
+
+        priv, pub = keypair
+        body = b'{"data": {}}'
+        ts = str(int(time.time()) + 120)  # beyond the 30s skew allowance
+        assert not _validate_telnyx_signature(
+            body, self._sign(priv, ts, body), ts, pub
+        )
+
+    def test_accepts_small_future_skew(self, keypair) -> None:
+        """A webhook host whose clock lags Telnyx by a few seconds is a
+        common, legitimate deployment condition."""
+        import time
+
+        from getpatter.server import _validate_telnyx_signature
+
+        priv, pub = keypair
+        body = b'{"data": {}}'
+        ts = str(int(time.time()) + 10)  # within the 30s skew allowance
+        assert _validate_telnyx_signature(body, self._sign(priv, ts, body), ts, pub)

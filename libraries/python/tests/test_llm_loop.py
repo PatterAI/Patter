@@ -172,6 +172,31 @@ async def test_build_messages_from_history():
 
 
 @pytest.mark.asyncio
+async def test_build_messages_skips_tool_history_entries():
+    """Tool entries in conversation history are display/dashboard artefacts.
+
+    Replaying them as ``role: "tool"`` would 400 on the OpenAI API (no paired
+    assistant ``tool_calls`` message); the old behaviour replayed them as
+    fabricated ``role: "user"`` turns containing raw tool JSON.
+    """
+    loop = _make_llm_loop()
+
+    history = [
+        {"role": "user", "text": "Transfer me", "timestamp": 1.0},
+        {"role": "tool", "text": 'transfer_call → {"ok": true}', "timestamp": 2.0},
+        {"role": "assistant", "text": "Transferring you now.", "timestamp": 3.0},
+    ]
+    messages = loop._build_messages(history, "Thanks")
+
+    assert messages == [
+        {"role": "system", "content": "You are a test assistant."},
+        {"role": "user", "content": "Transfer me"},
+        {"role": "assistant", "content": "Transferring you now."},
+        {"role": "user", "content": "Thanks"},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_max_iterations_guard():
     """LLM loop stops after max iterations to prevent infinite tool loops."""
     tool = {
