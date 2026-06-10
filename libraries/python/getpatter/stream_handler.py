@@ -2490,6 +2490,19 @@ class PipelineStreamHandler(StreamHandler):
         # ``_end_tail_grace_for_new_turn``. Mirrors TS
         # ``playbackBufferedUntil``.
         self._playback_buffered_until: float = 0.0
+        # Per-turn playback timeline used to estimate the response prefix the
+        # caller actually HEARD when a barge-in lands. ``_turn_playback_total_s``
+        # accumulates the playout duration of every chunk pushed this turn
+        # (including filler audio, which keeps the timeline aligned);
+        # ``_turn_spoken_segments`` records ``(sentence_text,
+        # cumulative_start_s)`` for each RESPONSE sentence at its first audible
+        # chunk (filler / error-fallback audio advances the clock but adds no
+        # segment). ``heard = total - remaining_backlog`` then maps to a
+        # sentence-granular prefix — see ``_heard_response_prefix``. Both reset
+        # at ``_begin_speaking``. Mirrors TS ``turnPlaybackTotalMs`` /
+        # ``turnSpokenSegments``.
+        self._turn_playback_total_s: float = 0.0
+        self._turn_spoken_segments: list[tuple[str, float]] = []
         # Optional barge-in confirmation strategies (see
         # ``getpatter.services.barge_in_strategies``). With an empty tuple
         # the SDK uses the legacy "cancel on first VAD speech_start"
@@ -3140,8 +3153,14 @@ class PipelineStreamHandler(StreamHandler):
         hook_executor: PipelineHookExecutor,
         hook_ctx: HookContext,
         first_tts_chunk: list,
+        record_segment: bool = True,
     ) -> bool:
-        """Synthesize a single sentence through TTS with hooks. Returns False if interrupted."""
+        """Synthesize a single sentence through TTS with hooks. Returns False if interrupted.
+
+        ``record_segment=False`` (filler / error-fallback audio) advances the
+        playback clock without adding a heard-prefix segment — that audio is
+        not part of the LLM's reply. See ``_heard_response_prefix``.
+        """
         if self._tts is None:
             return True
 
@@ -3217,6 +3236,18 @@ class PipelineStreamHandler(StreamHandler):
                 # very fast carrier echo is still seen by the next mic frame.
                 if self._aec is not None:
                     self._aec.push_far_end(processed_audio)
+                if record_segment:
+                    # First audible chunk of this sentence — stamp its start
+                    # on the per-turn playback timeline so a barge-in can
+                    # estimate the heard prefix at sentence granularity.
+                    # ``getattr`` is defensive against test fixtures built
+                    # via ``object.__new__`` (no ``__init__``).
+                    segments = getattr(self, "_turn_spoken_segments", None)
+                    if segments is not None:
+                        segments.append(
+                            (processed, getattr(self, "_turn_playback_total_s", 0.0))
+                        )
+                    record_segment = False
                 await self.audio_sender.send_audio(processed_audio)
                 self._track_outbound_playback(len(processed_audio))
                 self._mark_first_audio_sent()
@@ -3260,8 +3291,14 @@ class PipelineStreamHandler(StreamHandler):
             # turn and we still hold the floor (no concurrent barge-in).
             if first_tts_chunk[0] and self._is_speaking:
                 try:
+                    # Filler audio is not part of the LLM's reply — advance
+                    # the playback clock without a heard-prefix segment.
                     await self._synthesize_sentence(
-                        message, hook_executor, hook_ctx, first_tts_chunk
+                        message,
+                        hook_executor,
+                        hook_ctx,
+                        first_tts_chunk,
+                        record_segment=False,
                     )
                 except asyncio.CancelledError:
                     raise
@@ -3429,8 +3466,14 @@ class PipelineStreamHandler(StreamHandler):
                 fallback = getattr(self.agent, "llm_error_message", None)
                 if fallback and first_tts_chunk[0] and self._is_speaking:
                     try:
+                        # Error-fallback audio is not part of the LLM's reply
+                        # — no heard-prefix segment.
                         await self._synthesize_sentence(
-                            fallback, hook_executor, hook_ctx, first_tts_chunk
+                            fallback,
+                            hook_executor,
+                            hook_ctx,
+                            first_tts_chunk,
+                            record_segment=False,
                         )
                     except Exception:  # pragma: no cover - defensive
                         logger.exception("llm_error_message fallback synthesis failed")
@@ -3500,7 +3543,23 @@ class PipelineStreamHandler(StreamHandler):
         # ungrounded full reply that pollutes its context.
         self._last_response_interrupted = interrupted
         if interrupted and response_text:
-            response_text = f"{response_text} [interrupted by caller]"
+            # Truncate to what the caller actually HEARD, not everything the
+            # LLM generated. An agent-runtime LLM delivers the full reply at
+            # once, so by barge-in time ``full_response_parts`` can hold tens
+            # of seconds of text the caller never listened to — recording it
+            # would make a stateful runtime believe it was all said. Falls
+            # back to the legacy full-text marker when no playback segments
+            # were tracked (e.g. no TTS configured).
+            heard = self._heard_response_prefix()
+            if heard is not None:
+                heard_text, _heard_everything = heard
+                response_text = (
+                    f"{heard_text} [interrupted by caller]"
+                    if heard_text
+                    else "[interrupted by caller]"
+                )
+            else:
+                response_text = f"{response_text} [interrupted by caller]"
         return response_text
 
     async def _process_regular_response(self, response_text: str, call_id: str) -> None:
@@ -3653,6 +3712,11 @@ class PipelineStreamHandler(StreamHandler):
             self._speaking_started_at = None
             self._first_audio_sent_at = None
             self._last_cancel_at = time.time()
+            # A barge-in landing AFTER the turn completed (carrier still
+            # draining the buffered tail) — rewrite the history to the heard
+            # prefix FIRST, while the playback cursor still measures what
+            # was left unheard.
+            self._maybe_truncate_completed_turn_history()
             # The ``send_clear`` below drops whatever the carrier had
             # buffered ahead — snap the playback cursor back and kill any
             # pending grace task so its phase-1 wait (carrier backlog) /
@@ -4267,6 +4331,10 @@ class PipelineStreamHandler(StreamHandler):
                                 self._speaking_generation += 1
                                 self._last_cancel_at = time.time()
                                 self._suppressed_speech_pending = False
+                                # Post-complete barge-in during the buffered
+                                # tail — rewrite history to the heard prefix
+                                # BEFORE resetting the playback cursor.
+                                self._maybe_truncate_completed_turn_history()
                                 # ``send_clear`` above dropped the carrier's
                                 # buffered audio — reset the playback cursor.
                                 self._playback_buffered_until = 0.0
@@ -4433,6 +4501,9 @@ class PipelineStreamHandler(StreamHandler):
         # Fresh turn — reset the echo-guard reference so this turn's barge-in
         # checks compare against THIS turn's spoken text, not the last turn's.
         self._current_agent_spoken_text = ""
+        # Fresh turn — reset the heard-prefix playback timeline.
+        self._turn_playback_total_s = 0.0
+        self._turn_spoken_segments = []
         # Reset the VAD detector so the next user utterance triggers a clean
         # SILENCE→SPEECH transition. Without this, PSTN echo from the
         # previous turn can keep the smoothed probability above the
@@ -4474,9 +4545,91 @@ class PipelineStreamHandler(StreamHandler):
             else 32_000.0
         )
         now = time.time()
+        chunk_s = num_bytes / bytes_per_s
         buffered_until = getattr(self, "_playback_buffered_until", 0.0)
         base = buffered_until if buffered_until > now else now
-        self._playback_buffered_until = base + (num_bytes / bytes_per_s)
+        self._playback_buffered_until = base + chunk_s
+        # Per-turn playout total — the time axis for the heard-prefix
+        # estimate (see ``_heard_response_prefix``). Reset at
+        # ``_begin_speaking``.
+        self._turn_playback_total_s = (
+            getattr(self, "_turn_playback_total_s", 0.0) + chunk_s
+        )
+
+    def _heard_response_prefix(self) -> tuple[str, bool] | None:
+        """Estimate the response prefix the caller actually HEARD this turn.
+
+        The pipeline pushes audio faster than realtime, so at barge-in time
+        ``heard = total_pushed - carrier_backlog`` seconds of audio have
+        actually played. Mapped at sentence granularity against
+        ``_turn_spoken_segments``: a sentence counts as heard once its
+        playback has STARTED (``start <= heard``), so the sentence playing at
+        the moment of interruption is included.
+
+        Returns ``None`` when no segments were tracked this turn (nothing
+        synthesized through the tracked path — callers fall back to the
+        legacy full-text behaviour). Otherwise ``(heard_text,
+        heard_everything)``. Mirrors TS ``heardResponsePrefix``.
+        """
+        segments = getattr(self, "_turn_spoken_segments", None)
+        if not segments:
+            return None
+        total_s = getattr(self, "_turn_playback_total_s", 0.0)
+        remaining_s = max(
+            0.0, getattr(self, "_playback_buffered_until", 0.0) - time.time()
+        )
+        heard_s = max(0.0, total_s - remaining_s)
+        heard = [text for text, start_s in segments if start_s <= heard_s]
+        return " ".join(heard), len(heard) == len(segments)
+
+    def _rewrite_last_assistant_entry(self, text: str) -> None:
+        """Replace the text of the most recent assistant entry in the
+        conversation history and the dashboard transcript. No-op when the
+        last entry is not an assistant turn (e.g. the caller's next turn was
+        already committed)."""
+        for entries in (
+            getattr(self, "conversation_history", None),
+            getattr(self, "transcript_entries", None),
+        ):
+            if not entries:
+                continue
+            last = entries[-1]
+            if isinstance(last, dict) and last.get("role") == "assistant":
+                last["text"] = text
+
+    def _maybe_truncate_completed_turn_history(self) -> None:
+        """LiveKit-style "heard prefix" semantics for a barge-in that lands
+        AFTER the turn completed, while the carrier is still playing the
+        buffered tail.
+
+        The completed turn already recorded its FULL reply in history, but
+        the caller only heard part of it before interrupting — a stateful
+        agent runtime (Hermes / OpenClaw) would otherwise "remember saying"
+        things the caller never heard. Rewrites the last assistant entry to
+        the heard prefix + ``[interrupted by caller]``.
+
+        MUST run BEFORE the cancel path resets ``_playback_buffered_until``
+        (the backlog is the heard-prefix input). No-op when a turn is still
+        in flight (the streaming path applies its own marker), when there is
+        no backlog, or when everything was already heard.
+        """
+        dispatch = getattr(self, "_dispatch_task", None)
+        if dispatch is not None and not dispatch.done():
+            return
+        remaining_s = getattr(self, "_playback_buffered_until", 0.0) - time.time()
+        if remaining_s <= 0:
+            return
+        heard = self._heard_response_prefix()
+        if heard is None:
+            return
+        heard_text, heard_everything = heard
+        if heard_everything:
+            return
+        self._rewrite_last_assistant_entry(
+            f"{heard_text} [interrupted by caller]"
+            if heard_text
+            else "[interrupted by caller]"
+        )
 
     def _can_barge_in(self) -> bool:
         """Whether barge-in is allowed to fire right now.

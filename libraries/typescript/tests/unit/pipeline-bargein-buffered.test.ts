@@ -237,3 +237,138 @@ describe('[unit] barge-in during the buffered backlog — Hermes/OpenClaw regres
     expect(h.playbackBufferedUntil).toBeLessThanOrEqual(before + 300);
   });
 });
+
+describe('[unit] heardResponsePrefix — what did the caller actually listen to?', () => {
+  it('maps the backlog to a sentence-granular heard prefix', () => {
+    const h = makeHandler() as any;
+    h.turnSpokenSegments = [
+      { text: 'Frase uno.', startMs: 0 },
+      { text: 'Frase due.', startMs: 2000 },
+      { text: 'Frase tre.', startMs: 4000 },
+    ];
+    h.turnPlaybackTotalMs = 6000;
+    // 4 s still buffered → only the first 2 s actually played.
+    h.playbackBufferedUntil = Date.now() + 4000;
+
+    const heard = h.heardResponsePrefix();
+
+    expect(heard.text).toBe('Frase uno. Frase due.');
+    expect(heard.heardEverything).toBe(false);
+  });
+
+  it('returns null when no segments were tracked', () => {
+    const h = makeHandler() as any;
+    expect(h.heardResponsePrefix()).toBeNull();
+  });
+
+  it('reports everything heard once the backlog drained', () => {
+    const h = makeHandler() as any;
+    h.turnSpokenSegments = [
+      { text: 'Frase uno.', startMs: 0 },
+      { text: 'Frase due.', startMs: 2000 },
+    ];
+    h.turnPlaybackTotalMs = 4000;
+    h.playbackBufferedUntil = 0; // long drained
+
+    const heard = h.heardResponsePrefix();
+
+    expect(heard.text).toBe('Frase uno. Frase due.');
+    expect(heard.heardEverything).toBe(true);
+  });
+
+  it('synthesizeSentence records a heard-prefix segment per sentence', async () => {
+    const deps = makeDeps();
+    const h = makeHandler(deps) as any;
+    h.isSpeaking = true;
+    h.tts = {
+      synthesizeStream: async function* () {
+        yield Buffer.alloc(6400); // 200 ms of PCM16 @ 16 kHz
+      },
+    };
+
+    const hookExecutor = new PipelineHookExecutor(undefined);
+    await h.synthesizeSentence('Frase uno.', hookExecutor, h.buildHookContext(), {
+      value: false,
+    });
+    await h.synthesizeSentence('Frase due.', hookExecutor, h.buildHookContext(), {
+      value: true,
+    });
+
+    expect(h.turnSpokenSegments).toEqual([
+      { text: 'Frase uno.', startMs: 0 },
+      { text: 'Frase due.', startMs: 200 },
+    ]);
+  });
+
+  it('filler audio advances the clock without adding a segment', async () => {
+    const deps = makeDeps();
+    const h = makeHandler(deps) as any;
+    h.isSpeaking = true;
+    h.tts = {
+      synthesizeStream: async function* () {
+        yield Buffer.alloc(6400);
+      },
+    };
+
+    await h.synthesizeSentence(
+      'One moment.',
+      new PipelineHookExecutor(undefined),
+      h.buildHookContext(),
+      { value: false },
+      false, // recordSegment=false — filler / error fallback
+    );
+
+    expect(h.turnSpokenSegments).toEqual([]);
+    expect(h.turnPlaybackTotalMs).toBe(200);
+  });
+});
+
+describe('[unit] post-complete barge-in — history rewritten to the heard prefix', () => {
+  const FULL = 'Frase uno. Frase due. Frase tre.';
+
+  function completedTurnHandler(): { h: any; deps: StreamHandlerDeps } {
+    const deps = makeDeps();
+    const h = makeHandler(deps) as any;
+    h.isSpeaking = true;
+    h.history.push({ role: 'assistant', text: FULL, timestamp: Date.now() });
+    h.turnSpokenSegments = [
+      { text: 'Frase uno.', startMs: 0 },
+      { text: 'Frase due.', startMs: 2000 },
+      { text: 'Frase tre.', startMs: 4000 },
+    ];
+    h.turnPlaybackTotalMs = 6000;
+    h.playbackBufferedUntil = Date.now() + 4000;
+    return { h, deps };
+  }
+
+  it('a barge-in during the buffered tail truncates the recorded reply', () => {
+    const { h, deps } = completedTurnHandler();
+
+    h.runBargeInCancel('aspetta');
+
+    const last = h.history.entries[h.history.entries.length - 1];
+    expect(last.text).toBe('Frase uno. Frase due. [interrupted by caller]');
+    expect(deps.bridge.sendClear).toHaveBeenCalledTimes(1);
+  });
+
+  it('no backlog → no rewrite', () => {
+    const { h } = completedTurnHandler();
+    h.playbackBufferedUntil = 0; // everything already played
+
+    h.runBargeInCancel('ok');
+
+    const last = h.history.entries[h.history.entries.length - 1];
+    expect(last.text).toBe(FULL);
+  });
+
+  it('a turn still in flight is owned by the streaming marker — no rewrite', () => {
+    const { h } = completedTurnHandler();
+    h.dispatchTask = new Promise(() => {}); // in flight, never settles
+
+    h.runBargeInCancel('aspetta');
+
+    const last = h.history.entries[h.history.entries.length - 1];
+    expect(last.text).toBe(FULL);
+    h.dispatchTask = null;
+  });
+});

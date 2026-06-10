@@ -331,11 +331,13 @@ describe('[mocked] pipeline long-turn filler (longTurnMessage)', () => {
     await stt.emitTranscript('What is the weather?');
 
     // The real reply still plays; the broken filler degraded to silence.
+    // Filler audio is not part of the LLM reply — recordSegment=false.
     await vi.waitFor(() => expect(synthSpy).toHaveBeenCalledWith(
       FILLER,
       expect.anything(),
       expect.anything(),
       expect.anything(),
+      false,
     ), { timeout: 5000 });
     await vi.waitFor(() => expect(synthSpy).toHaveBeenCalledWith(
       'Here is your answer.',

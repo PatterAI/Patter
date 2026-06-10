@@ -477,11 +477,13 @@ describe('[mocked] pipeline LLM-error spoken fallback (llmErrorMessage)', () => 
 
     await new Promise<void>((r) => setTimeout(r, 300));
 
+    // Error-fallback audio is not part of the LLM reply — recordSegment=false.
     expect(synthSpy).toHaveBeenCalledWith(
       FALLBACK,
       expect.anything(),
       expect.anything(),
       expect.anything(),
+      false,
     );
     expect(bridge.sendAudio as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
   }, 10000);

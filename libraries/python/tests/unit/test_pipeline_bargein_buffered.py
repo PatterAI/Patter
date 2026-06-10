@@ -201,6 +201,58 @@ class TestBargeInDuringBufferedBacklog:
         assert handler._playback_buffered_until == 0.0
         assert handler._grace_task is None
 
+    async def test_synthesize_sentence_records_heard_prefix_segment(self) -> None:
+        """Each response sentence is stamped on the per-turn playback
+        timeline at its first audible chunk."""
+
+        class _StubTTS:
+            async def synthesize(self, _text: str):
+                yield b"\x00" * 6400  # 200 ms of PCM16 @ 16 kHz
+
+        handler = _make_handler(_make_audio_sender())
+        handler._tts = _StubTTS()
+        handler._is_speaking = True
+
+        from getpatter.services.pipeline_hooks import PipelineHookExecutor
+
+        ctx = handler._build_hook_context()
+        await handler._synthesize_sentence(
+            "Frase uno.", PipelineHookExecutor(None), ctx, [True]
+        )
+        await handler._synthesize_sentence(
+            "Frase due.", PipelineHookExecutor(None), ctx, [False]
+        )
+
+        assert handler._turn_spoken_segments == [
+            ("Frase uno.", 0.0),
+            ("Frase due.", pytest.approx(0.2)),
+        ]
+
+    async def test_filler_audio_advances_clock_without_segment(self) -> None:
+        """record_segment=False (filler / error fallback) advances the
+        playback clock but adds no heard-prefix segment."""
+
+        class _StubTTS:
+            async def synthesize(self, _text: str):
+                yield b"\x00" * 6400
+
+        handler = _make_handler(_make_audio_sender())
+        handler._tts = _StubTTS()
+        handler._is_speaking = True
+
+        from getpatter.services.pipeline_hooks import PipelineHookExecutor
+
+        await handler._synthesize_sentence(
+            "One moment.",
+            PipelineHookExecutor(None),
+            handler._build_hook_context(),
+            [True],
+            record_segment=False,
+        )
+
+        assert handler._turn_spoken_segments == []
+        assert handler._turn_playback_total_s == pytest.approx(0.2)
+
     async def test_synthesize_sentence_tracks_pushed_audio(self) -> None:
         """The pipeline TTS path must advance the playback cursor for every
         chunk it pushes to the carrier."""
@@ -222,3 +274,149 @@ class TestBargeInDuringBufferedBacklog:
 
         assert ok is True
         assert handler._playback_buffered_until == pytest.approx(before + 0.2, abs=0.1)
+
+
+# ---------------------------------------------------------------------------
+# Heard-prefix estimation — what did the caller actually listen to?
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestHeardResponsePrefix:
+    def test_maps_backlog_to_sentence_prefix(self) -> None:
+        handler = _make_handler(_make_audio_sender())
+        handler._turn_spoken_segments = [
+            ("Frase uno.", 0.0),
+            ("Frase due.", 2.0),
+            ("Frase tre.", 4.0),
+        ]
+        handler._turn_playback_total_s = 6.0
+        # 4 s still buffered → only the first 2 s actually played.
+        handler._playback_buffered_until = time.time() + 4.0
+
+        text, heard_everything = handler._heard_response_prefix()
+
+        assert text == "Frase uno. Frase due."
+        assert heard_everything is False
+
+    def test_no_segments_returns_none(self) -> None:
+        handler = _make_handler(_make_audio_sender())
+        assert handler._heard_response_prefix() is None
+
+    def test_drained_backlog_means_everything_heard(self) -> None:
+        handler = _make_handler(_make_audio_sender())
+        handler._turn_spoken_segments = [("Frase uno.", 0.0), ("Frase due.", 2.0)]
+        handler._turn_playback_total_s = 4.0
+        handler._playback_buffered_until = 0.0  # long drained
+
+        text, heard_everything = handler._heard_response_prefix()
+
+        assert text == "Frase uno. Frase due."
+        assert heard_everything is True
+
+
+# ---------------------------------------------------------------------------
+# Post-complete barge-in — rewrite history to the heard prefix
+# ---------------------------------------------------------------------------
+
+
+def _completed_turn_handler(full_text: str) -> PipelineStreamHandler:
+    """Handler in the post-complete state: reply recorded in history, carrier
+    still playing the buffered tail."""
+    handler = _make_handler(_make_audio_sender())
+    handler._is_speaking = True
+    handler.conversation_history.append(
+        {"role": "assistant", "text": full_text, "timestamp": time.time()}
+    )
+    handler.transcript_entries.append({"role": "assistant", "text": full_text})
+    handler._turn_spoken_segments = [
+        ("Frase uno.", 0.0),
+        ("Frase due.", 2.0),
+        ("Frase tre.", 4.0),
+    ]
+    handler._turn_playback_total_s = 6.0
+    handler._playback_buffered_until = time.time() + 4.0
+    return handler
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestPostCompleteHeardPrefixRewrite:
+    async def test_bargein_during_tail_rewrites_history(self) -> None:
+        """A barge-in after turn-complete must truncate the recorded reply to
+        the heard prefix so a stateful runtime doesn't 'remember saying'
+        sentences the caller never heard."""
+        full = "Frase uno. Frase due. Frase tre."
+        handler = _completed_turn_handler(full)
+
+        await handler._do_cancel_for_barge_in("aspetta")
+
+        expected = "Frase uno. Frase due. [interrupted by caller]"
+        assert handler.conversation_history[-1]["text"] == expected
+        assert handler.transcript_entries[-1]["text"] == expected
+
+    async def test_no_backlog_no_rewrite(self) -> None:
+        full = "Frase uno. Frase due. Frase tre."
+        handler = _completed_turn_handler(full)
+        handler._playback_buffered_until = 0.0  # everything already played
+
+        await handler._do_cancel_for_barge_in("ok")
+
+        assert handler.conversation_history[-1]["text"] == full
+
+    async def test_in_flight_turn_is_not_rewritten(self) -> None:
+        """While a turn is still in flight the streaming path owns the
+        marker — the post-complete rewrite must not double-apply."""
+        full = "Frase uno. Frase due. Frase tre."
+        handler = _completed_turn_handler(full)
+        handler._dispatch_task = asyncio.create_task(asyncio.sleep(0.5))
+
+        try:
+            await handler._do_cancel_for_barge_in("aspetta")
+            assert handler.conversation_history[-1]["text"] == full
+        finally:
+            handler._dispatch_task.cancel()
+            try:
+                await handler._dispatch_task
+            except asyncio.CancelledError:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Mid-turn barge-in — the marker records only the heard prefix
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestMidTurnHeardPrefixMarker:
+    async def test_interrupted_response_truncates_to_heard_prefix(
+        self, monkeypatch
+    ) -> None:
+        """An agent-runtime LLM delivers the full reply at once: every
+        sentence is synthesized into the carrier buffer within ms, but the
+        caller has only HEARD the first one when the barge-in lands. The
+        history marker must record that prefix, not the whole reply."""
+        monkeypatch.setenv("PATTER_TTS_TAIL_GRACE_MS", "0")
+        handler = _make_handler(_make_audio_sender())
+
+        class _BigChunkTTS:
+            output_format = "pcm_16000"
+
+            async def synthesize(self, _text: str):
+                yield b"\x00" * 64000  # 2 s of PCM16 @ 16 kHz per sentence
+
+        handler._tts = _BigChunkTTS()
+
+        async def _result():
+            yield "Frase uno. "
+            yield "Frase due. "
+            # Barge-in lands after both sentences were PUSHED (4 s buffered)
+            # but before any further token.
+            handler._llm_cancel_event.set()
+            yield "Frase tre."
+
+        text = await handler._process_streaming_response(_result(), "call-heard")
+
+        assert handler._last_response_interrupted is True
+        assert text == "Frase uno. [interrupted by caller]"
