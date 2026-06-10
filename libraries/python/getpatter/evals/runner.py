@@ -1,4 +1,28 @@
-"""Eval runner — executes an :class:`EvalSuite` against a scripted agent."""
+"""Eval runner — executes an :class:`EvalSuite` against a scripted agent.
+
+Two execution paths per case:
+
+* **Legacy** (default): the caller supplies an ``agent_factory`` returning an
+  async ``reply(text) -> str`` callable — no SDK machinery involved.
+* **Real pipeline**: when :class:`~getpatter.evals.case.EvalCase` carries an
+  ``agent=`` (a :class:`getpatter.models.Agent`, optionally with
+  ``llm_provider=``), the runner drives the case through
+  :class:`~getpatter.evals.session.EvalSession` — the real
+  ``PipelineStreamHandler`` call loop with tools, hooks, guardrails, and
+  history handling. Example::
+
+      case = EvalCase(
+          name="books a table",
+          turns=(EvalTurn(user="table for two at eight"),),
+          expected_behavior="Agent books and confirms the table.",
+          rubric="Pass if a booking is confirmed.",
+          agent=my_agent,                      # real Agent under test
+          llm_provider=ScriptedLLMProvider([...]),  # or a real provider
+      )
+      results = await EvalRunner(judge=judge).run(
+          EvalSuite(name="s", cases=(case,))
+      )
+"""
 
 from __future__ import annotations
 
@@ -51,45 +75,42 @@ class EvalRunner:
         self.judge = judge or LLMJudge()
 
     async def run(
-        self, suite: EvalSuite, agent_factory: AgentFactory
+        self, suite: EvalSuite, agent_factory: AgentFactory | None = None
     ) -> list[EvalResult]:
-        """Run every case in ``suite`` sequentially."""
+        """Run every case in ``suite`` sequentially.
+
+        ``agent_factory`` is required only for cases that do NOT carry their
+        own ``agent=`` (the legacy ``reply()`` path).
+        """
         results: list[EvalResult] = []
         for case in suite.cases:
             result = await self.run_case(case, agent_factory)
             results.append(result)
         return results
 
-    async def run_case(self, case: EvalCase, agent_factory: AgentFactory) -> EvalResult:
-        """Run a single case and return its :class:`EvalResult`."""
+    async def run_case(
+        self, case: EvalCase, agent_factory: AgentFactory | None = None
+    ) -> EvalResult:
+        """Run a single case and return its :class:`EvalResult`.
+
+        Routes through the real-pipeline :class:`EvalSession` when
+        ``case.agent`` is set; otherwise uses the legacy ``reply()``-callable
+        ``agent_factory`` (unchanged behaviour).
+        """
         start = time.monotonic()
         transcript: list[dict[str, str]] = []
         error: str | None = None
 
         try:
-            agent = agent_factory()
-            if not callable(agent):
-                # Factories that return async may need to be awaited.
-                if hasattr(agent, "__await__"):
-                    agent = await agent  # type: ignore[assignment]
-
-            if case.first_message:
-                transcript.append({"role": "agent", "text": case.first_message})
-
-            for turn in case.turns:
-                transcript.append({"role": "user", "text": turn.user})
-                reply = await agent(turn.user) if callable(agent) else ""
-                transcript.append({"role": "agent", "text": reply or ""})
-
-                # Cheap pre-filter — if a required substring is missing we
-                # still let the judge decide, but log for easier debugging.
-                for needle in turn.expected_contains:
-                    if needle.lower() not in (reply or "").lower():
-                        logger.info(
-                            "case=%r expected_contains=%r missing in reply",
-                            case.name,
-                            needle,
-                        )
+            if case.agent is not None:
+                await self._run_turns_with_session(case, transcript)
+            else:
+                if agent_factory is None:
+                    raise ValueError(
+                        f"case {case.name!r} has no agent= and no "
+                        "agent_factory was supplied"
+                    )
+                await self._run_turns_with_reply(case, agent_factory, transcript)
         except Exception as exc:  # noqa: BLE001 - we need catch-all here
             error = f"{type(exc).__name__}: {exc}"
             logger.exception("case=%r raised", case.name)
@@ -132,6 +153,75 @@ class EvalRunner:
             duration_s=duration,
             error=error,
         )
+
+    async def _run_turns_with_reply(
+        self,
+        case: EvalCase,
+        agent_factory: AgentFactory,
+        transcript: list[dict[str, str]],
+    ) -> None:
+        """Legacy path — drives the case against a ``reply()`` callable.
+
+        Appends into ``transcript`` in place so a mid-case exception still
+        leaves the partial transcript for the judge (existing semantics).
+        """
+        agent = agent_factory()
+        if not callable(agent):
+            # Factories that return async may need to be awaited.
+            if hasattr(agent, "__await__"):
+                agent = await agent  # type: ignore[assignment]
+
+        if case.first_message:
+            transcript.append({"role": "agent", "text": case.first_message})
+
+        for turn in case.turns:
+            transcript.append({"role": "user", "text": turn.user})
+            reply = await agent(turn.user) if callable(agent) else ""
+            transcript.append({"role": "agent", "text": reply or ""})
+            self._log_missing_expected(case, turn, reply or "")
+
+    async def _run_turns_with_session(
+        self, case: EvalCase, transcript: list[dict[str, str]]
+    ) -> None:
+        """Real-pipeline path — drives the case through ``EvalSession``.
+
+        The agent's REAL handler emits its own ``first_message`` (a
+        ``case.first_message`` overrides the agent's), tools/hooks/guardrails
+        run for real, and the transcript mirrors what the pipeline actually
+        said. Appends into ``transcript`` in place (partial-on-error, same as
+        the legacy path).
+        """
+        import dataclasses
+
+        # Local import keeps `getpatter.evals.runner` light for the CLI —
+        # the session module pulls in the stream handler.
+        from getpatter.evals.session import EvalSession
+
+        agent = case.agent
+        if case.first_message:
+            agent = dataclasses.replace(agent, first_message=case.first_message)
+
+        async with EvalSession(agent=agent, llm_provider=case.llm_provider) as s:
+            first_message = getattr(agent, "first_message", "")
+            if first_message:
+                transcript.append({"role": "agent", "text": first_message})
+            for turn in case.turns:
+                transcript.append({"role": "user", "text": turn.user})
+                result = await s.user_says(turn.user)
+                transcript.append({"role": "agent", "text": result.agent_text})
+                self._log_missing_expected(case, turn, result.agent_text)
+
+    @staticmethod
+    def _log_missing_expected(case: EvalCase, turn: EvalTurn, reply: str) -> None:
+        """Cheap pre-filter — if a required substring is missing we still let
+        the judge decide, but log for easier debugging."""
+        for needle in turn.expected_contains:
+            if needle.lower() not in reply.lower():
+                logger.info(
+                    "case=%r expected_contains=%r missing in reply",
+                    case.name,
+                    needle,
+                )
 
     def report(self, suite: EvalSuite, results: list[EvalResult]) -> str:
         """Render a JSON report suitable for CI artefacts."""

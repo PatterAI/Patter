@@ -10,6 +10,7 @@ Designed to be loaded from a YAML/JSON suite file — see
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -33,7 +34,20 @@ class EvalCase:
     # Optional metadata for reporting/filtering.
     tags: tuple[str, ...] = field(default_factory=tuple)
     # Optional first-message the agent should emit before any user turn.
+    # On the real-pipeline path (``agent`` set) it overrides the agent's own
+    # ``first_message`` so the REAL handler speaks it; on the legacy
+    # ``reply()`` path it is prepended to the transcript display-only.
     first_message: str = ""
+    # Optional REAL-pipeline target. When ``agent`` (a
+    # :class:`getpatter.models.Agent`) is set, the runner drives the case
+    # through :class:`getpatter.evals.session.EvalSession` — the real
+    # ``PipelineStreamHandler`` call loop (tools, hooks, guardrails, history)
+    # — instead of the legacy ``reply()``-callable factory. ``llm_provider``
+    # optionally overrides ``agent.llm`` (e.g. a ``ScriptedLLMProvider`` for
+    # CI). Typed ``Any`` to keep this module import-light; both default to
+    # ``None`` so existing suites are unaffected.
+    agent: Any = None
+    llm_provider: Any = None
 
 
 @dataclass(frozen=True)
