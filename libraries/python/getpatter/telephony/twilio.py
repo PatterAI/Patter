@@ -498,6 +498,7 @@ async def twilio_stream_bridge(
                         transcript_entries=transcript_entries,
                         pop_prewarm_audio=pop_prewarm_audio,
                         pop_prewarmed_connections=pop_prewarmed_connections,
+                        speech_events=speech_events,
                     )
                 elif provider == "elevenlabs_convai":
                     handler = ElevenLabsConvAIStreamHandler(
@@ -515,6 +516,7 @@ async def twilio_stream_bridge(
                         on_transcript_line=on_transcript_line,
                         conversation_history=conversation_history,
                         transcript_entries=transcript_entries,
+                        speech_events=speech_events,
                     )
                 else:
                     handler = OpenAIRealtimeStreamHandler(

@@ -22,6 +22,7 @@ from getpatter.services.call_log import (
     CallLogger,
     alog_call_end,
     alog_call_start,
+    alog_event,
     alog_turn,
     resolve_log_root,
 )
@@ -677,7 +678,8 @@ class EmbeddedServer:
             logger.warning("on_machine_detection callback threw: %s", exc)
 
     def _wrap_callbacks(self):
-        """Return (on_call_start, on_call_end, on_metrics, on_transcript_line) wrappers.
+        """Return (on_call_start, on_call_end, on_metrics, on_transcript_line,
+        on_transcript) wrappers.
 
         Each wrapper feeds data into the dashboard store first, then calls
         the user-provided callback (if any).  Completed calls are also
@@ -688,6 +690,7 @@ class EmbeddedServer:
         user_start = self.on_call_start
         user_end = self.on_call_end
         user_metrics = self.on_metrics
+        user_transcript = self.on_transcript
         call_logger = self._call_logger
         agent = self.agent
 
@@ -858,6 +861,22 @@ class EmbeddedServer:
                     if metrics_obj
                     else None
                 )
+                # Surface the terminal error code (set when the call ended
+                # abnormally) as an ``error`` event in events.jsonl and as the
+                # ``error`` field of metadata.json. Code only — never the
+                # message (may carry PII).
+                error_code = (
+                    (getattr(metrics_obj, "error_code", "") or "")
+                    if metrics_obj
+                    else ""
+                )
+                if error_code:
+                    await alog_event(
+                        call_logger,
+                        data.get("call_id", ""),
+                        "error",
+                        {"error_code": error_code},
+                    )
                 await alog_call_end(
                     call_logger,
                     data.get("call_id", ""),
@@ -865,6 +884,7 @@ class EmbeddedServer:
                     turns=turns_count,
                     cost=cost_dict,
                     latency=latency_dict,
+                    error=error_code or None,
                 )
             try:
                 if user_end is not None:
@@ -897,6 +917,30 @@ class EmbeddedServer:
                     turn_dict = turn
                 if turn_dict is not None:
                     await alog_turn(call_logger, data.get("call_id", ""), turn_dict)
+                    # Interrupted turn → operational ``barge_in`` event for
+                    # events.jsonl. ``bargein_ms`` (detect → playback halted)
+                    # may be None when the stop timestamp was missed; the
+                    # ``[interrupted]`` agent_text marker is the canonical
+                    # interrupt signal in both SDKs.
+                    latency = turn_dict.get("latency")
+                    bargein_ms = (
+                        latency.get("bargein_ms")
+                        if isinstance(latency, dict)
+                        else None
+                    )
+                    if (
+                        turn_dict.get("agent_text") == "[interrupted]"
+                        or bargein_ms is not None
+                    ):
+                        await alog_event(
+                            call_logger,
+                            data.get("call_id", ""),
+                            "barge_in",
+                            {
+                                "turn_index": turn_dict.get("turn_index"),
+                                "bargein_ms": bargein_ms,
+                            },
+                        )
             if user_metrics is not None:
                 await user_metrics(data)
 
@@ -909,7 +953,39 @@ class EmbeddedServer:
             if store is not None:
                 store.record_transcript_line(data)
 
-        return _on_call_start, _on_call_end, _on_metrics, _on_transcript_line
+        async def _on_transcript(data):
+            # Tool invocations surface as ``role="tool"`` transcript events
+            # (two per invocation: the call with ``tool_result=None``, then
+            # the result). Persist them to ``events.jsonl`` — documented as
+            # holding tool_call events since 0.6 but never written until now.
+            if (
+                call_logger.enabled
+                and data.get("role") == "tool"
+                and data.get("tool_name")
+            ):
+                event_type = (
+                    "tool_call" if data.get("tool_result") is None else "tool_result"
+                )
+                await alog_event(
+                    call_logger,
+                    data.get("call_id", "") or "",
+                    event_type,
+                    {
+                        "name": data.get("tool_name"),
+                        "arguments": data.get("tool_args") or {},
+                        "result": data.get("tool_result"),
+                    },
+                )
+            if user_transcript is not None:
+                await user_transcript(data)
+
+        return (
+            _on_call_start,
+            _on_call_end,
+            _on_metrics,
+            _on_transcript_line,
+            _on_transcript,
+        )
 
     def _dashboard_is_exposed(self) -> bool:
         """Return True when this server would be reachable beyond loopback.
@@ -1285,7 +1361,9 @@ class EmbeddedServer:
             self._ws_conn_counts[client_ip] += 1
             self._active_connections.add(websocket)
             try:
-                _start, _end, _metrics, _transcript_line = self._wrap_callbacks()
+                _start, _end, _metrics, _transcript_line, _transcript = (
+                    self._wrap_callbacks()
+                )
                 await twilio_stream_bridge(
                     websocket=websocket,
                     agent=self.agent,
@@ -1294,7 +1372,7 @@ class EmbeddedServer:
                     openai_key=self.config.openai_key,
                     on_call_start=_start,
                     on_call_end=_end,
-                    on_transcript=self.on_transcript,
+                    on_transcript=_transcript,
                     on_message=self.on_message,
                     deepgram_key=self.config.deepgram_key,
                     elevenlabs_key=self.config.elevenlabs_key,
@@ -1655,16 +1733,19 @@ class EmbeddedServer:
             self._ws_conn_counts[client_ip] += 1
             self._active_connections.add(websocket)
             try:
-                _start, _end, _metrics, _transcript_line = self._wrap_callbacks()
+                _start, _end, _metrics, _transcript_line, _transcript = (
+                    self._wrap_callbacks()
+                )
                 await telnyx_stream_bridge(
                     websocket=websocket,
                     agent=self.agent,
                     pop_prewarm_audio=self.pop_prewarm_audio,
                     pop_prewarmed_connections=self.pop_prewarmed_connections,
+                    speech_events=getattr(self, "speech_events", None),
                     openai_key=self.config.openai_key,
                     on_call_start=_start,
                     on_call_end=_end,
-                    on_transcript=self.on_transcript,
+                    on_transcript=_transcript,
                     on_message=self.on_message,
                     deepgram_key=self.config.deepgram_key,
                     elevenlabs_key=self.config.elevenlabs_key,
@@ -1903,7 +1984,9 @@ class EmbeddedServer:
             self._ws_conn_counts[client_ip] += 1
             self._active_connections.add(websocket)
             try:
-                _start, _end, _metrics, _transcript_line = self._wrap_callbacks()
+                _start, _end, _metrics, _transcript_line, _transcript = (
+                    self._wrap_callbacks()
+                )
                 await plivo_stream_bridge(
                     websocket=websocket,
                     agent=self.agent,
@@ -1912,7 +1995,7 @@ class EmbeddedServer:
                     openai_key=self.config.openai_key,
                     on_call_start=_start,
                     on_call_end=_end,
-                    on_transcript=self.on_transcript,
+                    on_transcript=_transcript,
                     on_message=self.on_message,
                     deepgram_key=self.config.deepgram_key,
                     elevenlabs_key=self.config.elevenlabs_key,

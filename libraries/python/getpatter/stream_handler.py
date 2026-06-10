@@ -843,13 +843,13 @@ class StreamHandler(ABC):
     # ------------------------------------------------------------------
 
     async def _emit_user_speech_started(self) -> None:
-        if self.speech_events is None:
+        if getattr(self, "speech_events", None) is None:
             return
         self._user_speech_start_ms = time.time() * 1000
         await self.speech_events.fire_user_speech_started()
 
     async def _emit_user_speech_ended(self) -> None:
-        if self.speech_events is None:
+        if getattr(self, "speech_events", None) is None:
             return
         now_ms = time.time() * 1000
         duration_ms = (
@@ -865,14 +865,14 @@ class StreamHandler(ABC):
     async def _emit_user_speech_eos(
         self, *, trigger: str, transcript_so_far: str | None = None
     ) -> None:
-        if self.speech_events is None:
+        if getattr(self, "speech_events", None) is None:
             return
         await self.speech_events.fire_user_speech_eos(
             trigger=trigger, transcript_so_far=transcript_so_far
         )
 
     async def _emit_agent_speech_started(self, *, engine: str | None = None) -> None:
-        if self.speech_events is None:
+        if getattr(self, "speech_events", None) is None:
             return
         self._agent_turn_start_ms = time.time() * 1000
         tts_provider = self._infer_tts_provider()
@@ -881,7 +881,7 @@ class StreamHandler(ABC):
         )
 
     async def _emit_agent_speech_ended(self, *, interrupted: bool = False) -> None:
-        if self.speech_events is None:
+        if getattr(self, "speech_events", None) is None:
             return
         now_ms = time.time() * 1000
         duration_ms = (
@@ -900,7 +900,7 @@ class StreamHandler(ABC):
         """Fire the per-turn TTFT marker. Idempotent within a turn —
         :class:`SpeechEvents` guards on ``_first_token_for_turn``.
         """
-        if self.speech_events is None:
+        if getattr(self, "speech_events", None) is None:
             return
         await self.speech_events.fire_llm_first_token(
             llm_provider=llm_provider, model=model or ""
@@ -912,7 +912,7 @@ class StreamHandler(ABC):
         ``tts_provider`` defaults to the inferred TTS class name (Pipeline
         mode) or the engine name (Realtime / ConvAI).
         """
-        if self.speech_events is None:
+        if getattr(self, "speech_events", None) is None:
             return
         provider = tts_provider or self._infer_tts_provider() or "unknown"
         await self.speech_events.fire_audio_out(tts_provider=provider)
@@ -2179,6 +2179,7 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
         transcript_entries: deque | None = None,
         output_audio_format: str | None = None,
         input_audio_format: str | None = None,
+        speech_events=None,
     ) -> None:
         super().__init__(
             agent=agent,
@@ -2193,6 +2194,7 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
             on_transcript_line=on_transcript_line,
             conversation_history=conversation_history,
             transcript_entries=transcript_entries,
+            speech_events=speech_events,
         )
         self._elevenlabs_key = elevenlabs_key
         self._for_twilio = for_twilio
@@ -2605,6 +2607,7 @@ class PipelineStreamHandler(StreamHandler):
         transcript_entries: deque | None = None,
         pop_prewarm_audio=None,
         pop_prewarmed_connections=None,
+        speech_events=None,
     ) -> None:
         super().__init__(
             agent=agent,
@@ -2619,6 +2622,7 @@ class PipelineStreamHandler(StreamHandler):
             on_metrics=on_metrics,
             conversation_history=conversation_history,
             transcript_entries=transcript_entries,
+            speech_events=speech_events,
         )
         # Optional accessor returning pre-rendered first-message audio for
         # ``call_id``. Wired by ``Patter.serve()`` when the parent client
@@ -3989,6 +3993,8 @@ class PipelineStreamHandler(StreamHandler):
                 await self.audio_sender.send_clear()
             except Exception as exc:
                 logger.debug("send_clear during barge-in failed: %s", exc)
+            # Speech-event: agent stop edge — interrupted by the caller.
+            await self._emit_agent_speech_ended(interrupted=True)
             # Replay the self-hearing ring so the words the user spoke
             # BEFORE the confirming transcript reach STT (the models.py
             # contract for confirmed barge-ins promised this flush).
@@ -4377,6 +4383,21 @@ class PipelineStreamHandler(StreamHandler):
             }
             if self.metrics is not None:
                 self.metrics.record_turn_committed()
+            # Speech-event: end-of-utterance committed (pipeline analogue of
+            # Realtime's input_audio_buffer.committed). Advances the
+            # dispatcher's turn index so per-turn llm_token/audio_out gating
+            # works beyond the first turn. Trigger reflects how this commit
+            # was driven: local VAD silence when a VAD is active, otherwise
+            # the STT provider's own endpointing.
+            await self._emit_user_speech_eos(
+                trigger=(
+                    "vad_silence"
+                    if (getattr(self.agent, "vad", None) or self._auto_vad)
+                    is not None
+                    else "manual_commit"
+                ),
+                transcript_so_far=filtered_text,
+            )
             _close_endpoint_span()
             result = self._llm_loop.run(
                 filtered_text,
@@ -4504,6 +4525,10 @@ class PipelineStreamHandler(StreamHandler):
                 vad_event = None
             if vad_event is not None:
                 if vad_event.type == "speech_start":
+                    # Speech-event: the seven-event public API never fired in
+                    # pipeline mode (only realtime emitted) — wire the user
+                    # start edge here. No-op without a dispatcher.
+                    await self._emit_user_speech_started()
                     # Tail-grace new-turn rescue: the agent already finished
                     # its turn and we are only in the post-TTS echo-guard
                     # window. A VAD speech_start here is the user's next turn,
@@ -4625,6 +4650,9 @@ class PipelineStreamHandler(StreamHandler):
                         # vulnerability. No-op once the turn is committed.
                         self.metrics.anchor_user_speech_start()
                 elif vad_event.type == "speech_end":
+                    # Speech-event: user stop edge (pipeline-mode parity with
+                    # realtime). No-op without a dispatcher.
+                    await self._emit_user_speech_ended()
                     if self.metrics is not None:
                         self.metrics.record_vad_stop()
                     # The SDK's VAD has detected end-of-speech earlier
@@ -4738,6 +4766,8 @@ class PipelineStreamHandler(StreamHandler):
     _POST_CANCEL_DRAIN_S: float = 0.15
 
     async def _begin_speaking(self, is_first_message: bool = False) -> None:
+        # Speech-event: agent start edge (pipeline parity with realtime).
+        await self._emit_agent_speech_started(engine="pipeline")
         """Mark TTS playback as in-progress and bump the generation counter.
 
         Awaits the post-cancel drain window before flipping state so the
@@ -4953,6 +4983,8 @@ class PipelineStreamHandler(StreamHandler):
         return elapsed >= gate
 
     async def _end_speaking_with_grace(self) -> None:
+        # Speech-event: agent stop edge (clean turn end).
+        await self._emit_agent_speech_ended(interrupted=False)
         """Flip ``_is_speaking`` to False after a configurable grace period.
 
         TTS adapters typically signal "stream complete" while the carrier is

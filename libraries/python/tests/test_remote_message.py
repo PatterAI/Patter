@@ -172,13 +172,25 @@ class _AsyncIter:
 
 
 class _MockWS:
-    """Mock WebSocket that supports async iteration and async context manager."""
+    """Mock WebSocket that supports recv(), async iteration and async
+    context manager. ``recv()`` mirrors a real socket: it raises
+    ``ConnectionClosedOK`` once the peer's frames are exhausted (the
+    production read-loop polls ``recv()`` under a per-receive timeout)."""
     def __init__(self, frames):
         self._frames = frames
+        self._iter = iter(frames)
         self.sent = []
 
     async def send(self, data):
         self.sent.append(data)
+
+    async def recv(self):
+        import websockets
+
+        try:
+            return next(self._iter)
+        except StopIteration:
+            raise websockets.ConnectionClosedOK(None, None) from None
 
     def __aiter__(self):
         return _AsyncIter(self._frames)

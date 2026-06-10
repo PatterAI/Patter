@@ -714,6 +714,8 @@ export class StreamHandler {
       }
     }
     this.speakingGeneration++;
+    // Speech-event: agent start edge (pipeline parity with realtime).
+    await this.emitAgentSpeechStarted();
     this.isSpeaking = true;
     // A fresh turn is actively streaming — not in the post-TTS echo window.
     // Clear the tail-grace flag so a VAD speech_start during this turn is
@@ -966,6 +968,9 @@ export class StreamHandler {
    * barge-in armed during the audible tail. Tunable via env.
    */
   private endSpeakingWithGrace(): void {
+    // Speech-event: agent stop edge (clean turn end). Fire-and-forget —
+    // this method is synchronous by design.
+    void this.emitAgentSpeechEnded(false).catch(() => {});
     const rawGrace = process.env.PATTER_TTS_TAIL_GRACE_MS;
     const parsedGrace = rawGrace !== undefined ? Number(rawGrace) : NaN;
     const grace = (rawGrace !== undefined && Number.isFinite(parsedGrace))
@@ -1765,6 +1770,10 @@ export class StreamHandler {
             );
           }
           if (evt?.type === 'speech_start') {
+            // Speech-event: the seven-event public API never fired in
+            // pipeline mode (only realtime emitted) — wire the user start
+            // edge here. No-op without a dispatcher.
+            await this.emitUserSpeechStarted();
             // Tail-grace new-turn rescue: the agent already finished its turn
             // and we are only in the post-TTS echo-guard window. A VAD
             // speech_start here is the user's next turn, not a barge-in — end
@@ -1863,6 +1872,8 @@ export class StreamHandler {
               this.metricsAcc.anchorUserSpeechStart();
             }
           } else if (evt?.type === 'speech_end') {
+            // Speech-event: user stop edge (pipeline parity with realtime).
+            await this.emitUserSpeechEnded();
             this.metricsAcc.recordVadStop();
             // The SDK's VAD has detected end-of-speech earlier and more
             // reliably than the provider's own endpointing on PSTN
@@ -2937,6 +2948,11 @@ export class StreamHandler {
     // onUserTurnCompleted hook is not yet wired in TS — record 0 delay so EOU can still emit.
     this.metricsAcc.recordOnUserTurnCompletedDelay(0);
     this.metricsAcc.recordTurnCommitted();
+    // Speech-event: end-of-utterance committed (pipeline analogue of
+    // Realtime's input_audio_buffer.committed). Advances the dispatcher's
+    // turn index so per-turn llm_token/audio_out gating works beyond the
+    // first turn. Mirrors Python.
+    await this.emitUserSpeechEos(filteredTranscript);
     closeEndpointSpan();
 
     // Settle the previous turn first (single-in-flight). It is either already
@@ -3219,6 +3235,8 @@ export class StreamHandler {
    * the legacy synchronous path and the strategy-confirmed async path.
    */
   private runBargeInCancel(transcriptText: string): void {
+    // Speech-event: agent stop edge — interrupted by the caller.
+    void this.emitAgentSpeechEnded(true).catch(() => {});
     // Capture pending state BEFORE clearPendingBargeIn() drops it — if VAD
     // already started the overlap window via ``startPendingBargeIn`` we MUST
     // NOT call ``recordOverlapStart`` again (that would overwrite T1 with

@@ -441,7 +441,7 @@ class TestServerDashboardIntegration:
 
         server._metrics_store = MetricsStore()
 
-        start_cb, end_cb, metrics_cb, transcript_line_cb = server._wrap_callbacks()
+        start_cb, end_cb, metrics_cb, transcript_line_cb, _transcript_cb = server._wrap_callbacks()
         assert callable(start_cb)
         assert callable(end_cb)
         assert callable(metrics_cb)

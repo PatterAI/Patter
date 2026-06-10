@@ -152,7 +152,7 @@ class TestWrapCallbacks:
         user_cb = AsyncMock()
         srv.on_call_start = user_cb
 
-        on_start, _, _, _ = srv._wrap_callbacks()
+        on_start, _, _, _, _ = srv._wrap_callbacks()
         await on_start({"call_id": "c1"})
 
         store.record_call_start.assert_called_once_with({"call_id": "c1"})
@@ -166,7 +166,7 @@ class TestWrapCallbacks:
         user_cb = AsyncMock()
         srv.on_call_end = user_cb
 
-        _, on_end, _, _ = srv._wrap_callbacks()
+        _, on_end, _, _, _ = srv._wrap_callbacks()
         data = {"call_id": "c1", "metrics": {"duration": 10}}
         await on_end(data)
 
@@ -181,7 +181,7 @@ class TestWrapCallbacks:
         user_cb = AsyncMock()
         srv.on_metrics = user_cb
 
-        _, _, on_metrics, _ = srv._wrap_callbacks()
+        _, _, on_metrics, _, _ = srv._wrap_callbacks()
         await on_metrics({"turn": 1})
 
         store.record_turn.assert_called_once_with({"turn": 1})
@@ -194,7 +194,7 @@ class TestWrapCallbacks:
         user_cb = AsyncMock()
         srv.on_call_start = user_cb
 
-        on_start, _, _, _ = srv._wrap_callbacks()
+        on_start, _, _, _, _ = srv._wrap_callbacks()
         await on_start({"call_id": "c1"})
 
         user_cb.assert_awaited_once()
@@ -206,7 +206,7 @@ class TestWrapCallbacks:
         srv._metrics_store = store
         srv.on_call_start = None
 
-        on_start, _, _, _ = srv._wrap_callbacks()
+        on_start, _, _, _, _ = srv._wrap_callbacks()
         await on_start({"call_id": "c1"})
 
         store.record_call_start.assert_called_once()
@@ -242,7 +242,7 @@ class TestWrapCallbacks:
         # Real on-disk CallLogger so we can read back metadata.json.
         srv._call_logger = CallLogger(tmp_path)
 
-        on_start, _, _, _ = srv._wrap_callbacks()
+        on_start, _, _, _, _ = srv._wrap_callbacks()
         # Simulate the bridge's on_call_start payload for an outbound call:
         # the WS query string was empty so caller/callee are blank.
         await on_start(
@@ -261,6 +261,166 @@ class TestWrapCallbacks:
         # Phone redact mode default is "mask" — last-4 visible.
         assert payload["caller"].endswith("2222")
         assert payload["callee"].endswith("4444")
+
+    @staticmethod
+    def _read_events(tmp_path, call_id):
+        import json
+
+        paths = list(tmp_path.glob(f"calls/*/*/*/{call_id}/events.jsonl"))
+        if not paths:
+            return []
+        return [
+            json.loads(line)
+            for line in paths[0].read_text("utf-8").splitlines()
+            if line.strip()
+        ]
+
+    @pytest.mark.asyncio
+    async def test_tool_transcript_lines_write_events_jsonl(self, tmp_path) -> None:
+        """``role="tool"`` transcript events land in events.jsonl as
+        ``tool_call`` (invocation, result still pending) and ``tool_result``
+        records — the file was documented since 0.6 but never written."""
+        from getpatter.services.call_log import CallLogger
+
+        srv = _make_server()
+        srv._metrics_store = None
+        srv._call_logger = CallLogger(tmp_path)
+        user_cb = AsyncMock()
+        srv.on_transcript = user_cb
+
+        _, _, _, _, on_transcript = srv._wrap_callbacks()
+        await on_transcript(
+            {
+                "role": "tool",
+                "text": "get_weather({})",
+                "call_id": "CA-tools",
+                "tool_name": "get_weather",
+                "tool_args": {"city": "Rome"},
+                "tool_result": None,
+            }
+        )
+        await on_transcript(
+            {
+                "role": "tool",
+                "text": "get_weather(...) → sunny",
+                "call_id": "CA-tools",
+                "tool_name": "get_weather",
+                "tool_args": {"city": "Rome"},
+                "tool_result": "sunny",
+            }
+        )
+        # Regular lines must NOT produce events.
+        await on_transcript({"role": "user", "text": "hi", "call_id": "CA-tools"})
+
+        events = self._read_events(tmp_path, "CA-tools")
+        assert [e["type"] for e in events] == ["tool_call", "tool_result"]
+        assert events[0]["data"] == {
+            "name": "get_weather",
+            "arguments": {"city": "Rome"},
+            "result": None,
+        }
+        assert events[1]["data"]["result"] == "sunny"
+        # User callback still sees every line, including non-tool ones.
+        assert user_cb.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_interrupted_turn_writes_barge_in_event(self, tmp_path) -> None:
+        from getpatter.services.call_log import CallLogger
+
+        srv = _make_server()
+        srv._metrics_store = None
+        srv._call_logger = CallLogger(tmp_path)
+
+        _, _, on_metrics, _, _ = srv._wrap_callbacks()
+        await on_metrics(
+            {
+                "call_id": "CA-barge",
+                "turn": {
+                    "turn_index": 2,
+                    "user_text": "wait",
+                    "agent_text": "[interrupted]",
+                    "latency": {"bargein_ms": 87.5},
+                },
+            }
+        )
+        # A clean turn must NOT produce a barge_in event.
+        await on_metrics(
+            {
+                "call_id": "CA-barge",
+                "turn": {
+                    "turn_index": 3,
+                    "user_text": "ok",
+                    "agent_text": "sure",
+                    "latency": {"total_ms": 900.0, "bargein_ms": None},
+                },
+            }
+        )
+
+        events = self._read_events(tmp_path, "CA-barge")
+        assert [e["type"] for e in events] == ["barge_in"]
+        assert events[0]["data"] == {"turn_index": 2, "bargein_ms": 87.5}
+
+    @pytest.mark.asyncio
+    async def test_call_end_error_code_writes_error_event(self, tmp_path) -> None:
+        import json
+        from types import SimpleNamespace
+
+        from getpatter.services.call_log import CallLogger
+
+        srv = _make_server()
+        srv._metrics_store = None
+        srv._call_logger = CallLogger(tmp_path)
+
+        _, on_end, _, _, _ = srv._wrap_callbacks()
+        metrics = SimpleNamespace(
+            duration_seconds=12.0,
+            cost=None,
+            latency_avg=None,
+            latency_p50=None,
+            latency_p95=None,
+            latency_p99=None,
+            turns=(),
+            error_code="connection",
+        )
+        await on_end({"call_id": "CA-err", "metrics": metrics})
+
+        events = self._read_events(tmp_path, "CA-err")
+        assert [e["type"] for e in events] == ["error"]
+        assert events[0]["data"] == {"error_code": "connection"}
+        meta_paths = list(tmp_path.glob("calls/*/*/*/CA-err/metadata.json"))
+        assert len(meta_paths) == 1
+        payload = json.loads(meta_paths[0].read_text("utf-8"))
+        assert payload["error"] == "connection"
+
+    @pytest.mark.asyncio
+    async def test_clean_call_end_writes_no_error_event(self, tmp_path) -> None:
+        import json
+        from types import SimpleNamespace
+
+        from getpatter.services.call_log import CallLogger
+
+        srv = _make_server()
+        srv._metrics_store = None
+        srv._call_logger = CallLogger(tmp_path)
+
+        _, on_end, _, _, _ = srv._wrap_callbacks()
+        metrics = SimpleNamespace(
+            duration_seconds=5.0,
+            cost=None,
+            latency_avg=None,
+            latency_p50=None,
+            latency_p95=None,
+            latency_p99=None,
+            turns=(),
+            error_code="",
+        )
+        await on_end({"call_id": "CA-clean", "metrics": metrics})
+
+        assert self._read_events(tmp_path, "CA-clean") == []
+        meta_paths = list(tmp_path.glob("calls/*/*/*/CA-clean/metadata.json"))
+        assert len(meta_paths) == 1
+        payload = json.loads(meta_paths[0].read_text("utf-8"))
+        assert payload["error"] is None
 
 
 # ---------------------------------------------------------------------------

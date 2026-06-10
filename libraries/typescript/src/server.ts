@@ -2249,7 +2249,8 @@ export class EmbeddedServer {
 
   /** Build the shared StreamHandlerDeps for the current server configuration. */
   private buildStreamHandlerDeps(bridge: TelephonyBridge): import('./stream-handler').StreamHandlerDeps {
-    const [wrappedStart, wrappedMetrics, wrappedEnd] = this.wrapLoggingCallbacks(bridge);
+    const [wrappedStart, wrappedMetrics, wrappedEnd, wrappedTranscript] =
+      this.wrapLoggingCallbacks(bridge);
     return {
       config: this.config,
       agent: this.agent,
@@ -2259,7 +2260,7 @@ export class EmbeddedServer {
       remoteHandler: this.remoteHandler,
       onCallStart: wrappedStart,
       onCallEnd: wrappedEnd,
-      onTranscript: this.onTranscript,
+      onTranscript: wrappedTranscript,
       onMessage: this.onMessage,
       onMetrics: wrappedMetrics,
       recording: this.recording,
@@ -2285,12 +2286,14 @@ export class EmbeddedServer {
     typeof this.onCallStart,
     typeof this.onMetrics,
     typeof this.onCallEnd,
+    typeof this.onTranscript,
   ] {
     const logger = this.callLogger;
     const agent = this.agent;
     const userStart = this.onCallStart;
     const userMetrics = this.onMetrics;
     const userEnd = this.onCallEnd;
+    const userTranscript = this.onTranscript;
 
     const agentSnapshot = (): Record<string, unknown> => {
       const snap: Record<string, unknown> = {
@@ -2364,6 +2367,25 @@ export class EmbeddedServer {
           void logger
             .logTurn(callId, turn as Record<string, unknown>)
             .catch((err) => getLogger().error(`call_log turn error: ${String(err)}`));
+          // Interrupted turn → operational ``barge_in`` event for
+          // events.jsonl. ``bargein_ms`` (detect → playback halted) may be
+          // missing when the stop timestamp was missed; the
+          // ``[interrupted]`` agent_text marker is the canonical interrupt
+          // signal in both SDKs.
+          const t = turn as {
+            turn_index?: number;
+            agent_text?: string;
+            latency?: { bargein_ms?: number };
+          };
+          const bargeinMs = t.latency?.bargein_ms;
+          if (t.agent_text === '[interrupted]' || bargeinMs !== undefined) {
+            void logger
+              .logEvent(callId, 'barge_in', {
+                turn_index: t.turn_index ?? null,
+                bargein_ms: bargeinMs ?? null,
+              })
+              .catch((err) => getLogger().error(`call_log event error: ${String(err)}`));
+          }
         }
       }
       if (userMetrics) await userMetrics(data);
@@ -2404,6 +2426,19 @@ export class EmbeddedServer {
               p99: metricsObj.latency_p99 ?? null,
             }
           : null;
+        // Surface the terminal error code (set when the call ended
+        // abnormally) as an ``error`` event in events.jsonl and as the
+        // ``error`` field of metadata.json. Code only — never the message
+        // (may carry PII).
+        const errorCode =
+          typeof (metricsObj as { error_code?: unknown } | null)?.error_code === 'string'
+            ? ((metricsObj as { error_code: string }).error_code)
+            : '';
+        if (errorCode) {
+          void logger
+            .logEvent(callId, 'error', { error_code: errorCode })
+            .catch((err) => getLogger().error(`call_log event error: ${String(err)}`));
+        }
         // Fire-and-forget: call logging must never block the voice flow.
         void logger
           .logCallEnd(callId, {
@@ -2411,6 +2446,7 @@ export class EmbeddedServer {
             turns: metricsObj?.turns?.length,
             cost: metricsObj?.cost ?? null,
             latency,
+            error: errorCode || null,
           })
           .catch((err) => getLogger().error(`call_log end error: ${String(err)}`));
       }
@@ -2431,7 +2467,27 @@ export class EmbeddedServer {
       }
     };
 
-    return [wrappedStart, wrappedMetrics, wrappedEnd];
+    const wrappedTranscript = async (data: Record<string, unknown>): Promise<void> => {
+      // Tool invocations surface as ``role="tool"`` transcript events (two
+      // per invocation: the call with ``tool_result=null``, then the
+      // result). Persist them to ``events.jsonl`` — documented as holding
+      // tool_call events since 0.6 but never written until now.
+      if (logger.enabled && data.role === 'tool' && typeof data.tool_name === 'string') {
+        const callId = typeof data.call_id === 'string' ? data.call_id : '';
+        const eventType = data.tool_result == null ? 'tool_call' : 'tool_result';
+        // Fire-and-forget: call logging must never block the voice flow.
+        void logger
+          .logEvent(callId, eventType, {
+            name: data.tool_name,
+            arguments: data.tool_args ?? {},
+            result: data.tool_result ?? null,
+          })
+          .catch((err) => getLogger().error(`call_log event error: ${String(err)}`));
+      }
+      if (userTranscript) await userTranscript(data);
+    };
+
+    return [wrappedStart, wrappedMetrics, wrappedEnd, wrappedTranscript];
   }
 
   // ---------------------------------------------------------------------------

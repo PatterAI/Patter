@@ -513,7 +513,12 @@ async def test_guardrail_triggers_cancel_and_replacement():
             pass
 
     mock_adapter.cancel_response.assert_called()
-    mock_adapter.send_text.assert_called_with("I can't say that.")
+    # The replacement is spoken as the ASSISTANT's own response via
+    # ``send_reassurance`` (an instructed response.create) — ``send_text``
+    # injected it as a phantom ``role:user`` turn the model then replied to.
+    # AsyncMock auto-provides ``send_reassurance``, matching the GA adapter.
+    mock_adapter.send_reassurance.assert_called_with("I can't say that.")
+    mock_adapter.send_text.assert_not_called()
 
 
 @pytest.mark.asyncio

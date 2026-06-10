@@ -268,6 +268,7 @@ async def telnyx_stream_bridge(
     patter_side: str = "uut",
     pop_prewarm_audio=None,
     pop_prewarmed_connections=None,
+    speech_events=None,
 ) -> None:
     """Bridge a Telnyx WebSocket media stream to the configured AI provider.
 
@@ -590,6 +591,7 @@ async def telnyx_stream_bridge(
                         transcript_entries=transcript_entries,
                         pop_prewarm_audio=pop_prewarm_audio,
                         pop_prewarmed_connections=pop_prewarmed_connections,
+                        speech_events=speech_events,
                     )
                 elif provider == "elevenlabs_convai":
                     handler = ElevenLabsConvAIStreamHandler(
@@ -611,6 +613,7 @@ async def telnyx_stream_bridge(
                         on_metrics=on_metrics,
                         on_transcript_line=on_transcript_line,
                         transcript_entries=transcript_entries,
+                        speech_events=speech_events,
                     )
                 else:
                     handler = OpenAIRealtimeStreamHandler(
@@ -636,6 +639,7 @@ async def telnyx_stream_bridge(
                         # codec forwards bytes pass-through on both legs.
                         audio_format="g711_ulaw",
                         pop_prewarmed_connections=pop_prewarmed_connections,
+                        speech_events=speech_events,
                     )
 
                 # Inherit patter.side from the parent Patter instance so all
