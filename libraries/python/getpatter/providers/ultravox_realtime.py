@@ -14,7 +14,7 @@ import asyncio
 import json
 import logging
 from enum import IntEnum, StrEnum
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Union
 
 logger = logging.getLogger("getpatter.ultravox_realtime")
 

@@ -18,7 +18,7 @@ import asyncio
 import json
 import logging
 from enum import IntEnum, StrEnum
-from typing import ClassVar, Any, AsyncIterator
+from typing import ClassVar, Any, AsyncIterator, Union
 
 import aiohttp
 

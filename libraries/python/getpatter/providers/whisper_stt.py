@@ -7,7 +7,7 @@ import io
 import logging
 import wave
 from enum import StrEnum
-from typing import ClassVar, AsyncIterator, Literal
+from typing import ClassVar, AsyncIterator, Literal, Union
 
 import httpx
 

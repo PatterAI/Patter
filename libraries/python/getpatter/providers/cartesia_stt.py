@@ -12,7 +12,7 @@ import json
 import logging
 from dataclasses import dataclass
 from enum import IntEnum, StrEnum
-from typing import ClassVar, AsyncIterator, Literal
+from typing import ClassVar, AsyncIterator, Literal, Union
 from urllib.parse import urlencode
 
 import aiohttp
