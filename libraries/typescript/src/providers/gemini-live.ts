@@ -17,6 +17,7 @@
  */
 
 import { getLogger } from '../logger';
+import { sanitizeGeminiSchema } from './google-llm';
 
 export const GEMINI_DEFAULT_INPUT_SR = 16000;
 export const GEMINI_DEFAULT_OUTPUT_SR = 24000;
@@ -129,7 +130,10 @@ export class GeminiLiveAdapter {
           functionDeclarations: this.tools.map((t) => ({
             name: t.name,
             description: t.description,
-            parameters: t.parameters,
+            // Strip JSON-Schema keys the Live API's proto Schema rejects
+            // ($schema, additionalProperties — strict-mode and zod-derived
+            // MCP tools): one such tool 400'd the whole session.
+            parameters: sanitizeGeminiSchema(t.parameters),
           })),
         },
       ];

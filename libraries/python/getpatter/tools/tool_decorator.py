@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import inspect
 import re
+import types
 import typing
 from typing import Any, Callable, get_args, get_origin
 
@@ -45,13 +46,28 @@ def _json_schema_type(annotation: Any) -> tuple[str, bool]:
     """
     origin = get_origin(annotation)
 
-    # Optional[X] is Union[X, None]
-    if origin is typing.Union:
+    # Optional[X] is Union[X, None]. PEP 604 unions (``str | None``) have
+    # origin ``types.UnionType``, NOT ``typing.Union`` — checking only the
+    # latter mapped the idiomatic 3.10+ spelling to ``object`` and wrongly
+    # marked it required.
+    if origin is typing.Union or origin is types.UnionType:
         args = [a for a in get_args(annotation) if a is not type(None)]
         if len(args) == 1:
             base_type, _ = _json_schema_type(args[0])
             return base_type, True
         return "object", True
+
+    # Literal['a', 'b'] → the base type of its values (enum values are
+    # added by the caller via _json_schema_enum).
+    if origin is typing.Literal:
+        values = get_args(annotation)
+        if values and all(isinstance(v, str) for v in values):
+            return "string", False
+        if values and all(isinstance(v, bool) for v in values):
+            return "boolean", False
+        if values and all(isinstance(v, int) for v in values):
+            return "integer", False
+        return "string", False
 
     # Generic aliases like list[int], dict[str, Any]
     if origin is not None:
@@ -167,10 +183,30 @@ def tool(fn: Callable[..., Any]) -> ToolDefinition:
         else:
             schema_type, is_optional = _json_schema_type(annotation)
 
-        prop: dict[str, str] = {"type": schema_type}
+        prop: dict[str, Any] = {"type": schema_type}
         desc = arg_descriptions.get(name, "")
         if desc:
             prop["description"] = desc
+
+        if annotation is not None:
+            ann = annotation
+            # Unwrap Optional/union to inspect the inner annotation.
+            if get_origin(ann) is typing.Union or get_origin(ann) is types.UnionType:
+                inner = [a for a in get_args(ann) if a is not type(None)]
+                if len(inner) == 1:
+                    ann = inner[0]
+            # Literal['a','b'] → enum (the model otherwise free-texts the
+            # value; Gemini also rejects bare-object literals).
+            if get_origin(ann) is typing.Literal:
+                prop["enum"] = list(get_args(ann))
+            # list[X] → items (Gemini rejects array schemas without items).
+            if schema_type == "array":
+                item_args = get_args(ann)
+                if item_args:
+                    item_type, _ = _json_schema_type(item_args[0])
+                    prop["items"] = {"type": item_type}
+                else:
+                    prop["items"] = {"type": "string"}
 
         properties[name] = prop
 
@@ -236,8 +272,8 @@ def define_tool(
     description: str,
     parameters: dict[str, ParamSpec],
     handler: Callable[..., Any],
-) -> ToolDefinition:
-    """Schema-first factory that builds a ``ToolDefinition`` dict.
+) -> "Any":
+    """Schema-first factory that builds a public :class:`~getpatter.Tool`.
 
     Mirrors the TypeScript ``defineTool`` function: caller supplies an
     explicit JSON-Schema-style parameter map rather than relying on
@@ -297,9 +333,15 @@ def define_tool(
 
     _adapter.__wrapped__ = handler  # type: ignore[attr-defined]
 
-    return {
-        "name": name,
-        "description": description,
-        "parameters": json_schema,
-        "handler": _adapter,
-    }
+    # Return a public ``Tool`` instance — ``Patter.agent(tools=[...])``
+    # validates with ``isinstance(tool, Tool)`` since 0.5.0, so the
+    # previous dict return was rejected with a TypeError despite being
+    # this function's documented purpose ("for parity with defineTool").
+    from getpatter._public_api import Tool as _PublicTool
+
+    return _PublicTool(
+        name=name,
+        description=description,
+        parameters=json_schema,
+        handler=_adapter,
+    )

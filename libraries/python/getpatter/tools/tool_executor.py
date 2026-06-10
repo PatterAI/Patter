@@ -312,14 +312,20 @@ class ToolExecutor:
         for attempt in range(total_attempts):
             try:
                 coro = _invoke_handler(handler, arguments, call_context, on_progress)
-                if timeout_s is not None:
-                    result = await asyncio.wait_for(coro, timeout_s)
-                else:
-                    result = await coro
+                # Default budget when the tool declares none: an unbounded
+                # handler await (which is what every MCP tool is) froze the
+                # realtime event loop indefinitely on a hung tool. Mirrors
+                # the TS DefaultToolExecutor's 10 s default.
+                effective_timeout = (
+                    timeout_s if timeout_s is not None else _DEFAULT_TOOL_TIMEOUT_S
+                )
+                result = await asyncio.wait_for(coro, effective_timeout)
                 self._breaker.record_success(tool_name)
                 if isinstance(result, str):
                     return result
-                return json.dumps(result)
+                # default=str: a non-JSON-serializable return (datetime, …)
+                # used to burn all retry attempts + backoff before erroring.
+                return json.dumps(result, default=str)
             except (asyncio.TimeoutError, TimeoutError):
                 # A timeout is terminal — do NOT retry (retrying would
                 # multiply the wait by ``total_attempts`` and stall the turn).
@@ -407,6 +413,24 @@ class ToolExecutor:
                     )
                 self._breaker.record_success(tool_name)
                 return json.dumps(response.json())
+            except httpx.TimeoutException as e:
+                # Terminal like the handler path: retrying a timed-out
+                # webhook multiplies the wait by the attempt count — with a
+                # large timeout_s a dead webhook could hold a voice turn for
+                # many minutes.
+                self._breaker.record_failure(tool_name)
+                logger.error(
+                    "Tool webhook '%s' timed out after %ss (terminal, no retry): %s",
+                    tool_name,
+                    timeout_s,
+                    e,
+                )
+                return json.dumps(
+                    {
+                        "error": f"Webhook for tool '{tool_name}' timed out",
+                        "fallback": True,
+                    }
+                )
             except Exception as e:  # noqa: BLE001 - intentional broad catch
                 if attempt < self.MAX_RETRIES:
                     logger.warning(

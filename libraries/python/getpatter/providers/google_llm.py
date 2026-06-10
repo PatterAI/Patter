@@ -292,6 +292,47 @@ class GoogleLLMProvider:
 # ---------------------------------------------------------------------------
 
 
+
+# Keys Gemini's restricted proto ``Schema`` accepts. Anything else
+# (``$schema``, ``additionalProperties`` — emitted by strict-mode tools and
+# nearly every zod-derived MCP server — ``oneOf``, …) makes the request 400.
+_GEMINI_SCHEMA_KEYS = frozenset(
+    {
+        "type",
+        "description",
+        "properties",
+        "items",
+        "enum",
+        "required",
+        "nullable",
+        "format",
+        "minimum",
+        "maximum",
+        "minLength",
+        "maxLength",
+        "minItems",
+        "maxItems",
+        "pattern",
+        "anyOf",
+        "default",
+        "title",
+    }
+)
+
+
+def _sanitize_gemini_schema(schema):
+    """Recursively strip JSON-Schema keys Gemini's proto Schema rejects."""
+    if isinstance(schema, dict):
+        return {
+            k: _sanitize_gemini_schema(v)
+            for k, v in schema.items()
+            if k in _GEMINI_SCHEMA_KEYS
+        }
+    if isinstance(schema, list):
+        return [_sanitize_gemini_schema(v) for v in schema]
+    return schema
+
+
 def _to_gemini_tools(tools: list[dict]) -> list[Any]:
     """Convert OpenAI-style tool definitions to Gemini ``Tool`` objects."""
     from google.genai import types
@@ -303,7 +344,9 @@ def _to_gemini_tools(tools: list[dict]) -> list[Any]:
             types.FunctionDeclaration(
                 name=fn["name"],
                 description=fn.get("description", ""),
-                parameters=fn.get("parameters", {"type": "object", "properties": {}}),
+                parameters=_sanitize_gemini_schema(
+                    fn.get("parameters", {"type": "object", "properties": {}})
+                ),
             )
         )
     if not function_decls:

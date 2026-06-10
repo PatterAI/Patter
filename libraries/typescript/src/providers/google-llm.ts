@@ -270,13 +270,50 @@ export class GoogleLLMProvider implements LLMProvider {
 // Translation helpers (OpenAI format -> Gemini REST contents)
 // ---------------------------------------------------------------------------
 
+// Keys Gemini's restricted proto ``Schema`` accepts. Anything else
+// ($schema, additionalProperties — emitted by strict-mode tools and nearly
+// every zod-derived MCP server — oneOf, …) makes the request 400.
+const GEMINI_SCHEMA_KEYS = new Set([
+  'type',
+  'description',
+  'properties',
+  'items',
+  'enum',
+  'required',
+  'nullable',
+  'format',
+  'minimum',
+  'maximum',
+  'minLength',
+  'maxLength',
+  'minItems',
+  'maxItems',
+  'pattern',
+  'anyOf',
+  'default',
+  'title',
+]);
+
+/** Recursively strip JSON-Schema keys Gemini's proto Schema rejects. */
+export function sanitizeGeminiSchema(schema: unknown): unknown {
+  if (Array.isArray(schema)) return schema.map(sanitizeGeminiSchema);
+  if (schema !== null && typeof schema === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(schema as Record<string, unknown>)) {
+      if (GEMINI_SCHEMA_KEYS.has(k)) out[k] = sanitizeGeminiSchema(v);
+    }
+    return out;
+  }
+  return schema;
+}
+
 function toGeminiTools(tools: OpenAIToolDef[]): Array<Record<string, unknown>> {
   const functionDeclarations = tools.map((t) => {
     const fn = t.function ?? t;
     return {
       name: String(fn.name ?? ''),
       description: String(fn.description ?? ''),
-      parameters: fn.parameters ?? { type: 'object', properties: {} },
+      parameters: sanitizeGeminiSchema(fn.parameters ?? { type: 'object', properties: {} }),
     };
   });
   if (functionDeclarations.length === 0) return [];

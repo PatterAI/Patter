@@ -183,13 +183,21 @@ class GeminiLiveAdapter:
                 parts=[genai_types.Part(text=self.instructions)],
             )
         if self.tools:
+            from getpatter.providers.google_llm import _sanitize_gemini_schema
+
             config["tools"] = [
                 {
                     "function_declarations": [
                         {
                             "name": t["name"],
                             "description": t.get("description", ""),
-                            "parameters": t.get("parameters", {}),
+                            # Strip JSON-Schema keys the Live API's proto
+                            # Schema rejects ($schema, additionalProperties —
+                            # emitted by strict-mode and zod-derived MCP
+                            # tools): one such tool 400'd the whole session.
+                            "parameters": _sanitize_gemini_schema(
+                                t.get("parameters", {})
+                            ),
                         }
                         for t in self.tools
                     ],
