@@ -246,6 +246,9 @@ class SileroVAD(VADProvider):
         self._speech_threshold_duration = 0.0
         self._silence_threshold_duration = 0.0
         self._pub_current_sample = 0
+        # Transitions beyond the first in a single process_frame call
+        # (drained one per call so none are lost).
+        self._pending_transitions: list = []
         self._pub_timestamp = 0.0
         self._closed = False
 
@@ -299,6 +302,9 @@ class SileroVAD(VADProvider):
 
         window_size = self._model.window_size_samples
         loop = asyncio.get_running_loop()
+        # Drain a transition queued by a previous multi-window chunk first.
+        if self._pending_transitions:
+            return self._pending_transitions.pop(0)
         event: VADEvent | None = None
 
         while self._pending.shape[0] >= window_size:
@@ -323,12 +329,16 @@ class SileroVAD(VADProvider):
             self._pub_timestamp += window_duration
 
             transition = self._advance_state(p, window_duration)
-            if transition is not None and event is None:
-                # Keep the first transition in this batch; subsequent windows
-                # in the same call continue to update internal state but we
-                # only surface one event per process_frame call so callers do
-                # not lose transitions to a later overwrite.
-                event = transition
+            if transition is not None:
+                if event is None:
+                    event = transition
+                else:
+                    # Queue later transitions instead of dropping them: a
+                    # chunk spanning speech_end → speech_start lost the
+                    # start event entirely (the comment claimed the
+                    # opposite). The next process_frame call drains the
+                    # queue first. Mirrors the TS adapter's pending queue.
+                    self._pending_transitions.append(transition)
 
         return event
 
@@ -395,6 +405,7 @@ class SileroVAD(VADProvider):
         if self._closed:
             return
         self._pending = np.zeros(0, dtype=np.float32)
+        self._pending_transitions.clear()
         self._pub_speaking = False
         self._speech_threshold_duration = 0.0
         self._silence_threshold_duration = 0.0

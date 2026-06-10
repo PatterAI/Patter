@@ -186,10 +186,18 @@ export class StatefulResampler {
   // previous chunk ended on an even-output boundary).
   private firHistory: Int16Array = new Int16Array(2); // [s_{-2}, s_{-1}]
   private firHistoryValid = false;
+  /**
+   * Samples after the last emitted FIR center, carried to the next chunk
+   * (1–2 samples: the next center and/or its missing lookahead). Replaces
+   * the old single ``firPendingSample`` — that design wrote the pending
+   * sample into history too (processed twice, true s-2 lost) and edge-
+   * replicated the +2 tap at every chunk end, producing audible crackle at
+   * chunk boundaries.
+   */
+  private firCarry: Int16Array = new Int16Array(0);
   // Pending sample carried from odd-count chunks (not the byte carry —
   // this is a complete Int16 sample that becomes the first input for the
   // next call).
-  private firPendingSample: number | null = null;
 
   // 8k→16k: last input sample deferred across chunk boundaries.
   private upsampleLast = 0;
@@ -262,16 +270,19 @@ export class StatefulResampler {
       );
     }
 
-    if (this.srcRate === 16000 && this.dstRate === 8000 && this.firPendingSample !== null) {
-      // We have one pending input sample that hasn't generated output yet.
-      // Edge-replicate it: treat it as a chunk of 2 identical samples so
-      // it produces 1 output.
-      const s = this.firPendingSample;
-      const tmp = Buffer.alloc(4);
-      tmp.writeInt16LE(s, 0);
-      tmp.writeInt16LE(s, 2);
-      const out = this._downsample16kTo8k(tmp);
-      this.firPendingSample = null;
+    if (this.srcRate === 16000 && this.dstRate === 8000 && this.firCarry.length > 0) {
+      // End of stream: emit the deferred final center, edge-replicating the
+      // missing lookahead taps.
+      const carry = this.firCarry;
+      this.firCarry = new Int16Array(0);
+      const s0 = carry[0];
+      const sP1 = carry.length > 1 ? carry[1] : s0;
+      const sP2 = sP1;
+      const sM2 = this.firHistoryValid ? this.firHistory[0] : 0;
+      const sM1 = this.firHistoryValid ? this.firHistory[1] : 0;
+      const filtered = (sM2 + 4 * sM1 + 6 * s0 + 4 * sP1 + sP2 + 8) >> 4;
+      const out = Buffer.alloc(2);
+      out.writeInt16LE(Math.max(-32768, Math.min(32767, filtered)), 0);
       return out;
     }
 
@@ -291,7 +302,7 @@ export class StatefulResampler {
   reset(): void {
     this.firHistory = new Int16Array(2);
     this.firHistoryValid = false;
-    this.firPendingSample = null;
+    this.firCarry = new Int16Array(0);
     this.upsampleLast = 0;
     this.upsampleHasHistory = false;
     this.resample24Last = 0;
@@ -322,71 +333,50 @@ export class StatefulResampler {
    */
   private _downsample16kTo8k(buf: Buffer): Buffer {
     const newSampleCount = buf.length >> 1;
+    const carried = this.firCarry;
+    const total = carried.length + newSampleCount;
 
-    // Build input array: optional pending sample + new samples.
-    const hasPending = this.firPendingSample !== null;
-    const totalInput = newSampleCount + (hasPending ? 1 : 0);
-
-    const input = new Int16Array(totalInput);
-    if (hasPending) {
-      input[0] = this.firPendingSample as number;
-      for (let j = 0; j < newSampleCount; j++) input[j + 1] = buf.readInt16LE(j * 2);
-    } else {
-      for (let j = 0; j < newSampleCount; j++) input[j] = buf.readInt16LE(j * 2);
+    const all = new Int16Array(total);
+    all.set(carried, 0);
+    for (let j = 0; j < newSampleCount; j++) {
+      all[carried.length + j] = buf.readInt16LE(j * 2);
     }
-    this.firPendingSample = null;
-
-    if (totalInput === 0) return Buffer.alloc(0);
+    if (total === 0) return Buffer.alloc(0);
 
     // Seed FIR history with silence on the first call.  The correct
     // initial condition is zeros (there was no audio before this call).
-    // Seeding with input[0] created a startup transient when ElevenLabs
-    // audio began at non-zero amplitude — the all-input[0] history
-    // amplified the first output sample relative to steady-state, which
-    // sounded as crackling on the very first TTS chunk of a call.
     if (!this.firHistoryValid) {
       this.firHistory[0] = 0;
       this.firHistory[1] = 0;
       this.firHistoryValid = true;
     }
 
-    // Build extended array: [history[-2], history[-1], input[0], input[1], ...]
-    const extended = new Int16Array(totalInput + 2);
-    extended[0] = this.firHistory[0];
-    extended[1] = this.firHistory[1];
-    for (let j = 0; j < totalInput; j++) extended[j + 2] = input[j];
-
-    // Number of output samples = floor(totalInput / 2).
-    // The remaining odd sample (if totalInput is odd) is carried in firPendingSample.
-    const outSamples = totalInput >> 1;
-    const out = Buffer.alloc(outSamples * 2);
-
-    for (let i = 0; i < outSamples; i++) {
-      const c = 2 + i * 2; // center in extended
-      const sM2 = extended[c - 2];
-      const sM1 = extended[c - 1];
-      const s0  = extended[c];
-      const sP1 = c + 1 < extended.length ? extended[c + 1] : extended[extended.length - 1];
-      const sP2 = c + 2 < extended.length ? extended[c + 2] : extended[extended.length - 1];
-
+    // Centers sit at even stream positions 0, 2, 4 … within ``all``; each
+    // output needs the +2 lookahead sample, so emit only while it exists —
+    // the remaining 1-2 samples carry to the next chunk (``flush()``
+    // edge-replicates at end of stream). This is what makes chunked
+    // processing bit-identical to one-shot processing.
+    const nOut = total >= 3 ? ((total - 3) >> 1) + 1 : 0;
+    const out = Buffer.alloc(nOut * 2);
+    for (let i = 0; i < nOut; i++) {
+      const c = i * 2;
+      const sM2 = c >= 2 ? all[c - 2] : this.firHistory[0];
+      const sM1 = c >= 1 ? all[c - 1] : this.firHistory[1];
+      const s0 = all[c];
+      const sP1 = all[c + 1];
+      const sP2 = all[c + 2];
       const filtered = (sM2 + 4 * sM1 + 6 * s0 + 4 * sP1 + sP2 + 8) >> 4;
       out.writeInt16LE(Math.max(-32768, Math.min(32767, filtered)), i * 2);
     }
 
-    // If totalInput is odd, the last sample becomes the next chunk's first input.
-    if (totalInput % 2 === 1) {
-      this.firPendingSample = input[totalInput - 1];
+    // Carry forward everything from the next (un-emittable) center on, and
+    // remember the two samples preceding it as FIR history.
+    const nextCenter = nOut * 2;
+    if (nextCenter >= 2) {
+      this.firHistory[0] = all[nextCenter - 2];
+      this.firHistory[1] = all[nextCenter - 1];
     }
-
-    // Update FIR history: last 2 samples of the extended array we processed.
-    // These are the last 2 samples of `input` (or 1 if totalInput === 1).
-    if (totalInput >= 2) {
-      this.firHistory[0] = input[totalInput - 2];
-      this.firHistory[1] = input[totalInput - 1];
-    } else {
-      this.firHistory[0] = this.firHistory[1];
-      this.firHistory[1] = input[0];
-    }
+    this.firCarry = all.slice(nextCenter);
 
     return out;
   }

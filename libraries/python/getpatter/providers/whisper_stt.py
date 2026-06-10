@@ -146,9 +146,29 @@ class WhisperSTT(STTProvider):
         return cls(api_key=api_key, language=language, model=model)
 
     async def connect(self) -> None:
-        """Initialise the adapter (no persistent connection needed for Whisper)."""
+        """Initialise the adapter (no persistent connection needed for Whisper).
+
+        Fully resets per-call state so a sequential second call on the same
+        instance works: ``close()`` closes the httpx client (every chunk of
+        call 2 raised ``client has been closed``) and leaves a ``None``
+        sentinel in the queue that instantly terminated call 2's
+        ``receive_transcripts`` loop.
+        """
         self._running = True
         self._buffer = bytearray()
+        if self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                timeout=10.0,
+            )
+        # Drain stale sentinels/transcripts from a previous call.
+        while not self._transcript_queue.empty():
+            try:
+                self._transcript_queue.get_nowait()
+            except asyncio.QueueEmpty:  # pragma: no cover - defensive
+                break
+        # Serialize-transcriptions chain anchor (see send_audio).
+        self._transcribe_chain = None
 
     async def send_audio(self, audio_chunk: bytes) -> None:
         """Buffer incoming PCM audio and transcribe when the buffer is full."""
@@ -157,7 +177,23 @@ class WhisperSTT(STTProvider):
         if len(self._buffer) >= BUFFER_SIZE_BYTES:
             buf = bytes(self._buffer)
             self._buffer.clear()
-            task = asyncio.create_task(self._transcribe_and_enqueue(buf))
+
+            # Chain on the previous chunk's transcription: parallel HTTP
+            # requests with OpenAI's latency variance routinely delivered
+            # chunk N+1's final before chunk N's, scrambling word order in
+            # history ("call you tomorrow" / "I will"). Mirrors TS.
+            prev = getattr(self, "_transcribe_chain", None)
+
+            async def _ordered(p=prev, b=buf) -> None:
+                if p is not None:
+                    try:
+                        await p
+                    except Exception:  # pragma: no cover - prior chunk logged
+                        pass
+                await self._transcribe_and_enqueue(b)
+
+            task = asyncio.create_task(_ordered())
+            self._transcribe_chain = task
             self._pending.add(task)
             task.add_done_callback(self._pending.discard)
 

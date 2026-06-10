@@ -10,7 +10,7 @@ export interface OpenAITranscribeSTTOptions {
   model?: string;
   language?: string;
   bufferSize?: number;
-  /** ``"verbose_json"`` exposes segment-level confidence / timestamps. */
+  /** ``"json"`` only — the gpt-4o transcribe models reject ``"verbose_json"`` (whisper-1/WhisperSTT supports it). */
   responseFormat?: WhisperResponseFormat;
 }
 

@@ -448,7 +448,11 @@ export class DeepgramSTT {
   private emitTranscript(transcript: Transcript): void {
     for (const cb of this.transcriptCallbacks) {
       try {
-        cb(transcript);
+        // The callback is async — the sync catch alone never saw its
+        // rejection, which killed the process as an unhandled rejection.
+        Promise.resolve(cb(transcript)).catch((err) =>
+          getLogger().error(`DeepgramSTT transcript callback failed: ${String(err)}`),
+        );
       } catch (err) {
         getLogger().error(`DeepgramSTT transcript callback threw: ${String(err)}`);
       }

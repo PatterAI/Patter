@@ -2529,7 +2529,10 @@ export class StreamHandler {
               this.metricsAcc.recordTtsFirstByte();
               await this.emitAudioOut();
             }
-            if (this.aec) this.aec.pushFarEnd(chunk);
+            // Same carrier-native gate as the paced path above: on the
+            // mulaw fast path these are wire bytes, not PCM16 — pushing
+            // them corrupted the AEC reference.
+            if (this.aec && !this.ttsOutputFormatNativeForCarrier) this.aec.pushFarEnd(chunk);
             const encoded = this.encodePipelineAudio(chunk);
             this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
             this.markFirstAudioSent();
@@ -2696,12 +2699,14 @@ export class StreamHandler {
           // Speech-event: per-turn first TTS audio chunk.
           await this.emitAudioOut();
         }
-        // Far-end tap for the echo canceller. ``processedAudio`` is the
-        // exact PCM 16 kHz Buffer that the carrier-side encoder is about
-        // to transcode + send — i.e. the cleanest reference of "what the
-        // speaker is about to play". Push BEFORE ``sendAudio`` so a very
-        // fast carrier echo is still seen by the next mic frame.
-        if (this.aec) {
+        // Far-end tap for the echo canceller. On the default path
+        // ``processedAudio`` is the exact PCM 16 kHz Buffer the carrier-side
+        // encoder is about to transcode + send — the cleanest reference of
+        // "what the speaker is about to play". Push BEFORE ``sendAudio`` so
+        // a very fast carrier echo is still seen by the next mic frame.
+        // SKIPPED on the carrier-native fast path — there these are mulaw
+        // wire bytes and the int16 ingest turned the reference to garbage.
+        if (this.aec && !this.ttsOutputFormatNativeForCarrier) {
           this.aec.pushFarEnd(processedAudio);
         }
         if (recordSegment) {

@@ -3024,7 +3024,15 @@ class PipelineStreamHandler(StreamHandler):
                             first_chunk_sent = True
                             if self.metrics is not None:
                                 self.metrics.record_tts_first_byte()
-                        if self._aec is not None:
+                        # AEC far-end tap gated on the
+                        # carrier-native fast path: when the TTS adapter was
+                        # auto-flipped to ulaw_8000, these bytes are mulaw
+                        # wire bytes — pushing them into an AEC built for
+                        # int16 PCM 16 kHz corrupted the reference (and an
+                        # odd-length mulaw chunk crashed np.frombuffer).
+                        if self._aec is not None and not getattr(
+                            self, "_tts_output_format_native_for_carrier", False
+                        ):
                             self._aec.push_far_end(audio_chunk)
                         await self.audio_sender.send_audio(audio_chunk)
                         self._mark_first_audio_sent()
@@ -3350,12 +3358,18 @@ class PipelineStreamHandler(StreamHandler):
                         "tts_chunk",
                         {"bytes": len(processed_audio)},
                     )
-                # Far-end tap for the echo canceller. ``processed_audio`` is
-                # the exact PCM 16 kHz bytes that get transcoded + sent to
-                # the carrier — i.e. the cleanest reference of "what the
-                # speaker is about to play". Push BEFORE ``send_audio`` so a
-                # very fast carrier echo is still seen by the next mic frame.
-                if self._aec is not None:
+                # Far-end tap for the echo canceller. On the default path
+                # ``processed_audio`` is the exact PCM 16 kHz bytes that get
+                # transcoded + sent to the carrier — the cleanest reference
+                # of "what the speaker is about to play". Push BEFORE
+                # ``send_audio`` so a very fast carrier echo is still seen by
+                # the next mic frame. SKIPPED on the carrier-native fast path
+                # — there these are mulaw 8 kHz wire bytes, which corrupted
+                # the int16-PCM-16k reference (and odd-length chunks crashed
+                # np.frombuffer mid-turn, misreported as an LLM error).
+                if self._aec is not None and not getattr(
+                    self, "_tts_output_format_native_for_carrier", False
+                ):
                     self._aec.push_far_end(processed_audio)
                 if record_segment:
                     # First audible chunk of this sentence — stamp its start
@@ -5284,7 +5298,11 @@ class PipelineStreamHandler(StreamHandler):
             chunk = bytes_[i : i + self._PREWARM_CHUNK_BYTES]
             if not first_chunk_sent:
                 first_chunk_sent = True
-            if self._aec is not None:
+            # Same carrier-native gate as the live-TTS far-end taps: prewarm
+            # bytes are mulaw 8 kHz on Twilio/Plivo.
+            if self._aec is not None and not getattr(
+                self, "_tts_output_format_native_for_carrier", False
+            ):
                 self._aec.push_far_end(chunk)
             await self.audio_sender.send_audio(chunk)
             self._mark_first_audio_sent()

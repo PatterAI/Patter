@@ -97,6 +97,11 @@ def _create_stt_from_config(config, for_twilio: bool = False):
             "client_reference_id",
         }
         kwargs = {k: v for k, v in opts.items() if k in allowed}
+        # ``STTConfig.language`` (set by the ``providers.soniox(...)`` helper)
+        # was silently discarded — SonioxSTT has no ``language`` parameter;
+        # map it to ``language_hints`` unless hints were given explicitly.
+        if "language_hints" not in kwargs and config.language:
+            kwargs["language_hints"] = [config.language]
         return SonioxSTT(api_key=config.api_key, **kwargs)
 
     if provider == "speechmatics":

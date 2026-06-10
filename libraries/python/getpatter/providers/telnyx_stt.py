@@ -166,6 +166,16 @@ class TelnyxSTT(STTProvider):
         headers = {"Authorization": f"Bearer {self.api_key}"}
 
         self._ws = await self._session.ws_connect(url, headers=headers)
+        # Per-connection reset for sequential reuse: a second call on the
+        # same instance never re-sent the WAV header (Telnyx then rejected
+        # the raw PCM) and a stale ``None`` sentinel from the previous
+        # close() instantly terminated the new transcript loop.
+        self._header_sent = False
+        while not self._queue.empty():
+            try:
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:  # pragma: no cover - defensive
+                break
         self._recv_task = asyncio.create_task(self._recv_loop())
 
     async def send_audio(self, audio_chunk: bytes) -> None:

@@ -316,7 +316,16 @@ export class CartesiaSTT {
 
   private emit(transcript: Transcript): void {
     for (const cb of this.callbacks) {
-      cb(transcript);
+      // The registered callback is async (stream-handler's handleTranscript)
+      // — a bare call left its rejection unhandled, which kills the Node
+      // process. Contain both sync throws and async rejections.
+      try {
+        Promise.resolve(cb(transcript)).catch((err) =>
+          getLogger().error(`STT transcript callback failed: ${String(err)}`),
+        );
+      } catch (err) {
+        getLogger().error(`STT transcript callback threw: ${String(err)}`);
+      }
     }
   }
 

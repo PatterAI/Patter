@@ -314,6 +314,21 @@ class SonioxSTT(STTProvider):
         self._audio_bytes_sent += len(audio_chunk)
         await self._ws.send_bytes(audio_chunk)
 
+    async def finalize(self) -> None:
+        """Ask Soniox to finalize buffered audio immediately.
+
+        The pipeline's VAD ``speech_end`` fast-path duck-types
+        ``stt.finalize`` — without this method every Soniox turn waited out
+        the full endpointing delay (avoidable dead air per turn). Soniox's
+        WS API accepts ``{"type": "finalize"}`` for exactly this.
+        """
+        if self._ws is None or self._ws.closed:
+            return
+        try:
+            await self._ws.send_str(json.dumps({"type": "finalize"}))
+        except Exception as exc:  # noqa: BLE001 - best-effort fast path
+            logger.debug("Soniox finalize failed: %s", exc)
+
     # ------------------------------------------------------------------
     # Transcript stream
     # ------------------------------------------------------------------
@@ -332,6 +347,7 @@ class SonioxSTT(STTProvider):
             raise RuntimeError("SonioxSTT is not connected. Call connect() first.")
 
         final_acc = _TokenAccumulator()
+        last_interim_text = ""  # dedupe unchanged interim re-emissions
 
         async for msg in self._ws:
             if msg.type in (
@@ -384,7 +400,15 @@ class SonioxSTT(STTProvider):
             # Emit an interim update with ``final_acc + non_final`` so
             # downstream consumers see the best in-flight hypothesis.
             interim_text = (final_acc.text + non_final.text).strip()
-            if interim_text and not emitted_final_this_msg:
+            # Skip re-emitting an unchanged interim: keepalive/progress
+            # frames with no new tokens re-yielded the identical text,
+            # re-triggering downstream partial-transcript/barge-in checks.
+            if (
+                interim_text
+                and not emitted_final_this_msg
+                and interim_text != last_interim_text
+            ):
+                last_interim_text = interim_text
                 # Blended confidence: average of whichever sides contributed.
                 final_sum, final_count = final_acc.raw
                 non_final_sum, non_final_count = non_final.raw

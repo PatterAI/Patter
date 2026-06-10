@@ -575,13 +575,18 @@ class AssemblyAISTT(STTProvider):
                 ):
                     break
         finally:
-            self._running = False
             close_code = self._ws.close_code if self._ws is not None else None
-            if (
+            will_reconnect = (
                 close_code in RECONNECT_ERROR_CODES
                 and not self._closing_event.is_set()
                 and self._reconnect_attempts < 1
-            ):
+            )
+            if will_reconnect:
+                # Keep ``_running`` TRUE through the reconnect handshake:
+                # ``receive_transcripts`` polls the flag every 100 ms and the
+                # TLS+WS handshake takes longer — dropping it here terminated
+                # the consumer, so a successfully reconnected (and billed)
+                # session delivered zero transcripts to the pipeline.
                 self._reconnect_attempts += 1
                 logger.warning(
                     "AssemblyAISTT: close code %s — attempting single reconnect.",
@@ -591,6 +596,9 @@ class AssemblyAISTT(STTProvider):
                     await self._reconnect()
                 except Exception:  # noqa: BLE001
                     logger.exception("AssemblyAISTT reconnect failed")
+                    self._running = False
+            else:
+                self._running = False
 
     async def _reconnect(self) -> None:
         """Re-open the WebSocket and resume the recv loop."""

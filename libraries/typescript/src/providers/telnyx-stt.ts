@@ -128,7 +128,13 @@ export class TelnyxSTT {
       };
 
       for (const cb of this.callbacks) {
-        cb(transcript);
+        try {
+          Promise.resolve(cb(transcript)).catch((err) =>
+            getLogger().error(`STT transcript callback failed: ${String(err)}`),
+          );
+        } catch (err) {
+          getLogger().error(`STT transcript callback threw: ${String(err)}`);
+        }
       }
     });
 
