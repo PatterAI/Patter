@@ -2150,6 +2150,7 @@ class Patter:
         agent: Agent,
         port: int = 8000,
         recording: bool = False,
+        local_recording: bool | str = False,
         on_call_start: Callable[[dict], Awaitable[None]] | None = None,
         on_call_end: Callable[[dict], Awaitable[None]] | None = None,
         on_transcript: Callable[[dict], Awaitable[None]] | None = None,
@@ -2175,6 +2176,18 @@ class Patter:
                 user's transcribed text in pipeline mode; the return value is
                 synthesised to speech and played back to the caller.
             recording: When ``True``, record each call via the Twilio Recordings API.
+            local_recording: Carrier-neutral local call recording. When
+                ``True``, the SDK records each call at the transport as an
+                interleaved stereo WAV — left channel = caller, right channel
+                = agent — at 16 kHz PCM16, written incrementally to
+                ``<call_log_dir>/recording.wav`` when call logging
+                (``persist`` / ``PATTER_LOG_DIR``) is enabled, else to
+                ``./recordings/<call_id>.wav``. Pass a directory string to
+                choose where the WAVs go. Works on every carrier (Twilio,
+                Telnyx, Plivo) and every engine mode; independent of the
+                carrier-side ``recording`` flag (both can be on). The final
+                path is surfaced as ``recording_path`` in the ``on_call_end``
+                payload and in the call-log metadata. Default ``False``.
             voicemail_message: If set, spoken as a voicemail message when AMD
                 detects a machine (requires machine_detection=True on call()).
             dashboard: When ``True`` (default), serves a local metrics dashboard
@@ -2222,6 +2235,11 @@ class Patter:
         if not isinstance(recording, bool):
             raise TypeError(
                 f"recording must be a bool, got {type(recording).__name__}."
+            )
+        if not isinstance(local_recording, (bool, str)):
+            raise TypeError(
+                "local_recording must be a bool or a directory string, got "
+                f"{type(local_recording).__name__}."
             )
 
         # Pre-import AEC at serve startup so the first call doesn't pay
@@ -2291,6 +2309,7 @@ class Patter:
             config=config,
             agent=agent,
             recording=recording,
+            local_recording=local_recording,
             voicemail_message=voicemail_message,
             pricing=self._pricing,
             dashboard=dashboard,

@@ -328,6 +328,7 @@ async def plivo_stream_bridge(
     plivo_auth_token: str = "",
     webhook_host: str = "",
     recording: bool = False,
+    local_recorder_factory=None,
     on_metrics=None,
     on_transcript_line=None,
     pricing: dict | None = None,
@@ -363,6 +364,10 @@ async def plivo_stream_bridge(
     ) = None
     audio_sender: PlivoAudioSender | None = None
     metrics = None
+    # Carrier-neutral local recorder for this call (None = off). Tracked
+    # bridge-side (not just on the handler) so the on_call_end payload can
+    # surface ``recording_path`` without poking handler internals.
+    local_recorder = None
 
     _call_start_monotonic: float | None = None
     _scope_stack = contextlib.ExitStack()
@@ -603,6 +608,16 @@ async def plivo_stream_bridge(
                 except Exception:  # pragma: no cover — defense in depth
                     logger.debug("Failed to set handler._patter_side", exc_info=True)
 
+                # Attach the carrier-neutral local recorder BEFORE
+                # handler.start() so the firstMessage TTS is captured. The
+                # factory returns None when local recording is off / failed.
+                if local_recorder_factory is not None:
+                    try:
+                        local_recorder = local_recorder_factory(call_id_actual)
+                        handler.local_recorder = local_recorder
+                    except Exception as _exc:  # noqa: BLE001 - best-effort
+                        logger.warning("Local recorder setup failed: %s", _exc)
+
                 try:
                     if call_id_actual:
                         _scope_stack.enter_context(
@@ -726,17 +741,21 @@ async def plivo_stream_bridge(
                 logger.warning("Metrics finalization error: %s", exc)
         if on_call_end:
             try:
-                await on_call_end(
-                    {
-                        "call_id": call_id_actual,
-                        "caller": caller,
-                        "callee": callee,
-                        "ended_at": time.time(),
-                        "transcript": list(transcript_entries),
-                        "conversation_history": list(conversation_history),
-                        "metrics": call_metrics,
-                    }
-                )
+                _end_payload = {
+                    "call_id": call_id_actual,
+                    "caller": caller,
+                    "callee": callee,
+                    "ended_at": time.time(),
+                    "transcript": list(transcript_entries),
+                    "conversation_history": list(conversation_history),
+                    "metrics": call_metrics,
+                }
+                # Surface the local recording path when active. The handler's
+                # cleanup() above finalized the WAV; ``close()`` is idempotent
+                # and returns the path (or None when the recorder broke).
+                if local_recorder is not None:
+                    _end_payload["recording_path"] = local_recorder.close()
+                await on_call_end(_end_payload)
             except Exception as exc:
                 logger.exception("on_call_end error: %s", exc)
 

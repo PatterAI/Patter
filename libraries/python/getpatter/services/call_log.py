@@ -216,6 +216,18 @@ class CallLogger:
 
     # -- Public API -------------------------------------------------------
 
+    def call_dir(self, call_id: str) -> Path | None:
+        """Return the per-call directory for ``call_id``, or ``None`` when
+        logging is disabled.
+
+        Resolves against the call's recorded start time (set by
+        :meth:`log_call_start`) so artifacts written later in the call —
+        e.g. the local recording WAV — land in the same ``YYYY/MM/DD``
+        directory as ``metadata.json`` even across midnight. Mirrors the TS
+        ``CallLogger.callDir``.
+        """
+        return self._call_dir(call_id, self._started_at.get(call_id))
+
     def log_call_start(
         self,
         call_id: str,
@@ -324,8 +336,14 @@ class CallLogger:
         latency: dict[str, Any] | None = None,
         status: str = "completed",
         error: str | None = None,
+        recording_path: str | None = None,
     ) -> None:
-        """Finalise ``metadata.json`` with end-of-call aggregates."""
+        """Finalise ``metadata.json`` with end-of-call aggregates.
+
+        ``recording_path`` (when local recording was active for the call)
+        is persisted as an extra ``recording_path`` field; omitted entirely
+        otherwise so existing metadata shapes are unchanged.
+        """
         if not self.enabled:
             return
         call_dir = self._call_dir(call_id, self._started_at.pop(call_id, None))
@@ -357,6 +375,8 @@ class CallLogger:
                 "error": error,
             }
         )
+        if recording_path is not None:
+            existing["recording_path"] = recording_path
         try:
             _atomic_write_json(metadata_path, existing)
         except OSError as exc:

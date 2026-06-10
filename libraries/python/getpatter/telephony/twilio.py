@@ -246,6 +246,7 @@ async def twilio_stream_bridge(
     twilio_sid: str = "",
     twilio_token: str = "",
     recording: bool = False,
+    local_recorder_factory=None,
     on_metrics=None,
     on_transcript_line=None,
     pricing: dict | None = None,
@@ -279,6 +280,11 @@ async def twilio_stream_bridge(
         twilio_sid: Twilio Account SID (for call transfer and recording).
         twilio_token: Twilio Auth Token (for call transfer and recording).
         recording: When ``True``, start recording the call via Twilio Recordings API.
+        local_recorder_factory: Optional ``callable(call_id) -> LocalCallRecorder | None``
+            (wired by ``EmbeddedServer.create_local_recorder``). When it
+            returns a recorder, the stream handler taps caller + agent audio
+            into a local stereo WAV — carrier-neutral, independent of
+            ``recording``.
     """
     await websocket.accept()
 
@@ -298,6 +304,10 @@ async def twilio_stream_bridge(
     ) = None
     audio_sender: TwilioAudioSender | None = None
     metrics = None
+    # Carrier-neutral local recorder for this call (None = off). Tracked
+    # bridge-side (not just on the handler) so the on_call_end payload can
+    # surface ``recording_path`` without poking handler internals.
+    local_recorder = None
 
     # Wall-clock duration tracking for patter.cost.telephony_minutes. Set on
     # the ``start`` event so we measure only the bridged audio period, not
@@ -551,6 +561,16 @@ async def twilio_stream_bridge(
                 except Exception:  # pragma: no cover — defense in depth
                     logger.debug("Failed to set handler._patter_side", exc_info=True)
 
+                # Attach the carrier-neutral local recorder BEFORE
+                # handler.start() so the firstMessage TTS is captured. The
+                # factory returns None when local recording is off / failed.
+                if local_recorder_factory is not None:
+                    try:
+                        local_recorder = local_recorder_factory(call_sid_actual)
+                        handler.local_recorder = local_recorder
+                    except Exception as _exc:  # noqa: BLE001 - best-effort
+                        logger.warning("Local recorder setup failed: %s", _exc)
+
                 # Enter patter_call_scope NOW that call_id is known. The
                 # ExitStack keeps the scope active until the finally cleanup
                 # block runs. Cleanup paths (handler cleanup, telephony cost
@@ -684,17 +704,21 @@ async def twilio_stream_bridge(
                 logger.warning("Metrics finalization error: %s", exc)
         if on_call_end:
             try:
-                await on_call_end(
-                    {
-                        "call_id": call_sid_actual,
-                        "caller": caller,
-                        "callee": callee,
-                        "ended_at": time.time(),
-                        "transcript": list(transcript_entries),
-                        "conversation_history": list(conversation_history),
-                        "metrics": call_metrics,
-                    }
-                )
+                _end_payload = {
+                    "call_id": call_sid_actual,
+                    "caller": caller,
+                    "callee": callee,
+                    "ended_at": time.time(),
+                    "transcript": list(transcript_entries),
+                    "conversation_history": list(conversation_history),
+                    "metrics": call_metrics,
+                }
+                # Surface the local recording path when active. The handler's
+                # cleanup() above finalized the WAV; ``close()`` is idempotent
+                # and returns the path (or None when the recorder broke).
+                if local_recorder is not None:
+                    _end_payload["recording_path"] = local_recorder.close()
+                await on_call_end(_end_payload)
             except Exception as exc:
                 logger.exception("on_call_end error: %s", exc)
 

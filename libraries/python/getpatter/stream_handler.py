@@ -871,6 +871,13 @@ class StreamHandler(ABC):
         # Closed in ``cleanup``/``fire_call_end`` to free open MCP
         # WebSocket / HTTP connections. Parity with TS field.
         self._mcp_manager: Any = None
+        # Carrier-neutral local call recorder (``LocalCallRecorder`` from
+        # ``getpatter.audio.call_recorder``) — wired by the telephony bridge
+        # right after handler construction when ``serve(local_recording=...)``
+        # is on (next to the ``_patter_side`` assignment). ``None`` (default)
+        # keeps every tap a no-op. Closed via ``_close_local_recorder`` in
+        # each subclass ``cleanup``. Parity with TS ``StreamHandler.localRecorder``.
+        self.local_recorder: Any = None
 
         # Set by Patter._attach_span_exporter via attach_span_exporter; "uut" by default.
         # Read once at handler start; later changes via the same Patter instance
@@ -925,6 +932,33 @@ class StreamHandler(ABC):
             await manager.close()
         except Exception as exc:
             logger.debug("MCP close error (ignored): %s", exc)
+
+    def _close_local_recorder(self) -> None:
+        """Finalize the local recording WAV (if any). Idempotent + guarded —
+        called from every subclass ``cleanup`` so abnormal teardown paths
+        (carrier WS drop, stream error) still patch the WAV header and leave
+        a parseable file. The recorder reference is kept so the bridge can
+        read ``handler.local_recorder.path`` for the ``on_call_end`` payload.
+        """
+        recorder = getattr(self, "local_recorder", None)
+        if recorder is None:
+            return
+        try:
+            recorder.close()
+        except Exception as exc:  # noqa: BLE001 - teardown must never raise
+            logger.debug("Local recorder close failed: %s", exc)
+
+    def _tap_caller_audio(self, data: bytes, encoding: str) -> None:
+        """Feed a caller-side chunk to the local recorder (no-op when off)."""
+        recorder = getattr(self, "local_recorder", None)
+        if recorder is not None:
+            recorder.add_caller_audio(data, encoding=encoding)
+
+    def _tap_agent_audio(self, data: bytes, encoding: str) -> None:
+        """Feed an agent-side chunk to the local recorder (no-op when off)."""
+        recorder = getattr(self, "local_recorder", None)
+        if recorder is not None:
+            recorder.add_agent_audio(data, encoding=encoding)
 
     def add_observer(self, fn) -> None:
         """Register *fn* as an observer for all ``metrics_collected`` events.
@@ -1662,6 +1696,18 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                         # idempotency guards stop double-firing within a turn.
                         await self._emit_audio_out(tts_provider="openai_realtime")
                         waiting_first_audio = False
+                    # Local-recording tap (agent side). The adapter emits the
+                    # negotiated session codec: μ-law 8 kHz for ``g711_ulaw``
+                    # sessions (all current carriers), PCM16 24 kHz otherwise
+                    # — decode in the tap, never skip, so the recorder always
+                    # receives PCM16 16 kHz.
+                    if getattr(self, "local_recorder", None) is not None:
+                        self._tap_agent_audio(
+                            ev_data,
+                            "mulaw_8k"
+                            if self._audio_format == "g711_ulaw"
+                            else "pcm16_24k",
+                        )
                     await self.audio_sender.send_audio(ev_data)
                     await self.audio_sender.send_mark(f"audio_{id(ev_data)}")
 
@@ -2212,6 +2258,21 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
 
     async def on_audio_received(self, audio_bytes: bytes) -> None:
         """Forward decoded telephony audio to the OpenAI Realtime session (transcoding if needed)."""
+        # Local-recording tap — BEFORE the adapter guard so the caller side
+        # is captured even while the Realtime WS is still connecting. The
+        # Realtime handler forwards carrier bytes untouched, so the inbound
+        # encoding follows the negotiated session codec: ``g711_ulaw``
+        # sessions (Twilio / Telnyx / Plivo) receive μ-law 8 kHz; the
+        # ``input_transcode`` path receives PCM16 16 kHz from the carrier.
+        # The recorder decodes to PCM16 16 kHz internally.
+        if getattr(self, "local_recorder", None) is not None:
+            if self._input_transcode == "pcm16_16k_to_g711_ulaw":
+                _rec_enc = "pcm16_16k"
+            elif self._audio_format == "g711_ulaw":
+                _rec_enc = "mulaw_8k"
+            else:
+                _rec_enc = "pcm16_16k"
+            self._tap_caller_audio(audio_bytes, _rec_enc)
         if self._adapter is None:
             return
         if self._input_transcode == "pcm16_16k_to_g711_ulaw":
@@ -2250,6 +2311,8 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         # Close MCP server connections. Best effort: a flaky MCP server
         # must not derail call-end teardown.
         await self._close_mcp()
+        # Finalize the local recording WAV (guarded + idempotent).
+        self._close_local_recorder()
         # Flush and discard the resampler tail on cleanup.
         if self._resampler_16k_to_8k is not None:
             self._resampler_16k_to_8k.flush()
@@ -2411,6 +2474,15 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
                         # token-level LLM deltas; the audio edge is the only
                         # observable per-turn signal.
                         await self._emit_audio_out(tts_provider="elevenlabs_convai")
+                    # Local-recording tap (agent side). ConvAI emits μ-law
+                    # 8 kHz on the native fast-path, PCM16 16 kHz otherwise —
+                    # decode in the tap so the recorder always receives
+                    # PCM16 16 kHz.
+                    if getattr(self, "local_recorder", None) is not None:
+                        self._tap_agent_audio(
+                            ev_data,
+                            "mulaw_8k" if self._native_mulaw_8k else "pcm16_16k",
+                        )
                     await self.audio_sender.send_audio(ev_data)
 
                 elif ev_type == "speech_stopped":
@@ -2637,6 +2709,14 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
 
     async def on_audio_received(self, audio_bytes: bytes) -> None:
         """Forward decoded telephony audio to ConvAI (μ-law fast-path or resampled PCM16)."""
+        # Local-recording tap — BEFORE the adapter guard so caller audio is
+        # captured even while the ConvAI WS is still connecting. Every
+        # carrier wired to this handler today (Twilio / Plivo via
+        # ``for_twilio=True``, Telnyx via PCMU bidirectional streaming)
+        # delivers μ-law 8 kHz on the inbound leg; the recorder decodes to
+        # PCM16 16 kHz internally.
+        if getattr(self, "local_recorder", None) is not None:
+            self._tap_caller_audio(audio_bytes, "mulaw_8k")
         if self._adapter is None:
             return
         # Native μ-law 8 kHz fast-path: ConvAI negotiated ulaw_8000 on the
@@ -2671,6 +2751,8 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
                 pass
         if self._adapter:
             await self._adapter.close()
+        # Finalize the local recording WAV (guarded + idempotent).
+        self._close_local_recorder()
         # Flush and discard the resampler tail on cleanup.
         if self._resampler_8k_to_16k is not None:
             self._resampler_8k_to_16k.flush()
@@ -3708,6 +3790,9 @@ class PipelineStreamHandler(StreamHandler):
                     self, "_tts_output_format_native_for_carrier", False
                 ):
                     self._aec.push_far_end(processed_audio)
+                # Local-recording tap (agent side) — decodes on the
+                # carrier-native μ-law fast path instead of skipping.
+                self._tap_pipeline_agent_audio(processed_audio)
                 if record_segment:
                     # First audible chunk of this sentence — stamp its start
                     # on the per-turn playback timeline so a barge-in can
@@ -4784,6 +4869,9 @@ class PipelineStreamHandler(StreamHandler):
                 self, "_tts_output_format_native_for_carrier", False
             ):
                 self._aec.push_far_end(chunk)
+            # Local-recording tap (agent side) — decodes on the
+            # carrier-native μ-law fast path instead of skipping.
+            self._tap_pipeline_agent_audio(chunk)
             await self.audio_sender.send_audio(chunk)
             self._track_outbound_playback(len(chunk))
             self._mark_first_audio_sent()
@@ -5319,8 +5407,16 @@ class PipelineStreamHandler(StreamHandler):
             await self._emit_audio_out()
         if self._event_bus is not None:
             self._event_bus.emit("tts_chunk", {"bytes": len(processed_audio)})
-        if self._aec is not None:
+        # Far-end tap mirrors the direct send path: SKIPPED on the
+        # carrier-native fast path where these are mulaw 8 kHz wire bytes
+        # that would corrupt the int16-PCM-16k AEC reference.
+        if self._aec is not None and not getattr(
+            self, "_tts_output_format_native_for_carrier", False
+        ):
             self._aec.push_far_end(processed_audio)
+        # Local-recording tap (agent side) — decodes on the carrier-native
+        # μ-law fast path instead of skipping.
+        self._tap_pipeline_agent_audio(processed_audio)
         await self.audio_sender.send_audio(processed_audio)
         self._track_outbound_playback(len(processed_audio))
         self._mark_first_audio_sent()
@@ -6002,6 +6098,18 @@ class PipelineStreamHandler(StreamHandler):
 
     async def on_audio_received(self, audio_bytes: bytes) -> None:
         """Forward caller audio to STT (transcoding to PCM16 16 kHz, running VAD/hooks)."""
+        # Local-recording tap — ABOVE the STT/barge-in early-returns so the
+        # caller channel has no gaps when STT is unset or inbound frames are
+        # dropped during TTS (``barge_in_threshold_ms == 0``). The recorder
+        # performs the same mulaw→PCM16 decode + 8→16 kHz resample as the
+        # STT path below (own stateful resampler), so it always receives
+        # PCM16 16 kHz regardless of the carrier wire codec. Tapped PRE-AEC:
+        # the recording captures what the caller actually sent.
+        if getattr(self, "local_recorder", None) is not None:
+            self._tap_caller_audio(
+                audio_bytes,
+                "mulaw_8k" if self._input_is_mulaw_8k else "pcm16_16k",
+            )
         if self._stt is None:
             return
         # Always forward caller audio to STT — even while the agent is
@@ -7029,6 +7137,33 @@ class PipelineStreamHandler(StreamHandler):
             return False
         return fmt == "ulaw_8000"
 
+    def _tap_pipeline_agent_audio(self, chunk: bytes) -> None:
+        """Local-recording tap for outbound pipeline TTS chunks.
+
+        Sits next to the AEC far-end taps. Unlike AEC (which must skip
+        non-PCM bytes), the recording tap DECODES on the carrier-native fast
+        path: when the TTS adapter emits the wire codec directly
+        (``_tts_output_format_native_for_carrier``) the chunk is μ-law 8 kHz
+        on mulaw carriers (Twilio / Plivo) — decode + resample in the
+        recorder so it always receives PCM16 16 kHz. Telnyx-native
+        (``pcm_16000``) and the default transcode path are already
+        PCM16 16 kHz.
+        """
+        # ``getattr`` is defensive against test fixtures built via
+        # ``object.__new__`` (no ``__init__``) — same pattern as the
+        # ``_turn_spoken_segments`` access in ``_synthesize_sentence``.
+        if getattr(self, "local_recorder", None) is None:
+            return
+        encoding = (
+            "mulaw_8k"
+            if (
+                getattr(self, "_tts_output_format_native_for_carrier", False)
+                and getattr(self, "_for_twilio", False)
+            )
+            else "pcm16_16k"
+        )
+        self._tap_agent_audio(chunk, encoding)
+
     # 40 ms @ 16 kHz mono PCM16 = 1280 bytes. Sized to mirror the smallest
     # live-TTS chunk boundary so cancel granularity (mark/clear bookkeeping)
     # is identical regardless of whether the firstMessage came from the
@@ -7229,6 +7364,9 @@ class PipelineStreamHandler(StreamHandler):
                         self, "_tts_output_format_native_for_carrier", False
                     ):
                         self._aec.push_far_end(audio_chunk)
+                    # Local-recording tap (agent side) — decodes on the
+                    # carrier-native μ-law fast path instead of skipping.
+                    self._tap_pipeline_agent_audio(audio_chunk)
                     await self.audio_sender.send_audio(audio_chunk)
                     self._mark_first_audio_sent()
         finally:
@@ -7329,6 +7467,9 @@ class PipelineStreamHandler(StreamHandler):
                 self, "_tts_output_format_native_for_carrier", False
             ):
                 self._aec.push_far_end(chunk)
+            # Local-recording tap (agent side) — decodes on the
+            # carrier-native μ-law fast path instead of skipping.
+            self._tap_pipeline_agent_audio(chunk)
             await self.audio_sender.send_audio(chunk)
             self._mark_first_audio_sent()
             mark_awaitable = await self._send_mark_awaitable()
@@ -7475,6 +7616,10 @@ class PipelineStreamHandler(StreamHandler):
             await self._close_mcp()
         except Exception as _exc:  # noqa: BLE001 - teardown must continue
             logger.debug("MCP close failed: %s", _exc)
+        # Finalize the local recording WAV (guarded + idempotent) — covers
+        # abnormal teardown too: the bridge ``finally`` block always runs
+        # ``cleanup()``, so a truncated call still gets its header patched.
+        self._close_local_recorder()
         # Flush and discard the inbound resampler tail on cleanup (owned by
         # the input processing chain since slice 1 of the pipeline-stages
         # decomposition). ``getattr`` so test fixtures built via

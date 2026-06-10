@@ -406,6 +406,7 @@ class EmbeddedServer:
         config: LocalConfig,
         agent: Agent,
         recording: bool = False,
+        local_recording: bool | str = False,
         voicemail_message: str = "",
         pricing: dict | None = None,
         dashboard: bool = True,
@@ -415,6 +416,12 @@ class EmbeddedServer:
         self.config = config
         self.agent = agent
         self.recording = recording
+        # Carrier-neutral local stereo recording (left=caller, right=agent).
+        # ``False`` (default) = off; ``True`` = write ``recording.wav`` into
+        # the per-call log directory (or ``./recordings`` when call logging
+        # is disabled); a string = explicit directory for the WAV files.
+        # Independent of the carrier-side ``recording`` flag — both may be on.
+        self.local_recording = local_recording
         self.voicemail_message = voicemail_message
         self.pricing = pricing
         self.dashboard = dashboard
@@ -523,6 +530,51 @@ class EmbeddedServer:
         ``EmbeddedServer.resolvedDashboardToken`` getter — see sdk-parity.
         """
         return self._effective_dashboard_token
+
+    # === Carrier-neutral local recording ===
+
+    def create_local_recorder(self, call_id: str):
+        """Build a ``LocalCallRecorder`` for ``call_id``, or ``None``.
+
+        Resolution (mirrors TS ``EmbeddedServer.makeLocalRecorder``):
+
+        1. ``local_recording`` falsy → ``None`` (feature off, default).
+        2. ``local_recording`` is a directory string → ``<dir>/<call_id>.wav``.
+        3. call logging enabled → ``<call_log_dir>/recording.wav`` (next to
+           ``metadata.json`` / ``transcript.jsonl``).
+        4. fallback → ``./recordings/<call_id>.wav`` under the CWD.
+
+        Never raises: any setup failure (unwritable dir, missing audioop)
+        logs a warning and returns ``None`` so the call proceeds unrecorded.
+        """
+        if not self.local_recording:
+            return None
+        try:
+            from pathlib import Path
+
+            from getpatter.audio.call_recorder import LocalCallRecorder
+
+            safe_id = (
+                sanitize_log_value(call_id, max_len=64).replace("/", "_") or "unknown"
+            )
+            if isinstance(self.local_recording, str):
+                path = Path(self.local_recording).expanduser() / f"{safe_id}.wav"
+            else:
+                call_dir = (
+                    self._call_logger.call_dir(call_id)
+                    if self._call_logger.enabled
+                    else None
+                )
+                if call_dir is not None:
+                    path = call_dir / "recording.wav"
+                else:
+                    path = Path("recordings") / f"{safe_id}.wav"
+            return LocalCallRecorder(path)
+        except Exception as exc:  # noqa: BLE001 - recording must never block a call
+            logger.warning(
+                "Local recording disabled for %s: %s", sanitize_log_value(call_id), exc
+            )
+            return None
 
     # === Outbound completion registry (call(wait=True)) ===
 
@@ -885,6 +937,9 @@ class EmbeddedServer:
                     cost=cost_dict,
                     latency=latency_dict,
                     error=error_code or None,
+                    # Present only when local recording was active for the
+                    # call (set by the bridge on the on_call_end payload).
+                    recording_path=data.get("recording_path"),
                 )
             try:
                 if user_end is not None:
@@ -1379,6 +1434,7 @@ class EmbeddedServer:
                     twilio_sid=self.config.twilio_sid,
                     twilio_token=self.config.twilio_token,
                     recording=self.recording,
+                    local_recorder_factory=self.create_local_recorder,
                     on_metrics=_metrics,
                     on_transcript_line=_transcript_line,
                     pricing=self.pricing,
@@ -1751,6 +1807,7 @@ class EmbeddedServer:
                     elevenlabs_key=self.config.elevenlabs_key,
                     telnyx_key=self.config.telnyx_key,
                     recording=self.recording,
+                    local_recorder_factory=self.create_local_recorder,
                     on_metrics=_metrics,
                     on_transcript_line=_transcript_line,
                     pricing=self.pricing,
@@ -2003,6 +2060,7 @@ class EmbeddedServer:
                     plivo_auth_token=self.config.plivo_auth_token,
                     webhook_host=self.config.webhook_url,
                     recording=self.recording,
+                    local_recorder_factory=self.create_local_recorder,
                     on_metrics=_metrics,
                     on_transcript_line=_transcript_line,
                     pricing=self.pricing,
