@@ -1,5 +1,7 @@
 ## Unreleased
 
+## 0.6.6 (2026-06-10)
+
 ### Added
 
 - **`CustomLLM` — the canonical "Custom LLM" provider for any OpenAI-compatible endpoint.** One generic provider (the same engine the `HermesLLM` / `OpenClawLLM` presets subclass) now ships under the name the voice-AI ecosystem uses for this pattern: `from getpatter import CustomLLM` / `from getpatter.llm import custom` (Python) and `import { CustomLLM, custom } from "getpatter"` (TypeScript). Works with agent runtimes (Hermes, OpenClaw), keyless local gateways (Ollama, vLLM, LM Studio), or any service implementing `/chat/completions` with SSE streaming + tool calls — barge-in cancellation, long-turn filler, spoken error fallback, and cost attribution included. As part of this, the `session_key_from="caller_hash"` / `sessionKeyFrom: "caller_hash"` per-caller memory selector was hoisted from the Hermes preset into the generic provider, so ANY header-scoped runtime can enable cross-call per-caller memory (`patter-caller-<hash>`, never the raw number); the Hermes preset now delegates to it (behaviour unchanged). New `libraries/python/getpatter/llm/custom.py`, `libraries/typescript/src/llm/custom.ts`; `docs/python-sdk/llm.mdx`, `docs/typescript-sdk/llm.mdx`.
