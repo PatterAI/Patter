@@ -613,8 +613,27 @@ class Agent:
     barge_in_strategies: tuple["BargeInStrategy", ...] = ()
     # Maximum time (ms) to wait for at least one strategy to confirm a
     # pending barge-in before discarding the pending state and resuming
-    # TTS. Only consulted when ``barge_in_strategies`` is non-empty.
+    # TTS. Consulted when ``barge_in_strategies`` is non-empty AND as the
+    # false-interruption window for ``barge_in_mode="pause_resume"``.
     barge_in_confirm_ms: int = 1500
+    # How a VAD ``speech_start`` during the agent's turn is handled
+    # (pipeline mode):
+    #   - ``"cancel"`` (default): today's behaviour — the in-flight turn is
+    #     cancelled immediately (or marked pending when
+    #     ``barge_in_strategies`` are configured).
+    #   - ``"pause_resume"`` (LiveKit-style false-interruption handling):
+    #     output is PAUSED immediately — the carrier buffer is cleared and
+    #     no further TTS audio is sent — while the LLM stream and the TTS
+    #     provider stream stay alive (tokens buffer as sentences,
+    #     synthesized audio queues in memory, both bounded). If a committed
+    #     final transcript confirms the interruption within
+    #     ``barge_in_confirm_ms`` the turn is cancelled exactly as in
+    #     ``"cancel"`` mode; if the window expires with no transcript (a
+    #     cough, line noise) the agent RESUMES from the first sentence the
+    #     caller had not fully heard, re-sending retained audio without
+    #     re-billing TTS, and the event is recorded as a false interruption
+    #     (a backchannel — not an interruption — in metrics).
+    barge_in_mode: str = "cancel"
     # When ``True`` (default), ``Patter.call`` warms up the STT, TTS, and LLM
     # provider connections in parallel with the carrier-side ``initiate_call``
     # request so DNS, TLS, and HTTP/2 handshakes are already complete by the

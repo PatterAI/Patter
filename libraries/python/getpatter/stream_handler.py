@@ -2792,8 +2792,58 @@ class PipelineStreamHandler(StreamHandler):
         self._barge_in_pending_since: float | None = None
         # Background task that fires the pending-timeout. Cancelled on
         # confirmation, on agent stop, and on call shutdown so a stale
-        # pending never bleeds into the next turn.
+        # pending never bleeds into the next turn. In
+        # ``barge_in_mode="pause_resume"`` this same handle holds the
+        # false-interruption resume timer (``_pause_resume_timeout``).
         self._barge_in_pending_task = None
+        # ---- Pause-and-resume false-interruption handling ----
+        # ``barge_in_mode="pause_resume"`` (opt-in): on VAD speech_start
+        # during the agent's turn, output is PAUSED (carrier cleared, sends
+        # gated on ``_output_paused``) instead of cancelled. A committed
+        # final transcript within ``_barge_in_confirm_s`` KILLS the turn
+        # (full cancel path); otherwise the agent RESUMES from the first
+        # sentence the caller had not fully heard. Mirrors TS
+        # ``bargeInMode`` / ``outputPaused``.
+        _mode = getattr(agent, "barge_in_mode", "cancel") or "cancel"
+        if _mode not in ("cancel", "pause_resume"):
+            logger.warning(
+                "Unknown barge_in_mode %r — falling back to 'cancel'", _mode
+            )
+            _mode = "cancel"
+        self._barge_in_mode: str = _mode
+        # True while output is paused: ``_synthesize_sentence`` queues
+        # chunks into the per-sentence retention entries instead of
+        # sending, and the streaming loops buffer whole sentences as text.
+        self._output_paused: bool = False
+        # Per-pause decision event — set when the pause resolves (resume,
+        # kill, or teardown) so loop-side waiters can proceed. Recreated at
+        # every ``_start_pause_resume``.
+        self._pause_decision_event: asyncio.Event | None = None
+        # Sentences produced by the LLM while paused (text, pre-guardrail).
+        # Spoken in order on resume; discarded on kill. Bounded by
+        # ``_PAUSE_MAX_BUFFERED_SENTENCES`` — overflow degrades to a full
+        # cancel so memory stays bounded even against a runaway stream.
+        self._paused_sentences: list[str] = []
+        # Per-turn retained sentence audio (pause_resume mode only): one
+        # entry per response sentence holding every TTS chunk produced for
+        # it ({"text", "chunks", "sent"}). ``sent`` is the count of chunks
+        # actually delivered to the carrier — the resume path resets it to
+        # 0 for the unheard tail and re-sends from memory (no TTS
+        # re-billing). Index-aligned with ``_turn_spoken_segments`` for the
+        # stamped prefix. Bounded by ``_PAUSE_RESUME_MAX_RETAINED_S``.
+        self._turn_sentence_audio: list[dict] = []
+        self._pause_retained_bytes: int = 0
+        # Set when the retained-audio cap was exceeded while NOT paused
+        # (very long carrier backlog): retention is released and
+        # pause_resume falls back to legacy cancel for the rest of the
+        # turn. Reset at ``_begin_speaking``.
+        self._pause_resume_overflowed: bool = False
+        # Sentence index (into ``_turn_spoken_segments`` /
+        # ``_turn_sentence_audio``) of the first sentence the caller had
+        # NOT fully heard at pause time — the resume offset. Sentence
+        # granularity: the partially-played sentence is replayed from its
+        # start (natural-sounding repair) rather than resumed mid-word.
+        self._pause_resume_index: int = 0
         # Monotonic counter incremented at every TTS-start. ``_end_speaking_with_grace``
         # captures the value at scheduling time and only flips ``_is_speaking`` to
         # False if no new turn started in the meantime. Prevents an in-flight grace
@@ -3389,6 +3439,13 @@ class PipelineStreamHandler(StreamHandler):
         # previous sentence would corrupt the first sample of this one.
         # Matches TS ``ttsByteCarry = null`` reset at each synth boundary.
         self.audio_sender.reset_pcm_carry()
+        # Pause-and-resume retention: in ``barge_in_mode="pause_resume"``
+        # every chunk of a RESPONSE sentence is kept in a per-sentence
+        # entry so a paused turn can re-send the cleared-but-unheard tail
+        # at resume time without re-billing TTS. ``None`` (legacy mode /
+        # filler audio / post-overflow) keeps the direct send path
+        # byte-identical to today.
+        entry = self._begin_retained_sentence(processed) if record_segment else None
         try:
             async for audio_chunk in gen:
                 if not self._is_speaking:
@@ -3411,11 +3468,14 @@ class PipelineStreamHandler(StreamHandler):
                 if not self._is_speaking:
                     return False  # barge-in fired during the hook await
 
-                if first_tts_chunk[0]:
+                if first_tts_chunk[0] and not getattr(self, "_output_paused", False):
                     # Flip the per-turn "first PCM chunk emitted" flag BEFORE
                     # the metrics branch so it is a reliable "audio reached the
                     # carrier" signal even when ``self.metrics is None`` — the
-                    # llm_error_message fallback gate depends on it.
+                    # llm_error_message fallback gate depends on it. While the
+                    # pause gate holds the chunk in memory it has NOT reached
+                    # the carrier — the flag (and the audio_out speech event)
+                    # waits for the first post-resume chunk.
                     first_tts_chunk[0] = False
                     if self.metrics is not None:
                         self.metrics.record_tts_first_byte()
@@ -3428,6 +3488,38 @@ class PipelineStreamHandler(StreamHandler):
                         "tts_chunk",
                         {"bytes": len(processed_audio)},
                     )
+                # Pause-and-resume retention path: the chunk is appended to
+                # the sentence's entry; while paused it stays queued, while
+                # speaking it is drained (sent) immediately. Segment
+                # stamping / AEC tap / playback tracking live in
+                # ``_drain_sentence_entry`` so they fire at SEND time, not
+                # at synthesis time.
+                if entry is not None and getattr(
+                    self, "_pause_resume_overflowed", False
+                ):
+                    entry = None  # retention released mid-sentence
+                if entry is not None:
+                    if await self._retain_pause_chunk(entry, processed_audio):
+                        if not getattr(self, "_output_paused", False):
+                            await self._drain_sentence_entry(entry)
+                            if not self._is_speaking:
+                                return False  # cancel raced the drain
+                        continue
+                    if not self._is_speaking:
+                        # Overflow while paused degraded to a full cancel.
+                        return False
+                    # Overflow while speaking: retention released — fall
+                    # through to the direct send path for this chunk and
+                    # the rest of the turn. The sentence keeps its already
+                    # stamped segment (if any); the inline stamp below is
+                    # skipped to avoid a duplicate.
+                    entry = None
+                    record_segment = False
+                if getattr(self, "_output_paused", False):
+                    # Paused with no retention entry (filler / error-
+                    # fallback audio): drop the chunk — replaying
+                    # moment-filling audio after a pause is pointless.
+                    continue
                 # Far-end tap for the echo canceller. On the default path
                 # ``processed_audio`` is the exact PCM 16 kHz bytes that get
                 # transcoded + sent to the carrier — the cleanest reference
@@ -3600,6 +3692,13 @@ class PipelineStreamHandler(StreamHandler):
                         )
 
                     sentences = chunker.push(token)
+                    # pause_resume: a resume may have fired between tokens —
+                    # speak the sentences buffered during the pause FIRST so
+                    # the reply stays in order.
+                    if not getattr(self, "_output_paused", False):
+                        released = self._release_paused_sentences()
+                        if released:
+                            sentences = released + sentences
                     # Fix 3: mark first-sentence boundary for accurate tts_ms.
                     if sentences and self.metrics is not None and first_tts_chunk[0]:
                         self.metrics.record_llm_first_sentence()
@@ -3607,6 +3706,11 @@ class PipelineStreamHandler(StreamHandler):
                         if not self._is_speaking:
                             interrupted = True
                             break
+                        # pause_resume: while output is paused, buffer the
+                        # sentence (bounded) — spoken on resume, discarded
+                        # on kill. Keeps consuming LLM tokens either way.
+                        if await self._buffer_sentence_if_paused(sentence):
+                            continue
 
                         blocked, guard_name = evaluate_guardrails(self.agent, sentence)
                         if blocked:
@@ -3686,32 +3790,55 @@ class PipelineStreamHandler(StreamHandler):
             if self.metrics is not None:
                 self.metrics.record_llm_complete()
 
-            # Flush remaining text from chunker (skip if LLM errored)
+            # Flush remaining text from chunker (skip if LLM errored). The
+            # outer loop exists for pause_resume: the turn must not end
+            # while a pause decision is outstanding — buffered sentences
+            # are spoken on resume; a kill marks the turn interrupted. Each
+            # wait is bounded by the confirm window (the resume timer
+            # guarantees a decision), and legacy mode never pauses so the
+            # loop runs exactly once — byte-identical behaviour.
             if not llm_error and not interrupted:
-                for sentence in chunker.flush():
-                    if not self._is_speaking:
-                        interrupted = True
-                        break
-
-                    blocked, guard_name = evaluate_guardrails(self.agent, sentence)
-                    if blocked:
-                        sentence = get_guardrail_replacement(self.agent, guard_name)
-
-                    if hook_executor.has_after_llm_sentence():
-                        transformed = await hook_executor.run_after_llm_sentence(
-                            sentence, hook_ctx
-                        )
-                        if transformed is None:
+                pending_sentences = chunker.flush()
+                while True:
+                    for sentence in pending_sentences:
+                        if not self._is_speaking:
+                            interrupted = True
+                            break
+                        if await self._buffer_sentence_if_paused(sentence):
                             continue
-                        sentence = transformed
 
-                    # Real flushed audio about to play — cancel the filler.
-                    long_turn_task = await self._cancel_long_turn_filler(long_turn_task)
-                    if not await self._synthesize_sentence(
-                        sentence, hook_executor, hook_ctx, first_tts_chunk
+                        blocked, guard_name = evaluate_guardrails(self.agent, sentence)
+                        if blocked:
+                            sentence = get_guardrail_replacement(self.agent, guard_name)
+
+                        if hook_executor.has_after_llm_sentence():
+                            transformed = await hook_executor.run_after_llm_sentence(
+                                sentence, hook_ctx
+                            )
+                            if transformed is None:
+                                continue
+                            sentence = transformed
+
+                        # Real flushed audio about to play — cancel the filler.
+                        long_turn_task = await self._cancel_long_turn_filler(
+                            long_turn_task
+                        )
+                        if not await self._synthesize_sentence(
+                            sentence, hook_executor, hook_ctx, first_tts_chunk
+                        ):
+                            interrupted = True
+                            break
+                    if interrupted:
+                        break
+                    if not (
+                        getattr(self, "_output_paused", False)
+                        or getattr(self, "_paused_sentences", None)
                     ):
+                        break
+                    if not await self._await_pause_decision():
                         interrupted = True
                         break
+                    pending_sentences = self._release_paused_sentences()
         finally:
             # Ensure the long-turn filler task never outlives the turn (clean
             # cancellation, CancelledError suppressed inside the helper).
@@ -3800,15 +3927,34 @@ class PipelineStreamHandler(StreamHandler):
         first_tts_chunk = [True]
         interrupted = False
         try:
-            for sentence in sentences:
-                if not self._is_speaking:
-                    interrupted = True
+            # Outer loop mirrors ``_process_streaming_response``: in
+            # pause_resume mode the turn waits out an in-flight pause
+            # decision (buffered sentences speak on resume, a kill marks
+            # interrupted); legacy mode never pauses → single pass.
+            pending_sentences = sentences
+            while True:
+                for sentence in pending_sentences:
+                    if not self._is_speaking:
+                        interrupted = True
+                        break
+                    if await self._buffer_sentence_if_paused(sentence):
+                        continue
+                    if not await self._synthesize_sentence(
+                        sentence, hook_executor, hook_ctx, first_tts_chunk
+                    ):
+                        interrupted = True
+                        break
+                if interrupted:
                     break
-                if not await self._synthesize_sentence(
-                    sentence, hook_executor, hook_ctx, first_tts_chunk
+                if not (
+                    getattr(self, "_output_paused", False)
+                    or getattr(self, "_paused_sentences", None)
                 ):
+                    break
+                if not await self._await_pause_decision():
                     interrupted = True
                     break
+                pending_sentences = self._release_paused_sentences()
         finally:
             # Schedule the flip to idle (see ``_process_streaming_response``).
             await self._end_speaking_with_grace()
@@ -3837,9 +3983,15 @@ class PipelineStreamHandler(StreamHandler):
         # treated that echo as "the next turn", flipped speaking state off,
         # and the downstream isSpeaking-gated echo check could no longer
         # fire — the agent answered its own words as a phantom user turn.
-        # Only active under ``_forward_stt_while_speaking`` (the only path
-        # that feeds TTS audio to STT). Mirrors TS ``handleBargeIn``.
-        if getattr(self, "_forward_stt_while_speaking", False) and _looks_like_echo(
+        # Active under ``_forward_stt_while_speaking`` (the only path that
+        # feeds TTS audio to STT) AND while output is paused (pause_resume
+        # forwards mic audio to STT during the confirm window, and the
+        # just-cleared audio's PSTN echo tail can lag into it), so the
+        # default VAD path is unaffected. Mirrors TS ``handleBargeIn``.
+        if (
+            getattr(self, "_forward_stt_while_speaking", False)
+            or getattr(self, "_output_paused", False)
+        ) and _looks_like_echo(
             transcript.text, getattr(self, "_current_agent_spoken_text", "")
         ):
             logger.info(
@@ -3895,6 +4047,20 @@ class PipelineStreamHandler(StreamHandler):
             logger.info(
                 "Barge-in transcript suppressed (agent speaking < gate, aec=%s)",
                 aec_state,
+            )
+            return
+        # Pause-and-resume: while output is paused, only a committed FINAL
+        # transcript (non-hallucination, non-duplicate) may confirm the kill
+        # — interims and noise wait for the resume timer instead. The
+        # confirming transcript then continues through the strategy/legacy
+        # decision below exactly as today.
+        if getattr(self, "_output_paused", False) and not self._passes_paused_kill_filters(
+            transcript
+        ):
+            logger.debug(
+                "Paused turn: transcript %r cannot confirm the kill "
+                "(interim/hallucination/duplicate) — awaiting resume timer",
+                sanitize_log_value(transcript.text[:40]),
             )
             return
         strategies = getattr(self, "_barge_in_strategies", ()) or ()
@@ -3958,8 +4124,13 @@ class PipelineStreamHandler(StreamHandler):
             # A barge-in landing AFTER the turn completed (carrier still
             # draining the buffered tail) — rewrite the history to the heard
             # prefix FIRST, while the playback cursor still measures what
-            # was left unheard.
+            # was left unheard (or, for a paused turn, while the frozen
+            # pause cursor still does).
             self._maybe_truncate_completed_turn_history()
+            # Pause-and-resume: a kill while paused discards the held
+            # buffers (queued sentences + retained audio) and wakes any
+            # pause-decision waiter, which then observes the interrupt.
+            self._discard_pause_state()
             # The ``send_clear`` below drops whatever the carrier had
             # buffered ahead — snap the playback cursor back and kill any
             # pending grace task so its phase-1 wait (carrier backlog) /
@@ -4076,6 +4247,395 @@ class PipelineStreamHandler(StreamHandler):
         self._barge_in_pending_task = None
         self._barge_in_pending_since = None
 
+    # ---------------------------------------------------------------
+    # Pause-and-resume false-interruption handling (barge_in_mode =
+    # "pause_resume"). LiveKit-style: PAUSE output on VAD speech_start,
+    # KILL on a committed final transcript within the confirm window,
+    # RESUME from the first not-fully-heard sentence otherwise.
+    # ---------------------------------------------------------------
+
+    # Cap on sentences buffered as text while output is paused. A pause
+    # lasts at most ``_barge_in_confirm_s`` (1.5 s default) so this is
+    # generous; an agent-runtime LLM that delivers its whole reply at once
+    # can exceed it — overflow degrades to a full cancel so memory stays
+    # bounded. Mirrors TS ``PAUSE_MAX_BUFFERED_SENTENCES``.
+    _PAUSE_MAX_BUFFERED_SENTENCES: int = 32
+    # Cap (seconds of playout) on retained per-sentence TTS audio — both
+    # the already-sent tail kept for re-send and chunks queued while
+    # paused. 15 s ≈ 480 KB of PCM16 @ 16 kHz per concurrent call.
+    # Overflow while paused → degrade to full cancel; overflow while
+    # speaking (very long carrier backlog) → release the retention and
+    # fall back to legacy cancel behaviour for the rest of the turn.
+    # Mirrors TS ``PAUSE_RESUME_MAX_RETAINED_S``.
+    _PAUSE_RESUME_MAX_RETAINED_S: float = 15.0
+
+    def _pause_retained_cap_bytes(self) -> int:
+        """Retained-audio cap in bytes for the active TTS chunk format
+        (mirrors the bytes-per-second logic of ``_track_outbound_playback``)."""
+        bytes_per_s = (
+            8_000.0
+            if getattr(self.audio_sender, "_input_is_mulaw_8k", False)
+            else 32_000.0
+        )
+        return int(self._PAUSE_RESUME_MAX_RETAINED_S * bytes_per_s)
+
+    def _should_pause_for_barge_in(self) -> bool:
+        """Whether a VAD ``speech_start`` during the agent's turn should take
+        the pause-and-resume path instead of cancel/pending.
+
+        Requires ``barge_in_mode="pause_resume"`` AND resumable state: a
+        dispatch in flight (the sentence/TTS loops honour the pause gate) or
+        retained sentence audio from a just-completed turn still playing out
+        of the carrier buffer. The firstMessage paced sender keeps today's
+        immediate-cancel behaviour (its prewarm-bytes path has no retained
+        sentences to resume from — known limitation, see ``_start_pause_resume``).
+        """
+        if getattr(self, "_barge_in_mode", "cancel") != "pause_resume":
+            return False
+        if getattr(self, "_pause_resume_overflowed", False):
+            return False
+        if getattr(self, "_output_paused", False):
+            return True  # already paused — stay on the pause path (idempotent)
+        dispatch = getattr(self, "_dispatch_task", None)
+        if dispatch is not None and not dispatch.done():
+            return True
+        return bool(getattr(self, "_turn_sentence_audio", None))
+
+    def _compute_pause_resume_point(self) -> tuple[int, float]:
+        """Resume offset at SENTENCE granularity.
+
+        Returns ``(index, heard_s)`` where ``index`` is the first sentence
+        (into ``_turn_spoken_segments`` / ``_turn_sentence_audio``) whose
+        playback had NOT completed when the pause landed — computed from the
+        #164 playback-cursor bookkeeping: ``heard = total_pushed -
+        carrier_backlog``. Granularity choice: the partially-played sentence
+        is replayed from its start (mark/clear bookkeeping is per-sentence
+        and a clipped sentence restarted at its boundary sounds like a
+        natural repair), rather than resumed mid-word at byte offset.
+        """
+        segments = getattr(self, "_turn_spoken_segments", None) or []
+        total_s = getattr(self, "_turn_playback_total_s", 0.0)
+        remaining_s = max(
+            0.0, getattr(self, "_playback_buffered_until", 0.0) - time.time()
+        )
+        heard_s = max(0.0, total_s - remaining_s)
+        idx = len(segments)
+        for i in range(len(segments) - 1, -1, -1):
+            end_s = segments[i + 1][1] if i + 1 < len(segments) else total_s
+            if end_s > heard_s + 1e-6:
+                idx = i
+            else:
+                break
+        return idx, heard_s
+
+    async def _start_pause_resume(self) -> None:
+        """PAUSE the agent's output on a VAD ``speech_start`` (pause_resume
+        mode): gate further sends on ``_output_paused``, ``send_clear`` the
+        carrier so queued audio stops quickly, and schedule the
+        false-interruption resume timer. The LLM stream and the TTS
+        provider stream are deliberately NOT cancelled — tokens keep
+        buffering as sentences and synthesized audio queues in memory (both
+        bounded) so a resume can pick up seamlessly.
+        """
+        if getattr(self, "_output_paused", False):
+            return
+        # Anchor the overlap window exactly like ``_start_pending_barge_in``
+        # so a kill records detection_delay from VAD-T1 (never restarted).
+        if getattr(self, "_barge_in_pending_since", None) is None:
+            self._barge_in_pending_since = time.time()
+            if self.metrics is not None:
+                self.metrics.record_overlap_start()
+        # A stale strategy-pending timer is superseded by the pause timer.
+        task = getattr(self, "_barge_in_pending_task", None)
+        if task is not None and not task.done():
+            task.cancel()
+        self._barge_in_pending_task = None
+        self._output_paused = True
+        self._pause_decision_event = asyncio.Event()
+        # Freeze the playback bookkeeping at the heard offset: the clear
+        # below drops the carrier backlog, so anything pushed beyond the
+        # heard cursor is void. A kill that follows then computes the
+        # heard prefix from this frozen state; a resume re-advances it as
+        # the tail is re-sent.
+        idx, heard_s = self._compute_pause_resume_point()
+        self._pause_resume_index = idx
+        self._turn_playback_total_s = heard_s
+        self._playback_buffered_until = 0.0
+        # The phase-1 grace wait (carrier backlog) is void after the clear;
+        # resume re-arms it for the re-sent tail.
+        self._clear_grace_task()
+        if getattr(self, "_pending_marks", None):
+            self._drain_pending_marks()
+        logger.info(
+            "Barge-in PAUSE (VAD speech_start during TTS); resuming from "
+            "sentence %d unless a transcript confirms within %.2fs",
+            idx,
+            getattr(self, "_barge_in_confirm_s", 1.5),
+        )
+        try:
+            await self.audio_sender.send_clear()
+        except Exception as exc:
+            logger.debug("send_clear during pause failed: %s", exc)
+        # Output is silent from here — flush the self-hearing ring so STT
+        # receives the user's leading words and can produce the confirming
+        # transcript (or nothing, for a cough). ``on_audio_received``
+        # forwards subsequent frames to STT while paused for the same reason.
+        await self._flush_inbound_audio_ring()
+        try:
+            self._barge_in_pending_task = asyncio.create_task(
+                self._pause_resume_timeout()
+            )
+        except RuntimeError as exc:  # pragma: no cover - no running loop
+            logger.debug("could not schedule pause-resume timeout: %s", exc)
+            self._barge_in_pending_task = None
+
+    async def _pause_resume_timeout(self) -> None:
+        """Fire the false-interruption resume when no transcript confirmed
+        the pause within ``_barge_in_confirm_s``."""
+        try:
+            await asyncio.sleep(self._barge_in_confirm_s)
+        except asyncio.CancelledError:
+            return
+        if not getattr(self, "_output_paused", False):
+            return
+        await self._resume_after_false_interruption()
+
+    async def _resume_after_false_interruption(self) -> None:
+        """RESUME output after a pause that no transcript confirmed.
+
+        Re-sends the cleared-but-unheard tail from the retained sentence
+        audio (sentence granularity, no TTS re-billing), unpauses the live
+        send path, and records the event as a FALSE interruption: the
+        overlap closes via ``record_overlap_end(was_interruption=False)``
+        (the backchannel counter — the interruption count is NOT
+        incremented) and the turn is never marked interrupted.
+        """
+        if not getattr(self, "_output_paused", False):
+            return
+        entries = getattr(self, "_turn_sentence_audio", None) or []
+        idx = max(0, min(getattr(self, "_pause_resume_index", 0), len(entries)))
+        tail = entries[idx:]
+        # Drop the stale segment stamps of the sentences about to be
+        # replayed — the replay re-stamps them at their new positions on
+        # the (frozen-then-resumed) playback timeline, so a later barge-in
+        # still maps to an accurate heard prefix without duplicates.
+        segments = getattr(self, "_turn_spoken_segments", None)
+        if segments is not None:
+            del segments[idx:]
+        for entry in tail:
+            entry["sent"] = 0
+        if self.metrics is not None:
+            # False interruption — the backchannel path. Mirrors
+            # ``_pending_barge_in_timeout``.
+            self.metrics.record_overlap_end(was_interruption=False)
+            self.metrics.anchor_user_speech_start()
+        self._barge_in_pending_since = None
+        self._barge_in_pending_task = None
+        logger.info(
+            "False interruption: no confirming transcript within %.2fs — "
+            "resuming %d retained sentence(s)",
+            getattr(self, "_barge_in_confirm_s", 1.5),
+            len(tail),
+        )
+        if self._event_bus is not None:
+            self._event_bus.emit(
+                "false_interruption", {"resumed_sentences": len(tail)}
+            )
+        # Re-send the unheard tail BEFORE unpausing so the in-flight
+        # synthesis (which queues while paused) cannot interleave a newer
+        # chunk ahead of the replayed audio.
+        for entry in tail:
+            if not self._is_speaking:
+                break
+            # Sentence boundary — drop any stale PCM16 alignment carry, the
+            # same contract ``_synthesize_sentence`` keeps per sentence.
+            self.audio_sender.reset_pcm_carry()
+            await self._drain_sentence_entry(entry, force=True)
+        self._output_paused = False
+        # Close the unpause race: a chunk queued between the last drain and
+        # the flag flip would otherwise wait for the next live chunk.
+        if tail and self._is_speaking:
+            await self._drain_sentence_entry(tail[-1], force=True)
+        evt = getattr(self, "_pause_decision_event", None)
+        if evt is not None and not evt.is_set():
+            evt.set()
+        # Post-complete turn (carrier was draining the buffered tail when
+        # the pause landed): the turn body already finished pushing — its
+        # grace task was cancelled at pause time — so re-arm the grace
+        # machinery for the re-sent backlog: phase-1 hold keeps barge-in
+        # armed for the whole audible window, exactly as #164. A turn
+        # still in flight arms it itself in its ``finally``.
+        if getattr(self, "_turn_output_done", True) and self._is_speaking:
+            await self._end_speaking_with_grace()
+
+    def _discard_pause_state(self) -> None:
+        """Drop all pause-and-resume state (flags + buffers) and wake any
+        pause-decision waiter. Used by the kill path, fresh turns, and
+        teardown. Idempotent; safe on ``object.__new__`` test fixtures."""
+        self._output_paused = False
+        self._pause_resume_index = 0
+        paused = getattr(self, "_paused_sentences", None)
+        if paused:
+            paused.clear()
+        entries = getattr(self, "_turn_sentence_audio", None)
+        if entries:
+            entries.clear()
+        self._pause_retained_bytes = 0
+        evt = getattr(self, "_pause_decision_event", None)
+        if evt is not None and not evt.is_set():
+            evt.set()
+
+    async def _await_pause_decision(self) -> bool:
+        """Block until the in-flight pause resolves. ``True`` → resumed
+        (keep speaking); ``False`` → killed (turn interrupted). Bounded:
+        fails open past the confirm window plus margin (the resume timer
+        guarantees a decision; the margin covers teardown races)."""
+        while getattr(self, "_output_paused", False) and self._is_speaking:
+            evt = getattr(self, "_pause_decision_event", None)
+            if evt is None:
+                break
+            try:
+                await asyncio.wait_for(
+                    evt.wait(),
+                    timeout=getattr(self, "_barge_in_confirm_s", 1.5) + 5.0,
+                )
+            except asyncio.TimeoutError:  # pragma: no cover - defensive
+                logger.debug("pause decision wait timed out — failing open")
+                break
+        return self._is_speaking
+
+    async def _buffer_sentence_if_paused(self, sentence: str) -> bool:
+        """While paused, buffer ``sentence`` (pre-guardrail text) for the
+        resume drain and return ``True``; return ``False`` when not paused
+        (caller synthesizes normally). Overflow degrades to a full cancel —
+        the bounded buffer is a memory-safety valve, not a speech queue."""
+        if not getattr(self, "_output_paused", False):
+            return False
+        buf = getattr(self, "_paused_sentences", None)
+        if buf is None:
+            buf = self._paused_sentences = []
+        if len(buf) >= self._PAUSE_MAX_BUFFERED_SENTENCES:
+            logger.warning(
+                "pause_resume sentence buffer overflow (%d) — degrading to full cancel",
+                len(buf),
+            )
+            await self._do_cancel_for_barge_in("<pause_resume sentence-buffer overflow>")
+            return True  # handled; the loop observes _is_speaking=False next
+        buf.append(sentence)
+        return True
+
+    def _release_paused_sentences(self) -> list[str]:
+        """Pop-and-return every sentence buffered during the pause."""
+        buf = getattr(self, "_paused_sentences", None)
+        if not buf:
+            return []
+        out = list(buf)
+        buf.clear()
+        return out
+
+    def _begin_retained_sentence(self, text: str) -> dict | None:
+        """Open a retention entry for a response sentence (pause_resume mode
+        only — returns ``None`` otherwise, keeping the legacy send path
+        byte-identical). Filler / error-fallback audio is never retained
+        (``record_segment=False`` callers skip this)."""
+        if getattr(self, "_barge_in_mode", "cancel") != "pause_resume":
+            return None
+        if getattr(self, "_pause_resume_overflowed", False):
+            return None
+        entries = getattr(self, "_turn_sentence_audio", None)
+        if entries is None:
+            entries = self._turn_sentence_audio = []
+        entry = {"text": text, "chunks": [], "sent": 0}
+        entries.append(entry)
+        return entry
+
+    async def _retain_pause_chunk(self, entry: dict, chunk: bytes) -> bool:
+        """Append ``chunk`` to the sentence's retention entry, enforcing the
+        retained-audio cap. Returns ``True`` when retained; ``False`` on
+        overflow (paused → the turn was just killed; speaking → retention
+        was released and the caller falls back to direct sends)."""
+        entry["chunks"].append(chunk)
+        self._pause_retained_bytes = (
+            getattr(self, "_pause_retained_bytes", 0) + len(chunk)
+        )
+        if self._pause_retained_bytes <= self._pause_retained_cap_bytes():
+            return True
+        if getattr(self, "_output_paused", False):
+            logger.warning(
+                "pause_resume retained-audio cap (%.0fs) exceeded while paused — "
+                "degrading to full cancel",
+                self._PAUSE_RESUME_MAX_RETAINED_S,
+            )
+            await self._do_cancel_for_barge_in("<pause_resume audio-buffer overflow>")
+        else:
+            logger.info(
+                "pause_resume retained-audio cap (%.0fs) exceeded — disabling "
+                "pause-resume for this turn (legacy cancel applies)",
+                self._PAUSE_RESUME_MAX_RETAINED_S,
+            )
+            self._pause_resume_overflowed = True
+            self._pause_retained_bytes = 0
+            entries = getattr(self, "_turn_sentence_audio", None) or []
+            for e in entries:
+                e["chunks"] = []
+                e["sent"] = 0
+        return False
+
+    async def _drain_sentence_entry(self, entry: dict, force: bool = False) -> None:
+        """Send every not-yet-sent chunk of a retention entry to the carrier
+        (claim-then-send so concurrent drains can never double-send).
+        Stamps the sentence's heard-prefix segment at its first sent chunk —
+        a replay (``sent`` reset to 0) re-stamps at the new timeline
+        position. ``force=True`` bypasses the pause gate (resume path only).
+        """
+        while entry["sent"] < len(entry["chunks"]):
+            if not self._is_speaking:
+                return
+            if getattr(self, "_output_paused", False) and not force:
+                return
+            idx = entry["sent"]
+            entry["sent"] = idx + 1
+            chunk = entry["chunks"][idx]
+            if idx == 0:
+                segments = getattr(self, "_turn_spoken_segments", None)
+                if segments is not None:
+                    segments.append(
+                        (entry["text"], getattr(self, "_turn_playback_total_s", 0.0))
+                    )
+            # Far-end tap mirrors the direct send path: SKIPPED on the
+            # carrier-native fast path where these are mulaw 8 kHz wire
+            # bytes that would corrupt the int16-PCM-16k AEC reference.
+            if getattr(self, "_aec", None) is not None and not getattr(
+                self, "_tts_output_format_native_for_carrier", False
+            ):
+                self._aec.push_far_end(chunk)
+            await self.audio_sender.send_audio(chunk)
+            self._track_outbound_playback(len(chunk))
+            self._mark_first_audio_sent()
+
+    def _passes_paused_kill_filters(self, transcript) -> bool:
+        """Whether a transcript may KILL a paused turn: it must be a
+        committed FINAL (interims cannot confirm), not a known STT
+        hallucination, and not a duplicate of the last committed utterance —
+        the same filter family ``_commit_transcript`` applies, evaluated
+        without consuming its dedup state (the transcript still flows on to
+        ``_commit_transcript`` to become the user's next turn)."""
+        if not (
+            getattr(transcript, "is_final", False)
+            or getattr(transcript, "speech_final", False)
+        ):
+            return False
+        normalised = transcript.text.strip().lower()
+        stripped = normalised.rstrip(".,!?;: ").strip()
+        if stripped in _STT_HALLUCINATIONS or stripped == "":
+            return False
+        if (
+            normalised == getattr(self, "_last_commit_text", "")
+            and time.time() - getattr(self, "_last_commit_at", 0.0) < 2.0
+        ):
+            return False
+        return True
+
     def _commit_transcript(self, text: str) -> bool:
         """Dedup + throttle + hallucination filter for final STT transcripts.
 
@@ -4095,13 +4655,17 @@ class PipelineStreamHandler(StreamHandler):
             logger.debug("Dropped likely STT hallucination: %r", normalised[:40])
             return False
         # Echo guard: while the agent is still speaking (the forward-STT echo
-        # window), a transcript that matches the agent's own speech is its TTS
-        # bleeding back into STT, not a user turn. Gated on
-        # ``_forward_stt_while_speaking`` + ``_is_speaking`` so a real post-turn
+        # window — or a pause_resume confirm window, which forwards mic audio
+        # to STT while the agent formally holds the floor), a transcript that
+        # matches the agent's own speech is its TTS bleeding back into STT,
+        # not a user turn. Gated on ``_is_speaking`` so a real post-turn
         # reply (committed when the agent is idle) is never dropped, and the
         # default VAD path — which withholds audio during TTS — is unaffected.
         if (
-            getattr(self, "_forward_stt_while_speaking", False)
+            (
+                getattr(self, "_forward_stt_while_speaking", False)
+                or getattr(self, "_output_paused", False)
+            )
             and getattr(self, "_is_speaking", False)
             and _looks_like_echo(text, getattr(self, "_current_agent_spoken_text", ""))
         ):
@@ -4570,6 +5134,23 @@ class PipelineStreamHandler(StreamHandler):
                         # grace-timer flip will drain the ring buffer to
                         # STT so the user's words are not silently lost.
                         self._suppressed_speech_pending = True
+                    elif self._is_speaking and self._should_pause_for_barge_in():
+                        # PAUSE-AND-RESUME (opt-in ``barge_in_mode=
+                        # "pause_resume"``): output pauses immediately —
+                        # the carrier buffer is cleared so the agent goes
+                        # silent within one frame — but nothing is
+                        # cancelled. A committed final transcript within
+                        # ``_barge_in_confirm_s`` kills the turn via
+                        # ``_handle_barge_in`` → ``_do_cancel_for_barge_in``;
+                        # otherwise ``_pause_resume_timeout`` resumes from
+                        # the first not-fully-heard sentence. Takes
+                        # precedence over the defer_cancel paths below —
+                        # it is strictly safer (output stops immediately
+                        # AND a false positive is recoverable). The frame
+                        # falls through to STT below (paused output makes
+                        # the line echo-quiet) so the confirm window can
+                        # actually hear the user.
+                        await self._start_pause_resume()
                     elif self._is_speaking:
                         # Caller spoke over in-flight TTS. The cancel is
                         # DEFERRED to transcript confirmation — instead of
@@ -4687,7 +5268,12 @@ class PipelineStreamHandler(StreamHandler):
             # interruptions ("stop") never produced a transcript and the
             # agent kept talking; long ones produced truncated
             # transcripts and the agent answered to fragments.
-            if self._is_speaking:
+            # Pause-and-resume: while output is PAUSED the line is
+            # echo-quiet (no TTS is playing), so frames flow straight to
+            # STT — the confirm window depends on STT hearing the user.
+            # ``_start_pause_resume`` already flushed the ring's leading
+            # edge when the pause began.
+            if self._is_speaking and not getattr(self, "_output_paused", False):
                 # The deque's ``maxlen=13`` (~260 ms at 20 ms/frame, matching
                 # SileroVAD ``min_speech_duration``) evicts the oldest frame
                 # on append, so the post-barge-in replay only recovers the
@@ -4821,6 +5407,21 @@ class PipelineStreamHandler(StreamHandler):
         # Fresh turn — reset the heard-prefix playback timeline.
         self._turn_playback_total_s = 0.0
         self._turn_spoken_segments = []
+        # Fresh turn — drop any pause-and-resume state and retained audio
+        # from the previous turn (a paused turn can never reach here — the
+        # pause-decision wait resolves before the turn ends — but be
+        # defensive) and re-enable retention after an overflow.
+        self._discard_pause_state()
+        self._turn_sentence_audio = []
+        self._pause_retained_bytes = 0
+        self._pause_resume_overflowed = False
+        self._pause_decision_event = None
+        # False until the turn body finishes pushing audio (the
+        # ``_end_speaking_with_grace`` call in its finally). The resume
+        # path uses it to decide whether the #164 grace machinery must be
+        # re-armed for the re-sent tail (post-complete pause) or whether
+        # the still-running turn body will arm it itself.
+        self._turn_output_done = False
         # Reset the VAD detector so the next user utterance triggers a clean
         # SILENCE→SPEECH transition. Without this, PSTN echo from the
         # previous turn can keep the smoothed probability above the
@@ -4934,7 +5535,11 @@ class PipelineStreamHandler(StreamHandler):
         if dispatch is not None and not dispatch.done():
             return
         remaining_s = getattr(self, "_playback_buffered_until", 0.0) - time.time()
-        if remaining_s <= 0:
+        # Pause-and-resume froze the playback bookkeeping at pause time
+        # (cursor snapped to 0, total rewound to the heard offset), so a
+        # kill while paused has no live backlog — the frozen heard prefix
+        # below is still the right input for the rewrite.
+        if remaining_s <= 0 and not getattr(self, "_output_paused", False):
             return
         heard = self._heard_response_prefix()
         if heard is None:
@@ -5001,6 +5606,10 @@ class PipelineStreamHandler(StreamHandler):
         — with barge-in armed — for the whole audible window. See the inline
         comments below.
         """
+        # The turn body has finished pushing audio — from here on, a
+        # pause-resume cycle owns re-arming the grace machinery (see
+        # ``_resume_after_false_interruption``).
+        self._turn_output_done = True
         try:
             grace_ms = int(os.environ.get("PATTER_TTS_TAIL_GRACE_MS", "1500"))
         except ValueError:
@@ -5022,6 +5631,10 @@ class PipelineStreamHandler(StreamHandler):
             self._speaking_started_at = None
             self._first_audio_sent_at = None
             self._clear_pending_barge_in()
+            # Hygiene: a turn that ended while paused (only reachable via
+            # the LLM-error path — normal turns wait out the pause
+            # decision) must not leak its pause buffers into idle time.
+            self._discard_pause_state()
             await self._reset_barge_in_strategies()
             if self._suppressed_speech_pending:
                 self._suppressed_speech_pending = False
@@ -5080,6 +5693,9 @@ class PipelineStreamHandler(StreamHandler):
                     self._speaking_started_at = None
                     self._first_audio_sent_at = None
                     self._clear_pending_barge_in()
+                    # See the zero-grace branch — drop any pause state a
+                    # turn that errored mid-pause left behind.
+                    self._discard_pause_state()
                     await self._reset_barge_in_strategies()
                     if self._suppressed_speech_pending:
                         self._suppressed_speech_pending = False
@@ -5136,6 +5752,8 @@ class PipelineStreamHandler(StreamHandler):
         self._speaking_generation += 1
         self._clear_grace_task()
         self._clear_pending_barge_in()
+        # The next turn owns the floor — any stale pause state is void.
+        self._discard_pause_state()
         await self._reset_barge_in_strategies()
         # Recover the user's leading words. Same rationale as the barge-in
         # flush — but here it is the only audio recovery, since the agent
@@ -5608,6 +6226,10 @@ class PipelineStreamHandler(StreamHandler):
         # spurious overlap_end events. Idempotent: safe to call when no
         # pending state exists.
         self._clear_pending_barge_in()
+        # Drop pause-and-resume buffers and wake any pause-decision waiter
+        # so a call ending mid-pause cannot strand a loop awaiting the
+        # (now cancelled) resume timer.
+        self._discard_pause_state()
         # Cancel any pending tail-grace flip task so it does not sleep past
         # teardown and touch a finalised handler.
         self._clear_grace_task()
