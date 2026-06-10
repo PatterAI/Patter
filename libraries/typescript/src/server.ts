@@ -367,7 +367,16 @@ function validateTelnyxSignature(
     if (ageMs > toleranceSec * 1000 || ageMs < -TELNYX_FUTURE_SKEW_MS) return false;
 
     const payload = `${timestamp}|${rawBody}`;
-    const keyBuffer = Buffer.from(publicKey, 'base64');
+    const rawKey = Buffer.from(publicKey, 'base64');
+
+    // The Telnyx portal issues TELNYX_PUBLIC_KEY as base64 of the RAW
+    // 32-byte Ed25519 key (their own SDKs feed it straight to NaCl). Only
+    // accepting DER/SPKI meant every webhook 403'd (fail-closed) the moment
+    // the documented security feature was enabled. Wrap raw keys in the
+    // 12-byte Ed25519 SPKI prefix so createPublicKey accepts both forms.
+    const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
+    const keyBuffer =
+      rawKey.length === 32 ? Buffer.concat([ED25519_SPKI_PREFIX, rawKey]) : rawKey;
 
     // Node 15+ supports Ed25519 natively via createPublicKey / verify
     const keyObject = crypto.createPublicKey({
@@ -1084,6 +1093,40 @@ export class EmbeddedServer {
     return promise;
   }
 
+  /**
+   * Re-key per-call bookkeeping from the dial-time id to the live id.
+   *
+   * Plivo's ``POST /Call/`` returns ``request_uuid`` while every subsequent
+   * webhook and media frame carries the live ``CallUUID`` — without
+   * re-keying, ``call({ wait: true })`` promises, AMD callbacks and prewarm
+   * slots registered under the request_uuid never resolve/pop. Mirrors
+   * Python's ``alias_call_id``.
+   */
+  aliasCallId(oldId: string, newId: string): void {
+    if (!oldId || !newId || oldId === newId) return;
+    const completion = this.completions.get(oldId);
+    if (completion && !completion.done && !this.completions.has(newId)) {
+      this.completions.set(newId, completion);
+    }
+    this.completions.delete(oldId);
+    const cb = this.onMachineDetectionByCallSid.get(oldId);
+    if (cb && !this.onMachineDetectionByCallSid.has(newId)) {
+      this.onMachineDetectionByCallSid.set(newId, cb);
+    }
+    this.onMachineDetectionByCallSid.delete(oldId);
+    const cls = this.amdClass.get(oldId);
+    if (cls && !this.amdClass.has(newId)) this.amdClass.set(newId, cls);
+    this.amdClass.delete(oldId);
+    try {
+      this.aliasPrewarm?.(oldId, newId);
+    } catch (err) {
+      getLogger().debug(`aliasPrewarm threw: ${String(err)}`);
+    }
+  }
+
+  /** Optional client-bound hook to re-key prewarm caches (see aliasCallId). */
+  public aliasPrewarm: ((oldId: string, newId: string) => void) | undefined;
+
   /** Drop a registered completion (e.g. on a backstop timeout) without resolving it. */
   deleteCompletion(callId: string): void {
     this.completions.delete(callId);
@@ -1453,10 +1496,7 @@ export class EmbeddedServer {
       // the prewarmed greeting is never consumed. Evict the cache entry
       // once so the WARN fires regardless of whether ``voicemailMessage``
       // is configured.
-      if (
-        (answeredBy === 'machine_end_beep' || answeredBy === 'machine_end_silence') &&
-        callSid
-      ) {
+      if (answeredBy.startsWith('machine_end') && callSid) {
         try {
           this.recordPrewarmWaste(callSid);
         } catch (err) {
@@ -1465,7 +1505,7 @@ export class EmbeddedServer {
       }
 
       if (
-        (answeredBy === 'machine_end_beep' || answeredBy === 'machine_end_silence') &&
+        answeredBy.startsWith('machine_end') &&
         this.voicemailMessage &&
         this.config.twilioSid &&
         this.config.twilioToken
@@ -1559,6 +1599,7 @@ export class EmbeddedServer {
             call_control_id?: string;
             from?: string;
             to?: string;
+            direction?: string;
             digit?: string;
             result?: string;
             hangup_cause?: string;
@@ -1636,7 +1677,11 @@ export class EmbeddedServer {
           }
         }
         if (amdCallId && (amdResult === 'machine' || amdResult === 'machine_detected')) {
-          await this.handleTelnyxAmdVoicemail(amdCallId);
+          // Voicemail drop moved to ``call.machine.greeting.ended``: the
+          // dial requests ``answering_machine_detection: "greeting_end"``
+          // precisely so Telnyx tells us when the machine's greeting
+          // reaches the beep — speaking on this early classification
+          // started the voicemail mid-greeting (clipped before the beep).
           // FIX #91 — when AMD classifies as machine the agent's first
           // message is replaced by ``voicemailMessage`` (or the call
           // simply ends), so the prewarmed greeting is never consumed.
@@ -1646,6 +1691,20 @@ export class EmbeddedServer {
           } catch (err) {
             getLogger().debug(`recordPrewarmWaste threw: ${String(err)}`);
           }
+        }
+        return res.status(200).send();
+      }
+
+      if (eventType === 'call.machine.greeting.ended') {
+        // The answering machine's greeting just ended (beep) — the correct
+        // moment to speak the voicemail. Fire-and-forget: the drop sleeps
+        // for the playback estimate (up to 30 s) and the webhook must 200
+        // NOW or Telnyx retries it and the message overlaps itself.
+        const greetCallId = payload.call_control_id ?? '';
+        if (greetCallId && this.voicemailMessage) {
+          void this.handleTelnyxAmdVoicemail(greetCallId).catch((err) =>
+            getLogger().warn(`Telnyx voicemail drop failed: ${String(err)}`),
+          );
         }
         return res.status(200).send();
       }
@@ -1724,11 +1783,22 @@ export class EmbeddedServer {
 
       try {
         if (eventType === 'call.initiated') {
+          const direction = String(payload.direction ?? '').toLowerCase();
+          if (direction === 'outgoing') {
+            // Our own outbound leg: the Answer command is only valid on
+            // incoming legs (422 on outgoing), and the historical
+            // answer-with-inline-stream fold severed outbound media entirely
+            // — the callee answered to dead air. Streaming is attached on
+            // ``call.answered`` below instead.
+            getLogger().debug(`Telnyx call.initiated ${callControlId} (outgoing) — awaiting answer`);
+            return res.status(200).send();
+          }
           // PERF — Telnyx accepts the streaming params inline on
           // ``actions/answer`` and auto-starts the stream the moment the
           // leg picks up. Folding ``streaming_start`` into the answer body
           // removes the ``call.answered`` webhook round-trip and a second
-          // POST (~100-200 ms saved per inbound call).
+          // POST (~100-200 ms saved per inbound call). Incoming legs only —
+          // see above.
           const caller = payload.from ?? '';
           const callee = payload.to ?? '';
           const streamUrl =
@@ -1754,9 +1824,45 @@ export class EmbeddedServer {
             getLogger().warn(`Telnyx answer failed: ${resp.status} ${(await resp.text()).slice(0, 200)}`);
           }
         } else if (eventType === 'call.answered') {
-          // No-op: ``call.initiated`` already submitted answer + streaming
-          // in a single call. Telnyx still emits ``call.answered`` as an
-          // informational event; acknowledge it without a redundant POST.
+          const direction = String(payload.direction ?? '').toLowerCase();
+          if (direction === 'outgoing') {
+            // Outbound leg picked up: attach the media stream now. The Dial
+            // API takes no stream params and the inbound-style
+            // answer-with-stream never runs for outgoing legs, so this POST
+            // is the ONLY place outbound audio is wired.
+            const outCaller = payload.from ?? '';
+            const outCallee = payload.to ?? '';
+            const streamUrl =
+              `wss://${this.config.webhookUrl}/ws/stream/${encodeURIComponent(callControlId)}` +
+              `?caller=${encodeURIComponent(outCaller)}&callee=${encodeURIComponent(outCallee)}`;
+            getLogger().info(
+              `Telnyx call.answered ${callControlId} (outgoing) — starting media stream`,
+            );
+            const resp = await fetch(
+              `${apiBase}/calls/${encodeURIComponent(callControlId)}/actions/streaming_start`,
+              {
+                method: 'POST',
+                headers: authHeaders,
+                body: JSON.stringify({
+                  stream_url: streamUrl,
+                  stream_track: 'inbound_track',
+                  stream_bidirectional_mode: 'rtp',
+                  stream_bidirectional_codec: 'PCMU',
+                  stream_bidirectional_sampling_rate: 8000,
+                  stream_bidirectional_target_legs: 'self',
+                }),
+                signal: AbortSignal.timeout(10_000),
+              },
+            );
+            if (!resp.ok) {
+              getLogger().warn(
+                `Telnyx streaming_start failed: ${resp.status} ${(await resp.text()).slice(0, 200)}`,
+              );
+            }
+            return res.status(200).send();
+          }
+          // Incoming legs: ``call.initiated`` already submitted answer +
+          // streaming in a single call; acknowledge.
           getLogger().debug(`Telnyx call.answered ${callControlId} — stream already active (inline)`);
         } else {
           getLogger().debug(`Telnyx event ignored: ${eventType}`);
@@ -1814,6 +1920,10 @@ export class EmbeddedServer {
       const callUuid = body['CallUUID'] ?? '';
       const caller = body['From'] ?? '';
       const callee = body['To'] ?? '';
+      // API-originated calls answer with BOTH ids: re-key wait promises /
+      // AMD callbacks / prewarm slots from request_uuid → CallUUID.
+      const requestUuid = body['RequestUUID'] ?? '';
+      if (requestUuid && callUuid) this.aliasCallId(requestUuid, callUuid);
       const qs = `?caller=${encodeURIComponent(caller)}&callee=${encodeURIComponent(callee)}`;
       const streamUrl = `wss://${this.config.webhookUrl}/ws/plivo/stream/${callUuid || 'outbound'}${qs}`;
       const xml = PlivoAdapter.generateStreamXml(streamUrl, 'audio/x-mulaw;rate=8000', {
@@ -1908,12 +2018,15 @@ export class EmbeddedServer {
           getLogger().debug(`recordPrewarmWaste threw: ${String(err)}`);
         }
         if (this.voicemailMessage && this.config.plivoAuthId && this.config.plivoAuthToken) {
-          await dropPlivoVoicemail(
+          // Fire-and-forget: the drop sleeps for the playback estimate and
+          // the webhook must 200 NOW or Plivo retries it and the voicemail
+          // is spoken twice over itself.
+          void dropPlivoVoicemail(
             callUuid,
             this.voicemailMessage,
             this.config.plivoAuthId,
             this.config.plivoAuthToken,
-          );
+          ).catch((err) => getLogger().warn(`Plivo voicemail drop failed: ${String(err)}`));
         }
       }
       res.status(200).send();
@@ -1942,7 +2055,19 @@ export class EmbeddedServer {
     const wsConnectionsByIp = new Map<string, number>();
 
     this.server.on('upgrade', (req, socket, head) => {
-      const remoteIp = (req.socket?.remoteAddress ?? 'unknown').replace(/^::ffff:/, '');
+      let remoteIp = (req.socket?.remoteAddress ?? 'unknown').replace(/^::ffff:/, '');
+      // Behind the recommended cloudflared/ngrok tunnel EVERY carrier media
+      // WS arrives from loopback — keying the cap on the socket peer put all
+      // calls in one shared bucket (legitimate call #11 rejected; one remote
+      // abuser could exhaust it). Prefer the tunnel-provided client IP.
+      if (remoteIp === '127.0.0.1' || remoteIp === '::1') {
+        const fwd =
+          (req.headers['cf-connecting-ip'] as string | undefined) ??
+          (req.headers['x-forwarded-for'] as string | undefined) ??
+          '';
+        const firstHop = fwd.split(',')[0]?.trim();
+        if (firstHop) remoteIp = firstHop.replace(/^::ffff:/, '');
+      }
       const currentCount = wsConnectionsByIp.get(remoteIp) ?? 0;
       if (currentCount >= MAX_WS_PER_IP) {
         getLogger().warn(`WebSocket upgrade rejected: too many connections from ${remoteIp}`);
@@ -2054,16 +2179,17 @@ export class EmbeddedServer {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${telnyxKey}`,
     } as const;
-    // Heuristic playback-duration estimate — ~150 ms per character
-    // (≈14 chars/sec English speech) plus a 1500 ms buffer, capped at
-    // 30 s. Avoids cutting the voicemail mid-sentence on hangup. The
-    // proper fix is to subscribe to Telnyx ``call.speak.ended`` and hang
-    // up there; kept as a heuristic since the webhook plumbing change
-    // is broader than this handler. Mirrors
-    // ``libraries/python/getpatter/handlers/telnyx_handler.py::handle_amd_result``.
+    // Heuristic playback-duration estimate — ~150 ms per character,
+    // capped at 30 s. Avoids cutting the voicemail mid-sentence on
+    // hangup. The proper fix is to subscribe to Telnyx
+    // ``call.speak.ended`` and hang up there; kept as a heuristic since
+    // the webhook plumbing change is broader than this handler. Same
+    // constant as Python ``telephony/telnyx.py::handle_amd_result`` —
+    // the SDKs previously hung up at 2x-different times (71 vs 150
+    // ms/char) for the same message.
     const estimatedMs = Math.min(
       30_000,
-      Math.ceil((this.voicemailMessage.length / 14) * 1000) + 1500,
+      this.voicemailMessage.length * 150,
     );
     try {
       const speakResp = await fetch(
@@ -2262,18 +2388,20 @@ export class EmbeddedServer {
           })
           .catch((err) => getLogger().error(`call_log end error: ${String(err)}`));
       }
-      if (userEnd) await userEnd(data);
-      // Resolve any pending call({ wait: true }) for this call. A media-stream
-      // end means the call connected: classify ``voicemail`` when AMD tagged
-      // the callee as a machine, else ``answered``. Fan-out — this runs
-      // regardless of (and after) the user's own onCallEnd callback, so
-      // wiring a callback no longer monopolises completion signalling.
-      // Mirrors the Python ``_on_call_end`` wrapper.
-      const cid = typeof data.call_id === 'string' ? data.call_id : '';
-      if (cid) {
-        const cls = this.amdClass.get(cid);
-        const outcome: CallOutcome = cls === 'machine' ? 'voicemail' : 'answered';
-        this.resolveCompletion(cid, { outcome, status: 'completed', data });
+      try {
+        if (userEnd) await userEnd(data);
+      } finally {
+        // Resolve any pending call({ wait: true }) for this call. A
+        // media-stream end means the call connected: classify ``voicemail``
+        // when AMD tagged the callee as a machine, else ``answered``. Runs
+        // in a ``finally`` so a raising user callback can no longer strand
+        // the waiter until the backstop timeout. Mirrors Python.
+        const cid = typeof data.call_id === 'string' ? data.call_id : '';
+        if (cid) {
+          const cls = this.amdClass.get(cid);
+          const outcome: CallOutcome = cls === 'machine' ? 'voicemail' : 'answered';
+          this.resolveCompletion(cid, { outcome, status: 'completed', data });
+        }
       }
     };
 
@@ -2290,7 +2418,24 @@ export class EmbeddedServer {
     const bridge = new TwilioBridge(this.config);
     const handler = new StreamHandler(this.buildStreamHandlerDeps(bridge), ws, caller, callee);
 
-    ws.on('message', async (raw) => {
+    // Per-connection FIFO: ws@8 invokes async listeners WITHOUT awaiting
+    // them, so back-to-back 20 ms media frames interleaved inside
+    // handleAudio (VAD state races, out-of-order STT feeds) and a rejection
+    // on the close path became an unhandled rejection that killed the whole
+    // process. Serialize every event onto one chain and contain errors.
+    let wsQueue: Promise<void> = Promise.resolve();
+    const enqueueWs = (fn: () => Promise<void>): void => {
+      wsQueue = wsQueue.then(fn).catch((err) => {
+        getLogger().error('Stream handler error:', err);
+        try {
+          handler.recordError(err);
+        } catch {
+          /* recordError must never throw the chain dead */
+        }
+      });
+    };
+
+    ws.on('message', (raw) => enqueueWs(async () => {
       try {
         let data: {
           event: string;
@@ -2336,11 +2481,22 @@ export class EmbeddedServer {
         getLogger().error('Stream handler error:', err);
         handler.recordError(err); // coarse error code for call_completed telemetry
       }
-    });
+    }));
 
-    ws.on('close', async () => {
+    ws.on('close', () => enqueueWs(async () => {
       this.activeCallIds.delete(ws);
       await handler.handleWsClose();
+    }));
+
+    // An abrupt TCP reset emits 'error'; with no listener registered the
+    // EventEmitter throw became an uncaughtException killing every live call.
+    ws.on('error', (err) => {
+      getLogger().error(`Twilio media WS error: ${String(err)}`);
+      try {
+        ws.terminate();
+      } catch {
+        /* already closed */
+      }
     });
   }
 
@@ -2355,7 +2511,24 @@ export class EmbeddedServer {
     const handler = new StreamHandler(this.buildStreamHandlerDeps(bridge), ws, caller, callee);
     let streamStarted = false;
 
-    ws.on('message', async (raw) => {
+    // Per-connection FIFO: ws@8 invokes async listeners WITHOUT awaiting
+    // them, so back-to-back 20 ms media frames interleaved inside
+    // handleAudio (VAD state races, out-of-order STT feeds) and a rejection
+    // on the close path became an unhandled rejection that killed the whole
+    // process. Serialize every event onto one chain and contain errors.
+    let wsQueue: Promise<void> = Promise.resolve();
+    const enqueueWs = (fn: () => Promise<void>): void => {
+      wsQueue = wsQueue.then(fn).catch((err) => {
+        getLogger().error('Stream handler error:', err);
+        try {
+          handler.recordError(err);
+        } catch {
+          /* recordError must never throw the chain dead */
+        }
+      });
+    };
+
+    ws.on('message', (raw) => enqueueWs(async () => {
       try {
         // BUG #17 — Telnyx media-stream WebSocket uses ``event`` (not
         // ``event_type``, which is a Call Control REST notification field),
@@ -2417,13 +2590,22 @@ export class EmbeddedServer {
         getLogger().error('Stream handler error (Telnyx):', err);
         handler.recordError(err); // coarse error code for call_completed telemetry
       }
-    });
+    }));
 
-    ws.on('close', async () => {
+    ws.on('close', () => enqueueWs(async () => {
       // Mirrors the Twilio/Plivo close handlers — without the delete the
       // entry survives the call and the Map grows for the server's lifetime.
       this.activeCallIds.delete(ws);
       await handler.handleWsClose();
+    }));
+
+    ws.on('error', (err) => {
+      getLogger().error(`Telnyx media WS error: ${String(err)}`);
+      try {
+        ws.terminate();
+      } catch {
+        /* already closed */
+      }
     });
   }
 
@@ -2437,7 +2619,24 @@ export class EmbeddedServer {
     const bridge = new PlivoBridge(this.config);
     const handler = new StreamHandler(this.buildStreamHandlerDeps(bridge), ws, caller, callee);
 
-    ws.on('message', async (raw) => {
+    // Per-connection FIFO: ws@8 invokes async listeners WITHOUT awaiting
+    // them, so back-to-back 20 ms media frames interleaved inside
+    // handleAudio (VAD state races, out-of-order STT feeds) and a rejection
+    // on the close path became an unhandled rejection that killed the whole
+    // process. Serialize every event onto one chain and contain errors.
+    let wsQueue: Promise<void> = Promise.resolve();
+    const enqueueWs = (fn: () => Promise<void>): void => {
+      wsQueue = wsQueue.then(fn).catch((err) => {
+        getLogger().error('Stream handler error:', err);
+        try {
+          handler.recordError(err);
+        } catch {
+          /* recordError must never throw the chain dead */
+        }
+      });
+    };
+
+    ws.on('message', (raw) => enqueueWs(async () => {
       try {
         // Plivo media-stream frames: ``start`` (callId/streamId/mediaFormat),
         // ``media``, ``playedStream`` (checkpoint ack ≈ Twilio mark), ``dtmf``,
@@ -2466,6 +2665,16 @@ export class EmbeddedServer {
           const callId = data.start?.callId ?? '';
           if (callId) this.activeCallIds.set(ws, callId);
           await handler.handleCallStart(callId);
+          // ``recording: true`` parity: Python's Plivo bridge starts the
+          // recording here; the generic Twilio-credential-gated helper never
+          // covered Plivo, so the flag silently no-op'd in TS.
+          if (this.recording && callId) {
+            try {
+              await bridge.startRecording?.(callId);
+            } catch (e) {
+              getLogger().warn(`Could not start Plivo recording: ${String(e)}`);
+            }
+          }
         } else if (event === 'media') {
           const payload = data.media?.payload ?? '';
           // ``await`` keeps a rejection inside the outer try/catch — un-awaited
@@ -2487,11 +2696,20 @@ export class EmbeddedServer {
         getLogger().error('Stream handler error (Plivo):', err);
         handler.recordError(err); // coarse error code for call_completed telemetry
       }
-    });
+    }));
 
-    ws.on('close', async () => {
+    ws.on('close', () => enqueueWs(async () => {
       this.activeCallIds.delete(ws);
       await handler.handleWsClose();
+    }));
+
+    ws.on('error', (err) => {
+      getLogger().error(`Plivo media WS error: ${String(err)}`);
+      try {
+        ws.terminate();
+      } catch {
+        /* already closed */
+      }
     });
   }
 

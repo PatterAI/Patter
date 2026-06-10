@@ -955,6 +955,7 @@ export class Patter {
     // StreamHandler can adopt pre-opened STT / TTS / Realtime WSs at
     // ``start`` instead of paying the cold-handshake on first turn.
     this.embeddedServer.popPrewarmedConnections = this.popPrewarmedConnections;
+    this.embeddedServer.aliasPrewarm = this.aliasPrewarm;
     // Forward the waste-recorder so the carrier status / hangup webhook
     // handlers can evict the cache when a call terminates before the
     // media stream starts (no-answer, busy, failed, canceled, or AMD
@@ -1080,6 +1081,26 @@ export class Patter {
    * carrier ``start`` event instead of opening fresh ones — saving
    * ~150-900 ms of cold-start handshake on the first turn.
    */
+  /**
+   * Re-key prewarm caches from a dial-time id to the live carrier id.
+   * Plivo issues ``request_uuid`` at dial time but the media stream and
+   * webhooks carry ``CallUUID`` — without re-keying, prewarmed first-message
+   * audio and parked provider sockets never matched and always TTL-evicted
+   * as "wasted". Mirrors Python ``_alias_prewarm``.
+   */
+  aliasPrewarm = (oldId: string, newId: string): void => {
+    if (!oldId || !newId || oldId === newId) return;
+    const rekey = <V>(map: Map<string, V>): void => {
+      const v = map.get(oldId);
+      if (v !== undefined && !map.has(newId)) map.set(newId, v);
+      map.delete(oldId);
+    };
+    rekey(this.prewarmAudio);
+    rekey(this.prewarmTtlTimers);
+    rekey(this.prewarmedConnections);
+    rekey(this.prewarmedConnTimers);
+  };
+
   popPrewarmedConnections = (callId: string): ParkedProviderConnections | undefined => {
     const slot = this.prewarmedConnections.get(callId);
     if (slot === undefined) return undefined;
@@ -1675,6 +1696,13 @@ export class Patter {
         if (options.agent.prewarm !== false) {
           this.parkProviderConnections(options.agent, plivoCallId);
         }
+      }
+      // ``wait: true`` parity: register the completion under the dial-time
+      // request_uuid — the Plivo answer webhook re-keys it to the live
+      // CallUUID via aliasCallId, so terminal signals resolve it. The old
+      // bare ``return`` silently ignored ``wait`` for Plivo.
+      if (plivoCallId) {
+        return this.maybeAwaitCompletion(options, plivoCallId, effectiveRingTimeout);
       }
       return;
     }

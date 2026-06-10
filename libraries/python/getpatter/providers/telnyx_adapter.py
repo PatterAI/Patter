@@ -67,22 +67,37 @@ class TelnyxAdapter(TelephonyProvider):
     async def configure_number(self, number: str, webhook_url: str) -> None:
         """Associate number with the Call Control Application.
 
-        Uses ``PATCH /phone_numbers/{id}/voice`` which is the correct voice
-        settings endpoint per the Telnyx numbers skill. The older
-        ``PATCH /phone_numbers/{id}`` endpoint does not accept
-        ``connection_id`` consistently across the v2 API.
+        ``connection_id`` lives on ``PATCH /phone_numbers/{id}`` — the
+        ``/voice`` sub-resource only covers voice settings and silently
+        ignores unknown body fields, so the previous single ``/voice`` PATCH
+        returned 200 without ever linking the number to the Call Control app
+        (inbound calls didn't route until fixed in the portal). Send the
+        association to the base endpoint and keep voice settings on
+        ``/voice``.
 
         ``number`` may be the phone_number ID or the E.164 string; the API
         accepts both identifiers but the phone_number ID is preferred.
         """
         from urllib.parse import quote as _quote
 
+        encoded = _quote(number, safe="")
+        assoc = await self._client.patch(
+            f"/phone_numbers/{encoded}",
+            json={"connection_id": self.connection_id},
+        )
+        if assoc.status_code >= 400:
+            import logging as _logging
+
+            _logging.getLogger("getpatter").warning(
+                "Telnyx connection association returned %s: %s",
+                assoc.status_code,
+                assoc.text[:300],
+            )
         payload = {
-            "connection_id": self.connection_id,
             "tech_prefix_enabled": False,
         }
         resp = await self._client.patch(
-            f"/phone_numbers/{_quote(number, safe='')}/voice",
+            f"/phone_numbers/{encoded}/voice",
             json=payload,
         )
         if resp.status_code >= 400:
@@ -111,10 +126,11 @@ class TelnyxAdapter(TelephonyProvider):
 
         NOTE: ``stream_url`` / ``stream_track`` are NOT accepted by
         ``POST /calls``. Telnyx attaches media streaming after the call is
-        answered via ``POST /calls/{id}/actions/streaming_start`` — typically
-        triggered from the ``call.answered`` webhook. The ``stream_url``
-        argument is retained for interface parity (``TelephonyProvider``)
-        but is intentionally unused here.
+        answered via ``POST /calls/{id}/actions/streaming_start``, triggered
+        from the ``call.answered`` webhook for outgoing legs (the inbound
+        path folds streaming into ``actions/answer`` on ``call.initiated``).
+        The ``stream_url`` argument is retained for interface parity
+        (``TelephonyProvider``) but is intentionally unused here.
 
         See the ``call.answered`` handler in ``server.py`` for the full flow.
 

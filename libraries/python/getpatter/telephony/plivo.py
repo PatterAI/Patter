@@ -23,6 +23,8 @@ from urllib.parse import quote
 
 import httpx
 
+from starlette.websockets import WebSocketDisconnect
+
 from getpatter.observability.attributes import patter_call_scope
 from getpatter.stream_handler import (
     END_CALL_TOOL,
@@ -407,8 +409,8 @@ async def plivo_stream_bridge(
                     "Call started: %s (Plivo, %s, %s → %s)",
                     call_id_actual,
                     _mode,
-                    caller or "?",
-                    callee or "?",
+                    mask_phone_number(caller) or "?",
+                    mask_phone_number(callee) or "?",
                 )
                 if media_format:
                     logger.debug("Plivo mediaFormat: %s", media_format)
@@ -646,6 +648,10 @@ async def plivo_stream_bridge(
             elif event == "stop":
                 break
 
+    except WebSocketDisconnect:
+        # Carrier-side teardown without a ``stop`` frame is a normal-ish
+        # hangup, not a failure — don't pollute error telemetry with it.
+        logger.info("Carrier WebSocket disconnected without stop frame")
     except Exception as exc:
         logger.exception("Stream error: %s", exc)
         # Record the terminal error code on the metrics so call telemetry and the
@@ -663,7 +669,13 @@ async def plivo_stream_bridge(
                 logger.debug("Plivo audio_sender flush failed: %s", _exc)
 
         if handler is not None:
-            await handler.cleanup()
+            try:
+                await handler.cleanup()
+            except Exception as _exc:  # noqa: BLE001 - teardown must complete
+                # cleanup() awaits adapter/STT/TTS closes; one raise here used
+                # to skip the rest of the finally (no metrics finalize, no
+                # on_call_end, dashboard row stuck active forever).
+                logger.exception("handler.cleanup failed: %s", _exc)
 
         # --- Observability: emit patter.cost.telephony_minutes ---
         if _call_start_monotonic is not None and plivo_auth_id and plivo_auth_token:
@@ -718,7 +730,8 @@ async def plivo_stream_bridge(
                         "caller": caller,
                         "callee": callee,
                         "ended_at": time.time(),
-                        "transcript": list(conversation_history),
+                        "transcript": list(transcript_entries),
+                        "conversation_history": list(conversation_history),
                         "metrics": call_metrics,
                     }
                 )

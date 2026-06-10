@@ -1455,6 +1455,28 @@ class TestTelnyxSignatureAntiReplay:
         ts = str(int(time.time()))
         assert _validate_telnyx_signature(body, self._sign(priv, ts, body), ts, pub)
 
+    def test_accepts_raw_32_byte_public_key(self, keypair) -> None:
+        """The Telnyx portal issues TELNYX_PUBLIC_KEY as base64 of the RAW
+        32-byte Ed25519 key (their SDKs feed it straight to NaCl) — the
+        validator must accept that form, not just DER/SPKI."""
+        import base64
+        import time
+
+        from cryptography.hazmat.primitives import serialization
+
+        from getpatter.server import _validate_telnyx_signature
+
+        priv, _ = keypair
+        raw_pub = priv.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+        assert len(raw_pub) == 32
+        pub_b64 = base64.b64encode(raw_pub).decode("ascii")
+        body = b'{"data": {}}'
+        ts = str(int(time.time()))
+        assert _validate_telnyx_signature(body, self._sign(priv, ts, body), ts, pub_b64)
+
     def test_rejects_stale_timestamp(self, keypair) -> None:
         import time
 

@@ -12,6 +12,8 @@ import time
 from collections import deque
 from urllib.parse import quote
 
+from starlette.websockets import WebSocketDisconnect
+
 from getpatter.observability.attributes import patter_call_scope
 from getpatter.telephony.common import _validate_e164
 from getpatter.utils.log_sanitize import mask_phone_number
@@ -699,6 +701,10 @@ async def telnyx_stream_bridge(
             elif event_type_telnyx == "stop":
                 break
 
+    except WebSocketDisconnect:
+        # Carrier-side teardown without a ``stop`` frame is a normal-ish
+        # hangup, not a failure — don't pollute error telemetry with it.
+        logger.info("Carrier WebSocket disconnected without stop frame")
     except Exception as exc:
         logger.exception("Stream error: %s", exc)
         # Record the terminal error code on the metrics so call telemetry and the
@@ -735,7 +741,13 @@ async def telnyx_stream_bridge(
                 logger.debug("Telnyx audio_sender flush failed: %s", _exc)
 
         if handler is not None:
-            await handler.cleanup()
+            try:
+                await handler.cleanup()
+            except Exception as _exc:  # noqa: BLE001 - teardown must complete
+                # cleanup() awaits adapter/STT/TTS closes; one raise here used
+                # to skip the rest of the finally (no metrics finalize, no
+                # on_call_end, dashboard row stuck active forever).
+                logger.exception("handler.cleanup failed: %s", _exc)
 
         # --- Observability: emit patter.cost.telephony_minutes ---
         # Wired here so the span inherits patter.call_id / patter.side
@@ -795,6 +807,7 @@ async def telnyx_stream_bridge(
                         "callee": callee,
                         "ended_at": time.time(),
                         "transcript": list(transcript_entries),
+                        "conversation_history": list(conversation_history),
                         "metrics": call_metrics,
                     }
                 )

@@ -148,12 +148,30 @@ def validate_webhook_url(url: str) -> bool:
 
 
 def _client_ip_for_ws(websocket: WebSocket) -> str:
-    """Best-effort remote IP for a WebSocket, normalising IPv4-mapped IPv6."""
+    """Best-effort remote IP for a WebSocket, normalising IPv4-mapped IPv6.
+
+    Behind the recommended cloudflared/ngrok tunnel EVERY carrier media WS
+    arrives from loopback, so keying the per-IP cap on the socket peer put
+    all calls in one shared bucket: legitimate call #11 was rejected, and a
+    single remote abuser could exhaust the bucket for everyone. For loopback
+    peers, prefer the tunnel-provided client IP headers.
+    """
     client = websocket.client
     if client is None:
         return "unknown"
     raw = client.host or "unknown"
-    return re.sub(r"^::ffff:", "", raw)
+    ip = re.sub(r"^::ffff:", "", raw)
+    if ip in ("127.0.0.1", "::1", "localhost"):
+        fwd = (
+            websocket.headers.get("cf-connecting-ip")
+            or websocket.headers.get("x-forwarded-for")
+            or ""
+        )
+        if fwd:
+            first_hop = fwd.split(",")[0].strip()
+            if first_hop:
+                ip = re.sub(r"^::ffff:", "", first_hop)
+    return ip
 
 
 def _classify_twilio_amd(answered_by: str) -> str:
@@ -261,6 +279,9 @@ def _validate_telnyx_signature(
         return False
     try:
         from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+            Ed25519PublicKey,
+        )
         from cryptography.hazmat.primitives.serialization import load_der_public_key
     except ImportError:
         logger.warning(
@@ -270,7 +291,14 @@ def _validate_telnyx_signature(
         return False
     try:
         key_bytes = base64.b64decode(public_key)
-        key = load_der_public_key(key_bytes)
+        # The Telnyx portal issues TELNYX_PUBLIC_KEY as base64 of the RAW
+        # 32-byte Ed25519 key (their own SDKs feed it straight to NaCl).
+        # Only accepting DER/SPKI meant every webhook 403'd (fail-closed)
+        # the moment the documented security feature was enabled.
+        if len(key_bytes) == 32:
+            key = Ed25519PublicKey.from_public_bytes(key_bytes)
+        else:
+            key = load_der_public_key(key_bytes)
         payload = timestamp.encode("utf-8") + b"|" + raw_body
     except (ValueError, TypeError):
         return False
@@ -437,6 +465,9 @@ class EmbeddedServer:
         # lets ``call(wait=True)`` return a structured ``CallResult`` without
         # the caller hand-wiring ``on_call_end`` to an ``asyncio.Event``.
         self._completions: dict[str, asyncio.Future] = {}
+        # Fire-and-forget background tasks (voicemail drops, …). Held so the
+        # event loop doesn't GC them mid-flight; pruned on completion.
+        self._bg_tasks: set[asyncio.Task] = set()
         self._amd_class: dict[str, str] = {}
         # Pre-warm first-message audio accessor wired by ``Patter.serve()``.
         # The per-call StreamHandler invokes this with its ``call_id`` at the
@@ -494,6 +525,26 @@ class EmbeddedServer:
 
     # === Outbound completion registry (call(wait=True)) ===
 
+
+    def _spawn_bg(self, coro, label: str) -> None:
+        """Run ``coro`` as a tracked fire-and-forget background task.
+
+        Webhook handlers must return 200 immediately — awaiting a voicemail
+        drop inline (speak + up-to-30 s playback sleep + hangup) delayed the
+        response past the carrier's delivery timeout, so Telnyx/Plivo retried
+        the webhook and the voicemail was spoken twice over itself.
+        """
+
+        async def _runner() -> None:
+            try:
+                await coro
+            except Exception as exc:  # noqa: BLE001 - background best-effort
+                logger.warning("%s failed: %s", label, exc)
+
+        task = asyncio.create_task(_runner())
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
     def register_completion(self, call_id: str) -> "asyncio.Future":
         """Register (or return) a completion future for an outbound call.
 
@@ -508,6 +559,34 @@ class EmbeddedServer:
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         self._completions[call_id] = fut
         return fut
+
+    def alias_call_id(self, old_id: str, new_id: str) -> None:
+        """Re-key per-call bookkeeping from the dial-time id to the live id.
+
+        Plivo's ``POST /Call/`` returns ``request_uuid`` while every
+        subsequent webhook and media frame carries the live ``CallUUID`` —
+        without re-keying, ``call(wait=True)`` futures, AMD callbacks and
+        prewarm slots registered under the request_uuid never resolve/pop
+        (the waiter hung until the ~30-min backstop and prewarmed audio
+        always TTL-evicted as "wasted").
+        """
+        if not old_id or not new_id or old_id == new_id:
+            return
+        fut = self._completions.pop(old_id, None)
+        if fut is not None and not fut.done() and new_id not in self._completions:
+            self._completions[new_id] = fut
+        cb = self.on_machine_detection_by_call_sid.pop(old_id, None)
+        if cb is not None:
+            self.on_machine_detection_by_call_sid.setdefault(new_id, cb)
+        cls = self._amd_class.pop(old_id, None)
+        if cls is not None:
+            self._amd_class.setdefault(new_id, cls)
+        alias_prewarm = getattr(self, "alias_prewarm", None)
+        if callable(alias_prewarm):
+            try:
+                alias_prewarm(old_id, new_id)
+            except Exception as exc:  # noqa: BLE001 - bookkeeping only
+                logger.debug("alias_prewarm raised: %s", exc)
 
     def _resolve_completion(
         self,
@@ -633,6 +712,25 @@ class EmbeddedServer:
             return {k: v for k, v in snapshot.items() if v is not None}
 
         async def _on_call_start(data):
+            # The bridges hardcode ``direction: "inbound"`` (the media-stream
+            # WS carries no direction); outbound calls pre-registered via
+            # ``record_call_initiated`` hold the truth in the store. Resolve
+            # it BEFORE recording/forwarding so the dashboard, call log,
+            # telemetry and the user callback all see ``outbound`` for
+            # outbound calls. Mirrors the TS stream-handler resolution.
+            if store is not None:
+                _cid = data.get("call_id", "") or ""
+                if _cid:
+                    _pre = next(
+                        (
+                            c
+                            for c in store.get_active_calls()
+                            if c.get("call_id") == _cid
+                        ),
+                        None,
+                    )
+                    if _pre and _pre.get("direction"):
+                        data["direction"] = _pre["direction"]
             if store is not None:
                 store.record_call_start(data)
             # Anonymous telemetry: per-call start (engine/provider/carrier +
@@ -768,20 +866,22 @@ class EmbeddedServer:
                     cost=cost_dict,
                     latency=latency_dict,
                 )
-            if user_end is not None:
-                await user_end(data)
-            # Resolve any pending call(wait=True) future. A media-stream end
-            # means the call connected: classify ``voicemail`` when AMD tagged
-            # the callee as a machine, else ``answered``. Fan-out — this runs
-            # regardless of (and after) the user's own on_call_end callback,
-            # so wiring a callback no longer monopolises completion signalling.
-            cid = data.get("call_id", "")
-            if cid:
-                cls = self._amd_class.get(cid)
-                outcome = "voicemail" if cls == "machine" else "answered"
-                self._resolve_completion(
-                    cid, outcome=outcome, status="completed", data=data
-                )
+            try:
+                if user_end is not None:
+                    await user_end(data)
+            finally:
+                # Resolve any pending call(wait=True) future. A media-stream
+                # end means the call connected: classify ``voicemail`` when
+                # AMD tagged the callee as a machine, else ``answered``.
+                # Runs in a ``finally`` so a raising user callback can no
+                # longer strand the waiter until the ~30-min backstop.
+                cid = data.get("call_id", "")
+                if cid:
+                    cls = self._amd_class.get(cid)
+                    outcome = "voicemail" if cls == "machine" else "answered"
+                    self._resolve_completion(
+                        cid, outcome=outcome, status="completed", data=data
+                    )
 
         async def _on_metrics(data):
             if store is not None:
@@ -1123,14 +1223,14 @@ class EmbeddedServer:
             # the prewarmed greeting is never consumed. Evict the cache
             # entry once so the WARN fires regardless of whether
             # ``voicemail_message`` is configured.
-            if answered_by in ("machine_end_beep", "machine_end_silence") and call_sid:
+            if answered_by.startswith("machine_end") and call_sid:
                 try:
                     self.record_prewarm_waste(call_sid)
                 except Exception as exc:  # noqa: BLE001 - defensive
                     logger.debug("record_prewarm_waste raised: %s", exc)
 
             if (
-                answered_by in ("machine_end_beep", "machine_end_silence")
+                answered_by.startswith("machine_end")
                 and self.voicemail_message
                 and self.config.twilio_sid
                 and self.config.twilio_token
@@ -1297,14 +1397,27 @@ class EmbeddedServer:
 
             try:
                 if event_type == "call.initiated":
+                    from urllib.parse import quote as _quote
+
+                    direction = str(payload.get("direction", "")).lower()
+                    if direction == "outgoing":
+                        # Our own outbound leg: the Answer command is only
+                        # valid on incoming legs (422 on outgoing), and the
+                        # historical answer-with-inline-stream fold severed
+                        # outbound media entirely — the callee answered to
+                        # dead air. Streaming is attached on
+                        # ``call.answered`` below instead.
+                        logger.debug(
+                            "Telnyx call.initiated %s (outgoing) — awaiting answer",
+                            call_control_id,
+                        )
+                        return Response(status_code=200)
                     # PERF — Telnyx accepts the streaming params inline on
                     # ``actions/answer`` and auto-starts the stream the moment
                     # the leg picks up. Folding ``streaming_start`` into the
                     # answer body removes both the ``call.answered`` webhook
                     # round-trip and a second POST (~100-200 ms saved per
-                    # inbound call).
-                    from urllib.parse import quote as _quote
-
+                    # inbound call). Incoming legs only — see above.
                     stream_url = (
                         f"wss://{self.config.webhook_url}/ws/telnyx/stream/{_quote(call_control_id, safe='')}"
                         f"?caller={_quote(caller)}&callee={_quote(callee)}"
@@ -1336,14 +1449,51 @@ class EmbeddedServer:
                                 resp.text,
                             )
                 elif event_type == "call.answered":
-                    # No-op: ``call.initiated`` already submitted answer +
-                    # streaming_start in a single call. Telnyx still emits
-                    # ``call.answered`` as an informational event; acknowledge
-                    # without making a redundant POST.
-                    logger.debug(
-                        "Telnyx call.answered %s — stream already active (inline)",
-                        call_control_id,
-                    )
+                    from urllib.parse import quote as _quote
+
+                    direction = str(payload.get("direction", "")).lower()
+                    if direction == "outgoing":
+                        # Outbound leg picked up: attach the media stream now.
+                        # ``Patter.call()`` dials WITHOUT stream params (the
+                        # Dial API doesn't take them) and the inbound-style
+                        # answer-with-stream never runs for outgoing legs, so
+                        # this POST is the ONLY place outbound audio is wired.
+                        out_caller = str(payload.get("from", "") or "")
+                        out_callee = str(payload.get("to", "") or "")
+                        stream_url = (
+                            f"wss://{self.config.webhook_url}/ws/telnyx/stream/{_quote(call_control_id, safe='')}"
+                            f"?caller={_quote(out_caller)}&callee={_quote(out_callee)}"
+                        )
+                        logger.info(
+                            "Telnyx call.answered %s (outgoing) — starting media stream",
+                            call_control_id,
+                        )
+                        async with _httpx.AsyncClient(timeout=10.0) as client:
+                            resp = await client.post(
+                                f"{api_base}/calls/{_quote(call_control_id, safe='')}/actions/streaming_start",
+                                headers=auth_headers,
+                                json={
+                                    "stream_url": stream_url,
+                                    "stream_track": "inbound_track",
+                                    "stream_bidirectional_mode": "rtp",
+                                    "stream_bidirectional_codec": "PCMU",
+                                    "stream_bidirectional_sampling_rate": 8000,
+                                    "stream_bidirectional_target_legs": "self",
+                                },
+                            )
+                            if resp.status_code >= 400:
+                                logger.warning(
+                                    "Telnyx streaming_start failed: %s %s",
+                                    resp.status_code,
+                                    resp.text[:300],
+                                )
+                    else:
+                        # Incoming legs: ``call.initiated`` already submitted
+                        # answer + streaming in a single call; acknowledge.
+                        logger.debug(
+                            "Telnyx call.answered %s — stream already active (inline)",
+                            call_control_id,
+                        )
                 elif event_type == "call.machine.detection.ended":
                     # AMD (answering machine detection) result — mirror the
                     # Twilio voicemail-drop flow when Telnyx reports the leg
@@ -1377,15 +1527,13 @@ class EmbeddedServer:
                                 detected_at=time.time(),
                             ),
                         )
-                    if self.voicemail_message:
-                        from getpatter.telephony.telnyx import handle_amd_result
-
-                        await handle_amd_result(
-                            call_control_id=call_control_id,
-                            result=amd_result,
-                            voicemail_message=self.voicemail_message,
-                            telnyx_key=api_key,
-                        )
+                    # Voicemail drop moved to ``call.machine.greeting.ended``:
+                    # the dial requests ``answering_machine_detection:
+                    # "greeting_end"`` precisely so Telnyx tells us when the
+                    # machine's greeting reaches the beep — speaking on the
+                    # early ``detection.ended`` classification started the
+                    # voicemail mid-greeting and it was clipped before the
+                    # beep.
                     # FIX #91 — when AMD classifies as machine the agent's
                     # first message is replaced by ``voicemail_message`` (or
                     # the call simply ends), so the prewarmed greeting is
@@ -1398,6 +1546,24 @@ class EmbeddedServer:
                             self.record_prewarm_waste(call_control_id)
                         except Exception as exc:  # noqa: BLE001 - defensive
                             logger.debug("record_prewarm_waste raised: %s", exc)
+                elif event_type == "call.machine.greeting.ended":
+                    # The answering machine's greeting just ended (beep) —
+                    # this is the correct moment to speak the voicemail.
+                    # Fire-and-forget: the drop sleeps for the playback
+                    # estimate (up to 30 s) and the webhook must 200 NOW or
+                    # Telnyx retries it and the message overlaps itself.
+                    if self.voicemail_message and call_control_id:
+                        from getpatter.telephony.telnyx import handle_amd_result
+
+                        self._spawn_bg(
+                            handle_amd_result(
+                                call_control_id=call_control_id,
+                                result="machine",
+                                voicemail_message=self.voicemail_message,
+                                telnyx_key=api_key,
+                            ),
+                            "Telnyx voicemail drop",
+                        )
                 elif event_type == "call.hangup":
                     # FIX #91 — Telnyx fires ``call.hangup`` as the final
                     # status notification. ``hangup_cause`` distinguishes
@@ -1584,6 +1750,11 @@ class EmbeddedServer:
             call_uuid = form.get("CallUUID", "")
             caller = form.get("From", "")
             callee = form.get("To", "")
+            # API-originated calls answer with BOTH ids: re-key wait futures /
+            # AMD callbacks / prewarm slots from request_uuid → CallUUID.
+            request_uuid = form.get("RequestUUID", "")
+            if request_uuid and call_uuid:
+                self.alias_call_id(request_uuid, call_uuid)
             xml = plivo_webhook_handler(
                 call_uuid or "outbound", caller, callee, self.config.webhook_url
             )
@@ -1683,11 +1854,17 @@ class EmbeddedServer:
                 ):
                     from getpatter.telephony.plivo import handle_amd_result
 
-                    await handle_amd_result(
-                        call_uuid=call_uuid,
-                        voicemail_message=self.voicemail_message,
-                        auth_id=self.config.plivo_auth_id,
-                        auth_token=self.config.plivo_auth_token,
+                    # Fire-and-forget — see _spawn_bg: an inline await held
+                    # the webhook response past Plivo's delivery timeout and
+                    # the retried webhook spoke the voicemail twice.
+                    self._spawn_bg(
+                        handle_amd_result(
+                            call_uuid=call_uuid,
+                            voicemail_message=self.voicemail_message,
+                            auth_id=self.config.plivo_auth_id,
+                            auth_token=self.config.plivo_auth_token,
+                        ),
+                        "Plivo voicemail drop",
                     )
             return Response(content="", status_code=200)
 
@@ -1933,10 +2110,18 @@ class EmbeddedServer:
         config = uvicorn.Config(app, host=bind_host, port=port, log_level="info")
         self._server = uvicorn.Server(config)
 
-        # Register signal handlers for graceful shutdown
+        # Register signal handlers for graceful shutdown.
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, lambda: asyncio.create_task(self.stop()))
+            try:
+                loop.add_signal_handler(
+                    sig, lambda: asyncio.create_task(self.stop())
+                )
+            except NotImplementedError:
+                # Windows event loops don't support add_signal_handler —
+                # without this guard every ``Patter.serve()`` crashed at
+                # startup. Uvicorn installs its own handlers there.
+                break
 
         await self._server.serve()
 

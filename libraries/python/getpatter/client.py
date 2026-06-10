@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal
@@ -376,6 +377,14 @@ class Patter:
                 )
             webhook_url = tunnel_webhook
         self._tunnel_directive = tunnel_directive
+
+        # Normalise webhook_url to a bare hostname: every consumer builds
+        # ``https://{webhook_url}`` / ``wss://{webhook_url}`` URLs, so a
+        # schemed value produced broken ``wss://https://...`` stream URLs and
+        # permanent carrier 403s. Mirrors the TS client normalisation.
+        if webhook_url:
+            webhook_url = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", webhook_url)
+            webhook_url = webhook_url.rstrip("/")
 
         twilio_sid = ""
         twilio_token = ""
@@ -918,7 +927,7 @@ class Patter:
                 ["initiated", "ringing", "answered", "completed"],
             )
             call_id = await adapter.initiate_call(
-                config.phone_number or from_number,
+                from_number or config.phone_number,
                 to,
                 stream_url,
                 extra_params=extra_params,
@@ -928,7 +937,7 @@ class Patter:
             # that never reach media (no-answer, busy, carrier-reject).
             initiated_payload = {
                 "call_id": call_id,
-                "caller": config.phone_number or from_number,
+                "caller": from_number or config.phone_number,
                 "callee": to,
                 "direction": "outbound",
                 "status": "initiated",
@@ -969,17 +978,25 @@ class Patter:
                 connection_id=config.telnyx_connection_id,
             )
             stream_url = f"wss://{config.webhook_url}/ws/telnyx/stream/outbound"
-            call_id = await adapter.initiate_call(
-                config.phone_number or from_number,
-                to,
-                stream_url,
-                ring_timeout=ring_timeout,
-                machine_detection=wants_amd,
-            )
+            try:
+                call_id = await adapter.initiate_call(
+                    from_number or config.phone_number,
+                    to,
+                    stream_url,
+                    ring_timeout=ring_timeout,
+                    machine_detection=wants_amd,
+                )
+            finally:
+                # The adapter opens a pooled httpx.AsyncClient in __init__;
+                # without this close every outbound dial leaked the pool.
+                try:
+                    await adapter.close()
+                except Exception:  # noqa: BLE001 - best-effort cleanup
+                    pass
             logger.info("Outbound call initiated: %s", call_id)
             initiated_payload = {
                 "call_id": call_id,
-                "caller": config.phone_number or from_number,
+                "caller": from_number or config.phone_number,
                 "callee": to,
                 "direction": "outbound",
                 "status": "initiated",
@@ -1022,23 +1039,32 @@ class Patter:
             answer_url = f"https://{config.webhook_url}/webhooks/plivo/voice"
             status_url = f"https://{config.webhook_url}/webhooks/plivo/status"
             amd_url = f"https://{config.webhook_url}/webhooks/plivo/amd"
-            call_id = await adapter.initiate_call(
-                config.phone_number or from_number,
-                to,
-                stream_url,
-                answer_url=answer_url,
-                # hangup_url is Plivo's StatusCallback analogue — without it,
-                # the /webhooks/plivo/status route never fires for outbound
-                # calls and the dashboard misses no-answer / busy / failed.
-                hangup_url=status_url,
-                ring_timeout=ring_timeout,
-                machine_detection=wants_amd,
-                machine_detection_url=amd_url if wants_amd else "",
-            )
+            try:
+                call_id = await adapter.initiate_call(
+                    from_number or config.phone_number,
+                    to,
+                    stream_url,
+                    answer_url=answer_url,
+                    # hangup_url is Plivo's StatusCallback analogue — without
+                    # it, the /webhooks/plivo/status route never fires for
+                    # outbound calls and the dashboard misses no-answer /
+                    # busy / failed.
+                    hangup_url=status_url,
+                    ring_timeout=ring_timeout,
+                    machine_detection=wants_amd,
+                    machine_detection_url=amd_url if wants_amd else "",
+                )
+            finally:
+                # The adapter opens a pooled httpx.AsyncClient in __init__;
+                # without this close every outbound dial leaked the pool.
+                try:
+                    await adapter.close()
+                except Exception:  # noqa: BLE001 - best-effort cleanup
+                    pass
             logger.info("Outbound call initiated: %s", call_id)
             initiated_payload = {
                 "call_id": call_id,
-                "caller": config.phone_number or from_number,
+                "caller": from_number or config.phone_number,
                 "callee": to,
                 "direction": "outbound",
                 "status": "initiated",
@@ -1151,6 +1177,26 @@ class Patter:
         # call and never blocks the user.
         self._prewarm_tasks.add(task)
         task.add_done_callback(self._prewarm_tasks.discard)
+
+    def _alias_prewarm(self, old_id: str, new_id: str) -> None:
+        """Re-key prewarm caches from a dial-time id to the live carrier id.
+
+        Plivo issues ``request_uuid`` at dial time but the media stream and
+        webhooks carry ``CallUUID`` — without re-keying, prewarmed first
+        message audio and parked provider sockets never matched and always
+        TTL-evicted as "wasted".
+        """
+        if not old_id or not new_id or old_id == new_id:
+            return
+        for attr in (
+            "_prewarm_audio",
+            "_prewarm_ttl_tasks",
+            "_prewarmed_connections",
+            "_prewarmed_conn_tasks",
+        ):
+            mapping = getattr(self, attr, None)
+            if isinstance(mapping, dict) and old_id in mapping and new_id not in mapping:
+                mapping[new_id] = mapping.pop(old_id)
 
     def pop_prewarmed_connections(self, call_id: str) -> dict[str, Any] | None:
         """Pop and return the parked provider WS handles for ``call_id``,
@@ -2241,6 +2287,7 @@ class Patter:
         # StreamHandler can adopt pre-opened STT / TTS / Realtime WSs at
         # ``start`` instead of paying the cold handshake on first turn.
         self._server.pop_prewarmed_connections = self.pop_prewarmed_connections  # type: ignore[attr-defined]
+        self._server.alias_prewarm = self._alias_prewarm  # type: ignore[attr-defined]
         # Forward the waste-recorder so the carrier status / hangup
         # webhook handlers can evict the cache when a call terminates
         # before the media stream starts (no-answer, busy, failed,
