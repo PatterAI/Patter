@@ -4198,7 +4198,11 @@ class PipelineStreamHandler(StreamHandler):
             # Known limitation: per-turn audio_seconds is not tracked
             # here; metrics rely on total _stt_byte_count plus the
             # end_call() estimation pass.
-            self.metrics.record_vad_stop()
+            # first_wins: only a FALLBACK when no VAD speech_end stamped
+            # this turn (no local VAD configured). Unconditional stamping
+            # made EOU delay ≈0 on every emission (TS gates the stamp on the
+            # provider's speechFinal for the same reason).
+            self.metrics.record_vad_stop(first_wins=True)
             self.metrics.record_stt_complete(transcript_text)
             self.metrics.record_stt_final_timestamp()
 

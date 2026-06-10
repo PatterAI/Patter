@@ -557,7 +557,8 @@ export class CallMetricsAccumulator {
 
   /** Stamp first TTS audio byte sent on the wire (used to compute TTS TTFB). */
   recordTtsFirstByte(): void {
-    if (this._ttsFirstByte === null) {
+    const isFirstByte = this._ttsFirstByte === null;
+    if (isFirstByte) {
       this._ttsFirstByte = hrTimeMs();
     }
 
@@ -565,6 +566,11 @@ export class CallMetricsAccumulator {
     if (this._reportOnlyInitialTtfb && this._initialTtfbEmitted) {
       return;
     }
+
+    // Emit ONLY inside the first-byte latch (parity with Python, which emits
+    // under ``if self._tts_first_byte is None``): emitting on every call
+    // re-published the same stale TTFB value as a fresh tts_metrics event.
+    if (!isFirstByte) return;
     this._initialTtfbEmitted = true;
 
     // Emit TTFBMetrics for parity with Python services/metrics.py:
@@ -807,10 +813,12 @@ export class CallMetricsAccumulator {
    * @param ts Optional override timestamp in hrTimeMs units.
    */
   recordOverlapEnd(wasInterruption: boolean, ts?: number): void {
+    // Mirror Python: an overlap-end without an overlap-start is a stray
+    // signal — counting it inflated numInterruptions and emitted a
+    // zero-delay payload, drifting the two SDKs' interruption counts apart.
+    if (this._overlapStartedAt === null) return;
     const now = ts ?? hrTimeMs();
-    const detectionDelay = this._overlapStartedAt !== null
-      ? Math.max(0, now - this._overlapStartedAt)
-      : 0;
+    const detectionDelay = Math.max(0, now - this._overlapStartedAt);
     this._overlapStartedAt = null;
 
     if (wasInterruption) {
@@ -1163,7 +1171,10 @@ export class CallMetricsAccumulator {
     let tts: number;
     let llm: number;
 
-    if (this.providerMode === 'openai_realtime') {
+    if (this.providerMode === 'openai_realtime' || this.providerMode === 'openai_realtime_2') {
+      // v1-beta AND GA: matching only the exact 'openai_realtime' string
+      // made every GA-engine call fall into the pipeline branch and report
+      // $0 AI cost (while still emitting cached savings).
       stt = 0;
       tts = 0;
       llm = this._totalRealtimeCost;

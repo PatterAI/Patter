@@ -542,7 +542,10 @@ export class Patter {
           : options.tunnel
             ? "configured"
             : "none",
-      ...telemetryEnvironmentDims(),
+      // Environment dims only when telemetry is ENABLED: the helper's
+      // previousVersion probe writes ~/.getpatter/version, violating the
+      // documented invariant that opting out never touches the filesystem.
+      ...(this.telemetry.enabled ? telemetryEnvironmentDims() : {}),
     };
     // Activation marker: emit `first_run` once per install (the run that creates
     // the install-id state). Gated on the enabled path so opting out never

@@ -212,6 +212,11 @@ export function buildEvent(
       }
     } else if (BOOL_DIMENSIONS.has(key) && typeof value !== 'boolean') {
       continue;
+    } else if (NUMERIC_DIMENSIONS.has(key) && typeof value !== 'number') {
+      // Numeric dims must be numbers: a buggy caller passing a string under
+      // latency_ms/cost_usd would otherwise ship free text to the wire —
+      // the one gap in the two-layer allowlist. Mirrors Python.
+      continue;
     }
     if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
       event[key] = value;

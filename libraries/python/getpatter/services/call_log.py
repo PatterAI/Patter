@@ -14,8 +14,10 @@ Layout::
 
 Files are written atomically (tmp + rename) for ``metadata.json``; JSONL
 files are append-only. All timestamps are UTC ISO-8601 with millisecond
-precision. Phone numbers in ``metadata.json`` are masked by default via
-:func:`getpatter.utils.log_sanitize.mask_phone_number`.
+precision. Phone numbers in ``metadata.json`` are stored RAW by default
+(since 2026-05-21, for the dashboard reveal toggle — the log root is
+user-private). Set ``PATTER_LOG_REDACT_PHONE=mask`` (or ``hash_only``) to
+redact via :func:`getpatter.utils.log_sanitize.mask_phone_number`.
 
 Schema follows industry convention — fields map to OpenTelemetry
 ``gen_ai.*`` semantic conventions.
@@ -25,7 +27,7 @@ Environment variables:
 - ``PATTER_LOG_DIR``       — root directory or ``"auto"`` (enables logging)
 - ``PATTER_LOG_RETENTION_DAYS`` — auto-cleanup threshold (default ``30``;
                                    ``0`` = keep forever)
-- ``PATTER_LOG_REDACT_PHONE`` — ``full`` | ``mask`` (default) | ``hash_only``
+- ``PATTER_LOG_REDACT_PHONE`` — ``full`` (default) | ``mask`` | ``hash_only``
 
 See ``docs/python-sdk/observability.mdx`` for the full guide.
 """

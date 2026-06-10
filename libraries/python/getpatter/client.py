@@ -433,10 +433,18 @@ class Patter:
         self._telemetry = _build_telemetry_client(telemetry)
         self._telemetry_seen_engines: set[str] = set()
         self._telemetry_seen_agent_shapes: set[tuple] = set()
+        # Environment dims only when telemetry is ENABLED: the helper's
+        # ``previous_version`` probe writes ``~/.getpatter/version`` (and
+        # ``days_since_install_bucket`` mkdirs the state root), violating the
+        # documented invariant that opting out never touches the filesystem.
         _init_dims = {
             "carrier": carrier_kind or "none",
             "tunnel": _telemetry_tunnel_kind(self._tunnel_directive),
-            **_telemetry_environment_dims(),
+            **(
+                _telemetry_environment_dims()
+                if getattr(self._telemetry, "enabled", False)
+                else {}
+            ),
         }
         # Activation marker: emit ``first_run`` once per install (the run that
         # creates the install-id state). Gated on the enabled path so opting out

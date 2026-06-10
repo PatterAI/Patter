@@ -107,7 +107,23 @@ class EvalRunner:
                 error=error,
             )
 
-        judge_result = await self.judge.judge_case(case, transcript)
+        try:
+            judge_result = await self.judge.judge_case(case, transcript)
+        except Exception as exc:  # noqa: BLE001 - network call to the judge LLM
+            # One transient judge failure (429, timeout, missing key) used to
+            # abort the WHOLE suite, discarding every completed case.
+            duration = time.monotonic() - start
+            from getpatter.evals.case import JudgeResult
+
+            return EvalResult(
+                case_name=case.name,
+                transcript=transcript,
+                judge=JudgeResult(
+                    score=0.0, passed=False, reasoning=f"judge error: {exc}"
+                ),
+                duration_s=duration,
+                error=f"judge error: {exc}",
+            )
         duration = time.monotonic() - start
         return EvalResult(
             case_name=case.name,

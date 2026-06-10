@@ -15,7 +15,9 @@
  *
  * Files are written atomically (tmp + rename) for ``metadata.json``; JSONL
  * files are append-only. All timestamps are UTC ISO-8601 with millisecond
- * precision. Phone numbers in ``metadata.json`` are masked by default via
+ * precision. Phone numbers in ``metadata.json`` are stored RAW by default
+ * (for the dashboard reveal toggle — the log root is user-private); set
+ * ``PATTER_LOG_REDACT_PHONE=mask``/``hash_only`` to redact via
  * ``maskPhoneNumber``.
  *
  * Schema matches ``libraries/python/getpatter/services/call_log.py`` for cross-SDK
@@ -222,10 +224,20 @@ export class CallLogger {
     return path.join(this.root, 'calls', year, month, day, safeId);
   }
 
+  /**
+   * Per-call start time so every artefact lands in the START day's
+   * directory. Re-deriving the day from Date.now() split calls crossing
+   * midnight UTC across two directories: the original metadata stayed
+   * "in_progress" forever and the dashboard hydrate resurrected it as a
+   * phantom live call. Mirrors Python's ``_started_at`` map.
+   */
+  private readonly startedAt = new Map<string, number>();
+
   /** Write the initial `metadata.json` for a new call. */
   async logCallStart(callId: string, input: CallStartInput = {}): Promise<void> {
     if (!this.enabled) return;
     const startedAt = Date.now() / 1000;
+    this.startedAt.set(callId, startedAt);
     const dir = this.callDir(callId, startedAt);
     if (dir === null) return;
     const metadata = {
@@ -263,7 +275,7 @@ export class CallLogger {
   /** Append a single turn record to the call's `transcript.jsonl`. */
   async logTurn(callId: string, turn: CallTurnRecord): Promise<void> {
     if (!this.enabled) return;
-    const dir = this.callDir(callId);
+    const dir = this.callDir(callId, this.startedAt.get(callId));
     if (dir === null) return;
     const record = {
       schema_version: SCHEMA_VERSION,
@@ -282,7 +294,7 @@ export class CallLogger {
   /** Append an operational event (tool_call, barge_in, error, …) to `events.jsonl`. */
   async logEvent(callId: string, eventType: string, payload: Record<string, unknown> = {}): Promise<void> {
     if (!this.enabled) return;
-    const dir = this.callDir(callId);
+    const dir = this.callDir(callId, this.startedAt.get(callId));
     if (dir === null) return;
     const record = {
       schema_version: SCHEMA_VERSION,
@@ -302,7 +314,7 @@ export class CallLogger {
   /** Merge end-of-call fields into the existing `metadata.json`. */
   async logCallEnd(callId: string, input: CallEndInput = {}): Promise<void> {
     if (!this.enabled) return;
-    const dir = this.callDir(callId);
+    const dir = this.callDir(callId, this.startedAt.get(callId));
     if (dir === null) return;
     const metadataPath = path.join(dir, 'metadata.json');
     let existing: Record<string, unknown> = {};
@@ -335,7 +347,9 @@ export class CallLogger {
         `call_log finalize failed (${sanitizeLogValue(callId)}): ${sanitizeLogValue(String(err))}`,
       );
     }
+    this.startedAt.delete(callId);
   }
+
 
   // --- Retention ---------------------------------------------------------
 

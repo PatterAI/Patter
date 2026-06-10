@@ -1333,7 +1333,7 @@ export class StreamHandler {
     // when set; fall back to the adapter default.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const realtimeModelName =
-      providerMode === 'openai_realtime'
+      providerMode === 'openai_realtime' || (providerMode as string) === 'openai_realtime_2'
         ? String(((deps.agent as any).model ?? '') || '') || 'gpt-realtime-mini'
         : '';
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1351,7 +1351,10 @@ export class StreamHandler {
         llmProviderName = stripped || 'custom';
       }
     } else {
-      llmProviderName = providerMode === 'openai_realtime' ? 'openai_realtime' : 'openai';
+      llmProviderName =
+        providerMode === 'openai_realtime' || (providerMode as string) === 'openai_realtime_2'
+          ? 'openai_realtime'
+          : 'openai';
     }
     this.llmProviderTag = llmProviderName;
 

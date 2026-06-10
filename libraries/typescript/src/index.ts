@@ -351,6 +351,15 @@ export {
 // Observability — OTel-compatible tracing (optional peer dep).
 export {
   initTracing,
+  // Without these exports users could not flush the BatchSpanProcessor
+  // Patter creates (NodeTracerProvider does NOT flush on exit, unlike the
+  // Python OTel SDK's atexit hook) — trailing spans were silently dropped
+  // at process exit — nor stamp patter.cost.* attributes (Python parity).
+  shutdownTracing,
+  withSpan,
+  recordPatterAttrs,
+  patterCallScope,
+  attachSpanExporter,
   startSpan,
   isTracingEnabled,
   EventBus,
