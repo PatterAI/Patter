@@ -1238,6 +1238,8 @@ export class StreamHandler {
    * Python ``_dispatch_task``.
    */
   private dispatchTask: Promise<void> | null = null;
+  /** Background greeting playback (see playFirstMessage). */
+  private firstMessageTask: Promise<void> | null = null;
   /**
    * Cap (ms) on how long teardown waits for the backgrounded dispatch to
    * settle. JS promises are not cancellable, so a user-supplied ``onMessage``
@@ -2016,6 +2018,14 @@ export class StreamHandler {
    * can't be cancelled). No-op when nothing is in flight.
    */
   private async settleDispatchForTeardown(): Promise<void> {
+    // Settle the backgrounded greeting too: cancelSpeaking/llmAbort flips
+    // isSpeaking so playFirstMessage's send loop exits on its next check —
+    // this await just ensures its finally (resetTtsCarry / grace flip) ran
+    // before adapters are torn down.
+    if (this.firstMessageTask) {
+      await this.firstMessageTask.catch(() => {});
+      this.firstMessageTask = null;
+    }
     if (!this.dispatchTask) return;
     const settle = this.dispatchTask.catch(() => {});
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -2235,6 +2245,94 @@ export class StreamHandler {
    * uses that to decide whether to record TTS-first-byte / turn-complete
    * metrics. See BUG #128 for the regression this fix targets.
    */
+  /**
+   * Stream the configured greeting — runs as a BACKGROUND task.
+   *
+   * ``handleCallStart`` used to execute this inline; with the carrier WS
+   * events now serialized onto a per-connection FIFO, that blocked EVERY
+   * media frame for the whole greeting (VAD/barge-in structurally
+   * impossible on the first message, mark acks unread). ``handleCallStart``
+   * awaits ``beginSpeaking(true)`` BEFORE spawning this task so the
+   * self-hearing guard engages from the very first inbound frame.
+   * Mirrors the Python ``_play_first_message`` task.
+   */
+  private async playFirstMessage(label: string): Promise<void> {
+    const firstMessage = this.deps.agent.firstMessage;
+    if (!firstMessage || !this.tts) return;
+    let firstChunkSent = false;
+    this.resetTtsCarry();
+    // Check the prewarm cache first. When ``Patter.call`` was made
+    // with ``agent.prewarmFirstMessage: true`` the firstMessage has
+    // already been synthesised during the ringing window — we send
+    // the bytes directly through the carrier-side encoder (which
+    // handles native-rate → carrier-rate resampling) and skip the
+    // TTS round-trip entirely.
+    let prewarmBytes: Buffer | undefined;
+    if (this.deps.popPrewarmAudio) {
+      try {
+        prewarmBytes = this.deps.popPrewarmAudio(this.callId);
+      } catch (err) {
+        getLogger().debug(`popPrewarmAudio raised: ${String(err)}`);
+      }
+    }
+    try {
+      if (prewarmBytes) {
+        this.metricsAcc.recordTtsFirstByte();
+        await this.emitAudioOut();
+        firstChunkSent = await this.streamPrewarmBytes(prewarmBytes);
+      } else {
+        // Streaming TTS path (no prewarm cache). Uses the same simple
+        // per-chunk send as synthesizeSentence — ElevenLabs HTTP streams
+        // at near-real-time speed so the carrier-side buffer stays bounded
+        // without mark-gated pacing.  Routing streaming chunks through
+        // sendPacedFirstMessageBytes caused crackling: its drain+reset on
+        // every HTTP chunk destroyed mark back-pressure continuity and the
+        // per-sub-chunk sleep slowed delivery below Twilio's playout rate,
+        // producing periodic buffer underruns.  The prewarm path (a single
+        // pre-synthesised buffer) still uses sendPacedFirstMessageBytes
+        // because that buffer can be several seconds long and needs pacing.
+        for await (const chunk of this.tts.synthesizeStream(firstMessage)) {
+          if (!this.isSpeaking) break;
+          if (!firstChunkSent) {
+            firstChunkSent = true;
+            this.metricsAcc.recordTtsFirstByte();
+            await this.emitAudioOut();
+          }
+          // Same carrier-native gate as the paced path above: on the
+          // mulaw fast path these are wire bytes, not PCM16 — pushing
+          // them corrupted the AEC reference.
+          if (this.aec && !this.ttsOutputFormatNativeForCarrier) this.aec.pushFarEnd(chunk);
+          const encoded = this.encodePipelineAudio(chunk);
+          this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
+          this.markFirstAudioSent();
+        }
+      }
+    } catch (e) {
+      getLogger().error(`First message TTS error (${label}):`, e);
+    } finally {
+      // Drop any partial int16 byte to prevent cross-turn corruption
+      // if the stream threw before a complete sample was delivered.
+      this.resetTtsCarry();
+      // Flip back to not-speaking with grace so the ring buffer
+      // accumulated during the intro is flushed and the next user
+      // utterance is recognised cleanly.
+      this.endSpeakingWithGrace();
+    }
+    if (firstChunkSent) {
+      // Bill the firstMessage TTS characters — they were synthesised
+      // at ElevenLabs (or the configured TTS provider) and the
+      // customer pays for them. The previous flow only called
+      // ``recordTurnComplete`` here, which finalises the turn but does
+      // NOT increment the TTS char counter — so a 5-turn call with an
+      // 82-char greeting was under-billed by ~22% on TTS cost.
+      // ``recordTtsComplete`` is the canonical accumulator entry
+      // point for TTS char billing (parity with Python fix).
+      this.metricsAcc.recordTtsComplete(firstMessage);
+      await this.emitTurnMetrics(this.metricsAcc.recordTurnComplete(firstMessage));
+      this.history.push({ role: 'assistant', text: firstMessage, timestamp: Date.now() });
+    }
+  }
+
   private async sendPacedFirstMessageBytes(bytes: Buffer): Promise<boolean> {
     // Reset any stale mark state defensively — we don't emit marks on
     // this path but ``onMark`` and the rest of the handler rely on the
@@ -2493,78 +2591,11 @@ export class StreamHandler {
       // the echo of the GREETING (the highest-echo window of the call)
       // compared against an empty string and confirmed a phantom barge-in.
       this.currentAgentSpokenText = this.deps.agent.firstMessage;
-      let firstChunkSent = false;
-      this.resetTtsCarry();
-      // Check the prewarm cache first. When ``Patter.call`` was made
-      // with ``agent.prewarmFirstMessage: true`` the firstMessage has
-      // already been synthesised during the ringing window — we send
-      // the bytes directly through the carrier-side encoder (which
-      // handles native-rate → carrier-rate resampling) and skip the
-      // TTS round-trip entirely.
-      let prewarmBytes: Buffer | undefined;
-      if (this.deps.popPrewarmAudio) {
-        try {
-          prewarmBytes = this.deps.popPrewarmAudio(this.callId);
-        } catch (err) {
-          getLogger().debug(`popPrewarmAudio raised: ${String(err)}`);
-        }
-      }
-      try {
-        if (prewarmBytes) {
-          this.metricsAcc.recordTtsFirstByte();
-          await this.emitAudioOut();
-          firstChunkSent = await this.streamPrewarmBytes(prewarmBytes);
-        } else {
-          // Streaming TTS path (no prewarm cache). Uses the same simple
-          // per-chunk send as synthesizeSentence — ElevenLabs HTTP streams
-          // at near-real-time speed so the carrier-side buffer stays bounded
-          // without mark-gated pacing.  Routing streaming chunks through
-          // sendPacedFirstMessageBytes caused crackling: its drain+reset on
-          // every HTTP chunk destroyed mark back-pressure continuity and the
-          // per-sub-chunk sleep slowed delivery below Twilio's playout rate,
-          // producing periodic buffer underruns.  The prewarm path (a single
-          // pre-synthesised buffer) still uses sendPacedFirstMessageBytes
-          // because that buffer can be several seconds long and needs pacing.
-          for await (const chunk of this.tts.synthesizeStream(this.deps.agent.firstMessage)) {
-            if (!this.isSpeaking) break;
-            if (!firstChunkSent) {
-              firstChunkSent = true;
-              this.metricsAcc.recordTtsFirstByte();
-              await this.emitAudioOut();
-            }
-            // Same carrier-native gate as the paced path above: on the
-            // mulaw fast path these are wire bytes, not PCM16 — pushing
-            // them corrupted the AEC reference.
-            if (this.aec && !this.ttsOutputFormatNativeForCarrier) this.aec.pushFarEnd(chunk);
-            const encoded = this.encodePipelineAudio(chunk);
-            this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
-            this.markFirstAudioSent();
-          }
-        }
-      } catch (e) {
-        getLogger().error(`First message TTS error (${label}):`, e);
-      } finally {
-        // Drop any partial int16 byte to prevent cross-turn corruption
-        // if the stream threw before a complete sample was delivered.
-        this.resetTtsCarry();
-        // Flip back to not-speaking with grace so the ring buffer
-        // accumulated during the intro is flushed and the next user
-        // utterance is recognised cleanly.
-        this.endSpeakingWithGrace();
-      }
-      if (firstChunkSent) {
-        // Bill the firstMessage TTS characters — they were synthesised
-        // at ElevenLabs (or the configured TTS provider) and the
-        // customer pays for them. The previous flow only called
-        // ``recordTurnComplete`` here, which finalises the turn but does
-        // NOT increment the TTS char counter — so a 5-turn call with an
-        // 82-char greeting was under-billed by ~22% on TTS cost.
-        // ``recordTtsComplete`` is the canonical accumulator entry
-        // point for TTS char billing (parity with Python fix).
-        this.metricsAcc.recordTtsComplete(this.deps.agent.firstMessage);
-        await this.emitTurnMetrics(this.metricsAcc.recordTurnComplete(this.deps.agent.firstMessage));
-        this.history.push({ role: 'assistant', text: this.deps.agent.firstMessage, timestamp: Date.now() });
-      }
+      // Launch the greeting as a tracked background task — see
+      // playFirstMessage for why it must not run inline.
+      this.firstMessageTask = this.playFirstMessage(label).catch((err) => {
+        getLogger().error(`First message playback failed (${label}): ${String(err)}`);
+      });
     }
 
     // Create LLM loop for pipeline mode when no onMessage handler provided.

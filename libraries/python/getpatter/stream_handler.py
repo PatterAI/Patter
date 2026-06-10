@@ -2505,6 +2505,8 @@ class PipelineStreamHandler(StreamHandler):
         # Awaited BEFORE the STT receive loop starts so the message
         # pump never reads from a half-open WS.
         self._stt_connect_task: asyncio.Task | None = None
+        # Background greeting playback (see _play_first_message).
+        self._first_message_task: asyncio.Task | None = None
         self._tts = None
         # Auto-VAD: if ``agent.vad`` is None we attempt to load SileroVAD
         # with phone-friendly defaults during ``start()``. Stored separately
@@ -2957,121 +2959,28 @@ class PipelineStreamHandler(StreamHandler):
 
         logger.debug("Pipeline mode: STT connect kicked off")
 
-        # Play first_message if configured and no on_message handler.
-        # Measure TTS-first-byte latency for parity with TS (`stream-handler.ts`).
+        # Play first_message if configured and no on_message handler — as a
+        # BACKGROUND task (see _play_first_message): the greeting must not
+        # block the carrier read loop. _begin_speaking completes BEFORE
+        # start() returns so the self-hearing guard engages immediately.
         if (
             self.agent.first_message
             and self.on_message is None
             and self._tts is not None
         ):
-            if self.metrics is not None:
-                self.metrics.start_turn()
-            # Mark the agent as speaking for the duration of the first
-            # message — without this, the self-hearing guard never
-            # engages, the user's audio (mixed with TTS bleed) is
-            # forwarded to STT and produces garbage transcripts, and
-            # the ring buffer for pre-barge-in audio is never
-            # populated. Mirrors the per-turn behaviour in
-            # `_process_streaming_response` / `_process_regular_response`.
-            #
-            # ``is_first_message=True`` pre-stamps ``_first_audio_sent_at``
-            # synchronously so the barge-in gate runs in parallel with TTS
-            # TTFB instead of only after audio arrives — without this, the
-            # firstMessage is effectively un-interruptible for 300-800 ms.
             await self._begin_speaking(is_first_message=True)
-            first_chunk_sent = False
-            # Drop any stale PCM16 carry byte from a prior synth (none at call
-            # start, but defensive for parity with TS ``ttsByteCarry = null``).
-            self.audio_sender.reset_pcm_carry()
-            # Check the prewarm cache first. When ``Patter.call`` was made
-            # with ``agent.prewarm_first_message=True`` the firstMessage
-            # has already been synthesised during the ringing window — we
-            # stream the bytes directly through the carrier-side
-            # AudioSender (which handles native-rate → carrier-rate
-            # resampling) and skip the TTS round-trip entirely.
-            prewarm_bytes: bytes | None = None
-            if self._pop_prewarm_audio is not None:
-                try:
-                    prewarm_bytes = self._pop_prewarm_audio(self.call_id)
-                except Exception as exc:  # noqa: BLE001 - best-effort
-                    logger.debug("pop_prewarm_audio raised: %s", exc)
-                    prewarm_bytes = None
-            try:
-                if prewarm_bytes:
-                    if self.metrics is not None:
-                        self.metrics.record_tts_first_byte()
-                    first_chunk_sent = await self._stream_prewarm_bytes(prewarm_bytes)
-                else:
-                    # Streaming TTS path (no prewarm cache). Uses the same
-                    # simple per-chunk send as _synthesize_sentence —
-                    # ElevenLabs HTTP streams at near-real-time speed so the
-                    # carrier-side buffer stays bounded without mark-gated
-                    # pacing.  Routing streaming chunks through
-                    # _send_paced_first_message_bytes caused crackling: its
-                    # drain+reset on every HTTP chunk destroyed mark
-                    # back-pressure continuity and the per-sub-chunk sleep
-                    # slowed delivery below Twilio's playout rate, producing
-                    # periodic buffer underruns.  The prewarm path (a single
-                    # pre-synthesised buffer) still uses
-                    # _send_paced_first_message_bytes because that buffer can
-                    # be several seconds long and needs pacing.
-                    async for audio_chunk in self._tts.synthesize(
-                        self.agent.first_message
-                    ):
-                        if not self._is_speaking:
-                            break
-                        if not first_chunk_sent:
-                            first_chunk_sent = True
-                            if self.metrics is not None:
-                                self.metrics.record_tts_first_byte()
-                        # AEC far-end tap gated on the
-                        # carrier-native fast path: when the TTS adapter was
-                        # auto-flipped to ulaw_8000, these bytes are mulaw
-                        # wire bytes — pushing them into an AEC built for
-                        # int16 PCM 16 kHz corrupted the reference (and an
-                        # odd-length mulaw chunk crashed np.frombuffer).
-                        if self._aec is not None and not getattr(
-                            self, "_tts_output_format_native_for_carrier", False
-                        ):
-                            self._aec.push_far_end(audio_chunk)
-                        await self.audio_sender.send_audio(audio_chunk)
-                        self._mark_first_audio_sent()
-            finally:
-                # Drop any partial int16 byte to prevent cross-turn corruption
-                # if the stream threw before a complete sample was delivered.
-                self.audio_sender.reset_pcm_carry()
-                # Flip back to not-speaking with grace so the ring
-                # buffer accumulated during the intro is flushed and
-                # the next user utterance is recognised cleanly.
-                await self._end_speaking_with_grace()
-            if first_chunk_sent:
-                # History append must NOT depend on metrics being enabled:
-                # with ``metrics=None`` the greeting was absent from LLM
-                # context (the model could re-greet) and from transcripts.
-                self.conversation_history.append(
-                    {
-                        "role": "assistant",
-                        "text": self.agent.first_message,
-                        "timestamp": time.time(),
-                    }
-                )
-                # Echo-guard reference: under forward-STT-while-speaking the
-                # guard compared echoes against an EMPTY reference during the
-                # greeting (the highest-echo window of the call) and treated
-                # the agent's own first words as a user barge-in.
-                self._current_agent_spoken_text = self.agent.first_message
-            if first_chunk_sent and self.metrics is not None:
-                # Bill the firstMessage TTS characters — they were synthesised
-                # at ElevenLabs (or the configured TTS provider) and the
-                # customer pays for them. The previous flow only called
-                # ``record_turn_complete`` here, which finalises the turn
-                # but does NOT increment ``_total_tts_characters`` — so a
-                # 5-turn call with an 82-char greeting was under-billed
-                # by ~22% on TTS cost. ``record_tts_complete`` is the
-                # canonical accumulator entry point for TTS char billing.
-                self.metrics.record_tts_complete(self.agent.first_message)
-                turn = self.metrics.record_turn_complete(self.agent.first_message)
-                await self._emit_turn_metrics(turn)
+            self._first_message_task = asyncio.create_task(
+                self._play_first_message()
+            )
+
+            def _log_first_message_result(task: asyncio.Task) -> None:
+                if task.cancelled():
+                    return
+                exc = task.exception()
+                if exc is not None:
+                    logger.error("first_message playback failed: %s", exc)
+
+            self._first_message_task.add_done_callback(_log_first_message_result)
 
         # CallControl for pipeline mode
         self._call_control = CallControl(
@@ -5243,6 +5152,127 @@ class PipelineStreamHandler(StreamHandler):
         """Stream a cached firstMessage buffer in pacing-friendly chunks."""
         return await self._send_paced_first_message_bytes(prewarm_bytes)
 
+    async def _play_first_message(self) -> None:
+        """Stream the configured greeting — runs as a BACKGROUND task.
+
+        ``start()`` used to execute this inline, which blocked the carrier
+        bridge's single read loop for the whole greeting: no media frames
+        were processed (VAD/barge-in structurally impossible on the first
+        message), ``stop`` frames went unnoticed, and prewarmed mark-gated
+        pacing starved because mark acks could never be read (0.5 s timeout
+        per chunk → ~13x slower than realtime, guaranteed jitter underrun).
+        ``start()`` awaits ``_begin_speaking(is_first_message=True)`` BEFORE
+        spawning this task so the self-hearing guard engages from the very
+        first inbound frame.
+        """
+        if self.metrics is not None:
+            self.metrics.start_turn()
+        # Mark the agent as speaking for the duration of the first
+        # message — without this, the self-hearing guard never
+        # engages, the user's audio (mixed with TTS bleed) is
+        # forwarded to STT and produces garbage transcripts, and
+        # the ring buffer for pre-barge-in audio is never
+        # populated. Mirrors the per-turn behaviour in
+        # `_process_streaming_response` / `_process_regular_response`.
+        #
+        # ``is_first_message=True`` pre-stamps ``_first_audio_sent_at``
+        # synchronously so the barge-in gate runs in parallel with TTS
+        # TTFB instead of only after audio arrives — without this, the
+        # firstMessage is effectively un-interruptible for 300-800 ms.
+        first_chunk_sent = False
+        # Drop any stale PCM16 carry byte from a prior synth (none at call
+        # start, but defensive for parity with TS ``ttsByteCarry = null``).
+        self.audio_sender.reset_pcm_carry()
+        # Check the prewarm cache first. When ``Patter.call`` was made
+        # with ``agent.prewarm_first_message=True`` the firstMessage
+        # has already been synthesised during the ringing window — we
+        # stream the bytes directly through the carrier-side
+        # AudioSender (which handles native-rate → carrier-rate
+        # resampling) and skip the TTS round-trip entirely.
+        prewarm_bytes: bytes | None = None
+        if self._pop_prewarm_audio is not None:
+            try:
+                prewarm_bytes = self._pop_prewarm_audio(self.call_id)
+            except Exception as exc:  # noqa: BLE001 - best-effort
+                logger.debug("pop_prewarm_audio raised: %s", exc)
+                prewarm_bytes = None
+        try:
+            if prewarm_bytes:
+                if self.metrics is not None:
+                    self.metrics.record_tts_first_byte()
+                first_chunk_sent = await self._stream_prewarm_bytes(prewarm_bytes)
+            else:
+                # Streaming TTS path (no prewarm cache). Uses the same
+                # simple per-chunk send as _synthesize_sentence —
+                # ElevenLabs HTTP streams at near-real-time speed so the
+                # carrier-side buffer stays bounded without mark-gated
+                # pacing.  Routing streaming chunks through
+                # _send_paced_first_message_bytes caused crackling: its
+                # drain+reset on every HTTP chunk destroyed mark
+                # back-pressure continuity and the per-sub-chunk sleep
+                # slowed delivery below Twilio's playout rate, producing
+                # periodic buffer underruns.  The prewarm path (a single
+                # pre-synthesised buffer) still uses
+                # _send_paced_first_message_bytes because that buffer can
+                # be several seconds long and needs pacing.
+                async for audio_chunk in self._tts.synthesize(
+                    self.agent.first_message
+                ):
+                    if not self._is_speaking:
+                        break
+                    if not first_chunk_sent:
+                        first_chunk_sent = True
+                        if self.metrics is not None:
+                            self.metrics.record_tts_first_byte()
+                    # AEC far-end tap gated on the
+                    # carrier-native fast path: when the TTS adapter was
+                    # auto-flipped to ulaw_8000, these bytes are mulaw
+                    # wire bytes — pushing them into an AEC built for
+                    # int16 PCM 16 kHz corrupted the reference (and an
+                    # odd-length mulaw chunk crashed np.frombuffer).
+                    if self._aec is not None and not getattr(
+                        self, "_tts_output_format_native_for_carrier", False
+                    ):
+                        self._aec.push_far_end(audio_chunk)
+                    await self.audio_sender.send_audio(audio_chunk)
+                    self._mark_first_audio_sent()
+        finally:
+            # Drop any partial int16 byte to prevent cross-turn corruption
+            # if the stream threw before a complete sample was delivered.
+            self.audio_sender.reset_pcm_carry()
+            # Flip back to not-speaking with grace so the ring
+            # buffer accumulated during the intro is flushed and
+            # the next user utterance is recognised cleanly.
+            await self._end_speaking_with_grace()
+        if first_chunk_sent:
+            # History append must NOT depend on metrics being enabled:
+            # with ``metrics=None`` the greeting was absent from LLM
+            # context (the model could re-greet) and from transcripts.
+            self.conversation_history.append(
+                {
+                    "role": "assistant",
+                    "text": self.agent.first_message,
+                    "timestamp": time.time(),
+                }
+            )
+            # Echo-guard reference: under forward-STT-while-speaking the
+            # guard compared echoes against an EMPTY reference during the
+            # greeting (the highest-echo window of the call) and treated
+            # the agent's own first words as a user barge-in.
+            self._current_agent_spoken_text = self.agent.first_message
+        if first_chunk_sent and self.metrics is not None:
+            # Bill the firstMessage TTS characters — they were synthesised
+            # at ElevenLabs (or the configured TTS provider) and the
+            # customer pays for them. The previous flow only called
+            # ``record_turn_complete`` here, which finalises the turn
+            # but does NOT increment ``_total_tts_characters`` — so a
+            # 5-turn call with an 82-char greeting was under-billed
+            # by ~22% on TTS cost. ``record_tts_complete`` is the
+            # canonical accumulator entry point for TTS char billing.
+            self.metrics.record_tts_complete(self.agent.first_message)
+            turn = self.metrics.record_turn_complete(self.agent.first_message)
+            await self._emit_turn_metrics(turn)
+
     async def _send_paced_first_message_bytes(self, bytes_: bytes) -> bool:
         """Iterate ``bytes_`` as ``_PREWARM_CHUNK_BYTES``-sized PCM16 slices
         and forward each via ``audio_sender.send_audio`` with mark-gated
@@ -5352,6 +5382,15 @@ class PipelineStreamHandler(StreamHandler):
                 _tts_cancel()
             except Exception:
                 pass
+        # Stop a still-running greeting task before tearing anything down.
+        _fm_task = getattr(self, "_first_message_task", None)
+        if _fm_task is not None and not _fm_task.done():
+            _fm_task.cancel()
+            try:
+                await _fm_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._first_message_task = None
         # Cancel the STT consumer FIRST: while cleanup awaited the cancelled
         # dispatch task, the still-alive STT loop (blocked in
         # ``_await_dispatch_settle`` on that same task) could wake first and
