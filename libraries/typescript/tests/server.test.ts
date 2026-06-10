@@ -481,13 +481,17 @@ describe('EmbeddedServer writes operational events to events.jsonl', () => {
         { timeout: 2000 },
       );
       const events = readEvents(tmp);
-      expect(events.map((e) => e.type)).toEqual(['tool_call', 'tool_result']);
-      expect(events[0].data).toEqual({
+      // Both writes are fire-and-forget, so on-disk order is not guaranteed
+      // (each record carries its own ``ts``); assert content, not order.
+      expect(events.map((e) => e.type).sort()).toEqual(['tool_call', 'tool_result']);
+      const callEvent = events.find((e) => e.type === 'tool_call');
+      expect(callEvent?.data).toEqual({
         name: 'get_weather',
         arguments: { city: 'Rome' },
         result: null,
       });
-      expect(events[1].data.result).toBe('sunny');
+      const resultEvent = events.find((e) => e.type === 'tool_result');
+      expect(resultEvent?.data.result).toBe('sunny');
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
