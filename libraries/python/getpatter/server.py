@@ -1440,6 +1440,8 @@ class EmbeddedServer:
                     pricing=self.pricing,
                     report_only_initial_ttfb=self.config.report_only_initial_ttfb,
                     speech_events=getattr(self, "speech_events", None),
+                    webhook_host=self.config.webhook_url,
+                    agent_number=self.config.phone_number,
                 )
             finally:
                 self._active_connections.discard(websocket)
@@ -1448,6 +1450,83 @@ class EmbeddedServer:
                     self._ws_conn_counts.pop(client_ip, None)
                 else:
                     self._ws_conn_counts[client_ip] = remaining
+
+        @app.post("/webhooks/twilio/conference")
+        async def twilio_conference_callback(request: Request):
+            # Conference lifecycle events for warm transfers (start / end /
+            # join / leave). Observability-only: logged and acknowledged.
+            # Signature-validated exactly like every other Twilio webhook —
+            # fail-closed.
+            form_or_response = await _read_and_validate_twilio_form(request)
+            if isinstance(form_or_response, Response):
+                return form_or_response
+            form = form_or_response
+            logger.info(
+                "Twilio conference event %s for %s (conference=%s, call=%s)",
+                sanitize_log_value(form.get("StatusCallbackEvent", "")),
+                sanitize_log_value(form.get("FriendlyName", "")),
+                sanitize_log_value(form.get("ConferenceSid", "")),
+                sanitize_log_value(form.get("CallSid", "")),
+            )
+            return Response(content="", status_code=204)
+
+        @app.post("/webhooks/twilio/warm-status")
+        async def twilio_warm_transfer_status(request: Request):
+            # Terminal status of the warm-transfer TARGET leg (the human
+            # agent dialed into the conference). When that leg never connects
+            # (busy / no-answer / failed / canceled) the caller is parked on
+            # hold with the AI stream already gone — release them gracefully.
+            # Signature-validated exactly like every other Twilio webhook —
+            # fail-closed.
+            form_or_response = await _read_and_validate_twilio_form(request)
+            if isinstance(form_or_response, Response):
+                return form_or_response
+            form = form_or_response
+            call_status = form.get("CallStatus", "")
+            caller_call_sid = request.query_params.get("caller_call_sid", "")
+            logger.info(
+                "Twilio warm-transfer target status %s (caller leg %s)",
+                sanitize_log_value(call_status),
+                sanitize_log_value(caller_call_sid),
+            )
+            if call_status in ("busy", "no-answer", "failed", "canceled"):
+                from getpatter.telephony.twilio import (
+                    _WARM_TRANSFER_FAILED_MESSAGE,
+                    _validate_twilio_sid,
+                    _xml_escape,
+                )
+
+                if not _validate_twilio_sid(caller_call_sid, "CA"):
+                    logger.warning(
+                        "warm-status callback: invalid caller_call_sid %r, ignoring",
+                        caller_call_sid,
+                    )
+                    return Response(content="", status_code=204)
+                if self.config.twilio_sid and self.config.twilio_token:
+                    import httpx as _httpx
+
+                    twiml = (
+                        f"<Response><Say>{_xml_escape(_WARM_TRANSFER_FAILED_MESSAGE)}"
+                        "</Say><Hangup/></Response>"
+                    )
+                    try:
+                        async with _httpx.AsyncClient(timeout=10.0) as _http:
+                            await _http.post(
+                                f"https://api.twilio.com/2010-04-01/Accounts/{self.config.twilio_sid}/Calls/{caller_call_sid}.json",
+                                auth=(self.config.twilio_sid, self.config.twilio_token),
+                                data={"Twiml": twiml},
+                            )
+                        logger.info(
+                            "Warm transfer target unreachable (%s) — released caller %s",
+                            sanitize_log_value(call_status),
+                            sanitize_log_value(caller_call_sid),
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Could not release caller after failed warm transfer: %s",
+                            exc,
+                        )
+            return Response(content="", status_code=204)
 
         # --- Telnyx ---
 

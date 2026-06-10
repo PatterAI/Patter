@@ -420,16 +420,36 @@ async def telnyx_stream_bridge(
                 )
 
                 # --- Telnyx-specific call control helpers ---
-                async def _telnyx_transfer(number, *, client_state: str | None = None):
+                async def _telnyx_transfer(
+                    number,
+                    *,
+                    mode: str = "cold",
+                    summary: str = "",
+                    client_state: str | None = None,
+                ):
                     """Blind-transfer the call via the Telnyx Call Control API.
 
                     Accepts either an E.164 phone number or a SIP URI
                     (``sip:user@host`` / ``sips:user@host``).
 
+                    ``mode="warm"`` is NOT yet implemented on Telnyx — the
+                    Call Control conference flow requires a second outbound
+                    leg (connection_id + answer-webhook coordination) that
+                    the bridge does not plumb today. A clear error envelope
+                    is returned so the agent keeps the call instead of
+                    silently degrading to a blind redirect. ``summary`` is
+                    accepted for cross-carrier signature parity and unused
+                    in cold mode.
+
                     ``client_state`` (optional) is a caller-supplied string
                     that Telnyx will echo on every subsequent webhook for
                     this call leg. Base64-encoded per Telnyx contract.
                     """
+                    if mode == "warm":
+                        logger.warning(
+                            "warm transfer requested but not yet supported on telnyx"
+                        )
+                        return {"error": "warm transfer not yet supported on telnyx"}
                     if not _is_valid_transfer_target(number):
                         logger.warning(
                             "Telnyx transfer rejected: invalid target %s",

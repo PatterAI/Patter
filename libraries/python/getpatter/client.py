@@ -1698,6 +1698,7 @@ class Patter:
         llm: LLMProvider | None = None,
         mcp_servers: list | None = None,
         consult: ConsultConfig | None = None,
+        handoffs: dict[str, Agent] | None = None,
         prewarm_first_message: bool | None = None,
         openai_realtime_noise_reduction: Literal["near_field", "far_field"]
         | None = None,
@@ -1751,6 +1752,17 @@ class Patter:
             guardrails: List of ``Guardrail`` instances (build with the
                 ``guardrail()`` factory). Responses matching a guardrail are
                 replaced before TTS.
+            handoffs: Multi-agent handoff targets — ``{name: other_agent}``
+                where each value is another ``Agent`` built with
+                ``phone.agent(...)``. When set, Patter injects a built-in
+                ``handoff_to(name, reason?)`` tool (Realtime + Pipeline
+                modes); calling it swaps the CURRENT call to the target
+                agent's system prompt, tools, variables, guardrails, and
+                onward handoffs mid-call. Audio infrastructure established
+                at call start (STT/TTS/engine connection — and therefore
+                voice on engines that cannot switch voice mid-session) is
+                retained. Chained handoffs follow the target's own
+                ``handoffs`` map.
             engine: ``OpenAIRealtime(...)`` or ``ElevenLabsConvAI(...)``.
             tool_call_preambles: Realtime modes only. ``False`` (default) ships
                 ``system_prompt`` unchanged. ``True`` prepends a native
@@ -2000,6 +2012,31 @@ class Patter:
                 "be ignored for this agent."
             )
 
+        # --- Validate handoffs (multi-agent handoff targets) ---
+        if handoffs is not None:
+            if not isinstance(handoffs, dict):
+                raise TypeError(
+                    f"handoffs must be a dict of {{name: Agent}}, got "
+                    f"{type(handoffs).__name__}."
+                )
+            for h_name, h_agent in handoffs.items():
+                if not isinstance(h_name, str) or not h_name:
+                    raise ValueError(
+                        "handoffs keys must be non-empty strings (the names the "
+                        "LLM passes to handoff_to)."
+                    )
+                if not isinstance(h_agent, Agent):
+                    raise TypeError(
+                        f"handoffs[{h_name!r}] must be an Agent (build with "
+                        f"phone.agent(...)), got {type(h_agent).__name__}."
+                    )
+            if provider == "elevenlabs_convai":
+                logger.warning(
+                    "handoffs is set but provider is ElevenLabs ConvAI; the "
+                    "handoff_to tool is only injected in Realtime and Pipeline "
+                    "modes and will be ignored for this agent."
+                )
+
         return Agent(
             system_prompt=system_prompt,
             voice=voice,
@@ -2031,6 +2068,7 @@ class Patter:
             llm=llm,
             mcp_servers=tuple(mcp_servers) if mcp_servers is not None else None,
             consult=consult,
+            handoffs=dict(handoffs) if handoffs is not None else None,
             prewarm_first_message=prewarm_first_message,
             openai_realtime_reasoning_effort=openai_realtime_reasoning_effort,
             openai_realtime_input_audio_transcription_model=openai_realtime_input_audio_transcription_model,

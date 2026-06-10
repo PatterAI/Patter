@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     pass
 
 from getpatter._speech_events import EouTrigger
-from getpatter.models import HookContext
+from getpatter.models import HookContext, _invoke_transfer_fn
 from getpatter.observability.tracing import (
     SPAN_BARGEIN,
     SPAN_ENDPOINT,
@@ -346,11 +346,109 @@ TRANSFER_CALL_TOOL: dict = {
             "number": {
                 "type": "string",
                 "description": "Phone number to transfer to (E.164 format)",
-            }
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["cold", "warm"],
+                "description": (
+                    "Transfer mode. 'cold' (default) redirects the caller "
+                    "immediately. 'warm' puts the caller on hold music, dials "
+                    "the human agent, announces the summary to them, then "
+                    "bridges everyone together."
+                ),
+            },
+            "summary": {
+                "type": "string",
+                "description": (
+                    "Warm mode only — one or two sentences announced to the "
+                    "human agent before the caller is bridged (who is calling "
+                    "and what they need)."
+                ),
+            },
         },
         "required": ["number"],
     },
 }
+
+# Valid values for the ``mode`` argument of the built-in ``transfer_call``
+# tool. Anything else is rejected with an error envelope (never silently
+# coerced) so a hallucinated mode cannot trigger an unintended blind redirect.
+_TRANSFER_MODES = ("cold", "warm")
+
+#: Name of the built-in multi-agent handoff tool injected when
+#: ``Agent.handoffs`` is configured.
+HANDOFF_TOOL_NAME = "handoff_to"
+
+
+def build_handoff_tool(handoff_names) -> dict:
+    """Build the ``handoff_to`` tool schema for the given target-agent names.
+
+    The names are surfaced both as a JSON-schema ``enum`` (so the model can
+    only pick a configured target) and in the description. Sorted for a
+    deterministic schema. Parity with TS ``buildHandoffTool``.
+    """
+    names = sorted(str(n) for n in handoff_names)
+    return {
+        "name": HANDOFF_TOOL_NAME,
+        "description": (
+            "Hand the conversation off to another specialized agent. The call "
+            "continues seamlessly with the new agent's instructions and tools. "
+            "Available agents: " + ", ".join(names)
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "enum": names,
+                    "description": "Name of the agent to hand the conversation to",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Brief reason for the handoff",
+                },
+            },
+            "required": ["name"],
+        },
+    }
+
+
+def _apply_handoff_target(current, target):
+    """Return a copy of ``current`` with the LLM-visible configuration of the
+    handoff ``target`` applied.
+
+    Only conversational config swaps: ``system_prompt``, ``tools``,
+    ``variables``, ``guardrails``, ``text_transforms``, ``consult``,
+    ``handoffs`` (so chained handoffs follow the target's own map),
+    ``disable_phone_preamble`` and ``tool_call_preambles``. Live audio
+    infrastructure established at call start — STT/TTS/VAD instances, engine
+    connection, carrier codec settings, and therefore the voice on engines
+    that cannot switch voice mid-session — is intentionally retained from
+    ``current``. ``Agent`` is a frozen dataclass, so a new instance is
+    returned via :func:`dataclasses.replace`.
+    """
+    import dataclasses
+
+    return dataclasses.replace(
+        current,
+        system_prompt=target.system_prompt,
+        tools=target.tools,
+        variables=target.variables,
+        guardrails=target.guardrails,
+        text_transforms=target.text_transforms,
+        consult=target.consult,
+        handoffs=target.handoffs,
+        disable_phone_preamble=target.disable_phone_preamble,
+        tool_call_preambles=target.tool_call_preambles,
+    )
+
+
+def _handoff_history_text(name: str, reason: str) -> str:
+    """Render the system-style transcript line recording a handoff."""
+    text = f"[handoff] Conversation handed to agent '{name}'"
+    if reason:
+        text += f" — {reason}"
+    return text
 
 END_CALL_TOOL: dict = {
     "name": "end_call",
@@ -392,12 +490,22 @@ def _augment_with_builtin_handoff_tools(
     if transfer_fn is not None:
 
         async def _transfer_handler(arguments: dict, call_context: dict) -> str:
-            number = (arguments or {}).get("number", "")
-            # Validate BEFORE attempting the transfer: the carrier helpers
-            # silently no-op on a non-E.164 target, so the old path told the
-            # LLM "Transferring to 555-1234" while nothing happened and the
-            # call sat in limbo. Mirrors the realtime path's rejection
-            # envelope and the TS pipeline.
+            args = arguments or {}
+            number = args.get("number", "")
+            mode = args.get("mode") or "cold"
+            summary = args.get("summary") or ""
+            if mode not in _TRANSFER_MODES:
+                return json.dumps(
+                    {
+                        "error": f"Invalid transfer mode {mode!r} — use 'cold' or 'warm'",
+                        "status": "rejected",
+                    }
+                )
+            # Validate BEFORE attempting the transfer (both modes): the
+            # carrier helpers silently no-op on a non-E.164 target, so the
+            # old path told the LLM "Transferring to 555-1234" while nothing
+            # happened and the call sat in limbo. Mirrors the realtime
+            # path's rejection envelope and the TS pipeline.
             if not _validate_e164(number):
                 logger.warning(
                     "transfer_call rejected: invalid number %s",
@@ -406,6 +514,16 @@ def _augment_with_builtin_handoff_tools(
                 return json.dumps(
                     {"error": "Invalid phone number format", "status": "rejected"}
                 )
+            if mode == "warm":
+                outcome = await _invoke_transfer_fn(
+                    transfer_fn, number, mode="warm", summary=summary
+                )
+                if isinstance(outcome, dict):
+                    return json.dumps(outcome)
+                return json.dumps(
+                    {"status": "transferring", "mode": "warm", "to": number}
+                )
+            # Cold mode: byte-identical to the historical behaviour.
             await transfer_fn(number)
             return f"Transferring to {number}"
 
@@ -1472,6 +1590,107 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                 }
             )
 
+    async def _handle_handoff_function_call(self, func_data: dict) -> None:
+        """Dispatch the built-in ``handoff_to`` tool on the Realtime path.
+
+        Swaps the live session to the target agent's configuration via a
+        mid-session ``session.update`` (new ``instructions`` + ``tools``),
+        updates ``self.agent`` so subsequent tool dispatch resolves against
+        the target's tool list, and records a system-style history entry so
+        transcripts show the handoff. ALWAYS sends a function result — an
+        unknown name / malformed args produce an error envelope, never
+        silence (a missing function result would wedge the model).
+
+        Voice is intentionally NOT swapped: OpenAI Realtime rejects a voice
+        change once the session has produced audio, so the session keeps the
+        voice established at call start (documented limitation; an INFO log
+        is emitted when the target requested a different voice).
+        """
+        raw_args = func_data.get("arguments", "{}")
+        try:
+            args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+        except (json.JSONDecodeError, ValueError):
+            args = None
+        if not isinstance(args, dict):
+            result = json.dumps(
+                {"error": "Malformed handoff_to arguments", "status": "rejected"}
+            )
+            await self._adapter.send_function_result(func_data["call_id"], result)
+            await self._emit_tool_event(HANDOFF_TOOL_NAME, {}, result)
+            return
+        name = args.get("name", "")
+        reason = args.get("reason") or ""
+        handoffs: dict = getattr(self.agent, "handoffs", None) or {}
+        target = handoffs.get(name)
+        if target is None:
+            result = json.dumps(
+                {
+                    "error": f"Unknown handoff agent {name!r}",
+                    "available": sorted(handoffs.keys()),
+                }
+            )
+            await self._adapter.send_function_result(func_data["call_id"], result)
+            await self._emit_tool_event(HANDOFF_TOOL_NAME, args, result)
+            return
+
+        if target.voice and target.voice != self.agent.voice:
+            logger.info(
+                "handoff_to %r: voice change is not supported mid-session on "
+                "OpenAI Realtime — keeping the current voice.",
+                name,
+            )
+
+        # Swap the LLM-visible config (frozen dataclass → dataclasses.replace
+        # inside _apply_handoff_target) and re-inject the consult tool when the
+        # target configures one.
+        self.agent = _inject_consult_tool(_apply_handoff_target(self.agent, target))
+        self.resolved_prompt = resolve_agent_prompt(self.agent)
+
+        # Build the new wire tool list: target tools + built-ins (+ onward
+        # handoff tool when the target has its own handoff map). Mirrors the
+        # construction in ``start()``.
+        new_tools: list[dict] = [
+            {
+                "name": t["name"],
+                "description": t.get("description", ""),
+                "parameters": t.get("parameters", {}),
+                **({"strict": True} if t.get("strict") is True else {}),
+            }
+            for t in (self.agent.tools or [])
+        ]
+        new_tools += [TRANSFER_CALL_TOOL, END_CALL_TOOL]
+        if getattr(self.agent, "handoffs", None):
+            new_tools.append(build_handoff_tool(self.agent.handoffs.keys()))
+
+        new_instructions = apply_tool_call_preambles(
+            self.resolved_prompt,
+            getattr(self.agent, "tool_call_preambles", False),
+        )
+        # session.update FIRST, then the function result — the result triggers
+        # the next ``response.create``, which must already run under the new
+        # instructions so the model replies as the target agent.
+        await self._adapter.update_session(
+            instructions=new_instructions, tools=new_tools
+        )
+
+        handoff_text = _handoff_history_text(name, reason)
+        self.conversation_history.append(
+            {"role": "system", "text": handoff_text, "timestamp": time.time()}
+        )
+        self.transcript_entries.append({"role": "system", "text": handoff_text})
+        if self.on_transcript:
+            await self.on_transcript(
+                {
+                    "role": "system",
+                    "text": handoff_text,
+                    "call_id": self.call_id,
+                }
+            )
+
+        result = json.dumps({"status": "handed_off", "to": name})
+        await self._adapter.send_function_result(func_data["call_id"], result)
+        await self._emit_tool_event(HANDOFF_TOOL_NAME, args, result)
+
     async def start(self) -> None:
         """Connect to OpenAI Realtime, register tools, and begin event forwarding."""
         self._arm_max_call_watchdog()
@@ -1521,6 +1740,11 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                 entry["strict"] = True
             agent_tools.append(entry)
         openai_tools: list[dict] = agent_tools + [TRANSFER_CALL_TOOL, END_CALL_TOOL]
+        # Multi-agent handoff: advertise the built-in ``handoff_to`` tool when
+        # the agent has handoff targets configured. Dispatched in
+        # ``_forward_events`` (see ``_handle_handoff_function_call``).
+        if getattr(self.agent, "handoffs", None):
+            openai_tools.append(build_handoff_tool(self.agent.handoffs.keys()))
 
         # Forward optional engine-level Realtime knobs (carried on the Agent
         # by ``Patter._unpack_engine``) only when set, so the adapter's own
@@ -2059,6 +2283,25 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                             )
                             continue
                         transfer_number = args.get("number", "")
+                        transfer_mode = args.get("mode") or "cold"
+                        transfer_summary = args.get("summary") or ""
+                        if transfer_mode not in _TRANSFER_MODES:
+                            rejection = json.dumps(
+                                {
+                                    "error": (
+                                        f"Invalid transfer mode {transfer_mode!r}"
+                                        " — use 'cold' or 'warm'"
+                                    ),
+                                    "status": "rejected",
+                                }
+                            )
+                            await self._adapter.send_function_result(
+                                func_data["call_id"], rejection
+                            )
+                            await self._emit_tool_event(
+                                "transfer_call", args, rejection
+                            )
+                            continue
                         if not _validate_e164(transfer_number):
                             logger.warning(
                                 "transfer_call rejected: invalid number %s",
@@ -2077,6 +2320,52 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                                 "transfer_call", args, rejection
                             )
                             continue
+                        if transfer_mode == "warm":
+                            # Warm transfer: run the carrier sequence FIRST so
+                            # an unsupported carrier / REST failure surfaces an
+                            # error envelope and the AI keeps the call instead
+                            # of going dark. Only a confirmed warm transfer
+                            # ends this event loop.
+                            outcome = await _invoke_transfer_fn(
+                                self._transfer_fn,
+                                transfer_number,
+                                mode="warm",
+                                summary=transfer_summary,
+                            )
+                            if isinstance(outcome, dict) and outcome.get("error"):
+                                result = json.dumps(outcome)
+                                await self._adapter.send_function_result(
+                                    func_data["call_id"], result
+                                )
+                                await self._emit_tool_event(
+                                    "transfer_call", args, result
+                                )
+                                continue
+                            result = json.dumps(
+                                outcome
+                                if isinstance(outcome, dict)
+                                else {
+                                    "status": "transferring",
+                                    "mode": "warm",
+                                    "to": transfer_number,
+                                }
+                            )
+                            await self._adapter.send_function_result(
+                                func_data["call_id"], result
+                            )
+                            await self._emit_tool_event("transfer_call", args, result)
+                            if self.on_transcript:
+                                await self.on_transcript(
+                                    {
+                                        "role": "system",
+                                        "text": (
+                                            "Call transferred (warm) to "
+                                            f"{transfer_number}"
+                                        ),
+                                        "call_id": self.call_id,
+                                    }
+                                )
+                            return
                         logger.debug(
                             "Transferring call to %s",
                             mask_phone_number(transfer_number),
@@ -2131,6 +2420,11 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                                 }
                             )
                         return
+
+                    elif func_data["name"] == HANDOFF_TOOL_NAME and getattr(
+                        self.agent, "handoffs", None
+                    ):
+                        await self._handle_handoff_function_call(func_data)
 
                     else:
                         tool_def = next(
@@ -3501,11 +3795,7 @@ class PipelineStreamHandler(StreamHandler):
             # Merge the built-in consult tool (if configured) before the
             # handoff built-ins so the pipeline LLM sees it too.
             self.agent = _inject_consult_tool(self.agent)
-            combined_tools = _augment_with_builtin_handoff_tools(
-                self.agent.tools,
-                transfer_fn=self._transfer_fn,
-                hangup_fn=self._hangup_fn,
-            )
+            combined_tools = self._build_combined_pipeline_tools()
             tool_executor = ToolExecutor() if combined_tools else None
             llm_model = self.agent.model
             if "realtime" in llm_model:
@@ -3566,6 +3856,89 @@ class PipelineStreamHandler(StreamHandler):
             callee=self.callee,
             history=tuple(self.conversation_history),
         )
+
+    def _build_combined_pipeline_tools(self) -> list[dict]:
+        """Build the full pipeline tool list for the CURRENT ``self.agent``:
+        user tools + built-in ``transfer_call`` / ``end_call`` + the
+        ``handoff_to`` tool when handoff targets are configured. Re-invoked
+        after a handoff so the LLM loop advertises the target agent's tools
+        (including its onward handoff map)."""
+        combined = _augment_with_builtin_handoff_tools(
+            self.agent.tools,
+            transfer_fn=self._transfer_fn,
+            hangup_fn=self._hangup_fn,
+        )
+        if getattr(self.agent, "handoffs", None):
+            combined.append(
+                {
+                    **build_handoff_tool(self.agent.handoffs.keys()),
+                    "handler": self._handoff_tool_handler,
+                }
+            )
+        return combined
+
+    async def _handoff_tool_handler(self, arguments: dict, call_context: dict) -> str:
+        """Handler closure for the built-in ``handoff_to`` tool (pipeline)."""
+        args = arguments or {}
+        return await self._perform_handoff(
+            args.get("name", ""), args.get("reason") or ""
+        )
+
+    async def _perform_handoff(self, name: str, reason: str) -> str:
+        """Swap the live pipeline call to the named handoff target agent.
+
+        Updates ``self.agent`` (frozen dataclass → ``dataclasses.replace``
+        inside :func:`_apply_handoff_target`), swaps the LLM loop's system
+        prompt + tool list so the NEXT turn runs as the target agent, and
+        appends a system-style history entry recording the handoff. ALWAYS
+        returns a tool-result string — an unknown name produces an error
+        envelope, never silence.
+
+        Live audio infrastructure (STT/TTS/VAD instances — and therefore the
+        speaking voice) established at call start is intentionally retained:
+        swapping a connected TTS provider mid-call is not supported in v1.
+        An INFO log is emitted when the target requested a different voice.
+        """
+        handoffs: dict = getattr(self.agent, "handoffs", None) or {}
+        target = handoffs.get(name)
+        if target is None:
+            return json.dumps(
+                {
+                    "error": f"Unknown handoff agent {name!r}",
+                    "available": sorted(handoffs.keys()),
+                }
+            )
+        if target.voice and target.voice != self.agent.voice:
+            logger.info(
+                "handoff_to %r: voice change is not supported mid-call in "
+                "pipeline mode (the TTS adapter is already connected) — "
+                "keeping the current voice.",
+                name,
+            )
+        self.agent = _inject_consult_tool(_apply_handoff_target(self.agent, target))
+        self.resolved_prompt = resolve_agent_prompt(self.agent)
+        if self._llm_loop is not None:
+            self._llm_loop.update_agent(
+                system_prompt=self.resolved_prompt,
+                tools=self._build_combined_pipeline_tools(),
+                disable_phone_preamble=getattr(
+                    self.agent, "disable_phone_preamble", False
+                ),
+            )
+        handoff_text = _handoff_history_text(name, reason)
+        self.conversation_history.append(
+            {"role": "system", "text": handoff_text, "timestamp": time.time()}
+        )
+        self.transcript_entries.append({"role": "system", "text": handoff_text})
+        if self.on_transcript is not None:
+            await self.on_transcript(
+                {
+                    "role": "system",
+                    "text": handoff_text,
+                    "call_id": self.call_id,
+                }
+            )
+        return json.dumps({"status": "handed_off", "to": name})
 
     async def _emit_assistant_transcript(self, text: str) -> None:
         """Push an assistant turn into history+transcript_entries and fire

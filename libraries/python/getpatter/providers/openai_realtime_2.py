@@ -872,6 +872,24 @@ class OpenAIRealtime2Adapter(OpenAIRealtimeAdapter):
             json.dumps({"type": "response.create", "response": response_body})
         )
 
+    def _build_session_update_patch(
+        self,
+        instructions: str | None,
+        tools: list[dict] | None,
+    ) -> dict:
+        """GA-shape partial ``session.update`` body for a mid-session swap.
+
+        Identical to the base v1 patch plus the mandatory
+        ``"type": "realtime"`` discriminator — the GA endpoint rejects a
+        ``session.update`` without it. Used by
+        :meth:`OpenAIRealtimeAdapter.update_session` (inherited unchanged)
+        for the multi-agent ``handoff_to`` flow.
+        """
+        session = super()._build_session_update_patch(instructions, tools)
+        if session:
+            session["type"] = "realtime"
+        return session
+
     async def send_reassurance(self, text: str) -> None:
         """Speak a short reassurance filler WITHOUT adding a ``role:user`` turn.
 

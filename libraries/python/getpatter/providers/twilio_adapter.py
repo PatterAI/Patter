@@ -122,6 +122,62 @@ class TwilioAdapter(TelephonyProvider):
             logger.debug("record_call_end_cost failed", exc_info=True)
 
     @staticmethod
+    def generate_warm_transfer_caller_twiml(
+        conference_name: str,
+        status_callback_url: str = "",
+    ) -> str:
+        """TwiML that parks the CALLER leg in the warm-transfer conference.
+
+        ``startConferenceOnEnter=false`` keeps the caller on Twilio's default
+        hold music until a participant with ``startConferenceOnEnter=true``
+        (the human agent) joins; ``endConferenceOnExit=true`` tears the
+        conference down if the caller hangs up while waiting. When
+        ``status_callback_url`` is provided, conference lifecycle events
+        (start / end / join / leave) are posted there for observability.
+        """
+        from twilio.twiml.voice_response import Dial
+
+        response = VoiceResponse()
+        dial = Dial()
+        conference_kwargs: dict = {
+            "start_conference_on_enter": False,
+            "end_conference_on_exit": True,
+        }
+        if status_callback_url:
+            conference_kwargs["status_callback"] = status_callback_url
+            conference_kwargs["status_callback_event"] = "start end join leave"
+        dial.conference(conference_name, **conference_kwargs)
+        response.append(dial)
+        return str(response)
+
+    @staticmethod
+    def generate_warm_transfer_target_twiml(
+        conference_name: str,
+        summary: str = "",
+    ) -> str:
+        """TwiML executed on the TARGET (human agent) leg of a warm transfer.
+
+        Speaks the agent-provided handoff ``summary`` first (skipped when
+        empty), then joins the conference with ``startConferenceOnEnter=true``
+        — which starts the conference, stops the caller's hold music, and
+        bridges the two. ``endConferenceOnExit=true`` ends the conference
+        (and therefore the caller leg) when the human agent hangs up.
+        """
+        from twilio.twiml.voice_response import Dial
+
+        response = VoiceResponse()
+        if summary:
+            response.say(summary)
+        dial = Dial()
+        dial.conference(
+            conference_name,
+            start_conference_on_enter=True,
+            end_conference_on_exit=True,
+        )
+        response.append(dial)
+        return str(response)
+
+    @staticmethod
     def generate_stream_twiml(
         stream_url: str,
         parameters: dict[str, str] | None = None,

@@ -73,6 +73,167 @@ def _xml_escape(s: str) -> str:
     )
 
 
+# Spoken to the caller when the warm-transfer target leg could not be dialed
+# after the caller was already parked in the conference (the AI media stream
+# is gone at that point, so a graceful goodbye beats infinite hold music).
+_WARM_TRANSFER_FAILED_MESSAGE = (
+    "Sorry, no one is available to take your call right now. Goodbye."
+)
+
+
+def warm_transfer_conference_name(call_sid: str) -> str:
+    """Deterministic, per-call conference name for a Twilio warm transfer.
+
+    ``call_sid`` is validated upstream (34-char Twilio SID), so the name is
+    safe for both TwiML attributes and REST URLs.
+    """
+    return f"patter-warm-{call_sid}"
+
+
+async def twilio_warm_transfer(
+    *,
+    call_sid: str,
+    to_number: str,
+    from_number: str,
+    twilio_sid: str,
+    twilio_token: str,
+    summary: str = "",
+    webhook_host: str = "",
+) -> dict:
+    """Execute the Twilio conference-based WARM transfer REST sequence.
+
+    1. Redirect the caller's live call into a named conference
+       (``startConferenceOnEnter=false`` → the caller hears Twilio's default
+       hold music). This replaces the ``<Connect><Stream>`` TwiML, so Twilio
+       tears down the AI media stream automatically — the "AI leg" ends here.
+    2. Dial the human agent (``Calls.json`` create) with TwiML that first
+       speaks ``summary`` (``<Say>``), then joins the same conference with
+       ``startConferenceOnEnter=true`` — bridging caller and human.
+
+    When ``webhook_host`` is set, conference lifecycle events are posted to
+    ``/webhooks/twilio/conference`` and the target leg's terminal status to
+    ``/webhooks/twilio/warm-status?caller_call_sid=...`` (which gracefully
+    releases a caller stuck on hold when the human never answers).
+
+    Returns ``{"status": "transferring", "mode": "warm", ...}`` on success or
+    a ``{"error": ...}`` envelope on validation/REST failure. Never raises.
+    """
+    from getpatter.providers.twilio_adapter import TwilioAdapter  # lazy import
+
+    if not _validate_e164(to_number):
+        logger.warning(
+            "warm transfer rejected: invalid number %s", mask_phone_number(to_number)
+        )
+        return {"error": "Invalid phone number format", "status": "rejected"}
+    if not (twilio_sid and twilio_token and call_sid):
+        return {"error": "warm transfer not available: missing Twilio credentials"}
+    if not _validate_twilio_sid(call_sid, "CA"):
+        logger.warning("warm transfer skipped: invalid CallSid %r", call_sid)
+        return {"error": "warm transfer not available: invalid CallSid"}
+    if not _validate_e164(from_number):
+        # Twilio requires a verified / Twilio-owned From for the new leg.
+        logger.warning(
+            "warm transfer rejected: no valid From number (got %s)",
+            mask_phone_number(from_number),
+        )
+        return {
+            "error": "warm transfer not available: no valid agent number to dial from"
+        }
+
+    conference = warm_transfer_conference_name(call_sid)
+    conference_callback = (
+        f"https://{webhook_host}/webhooks/twilio/conference" if webhook_host else ""
+    )
+    caller_twiml = TwilioAdapter.generate_warm_transfer_caller_twiml(
+        conference, status_callback_url=conference_callback
+    )
+    target_twiml = TwilioAdapter.generate_warm_transfer_target_twiml(
+        conference, summary=summary
+    )
+
+    import httpx as _httpx
+
+    api_base = f"https://api.twilio.com/2010-04-01/Accounts/{twilio_sid}"
+    async with _httpx.AsyncClient(timeout=10.0) as _http:
+        # Step 1 — park the caller in the conference (replaces the media
+        # stream TwiML; the AI leg ends with it).
+        try:
+            resp = await _http.post(
+                f"{api_base}/Calls/{call_sid}.json",
+                auth=(twilio_sid, twilio_token),
+                data={"Twiml": caller_twiml},
+            )
+            if resp.status_code >= 400:
+                logger.warning(
+                    "warm transfer: conference redirect failed (HTTP %d)",
+                    resp.status_code,
+                )
+                return {"error": "warm transfer failed: could not place caller on hold"}
+        except Exception as exc:  # noqa: BLE001 — surface as envelope, never raise
+            logger.warning("warm transfer: conference redirect failed: %s", exc)
+            return {"error": "warm transfer failed: could not place caller on hold"}
+
+        # Step 2 — dial the human agent into the conference with the
+        # announcement leg.
+        dial_data: dict = {
+            "To": to_number,
+            "From": from_number,
+            "Twiml": target_twiml,
+        }
+        if webhook_host:
+            from urllib.parse import quote as _quote
+
+            dial_data["StatusCallback"] = (
+                f"https://{webhook_host}/webhooks/twilio/warm-status"
+                f"?caller_call_sid={_quote(call_sid, safe='')}"
+            )
+            dial_data["StatusCallbackEvent"] = "completed"
+        try:
+            resp = await _http.post(
+                f"{api_base}/Calls.json",
+                auth=(twilio_sid, twilio_token),
+                data=dial_data,
+            )
+            dial_failed = resp.status_code >= 400
+            if dial_failed:
+                logger.warning(
+                    "warm transfer: target dial failed (HTTP %d)", resp.status_code
+                )
+        except Exception as exc:  # noqa: BLE001 — surface as envelope, never raise
+            logger.warning("warm transfer: target dial failed: %s", exc)
+            dial_failed = True
+
+        if dial_failed:
+            # The caller is already parked on hold and the AI stream is gone —
+            # release them gracefully instead of leaving infinite hold music.
+            try:
+                await _http.post(
+                    f"{api_base}/Calls/{call_sid}.json",
+                    auth=(twilio_sid, twilio_token),
+                    data={
+                        "Twiml": (
+                            f"<Response><Say>{_xml_escape(_WARM_TRANSFER_FAILED_MESSAGE)}"
+                            "</Say><Hangup/></Response>"
+                        )
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001 — best-effort recovery
+                logger.warning("warm transfer: caller recovery failed: %s", exc)
+            return {"error": "warm transfer failed: could not dial the transfer target"}
+
+    logger.info(
+        "Warm transfer started: caller parked in %s, dialing %s",
+        conference,
+        mask_phone_number(to_number),
+    )
+    return {
+        "status": "transferring",
+        "mode": "warm",
+        "to": to_number,
+        "conference": conference,
+    }
+
+
 def twilio_webhook_handler(
     call_sid: str,
     caller: str,
@@ -255,6 +416,8 @@ async def twilio_stream_bridge(
     patter_side: str = "uut",
     pop_prewarm_audio=None,
     pop_prewarmed_connections=None,
+    webhook_host: str = "",
+    agent_number: str = "",
 ) -> None:
     """Bridge a Twilio WebSocket media stream to the configured AI provider.
 
@@ -285,6 +448,12 @@ async def twilio_stream_bridge(
             returns a recorder, the stream handler taps caller + agent audio
             into a local stereo WAV — carrier-neutral, independent of
             ``recording``.
+        webhook_host: Public hostname (no scheme) of this server — used to
+            register warm-transfer conference / status callbacks. Optional;
+            when empty, warm transfers run without callbacks.
+        agent_number: The agent's own Twilio number (E.164) — used as the
+            ``From`` caller-ID when dialing the warm-transfer target. Falls
+            back to ``callee`` (the number the caller dialed) when empty.
     """
     await websocket.accept()
 
@@ -442,7 +611,22 @@ async def twilio_stream_bridge(
                 )
 
                 # --- Twilio-specific call control helpers ---
-                async def _twilio_transfer(number):
+                async def _twilio_transfer(number, *, mode: str = "cold", summary: str = ""):
+                    if mode == "warm":
+                        # Conference-based warm transfer: park the caller on
+                        # hold, dial the human with the announced summary,
+                        # bridge on answer. The AI media stream ends when the
+                        # caller's TwiML is replaced. Returns a result /
+                        # error envelope dict (never raises).
+                        return await twilio_warm_transfer(
+                            call_sid=call_sid_actual,
+                            to_number=number,
+                            from_number=agent_number or callee,
+                            twilio_sid=twilio_sid,
+                            twilio_token=twilio_token,
+                            summary=summary,
+                            webhook_host=webhook_host,
+                        )
                     if not _validate_e164(number):
                         logger.warning(
                             "transfer rejected: invalid number %s",

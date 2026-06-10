@@ -475,7 +475,19 @@ async def plivo_stream_bridge(
                 )
 
                 # --- Plivo-specific call control helpers ---
-                async def _plivo_transfer(number):
+                async def _plivo_transfer(number, *, mode: str = "cold", summary: str = ""):
+                    # ``mode="warm"`` is NOT yet implemented on Plivo — the
+                    # MPC (multi-party call) flow needs participant-role
+                    # coordination the bridge does not plumb today. A clear
+                    # error envelope is returned so the agent keeps the call
+                    # instead of silently degrading to a blind redirect.
+                    # ``summary`` is accepted for cross-carrier signature
+                    # parity and unused in cold mode.
+                    if mode == "warm":
+                        logger.warning(
+                            "warm transfer requested but not yet supported on plivo"
+                        )
+                        return {"error": "warm transfer not yet supported on plivo"}
                     if not _validate_e164(number):
                         logger.warning(
                             "transfer rejected: invalid number %s",

@@ -551,6 +551,17 @@ class Agent:
     # stays off the per-turn path — consulted only on demand. ``None`` (default)
     # disables it. See :class:`ConsultConfig`.
     consult: "ConsultConfig | None" = None
+    # Multi-agent handoff targets: ``{name: Agent}``. When set, Patter
+    # auto-injects a ``handoff_to`` tool (Realtime + Pipeline modes) the LLM
+    # can call to swap the CURRENT call to another agent's configuration
+    # mid-call — system prompt, tools, variables, guardrails, and onward
+    # ``handoffs`` are taken from the target agent; audio infrastructure
+    # (STT/TTS/VAD/engine connection — and therefore voice on engines that
+    # cannot switch voice mid-session) stays as established at call start.
+    # ``None`` (default) disables the tool. Targets are full ``Agent``
+    # instances built with :meth:`Patter.agent`; chained handoffs follow the
+    # TARGET's own ``handoffs`` map.
+    handoffs: "dict[str, Agent] | None" = None
     # Minimum sustained voice (ms) before treating caller audio as a barge-in
     # and interrupting TTS. ``0`` disables barge-in entirely — useful on noisy
     # links (ngrok tunnels, speakerphone) where the agent can hear itself.
@@ -962,6 +973,55 @@ class CallResult:
     metrics: CallMetrics | None = None
 
 
+async def _invoke_transfer_fn(
+    transfer_fn,
+    number: str,
+    *,
+    mode: str = "cold",
+    summary: str = "",
+) -> dict | None:
+    """Invoke a telephony ``transfer_fn`` with warm-transfer kwargs when its
+    signature accepts them.
+
+    Cold mode ALWAYS calls ``transfer_fn(number)`` positionally — byte-
+    identical to the historical contract for every callable (carrier
+    closures default ``mode="cold"`` themselves). Warm mode passes
+    ``mode`` / ``summary`` keywords when the callable's signature accepts
+    them (or absorbs ``**kwargs``); the built-in per-carrier transfer
+    functions return either a result dict (``{"status": "transferring",
+    ...}`` / ``{"error": ...}``) or ``None``. A ``mode="warm"`` request
+    against a legacy callable that only declares ``(number)`` returns a
+    clear error envelope instead of silently degrading to a cold transfer.
+    Mirrors the TypeScript path where ``bridge.transferCall(callId, number,
+    options)`` simply ignores the extra argument on legacy implementations.
+    """
+    import inspect
+
+    if transfer_fn is None:
+        return {"error": "transfer is not available on this call"}
+    if mode == "cold":
+        return await transfer_fn(number)
+    if mode != "warm":
+        # Never silently coerce an unknown mode into a blind redirect — the
+        # built-in tool paths pre-validate, so this guards the programmatic
+        # ``CallControl.transfer`` surface (TS gets the same guarantee from
+        # the ``'cold' | 'warm'`` type on ``TransferCallOptions``).
+        return {
+            "error": f"Invalid transfer mode {mode!r} — use 'cold' or 'warm'",
+            "status": "rejected",
+        }
+    try:
+        sig = inspect.signature(transfer_fn)
+        accepts_warm_kwargs = any(
+            p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+        ) or {"mode", "summary"} <= set(sig.parameters)
+    except (TypeError, ValueError):  # pragma: no cover - exotic callables
+        accepts_warm_kwargs = False
+    if not accepts_warm_kwargs:
+        return {"error": "warm transfer is not supported by this transfer handler"}
+    return await transfer_fn(number, mode=mode, summary=summary)
+
+
 class CallControl:
     """In-call control interface passed to ``on_message`` handlers.
 
@@ -1015,13 +1075,36 @@ class CallControl:
         """True if transfer() or hangup() was called."""
         return self._transferred.is_set() or self._hung_up.is_set()
 
-    async def transfer(self, number: str) -> None:
-        """Transfer the call to another phone number (E.164 format)."""
-        if self._transfer_fn is not None:
-            await self._transfer_fn(number)
-            self._transferred.set()
-        else:
+    async def transfer(
+        self, number: str, *, mode: Literal["cold", "warm"] = "cold", summary: str = ""
+    ) -> dict | None:
+        """Transfer the call to another phone number (E.164 format).
+
+        Args:
+            number: Target phone number in E.164 format.
+            mode: ``"cold"`` (default) redirects the caller immediately —
+                byte-identical to the historical behaviour. ``"warm"`` puts
+                the caller on hold music, dials the target with an announced
+                ``summary``, then bridges the two together (Twilio only for
+                now; other carriers return an error envelope).
+            summary: Warm mode only — short handoff summary announced to the
+                human agent before the caller is bridged.
+
+        Returns:
+            ``None`` for a cold transfer (legacy contract), or a result dict
+            for warm mode: ``{"status": "transferring", "mode": "warm", ...}``
+            on success, ``{"error": ...}`` when warm transfer is unsupported
+            or failed (the call keeps running in that case).
+        """
+        if self._transfer_fn is None:
             logger.warning("transfer() not available for this provider mode")
+            return None
+        result = await _invoke_transfer_fn(
+            self._transfer_fn, number, mode=mode, summary=summary
+        )
+        if not (isinstance(result, dict) and result.get("error")):
+            self._transferred.set()
+        return result
 
     async def hangup(self) -> None:
         """End the call."""
