@@ -113,6 +113,15 @@ class OpenAICompatibleLLMProvider(OpenAILLMProvider):
             fallback used when no factory is configured. The returned value is a
             credential-grade memory scope and is NEVER logged. ``None``
             (default) means the static path is used.
+        session_key_from: Convenience selector for a built-in per-call key
+            derivation (requires ``session_key_header``). Set to
+            ``"caller_hash"`` to derive the session key per call as
+            ``f"patter-caller-{ctx.caller_hash}"`` (a stable, non-reversible
+            hash of the caller — never the raw number), enabling per-caller
+            cross-call memory on any runtime that scopes memory by header.
+            ``None`` (default) uses the static ``session_key`` path. Ignored
+            when ``session_key_factory`` is given explicitly. Same semantics as
+            the Hermes preset's selector.
         **kwargs: Sampling kwargs forwarded to :class:`OpenAILLMProvider`.
     """
 
@@ -134,8 +143,22 @@ class OpenAICompatibleLLMProvider(OpenAILLMProvider):
         session_key_header: str | None = None,
         session_key: str | None = None,
         session_key_factory: Callable[[SessionContext], str | None] | None = None,
+        session_key_from: str | None = None,
         **kwargs,
     ) -> None:
+        # ``session_key_from="caller_hash"`` installs a default factory that
+        # scopes durable memory per caller via the non-reversible caller hash
+        # (never the raw number). An explicit ``session_key_factory`` always
+        # wins over this convenience selector. Same logic as the Hermes preset.
+        if session_key_factory is None and session_key_from == "caller_hash":
+            session_key_factory = lambda ctx: (
+                f"patter-caller-{ctx.caller_hash}" if ctx.caller_hash else None
+            )
+        elif session_key_from is not None and session_key_from != "caller_hash":
+            raise ValueError(
+                "session_key_from must be 'caller_hash' or None, "
+                f"got {session_key_from!r}"
+            )
         try:
             from openai import AsyncOpenAI
         except ImportError as e:
