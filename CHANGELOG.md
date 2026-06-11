@@ -1,5 +1,7 @@
 ## Unreleased
 
+## 0.6.7 (2026-06-10)
+
 ### Fixed
 
 - **Telemetry: fire-and-forget events no longer vanish before delivery.** Three
