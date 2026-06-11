@@ -737,14 +737,21 @@ export class Patter {
     if (
       working.provider === 'openai_realtime' &&
       !working.engine &&
-      !this.localConfig.openaiKey &&
-      !process.env.OPENAI_API_KEY
+      !this.localConfig.openaiKey
     ) {
-      throw new Error(
-        "OpenAI Realtime mode requires an OpenAI API key. Pass " +
-          "engine: new OpenAIRealtime({ apiKey: 'sk-...' }) or set " +
-          'OPENAI_API_KEY in the environment.',
-      );
+      const envKey = process.env.OPENAI_API_KEY;
+      if (envKey) {
+        // Backfill the local config so the CALL PATH uses the env key too —
+        // accepting here but dialing with an empty key later would be a dead
+        // call instead of a clear error (parity with Python).
+        this.localConfig = { ...this.localConfig, openaiKey: envKey };
+      } else {
+        throw new Error(
+          "OpenAI Realtime mode requires an OpenAI API key. Pass " +
+            "engine: new OpenAIRealtime({ apiKey: 'sk-...' }) or set " +
+            'OPENAI_API_KEY in the environment.',
+        );
+      }
     }
 
     // The consult tool is injected only in Realtime and Pipeline modes;

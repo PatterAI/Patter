@@ -29,6 +29,18 @@
 
 ### Fixed
 
+- **`provider="openai_realtime"` now honours `OPENAI_API_KEY` from the
+  environment — and the env key actually reaches the call path.** Python's
+  validation rejected the provider-string path unless the key was on the
+  config, even though its own error message promised "or set OPENAI_API_KEY in
+  the environment" (the engine markers already env-fallback). TypeScript
+  accepted the env var at validation but then dialed with an empty
+  `localConfig.openaiKey` — a dead call at connect time instead of a clear
+  error. Both SDKs now backfill the local config from the environment when the
+  provider-string path has no configured key, and reject with the same message
+  when no key exists anywhere. Caught by running the cross-SDK parity suite
+  with `OPENAI_API_KEY` set. `libraries/python/getpatter/client.py`,
+  `libraries/typescript/src/client.ts`.
 - **Python: an explicit `voice=` / `model=` on `agent()` now always wins over
   the `engine=` marker — even when the value equals the documented default.**
   The kwargs moved to sentinel defaults (`voice: str | None = None`,

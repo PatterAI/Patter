@@ -1965,11 +1965,23 @@ class Patter:
             provider in ("openai_realtime", "openai_realtime_2")
             and not self._local_config.openai_key
         ):
-            raise ValueError(
-                "OpenAI Realtime mode requires an OpenAI API key. Pass "
-                "engine=OpenAIRealtime(api_key='sk-...') or set OPENAI_API_KEY "
-                "in the environment."
-            )
+            # The provider= string path has no engine marker to carry the key —
+            # honour OPENAI_API_KEY from the environment (the error message has
+            # always promised it, TS accepts it, and the engine markers already
+            # env-fallback). Backfill the local config so the CALL PATH uses the
+            # key too — accepting here but dialing with an empty key later
+            # would be a dead call instead of a clear error.
+            _env_openai_key = os.environ.get("OPENAI_API_KEY", "")
+            if _env_openai_key:
+                self._local_config = replace(
+                    self._local_config, openai_key=_env_openai_key
+                )
+            else:
+                raise ValueError(
+                    "OpenAI Realtime mode requires an OpenAI API key. Pass "
+                    "engine=OpenAIRealtime(api_key='sk-...') or set OPENAI_API_KEY "
+                    "in the environment."
+                )
 
         if provider == "pipeline":
             if stt_resolved is None:

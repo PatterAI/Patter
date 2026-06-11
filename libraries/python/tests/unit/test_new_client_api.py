@@ -485,3 +485,36 @@ class TestAgentFactoryBargeInKwargs:
                 tts=elevenlabs_tts.TTS(api_key="el_test"),
                 barge_in_mode="silence",
             )
+
+
+class TestProviderRealtimeEnvKey:
+    """``provider="openai_realtime"`` honours ``OPENAI_API_KEY`` from the env.
+
+    The error message has always promised "or set OPENAI_API_KEY in the
+    environment" and TypeScript accepts the env var — Python must too, AND the
+    key must be backfilled into the local config so the call path actually
+    uses it (accepting at validation but dialing with an empty key would be a
+    dead call).
+    """
+
+    def _phone(self) -> Patter:
+        return Patter(
+            carrier=Twilio(account_sid="AC", auth_token="tok"),
+            phone_number="+15550001234",
+            webhook_url="abc.ngrok.io",
+        )
+
+    def test_env_key_accepted_and_backfilled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+        phone = self._phone()
+        agent = phone.agent(system_prompt="hi", provider="openai_realtime")
+        assert agent.provider == "openai_realtime"
+        assert phone._local_config.openai_key == "sk-env"
+
+    def test_no_key_anywhere_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        phone = self._phone()
+        with pytest.raises(ValueError, match="OpenAI API key"):
+            phone.agent(system_prompt="hi", provider="openai_realtime")
