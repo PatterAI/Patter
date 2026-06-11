@@ -177,8 +177,11 @@ export class TelemetryClient {
       this.inflight = null;
       // Events recorded while the POST was in flight are sitting in the buffer
       // with no flush scheduled (record() saw `inflight` and skipped) — chain
-      // another flush or they strand until close()/process exit.
-      if (this.buffer.length > 0) this.scheduleFlush();
+      // another flush or they strand until close()/process exit. Never chain
+      // after close() began: close() awaits the in-flight flush and then drains
+      // the buffer itself — a chained flush here would detach from close() and
+      // die mid-air on a prompt process exit (mirrors Python's `not _closed`).
+      if (this.buffer.length > 0 && !this.closed) this.scheduleFlush();
     });
     void this.inflight;
   }

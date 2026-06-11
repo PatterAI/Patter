@@ -1,5 +1,17 @@
 ## Unreleased
 
+### Fixed
+
+- **Telemetry (TypeScript): a flush completing after `close()` began no longer
+  chains a detached delivery.** The post-flush chain in
+  `libraries/typescript/src/telemetry/client.ts` now stops once `close()` has
+  started (parity with Python's `not self._closed` guard): without it, an event
+  recorded during an in-flight POST could be picked up by a chained flush that
+  `close()` never awaited — a prompt process exit then killed that POST mid-air.
+  `close()` now always drains later-buffered events itself before resolving.
+  Added the previously missing regression tests (both SDKs) for the
+  "event recorded during an in-flight flush is chained, not stranded" 0.6.7 fix.
+
 ## 0.6.7 (2026-06-10)
 
 ### Fixed

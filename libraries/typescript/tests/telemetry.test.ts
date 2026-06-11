@@ -134,6 +134,84 @@ async function waitFor(collector: Collector, n: number, timeoutMs = 2000): Promi
   }
 }
 
+/**
+ * A real collector that holds its FIRST response until released — lets a test
+ * pin the "event recorded while a flush POST is in flight" window
+ * deterministically. Test-local lifecycle: always release() before stop().
+ */
+class GatedCollector {
+  requests: unknown[] = [];
+  private server!: Server;
+  private heldOne = false;
+  private gateResolve!: () => void;
+  private readonly gate = new Promise<void>((r) => {
+    this.gateResolve = r;
+  });
+  private firstStartedResolve!: () => void;
+  readonly firstRequestStarted = new Promise<void>((r) => {
+    this.firstStartedResolve = r;
+  });
+
+  release(): void {
+    this.gateResolve();
+  }
+
+  async start(): Promise<void> {
+    this.server = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (c: Buffer) => chunks.push(c));
+      req.on('end', () => {
+        const hold = !this.heldOne;
+        this.heldOne = true;
+        this.firstStartedResolve();
+        const respond = (): void => {
+          try {
+            this.requests.push(JSON.parse(Buffer.concat(chunks).toString()));
+          } catch {
+            this.requests.push(null);
+          }
+          res.statusCode = 204;
+          res.end();
+        };
+        if (hold) void this.gate.then(respond);
+        else respond();
+      });
+    });
+    await new Promise<void>((resolve) =>
+      this.server.listen(0, '127.0.0.1', () => resolve()),
+    );
+  }
+
+  get url(): string {
+    const addr = this.server.address();
+    const port = typeof addr === 'object' && addr ? addr.port : 0;
+    return `http://127.0.0.1:${port}/v1/ingest`;
+  }
+
+  get events(): Array<Record<string, unknown>> {
+    const out: Array<Record<string, unknown>> = [];
+    for (const batch of this.requests) {
+      if (Array.isArray(batch)) out.push(...(batch as Array<Record<string, unknown>>));
+    }
+    return out;
+  }
+
+  async stop(): Promise<void> {
+    await new Promise<void>((resolve) => this.server.close(() => resolve()));
+  }
+}
+
+async function waitForEvents(
+  c: { events: Array<Record<string, unknown>> },
+  n: number,
+  timeoutMs = 2000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (c.events.length < n && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
 let collector: Collector;
 
 beforeEach(async () => {
@@ -216,6 +294,58 @@ describe('[integration] telemetry — enabled path', () => {
     await client.close();
 
     expect(collector.events.map((e) => e.event)).toEqual(['cli_command']);
+  });
+
+  it('an event recorded during an in-flight flush is chained, not stranded', async () => {
+    // Regression: record() saw `inflight` and skipped scheduling, so an event
+    // recorded while a flush POST was in flight sat in the buffer with no
+    // flush scheduled — constructor-time events shadowed agent-time events
+    // until close()/process exit. Pinned WITHOUT calling close(): delivery
+    // must happen on its own via the chained flush.
+    enableTelemetryEnv();
+    const gated = new GatedCollector();
+    await gated.start();
+    try {
+      const client = new TelemetryClient({ sdkVersion: '0.6.7', endpoint: gated.url });
+      client.record('cli_command', { cli_command: 'dashboard' });
+      await gated.firstRequestStarted; // first POST genuinely in flight (held)
+      client.record('first_run'); // buffered; no flush scheduled
+      gated.release();
+
+      await waitForEvents(gated, 2);
+      expect(gated.events.map((e) => e.event).sort()).toEqual(['cli_command', 'first_run']);
+      // Two separate POSTs: the second was chained by the completing first flush.
+      expect(gated.requests).toHaveLength(2);
+      await client.close();
+    } finally {
+      gated.release();
+      await gated.stop();
+    }
+  });
+
+  it('close() during an in-flight flush delivers later-buffered events before resolving', async () => {
+    // Pins the `!this.closed` chain guard (parity with Python's `not _closed`):
+    // without it, the completing in-flight flush chains a DETACHED flush for
+    // the second event, close()'s own flush sees an empty buffer and resolves
+    // early, and a prompt process exit kills the detached POST mid-air.
+    enableTelemetryEnv();
+    const gated = new GatedCollector();
+    await gated.start();
+    try {
+      const client = new TelemetryClient({ sdkVersion: '0.6.7', endpoint: gated.url });
+      client.record('cli_command', { cli_command: 'dashboard' });
+      await gated.firstRequestStarted;
+      client.record('first_run'); // buffered behind the in-flight POST
+      const closing = client.close();
+      gated.release();
+      await closing;
+
+      // By the time close() resolves, BOTH events must have been delivered.
+      expect(gated.events.map((e) => e.event).sort()).toEqual(['cli_command', 'first_run']);
+    } finally {
+      gated.release();
+      await gated.stop();
+    }
   });
 
   it('drops denylisted dimensions', async () => {
