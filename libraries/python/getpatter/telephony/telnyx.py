@@ -46,12 +46,6 @@ _DTMF_DEFAULT_DURATION_MS = 250
 _SIP_URI_RE = re.compile(r"^sips?:[^\s@]+(@[^\s]+)?$", re.IGNORECASE)
 
 
-# TODO: TS equivalent — mirror the pause-digit set (``w``/``W``) in
-# ``libraries/typescript/src/server.ts`` ``TELNYX_DTMF_ALLOWED`` (Team 8).
-# Telnyx ``send_dtmf`` accepts ``w`` / ``W`` as a pause character (500 ms
-# wait per Telnyx docs) alongside DTMF digits and A-D letters.
-
-
 async def handle_amd_result(
     *,
     call_control_id: str,
