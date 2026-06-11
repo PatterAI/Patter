@@ -2,6 +2,23 @@
 
 ### Added
 
+- **TypeScript: `EvalSession` — the eval harness now has full parity with
+  Python.** `import { EvalSession, expect, ScriptedLLMProvider } from
+  "getpatter"` constructs a REAL pipeline-mode `StreamHandler` and injects user
+  turns through the live-call path (transcript commit → dispatch → `LLMLoop` →
+  tool executor → sentence chunker → TTS), faking only the paid/external
+  boundary (`FakeAudioSender`/`FakeSTT`/`FakeTTS` + a deterministic
+  `ScriptedLLMProvider` or any real `LLMProvider`). `await session.userSays("…")`
+  returns a readonly `TurnResult` (`agentText`, `toolCalls`, `historySnapshot`,
+  `interrupted`, `metricsTurn`); `expect(result)` adds chainable
+  `.toolCalled(name, argsSubset?)` / `.noToolCalled()` / `.agentTextContains(…)`
+  plus async `.judge(llmJudge, { intent })`. `EvalCase` gains optional
+  `agent`/`llmProvider` routing through the session (the legacy reply-factory
+  path is unchanged), and `getpatter eval run <suite>` replaces the CLI stub
+  (exit codes 0/1/2, JSON report, `--agent module:export` loader). Defaults and
+  report rows are byte-compatible with Python's. New
+  `libraries/typescript/src/evals/`; `src/cli.ts`, `src/index.ts`.
+
 - **Python: `barge_in_mode` / `barge_in_confirm_ms` are now `Patter.agent()`
   keywords** (TypeScript parity — `AgentOptions` already exposed `bargeInMode` /
   `bargeInConfirmMs`). Previously they existed only as `Agent` dataclass fields,
