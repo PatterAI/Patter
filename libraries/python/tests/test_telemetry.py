@@ -610,7 +610,9 @@ async def test_server_wiring_emits_call_completed(enabled, collector):
     from getpatter.models import CallMetrics, CostBreakdown, LatencyBreakdown
 
     server = _telemetry_server(collector)
-    _start, on_call_end, _metrics, _transcript_line, _transcript = server._wrap_callbacks()
+    _start, on_call_end, _metrics, _transcript_line, _transcript = (
+        server._wrap_callbacks()
+    )
     metrics = CallMetrics(
         call_id="CAx",
         duration_seconds=73.0,
@@ -1026,7 +1028,9 @@ def test_direction_on_call_completed():
         def record(self, name, **dims):
             recorded.append(dims)
 
-    cm.record_call_completed(_Sink(), outcome="failed", carrier="telnyx", direction="outbound")
+    cm.record_call_completed(
+        _Sink(), outcome="failed", carrier="telnyx", direction="outbound"
+    )
     assert recorded[0]["direction"] == "outbound"
 
 
@@ -1036,6 +1040,107 @@ def test_is_first_run_is_idempotent(monkeypatch, tmp_path):
     monkeypatch.setenv("PATTER_TELEMETRY_STATE_DIR", str(tmp_path))
     assert iid.is_first_run() is True  # first call marks it
     assert iid.is_first_run() is False  # every later call
+
+
+# --- state-dir hardening + visible disclosure + relay-cap chunking (0.6.8) ----
+
+
+def test_xdg_state_home_uses_getpatter_subdir(monkeypatch, tmp_path):
+    """XDG spec: state files live in an app subdirectory, never the shared root."""
+    from getpatter.telemetry import install_id as iid
+
+    monkeypatch.delenv("PATTER_TELEMETRY_STATE_DIR", raising=False)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    iid._install_id = None
+    first = iid.install_id()
+    assert (tmp_path / "getpatter" / "install-id").read_text().strip() == first
+    assert not (tmp_path / "install-id").exists()
+
+
+def test_xdg_legacy_install_id_migrates(monkeypatch, tmp_path):
+    """A pre-0.6.8 id in the bare XDG root is kept (no double-counted install)
+    and migrated into the subdirectory."""
+    from getpatter.telemetry import install_id as iid
+
+    monkeypatch.delenv("PATTER_TELEMETRY_STATE_DIR", raising=False)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    legacy_id = "ab" * 16
+    (tmp_path / "install-id").write_text(legacy_id)
+    iid._install_id = None
+    assert iid.install_id() == legacy_id
+    assert (tmp_path / "getpatter" / "install-id").read_text().strip() == legacy_id
+
+
+def test_xdg_legacy_opt_out_still_honored(monkeypatch, tmp_path):
+    """An opt-out persisted by a pre-0.6.8 build (bare XDG root) must keep
+    disabling telemetry after the state-dir move — consent survives upgrades."""
+    from getpatter.telemetry import install_id as iid
+    from getpatter.telemetry.consent import is_enabled
+
+    monkeypatch.setattr("getpatter.telemetry.consent.is_ci", lambda: False)
+    monkeypatch.setattr("getpatter.telemetry.consent.is_test", lambda: False)
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+    monkeypatch.delenv("PATTER_TELEMETRY_DISABLED", raising=False)
+    monkeypatch.delenv("PATTER_TELEMETRY_STATE_DIR", raising=False)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+
+    (tmp_path / "telemetry-disabled").write_text("1")  # pre-0.6.8 marker
+    assert iid.is_opted_out() is True
+    assert is_enabled() is False
+    iid.set_opt_out(False)  # re-enable must clear the legacy marker too
+    assert iid.is_opted_out() is False
+    assert is_enabled() is True
+
+
+def test_xdg_legacy_first_run_not_reemitted(monkeypatch, tmp_path):
+    from getpatter.telemetry import install_id as iid
+
+    monkeypatch.delenv("PATTER_TELEMETRY_STATE_DIR", raising=False)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    (tmp_path / "first-run").write_text("1")  # pre-0.6.8 marker
+    assert iid.is_first_run() is False
+
+
+def test_first_use_notice_is_visible_on_stderr(enabled, collector, monkeypatch, capsys):
+    """The opt-out disclosure must be visible by default. The SDK attaches no
+    logging handler, so a logger.info-only notice is invisible (lastResort shows
+    WARNING+) — it goes straight to stderr, once per process."""
+    from getpatter.telemetry import client as client_mod
+
+    monkeypatch.setattr(client_mod, "_NOTICE_SHOWN", False)
+    TelemetryClient(sdk_version="0.6.7", endpoint=collector.url)
+    err = capsys.readouterr().err
+    assert "Anonymous usage telemetry is on" in err
+    assert "docs.getpatter.com/telemetry" in err
+    # Once per process: a second client does not repeat it.
+    TelemetryClient(sdk_version="0.6.7", endpoint=collector.url)
+    assert "Anonymous usage telemetry" not in capsys.readouterr().err
+
+
+async def test_flush_chunks_large_buffers_to_relay_cap(enabled, collector):
+    """The relay rejects >64 events per request — a large flush must ship as
+    multiple POSTs, never one oversized batch (which the relay drops/truncates)."""
+    client = TelemetryClient(sdk_version="0.6.7", endpoint=collector.url)
+    for _ in range(100):
+        client.record("cli_command", cli_command="dashboard")
+    await _wait_for(collector, 100)
+    await client.aclose()
+
+    assert len(collector.events) == 100  # nothing truncated
+    batches = [len(b) for b in collector.requests if isinstance(b, list)]
+    assert batches and max(batches) <= 64
+
+
+def test_flush_sync_chunks_large_buffers(enabled, collector):
+    """The synchronous atexit path applies the same relay-cap chunking."""
+    client = TelemetryClient(sdk_version="0.6.7", endpoint=collector.url)
+    for _ in range(70):
+        client.record("cli_command", cli_command="eval")
+    client._flush_sync()
+
+    assert len(collector.events) == 70
+    batches = [len(b) for b in collector.requests if isinstance(b, list)]
+    assert batches and max(batches) <= 64
 
 
 def test_persisted_opt_out_disables_consent(monkeypatch, tmp_path):

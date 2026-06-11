@@ -43,6 +43,9 @@ _TIMEOUT_S = 3.0
 _FLUSH_TIMEOUT_S = 2.0
 _ATEXIT_TIMEOUT_S = 0.25  # keep process-exit blocking minimal for short-lived runs
 _BUFFER_MAX = 256
+# The relay rejects batches larger than 64 events per request — a full buffer
+# must ship as multiple POSTs or events 65..256 silently vanish server-side.
+_MAX_EVENTS_PER_POST = 64
 
 # Module-level registry so a single ``atexit`` hook flushes every live client
 # without leaking one handler per instance. A ``WeakSet`` lets a client whose
@@ -70,15 +73,24 @@ def _show_notice_once() -> None:
     if _NOTICE_SHOWN:
         return
     _NOTICE_SHOWN = True
-    logger.info(
-        "Anonymous usage telemetry is on (no PII, no call content). Collected: "
-        "a random anonymous install id, SDK version, language, OS family, runtime "
-        "version, coarse feature flags, the composed stack (provider + model per "
-        "layer), tool counts, integration category, and per-call duration, latency, "
-        "cost, and error codes (no call content, no message text). "
-        "Disable with PATTER_TELEMETRY_DISABLED=1, DO_NOT_TRACK=1, or telemetry=False. "
-        "Details: https://docs.getpatter.com/telemetry"
-    )
+    # Written straight to stderr, not through logging: the SDK attaches no
+    # handler, so logging's WARNING-level lastResort would swallow an INFO
+    # disclosure — and the opt-out notice must be visible by default (it is
+    # what legitimises the opt-out model; Next.js/Astro print theirs too).
+    # The TS SDK's console-backed logger already shows it — this keeps parity.
+    try:
+        sys.stderr.write(
+            "[patter] Anonymous usage telemetry is on (no PII, no call content). "
+            "Collected: a random anonymous install id, SDK version, language, OS "
+            "family, runtime version, coarse feature flags, the composed stack "
+            "(provider + model per layer), tool counts, integration category, and "
+            "per-call duration, latency, cost, and error codes (no call content, "
+            "no message text). Disable with PATTER_TELEMETRY_DISABLED=1, "
+            "DO_NOT_TRACK=1, or telemetry=False. "
+            "Details: https://docs.getpatter.com/telemetry\n"
+        )
+    except Exception:
+        pass
 
 
 def _register_atexit() -> None:
@@ -237,11 +249,17 @@ class TelemetryClient:
         events = self._drain()
         try:
             http = self._ensure_http()
-            await http.post(self._endpoint, json=events)
+            # Ship in relay-sized chunks: a buffer larger than the relay's
+            # per-request cap would otherwise be silently truncated server-side.
+            for start in range(0, len(events), _MAX_EVENTS_PER_POST):
+                await http.post(
+                    self._endpoint, json=events[start : start + _MAX_EVENTS_PER_POST]
+                )
             # Status is ignored — telemetry is best-effort and never load-bearing.
         except Exception:
-            # Drop on any failure; do NOT requeue (avoids unbounded growth and
-            # keeps offline behaviour identical to online).
+            # Drop on any failure — including this flush's remaining chunks; do
+            # NOT requeue (avoids unbounded growth and keeps offline behaviour
+            # identical to online).
             logger.debug("telemetry flush failed", exc_info=True)
 
     def _ensure_http(self) -> Any:
@@ -260,6 +278,10 @@ class TelemetryClient:
             import httpx
 
             with httpx.Client(timeout=_ATEXIT_TIMEOUT_S) as client:
-                client.post(self._endpoint, json=events)
+                for start in range(0, len(events), _MAX_EVENTS_PER_POST):
+                    client.post(
+                        self._endpoint,
+                        json=events[start : start + _MAX_EVENTS_PER_POST],
+                    )
         except Exception:
             logger.debug("telemetry atexit flush failed", exc_info=True)

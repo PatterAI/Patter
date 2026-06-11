@@ -61,6 +61,33 @@
   `close()` now always drains later-buffered events itself before resolving.
   Added the previously missing regression tests (both SDKs) for the
   "event recorded during an in-flight flush is chained, not stranded" 0.6.7 fix.
+- **Telemetry: large flushes are no longer truncated by the collector.** The
+  client buffers up to 256 events but the collector accepts at most 64 per
+  request — a busy session's flush could silently lose everything past the cap
+  (or the whole batch when oversized). Both SDKs now ship flushes in chunks of
+  ≤64 events per POST, on the async path and the exit-flush path.
+  `libraries/python/getpatter/telemetry/client.py`,
+  `libraries/typescript/src/telemetry/client.ts`.
+- **Telemetry: state files respect the XDG spec, and a persisted opt-out
+  survives environment changes.** With `XDG_STATE_HOME` set, the state files
+  (`install-id`, `version`, `first-run`, `telemetry-disabled`) were written into
+  the bare XDG root instead of an app subdirectory — colliding with other tools
+  and, worse, making a `getpatter telemetry disable` opt-out persisted under
+  `~/.getpatter/` go unhonored when the process later ran with XDG set (and vice
+  versa). Files now live in `$XDG_STATE_HOME/getpatter/`; a pre-existing legacy
+  id is migrated (no double-counted installs, mtime preserved for the install-age
+  bucket), a legacy opt-out marker keeps disabling telemetry, and a legacy
+  first-run marker is never re-emitted.
+  `libraries/python/getpatter/telemetry/install_id.py`,
+  `libraries/typescript/src/telemetry/install-id.ts`.
+- **Telemetry: the first-use disclosure is actually visible in Python.** The
+  one-time "anonymous telemetry is on" notice was emitted via `logging` at INFO
+  level, but the SDK attaches no handler — Python's last-resort handler only
+  shows WARNING and above, so a default install never saw the opt-out notice
+  (TypeScript already printed it via its console-backed logger). Python now
+  writes the disclosure straight to stderr, once per process, matching the
+  TypeScript behaviour and the OSS norm (Next.js/Astro).
+  `libraries/python/getpatter/telemetry/client.py`.
 
 ## 0.6.7 (2026-06-10)
 

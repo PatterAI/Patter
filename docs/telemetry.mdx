@@ -46,7 +46,8 @@ value is replaced with `other` before sending):
 
 The `run_id` is a fresh random value on every process start (it groups one run's
 events). The `install_id` is a random UUID generated **once** and stored in a small
-local file (`~/.getpatter/install-id`) so the maintainers can count unique active
+local file (`~/.getpatter/install-id`, or `$XDG_STATE_HOME/getpatter/install-id`
+when `XDG_STATE_HOME` is set) so the maintainers can count unique active
 installs over time — it is a random number, **not** tied to you or any PII, and is
 never derived from hardware (MAC address, hostname, serial numbers). Opting out
 never creates or reads this file. The collector drops the source IP on receipt.
