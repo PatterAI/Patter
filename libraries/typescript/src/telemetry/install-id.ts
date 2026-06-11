@@ -30,10 +30,34 @@ export function runId(): string {
   return RUN_ID;
 }
 
+/**
+ * Directory holding the telemetry state files (overridable for tests).
+ * Precedence: `PATTER_TELEMETRY_STATE_DIR` (used literally) →
+ * `$XDG_STATE_HOME/getpatter` (the XDG spec requires an app subdirectory —
+ * writing into the shared root collides with other tools) → `~/.getpatter`.
+ */
+function stateDir(): string {
+  const override = process.env.PATTER_TELEMETRY_STATE_DIR;
+  if (override && override.length > 0) return override;
+  const xdg = process.env.XDG_STATE_HOME;
+  if (xdg && xdg.length > 0) return path.join(xdg, 'getpatter');
+  return path.join(os.homedir(), '.getpatter');
+}
+
+/**
+ * Where pre-0.6.8 builds wrote state when `XDG_STATE_HOME` was set: the bare
+ * `$XDG_STATE_HOME` root (no `getpatter/` subdirectory). Existing installs must
+ * keep their id — and, critically, a persisted opt-out must keep being honored —
+ * so the readers below fall back here. `null` when no legacy location applies.
+ */
+function legacyStateDir(): string | null {
+  if (process.env.PATTER_TELEMETRY_STATE_DIR) return null;
+  const xdg = process.env.XDG_STATE_HOME;
+  return xdg && xdg.length > 0 ? xdg : null;
+}
+
 function statePath(): string {
-  const base = process.env.PATTER_TELEMETRY_STATE_DIR || process.env.XDG_STATE_HOME;
-  const root = base && base.length > 0 ? base : path.join(os.homedir(), '.getpatter');
-  return path.join(root, 'install-id');
+  return path.join(stateDir(), 'install-id');
 }
 
 /**
@@ -52,6 +76,31 @@ export function installId(): string {
     }
   } catch {
     // not present / unreadable — fall through to create one
+  }
+
+  const legacyDir = legacyStateDir();
+  if (legacyDir !== null) {
+    const legacy = path.join(legacyDir, 'install-id');
+    let existing = '';
+    try {
+      existing = fs.readFileSync(legacy, 'utf8').trim();
+    } catch {
+      existing = '';
+    }
+    if (HEX32.test(existing)) {
+      // Migrate the pre-0.6.8 id so the install keeps counting as one,
+      // preserving the file mtime that feeds daysSinceInstallBucket.
+      try {
+        fs.mkdirSync(path.dirname(p), { recursive: true });
+        fs.writeFileSync(p, existing, 'utf8');
+        const stat = fs.statSync(legacy);
+        fs.utimesSync(p, stat.atime, stat.mtime);
+      } catch {
+        /* best-effort */
+      }
+      cachedInstallId = existing;
+      return cachedInstallId;
+    }
   }
 
   const newId = randomUUID().replace(/-/g, '');
@@ -81,6 +130,16 @@ export function previousVersion(current: string): string {
     prev = fs.readFileSync(p, 'utf8').trim();
   } catch {
     prev = '';
+  }
+  if (prev === '') {
+    const legacyDir = legacyStateDir();
+    if (legacyDir !== null) {
+      try {
+        prev = fs.readFileSync(path.join(legacyDir, 'version'), 'utf8').trim();
+      } catch {
+        prev = '';
+      }
+    }
   }
   try {
     fs.mkdirSync(path.dirname(p), { recursive: true });
@@ -125,6 +184,15 @@ export function isFirstRun(): boolean {
   } catch {
     return false;
   }
+  const legacyDir = legacyStateDir();
+  if (legacyDir !== null) {
+    try {
+      // A pre-0.6.8 marker in the bare XDG root — never re-emit first_run.
+      if (fs.existsSync(path.join(legacyDir, 'first-run'))) return false;
+    } catch {
+      return false;
+    }
+  }
   try {
     fs.mkdirSync(path.dirname(p), { recursive: true });
     fs.writeFileSync(p, '1', 'utf8');
@@ -144,7 +212,16 @@ function optOutPath(): string {
  */
 export function isOptedOut(): boolean {
   try {
-    return fs.existsSync(optOutPath());
+    if (fs.existsSync(optOutPath())) return true;
+  } catch {
+    /* fall through to the legacy check */
+  }
+  // Honor a marker written by pre-0.6.8 builds into the bare $XDG_STATE_HOME
+  // root: an opt-out must survive the state-dir move.
+  const legacyDir = legacyStateDir();
+  if (legacyDir === null) return false;
+  try {
+    return fs.existsSync(path.join(legacyDir, 'telemetry-disabled'));
   } catch {
     return false;
   }
@@ -165,6 +242,16 @@ export function setOptOut(disabled: boolean): void {
       fs.unlinkSync(p);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+    // Also clear a pre-0.6.8 marker in the bare $XDG_STATE_HOME root —
+    // isOptedOut honors it, so leaving it behind would pin telemetry off.
+    const legacyDir = legacyStateDir();
+    if (legacyDir !== null) {
+      try {
+        fs.unlinkSync(path.join(legacyDir, 'telemetry-disabled'));
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      }
     }
   }
 }

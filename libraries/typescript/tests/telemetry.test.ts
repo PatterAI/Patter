@@ -707,6 +707,88 @@ describe('[unit] deploy-shape + upgrade funnel (schema v4)', () => {
   });
 });
 
+describe('[unit] state-dir hardening (XDG subdir + legacy migration, 0.6.8)', () => {
+  let savedStateDir: string | undefined;
+  let savedXdg: string | undefined;
+
+  beforeEach(() => {
+    savedStateDir = process.env.PATTER_TELEMETRY_STATE_DIR;
+    savedXdg = process.env.XDG_STATE_HOME;
+  });
+  afterEach(() => {
+    if (savedStateDir === undefined) delete process.env.PATTER_TELEMETRY_STATE_DIR;
+    else process.env.PATTER_TELEMETRY_STATE_DIR = savedStateDir;
+    if (savedXdg === undefined) delete process.env.XDG_STATE_HOME;
+    else process.env.XDG_STATE_HOME = savedXdg;
+    vi.resetModules();
+  });
+
+  it('uses the getpatter subdirectory under XDG_STATE_HOME, never the shared root', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'patter-xdg-'));
+    delete process.env.PATTER_TELEMETRY_STATE_DIR;
+    process.env.XDG_STATE_HOME = dir;
+    vi.resetModules();
+    const mod = await import('../src/telemetry/install-id');
+    const id = mod.installId();
+    expect(fs.readFileSync(path.join(dir, 'getpatter', 'install-id'), 'utf8').trim()).toBe(id);
+    expect(fs.existsSync(path.join(dir, 'install-id'))).toBe(false);
+  });
+
+  it('keeps and migrates a pre-0.6.8 install id from the bare XDG root', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'patter-xdg-legacy-'));
+    delete process.env.PATTER_TELEMETRY_STATE_DIR;
+    process.env.XDG_STATE_HOME = dir;
+    const legacyId = 'ab'.repeat(16);
+    fs.writeFileSync(path.join(dir, 'install-id'), legacyId, 'utf8');
+    vi.resetModules();
+    const mod = await import('../src/telemetry/install-id');
+    expect(mod.installId()).toBe(legacyId); // no double-counted install
+    expect(
+      fs.readFileSync(path.join(dir, 'getpatter', 'install-id'), 'utf8').trim(),
+    ).toBe(legacyId);
+  });
+
+  it('honors a pre-0.6.8 opt-out marker in the bare XDG root; re-enable clears it', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'patter-xdg-opt-'));
+    delete process.env.PATTER_TELEMETRY_STATE_DIR;
+    process.env.XDG_STATE_HOME = dir;
+    fs.writeFileSync(path.join(dir, 'telemetry-disabled'), '1', 'utf8');
+    vi.resetModules();
+    const mod = await import('../src/telemetry/install-id');
+    expect(mod.isOptedOut()).toBe(true); // consent survives the state-dir move
+    mod.setOptOut(false);
+    expect(mod.isOptedOut()).toBe(false);
+    expect(fs.existsSync(path.join(dir, 'telemetry-disabled'))).toBe(false);
+  });
+
+  it('never re-emits first_run when the pre-0.6.8 marker exists', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'patter-xdg-fr-'));
+    delete process.env.PATTER_TELEMETRY_STATE_DIR;
+    process.env.XDG_STATE_HOME = dir;
+    fs.writeFileSync(path.join(dir, 'first-run'), '1', 'utf8');
+    vi.resetModules();
+    const mod = await import('../src/telemetry/install-id');
+    expect(mod.isFirstRun()).toBe(false);
+  });
+});
+
+describe('[integration] telemetry — relay-cap chunking (0.6.8)', () => {
+  it('chunks a large flush to ≤64 events per POST, delivering everything', async () => {
+    enableTelemetryEnv();
+    const client = new TelemetryClient({ sdkVersion: '0.6.7', endpoint: collector.url });
+    for (let i = 0; i < 100; i++) client.record('cli_command', { cli_command: 'dashboard' });
+    await waitFor(collector, 100);
+    await client.close();
+
+    expect(collector.events).toHaveLength(100); // nothing truncated
+    const sizes = collector.requests
+      .filter((b): b is unknown[] => Array.isArray(b))
+      .map((b) => b.length);
+    expect(sizes.length).toBeGreaterThan(1);
+    expect(Math.max(...sizes)).toBeLessThanOrEqual(64);
+  });
+});
+
 describe('[unit] CLI usage + first-run + call funnel + opt-out (schema v5)', () => {
   it('is on schema v5', () => {
     expect(SCHEMA_VERSION).toBe(5);

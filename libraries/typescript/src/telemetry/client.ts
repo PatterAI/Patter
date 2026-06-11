@@ -26,6 +26,9 @@ export const DEFAULT_ENDPOINT = 'https://telemetry.getpatter.com/v1/ingest';
 
 const TIMEOUT_MS = 3000;
 const BUFFER_MAX = 256;
+// The relay rejects batches larger than 64 events per request — a full buffer
+// must ship as multiple POSTs or events 65..256 silently vanish server-side.
+const MAX_EVENTS_PER_POST = 64;
 
 let noticeShown = false;
 // WeakRefs so a client whose owning `Patter` was discarded is garbage-collected
@@ -188,22 +191,29 @@ export class TelemetryClient {
     const events = this.buffer.splice(0, this.buffer.length);
     pendingFlush.delete(this); // nothing buffered — GC may reclaim us again
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
-    (timer as { unref?: () => void }).unref?.();
     try {
-      await fetch(this.endpoint, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(events),
-        signal: controller.signal,
-      });
-      // Status ignored — telemetry is best-effort and never load-bearing.
+      // Ship in relay-sized chunks: a buffer larger than the relay's
+      // per-request cap would otherwise be silently truncated server-side.
+      for (let start = 0; start < events.length; start += MAX_EVENTS_PER_POST) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+        (timer as { unref?: () => void }).unref?.();
+        try {
+          await fetch(this.endpoint, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(events.slice(start, start + MAX_EVENTS_PER_POST)),
+            signal: controller.signal,
+          });
+          // Status ignored — telemetry is best-effort and never load-bearing.
+        } finally {
+          clearTimeout(timer);
+        }
+      }
     } catch (err) {
-      // Drop on any failure; do NOT requeue (keeps offline behaviour identical).
+      // Drop on any failure — including this flush's remaining chunks; do NOT
+      // requeue (keeps offline behaviour identical).
       getLogger().debug('telemetry flush failed', err);
-    } finally {
-      clearTimeout(timer);
     }
   }
 }
