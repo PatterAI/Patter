@@ -6,6 +6,7 @@
  * helpers are thin pass-throughs that return the instance or null. Kept as
  * functions so the Twilio/Telnyx bridges have a single dispatch point.
  */
+import { getLogger } from './logger';
 import type { AgentOptions } from './types';
 
 /** Per-word timings / metadata (Deepgram-shaped). Optional on every adapter. */
@@ -85,7 +86,31 @@ export interface TTSAdapter {
  * is configured. In v0.5.0+ ``agent.stt`` is always an adapter instance.
  */
 export async function createSTT(agent: AgentOptions): Promise<STTAdapter | null> {
-  return agent.stt ?? null;
+  const stt = agent.stt ?? null;
+  if (!stt) return null;
+  // CLONE per call: the documented pattern hands ONE adapter instance to ONE
+  // agent served for MANY calls, but the adapters are stateful per-connection
+  // objects — concurrent calls sharing one instance overwrote each other's
+  // sockets/callback sets (cross-call transcript bleed; the first hangup
+  // closed the surviving call's socket). Adapters without clone() fall back
+  // to the legacy shared instance with a loud warning.
+  const cloneable = stt as STTAdapter & { clone?: () => STTAdapter };
+  if (typeof cloneable.clone === 'function') {
+    try {
+      return cloneable.clone();
+    } catch (err) {
+      getLogger().warn(
+        `STT adapter ${stt.constructor?.name ?? 'unknown'} clone() failed (${String(err)}) — ` +
+          'falling back to the SHARED instance; concurrent calls may interfere.',
+      );
+      return stt;
+    }
+  }
+  getLogger().warn(
+    `STT adapter ${stt.constructor?.name ?? 'unknown'} has no clone() — using the SHARED ` +
+      'instance; concurrent calls on this agent may interfere. Implement clone() to fix.',
+  );
+  return stt;
 }
 
 /** Return the TTS adapter instance attached to ``agent``, or null. */

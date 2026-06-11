@@ -306,6 +306,44 @@ export interface OpenAICompatibleConsult {
   readonly sessionHeader?: string;
 }
 
+/**
+ * Options for a call transfer initiated via the built-in `transfer_call`
+ * tool or `TelephonyBridge.transferCall`.
+ *
+ * Mirrors Python's `mode` / `summary` keywords on the per-carrier transfer
+ * functions.
+ */
+export interface TransferCallOptions {
+  /**
+   * `'cold'` (default) redirects the caller immediately — byte-identical to
+   * the historical blind transfer. `'warm'` puts the caller on hold music,
+   * dials the target with an announced {@link summary}, then bridges the two
+   * together (Twilio only for now; other carriers return an error envelope).
+   */
+  readonly mode?: 'cold' | 'warm';
+  /**
+   * Warm mode only — one or two sentences announced to the human agent
+   * before the caller is bridged (who is calling and what they need).
+   */
+  readonly summary?: string;
+}
+
+/**
+ * Result of a transfer attempt. Cold transfers may resolve `void` (legacy
+ * contract); warm transfers resolve a result envelope —
+ * `{ status: 'transferring', mode: 'warm', ... }` on success or
+ * `{ error: ... }` when warm transfer is unsupported on the carrier or the
+ * carrier REST sequence failed (the call keeps running in that case).
+ */
+export interface TransferCallResult {
+  readonly status?: string;
+  readonly mode?: 'cold' | 'warm';
+  readonly to?: string;
+  /** Per-call conference name (Twilio warm transfers). */
+  readonly conference?: string;
+  readonly error?: string;
+}
+
 // === Local mode ===
 
 /** Constructor options for `new Patter({...})` in local-server mode. */
@@ -475,6 +513,30 @@ export interface VADProvider {
   reset?(): Promise<void> | void;
 }
 
+/**
+ * Semantic end-of-utterance (turn) detector.
+ *
+ * Predicts whether the caller has FINISHED their turn — as opposed to a
+ * VAD, which only reports whether they are currently producing sound.
+ * Implementations include `SmartTurnDetector` (pipecat-ai smart-turn v3,
+ * ONNX). Used via `Agent.turnDetector`; integrated in the pipeline stream
+ * handler on the VAD `speech_end` edge to defer the STT finalize until the
+ * model agrees the turn is complete (bounded by `Agent.maxSemanticHoldMs`).
+ * Mirror of the Python `TurnDetectorProvider` ABC.
+ */
+export interface TurnDetectorProvider {
+  /** End-of-turn probability at/above which the turn is complete. */
+  readonly threshold: number;
+  /**
+   * Return the end-of-turn probability in `[0, 1]` for the window.
+   * `pcm16Window` is mono int16 little-endian PCM at 16 kHz covering the
+   * most recent seconds of caller audio (the handler keeps a rolling
+   * ~8 s buffer).
+   */
+  predict(pcm16Window: Buffer): Promise<number>;
+  close(): Promise<void>;
+}
+
 /** Pre-STT audio filter — noise cancellation, gain, EQ. */
 export interface AudioFilter {
   process(pcmChunk: Buffer, sampleRate: number): Promise<Buffer>;
@@ -611,6 +673,18 @@ export interface AgentOptions {
    */
   readonly consult?: ConsultConfig;
   /**
+   * Multi-agent handoff targets: ``{ name: agentOptions }``. When set, Patter
+   * auto-injects a built-in ``handoff_to(name, reason?)`` tool (Realtime +
+   * Pipeline modes); calling it swaps the CURRENT call to the target agent's
+   * configuration mid-call — system prompt, tools, variables, guardrails,
+   * and onward ``handoffs`` are taken from the target. Audio infrastructure
+   * established at call start (STT/TTS/engine connection — and therefore
+   * voice on engines that cannot switch voice mid-session) is retained.
+   * Chained handoffs follow the TARGET's own ``handoffs`` map. ``undefined``
+   * (default) disables the tool. Mirrors Python ``Agent.handoffs``.
+   */
+  readonly handoffs?: Readonly<Record<string, AgentOptions>>;
+  /**
    * When ``true``, ship ``systemPrompt`` to the LLM verbatim. Default
    * (``false``) prepends a phone-friendly preamble that instructs the
    * model to avoid markdown, emojis, bullet lists, and verbose replies —
@@ -664,6 +738,26 @@ export interface AgentOptions {
   readonly textTransforms?: ReadonlyArray<(text: string) => string>;
   /** Optional server-side VAD (e.g., Silero). Pipeline mode only. */
   readonly vad?: VADProvider;
+  /**
+   * Opt-in semantic end-of-utterance model (e.g. `SmartTurnDetector.load()`
+   * — pipecat-ai smart-turn v3, ONNX). Pipeline mode only. When set, a VAD
+   * `speech_end` no longer finalizes the STT utterance immediately: the
+   * detector scores the last ~8 s of caller audio and the turn is committed
+   * only once the end-of-turn probability reaches `turnDetector.threshold`
+   * (the EOU trigger is then stamped `semantic_turn_detector`). While the
+   * model says "incomplete" the handler re-polls on subsequent silence,
+   * bounded by `maxSemanticHoldMs`. Undefined (default) keeps today's pure
+   * VAD-silence endpointing byte-identical.
+   */
+  readonly turnDetector?: TurnDetectorProvider;
+  /**
+   * Hard cap (ms) on how long the semantic turn detector may hold a turn
+   * open past the VAD `speech_end` before the SDK finalizes anyway (with
+   * the `vad_silence` trigger), so a turn can never hang on a model that
+   * keeps predicting "incomplete". Only consulted when `turnDetector` is
+   * set. Default 1200 ms.
+   */
+  readonly maxSemanticHoldMs?: number;
   /** Optional pre-STT audio filter (noise cancellation). Pipeline mode only. */
   readonly audioFilter?: AudioFilter;
   /** Optional background audio mixer (hold music, thinking cues). Pipeline mode only. */
@@ -695,10 +789,32 @@ export interface AgentOptions {
   /**
    * Maximum time (ms) to wait for at least one strategy to confirm a
    * pending barge-in before discarding the pending state and resuming
-   * TTS. Only consulted when ``bargeInStrategies`` is non-empty.
+   * TTS. Consulted when ``bargeInStrategies`` is non-empty AND as the
+   * false-interruption window for ``bargeInMode: 'pause_resume'``.
    * Default: 1500.
    */
   readonly bargeInConfirmMs?: number;
+  /**
+   * How a VAD ``speech_start`` during the agent's turn is handled
+   * (pipeline mode):
+   *
+   * - ``'cancel'`` (default): today's behaviour — the in-flight turn is
+   *   cancelled immediately (or marked pending when
+   *   ``bargeInStrategies`` are configured).
+   * - ``'pause_resume'`` (LiveKit-style false-interruption handling):
+   *   output is PAUSED immediately — the carrier buffer is cleared and
+   *   no further TTS audio is sent — while the LLM stream and the TTS
+   *   provider stream stay alive (tokens buffer as sentences,
+   *   synthesized audio queues in memory, both bounded). If a committed
+   *   final transcript confirms the interruption within
+   *   ``bargeInConfirmMs`` the turn is cancelled exactly as in
+   *   ``'cancel'`` mode; if the window expires with no transcript (a
+   *   cough, line noise) the agent RESUMES from the first sentence the
+   *   caller had not fully heard, re-sending retained audio without
+   *   re-billing TTS, and the event is recorded as a false interruption
+   *   (a backchannel — not an interruption — in metrics).
+   */
+  readonly bargeInMode?: 'cancel' | 'pause_resume';
   /**
    * When ``true`` (default), ``Patter.call`` warms up the STT, TTS, and
    * LLM provider connections in parallel with the carrier-side
@@ -741,6 +857,31 @@ export interface AgentOptions {
    * currency, balanced delimiter, ellipsis).
    */
   readonly aggressiveFirstFlush?: boolean;
+  /**
+   * PREEMPTIVE GENERATION (pipeline mode, built-in LLM loop only; opt-in).
+   * When ``true`` the SDK starts the LLM — and sentence-chunked TTS
+   * synthesis — EARLY on a confident INTERIM transcript (one that ends with
+   * sentence-final punctuation, or that has been unchanged for
+   * ``preemptiveMinStableMs``), holding all synthesized audio in memory.
+   * When the FINAL transcript commits: if it matches the speculated interim
+   * (normalized — case/punctuation/whitespace-insensitive) the buffered
+   * audio is RELEASED to the carrier immediately (the LLM+TTS latency was
+   * paid during the user's own end-of-utterance silence); if it differs,
+   * the speculation is discarded silently and the turn dispatches normally
+   * on the final. History and metrics record exactly one turn either way.
+   * Same pattern as LiveKit Agents' ``preemptive_generation``. Default:
+   * ``false`` — every turn waits for the final transcript, as today.
+   * Mirrors Python ``preemptive_generation``.
+   */
+  readonly preemptiveGeneration?: boolean;
+  /**
+   * Interim-stability window (ms) for preemptive generation: an interim
+   * transcript that does NOT end with sentence-final punctuation qualifies
+   * for speculation only once it has remained unchanged for this long.
+   * Only consulted when ``preemptiveGeneration`` is true. Default: 300.
+   * Mirrors Python ``preemptive_min_stable_ms``.
+   */
+  readonly preemptiveMinStableMs?: number;
   /**
    * Input noise reduction for speakerphone / conference audio (OpenAI
    * Realtime mode only). `undefined` (default) omits the field entirely
@@ -818,7 +959,15 @@ export interface ServeOptions {
   readonly port?: number;
   /** When true, start a cloudflared tunnel automatically (requires `cloudflared` npm package). */
   readonly tunnel?: boolean;
-  readonly onCallStart?: (data: Record<string, unknown>) => Promise<void>;
+  /**
+   * Called when a call's media stream starts. Returning an object applies
+   * PER-CALL AGENT OVERRIDES (snake_case keys: system_prompt, voice, model,
+   * language, first_message, provider, tools, variables) — parity with the
+   * Python SDK. Return nothing to just observe.
+   */
+  readonly onCallStart?: (
+    data: Record<string, unknown>,
+  ) => Promise<void | Record<string, unknown> | undefined> | void | Record<string, unknown>;
   readonly onCallEnd?: (data: Record<string, unknown>) => Promise<void>;
   readonly onTranscript?: (data: Record<string, unknown>) => Promise<void>;
   /** Pipeline mode only — called with the user's transcript; return value is spoken.
@@ -828,6 +977,19 @@ export interface ServeOptions {
   readonly onMetrics?: (data: Record<string, unknown>) => Promise<void>;
   /** When true, record calls via the Twilio Recordings API. */
   readonly recording?: boolean;
+  /**
+   * Carrier-neutral local call recording. When `true`, the SDK records each
+   * call at the transport as an interleaved stereo WAV — left channel =
+   * caller, right channel = agent — at 16 kHz PCM16, written incrementally
+   * to `<call_log_dir>/recording.wav` when call logging (`persist` /
+   * `PATTER_LOG_DIR`) is enabled, else to `./recordings/<call_id>.wav`.
+   * Pass a directory string to choose where the WAVs go. Works on every
+   * carrier (Twilio, Telnyx, Plivo) and every engine mode; independent of
+   * the carrier-side `recording` flag (both can be on). The final path is
+   * surfaced as `recording_path` in the `onCallEnd` payload and in the
+   * call-log metadata. Default `false`.
+   */
+  readonly localRecording?: boolean | string;
   /** If set, spoken as a voicemail message when AMD detects a machine. */
   readonly voicemailMessage?: string;
   /** Custom pricing overrides for cost calculation. */
@@ -909,6 +1071,13 @@ export interface MachineDetectionResult {
 export interface LocalCallOptions {
   readonly to: string;
   readonly agent: AgentOptions;
+  /**
+   * Per-call greeting override — what the AI says when the callee answers.
+   * Overrides ``agent.firstMessage`` for this call only (prewarm synthesis
+   * and the stream handler both read the overridden value). Parity with
+   * Python ``call(first_message=...)``.
+   */
+  readonly firstMessage?: string;
   /**
    * Enable answering-machine detection. **Defaults to ``true``** — the SDK
    * asks Twilio (``MachineDetection=DetectMessageEnd`` + Async AMD) or

@@ -257,9 +257,11 @@ class CerebrasLLMProvider(OpenAILLMProvider):
         404 ``model_not_found`` on Cerebras almost always means the model
         name isn't available on the caller's tier (Cerebras gates models per
         plan). The error is logged with a recovery hint at ERROR level and
-        the generator returns silently — voice pipelines treat LLM provider
-        failures as recoverable (the call continues; the user just hears no
-        LLM response), so raising would be a behavioural change.
+        then re-raised: a silently-completed empty stream is
+        indistinguishable from success, so the LLM fallback chain would
+        never fail over and the spoken ``llm_error_message`` would never
+        fire — the caller would get dead air with a healthy fallback
+        configured. Mirrors the TS provider (cerebras-llm.ts throws).
 
         ``call_id`` is accepted for protocol parity and forwarded to the
         parent (which ignores it — Cerebras is a raw-inference provider with
@@ -281,7 +283,6 @@ class CerebrasLLMProvider(OpenAILLMProvider):
                     "Upstream: %s",
                     self._model,
                     _CEREBRAS_BASE_URL,
-                    text,
+                    text[:200],
                 )
-                return
             raise

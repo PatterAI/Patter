@@ -115,6 +115,9 @@ class LLMJudge:
         except (TypeError, ValueError):
             score = 0.0
         score = max(0.0, min(1.0, score))
-        passed = bool(data.get("passed", score >= self.pass_threshold))
+        # Verdict is computed LOCALLY from the score: trusting the judge's
+        # self-reported ``passed`` let a hallucinated ``passed: true`` with
+        # ``score: 0.2`` record a pass.
+        passed = score >= self.pass_threshold
         reasoning = str(data.get("reasoning", ""))
         return JudgeResult(score=score, passed=passed, reasoning=reasoning)

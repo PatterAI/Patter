@@ -401,3 +401,200 @@ describe('EmbeddedServer wraps logging callbacks with active-record fallback', (
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// events.jsonl wiring — tool_call / barge_in / error operational events
+// ---------------------------------------------------------------------------
+
+describe('EmbeddedServer writes operational events to events.jsonl', () => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const fs = require('node:fs') as typeof import('node:fs');
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const os = require('node:os') as typeof import('node:os');
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const path = require('node:path') as typeof import('node:path');
+
+  type Wrapped = [
+    (d: Record<string, unknown>) => Promise<unknown>,
+    (d: Record<string, unknown>) => Promise<void>,
+    (d: Record<string, unknown>) => Promise<void>,
+    (d: Record<string, unknown>) => Promise<void>,
+  ];
+
+  const makeWrapped = (tmp: string): Wrapped => {
+    const server = new EmbeddedServer(makeConfig({ persistRoot: tmp }), makeAgent());
+    return (server as unknown as {
+      wrapLoggingCallbacks: (b: { telephonyProvider: string }) => Wrapped;
+    }).wrapLoggingCallbacks({ telephonyProvider: 'twilio' });
+  };
+
+  const findFiles = (root: string, name: string): string[] => {
+    const out: string[] = [];
+    const walk = (d: string): void => {
+      for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
+        const full = path.join(d, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (entry.name === name) out.push(full);
+      }
+    };
+    walk(root);
+    return out;
+  };
+
+  const readEvents = (root: string): Array<{ type: string; data: Record<string, unknown> }> => {
+    const paths = findFiles(root, 'events.jsonl');
+    if (paths.length === 0) return [];
+    return fs
+      .readFileSync(paths[0], 'utf8')
+      .split('\n')
+      .filter((l) => l.trim().length > 0)
+      .map((l) => JSON.parse(l) as { type: string; data: Record<string, unknown> });
+  };
+
+  it('writes tool_call + tool_result events for role=tool transcript lines', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'patter-events-'));
+    try {
+      const [, , , wrappedTranscript] = makeWrapped(tmp);
+      await wrappedTranscript({
+        role: 'tool',
+        text: 'get_weather({})',
+        call_id: 'CA-tools',
+        tool_name: 'get_weather',
+        tool_args: { city: 'Rome' },
+        tool_result: null,
+      });
+      await wrappedTranscript({
+        role: 'tool',
+        text: 'get_weather(...) → sunny',
+        call_id: 'CA-tools',
+        tool_name: 'get_weather',
+        tool_args: { city: 'Rome' },
+        tool_result: 'sunny',
+      });
+      // Regular lines must NOT produce events.
+      await wrappedTranscript({ role: 'user', text: 'hi', call_id: 'CA-tools' });
+
+      await vi.waitFor(
+        () => {
+          expect(readEvents(tmp)).toHaveLength(2);
+        },
+        { timeout: 2000 },
+      );
+      const events = readEvents(tmp);
+      // Both writes are fire-and-forget, so on-disk order is not guaranteed
+      // (each record carries its own ``ts``); assert content, not order.
+      expect(events.map((e) => e.type).sort()).toEqual(['tool_call', 'tool_result']);
+      const callEvent = events.find((e) => e.type === 'tool_call');
+      expect(callEvent?.data).toEqual({
+        name: 'get_weather',
+        arguments: { city: 'Rome' },
+        result: null,
+      });
+      const resultEvent = events.find((e) => e.type === 'tool_result');
+      expect(resultEvent?.data.result).toBe('sunny');
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('writes a barge_in event for interrupted turns only', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'patter-events-'));
+    try {
+      const [, wrappedMetrics] = makeWrapped(tmp);
+      await wrappedMetrics({
+        call_id: 'CA-barge',
+        turn: {
+          turn_index: 2,
+          user_text: 'wait',
+          agent_text: '[interrupted]',
+          latency: { bargein_ms: 87.5 },
+        },
+      });
+      // A clean turn must NOT produce a barge_in event.
+      await wrappedMetrics({
+        call_id: 'CA-barge',
+        turn: {
+          turn_index: 3,
+          user_text: 'ok',
+          agent_text: 'sure',
+          latency: { total_ms: 900 },
+        },
+      });
+
+      await vi.waitFor(
+        () => {
+          expect(readEvents(tmp)).toHaveLength(1);
+          // Both turns' transcript writes must have drained too, so the
+          // "no second event" assertion below is meaningful.
+          expect(
+            fs.readFileSync(findFiles(tmp, 'transcript.jsonl')[0], 'utf8').trim().split('\n'),
+          ).toHaveLength(2);
+        },
+        { timeout: 2000 },
+      );
+      const events = readEvents(tmp);
+      expect(events.map((e) => e.type)).toEqual(['barge_in']);
+      expect(events[0].data).toEqual({ turn_index: 2, bargein_ms: 87.5 });
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('writes an error event and metadata error field from metrics.error_code', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'patter-events-'));
+    try {
+      const [, , wrappedEnd] = makeWrapped(tmp);
+      await wrappedEnd({
+        call_id: 'CA-err',
+        metrics: {
+          duration_seconds: 12,
+          turns: [],
+          cost: null,
+          error_code: 'connection',
+        },
+      });
+
+      await vi.waitFor(
+        () => {
+          expect(readEvents(tmp)).toHaveLength(1);
+          expect(findFiles(tmp, 'metadata.json')).toHaveLength(1);
+        },
+        { timeout: 2000 },
+      );
+      const events = readEvents(tmp);
+      expect(events.map((e) => e.type)).toEqual(['error']);
+      expect(events[0].data).toEqual({ error_code: 'connection' });
+      const meta = JSON.parse(
+        fs.readFileSync(findFiles(tmp, 'metadata.json')[0], 'utf8'),
+      ) as { error: string | null };
+      expect(meta.error).toBe('connection');
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('writes no error event for a clean call end', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'patter-events-'));
+    try {
+      const [, , wrappedEnd] = makeWrapped(tmp);
+      await wrappedEnd({
+        call_id: 'CA-clean',
+        metrics: { duration_seconds: 5, turns: [], cost: null, error_code: '' },
+      });
+
+      await vi.waitFor(
+        () => {
+          expect(findFiles(tmp, 'metadata.json')).toHaveLength(1);
+        },
+        { timeout: 2000 },
+      );
+      expect(readEvents(tmp)).toEqual([]);
+      const meta = JSON.parse(
+        fs.readFileSync(findFiles(tmp, 'metadata.json')[0], 'utf8'),
+      ) as { error: string | null };
+      expect(meta.error).toBeNull();
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});

@@ -45,6 +45,8 @@ class _PerToolState:
     state: CircuitBreakerState = CircuitBreakerState.CLOSED
     consecutive_failures: int = 0
     opened_at: float = 0.0
+    # True while a HALF_OPEN probe is in flight — gates concurrent callers.
+    probe_in_flight: bool = False
 
 
 # Once-per-process flag so the deprecation warning fires once instead of
@@ -155,9 +157,15 @@ class CircuitBreakerRegistry:
                 # Cooldown elapsed — allow exactly one probe to determine
                 # if the downstream has recovered.
                 s.state = CircuitBreakerState.HALF_OPEN
+                s.probe_in_flight = True
                 return True
             return False
-        # HALF_OPEN — allow only one in-flight probe at a time.
+        # HALF_OPEN — allow only one in-flight probe at a time. The old
+        # unconditional ``return True`` let a burst of parallel tool calls
+        # all hammer a recovering backend (TS gates with probeInFlight).
+        if s.probe_in_flight:
+            return False
+        s.probe_in_flight = True
         return True
 
     def record_success(self, tool_name: str) -> None:
@@ -168,6 +176,7 @@ class CircuitBreakerRegistry:
         s.state = CircuitBreakerState.CLOSED
         s.consecutive_failures = 0
         s.opened_at = 0.0
+        s.probe_in_flight = False
 
     def record_failure(self, tool_name: str) -> None:
         """Mark a failed execution; trips OPEN once threshold is reached."""
@@ -178,6 +187,7 @@ class CircuitBreakerRegistry:
             s = _PerToolState()
             self._state[tool_name] = s
         s.consecutive_failures += 1
+        s.probe_in_flight = False
         if s.consecutive_failures >= self._threshold:
             s.state = CircuitBreakerState.OPEN
             s.opened_at = self._clock()

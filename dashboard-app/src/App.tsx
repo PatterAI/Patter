@@ -72,14 +72,23 @@ export function App() {
   // Resolve bucket strategy + window for the active range. Bucket counts
   // and sizes are aligned to natural boundaries so tooltip ranges read as
   // "11:00 → 12:00" rather than "11:39 → 12:33".
-  const strategy = useMemo(() => bucketStrategyForRange(range), [range]);
+  // Re-anchor the window periodically: the strategy captures Date.now() and
+  // was memoized on [range] only, so the window froze at mount — a dashboard
+  // left open past the window edge silently dropped calls that ended after
+  // it (within at most 1 hour on the default 24h view).
+  const [nowTick, setNowTick] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNowTick(Date.now()), 30_000);
+    return () => clearInterval(t);
+  }, []);
+  const strategy = useMemo(() => bucketStrategyForRange(range, nowTick), [range, nowTick]);
   const timeWindow = strategy.window;
 
   // Calls that fall inside the selected range. Live calls are always
   // included regardless of the range filter — the user always wants to see
   // what's happening right now.
   const filteredCalls = useMemo(() => {
-    if (range === 'All') return calls;
+    if (range === 'All' || timeWindow === null) return calls;
     const inWindow = new Set(filterCallsInWindow(calls, timeWindow).map((c) => c.id));
     return calls.filter((c) => c.status === 'live' || inWindow.has(c.id));
   }, [calls, range, timeWindow]);

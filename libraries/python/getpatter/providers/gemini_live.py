@@ -19,7 +19,7 @@ import asyncio
 import json
 import logging
 from enum import IntEnum, StrEnum
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Union
 
 logger = logging.getLogger("getpatter.gemini_live")
 
@@ -68,6 +68,7 @@ class GeminiLiveEventType(StrEnum):
     """Adapter-level event-type strings yielded by :meth:`receive_events`."""
 
     AUDIO = "audio"
+    TRANSCRIPT_INPUT = "transcript_input"
     TRANSCRIPT_OUTPUT = "transcript_output"
     FUNCTION_CALL = "function_call"
     RESPONSE_DONE = "response_done"
@@ -177,19 +178,32 @@ class GeminiLiveAdapter:
             "response_modalities": [GeminiLiveResponseModality.AUDIO.value],
             "speech_config": speech_config,
             "temperature": self.temperature,
+            # Without these, native-audio sessions produced NO user
+            # transcript ever and no assistant transcript in AUDIO modality —
+            # logs/history/metrics got nothing for Gemini Live calls.
+            "input_audio_transcription": {},
+            "output_audio_transcription": {},
         }
         if self.instructions:
             config["system_instruction"] = genai_types.Content(
                 parts=[genai_types.Part(text=self.instructions)],
             )
         if self.tools:
+            from getpatter.providers.google_llm import _sanitize_gemini_schema
+
             config["tools"] = [
                 {
                     "function_declarations": [
                         {
                             "name": t["name"],
                             "description": t.get("description", ""),
-                            "parameters": t.get("parameters", {}),
+                            # Strip JSON-Schema keys the Live API's proto
+                            # Schema rejects ($schema, additionalProperties —
+                            # emitted by strict-mode and zod-derived MCP
+                            # tools): one such tool 400'd the whole session.
+                            "parameters": _sanitize_gemini_schema(
+                                t.get("parameters", {})
+                            ),
                         }
                         for t in self.tools
                     ],
@@ -278,10 +292,32 @@ class GeminiLiveAdapter:
                                     GeminiLiveEventType.TRANSCRIPT_OUTPUT.value,
                                     text,
                                 )
+                    input_tx = getattr(server_content, "input_transcription", None)
+                    if input_tx is not None and getattr(input_tx, "text", None):
+                        yield (
+                            GeminiLiveEventType.TRANSCRIPT_INPUT.value,
+                            input_tx.text,
+                        )
+                    output_tx = getattr(server_content, "output_transcription", None)
+                    if output_tx is not None and getattr(output_tx, "text", None):
+                        yield (
+                            GeminiLiveEventType.TRANSCRIPT_OUTPUT.value,
+                            output_tx.text,
+                        )
                     if getattr(server_content, "turn_complete", False):
                         yield (GeminiLiveEventType.RESPONSE_DONE.value, None)
                     if getattr(server_content, "interrupted", False):
                         yield (GeminiLiveEventType.SPEECH_STARTED.value, None)
+
+                go_away = getattr(response, "go_away", None)
+                if go_away is not None:
+                    # Gemini Live hard-caps session length (~10-15 min without
+                    # resumption); goAway is the only warning before the
+                    # server drops the connection. Surface it loudly.
+                    logger.warning(
+                        "Gemini Live goAway received — session ends in %s",
+                        getattr(go_away, "time_left", "unknown"),
+                    )
 
                 tool_call = getattr(response, "tool_call", None)
                 if tool_call is not None:

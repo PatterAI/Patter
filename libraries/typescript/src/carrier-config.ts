@@ -89,15 +89,33 @@ export async function configureTelnyxNumber(
   connectionId: string,
   phoneNumber: string,
 ): Promise<void> {
+  // ``connection_id`` lives on ``PATCH /phone_numbers/{id}`` — the ``/voice``
+  // sub-resource only covers voice settings and silently ignores unknown
+  // fields, so the previous single ``/voice`` PATCH returned 200 without ever
+  // linking the number to the Call Control app (inbound calls didn't route).
+  const headers = {
+    Authorization: `Bearer ${apiKey}`,
+    'Content-Type': 'application/json',
+  };
+  const assoc = await fetch(
+    `${TELNYX_API_BASE}/phone_numbers/${encodeURIComponent(phoneNumber)}`,
+    {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({ connection_id: connectionId }),
+    },
+  );
+  if (!assoc.ok) {
+    throw new Error(
+      `Telnyx PATCH /phone_numbers/${redactPhone(phoneNumber)} failed: ${assoc.status} ${await assoc.text()}`,
+    );
+  }
   const resp = await fetch(
     `${TELNYX_API_BASE}/phone_numbers/${encodeURIComponent(phoneNumber)}/voice`,
     {
       method: 'PATCH',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ connection_id: connectionId, tech_prefix_enabled: false }),
+      headers,
+      body: JSON.stringify({ tech_prefix_enabled: false }),
     },
   );
   if (!resp.ok) {

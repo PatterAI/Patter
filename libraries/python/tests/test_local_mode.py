@@ -195,6 +195,7 @@ async def test_serve_calls_embedded_server():
             config=phone._local_config,
             agent=agent,
             recording=False,
+            local_recording=False,
             voicemail_message="",
             pricing=None,
             dashboard=True,

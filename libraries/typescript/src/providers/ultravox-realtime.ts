@@ -47,6 +47,10 @@ export class UltravoxRealtimeAdapter {
   private readonly firstMessage: string;
 
   private ws: WebSocket | null = null;
+  /** Last Ultravox state string (turn-end transition detection). */
+  private lastUltravoxState = '';
+  /** Whether the current agent turn streamed delta frames (dedupe finals). */
+  private agentStreamedDeltas = false;
   private handlers: UltravoxEventHandler[] = [];
   /** Exposed for diagnostics — true while the underlying socket is open. */
   running = false;
@@ -234,10 +238,24 @@ export class UltravoxRealtimeAdapter {
     const etype = event.type ?? '';
     if (etype === 'transcript') {
       const role = event.role as string | undefined;
-      const text = (event.text ?? event.delta ?? '') as string;
+      const delta = (event.delta ?? '') as string;
+      const fullText = (event.text ?? '') as string;
       const isFinal = Boolean(event.final);
-      if (role === 'user' && isFinal && text) await this.emit('transcript_input', text);
-      else if (role === 'agent' && text) await this.emit('transcript_output', text);
+      if (role === 'user' && isFinal && (fullText || delta)) {
+        await this.emit('transcript_input', fullText || delta);
+      } else if (role === 'agent') {
+        // APPEND-only consumers downstream: emit DELTA frames as-is;
+        // Ultravox 'text' frames carry the FULL utterance so far, so
+        // forwarding them as appends duplicated the transcript
+        // ("Hel" + "lo" + "Hello"). Mirrors Python.
+        if (delta) {
+          await this.emit('transcript_output', delta);
+          this.agentStreamedDeltas = true;
+        } else if (isFinal && fullText && !this.agentStreamedDeltas) {
+          await this.emit('transcript_output', fullText);
+        }
+        if (isFinal) this.agentStreamedDeltas = false;
+      }
     } else if (etype === 'client_tool_invocation') {
       await this.emit('function_call', {
         call_id: event.invocationId ?? '',
@@ -246,8 +264,19 @@ export class UltravoxRealtimeAdapter {
       });
     } else if (etype === 'state') {
       const state = event.state as string | undefined;
-      if (state === 'listening') await this.emit('speech_started', null);
-      else if (state === 'idle') await this.emit('response_done', null);
+      const prev = this.lastUltravoxState;
+      this.lastUltravoxState = state ?? '';
+      // 'listening' is entered after EVERY normal agent turn — the old
+      // mapping to speech_started cleared the carrier playout buffer at
+      // each turn end, clipping the audio tail. The genuine barge-in
+      // signal is playback_clear_buffer (below); turn END is the
+      // speaking→listening transition ('idle' never fires mid-call).
+      // Mirrors Python.
+      if (state === 'listening' && prev === 'speaking') {
+        await this.emit('response_done', null);
+      } else if (state === 'idle') {
+        await this.emit('response_done', null);
+      }
     } else if (etype === 'playback_clear_buffer') {
       await this.emit('speech_started', null);
     }

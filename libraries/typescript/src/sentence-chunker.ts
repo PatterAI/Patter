@@ -355,6 +355,14 @@ export class SentenceChunker {
     // Keep the last (potentially incomplete) sentence in the buffer
     this.buffer = sentences[sentences.length - 1]?.[0] ?? '';
 
+    if (result.length > 0) {
+      // A standard-path emission ends the "first flush" window too: only
+      // the aggressive flush cleared the flag, so a comma in sentence 2+
+      // could still trigger a clause-level flush mid-turn — choppy prosody,
+      // contradicting the documented "first clause of each turn" contract.
+      this.isFirstFlush = false;
+    }
+
     return result;
   }
 

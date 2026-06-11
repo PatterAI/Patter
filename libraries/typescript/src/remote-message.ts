@@ -222,7 +222,12 @@ export class RemoteMessageHandler {
       // Then wait for new messages (with a per-read timeout to avoid
       // hanging forever if the server connects but then goes silent).
       const READ_TIMEOUT_MS = 30_000;
-      while (!done && !error) {
+      // Drain buffered chunks even after ``done``/close: the consumer spends
+      // seconds in TTS between yields, so a server streaming
+      // ``{text:a}{text:b}{done}`` back-to-back buffered b (and the done)
+      // while we were suspended mid-yield — the old ``!done`` condition then
+      // silently dropped every buffered chunk after the first.
+      while (!error && (chunks.length > 0 || !done)) {
         const messagePromise = new Promise<string | null>((resolve) => {
           if (chunks.length > 0) {
             resolve(chunks.shift()!);

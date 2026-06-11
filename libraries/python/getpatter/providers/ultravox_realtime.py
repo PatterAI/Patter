@@ -14,7 +14,7 @@ import asyncio
 import json
 import logging
 from enum import IntEnum, StrEnum
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Union
 
 logger = logging.getLogger("getpatter.ultravox_realtime")
 
@@ -332,12 +332,30 @@ class UltravoxRealtimeAdapter:
         etype = event.get("type", "")
         if etype == UltravoxServerEvent.TRANSCRIPT:
             role = event.get("role", "")
-            text = event.get("text", "") or event.get("delta", "")
+            delta = event.get("delta", "") or ""
+            full_text = event.get("text", "") or ""
             is_final = bool(event.get("final", False))
-            if role == "user" and is_final and text:
-                yield (UltravoxAdapterEvent.TRANSCRIPT_INPUT.value, text)
-            elif role == "agent" and text:
-                yield (UltravoxAdapterEvent.TRANSCRIPT_OUTPUT.value, text)
+            if role == "user" and is_final and (full_text or delta):
+                yield (
+                    UltravoxAdapterEvent.TRANSCRIPT_INPUT.value,
+                    full_text or delta,
+                )
+            elif role == "agent":
+                # APPEND-only consumers downstream: emit DELTA frames as-is;
+                # Ultravox 'text' frames carry the FULL utterance so far, so
+                # forwarding them as appends duplicated the transcript
+                # ("Hel" + "lo" + "Hello"). A final 'text' frame with no
+                # delta still emits once (non-streaming sessions).
+                if delta:
+                    yield (UltravoxAdapterEvent.TRANSCRIPT_OUTPUT.value, delta)
+                elif is_final and full_text and not getattr(
+                    self, "_agent_streamed_deltas", False
+                ):
+                    yield (UltravoxAdapterEvent.TRANSCRIPT_OUTPUT.value, full_text)
+                if delta:
+                    self._agent_streamed_deltas = True
+                if is_final:
+                    self._agent_streamed_deltas = False
         elif etype == UltravoxServerEvent.CLIENT_TOOL_INVOCATION:
             yield (
                 UltravoxAdapterEvent.FUNCTION_CALL.value,
@@ -349,8 +367,20 @@ class UltravoxRealtimeAdapter:
             )
         elif etype == UltravoxServerEvent.STATE:
             state = event.get("state", "")
-            if state == UltravoxState.LISTENING:
-                yield (UltravoxAdapterEvent.SPEECH_STARTED.value, None)
+            prev_state = getattr(self, "_last_ultravox_state", "")
+            self._last_ultravox_state = state
+            # 'listening' is entered after EVERY normal agent turn
+            # (speaking→listening) — the old mapping to speech_started made
+            # consumers clear the carrier playout buffer at each turn end,
+            # clipping the audio tail. The genuine barge-in signal is
+            # playback_clear_buffer (mapped below); turn END is the
+            # speaking→listening transition ('idle' never fires mid-call,
+            # so response_done effectively never fired before).
+            if (
+                state == UltravoxState.LISTENING
+                and prev_state == UltravoxState.SPEAKING
+            ):
+                yield (UltravoxAdapterEvent.RESPONSE_DONE.value, None)
             elif state == UltravoxState.IDLE:
                 yield (UltravoxAdapterEvent.RESPONSE_DONE.value, None)
         elif etype == UltravoxServerEvent.PLAYBACK_CLEAR_BUFFER:

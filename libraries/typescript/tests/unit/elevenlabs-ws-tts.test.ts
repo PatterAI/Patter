@@ -92,9 +92,9 @@ describe('ElevenLabsWebSocketTTS — construction', () => {
     });
   });
 
-  it('forTelnyx sets pcm_16000', () => {
+  it('forTelnyx sets ulaw_8000 (the SDK pins Telnyx to PCMU 8k)', () => {
     const tts = ElevenLabsWebSocketTTS.forTelnyx({ apiKey: 'k' });
-    expect(tts.outputFormat).toBe('pcm_16000');
+    expect(tts.outputFormat).toBe('ulaw_8000');
   });
 
   it('forTwilio with explicit voiceSettings preserves them', () => {
@@ -153,10 +153,10 @@ describe('ElevenLabsWebSocketTTS — carrier auto-flip', () => {
     expect(url).toContain('output_format=ulaw_8000');
   });
 
-  it('telnyx carrier keeps default pcm_16000', () => {
+  it('telnyx carrier flips to ulaw_8000 (PCMU wire)', () => {
     const tts = new ElevenLabsWebSocketTTS({ apiKey: 'k' });
     tts.setTelephonyCarrier('telnyx');
-    expect(tts.outputFormat).toBe('pcm_16000');
+    expect(tts.outputFormat).toBe('ulaw_8000');
   });
 
   it('explicit outputFormat is respected over carrier hint', () => {

@@ -35,7 +35,7 @@ class OpenAITranscribeSTT(WhisperSTT):
         model: One of ``"gpt-4o-transcribe"`` (default) or
             ``"gpt-4o-mini-transcribe"``. ``"whisper-1"`` is intentionally
             rejected here — use :class:`WhisperSTT` for that.
-        response_format: ``"json"`` (default) or ``"verbose_json"``.
+        response_format: ``"json"`` (gpt-4o models reject ``"verbose_json"``).
     """
 
     #: Stable pricing/dashboard key — read by stream-handler/metrics.
@@ -53,6 +53,15 @@ class OpenAITranscribeSTT(WhisperSTT):
                 f"OpenAITranscribeSTT: unsupported model {model!r}. "
                 f"Expected one of {sorted(_ALLOWED_MODELS)}. "
                 f"For 'whisper-1', use WhisperSTT instead."
+            )
+        if response_format == "verbose_json":
+            # OpenAI only supports verbose_json on whisper-1; the
+            # gpt-4o(-mini)-transcribe models 400 on it — every chunk failed
+            # (errors only logged) while audio kept being buffered/billed.
+            raise ValueError(
+                "OpenAITranscribeSTT: response_format='verbose_json' is only "
+                "supported by whisper-1 (use WhisperSTT). "
+                f"{model!r} accepts 'json'."
             )
         super().__init__(
             api_key=api_key,

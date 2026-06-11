@@ -28,7 +28,10 @@ class TTS(_OpenAITTS):
         api_key: str | None = None,
         *,
         voice: str = "alloy",
-        model: str = "tts-1",
+        # gpt-4o-mini-tts: matches the underlying provider default AND the
+        # TS facade — the same nominal config previously produced different
+        # voice quality/latency/price per SDK (tts-1 here, 4o-mini there).
+        model: str = "gpt-4o-mini-tts",
     ) -> None:
         key = api_key or os.environ.get("OPENAI_API_KEY")
         if not key:

@@ -912,14 +912,10 @@ class LLMLoop:
         else:
             self._provider = OpenAILLMProvider(api_key=openai_key, model=model)
 
-        if disable_phone_preamble:
-            self._system_prompt = system_prompt
-        else:
-            self._system_prompt = (
-                f"{DEFAULT_PHONE_PREAMBLE}\n\n{system_prompt}"
-                if system_prompt
-                else DEFAULT_PHONE_PREAMBLE
-            )
+        self._disable_phone_preamble = disable_phone_preamble
+        self._system_prompt = self._apply_phone_preamble(
+            system_prompt, disable_phone_preamble
+        )
         self._tools = tools
         self._tool_executor = tool_executor
         self._metrics = metrics
@@ -958,6 +954,26 @@ class LLMLoop:
 
         # Build OpenAI-format tool definitions (without handler/webhook_url)
         self._openai_tools: list[dict] | None = None
+        # Map tool name -> original tool dict (for handler/webhook_url lookup)
+        self._tool_map: dict[str, dict] = {}
+        self._rebuild_tool_state(tools)
+
+    @staticmethod
+    def _apply_phone_preamble(system_prompt: str, disable_phone_preamble: bool) -> str:
+        """Prepend :data:`DEFAULT_PHONE_PREAMBLE` unless disabled (byte-identical
+        to the historical inline ``__init__`` logic)."""
+        if disable_phone_preamble:
+            return system_prompt
+        return (
+            f"{DEFAULT_PHONE_PREAMBLE}\n\n{system_prompt}"
+            if system_prompt
+            else DEFAULT_PHONE_PREAMBLE
+        )
+
+    def _rebuild_tool_state(self, tools: list[dict] | None) -> None:
+        """(Re)build ``_openai_tools`` and ``_tool_map`` from a tool list."""
+        self._openai_tools = None
+        self._tool_map = {}
         if tools:
             self._openai_tools = []
             for t in tools:
@@ -969,12 +985,33 @@ class LLMLoop:
                     ),
                 }
                 self._openai_tools.append({"type": "function", "function": fn})
-
-        # Map tool name -> original tool dict (for handler/webhook_url lookup)
-        self._tool_map: dict[str, dict] = {}
-        if tools:
-            for t in tools:
                 self._tool_map[t["name"]] = t
+
+    def update_agent(
+        self,
+        *,
+        system_prompt: str | None = None,
+        tools: list[dict] | None = None,
+        disable_phone_preamble: bool | None = None,
+    ) -> None:
+        """Swap the system prompt and/or tool list mid-call (multi-agent handoff).
+
+        Takes effect on the NEXT turn — ``run`` builds its messages array
+        (with the system prompt at index 0) per turn, and reads
+        ``_openai_tools`` per provider iteration, so a swap that lands while
+        a turn is in flight finishes the current turn under the old prompt
+        and runs every subsequent turn as the new agent. ``None`` keeps the
+        corresponding current value. Mirrors TS ``LLMLoop.updateAgent``.
+        """
+        if disable_phone_preamble is not None:
+            self._disable_phone_preamble = disable_phone_preamble
+        if system_prompt is not None:
+            self._system_prompt = self._apply_phone_preamble(
+                system_prompt, self._disable_phone_preamble
+            )
+        if tools is not None:
+            self._tools = tools
+            self._rebuild_tool_state(tools)
 
     def set_on_tool_call(
         self,
@@ -1216,6 +1253,16 @@ class LLMLoop:
                         self._usage_missing_count,
                     )
 
+            # Barge-in guard: every provider returns *cleanly* when
+            # ``cancel_event`` fires mid-stream, which can leave
+            # ``tool_calls_accumulated`` holding truncated JSON. Executing
+            # those calls would fire real side effects (transfer, hangup,
+            # booking) with empty/wrong arguments after the caller already
+            # interrupted — so bail out before tool dispatch. (TS is immune:
+            # the aborted fetch throws out of ``run()``.)
+            if cancel_event is not None and cancel_event.is_set():
+                return
+
             # If no tool calls, we're done
             if not has_tool_calls:
                 if has_after_llm_response:
@@ -1253,12 +1300,30 @@ class LLMLoop:
                 try:
                     arguments = json.loads(tc_data["function"]["arguments"])
                 except json.JSONDecodeError as _je:
+                    # Malformed argument JSON (truncated stream, model error).
+                    # Do NOT execute with guessed arguments — a side-effecting
+                    # tool (transfer, SMS, booking) must never fire with an
+                    # empty payload. Answer the model with an error envelope
+                    # instead, preserving tool_call_id pairing.
                     logger.warning(
-                        "Tool '%s' returned malformed arguments JSON (falling back to {}): %s",
+                        "Tool '%s' received malformed arguments JSON (skipping execution): %s",
                         tool_name,
                         _je,
                     )
-                    arguments = {}
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc_data["id"],
+                            "content": json.dumps(
+                                {
+                                    "error": "Tool arguments were not valid JSON; "
+                                    "the call was not executed. Retry with "
+                                    "well-formed arguments.",
+                                }
+                            ),
+                        }
+                    )
+                    continue
 
                 result = await self._execute_tool(tool_name, arguments, call_context)
                 messages.append(
@@ -1335,6 +1400,12 @@ class LLMLoop:
                 # and replaying them as ``role: "user"`` fabricates user turns
                 # containing raw tool JSON. Skip them: the tool RESULT is
                 # already reflected in the assistant's following reply.
+                continue
+            elif role == "system":
+                # System entries (call-transfer / multi-agent-handoff markers)
+                # are transcript artefacts; replaying them as ``role: "user"``
+                # would fabricate user turns. The handoff itself is already
+                # reflected by the swapped system prompt at index 0.
                 continue
             else:
                 messages.append({"role": "user", "content": text})

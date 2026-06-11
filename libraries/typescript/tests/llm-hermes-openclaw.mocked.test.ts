@@ -56,7 +56,10 @@ async function inspectRequest(
 
 describe('[unit] HermesLLM preset', () => {
   it('defaults baseUrl, model, timeout (120 s), the user prefix and X-Hermes-Session-Id header', async () => {
-    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+    // The 120 s request budget is now an IDLE watchdog window (re-armed per
+    // chunk) instead of a whole-stream AbortSignal.timeout ceiling — assert
+    // the watchdog timer is armed with the configured window.
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
     const llm = new HermesLLM();
     expect(llm.model).toBe('hermes-agent');
     const { url, body, headers } = await inspectRequest(llm, 'c1');
@@ -65,7 +68,8 @@ describe('[unit] HermesLLM preset', () => {
     expect(body.user).toBe('patter-call-c1'); // upstream-log correlation, kept
     // PRIMARY mechanism: per-call session id header, on by default.
     expect(headers['X-Hermes-Session-Id']).toBe('patter-call-c1');
-    expect(timeoutSpy).toHaveBeenCalledWith(120_000);
+    expect(setTimeoutSpy.mock.calls.some((c) => c[1] === 120_000)).toBe(true);
+    setTimeoutSpy.mockRestore();
   });
 
   it('omits X-Hermes-Session-Key by default and emits it only when sessionKey is set', async () => {
@@ -114,7 +118,7 @@ describe('[unit] OpenClawLLM preset', () => {
   });
 
   it('defaults baseUrl :18789, OPENCLAW_API_KEY, the session header and 120 s timeout', async () => {
-    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
     process.env.OPENCLAW_API_KEY = 'oc-operator-secret';
     const llm = new OpenClawLLM({ agent: 'receptionist' });
     const { url, body, headers } = await inspectRequest(llm, 'c2');
@@ -122,7 +126,8 @@ describe('[unit] OpenClawLLM preset', () => {
     expect(headers.Authorization).toBe('Bearer oc-operator-secret');
     expect(body.user).toBe('patter-call-c2');
     expect(headers['x-openclaw-session-key']).toBe('c2');
-    expect(timeoutSpy).toHaveBeenCalledWith(120_000);
+    expect(setTimeoutSpy.mock.calls.some((c) => c[1] === 120_000)).toBe(true);
+    setTimeoutSpy.mockRestore();
   });
 });
 

@@ -309,12 +309,12 @@ class ElevenLabsWebSocketTTS(TTSProvider):
         auto_mode: bool = True,
         inactivity_timeout: int = DEFAULT_INACTIVITY_TIMEOUT,
     ) -> "ElevenLabsWebSocketTTS":
-        """WebSocket variant pre-configured for Telnyx (PCM 16 kHz native)."""
+        """WebSocket variant pre-configured for Telnyx (μ-law 8 kHz wire)."""
         return cls(
             api_key=api_key,
             voice_id=voice_id,
             model_id=model_id,
-            output_format=ElevenLabsOutputFormat.PCM_16000,
+            output_format=ElevenLabsOutputFormat.ULAW_8000,
             voice_settings=voice_settings,
             language_code=language_code,
             auto_mode=auto_mode,
@@ -326,11 +326,15 @@ class ElevenLabsWebSocketTTS(TTSProvider):
     # ------------------------------------------------------------------
 
     # Map of telephony carrier → ElevenLabs WS-native ``output_format`` for
-    # zero-transcode delivery to the carrier wire. Twilio Media Streams
-    # speaks PCMU/μ-law @ 8 kHz; Telnyx negotiates linear PCM 16 kHz.
+    # zero-transcode delivery to the carrier wire. All three carriers speak
+    # PCMU/μ-law @ 8 kHz: The SDK's own ``streaming_start`` pins the Telnyx wire to
+    # PCMU/μ-law @ 8 kHz (stream_bidirectional_codec=PCMU) — the previous
+    # ``pcm_16000`` entry made the native-format fast path ship raw PCM16
+    # bytes onto a μ-law wire: loud static on every default
+    # ElevenLabs-on-Telnyx call.
     _CARRIER_NATIVE_FORMAT: dict[str, ElevenLabsOutputFormat] = {
         "twilio": ElevenLabsOutputFormat.ULAW_8000,
-        "telnyx": ElevenLabsOutputFormat.PCM_16000,
+        "telnyx": ElevenLabsOutputFormat.ULAW_8000,
         # Plivo streams mulaw 8 kHz (we pin contentType in the answer XML).
         "plivo": ElevenLabsOutputFormat.ULAW_8000,
     }

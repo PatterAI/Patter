@@ -154,16 +154,21 @@ export class TelnyxAdapter {
   ): Promise<void> {
     if (!phoneNumber) throw new Error('TelnyxAdapter: phoneNumber is required');
     if (!opts.connectionId) throw new Error('TelnyxAdapter: connectionId is required');
-    // Use ``PATCH /phone_numbers/{id}/voice`` — the correct voice settings
-    // endpoint per the Telnyx numbers skill. The older
-    // ``PATCH /phone_numbers/{id}`` endpoint does not accept ``connection_id``
-    // consistently across the v2 API. ``phoneNumber`` may be the
-    // phone_number ID or the E.164 string; both are accepted.
+    // ``connection_id`` lives on ``PATCH /phone_numbers/{id}`` — the
+    // ``/voice`` sub-resource only covers voice settings and silently
+    // ignores unknown fields, so the previous single ``/voice`` PATCH
+    // returned 200 without ever linking the number to the Call Control app.
+    // ``phoneNumber`` may be the phone_number ID or the E.164 string.
     try {
       await this.request<unknown>(
         'PATCH',
+        `/phone_numbers/${encodeURIComponent(phoneNumber)}`,
+        { connection_id: opts.connectionId },
+      );
+      await this.request<unknown>(
+        'PATCH',
         `/phone_numbers/${encodeURIComponent(phoneNumber)}/voice`,
-        { connection_id: opts.connectionId, tech_prefix_enabled: false },
+        { tech_prefix_enabled: false },
       );
     } catch (err) {
       // Re-throw with a sanitised message that omits the phone number from the

@@ -39,13 +39,13 @@ export class ElevenLabsConvAIAdapter {
 
   private readonly apiKey: string;
   private readonly agentId: string;
-  private readonly voiceId: string;
+  private readonly voiceId: string | undefined;
   // Exposed for parity with Python SDK (`self.model_id`). ConvAI does not
   // accept a client-side model override today, but we preserve the value so
   // callers can introspect it and we can ship the override the day the
   // server exposes it.
   public readonly modelId: string;
-  private readonly language: string;
+  private readonly language: string | undefined;
   private readonly firstMessage: string;
   // Exposed publicly so the stream handler can detect μ-law negotiation
   // (``"ulaw_8000"``) and skip resampling / transcoding on the audio path.
@@ -74,16 +74,16 @@ export class ElevenLabsConvAIAdapter {
   constructor(
     apiKeyOrOptions: string | ElevenLabsConvAIOptions,
     agentId: string = '',
-    voiceId: string = 'EXAVITQu4vr4xnSDxMaL',
+    voiceId: string = '',
     firstMessage: string = '',
   ) {
     if (typeof apiKeyOrOptions === 'object') {
       const o = apiKeyOrOptions;
       this.apiKey = o.apiKey;
       this.agentId = o.agentId ?? '';
-      this.voiceId = o.voiceId ?? 'EXAVITQu4vr4xnSDxMaL';
+      this.voiceId = o.voiceId;
       this.modelId = o.modelId ?? 'eleven_flash_v2_5';
-      this.language = o.language ?? 'it';
+      this.language = o.language;
       this.firstMessage = o.firstMessage ?? '';
       this.outputAudioFormat = o.outputAudioFormat;
       this.inputAudioFormat = o.inputAudioFormat;
@@ -91,9 +91,13 @@ export class ElevenLabsConvAIAdapter {
     } else {
       this.apiKey = apiKeyOrOptions;
       this.agentId = agentId;
-      this.voiceId = voiceId;
+      this.voiceId = voiceId || undefined;
       this.modelId = 'eleven_flash_v2_5';
-      this.language = 'it';
+      // No language default: ElevenLabs REJECTS conversation overrides that
+      // aren't enabled in the agent's security settings, and the previous
+      // hardcoded 'it' forced every ConvAI conversation to Italian (or
+      // failed initiation outright).
+      this.language = undefined;
       this.firstMessage = firstMessage;
       this.outputAudioFormat = undefined;
       this.inputAudioFormat = undefined;
@@ -209,11 +213,15 @@ export class ElevenLabsConvAIAdapter {
         if (this.firstMessage) agentCfg['first_message'] = this.firstMessage;
         if (this.language) agentCfg['language'] = this.language;
 
-        const override: Record<string, unknown> = {
-          tts: this.outputAudioFormat
-            ? { voice_id: this.voiceId, output_format: this.outputAudioFormat }
-            : { voice_id: this.voiceId },
-        };
+        // Only send overrides the caller actually configured: ElevenLabs
+        // rejects overrides that aren't enabled in the agent's security
+        // settings, so an unconditional voice_id override broke the
+        // out-of-box engine against a default-configured agent.
+        const tts: Record<string, unknown> = {};
+        if (this.voiceId) tts['voice_id'] = this.voiceId;
+        if (this.outputAudioFormat) tts['output_format'] = this.outputAudioFormat;
+        const override: Record<string, unknown> = {};
+        if (Object.keys(tts).length > 0) override['tts'] = tts;
         if (this.inputAudioFormat) {
           override['asr'] = { input_format: this.inputAudioFormat };
         }
@@ -223,7 +231,9 @@ export class ElevenLabsConvAIAdapter {
 
         const config: Record<string, unknown> = {
           type: 'conversation_initiation_client_data',
-          conversation_config_override: override,
+          ...(Object.keys(override).length > 0
+            ? { conversation_config_override: override }
+            : {}),
         };
 
         this.ws!.send(JSON.stringify(config));
@@ -397,6 +407,24 @@ export class ElevenLabsConvAIAdapter {
       return;
     }
 
+    if (msgType === 'client_tool_call') {
+      // The ElevenLabs agent invoked a CLIENT tool — previously unhandled,
+      // so configured client tools stalled until the provider-side timeout.
+      // Surface as the shared function_call event so the stream handler
+      // routes it through the tool executor. Mirrors Python.
+      const tool = (parsed['client_tool_call'] ?? {}) as {
+        tool_call_id?: string;
+        tool_name?: string;
+        parameters?: Record<string, unknown>;
+      };
+      this.safeInvoke('function_call', {
+        call_id: tool.tool_call_id ?? '',
+        name: tool.tool_name ?? '',
+        arguments: tool.parameters ?? {},
+      });
+      return;
+    }
+
     if (msgType === 'error') {
       const errText =
         (parsed['message'] as string | undefined) ??
@@ -406,6 +434,19 @@ export class ElevenLabsConvAIAdapter {
       this.safeInvoke('error', errText);
       return;
     }
+  }
+
+  /** Answer a ``client_tool_call`` from the ElevenLabs agent. */
+  sendClientToolResult(toolCallId: string, result: string, isError = false): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.ws.send(
+      JSON.stringify({
+        type: 'client_tool_result',
+        tool_call_id: toolCallId,
+        result,
+        is_error: isError,
+      }),
+    );
   }
 
   /** Send a caller-side audio chunk to ConvAI as a base64 `user_audio_chunk`. */

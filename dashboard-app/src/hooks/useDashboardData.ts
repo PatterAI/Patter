@@ -58,6 +58,11 @@ export function useDashboardData(): DashboardData {
   const [error, setError] = useState<string | null>(null);
 
   const mountedRef = useRef<boolean>(true);
+  // Soft-delete tombstones: ids the operator deleted (locally or — via the
+  // ``calls_deleted`` SSE payload — in ANOTHER tab). ``mergeCallPreserving``
+  // re-appends any prev row missing from the server snapshot, so without
+  // these a deleted call was resurrected forever by the carry-over loop.
+  const deletedIdsRef = useRef<Set<string>>(new Set());
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -92,7 +97,7 @@ export function useDashboardData(): DashboardData {
         fetchAggregates(),
       ]);
       if (!mountedRef.current) return;
-      setCalls((prev) => mergeCallPreserving(prev, mergeCalls(active, recent)));
+      setCalls((prev) => mergeCallPreserving(prev, mergeCalls(active, recent), deletedIdsRef.current));
       setAggregates(aggs);
       setError(null);
     } catch (err) {
@@ -162,8 +167,23 @@ export function useDashboardData(): DashboardData {
     };
 
     for (const eventName of RELEVANT_EVENTS) {
+      if (eventName === 'calls_deleted') continue; // dedicated handler below
       source.addEventListener(eventName, handleRelevantEvent);
     }
+    // ``calls_deleted`` carries the deleted ids — record them as tombstones
+    // BEFORE refreshing so the merge cannot resurrect the rows (this is how
+    // a delete made in another tab propagates here).
+    source.addEventListener('calls_deleted', (event) => {
+      try {
+        const payload = JSON.parse((event as MessageEvent).data as string) as {
+          call_ids?: string[];
+        };
+        for (const id of payload.call_ids ?? []) deletedIdsRef.current.add(id);
+      } catch {
+        // Malformed payload — fall through to the refresh below.
+      }
+      handleRelevantEvent();
+    });
     // turn_complete updates a single call; the simplest correct behaviour is
     // to re-fetch the snapshot, same as call_status. Per-call fetching for
     // transcripts lives in useTranscript.
@@ -192,6 +212,9 @@ export function useDashboardData(): DashboardData {
   const removeCallsLocal = useCallback((ids: readonly string[]): void => {
     if (ids.length === 0) return;
     const drop = new Set(ids);
+    // Tombstone locally too: an in-flight refresh that raced the DELETE
+    // could otherwise re-merge the rows right back.
+    for (const id of ids) deletedIdsRef.current.add(id);
     setCalls((prev) => prev.filter((c) => !drop.has(c.id)));
   }, []);
 

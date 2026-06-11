@@ -13,8 +13,11 @@ Public API
 
 from __future__ import annotations
 
+import logging
 import warnings
 from typing import Optional, Tuple
+
+logger = logging.getLogger("getpatter")
 
 try:
     import audioop  # type: ignore[import]
@@ -243,15 +246,16 @@ class StatefulResampler:
         carry = self._carry.flush()
         out = b""
         if carry:
-            resampled, self._state = audioop.ratecv(
-                carry,
-                self._sample_width,
-                self._channels,
-                self._src_rate,
-                self._dst_rate,
-                self._state,
+            # ``PcmCarry`` only ever buffers a PARTIAL frame (len % width),
+            # so a non-empty carry can never be a whole number of frames —
+            # feeding it to ratecv raised ``audioop.error`` on every odd-
+            # length input (including the deprecated helper wrappers and the
+            # OpenAI-TTS tail flush). Drop the sub-sample remainder with a
+            # debug log, matching the TS resampler.
+            logger.debug(
+                "StatefulResampler.flush: dropping %d sub-frame carry byte(s)",
+                len(carry),
             )
-            out = resampled
         self.reset()
         return out
 

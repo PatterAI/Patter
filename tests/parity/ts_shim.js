@@ -24,7 +24,10 @@ async function main() {
     scenario = JSON.parse(input);
   }
 
-  const sdkPath = path.resolve(__dirname, '../../sdk-ts/dist/index.js');
+  // Keep stdout pure JSON: the Patter constructor prints the telemetry
+  // banner to stdout when telemetry is enabled.
+  process.env.PATTER_TELEMETRY_DISABLED = '1';
+  const sdkPath = path.resolve(__dirname, '../../libraries/typescript/dist/index.js');
   const sdk = require(sdkPath);
 
   const result = await dispatch(scenario, sdk);
@@ -59,38 +62,34 @@ async function dispatch(scenario, sdk) {
 // --- Scenario handlers ---
 
 function runCallInit(scenario, sdk) {
+  // Modern carrier-object API. Cloud mode and the DEFAULT_*_URL constants
+  // were removed from the SDK — both runners report 'removed' so the parity
+  // contract still holds.
   const results = {};
 
   for (const testCase of scenario.input.kwargs.cases) {
     try {
+      const params = testCase.params ?? {};
       if (testCase.name === 'cloud_mode') {
-        const client = new sdk.Patter({ apiKey: testCase.params.api_key });
-        results[testCase.name] = client.apiKey ? 'cloud' : 'unknown';
-      } else if (testCase.name === 'local_mode_explicit') {
+        results[testCase.name] = 'removed';
+      } else if (
+        testCase.name === 'local_mode_explicit' ||
+        testCase.name === 'local_mode_auto_detect'
+      ) {
         const client = new sdk.Patter({
-          mode: 'local',
-          twilioSid: testCase.params.twilio_sid,
-          twilioToken: testCase.params.twilio_token,
-          phoneNumber: testCase.params.phone_number,
-          webhookUrl: testCase.params.webhook_url,
+          carrier: new sdk.Twilio({
+            accountSid: params.twilio_sid,
+            authToken: params.twilio_token,
+          }),
+          phoneNumber: params.phone_number,
+          webhookUrl: params.webhook_url,
         });
-        // In local mode, apiKey is empty
-        results[testCase.name] = client.apiKey === '' ? 'local' : 'unknown';
-      } else if (testCase.name === 'local_mode_auto_detect') {
-        // TS SDK requires explicit mode: 'local'
-        const client = new sdk.Patter({
-          mode: 'local',
-          twilioSid: testCase.params.twilio_sid,
-          twilioToken: testCase.params.twilio_token,
-          phoneNumber: testCase.params.phone_number,
-          webhookUrl: testCase.params.webhook_url,
-        });
-        results[testCase.name] = client.apiKey === '' ? 'local' : 'unknown';
-      } else if (testCase.name === 'default_backend_url') {
-        // The default backend URL is a private field; verify the constant
-        results[testCase.name] = 'wss://api.getpatter.com';
-      } else if (testCase.name === 'default_rest_url') {
-        results[testCase.name] = 'https://api.getpatter.com';
+        results[testCase.name] = client ? 'local' : 'unknown';
+      } else if (
+        testCase.name === 'default_backend_url' ||
+        testCase.name === 'default_rest_url'
+      ) {
+        results[testCase.name] = 'removed';
       }
     } catch (e) {
       results[testCase.name] = `error: ${e.message}`;
@@ -269,35 +268,32 @@ function runVoiceModeEnum(scenario, sdk) {
   const expectedModes = ['openai_realtime', 'elevenlabs_convai', 'pipeline'];
   const results = {};
 
-  // Create a local-mode client for testing agent()
   try {
     const client = new sdk.Patter({
-      mode: 'local',
-      twilioSid: 'ACtest000000000000000000000000000',
-      twilioToken: 'test_token',
+      carrier: new sdk.Twilio({
+        accountSid: 'ACtest000000000000000000000000000',
+        authToken: 'test_token',
+      }),
       phoneNumber: '+15551234567',
       webhookUrl: 'test.ngrok.io',
     });
 
-    // Test each valid mode
     for (const mode of expectedModes) {
       try {
-        client.agent({
-          systemPrompt: 'Test',
-          provider: mode,
-        });
+        const extra = {};
+        if (mode === 'pipeline') {
+          extra.stt = new sdk.DeepgramSTT('dg_test');
+          extra.tts = new sdk.ElevenLabsTTS('el_test');
+        }
+        client.agent({ systemPrompt: 'Test', provider: mode, ...extra });
         results[mode] = 'accepted';
       } catch (e) {
-        results[mode] = `rejected: ${e.message}`;
+        results[mode] = 'rejected';
       }
     }
 
-    // Test an invalid mode
     try {
-      client.agent({
-        systemPrompt: 'Test',
-        provider: 'invalid_mode',
-      });
+      client.agent({ systemPrompt: 'Test', provider: 'invalid_mode' });
       results['invalid_mode'] = 'accepted';
     } catch (e) {
       results['invalid_mode'] = 'rejected';

@@ -180,6 +180,10 @@ export function buildConsultTool(config: ConsultConfig): ToolDefinition {
     description: config.description ?? DEFAULT_DESCRIPTION,
     parameters: PARAMETERS,
     handler,
+    // Declare the per-tool budget: without it DefaultToolExecutor raced the
+    // handler against its 10 s default and killed any consult longer than
+    // that — while the handler's own AbortSignal budget was 30 s.
+    timeoutMs,
   };
   return config.reassurance != null ? { ...tool, reassurance: config.reassurance } : tool;
 }

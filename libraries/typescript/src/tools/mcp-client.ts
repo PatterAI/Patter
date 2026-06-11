@@ -164,10 +164,22 @@ export class MCPManager {
           description: t.description ?? '',
           parameters: (t.inputSchema as Record<string, unknown>) ?? { type: 'object', properties: {} },
           handler: async (args: Record<string, unknown>): Promise<string> => {
-            const callResult: { content?: Array<{ type: string; text?: string }>; isError?: boolean } = await client.callTool({
-              name: t.name,
-              arguments: args,
-            });
+            let callResult: { content?: Array<{ type: string; text?: string }>; isError?: boolean };
+            try {
+              callResult = await client.callTool({
+                name: t.name,
+                arguments: args,
+              });
+            } catch (err) {
+              // Return the envelope instead of throwing: a thrown transport
+              // error reached DefaultToolExecutor's retry loop, which would
+              // re-fire a non-idempotent MCP tool (send_email…) up to 3
+              // times on a transient error. Parity with the Python handler.
+              return JSON.stringify({
+                error: `MCP tool '${t.name}' failed: ${String(err).slice(0, 200)}`,
+                fallback: true,
+              });
+            }
             const text = (callResult.content ?? [])
               .map((c) => (c.type === 'text' ? c.text ?? '' : JSON.stringify(c)))
               .join('\n');

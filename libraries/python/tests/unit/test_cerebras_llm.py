@@ -5,10 +5,10 @@ free tier (model gated to paid plans). The fix lowers the default to
 ``llama3.1-8b`` (free-tier available, sub-100ms TTFT) and translates 404
 model_not_found into a clear log message that names override candidates.
 
-Behaviour matches the TS provider: log at ERROR level and exit the stream
-quietly. Voice pipelines treat LLM provider failures as recoverable (the
-call continues, the user just hears no LLM response), so raising would be
-a behavioural change for callers.
+Behaviour matches the TS provider: log the recovery hint at ERROR level,
+then re-raise so the LLM fallback chain can fail over and the spoken
+``llm_error_message`` can fire — a silent empty stream looks like success
+and leaves the caller in dead air.
 
 The Cerebras ``stream()`` is now a thin wrapper over the parent
 ``OpenAILLMProvider.stream`` (refactor: sampling kwargs live in the parent).
@@ -79,7 +79,9 @@ async def test_404_model_not_found_is_logged_with_recovery_hint(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A gated model surfaces an ERROR log naming override candidates and
-    /v1/models, then the stream completes without yielding chunks."""
+    /v1/models, then RE-RAISES so the fallback chain can fail over and the
+    spoken ``llm_error_message`` can fire (a silently-completed empty stream
+    is indistinguishable from success). Mirrors the TS provider."""
 
     provider = _provider("gated-model")
 
@@ -91,11 +93,10 @@ async def test_404_model_not_found_is_logged_with_recovery_hint(
 
     with _failing_parent_stream(upstream):
         with caplog.at_level(logging.ERROR, logger="getpatter.providers.cerebras_llm"):
-            chunks = [
-                chunk async for chunk in provider.stream([{"role": "user", "content": "hi"}])
-            ]
+            with pytest.raises(RuntimeError, match="model_not_found"):
+                async for _ in provider.stream([{"role": "user", "content": "hi"}]):
+                    pass
 
-    assert chunks == []  # stream exits silently — no chunks emitted
     log_text = "\n".join(record.getMessage() for record in caplog.records)
     assert "gated-model" in log_text
     assert "not available on your tier" in log_text

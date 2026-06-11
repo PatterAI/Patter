@@ -88,6 +88,9 @@ export class WhisperSTT {
    * ``(apiKey, model, language, bufferSize, responseFormat)`` — callers using
    * the old order will need to swap ``language`` and ``model``.
    */
+  /** Construction args replayed by clone(). */
+  private readonly patterCtorArgs: unknown[];
+
   constructor(
     apiKey: string,
     language?: string,
@@ -95,6 +98,7 @@ export class WhisperSTT {
     bufferSize: number = DEFAULT_BUFFER_SIZE,
     responseFormat: WhisperResponseFormat = 'json',
   ) {
+    this.patterCtorArgs = [apiKey, language, model, bufferSize, responseFormat];
     if (!ALLOWED_MODELS.has(model)) {
       throw new Error(
         `WhisperSTT: unsupported model "${model}". Expected one of ${[...ALLOWED_MODELS].join(', ')}.`,
@@ -113,6 +117,17 @@ export class WhisperSTT {
   }
 
   /** Reset the audio buffer and arm the adapter for incoming chunks. */
+
+  /**
+   * Fresh adapter built with this instance's construction arguments —
+   * called per call by the stream handler so concurrent calls never share
+   * connection state (sockets/queues; cross-call transcript bleed).
+   */
+  clone(): this {
+    const ctor = this.constructor as new (...args: unknown[]) => this;
+    return new ctor(...this.patterCtorArgs);
+  }
+
   async connect(): Promise<void> {
     this.running = true;
     this.chunks = [];

@@ -44,8 +44,8 @@ function resolveApiKey(apiKey: string | undefined): string {
  * const tts = new cartesia.TTS({ apiKey: "..." });
  * ```
  *
- * **Telephony optimization** — use {@link TTS.forTwilio} (PCM @ 8 kHz,
- * skipping the SDK-side 16 kHz → 8 kHz resample before μ-law transcoding)
+ * **Telephony** — use {@link TTS.forTwilio} (PCM @ 16 kHz; the pipeline's
+ * carrier-side encoder performs the 16 kHz → 8 kHz + μ-law step itself)
  * or {@link TTS.forTelnyx} (PCM @ 16 kHz, native Telnyx default) on
  * phone calls.
  */
@@ -58,7 +58,7 @@ export class TTS extends _CartesiaTTS {
     super(key, rest);
   }
 
-  /** Pipeline TTS pre-configured for Twilio Media Streams (PCM @ 8 kHz). */
+  /** Pipeline TTS pre-configured for Twilio Media Streams (PCM @ 16 kHz — the pipeline decimates to the 8 kHz wire itself; 8 kHz here was decimated AGAIN → chipmunk audio). */
   static override forTwilio(opts?: CartesiaCarrierOptions): TTS;
   // Parent-compatible overload — accepts the legacy positional form too.
   static override forTwilio(
@@ -71,7 +71,7 @@ export class TTS extends _CartesiaTTS {
   ): TTS {
     const opts: CartesiaCarrierOptions =
       typeof arg1 === "string" ? { apiKey: arg1, ...(arg2 ?? {}) } : (arg1 ?? {});
-    return new TTS({ ...opts, sampleRate: 8000 });
+    return new TTS({ ...opts, sampleRate: 16000 });
   }
 
   /** Pipeline TTS pre-configured for Telnyx (PCM @ 16 kHz). */

@@ -1,6 +1,9 @@
 """Shared utility functions for telephony handlers."""
 
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger("getpatter")
 
 import re
 
@@ -47,8 +50,25 @@ def _create_stt_from_config(config, for_twilio: bool = False):
     if config is None:
         return None
     # v0.5.0 — already-built provider instance (e.g. ``deepgram.STT(...)``).
+    # CLONE it: the documented pattern hands ONE instance to ONE agent served
+    # for MANY calls, but the adapters are stateful per-connection objects —
+    # concurrent calls sharing one instance overwrote each other's sockets
+    # and queues (cross-call transcript bleed; the first hangup closed the
+    # surviving call's socket). Fall back to the shared instance with a loud
+    # warning when the adapter can't be cloned.
     if isinstance(config, STTProvider):
-        return config
+        try:
+            return config.clone()
+        except Exception as exc:  # noqa: BLE001 - degrade to legacy sharing
+            logger.warning(
+                "STT adapter %s could not be cloned per call (%s) — falling "
+                "back to the SHARED instance. Concurrent calls on this agent "
+                "may interfere with each other; implement clone() on the "
+                "adapter to fix.",
+                type(config).__name__,
+                exc,
+            )
+            return config
     provider = config.provider
     opts = dict(config.options or {})
 
@@ -97,6 +117,11 @@ def _create_stt_from_config(config, for_twilio: bool = False):
             "client_reference_id",
         }
         kwargs = {k: v for k, v in opts.items() if k in allowed}
+        # ``STTConfig.language`` (set by the ``providers.soniox(...)`` helper)
+        # was silently discarded — SonioxSTT has no ``language`` parameter;
+        # map it to ``language_hints`` unless hints were given explicitly.
+        if "language_hints" not in kwargs and config.language:
+            kwargs["language_hints"] = [config.language]
         return SonioxSTT(api_key=config.api_key, **kwargs)
 
     if provider == "speechmatics":

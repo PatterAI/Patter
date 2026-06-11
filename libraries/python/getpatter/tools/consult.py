@@ -100,6 +100,10 @@ def build_consult_tool(config: "ConsultConfig") -> dict:
         "description": config.description,
         "parameters": _PARAMETERS,
         "handler": handler,
+        # Declare the per-tool budget so the executor's default handler
+        # timeout can't cut a long back-office consult short — the handler's
+        # own httpx timeout governs the request, this governs the await.
+        "timeout_s": timeout_s,
     }
     if config.reassurance is not None:
         tool["reassurance"] = config.reassurance

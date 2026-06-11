@@ -12,6 +12,8 @@ tool list with handler closures wired to the telephony-level
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from getpatter.stream_handler import (
@@ -105,7 +107,9 @@ async def test_hangup_handler_dispatches_to_hangup_fn():
 @pytest.mark.asyncio
 async def test_transfer_handler_handles_missing_number_gracefully():
     """LLM occasionally emits transfer_call without a number arg; the
-    handler must not crash."""
+    handler must not crash. The handler validates E.164 BEFORE calling the
+    carrier helper (which would silently no-op on a bad target) and returns
+    a structured rejection so the LLM can recover."""
     called: list[str] = []
 
     async def fake_transfer(number: str) -> None:
@@ -115,6 +119,9 @@ async def test_transfer_handler_handles_missing_number_gracefully():
         None, transfer_fn=fake_transfer, hangup_fn=None
     )
     result = await tools[0]["handler"]({}, {"call_id": "CAtest"})
-    # Calls through with empty string (downstream _validate_e164 will reject)
-    assert called == [""]
-    assert "rejected" in result.lower() or result == "Transferring to "
+    # Rejected eagerly — the carrier helper must NOT be invoked with a
+    # non-E.164 target, and the LLM gets a structured error envelope.
+    assert called == []
+    payload = json.loads(result)
+    assert payload["status"] == "rejected"
+    assert "error" in payload

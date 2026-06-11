@@ -1225,7 +1225,16 @@ class TestTelnyxAdapterIO:
         adapter._client.patch.return_value = mock_resp
 
         await adapter.configure_number("+15551234567", "https://example.com/webhook")
-        adapter._client.patch.assert_called_once()
+        # Two PATCHes now: the connection association goes to the base
+        # ``/phone_numbers/{id}`` endpoint (the ``/voice`` sub-resource
+        # silently ignored ``connection_id``), then voice settings to
+        # ``/voice``.
+        assert adapter._client.patch.call_count == 2
+        first, second = adapter._client.patch.call_args_list
+        assert first.args[0] == "/phone_numbers/%2B15551234567"
+        assert first.kwargs["json"] == {"connection_id": "conn_123"}
+        assert second.args[0] == "/phone_numbers/%2B15551234567/voice"
+        assert second.kwargs["json"] == {"tech_prefix_enabled": False}
 
     @pytest.mark.asyncio
     async def test_end_call(self) -> None:

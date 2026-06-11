@@ -302,12 +302,13 @@ class TestBargeInOverlapStartPreserved:
 
         assert h._is_speaking is False
         assert len(emitted) == 1, "exactly one interruption metric expected"
-        # detection_delay is in seconds; we expect ~0.2 s (200 ms),
-        # NOT ~0 s. Allow a generous upper bound for CI scheduling jitter.
+        # detection_delay is in MILLISECONDS (aligned with TS and with every
+        # other latency field); we expect ~200 ms, NOT ~0. Allow a generous
+        # upper bound for CI scheduling jitter.
         delay = emitted[0].detection_delay
-        assert 0.150 <= delay <= 0.500, (
+        assert 150.0 <= delay <= 500.0, (
             f"detection_delay must reflect VAD→confirm window (~200 ms), "
-            f"got {delay:.4f} s — likely the second record_overlap_start "
+            f"got {delay:.1f} ms — likely the second record_overlap_start "
             f"overwrote T1, regressing FIX #88"
         )
 

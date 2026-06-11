@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import os
 from enum import IntEnum, StrEnum
-from typing import ClassVar, Any, AsyncIterator, Optional
+from typing import ClassVar, Any, AsyncIterator, Optional, Union
 
 from getpatter.providers.base import TTSProvider
 

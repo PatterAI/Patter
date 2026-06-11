@@ -21,4 +21,5 @@ __all__ = [
     "soniox",
     "speechmatics",
     "assemblyai",
+    "openai_transcribe",
 ]

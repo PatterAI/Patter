@@ -188,6 +188,11 @@ class TestSession:
                     print(f"    {role}: {entry['text']}")
                 continue
 
+            # Snapshot BEFORE appending the current turn: LLMLoop.run replays
+            # the given history and appends user_input itself — including the
+            # current turn would send the message twice (mirrors the
+            # stream-handler fix; the TS test-mode documents the same hazard).
+            history_snapshot = list(conversation_history)
             conversation_history.append(
                 {
                     "role": "user",
@@ -227,7 +232,7 @@ class TestSession:
                 }
                 parts = []
                 async for token in llm_loop.run(
-                    user_input, conversation_history, call_ctx
+                    user_input, history_snapshot, call_ctx
                 ):
                     parts.append(token)
                 response_text = "".join(parts)

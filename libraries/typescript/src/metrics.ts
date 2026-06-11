@@ -21,6 +21,7 @@ import type {
   ProcessingMetrics,
   TTFBMetrics,
 } from './observability/metric-types';
+import type { TransferCallOptions, TransferCallResult } from './types';
 
 // ---- Data types ----
 
@@ -142,14 +143,32 @@ export interface CallMetrics {
   /** Terminal error code when the call ended abnormally (a lowercased ErrorCode
    * value or "other"); empty/absent for a clean call. Never the message. */
   readonly error_code?: string;
+  /** PREEMPTIVE GENERATION counters (pipeline mode, only non-zero when
+   * `agent.preemptiveGeneration` is true). `preemptive_hits` counts
+   * speculative turns released on a matching final transcript (latency win);
+   * `preemptive_misses` counts speculations started but discarded
+   * (mismatched final, barge-in, replaced by a newer interim, buffer
+   * overflow) — i.e. wasted LLM/TTS spend. Mirrors Python
+   * `CallMetrics.preemptive_hits` / `preemptive_misses`. */
+  readonly preemptive_hits?: number;
+  readonly preemptive_misses?: number;
 }
 
 // ---- CallControl interface ----
 
 /** Programmatic control surface for a live call (transfer, hangup, DTMF). */
 export interface CallControl {
-  /** Transfer the call to a different number or SIP URI. */
-  transfer(number: string): Promise<void>;
+  /**
+   * Transfer the call to a different number or SIP URI.
+   *
+   * `options.mode === 'warm'` requests a hold-announce-bridge warm transfer
+   * (Twilio only for now); omitted / `'cold'` runs the historical blind
+   * redirect byte-identically. Warm mode resolves a
+   * {@link TransferCallResult} envelope (`{ error }` when unsupported or
+   * failed — the call keeps running); cold mode may resolve `void` (legacy
+   * contract). Mirrors Python `CallControl.transfer(number, mode=, summary=)`.
+   */
+  transfer(number: string, options?: TransferCallOptions): Promise<TransferCallResult | void>;
   /** Hang up the call. */
   hangup(): Promise<void>;
   /**
@@ -277,6 +296,13 @@ export class CallMetricsAccumulator {
   private _actualSttCost: number | null = null;
   // Fix 10: accumulated LLM token cost for non-Realtime pipeline mode.
   private _totalLlmCost = 0;
+  // PREEMPTIVE GENERATION counters (pipeline mode, opt-in). Hits =
+  // speculative turns released on a matching final transcript; misses =
+  // speculations started but discarded (mismatched final, barge-in,
+  // replaced by a newer interim, buffer overflow). Surfaced on the final
+  // CallMetrics. Parity with Python `_preemptive_hits` / `_preemptive_misses`.
+  private _preemptiveHits = 0;
+  private _preemptiveMisses = 0;
   // Last LLM model identifier from a recordLlmUsage call — emitted on
   // CallMetrics.llm_model so the dashboard cost panel can display
   // "Cerebras gpt-oss-120b" instead of just "Cerebras".
@@ -557,7 +583,8 @@ export class CallMetricsAccumulator {
 
   /** Stamp first TTS audio byte sent on the wire (used to compute TTS TTFB). */
   recordTtsFirstByte(): void {
-    if (this._ttsFirstByte === null) {
+    const isFirstByte = this._ttsFirstByte === null;
+    if (isFirstByte) {
       this._ttsFirstByte = hrTimeMs();
     }
 
@@ -565,6 +592,11 @@ export class CallMetricsAccumulator {
     if (this._reportOnlyInitialTtfb && this._initialTtfbEmitted) {
       return;
     }
+
+    // Emit ONLY inside the first-byte latch (parity with Python, which emits
+    // under ``if self._tts_first_byte is None``): emitting on every call
+    // re-published the same stale TTFB value as a fresh tts_metrics event.
+    if (!isFirstByte) return;
     this._initialTtfbEmitted = true;
 
     // Emit TTFBMetrics for parity with Python services/metrics.py:
@@ -807,10 +839,12 @@ export class CallMetricsAccumulator {
    * @param ts Optional override timestamp in hrTimeMs units.
    */
   recordOverlapEnd(wasInterruption: boolean, ts?: number): void {
+    // Mirror Python: an overlap-end without an overlap-start is a stray
+    // signal — counting it inflated numInterruptions and emitted a
+    // zero-delay payload, drifting the two SDKs' interruption counts apart.
+    if (this._overlapStartedAt === null) return;
     const now = ts ?? hrTimeMs();
-    const detectionDelay = this._overlapStartedAt !== null
-      ? Math.max(0, now - this._overlapStartedAt)
-      : 0;
+    const detectionDelay = Math.max(0, now - this._overlapStartedAt);
     this._overlapStartedAt = null;
 
     if (wasInterruption) {
@@ -864,6 +898,19 @@ export class CallMetricsAccumulator {
       this._pricing,
       resolvedModel,
     );
+  }
+
+  /** Count a preemptive (speculative) turn RELEASED on a matching final
+   * transcript — the buffered LLM+TTS work became the real turn. */
+  recordPreemptiveHit(): void {
+    this._preemptiveHits += 1;
+  }
+
+  /** Count a preemptive (speculative) turn started but discarded without
+   * release (mismatched final, barge-in during speculation, replaced by a
+   * newer interim, or buffer overflow). */
+  recordPreemptiveMiss(): void {
+    this._preemptiveMisses += 1;
   }
 
   /** Override the carrier-billed telephony cost (e.g. exact value reported via Twilio API). */
@@ -949,6 +996,8 @@ export class CallMetricsAccumulator {
       tts_model: this.ttsModel,
       llm_model: this._llmModel,
       error_code: this._errorCode,
+      preemptive_hits: this._preemptiveHits,
+      preemptive_misses: this._preemptiveMisses,
     };
 
     this._eventBus?.emit('call_ended', { callId: this.callId, metrics });
@@ -1163,7 +1212,10 @@ export class CallMetricsAccumulator {
     let tts: number;
     let llm: number;
 
-    if (this.providerMode === 'openai_realtime') {
+    if (this.providerMode === 'openai_realtime' || this.providerMode === 'openai_realtime_2') {
+      // v1-beta AND GA: matching only the exact 'openai_realtime' string
+      // made every GA-engine call fall into the pipeline branch and report
+      // $0 AI cost (while still emitting cached savings).
       stt = 0;
       tts = 0;
       llm = this._totalRealtimeCost;

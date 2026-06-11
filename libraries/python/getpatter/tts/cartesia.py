@@ -36,8 +36,8 @@ class TTS(_CartesiaTTS):
 
     Telephony optimization
     ----------------------
-    Use :meth:`for_twilio` (PCM @ 8 kHz, skipping the SDK-side
-    16 kHz → 8 kHz resample before μ-law transcoding) or
+    Use :meth:`for_twilio` (PCM @ 16 kHz (the pipeline decimates to the 8 kHz wire itself), skipping the SDK-side
+    16 kHz → 16 kHz (the pipeline decimates to the 8 kHz wire itself) resample before μ-law transcoding) or
     :meth:`for_telnyx` (PCM @ 16 kHz, native Telnyx default) on phone
     calls.
     """
@@ -73,7 +73,7 @@ class TTS(_CartesiaTTS):
         language: str = "en",
         speed: Optional[str | float] = None,
     ) -> "TTS":
-        """Pipeline TTS pre-configured for Twilio Media Streams (PCM @ 8 kHz).
+        """Pipeline TTS pre-configured for Twilio Media Streams (PCM @ 16 kHz (the pipeline decimates to the 8 kHz wire itself)).
 
         Falls back to ``CARTESIA_API_KEY`` from the env when ``api_key``
         is omitted. See
@@ -85,7 +85,7 @@ class TTS(_CartesiaTTS):
             model=model,
             voice=voice,
             language=language,
-            sample_rate=8000,
+            sample_rate=16000,
             speed=speed,
         )
 

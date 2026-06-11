@@ -57,11 +57,17 @@ describe('CerebrasLLMProvider 404 model_not_found handling', () => {
       logs.push(args.map((a) => String(a)).join(' '));
     });
 
-    // Drain the stream — the provider exits silently on error, so we just
-    // need to consume it and inspect side effects.
-    for await (const _ of provider.stream([{ role: 'user', content: 'hi' }])) {
-      // no-op
-    }
+    // The provider now THROWS on a non-recoverable error so the LLM fallback
+    // chain can fail over and the spoken error fallback can fire (a silent
+    // return looked like a successful, empty turn). Draining must reject; the
+    // recovery-hint log still fires as a side effect before the throw.
+    await expect(
+      (async () => {
+        for await (const _ of provider.stream([{ role: 'user', content: 'hi' }])) {
+          // no-op
+        }
+      })(),
+    ).rejects.toThrow();
 
     const combined = logs.join('\n');
     expect(combined).toContain('gated-model');
@@ -82,9 +88,13 @@ describe('CerebrasLLMProvider 404 model_not_found handling', () => {
       logs.push(args.map((a) => String(a)).join(' '));
     });
 
-    for await (const _ of provider.stream([{ role: 'user', content: 'hi' }])) {
-      // no-op
-    }
+    await expect(
+      (async () => {
+        for await (const _ of provider.stream([{ role: 'user', content: 'hi' }])) {
+          // no-op
+        }
+      })(),
+    ).rejects.toThrow();
 
     const combined = logs.join('\n');
     expect(combined).toContain('Cerebras API error: 404');

@@ -20,7 +20,7 @@ import { RemoteMessageHandler, isRemoteUrl, isWebSocketUrl } from './remote-mess
 import { createHistoryManager } from './handler-utils';
 import { DefaultToolExecutor } from './llm-loop';
 import { MCPManager } from './tools/mcp-client';
-import type { AgentOptions, Guardrail, HookContext, PipelineMessageHandler, ToolDefinition, VADProvider, CarrierKind } from './types';
+import type { AgentOptions, Guardrail, HookContext, PipelineMessageHandler, ToolDefinition, TransferCallOptions, TransferCallResult, VADProvider, CarrierKind } from './types';
 import type { MetricsStore } from './dashboard/store';
 import { getLogger } from './logger';
 import { validateTwilioSid, TRANSFER_CALL_TOOL, END_CALL_TOOL } from './server';
@@ -28,6 +28,7 @@ import { buildConsultTool } from './consult';
 import type { ProviderPricing } from './pricing';
 import { SentenceChunker } from './sentence-chunker';
 import { PipelineHookExecutor } from './pipeline-hooks';
+import { InputProcessingChain } from './services/input-chain';
 import { EventBus } from './observability/event-bus';
 import type { PatterEventType } from './observability/event-bus';
 import {
@@ -142,8 +143,14 @@ export interface TelephonyBridge {
   /** Send a clear/interrupt event to stop audio playback. */
   sendClear(ws: WSWebSocket, streamSid: string): void;
 
-  /** Transfer the call to a different number or SIP URI via provider API. */
-  transferCall(callId: string, toNumber: string): Promise<void>;
+  /** Transfer the call to a different number or SIP URI via provider API.
+   *  ``options.mode === 'warm'`` requests a hold-announce-bridge warm
+   *  transfer (Twilio only for now); the default / omitted options run the
+   *  historical cold (blind) redirect byte-identically. Returns a
+   *  {@link TransferCallResult} envelope for warm mode (``{ error }`` when
+   *  unsupported / failed — the call keeps running); cold mode may resolve
+   *  ``void`` (legacy contract). */
+  transferCall(callId: string, toNumber: string, options?: TransferCallOptions): Promise<TransferCallResult | void>;
   /** Hang up the call via provider API. */
   endCall(callId: string, ws: WSWebSocket): Promise<void>;
   /** Send DTMF digits to the caller. Carriers using REST (Telnyx) ignore
@@ -221,7 +228,7 @@ function isValidE164(number: string): boolean {
 export function augmentWithBuiltinHandoffTools(
   userTools: ToolDefinition[] | null | undefined,
   callbacks: {
-    transferCall?: (number: string) => Promise<void>;
+    transferCall?: (number: string, options?: TransferCallOptions) => Promise<TransferCallResult | void>;
     endCall?: (reason: string) => Promise<void>;
   },
 ): ToolDefinition[] {
@@ -232,9 +239,25 @@ export function augmentWithBuiltinHandoffTools(
       ...TRANSFER_CALL_TOOL,
       handler: async (args: Record<string, unknown>): Promise<string> => {
         const number = typeof args.number === 'string' ? args.number : '';
+        const mode = typeof args.mode === 'string' && args.mode ? args.mode : 'cold';
+        const summary = typeof args.summary === 'string' ? args.summary : '';
+        if (mode !== 'cold' && mode !== 'warm') {
+          return JSON.stringify({
+            error: `Invalid transfer mode '${mode}' — use 'cold' or 'warm'`,
+            status: 'rejected',
+          });
+        }
         if (!isValidE164(number)) {
           return JSON.stringify({ error: 'Invalid phone number format', status: 'rejected' });
         }
+        if (mode === 'warm') {
+          const outcome = await transferCall(number, { mode: 'warm', summary });
+          if (outcome && typeof outcome === 'object') {
+            return JSON.stringify(outcome);
+          }
+          return JSON.stringify({ status: 'transferring', mode: 'warm', to: number });
+        }
+        // Cold mode: byte-identical to the historical behaviour.
         await transferCall(number);
         return JSON.stringify({ status: 'transferring', to: number });
       },
@@ -252,6 +275,86 @@ export function augmentWithBuiltinHandoffTools(
     });
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Multi-agent handoff — built-in handoff_to tool
+// ---------------------------------------------------------------------------
+
+/** Name of the built-in multi-agent handoff tool injected when
+ *  `AgentOptions.handoffs` is configured. */
+export const HANDOFF_TOOL_NAME = 'handoff_to';
+
+/**
+ * Build the `handoff_to` tool schema for the given target-agent names.
+ *
+ * The names are surfaced both as a JSON-schema `enum` (so the model can only
+ * pick a configured target) and in the description. Sorted for a
+ * deterministic schema. Parity with Python `build_handoff_tool`.
+ */
+export function buildHandoffTool(handoffNames: readonly string[]): {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+} {
+  const names = [...handoffNames].map(String).sort();
+  return {
+    name: HANDOFF_TOOL_NAME,
+    description:
+      'Hand the conversation off to another specialized agent. The call ' +
+      "continues seamlessly with the new agent's instructions and tools. " +
+      'Available agents: ' + names.join(', '),
+    parameters: {
+      type: 'object',
+      properties: {
+        name: {
+          type: 'string',
+          enum: names,
+          description: 'Name of the agent to hand the conversation to',
+        },
+        reason: {
+          type: 'string',
+          description: 'Brief reason for the handoff',
+        },
+      },
+      required: ['name'],
+    },
+  };
+}
+
+/**
+ * Return a copy of `current` with the LLM-visible configuration of the
+ * handoff `target` applied.
+ *
+ * Only conversational config swaps: `systemPrompt`, `tools`, `variables`,
+ * `guardrails`, `textTransforms`, `consult`, `handoffs` (so chained handoffs
+ * follow the target's own map), `disablePhonePreamble` and
+ * `toolCallPreambles`. Live audio infrastructure established at call start —
+ * STT/TTS/VAD instances, engine connection, carrier codec settings, and
+ * therefore the voice on engines that cannot switch voice mid-session — is
+ * intentionally retained from `current`. Parity with Python
+ * `_apply_handoff_target`.
+ */
+export function applyHandoffTarget(current: AgentOptions, target: AgentOptions): AgentOptions {
+  return {
+    ...current,
+    systemPrompt: target.systemPrompt,
+    tools: target.tools,
+    variables: target.variables,
+    guardrails: target.guardrails,
+    textTransforms: target.textTransforms,
+    consult: target.consult,
+    handoffs: target.handoffs,
+    disablePhonePreamble: target.disablePhonePreamble,
+    toolCallPreambles: target.toolCallPreambles,
+  };
+}
+
+/** Render the system-style transcript line recording a handoff. */
+export function handoffHistoryText(name: string, reason: string): string {
+  let text = `[handoff] Conversation handed to agent '${name}'`;
+  if (reason) text += ` — ${reason}`;
+  return text;
 }
 
 /**
@@ -393,6 +496,94 @@ export function isNearDuplicate(a: string, b: string): boolean {
   return longer.startsWith(shorter + ' ');
 }
 
+/** Sentence-ending characters shared with the hallucination splitter — also
+ * the fast-path confidence signal for preemptive generation. Mirrors Python
+ * ``_SENTENCE_ENDERS``. */
+const SENTENCE_ENDERS = '.!?…。！？';
+
+/** True when `text` (whitespace-trimmed) ends with sentence-final punctuation.
+ * Mirrors Python ``_ends_with_sentence_final_punct``. */
+export function endsWithSentenceFinalPunct(text: string): boolean {
+  const stripped = (text ?? '').trimEnd();
+  return stripped.length > 0 && SENTENCE_ENDERS.includes(stripped[stripped.length - 1]);
+}
+
+/**
+ * Whether a committed FINAL transcript matches the INTERIM a speculative turn
+ * was generated from, i.e. the speculation can be released. Both sides are
+ * normalized via {@link normalizeForEcho} (lowercase, punctuation stripped,
+ * whitespace collapsed), so a final that merely adds trailing punctuation /
+ * capitalization to the interim still matches. Mirrors Python
+ * ``_speculation_matches``.
+ */
+export function speculationMatches(interim: string, final: string): boolean {
+  const a = normalizeForEcho(interim);
+  const b = normalizeForEcho(final);
+  return a.length > 0 && a === b;
+}
+
+/**
+ * In-flight PREEMPTIVE GENERATION state for one speculated user turn.
+ *
+ * Created by `StreamHandler.startSpeculation` on a confident interim
+ * transcript. The owning task runs the LLM + sentence-chunked TTS but HOLDS
+ * all audio in `buffered` until the final transcript commits:
+ *
+ * - release (final matches): `released=true` + `signalDecision()` — the task
+ *   flushes `buffered` to the carrier and continues live; it IS the real
+ *   turn from then on (history/metrics recorded by the releaser + task).
+ * - discard (mismatch / barge-in / replaced / overflow / teardown): the
+ *   abort signal fires — the task unwinds without ever touching the carrier,
+ *   conversation history, or per-turn metrics.
+ *
+ * Mirrors Python ``_SpeculativeTurn``.
+ */
+class SpeculativeTurn {
+  readonly interimText: string;
+  readonly normText: string;
+  /** Per-speculation LLM cancel signal (same machinery the live path hands
+   * to `llmLoop.run`). On release this becomes the handler's `llmAbort` so
+   * the existing barge-in cancel paths reach the speculative stream. */
+  readonly abort = new AbortController();
+  released = false;
+  /** True once buffered audio has been flushed to the carrier (release). */
+  flushed = false;
+  /** True when the speculation can no longer be released (LLM error, buffer
+   * overflow, internal failure) — the commit path must dispatch normally. */
+  failed = false;
+  /** Barge-in after release cut the live continuation short. */
+  interrupted = false;
+  /** Stamped at release with the committed final transcript. */
+  finalText = '';
+  /** Per-sentence audio held until release. The chunks array is registered
+   * BEFORE synthesis so a mid-sentence release flushes the partial too. */
+  buffered: Array<{ text: string; chunks: Buffer[] }> = [];
+  bufferedBytes = 0;
+  responseParts: string[] = [];
+  /** Same flag shape `synthesizeSentence` uses, shared across the buffered
+   * flush and the live continuation so the per-turn first-byte metric stays
+   * idempotent. */
+  readonly ttsFirstByteSent = { value: false };
+  llmFirstTokenRecorded = false;
+  task: Promise<void> | null = null;
+  /** Resolves once the commit-time decision is known (either way); the task
+   * parks on it when generation finishes before the final commits. */
+  readonly decision: Promise<void>;
+  private decisionResolve!: () => void;
+
+  constructor(interimText: string) {
+    this.interimText = interimText;
+    this.normText = normalizeForEcho(interimText);
+    this.decision = new Promise<void>((resolve) => {
+      this.decisionResolve = resolve;
+    });
+  }
+
+  signalDecision(): void {
+    this.decisionResolve();
+  }
+}
+
 // ---------------------------------------------------------------------------
 // StreamHandler context (immutable per-call configuration)
 // ---------------------------------------------------------------------------
@@ -409,12 +600,32 @@ export interface StreamHandlerDeps {
   readonly metricsStore: MetricsStore;
   readonly pricing: Record<string, Partial<ProviderPricing>> | null;
   readonly remoteHandler: RemoteMessageHandler;
-  readonly onCallStart?: (data: Record<string, unknown>) => Promise<void>;
+  /**
+   * Per-call start callback. A returned object is treated as PER-CALL AGENT
+   * OVERRIDES (snake_case keys: system_prompt, voice, model, language,
+   * first_message, provider, tools, variables) — parity with Python's
+   * ``apply_call_overrides``. Return nothing for the legacy observe-only
+   * behaviour.
+   */
+  readonly onCallStart?: (
+    data: Record<string, unknown>,
+  ) => Promise<void | Record<string, unknown> | undefined> | void | Record<string, unknown>;
   readonly onCallEnd?: (data: Record<string, unknown>) => Promise<void>;
   readonly onTranscript?: (data: Record<string, unknown>) => Promise<void>;
   readonly onMessage?: PipelineMessageHandler | string;
   readonly onMetrics?: (data: Record<string, unknown>) => Promise<void>;
   readonly recording: boolean;
+  /**
+   * Optional factory returning a carrier-neutral local call recorder for
+   * ``callId`` (wired by ``EmbeddedServer.makeLocalRecorder`` when
+   * ``serve({ localRecording })`` is on). Returning ``null`` / leaving the
+   * field unset keeps every recording tap a no-op. The handler owns the
+   * recorder lifetime: created in ``handleCallStart``, finalized in
+   * ``fireCallEnd`` (every teardown path funnels there).
+   */
+  readonly makeLocalRecorder?: (
+    callId: string,
+  ) => import('./audio/call-recorder').LocalCallRecorder | null;
   /** When true, only the first TTFB per call is forwarded to the event bus. Default false. */
   readonly reportOnlyInitialTtfb?: boolean;
   /**
@@ -507,8 +718,6 @@ export class StreamHandler {
    * dashboard / pricing rows.
    */
   private llmProviderTag: string = "openai";
-  /** Set to true after a VAD error to suppress log spam for the rest of the call. */
-  private vadDisabled = false;
   /**
    * Auto-loaded SileroVAD when ``agent.vad`` is undefined. Populated by
    * ``initPipeline`` and queried alongside ``agent.vad`` on every audio frame.
@@ -523,6 +732,16 @@ export class StreamHandler {
    * headset deployments that don't have TTS bleed.
    */
   private aec: import('./audio/aec').NlmsEchoCanceller | null = null;
+  /**
+   * Carrier-neutral local call recorder (stereo WAV; left=caller,
+   * right=agent). Created in ``handleCallStart`` via
+   * ``deps.makeLocalRecorder`` when ``serve({ localRecording })`` is on;
+   * ``null`` keeps every tap a no-op. Finalized (header patched, file
+   * closed) in ``fireCallEnd`` — both ``handleStop`` and ``handleWsClose``
+   * funnel there, so abnormal teardown still yields a parseable file.
+   * Parity with Python ``StreamHandler.local_recorder``.
+   */
+  private localRecorder: import('./audio/call-recorder').LocalCallRecorder | null = null;
   /**
    * Monotonic counter incremented on every TTS-start. The grace timer
    * scheduled by ``endSpeakingWithGrace`` only flips ``isSpeaking=false``
@@ -599,8 +818,77 @@ export class StreamHandler {
   /** Wall-clock (ms) when the current pending barge-in started, or
    * ``null`` if no barge-in is pending. */
   private bargeInPendingSince: number | null = null;
-  /** Timer that fires the pending-barge-in timeout. */
+  /** Timer that fires the pending-barge-in timeout. In
+   * ``bargeInMode: 'pause_resume'`` this same handle holds the
+   * false-interruption resume timer. */
   private bargeInPendingTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Pause-and-resume false-interruption handling (opt-in
+   * ``agent.bargeInMode: 'pause_resume'``; default ``'cancel'`` keeps
+   * today's behaviour byte-identical). LiveKit-style: PAUSE output on
+   * VAD speech_start (carrier cleared, sends gated on ``outputPaused``),
+   * KILL on a committed final transcript within ``bargeInConfirmMs``,
+   * RESUME from the first not-fully-heard sentence otherwise. Mirrors
+   * Python ``_barge_in_mode`` / ``_output_paused``.
+   */
+  private readonly bargeInMode: 'cancel' | 'pause_resume';
+  /** True while output is paused: ``synthesizeSentence`` queues chunks
+   * into per-sentence retention entries instead of sending, and the LLM
+   * loops buffer whole sentences as text. */
+  private outputPaused = false;
+  /** Per-pause decision latch — resolved when the pause resolves
+   * (resume, kill, or teardown) so loop-side waiters can proceed. */
+  private pauseDecision: { promise: Promise<void>; resolve: () => void } | null =
+    null;
+  /** Sentences produced by the LLM while paused (text, pre-guardrail).
+   * Spoken in order on resume; discarded on kill. Bounded by
+   * ``PAUSE_MAX_BUFFERED_SENTENCES`` — overflow degrades to a full
+   * cancel so memory stays bounded against a runaway stream. */
+  private pausedSentences: string[] = [];
+  /**
+   * Per-turn retained sentence audio (pause_resume mode only): one entry
+   * per response sentence holding every TTS chunk produced for it.
+   * ``sent`` counts chunks actually delivered to the carrier — the
+   * resume path resets it to 0 for the unheard tail and re-sends from
+   * memory (no TTS re-billing). Index-aligned with
+   * ``turnSpokenSegments`` for the stamped prefix. Bounded by
+   * ``PAUSE_RESUME_MAX_RETAINED_S``.
+   */
+  private turnSentenceAudio: Array<{
+    text: string;
+    chunks: Buffer[];
+    sent: number;
+  }> = [];
+  private pauseRetainedBytes = 0;
+  /** Set when the retained-audio cap was exceeded while NOT paused (very
+   * long carrier backlog): retention is released and pause_resume falls
+   * back to legacy cancel for the rest of the turn. Reset at
+   * ``beginSpeaking``. */
+  private pauseResumeOverflowed = false;
+  /** Sentence index (into ``turnSpokenSegments`` / ``turnSentenceAudio``)
+   * of the first sentence the caller had NOT fully heard at pause time —
+   * the resume offset. Sentence granularity: the partially-played
+   * sentence is replayed from its start (natural-sounding repair) rather
+   * than resumed mid-word. */
+  private pauseResumeIndex = 0;
+  /** False until the turn body finishes pushing audio (the
+   * ``endSpeakingWithGrace`` call in its finally). The resume path uses
+   * it to decide whether the #164 grace machinery must be re-armed for
+   * the re-sent tail (post-complete pause) or whether the still-running
+   * turn body will arm it itself. */
+  private turnOutputDone = false;
+  /** Cap on sentences buffered as text while output is paused. A pause
+   * lasts at most ``bargeInConfirmMs`` (1.5 s default) so this is
+   * generous; overflow degrades to a full cancel. Mirrors Python
+   * ``_PAUSE_MAX_BUFFERED_SENTENCES``. */
+  private static readonly PAUSE_MAX_BUFFERED_SENTENCES = 32;
+  /** Cap (seconds of playout) on retained per-sentence TTS audio — both
+   * the already-sent tail kept for re-send and chunks queued while
+   * paused. 15 s ≈ 480 KB of PCM16 @ 16 kHz per concurrent call.
+   * Overflow while paused → degrade to full cancel; overflow while
+   * speaking → release retention and fall back to legacy cancel for the
+   * rest of the turn. Mirrors Python ``_PAUSE_RESUME_MAX_RETAINED_S``. */
+  private static readonly PAUSE_RESUME_MAX_RETAINED_S = 15;
   /**
    * Set to true when a VAD ``speech_start`` was suppressed by the
    * anti-echo gate during the current agent turn.  Cleared on
@@ -609,6 +897,47 @@ export class StreamHandler {
    * so the user's speech is not silently discarded.
    */
   private suppressedSpeechPending = false;
+  // ---- Semantic turn detection (opt-in via ``agent.turnDetector``) ----
+  // When a detector is configured, a VAD ``speech_end`` no longer
+  // finalizes STT immediately: the detector scores the rolling window
+  // below and the finalize is deferred (held) while it predicts
+  // "incomplete", bounded by ``agent.maxSemanticHoldMs``. With the
+  // default ``turnDetector`` unset every field below is dormant and the
+  // speech_end path is byte-identical to previous releases. Parity with
+  // Python ``_semantic_*`` state on ``PipelineStreamHandler``.
+  /** Rolling window byte budget: the last 8 s of PCM16 @ 16 kHz. */
+  private static readonly SEMANTIC_WINDOW_MAX_BYTES = 16000 * 2 * 8;
+  /** Re-score cadence while holding: one prediction per this much silence. */
+  private static readonly SEMANTIC_POLL_MS = 200;
+  /** Rolling buffer of post-decode PCM16-16k frames (bounded to 8 s). */
+  private semanticAudioRing: Buffer[] = [];
+  private semanticAudioRingBytes = 0;
+  /** True while a sub-threshold prediction is holding the finalize open. */
+  private semanticHoldActive = false;
+  /** Wall-clock (ms) deadline for the hard cap, null when idle. */
+  private semanticHoldDeadlineMs: number | null = null;
+  /** Invalidates the backstop timer once its hold has been resolved. */
+  private semanticHoldGeneration = 0;
+  /** Wall-clock backstop — finalizes at the cap even if audio stalls. */
+  private semanticHoldTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Bytes accumulated since the last prediction while holding. */
+  private semanticPollPendingBytes = 0;
+  /**
+   * Set on the FIRST detector failure: semantic endpointing is then
+   * disabled for the remainder of the call (one clear warning, plain
+   * VAD-silence behavior) instead of warning per turn against a
+   * permanently broken model. Mirrors Python ``_semantic_detector_failed``
+   * and the existing ``vadDisabled`` fail-once pattern.
+   */
+  private turnDetectorFailed = false;
+  /**
+   * EOU trigger for the NEXT committed turn. Stamped by the semantic
+   * finalize paths, consumed (and reset) on transcript commit. Parity
+   * with Python ``_last_eou_trigger``.
+   */
+  private lastEouTrigger: import('./_speech-events').EouTrigger = 'vad_silence';
+  /** Hard cap (ms) a semantic hold may defer the finalize. */
+  private readonly maxSemanticHoldMs: number = 1200;
   /**
    * Minimum wall-clock duration (ms) the agent must have been speaking
    * before barge-in is allowed to fire when AEC is active. Covers the
@@ -705,6 +1034,8 @@ export class StreamHandler {
       }
     }
     this.speakingGeneration++;
+    // Speech-event: agent start edge (pipeline parity with realtime).
+    await this.emitAgentSpeechStarted();
     this.isSpeaking = true;
     // A fresh turn is actively streaming — not in the post-TTS echo window.
     // Clear the tail-grace flag so a VAD speech_start during this turn is
@@ -736,6 +1067,15 @@ export class StreamHandler {
     // Fresh turn — reset the heard-prefix playback timeline.
     this.turnPlaybackTotalMs = 0;
     this.turnSpokenSegments = [];
+    // Fresh turn — drop any pause-and-resume state and retained audio from
+    // the previous turn (a paused turn can never reach here — the
+    // pause-decision wait resolves before the turn ends — but be
+    // defensive) and re-enable retention after an overflow.
+    this.discardPauseState();
+    this.pauseResumeOverflowed = false;
+    // False until the turn body finishes pushing audio — see
+    // ``resumeAfterFalseInterruption``.
+    this.turnOutputDone = false;
     // Reset the VAD detector so the next user utterance triggers a clean
     // SILENCE→SPEECH transition. Without this, PSTN echo from the previous
     // turn can keep the detector's smoothed probability above the
@@ -845,7 +1185,11 @@ export class StreamHandler {
   private maybeTruncateCompletedTurnHistory(): void {
     if (this.dispatchTask !== null) return; // turn still in flight
     const remainingMs = this.playbackBufferedUntil - Date.now();
-    if (remainingMs <= 0) return;
+    // Pause-and-resume froze the playback bookkeeping at pause time
+    // (cursor snapped to 0, total rewound to the heard offset), so a kill
+    // while paused has no live backlog — the frozen heard prefix below is
+    // still the right input for the rewrite.
+    if (remainingMs <= 0 && !this.outputPaused) return;
     const heard = this.heardResponsePrefix();
     if (heard === null || heard.heardEverything) return;
     this.rewriteLastAssistantEntry(
@@ -957,6 +1301,13 @@ export class StreamHandler {
    * barge-in armed during the audible tail. Tunable via env.
    */
   private endSpeakingWithGrace(): void {
+    // Speech-event: agent stop edge (clean turn end). Fire-and-forget —
+    // this method is synchronous by design.
+    void this.emitAgentSpeechEnded(false).catch(() => {});
+    // The turn body has finished pushing audio — from here on, a
+    // pause-resume cycle owns re-arming the grace machinery (see
+    // ``resumeAfterFalseInterruption``).
+    this.turnOutputDone = true;
     const rawGrace = process.env.PATTER_TTS_TAIL_GRACE_MS;
     const parsedGrace = rawGrace !== undefined ? Number(rawGrace) : NaN;
     const grace = (rawGrace !== undefined && Number.isFinite(parsedGrace))
@@ -994,6 +1345,10 @@ export class StreamHandler {
             this.speakingStartedAt = null;
             this.firstAudioSentAt = null;
             this.clearPendingBargeIn();
+            // Hygiene: a turn that ended while paused (only reachable via
+            // the LLM-error path — normal turns wait out the pause
+            // decision) must not leak its pause buffers into idle time.
+            this.discardPauseState();
             void this.resetBargeInStrategies();
             // If VAD detected speech during the agent's turn but it was
             // gate-suppressed (agent hadn't been speaking long enough for
@@ -1036,6 +1391,9 @@ export class StreamHandler {
       this.speakingStartedAt = null;
       this.firstAudioSentAt = null;
       this.clearPendingBargeIn();
+      // See the grace-flip branch — drop any pause state a turn that
+      // errored mid-pause left behind.
+      this.discardPauseState();
       void this.resetBargeInStrategies();
       if (this.suppressedSpeechPending) {
         this.suppressedSpeechPending = false;
@@ -1072,6 +1430,8 @@ export class StreamHandler {
     this.speakingGeneration++; // invalidates the pending grace timer
     this.clearGraceTimer();
     this.clearPendingBargeIn();
+    // The next turn owns the floor — any stale pause state is void.
+    this.discardPauseState();
     void this.resetBargeInStrategies();
     // Recover the user's leading words. Same rationale as the barge-in flush
     // — but here it is the only audio recovery, since the agent already
@@ -1095,7 +1455,7 @@ export class StreamHandler {
    */
   private resetVad(): void {
     const activeVad = this.deps.agent.vad ?? this.autoVad;
-    if (!activeVad || this.vadDisabled) return;
+    if (!activeVad || this.inputChain.isVadDisabled()) return;
     try {
       const ret = activeVad.reset?.();
       if (ret instanceof Promise) {
@@ -1163,6 +1523,15 @@ export class StreamHandler {
    * should read ``this.resolvedTools ?? this.deps.agent.tools``.
    */
   private resolvedTools: ToolDefinition[] | null = null;
+  /**
+   * Per-call effective agent configuration. Starts as ``deps.agent`` and is
+   * REPLACED (never mutated — ``AgentOptions`` is shared and readonly) by a
+   * multi-agent ``handoff_to`` so the rest of the call runs with the target
+   * agent's LLM-visible config (system prompt, tools, variables, guardrails,
+   * text transforms, onward handoffs). Parity with the Python handler's
+   * ``self.agent`` swap.
+   */
+  private currentAgent: AgentOptions;
   private llmLoop: LLMLoop | null = null;
   /**
    * Per-call tool executor — provides retry-with-exponential-backoff and a
@@ -1238,6 +1607,8 @@ export class StreamHandler {
    * Python ``_dispatch_task``.
    */
   private dispatchTask: Promise<void> | null = null;
+  /** Background greeting playback (see playFirstMessage). */
+  private firstMessageTask: Promise<void> | null = null;
   /**
    * Cap (ms) on how long teardown waits for the backgrounded dispatch to
    * settle. JS promises are not cancellable, so a user-supplied ``onMessage``
@@ -1259,6 +1630,29 @@ export class StreamHandler {
   // Throttle state for back-to-back STT finals — see ``commitTranscript``.
   private lastCommitText = '';
   private lastCommitAt = 0;
+  // --- PREEMPTIVE GENERATION (opt-in, built-in LLM loop only) ---
+  // When enabled, a confident INTERIM transcript starts a speculative
+  // LLM+TTS dispatch whose audio is HELD in memory; the final transcript's
+  // commit either releases it (matching text — the already-generated audio
+  // flushes immediately) or discards it and dispatches normally. See
+  // ``noteInterimTranscript`` / ``tryReleaseSpeculation``. Parity with
+  // Python ``_preemptive_enabled``.
+  private readonly preemptiveEnabled: boolean;
+  private readonly preemptiveMinStableMs: number;
+  /** The single in-flight speculation (at most one). ``null`` when idle,
+   * when discarded, or once released (a released speculation becomes the
+   * live turn tracked by ``dispatchTask`` instead). */
+  private speculation: SpeculativeTurn | null = null;
+  // Interim-stability tracking: normalized text of the newest interim plus
+  // the one-shot timer that starts a speculation once the text has been
+  // unchanged for ``preemptiveMinStableMs``.
+  private interimNorm = '';
+  private interimText = '';
+  private interimStableTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Hard cap (ms of playout) on TTS audio buffered by a speculative turn.
+   * Overflow aborts the speculation. Parity with Python
+   * ``_PREEMPTIVE_MAX_BUFFER_S``. */
+  private static readonly PREEMPTIVE_MAX_BUFFER_MS = 15_000;
   /** The agent's spoken text for the CURRENT turn, accumulated as tokens stream.
    * The echo guard rejects transcripts matching it (the agent's own TTS bleeding
    * back into STT when audio is forwarded during TTS without effective AEC).
@@ -1276,6 +1670,22 @@ export class StreamHandler {
   // Created lazily on first use; reset() on call end.
   private readonly inboundResampler: StatefulResampler = createResampler8kTo16k();
   private readonly outboundResampler: StatefulResampler = createResampler16kTo8k();
+  /**
+   * Inbound audio processing chain: decode (mulaw→PCM16) → stateful 8k→16k
+   * resample → AEC near-end → ``agent.audioFilter`` → VAD (slice 1 of the
+   * pipeline-stages decomposition — docs/architecture/pipeline-stages.md).
+   * Shares ``inboundResampler`` so ``flushResamplers`` keeps draining the
+   * tail on call close; AEC / filter / VAD are late-bound getters because
+   * ``initPipeline`` (and the unit suites) install ``aec`` / ``autoVad``
+   * after construction. Owns the per-call VAD error kill switch that
+   * previously lived here as ``vadDisabled``.
+   */
+  private readonly inputChain: InputProcessingChain = new InputProcessingChain({
+    resampler: this.inboundResampler,
+    getAec: () => this.aec,
+    getAudioFilter: () => this.deps.agent.audioFilter,
+    getVad: () => this.deps.agent.vad ?? this.autoVad,
+  });
 
   private readonly history: ReturnType<typeof createHistoryManager>;
   private readonly metricsAcc: CallMetricsAccumulator;
@@ -1286,6 +1696,7 @@ export class StreamHandler {
     this.ws = ws;
     this.caller = caller;
     this.callee = callee;
+    this.currentAgent = deps.agent;
 
     if (this.forwardSttWhileSpeaking) {
       getLogger().warn(
@@ -1302,6 +1713,26 @@ export class StreamHandler {
       typeof confirmMs === 'number' && Number.isFinite(confirmMs) && confirmMs > 0
         ? confirmMs
         : 1500;
+    const mode = deps.agent.bargeInMode ?? 'cancel';
+    if (mode !== 'cancel' && mode !== 'pause_resume') {
+      getLogger().warn(`Unknown bargeInMode ${String(mode)} — falling back to 'cancel'`);
+    }
+    this.bargeInMode = mode === 'pause_resume' ? 'pause_resume' : 'cancel';
+    this.preemptiveEnabled = deps.agent.preemptiveGeneration ?? false;
+    const stableMs = deps.agent.preemptiveMinStableMs;
+    this.preemptiveMinStableMs =
+      typeof stableMs === 'number' && Number.isFinite(stableMs) && stableMs >= 0
+        ? stableMs
+        : 300;
+
+    // Semantic turn detection hard cap (only consulted when
+    // ``agent.turnDetector`` is configured). Parity with Python
+    // ``max_semantic_hold_ms`` (default 1200 ms).
+    const holdMs = deps.agent.maxSemanticHoldMs;
+    this.maxSemanticHoldMs =
+      typeof holdMs === 'number' && Number.isFinite(holdMs) && holdMs >= 0
+        ? holdMs
+        : 1200;
 
     this.history = createHistoryManager(200);
 
@@ -1333,7 +1764,7 @@ export class StreamHandler {
     // when set; fall back to the adapter default.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const realtimeModelName =
-      providerMode === 'openai_realtime'
+      providerMode === 'openai_realtime' || (providerMode as string) === 'openai_realtime_2'
         ? String(((deps.agent as any).model ?? '') || '') || 'gpt-realtime-mini'
         : '';
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1351,7 +1782,10 @@ export class StreamHandler {
         llmProviderName = stripped || 'custom';
       }
     } else {
-      llmProviderName = providerMode === 'openai_realtime' ? 'openai_realtime' : 'openai';
+      llmProviderName =
+        providerMode === 'openai_realtime' || (providerMode as string) === 'openai_realtime_2'
+          ? 'openai_realtime'
+          : 'openai';
     }
     this.llmProviderTag = llmProviderName;
 
@@ -1586,7 +2020,7 @@ export class StreamHandler {
       // phone.call() the store has direction='outbound', otherwise inbound.
       const direction =
         this.deps.metricsStore.getActive(callId)?.direction ?? 'inbound';
-      await this.deps.onCallStart({
+      const overrides = await this.deps.onCallStart({
         call_id: callId,
         caller: this.caller,
         callee: this.callee,
@@ -1594,9 +2028,27 @@ export class StreamHandler {
         telephony_provider: this.deps.bridge.telephonyProvider,
         ...(Object.keys(customParams).length > 0 ? { custom_params: customParams } : {}),
       });
+      // Dynamic per-call configuration: Python applied a returned dict via
+      // apply_call_overrides since 0.5.x; TS typed the callback void and
+      // silently ignored the result.
+      if (overrides && typeof overrides === 'object') {
+        this.applyCallOverrides(overrides as Record<string, unknown>);
+      }
     }
 
     await this.startRecordingIfRequested(callId);
+
+    // Carrier-neutral local recording — created BEFORE the adapter /
+    // pipeline init so the firstMessage TTS is captured. Independent of the
+    // carrier-side `recording` flag above (both can be on). The factory
+    // returns null when `localRecording` is off or setup failed.
+    if (this.deps.makeLocalRecorder) {
+      try {
+        this.localRecorder = this.deps.makeLocalRecorder(callId);
+      } catch (e) {
+        getLogger().warn(`Local recorder setup failed: ${String(e)}`);
+      }
+    }
 
     // Resolve dynamic variables in system prompt
     const agentVars = this.deps.sanitizeVariables(this.deps.agent.variables ?? {});
@@ -1702,19 +2154,38 @@ export class StreamHandler {
   /** Handle an incoming audio chunk (already decoded from base64). */
   /** Forward inbound audio bytes to the AI adapter and (in pipeline mode) the STT provider. */
   async handleAudio(audioBuffer: Buffer): Promise<void> {
+    // Local-recording tap (caller side) — BEFORE every engine-mode branch
+    // and guard below, so the caller channel has no gaps while STT / the
+    // realtime adapter are still connecting or frames are dropped during
+    // TTS. The wire codec comes from the bridge: μ-law 8 kHz carriers
+    // (Twilio, Plivo, Telnyx-PCMU) say ``ulaw_8000``; the recorder decodes
+    // to PCM16 16 kHz internally. Parity with the Python handlers'
+    // ``on_audio_received`` taps.
+    if (this.localRecorder) {
+      this.localRecorder.addCallerAudio(
+        audioBuffer,
+        this.deps.bridge.inputWireFormat === 'pcm_16000' ? 'pcm16_16k' : 'mulaw_8k',
+      );
+    }
     const provider = this.deps.agent.provider ?? 'openai_realtime';
     if (provider === 'pipeline' && this.stt) {
-      // Both Twilio and Telnyx (with default streaming_start PCMU bidirectional)
-      // deliver mulaw 8 kHz — always transcode to PCM16 16 kHz before STT.
-      const pcm8k = mulawToPcm16(audioBuffer);
-      let pcm16k = this.inboundResampler.process(pcm8k);
+      // Decode (mulaw 8 kHz → PCM16) → stateful 8k→16k resample → AEC
+      // near-end → ``agent.audioFilter`` → VAD all live in the
+      // ``InputProcessingChain`` (slice 1 of the pipeline-stages
+      // decomposition — docs/architecture/pipeline-stages.md). The chain
+      // returns the processed frame plus at most one VAD event; everything
+      // downstream (VAD-event handling, self-hearing gate, ring buffer,
+      // ``beforeSendToStt`` hook, STT feed) stays here for this slice.
+      const frame = await this.inputChain.process(audioBuffer);
+      const pcm16k = frame.pcm16k;
 
-      // Acoustic echo cancellation — subtract estimated TTS bleed from the
-      // mic stream before VAD/STT see it. Pass-through until the canceller
-      // has enough far-end history to fill its filter window (~128 ms),
-      // then converges over the next 0.5–2 s of TTS-only frames.
-      if (this.aec) {
-        pcm16k = this.aec.processNearEnd(pcm16k);
+      // Semantic turn detection: keep the last ~8 s of post-decode PCM16
+      // 16 kHz so the detector can score the caller's current turn on the
+      // VAD speech_end edge. Zero cost when no ``agent.turnDetector`` is
+      // configured (or after the detector failed and semantic endpointing
+      // was disabled). Parity with Python ``_semantic_buffer_append``.
+      if (this.deps.agent.turnDetector && !this.turnDetectorFailed) {
+        this.semanticBufferAppend(pcm16k);
       }
 
       // External VAD (e.g. Silero) when configured. Drives:
@@ -1725,18 +2196,9 @@ export class StreamHandler {
       //    interruption (no waiting for STT to emit a transcript).
       //  - Endpointing-free STT: no need to wait for Deepgram's silence
       //    timeout — we already know when the user is talking.
-      const activeVad = this.deps.agent.vad ?? this.autoVad;
-      if (activeVad && !this.vadDisabled) {
+      if (frame.vadConfigured) {
         try {
-          // H4: protect hot path against slow ONNX inference — if VAD takes
-          // longer than 25 ms, treat the frame as silent and continue.
-          const vadPromise = activeVad.processFrame(pcm16k, 16000);
-          let vadTimeoutId: ReturnType<typeof setTimeout>;
-          const timeoutPromise = new Promise<null>((resolve) => {
-            vadTimeoutId = setTimeout(() => resolve(null), 25);
-          });
-          const evt = await Promise.race([vadPromise, timeoutPromise]);
-          clearTimeout(vadTimeoutId!);
+          const evt = frame.vadEvent;
           if (evt) {
             // INFO-level log so the user can see VAD activity in the standard
             // server output without flipping debug logging.
@@ -1745,6 +2207,17 @@ export class StreamHandler {
             );
           }
           if (evt?.type === 'speech_start') {
+            // Speech-event: the seven-event public API never fired in
+            // pipeline mode (only realtime emitted) — wire the user start
+            // edge here. No-op without a dispatcher.
+            await this.emitUserSpeechStarted();
+            // The user resumed speaking — an active semantic hold (the
+            // turn detector judged the previous pause mid-turn) is proven
+            // right; drop it so the utterance keeps accumulating and the
+            // next speech_end re-evaluates from scratch.
+            if (this.deps.agent.turnDetector) {
+              this.cancelSemanticHold();
+            }
             // Tail-grace new-turn rescue: the agent already finished its turn
             // and we are only in the post-TTS echo-guard window. A VAD
             // speech_start here is the user's next turn, not a barge-in — end
@@ -1780,6 +2253,21 @@ export class StreamHandler {
               // STT so the speech isn't silently discarded when the
               // agent finishes naturally without a barge-in.
               this.suppressedSpeechPending = true;
+            } else if (this.isSpeaking && this.shouldPauseForBargeIn()) {
+              // PAUSE-AND-RESUME (opt-in ``bargeInMode: 'pause_resume'``):
+              // output pauses immediately — the carrier buffer is cleared
+              // so the agent goes silent within one frame — but nothing is
+              // cancelled. A committed final transcript within
+              // ``bargeInConfirmMs`` kills the turn via ``handleBargeIn`` →
+              // ``runBargeInCancel``; otherwise the resume timer replays
+              // from the first not-fully-heard sentence. Takes precedence
+              // over the deferCancel paths below — it is strictly safer
+              // (output stops immediately AND a false positive is
+              // recoverable). The frame falls through to STT below (paused
+              // output makes the line echo-quiet) so the confirm window
+              // can actually hear the user. Parity with Python
+              // ``_start_pause_resume``.
+              this.startPauseResume();
             } else if (this.isSpeaking) {
               // Defer the cancel to transcript confirmation — instead of
               // firing on raw VAD energy — when EITHER opt-in
@@ -1842,29 +2330,56 @@ export class StreamHandler {
               // original phantom-during-warmup-gate vulnerability.
               this.metricsAcc.anchorUserSpeechStart();
             }
+            // PREEMPTIVE GENERATION: the user resumed speaking while a
+            // speculative turn was buffering — the interim it was generated
+            // from is stale, so abort silently (nothing was audible; the
+            // next confident interim re-speculates). A RELEASED speculation
+            // is no longer registered here — it is the live turn and the
+            // barge-in paths above own it.
+            if (!this.isSpeaking && this.speculation !== null) {
+              await this.abortSpeculation('user_speech_resumed');
+            }
           } else if (evt?.type === 'speech_end') {
+            // Speech-event: user stop edge (pipeline parity with realtime).
+            await this.emitUserSpeechEnded();
             this.metricsAcc.recordVadStop();
-            // The SDK's VAD has detected end-of-speech earlier and more
-            // reliably than the provider's own endpointing on PSTN
-            // (Deepgram's natural-pause endpointing can run 1-6 s before
-            // it emits a final). Ask the provider to finalise the
-            // in-flight utterance NOW so the next turn can dispatch
-            // immediately. Optional chained — Whisper-class adapters
-            // that don't support per-utterance finalisation simply skip.
-            try {
-              const ret = this.stt?.finalize?.();
-              if (ret instanceof Promise) {
-                ret.catch((err) =>
-                  getLogger().debug(`STT finalize threw: ${String(err)}`),
-                );
-              }
-            } catch (err) {
-              getLogger().debug(`STT finalize threw: ${String(err)}`);
+            if (this.deps.agent.turnDetector && !this.turnDetectorFailed) {
+              // Semantic turn detection (opt-in): defer the STT finalize
+              // until the end-of-utterance model agrees the caller is done
+              // — or hold for at most ``maxSemanticHoldMs`` while it
+              // predicts "incomplete" (mid-sentence pause). The default
+              // ``turnDetector``-unset path below is unchanged, and a
+              // failed detector permanently rejoins it.
+              await this.semanticEouCheck();
+            } else {
+              // The SDK's VAD has detected end-of-speech earlier and more
+              // reliably than the provider's own endpointing on PSTN
+              // (Deepgram's natural-pause endpointing can run 1-6 s before
+              // it emits a final). Ask the provider to finalise the
+              // in-flight utterance NOW so the next turn can dispatch
+              // immediately.
+              this.finalizeSttForEou();
             }
           }
+
+          // Semantic hold poll: while the detector is holding the turn
+          // open, every additional silent frame advances the audio clock —
+          // re-score after each ``SEMANTIC_POLL_MS`` window of silence and
+          // force the finalize once the hard cap is reached. Frames that
+          // carried a VAD transition are skipped: a ``speech_start`` just
+          // cancelled the hold, and on the ``speech_end`` frame itself the
+          // detector already scored this audio (the silence window starts
+          // AFTER the decision point). Parity with Python
+          // ``_poll_semantic_hold``.
+          if (this.deps.agent.turnDetector && this.semanticHoldActive && !evt) {
+            await this.pollSemanticHold(pcm16k.length);
+          }
         } catch (err) {
-          // Disable VAD for the rest of the call to avoid log spam on repeated failures.
-          this.vadDisabled = true;
+          // Disable VAD for the rest of the call to avoid log spam on
+          // repeated failures. Inference failures are already handled inside
+          // the chain; this preserves the pre-extraction semantics where a
+          // throw from the EVENT-HANDLING path above also disabled VAD.
+          this.inputChain.disableVad();
           getLogger().warn(`VAD processFrame failed — disabling VAD for this call: ${String(err)}`);
         }
       }
@@ -1884,8 +2399,12 @@ export class StreamHandler {
       // buffer, short interruptions ("stop") never produced a
       // transcript and the agent kept talking; long ones produced
       // truncated transcripts and the agent answered to fragments.
-      if (this.isSpeaking) {
-        if (this.deps.agent.vad ?? this.autoVad) {
+      // Pause-and-resume: while output is PAUSED the line is echo-quiet
+      // (no TTS is playing), so frames flow straight to STT — the confirm
+      // window depends on STT hearing the user. ``startPauseResume``
+      // already flushed the ring's leading edge when the pause began.
+      if (this.isSpeaking && !this.outputPaused) {
+        if (frame.vadConfigured) {
           this.inboundAudioRing.push(pcm16k);
           if (
             this.inboundAudioRing.length > StreamHandler.INBOUND_AUDIO_RING_FRAMES
@@ -2013,6 +2532,14 @@ export class StreamHandler {
    * can't be cancelled). No-op when nothing is in flight.
    */
   private async settleDispatchForTeardown(): Promise<void> {
+    // Settle the backgrounded greeting too: cancelSpeaking/llmAbort flips
+    // isSpeaking so playFirstMessage's send loop exits on its next check —
+    // this await just ensures its finally (resetTtsCarry / grace flip) ran
+    // before adapters are torn down.
+    if (this.firstMessageTask) {
+      await this.firstMessageTask.catch(() => {});
+      this.firstMessageTask = null;
+    }
     if (!this.dispatchTask) return;
     const settle = this.dispatchTask.catch(() => {});
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -2026,8 +2553,226 @@ export class StreamHandler {
     }
   }
 
+
+  /**
+   * Apply per-call agent overrides returned by ``onCallStart``. snake_case
+   * keys mirror the Python payload contract (``apply_call_overrides``);
+   * ``stt_config``/``tts_config`` dicts are Python-only (TS agents carry
+   * adapter instances, not configs) and are ignored here with a warning.
+   * The deps object is per-handler, so swapping its ``agent`` is call-local.
+   */
+  private applyCallOverrides(overrides: Record<string, unknown>): void {
+    const next: Record<string, unknown> = { ...this.deps.agent };
+    const applied: string[] = [];
+    const map: Record<string, string> = {
+      system_prompt: 'systemPrompt',
+      voice: 'voice',
+      model: 'model',
+      language: 'language',
+      first_message: 'firstMessage',
+      provider: 'provider',
+      tools: 'tools',
+      variables: 'variables',
+    };
+    for (const [key, field] of Object.entries(map)) {
+      if (key in overrides) {
+        next[field] = overrides[key];
+        applied.push(key);
+      }
+    }
+    if ('stt_config' in overrides || 'tts_config' in overrides) {
+      getLogger().warn(
+        'onCallStart overrides: stt_config/tts_config are Python-only (TS agents ' +
+          'carry adapter instances) — ignored.',
+      );
+    }
+    if (applied.length > 0) {
+      (this.deps as { agent: AgentOptions }).agent = next as unknown as AgentOptions;
+      getLogger().debug(`Per-call config overrides applied: ${applied.join(', ')}`);
+    }
+  }
+
   /** Handle call stop / stream end. */
   /** Handle a carrier-emitted `stop` event signalling the call has ended. */
+  // ---------------------------------------------------------------------------
+  // Semantic turn detection (opt-in via ``agent.turnDetector``)
+  // Parity with Python ``PipelineStreamHandler._semantic_*`` helpers.
+  // ---------------------------------------------------------------------------
+
+  /** Append a post-decode PCM16-16k frame to the rolling 8 s window. */
+  private semanticBufferAppend(pcm16k: Buffer): void {
+    if (pcm16k.length === 0) return;
+    this.semanticAudioRing.push(pcm16k);
+    this.semanticAudioRingBytes += pcm16k.length;
+    while (
+      this.semanticAudioRingBytes > StreamHandler.SEMANTIC_WINDOW_MAX_BYTES &&
+      this.semanticAudioRing.length > 0
+    ) {
+      const dropped = this.semanticAudioRing.shift();
+      if (dropped) this.semanticAudioRingBytes -= dropped.length;
+    }
+  }
+
+  /** Concatenate the rolling window for one detector prediction. */
+  private semanticWindowBytes(): Buffer {
+    return Buffer.concat(this.semanticAudioRing);
+  }
+
+  /**
+   * Drop the rolling window — called when a turn commits so the next
+   * turn's window contains only its own audio (mirrors the reference
+   * smart-turn integrations, which score per-turn audio).
+   */
+  private resetSemanticWindow(): void {
+    this.semanticAudioRing = [];
+    this.semanticAudioRingBytes = 0;
+  }
+
+  /**
+   * Score the rolling window; finalize, or hold for more silence.
+   *
+   * Fail-open AND fail-once: the first detector error falls back to the
+   * legacy immediate finalize (``vad_silence`` trigger) and disables
+   * semantic endpointing for the remainder of the call — a broken model
+   * must never stall a live phone call, and a permanently broken one
+   * (onnxruntime-node missing/incompatible, model file gone) must produce
+   * a single clear warning, not one per turn.
+   */
+  private async semanticEouCheck(): Promise<void> {
+    const detector = this.deps.agent.turnDetector;
+    if (!detector) return;
+    let probability: number;
+    try {
+      probability = await detector.predict(this.semanticWindowBytes());
+    } catch (err) {
+      this.turnDetectorFailed = true;
+      getLogger().warn(
+        'Semantic turn detector failed — disabling it for this call and ' +
+          `falling back to plain VAD-silence endpointing: ${String(err)}`,
+      );
+      this.cancelSemanticHold();
+      // The rolling window is dead weight now that the detector is
+      // disabled — release the up-to-8 s of buffered PCM immediately.
+      this.resetSemanticWindow();
+      this.lastEouTrigger = 'vad_silence';
+      this.finalizeSttForEou();
+      return;
+    }
+
+    const threshold = detector.threshold ?? 0.5;
+    if (probability >= threshold) {
+      getLogger().debug(
+        `Semantic turn detector: end of turn (p=${probability.toFixed(3)} >= ${threshold})`,
+      );
+      this.cancelSemanticHold();
+      this.lastEouTrigger = 'semantic_turn_detector';
+      this.finalizeSttForEou();
+    } else if (!this.semanticHoldActive) {
+      getLogger().debug(
+        `Semantic turn detector: holding turn open (p=${probability.toFixed(3)} < ${threshold})`,
+      );
+      this.beginSemanticHold();
+    }
+    // else: already holding — stay held; the frame-driven poll (or the
+    // wall-clock backstop) schedules the next decision.
+  }
+
+  /** Arm the hold state + the wall-clock backstop for the hard cap. */
+  private beginSemanticHold(): void {
+    this.semanticHoldActive = true;
+    this.semanticHoldDeadlineMs = Date.now() + this.maxSemanticHoldMs;
+    this.semanticPollPendingBytes = 0;
+    this.semanticHoldGeneration += 1;
+    const generation = this.semanticHoldGeneration;
+    // Wall-clock cap enforcement — runs even if inbound audio stalls
+    // entirely (the frame-driven poll then never runs). Generation-guarded
+    // (mirrors the grace-timer pattern): a hold resolved before the timer
+    // fires invalidates it, so it can never finalize a later utterance.
+    this.semanticHoldTimer = setTimeout(() => {
+      this.semanticHoldTimer = null;
+      if (generation !== this.semanticHoldGeneration || !this.semanticHoldActive) {
+        return;
+      }
+      this.resolveSemanticHoldCap();
+    }, this.maxSemanticHoldMs);
+  }
+
+  /** Drop the hold (and its backstop timer) without finalizing. Idempotent. */
+  private cancelSemanticHold(): void {
+    if (!this.semanticHoldActive) {
+      // Includes teardown on a handler that never held — keep the timer
+      // clear anyway (defensive; it is always null here in practice).
+      if (this.semanticHoldTimer !== null) {
+        clearTimeout(this.semanticHoldTimer);
+        this.semanticHoldTimer = null;
+      }
+      return;
+    }
+    this.semanticHoldActive = false;
+    this.semanticHoldDeadlineMs = null;
+    this.semanticPollPendingBytes = 0;
+    this.semanticHoldGeneration += 1;
+    if (this.semanticHoldTimer !== null) {
+      clearTimeout(this.semanticHoldTimer);
+      this.semanticHoldTimer = null;
+    }
+  }
+
+  /**
+   * Advance the audio clock of an active hold by one inbound frame.
+   *
+   * Finalizes (``vad_silence``) once the hard cap is reached; otherwise
+   * re-runs the detector after each additional ``SEMANTIC_POLL_MS`` of
+   * silence so a model that flips to "complete" with more trailing
+   * silence commits the turn as ``semantic_turn_detector``.
+   */
+  private async pollSemanticHold(frameBytes: number): Promise<void> {
+    if (this.semanticHoldDeadlineMs !== null && Date.now() >= this.semanticHoldDeadlineMs) {
+      this.resolveSemanticHoldCap();
+      return;
+    }
+    this.semanticPollPendingBytes += frameBytes;
+    const pollBytes = Math.floor(16000 * 2 * (StreamHandler.SEMANTIC_POLL_MS / 1000));
+    if (this.semanticPollPendingBytes < pollBytes) return;
+    this.semanticPollPendingBytes = 0;
+    await this.semanticEouCheck();
+  }
+
+  /**
+   * Hard cap reached: finalize anyway so the turn can never hang. The
+   * semantic model never agreed, so the commit reason is the accumulated
+   * silence — the EOU trigger stays ``vad_silence``.
+   */
+  private resolveSemanticHoldCap(): void {
+    if (!this.semanticHoldActive) return;
+    getLogger().debug(
+      `Semantic hold cap reached (${this.maxSemanticHoldMs} ms) — finalizing on VAD silence`,
+    );
+    this.cancelSemanticHold();
+    this.lastEouTrigger = 'vad_silence';
+    this.finalizeSttForEou();
+  }
+
+  /**
+   * Ask the STT provider to finalize the in-flight utterance NOW.
+   * Optional chained — Whisper-class adapters that don't support
+   * per-utterance finalisation simply skip. Extracted verbatim from the
+   * VAD ``speech_end`` branch so the default path stays byte-identical
+   * and the semantic turn-detector paths reuse it.
+   */
+  private finalizeSttForEou(): void {
+    try {
+      const ret = this.stt?.finalize?.();
+      if (ret instanceof Promise) {
+        ret.catch((err) =>
+          getLogger().debug(`STT finalize threw: ${String(err)}`),
+        );
+      }
+    } catch (err) {
+      getLogger().debug(`STT finalize threw: ${String(err)}`);
+    }
+  }
+
   async handleStop(): Promise<void> {
     // Abort any in-flight LLM stream and close any in-flight TTS WS so
     // the runPipelineLlm / synthesizeStream awaits unblock immediately
@@ -2046,6 +2791,11 @@ export class StreamHandler {
     if (typeof ttsCancelable?.cancelActiveStream === 'function') {
       try { ttsCancelable.cancelActiveStream(); } catch { /* defensive */ }
     }
+    // PREEMPTIVE GENERATION: stop the interim-stability timer and tear down
+    // any in-flight speculation (teardown — not a miss) before adapters
+    // close underneath it.
+    this.clearInterimStabilityTimer();
+    await this.abortSpeculation('teardown', false);
     // Settle the backgrounded turn dispatch (the abort above unblocks it) so
     // no in-flight LLM/TTS work touches adapters after they close — bounded so
     // a hung user onMessage cannot block teardown. Parity with Python cleanup
@@ -2058,6 +2808,14 @@ export class StreamHandler {
     // metrics object — a slow leak in long-running servers and a race
     // producing spurious overlap_end events. Idempotent.
     this.clearPendingBargeIn();
+    // Drop pause-and-resume buffers and wake any pause-decision waiter so
+    // a call ending mid-pause cannot strand a loop awaiting the (now
+    // cancelled) resume timer.
+    this.discardPauseState();
+    // Drop any active semantic-turn hold so its wall-clock backstop timer
+    // cannot fire after teardown and call ``stt.finalize`` on a closed
+    // adapter. Idempotent; no-op when no ``turnDetector`` is configured.
+    this.cancelSemanticHold();
     // Resolve every pending firstMessage mark waiter before tearing the
     // adapter down. A call that ends mid firstMessage (carrier stop
     // arriving before the paced sender finished) would otherwise leak
@@ -2088,12 +2846,21 @@ export class StreamHandler {
     if (typeof ttsCancelable?.cancelActiveStream === 'function') {
       try { ttsCancelable.cancelActiveStream(); } catch { /* defensive */ }
     }
+    // See handleStop — tear down any in-flight speculation (not a miss).
+    this.clearInterimStabilityTimer();
+    await this.abortSpeculation('teardown', false);
     // Settle the backgrounded turn dispatch before tearing down adapters,
     // bounded so a hung user onMessage cannot block teardown (see handleStop).
     await this.settleDispatchForTeardown();
     // See handleStop — drop pending barge-in timer before cleanup so a
     // dead handler can never fire a stale recordOverlapEnd callback.
     this.clearPendingBargeIn();
+    // See handleStop — drop pause-and-resume state so a dead handler can
+    // never strand a pause-decision waiter or replay stale audio.
+    this.discardPauseState();
+    // See handleStop — drop any active semantic-turn hold so its backstop
+    // timer cannot fire ``stt.finalize`` against a torn-down adapter.
+    this.cancelSemanticHold();
     // See handleStop — drain pending firstMessage marks so an abnormal
     // carrier WS drop during the paced sender cannot leak unresolved
     // promises owned by the send loop, and reset the counter.
@@ -2133,6 +2900,22 @@ export class StreamHandler {
    * streaming TTS providers never byte-swap the PCM16 samples downstream.
    */
   private encodePipelineAudio(audioChunk: Buffer): string {
+    // Local-recording tap (agent side, pipeline mode) — this method is the
+    // single chokepoint every outbound pipeline chunk passes through
+    // (firstMessage, prewarm, per-sentence TTS). Unlike the AEC far-end
+    // taps (which must skip non-PCM bytes), the recording tap DECODES on
+    // the carrier-native fast path: μ-law 8 kHz on Twilio/Plivo, PCM16
+    // 16 kHz on Telnyx-native and the default transcode path. Parity with
+    // Python ``_tap_pipeline_agent_audio``.
+    if (this.localRecorder) {
+      this.localRecorder.addAgentAudio(
+        audioChunk,
+        this.ttsOutputFormatNativeForCarrier &&
+          this.deps.bridge.telephonyProvider !== 'telnyx'
+          ? 'mulaw_8k'
+          : 'pcm16_16k',
+      );
+    }
     // Carrier-native fast path: when the TTS adapter is configured to
     // emit ``ulaw_8000`` (Twilio wire codec) the bytes coming in are
     // already in the format Twilio expects. Skip the 16 kHz → 8 kHz
@@ -2171,14 +2954,14 @@ export class StreamHandler {
     const fmt = (this.tts as { outputFormat?: string }).outputFormat;
     if (typeof fmt !== 'string') return false;
     const carrier = this.deps.bridge.telephonyProvider;
-    if (carrier === 'twilio') return fmt === 'ulaw_8000';
-    if (carrier === 'telnyx') return fmt === 'pcm_16000';
-    // Plivo streams μ-law 8 kHz (same wire codec as Twilio). The ElevenLabs
-    // adapter auto-selects ``ulaw_8000`` for Plivo, so when the TTS output is
-    // already μ-law the pipeline must bypass the PCM resample/re-encode path —
-    // otherwise the already-encoded bytes are mangled into static. Mirrors the
-    // Python ``for_twilio`` handling, which already covers Plivo.
-    if (carrier === 'plivo') return fmt === 'ulaw_8000';
+    // Every supported carrier wire is μ-law 8 kHz — the SDK's own
+    // ``streaming_start`` pins Telnyx to PCMU (the old 'pcm_16000'
+    // expectation shipped raw PCM16 onto the μ-law wire: static). When the
+    // TTS output is already μ-law the pipeline must bypass the PCM
+    // resample/re-encode path — otherwise the encoded bytes are mangled.
+    if (carrier === 'twilio' || carrier === 'telnyx' || carrier === 'plivo') {
+      return fmt === 'ulaw_8000';
+    }
     return false;
   }
 
@@ -2232,6 +3015,94 @@ export class StreamHandler {
    * uses that to decide whether to record TTS-first-byte / turn-complete
    * metrics. See BUG #128 for the regression this fix targets.
    */
+  /**
+   * Stream the configured greeting — runs as a BACKGROUND task.
+   *
+   * ``handleCallStart`` used to execute this inline; with the carrier WS
+   * events now serialized onto a per-connection FIFO, that blocked EVERY
+   * media frame for the whole greeting (VAD/barge-in structurally
+   * impossible on the first message, mark acks unread). ``handleCallStart``
+   * awaits ``beginSpeaking(true)`` BEFORE spawning this task so the
+   * self-hearing guard engages from the very first inbound frame.
+   * Mirrors the Python ``_play_first_message`` task.
+   */
+  private async playFirstMessage(label: string): Promise<void> {
+    const firstMessage = this.deps.agent.firstMessage;
+    if (!firstMessage || !this.tts) return;
+    let firstChunkSent = false;
+    this.resetTtsCarry();
+    // Check the prewarm cache first. When ``Patter.call`` was made
+    // with ``agent.prewarmFirstMessage: true`` the firstMessage has
+    // already been synthesised during the ringing window — we send
+    // the bytes directly through the carrier-side encoder (which
+    // handles native-rate → carrier-rate resampling) and skip the
+    // TTS round-trip entirely.
+    let prewarmBytes: Buffer | undefined;
+    if (this.deps.popPrewarmAudio) {
+      try {
+        prewarmBytes = this.deps.popPrewarmAudio(this.callId);
+      } catch (err) {
+        getLogger().debug(`popPrewarmAudio raised: ${String(err)}`);
+      }
+    }
+    try {
+      if (prewarmBytes) {
+        this.metricsAcc.recordTtsFirstByte();
+        await this.emitAudioOut();
+        firstChunkSent = await this.streamPrewarmBytes(prewarmBytes);
+      } else {
+        // Streaming TTS path (no prewarm cache). Uses the same simple
+        // per-chunk send as synthesizeSentence — ElevenLabs HTTP streams
+        // at near-real-time speed so the carrier-side buffer stays bounded
+        // without mark-gated pacing.  Routing streaming chunks through
+        // sendPacedFirstMessageBytes caused crackling: its drain+reset on
+        // every HTTP chunk destroyed mark back-pressure continuity and the
+        // per-sub-chunk sleep slowed delivery below Twilio's playout rate,
+        // producing periodic buffer underruns.  The prewarm path (a single
+        // pre-synthesised buffer) still uses sendPacedFirstMessageBytes
+        // because that buffer can be several seconds long and needs pacing.
+        for await (const chunk of this.tts.synthesizeStream(firstMessage)) {
+          if (!this.isSpeaking) break;
+          if (!firstChunkSent) {
+            firstChunkSent = true;
+            this.metricsAcc.recordTtsFirstByte();
+            await this.emitAudioOut();
+          }
+          // Same carrier-native gate as the paced path above: on the
+          // mulaw fast path these are wire bytes, not PCM16 — pushing
+          // them corrupted the AEC reference.
+          if (this.aec && !this.ttsOutputFormatNativeForCarrier) this.aec.pushFarEnd(chunk);
+          const encoded = this.encodePipelineAudio(chunk);
+          this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
+          this.markFirstAudioSent();
+        }
+      }
+    } catch (e) {
+      getLogger().error(`First message TTS error (${label}):`, e);
+    } finally {
+      // Drop any partial int16 byte to prevent cross-turn corruption
+      // if the stream threw before a complete sample was delivered.
+      this.resetTtsCarry();
+      // Flip back to not-speaking with grace so the ring buffer
+      // accumulated during the intro is flushed and the next user
+      // utterance is recognised cleanly.
+      this.endSpeakingWithGrace();
+    }
+    if (firstChunkSent) {
+      // Bill the firstMessage TTS characters — they were synthesised
+      // at ElevenLabs (or the configured TTS provider) and the
+      // customer pays for them. The previous flow only called
+      // ``recordTurnComplete`` here, which finalises the turn but does
+      // NOT increment the TTS char counter — so a 5-turn call with an
+      // 82-char greeting was under-billed by ~22% on TTS cost.
+      // ``recordTtsComplete`` is the canonical accumulator entry
+      // point for TTS char billing (parity with Python fix).
+      this.metricsAcc.recordTtsComplete(firstMessage);
+      await this.emitTurnMetrics(this.metricsAcc.recordTurnComplete(firstMessage));
+      this.history.push({ role: 'assistant', text: firstMessage, timestamp: Date.now() });
+    }
+  }
+
   private async sendPacedFirstMessageBytes(bytes: Buffer): Promise<boolean> {
     // Reset any stale mark state defensively — we don't emit marks on
     // this path but ``onMark`` and the rest of the handler rely on the
@@ -2485,75 +3356,16 @@ export class StreamHandler {
       // and without an early anchor the firstMessage is uninterruptible
       // during that window.
       await this.beginSpeaking(true);
-      let firstChunkSent = false;
-      this.resetTtsCarry();
-      // Check the prewarm cache first. When ``Patter.call`` was made
-      // with ``agent.prewarmFirstMessage: true`` the firstMessage has
-      // already been synthesised during the ringing window — we send
-      // the bytes directly through the carrier-side encoder (which
-      // handles native-rate → carrier-rate resampling) and skip the
-      // TTS round-trip entirely.
-      let prewarmBytes: Buffer | undefined;
-      if (this.deps.popPrewarmAudio) {
-        try {
-          prewarmBytes = this.deps.popPrewarmAudio(this.callId);
-        } catch (err) {
-          getLogger().debug(`popPrewarmAudio raised: ${String(err)}`);
-        }
-      }
-      try {
-        if (prewarmBytes) {
-          this.metricsAcc.recordTtsFirstByte();
-          await this.emitAudioOut();
-          firstChunkSent = await this.streamPrewarmBytes(prewarmBytes);
-        } else {
-          // Streaming TTS path (no prewarm cache). Uses the same simple
-          // per-chunk send as synthesizeSentence — ElevenLabs HTTP streams
-          // at near-real-time speed so the carrier-side buffer stays bounded
-          // without mark-gated pacing.  Routing streaming chunks through
-          // sendPacedFirstMessageBytes caused crackling: its drain+reset on
-          // every HTTP chunk destroyed mark back-pressure continuity and the
-          // per-sub-chunk sleep slowed delivery below Twilio's playout rate,
-          // producing periodic buffer underruns.  The prewarm path (a single
-          // pre-synthesised buffer) still uses sendPacedFirstMessageBytes
-          // because that buffer can be several seconds long and needs pacing.
-          for await (const chunk of this.tts.synthesizeStream(this.deps.agent.firstMessage)) {
-            if (!this.isSpeaking) break;
-            if (!firstChunkSent) {
-              firstChunkSent = true;
-              this.metricsAcc.recordTtsFirstByte();
-              await this.emitAudioOut();
-            }
-            if (this.aec) this.aec.pushFarEnd(chunk);
-            const encoded = this.encodePipelineAudio(chunk);
-            this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
-            this.markFirstAudioSent();
-          }
-        }
-      } catch (e) {
-        getLogger().error(`First message TTS error (${label}):`, e);
-      } finally {
-        // Drop any partial int16 byte to prevent cross-turn corruption
-        // if the stream threw before a complete sample was delivered.
-        this.resetTtsCarry();
-        // Flip back to not-speaking with grace so the ring buffer
-        // accumulated during the intro is flushed and the next user
-        // utterance is recognised cleanly.
-        this.endSpeakingWithGrace();
-      }
-      if (firstChunkSent) {
-        // Bill the firstMessage TTS characters — they were synthesised
-        // at ElevenLabs (or the configured TTS provider) and the
-        // customer pays for them. The previous flow only called
-        // ``recordTurnComplete`` here, which finalises the turn but does
-        // NOT increment the TTS char counter — so a 5-turn call with an
-        // 82-char greeting was under-billed by ~22% on TTS cost.
-        // ``recordTtsComplete`` is the canonical accumulator entry
-        // point for TTS char billing (parity with Python fix).
-        this.metricsAcc.recordTtsComplete(this.deps.agent.firstMessage);
-        await this.emitTurnMetrics(this.metricsAcc.recordTurnComplete(this.deps.agent.firstMessage));
-        this.history.push({ role: 'assistant', text: this.deps.agent.firstMessage, timestamp: Date.now() });
-      }
+      // Echo-guard reference: beginSpeaking resets it, and only the
+      // streaming-LLM path repopulated it — under forward-STT-while-speaking
+      // the echo of the GREETING (the highest-echo window of the call)
+      // compared against an empty string and confirmed a phantom barge-in.
+      this.currentAgentSpokenText = this.deps.agent.firstMessage;
+      // Launch the greeting as a tracked background task — see
+      // playFirstMessage for why it must not run inline.
+      this.firstMessageTask = this.playFirstMessage(label).catch((err) => {
+        getLogger().error(`First message playback failed (${label}): ${String(err)}`);
+      });
     }
 
     // Create LLM loop for pipeline mode when no onMessage handler provided.
@@ -2567,18 +3379,13 @@ export class StreamHandler {
       }
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const providerModel = (this.deps.agent.llm as any)?.model ?? '';
-      // Inject the built-in transfer_call / end_call tools — parity with the
-      // Realtime path which injects them at `server.ts` and dispatches via
-      // the bridge in this file's tool dispatcher. Without this, pipeline-mode
-      // LLMs never see the built-ins and can't initiate a handoff or hangup
-      // no matter what the system prompt says.
-      const augmentedTools = augmentWithBuiltinHandoffTools(
-        (this.resolvedTools ?? this.deps.agent.tools) as ToolDefinition[] | null | undefined,
-        {
-          transferCall: (number) => this.deps.bridge.transferCall(this.callId, number),
-          endCall: () => this.deps.bridge.endCall(this.callId, this.ws),
-        },
-      );
+      // Inject the built-in transfer_call / end_call tools (and handoff_to
+      // when `agent.handoffs` is configured) — parity with the Realtime path
+      // which injects them at `server.ts` and dispatches via the bridge in
+      // this file's tool dispatcher. Without this, pipeline-mode LLMs never
+      // see the built-ins and can't initiate a handoff or hangup no matter
+      // what the system prompt says.
+      const augmentedTools = this.buildPipelineLlmTools();
       this.llmLoop = new LLMLoop(
         '', // apiKey unused when llmProvider is supplied
         providerModel, // propagate so calculateLlmCost can match the price row
@@ -2594,13 +3401,7 @@ export class StreamHandler {
     } else if (!this.deps.onMessage && this.deps.config.openaiKey) {
       let llmModel = this.deps.agent.model || 'gpt-4o-mini';
       if (llmModel.includes('realtime')) llmModel = 'gpt-4o-mini';
-      const augmentedTools = augmentWithBuiltinHandoffTools(
-        (this.resolvedTools ?? this.deps.agent.tools) as ToolDefinition[] | null | undefined,
-        {
-          transferCall: (number) => this.deps.bridge.transferCall(this.callId, number),
-          endCall: () => this.deps.bridge.endCall(this.callId, this.ws),
-        },
-      );
+      const augmentedTools = this.buildPipelineLlmTools();
       this.llmLoop = new LLMLoop(
         this.deps.config.openaiKey,
         llmModel,
@@ -2658,7 +3459,7 @@ export class StreamHandler {
 
     // Apply text transforms before the beforeSynthesize hook
     let transformed = sentence;
-    const transforms = this.deps.agent.textTransforms;
+    const transforms = this.currentAgent.textTransforms;
     if (transforms) {
       for (const fn of transforms) {
         transformed = fn(transformed);
@@ -2670,6 +3471,12 @@ export class StreamHandler {
     if (processedText === null) return;
 
     this.resetTtsCarry();
+    // Pause-and-resume retention: in ``bargeInMode: 'pause_resume'`` every
+    // chunk of a RESPONSE sentence is kept in a per-sentence entry so a
+    // paused turn can re-send the cleared-but-unheard tail at resume time
+    // without re-billing TTS. ``null`` (legacy mode / filler audio /
+    // post-overflow) keeps the direct send path byte-identical to today.
+    let retainEntry = recordSegment ? this.beginRetainedSentence(processedText) : null;
     try {
       for await (const chunk of this.tts.synthesizeStream(processedText)) {
         if (!this.isSpeaking) break;
@@ -2685,18 +3492,53 @@ export class StreamHandler {
         if (processedAudio === null) continue;
         if (!this.isSpeaking) break;
 
-        if (!ttsFirstByteSent.value) {
+        if (!ttsFirstByteSent.value && !this.outputPaused) {
+          // While the pause gate holds the chunk in memory it has NOT
+          // reached the carrier — the flag (and the audio_out speech
+          // event) waits for the first post-resume chunk.
           ttsFirstByteSent.value = true;
           this.metricsAcc.recordTtsFirstByte();
           // Speech-event: per-turn first TTS audio chunk.
           await this.emitAudioOut();
         }
-        // Far-end tap for the echo canceller. ``processedAudio`` is the
-        // exact PCM 16 kHz Buffer that the carrier-side encoder is about
-        // to transcode + send — i.e. the cleanest reference of "what the
-        // speaker is about to play". Push BEFORE ``sendAudio`` so a very
-        // fast carrier echo is still seen by the next mic frame.
-        if (this.aec) {
+        // Pause-and-resume retention path: the chunk is appended to the
+        // sentence's entry; while paused it stays queued, while speaking
+        // it is drained (sent) immediately. Segment stamping / AEC tap /
+        // playback tracking live in ``drainSentenceEntry`` so they fire at
+        // SEND time, not at synthesis time.
+        if (retainEntry !== null && this.pauseResumeOverflowed) {
+          retainEntry = null; // retention released mid-sentence
+        }
+        if (retainEntry !== null) {
+          if (this.retainPauseChunk(retainEntry, processedAudio)) {
+            if (!this.outputPaused) {
+              this.drainSentenceEntry(retainEntry);
+              if (!this.isSpeaking) break; // cancel raced the drain
+            }
+            continue;
+          }
+          if (!this.isSpeaking) break; // paused overflow degraded to cancel
+          // Overflow while speaking: retention released — fall through to
+          // the direct send path for this chunk and the rest of the turn.
+          // The sentence keeps its already stamped segment (if any); the
+          // inline stamp below is skipped to avoid a duplicate.
+          retainEntry = null;
+          recordSegment = false;
+        }
+        if (this.outputPaused) {
+          // Paused with no retention entry (filler / error-fallback
+          // audio): drop the chunk — replaying moment-filling audio after
+          // a pause is pointless.
+          continue;
+        }
+        // Far-end tap for the echo canceller. On the default path
+        // ``processedAudio`` is the exact PCM 16 kHz Buffer the carrier-side
+        // encoder is about to transcode + send — the cleanest reference of
+        // "what the speaker is about to play". Push BEFORE ``sendAudio`` so
+        // a very fast carrier echo is still seen by the next mic frame.
+        // SKIPPED on the carrier-native fast path — there these are mulaw
+        // wire bytes and the int16 ingest turned the reference to garbage.
+        if (this.aec && !this.ttsOutputFormatNativeForCarrier) {
           this.aec.pushFarEnd(processedAudio);
         }
         if (recordSegment) {
@@ -2760,7 +3602,18 @@ export class StreamHandler {
       this.metricsAcc.recordVadStop();
     }
 
-    if (!transcript.isFinal || !transcript.text) return;
+    if (!transcript.isFinal || !transcript.text) {
+      // PREEMPTIVE GENERATION: a confident interim may start a speculative
+      // LLM+TTS dispatch (audio held until the final commits). No-op unless
+      // ``agent.preemptiveGeneration``. Awaited so successive interims on the
+      // transcript drain loop are processed strictly in order (replacing a
+      // speculation fully aborts the old one before the new one starts) —
+      // parity with Python's awaited ``_note_interim_transcript``.
+      if (transcript.text && !transcript.isFinal) {
+        await this.noteInterimTranscript(transcript.text);
+      }
+      return;
+    }
     if (!this.commitTranscript(transcript.text)) {
       // Final transcript dropped (dedup / hallucination / back-to-back).
       // Any VAD ``speech_end`` that fired during this dropped utterance
@@ -2779,12 +3632,40 @@ export class StreamHandler {
     );
     getLogger().debug(`User (${label} pipeline): ${sanitizeLogValue(transcript.text)}`);
 
+    // A final transcript committed — interim-stability tracking for this
+    // utterance is over (prevents a stale stability timer from speculating
+    // on the just-answered utterance).
+    this.resetInterimTracking();
+
     // Safety net: startTurnIfIdle() was already called above on first partial
     // text; this second call is a no-op in the normal path but guards code paths
     // (e.g. tests) that pass a final transcript without any preceding partial.
     this.metricsAcc.startTurnIfIdle();
     this.metricsAcc.recordSttComplete(transcript.text);
     this.metricsAcc.recordSttFinalTimestamp();
+
+    // PREEMPTIVE GENERATION: when a speculative turn matching this final is
+    // in flight, RELEASE it (its task becomes the live dispatch) instead of
+    // starting a fresh one; a mismatch discards the speculation here and
+    // falls through to the normal dispatch below.
+    if (await this.tryReleaseSpeculation(transcript.text)) return;
+
+    // Semantic turn detection (opt-in): a committed transcript supersedes
+    // any in-flight hold (the STT endpointed on its own), and the per-turn
+    // rolling window restarts so the next turn is scored on its own audio.
+    if (this.deps.agent.turnDetector) {
+      this.cancelSemanticHold();
+      this.resetSemanticWindow();
+    }
+    // Speech-event: end-of-utterance committed (pipeline analogue of
+    // Realtime's input_audio_buffer.committed, which fires at the server
+    // commit signal regardless of what the app does with the text). Fires
+    // HERE — at transcript commit, before the hook veto and the
+    // handler-availability checks — so both the onMessage and built-in LLM
+    // paths (and discarded orphan turns) advance the dispatcher's turn
+    // index. The helper consumes the semantic detector's stamped trigger
+    // when one is configured. Mirrors Python ``_dispatch_turn``.
+    await this.emitUserSpeechEos(transcript.text);
 
     // Endpoint span — silence-detected → LLM-dispatch window. The matching
     // ``end()`` lives below right before ``recordTurnCommitted``. We use a
@@ -2802,12 +3683,19 @@ export class StreamHandler {
     };
 
     if (this.deps.onTranscript) {
-      await this.deps.onTranscript({
-        role: 'user',
-        text: transcript.text,
-        call_id: this.callId,
-        history: [...this.history.entries],
-      });
+      try {
+        await this.deps.onTranscript({
+          role: 'user',
+          text: transcript.text,
+          call_id: this.callId,
+          history: [...this.history.entries],
+        });
+      } catch (err) {
+        // Observer callbacks must never break the pipeline: a raise here
+        // propagated into the STT adapter's un-awaited emit loop and became
+        // a process-killing unhandled rejection.
+        getLogger().error(`onTranscript callback failed: ${String(err)}`);
+      }
     }
 
     // --- afterTranscribe hook ---
@@ -2821,8 +3709,12 @@ export class StreamHandler {
       return;
     }
 
-    // Push filtered text to history (after hook, so LLM sees redacted/modified text)
-    this.history.push({ role: 'user', text: filteredTranscript, timestamp: Date.now() });
+    // Push filtered text to history (after hook, so LLM sees redacted/modified text).
+    // Keep the reference: the LLM snapshot below must EXCLUDE this entry —
+    // ``LLMLoop.buildMessages`` replays history and then appends the current
+    // user text itself, so including it here sent the utterance twice per turn.
+    const ownUserEntry = { role: 'user', text: filteredTranscript, timestamp: Date.now() };
+    this.history.push(ownUserEntry);
 
     // Wave6B: record that the transcript is being committed to the LLM.
     // onUserTurnCompleted hook is not yet wired in TS — record 0 delay so EOU can still emit.
@@ -2835,24 +3727,29 @@ export class StreamHandler {
     // await is fast and does not head-of-line-block the drain loop in
     // practice, while preserving strict per-turn history/metrics ordering.
     await this.dispatchTask?.catch(() => {});
-    // Snapshot history at launch — AFTER this turn's own user push above, BEFORE
-    // any later transcript can mutate it. The dispatch runs in the background,
-    // so passing the LIVE ``this.history.entries`` would let a following
-    // transcript's user push (which happens on the drain loop while this turn is
-    // in flight) contaminate this turn's LLM prompt. Mirrors Python's
-    // ``list(self.conversation_history)`` snapshot.
-    const historySnapshot = [...this.history.entries];
+    // Snapshot history at launch — AFTER the previous turn's settle above (so
+    // its assistant entry is included), BEFORE any later transcript can mutate
+    // it, and WITHOUT this turn's own user entry (buildMessages appends the
+    // current user text itself — see ownUserEntry above). Mirrors Python's
+    // pre-append ``list(self.conversation_history)`` snapshot.
+    const historySnapshot = this.history.entries.filter((e) => e !== ownUserEntry);
     // Launch the turn as a tracked background task and RETURN immediately so
     // the transcript drain loop keeps running handleBargeIn against this LIVE
     // turn (the head-of-line-blocking fix). Parity with Python
     // ``create_task(_dispatch_turn(...))``.
+    // Attach the catch AT CREATION: dispatchTurn has try/finally only, and
+    // the next turn's ``await this.dispatchTask?.catch(...)`` attaches a
+    // handler far too late for Node's unhandled-rejection check — a throwing
+    // user onTranscript/onMetrics inside the turn killed the process.
     this.dispatchTask = this.dispatchTurn(
       filteredTranscript,
       hookExecutor,
       hookCtx,
       interrupted,
       historySnapshot,
-    );
+    ).catch((err) => {
+      getLogger().error(`LLM dispatch turn failed: ${String(err)}`);
+    });
   }
 
   /**
@@ -2960,11 +3857,12 @@ export class StreamHandler {
         await this.emitAssistantTranscript(spokenText);
         if (!interrupted) this.metricsAcc.recordTtsComplete(responseText);
       } else {
-        interrupted = (await this.runRegularLlm(responseText, hookExecutor, hookCtx)) || interrupted;
-        // ``runRegularLlm`` returns the possibly-replaced text via side effect on
-        // history; recompute responseText from the last history entry for the
-        // turn-complete record.
-        responseText = this.history.entries[this.history.entries.length - 1]?.text ?? responseText;
+        // ``runRegularLlm`` returns the possibly-replaced text directly —
+        // re-reading ``history[-1]`` raced a concurrently committed user
+        // turn and recorded the USER's text as this turn's completion.
+        const regular = await this.runRegularLlm(responseText, hookExecutor, hookCtx);
+        interrupted = regular.interrupted || interrupted;
+        responseText = regular.finalText;
       }
 
       // Skip turn-complete when barge-in already recorded the turn as
@@ -2987,6 +3885,7 @@ export class StreamHandler {
   private async handleBargeInAsync(transcript: {
     text?: string;
     isFinal?: boolean;
+    speechFinal?: boolean;
   }): Promise<boolean> {
     if (!transcript.text || !this.isSpeaking) return false;
     if (this.tailGraceActive) {
@@ -3001,9 +3900,12 @@ export class StreamHandler {
     // Echo guard: when audio is forwarded to STT during TTS (no effective AEC),
     // the agent's own voice can be transcribed and would barge in on itself.
     // Drop transcripts that look like a fragment of what the agent is saying.
-    // Only under forwardSttWhileSpeaking, so the default VAD path is unaffected.
+    // Active under forwardSttWhileSpeaking AND while output is paused
+    // (pause_resume forwards mic audio to STT during the confirm window and
+    // the just-cleared audio's PSTN echo tail can lag into it), so the
+    // default VAD path is unaffected.
     if (
-      this.forwardSttWhileSpeaking &&
+      (this.forwardSttWhileSpeaking || this.outputPaused) &&
       looksLikeEcho(transcript.text, this.currentAgentSpokenText)
     ) {
       getLogger().info(
@@ -3016,6 +3918,19 @@ export class StreamHandler {
     if (!this.canBargeIn()) {
       getLogger().info(
         `Barge-in transcript suppressed (agent speaking < gate, aec=${this.aec ? 'on' : 'off'})`,
+      );
+      return false;
+    }
+    // Pause-and-resume: while output is paused, only a committed FINAL
+    // transcript (non-hallucination, non-duplicate) may confirm the kill —
+    // interims and noise wait for the resume timer instead. The confirming
+    // transcript then continues through the strategy/legacy decision below
+    // exactly as today.
+    if (this.outputPaused && !this.passesPausedKillFilters(transcript)) {
+      getLogger().debug(
+        `Paused turn: transcript ${sanitizeLogValue(
+          transcript.text.slice(0, 40),
+        )} cannot confirm the kill (interim/hallucination/duplicate) — awaiting resume timer`,
       );
       return false;
     }
@@ -3053,24 +3968,44 @@ export class StreamHandler {
    * floating promise — non-confirmed transcripts simply skip the cancel
    * and the legacy boolean return is meaningless under that opt-in path.
    */
-  private handleBargeIn(transcript: { text?: string; isFinal?: boolean }): boolean {
+  private handleBargeIn(transcript: {
+    text?: string;
+    isFinal?: boolean;
+    speechFinal?: boolean;
+  }): boolean {
     if (!transcript.text || !this.isSpeaking) return false;
-    if (this.tailGraceActive) {
-      // Tail-grace transcript = next turn, not a barge-in. End the grace and
-      // let the transcript dispatch normally (parity with the async path).
-      this.endTailGraceForNewTurn();
-      return false;
-    }
-    // Echo guard (parity with handleBargeInAsync) — never let the agent's own
-    // forwarded TTS echo barge in on itself.
+    // Echo guard FIRST — before the tail-grace rescue: the grace window
+    // (~1.5 s after TTS) is exactly when the agent's final-sentence echo
+    // arrives via STT. Running the rescue first treated that echo as "the
+    // next turn", flipped isSpeaking off, and commitTranscript's
+    // isSpeaking-gated echo check could no longer fire — the agent answered
+    // its own words as a phantom user turn. Mirrors the Python fix. Also
+    // active while output is PAUSED (pause_resume forwards mic audio during
+    // the confirm window and the just-cleared audio's echo tail can lag
+    // into it).
     if (
-      this.forwardSttWhileSpeaking &&
+      (this.forwardSttWhileSpeaking || this.outputPaused) &&
       looksLikeEcho(transcript.text, this.currentAgentSpokenText)
     ) {
       getLogger().info(
         `Barge-in suppressed: transcript matches agent's own speech (echo) — ${sanitizeLogValue(
           transcript.text.slice(0, 40),
         )}`,
+      );
+      return false;
+    }
+    if (this.tailGraceActive) {
+      // Tail-grace transcript = next turn, not a barge-in. End the grace and
+      // let the transcript dispatch normally (parity with the async path).
+      this.endTailGraceForNewTurn();
+      return false;
+    }
+    // Pause-and-resume final-only gate (parity with handleBargeInAsync).
+    if (this.outputPaused && !this.passesPausedKillFilters(transcript)) {
+      getLogger().debug(
+        `Paused turn: transcript ${sanitizeLogValue(
+          transcript.text.slice(0, 40),
+        )} cannot confirm the kill (interim/hallucination/duplicate) — awaiting resume timer`,
       );
       return false;
     }
@@ -3100,6 +4035,8 @@ export class StreamHandler {
    * the legacy synchronous path and the strategy-confirmed async path.
    */
   private runBargeInCancel(transcriptText: string): void {
+    // Speech-event: agent stop edge — interrupted by the caller.
+    void this.emitAgentSpeechEnded(true).catch(() => {});
     // Capture pending state BEFORE clearPendingBargeIn() drops it — if VAD
     // already started the overlap window via ``startPendingBargeIn`` we MUST
     // NOT call ``recordOverlapStart`` again (that would overwrite T1 with
@@ -3118,8 +4055,13 @@ export class StreamHandler {
     const bargeinSpan = startSpan(SPAN_BARGEIN, { 'patter.call.id': this.callId });
     try {
       // Post-complete barge-in during the buffered tail — rewrite history to
-      // the heard prefix BEFORE cancelSpeaking resets the playback cursor.
+      // the heard prefix BEFORE cancelSpeaking resets the playback cursor
+      // (or, for a paused turn, while the frozen pause cursor still holds).
       this.maybeTruncateCompletedTurnHistory();
+      // Pause-and-resume: a kill while paused discards the held buffers
+      // (queued sentences + retained audio) and wakes any pause-decision
+      // waiter, which then observes the interrupt.
+      this.discardPauseState();
       this.cancelSpeaking();
       try {
         this.deps.bridge.sendClear(this.ws, this.streamSid);
@@ -3172,6 +4114,359 @@ export class StreamHandler {
     this.bargeInPendingSince = null;
   }
 
+  // ---------------------------------------------------------------------------
+  // Pause-and-resume false-interruption handling (bargeInMode: 'pause_resume').
+  // LiveKit-style: PAUSE output on VAD speech_start, KILL on a committed final
+  // transcript within the confirm window, RESUME from the first
+  // not-fully-heard sentence otherwise. Mirrors Python `_start_pause_resume`.
+  // ---------------------------------------------------------------------------
+
+  /** Retained-audio cap in bytes for the active TTS chunk format (mirrors
+   * the bytes-per-ms logic of ``trackOutboundPlayback``). */
+  private pauseRetainedCapBytes(): number {
+    const bytesPerMs =
+      this.ttsOutputFormatNativeForCarrier &&
+      this.deps.bridge.telephonyProvider !== 'telnyx'
+        ? 8
+        : 32;
+    return StreamHandler.PAUSE_RESUME_MAX_RETAINED_S * 1000 * bytesPerMs;
+  }
+
+  /**
+   * Whether a VAD ``speech_start`` during the agent's turn should take the
+   * pause-and-resume path instead of cancel/pending. Requires
+   * ``bargeInMode: 'pause_resume'`` AND resumable state: a dispatch in
+   * flight (the sentence/TTS loops honour the pause gate) or retained
+   * sentence audio from a just-completed turn still playing out of the
+   * carrier buffer. The firstMessage paced sender keeps today's
+   * immediate-cancel behaviour (its prewarm-bytes path has no retained
+   * sentences to resume from — known limitation).
+   */
+  private shouldPauseForBargeIn(): boolean {
+    if (this.bargeInMode !== 'pause_resume') return false;
+    if (this.pauseResumeOverflowed) return false;
+    if (this.outputPaused) return true; // already paused — stay on the path
+    if (this.dispatchTask !== null) return true;
+    return this.turnSentenceAudio.length > 0;
+  }
+
+  /**
+   * Resume offset at SENTENCE granularity: the first sentence (into
+   * ``turnSpokenSegments`` / ``turnSentenceAudio``) whose playback had NOT
+   * completed when the pause landed — computed from the #164
+   * playback-cursor bookkeeping (``heard = totalPushed - carrierBacklog``).
+   * Granularity choice: the partially-played sentence is replayed from its
+   * start (mark/clear bookkeeping is per-sentence and a clipped sentence
+   * restarted at its boundary sounds like a natural repair), rather than
+   * resumed mid-word at a byte offset.
+   */
+  private computePauseResumePoint(): { index: number; heardMs: number } {
+    const segments = this.turnSpokenSegments;
+    const totalMs = this.turnPlaybackTotalMs;
+    const remainingMs = Math.max(0, this.playbackBufferedUntil - Date.now());
+    const heardMs = Math.max(0, totalMs - remainingMs);
+    let index = segments.length;
+    for (let i = segments.length - 1; i >= 0; i--) {
+      const endMs = i + 1 < segments.length ? segments[i + 1].startMs : totalMs;
+      if (endMs > heardMs + 1e-6) index = i;
+      else break;
+    }
+    return { index, heardMs };
+  }
+
+  /**
+   * PAUSE the agent's output on a VAD ``speech_start`` (pause_resume
+   * mode): gate further sends on ``outputPaused``, ``sendClear`` the
+   * carrier so queued audio stops quickly, and schedule the
+   * false-interruption resume timer. The LLM stream and the TTS provider
+   * stream are deliberately NOT cancelled — tokens keep buffering as
+   * sentences and synthesized audio queues in memory (both bounded) so a
+   * resume can pick up seamlessly.
+   */
+  private startPauseResume(): void {
+    if (this.outputPaused) return;
+    // Anchor the overlap window exactly like ``startPendingBargeIn`` so a
+    // kill records detection_delay from VAD-T1 (never restarted).
+    if (this.bargeInPendingSince === null) {
+      this.bargeInPendingSince = Date.now();
+      this.metricsAcc.recordOverlapStart();
+    }
+    // A stale strategy-pending timer is superseded by the pause timer.
+    if (this.bargeInPendingTimer !== null) {
+      clearTimeout(this.bargeInPendingTimer);
+      this.bargeInPendingTimer = null;
+    }
+    this.outputPaused = true;
+    let resolveFn: () => void = () => undefined;
+    const promise = new Promise<void>((resolve) => {
+      resolveFn = resolve;
+    });
+    this.pauseDecision = { promise, resolve: resolveFn };
+    // Freeze the playback bookkeeping at the heard offset: the clear below
+    // drops the carrier backlog, so anything pushed beyond the heard cursor
+    // is void. A kill that follows then computes the heard prefix from this
+    // frozen state; a resume re-advances it as the tail is re-sent.
+    const { index, heardMs } = this.computePauseResumePoint();
+    this.pauseResumeIndex = index;
+    this.turnPlaybackTotalMs = heardMs;
+    this.playbackBufferedUntil = 0;
+    // The phase-1 grace wait (carrier backlog) is void after the clear;
+    // resume re-arms it for the re-sent tail.
+    this.clearGraceTimer();
+    this.drainPendingMarks();
+    getLogger().info(
+      `Barge-in PAUSE (VAD speech_start during TTS); resuming from sentence ` +
+        `${index} unless a transcript confirms within ${this.bargeInConfirmMs}ms`,
+    );
+    try {
+      this.deps.bridge.sendClear(this.ws, this.streamSid);
+    } catch (err) {
+      getLogger().debug(`sendClear during pause failed: ${String(err)}`);
+    }
+    // Output is silent from here — flush the self-hearing ring so STT
+    // receives the user's leading words and can produce the confirming
+    // transcript (or nothing, for a cough). ``handleAudio`` forwards
+    // subsequent frames to STT while paused for the same reason.
+    this.flushInboundAudioRing();
+    this.bargeInPendingTimer = setTimeout(() => {
+      this.bargeInPendingTimer = null;
+      if (!this.outputPaused) return;
+      this.resumeAfterFalseInterruption();
+    }, this.bargeInConfirmMs);
+  }
+
+  /**
+   * RESUME output after a pause that no transcript confirmed. Re-sends the
+   * cleared-but-unheard tail from the retained sentence audio (sentence
+   * granularity, no TTS re-billing), unpauses the live send path, and
+   * records the event as a FALSE interruption: the overlap closes via
+   * ``recordOverlapEnd(false)`` (the backchannel counter — the
+   * interruption count is NOT incremented) and the turn is never marked
+   * interrupted.
+   */
+  private resumeAfterFalseInterruption(): void {
+    if (!this.outputPaused) return;
+    const entries = this.turnSentenceAudio;
+    const idx = Math.max(0, Math.min(this.pauseResumeIndex, entries.length));
+    const tail = entries.slice(idx);
+    // Drop the stale segment stamps of the sentences about to be replayed
+    // — the replay re-stamps them at their new positions on the
+    // (frozen-then-resumed) playback timeline, so a later barge-in still
+    // maps to an accurate heard prefix without duplicates.
+    this.turnSpokenSegments.splice(idx);
+    for (const entry of tail) entry.sent = 0;
+    // False interruption — the backchannel path. Mirrors the pending
+    // barge-in timeout.
+    this.metricsAcc.recordOverlapEnd(false);
+    this.metricsAcc.anchorUserSpeechStart();
+    this.bargeInPendingSince = null;
+    getLogger().info(
+      `False interruption: no confirming transcript within ` +
+        `${this.bargeInConfirmMs}ms — resuming ${tail.length} retained sentence(s)`,
+    );
+    this._eventBus.emit('false_interruption', { resumedSentences: tail.length });
+    // Re-send the unheard tail BEFORE unpausing so the in-flight synthesis
+    // (which queues while paused) cannot interleave a newer chunk ahead of
+    // the replayed audio.
+    for (const entry of tail) {
+      if (!this.isSpeaking) break;
+      // Sentence boundary — drop any stale PCM16 alignment carry, the same
+      // contract ``synthesizeSentence`` keeps per sentence.
+      this.resetTtsCarry();
+      this.drainSentenceEntry(entry, true);
+    }
+    this.outputPaused = false;
+    // Close the unpause race: a chunk queued between the last drain and the
+    // flag flip would otherwise wait for the next live chunk.
+    if (tail.length > 0 && this.isSpeaking) {
+      this.drainSentenceEntry(tail[tail.length - 1], true);
+    }
+    const decision = this.pauseDecision;
+    this.pauseDecision = null;
+    if (decision) decision.resolve();
+    // Post-complete turn (carrier was draining the buffered tail when the
+    // pause landed): the turn body already finished pushing — its grace
+    // timer was cancelled at pause time — so re-arm the grace machinery for
+    // the re-sent backlog: phase-1 hold keeps barge-in armed for the whole
+    // audible window, exactly as #164. A turn still in flight arms it
+    // itself in its ``finally``.
+    if (this.turnOutputDone && this.isSpeaking) {
+      this.endSpeakingWithGrace();
+    }
+  }
+
+  /** Drop all pause-and-resume state (flags + buffers) and wake any
+   * pause-decision waiter. Used by the kill path, fresh turns, and
+   * teardown. Idempotent. */
+  private discardPauseState(): void {
+    this.outputPaused = false;
+    this.pauseResumeIndex = 0;
+    this.pausedSentences = [];
+    this.turnSentenceAudio = [];
+    this.pauseRetainedBytes = 0;
+    const decision = this.pauseDecision;
+    this.pauseDecision = null;
+    if (decision) decision.resolve();
+  }
+
+  /** Block until the in-flight pause resolves. ``true`` → resumed (keep
+   * speaking); ``false`` → killed (turn interrupted). Bounded: fails open
+   * past the confirm window plus margin (the resume timer guarantees a
+   * decision; the margin covers teardown races). Mirrors Python
+   * ``_await_pause_decision``. */
+  private async awaitPauseDecision(): Promise<boolean> {
+    while (this.outputPaused && this.isSpeaking) {
+      const decision = this.pauseDecision;
+      if (decision === null) break;
+      const timedOut = await new Promise<boolean>((resolve) => {
+        const timer = setTimeout(
+          () => resolve(true),
+          this.bargeInConfirmMs + 5000,
+        );
+        void decision.promise.then(() => {
+          clearTimeout(timer);
+          resolve(false);
+        });
+      });
+      if (timedOut) {
+        getLogger().debug('pause decision wait timed out — failing open');
+        break;
+      }
+    }
+    return this.isSpeaking;
+  }
+
+  /** While paused, buffer ``sentence`` (pre-guardrail text) for the resume
+   * drain and return ``true``; return ``false`` when not paused (caller
+   * synthesizes normally). Overflow degrades to a full cancel — the
+   * bounded buffer is a memory-safety valve, not a speech queue. */
+  private bufferSentenceIfPaused(sentence: string): boolean {
+    if (!this.outputPaused) return false;
+    if (this.pausedSentences.length >= StreamHandler.PAUSE_MAX_BUFFERED_SENTENCES) {
+      getLogger().warn(
+        `pause_resume sentence buffer overflow (${this.pausedSentences.length}) — degrading to full cancel`,
+      );
+      this.runBargeInCancel('<pause_resume sentence-buffer overflow>');
+      return true; // handled; the loop observes !isSpeaking next
+    }
+    this.pausedSentences.push(sentence);
+    return true;
+  }
+
+  /** Pop-and-return every sentence buffered during the pause. */
+  private releasePausedSentences(): string[] {
+    if (this.pausedSentences.length === 0) return [];
+    const out = this.pausedSentences;
+    this.pausedSentences = [];
+    return out;
+  }
+
+  /** Open a retention entry for a response sentence (pause_resume mode
+   * only — returns ``null`` otherwise, keeping the legacy send path
+   * byte-identical). Filler / error-fallback audio is never retained
+   * (``recordSegment=false`` callers skip this). */
+  private beginRetainedSentence(
+    text: string,
+  ): { text: string; chunks: Buffer[]; sent: number } | null {
+    if (this.bargeInMode !== 'pause_resume') return null;
+    if (this.pauseResumeOverflowed) return null;
+    const entry = { text, chunks: [] as Buffer[], sent: 0 };
+    this.turnSentenceAudio.push(entry);
+    return entry;
+  }
+
+  /** Append ``chunk`` to the sentence's retention entry, enforcing the
+   * retained-audio cap. Returns ``true`` when retained; ``false`` on
+   * overflow (paused → the turn was just killed; speaking → retention was
+   * released and the caller falls back to direct sends). */
+  private retainPauseChunk(
+    entry: { text: string; chunks: Buffer[]; sent: number },
+    chunk: Buffer,
+  ): boolean {
+    entry.chunks.push(chunk);
+    this.pauseRetainedBytes += chunk.length;
+    if (this.pauseRetainedBytes <= this.pauseRetainedCapBytes()) return true;
+    if (this.outputPaused) {
+      getLogger().warn(
+        `pause_resume retained-audio cap (${StreamHandler.PAUSE_RESUME_MAX_RETAINED_S}s) ` +
+          'exceeded while paused — degrading to full cancel',
+      );
+      this.runBargeInCancel('<pause_resume audio-buffer overflow>');
+    } else {
+      getLogger().info(
+        `pause_resume retained-audio cap (${StreamHandler.PAUSE_RESUME_MAX_RETAINED_S}s) ` +
+          'exceeded — disabling pause-resume for this turn (legacy cancel applies)',
+      );
+      this.pauseResumeOverflowed = true;
+      this.pauseRetainedBytes = 0;
+      for (const e of this.turnSentenceAudio) {
+        e.chunks = [];
+        e.sent = 0;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Send every not-yet-sent chunk of a retention entry to the carrier
+   * (claim-then-send so concurrent drains can never double-send). Stamps
+   * the sentence's heard-prefix segment at its first sent chunk — a replay
+   * (``sent`` reset to 0) re-stamps at the new timeline position.
+   * ``force=true`` bypasses the pause gate (resume path only).
+   */
+  private drainSentenceEntry(
+    entry: { text: string; chunks: Buffer[]; sent: number },
+    force = false,
+  ): void {
+    while (entry.sent < entry.chunks.length) {
+      if (!this.isSpeaking) return;
+      if (this.outputPaused && !force) return;
+      const idx = entry.sent;
+      entry.sent = idx + 1;
+      const chunk = entry.chunks[idx];
+      if (idx === 0) {
+        this.turnSpokenSegments.push({
+          text: entry.text,
+          startMs: this.turnPlaybackTotalMs,
+        });
+      }
+      // Far-end tap mirrors the direct send path: SKIPPED on the
+      // carrier-native fast path where these are mulaw wire bytes that
+      // would corrupt the int16-PCM-16k AEC reference.
+      if (this.aec && !this.ttsOutputFormatNativeForCarrier) this.aec.pushFarEnd(chunk);
+      const encoded = this.encodePipelineAudio(chunk);
+      this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
+      this.trackOutboundPlayback(chunk.length);
+      this.markFirstAudioSent();
+    }
+  }
+
+  /** Whether a transcript may KILL a paused turn: it must be a committed
+   * FINAL (interims cannot confirm), not a known STT hallucination, and
+   * not a duplicate of the last committed utterance — the same filter
+   * family ``commitTranscript`` applies, evaluated without consuming its
+   * dedup state (the transcript still flows on to ``commitTranscript`` to
+   * become the user's next turn). */
+  private passesPausedKillFilters(transcript: {
+    text?: string;
+    isFinal?: boolean;
+    speechFinal?: boolean;
+  }): boolean {
+    if (transcript.isFinal !== true && transcript.speechFinal !== true) {
+      return false;
+    }
+    const normalised = (transcript.text ?? '').trim().toLowerCase();
+    const stripped = normalised.replace(/[.,!?;: ]+$/, '').trim();
+    if (HALLUCINATIONS.has(stripped) || stripped === '') return false;
+    if (
+      normalised === this.lastCommitText &&
+      Date.now() - this.lastCommitAt < 2000
+    ) {
+      return false;
+    }
+    return true;
+  }
+
   /**
    * Dedup + throttle + hallucination filter for final STT transcripts.
    * Mirrors ``PipelineStreamHandler._stt_loop`` on the Python side.
@@ -3191,12 +4486,14 @@ export class StreamHandler {
       return false;
     }
     // Echo guard: while the agent is still speaking (the forward-STT echo
-    // window), a transcript that matches the agent's own speech is its TTS
-    // bleeding back into STT, not a user turn. Gated on forwardSttWhileSpeaking
-    // + isSpeaking so a real post-turn reply (committed when idle) is never
-    // dropped, and the default VAD path is unaffected. Parity with Python.
+    // window — or a pause_resume confirm window, which forwards mic audio
+    // to STT while the agent formally holds the floor), a transcript that
+    // matches the agent's own speech is its TTS bleeding back into STT,
+    // not a user turn. Gated on isSpeaking so a real post-turn reply
+    // (committed when idle) is never dropped, and the default VAD path is
+    // unaffected. Parity with Python.
     if (
-      this.forwardSttWhileSpeaking &&
+      (this.forwardSttWhileSpeaking || this.outputPaused) &&
       this.isSpeaking &&
       looksLikeEcho(text, this.currentAgentSpokenText)
     ) {
@@ -3224,6 +4521,701 @@ export class StreamHandler {
     this.lastCommitText = normalised;
     this.lastCommitAt = now;
     return true;
+  }
+
+  // ---------------------------------------------------------------------------
+  // PREEMPTIVE GENERATION (opt-in) — speculative dispatch on a confident
+  // interim transcript; commit-or-discard at end of utterance. Mirrors Python
+  // ``_note_interim_transcript`` / ``_try_release_speculation`` and LiveKit's
+  // ``preemptive_generation``.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Whether a speculative dispatch may start right now. Built-in LLM loop
+   * only (an ``onMessage`` handler may have external side effects per
+   * invocation, so it is never run speculatively), and only while the agent
+   * is idle: not speaking (an interim during agent speech is barge-in
+   * material, not a next turn) and no turn dispatch in flight
+   * (single-in-flight contract). Parity with Python ``_can_speculate``.
+   */
+  private canSpeculate(): boolean {
+    if (!this.preemptiveEnabled) return false;
+    if (this.deps.onMessage || !this.llmLoop) return false;
+    if (this.isSpeaking) return false;
+    return this.dispatchTask === null;
+  }
+
+  /**
+   * Read-only mirror of the ``commitTranscript`` filters: a candidate
+   * interim must pass the same hallucination / echo / duplicate checks a
+   * final would face at commit time — otherwise we would speculate on text
+   * whose final is guaranteed to be dropped. Never mutates the dedup state.
+   * Parity with Python ``_speculation_input_ok``.
+   */
+  private speculationInputOk(text: string): boolean {
+    const normalised = text.trim().toLowerCase();
+    const stripped = normalised.replace(/[.,!?;: ]+$/, '').trim();
+    if (HALLUCINATIONS.has(stripped) || stripped === '') return false;
+    if (
+      this.forwardSttWhileSpeaking &&
+      this.isSpeaking &&
+      looksLikeEcho(text, this.currentAgentSpokenText)
+    ) {
+      return false;
+    }
+    // The matching final would be dropped as a duplicate at commit time.
+    const sinceLastMs = Date.now() - this.lastCommitAt;
+    if (sinceLastMs < 2000 && normalised === this.lastCommitText) return false;
+    return true;
+  }
+
+  /**
+   * Track an interim transcript and start a speculation when it qualifies:
+   * (a) it ends with sentence-final punctuation (immediate), or (b) it has
+   * been unchanged for ``preemptiveMinStableMs`` (one-shot stability timer).
+   * No-op when preemptive generation is disabled or the handler cannot
+   * speculate right now. Parity with Python ``_note_interim_transcript``.
+   */
+  private async noteInterimTranscript(text: string): Promise<void> {
+    if (!this.preemptiveEnabled) return;
+    const norm = normalizeForEcho(text);
+    if (!norm) return;
+    const spec = this.speculation;
+    if (spec !== null && spec.normText === norm && !spec.failed) {
+      return; // already speculating on this exact utterance
+    }
+    if (!this.canSpeculate()) {
+      this.clearInterimStabilityTimer();
+      this.interimNorm = '';
+      return;
+    }
+    if (!this.speculationInputOk(text)) return;
+    if (endsWithSentenceFinalPunct(text)) {
+      // High-confidence interim — speculate immediately (replacing any
+      // stale speculation on older text). Awaited so the replaced
+      // speculation is fully unwound before the new one registers.
+      this.clearInterimStabilityTimer();
+      this.interimNorm = norm;
+      this.interimText = text;
+      await this.startSpeculation(text).catch((err) =>
+        getLogger().debug(`startSpeculation threw: ${String(err)}`),
+      );
+      return;
+    }
+    if (norm !== this.interimNorm) {
+      // Text changed — restart the stability window.
+      this.interimNorm = norm;
+      this.interimText = text;
+      this.clearInterimStabilityTimer();
+      if (this.preemptiveMinStableMs <= 0) {
+        await this.startSpeculation(text).catch((err) =>
+          getLogger().debug(`startSpeculation threw: ${String(err)}`),
+        );
+        return;
+      }
+      this.interimStableTimer = setTimeout(() => {
+        this.interimStableTimer = null;
+        if (this.interimNorm !== norm) return; // a newer interim superseded it
+        const current = this.speculation;
+        if (current !== null && current.normText === norm && !current.failed) return;
+        if (!this.canSpeculate() || !this.speculationInputOk(this.interimText)) return;
+        void this.startSpeculation(this.interimText).catch((err) =>
+          getLogger().debug(`stability-triggered speculation threw: ${String(err)}`),
+        );
+      }, this.preemptiveMinStableMs);
+    }
+  }
+
+  /** Cancel the pending interim-stability timer, if any. Idempotent. */
+  private clearInterimStabilityTimer(): void {
+    if (this.interimStableTimer !== null) {
+      clearTimeout(this.interimStableTimer);
+      this.interimStableTimer = null;
+    }
+  }
+
+  /** Drop interim-stability state — called once a final commits (the
+   * utterance is decided) and on teardown. */
+  private resetInterimTracking(): void {
+    this.clearInterimStabilityTimer();
+    this.interimNorm = '';
+    this.interimText = '';
+  }
+
+  /**
+   * Launch a speculative dispatch for ``interimText``, replacing (and
+   * counting as a miss) any previous speculation on different text. The
+   * task's rejection handler is attached at creation (same contract as
+   * ``dispatchTask``). Parity with Python ``_start_speculation``.
+   */
+  private async startSpeculation(interimText: string): Promise<void> {
+    await this.abortSpeculation('replaced_by_newer_interim');
+    if (this.speculation !== null) {
+      // A concurrent path (stability timer vs. drain loop) registered a
+      // NEWER speculation while we awaited the old one's unwind — keep it.
+      // Overwriting here would orphan its task parked on the commit
+      // decision forever. Parity with Python ``_start_speculation``.
+      return;
+    }
+    const spec = new SpeculativeTurn(interimText);
+    this.speculation = spec;
+    spec.task = this.runSpeculativeDispatch(spec).catch((err) => {
+      getLogger().error('Preemptive: speculative dispatch rejected:', err);
+    });
+    getLogger().debug(
+      `Preemptive: speculation started on interim ${sanitizeLogValue(interimText.slice(0, 60))}`,
+    );
+  }
+
+  /**
+   * Discard the current speculation (if any): signal abort, await the task's
+   * unwind (bounded — JS promises are not cancellable, so a provider that
+   * ignores the signal must not block the caller), and count a miss unless
+   * this is teardown. The speculative task never touched history / carrier /
+   * per-turn metrics, so there is nothing to roll back. Idempotent. Parity
+   * with Python ``_abort_speculation``.
+   */
+  private async abortSpeculation(reason: string, countMiss = true): Promise<void> {
+    const spec = this.speculation;
+    if (spec === null) return;
+    // Deregister synchronously so a concurrent commit cannot release a
+    // speculation that is already being torn down.
+    this.speculation = null;
+    spec.failed = true;
+    try {
+      spec.abort.abort();
+    } catch {
+      // Defensive — abort() throws nothing in modern runtimes.
+    }
+    // Wake a task parked on the commit decision; ``released`` stays false so
+    // it unwinds as a discard.
+    spec.signalDecision();
+    if (spec.task) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const cap = new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, 5_000);
+      });
+      try {
+        await Promise.race([spec.task.catch(() => {}), cap]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }
+    if (countMiss) this.metricsAcc.recordPreemptiveMiss();
+    getLogger().debug(`Preemptive: speculation discarded (${reason})`);
+  }
+
+  /**
+   * Self-abort from WITHIN the speculative task (LLM error, buffer overflow,
+   * afterTranscribe veto). Marks the speculation unreleasable and
+   * deregisters it so the commit path dispatches normally. Never awaits (the
+   * caller IS the task). Parity with Python ``_fail_speculation_inline``.
+   */
+  private failSpeculationInline(spec: SpeculativeTurn, reason: string): void {
+    spec.failed = true;
+    try {
+      spec.abort.abort();
+    } catch {
+      // Defensive.
+    }
+    spec.signalDecision();
+    if (this.speculation === spec) this.speculation = null;
+    this.metricsAcc.recordPreemptiveMiss();
+    getLogger().debug(`Preemptive: speculation failed (${reason})`);
+  }
+
+  /**
+   * Commit-time decision for the in-flight speculation. Returns ``true``
+   * when the speculation was RELEASED — the caller must NOT dispatch a
+   * normal turn (the speculative task is now the live turn, tracked via
+   * ``dispatchTask``). Returns ``false`` when there was no usable
+   * speculation (none in flight, failed, or mismatched — the mismatch is
+   * discarded here) and the normal dispatch must run.
+   *
+   * On release, the commit-point bookkeeping the normal path performs in
+   * ``processTranscript`` happens HERE — the ``onTranscript`` callback, the
+   * conversation-history user push (final transcript text), and the
+   * turn-committed metric anchors (so TTFT/latency reflect user-perceived
+   * timing from the REAL final-transcript commit) — exactly once per turn.
+   * Parity with Python ``_try_release_speculation``.
+   */
+  private async tryReleaseSpeculation(finalText: string): Promise<boolean> {
+    const spec = this.speculation;
+    if (spec === null) return false;
+    if (
+      spec.failed ||
+      spec.abort.signal.aborted ||
+      !speculationMatches(spec.interimText, finalText)
+    ) {
+      await this.abortSpeculation('final_mismatch');
+      return false;
+    }
+
+    // ---- RELEASE ----
+    this.speculation = null;
+    spec.finalText = finalText;
+    // Point the live cancel machinery at the speculative stream so the
+    // existing barge-in paths (``cancelSpeaking`` aborts ``llmAbort``) tear
+    // it down exactly like a normal turn's stream.
+    this.llmAbort = spec.abort;
+    this.metricsAcc.recordPreemptiveHit();
+    getLogger().debug(`User (${this.deps.bridge.label} pipeline): ${sanitizeLogValue(finalText)}`);
+
+    if (this.deps.onTranscript) {
+      await this.deps.onTranscript({
+        role: 'user',
+        text: finalText,
+        call_id: this.callId,
+        history: [...this.history.entries],
+      });
+    }
+    // History/transcript record the FINAL transcript text as the user
+    // message (the LLM consumed the matching interim — normalized-equal by
+    // definition of the release gate).
+    this.history.push({ role: 'user', text: finalText, timestamp: Date.now() });
+    this.metricsAcc.recordOnUserTurnCompletedDelay(0);
+    this.metricsAcc.recordTurnCommitted();
+    // Released turns return before processTranscript's commit bookkeeping:
+    // perform the semantic turn-detection cleanup and the committed-EOS
+    // speech event here too, so combining ``preemptiveGeneration`` with
+    // ``turnDetector`` neither leaks a stale stamped trigger into the next
+    // turn nor skips the EOS event. Parity with Python
+    // ``_try_release_speculation``.
+    if (this.deps.agent.turnDetector) {
+      this.cancelSemanticHold();
+      this.resetSemanticWindow();
+    }
+    await this.emitUserSpeechEos(finalText);
+
+    // Settle the previous turn first (single-in-flight) — fast no-op, a
+    // speculation can only have started while no dispatch was in flight.
+    await this.dispatchTask?.catch(() => {});
+    spec.released = true;
+    spec.signalDecision();
+    // The speculative task is now the live turn.
+    this.dispatchTask = spec.task;
+    getLogger().info(
+      `Preemptive: speculation RELEASED on matching final ${sanitizeLogValue(finalText.slice(0, 60))}`,
+    );
+    return true;
+  }
+
+  /** Playout duration (ms) of the audio a speculation has buffered so far.
+   * Same bytes-per-ms model as ``trackOutboundPlayback``. */
+  private specBufferMs(spec: SpeculativeTurn): number {
+    const bytesPerMs =
+      this.ttsOutputFormatNativeForCarrier &&
+      this.deps.bridge.telephonyProvider !== 'telnyx'
+        ? 8
+        : 32;
+    return spec.bufferedBytes / bytesPerMs;
+  }
+
+  /** Push one (already hook-processed) audio chunk of a RELEASED speculation
+   * to the carrier — the same per-chunk bookkeeping ``synthesizeSentence``
+   * performs on the live path. */
+  private async specSendChunk(spec: SpeculativeTurn, processedAudio: Buffer): Promise<void> {
+    if (!spec.ttsFirstByteSent.value) {
+      spec.ttsFirstByteSent.value = true;
+      this.metricsAcc.recordTtsFirstByte();
+      await this.emitAudioOut();
+    }
+    // Far-end tap mirrors the direct send path: SKIPPED on the
+    // carrier-native fast path where these are mulaw wire bytes that
+    // would corrupt the int16-PCM-16k AEC reference.
+    if (this.aec && !this.ttsOutputFormatNativeForCarrier) {
+      this.aec.pushFarEnd(processedAudio);
+    }
+    const encoded = this.encodePipelineAudio(processedAudio);
+    this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
+    this.trackOutboundPlayback(processedAudio.length);
+    this.markFirstAudioSent();
+  }
+
+  /**
+   * Idempotent release flush: take the floor (``beginSpeaking``), stamp the
+   * post-commit LLM markers, and stream every buffered sentence to the
+   * carrier in order. After this the speculative task continues as a plain
+   * live turn. No-op until the speculation is released. Parity with Python
+   * ``_spec_ensure_flushed``.
+   */
+  private async specEnsureFlushed(spec: SpeculativeTurn): Promise<void> {
+    if (spec.flushed || !spec.released) return;
+    spec.flushed = true;
+    await this.beginSpeaking();
+    // Post-commit metric markers: the user-perceived TTFT for a released
+    // speculation is "final commit → audio", so the first-token /
+    // first-sentence stamps are recorded NOW (after ``recordTurnCommitted``)
+    // rather than back when the speculative stream actually produced them.
+    if (spec.responseParts.length > 0) {
+      if (!spec.llmFirstTokenRecorded) {
+        spec.llmFirstTokenRecorded = true;
+        this.metricsAcc.recordLlmFirstToken();
+        await this.emitLlmFirstToken();
+      }
+      // Echo-guard reference for barge-in comparisons during the live
+      // continuation (``beginSpeaking`` reset it).
+      this.currentAgentSpokenText = spec.responseParts.join('');
+    }
+    if (spec.buffered.length > 0) {
+      this.metricsAcc.recordLlmFirstSentenceComplete();
+    }
+    for (const { text, chunks } of spec.buffered) {
+      if (chunks.length === 0) continue;
+      // Per-sentence carry reset, mirroring ``synthesizeSentence``.
+      this.resetTtsCarry();
+      let recordSegment = true;
+      for (const audio of chunks) {
+        if (!this.isSpeaking) {
+          // Barge-in landed mid-flush — stop exactly like the live
+          // sentence loop would.
+          spec.interrupted = true;
+          spec.buffered = [];
+          return;
+        }
+        if (recordSegment) {
+          this.turnSpokenSegments.push({ text, startMs: this.turnPlaybackTotalMs });
+          recordSegment = false;
+        }
+        await this.specSendChunk(spec, audio);
+      }
+      this.resetTtsCarry();
+    }
+    spec.buffered = []; // release the held memory
+  }
+
+  /**
+   * Synthesize one sentence of an UNRELEASED speculation, holding the audio
+   * in ``spec.buffered``. Transitions to live sending mid-sentence the
+   * moment the release lands. Returns ``false`` when the speculation must
+   * stop (aborted, overflow, or barge-in after a mid-sentence release).
+   * Parity with Python ``_spec_synthesize_buffered``.
+   */
+  private async specSynthesizeBuffered(
+    spec: SpeculativeTurn,
+    sentence: string,
+    hookExecutor: PipelineHookExecutor,
+    hookCtx: HookContext,
+  ): Promise<boolean> {
+    if (!this.tts) {
+      // No TTS configured — nothing audible to hold; still track the
+      // sentence so the released turn records it (parity with the live
+      // path, which is also silent without TTS).
+      spec.buffered.push({ text: sentence, chunks: [] });
+      return true;
+    }
+    let transformed = sentence;
+    for (const fn of this.deps.agent.textTransforms ?? []) {
+      transformed = fn(transformed);
+    }
+    const processedText = await hookExecutor.runBeforeSynthesize(transformed, hookCtx);
+    if (processedText === null) return true; // hook skipped this sentence
+
+    const chunks: Buffer[] = [];
+    // Register BEFORE synthesis so a mid-sentence release flushes the
+    // partial chunks collected so far in order.
+    spec.buffered.push({ text: processedText, chunks });
+    try {
+      for await (const chunk of this.tts.synthesizeStream(processedText)) {
+        if (spec.abort.signal.aborted && !spec.released) return false;
+        const processedAudio = await hookExecutor.runAfterSynthesize(chunk, processedText, hookCtx);
+        if (processedAudio === null) continue;
+        if (spec.released && !spec.flushed) {
+          // The final committed while this sentence was mid-synth — flush
+          // everything buffered (including this sentence's earlier chunks)
+          // and continue live below.
+          await this.specEnsureFlushed(spec);
+        }
+        if (spec.flushed) {
+          if (!this.isSpeaking) {
+            spec.interrupted = true;
+            return false;
+          }
+          await this.specSendChunk(spec, processedAudio);
+        } else {
+          chunks.push(processedAudio);
+          spec.bufferedBytes += processedAudio.length;
+          if (this.specBufferMs(spec) > StreamHandler.PREEMPTIVE_MAX_BUFFER_MS) {
+            this.failSpeculationInline(spec, 'buffer_overflow');
+            return false;
+          }
+        }
+      }
+    } catch (e) {
+      // Mirror the live path: a TTS error never crashes the turn.
+      getLogger().error(`TTS streaming error during speculation (${this.deps.bridge.label}):`, e);
+    }
+    return true;
+  }
+
+  /**
+   * Guardrails + tier-2 hook + synthesis for one speculative sentence —
+   * buffered pre-release, live post-release (same transforms either way).
+   * Returns ``false`` when the turn must stop. Parity with Python
+   * ``_spec_speak_sentence``.
+   */
+  private async specSpeakSentence(
+    spec: SpeculativeTurn,
+    sentence: string,
+    hookExecutor: PipelineHookExecutor,
+    hookCtx: HookContext,
+  ): Promise<boolean> {
+    // ``currentAgent`` (not deps.agent) so a mid-call handoff's guardrails
+    // apply to speculative sentences too.
+    const guard = checkGuardrails(sentence, this.currentAgent.guardrails);
+    let sentenceText = guard
+      ? (guard.replacement ?? "I'm sorry, I can't respond to that.")
+      : sentence;
+    if (hookExecutor.hasAfterLlmSentence()) {
+      const transformed = await hookExecutor.runAfterLlmSentence(sentenceText, hookCtx);
+      if (transformed === null) return true; // hook dropped this sentence
+      sentenceText = transformed;
+    }
+    if (spec.released) {
+      await this.specEnsureFlushed(spec);
+      if (!this.isSpeaking) {
+        spec.interrupted = true;
+        return false;
+      }
+      if (!spec.ttsFirstByteSent.value && spec.buffered.length === 0) {
+        // First sentence of the turn is being synthesized live (nothing was
+        // buffered pre-release) — stamp the boundary the streaming path
+        // stamps via ``recordLlmFirstSentenceComplete``.
+        this.metricsAcc.recordLlmFirstSentenceComplete();
+      }
+      await this.synthesizeSentence(sentenceText, hookExecutor, hookCtx, spec.ttsFirstByteSent);
+      if (!this.isSpeaking) {
+        spec.interrupted = true;
+        return false;
+      }
+      return true;
+    }
+    return this.specSynthesizeBuffered(spec, sentenceText, hookExecutor, hookCtx);
+  }
+
+  /**
+   * Turn-complete bookkeeping for a RELEASED speculation — mirrors the tail
+   * of ``runPipelineLlm`` + ``dispatchTurn`` (metrics turn record,
+   * interrupted heard-prefix marker, assistant history entry). Runs exactly
+   * once, after all audio was sent/cancelled. Parity with Python
+   * ``_finish_released_speculation``.
+   */
+  private async finishReleasedSpeculation(spec: SpeculativeTurn, llmError: boolean): Promise<void> {
+    const responseText = spec.responseParts.join('');
+    const interrupted = spec.interrupted;
+    let spokenText = responseText;
+    if (interrupted && responseText) {
+      const heard = this.heardResponsePrefix();
+      spokenText =
+        heard === null
+          ? `${responseText} [interrupted by caller]`
+          : heard.text
+            ? `${heard.text} [interrupted by caller]`
+            : '[interrupted by caller]';
+    }
+    if (spokenText) await this.emitAssistantTranscript(spokenText);
+    if (!interrupted && !llmError && responseText) {
+      this.metricsAcc.recordTtsComplete(responseText);
+      await this.emitTurnMetrics(this.metricsAcc.recordTurnComplete(responseText));
+    }
+  }
+
+  /**
+   * Body of one speculative turn: LLM stream → sentence chunking → buffered
+   * TTS, then commit-or-discard.
+   *
+   * Until release this task is side-effect free outside ``spec`` itself —
+   * no conversation-history writes, no carrier audio, no per-turn metrics
+   * (LLM token usage/cost IS recorded by ``LLMLoop``: the tokens were
+   * genuinely consumed either way). After release it behaves exactly like a
+   * live ``dispatchTurn`` body. Parity with Python
+   * ``_run_speculative_dispatch``.
+   */
+  private async runSpeculativeDispatch(spec: SpeculativeTurn): Promise<void> {
+    let llmError = false;
+    let stopped = false;
+    let tokenIter: AsyncIterator<string, void, unknown> | null = null;
+    const chunker = new SentenceChunker({
+      aggressiveFirstFlush: this.deps.agent.aggressiveFirstFlush ?? false,
+      language: this.deps.agent.language,
+    });
+    try {
+      const hookExecutor = new PipelineHookExecutor(this.deps.agent.hooks);
+      const hookCtx = this.buildHookContext();
+
+      // afterTranscribe gates/edits the text the LLM sees — same as a normal
+      // dispatch. A veto means the matching final would be vetoed too; fail
+      // the speculation and let the commit path run the hook again on the
+      // real final.
+      const filteredText = await hookExecutor.runAfterTranscribe(spec.interimText, hookCtx);
+      if (filteredText === null) {
+        this.failSpeculationInline(spec, 'after_transcribe_veto');
+        return;
+      }
+
+      // Prompt parity with ``processTranscript``: snapshot history and
+      // append the (filtered) user entry to the SNAPSHOT only — the shared
+      // history is committed at release time.
+      const snapshot = [
+        ...this.history.entries,
+        { role: 'user', text: filteredText, timestamp: Date.now() },
+      ];
+      const callCtx = { call_id: this.callId, caller: this.caller, callee: this.callee };
+      tokenIter = this.llmLoop!.run(
+        filteredText,
+        snapshot,
+        callCtx,
+        this.metricsAcc,
+        hookExecutor,
+        hookCtx,
+        { signal: spec.abort.signal },
+      )[Symbol.asyncIterator]();
+
+      try {
+        while (true) {
+          const nextToken = tokenIter.next();
+          let raced: IteratorResult<string, void> | null = null;
+          // Pre-release: race the next token against the commit decision so
+          // buffered audio flushes the MOMENT the final commits — even while
+          // the LLM is silent between tokens (agent-runtime LLMs can pause
+          // for seconds mid-stream).
+          while (raced === null && !spec.released && !spec.abort.signal.aborted) {
+            const DECIDED = {};
+            const winner = await Promise.race([
+              nextToken,
+              spec.decision.then(() => DECIDED as unknown),
+            ]);
+            if (winner === DECIDED) {
+              if (spec.released && !spec.flushed && !spec.abort.signal.aborted) {
+                await this.specEnsureFlushed(spec);
+              }
+              if (!spec.released) break; // discarded — abort path below
+            } else {
+              raced = winner as IteratorResult<string, void>;
+            }
+          }
+          if (spec.abort.signal.aborted) {
+            // Aborted (pre-release discard) or barge-in cancelled
+            // (post-release) — abandon the pending token fetch safely.
+            void Promise.resolve(nextToken).catch(() => {});
+            if (spec.released) spec.interrupted = true;
+            stopped = true;
+            break;
+          }
+          const result = raced ?? (await nextToken);
+          if (result.done) break;
+          const token = result.value;
+          spec.responseParts.push(token);
+          if (spec.released) {
+            // Flush as soon as the release is observed — never hold
+            // already-synthesized audio while waiting for the next sentence
+            // boundary.
+            if (!spec.flushed) await this.specEnsureFlushed(spec);
+            // Live continuation — keep the echo-guard reference and
+            // user-perceived TTFT current.
+            this.currentAgentSpokenText = spec.responseParts.join('');
+            if (!spec.llmFirstTokenRecorded) {
+              spec.llmFirstTokenRecorded = true;
+              this.metricsAcc.recordLlmFirstToken();
+              await this.emitLlmFirstToken();
+            }
+          }
+          for (const sentence of chunker.push(token)) {
+            if (!(await this.specSpeakSentence(spec, sentence, hookExecutor, hookCtx))) {
+              stopped = true;
+              break;
+            }
+          }
+          if (stopped) break;
+        }
+      } catch (e) {
+        const isAbort = (e as Error)?.name === 'AbortError' || spec.abort.signal.aborted;
+        if (isAbort && !spec.released) return; // torn down by an abort — silent
+        if (isAbort) {
+          spec.interrupted = true;
+          stopped = true;
+        } else {
+          llmError = true;
+          chunker.reset();
+          getLogger().error(
+            `Preemptive: LLM streaming error during speculation (${this.deps.bridge.label}):`,
+            e,
+          );
+          if (!spec.released) {
+            // Unreleased — fail silently; the final dispatches normally
+            // (and gets its own, live, error handling).
+            this.failSpeculationInline(spec, 'llm_error');
+            return;
+          }
+          // Released — the turn is live: mirror the live error path.
+          this.metricsAcc.recordTurnInterrupted();
+          const fallback = this.deps.agent.llmErrorMessage;
+          if (fallback && !spec.ttsFirstByteSent.value && this.isSpeaking) {
+            try {
+              await this.synthesizeSentence(fallback, hookExecutor, hookCtx, spec.ttsFirstByteSent, false);
+            } catch (err) {
+              getLogger().error('llmErrorMessage fallback synthesis failed:', err);
+            }
+          }
+        }
+      }
+
+      if (!llmError && !stopped) {
+        for (const sentence of chunker.flush()) {
+          if (!(await this.specSpeakSentence(spec, sentence, hookExecutor, hookCtx))) {
+            stopped = true;
+            break;
+          }
+        }
+      }
+
+      if (!spec.released) {
+        if (spec.abort.signal.aborted || spec.failed) return; // pre-release discard
+        // Generation finished before the final committed — park and hold
+        // the audio until the commit decision lands.
+        await spec.decision;
+        if (!spec.released) return; // discarded
+      }
+
+      // Released: flush anything still held (covers "LLM finished before
+      // the final committed" — the common case), then run the turn-complete
+      // bookkeeping. ``endSpeakingWithGrace`` pairs with the
+      // ``beginSpeaking`` inside the flush.
+      try {
+        if (!spec.interrupted && !llmError) {
+          await this.specEnsureFlushed(spec);
+        }
+      } finally {
+        if (spec.flushed) this.endSpeakingWithGrace();
+      }
+      this.metricsAcc.recordLlmComplete();
+      await this.finishReleasedSpeculation(spec, llmError);
+    } catch (e) {
+      getLogger().error('Preemptive: speculative dispatch failed:', e);
+      if (!spec.released) {
+        this.failSpeculationInline(spec, 'exception');
+      } else if (spec.flushed && this.isSpeaking) {
+        // Never leave the floor held on an unexpected released-path failure.
+        this.endSpeakingWithGrace();
+      }
+    } finally {
+      // Close the LLM generator so the provider connection is freed even on
+      // an early unwind (parity with Python ``result.aclose()``).
+      try {
+        void tokenIter?.return?.();
+      } catch {
+        // Best-effort.
+      }
+      if (this.llmAbort === spec.abort) this.llmAbort = null;
+      if (this.speculation === spec) this.speculation = null;
+      // A RELEASED speculation became the live turn (``dispatchTask``) — on
+      // completion it must clear the handle exactly like ``dispatchTurn``'s
+      // ``finally`` does, or ``canSpeculate()`` (which requires
+      // ``dispatchTask === null``) would stay false for the REST OF THE
+      // CALL after the first hit. Python is immune (``_can_speculate``
+      // accepts ``dispatch.done()``); the TS convention is null-on-done.
+      if (this.dispatchTask === spec.task) this.dispatchTask = null;
+    }
   }
 
   /**
@@ -3337,7 +5329,7 @@ export class StreamHandler {
     const guardAndSpeak = async (sentence: string, isFirst: boolean): Promise<void> => {
       // Fix 3/5: record first-sentence boundary before synthesizing first sentence.
       if (isFirst) this.metricsAcc.recordLlmFirstSentenceComplete();
-      const guard = checkGuardrails(sentence, this.deps.agent.guardrails);
+      const guard = checkGuardrails(sentence, this.currentAgent.guardrails);
       let sentenceText = guard
         ? (guard.replacement ?? "I'm sorry, I can't respond to that.")
         : sentence;
@@ -3379,8 +5371,20 @@ export class StreamHandler {
           // barge-in transcript mid-turn is compared against what the agent has
           // said so far (echo lags the tokens). Parity with Python.
           this.currentAgentSpokenText = allParts.join('');
-          for (const sentence of chunker.push(token)) {
+          let sentences = chunker.push(token);
+          // pause_resume: a resume may have fired between tokens — speak
+          // the sentences buffered during the pause FIRST so the reply
+          // stays in order.
+          if (!this.outputPaused) {
+            const released = this.releasePausedSentences();
+            if (released.length > 0) sentences = [...released, ...sentences];
+          }
+          for (const sentence of sentences) {
             if (!this.isSpeaking) break;
+            // pause_resume: while output is paused, buffer the sentence
+            // (bounded) — spoken on resume, discarded on kill. Keeps
+            // consuming LLM tokens either way.
+            if (this.bufferSentenceIfPaused(sentence)) continue;
             await guardAndSpeak(sentence, !firstSentenceEmitted);
             firstSentenceEmitted = true;
           }
@@ -3428,11 +5432,25 @@ export class StreamHandler {
 
       this.metricsAcc.recordLlmComplete(); // record BEFORE TTS flush, not after
 
+      // The outer loop exists for pause_resume: the turn must not end
+      // while a pause decision is outstanding — buffered sentences are
+      // spoken on resume; a kill aborts the turn. Each wait is bounded by
+      // the confirm window (the resume timer guarantees a decision), and
+      // legacy mode never pauses so the loop runs exactly once —
+      // byte-identical behaviour. Mirrors Python.
       if (!llmError && this.isSpeaking) {
-        for (const sentence of chunker.flush()) {
+        let pendingSentences = chunker.flush();
+        for (;;) {
+          for (const sentence of pendingSentences) {
+            if (!this.isSpeaking) break;
+            if (this.bufferSentenceIfPaused(sentence)) continue;
+            await guardAndSpeak(sentence, !firstSentenceEmitted);
+            firstSentenceEmitted = true;
+          }
           if (!this.isSpeaking) break;
-          await guardAndSpeak(sentence, !firstSentenceEmitted);
-          firstSentenceEmitted = true;
+          if (!this.outputPaused && this.pausedSentences.length === 0) break;
+          if (!(await this.awaitPauseDecision())) break;
+          pendingSentences = this.releasePausedSentences();
         }
       }
     } finally {
@@ -3468,8 +5486,8 @@ export class StreamHandler {
     responseText: string,
     hookExecutor: PipelineHookExecutor,
     hookCtx: HookContext,
-  ): Promise<boolean> {
-    const guard = checkGuardrails(responseText, this.deps.agent.guardrails);
+  ): Promise<{ interrupted: boolean; finalText: string }> {
+    const guard = checkGuardrails(responseText, this.currentAgent.guardrails);
     let text = responseText;
     if (guard) {
       getLogger().debug(`Guardrail '${guard.name}' triggered (pipeline)`);
@@ -3478,6 +5496,10 @@ export class StreamHandler {
 
     this.metricsAcc.recordLlmComplete();
     await this.emitAssistantTranscript(text);
+    // Echo-guard reference: only the streaming path populated it, so the
+    // echo of non-streaming replies compared against an empty string under
+    // forward-STT-while-speaking and committed as a phantom user turn.
+    this.currentAgentSpokenText = text;
 
     const chunker = new SentenceChunker();
     const sentences = [...chunker.push(text), ...chunker.flush()];
@@ -3486,24 +5508,39 @@ export class StreamHandler {
     let interrupted = false;
 
     try {
-      for (const sentence of sentences) {
-        if (!this.isSpeaking) { interrupted = true; break; }
-        let sentenceText = sentence;
-        // Tier 2 — apply per-sentence after_llm hook on non-streaming
-        // path too (parity with the streaming path's guardAndSpeak).
-        if (hookExecutor.hasAfterLlmSentence()) {
-          const transformed = await hookExecutor.runAfterLlmSentence(sentenceText, hookCtx);
-          if (transformed === null) continue; // hook dropped this sentence
-          sentenceText = transformed;
+      // Outer loop mirrors ``runPipelineLlm``: in pause_resume mode the
+      // turn waits out an in-flight pause decision (buffered sentences
+      // speak on resume, a kill marks interrupted); legacy mode never
+      // pauses → single pass.
+      let pendingSentences: readonly string[] = sentences;
+      for (;;) {
+        for (const sentence of pendingSentences) {
+          if (!this.isSpeaking) { interrupted = true; break; }
+          if (this.bufferSentenceIfPaused(sentence)) continue;
+          let sentenceText = sentence;
+          // Tier 2 — apply per-sentence after_llm hook on non-streaming
+          // path too (parity with the streaming path's guardAndSpeak).
+          if (hookExecutor.hasAfterLlmSentence()) {
+            const transformed = await hookExecutor.runAfterLlmSentence(sentenceText, hookCtx);
+            if (transformed === null) continue; // hook dropped this sentence
+            sentenceText = transformed;
+          }
+          await this.synthesizeSentence(sentenceText, hookExecutor, hookCtx, ttsFirstByteSent);
         }
-        await this.synthesizeSentence(sentenceText, hookExecutor, hookCtx, ttsFirstByteSent);
+        if (interrupted) break;
+        if (!this.outputPaused && this.pausedSentences.length === 0) break;
+        if (!(await this.awaitPauseDecision())) {
+          interrupted = true;
+          break;
+        }
+        pendingSentences = this.releasePausedSentences();
       }
     } finally {
       this.endSpeakingWithGrace();
     }
 
     if (!interrupted) this.metricsAcc.recordTtsComplete(text);
-    return interrupted;
+    return { interrupted, finalText: text };
   }
 
   /** Handle streaming WebSocket remote response with TTS. */
@@ -3513,9 +5550,23 @@ export class StreamHandler {
     this.metricsAcc.recordLlmComplete();
     await this.beginSpeaking();
     let wsTtsStarted = false;
+    let interrupted = false;
     try {
       for await (const chunk of this.deps.remoteHandler.callWebSocket(onMessage, msgData)) {
+        // Honour barge-in at the OUTER loop too: only breaking the inner
+        // audio loop kept consuming the remote stream and STARTED A FRESH
+        // TTS SYNTHESIS PER CHUNK after the caller interrupted — billed
+        // audio nobody hears, and the next user turn queued behind the
+        // remote stream's end.
+        if (!this.isSpeaking) {
+          interrupted = true;
+          break;
+        }
         parts.push(chunk);
+        // Echo-guard reference: without it, the echo of WS-remote replies
+        // compared against an empty string under forward-STT-while-speaking
+        // and committed as a phantom user turn.
+        this.currentAgentSpokenText = parts.join('');
         if (this.tts) {
           this.resetTtsCarry();
           for await (const audioChunk of this.tts.synthesizeStream(chunk)) {
@@ -3534,8 +5585,13 @@ export class StreamHandler {
       this.resetTtsCarry();
     }
     const responseText = parts.join('');
-    this.metricsAcc.recordTtsComplete(responseText);
-    await this.emitTurnMetrics(this.metricsAcc.recordTurnComplete(responseText));
+    if (!interrupted) {
+      // Gate billing/turn-complete on a clean finish like the other paths —
+      // recordTtsComplete on an interrupted turn billed full characters for
+      // audio the caller never heard.
+      this.metricsAcc.recordTtsComplete(responseText);
+      await this.emitTurnMetrics(this.metricsAcc.recordTurnComplete(responseText));
+    }
     if (responseText) await this.emitAssistantTranscript(responseText);
   }
 
@@ -3641,6 +5697,10 @@ export class StreamHandler {
     function_call: async (eventData) => {
       if (this.adapter instanceof OpenAIRealtimeAdapter) {
         await this.handleFunctionCall(eventData as { call_id: string; name: string; arguments: string });
+      } else if (this.adapter instanceof ElevenLabsConvAIAdapter) {
+        await this.handleConvAIClientTool(
+          eventData as { call_id: string; name: string; arguments: Record<string, unknown> },
+        );
       }
     },
   };
@@ -3669,10 +5729,29 @@ export class StreamHandler {
     });
   }
 
-  private async emitUserSpeechEos(transcriptSoFar?: string): Promise<void> {
+  private async emitUserSpeechEos(
+    transcriptSoFar?: string,
+    trigger?: import('./_speech-events').EouTrigger,
+  ): Promise<void> {
     if (!this.deps.speechEvents) return;
+    let resolved = trigger;
+    if (resolved === undefined) {
+      if (this.deps.agent.turnDetector) {
+        // Consume the EOU trigger stamped by the semantic finalize paths
+        // (``semantic_turn_detector`` when the model approved the commit,
+        // ``vad_silence`` otherwise). Single consumption point so the
+        // event fires exactly once per committed turn.
+        resolved = this.lastEouTrigger;
+        this.lastEouTrigger = 'vad_silence';
+      } else {
+        // No detector: reflect how this commit was driven — local VAD
+        // silence when a VAD is active, otherwise the STT provider's own
+        // endpointing. Parity with Python ``_dispatch_turn``.
+        resolved = (this.deps.agent.vad ?? this.autoVad) ? 'vad_silence' : 'manual_commit';
+      }
+    }
     await this.deps.speechEvents.fireUserSpeechEos({
-      trigger: "vad_silence",
+      trigger: resolved,
       transcriptSoFar,
     });
   }
@@ -3746,6 +5825,20 @@ export class StreamHandler {
     // through untransformed. Do NOT resample here: inboundResampler is 8k→16k
     // for the STT inbound path; reusing it on the outbound path corrupts both
     // directions.
+    //
+    // Local-recording tap (agent side, Realtime / ConvAI). Per the comment
+    // above the Realtime bytes are μ-law 8 kHz; ConvAI emits μ-law only
+    // when ``ulaw_8000`` was negotiated (``forTwilio`` / ``forTelnyx``),
+    // else PCM16 16 kHz. The recorder decodes to PCM16 16 kHz internally.
+    if (this.localRecorder) {
+      const convaiPcm =
+        this.adapter instanceof ElevenLabsConvAIAdapter &&
+        this.adapter.outputAudioFormat !== 'ulaw_8000';
+      this.localRecorder.addAgentAudio(
+        eventData,
+        convaiPcm ? 'pcm16_16k' : 'mulaw_8k',
+      );
+    }
     const outAudio = eventData;
     this.deps.bridge.sendAudio(this.ws, outAudio.toString('base64'), this.streamSid);
     this.markFirstAudioSent();
@@ -3853,7 +5946,8 @@ export class StreamHandler {
     // Speech-event: end-of-utterance committed (Realtime mode emits this
     // on ``input_audio_buffer.committed``, the canonical "user finished"
     // signal). Advances `turnIdx` and arms first-token / first-audio.
-    await this.emitUserSpeechEos(inputText);
+    // Explicit trigger: the OpenAI server VAD drove this commit.
+    await this.emitUserSpeechEos(inputText, 'vad_silence');
     // Marks ASR as complete — exposes a stt_ms bucket in Realtime mode
     // distinct from the llm+tts portion. Parity with Python handler.
     this.metricsAcc.recordSttComplete(inputText);
@@ -3979,7 +6073,7 @@ export class StreamHandler {
     // — guarded by `firstTokenForTurn`. The provider tag matches the
     // engine that produced the transcript (Realtime or ConvAI).
     await this.emitLlmFirstToken();
-    const triggered = checkGuardrails(outputText, this.deps.agent.guardrails);
+    const triggered = checkGuardrails(outputText, this.currentAgent.guardrails);
     if (triggered) {
       getLogger().debug(`Guardrail '${triggered.name}' triggered`);
       if (this.adapter instanceof OpenAIRealtimeAdapter) {
@@ -4206,22 +6300,123 @@ export class StreamHandler {
     }
   }
 
+
+  /**
+   * Execute an ElevenLabs ``client_tool_call`` and ALWAYS answer it — a
+   * missing client_tool_result stalls the ElevenLabs agent until its own
+   * tool timeout. transfer_call/end_call declared as ElevenLabs client
+   * tools route to the carrier helpers. Mirrors Python
+   * ``_handle_convai_client_tool``.
+   */
+  private async handleConvAIClientTool(fc: {
+    call_id: string;
+    name: string;
+    arguments: Record<string, unknown>;
+  }): Promise<void> {
+    const adapter = this.adapter as ElevenLabsConvAIAdapter;
+    const respond = (result: string, isError = false): void => {
+      try {
+        adapter.sendClientToolResult(fc.call_id, result, isError);
+      } catch (err) {
+        getLogger().warn(`client_tool_result send failed: ${String(err)}`);
+      }
+    };
+    const args = fc.arguments ?? {};
+
+    if (fc.name === 'transfer_call') {
+      const number = String((args as { number?: unknown }).number ?? '');
+      if (!/^\+[1-9]\d{6,14}$/.test(number)) {
+        respond(JSON.stringify({ error: 'Invalid phone number format', status: 'rejected' }), true);
+        return;
+      }
+      try {
+        await this.deps.bridge.transferCall(this.callId, number);
+        respond(`Transferring to ${number}`);
+      } catch (err) {
+        respond(JSON.stringify({ error: String(err).slice(0, 200) }), true);
+      }
+      return;
+    }
+    if (fc.name === 'end_call') {
+      respond('Call ended');
+      try {
+        await this.deps.bridge.endCall(this.callId, this.ws);
+      } catch (err) {
+        getLogger().warn(`end_call failed: ${String(err)}`);
+      }
+      return;
+    }
+
+    const tools = (this.resolvedTools ?? this.deps.agent.tools ?? []) as ToolDefinition[];
+    const toolDef = tools.find((t) => t.name === fc.name);
+    if (!toolDef || (!toolDef.webhookUrl && !toolDef.handler)) {
+      getLogger().warn(`ConvAI client_tool_call for unregistered tool '${fc.name}'`);
+      respond(JSON.stringify({ error: `Tool '${fc.name}' is not registered`, fallback: true }), true);
+      return;
+    }
+
+    try {
+      const executor = new DefaultToolExecutor();
+      const result = await executor.execute(toolDef, args, {
+        call_id: this.callId,
+        caller: this.caller,
+        callee: this.callee,
+      });
+      respond(result);
+      this.recordToolCall(fc.name, args, result);
+    } catch (err) {
+      getLogger().error(`ConvAI client tool '${fc.name}' failed: ${String(err)}`);
+      respond(JSON.stringify({ error: String(err).slice(0, 200), fallback: true }), true);
+    }
+  }
+
   private async handleFunctionCall(fc: { call_id: string; name: string; arguments: string }): Promise<void> {
     const adapter = this.adapter as OpenAIRealtimeAdapter;
 
     if (fc.name === 'transfer_call') {
-      let transferArgs: { number?: string };
+      let transferArgs: { number?: string; mode?: string; summary?: string };
       try {
-        transferArgs = JSON.parse(fc.arguments || '{}') as { number?: string };
+        transferArgs = JSON.parse(fc.arguments || '{}') as { number?: string; mode?: string; summary?: string };
       } catch {
         transferArgs = {};
       }
       const transferTo = transferArgs.number ?? '';
+      const transferMode = transferArgs.mode || 'cold';
+      const transferSummary = transferArgs.summary ?? '';
+      if (transferMode !== 'cold' && transferMode !== 'warm') {
+        const rejection = JSON.stringify({
+          error: `Invalid transfer mode '${transferMode}' — use 'cold' or 'warm'`,
+          status: 'rejected',
+        });
+        await adapter.sendFunctionResult(fc.call_id, rejection);
+        await this.emitToolEvent('transfer_call', transferArgs, rejection);
+        return;
+      }
       if (!isValidE164(transferTo)) {
         getLogger().warn(`transfer_call rejected (${this.deps.bridge.label}): invalid number ${JSON.stringify(transferTo)}`);
         const rejection = JSON.stringify({ error: 'Invalid phone number format', status: 'rejected' });
         await adapter.sendFunctionResult(fc.call_id, rejection);
         await this.emitToolEvent('transfer_call', transferArgs, rejection);
+        return;
+      }
+      if (transferMode === 'warm') {
+        // Warm transfer: run the carrier sequence FIRST so an unsupported
+        // carrier / REST failure surfaces an error envelope and the AI keeps
+        // the call instead of going dark. Parity with the Python handler.
+        const outcome = await this.deps.bridge.transferCall(this.callId, transferTo, {
+          mode: 'warm',
+          summary: transferSummary,
+        });
+        const resultObj: TransferCallResult =
+          outcome && typeof outcome === 'object'
+            ? outcome
+            : { status: 'transferring', mode: 'warm', to: transferTo };
+        const result = JSON.stringify(resultObj);
+        await adapter.sendFunctionResult(fc.call_id, result);
+        await this.emitToolEvent('transfer_call', transferArgs, result);
+        if (!resultObj.error && this.deps.onTranscript) {
+          await this.deps.onTranscript({ role: 'system', text: `Call transferred (warm) to ${transferTo}`, call_id: this.callId });
+        }
         return;
       }
       getLogger().debug(`Transferring call to ${transferTo}`);
@@ -4251,6 +6446,11 @@ export class StreamHandler {
       if (this.deps.onTranscript) {
         await this.deps.onTranscript({ role: 'system', text: `Call ended: ${reason}`, call_id: this.callId });
       }
+      return;
+    }
+
+    if (fc.name === HANDOFF_TOOL_NAME && this.currentAgent.handoffs) {
+      await this.handleHandoffFunctionCall(fc);
       return;
     }
 
@@ -4348,6 +6548,196 @@ export class StreamHandler {
     await this.emitToolEvent(fc.name, parsedArgs, result);
   }
 
+  /**
+   * The effective per-call tool list for the CURRENT agent: target tools plus
+   * the built-in consult tool when configured (deduped by name). Used after a
+   * handoff to rebuild `resolvedTools`.
+   */
+  private effectiveToolsForCurrentAgent(): ToolDefinition[] {
+    const effective = [...((this.currentAgent.tools as ToolDefinition[] | undefined) ?? [])];
+    if (this.currentAgent.consult) {
+      const consultTool = buildConsultTool(this.currentAgent.consult);
+      if (!effective.some((t) => t.name === consultTool.name)) {
+        effective.push(consultTool);
+      }
+    }
+    return effective;
+  }
+
+  /**
+   * Dispatch the built-in `handoff_to` tool on the Realtime path.
+   *
+   * Swaps the live session to the target agent's configuration via a
+   * mid-session `session.update` (new `instructions` + `tools`), updates
+   * `currentAgent` / `resolvedTools` so subsequent tool dispatch resolves
+   * against the target's tool list, and records a system-style history entry
+   * so transcripts show the handoff. ALWAYS sends a function result — an
+   * unknown name / malformed args produce an error envelope, never silence
+   * (a missing function result would wedge the model).
+   *
+   * Voice is intentionally NOT swapped: OpenAI Realtime rejects a voice
+   * change once the session has produced audio, so the session keeps the
+   * voice established at call start (documented limitation; an info log is
+   * emitted when the target requested a different voice). Parity with the
+   * Python `_handle_handoff_function_call`.
+   */
+  private async handleHandoffFunctionCall(fc: { call_id: string; name: string; arguments: string }): Promise<void> {
+    const adapter = this.adapter as OpenAIRealtimeAdapter;
+    let args: { name?: string; reason?: string } | null;
+    try {
+      args = JSON.parse(fc.arguments || '{}') as { name?: string; reason?: string };
+    } catch {
+      args = null;
+    }
+    if (!args || typeof args !== 'object') {
+      const result = JSON.stringify({ error: 'Malformed handoff_to arguments', status: 'rejected' });
+      await adapter.sendFunctionResult(fc.call_id, result);
+      await this.emitToolEvent(HANDOFF_TOOL_NAME, {}, result);
+      return;
+    }
+    const name = typeof args.name === 'string' ? args.name : '';
+    const reason = typeof args.reason === 'string' ? args.reason : '';
+    const handoffs = this.currentAgent.handoffs ?? {};
+    const target = handoffs[name];
+    if (!target) {
+      const result = JSON.stringify({
+        error: `Unknown handoff agent '${name}'`,
+        available: Object.keys(handoffs).sort(),
+      });
+      await adapter.sendFunctionResult(fc.call_id, result);
+      await this.emitToolEvent(HANDOFF_TOOL_NAME, args, result);
+      return;
+    }
+
+    if (target.voice && target.voice !== this.currentAgent.voice) {
+      getLogger().info(
+        `handoff_to '${name}': voice change is not supported mid-session on ` +
+          'OpenAI Realtime — keeping the current voice.',
+      );
+    }
+
+    this.currentAgent = applyHandoffTarget(this.currentAgent, target);
+    const effective = this.effectiveToolsForCurrentAgent();
+    this.resolvedTools = effective;
+
+    // Build the new wire tool list: target tools + built-ins (+ onward
+    // handoff tool when the target has its own handoff map). Mirrors the
+    // construction in `buildAIAdapter`.
+    const wireTools: Array<{ name: string; description: string; parameters: Record<string, unknown>; strict?: boolean }> = effective.map((t) => {
+      const entry: { name: string; description: string; parameters: Record<string, unknown>; strict?: boolean } = {
+        name: t.name,
+        description: t.description ?? '',
+        parameters: (t.parameters ?? {}) as Record<string, unknown>,
+      };
+      if ((t as { strict?: boolean }).strict === true) entry.strict = true;
+      return entry;
+    });
+    wireTools.push(TRANSFER_CALL_TOOL, END_CALL_TOOL);
+    const onwardHandoffs = this.currentAgent.handoffs;
+    if (onwardHandoffs && Object.keys(onwardHandoffs).length > 0) {
+      wireTools.push(buildHandoffTool(Object.keys(onwardHandoffs)));
+    }
+
+    const vars = this.deps.sanitizeVariables({ ...(this.currentAgent.variables ?? {}) });
+    const resolvedPrompt = this.deps.resolveVariables(this.currentAgent.systemPrompt, vars);
+    const newInstructions = applyToolCallPreambles(
+      resolvedPrompt,
+      (this.currentAgent as { toolCallPreambles?: boolean | string }).toolCallPreambles,
+    );
+
+    // session.update FIRST, then the function result — the result triggers
+    // the next `response.create`, which must already run under the new
+    // instructions so the model replies as the target agent.
+    await adapter.updateSession({ instructions: newInstructions, tools: wireTools });
+
+    const handoffText = handoffHistoryText(name, reason);
+    this.history.push({ role: 'system', text: handoffText, timestamp: Date.now() });
+    if (this.deps.onTranscript) {
+      await this.deps.onTranscript({ role: 'system', text: handoffText, call_id: this.callId });
+    }
+
+    const result = JSON.stringify({ status: 'handed_off', to: name });
+    await adapter.sendFunctionResult(fc.call_id, result);
+    await this.emitToolEvent(HANDOFF_TOOL_NAME, args, result);
+  }
+
+  /**
+   * Swap the live pipeline call to the named handoff target agent.
+   *
+   * Updates `currentAgent` (the shared `AgentOptions` is never mutated),
+   * swaps the LLM loop's system prompt + tool list so the NEXT turn runs as
+   * the target agent, and appends a system-style history entry recording the
+   * handoff. ALWAYS returns a tool-result string — an unknown name produces
+   * an error envelope, never silence.
+   *
+   * Live audio infrastructure (STT/TTS/VAD instances — and therefore the
+   * speaking voice) established at call start is intentionally retained:
+   * swapping a connected TTS provider mid-call is not supported in v1.
+   * Parity with the Python `_perform_handoff`.
+   */
+  private async performHandoff(name: string, reason: string): Promise<string> {
+    const handoffs = this.currentAgent.handoffs ?? {};
+    const target = handoffs[name];
+    if (!target) {
+      return JSON.stringify({
+        error: `Unknown handoff agent '${name}'`,
+        available: Object.keys(handoffs).sort(),
+      });
+    }
+    if (target.voice && target.voice !== this.currentAgent.voice) {
+      getLogger().info(
+        `handoff_to '${name}': voice change is not supported mid-call in ` +
+          'pipeline mode (the TTS adapter is already connected) — keeping the current voice.',
+      );
+    }
+    this.currentAgent = applyHandoffTarget(this.currentAgent, target);
+    this.resolvedTools = this.effectiveToolsForCurrentAgent();
+    const vars = this.deps.sanitizeVariables({ ...(this.currentAgent.variables ?? {}) });
+    const resolvedPrompt = this.deps.resolveVariables(this.currentAgent.systemPrompt, vars);
+    if (this.llmLoop) {
+      this.llmLoop.updateAgent({
+        systemPrompt: resolvedPrompt,
+        tools: this.buildPipelineLlmTools(),
+        disablePhonePreamble: this.currentAgent.disablePhonePreamble ?? false,
+      });
+    }
+    const handoffText = handoffHistoryText(name, reason);
+    this.history.push({ role: 'system', text: handoffText, timestamp: Date.now() });
+    if (this.deps.onTranscript) {
+      await this.deps.onTranscript({ role: 'system', text: handoffText, call_id: this.callId });
+    }
+    return JSON.stringify({ status: 'handed_off', to: name });
+  }
+
+  /**
+   * Build the full pipeline tool list for the CURRENT agent: user tools +
+   * built-in `transfer_call` / `end_call` + the `handoff_to` tool when
+   * handoff targets are configured. Re-invoked after a handoff so the LLM
+   * loop advertises the target agent's tools (including its onward handoff
+   * map). Parity with the Python `_build_combined_pipeline_tools`.
+   */
+  private buildPipelineLlmTools(): ToolDefinition[] {
+    const augmented = augmentWithBuiltinHandoffTools(
+      (this.resolvedTools ?? this.currentAgent.tools) as ToolDefinition[] | null | undefined,
+      {
+        transferCall: (number, options) => this.deps.bridge.transferCall(this.callId, number, options),
+        endCall: () => this.deps.bridge.endCall(this.callId, this.ws),
+      },
+    );
+    const handoffs = this.currentAgent.handoffs;
+    if (handoffs && Object.keys(handoffs).length > 0) {
+      augmented.push({
+        ...buildHandoffTool(Object.keys(handoffs)),
+        handler: async (args: Record<string, unknown>): Promise<string> =>
+          this.performHandoff(
+            typeof args.name === 'string' ? args.name : '',
+            typeof args.reason === 'string' ? args.reason : '',
+          ),
+      });
+    }
+    return augmented;
+  }
+
   // ---------------------------------------------------------------------------
   // Private: call end / metrics finalization
   // ---------------------------------------------------------------------------
@@ -4374,6 +6764,21 @@ export class StreamHandler {
       this.mcpManager = null;
     }
 
+    // Finalize the carrier-neutral local recording (if any): drain the
+    // agent FIFO, flush the write buffer, patch the WAV header, close the
+    // file. Idempotent + exception-safe — both ``handleStop`` and
+    // ``handleWsClose`` funnel here, so abnormal teardown (carrier WS
+    // drop) still yields a parseable file. Done BEFORE the cost queries
+    // below so the WAV is finalized promptly even when those take seconds.
+    let recordingPath: string | null = null;
+    if (this.localRecorder) {
+      try {
+        recordingPath = this.localRecorder.close();
+      } catch (err) {
+        getLogger().debug(`Local recorder close failed: ${String(err)}`);
+      }
+    }
+
     await this.deps.bridge.queryTelephonyCost(this.metricsAcc, this.callId);
 
     // Deepgram cost query — pull the key off the adapter when STT is a
@@ -4393,6 +6798,11 @@ export class StreamHandler {
       ended_at: Date.now() / 1000,
       transcript: [...this.history.entries],
       metrics: finalMetrics as unknown as Record<string, unknown>,
+      // Surface the local recording path when local recording was active
+      // for this call (``null`` when the recorder broke mid-call); the key
+      // is absent entirely when the feature is off. Parity with the Python
+      // bridges' ``recording_path`` handling.
+      ...(this.localRecorder ? { recording_path: recordingPath } : {}),
     };
 
     // Single INFO line per call-end — duration, turns, cost, latency.
@@ -4418,7 +6828,13 @@ export class StreamHandler {
       notifyDashboard(callEndData);
     } catch { /* ignore */ }
     if (this.deps.onCallEnd) {
-      await this.deps.onCallEnd(callEndData);
+      try {
+        await this.deps.onCallEnd(callEndData);
+      } catch (err) {
+        // On the ws 'close' path nothing upstream catches — a throwing user
+        // callback became an unhandled rejection that killed the process.
+        getLogger().error(`onCallEnd callback failed: ${String(err)}`);
+      }
     }
   }
 }

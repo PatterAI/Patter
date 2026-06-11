@@ -328,7 +328,7 @@ describe("ChatContext", () => {
       expect(result.messages[0].content).toBe("user msg");
     });
 
-    it("converts tool messages to their role string", () => {
+    it("folds tool messages into a user turn (Anthropic rejects role: tool)", () => {
       const ctx = new ChatContext();
       ctx.addUser("call the tool");
       ctx.addToolResult("tool output", "call_456");
@@ -336,8 +336,8 @@ describe("ChatContext", () => {
       const result = ctx.toAnthropic();
 
       expect(result.messages[1]).toEqual({
-        role: "tool",
-        content: "tool output",
+        role: "user",
+        content: "[tool result] tool output",
       });
     });
   });

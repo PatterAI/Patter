@@ -130,20 +130,21 @@ export interface ResolvedLocalConfig {
  *  - ``persist === false`` → ``null`` (force off, even if env var is set)
  *  - ``persist === true`` → platform default (``resolveLogRoot('auto')``)
  *  - ``persist`` is a string → exactly that path (after ``~`` expansion)
- *  - ``persist === undefined`` → fall back to ``PATTER_LOG_DIR`` env var,
- *    or ``null`` if the env is also unset (preserves the prior opt-in
- *    behaviour where persistence required setting the env explicitly)
+ *  - ``persist === undefined`` → ``PATTER_LOG_DIR`` env var if set, else the
+ *    platform default (``resolveLogRoot('auto')``). Persistence is ON by
+ *    default since 0.6.2 — both SDKs' docs state it and the dashboard's
+ *    hydrate path requires on-disk records to survive restarts; this
+ *    function had regressed to opt-in, silently diverging from Python.
  */
 function resolvePersistRoot(persist: boolean | string | undefined): string | null {
   if (persist === false) return null;
   if (persist === true) return resolveLogRoot('auto');
   if (typeof persist === 'string') return resolveLogRoot(persist);
-  // Restore opt-in semantics: when `persist` is omitted and PATTER_LOG_DIR
-  // is not set, return null (no disk writes). This preserves the documented
-  // backward-compatible default in LocalOptions.persist JSDoc.
   const envRoot = resolveLogRoot();
   if (envRoot !== null) return envRoot;
-  return null;
+  // No explicit persist + no env var → platform default so the dashboard
+  // hydrate path always has something to read (parity with Python).
+  return resolveLogRoot('auto');
 }
 
 /** Close every parked socket inside a ``ParkedProviderConnections`` slot. */
@@ -542,7 +543,10 @@ export class Patter {
           : options.tunnel
             ? "configured"
             : "none",
-      ...telemetryEnvironmentDims(),
+      // Environment dims only when telemetry is ENABLED: the helper's
+      // previousVersion probe writes ~/.getpatter/version, violating the
+      // documented invariant that opting out never touches the filesystem.
+      ...(this.telemetry.enabled ? telemetryEnvironmentDims() : {}),
     };
     // Activation marker: emit `first_run` once per install (the run that creates
     // the install-id state). Gated on the enabled path so opting out never
@@ -727,6 +731,22 @@ export class Patter {
       }
     }
 
+    // Fail fast on a missing OpenAI key for Realtime mode — Python validates
+    // here too; deferring to call time produced a dead call instead of a
+    // clear construction-time error (caught by the cross-SDK parity suite).
+    if (
+      working.provider === 'openai_realtime' &&
+      !working.engine &&
+      !this.localConfig.openaiKey &&
+      !process.env.OPENAI_API_KEY
+    ) {
+      throw new Error(
+        "OpenAI Realtime mode requires an OpenAI API key. Pass " +
+          "engine: new OpenAIRealtime({ apiKey: 'sk-...' }) or set " +
+          'OPENAI_API_KEY in the environment.',
+      );
+    }
+
     // The consult tool is injected only in Realtime and Pipeline modes;
     // ElevenLabs ConvAI tools live on the ElevenLabs-hosted agent, so warn
     // that the setting has no effect there.
@@ -736,6 +756,43 @@ export class Patter {
           'is only injected in Realtime and Pipeline modes and will be ignored ' +
           'for this agent.',
       );
+    }
+
+    // Validate handoffs (multi-agent handoff targets). Mirrors Python
+    // ``Patter.agent`` validation: a plain ``{ name: agentOptions }`` record
+    // with non-empty string names and agent-shaped values.
+    if (working.handoffs !== undefined) {
+      if (
+        typeof working.handoffs !== 'object' ||
+        working.handoffs === null ||
+        Array.isArray(working.handoffs)
+      ) {
+        throw new TypeError(
+          'handoffs must be an object of { name: agentOptions }, got ' +
+            `${Array.isArray(working.handoffs) ? 'array' : typeof working.handoffs}.`,
+        );
+      }
+      for (const [hName, hAgent] of Object.entries(working.handoffs)) {
+        if (!hName) {
+          throw new Error(
+            'handoffs keys must be non-empty strings (the names the LLM ' +
+              'passes to handoff_to).',
+          );
+        }
+        if (typeof hAgent !== 'object' || hAgent === null || Array.isArray(hAgent)) {
+          throw new TypeError(
+            `handoffs['${hName}'] must be an agent options object (build with ` +
+              `phone.agent({...})), got ${Array.isArray(hAgent) ? 'array' : typeof hAgent}.`,
+          );
+        }
+      }
+      if (working.provider === 'elevenlabs_convai') {
+        getLogger().warn(
+          'handoffs is set but provider is ElevenLabs ConvAI; the handoff_to ' +
+            'tool is only injected in Realtime and Pipeline modes and will be ' +
+            'ignored for this agent.',
+        );
+      }
     }
 
     // Validate llm — must implement the LLMProvider interface (duck-typed on
@@ -957,6 +1014,7 @@ export class Patter {
       opts.dashboard ?? true,
       opts.dashboardToken ?? '',
       opts.allowInsecureDashboard ?? false,
+      opts.localRecording ?? false,
     );
     // Give the server the telemetry client so the per-call ``call_completed``
     // event can be emitted from the call-end path.
@@ -968,6 +1026,8 @@ export class Patter {
     // StreamHandler can adopt pre-opened STT / TTS / Realtime WSs at
     // ``start`` instead of paying the cold-handshake on first turn.
     this.embeddedServer.popPrewarmedConnections = this.popPrewarmedConnections;
+    this.embeddedServer.aliasPrewarm = this.aliasPrewarm;
+    this.embeddedServer.speechEvents = this.speechEvents;
     // Forward the waste-recorder so the carrier status / hangup webhook
     // handlers can evict the cache when a call terminates before the
     // media stream starts (no-answer, busy, failed, canceled, or AMD
@@ -1093,6 +1153,26 @@ export class Patter {
    * carrier ``start`` event instead of opening fresh ones — saving
    * ~150-900 ms of cold-start handshake on the first turn.
    */
+  /**
+   * Re-key prewarm caches from a dial-time id to the live carrier id.
+   * Plivo issues ``request_uuid`` at dial time but the media stream and
+   * webhooks carry ``CallUUID`` — without re-keying, prewarmed first-message
+   * audio and parked provider sockets never matched and always TTL-evicted
+   * as "wasted". Mirrors Python ``_alias_prewarm``.
+   */
+  aliasPrewarm = (oldId: string, newId: string): void => {
+    if (!oldId || !newId || oldId === newId) return;
+    const rekey = <V>(map: Map<string, V>): void => {
+      const v = map.get(oldId);
+      if (v !== undefined && !map.has(newId)) map.set(newId, v);
+      map.delete(oldId);
+    };
+    rekey(this.prewarmAudio);
+    rekey(this.prewarmTtlTimers);
+    rekey(this.prewarmedConnections);
+    rekey(this.prewarmedConnTimers);
+  };
+
   popPrewarmedConnections = (callId: string): ParkedProviderConnections | undefined => {
     const slot = this.prewarmedConnections.get(callId);
     if (slot === undefined) return undefined;
@@ -1477,6 +1557,15 @@ export class Patter {
     if (!options.to) {
       throw new Error("'to' phone number is required");
     }
+    if (options.firstMessage) {
+      // Per-call greeting override: prewarm synthesis and the stream
+      // handler read agent.firstMessage, so rebuild the options with a
+      // per-call agent copy. Parity with Python call(first_message=...).
+      options = {
+        ...options,
+        agent: { ...options.agent, firstMessage: options.firstMessage },
+      };
+    }
     if (!/^\+[1-9]\d{6,14}$/.test(options.to)) {
       throw new Error("'to' must be E.164 format (+<country><digits>). Got value with invalid format.");
     }
@@ -1688,6 +1777,13 @@ export class Patter {
         if (options.agent.prewarm !== false) {
           this.parkProviderConnections(options.agent, plivoCallId);
         }
+      }
+      // ``wait: true`` parity: register the completion under the dial-time
+      // request_uuid — the Plivo answer webhook re-keys it to the live
+      // CallUUID via aliasCallId, so terminal signals resolve it. The old
+      // bare ``return`` silently ignored ``wait`` for Plivo.
+      if (plivoCallId) {
+        return this.maybeAwaitCompletion(options, plivoCallId, effectiveRingTimeout);
       }
       return;
     }

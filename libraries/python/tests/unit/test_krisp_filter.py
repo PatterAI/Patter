@@ -267,6 +267,104 @@ def test_filter_raises_when_sdk_unavailable(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Internal re-framing buffer (10 ms Krisp frames vs 20 ms pipeline frames)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+async def test_filter_reframes_20ms_input_into_10ms_krisp_frames(
+    fake_krisp, tmp_path
+):
+    """The pipeline pushes 20 ms telephony frames; a 10 ms Krisp session must
+    process them as two sub-frames instead of raising a frame-size mismatch
+    (which previously made ``agent.audio_filter`` raise on every frame once
+    wired into the input chain)."""
+    import numpy as np
+
+    from getpatter.providers.krisp_filter import KrispVivaFilter
+    from getpatter.providers.krisp_instance import KrispSDKManager
+
+    KrispSDKManager._reference_count = 0
+    KrispSDKManager._initialized = False
+
+    model = tmp_path / "m.kef"
+    model.write_bytes(b"x")
+    flt = KrispVivaFilter(model_path=str(model), frame_duration_ms=10, sample_rate=16000)
+
+    # 20 ms @ 16 kHz = 320 samples.
+    pcm_in = np.arange(320, dtype=np.int16).tobytes()
+    pcm_out = await flt.process(pcm_in, 16000)
+
+    # Exact multiple of the Krisp frame: nothing buffered, length preserved,
+    # and the fake session (identity) round-trips the samples.
+    assert pcm_out == pcm_in
+    assert flt._session.process.call_count == 2  # type: ignore[attr-defined]
+    for call in flt._session.process.call_args_list:  # type: ignore[attr-defined]
+        assert len(call.args[0]) == 160  # 10 ms @ 16 kHz per sub-frame
+
+    await flt.close()
+
+
+@pytest.mark.unit
+async def test_filter_buffers_subframe_remainder_across_calls(fake_krisp, tmp_path):
+    """A non-multiple chunk emits only whole Krisp frames and carries the
+    remainder into the next call — no audio is lost or duplicated."""
+    import numpy as np
+
+    from getpatter.providers.krisp_filter import KrispVivaFilter
+    from getpatter.providers.krisp_instance import KrispSDKManager
+
+    KrispSDKManager._reference_count = 0
+    KrispSDKManager._initialized = False
+
+    model = tmp_path / "m.kef"
+    model.write_bytes(b"x")
+    flt = KrispVivaFilter(model_path=str(model), frame_duration_ms=10, sample_rate=16000)
+
+    samples = np.arange(400, dtype=np.int16)  # 25 ms @ 16 kHz
+    first = await flt.process(samples[:240].tobytes(), 16000)  # 15 ms
+    # Only one whole 10 ms frame (160 samples) could be emitted; 80 buffered.
+    assert len(first) == 160 * 2
+    second = await flt.process(samples[240:].tobytes(), 16000)  # 10 ms more
+    # 80 buffered + 160 new = 240 → one more whole frame, 80 buffered again.
+    assert len(second) == 160 * 2
+    # Concatenated output is the identity round-trip of the first 320 samples.
+    assert first + second == samples[:320].tobytes()
+
+    await flt.close()
+
+
+@pytest.mark.unit
+async def test_filter_drops_pending_buffer_on_sample_rate_change(
+    fake_krisp, tmp_path
+):
+    import numpy as np
+
+    from getpatter.providers.krisp_filter import KrispVivaFilter
+    from getpatter.providers.krisp_instance import KrispSDKManager
+
+    KrispSDKManager._reference_count = 0
+    KrispSDKManager._initialized = False
+
+    model = tmp_path / "m.kef"
+    model.write_bytes(b"x")
+    flt = KrispVivaFilter(model_path=str(model), frame_duration_ms=10, sample_rate=16000)
+
+    # 5 ms @ 16 kHz: too small for a frame → fully buffered.
+    assert await flt.process(np.zeros(80, dtype=np.int16).tobytes(), 16000) == b""
+    assert flt._pending != b""
+
+    # Rate change: stale 16 kHz remainder must be dropped, and the 8 kHz
+    # 10 ms frame (80 samples) processes cleanly on its own.
+    pcm_8k = np.arange(80, dtype=np.int16).tobytes()
+    out = await flt.process(pcm_8k, 8000)
+    assert out == pcm_8k
+    assert flt._pending == b""
+
+    await flt.close()
+
+
+# ---------------------------------------------------------------------------
 # Real SDK integration (skipped by default)
 # ---------------------------------------------------------------------------
 

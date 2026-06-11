@@ -270,6 +270,14 @@ class SpeechmaticsSTT(STTProvider):
 
         self._client = voice.VoiceAgentClient(**kwargs)
         self._register_handlers(self._client)
+        # Drain a stale _STOP sentinel from a previous close() so a
+        # sequential second call on the same instance doesn't terminate its
+        # transcript loop on the first get().
+        while not self._queue.empty():
+            try:
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:  # pragma: no cover - defensive
+                break
         await self._client.connect()
 
     async def send_audio(self, audio_chunk: bytes) -> None:

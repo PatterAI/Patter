@@ -66,7 +66,19 @@ export function mergeCalls(active: CallRecord[], recent: CallRecord[]): Call[] {
  * ``fetchCalls`` paginates plus whatever lives in ``prev`` from the
  * current session.
  */
-export function mergeCallPreserving(prev: Call[], next: Call[]): Call[] {
+export function mergeCallPreserving(
+  prev: Call[],
+  next: Call[],
+  tombstones?: ReadonlySet<string>,
+): Call[] {
+  // Drop soft-deleted ids from BOTH inputs: deletions are absent from the
+  // server snapshot by design, so the prev-carry-over loop below would
+  // otherwise resurrect them forever (and a racing snapshot could carry one
+  // in ``next``).
+  if (tombstones && tombstones.size > 0) {
+    prev = prev.filter((c) => !tombstones.has(c.id));
+    next = next.filter((c) => !tombstones.has(c.id));
+  }
   const prevById = new Map(prev.map((c) => [c.id, c]));
   const nextIds = new Set(next.map((c) => c.id));
   const merged: Call[] = next.map((nc) => {

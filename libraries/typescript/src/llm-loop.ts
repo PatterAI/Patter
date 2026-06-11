@@ -480,6 +480,48 @@ export function mergeAbortSignals(
   return controller.signal;
 }
 
+/** Default idle window for streaming LLM reads (no data for this long → abort). */
+export const LLM_STREAM_IDLE_TIMEOUT_MS = 30_000;
+
+/**
+ * Idle watchdog for streaming LLM reads. Aborts only when NO data has
+ * arrived for ``ms`` — call ``touch()`` on every chunk to re-arm. Replaces
+ * the previous fixed 30 s whole-stream ceiling, which chopped any turn that
+ * streamed longer than 30 s mid-utterance (long answers, slow models,
+ * tool-heavy iterations) and surfaced as an AbortError that the pipeline
+ * misclassified as a clean barge-in (so no spoken error fallback fired).
+ * Python providers have no whole-stream ceiling either, so this also
+ * restores behavioral parity.
+ */
+export function createStreamIdleWatchdog(ms: number = LLM_STREAM_IDLE_TIMEOUT_MS): {
+  readonly signal: AbortSignal;
+  touch(): void;
+  clear(): void;
+  readonly fired: boolean;
+} {
+  const controller = new AbortController();
+  let fired = false;
+  const onIdle = () => {
+    fired = true;
+    controller.abort();
+  };
+  let timer: ReturnType<typeof setTimeout> = setTimeout(onIdle, ms);
+  return {
+    signal: controller.signal,
+    touch(): void {
+      if (fired) return;
+      clearTimeout(timer);
+      timer = setTimeout(onIdle, ms);
+    },
+    clear(): void {
+      clearTimeout(timer);
+    },
+    get fired(): boolean {
+      return fired;
+    },
+  };
+}
+
 export interface LLMProvider {
   stream(
     messages: Array<Record<string, unknown>>,
@@ -627,11 +669,12 @@ export class OpenAILLMProvider implements LLMProvider {
       body.tools = tools;
     }
 
-    // Combine the caller's per-turn cancel signal (barge-in) with our
-    // 30 s ceiling. ``AbortSignal.any`` aborts as soon as ANY input
-    // signal fires, so a barge-in that arrives mid-fetch tears the
-    // connection down immediately instead of waiting for the timeout.
-    const signal = mergeAbortSignals(opts?.signal, AbortSignal.timeout(30_000));
+    // Combine the caller's per-turn cancel signal (barge-in) with an IDLE
+    // watchdog (re-armed on every chunk). ``AbortSignal.any`` aborts as soon
+    // as ANY input signal fires, so a barge-in that arrives mid-fetch tears
+    // the connection down immediately instead of waiting for the timeout.
+    const idle = createStreamIdleWatchdog();
+    const signal = mergeAbortSignals(opts?.signal, idle.signal);
     const response = await fetch(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
@@ -662,6 +705,7 @@ export class OpenAILLMProvider implements LLMProvider {
     try {
       while (true) {
         const { done, value } = await reader.read();
+        idle.touch();
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
@@ -733,7 +777,19 @@ export class OpenAILLMProvider implements LLMProvider {
           }
         }
       }
+    } catch (err) {
+      // Distinguish the idle watchdog from a caller abort (barge-in): the
+      // pipeline treats AbortError as a clean cancel and stays silent, so a
+      // genuine stall must surface as a connection error to trigger the LLM
+      // fallback chain / spoken error message.
+      if (idle.fired && !opts?.signal?.aborted) {
+        throw new PatterConnectionError(
+          `LLM stream idle timeout — no data for ${LLM_STREAM_IDLE_TIMEOUT_MS / 1000}s`,
+        );
+      }
+      throw err;
     } finally {
+      idle.clear();
       reader.cancel().catch(() => {});
     }
   }
@@ -776,13 +832,16 @@ export const DEFAULT_PHONE_PREAMBLE =
 /** Pipeline-mode LLM driver: runs the chat loop, dispatches tool calls, and emits text deltas. */
 export class LLMLoop {
   private readonly provider: LLMProvider;
-  private readonly systemPrompt: string;
-  private readonly tools: ToolDefinition[] | null;
-  private readonly openaiTools: Array<{
+  // Mutable (not readonly): `updateAgent` swaps these mid-call for
+  // multi-agent handoff. The swap takes effect on the NEXT turn.
+  private systemPrompt: string;
+  private disablePhonePreamble: boolean;
+  private tools: ToolDefinition[] | null;
+  private openaiTools: Array<{
     type: string;
     function: { name: string; description: string; parameters: Record<string, unknown> };
   }> | null;
-  private readonly toolMap: Map<string, ToolDefinition>;
+  private toolMap: Map<string, ToolDefinition>;
   private toolExecutor: ToolExecutor;
   private eventBus?: EventBus;
   // Fix 10: track provider/model so usage chunks can be attributed for billing.
@@ -812,13 +871,8 @@ export class LLMLoop {
     disablePhonePreamble: boolean = false,
   ) {
     this.provider = llmProvider ?? new OpenAILLMProvider(apiKey, model);
-    if (disablePhonePreamble) {
-      this.systemPrompt = systemPrompt;
-    } else {
-      this.systemPrompt = systemPrompt
-        ? `${DEFAULT_PHONE_PREAMBLE}\n\n${systemPrompt}`
-        : DEFAULT_PHONE_PREAMBLE;
-    }
+    this.disablePhonePreamble = disablePhonePreamble;
+    this.systemPrompt = LLMLoop.applyPhonePreamble(systemPrompt, disablePhonePreamble);
     // Derive a billing-friendly provider name. Prefer the static
     // ``providerKey`` (stable, matches pricing keys); fall back to the
     // class-name stripping heuristic for custom providers without it.
@@ -844,20 +898,67 @@ export class LLMLoop {
 
     this.toolMap = new Map();
     this.openaiTools = null;
+    this.rebuildToolState(this.tools);
+  }
 
-    if (this.tools && this.tools.length > 0) {
+  /**
+   * Prepend {@link DEFAULT_PHONE_PREAMBLE} unless disabled — byte-identical
+   * to the historical inline constructor logic.
+   */
+  private static applyPhonePreamble(systemPrompt: string, disablePhonePreamble: boolean): string {
+    if (disablePhonePreamble) return systemPrompt;
+    return systemPrompt
+      ? `${DEFAULT_PHONE_PREAMBLE}\n\n${systemPrompt}`
+      : DEFAULT_PHONE_PREAMBLE;
+  }
+
+  /** (Re)build `openaiTools` and `toolMap` from a tool list. */
+  private rebuildToolState(tools: ToolDefinition[] | null): void {
+    this.toolMap = new Map();
+    this.openaiTools = null;
+    if (tools && tools.length > 0) {
       this.openaiTools = [];
-      for (const t of this.tools) {
+      for (const t of tools) {
         this.openaiTools.push({
           type: 'function',
           function: {
             name: t.name,
             description: t.description || '',
-            parameters: t.parameters || { type: 'object', properties: {} },
+            parameters: (t.parameters || { type: 'object', properties: {} }) as Record<string, unknown>,
           },
         });
         this.toolMap.set(t.name, t);
       }
+    }
+  }
+
+  /**
+   * Swap the system prompt and/or tool list mid-call (multi-agent handoff).
+   *
+   * Takes effect on the NEXT turn — `run` builds its messages array (with
+   * the system prompt at index 0) per turn, and reads `openaiTools` per
+   * provider iteration, so a swap that lands while a turn is in flight
+   * finishes the current turn under the old prompt and runs every subsequent
+   * turn as the new agent. Omitted fields keep the corresponding current
+   * value. Mirrors Python `LLMLoop.update_agent`.
+   */
+  updateAgent(update: {
+    systemPrompt?: string;
+    tools?: ToolDefinition[];
+    disablePhonePreamble?: boolean;
+  }): void {
+    if (update.disablePhonePreamble !== undefined) {
+      this.disablePhonePreamble = update.disablePhonePreamble;
+    }
+    if (update.systemPrompt !== undefined) {
+      this.systemPrompt = LLMLoop.applyPhonePreamble(
+        update.systemPrompt,
+        this.disablePhonePreamble,
+      );
+    }
+    if (update.tools !== undefined) {
+      this.tools = update.tools;
+      this.rebuildToolState(update.tools);
     }
   }
 
@@ -1056,6 +1157,13 @@ export class LLMLoop {
         }
       }
 
+      // Barge-in guard: when the caller's abort signal fired mid-stream the
+      // accumulated tool-call JSON can be truncated — executing those calls
+      // would fire real side effects (transfer, SMS, booking) with wrong
+      // arguments after the user already interrupted. Bail out before tool
+      // dispatch (mirrors the Python llm_loop cancel_event check).
+      if (opts?.signal?.aborted) return;
+
       if (!hasToolCalls) {
         if (hasAfterLlmResponse && hookExecutor && hookCtx) {
           const finalText = allEmittedText.join('');
@@ -1084,6 +1192,10 @@ export class LLMLoop {
       messages.push(assistantMsg);
 
       for (const tcData of assistantMsg.tool_calls!) {
+        // Stop between tools when a barge-in aborted the turn — the
+        // remaining (and current) executions would run against a cancelled
+        // turn and block the next committed transcript behind them.
+        if (opts?.signal?.aborted) return;
         const toolName = tcData.function.name;
         let args: Record<string, unknown>;
         try {
@@ -1145,6 +1257,11 @@ export class LLMLoop {
       // raw tool JSON. Skip them: the tool RESULT is already reflected in
       // the assistant's following reply. Mirrors Python ``_build_messages``.
       if (entry.role === 'tool') continue;
+      // System entries (call-transfer / multi-agent-handoff markers) are
+      // transcript artefacts; replaying them as ``role: 'user'`` would
+      // fabricate user turns. The handoff itself is already reflected by the
+      // swapped system prompt at index 0. Mirrors Python ``_build_messages``.
+      if (entry.role === 'system') continue;
       messages.push({
         role: entry.role === 'assistant' ? 'assistant' : 'user',
         content: entry.text,

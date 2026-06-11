@@ -33,6 +33,8 @@ export type {
   HookContext,
   RealtimeTurnDetection,
   SessionContext,
+  TransferCallOptions,
+  TransferCallResult,
 } from "./types";
 // `Guardrail` is intentionally not re-exported from `./types` — the public
 // `Guardrail` identifier is the class from `./public-api` (exported below),
@@ -220,6 +222,13 @@ export const custom = Object.freeze({ LLM: CustomLLMClass });
 export { SileroVAD } from "./providers/silero-vad";
 export type { SileroVADOptions, SileroSampleRate } from "./providers/silero-vad";
 
+// Semantic turn detection (end-of-utterance) — pipecat-ai smart-turn v3,
+// ONNX. Opt-in via ``agent.turnDetector``; the model file is NOT bundled —
+// download from https://huggingface.co/pipecat-ai/smart-turn-v3 and set
+// PATTER_SMART_TURN_MODEL (or pass ``modelPath``).
+export { SmartTurnDetector, SMART_TURN_MODEL_ENV_VAR } from "./providers/smart-turn";
+export type { SmartTurnDetectorOptions } from "./providers/smart-turn";
+
 // Noise-suppression audio filters (opt-in, plug into ``agent.audioFilter``).
 // DeepFilterNet — community ONNX, no license required.
 export { DeepFilterNetFilter } from "./providers/deepfilternet-filter";
@@ -270,6 +279,15 @@ export {
   createResampler24kTo8k,
 } from "./audio/transcoding";
 export type { StatefulResamplerOptions } from "./audio/transcoding";
+// Carrier-neutral local call recording (stereo WAV: left=caller, right=agent).
+// Enabled via `serve({ localRecording })`; exported for programmatic use,
+// matching Python's importable `getpatter.audio.call_recorder` module.
+export {
+  LocalCallRecorder,
+  RECORDING_SAMPLE_RATE,
+  AGENT_BACKLOG_CAP_S,
+} from "./audio/call-recorder";
+export type { RecorderEncoding } from "./audio/call-recorder";
 export { startTunnel } from "./tunnel";
 export type { TunnelHandle } from "./tunnel";
 export { ChatContext } from "./chat-context";
@@ -351,6 +369,15 @@ export {
 // Observability — OTel-compatible tracing (optional peer dep).
 export {
   initTracing,
+  // Without these exports users could not flush the BatchSpanProcessor
+  // Patter creates (NodeTracerProvider does NOT flush on exit, unlike the
+  // Python OTel SDK's atexit hook) — trailing spans were silently dropped
+  // at process exit — nor stamp patter.cost.* attributes (Python parity).
+  shutdownTracing,
+  withSpan,
+  recordPatterAttrs,
+  patterCallScope,
+  attachSpanExporter,
   startSpan,
   isTracingEnabled,
   EventBus,

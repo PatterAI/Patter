@@ -20,22 +20,34 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 
 logger = logging.getLogger("getpatter")
 
 from getpatter.exceptions import PatterConnectionError
 from getpatter.local_config import LocalConfig
-from getpatter.models import Agent, Guardrail, MachineDetectionResult
-from getpatter.providers.base import STTProvider, TTSProvider
+from getpatter.models import (
+    Agent,
+    CallResult,
+    ConsultConfig,
+    Guardrail,
+    MachineDetectionResult,
+    PipelineHooks,
+    RealtimeTurnDetection,
+)
+from getpatter.providers.base import (
+    AudioFilter,
+    BackgroundAudioPlayer,
+    STTProvider,
+    TTSProvider,
+    VADProvider,
+)
 from getpatter.services.llm_loop import LLMProvider
-
-if TYPE_CHECKING:  # pragma: no cover — typing only
-    from getpatter._public_api import Tool
-    from getpatter._speech_events import SpeechEventCallback
-    from getpatter.models import CallResult, RealtimeTurnDetection
+from getpatter._public_api import Tool
+from getpatter._speech_events import SpeechEventCallback
 
 
 # Maximum concurrent entries in the prewarm-first-message cache. Bounds
@@ -366,6 +378,14 @@ class Patter:
             webhook_url = tunnel_webhook
         self._tunnel_directive = tunnel_directive
 
+        # Normalise webhook_url to a bare hostname: every consumer builds
+        # ``https://{webhook_url}`` / ``wss://{webhook_url}`` URLs, so a
+        # schemed value produced broken ``wss://https://...`` stream URLs and
+        # permanent carrier 403s. Mirrors the TS client normalisation.
+        if webhook_url:
+            webhook_url = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", webhook_url)
+            webhook_url = webhook_url.rstrip("/")
+
         twilio_sid = ""
         twilio_token = ""
         telnyx_key = ""
@@ -413,10 +433,18 @@ class Patter:
         self._telemetry = _build_telemetry_client(telemetry)
         self._telemetry_seen_engines: set[str] = set()
         self._telemetry_seen_agent_shapes: set[tuple] = set()
+        # Environment dims only when telemetry is ENABLED: the helper's
+        # ``previous_version`` probe writes ``~/.getpatter/version`` (and
+        # ``days_since_install_bucket`` mkdirs the state root), violating the
+        # documented invariant that opting out never touches the filesystem.
         _init_dims = {
             "carrier": carrier_kind or "none",
             "tunnel": _telemetry_tunnel_kind(self._tunnel_directive),
-            **_telemetry_environment_dims(),
+            **(
+                _telemetry_environment_dims()
+                if getattr(self._telemetry, "enabled", False)
+                else {}
+            ),
         }
         # Activation marker: emit ``first_run`` once per install (the run that
         # creates the install-id state). Gated on the enabled path so opting out
@@ -803,6 +831,14 @@ class Patter:
         """
         if not agent:
             raise PatterConnectionError("call() requires the agent parameter.")
+        if first_message:
+            # Per-call greeting override — the parameter was documented but
+            # never referenced in the body. The Agent is a frozen dataclass,
+            # so build a per-call copy: prewarm synthesis, the WS bridge and
+            # the stream handler all read agent.first_message from here on.
+            from dataclasses import replace as _dc_replace
+
+            agent = _dc_replace(agent, first_message=first_message)
         from getpatter.telephony.common import _validate_e164
 
         if not isinstance(to, str) or not _validate_e164(to):
@@ -907,7 +943,7 @@ class Patter:
                 ["initiated", "ringing", "answered", "completed"],
             )
             call_id = await adapter.initiate_call(
-                config.phone_number or from_number,
+                from_number or config.phone_number,
                 to,
                 stream_url,
                 extra_params=extra_params,
@@ -917,7 +953,7 @@ class Patter:
             # that never reach media (no-answer, busy, carrier-reject).
             initiated_payload = {
                 "call_id": call_id,
-                "caller": config.phone_number or from_number,
+                "caller": from_number or config.phone_number,
                 "callee": to,
                 "direction": "outbound",
                 "status": "initiated",
@@ -958,17 +994,25 @@ class Patter:
                 connection_id=config.telnyx_connection_id,
             )
             stream_url = f"wss://{config.webhook_url}/ws/telnyx/stream/outbound"
-            call_id = await adapter.initiate_call(
-                config.phone_number or from_number,
-                to,
-                stream_url,
-                ring_timeout=ring_timeout,
-                machine_detection=wants_amd,
-            )
+            try:
+                call_id = await adapter.initiate_call(
+                    from_number or config.phone_number,
+                    to,
+                    stream_url,
+                    ring_timeout=ring_timeout,
+                    machine_detection=wants_amd,
+                )
+            finally:
+                # The adapter opens a pooled httpx.AsyncClient in __init__;
+                # without this close every outbound dial leaked the pool.
+                try:
+                    await adapter.close()
+                except Exception:  # noqa: BLE001 - best-effort cleanup
+                    pass
             logger.info("Outbound call initiated: %s", call_id)
             initiated_payload = {
                 "call_id": call_id,
-                "caller": config.phone_number or from_number,
+                "caller": from_number or config.phone_number,
                 "callee": to,
                 "direction": "outbound",
                 "status": "initiated",
@@ -1011,23 +1055,32 @@ class Patter:
             answer_url = f"https://{config.webhook_url}/webhooks/plivo/voice"
             status_url = f"https://{config.webhook_url}/webhooks/plivo/status"
             amd_url = f"https://{config.webhook_url}/webhooks/plivo/amd"
-            call_id = await adapter.initiate_call(
-                config.phone_number or from_number,
-                to,
-                stream_url,
-                answer_url=answer_url,
-                # hangup_url is Plivo's StatusCallback analogue — without it,
-                # the /webhooks/plivo/status route never fires for outbound
-                # calls and the dashboard misses no-answer / busy / failed.
-                hangup_url=status_url,
-                ring_timeout=ring_timeout,
-                machine_detection=wants_amd,
-                machine_detection_url=amd_url if wants_amd else "",
-            )
+            try:
+                call_id = await adapter.initiate_call(
+                    from_number or config.phone_number,
+                    to,
+                    stream_url,
+                    answer_url=answer_url,
+                    # hangup_url is Plivo's StatusCallback analogue — without
+                    # it, the /webhooks/plivo/status route never fires for
+                    # outbound calls and the dashboard misses no-answer /
+                    # busy / failed.
+                    hangup_url=status_url,
+                    ring_timeout=ring_timeout,
+                    machine_detection=wants_amd,
+                    machine_detection_url=amd_url if wants_amd else "",
+                )
+            finally:
+                # The adapter opens a pooled httpx.AsyncClient in __init__;
+                # without this close every outbound dial leaked the pool.
+                try:
+                    await adapter.close()
+                except Exception:  # noqa: BLE001 - best-effort cleanup
+                    pass
             logger.info("Outbound call initiated: %s", call_id)
             initiated_payload = {
                 "call_id": call_id,
-                "caller": config.phone_number or from_number,
+                "caller": from_number or config.phone_number,
                 "callee": to,
                 "direction": "outbound",
                 "status": "initiated",
@@ -1140,6 +1193,26 @@ class Patter:
         # call and never blocks the user.
         self._prewarm_tasks.add(task)
         task.add_done_callback(self._prewarm_tasks.discard)
+
+    def _alias_prewarm(self, old_id: str, new_id: str) -> None:
+        """Re-key prewarm caches from a dial-time id to the live carrier id.
+
+        Plivo issues ``request_uuid`` at dial time but the media stream and
+        webhooks carry ``CallUUID`` — without re-keying, prewarmed first
+        message audio and parked provider sockets never matched and always
+        TTL-evicted as "wasted".
+        """
+        if not old_id or not new_id or old_id == new_id:
+            return
+        for attr in (
+            "_prewarm_audio",
+            "_prewarm_ttl_tasks",
+            "_prewarmed_connections",
+            "_prewarmed_conn_tasks",
+        ):
+            mapping = getattr(self, attr, None)
+            if isinstance(mapping, dict) and old_id in mapping and new_id not in mapping:
+                mapping[new_id] = mapping.pop(old_id)
 
     def pop_prewarmed_connections(self, call_id: str) -> dict[str, Any] | None:
         """Pop and return the parked provider WS handles for ``call_id``,
@@ -1612,6 +1685,8 @@ class Patter:
         hooks: PipelineHooks | None = None,
         text_transforms: list[Callable] | None = None,
         vad: VADProvider | None = None,
+        turn_detector: "TurnDetectorProvider | None" = None,
+        max_semantic_hold_ms: int = 1200,
         audio_filter: AudioFilter | None = None,
         background_audio: BackgroundAudioPlayer | None = None,
         barge_in_threshold_ms: int = 300,
@@ -1623,12 +1698,15 @@ class Patter:
         llm: LLMProvider | None = None,
         mcp_servers: list | None = None,
         consult: ConsultConfig | None = None,
+        handoffs: dict[str, Agent] | None = None,
         prewarm_first_message: bool | None = None,
         openai_realtime_noise_reduction: Literal["near_field", "far_field"]
         | None = None,
         realtime_turn_detection: "RealtimeTurnDetection | None" = None,
         realtime_gate_response_on_transcript: bool | None = None,
         tool_call_preambles: bool | str = False,
+        preemptive_generation: bool = False,
+        preemptive_min_stable_ms: int = 300,
     ) -> Agent:
         """Create an ``Agent`` configuration.
 
@@ -1655,6 +1733,15 @@ class Patter:
                 at most once per turn and never once real audio has started.
             long_turn_message_after_s: Seconds to wait before the
                 ``long_turn_message`` filler fires. Default ``4.0``.
+            preemptive_generation: Pipeline mode (built-in LLM loop) only.
+                When ``True``, start the LLM + TTS early on a confident
+                INTERIM transcript and hold the audio; release it the moment
+                the matching final transcript commits (big latency win), or
+                discard silently and re-dispatch when the final differs.
+                Default ``False``.
+            preemptive_min_stable_ms: How long (ms) a non-punctuated interim
+                transcript must remain unchanged before it qualifies for
+                preemptive generation. Default ``300``.
             tools: List of ``Tool`` instances (build with the ``tool()`` factory).
             stt: ``STTProvider`` instance for pipeline mode (e.g.
                 ``DeepgramSTT(api_key=...)``).
@@ -1665,6 +1752,17 @@ class Patter:
             guardrails: List of ``Guardrail`` instances (build with the
                 ``guardrail()`` factory). Responses matching a guardrail are
                 replaced before TTS.
+            handoffs: Multi-agent handoff targets — ``{name: other_agent}``
+                where each value is another ``Agent`` built with
+                ``phone.agent(...)``. When set, Patter injects a built-in
+                ``handoff_to(name, reason?)`` tool (Realtime + Pipeline
+                modes); calling it swaps the CURRENT call to the target
+                agent's system prompt, tools, variables, guardrails, and
+                onward handoffs mid-call. Audio infrastructure established
+                at call start (STT/TTS/engine connection — and therefore
+                voice on engines that cannot switch voice mid-session) is
+                retained. Chained handoffs follow the target's own
+                ``handoffs`` map.
             engine: ``OpenAIRealtime(...)`` or ``ElevenLabsConvAI(...)``.
             tool_call_preambles: Realtime modes only. ``False`` (default) ships
                 ``system_prompt`` unchanged. ``True`` prepends a native
@@ -1922,6 +2020,31 @@ class Patter:
                 "be ignored for this agent."
             )
 
+        # --- Validate handoffs (multi-agent handoff targets) ---
+        if handoffs is not None:
+            if not isinstance(handoffs, dict):
+                raise TypeError(
+                    f"handoffs must be a dict of {{name: Agent}}, got "
+                    f"{type(handoffs).__name__}."
+                )
+            for h_name, h_agent in handoffs.items():
+                if not isinstance(h_name, str) or not h_name:
+                    raise ValueError(
+                        "handoffs keys must be non-empty strings (the names the "
+                        "LLM passes to handoff_to)."
+                    )
+                if not isinstance(h_agent, Agent):
+                    raise TypeError(
+                        f"handoffs[{h_name!r}] must be an Agent (build with "
+                        f"phone.agent(...)), got {type(h_agent).__name__}."
+                    )
+            if provider == "elevenlabs_convai":
+                logger.warning(
+                    "handoffs is set but provider is ElevenLabs ConvAI; the "
+                    "handoff_to tool is only injected in Realtime and Pipeline "
+                    "modes and will be ignored for this agent."
+                )
+
         return Agent(
             system_prompt=system_prompt,
             voice=voice,
@@ -1942,6 +2065,8 @@ class Patter:
                 tuple(text_transforms) if text_transforms is not None else None
             ),
             vad=vad,
+            turn_detector=turn_detector,
+            max_semantic_hold_ms=max_semantic_hold_ms,
             audio_filter=audio_filter,
             background_audio=background_audio,
             barge_in_threshold_ms=barge_in_threshold_ms,
@@ -1951,6 +2076,7 @@ class Patter:
             llm=llm,
             mcp_servers=tuple(mcp_servers) if mcp_servers is not None else None,
             consult=consult,
+            handoffs=dict(handoffs) if handoffs is not None else None,
             prewarm_first_message=prewarm_first_message,
             openai_realtime_reasoning_effort=openai_realtime_reasoning_effort,
             openai_realtime_input_audio_transcription_model=openai_realtime_input_audio_transcription_model,
@@ -1958,6 +2084,8 @@ class Patter:
             realtime_turn_detection=realtime_turn_detection,
             realtime_gate_response_on_transcript=realtime_gate_response_on_transcript,
             tool_call_preambles=tool_call_preambles,
+            preemptive_generation=preemptive_generation,
+            preemptive_min_stable_ms=preemptive_min_stable_ms,
         )
 
     @staticmethod
@@ -2068,6 +2196,7 @@ class Patter:
         agent: Agent,
         port: int = 8000,
         recording: bool = False,
+        local_recording: bool | str = False,
         on_call_start: Callable[[dict], Awaitable[None]] | None = None,
         on_call_end: Callable[[dict], Awaitable[None]] | None = None,
         on_transcript: Callable[[dict], Awaitable[None]] | None = None,
@@ -2093,6 +2222,18 @@ class Patter:
                 user's transcribed text in pipeline mode; the return value is
                 synthesised to speech and played back to the caller.
             recording: When ``True``, record each call via the Twilio Recordings API.
+            local_recording: Carrier-neutral local call recording. When
+                ``True``, the SDK records each call at the transport as an
+                interleaved stereo WAV — left channel = caller, right channel
+                = agent — at 16 kHz PCM16, written incrementally to
+                ``<call_log_dir>/recording.wav`` when call logging
+                (``persist`` / ``PATTER_LOG_DIR``) is enabled, else to
+                ``./recordings/<call_id>.wav``. Pass a directory string to
+                choose where the WAVs go. Works on every carrier (Twilio,
+                Telnyx, Plivo) and every engine mode; independent of the
+                carrier-side ``recording`` flag (both can be on). The final
+                path is surfaced as ``recording_path`` in the ``on_call_end``
+                payload and in the call-log metadata. Default ``False``.
             voicemail_message: If set, spoken as a voicemail message when AMD
                 detects a machine (requires machine_detection=True on call()).
             dashboard: When ``True`` (default), serves a local metrics dashboard
@@ -2140,6 +2281,11 @@ class Patter:
         if not isinstance(recording, bool):
             raise TypeError(
                 f"recording must be a bool, got {type(recording).__name__}."
+            )
+        if not isinstance(local_recording, (bool, str)):
+            raise TypeError(
+                "local_recording must be a bool or a directory string, got "
+                f"{type(local_recording).__name__}."
             )
 
         # Pre-import AEC at serve startup so the first call doesn't pay
@@ -2209,6 +2355,7 @@ class Patter:
             config=config,
             agent=agent,
             recording=recording,
+            local_recording=local_recording,
             voicemail_message=voicemail_message,
             pricing=self._pricing,
             dashboard=dashboard,
@@ -2238,6 +2385,7 @@ class Patter:
         # StreamHandler can adopt pre-opened STT / TTS / Realtime WSs at
         # ``start`` instead of paying the cold handshake on first turn.
         self._server.pop_prewarmed_connections = self.pop_prewarmed_connections  # type: ignore[attr-defined]
+        self._server.alias_prewarm = self._alias_prewarm  # type: ignore[attr-defined]
         # Forward the waste-recorder so the carrier status / hangup
         # webhook handlers can evict the cache when a call terminates
         # before the media stream starts (no-answer, busy, failed,

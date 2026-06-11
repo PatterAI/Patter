@@ -72,6 +72,18 @@ def mount_api(app, store: MetricsStore, token: str = "") -> None:
     async def api_call_detail(call_id: str):
         call = store.get_call(call_id)
         if call is None:
+            # Fall back to the active set so external integrations can poll a
+            # single endpoint regardless of call state (parity with the TS
+            # route, which returns getCall(...) ?? getActive(...)).
+            call = next(
+                (
+                    c
+                    for c in store.get_active_calls()
+                    if c.get("call_id") == call_id
+                ),
+                None,
+            )
+        if call is None:
             return JSONResponse(
                 content={"error": "Call not found"}, status_code=404
             )

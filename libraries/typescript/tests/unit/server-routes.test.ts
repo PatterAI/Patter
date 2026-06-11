@@ -285,6 +285,70 @@ describe('Telnyx Ed25519 signature validation', () => {
     return crypto.sign(null, Buffer.from(payload), privateKey).toString('base64');
   }
 
+  it('accepts the raw 32-byte public key form the Telnyx portal issues', async () => {
+    // The portal's TELNYX_PUBLIC_KEY is base64 of the RAW 32-byte Ed25519
+    // key (Telnyx SDKs feed it straight to NaCl) — not DER/SPKI. The
+    // validator must accept both; rejecting raw keys 403'd every webhook
+    // the moment signature validation was enabled.
+    const der = publicKey.export({ type: 'spki', format: 'der' }) as Buffer;
+    const rawPub = der.subarray(der.length - 32);
+    const rawPubBase64 = rawPub.toString('base64');
+
+    const server = new EmbeddedServer(
+      makeConfig({
+        telephonyProvider: 'telnyx',
+        telnyxKey: 'KEY_test',
+        telnyxConnectionId: 'conn_test',
+        telnyxPublicKey: rawPubBase64,
+      }),
+      makeAgent(),
+      undefined, undefined, undefined, undefined, false, '', undefined, undefined, false,
+    );
+
+    const port = await getFreePort();
+    await server.start(port);
+
+    try {
+      const originalFetch = globalThis.fetch;
+      const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+        async (input: string | URL | Request, init?: RequestInit) => {
+          const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+          if (url.includes('api.telnyx.com')) {
+            return { ok: true, status: 200, json: async () => ({ data: {} }), text: async () => '' } as Response;
+          }
+          return originalFetch(input, init);
+        },
+      );
+
+      try {
+        const rawBody = JSON.stringify({
+          data: {
+            event_type: 'call.initiated',
+            payload: { call_control_id: 'ctrl-raw-key', from: '+15551111111', to: '+15552222222' },
+          },
+        });
+        const timestamp = String(Math.floor(Date.now() / 1000));
+        const signature = signTelnyxPayload(timestamp, rawBody);
+
+        const resp = await fetch(`http://127.0.0.1:${port}/webhooks/telnyx/voice`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'telnyx-signature-ed25519': signature,
+            'telnyx-timestamp': timestamp,
+          },
+          body: rawBody,
+        });
+
+        expect(resp.status).toBe(200);
+      } finally {
+        spy.mockRestore();
+      }
+    } finally {
+      await server.stop();
+    }
+  });
+
   it('accepts a valid Ed25519-signed Telnyx webhook (real production path)', async () => {
     const server = new EmbeddedServer(
       makeConfig({

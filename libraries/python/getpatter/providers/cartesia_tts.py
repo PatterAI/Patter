@@ -103,7 +103,7 @@ class CartesiaTTS(TTSProvider):
     playback, dashboard previews, and 16 kHz pipelines. For real phone
     calls use the carrier-specific factories instead:
 
-    * :meth:`for_twilio` — requests ``sample_rate=8000`` natively from
+    * :meth:`for_twilio` — requests ``sample_rate=16000`` (pipeline rate) from
       Cartesia. Twilio's media-stream WebSocket expects μ-law @ 8 kHz, so
       the SDK normally resamples 16 kHz → 8 kHz before doing the PCM →
       μ-law transcode in ``TwilioAudioSender``. Asking Cartesia for
@@ -180,14 +180,18 @@ class CartesiaTTS(TTSProvider):
     ) -> "CartesiaTTS":
         """Build an instance pre-configured for Twilio Media Streams.
 
-        Sets ``sample_rate=8000`` so Cartesia emits PCM_S16LE @ 8 kHz
-        directly. Twilio's media stream uses μ-law @ 8 kHz so the SDK
-        still does the PCM → μ-law transcode client-side, but the
-        16 kHz → 8 kHz resample step is skipped. Saves ~10–30 ms first-
+        Emits PCM_S16LE @ 16 kHz — the rate the pipeline's carrier-side
+        encoder expects. The previous ``sample_rate=8000`` shortcut had no
+        consuming hook: the audio sender unconditionally runs its fixed
+        16 kHz → 8 kHz decimator, so 8 kHz input was decimated AGAIN and
+        played back at ~2x speed (chipmunk audio) on every call using this
+        factory. Revisit only if the sender ever learns to read a declared
+        TTS output rate. Original rationale (kept for context): skipping
+        the 16→8 resample saved ~10–30 ms first-
         byte plus per-frame CPU and removes a potential aliasing source.
         """
         kwargs.pop("sample_rate", None)
-        return cls(api_key=api_key, sample_rate=8000, **kwargs)
+        return cls(api_key=api_key, sample_rate=16000, **kwargs)
 
     @classmethod
     def for_telnyx(

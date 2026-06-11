@@ -99,7 +99,10 @@ class EOUMetrics:
 class InterruptionMetrics:
     """Barge-in / overlap metrics — heuristic only, no ML classification.
 
-    All duration fields are in **seconds**.
+    All duration fields are in **milliseconds** — matching every other
+    latency field in the SDK and the TypeScript emitter (which always
+    produced ms; the old "seconds" Python emission put cross-SDK consumers
+    1000x apart for the same event).
     """
 
     total_duration: float

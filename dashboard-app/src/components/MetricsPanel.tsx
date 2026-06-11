@@ -126,7 +126,7 @@ function LatencyView({ call }: { call: Call }) {
   const max = Math.max(total, 800);
   // Percentile boxes are statistical noise on calls with too few turns
   // (with n=4 samples, p95 is interpolation between sample[2] and sample[3]
-  // and doesn't correspond to any real turn). Show ``—`` until ≥5 turns.
+  // and doesn't correspond to any real turn). Show ``—`` until ≥2 turns.
   const showPct = (call.turnCount ?? 0) >= 2;
 
   return (

@@ -308,11 +308,12 @@ export const DEFAULT_PRICING: Record<string, ProviderPricing> = {
         cached_audio_input_per_token: 0.0000003,
         cached_text_input_per_token: 0.00000006,
       },
-      // gpt-4o-realtime-preview (legacy preview, ~10x mini for audio):
-      // audio in $100/M, audio out $200/M, text in $5/M, text out $20/M.
+      // gpt-4o-realtime-preview (legacy preview, ~4x mini for audio):
+      // audio in $40/M, audio out $80/M (Dec-2024 price cut from the
+      // $100/$200 launch rates), text in $5/M, text out $20/M.
       'gpt-4o-realtime-preview': {
-        audio_input_per_token: 0.0001,
-        audio_output_per_token: 0.0002,
+        audio_input_per_token: 0.00004,
+        audio_output_per_token: 0.00008,
         text_input_per_token: 0.000005,
         text_output_per_token: 0.000020,
         cached_audio_input_per_token: 0.0000020,
@@ -656,8 +657,8 @@ export const llmPricing: Record<string, Record<string, LlmModelPricing>> = {
   openai: {
     'gpt-4o': { input: 2.50, output: 10.00, cache_read: 1.25 },
     'gpt-4o-mini': { input: 0.15, output: 0.60, cache_read: 0.075 },
-    'gpt-4.1': { input: 3.00, output: 12.00, cache_read: 0.75 },
-    'gpt-4.1-mini': { input: 0.80, output: 3.20, cache_read: 0.20 },
+    'gpt-4.1': { input: 2.00, output: 8.00, cache_read: 0.50 },
+    'gpt-4.1-mini': { input: 0.40, output: 1.60, cache_read: 0.10 },
     'o3': { input: 2.00, output: 8.00, cache_read: 0.50 },
     'o4-mini': { input: 1.10, output: 4.40, cache_read: 0.275 },
   },

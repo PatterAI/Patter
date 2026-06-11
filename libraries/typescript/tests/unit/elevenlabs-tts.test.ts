@@ -72,9 +72,9 @@ describe('ElevenLabsTTS', () => {
       expect(internal.voiceSettings).toBe(custom);
     });
 
-    it('forTelnyx emits pcm_16000 natively', () => {
+    it('forTelnyx emits ulaw_8000 natively (the SDK pins Telnyx to PCMU 8k)', () => {
       const tts = ElevenLabsTTS.forTelnyx('el-key');
-      expect((tts as unknown as { outputFormat: string }).outputFormat).toBe('pcm_16000');
+      expect((tts as unknown as { outputFormat: string }).outputFormat).toBe('ulaw_8000');
     });
   });
 

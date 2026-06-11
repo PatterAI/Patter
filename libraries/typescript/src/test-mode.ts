@@ -18,7 +18,9 @@ export class TestSession {
     agent: AgentOptions;
     openaiKey?: string;
     onMessage?: PipelineMessageHandler;
-    onCallStart?: (data: Record<string, unknown>) => Promise<void>;
+    onCallStart?: (
+    data: Record<string, unknown>,
+  ) => Promise<void | Record<string, unknown> | undefined> | void | Record<string, unknown>;
     onCallEnd?: (data: Record<string, unknown>) => Promise<void>;
   }): Promise<void> {
     const { agent, openaiKey, onMessage, onCallStart, onCallEnd } = opts;
@@ -183,11 +185,19 @@ export class TestSession {
           // Intentional: streaming token output requires partial-line writes; logger
           // does not support this. Acceptable only in interactive terminal test mode.
           process.stdout.write('  Agent: ');
-          for await (const token of llmLoop.run(userInput, conversationHistory, callCtx)) {
-            parts.push(token);
-            // Intentional: streaming token output requires partial-line writes; logger
-            // does not support this. Acceptable only in interactive terminal test mode.
-            process.stdout.write(token);
+          try {
+            for await (const token of llmLoop.run(userInput, conversationHistory, callCtx)) {
+              parts.push(token);
+              // Intentional: streaming token output requires partial-line writes; logger
+              // does not support this. Acceptable only in interactive terminal test mode.
+              process.stdout.write(token);
+            }
+          } catch (err) {
+            // A provider error must not crash the whole REPL session — the
+            // onMessage branch is already wrapped; mirror it here.
+            log.info('');
+            log.error(`LLM error: ${String(err)}`);
+            continue;
           }
           log.info('');
           const responseText = parts.join('');

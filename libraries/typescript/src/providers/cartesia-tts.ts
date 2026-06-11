@@ -15,13 +15,11 @@
  * 16 kHz pipelines. For real phone calls, use the carrier-specific
  * factories instead:
  *
- * - {@link CartesiaTTS.forTwilio} requests `sampleRate=8000` natively from
- *   Cartesia. Twilio's media-stream WebSocket expects μ-law @ 8 kHz, so
- *   the SDK normally resamples 16 kHz → 8 kHz before doing the PCM →
- *   μ-law transcode in `TwilioAudioSender`. Asking Cartesia for 8 kHz
- *   PCM at the source skips the resample step (saves ~10–30 ms first-
- *   byte plus per-frame CPU and removes a potential aliasing source).
- *   The PCM → μ-law transcode still happens client-side.
+ * - {@link CartesiaTTS.forTwilio} requests `sampleRate=16000` — the rate
+ *   the pipeline's carrier-side encoder expects. The previous 8 kHz
+ *   shortcut had no consuming hook: the audio sender unconditionally runs
+ *   its fixed 16 kHz → 8 kHz decimator, so 8 kHz input was decimated
+ *   AGAIN and played back at ~2x speed (chipmunk audio).
  * - {@link CartesiaTTS.forTelnyx} requests `sampleRate=16000`. Telnyx
  *   negotiates L16/16000 on its bidirectional media WebSocket, so
  *   16 kHz PCM is already the format used end-to-end and no
@@ -136,7 +134,7 @@ export class CartesiaTTS {
   ): CartesiaTTS {
     return new CartesiaTTS(apiKey, {
       ...options,
-      sampleRate: CartesiaTTSSampleRate.HZ_8000,
+      sampleRate: CartesiaTTSSampleRate.HZ_16000,
     });
   }
 

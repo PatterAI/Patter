@@ -9,12 +9,16 @@ import json
 import threading
 import time
 from collections import deque
-from dataclasses import asdict
+from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from getpatter.models import CallMetrics
+
+# Sentinel event enqueued when a slow SSE subscriber is force-dropped so
+# its generator ends the HTTP response (the client then reconnects).
+_SSE_CLOSE: dict = {"type": "__close__", "data": {}}
 
 
 @runtime_checkable
@@ -113,6 +117,21 @@ class MetricsStore:
             with self._lock:
                 for q in dead:
                     self._subscribers.discard(q)
+            # Tell the stalled consumer's generator to terminate: without a
+            # sentinel it drained the residual queue and then waited on
+            # ``queue.get()`` forever, emitting only keepalives — the
+            # browser's EventSource saw a healthy connection and never
+            # reconnected, freezing the dashboard permanently. Make room
+            # first: the queue is full by definition here.
+            for q in dead:
+                try:
+                    q.get_nowait()
+                except asyncio.QueueEmpty:  # pragma: no cover - defensive
+                    pass
+                try:
+                    q.put_nowait(_SSE_CLOSE)
+                except asyncio.QueueFull:  # pragma: no cover - defensive
+                    pass
 
     # --- Recording ---
 
@@ -206,6 +225,11 @@ class MetricsStore:
             "busy",
             "failed",
             "canceled",
+            # Plivo's status webhook forwards these raw statuses for
+            # unanswered/cancelled dials; without them the row stayed in
+            # the active set forever (phantom live call, slow leak).
+            "timeout",
+            "cancel",
             "webhook_error",
         }
         with self._lock:
@@ -227,6 +251,15 @@ class MetricsStore:
                         "metrics": None,
                         **{k: v for k, v in extra.items() if k not in {"status"}},
                     }
+                    # Preserve the live transcript/turns accumulated so far:
+                    # when the carrier statusCallback beats the WS ``stop``
+                    # frame (documented race) this entry is what survives —
+                    # without the copy the transcript pane goes blank.
+                    # Mirrors the TS store.
+                    if active.get("transcript"):
+                        entry["transcript"] = active.get("transcript")
+                    if active.get("turns"):
+                        entry["turns"] = active.get("turns")
                     self._active_calls.pop(call_id, None)
                     self._calls.append(entry)
             else:
@@ -353,9 +386,14 @@ class MetricsStore:
         self._publish("turn_complete", {"call_id": call_id, "turn": turn_dict})
 
     def record_call_end(
-        self, data: dict[str, Any], metrics: CallMetrics | None = None
+        self, data: dict[str, Any], metrics: "CallMetrics | dict[str, Any] | None" = None
     ) -> None:
-        """Move a call from the active set into history with final metrics (publishes ``call_end``)."""
+        """Move a call from the active set into history with final metrics (publishes ``call_end``).
+
+        ``metrics`` accepts either a :class:`CallMetrics` dataclass (in-process
+        callers) or a plain dict (the standalone-dashboard ingest endpoint,
+        whose payload was JSON-serialised by ``notify_dashboard``).
+        """
         call_id = data.get("call_id", "")
         if not call_id:
             return
@@ -427,9 +465,30 @@ class MetricsStore:
                     else "completed"
                 )
             else:
-                entry.setdefault("status", "completed")
+                # No prior record (standalone-dashboard ingest of a finished
+                # call): take identity from the payload itself and derive
+                # started_at from the metrics duration so the row doesn't
+                # render with start ≈ end.
+                entry["caller"] = data.get("caller", "")
+                entry["callee"] = data.get("callee", "")
+                entry["direction"] = data.get("direction", "inbound")
+                started = data.get("started_at") or 0
+                if not started:
+                    m = metrics if isinstance(metrics, dict) else None
+                    duration = (m or {}).get("duration_seconds") or 0
+                    if duration:
+                        started = entry["ended_at"] - float(duration)
+                entry["started_at"] = started
+                entry.setdefault("status", str(data.get("status") or "completed"))
             if metrics is not None:
-                entry["metrics"] = asdict(metrics)
+                # The standalone-dashboard ingest endpoint passes metrics as a
+                # plain dict (already JSON-serialised by notify_dashboard);
+                # ``asdict`` on a non-dataclass raises TypeError, which fired
+                # AFTER the active row was popped — the completed call
+                # vanished from the dashboard on every hangup.
+                entry["metrics"] = (
+                    asdict(metrics) if is_dataclass(metrics) else dict(metrics)
+                )
             elif existing is not None and existing.get("metrics"):
                 # An earlier ``update_call_status`` may have written a
                 # placeholder metrics dict — keep it rather than dropping

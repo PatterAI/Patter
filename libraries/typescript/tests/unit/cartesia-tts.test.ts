@@ -105,11 +105,13 @@ describe('Cartesia TTS — telephony factories', () => {
   });
 
   describe('low-level CartesiaTTS', () => {
-    it('forTwilio sets sampleRate to 8000', async () => {
+    it('forTwilio sets sampleRate to 16000 (the pipeline decimates to 8k itself)', async () => {
+      // 8 kHz here was decimated AGAIN by the sender's fixed 16k→8k
+      // resampler → ~2x-speed chipmunk audio.
       const tts = CartesiaTTS.forTwilio('ct-key');
       await tts.synthesize('hello');
       const outputFormat = lastBody?.output_format as { sample_rate: number; encoding: string };
-      expect(outputFormat.sample_rate).toBe(8000);
+      expect(outputFormat.sample_rate).toBe(16000);
       // Encoding stays PCM — μ-law transcoding still happens client-side.
       expect(outputFormat.encoding).toBe('pcm_s16le');
     });
@@ -123,7 +125,7 @@ describe('Cartesia TTS — telephony factories', () => {
       } as unknown as Parameters<typeof CartesiaTTS.forTwilio>[1]);
       await tts.synthesize('hola');
       const outputFormat = lastBody?.output_format as { sample_rate: number };
-      expect(outputFormat.sample_rate).toBe(8000);
+      expect(outputFormat.sample_rate).toBe(16000);
       const voice = lastBody?.voice as { id: string };
       expect(voice.id).toBe('custom-voice-id');
       expect(lastBody?.language).toBe('es');
@@ -145,18 +147,20 @@ describe('Cartesia TTS — telephony factories', () => {
   });
 
   describe('pipeline-mode TTS class', () => {
-    it('forTwilio (options-object form) sets sampleRate to 8000', async () => {
+    it('forTwilio (options-object form) sets sampleRate to 16000', async () => {
+      // 8 kHz was decimated AGAIN by the sender's fixed 16k→8k resampler
+      // → chipmunk audio; the pipeline expects 16 kHz input.
       const tts = CartesiaPipelineTTS.forTwilio({ apiKey: 'ct-key' });
       await tts.synthesize('hello');
       const outputFormat = lastBody?.output_format as { sample_rate: number };
-      expect(outputFormat.sample_rate).toBe(8000);
+      expect(outputFormat.sample_rate).toBe(16000);
     });
 
     it('forTwilio (positional form) is parent-compatible', async () => {
       const tts = CartesiaPipelineTTS.forTwilio('ct-key');
       await tts.synthesize('hello');
       const outputFormat = lastBody?.output_format as { sample_rate: number };
-      expect(outputFormat.sample_rate).toBe(8000);
+      expect(outputFormat.sample_rate).toBe(16000);
     });
 
     it('forTelnyx (options-object form) sets sampleRate to 16000', async () => {
@@ -173,7 +177,7 @@ describe('Cartesia TTS — telephony factories', () => {
         const tts = CartesiaPipelineTTS.forTwilio();
         await tts.synthesize('hello');
         const outputFormat = lastBody?.output_format as { sample_rate: number };
-        expect(outputFormat.sample_rate).toBe(8000);
+        expect(outputFormat.sample_rate).toBe(16000);
       } finally {
         if (prev === undefined) delete process.env.CARTESIA_API_KEY;
         else process.env.CARTESIA_API_KEY = prev;

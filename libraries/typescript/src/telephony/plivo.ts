@@ -19,7 +19,7 @@ import { WebSocket as WSWebSocket } from 'ws';
 
 import type { TelephonyBridge } from '../stream-handler';
 import type { LocalConfig } from '../server';
-import type { AgentOptions, MachineDetectionResult } from '../types';
+import type { AgentOptions, MachineDetectionResult, TransferCallOptions, TransferCallResult } from '../types';
 import type { STTAdapter } from '../provider-factory';
 import { createSTT } from '../provider-factory';
 import { CallMetricsAccumulator } from '../metrics';
@@ -196,7 +196,20 @@ export class PlivoBridge implements TelephonyBridge {
     ws.send(JSON.stringify({ event: 'clearAudio', streamId: streamSid }));
   }
 
-  async transferCall(callId: string, toNumber: string): Promise<void> {
+  async transferCall(
+    callId: string,
+    toNumber: string,
+    options?: TransferCallOptions,
+  ): Promise<TransferCallResult | void> {
+    // ``mode: 'warm'`` is NOT yet implemented on Plivo — the MPC
+    // (multi-party call) flow needs participant-role coordination the bridge
+    // does not plumb today. A clear error envelope is returned so the agent
+    // keeps the call instead of silently degrading to a blind redirect.
+    // Mirrors the Python ``_plivo_transfer`` behaviour.
+    if (options?.mode === 'warm') {
+      getLogger().warn('warm transfer requested but not yet supported on plivo');
+      return { error: 'warm transfer not yet supported on plivo' };
+    }
     if (!/^\+[1-9]\d{6,14}$/.test(toNumber)) {
       getLogger().warn(`PlivoBridge.transferCall rejected: invalid target ${JSON.stringify(toNumber)}`);
       return;

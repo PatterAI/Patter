@@ -146,11 +146,16 @@ describe('StatefulResampler 16k→8k', () => {
     expect(r.process(Buffer.alloc(0)).length).toBe(0);
   });
 
-  it('produces half as many samples as input for an even chunk', () => {
+  it('produces half as many samples as input (one deferred until flush)', () => {
     const r = createResampler16kTo8k();
     const input = i16buf([100, 200, 300, 400, 500, 600, 700, 800]);
     const out = r.process(input);
-    expect(out.length).toBe(input.length / 2);
+    // The final center is deferred until its +2 lookahead exists (next
+    // chunk) or flush() edge-replicates it — this is what makes chunked
+    // output bit-identical to one-shot output at chunk boundaries.
+    const tail = r.flush();
+    expect(out.length + tail.length).toBe(input.length / 2);
+    expect(tail.length).toBe(2); // exactly one deferred output sample
   });
 
   it('no boundary clicks: split sine wave concat matches single-pass output', () => {

@@ -14,8 +14,10 @@ Layout::
 
 Files are written atomically (tmp + rename) for ``metadata.json``; JSONL
 files are append-only. All timestamps are UTC ISO-8601 with millisecond
-precision. Phone numbers in ``metadata.json`` are masked by default via
-:func:`getpatter.utils.log_sanitize.mask_phone_number`.
+precision. Phone numbers in ``metadata.json`` are stored RAW by default
+(since 2026-05-21, for the dashboard reveal toggle — the log root is
+user-private). Set ``PATTER_LOG_REDACT_PHONE=mask`` (or ``hash_only``) to
+redact via :func:`getpatter.utils.log_sanitize.mask_phone_number`.
 
 Schema follows industry convention — fields map to OpenTelemetry
 ``gen_ai.*`` semantic conventions.
@@ -25,7 +27,7 @@ Environment variables:
 - ``PATTER_LOG_DIR``       — root directory or ``"auto"`` (enables logging)
 - ``PATTER_LOG_RETENTION_DAYS`` — auto-cleanup threshold (default ``30``;
                                    ``0`` = keep forever)
-- ``PATTER_LOG_REDACT_PHONE`` — ``full`` | ``mask`` (default) | ``hash_only``
+- ``PATTER_LOG_REDACT_PHONE`` — ``full`` (default) | ``mask`` | ``hash_only``
 
 See ``docs/python-sdk/observability.mdx`` for the full guide.
 """
@@ -214,6 +216,18 @@ class CallLogger:
 
     # -- Public API -------------------------------------------------------
 
+    def call_dir(self, call_id: str) -> Path | None:
+        """Return the per-call directory for ``call_id``, or ``None`` when
+        logging is disabled.
+
+        Resolves against the call's recorded start time (set by
+        :meth:`log_call_start`) so artifacts written later in the call —
+        e.g. the local recording WAV — land in the same ``YYYY/MM/DD``
+        directory as ``metadata.json`` even across midnight. Mirrors the TS
+        ``CallLogger.callDir``.
+        """
+        return self._call_dir(call_id, self._started_at.get(call_id))
+
     def log_call_start(
         self,
         call_id: str,
@@ -322,8 +336,14 @@ class CallLogger:
         latency: dict[str, Any] | None = None,
         status: str = "completed",
         error: str | None = None,
+        recording_path: str | None = None,
     ) -> None:
-        """Finalise ``metadata.json`` with end-of-call aggregates."""
+        """Finalise ``metadata.json`` with end-of-call aggregates.
+
+        ``recording_path`` (when local recording was active for the call)
+        is persisted as an extra ``recording_path`` field; omitted entirely
+        otherwise so existing metadata shapes are unchanged.
+        """
         if not self.enabled:
             return
         call_dir = self._call_dir(call_id, self._started_at.pop(call_id, None))
@@ -355,6 +375,8 @@ class CallLogger:
                 "error": error,
             }
         )
+        if recording_path is not None:
+            existing["recording_path"] = recording_path
         try:
             _atomic_write_json(metadata_path, existing)
         except OSError as exc:

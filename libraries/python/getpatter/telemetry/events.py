@@ -220,6 +220,13 @@ def build_event(
                 continue
         elif key in _BOOL_DIMENSIONS and not isinstance(value, bool):
             continue
+        elif key in _NUMERIC_DIMENSIONS and (
+            isinstance(value, bool) or not isinstance(value, (int, float))
+        ):
+            # Numeric dims must be numbers: a buggy caller passing a string
+            # under latency_ms/cost_usd would otherwise ship free text to
+            # the wire — the one gap in the two-layer allowlist.
+            continue
         # Scalars only — no nested objects, no free-text payloads.
         if isinstance(value, (str, bool, int, float)):
             event[key] = value

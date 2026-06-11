@@ -17,6 +17,7 @@
  */
 
 import { getLogger } from '../logger';
+import { sanitizeGeminiSchema } from './google-llm';
 
 export const GEMINI_DEFAULT_INPUT_SR = 16000;
 export const GEMINI_DEFAULT_OUTPUT_SR = 24000;
@@ -25,6 +26,7 @@ export const GEMINI_DEFAULT_OUTPUT_SR = 24000;
 export type GeminiLiveEventHandler = (
   type:
     | 'audio'
+    | 'transcript_input'
     | 'transcript_output'
     | 'function_call'
     | 'speech_started'
@@ -119,6 +121,11 @@ export class GeminiLiveAdapter {
         languageCode: this.language,
       },
       temperature: this.temperature,
+      // Without these, native-audio sessions produced NO user transcript
+      // ever and no assistant transcript in AUDIO modality — logs/history/
+      // metrics got nothing for Gemini Live calls. Mirrors Python.
+      inputAudioTranscription: {},
+      outputAudioTranscription: {},
     };
     if (this.instructions) {
       config.systemInstruction = { parts: [{ text: this.instructions }] };
@@ -129,7 +136,10 @@ export class GeminiLiveAdapter {
           functionDeclarations: this.tools.map((t) => ({
             name: t.name,
             description: t.description,
-            parameters: t.parameters,
+            // Strip JSON-Schema keys the Live API's proto Schema rejects
+            // ($schema, additionalProperties — strict-mode and zod-derived
+            // MCP tools): one such tool 400'd the whole session.
+            parameters: sanitizeGeminiSchema(t.parameters),
           })),
         },
       ];
@@ -205,7 +215,8 @@ export class GeminiLiveAdapter {
   private async emit(
     type:
       | 'audio'
-      | 'transcript_output'
+      | 'transcript_input'
+    | 'transcript_output'
       | 'function_call'
       | 'speech_started'
       | 'response_done'
@@ -239,9 +250,12 @@ export class GeminiLiveAdapter {
                 text?: string;
               }>;
             };
+            inputTranscription?: { text?: string };
+            outputTranscription?: { text?: string };
             turnComplete?: boolean;
             interrupted?: boolean;
           };
+          goAway?: { timeLeft?: string };
           toolCall?: {
             functionCalls?: Array<{
               id?: string;
@@ -259,8 +273,22 @@ export class GeminiLiveAdapter {
             }
             if (part.text) await this.emit('transcript_output', part.text);
           }
+          if (sc.inputTranscription?.text) {
+            await this.emit('transcript_input', sc.inputTranscription.text);
+          }
+          if (sc.outputTranscription?.text) {
+            await this.emit('transcript_output', sc.outputTranscription.text);
+          }
           if (sc.turnComplete) await this.emit('response_done', null);
           if (sc.interrupted) await this.emit('speech_started', null);
+        }
+        if (r.goAway) {
+          // Gemini Live hard-caps session length (~10-15 min without
+          // resumption); goAway is the only warning before the server drops
+          // the connection. Surface it loudly.
+          getLogger().warn(
+            `Gemini Live goAway received — session ends in ${r.goAway.timeLeft ?? 'unknown'}`,
+          );
         }
         if (r.toolCall) {
           for (const fn of r.toolCall.functionCalls ?? []) {

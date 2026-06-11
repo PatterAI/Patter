@@ -3,7 +3,7 @@
 import asyncio
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 
 from getpatter.dashboard.store import MetricsStore
 
@@ -42,7 +42,7 @@ def mount_dashboard(app, store: MetricsStore, token: str = "") -> None:
     @app.get("/api/dashboard/calls", dependencies=[Depends(auth)])
     async def dashboard_calls(request: Request):
         try:
-            limit = min(int(request.query_params.get("limit", "50")), 1000)
+            limit = max(0, min(int(request.query_params.get("limit", "50")), 1000))
         except (ValueError, TypeError):
             limit = 50
         try:
@@ -114,6 +114,11 @@ def mount_dashboard(app, store: MetricsStore, token: str = "") -> None:
                     try:
                         event = await asyncio.wait_for(queue.get(), timeout=30.0)
                         event_type = event.get("type", "message")
+                        if event_type == "__close__":
+                            # The store force-dropped this subscriber (queue
+                            # overflow). End the response so the browser's
+                            # EventSource reconnects with a fresh queue.
+                            break
                         event_type = re.sub(r"[\r\n]", "", event_type)
                         data = json.dumps(event.get("data", {}), default=str)
                         yield f"event: {event_type}\ndata: {data}\n\n"
@@ -137,14 +142,24 @@ def mount_dashboard(app, store: MetricsStore, token: str = "") -> None:
 
         from_ts = 0.0
         to_ts = 0.0
+        # Interpret date-only values as UTC midnight: JS ``new Date('YYYY-MM-DD')``
+        # is UTC per the ES spec, while naive ``fromisoformat`` used the server's
+        # LOCAL timezone — the same export query returned different ranges from
+        # the two SDKs.
         if from_date:
             try:
-                from_ts = datetime.fromisoformat(from_date).timestamp()
+                _dt = datetime.fromisoformat(from_date)
+                if _dt.tzinfo is None:
+                    _dt = _dt.replace(tzinfo=timezone.utc)
+                from_ts = _dt.timestamp()
             except ValueError:
                 pass
         if to_date:
             try:
-                to_ts = datetime.fromisoformat(to_date).timestamp()
+                _dt = datetime.fromisoformat(to_date)
+                if _dt.tzinfo is None:
+                    _dt = _dt.replace(tzinfo=timezone.utc)
+                to_ts = _dt.timestamp()
             except ValueError:
                 pass
 

@@ -382,6 +382,14 @@ class SentenceChunker:
         last_text = sentences[-1][0] if sentences else ""
         self._buffer = last_text
 
+        if result:
+            # A standard-path emission ends the "first flush" window too:
+            # only the aggressive flush cleared the flag, so a comma in
+            # sentence 2+ could still trigger a clause-level flush mid-turn
+            # — choppy prosody, contradicting the documented "first clause
+            # of each turn" contract.
+            self._is_first_flush = False
+
         return result
 
     def _maybe_short_flush(self) -> list[str]:

@@ -10,7 +10,11 @@ def deepgram(
     model: str = "nova-3",  # accepts DeepgramModel or any string for forward-compat
     endpointing_ms: int = 150,
     utterance_end_ms: int | None = 1000,
-    smart_format: bool = True,
+    # Default False — matches the DeepgramSTT class default (punctuation /
+    # numeral formatting adds latency and the text goes into an LLM anyway).
+    # The helper previously defaulted True, so the two entry points behaved
+    # differently for the same nominal config.
+    smart_format: bool = False,
     interim_results: bool = True,
     vad_events: bool | None = None,
 ) -> STTConfig:

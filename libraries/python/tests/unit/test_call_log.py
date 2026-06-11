@@ -160,6 +160,34 @@ def test_log_call_end_finalises_metadata(tmp_path: Path) -> None:
     assert payload["caller"].endswith("2222")
 
 
+def test_log_call_end_persists_recording_path_when_present(tmp_path: Path) -> None:
+    logger = CallLogger(tmp_path)
+    logger.log_call_start("c1", caller="", callee="")
+    logger.log_call_end(
+        "c1", duration_seconds=5.0, recording_path="/tmp/calls/c1/recording.wav"
+    )
+    payload = json.loads(next(tmp_path.glob("**/metadata.json")).read_text("utf-8"))
+    assert payload["recording_path"] == "/tmp/calls/c1/recording.wav"
+
+
+def test_log_call_end_omits_recording_path_when_absent(tmp_path: Path) -> None:
+    logger = CallLogger(tmp_path)
+    logger.log_call_start("c1", caller="", callee="")
+    logger.log_call_end("c1", duration_seconds=5.0)
+    payload = json.loads(next(tmp_path.glob("**/metadata.json")).read_text("utf-8"))
+    assert "recording_path" not in payload
+
+
+def test_call_dir_resolves_against_recorded_start_time(tmp_path: Path) -> None:
+    logger = CallLogger(tmp_path)
+    logger.log_call_start("c1", caller="", callee="")
+    call_dir = logger.call_dir("c1")
+    assert call_dir is not None
+    assert (call_dir / "metadata.json").exists()
+    # Disabled logger → None.
+    assert CallLogger(None).call_dir("c1") is None
+
+
 def test_log_call_end_without_start_creates_minimal_envelope(tmp_path: Path) -> None:
     logger = CallLogger(tmp_path)
     # No log_call_start call — finalise should still write a record.
@@ -187,6 +215,25 @@ def test_sweep_removes_old_day_dirs(
     # Seed a "recent" dir for today — we don't assert on it explicitly, just
     # make sure the sweep didn't raise.
     logger._sweep_old_days()
+    assert not old_dir.exists()
+
+
+def test_sweep_removes_local_recordings_with_old_call_dirs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The local recording WAV lives inside the per-call directory, so the
+    retention sweep that removes aged day-directories deletes recordings
+    too — no separate retention policy needed."""
+    monkeypatch.setenv("PATTER_LOG_RETENTION_DAYS", "7")
+    logger = CallLogger(tmp_path)
+    old_dir = tmp_path / "calls" / "2000" / "01" / "15" / "old-call"
+    old_dir.mkdir(parents=True)
+    (old_dir / "metadata.json").write_text("{}")
+    (old_dir / "transcript.jsonl").write_text("")
+    recording = old_dir / "recording.wav"
+    recording.write_bytes(b"RIFF" + b"\x00" * 40)  # placeholder WAV bytes
+    logger._sweep_old_days()
+    assert not recording.exists()
     assert not old_dir.exists()
 
 

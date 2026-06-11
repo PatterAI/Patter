@@ -30,6 +30,14 @@ import enum
 import logging
 import random
 from importlib import resources
+
+import atexit
+from contextlib import ExitStack
+
+# Keeps zip-extracted resource files alive for the process lifetime (see
+# builtin_clip_path). Mirrors providers/silero_onnx.py.
+_resource_files = ExitStack()
+atexit.register(_resource_files.close)
 from typing import NamedTuple, Union
 
 from getpatter.providers.base import BackgroundAudioPlayer as _BaseBackgroundAudioPlayer
@@ -90,11 +98,11 @@ def builtin_clip_path(clip: BuiltinAudioClip | str) -> str:
     """
     filename = clip.value if isinstance(clip, BuiltinAudioClip) else clip
     ref = resources.files("getpatter.resources.audio") / filename
-    # ``as_file`` returns a context manager that may extract a file from
-    # a zipapp. Enter it immediately — callers only need the filesystem
-    # path during the synchronous decode step downstream.
-    with resources.as_file(ref) as p:
-        return str(p)
+    # ``as_file`` may EXTRACT the file (zip-based installs) and deletes it
+    # when the context exits — the old ``with ...: return str(p)`` handed
+    # back a path to an already-deleted temp file. Keep the context open for
+    # the process lifetime via an ExitStack (same pattern as silero_onnx).
+    return str(_resource_files.enter_context(resources.as_file(ref)))
 
 
 # ---------------------------------------------------------------------------

@@ -696,9 +696,14 @@ class OpenAIRealtimeAdapter:
                 ):
                     # Capture the in-flight assistant item id so we can
                     # truncate it precisely on barge-in.
+                    # ``output_item.added`` also fires for function_call
+                    # items; truncating one of those on barge-in makes the
+                    # server reject with an error event. Only track
+                    # message items (the audio-bearing kind).
                     item = data.get("item") or {}
+                    item_type = item.get("type")
                     item_id = item.get("id") or data.get("item_id")
-                    if item_id:
+                    if item_id and item_type in (None, "message"):
                         self._current_response_item_id = item_id
                         self._current_response_audio_ms = 0
                         self._current_response_first_audio_at = None
@@ -880,6 +885,53 @@ class OpenAIRealtimeAdapter:
         if self._ws is None:
             return
         await self._ws.send(json.dumps({"type": "response.create"}))
+
+    def _build_session_update_patch(
+        self,
+        instructions: str | None,
+        tools: list[dict] | None,
+    ) -> dict:
+        """Build the partial ``session`` body for a mid-session swap.
+
+        v1-beta wire shape: flat ``{instructions, tools}``. The GA adapter
+        overrides this to add the mandatory ``"type": "realtime"`` envelope.
+        OpenAI merges partial ``session.update`` payloads server-side, so
+        only the swapped fields are sent — audio formats, VAD tuning, and
+        voice are untouched.
+        """
+        session: dict = {}
+        if instructions is not None:
+            session["instructions"] = instructions
+        if tools is not None:
+            session["tools"] = [self._build_tool_wire_format(t) for t in tools]
+        return session
+
+    async def update_session(
+        self,
+        *,
+        instructions: str | None = None,
+        tools: list[dict] | None = None,
+    ) -> None:
+        """Apply a mid-session ``instructions`` / ``tools`` swap (multi-agent
+        handoff).
+
+        Sends a partial ``session.update`` carrying only the supplied fields
+        and records them on the adapter so reconnect/warmup paths rebuild the
+        session with the post-handoff config. Voice is intentionally NOT
+        updatable here — OpenAI Realtime rejects a voice change once the
+        session has produced audio, so the session keeps the voice
+        established at call start (documented limitation).
+        """
+        if instructions is not None:
+            self.instructions = instructions
+        if tools is not None:
+            self.tools = tools
+        session = self._build_session_update_patch(instructions, tools)
+        if not session or self._ws is None:
+            return
+        await self._ws.send(
+            json.dumps({"type": "session.update", "session": session})
+        )
 
     async def send_first_message(self, text: str) -> None:
         """Make the AI speak ``text`` as its opening line.

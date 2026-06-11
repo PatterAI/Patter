@@ -43,9 +43,10 @@ class TestProviderTelephonyFactories:
         assert tts.voice_settings is custom_settings
         assert tts.language_code == "en"
 
-    def test_for_telnyx_emits_pcm_16000(self) -> None:
+    def test_for_telnyx_emits_ulaw_8000(self) -> None:
+        # The SDK's streaming_start pins the Telnyx wire to PCMU/μ-law 8 kHz.
         tts = ElevenLabsTTS.for_telnyx(api_key="x")
-        assert tts.output_format == "pcm_16000"
+        assert tts.output_format == "ulaw_8000"
 
     def test_constructor_default_unchanged(self) -> None:
         """Non-telephony users keep getting pcm_16000 from the bare constructor."""

@@ -10,6 +10,8 @@ import re
 import time
 from collections import deque
 
+from starlette.websockets import WebSocketDisconnect
+
 from getpatter.observability.attributes import patter_call_scope
 from getpatter.stream_handler import (
     END_CALL_TOOL,
@@ -69,6 +71,167 @@ def _xml_escape(s: str) -> str:
         .replace('"', "&quot;")
         .replace("'", "&apos;")
     )
+
+
+# Spoken to the caller when the warm-transfer target leg could not be dialed
+# after the caller was already parked in the conference (the AI media stream
+# is gone at that point, so a graceful goodbye beats infinite hold music).
+_WARM_TRANSFER_FAILED_MESSAGE = (
+    "Sorry, no one is available to take your call right now. Goodbye."
+)
+
+
+def warm_transfer_conference_name(call_sid: str) -> str:
+    """Deterministic, per-call conference name for a Twilio warm transfer.
+
+    ``call_sid`` is validated upstream (34-char Twilio SID), so the name is
+    safe for both TwiML attributes and REST URLs.
+    """
+    return f"patter-warm-{call_sid}"
+
+
+async def twilio_warm_transfer(
+    *,
+    call_sid: str,
+    to_number: str,
+    from_number: str,
+    twilio_sid: str,
+    twilio_token: str,
+    summary: str = "",
+    webhook_host: str = "",
+) -> dict:
+    """Execute the Twilio conference-based WARM transfer REST sequence.
+
+    1. Redirect the caller's live call into a named conference
+       (``startConferenceOnEnter=false`` → the caller hears Twilio's default
+       hold music). This replaces the ``<Connect><Stream>`` TwiML, so Twilio
+       tears down the AI media stream automatically — the "AI leg" ends here.
+    2. Dial the human agent (``Calls.json`` create) with TwiML that first
+       speaks ``summary`` (``<Say>``), then joins the same conference with
+       ``startConferenceOnEnter=true`` — bridging caller and human.
+
+    When ``webhook_host`` is set, conference lifecycle events are posted to
+    ``/webhooks/twilio/conference`` and the target leg's terminal status to
+    ``/webhooks/twilio/warm-status?caller_call_sid=...`` (which gracefully
+    releases a caller stuck on hold when the human never answers).
+
+    Returns ``{"status": "transferring", "mode": "warm", ...}`` on success or
+    a ``{"error": ...}`` envelope on validation/REST failure. Never raises.
+    """
+    from getpatter.providers.twilio_adapter import TwilioAdapter  # lazy import
+
+    if not _validate_e164(to_number):
+        logger.warning(
+            "warm transfer rejected: invalid number %s", mask_phone_number(to_number)
+        )
+        return {"error": "Invalid phone number format", "status": "rejected"}
+    if not (twilio_sid and twilio_token and call_sid):
+        return {"error": "warm transfer not available: missing Twilio credentials"}
+    if not _validate_twilio_sid(call_sid, "CA"):
+        logger.warning("warm transfer skipped: invalid CallSid %r", call_sid)
+        return {"error": "warm transfer not available: invalid CallSid"}
+    if not _validate_e164(from_number):
+        # Twilio requires a verified / Twilio-owned From for the new leg.
+        logger.warning(
+            "warm transfer rejected: no valid From number (got %s)",
+            mask_phone_number(from_number),
+        )
+        return {
+            "error": "warm transfer not available: no valid agent number to dial from"
+        }
+
+    conference = warm_transfer_conference_name(call_sid)
+    conference_callback = (
+        f"https://{webhook_host}/webhooks/twilio/conference" if webhook_host else ""
+    )
+    caller_twiml = TwilioAdapter.generate_warm_transfer_caller_twiml(
+        conference, status_callback_url=conference_callback
+    )
+    target_twiml = TwilioAdapter.generate_warm_transfer_target_twiml(
+        conference, summary=summary
+    )
+
+    import httpx as _httpx
+
+    api_base = f"https://api.twilio.com/2010-04-01/Accounts/{twilio_sid}"
+    async with _httpx.AsyncClient(timeout=10.0) as _http:
+        # Step 1 — park the caller in the conference (replaces the media
+        # stream TwiML; the AI leg ends with it).
+        try:
+            resp = await _http.post(
+                f"{api_base}/Calls/{call_sid}.json",
+                auth=(twilio_sid, twilio_token),
+                data={"Twiml": caller_twiml},
+            )
+            if resp.status_code >= 400:
+                logger.warning(
+                    "warm transfer: conference redirect failed (HTTP %d)",
+                    resp.status_code,
+                )
+                return {"error": "warm transfer failed: could not place caller on hold"}
+        except Exception as exc:  # noqa: BLE001 — surface as envelope, never raise
+            logger.warning("warm transfer: conference redirect failed: %s", exc)
+            return {"error": "warm transfer failed: could not place caller on hold"}
+
+        # Step 2 — dial the human agent into the conference with the
+        # announcement leg.
+        dial_data: dict = {
+            "To": to_number,
+            "From": from_number,
+            "Twiml": target_twiml,
+        }
+        if webhook_host:
+            from urllib.parse import quote as _quote
+
+            dial_data["StatusCallback"] = (
+                f"https://{webhook_host}/webhooks/twilio/warm-status"
+                f"?caller_call_sid={_quote(call_sid, safe='')}"
+            )
+            dial_data["StatusCallbackEvent"] = "completed"
+        try:
+            resp = await _http.post(
+                f"{api_base}/Calls.json",
+                auth=(twilio_sid, twilio_token),
+                data=dial_data,
+            )
+            dial_failed = resp.status_code >= 400
+            if dial_failed:
+                logger.warning(
+                    "warm transfer: target dial failed (HTTP %d)", resp.status_code
+                )
+        except Exception as exc:  # noqa: BLE001 — surface as envelope, never raise
+            logger.warning("warm transfer: target dial failed: %s", exc)
+            dial_failed = True
+
+        if dial_failed:
+            # The caller is already parked on hold and the AI stream is gone —
+            # release them gracefully instead of leaving infinite hold music.
+            try:
+                await _http.post(
+                    f"{api_base}/Calls/{call_sid}.json",
+                    auth=(twilio_sid, twilio_token),
+                    data={
+                        "Twiml": (
+                            f"<Response><Say>{_xml_escape(_WARM_TRANSFER_FAILED_MESSAGE)}"
+                            "</Say><Hangup/></Response>"
+                        )
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001 — best-effort recovery
+                logger.warning("warm transfer: caller recovery failed: %s", exc)
+            return {"error": "warm transfer failed: could not dial the transfer target"}
+
+    logger.info(
+        "Warm transfer started: caller parked in %s, dialing %s",
+        conference,
+        mask_phone_number(to_number),
+    )
+    return {
+        "status": "transferring",
+        "mode": "warm",
+        "to": to_number,
+        "conference": conference,
+    }
 
 
 def twilio_webhook_handler(
@@ -244,6 +407,7 @@ async def twilio_stream_bridge(
     twilio_sid: str = "",
     twilio_token: str = "",
     recording: bool = False,
+    local_recorder_factory=None,
     on_metrics=None,
     on_transcript_line=None,
     pricing: dict | None = None,
@@ -252,6 +416,8 @@ async def twilio_stream_bridge(
     patter_side: str = "uut",
     pop_prewarm_audio=None,
     pop_prewarmed_connections=None,
+    webhook_host: str = "",
+    agent_number: str = "",
 ) -> None:
     """Bridge a Twilio WebSocket media stream to the configured AI provider.
 
@@ -277,6 +443,17 @@ async def twilio_stream_bridge(
         twilio_sid: Twilio Account SID (for call transfer and recording).
         twilio_token: Twilio Auth Token (for call transfer and recording).
         recording: When ``True``, start recording the call via Twilio Recordings API.
+        local_recorder_factory: Optional ``callable(call_id) -> LocalCallRecorder | None``
+            (wired by ``EmbeddedServer.create_local_recorder``). When it
+            returns a recorder, the stream handler taps caller + agent audio
+            into a local stereo WAV — carrier-neutral, independent of
+            ``recording``.
+        webhook_host: Public hostname (no scheme) of this server — used to
+            register warm-transfer conference / status callbacks. Optional;
+            when empty, warm transfers run without callbacks.
+        agent_number: The agent's own Twilio number (E.164) — used as the
+            ``From`` caller-ID when dialing the warm-transfer target. Falls
+            back to ``callee`` (the number the caller dialed) when empty.
     """
     await websocket.accept()
 
@@ -296,6 +473,10 @@ async def twilio_stream_bridge(
     ) = None
     audio_sender: TwilioAudioSender | None = None
     metrics = None
+    # Carrier-neutral local recorder for this call (None = off). Tracked
+    # bridge-side (not just on the handler) so the on_call_end payload can
+    # surface ``recording_path`` without poking handler internals.
+    local_recorder = None
 
     # Wall-clock duration tracking for patter.cost.telephony_minutes. Set on
     # the ``start`` event so we measure only the bridged audio period, not
@@ -430,7 +611,22 @@ async def twilio_stream_bridge(
                 )
 
                 # --- Twilio-specific call control helpers ---
-                async def _twilio_transfer(number):
+                async def _twilio_transfer(number, *, mode: str = "cold", summary: str = ""):
+                    if mode == "warm":
+                        # Conference-based warm transfer: park the caller on
+                        # hold, dial the human with the announced summary,
+                        # bridge on answer. The AI media stream ends when the
+                        # caller's TwiML is replaced. Returns a result /
+                        # error envelope dict (never raises).
+                        return await twilio_warm_transfer(
+                            call_sid=call_sid_actual,
+                            to_number=number,
+                            from_number=agent_number or callee,
+                            twilio_sid=twilio_sid,
+                            twilio_token=twilio_token,
+                            summary=summary,
+                            webhook_host=webhook_host,
+                        )
                     if not _validate_e164(number):
                         logger.warning(
                             "transfer rejected: invalid number %s",
@@ -496,6 +692,7 @@ async def twilio_stream_bridge(
                         transcript_entries=transcript_entries,
                         pop_prewarm_audio=pop_prewarm_audio,
                         pop_prewarmed_connections=pop_prewarmed_connections,
+                        speech_events=speech_events,
                     )
                 elif provider == "elevenlabs_convai":
                     handler = ElevenLabsConvAIStreamHandler(
@@ -513,6 +710,7 @@ async def twilio_stream_bridge(
                         on_transcript_line=on_transcript_line,
                         conversation_history=conversation_history,
                         transcript_entries=transcript_entries,
+                        speech_events=speech_events,
                     )
                 else:
                     handler = OpenAIRealtimeStreamHandler(
@@ -546,6 +744,16 @@ async def twilio_stream_bridge(
                     handler._patter_side = patter_side
                 except Exception:  # pragma: no cover — defense in depth
                     logger.debug("Failed to set handler._patter_side", exc_info=True)
+
+                # Attach the carrier-neutral local recorder BEFORE
+                # handler.start() so the firstMessage TTS is captured. The
+                # factory returns None when local recording is off / failed.
+                if local_recorder_factory is not None:
+                    try:
+                        local_recorder = local_recorder_factory(call_sid_actual)
+                        handler.local_recorder = local_recorder
+                    except Exception as _exc:  # noqa: BLE001 - best-effort
+                        logger.warning("Local recorder setup failed: %s", _exc)
 
                 # Enter patter_call_scope NOW that call_id is known. The
                 # ExitStack keeps the scope active until the finally cleanup
@@ -594,6 +802,10 @@ async def twilio_stream_bridge(
             elif event == "stop":
                 break
 
+    except WebSocketDisconnect:
+        # Carrier-side teardown without a ``stop`` frame is a normal-ish
+        # hangup, not a failure — don't pollute error telemetry with it.
+        logger.info("Carrier WebSocket disconnected without stop frame")
     except Exception as exc:
         logger.exception("Stream error: %s", exc)
         # Record the terminal error code on the metrics so call telemetry and the
@@ -613,7 +825,13 @@ async def twilio_stream_bridge(
                 logger.debug("Twilio audio_sender flush failed: %s", _exc)
 
         if handler is not None:
-            await handler.cleanup()
+            try:
+                await handler.cleanup()
+            except Exception as _exc:  # noqa: BLE001 - teardown must complete
+                # cleanup() awaits adapter/STT/TTS closes; one raise here used
+                # to skip the rest of the finally (no metrics finalize, no
+                # on_call_end, dashboard row stuck active forever).
+                logger.exception("handler.cleanup failed: %s", _exc)
 
         # --- Observability: emit patter.cost.telephony_minutes ---
         # Wired here so the span inherits patter.call_id / patter.side
@@ -670,17 +888,21 @@ async def twilio_stream_bridge(
                 logger.warning("Metrics finalization error: %s", exc)
         if on_call_end:
             try:
-                await on_call_end(
-                    {
-                        "call_id": call_sid_actual,
-                        "caller": caller,
-                        "callee": callee,
-                        "ended_at": time.time(),
-                        "transcript": list(transcript_entries),
-                        "conversation_history": list(conversation_history),
-                        "metrics": call_metrics,
-                    }
-                )
+                _end_payload = {
+                    "call_id": call_sid_actual,
+                    "caller": caller,
+                    "callee": callee,
+                    "ended_at": time.time(),
+                    "transcript": list(transcript_entries),
+                    "conversation_history": list(conversation_history),
+                    "metrics": call_metrics,
+                }
+                # Surface the local recording path when active. The handler's
+                # cleanup() above finalized the WAV; ``close()`` is idempotent
+                # and returns the path (or None when the recorder broke).
+                if local_recorder is not None:
+                    _end_payload["recording_path"] = local_recorder.close()
+                await on_call_end(_end_payload)
             except Exception as exc:
                 logger.exception("on_call_end error: %s", exc)
 

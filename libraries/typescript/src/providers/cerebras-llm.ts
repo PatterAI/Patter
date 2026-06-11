@@ -15,9 +15,13 @@
  */
 
 import type { LLMChunk, LLMProvider, LLMStreamOptions } from "../llm-loop";
-import { mergeAbortSignals } from "../llm-loop";
+import {
+  mergeAbortSignals,
+  createStreamIdleWatchdog,
+  LLM_STREAM_IDLE_TIMEOUT_MS,
+} from "../llm-loop";
 import { getLogger } from '../logger';
-import { PatterError } from '../errors';
+import { PatterError, PatterConnectionError } from '../errors';
 import { VERSION } from '../version';
 import { parseOpenAISseStream } from './groq-llm';
 
@@ -215,17 +219,32 @@ export class CerebrasLLMProvider implements LLMProvider {
     let lastStatus = 0;
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      // Idle watchdog (re-armed per chunk) instead of a whole-stream
+      // ceiling — see llm-loop.ts createStreamIdleWatchdog.
+      const idle = createStreamIdleWatchdog();
       const response = await fetch(`${this.baseUrl}/chat/completions`, {
         method: 'POST',
         headers,
         body: payload,
-        signal: mergeAbortSignals(opts?.signal, AbortSignal.timeout(30_000)),
+        signal: mergeAbortSignals(opts?.signal, idle.signal),
       });
 
       if (response.ok) {
-        yield* parseOpenAISseStream(response);
+        try {
+          yield* parseOpenAISseStream(response, idle.touch);
+        } catch (err) {
+          if (idle.fired && !opts?.signal?.aborted) {
+            throw new PatterConnectionError(
+              `Cerebras stream idle timeout — no data for ${LLM_STREAM_IDLE_TIMEOUT_MS / 1000}s`,
+            );
+          }
+          throw err;
+        } finally {
+          idle.clear();
+        }
         return;
       }
+      idle.clear();
 
       lastStatus = response.status;
       lastErrText = await response.text().catch(() => '');
@@ -241,15 +260,17 @@ export class CerebrasLLMProvider implements LLMProvider {
               `Override via \`new CerebrasLLM({ model: '<id>' })\` and list ` +
               `tier-available ids with \`GET ${this.baseUrl}/models\` ` +
               `(common: llama3.1-8b, qwen-3-235b-a22b-instruct-2507, llama-3.3-70b on paid). ` +
-              `Raw response: ${lastErrText}`,
+              `Raw response: ${lastErrText.slice(0, 200)}`,
           );
         } else {
-          getLogger().error(`Cerebras API error: ${response.status} ${lastErrText}`);
+          getLogger().error(`Cerebras API error: ${response.status} ${lastErrText.slice(0, 200)}`);
         }
-        // Voice pipelines treat LLM provider failures as recoverable —
-        // return silently so the call continues without an LLM response
-        // rather than crashing the whole pipeline.
-        return;
+        // Throw (don't return silently) so the LLM fallback chain can fail over
+        // to the next provider and the spoken error fallback can fire — a silent
+        // return looks like success and leaves the caller in dead air.
+        throw new PatterConnectionError(
+          `Cerebras API returned ${response.status}: ${lastErrText.slice(0, 200)}`,
+        );
       }
 
       const advisoryMs = parseRateLimitResetMs(response.headers);

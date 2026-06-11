@@ -328,14 +328,20 @@ class TestToAnthropic:
         assert len(result["messages"]) == 1
         assert result["messages"][0]["content"] == "user msg"
 
-    def test_tool_messages_included(self) -> None:
+    def test_tool_messages_folded_into_user_turn(self) -> None:
+        """Anthropic only accepts user/assistant roles — a passed-through
+        ``tool`` entry is a guaranteed 400, so the result is folded into a
+        user turn instead."""
         ctx = ChatContext()
         ctx.add_user("call the tool")
         ctx.add_tool_result("tool output", "call_456")
 
         result = ctx.to_anthropic()
 
-        assert result["messages"][1] == {"role": "tool", "content": "tool output"}
+        assert result["messages"][1] == {
+            "role": "user",
+            "content": "[tool result] tool output",
+        }
 
 
 # ---------------------------------------------------------------------------

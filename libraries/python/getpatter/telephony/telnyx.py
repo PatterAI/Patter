@@ -12,6 +12,8 @@ import time
 from collections import deque
 from urllib.parse import quote
 
+from starlette.websockets import WebSocketDisconnect
+
 from getpatter.observability.attributes import patter_call_scope
 from getpatter.telephony.common import _validate_e164
 from getpatter.utils.log_sanitize import mask_phone_number
@@ -259,6 +261,7 @@ async def telnyx_stream_bridge(
     elevenlabs_key: str = "",
     telnyx_key: str = "",
     recording: bool = False,
+    local_recorder_factory=None,
     on_metrics=None,
     on_transcript_line=None,
     pricing: dict | None = None,
@@ -266,6 +269,7 @@ async def telnyx_stream_bridge(
     patter_side: str = "uut",
     pop_prewarm_audio=None,
     pop_prewarmed_connections=None,
+    speech_events=None,
 ) -> None:
     """Bridge a Telnyx WebSocket media stream to the configured AI provider.
 
@@ -306,6 +310,10 @@ async def telnyx_stream_bridge(
     ) = None
     audio_sender: TelnyxAudioSender | None = None
     metrics = None
+    # Carrier-neutral local recorder for this call (None = off). Tracked
+    # bridge-side (not just on the handler) so the on_call_end payload can
+    # surface ``recording_path`` without poking handler internals.
+    local_recorder = None
 
     # Wall-clock duration tracking for patter.cost.telephony_minutes. Set on
     # the ``start`` event so we measure only the bridged audio period, not
@@ -412,16 +420,36 @@ async def telnyx_stream_bridge(
                 )
 
                 # --- Telnyx-specific call control helpers ---
-                async def _telnyx_transfer(number, *, client_state: str | None = None):
+                async def _telnyx_transfer(
+                    number,
+                    *,
+                    mode: str = "cold",
+                    summary: str = "",
+                    client_state: str | None = None,
+                ):
                     """Blind-transfer the call via the Telnyx Call Control API.
 
                     Accepts either an E.164 phone number or a SIP URI
                     (``sip:user@host`` / ``sips:user@host``).
 
+                    ``mode="warm"`` is NOT yet implemented on Telnyx — the
+                    Call Control conference flow requires a second outbound
+                    leg (connection_id + answer-webhook coordination) that
+                    the bridge does not plumb today. A clear error envelope
+                    is returned so the agent keeps the call instead of
+                    silently degrading to a blind redirect. ``summary`` is
+                    accepted for cross-carrier signature parity and unused
+                    in cold mode.
+
                     ``client_state`` (optional) is a caller-supplied string
                     that Telnyx will echo on every subsequent webhook for
                     this call leg. Base64-encoded per Telnyx contract.
                     """
+                    if mode == "warm":
+                        logger.warning(
+                            "warm transfer requested but not yet supported on telnyx"
+                        )
+                        return {"error": "warm transfer not yet supported on telnyx"}
                     if not _is_valid_transfer_target(number):
                         logger.warning(
                             "Telnyx transfer rejected: invalid target %s",
@@ -588,6 +616,7 @@ async def telnyx_stream_bridge(
                         transcript_entries=transcript_entries,
                         pop_prewarm_audio=pop_prewarm_audio,
                         pop_prewarmed_connections=pop_prewarmed_connections,
+                        speech_events=speech_events,
                     )
                 elif provider == "elevenlabs_convai":
                     handler = ElevenLabsConvAIStreamHandler(
@@ -599,10 +628,17 @@ async def telnyx_stream_bridge(
                         resolved_prompt=resolved_prompt,
                         metrics=metrics,
                         elevenlabs_key=elevenlabs_key,
+                        # Telnyx negotiates PCMU @ 8 kHz on streaming_start
+                        # (see the webhook handler) — same wire format as
+                        # Twilio. Without this flag the handler fed the
+                        # caller's mulaw bytes to ConvAI as if they were
+                        # PCM16 @ 16 kHz: garbled audio in both directions.
+                        for_twilio=True,
                         on_transcript=on_transcript,
                         on_metrics=on_metrics,
                         on_transcript_line=on_transcript_line,
                         transcript_entries=transcript_entries,
+                        speech_events=speech_events,
                     )
                 else:
                     handler = OpenAIRealtimeStreamHandler(
@@ -628,6 +664,7 @@ async def telnyx_stream_bridge(
                         # codec forwards bytes pass-through on both legs.
                         audio_format="g711_ulaw",
                         pop_prewarmed_connections=pop_prewarmed_connections,
+                        speech_events=speech_events,
                     )
 
                 # Inherit patter.side from the parent Patter instance so all
@@ -636,6 +673,16 @@ async def telnyx_stream_bridge(
                     handler._patter_side = patter_side
                 except Exception:  # pragma: no cover — defense in depth
                     logger.debug("Failed to set handler._patter_side", exc_info=True)
+
+                # Attach the carrier-neutral local recorder BEFORE
+                # handler.start() so the firstMessage TTS is captured. The
+                # factory returns None when local recording is off / failed.
+                if local_recorder_factory is not None:
+                    try:
+                        local_recorder = local_recorder_factory(call_id_actual)
+                        handler.local_recorder = local_recorder
+                    except Exception as _exc:  # noqa: BLE001 - best-effort
+                        logger.warning("Local recorder setup failed: %s", _exc)
 
                 # Enter patter_call_scope NOW that call_id is known. The
                 # ExitStack keeps the scope active until the finally cleanup
@@ -699,6 +746,10 @@ async def telnyx_stream_bridge(
             elif event_type_telnyx == "stop":
                 break
 
+    except WebSocketDisconnect:
+        # Carrier-side teardown without a ``stop`` frame is a normal-ish
+        # hangup, not a failure — don't pollute error telemetry with it.
+        logger.info("Carrier WebSocket disconnected without stop frame")
     except Exception as exc:
         logger.exception("Stream error: %s", exc)
         # Record the terminal error code on the metrics so call telemetry and the
@@ -735,7 +786,13 @@ async def telnyx_stream_bridge(
                 logger.debug("Telnyx audio_sender flush failed: %s", _exc)
 
         if handler is not None:
-            await handler.cleanup()
+            try:
+                await handler.cleanup()
+            except Exception as _exc:  # noqa: BLE001 - teardown must complete
+                # cleanup() awaits adapter/STT/TTS closes; one raise here used
+                # to skip the rest of the finally (no metrics finalize, no
+                # on_call_end, dashboard row stuck active forever).
+                logger.exception("handler.cleanup failed: %s", _exc)
 
         # --- Observability: emit patter.cost.telephony_minutes ---
         # Wired here so the span inherits patter.call_id / patter.side
@@ -788,16 +845,28 @@ async def telnyx_stream_bridge(
                 logger.warning("Metrics finalization error: %s", exc)
         if on_call_end:
             try:
-                await on_call_end(
-                    {
-                        "call_id": call_id_actual,
-                        "caller": caller,
-                        "callee": callee,
-                        "ended_at": time.time(),
-                        "transcript": list(transcript_entries),
-                        "metrics": call_metrics,
-                    }
-                )
+                _end_payload = {
+                    "call_id": call_id_actual,
+                    "caller": caller,
+                    "callee": callee,
+                    "ended_at": time.time(),
+                    "transcript": list(transcript_entries),
+                    # The Telnyx bridge doesn't keep its own history deque
+                    # (Twilio/Plivo do) — read the handler's so the
+                    # on_call_end payload shape matches across carriers.
+                    "conversation_history": list(
+                        getattr(handler, "conversation_history", None) or []
+                    )
+                    if handler is not None
+                    else [],
+                    "metrics": call_metrics,
+                }
+                # Surface the local recording path when active. The handler's
+                # cleanup() above finalized the WAV; ``close()`` is idempotent
+                # and returns the path (or None when the recorder broke).
+                if local_recorder is not None:
+                    _end_payload["recording_path"] = local_recorder.close()
+                await on_call_end(_end_payload)
             except Exception as exc:
                 logger.exception("on_call_end error: %s", exc)
 

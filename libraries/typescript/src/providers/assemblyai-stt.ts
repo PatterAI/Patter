@@ -135,6 +135,7 @@ interface AssemblyAIEvent {
 
 /** Thrown when a method that needs an open WebSocket is called before connect. */
 export class AssemblyAISTTNotConnectedError extends Error {
+
   constructor(message = 'AssemblyAISTT is not connected') {
     super(message);
     this.name = 'AssemblyAISTTNotConnectedError';
@@ -172,10 +173,14 @@ export class AssemblyAISTT {
   /** Unix timestamp when the AssemblyAI session expires. */
   public expiresAt: number | null = null;
 
+  /** Construction args replayed by clone(). */
+  private readonly patterCtorArgs: unknown[];
+
   constructor(
     private readonly apiKey: string,
     private readonly options: AssemblyAISTTOptions = {},
   ) {
+    this.patterCtorArgs = [apiKey, options];
     if (!apiKey) {
       throw new Error('AssemblyAISTT requires a non-empty apiKey');
     }
@@ -340,6 +345,17 @@ export class AssemblyAISTT {
   }
 
   /** Open the streaming WebSocket and arm message handlers. */
+
+  /**
+   * Fresh adapter built with this instance's construction arguments —
+   * called per call by the stream handler so concurrent calls never share
+   * connection state (sockets/queues; cross-call transcript bleed).
+   */
+  clone(): this {
+    const ctor = this.constructor as new (...args: unknown[]) => this;
+    return new ctor(...this.patterCtorArgs);
+  }
+
   async connect(): Promise<void> {
     this.closing = false;
     const url = this.buildUrl();
@@ -462,7 +478,16 @@ export class AssemblyAISTT {
 
   private emit(transcript: Transcript): void {
     for (const cb of this.callbacks) {
-      cb(transcript);
+      // The registered callback is async (stream-handler's handleTranscript)
+      // — a bare call left its rejection unhandled, which kills the Node
+      // process. Contain both sync throws and async rejections.
+      try {
+        Promise.resolve(cb(transcript)).catch((err) =>
+          getLogger().error(`STT transcript callback failed: ${String(err)}`),
+        );
+      } catch (err) {
+        getLogger().error(`STT transcript callback threw: ${String(err)}`);
+      }
     }
   }
 

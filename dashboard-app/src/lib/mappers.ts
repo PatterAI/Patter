@@ -92,7 +92,11 @@ export interface TranscriptTurn {
   readonly lat?: TranscriptTurnLatency;
 }
 
-const LIVE_STATUSES = new Set(['in-progress', 'initiated']);
+// ``ringing``/``queued`` are ongoing too: both SDKs subscribe to Twilio's
+// ringing statusCallback and forward the raw status — the old mapping sent
+// them through the default branch to 'ended', so every outbound call
+// showed an "ended" pill for the whole 10-30 s ring phase.
+const LIVE_STATUSES = new Set(['in-progress', 'initiated', 'ringing', 'queued']);
 
 function mapStatus(raw: string | undefined): CallStatus {
   if (!raw) return 'ended';
@@ -100,6 +104,9 @@ function mapStatus(raw: string | undefined): CallStatus {
     case 'in-progress':
     case 'initiated':
       return 'live';
+    case 'ringing':
+    case 'queued':
+      return 'queued';
     case 'completed':
       return 'ended';
     case 'no-answer':
@@ -216,9 +223,15 @@ export function toUiCall(record: CallRecord): Call {
   // Total turn count from runtime metrics (preferred) — falls back to
   // the persisted transcript length for hydrated rows. Percentile boxes
   // are hidden in the UI when turnCount < 5 (statistical floor).
+  // Transcript fallback halves the line count: the transcript holds one
+  // line per user AND assistant message (~2 lines per turn), so the raw
+  // length double-counted and let 1-turn hydrated calls pass the
+  // percentile-box gate.
   const turnCount =
     (Array.isArray(record.metrics?.turns) ? record.metrics?.turns?.length : undefined) ??
-    (Array.isArray(record.transcript) ? record.transcript.length : undefined);
+    (Array.isArray(record.transcript)
+      ? Math.ceil(record.transcript.length / 2)
+      : undefined);
 
   const call: Call = {
     id: record.call_id,
@@ -360,7 +373,8 @@ export type RangeKey = '1h' | '24h' | '7d' | 'All';
 export interface BucketStrategy {
   readonly count: number;
   readonly bucketSizeMs: number;
-  readonly window: TimeWindow;
+  /** null = derive the window from data extents (the 'All' range). */
+  readonly window: TimeWindow | null;
 }
 
 const MIN = 60 * 1000;
@@ -405,7 +419,10 @@ export function bucketStrategyForRange(
       return {
         count: 9,
         bucketSizeMs: 0, // computeSparkline will derive from data extents
-        window: { fromMs: 0, toMs: now },
+        // No window: the old { fromMs: 0 } was truthy, so the
+        // derive-from-data-extents branch was unreachable and 'All'
+        // bucketed 1970→now (every call in the rightmost bar).
+        window: null,
       };
   }
 }
@@ -415,7 +432,9 @@ export function bucketStrategyForRange(
  * ``bucketStrategyForRange`` when you also need the bucket count/size.
  */
 export function rangeToWindow(range: RangeKey, now: number = Date.now()): TimeWindow {
-  return bucketStrategyForRange(range, now).window;
+  // 'All' has no fixed window (derived from data extents) — callers of this
+  // legacy wrapper get an everything-window instead.
+  return bucketStrategyForRange(range, now).window ?? { fromMs: 0, toMs: now };
 }
 
 export function filterCallsInWindow(calls: readonly Call[], window: TimeWindow): Call[] {

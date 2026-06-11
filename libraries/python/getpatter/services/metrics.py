@@ -178,6 +178,15 @@ class CallMetricsAccumulator:
         # observable cost matches TS metrics.ts behaviour.
         self._total_llm_cost: float = 0.0
 
+        # --- Preemptive-generation counters (pipeline mode, opt-in) ---
+        # Hits = speculative turns released on a matching final transcript;
+        # misses = speculations started but discarded (mismatched final,
+        # barge-in, replaced by a newer interim, buffer overflow). Surfaced
+        # on the final CallMetrics. Parity with TS ``_preemptiveHits`` /
+        # ``_preemptiveMisses``.
+        self._preemptive_hits: int = 0
+        self._preemptive_misses: int = 0
+
     # ---- EventBus attachment ----
 
     def attach_event_bus(self, bus: "EventBus") -> None:
@@ -570,12 +579,23 @@ class CallMetricsAccumulator:
 
     # ---- EOUMetrics ----
 
-    def record_vad_stop(self, ts: float | None = None) -> None:
+    def record_vad_stop(
+        self, ts: float | None = None, *, first_wins: bool = False
+    ) -> None:
         """Record the timestamp when VAD detects end-of-speech.
 
         Args:
             ts: Wall-clock timestamp (seconds). Defaults to ``time.time()``.
+            first_wins: When True, keep an existing stamp for this turn —
+                used by the final-transcript fallback so it cannot overwrite
+                the REAL VAD ``speech_end`` stamp microseconds before
+                ``record_stt_final_timestamp`` (which made
+                ``end_of_utterance_delay`` always ≈0 and faked the endpoint
+                signal the very line before ``record_stt_complete``'s
+                explicit don't-fake logic).
         """
+        if first_wins and self._vad_stopped_at is not None:
+            return
         self._vad_stopped_at = ts if ts is not None else time.time()
         # First endpoint signal wins for endpoint_ms calculation.
         if self._endpoint_signal_at is None:
@@ -672,7 +692,9 @@ class CallMetricsAccumulator:
             return
 
         end_ts = ts if ts is not None else time.time()
-        detection_delay = end_ts - self._overlap_started_at
+        # MILLISECONDS — parity with the TS emitter and with every other
+        # latency field in the SDK (this event was the lone seconds outlier).
+        detection_delay = (end_ts - self._overlap_started_at) * 1000.0
         self._overlap_started_at = None
 
         if was_interruption:
@@ -753,6 +775,17 @@ class CallMetricsAccumulator:
             cache_write_tokens=cache_write_tokens,
         )
 
+    def record_preemptive_hit(self) -> None:
+        """Count a preemptive (speculative) turn RELEASED on a matching final
+        transcript — the buffered LLM+TTS work became the real turn."""
+        self._preemptive_hits += 1
+
+    def record_preemptive_miss(self) -> None:
+        """Count a preemptive (speculative) turn that was started but
+        discarded without release (mismatched final, barge-in during
+        speculation, replaced by a newer interim, or buffer overflow)."""
+        self._preemptive_misses += 1
+
     def set_actual_telephony_cost(self, cost: float) -> None:
         """Set the actual telephony cost from the provider API (post-call).
 
@@ -813,6 +846,8 @@ class CallMetricsAccumulator:
             tts_model=self.tts_model,
             llm_model=self._llm_model,
             error_code=self._error_code,
+            preemptive_hits=self._preemptive_hits,
+            preemptive_misses=self._preemptive_misses,
         )
 
         if self._event_bus is not None:
@@ -988,7 +1023,16 @@ class CallMetricsAccumulator:
         # we deliberately do NOT fall back to total_ms so dashboards can
         # distinguish "metric available" vs "metric missing".
         agent_response_ms: float | None = None
-        if endpoint_ms is not None and llm_ttft_ms is not None and tts_ms > 0:
+        # Gate on the actual first-token SIGNAL: ``llm_ttft_ms`` is
+        # initialised to 0.0, so the old ``is not None`` check was always
+        # true — when record_llm_first_token never fired (non-streaming
+        # on_message, custom handlers) the flagship SLO metric silently
+        # EXCLUDED the entire LLM segment. TS already leaves it undefined.
+        if (
+            endpoint_ms is not None
+            and self._llm_first_token is not None
+            and tts_ms > 0
+        ):
             agent_response_ms = round(endpoint_ms + llm_ttft_ms + tts_ms, 1)
 
         # Post-barge-in anchor hygiene: when the current turn began within
@@ -1035,8 +1079,11 @@ class CallMetricsAccumulator:
 
     def _compute_cost(self, duration_seconds: float) -> CostBreakdown:
         """Compute cost breakdown from accumulated usage data."""
-        if self.provider_mode == "openai_realtime":
-            # OpenAI Realtime: STT+LLM+TTS cost comes from token usage
+        if self.provider_mode in ("openai_realtime", "openai_realtime_2"):
+            # OpenAI Realtime (v1-beta AND GA): STT+LLM+TTS cost comes from
+            # token usage. Matching only the exact "openai_realtime" string
+            # made every GA-engine call fall into the pipeline branch and
+            # report $0 AI cost (while still emitting cached savings).
             stt_cost = 0.0
             tts_cost = 0.0
             llm_cost = self._total_realtime_cost
@@ -1110,10 +1157,13 @@ class CallMetricsAccumulator:
         n = len(turns)
 
         def _opt_avg(attr: str) -> float | None:
+            # Filter zeros like TS optAvg (and like both SDKs' percentile
+            # paths) — keeping 0.0 samples made the two SDKs' averages drift
+            # for the same call whenever a missing-signal turn recorded 0.
             vals = [
-                getattr(t.latency, attr)
+                v
                 for t in turns
-                if getattr(t.latency, attr) is not None
+                if (v := getattr(t.latency, attr)) is not None and v > 0
             ]
             return round(sum(vals) / len(vals), 1) if vals else None
 

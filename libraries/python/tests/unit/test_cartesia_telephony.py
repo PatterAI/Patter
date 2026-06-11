@@ -20,14 +20,14 @@ from getpatter.tts.cartesia import TTS as PipelineCartesiaTTS
 class TestProviderTelephonyFactories:
     """Provider-level factories on the low-level adapter class."""
 
-    def test_for_twilio_uses_8000_hz(self) -> None:
+    def test_for_twilio_uses_16000_hz(self) -> None:
         tts = CartesiaTTS.for_twilio(api_key="x")
-        assert tts.sample_rate == 8000
+        assert tts.sample_rate == 16000
 
-    def test_for_twilio_payload_requests_8000_hz(self) -> None:
+    def test_for_twilio_payload_requests_16000_hz(self) -> None:
         tts = CartesiaTTS.for_twilio(api_key="x")
         payload = tts._build_payload("hello")
-        assert payload["output_format"]["sample_rate"] == 8000
+        assert payload["output_format"]["sample_rate"] == 16000
         # Encoding stays PCM_S16LE — μ-law transcoding still happens
         # client-side in TwilioAudioSender.
         assert payload["output_format"]["encoding"] == "pcm_s16le"
@@ -39,16 +39,16 @@ class TestProviderTelephonyFactories:
             language="es",
             speed="fast",
         )
-        assert tts.sample_rate == 8000
+        assert tts.sample_rate == 16000
         assert tts.voice == "custom-voice-id"
         assert tts.language == "es"
         assert tts.speed == "fast"
 
     def test_for_twilio_ignores_caller_sample_rate(self) -> None:
         # Even if the caller passes sample_rate, the factory wins so the
-        # contract ("for_twilio == 8000 Hz") is preserved.
+        # contract ("for_twilio == 16000 Hz") is preserved.
         tts = CartesiaTTS.for_twilio(api_key="x", sample_rate=24000)
-        assert tts.sample_rate == 8000
+        assert tts.sample_rate == 16000
 
     def test_for_telnyx_uses_16000_hz(self) -> None:
         tts = CartesiaTTS.for_telnyx(api_key="x")
@@ -68,9 +68,9 @@ class TestProviderTelephonyFactories:
 class TestPipelineTTSTelephonyFactories:
     """Same factories on the pipeline-mode ``TTS`` wrapper."""
 
-    def test_for_twilio_uses_8000_hz(self) -> None:
+    def test_for_twilio_uses_16000_hz(self) -> None:
         tts = PipelineCartesiaTTS.for_twilio(api_key="x")
-        assert tts.sample_rate == 8000
+        assert tts.sample_rate == 16000
 
     def test_for_telnyx_uses_16000_hz(self) -> None:
         tts = PipelineCartesiaTTS.for_telnyx(api_key="x")
@@ -88,7 +88,7 @@ class TestPipelineTTSTelephonyFactories:
     ) -> None:
         monkeypatch.setenv("CARTESIA_API_KEY", "env-key")
         tts = PipelineCartesiaTTS.for_twilio()
-        assert tts.sample_rate == 8000
+        assert tts.sample_rate == 16000
 
     def test_for_telnyx_uses_env_api_key(
         self, monkeypatch: pytest.MonkeyPatch
@@ -106,4 +106,4 @@ class TestTopLevelImportSmoke:
         from getpatter import CartesiaTTS as PipelineWrapper
 
         tts = PipelineWrapper.for_twilio(api_key="x")
-        assert tts.sample_rate == 8000
+        assert tts.sample_rate == 16000

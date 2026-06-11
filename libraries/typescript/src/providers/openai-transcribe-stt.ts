@@ -45,6 +45,15 @@ export class OpenAITranscribeSTT extends WhisperSTT {
           `For "whisper-1", use WhisperSTT instead.`,
       );
     }
+    if (responseFormat === 'verbose_json') {
+      // OpenAI only supports verbose_json on whisper-1; the gpt-4o
+      // transcribe models 400 on it — every chunk failed (errors only
+      // logged) while audio kept being buffered/billed. Mirrors Python.
+      throw new Error(
+        `OpenAITranscribeSTT: responseFormat "verbose_json" is only supported by whisper-1 ` +
+          `(use WhisperSTT). "${model}" accepts "json".`,
+      );
+    }
     super(apiKey, language, model, bufferSize, responseFormat);
   }
 }

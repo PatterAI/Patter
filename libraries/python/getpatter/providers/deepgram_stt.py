@@ -352,7 +352,7 @@ class DeepgramSTT(STTProvider):
             speech_final=speech_final,
             from_finalize=from_finalize,
             request_id=self.request_id,
-            words=list(words),
+            words=tuple(words),
             event_type="Results",
         )
 

@@ -253,6 +253,9 @@ describe('[unit] OpenAICompatibleLLMProvider headers and timeout', () => {
   });
 
   it('honours the configurable timeout instead of the base 30 s ceiling', async () => {
+    // The budget is now an IDLE watchdog window (re-armed per chunk), not a
+    // whole-stream AbortSignal.timeout ceiling.
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
     const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
     const provider = new OpenAICompatibleLLMProvider({
       baseUrl: 'http://127.0.0.1:9/v1',
@@ -264,14 +267,15 @@ describe('[unit] OpenAICompatibleLLMProvider headers and timeout', () => {
       // drain
     }
     expect(calls.length).toBe(1);
-    // The request timeout (not the 5 s warmup) must be 120_000 ms, proving
-    // the base provider's hardcoded 30_000 ms ceiling was replaced.
-    expect(timeoutSpy).toHaveBeenCalledWith(120_000);
+    // The request idle window (not the 5 s warmup) must be 120_000 ms,
+    // proving the base provider's hardcoded 30_000 ms ceiling was replaced.
+    expect(setTimeoutSpy.mock.calls.some((c) => c[1] === 120_000)).toBe(true);
     expect(timeoutSpy).not.toHaveBeenCalledWith(30_000);
+    setTimeoutSpy.mockRestore();
   });
 
   it('defaults the generic timeout to 60 s', async () => {
-    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
     const provider = new OpenAICompatibleLLMProvider({
       baseUrl: 'http://127.0.0.1:9/v1',
       model: 'm',
@@ -281,7 +285,8 @@ describe('[unit] OpenAICompatibleLLMProvider headers and timeout', () => {
       // drain
     }
     expect(calls.length).toBe(1);
-    expect(timeoutSpy).toHaveBeenCalledWith(60_000);
+    expect(setTimeoutSpy.mock.calls.some((c) => c[1] === 60_000)).toBe(true);
+    setTimeoutSpy.mockRestore();
   });
 });
 

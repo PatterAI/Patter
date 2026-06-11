@@ -181,30 +181,47 @@ class RemoteMessageHandler:
             )
 
         try:
-            async with asyncio.timeout(_WS_TIMEOUT):
-                async with websockets.connect(url, open_timeout=10) as ws:
-                    await ws.send(json.dumps(data))
+            # Per-RECEIVE timeout — NOT a whole-exchange ceiling. The old
+            # ``asyncio.timeout`` context stayed armed while this generator
+            # was suspended at ``yield`` (i.e. while the consumer spoke the
+            # text through TTS), so any turn whose remote latency + SPOKEN
+            # duration exceeded the window was cancelled mid-sentence — and
+            # because the ``__aexit__`` that converts it to TimeoutError sat
+            # in a suspended frame, it surfaced as a bare cancellation the
+            # dispatch settle path swallowed silently.
+            async with websockets.connect(url, open_timeout=10) as ws:
+                await ws.send(json.dumps(data))
 
-                    async for raw in ws:
-                        try:
-                            frame = json.loads(raw)
-                        except (json.JSONDecodeError, TypeError):
-                            # Plain text frame
-                            yield str(raw)
-                            continue
+                while True:
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=_WS_TIMEOUT)
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "on_message WebSocket idle for %.1f s — closing %r",
+                            _WS_TIMEOUT,
+                            url,
+                        )
+                        return
+                    except websockets.ConnectionClosedOK:
+                        return
+                    try:
+                        frame = json.loads(raw)
+                    except (json.JSONDecodeError, TypeError):
+                        # Plain text frame
+                        yield str(raw)
+                        continue
 
-                        if isinstance(frame, dict):
-                            if frame.get("done"):
-                                return
-                            text = frame.get("text", "")
-                            if text:
-                                yield text
-                        else:
-                            yield str(frame)
+                    if isinstance(frame, dict):
+                        if frame.get("done"):
+                            return
+                        text = frame.get("text", "")
+                        if text:
+                            yield text
+                    else:
+                        yield str(frame)
         except asyncio.TimeoutError:
             logger.warning(
-                "on_message WebSocket exchange timed out after %.1f s for %r",
-                _WS_TIMEOUT,
+                "on_message WebSocket connect timed out for %r",
                 url,
             )
 

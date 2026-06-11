@@ -17,7 +17,7 @@ import json
 import logging
 import os
 from enum import StrEnum
-from typing import ClassVar, Any, AsyncIterator
+from typing import ClassVar, Any, AsyncIterator, Union
 
 logger = logging.getLogger("getpatter")
 
@@ -145,7 +145,6 @@ class GoogleLLMProvider:
         for a probe.
         """
         try:
-            api_key = getattr(self._client, "_api_client", None)
             # google-genai's Client doesn't expose the API key once it has
             # constructed its inner http client; fall back to env var.
             key = os.environ.get("GOOGLE_API_KEY") or ""
@@ -229,14 +228,14 @@ class GoogleLLMProvider:
                 function_call = getattr(part, "function_call", None)
                 if function_call:
                     args = getattr(function_call, "args", {}) or {}
-                    call_id = (
+                    fn_call_id = (
                         getattr(function_call, "id", None)
                         or f"gemini_call_{next_index}"
                     )
                     yield {
                         "type": "tool_call",
                         "index": next_index,
-                        "id": call_id,
+                        "id": fn_call_id,
                         "name": getattr(function_call, "name", "") or "",
                         "arguments": json.dumps(args),
                     }
@@ -250,18 +249,22 @@ class GoogleLLMProvider:
         if last_usage is not None:
             prompt_tokens = getattr(last_usage, "prompt_token_count", 0) or 0
             completion_tokens = getattr(last_usage, "candidates_token_count", 0) or 0
+            cached_tokens = (
+                getattr(last_usage, "cached_content_token_count", 0) or 0
+            )
             self._record_completion_cost(
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
             )
+            # ``prompt_token_count`` INCLUDES the cached portion; the usage
+            # chunk contract bills ``input_tokens`` at the full input rate and
+            # ``cache_read_tokens`` at the cache rate, so subtract to avoid
+            # double-billing cached tokens (mirrors the OpenAI providers).
             yield {
                 "type": "usage",
-                "input_tokens": prompt_tokens,
+                "input_tokens": max(0, prompt_tokens - cached_tokens),
                 "output_tokens": completion_tokens,
-                "cache_read_tokens": getattr(
-                    last_usage, "cached_content_token_count", 0
-                )
-                or 0,
+                "cache_read_tokens": cached_tokens,
             }
 
         yield {"type": "done"}
@@ -289,6 +292,47 @@ class GoogleLLMProvider:
 # ---------------------------------------------------------------------------
 
 
+
+# Keys Gemini's restricted proto ``Schema`` accepts. Anything else
+# (``$schema``, ``additionalProperties`` — emitted by strict-mode tools and
+# nearly every zod-derived MCP server — ``oneOf``, …) makes the request 400.
+_GEMINI_SCHEMA_KEYS = frozenset(
+    {
+        "type",
+        "description",
+        "properties",
+        "items",
+        "enum",
+        "required",
+        "nullable",
+        "format",
+        "minimum",
+        "maximum",
+        "minLength",
+        "maxLength",
+        "minItems",
+        "maxItems",
+        "pattern",
+        "anyOf",
+        "default",
+        "title",
+    }
+)
+
+
+def _sanitize_gemini_schema(schema):
+    """Recursively strip JSON-Schema keys Gemini's proto Schema rejects."""
+    if isinstance(schema, dict):
+        return {
+            k: _sanitize_gemini_schema(v)
+            for k, v in schema.items()
+            if k in _GEMINI_SCHEMA_KEYS
+        }
+    if isinstance(schema, list):
+        return [_sanitize_gemini_schema(v) for v in schema]
+    return schema
+
+
 def _to_gemini_tools(tools: list[dict]) -> list[Any]:
     """Convert OpenAI-style tool definitions to Gemini ``Tool`` objects."""
     from google.genai import types
@@ -300,7 +344,9 @@ def _to_gemini_tools(tools: list[dict]) -> list[Any]:
             types.FunctionDeclaration(
                 name=fn["name"],
                 description=fn.get("description", ""),
-                parameters=fn.get("parameters", {"type": "object", "properties": {}}),
+                parameters=_sanitize_gemini_schema(
+                    fn.get("parameters", {"type": "object", "properties": {}})
+                ),
             )
         )
     if not function_decls:
@@ -321,6 +367,11 @@ def _to_gemini_contents(messages: list[dict]) -> tuple[str, list[Any]]:
 
     system_parts: list[str] = []
     contents: list[types.Content] = []
+    # tool_call_id → function name, harvested from assistant turns so the
+    # paired FunctionResponse can carry the real function name. Gemini
+    # requires ``FunctionResponse.name`` to match ``FunctionCall.name``;
+    # the tool message itself only carries the call id.
+    fn_name_by_call_id: dict[str, str] = {}
 
     for msg in messages:
         role = msg.get("role")
@@ -351,6 +402,8 @@ def _to_gemini_contents(messages: list[dict]) -> tuple[str, list[Any]]:
                     args = json.loads(fn.get("arguments", "") or "{}")
                 except json.JSONDecodeError:
                     args = {}
+                if tc.get("id") and fn.get("name"):
+                    fn_name_by_call_id[tc["id"]] = fn["name"]
                 parts.append(
                     types.Part(
                         function_call=types.FunctionCall(
@@ -380,7 +433,9 @@ def _to_gemini_contents(messages: list[dict]) -> tuple[str, list[Any]]:
                     parts=[
                         types.Part(
                             function_response=types.FunctionResponse(
-                                name=msg.get("name", "") or tool_call_id,
+                                name=msg.get("name", "")
+                                or fn_name_by_call_id.get(tool_call_id, "")
+                                or tool_call_id,
                                 response=response_dict,
                                 id=tool_call_id or None,
                             )
@@ -418,5 +473,14 @@ def _to_gemini_contents(messages: list[dict]) -> tuple[str, list[Any]]:
             )
         else:
             merged.append(entry)
+
+    # Gemini expects the first content to be a user turn. Voice agents almost
+    # always open with ``first_message`` (an assistant/model greeting) —
+    # prepend a synthetic user turn so stricter backends don't 400.
+    if merged and merged[0].role == "model":
+        merged.insert(
+            0,
+            types.Content(role="user", parts=[types.Part(text="(call connected)")]),
+        )
 
     return "\n\n".join(system_parts), merged

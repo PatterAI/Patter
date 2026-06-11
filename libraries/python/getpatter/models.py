@@ -17,7 +17,13 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, Literal
 
 if TYPE_CHECKING:
-    from getpatter.providers.base import AudioFilter, BackgroundAudioPlayer, VADProvider
+    from getpatter.providers.base import (
+        AudioFilter,
+        BackgroundAudioPlayer,
+        TurnDetectorProvider,
+        VADProvider,
+    )
+    from getpatter.services.barge_in_strategies import BargeInStrategy
     from getpatter.services.llm_loop import LLMProvider
 
 logger = logging.getLogger("getpatter")
@@ -504,6 +510,23 @@ class Agent:
     vad: "VADProvider | None" = (
         None  # Optional server-side VAD (e.g., Silero) — pipeline mode only
     )
+    # Opt-in semantic end-of-utterance model (e.g.
+    # ``SmartTurnDetector.load()`` — pipecat-ai smart-turn v3, ONNX).
+    # Pipeline mode only. When set, a VAD ``speech_end`` no longer finalizes
+    # the STT utterance immediately: the detector scores the last ~8 s of
+    # caller audio and the turn is committed only once the end-of-turn
+    # probability reaches ``turn_detector.threshold`` (the EOU trigger is
+    # then stamped ``semantic_turn_detector``). While the model says
+    # "incomplete" the handler re-polls on subsequent silence, bounded by
+    # ``max_semantic_hold_ms``. ``None`` (default) keeps today's pure
+    # VAD-silence endpointing byte-identical.
+    turn_detector: "TurnDetectorProvider | None" = None
+    # Hard cap (ms) on how long the semantic turn detector may hold a turn
+    # open past the VAD ``speech_end`` before the SDK finalizes anyway (with
+    # the ``vad_silence`` trigger), so a turn can never hang on a model that
+    # keeps predicting "incomplete". Only consulted when ``turn_detector``
+    # is set. Default 1200 ms.
+    max_semantic_hold_ms: int = 1200
     audio_filter: "AudioFilter | None" = (
         None  # Optional pre-STT audio filter (noise cancel) — pipeline mode only
     )
@@ -528,6 +551,17 @@ class Agent:
     # stays off the per-turn path — consulted only on demand. ``None`` (default)
     # disables it. See :class:`ConsultConfig`.
     consult: "ConsultConfig | None" = None
+    # Multi-agent handoff targets: ``{name: Agent}``. When set, Patter
+    # auto-injects a ``handoff_to`` tool (Realtime + Pipeline modes) the LLM
+    # can call to swap the CURRENT call to another agent's configuration
+    # mid-call — system prompt, tools, variables, guardrails, and onward
+    # ``handoffs`` are taken from the target agent; audio infrastructure
+    # (STT/TTS/VAD/engine connection — and therefore voice on engines that
+    # cannot switch voice mid-session) stays as established at call start.
+    # ``None`` (default) disables the tool. Targets are full ``Agent``
+    # instances built with :meth:`Patter.agent`; chained handoffs follow the
+    # TARGET's own ``handoffs`` map.
+    handoffs: "dict[str, Agent] | None" = None
     # Minimum sustained voice (ms) before treating caller audio as a barge-in
     # and interrupting TTS. ``0`` disables barge-in entirely — useful on noisy
     # links (ngrok tunnels, speakerphone) where the agent can hear itself.
@@ -612,8 +646,27 @@ class Agent:
     barge_in_strategies: tuple["BargeInStrategy", ...] = ()
     # Maximum time (ms) to wait for at least one strategy to confirm a
     # pending barge-in before discarding the pending state and resuming
-    # TTS. Only consulted when ``barge_in_strategies`` is non-empty.
+    # TTS. Consulted when ``barge_in_strategies`` is non-empty AND as the
+    # false-interruption window for ``barge_in_mode="pause_resume"``.
     barge_in_confirm_ms: int = 1500
+    # How a VAD ``speech_start`` during the agent's turn is handled
+    # (pipeline mode):
+    #   - ``"cancel"`` (default): today's behaviour — the in-flight turn is
+    #     cancelled immediately (or marked pending when
+    #     ``barge_in_strategies`` are configured).
+    #   - ``"pause_resume"`` (LiveKit-style false-interruption handling):
+    #     output is PAUSED immediately — the carrier buffer is cleared and
+    #     no further TTS audio is sent — while the LLM stream and the TTS
+    #     provider stream stay alive (tokens buffer as sentences,
+    #     synthesized audio queues in memory, both bounded). If a committed
+    #     final transcript confirms the interruption within
+    #     ``barge_in_confirm_ms`` the turn is cancelled exactly as in
+    #     ``"cancel"`` mode; if the window expires with no transcript (a
+    #     cough, line noise) the agent RESUMES from the first sentence the
+    #     caller had not fully heard, re-sending retained audio without
+    #     re-billing TTS, and the event is recorded as a false interruption
+    #     (a backchannel — not an interruption — in metrics).
+    barge_in_mode: str = "cancel"
     # When ``True`` (default), ``Patter.call`` warms up the STT, TTS, and LLM
     # provider connections in parallel with the carrier-side ``initiate_call``
     # request so DNS, TLS, and HTTP/2 handshakes are already complete by the
@@ -648,6 +701,25 @@ class Agent:
     # ``Patter.call`` refuses to spawn the prewarm task and emits a WARN
     # when ``provider != "pipeline"``.
     prewarm_first_message: bool = False
+    # PREEMPTIVE GENERATION (pipeline mode, built-in LLM loop only; opt-in).
+    # When ``True`` the SDK starts the LLM — and sentence-chunked TTS
+    # synthesis — EARLY on a confident INTERIM transcript (one that ends with
+    # sentence-final punctuation, or that has been unchanged for
+    # ``preemptive_min_stable_ms``), holding all synthesized audio in memory.
+    # When the FINAL transcript commits: if it matches the speculated interim
+    # (normalized — case/punctuation/whitespace-insensitive) the buffered
+    # audio is RELEASED to the carrier immediately (the LLM+TTS latency was
+    # paid during the user's own end-of-utterance silence); if it differs,
+    # the speculation is discarded silently and the turn dispatches normally
+    # on the final. History and metrics record exactly one turn either way.
+    # Same pattern as LiveKit Agents' ``preemptive_generation``. Default
+    # ``False`` — every turn waits for the final transcript, as today.
+    preemptive_generation: bool = False
+    # Interim-stability window (ms) for preemptive generation: an interim
+    # transcript that does NOT end with sentence-final punctuation qualifies
+    # for speculation only once it has remained unchanged for this long.
+    # Only consulted when ``preemptive_generation=True``. Default 300.
+    preemptive_min_stable_ms: int = 300
 
 
 @dataclass(frozen=True)
@@ -852,6 +924,14 @@ class CallMetrics:
     # ``ErrorCode`` values, lowercased, or ``"other"``); empty for a clean call.
     # Used by anonymous telemetry and surfaced for diagnostics. Never the message.
     error_code: str = ""
+    # PREEMPTIVE GENERATION counters (pipeline mode, only non-zero when
+    # ``Agent.preemptive_generation=True``). ``preemptive_hits`` counts
+    # speculative turns released on a matching final transcript (latency
+    # win); ``preemptive_misses`` counts speculations started but discarded
+    # (mismatched final, barge-in, replaced by a newer interim, or buffer
+    # overflow) — i.e. wasted LLM/TTS spend.
+    preemptive_hits: int = 0
+    preemptive_misses: int = 0
 
 
 # Carrier-agnostic terminal outcomes for an outbound call. ``answered`` means a
@@ -891,6 +971,55 @@ class CallResult:
     # reached media (``no_answer`` / ``busy`` / ``failed``).
     cost: CostBreakdown | None = None
     metrics: CallMetrics | None = None
+
+
+async def _invoke_transfer_fn(
+    transfer_fn,
+    number: str,
+    *,
+    mode: str = "cold",
+    summary: str = "",
+) -> dict | None:
+    """Invoke a telephony ``transfer_fn`` with warm-transfer kwargs when its
+    signature accepts them.
+
+    Cold mode ALWAYS calls ``transfer_fn(number)`` positionally — byte-
+    identical to the historical contract for every callable (carrier
+    closures default ``mode="cold"`` themselves). Warm mode passes
+    ``mode`` / ``summary`` keywords when the callable's signature accepts
+    them (or absorbs ``**kwargs``); the built-in per-carrier transfer
+    functions return either a result dict (``{"status": "transferring",
+    ...}`` / ``{"error": ...}``) or ``None``. A ``mode="warm"`` request
+    against a legacy callable that only declares ``(number)`` returns a
+    clear error envelope instead of silently degrading to a cold transfer.
+    Mirrors the TypeScript path where ``bridge.transferCall(callId, number,
+    options)`` simply ignores the extra argument on legacy implementations.
+    """
+    import inspect
+
+    if transfer_fn is None:
+        return {"error": "transfer is not available on this call"}
+    if mode == "cold":
+        return await transfer_fn(number)
+    if mode != "warm":
+        # Never silently coerce an unknown mode into a blind redirect — the
+        # built-in tool paths pre-validate, so this guards the programmatic
+        # ``CallControl.transfer`` surface (TS gets the same guarantee from
+        # the ``'cold' | 'warm'`` type on ``TransferCallOptions``).
+        return {
+            "error": f"Invalid transfer mode {mode!r} — use 'cold' or 'warm'",
+            "status": "rejected",
+        }
+    try:
+        sig = inspect.signature(transfer_fn)
+        accepts_warm_kwargs = any(
+            p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+        ) or {"mode", "summary"} <= set(sig.parameters)
+    except (TypeError, ValueError):  # pragma: no cover - exotic callables
+        accepts_warm_kwargs = False
+    if not accepts_warm_kwargs:
+        return {"error": "warm transfer is not supported by this transfer handler"}
+    return await transfer_fn(number, mode=mode, summary=summary)
 
 
 class CallControl:
@@ -946,13 +1075,36 @@ class CallControl:
         """True if transfer() or hangup() was called."""
         return self._transferred.is_set() or self._hung_up.is_set()
 
-    async def transfer(self, number: str) -> None:
-        """Transfer the call to another phone number (E.164 format)."""
-        if self._transfer_fn is not None:
-            await self._transfer_fn(number)
-            self._transferred.set()
-        else:
+    async def transfer(
+        self, number: str, *, mode: Literal["cold", "warm"] = "cold", summary: str = ""
+    ) -> dict | None:
+        """Transfer the call to another phone number (E.164 format).
+
+        Args:
+            number: Target phone number in E.164 format.
+            mode: ``"cold"`` (default) redirects the caller immediately —
+                byte-identical to the historical behaviour. ``"warm"`` puts
+                the caller on hold music, dials the target with an announced
+                ``summary``, then bridges the two together (Twilio only for
+                now; other carriers return an error envelope).
+            summary: Warm mode only — short handoff summary announced to the
+                human agent before the caller is bridged.
+
+        Returns:
+            ``None`` for a cold transfer (legacy contract), or a result dict
+            for warm mode: ``{"status": "transferring", "mode": "warm", ...}``
+            on success, ``{"error": ...}`` when warm transfer is unsupported
+            or failed (the call keeps running in that case).
+        """
+        if self._transfer_fn is None:
             logger.warning("transfer() not available for this provider mode")
+            return None
+        result = await _invoke_transfer_fn(
+            self._transfer_fn, number, mode=mode, summary=summary
+        )
+        if not (isinstance(result, dict) and result.get("error")):
+            self._transferred.set()
+        return result
 
     async def hangup(self) -> None:
         """End the call."""

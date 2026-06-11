@@ -28,6 +28,8 @@ from __future__ import annotations
 import logging
 from typing import Final
 
+import time
+
 import numpy as np
 
 logger = logging.getLogger("getpatter")
@@ -161,6 +163,10 @@ class NlmsEchoCanceller:
     # Public API
     # ------------------------------------------------------------------
 
+    # Far-end staleness window (seconds): beyond this, process_near_end
+    # passes through instead of cancelling against a frozen reference.
+    _FAR_STALE_S: float = 0.25
+
     def push_far_end(self, pcm_bytes: bytes) -> None:
         """Append far-end (TTS) audio to the reference ring buffer.
 
@@ -170,6 +176,7 @@ class NlmsEchoCanceller:
         """
         if not pcm_bytes:
             return
+        self._last_far_push_monotonic = time.monotonic()
         samples = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
         n = samples.shape[0]
         buf_len = self._far_buf.shape[0]
@@ -190,6 +197,10 @@ class NlmsEchoCanceller:
         self._far_write_idx = (self._far_write_idx + n) % buf_len
         self._far_filled = min(self._far_filled + n, buf_len)
 
+    def _passthrough_frame(self, near: "np.ndarray") -> "np.ndarray":
+        """Return the frame unmodified (no echo estimate worth subtracting)."""
+        return near
+
     def process_near_end(self, pcm_bytes: bytes) -> bytes:
         """Subtract estimated echo from the near-end (mic) signal.
 
@@ -205,6 +216,17 @@ class NlmsEchoCanceller:
         # the filter window. This avoids the filter producing garbage
         # during the very first speech frame of the call.
         if self._far_filled < self._taps:
+            return pcm_bytes
+
+        # Pass-through when the far-end reference is STALE: the ring only
+        # advances on push_far_end, so while the agent is silent the
+        # "most recent" window stays frozen at the tail of the last TTS —
+        # convolving w·x_stale into every 20 ms user frame superimposed the
+        # same ~50 ms waveform repeatedly (an audible buzz at echo-estimate
+        # amplitude) exactly when there is no echo to cancel. 250 ms covers
+        # the carrier round-trip + jitter of a real echo tail.
+        last_push = getattr(self, "_last_far_push_monotonic", None)
+        if last_push is None or (time.monotonic() - last_push) > self._FAR_STALE_S:
             return pcm_bytes
 
         near = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
@@ -270,7 +292,13 @@ class NlmsEchoCanceller:
         # docstring + Hänsler/Schmidt for derivation.
         far_max = float(np.max(np.abs(far_window))) if far_window.size else 0.0
         near_max = float(np.max(np.abs(near)))
-        double_talk = near_max > self._rho * far_max if far_max > 1e-6 else False
+        # Freeze adaptation when the far reference is effectively silent:
+        # the old 1e-6 floor (-120 dBFS) kept adapting against TTS fade-outs
+        # with a near-zero norm, blowing the weights up against user speech
+        # (clipped garbage when TTS resumed). 1e-3 ≈ -60 dBFS.
+        if far_max <= 1e-3:
+            return self._passthrough_frame(near)
+        double_talk = near_max > self._rho * far_max
         if double_talk:
             self.double_talk_frames += 1
 

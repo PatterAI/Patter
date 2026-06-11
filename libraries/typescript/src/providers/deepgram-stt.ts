@@ -182,6 +182,9 @@ export class DeepgramSTT {
    * ``(apiKey, language?, model?, encoding?, sampleRate?)`` for backward
    * compatibility with code that predated BUG #13.
    */
+  /** Construction args replayed by clone(). */
+  private readonly patterCtorArgs: unknown[];
+
   constructor(
     apiKey: string,
     language?: string,
@@ -199,6 +202,7 @@ export class DeepgramSTT {
     sampleRate?: number,
     options?: DeepgramSTTOptions,
   ) {
+    this.patterCtorArgs = [apiKey, languageOrOptions, model, encoding, sampleRate, options];
     this.apiKey = apiKey;
     const opts: DeepgramSTTOptions & { language?: string } =
       typeof languageOrOptions === 'object' && languageOrOptions !== null
@@ -316,6 +320,17 @@ export class DeepgramSTT {
   }
 
   /** Open the streaming WebSocket and arm message + keepalive handlers. */
+
+  /**
+   * Fresh adapter built with this instance's construction arguments —
+   * called per call by the stream handler so concurrent calls never share
+   * connection state (sockets/queues; cross-call transcript bleed).
+   */
+  clone(): this {
+    const ctor = this.constructor as new (...args: unknown[]) => this;
+    return new ctor(...this.patterCtorArgs);
+  }
+
   async connect(): Promise<void> {
     await this.openSocket();
     this.running = true;
@@ -448,7 +463,11 @@ export class DeepgramSTT {
   private emitTranscript(transcript: Transcript): void {
     for (const cb of this.transcriptCallbacks) {
       try {
-        cb(transcript);
+        // The callback is async — the sync catch alone never saw its
+        // rejection, which killed the process as an unhandled rejection.
+        Promise.resolve(cb(transcript)).catch((err) =>
+          getLogger().error(`DeepgramSTT transcript callback failed: ${String(err)}`),
+        );
       } catch (err) {
         getLogger().error(`DeepgramSTT transcript callback threw: ${String(err)}`);
       }

@@ -130,6 +130,7 @@ export class SonioxSTT {
   private ws: WebSocket | null = null;
   private readonly callbacks = new Set<TranscriptCallback>();
   private final = new TokenAccumulator();
+  private lastInterimText = '';
   private keepaliveTimer: ReturnType<typeof setInterval> | null = null;
 
   private readonly apiKey: string;
@@ -144,7 +145,11 @@ export class SonioxSTT {
   private readonly clientReferenceId?: string;
   private readonly baseUrl: string;
 
+  /** Construction args replayed by clone(). */
+  private readonly patterCtorArgs: unknown[];
+
   constructor(apiKey: string, options: SonioxSTTOptions = {}) {
+    this.patterCtorArgs = [apiKey, options];
     if (!apiKey) {
       throw new Error('Soniox apiKey is required');
     }
@@ -197,6 +202,17 @@ export class SonioxSTT {
   }
 
   /** Open the streaming WebSocket and send the initial config payload. */
+
+  /**
+   * Fresh adapter built with this instance's construction arguments —
+   * called per call by the stream handler so concurrent calls never share
+   * connection state (sockets/queues; cross-call transcript bleed).
+   */
+  clone(): this {
+    const ctor = this.constructor as new (...args: unknown[]) => this;
+    return new ctor(...this.patterCtorArgs);
+  }
+
   async connect(): Promise<void> {
     // Reset the accumulator so reconnection after close() does not carry
     // stale final.text across streams.
@@ -282,7 +298,11 @@ export class SonioxSTT {
 
     if (!emittedFinalThisMsg) {
       const text = (this.final.text + nonFinal.text).trim();
-      if (text) {
+      // Skip re-emitting an unchanged interim: keepalive/progress frames
+      // with no new tokens re-emitted the identical text, re-triggering
+      // downstream partial-transcript/barge-in checks. Mirrors Python.
+      if (text && text !== this.lastInterimText) {
+        this.lastInterimText = text;
         const { sum: fSum, count: fCount } = this.final.raw;
         const { sum: nSum, count: nCount } = nonFinal.raw;
         const total = fCount + nCount;
@@ -303,7 +323,16 @@ export class SonioxSTT {
 
   private emit(transcript: Transcript): void {
     for (const cb of this.callbacks) {
-      cb(transcript);
+      // The registered callback is async (stream-handler's handleTranscript)
+      // — a bare call left its rejection unhandled, which kills the Node
+      // process. Contain both sync throws and async rejections.
+      try {
+        Promise.resolve(cb(transcript)).catch((err) =>
+          getLogger().error(`STT transcript callback failed: ${String(err)}`),
+        );
+      } catch (err) {
+        getLogger().error(`STT transcript callback threw: ${String(err)}`);
+      }
     }
   }
 
@@ -312,6 +341,20 @@ export class SonioxSTT {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     if (audio.length === 0) return;
     this.ws.send(audio);
+  }
+
+  /**
+   * Ask Soniox to finalize buffered audio immediately. The pipeline's VAD
+   * ``speech_end`` fast-path duck-types ``stt.finalize`` — without this
+   * every Soniox turn waited out the full endpointing delay. Mirrors Python.
+   */
+  finalize(): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    try {
+      this.ws.send(JSON.stringify({ type: 'finalize' }));
+    } catch (err) {
+      getLogger().debug(`Soniox finalize failed: ${String(err)}`);
+    }
   }
 
   /** Register a transcript listener. */

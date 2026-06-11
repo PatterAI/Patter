@@ -305,12 +305,17 @@ export class IVRActivity {
 
   /** Record the current user-turn state (e.g. `"listening"`, `"away"`). */
   noteUserState(state: string): void {
+    // Guard on the lifecycle flag: a state transition reported after
+    // ``stop()`` re-armed the silence timer and fired ``onSilence`` on a
+    // dead call.
+    if (!this.started) return;
     this.currentUserState = state;
     this.scheduleSilenceCheck();
   }
 
   /** Record the current agent-turn state (e.g. `"idle"`, `"listening"`). */
   noteAgentState(state: string): void {
+    if (!this.started) return;
     this.currentAgentState = state;
     this.scheduleSilenceCheck();
   }

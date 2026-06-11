@@ -24,7 +24,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     pass
 
-from getpatter.models import HookContext
+from getpatter._speech_events import EouTrigger
+from getpatter.models import HookContext, _invoke_transfer_fn
 from getpatter.observability.tracing import (
     SPAN_BARGEIN,
     SPAN_ENDPOINT,
@@ -33,6 +34,7 @@ from getpatter.observability.tracing import (
     SPAN_TTS,
     start_span,
 )
+from getpatter.services.input_chain import InputProcessingChain
 from getpatter.services.pipeline_hooks import PipelineHookExecutor
 from getpatter.services.sentence_chunker import SentenceChunker
 from getpatter.telephony.common import (
@@ -212,6 +214,108 @@ def _is_stt_hallucination(text: str) -> bool:
     return len(parts) > 1 and all(p in _STT_HALLUCINATIONS for p in parts)
 
 
+def _ends_with_sentence_final_punct(text: str) -> bool:
+    """True when *text* (whitespace-stripped) ends with sentence-final
+    punctuation — the fast-path confidence signal for preemptive generation.
+    Parity with TS ``endsWithSentenceFinalPunct``."""
+    stripped = (text or "").rstrip()
+    return bool(stripped) and stripped[-1] in _SENTENCE_ENDERS
+
+
+def _speculation_matches(interim: str, final: str) -> bool:
+    """Whether a committed FINAL transcript matches the INTERIM a speculative
+    turn was generated from, i.e. the speculation can be released.
+
+    Both sides are normalized via :func:`_normalize_for_echo` (lowercase,
+    punctuation stripped, whitespace collapsed), so a final that merely adds
+    trailing punctuation / capitalization to the interim still matches.
+    Parity with TS ``speculationMatches``.
+    """
+    a = _normalize_for_echo(interim)
+    b = _normalize_for_echo(final)
+    return bool(a) and a == b
+
+
+#: Hard cap (seconds of playout) on TTS audio buffered by a speculative turn.
+#: Overflow aborts the speculation — an unbounded buffer on a long LLM reply
+#: would hold tens of MB per call. ~15 s covers any reasonable spoken reply
+#: prefix while the user finishes their utterance. Parity with TS
+#: ``PREEMPTIVE_MAX_BUFFER_MS``.
+_PREEMPTIVE_MAX_BUFFER_S = 15.0
+
+
+class _SpeculativeTurn:
+    """In-flight PREEMPTIVE GENERATION state for one speculated user turn.
+
+    Created by ``PipelineStreamHandler._start_speculation`` on a confident
+    interim transcript. The owning task runs the LLM + sentence-chunked TTS
+    but HOLDS all audio in ``buffered`` until the final transcript commits:
+
+    * release (final matches): ``released=True`` + ``release_event`` set —
+      the task flushes ``buffered`` to the carrier and continues live; it IS
+      the real turn from then on (history/metrics recorded by the releaser
+      and the task).
+    * discard (mismatch / barge-in / replaced / overflow / teardown):
+      ``cancel_event`` set — the task unwinds without ever touching the
+      carrier, conversation history, or per-turn metrics.
+
+    Mirrors TS ``SpeculativeTurn``.
+    """
+
+    __slots__ = (
+        "interim_text",
+        "norm_text",
+        "cancel_event",
+        "release_event",
+        "released",
+        "flushed",
+        "failed",
+        "interrupted",
+        "final_text",
+        "buffered",
+        "buffered_bytes",
+        "response_parts",
+        "first_tts_chunk",
+        "llm_first_token_recorded",
+        "task",
+    )
+
+    def __init__(self, interim_text: str) -> None:
+        self.interim_text = interim_text
+        self.norm_text = _normalize_for_echo(interim_text)
+        # Per-speculation LLM cancel signal (same machinery the live path
+        # hands to ``LLMLoop.run``). On release this becomes the handler's
+        # ``_llm_cancel_event`` so the existing barge-in cancel paths reach
+        # the speculative stream.
+        self.cancel_event: asyncio.Event = asyncio.Event()
+        # Set once the commit-time decision is known (either way); the task
+        # parks on it when generation finishes before the final commits.
+        self.release_event: asyncio.Event = asyncio.Event()
+        self.released = False
+        # True once buffered audio has been flushed to the carrier (release).
+        self.flushed = False
+        # True when the speculation can no longer be released (LLM error,
+        # buffer overflow, internal failure) — the commit path must dispatch
+        # normally.
+        self.failed = False
+        # Barge-in after release cut the live continuation short.
+        self.interrupted = False
+        # Stamped at release with the committed final transcript.
+        self.final_text = ""
+        # Per-sentence audio held until release: (sentence_text, chunks).
+        # The chunks list is registered BEFORE synthesis so a mid-sentence
+        # release flushes the partial sentence too.
+        self.buffered: list[tuple[str, list[bytes]]] = []
+        self.buffered_bytes = 0
+        self.response_parts: list[str] = []
+        # Same single-element-list flag shape ``_synthesize_sentence`` uses,
+        # shared across the buffered flush and the live continuation so the
+        # per-turn first-byte metric stays idempotent.
+        self.first_tts_chunk: list[bool] = [True]
+        self.llm_first_token_recorded = False
+        self.task: asyncio.Task | None = None
+
+
 def _summarize_realtime_error(ev_data: Any) -> str:
     """Build a PII-free one-line summary of a Realtime ``error`` event.
 
@@ -242,11 +346,109 @@ TRANSFER_CALL_TOOL: dict = {
             "number": {
                 "type": "string",
                 "description": "Phone number to transfer to (E.164 format)",
-            }
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["cold", "warm"],
+                "description": (
+                    "Transfer mode. 'cold' (default) redirects the caller "
+                    "immediately. 'warm' puts the caller on hold music, dials "
+                    "the human agent, announces the summary to them, then "
+                    "bridges everyone together."
+                ),
+            },
+            "summary": {
+                "type": "string",
+                "description": (
+                    "Warm mode only — one or two sentences announced to the "
+                    "human agent before the caller is bridged (who is calling "
+                    "and what they need)."
+                ),
+            },
         },
         "required": ["number"],
     },
 }
+
+# Valid values for the ``mode`` argument of the built-in ``transfer_call``
+# tool. Anything else is rejected with an error envelope (never silently
+# coerced) so a hallucinated mode cannot trigger an unintended blind redirect.
+_TRANSFER_MODES = ("cold", "warm")
+
+#: Name of the built-in multi-agent handoff tool injected when
+#: ``Agent.handoffs`` is configured.
+HANDOFF_TOOL_NAME = "handoff_to"
+
+
+def build_handoff_tool(handoff_names) -> dict:
+    """Build the ``handoff_to`` tool schema for the given target-agent names.
+
+    The names are surfaced both as a JSON-schema ``enum`` (so the model can
+    only pick a configured target) and in the description. Sorted for a
+    deterministic schema. Parity with TS ``buildHandoffTool``.
+    """
+    names = sorted(str(n) for n in handoff_names)
+    return {
+        "name": HANDOFF_TOOL_NAME,
+        "description": (
+            "Hand the conversation off to another specialized agent. The call "
+            "continues seamlessly with the new agent's instructions and tools. "
+            "Available agents: " + ", ".join(names)
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "enum": names,
+                    "description": "Name of the agent to hand the conversation to",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Brief reason for the handoff",
+                },
+            },
+            "required": ["name"],
+        },
+    }
+
+
+def _apply_handoff_target(current, target):
+    """Return a copy of ``current`` with the LLM-visible configuration of the
+    handoff ``target`` applied.
+
+    Only conversational config swaps: ``system_prompt``, ``tools``,
+    ``variables``, ``guardrails``, ``text_transforms``, ``consult``,
+    ``handoffs`` (so chained handoffs follow the target's own map),
+    ``disable_phone_preamble`` and ``tool_call_preambles``. Live audio
+    infrastructure established at call start — STT/TTS/VAD instances, engine
+    connection, carrier codec settings, and therefore the voice on engines
+    that cannot switch voice mid-session — is intentionally retained from
+    ``current``. ``Agent`` is a frozen dataclass, so a new instance is
+    returned via :func:`dataclasses.replace`.
+    """
+    import dataclasses
+
+    return dataclasses.replace(
+        current,
+        system_prompt=target.system_prompt,
+        tools=target.tools,
+        variables=target.variables,
+        guardrails=target.guardrails,
+        text_transforms=target.text_transforms,
+        consult=target.consult,
+        handoffs=target.handoffs,
+        disable_phone_preamble=target.disable_phone_preamble,
+        tool_call_preambles=target.tool_call_preambles,
+    )
+
+
+def _handoff_history_text(name: str, reason: str) -> str:
+    """Render the system-style transcript line recording a handoff."""
+    text = f"[handoff] Conversation handed to agent '{name}'"
+    if reason:
+        text += f" — {reason}"
+    return text
 
 END_CALL_TOOL: dict = {
     "name": "end_call",
@@ -288,9 +490,42 @@ def _augment_with_builtin_handoff_tools(
     if transfer_fn is not None:
 
         async def _transfer_handler(arguments: dict, call_context: dict) -> str:
-            number = (arguments or {}).get("number", "")
+            args = arguments or {}
+            number = args.get("number", "")
+            mode = args.get("mode") or "cold"
+            summary = args.get("summary") or ""
+            if mode not in _TRANSFER_MODES:
+                return json.dumps(
+                    {
+                        "error": f"Invalid transfer mode {mode!r} — use 'cold' or 'warm'",
+                        "status": "rejected",
+                    }
+                )
+            # Validate BEFORE attempting the transfer (both modes): the
+            # carrier helpers silently no-op on a non-E.164 target, so the
+            # old path told the LLM "Transferring to 555-1234" while nothing
+            # happened and the call sat in limbo. Mirrors the realtime
+            # path's rejection envelope and the TS pipeline.
+            if not _validate_e164(number):
+                logger.warning(
+                    "transfer_call rejected: invalid number %s",
+                    mask_phone_number(number),
+                )
+                return json.dumps(
+                    {"error": "Invalid phone number format", "status": "rejected"}
+                )
+            if mode == "warm":
+                outcome = await _invoke_transfer_fn(
+                    transfer_fn, number, mode="warm", summary=summary
+                )
+                if isinstance(outcome, dict):
+                    return json.dumps(outcome)
+                return json.dumps(
+                    {"status": "transferring", "mode": "warm", "to": number}
+                )
+            # Cold mode: byte-identical to the historical behaviour.
             await transfer_fn(number)
-            return f"Transferring to {number}" if number else "Transfer rejected"
+            return f"Transferring to {number}"
 
         out.append({**TRANSFER_CALL_TOOL, "handler": _transfer_handler})
     if hangup_fn is not None:
@@ -450,11 +685,6 @@ def apply_tool_call_preambles(prompt: str, knob: bool | str) -> str:
 
 def apply_call_overrides(agent, overrides: dict):
     """Return a new Agent with per-call config overrides applied."""
-    from dataclasses import asdict
-
-    from getpatter.models import (
-        Agent as _Agent,
-    )
     from getpatter.models import (
         STTConfig as _STTCfg,
     )
@@ -482,9 +712,15 @@ def apply_call_overrides(agent, overrides: dict):
     if "variables" in overrides:
         fields["variables"] = overrides["variables"]
     if fields:
-        base = {k: v for k, v in asdict(agent).items() if k not in fields}
-        base.update(fields)
-        agent = _Agent(**base)
+        # ``dataclasses.replace`` — NOT an asdict() round-trip: asdict
+        # recursively converted nested configs (STTConfig/TTSConfig/
+        # PipelineHooks) into plain dicts and deep-copied live provider/VAD
+        # objects holding sockets and ONNX sessions, so ANY per-call
+        # override crashed the call later with AttributeError on the
+        # dict-ified config.
+        from dataclasses import replace as _dc_replace
+
+        agent = _dc_replace(agent, **fields)
         logger.debug("Per-call config overrides applied: %s", list(fields.keys()))
     return agent
 
@@ -727,8 +963,16 @@ class StreamHandler(ABC):
         # so every realtime-style subclass (OpenAI Realtime + ConvAI) shares it.
         # Parity with TS ``currentTurnIndex``.
         self._current_turn_index: int | None = None
-        self.conversation_history: deque = conversation_history or deque(maxlen=200)
-        self.transcript_entries: deque = transcript_entries or deque(maxlen=200)
+        # ``is not None`` — NOT ``or``: the bridges pass freshly-created EMPTY
+        # deques (falsy!), so ``or`` silently allocated private replacements
+        # and the bridge-side deques stayed empty forever — every
+        # ``on_call_end`` payload carried an empty transcript/history.
+        self.conversation_history: deque = (
+            conversation_history if conversation_history is not None else deque(maxlen=200)
+        )
+        self.transcript_entries: deque = (
+            transcript_entries if transcript_entries is not None else deque(maxlen=200)
+        )
         # Optional `SpeechEvents` dispatcher. When set, the handler emits
         # turn-taking edges (VAD start/stop, EOU commit, agent first/last
         # wire chunk) as the call progresses. None == prior behaviour.
@@ -745,6 +989,13 @@ class StreamHandler(ABC):
         # Closed in ``cleanup``/``fire_call_end`` to free open MCP
         # WebSocket / HTTP connections. Parity with TS field.
         self._mcp_manager: Any = None
+        # Carrier-neutral local call recorder (``LocalCallRecorder`` from
+        # ``getpatter.audio.call_recorder``) — wired by the telephony bridge
+        # right after handler construction when ``serve(local_recording=...)``
+        # is on (next to the ``_patter_side`` assignment). ``None`` (default)
+        # keeps every tap a no-op. Closed via ``_close_local_recorder`` in
+        # each subclass ``cleanup``. Parity with TS ``StreamHandler.localRecorder``.
+        self.local_recorder: Any = None
 
         # Set by Patter._attach_span_exporter via attach_span_exporter; "uut" by default.
         # Read once at handler start; later changes via the same Patter instance
@@ -800,6 +1051,33 @@ class StreamHandler(ABC):
         except Exception as exc:
             logger.debug("MCP close error (ignored): %s", exc)
 
+    def _close_local_recorder(self) -> None:
+        """Finalize the local recording WAV (if any). Idempotent + guarded —
+        called from every subclass ``cleanup`` so abnormal teardown paths
+        (carrier WS drop, stream error) still patch the WAV header and leave
+        a parseable file. The recorder reference is kept so the bridge can
+        read ``handler.local_recorder.path`` for the ``on_call_end`` payload.
+        """
+        recorder = getattr(self, "local_recorder", None)
+        if recorder is None:
+            return
+        try:
+            recorder.close()
+        except Exception as exc:  # noqa: BLE001 - teardown must never raise
+            logger.debug("Local recorder close failed: %s", exc)
+
+    def _tap_caller_audio(self, data: bytes, encoding: str) -> None:
+        """Feed a caller-side chunk to the local recorder (no-op when off)."""
+        recorder = getattr(self, "local_recorder", None)
+        if recorder is not None:
+            recorder.add_caller_audio(data, encoding=encoding)
+
+    def _tap_agent_audio(self, data: bytes, encoding: str) -> None:
+        """Feed an agent-side chunk to the local recorder (no-op when off)."""
+        recorder = getattr(self, "local_recorder", None)
+        if recorder is not None:
+            recorder.add_agent_audio(data, encoding=encoding)
+
     def add_observer(self, fn) -> None:
         """Register *fn* as an observer for all ``metrics_collected`` events.
 
@@ -821,13 +1099,13 @@ class StreamHandler(ABC):
     # ------------------------------------------------------------------
 
     async def _emit_user_speech_started(self) -> None:
-        if self.speech_events is None:
+        if getattr(self, "speech_events", None) is None:
             return
         self._user_speech_start_ms = time.time() * 1000
         await self.speech_events.fire_user_speech_started()
 
     async def _emit_user_speech_ended(self) -> None:
-        if self.speech_events is None:
+        if getattr(self, "speech_events", None) is None:
             return
         now_ms = time.time() * 1000
         duration_ms = (
@@ -843,14 +1121,14 @@ class StreamHandler(ABC):
     async def _emit_user_speech_eos(
         self, *, trigger: str, transcript_so_far: str | None = None
     ) -> None:
-        if self.speech_events is None:
+        if getattr(self, "speech_events", None) is None:
             return
         await self.speech_events.fire_user_speech_eos(
             trigger=trigger, transcript_so_far=transcript_so_far
         )
 
     async def _emit_agent_speech_started(self, *, engine: str | None = None) -> None:
-        if self.speech_events is None:
+        if getattr(self, "speech_events", None) is None:
             return
         self._agent_turn_start_ms = time.time() * 1000
         tts_provider = self._infer_tts_provider()
@@ -859,7 +1137,7 @@ class StreamHandler(ABC):
         )
 
     async def _emit_agent_speech_ended(self, *, interrupted: bool = False) -> None:
-        if self.speech_events is None:
+        if getattr(self, "speech_events", None) is None:
             return
         now_ms = time.time() * 1000
         duration_ms = (
@@ -878,7 +1156,7 @@ class StreamHandler(ABC):
         """Fire the per-turn TTFT marker. Idempotent within a turn —
         :class:`SpeechEvents` guards on ``_first_token_for_turn``.
         """
-        if self.speech_events is None:
+        if getattr(self, "speech_events", None) is None:
             return
         await self.speech_events.fire_llm_first_token(
             llm_provider=llm_provider, model=model or ""
@@ -890,7 +1168,7 @@ class StreamHandler(ABC):
         ``tts_provider`` defaults to the inferred TTS class name (Pipeline
         mode) or the engine name (Realtime / ConvAI).
         """
-        if self.speech_events is None:
+        if getattr(self, "speech_events", None) is None:
             return
         provider = tts_provider or self._infer_tts_provider() or "unknown"
         await self.speech_events.fire_audio_out(tts_provider=provider)
@@ -959,6 +1237,67 @@ class StreamHandler(ABC):
     async def cleanup(self) -> None:
         """Close provider connections and cancel background tasks."""
 
+    # Safety: auto-hangup ceiling to prevent runaway billing on calls that
+    # never receive a carrier stop (mirrors TS MAX_CALL_DURATION_MS = 1 h).
+    _MAX_CALL_DURATION_S: float = 60 * 60
+
+    def _arm_max_call_watchdog(self) -> None:
+        """Start the 1-hour auto-hangup watchdog (idempotent).
+
+        TS has had this guard since early on; Python calls without a carrier
+        stop event could previously run (and bill) forever.
+        """
+        existing = getattr(self, "_max_call_watchdog", None)
+        if existing is not None and not existing.done():
+            return
+
+        async def _watchdog() -> None:
+            await asyncio.sleep(self._MAX_CALL_DURATION_S)
+            logger.warning(
+                "Call %s hit max duration (%d min) — terminating",
+                self.call_id,
+                int(self._MAX_CALL_DURATION_S / 60),
+            )
+            hangup = getattr(self, "_hangup_fn", None)
+            if hangup is not None:
+                try:
+                    await hangup()
+                except Exception as exc:  # noqa: BLE001 - best effort
+                    logger.debug("max-duration hangup failed: %s", exc)
+
+        self._max_call_watchdog = asyncio.create_task(_watchdog())
+
+    def _cancel_max_call_watchdog(self) -> None:
+        task = getattr(self, "_max_call_watchdog", None)
+        if task is not None and not task.done():
+            task.cancel()
+        self._max_call_watchdog = None
+
+
+    async def _safe_on_transcript(self, payload: dict) -> None:
+        """Invoke the user's ``on_transcript`` with exception containment.
+
+        A raise from user code inside the realtime event-forwarding loop
+        permanently killed it — inbound audio kept flowing to the provider
+        while nothing came back (zombie call). Observer callbacks must never
+        break the pipeline.
+        """
+        if not self.on_transcript:
+            return
+        try:
+            await self.on_transcript(payload)
+        except Exception:  # noqa: BLE001 - user callback containment
+            logger.exception("on_transcript callback failed")
+
+    async def _safe_on_metrics(self, payload: dict) -> None:
+        """Invoke the user's ``on_metrics`` with exception containment."""
+        if not self.on_metrics:
+            return
+        try:
+            await self.on_metrics(payload)
+        except Exception:  # noqa: BLE001 - user callback containment
+            logger.exception("on_metrics callback failed")
+
     async def _emit_turn_metrics(self, turn, *, call_id: str | None = None) -> None:
         """Emit a completed turn to the user-supplied on_metrics callback.
 
@@ -990,7 +1329,7 @@ class StreamHandler(ABC):
 
         if not self.on_metrics or turn is None or self.metrics is None:
             return
-        await self.on_metrics(
+        await self._safe_on_metrics(
             {
                 "call_id": call_id if call_id is not None else self.call_id,
                 "turn": turn,
@@ -1104,7 +1443,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
             # FIX-5: stamp the reserved turn index so the dashboard can order
             # this assistant line relative to its user line by (turn_index,
             # role) even when the lines arrive out of order.
-            await self.on_transcript(
+            await self._safe_on_transcript(
                 {
                     "role": "assistant",
                     "text": text,
@@ -1240,7 +1579,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         )
         self.transcript_entries.append({"role": "tool", "text": text})
         if self.on_transcript:
-            await self.on_transcript(
+            await self._safe_on_transcript(
                 {
                     "role": "tool",
                     "text": text,
@@ -1251,8 +1590,110 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                 }
             )
 
+    async def _handle_handoff_function_call(self, func_data: dict) -> None:
+        """Dispatch the built-in ``handoff_to`` tool on the Realtime path.
+
+        Swaps the live session to the target agent's configuration via a
+        mid-session ``session.update`` (new ``instructions`` + ``tools``),
+        updates ``self.agent`` so subsequent tool dispatch resolves against
+        the target's tool list, and records a system-style history entry so
+        transcripts show the handoff. ALWAYS sends a function result — an
+        unknown name / malformed args produce an error envelope, never
+        silence (a missing function result would wedge the model).
+
+        Voice is intentionally NOT swapped: OpenAI Realtime rejects a voice
+        change once the session has produced audio, so the session keeps the
+        voice established at call start (documented limitation; an INFO log
+        is emitted when the target requested a different voice).
+        """
+        raw_args = func_data.get("arguments", "{}")
+        try:
+            args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+        except (json.JSONDecodeError, ValueError):
+            args = None
+        if not isinstance(args, dict):
+            result = json.dumps(
+                {"error": "Malformed handoff_to arguments", "status": "rejected"}
+            )
+            await self._adapter.send_function_result(func_data["call_id"], result)
+            await self._emit_tool_event(HANDOFF_TOOL_NAME, {}, result)
+            return
+        name = args.get("name", "")
+        reason = args.get("reason") or ""
+        handoffs: dict = getattr(self.agent, "handoffs", None) or {}
+        target = handoffs.get(name)
+        if target is None:
+            result = json.dumps(
+                {
+                    "error": f"Unknown handoff agent {name!r}",
+                    "available": sorted(handoffs.keys()),
+                }
+            )
+            await self._adapter.send_function_result(func_data["call_id"], result)
+            await self._emit_tool_event(HANDOFF_TOOL_NAME, args, result)
+            return
+
+        if target.voice and target.voice != self.agent.voice:
+            logger.info(
+                "handoff_to %r: voice change is not supported mid-session on "
+                "OpenAI Realtime — keeping the current voice.",
+                name,
+            )
+
+        # Swap the LLM-visible config (frozen dataclass → dataclasses.replace
+        # inside _apply_handoff_target) and re-inject the consult tool when the
+        # target configures one.
+        self.agent = _inject_consult_tool(_apply_handoff_target(self.agent, target))
+        self.resolved_prompt = resolve_agent_prompt(self.agent)
+
+        # Build the new wire tool list: target tools + built-ins (+ onward
+        # handoff tool when the target has its own handoff map). Mirrors the
+        # construction in ``start()``.
+        new_tools: list[dict] = [
+            {
+                "name": t["name"],
+                "description": t.get("description", ""),
+                "parameters": t.get("parameters", {}),
+                **({"strict": True} if t.get("strict") is True else {}),
+            }
+            for t in (self.agent.tools or [])
+        ]
+        new_tools += [TRANSFER_CALL_TOOL, END_CALL_TOOL]
+        if getattr(self.agent, "handoffs", None):
+            new_tools.append(build_handoff_tool(self.agent.handoffs.keys()))
+
+        new_instructions = apply_tool_call_preambles(
+            self.resolved_prompt,
+            getattr(self.agent, "tool_call_preambles", False),
+        )
+        # session.update FIRST, then the function result — the result triggers
+        # the next ``response.create``, which must already run under the new
+        # instructions so the model replies as the target agent.
+        await self._adapter.update_session(
+            instructions=new_instructions, tools=new_tools
+        )
+
+        handoff_text = _handoff_history_text(name, reason)
+        self.conversation_history.append(
+            {"role": "system", "text": handoff_text, "timestamp": time.time()}
+        )
+        self.transcript_entries.append({"role": "system", "text": handoff_text})
+        if self.on_transcript:
+            await self.on_transcript(
+                {
+                    "role": "system",
+                    "text": handoff_text,
+                    "call_id": self.call_id,
+                }
+            )
+
+        result = json.dumps({"status": "handed_off", "to": name})
+        await self._adapter.send_function_result(func_data["call_id"], result)
+        await self._emit_tool_event(HANDOFF_TOOL_NAME, args, result)
+
     async def start(self) -> None:
         """Connect to OpenAI Realtime, register tools, and begin event forwarding."""
+        self._arm_max_call_watchdog()
         # Both ``openai_realtime`` and ``openai_realtime_2`` engines now
         # route through the GA-compatible ``OpenAIRealtime2Adapter`` —
         # OpenAI deprecated the Beta Realtime API on 2026-05, returning
@@ -1299,6 +1740,11 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                 entry["strict"] = True
             agent_tools.append(entry)
         openai_tools: list[dict] = agent_tools + [TRANSFER_CALL_TOOL, END_CALL_TOOL]
+        # Multi-agent handoff: advertise the built-in ``handoff_to`` tool when
+        # the agent has handoff targets configured. Dispatched in
+        # ``_forward_events`` (see ``_handle_handoff_function_call``).
+        if getattr(self.agent, "handoffs", None):
+            openai_tools.append(build_handoff_tool(self.agent.handoffs.keys()))
 
         # Forward optional engine-level Realtime knobs (carried on the Agent
         # by ``Patter._unpack_engine``) only when set, so the adapter's own
@@ -1474,6 +1920,18 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                         # idempotency guards stop double-firing within a turn.
                         await self._emit_audio_out(tts_provider="openai_realtime")
                         waiting_first_audio = False
+                    # Local-recording tap (agent side). The adapter emits the
+                    # negotiated session codec: μ-law 8 kHz for ``g711_ulaw``
+                    # sessions (all current carriers), PCM16 24 kHz otherwise
+                    # — decode in the tap, never skip, so the recorder always
+                    # receives PCM16 16 kHz.
+                    if getattr(self, "local_recorder", None) is not None:
+                        self._tap_agent_audio(
+                            ev_data,
+                            "mulaw_8k"
+                            if self._audio_format == "g711_ulaw"
+                            else "pcm16_24k",
+                        )
                     await self.audio_sender.send_audio(ev_data)
                     await self.audio_sender.send_mark(f"audio_{id(ev_data)}")
 
@@ -1572,7 +2030,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                         # stamped with the reserved turn index so the dashboard
                         # can place it ABOVE its assistant line even if that
                         # line was already surfaced.
-                        await self.on_transcript(
+                        await self._safe_on_transcript(
                             {
                                 "role": "user",
                                 "text": ev_data,
@@ -1633,15 +2091,38 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                             llm_provider="openai_realtime",
                             model=self.agent.model,
                         )
+                        # Evaluate on the ACCUMULATED text: per-delta checks
+                        # never matched a blocked term split across deltas.
                         blocked, guard_name = evaluate_guardrails(
-                            self.agent, response_text
+                            self.agent, current_agent_text + response_text
                         )
                         if blocked:
                             await self._adapter.cancel_response()
+                            # Drop the blocked sentence's audio already queued
+                            # at the carrier — cancel_response alone let it
+                            # play out in full.
+                            try:
+                                await self.audio_sender.send_clear()
+                            except Exception as exc:  # noqa: BLE001
+                                logger.debug(
+                                    "send_clear on guardrail block failed: %s", exc
+                                )
                             replacement = get_guardrail_replacement(
                                 self.agent, guard_name
                             )
-                            await self._adapter.send_text(replacement)
+                            # Speak the replacement as the ASSISTANT's own
+                            # response (instructed response.create) —
+                            # ``send_text`` injected it as a phantom
+                            # ``role:user`` turn, so the model REPLIED to
+                            # "I can't respond to that" as if the caller had
+                            # said it.
+                            send_re = getattr(
+                                self._adapter, "send_reassurance", None
+                            )
+                            if callable(send_re):
+                                await send_re(replacement)
+                            else:
+                                await self._adapter.send_text(replacement)
                             current_agent_text = ""
                         else:
                             # Accumulate deltas — push single entry on response_done
@@ -1802,6 +2283,25 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                             )
                             continue
                         transfer_number = args.get("number", "")
+                        transfer_mode = args.get("mode") or "cold"
+                        transfer_summary = args.get("summary") or ""
+                        if transfer_mode not in _TRANSFER_MODES:
+                            rejection = json.dumps(
+                                {
+                                    "error": (
+                                        f"Invalid transfer mode {transfer_mode!r}"
+                                        " — use 'cold' or 'warm'"
+                                    ),
+                                    "status": "rejected",
+                                }
+                            )
+                            await self._adapter.send_function_result(
+                                func_data["call_id"], rejection
+                            )
+                            await self._emit_tool_event(
+                                "transfer_call", args, rejection
+                            )
+                            continue
                         if not _validate_e164(transfer_number):
                             logger.warning(
                                 "transfer_call rejected: invalid number %s",
@@ -1820,6 +2320,52 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                                 "transfer_call", args, rejection
                             )
                             continue
+                        if transfer_mode == "warm":
+                            # Warm transfer: run the carrier sequence FIRST so
+                            # an unsupported carrier / REST failure surfaces an
+                            # error envelope and the AI keeps the call instead
+                            # of going dark. Only a confirmed warm transfer
+                            # ends this event loop.
+                            outcome = await _invoke_transfer_fn(
+                                self._transfer_fn,
+                                transfer_number,
+                                mode="warm",
+                                summary=transfer_summary,
+                            )
+                            if isinstance(outcome, dict) and outcome.get("error"):
+                                result = json.dumps(outcome)
+                                await self._adapter.send_function_result(
+                                    func_data["call_id"], result
+                                )
+                                await self._emit_tool_event(
+                                    "transfer_call", args, result
+                                )
+                                continue
+                            result = json.dumps(
+                                outcome
+                                if isinstance(outcome, dict)
+                                else {
+                                    "status": "transferring",
+                                    "mode": "warm",
+                                    "to": transfer_number,
+                                }
+                            )
+                            await self._adapter.send_function_result(
+                                func_data["call_id"], result
+                            )
+                            await self._emit_tool_event("transfer_call", args, result)
+                            if self.on_transcript:
+                                await self.on_transcript(
+                                    {
+                                        "role": "system",
+                                        "text": (
+                                            "Call transferred (warm) to "
+                                            f"{transfer_number}"
+                                        ),
+                                        "call_id": self.call_id,
+                                    }
+                                )
+                            return
                         logger.debug(
                             "Transferring call to %s",
                             mask_phone_number(transfer_number),
@@ -1834,7 +2380,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                         if self._transfer_fn:
                             await self._transfer_fn(transfer_number)
                         if self.on_transcript:
-                            await self.on_transcript(
+                            await self._safe_on_transcript(
                                 {
                                     "role": "system",
                                     "text": f"Call transferred to {transfer_number}",
@@ -1866,7 +2412,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                         if self._hangup_fn:
                             await self._hangup_fn()
                         if self.on_transcript:
-                            await self.on_transcript(
+                            await self._safe_on_transcript(
                                 {
                                     "role": "system",
                                     "text": f"Call ended: {reason}",
@@ -1874,6 +2420,11 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                                 }
                             )
                         return
+
+                    elif func_data["name"] == HANDOFF_TOOL_NAME and getattr(
+                        self.agent, "handoffs", None
+                    ):
+                        await self._handle_handoff_function_call(func_data)
 
                     else:
                         tool_def = next(
@@ -1893,8 +2444,24 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                                     args = json.loads(args)
                                 except (json.JSONDecodeError, ValueError):
                                     logger.warning(
-                                        "function_call %s: malformed JSON args, skipping",
+                                        "function_call %s: malformed JSON args",
                                         func_data["name"],
+                                    )
+                                    # A skipped call leaves a dangling
+                                    # function_call item — the model waits
+                                    # for an output that never comes (dead
+                                    # air). Answer with an error envelope
+                                    # instead. Mirrors TS.
+                                    await self._adapter.send_function_result(
+                                        func_data["call_id"],
+                                        json.dumps(
+                                            {
+                                                "error": "Tool arguments were not "
+                                                "valid JSON; the call was not "
+                                                "executed.",
+                                                "fallback": True,
+                                            }
+                                        ),
                                     )
                                     continue
                             # Surface the invocation BEFORE execution so the
@@ -1946,6 +2513,27 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                             # Emit follow-up event with result so timeline
                             # shows full call/return semantics.
                             await self._emit_tool_event(func_data["name"], args, result)
+                        else:
+                            # Unknown (hallucinated) tool name, or a
+                            # schema-only tool with neither webhook nor
+                            # handler: ALWAYS answer the function_call —
+                            # silence left a dangling item and the tool turn
+                            # never completed (dead air). Mirrors TS.
+                            logger.warning(
+                                "function_call for unregistered tool '%s' — "
+                                "returning error envelope",
+                                func_data.get("name", ""),
+                            )
+                            await self._adapter.send_function_result(
+                                func_data["call_id"],
+                                json.dumps(
+                                    {
+                                        "error": f"Tool '{func_data.get('name', '')}' "
+                                        "is not registered",
+                                        "fallback": True,
+                                    }
+                                ),
+                            )
 
                 elif ev_type == "error":
                     # FIX-4: surface provider-side Realtime ``error`` events.
@@ -1964,6 +2552,21 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
 
     async def on_audio_received(self, audio_bytes: bytes) -> None:
         """Forward decoded telephony audio to the OpenAI Realtime session (transcoding if needed)."""
+        # Local-recording tap — BEFORE the adapter guard so the caller side
+        # is captured even while the Realtime WS is still connecting. The
+        # Realtime handler forwards carrier bytes untouched, so the inbound
+        # encoding follows the negotiated session codec: ``g711_ulaw``
+        # sessions (Twilio / Telnyx / Plivo) receive μ-law 8 kHz; the
+        # ``input_transcode`` path receives PCM16 16 kHz from the carrier.
+        # The recorder decodes to PCM16 16 kHz internally.
+        if getattr(self, "local_recorder", None) is not None:
+            if self._input_transcode == "pcm16_16k_to_g711_ulaw":
+                _rec_enc = "pcm16_16k"
+            elif self._audio_format == "g711_ulaw":
+                _rec_enc = "mulaw_8k"
+            else:
+                _rec_enc = "pcm16_16k"
+            self._tap_caller_audio(audio_bytes, _rec_enc)
         if self._adapter is None:
             return
         if self._input_transcode == "pcm16_16k_to_g711_ulaw":
@@ -1987,6 +2590,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
 
     async def cleanup(self) -> None:
         """Cancel the event-forward task and close the OpenAI Realtime adapter."""
+        self._cancel_max_call_watchdog()
         if self._pending_assistant_timer is not None:
             self._pending_assistant_timer.cancel()
             self._pending_assistant_timer = None
@@ -2001,6 +2605,8 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         # Close MCP server connections. Best effort: a flaky MCP server
         # must not derail call-end teardown.
         await self._close_mcp()
+        # Finalize the local recording WAV (guarded + idempotent).
+        self._close_local_recorder()
         # Flush and discard the resampler tail on cleanup.
         if self._resampler_16k_to_8k is not None:
             self._resampler_16k_to_8k.flush()
@@ -2034,6 +2640,7 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
         transcript_entries: deque | None = None,
         output_audio_format: str | None = None,
         input_audio_format: str | None = None,
+        speech_events=None,
     ) -> None:
         super().__init__(
             agent=agent,
@@ -2048,6 +2655,7 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
             on_transcript_line=on_transcript_line,
             conversation_history=conversation_history,
             transcript_entries=transcript_entries,
+            speech_events=speech_events,
         )
         self._elevenlabs_key = elevenlabs_key
         self._for_twilio = for_twilio
@@ -2069,6 +2677,7 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
 
     async def start(self) -> None:
         """Connect to the ElevenLabs ConvAI agent and begin event forwarding."""
+        self._arm_max_call_watchdog()
         from getpatter.providers.elevenlabs_convai import (
             ElevenLabsConvAIAdapter,  # type: ignore[import]
         )
@@ -2159,6 +2768,15 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
                         # token-level LLM deltas; the audio edge is the only
                         # observable per-turn signal.
                         await self._emit_audio_out(tts_provider="elevenlabs_convai")
+                    # Local-recording tap (agent side). ConvAI emits μ-law
+                    # 8 kHz on the native fast-path, PCM16 16 kHz otherwise —
+                    # decode in the tap so the recorder always receives
+                    # PCM16 16 kHz.
+                    if getattr(self, "local_recorder", None) is not None:
+                        self._tap_agent_audio(
+                            ev_data,
+                            "mulaw_8k" if self._native_mulaw_8k else "pcm16_16k",
+                        )
                     await self.audio_sender.send_audio(ev_data)
 
                 elif ev_type == "speech_stopped":
@@ -2187,7 +2805,7 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
                     )
                     self.transcript_entries.append({"role": "user", "text": ev_data})
                     if self.on_transcript:
-                        await self.on_transcript(
+                        await self._safe_on_transcript(
                             {
                                 "role": "user",
                                 "text": ev_data,
@@ -2229,7 +2847,7 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
                             {"role": "assistant", "text": current_agent_text}
                         )
                         if self.on_transcript:
-                            await self.on_transcript(
+                            await self._safe_on_transcript(
                                 {
                                     "role": "assistant",
                                     "text": current_agent_text,
@@ -2255,6 +2873,13 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
                         self.metrics.record_turn_interrupted()
                     waiting_first_audio = True
 
+                elif ev_type == "function_call":
+                    # ElevenLabs CLIENT tool invocation. Route through the
+                    # same tool lookup/executor as the other engines — the
+                    # ElevenLabs agent must ALWAYS get a client_tool_result
+                    # (silence stalls it until the provider-side timeout).
+                    await self._handle_convai_client_tool(ev_data or {})
+
                 elif ev_type == "interruption":
                     await self.audio_sender.send_clear()
                     if self.metrics is not None:
@@ -2273,8 +2898,119 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
         except Exception as exc:
             logger.exception("ElevenLabs ConvAI forward error: %s", exc)
 
+    async def _handle_convai_client_tool(self, func_data: dict) -> None:
+        """Execute an ElevenLabs ``client_tool_call`` and answer it.
+
+        Tools are matched against ``agent.tools`` (plus the built-in
+        ``transfer_call``/``end_call`` names so an ElevenLabs agent that
+        declares them as client tools reaches the carrier helpers). Every
+        path sends a ``client_tool_result`` — including unknown tools and
+        execution errors — because a missing result stalls the ElevenLabs
+        agent until its own tool timeout.
+        """
+        from getpatter.tools.tool_executor import ToolExecutor
+
+        call_id = str(func_data.get("call_id", "") or "")
+        name = str(func_data.get("name", "") or "")
+        arguments = func_data.get("arguments") or {}
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except (json.JSONDecodeError, ValueError):
+                arguments = {}
+
+        async def _respond(result: str, *, is_error: bool = False) -> None:
+            sender = getattr(self._adapter, "send_client_tool_result", None)
+            if callable(sender):
+                try:
+                    await sender(call_id, result, is_error=is_error)
+                except Exception as exc:  # noqa: BLE001 - keep the loop alive
+                    logger.warning("client_tool_result send failed: %s", exc)
+
+        # Built-ins first: transfer_call / end_call declared as ElevenLabs
+        # client tools route to the carrier helpers.
+        if name == "transfer_call":
+            number = str(arguments.get("number", "") or "")
+            if not _validate_e164(number):
+                await _respond(
+                    json.dumps(
+                        {"error": "Invalid phone number format", "status": "rejected"}
+                    ),
+                    is_error=True,
+                )
+                return
+            if self._transfer_fn is not None:
+                await self._transfer_fn(number)
+                await _respond(f"Transferring to {number}")
+            else:
+                await _respond(
+                    json.dumps({"error": "transfer not available"}), is_error=True
+                )
+            return
+        if name == "end_call":
+            await _respond("Call ended")
+            if self._hangup_fn is not None:
+                await self._hangup_fn()
+            return
+
+        tool_def = next(
+            (t for t in (self.agent.tools or []) if t.get("name") == name),
+            None,
+        )
+        if not tool_def or not (
+            tool_def.get("webhook_url") or tool_def.get("handler")
+        ):
+            logger.warning(
+                "ConvAI client_tool_call for unregistered tool '%s'", name
+            )
+            await _respond(
+                json.dumps(
+                    {"error": f"Tool '{name}' is not registered", "fallback": True}
+                ),
+                is_error=True,
+            )
+            return
+
+        await self._emit_tool_event(name, arguments, None)
+        executor = ToolExecutor()
+        try:
+            result = await executor.execute(
+                tool_name=name,
+                arguments=arguments,
+                call_context={
+                    "call_id": self.call_id,
+                    "caller": self.caller,
+                    "callee": self.callee,
+                },
+                webhook_url=tool_def.get("webhook_url", ""),
+                handler=tool_def.get("handler"),
+                tool_timeout_s=tool_def.get("timeout_s"),
+            )
+        except Exception as exc:  # noqa: BLE001 - always answer the agent
+            logger.exception("ConvAI client tool '%s' failed: %s", name, exc)
+            await _respond(
+                json.dumps({"error": str(exc)[:200], "fallback": True}),
+                is_error=True,
+            )
+            return
+        finally:
+            try:
+                await executor.close()
+            except Exception:  # noqa: BLE001 - best-effort cleanup
+                pass
+        await _respond(result)
+        await self._emit_tool_event(name, arguments, result)
+
     async def on_audio_received(self, audio_bytes: bytes) -> None:
         """Forward decoded telephony audio to ConvAI (μ-law fast-path or resampled PCM16)."""
+        # Local-recording tap — BEFORE the adapter guard so caller audio is
+        # captured even while the ConvAI WS is still connecting. Every
+        # carrier wired to this handler today (Twilio / Plivo via
+        # ``for_twilio=True``, Telnyx via PCMU bidirectional streaming)
+        # delivers μ-law 8 kHz on the inbound leg; the recorder decodes to
+        # PCM16 16 kHz internally.
+        if getattr(self, "local_recorder", None) is not None:
+            self._tap_caller_audio(audio_bytes, "mulaw_8k")
         if self._adapter is None:
             return
         # Native μ-law 8 kHz fast-path: ConvAI negotiated ulaw_8000 on the
@@ -2300,6 +3036,7 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
 
     async def cleanup(self) -> None:
         """Cancel the event-forward task and close the ConvAI adapter."""
+        self._cancel_max_call_watchdog()
         if self._background_task:
             self._background_task.cancel()
             try:
@@ -2308,6 +3045,8 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
                 pass
         if self._adapter:
             await self._adapter.close()
+        # Finalize the local recording WAV (guarded + idempotent).
+        self._close_local_recorder()
         # Flush and discard the resampler tail on cleanup.
         if self._resampler_8k_to_16k is not None:
             self._resampler_8k_to_16k.flush()
@@ -2348,6 +3087,7 @@ class PipelineStreamHandler(StreamHandler):
         transcript_entries: deque | None = None,
         pop_prewarm_audio=None,
         pop_prewarmed_connections=None,
+        speech_events=None,
     ) -> None:
         super().__init__(
             agent=agent,
@@ -2362,6 +3102,7 @@ class PipelineStreamHandler(StreamHandler):
             on_metrics=on_metrics,
             conversation_history=conversation_history,
             transcript_entries=transcript_entries,
+            speech_events=speech_events,
         )
         # Optional accessor returning pre-rendered first-message audio for
         # ``call_id``. Wired by ``Patter.serve()`` when the parent client
@@ -2398,6 +3139,8 @@ class PipelineStreamHandler(StreamHandler):
         # Awaited BEFORE the STT receive loop starts so the message
         # pump never reads from a half-open WS.
         self._stt_connect_task: asyncio.Task | None = None
+        # Background greeting playback (see _play_first_message).
+        self._first_message_task: asyncio.Task | None = None
         self._tts = None
         # Auto-VAD: if ``agent.vad`` is None we attempt to load SileroVAD
         # with phone-friendly defaults during ``start()``. Stored separately
@@ -2528,8 +3271,58 @@ class PipelineStreamHandler(StreamHandler):
         self._barge_in_pending_since: float | None = None
         # Background task that fires the pending-timeout. Cancelled on
         # confirmation, on agent stop, and on call shutdown so a stale
-        # pending never bleeds into the next turn.
+        # pending never bleeds into the next turn. In
+        # ``barge_in_mode="pause_resume"`` this same handle holds the
+        # false-interruption resume timer (``_pause_resume_timeout``).
         self._barge_in_pending_task = None
+        # ---- Pause-and-resume false-interruption handling ----
+        # ``barge_in_mode="pause_resume"`` (opt-in): on VAD speech_start
+        # during the agent's turn, output is PAUSED (carrier cleared, sends
+        # gated on ``_output_paused``) instead of cancelled. A committed
+        # final transcript within ``_barge_in_confirm_s`` KILLS the turn
+        # (full cancel path); otherwise the agent RESUMES from the first
+        # sentence the caller had not fully heard. Mirrors TS
+        # ``bargeInMode`` / ``outputPaused``.
+        _mode = getattr(agent, "barge_in_mode", "cancel") or "cancel"
+        if _mode not in ("cancel", "pause_resume"):
+            logger.warning(
+                "Unknown barge_in_mode %r — falling back to 'cancel'", _mode
+            )
+            _mode = "cancel"
+        self._barge_in_mode: str = _mode
+        # True while output is paused: ``_synthesize_sentence`` queues
+        # chunks into the per-sentence retention entries instead of
+        # sending, and the streaming loops buffer whole sentences as text.
+        self._output_paused: bool = False
+        # Per-pause decision event — set when the pause resolves (resume,
+        # kill, or teardown) so loop-side waiters can proceed. Recreated at
+        # every ``_start_pause_resume``.
+        self._pause_decision_event: asyncio.Event | None = None
+        # Sentences produced by the LLM while paused (text, pre-guardrail).
+        # Spoken in order on resume; discarded on kill. Bounded by
+        # ``_PAUSE_MAX_BUFFERED_SENTENCES`` — overflow degrades to a full
+        # cancel so memory stays bounded even against a runaway stream.
+        self._paused_sentences: list[str] = []
+        # Per-turn retained sentence audio (pause_resume mode only): one
+        # entry per response sentence holding every TTS chunk produced for
+        # it ({"text", "chunks", "sent"}). ``sent`` is the count of chunks
+        # actually delivered to the carrier — the resume path resets it to
+        # 0 for the unheard tail and re-sends from memory (no TTS
+        # re-billing). Index-aligned with ``_turn_spoken_segments`` for the
+        # stamped prefix. Bounded by ``_PAUSE_RESUME_MAX_RETAINED_S``.
+        self._turn_sentence_audio: list[dict] = []
+        self._pause_retained_bytes: int = 0
+        # Set when the retained-audio cap was exceeded while NOT paused
+        # (very long carrier backlog): retention is released and
+        # pause_resume falls back to legacy cancel for the rest of the
+        # turn. Reset at ``_begin_speaking``.
+        self._pause_resume_overflowed: bool = False
+        # Sentence index (into ``_turn_spoken_segments`` /
+        # ``_turn_sentence_audio``) of the first sentence the caller had
+        # NOT fully heard at pause time — the resume offset. Sentence
+        # granularity: the partially-played sentence is replayed from its
+        # start (natural-sounding repair) rather than resumed mid-word.
+        self._pause_resume_index: int = 0
         # Monotonic counter incremented at every TTS-start. ``_end_speaking_with_grace``
         # captures the value at scheduling time and only flips ``_is_speaking`` to
         # False if no new turn started in the meantime. Prevents an in-flight grace
@@ -2577,8 +3370,13 @@ class PipelineStreamHandler(StreamHandler):
         # Throttle state for back-to-back STT finals — see ``_commit_transcript``.
         self._last_commit_text: str = ""
         self._last_commit_at: float = 0.0
-        # Per-handler StatefulResampler for mulaw 8 kHz -> PCM16 16 kHz transcoding.
-        self._resampler_8k_to_16k = None
+        # Inbound audio processing chain: decode (mulaw->PCM16) -> stateful
+        # 8k->16k resample -> AEC near-end -> ``agent.audio_filter`` -> VAD.
+        # Lazily constructed on the first media frame (slice 1 of the
+        # pipeline-stages decomposition — docs/architecture/pipeline-stages.md);
+        # owns the per-handler StatefulResampler previously held in
+        # ``_resampler_8k_to_16k``.
+        self._input_chain: InputProcessingChain | None = None
         # FIFO of outstanding Twilio marks the SDK has sent but not yet seen
         # echoed back. Used by the firstMessage paced sender to bound the
         # carrier-side buffer depth — without this the loop pushed the entire
@@ -2601,9 +3399,82 @@ class PipelineStreamHandler(StreamHandler):
         # → base64, no resample/encode). Parity with TS
         # ``StreamHandler.ttsOutputFormatNativeForCarrier``.
         self._tts_output_format_native_for_carrier: bool = False
+        # --- PREEMPTIVE GENERATION (opt-in, built-in LLM loop only) ---
+        # When enabled, a confident INTERIM transcript starts a speculative
+        # LLM+TTS dispatch whose audio is HELD in memory; the final
+        # transcript's commit either releases it (matching text — the
+        # already-generated audio flushes immediately) or discards it and
+        # dispatches normally. See ``_note_interim_transcript`` /
+        # ``_try_release_speculation``. Parity with TS ``preemptiveEnabled``.
+        self._preemptive_enabled: bool = bool(
+            getattr(agent, "preemptive_generation", False)
+        )
+        try:
+            self._preemptive_min_stable_s: float = max(
+                0.0, float(getattr(agent, "preemptive_min_stable_ms", 300)) / 1000.0
+            )
+        except (TypeError, ValueError):
+            self._preemptive_min_stable_s = 0.3
+        # The single in-flight speculation (at most one). ``None`` when idle,
+        # when discarded, or once released (a released speculation becomes
+        # the live turn tracked by ``_dispatch_task`` instead).
+        self._speculation: _SpeculativeTurn | None = None
+        # Interim-stability tracking: normalized text of the newest interim
+        # plus the one-shot watcher that starts a speculation once the text
+        # has been unchanged for ``_preemptive_min_stable_s``.
+        self._interim_norm: str = ""
+        self._interim_text: str = ""
+        self._interim_stable_task: asyncio.Task | None = None
+        # ---- Semantic turn detection (opt-in via ``agent.turn_detector``) ----
+        # When a detector is configured, a VAD ``speech_end`` no longer
+        # finalizes STT immediately: the detector scores the rolling window
+        # below and the finalize is deferred (held) while it predicts
+        # "incomplete", bounded by ``agent.max_semantic_hold_ms``. With the
+        # default ``turn_detector=None`` every line below is dormant and the
+        # speech_end path is byte-identical to previous releases.
+        self._turn_detector = getattr(agent, "turn_detector", None)
+        try:
+            self._max_semantic_hold_ms: int = max(
+                0, int(getattr(agent, "max_semantic_hold_ms", 1200))
+            )
+        except (TypeError, ValueError):
+            self._max_semantic_hold_ms = 1200
+        # Rolling buffer of post-decode PCM16 16 kHz frames — the last ~8 s
+        # (256 000 bytes) the detector consumes per prediction. Only
+        # appended when a detector is configured; cleared on turn commit.
+        self._semantic_audio_ring: deque[bytes] = deque()
+        self._semantic_audio_ring_bytes: int = 0
+        # True while a sub-threshold prediction is holding the finalize
+        # open. Resolved by: a follow-up prediction crossing the threshold,
+        # a VAD ``speech_start`` (user resumed — hold moot), the hard cap,
+        # or a committed transcript (STT endpointed on its own).
+        self._semantic_hold_active: bool = False
+        # ``time.monotonic()`` deadline for the hard cap, None when idle.
+        self._semantic_hold_deadline: float | None = None
+        # Generation counter — invalidates the wall-clock backstop task when
+        # the hold it was scheduled for has already been resolved/cancelled.
+        self._semantic_hold_generation: int = 0
+        # Wall-clock backstop: finalizes at the cap even if inbound audio
+        # stalls entirely (the frame-driven poll below then never runs).
+        self._semantic_hold_task: asyncio.Task | None = None
+        # Bytes of audio accumulated since the last prediction while
+        # holding — re-polls every ``_SEMANTIC_POLL_MS`` of silence.
+        self._semantic_poll_pending_bytes: int = 0
+        # Set on the FIRST detector failure: semantic endpointing is then
+        # disabled for the remainder of the call (one clear warning, plain
+        # VAD-silence behavior) instead of warning per turn against a
+        # permanently broken model. Mirrors TS ``turnDetectorFailed`` and
+        # the existing ``vadDisabled`` fail-once pattern.
+        self._semantic_detector_failed: bool = False
+        # EOU trigger for the NEXT committed turn (``EouTrigger.VAD_SILENCE``
+        # | ``EouTrigger.SEMANTIC_TURN_DETECTOR``). Stamped by the semantic
+        # finalize paths, consumed (and reset) by ``_dispatch_turn``.
+        # Mirrors TS ``lastEouTrigger``.
+        self._last_eou_trigger: str = EouTrigger.VAD_SILENCE
 
     async def start(self) -> None:
         """Initialize STT/TTS providers, hooks, and start the STT receive loop."""
+        self._arm_max_call_watchdog()
         from getpatter.models import CallControl
 
         # Create STT. Pipeline mode always transcodes Twilio mulaw 8 kHz →
@@ -2850,104 +3721,28 @@ class PipelineStreamHandler(StreamHandler):
 
         logger.debug("Pipeline mode: STT connect kicked off")
 
-        # Play first_message if configured and no on_message handler.
-        # Measure TTS-first-byte latency for parity with TS (`stream-handler.ts`).
+        # Play first_message if configured and no on_message handler — as a
+        # BACKGROUND task (see _play_first_message): the greeting must not
+        # block the carrier read loop. _begin_speaking completes BEFORE
+        # start() returns so the self-hearing guard engages immediately.
         if (
             self.agent.first_message
             and self.on_message is None
             and self._tts is not None
         ):
-            if self.metrics is not None:
-                self.metrics.start_turn()
-            # Mark the agent as speaking for the duration of the first
-            # message — without this, the self-hearing guard never
-            # engages, the user's audio (mixed with TTS bleed) is
-            # forwarded to STT and produces garbage transcripts, and
-            # the ring buffer for pre-barge-in audio is never
-            # populated. Mirrors the per-turn behaviour in
-            # `_process_streaming_response` / `_process_regular_response`.
-            #
-            # ``is_first_message=True`` pre-stamps ``_first_audio_sent_at``
-            # synchronously so the barge-in gate runs in parallel with TTS
-            # TTFB instead of only after audio arrives — without this, the
-            # firstMessage is effectively un-interruptible for 300-800 ms.
             await self._begin_speaking(is_first_message=True)
-            first_chunk_sent = False
-            # Drop any stale PCM16 carry byte from a prior synth (none at call
-            # start, but defensive for parity with TS ``ttsByteCarry = null``).
-            self.audio_sender.reset_pcm_carry()
-            # Check the prewarm cache first. When ``Patter.call`` was made
-            # with ``agent.prewarm_first_message=True`` the firstMessage
-            # has already been synthesised during the ringing window — we
-            # stream the bytes directly through the carrier-side
-            # AudioSender (which handles native-rate → carrier-rate
-            # resampling) and skip the TTS round-trip entirely.
-            prewarm_bytes: bytes | None = None
-            if self._pop_prewarm_audio is not None:
-                try:
-                    prewarm_bytes = self._pop_prewarm_audio(self.call_id)
-                except Exception as exc:  # noqa: BLE001 - best-effort
-                    logger.debug("pop_prewarm_audio raised: %s", exc)
-                    prewarm_bytes = None
-            try:
-                if prewarm_bytes:
-                    if self.metrics is not None:
-                        self.metrics.record_tts_first_byte()
-                    first_chunk_sent = await self._stream_prewarm_bytes(prewarm_bytes)
-                else:
-                    # Streaming TTS path (no prewarm cache). Uses the same
-                    # simple per-chunk send as _synthesize_sentence —
-                    # ElevenLabs HTTP streams at near-real-time speed so the
-                    # carrier-side buffer stays bounded without mark-gated
-                    # pacing.  Routing streaming chunks through
-                    # _send_paced_first_message_bytes caused crackling: its
-                    # drain+reset on every HTTP chunk destroyed mark
-                    # back-pressure continuity and the per-sub-chunk sleep
-                    # slowed delivery below Twilio's playout rate, producing
-                    # periodic buffer underruns.  The prewarm path (a single
-                    # pre-synthesised buffer) still uses
-                    # _send_paced_first_message_bytes because that buffer can
-                    # be several seconds long and needs pacing.
-                    async for audio_chunk in self._tts.synthesize(
-                        self.agent.first_message
-                    ):
-                        if not self._is_speaking:
-                            break
-                        if not first_chunk_sent:
-                            first_chunk_sent = True
-                            if self.metrics is not None:
-                                self.metrics.record_tts_first_byte()
-                        if self._aec is not None:
-                            self._aec.push_far_end(audio_chunk)
-                        await self.audio_sender.send_audio(audio_chunk)
-                        self._mark_first_audio_sent()
-            finally:
-                # Drop any partial int16 byte to prevent cross-turn corruption
-                # if the stream threw before a complete sample was delivered.
-                self.audio_sender.reset_pcm_carry()
-                # Flip back to not-speaking with grace so the ring
-                # buffer accumulated during the intro is flushed and
-                # the next user utterance is recognised cleanly.
-                await self._end_speaking_with_grace()
-            if first_chunk_sent and self.metrics is not None:
-                # Bill the firstMessage TTS characters — they were synthesised
-                # at ElevenLabs (or the configured TTS provider) and the
-                # customer pays for them. The previous flow only called
-                # ``record_turn_complete`` here, which finalises the turn
-                # but does NOT increment ``_total_tts_characters`` — so a
-                # 5-turn call with an 82-char greeting was under-billed
-                # by ~22% on TTS cost. ``record_tts_complete`` is the
-                # canonical accumulator entry point for TTS char billing.
-                self.metrics.record_tts_complete(self.agent.first_message)
-                turn = self.metrics.record_turn_complete(self.agent.first_message)
-                self.conversation_history.append(
-                    {
-                        "role": "assistant",
-                        "text": self.agent.first_message,
-                        "timestamp": time.time(),
-                    }
-                )
-                await self._emit_turn_metrics(turn)
+            self._first_message_task = asyncio.create_task(
+                self._play_first_message()
+            )
+
+            def _log_first_message_result(task: asyncio.Task) -> None:
+                if task.cancelled():
+                    return
+                exc = task.exception()
+                if exc is not None:
+                    logger.error("first_message playback failed: %s", exc)
+
+            self._first_message_task.add_done_callback(_log_first_message_result)
 
         # CallControl for pipeline mode
         self._call_control = CallControl(
@@ -2992,14 +3787,15 @@ class PipelineStreamHandler(StreamHandler):
             # END_CALL_TOOL]``). Without this, pipeline-mode LLMs never see
             # the built-ins and can't initiate a handoff or hangup no matter
             # what the system prompt says.
+            # Discover MCP tools BEFORE building the tool list: pipeline
+            # mode silently ignored ``agent.mcp_servers`` (only the realtime
+            # handler called this), despite the documented mode-agnostic
+            # contract. No-op without configured servers.
+            await self._init_mcp_tools()
             # Merge the built-in consult tool (if configured) before the
             # handoff built-ins so the pipeline LLM sees it too.
             self.agent = _inject_consult_tool(self.agent)
-            combined_tools = _augment_with_builtin_handoff_tools(
-                self.agent.tools,
-                transfer_fn=self._transfer_fn,
-                hangup_fn=self._hangup_fn,
-            )
+            combined_tools = self._build_combined_pipeline_tools()
             tool_executor = ToolExecutor() if combined_tools else None
             llm_model = self.agent.model
             if "realtime" in llm_model:
@@ -3043,7 +3839,7 @@ class PipelineStreamHandler(StreamHandler):
                 # closed WS and end the call.
                 if self._hangup_fn is not None:
                     try:
-                        await self._hangup_fn(self.call_id)
+                        await self._hangup_fn()
                     except Exception:
                         pass
                 return
@@ -3061,6 +3857,89 @@ class PipelineStreamHandler(StreamHandler):
             history=tuple(self.conversation_history),
         )
 
+    def _build_combined_pipeline_tools(self) -> list[dict]:
+        """Build the full pipeline tool list for the CURRENT ``self.agent``:
+        user tools + built-in ``transfer_call`` / ``end_call`` + the
+        ``handoff_to`` tool when handoff targets are configured. Re-invoked
+        after a handoff so the LLM loop advertises the target agent's tools
+        (including its onward handoff map)."""
+        combined = _augment_with_builtin_handoff_tools(
+            self.agent.tools,
+            transfer_fn=self._transfer_fn,
+            hangup_fn=self._hangup_fn,
+        )
+        if getattr(self.agent, "handoffs", None):
+            combined.append(
+                {
+                    **build_handoff_tool(self.agent.handoffs.keys()),
+                    "handler": self._handoff_tool_handler,
+                }
+            )
+        return combined
+
+    async def _handoff_tool_handler(self, arguments: dict, call_context: dict) -> str:
+        """Handler closure for the built-in ``handoff_to`` tool (pipeline)."""
+        args = arguments or {}
+        return await self._perform_handoff(
+            args.get("name", ""), args.get("reason") or ""
+        )
+
+    async def _perform_handoff(self, name: str, reason: str) -> str:
+        """Swap the live pipeline call to the named handoff target agent.
+
+        Updates ``self.agent`` (frozen dataclass → ``dataclasses.replace``
+        inside :func:`_apply_handoff_target`), swaps the LLM loop's system
+        prompt + tool list so the NEXT turn runs as the target agent, and
+        appends a system-style history entry recording the handoff. ALWAYS
+        returns a tool-result string — an unknown name produces an error
+        envelope, never silence.
+
+        Live audio infrastructure (STT/TTS/VAD instances — and therefore the
+        speaking voice) established at call start is intentionally retained:
+        swapping a connected TTS provider mid-call is not supported in v1.
+        An INFO log is emitted when the target requested a different voice.
+        """
+        handoffs: dict = getattr(self.agent, "handoffs", None) or {}
+        target = handoffs.get(name)
+        if target is None:
+            return json.dumps(
+                {
+                    "error": f"Unknown handoff agent {name!r}",
+                    "available": sorted(handoffs.keys()),
+                }
+            )
+        if target.voice and target.voice != self.agent.voice:
+            logger.info(
+                "handoff_to %r: voice change is not supported mid-call in "
+                "pipeline mode (the TTS adapter is already connected) — "
+                "keeping the current voice.",
+                name,
+            )
+        self.agent = _inject_consult_tool(_apply_handoff_target(self.agent, target))
+        self.resolved_prompt = resolve_agent_prompt(self.agent)
+        if self._llm_loop is not None:
+            self._llm_loop.update_agent(
+                system_prompt=self.resolved_prompt,
+                tools=self._build_combined_pipeline_tools(),
+                disable_phone_preamble=getattr(
+                    self.agent, "disable_phone_preamble", False
+                ),
+            )
+        handoff_text = _handoff_history_text(name, reason)
+        self.conversation_history.append(
+            {"role": "system", "text": handoff_text, "timestamp": time.time()}
+        )
+        self.transcript_entries.append({"role": "system", "text": handoff_text})
+        if self.on_transcript is not None:
+            await self.on_transcript(
+                {
+                    "role": "system",
+                    "text": handoff_text,
+                    "call_id": self.call_id,
+                }
+            )
+        return json.dumps({"status": "handed_off", "to": name})
+
     async def _emit_assistant_transcript(self, text: str) -> None:
         """Push an assistant turn into history+transcript_entries and fire
         ``on_transcript`` so host applications observe pipeline-mode
@@ -3073,7 +3952,7 @@ class PipelineStreamHandler(StreamHandler):
         )
         self.transcript_entries.append({"role": "assistant", "text": text})
         if self.on_transcript is not None:
-            await self.on_transcript(
+            await self._safe_on_transcript(
                 {
                     "role": "assistant",
                     "text": text,
@@ -3114,7 +3993,7 @@ class PipelineStreamHandler(StreamHandler):
         )
         self.transcript_entries.append({"role": "tool", "text": call_text})
         if self.on_transcript is not None:
-            await self.on_transcript(
+            await self._safe_on_transcript(
                 {
                     "role": "tool",
                     "text": call_text,
@@ -3136,7 +4015,7 @@ class PipelineStreamHandler(StreamHandler):
             )
             self.transcript_entries.append({"role": "tool", "text": res_text})
             if self.on_transcript is not None:
-                await self.on_transcript(
+                await self._safe_on_transcript(
                     {
                         "role": "tool",
                         "text": res_text,
@@ -3190,6 +4069,13 @@ class PipelineStreamHandler(StreamHandler):
         # previous sentence would corrupt the first sample of this one.
         # Matches TS ``ttsByteCarry = null`` reset at each synth boundary.
         self.audio_sender.reset_pcm_carry()
+        # Pause-and-resume retention: in ``barge_in_mode="pause_resume"``
+        # every chunk of a RESPONSE sentence is kept in a per-sentence
+        # entry so a paused turn can re-send the cleared-but-unheard tail
+        # at resume time without re-billing TTS. ``None`` (legacy mode /
+        # filler audio / post-overflow) keeps the direct send path
+        # byte-identical to today.
+        entry = self._begin_retained_sentence(processed) if record_segment else None
         try:
             async for audio_chunk in gen:
                 if not self._is_speaking:
@@ -3212,11 +4098,14 @@ class PipelineStreamHandler(StreamHandler):
                 if not self._is_speaking:
                     return False  # barge-in fired during the hook await
 
-                if first_tts_chunk[0]:
+                if first_tts_chunk[0] and not getattr(self, "_output_paused", False):
                     # Flip the per-turn "first PCM chunk emitted" flag BEFORE
                     # the metrics branch so it is a reliable "audio reached the
                     # carrier" signal even when ``self.metrics is None`` — the
-                    # llm_error_message fallback gate depends on it.
+                    # llm_error_message fallback gate depends on it. While the
+                    # pause gate holds the chunk in memory it has NOT reached
+                    # the carrier — the flag (and the audio_out speech event)
+                    # waits for the first post-resume chunk.
                     first_tts_chunk[0] = False
                     if self.metrics is not None:
                         self.metrics.record_tts_first_byte()
@@ -3229,13 +4118,54 @@ class PipelineStreamHandler(StreamHandler):
                         "tts_chunk",
                         {"bytes": len(processed_audio)},
                     )
-                # Far-end tap for the echo canceller. ``processed_audio`` is
-                # the exact PCM 16 kHz bytes that get transcoded + sent to
-                # the carrier — i.e. the cleanest reference of "what the
-                # speaker is about to play". Push BEFORE ``send_audio`` so a
-                # very fast carrier echo is still seen by the next mic frame.
-                if self._aec is not None:
+                # Pause-and-resume retention path: the chunk is appended to
+                # the sentence's entry; while paused it stays queued, while
+                # speaking it is drained (sent) immediately. Segment
+                # stamping / AEC tap / playback tracking live in
+                # ``_drain_sentence_entry`` so they fire at SEND time, not
+                # at synthesis time.
+                if entry is not None and getattr(
+                    self, "_pause_resume_overflowed", False
+                ):
+                    entry = None  # retention released mid-sentence
+                if entry is not None:
+                    if await self._retain_pause_chunk(entry, processed_audio):
+                        if not getattr(self, "_output_paused", False):
+                            await self._drain_sentence_entry(entry)
+                            if not self._is_speaking:
+                                return False  # cancel raced the drain
+                        continue
+                    if not self._is_speaking:
+                        # Overflow while paused degraded to a full cancel.
+                        return False
+                    # Overflow while speaking: retention released — fall
+                    # through to the direct send path for this chunk and
+                    # the rest of the turn. The sentence keeps its already
+                    # stamped segment (if any); the inline stamp below is
+                    # skipped to avoid a duplicate.
+                    entry = None
+                    record_segment = False
+                if getattr(self, "_output_paused", False):
+                    # Paused with no retention entry (filler / error-
+                    # fallback audio): drop the chunk — replaying
+                    # moment-filling audio after a pause is pointless.
+                    continue
+                # Far-end tap for the echo canceller. On the default path
+                # ``processed_audio`` is the exact PCM 16 kHz bytes that get
+                # transcoded + sent to the carrier — the cleanest reference
+                # of "what the speaker is about to play". Push BEFORE
+                # ``send_audio`` so a very fast carrier echo is still seen by
+                # the next mic frame. SKIPPED on the carrier-native fast path
+                # — there these are mulaw 8 kHz wire bytes, which corrupted
+                # the int16-PCM-16k reference (and odd-length chunks crashed
+                # np.frombuffer mid-turn, misreported as an LLM error).
+                if self._aec is not None and not getattr(
+                    self, "_tts_output_format_native_for_carrier", False
+                ):
                     self._aec.push_far_end(processed_audio)
+                # Local-recording tap (agent side) — decodes on the
+                # carrier-native μ-law fast path instead of skipping.
+                self._tap_pipeline_agent_audio(processed_audio)
                 if record_segment:
                     # First audible chunk of this sentence — stamp its start
                     # on the per-turn playback timeline so a barge-in can
@@ -3395,6 +4325,13 @@ class PipelineStreamHandler(StreamHandler):
                         )
 
                     sentences = chunker.push(token)
+                    # pause_resume: a resume may have fired between tokens —
+                    # speak the sentences buffered during the pause FIRST so
+                    # the reply stays in order.
+                    if not getattr(self, "_output_paused", False):
+                        released = self._release_paused_sentences()
+                        if released:
+                            sentences = released + sentences
                     # Fix 3: mark first-sentence boundary for accurate tts_ms.
                     if sentences and self.metrics is not None and first_tts_chunk[0]:
                         self.metrics.record_llm_first_sentence()
@@ -3402,6 +4339,11 @@ class PipelineStreamHandler(StreamHandler):
                         if not self._is_speaking:
                             interrupted = True
                             break
+                        # pause_resume: while output is paused, buffer the
+                        # sentence (bounded) — spoken on resume, discarded
+                        # on kill. Keeps consuming LLM tokens either way.
+                        if await self._buffer_sentence_if_paused(sentence):
+                            continue
 
                         blocked, guard_name = evaluate_guardrails(self.agent, sentence)
                         if blocked:
@@ -3481,32 +4423,55 @@ class PipelineStreamHandler(StreamHandler):
             if self.metrics is not None:
                 self.metrics.record_llm_complete()
 
-            # Flush remaining text from chunker (skip if LLM errored)
+            # Flush remaining text from chunker (skip if LLM errored). The
+            # outer loop exists for pause_resume: the turn must not end
+            # while a pause decision is outstanding — buffered sentences
+            # are spoken on resume; a kill marks the turn interrupted. Each
+            # wait is bounded by the confirm window (the resume timer
+            # guarantees a decision), and legacy mode never pauses so the
+            # loop runs exactly once — byte-identical behaviour.
             if not llm_error and not interrupted:
-                for sentence in chunker.flush():
-                    if not self._is_speaking:
-                        interrupted = True
-                        break
-
-                    blocked, guard_name = evaluate_guardrails(self.agent, sentence)
-                    if blocked:
-                        sentence = get_guardrail_replacement(self.agent, guard_name)
-
-                    if hook_executor.has_after_llm_sentence():
-                        transformed = await hook_executor.run_after_llm_sentence(
-                            sentence, hook_ctx
-                        )
-                        if transformed is None:
+                pending_sentences = chunker.flush()
+                while True:
+                    for sentence in pending_sentences:
+                        if not self._is_speaking:
+                            interrupted = True
+                            break
+                        if await self._buffer_sentence_if_paused(sentence):
                             continue
-                        sentence = transformed
 
-                    # Real flushed audio about to play — cancel the filler.
-                    long_turn_task = await self._cancel_long_turn_filler(long_turn_task)
-                    if not await self._synthesize_sentence(
-                        sentence, hook_executor, hook_ctx, first_tts_chunk
+                        blocked, guard_name = evaluate_guardrails(self.agent, sentence)
+                        if blocked:
+                            sentence = get_guardrail_replacement(self.agent, guard_name)
+
+                        if hook_executor.has_after_llm_sentence():
+                            transformed = await hook_executor.run_after_llm_sentence(
+                                sentence, hook_ctx
+                            )
+                            if transformed is None:
+                                continue
+                            sentence = transformed
+
+                        # Real flushed audio about to play — cancel the filler.
+                        long_turn_task = await self._cancel_long_turn_filler(
+                            long_turn_task
+                        )
+                        if not await self._synthesize_sentence(
+                            sentence, hook_executor, hook_ctx, first_tts_chunk
+                        ):
+                            interrupted = True
+                            break
+                    if interrupted:
+                        break
+                    if not (
+                        getattr(self, "_output_paused", False)
+                        or getattr(self, "_paused_sentences", None)
                     ):
+                        break
+                    if not await self._await_pause_decision():
                         interrupted = True
                         break
+                    pending_sentences = self._release_paused_sentences()
         finally:
             # Ensure the long-turn filler task never outlives the turn (clean
             # cancellation, CancelledError suppressed inside the helper).
@@ -3576,6 +4541,11 @@ class PipelineStreamHandler(StreamHandler):
             response_text = get_guardrail_replacement(self.agent, guard_name)
 
         await self._emit_assistant_transcript(response_text)
+        # Echo-guard reference: only the streaming path populated it, so
+        # under forward-STT-while-speaking the echo of non-streaming
+        # (on_message / webhook) replies compared against an empty string
+        # and was committed as a phantom user turn.
+        self._current_agent_spoken_text = response_text
         # Use sentence chunking + hooks for consistent behavior with streaming path
         hooks = getattr(self.agent, "hooks", None)
         hook_executor = PipelineHookExecutor(hooks)
@@ -3590,15 +4560,34 @@ class PipelineStreamHandler(StreamHandler):
         first_tts_chunk = [True]
         interrupted = False
         try:
-            for sentence in sentences:
-                if not self._is_speaking:
-                    interrupted = True
+            # Outer loop mirrors ``_process_streaming_response``: in
+            # pause_resume mode the turn waits out an in-flight pause
+            # decision (buffered sentences speak on resume, a kill marks
+            # interrupted); legacy mode never pauses → single pass.
+            pending_sentences = sentences
+            while True:
+                for sentence in pending_sentences:
+                    if not self._is_speaking:
+                        interrupted = True
+                        break
+                    if await self._buffer_sentence_if_paused(sentence):
+                        continue
+                    if not await self._synthesize_sentence(
+                        sentence, hook_executor, hook_ctx, first_tts_chunk
+                    ):
+                        interrupted = True
+                        break
+                if interrupted:
                     break
-                if not await self._synthesize_sentence(
-                    sentence, hook_executor, hook_ctx, first_tts_chunk
+                if not (
+                    getattr(self, "_output_paused", False)
+                    or getattr(self, "_paused_sentences", None)
                 ):
+                    break
+                if not await self._await_pause_decision():
                     interrupted = True
                     break
+                pending_sentences = self._release_paused_sentences()
         finally:
             # Schedule the flip to idle (see ``_process_streaming_response``).
             await self._end_speaking_with_grace()
@@ -3621,6 +4610,60 @@ class PipelineStreamHandler(StreamHandler):
         """
         if not (transcript.text and self._is_speaking):
             return
+        # Echo guard FIRST — before the tail-grace rescue: the grace window
+        # (the ~1.5 s after TTS ends) is exactly when the agent's
+        # final-sentence echo arrives via STT. Running the rescue first
+        # treated that echo as "the next turn", flipped speaking state off,
+        # and the downstream isSpeaking-gated echo check could no longer
+        # fire — the agent answered its own words as a phantom user turn.
+        # Active under ``_forward_stt_while_speaking`` (the only path that
+        # feeds TTS audio to STT) AND while output is paused (pause_resume
+        # forwards mic audio to STT during the confirm window, and the
+        # just-cleared audio's PSTN echo tail can lag into it), so the
+        # default VAD path is unaffected. Mirrors TS ``handleBargeIn``.
+        if (
+            getattr(self, "_forward_stt_while_speaking", False)
+            or getattr(self, "_output_paused", False)
+        ) and _looks_like_echo(
+            transcript.text, getattr(self, "_current_agent_spoken_text", "")
+        ):
+            logger.info(
+                "Barge-in suppressed: transcript matches agent's own speech "
+                "(echo) — %r",
+                sanitize_log_value(transcript.text[:40]),
+            )
+            return
+        # Near-duplicate / hallucination guard BEFORE cancelling: Deepgram
+        # yields both the speech_final and a later is_final frame for the
+        # same utterance — the twin arriving up to 2 s after dispatch found
+        # the agent speaking, cancelled its brand-new turn, and was THEN
+        # dropped as a duplicate by _commit_transcript (agent went silent
+        # for the turn). Apply the same filters here, with the commit
+        # window semantics (exact dup ≤2 s, near-dup ≤0.5 s).
+        _normalised = transcript.text.strip().lower()
+        _since_last = time.time() - getattr(self, "_last_commit_at", 0.0)
+        if _is_stt_hallucination(_normalised):
+            logger.debug(
+                "Barge-in skipped: STT hallucination %r",
+                sanitize_log_value(transcript.text[:40]),
+            )
+            return
+        if _since_last < 2.0 and _normalised == getattr(
+            self, "_last_commit_text", ""
+        ):
+            logger.debug(
+                "Barge-in skipped: duplicate of just-committed transcript %r",
+                sanitize_log_value(transcript.text[:40]),
+            )
+            return
+        if _since_last < 0.5 and _is_near_duplicate(
+            _normalised, getattr(self, "_last_commit_text", "")
+        ):
+            logger.debug(
+                "Barge-in skipped: near-duplicate of just-committed transcript %r",
+                sanitize_log_value(transcript.text[:40]),
+            )
+            return
         # Defensive ``getattr`` — test fixtures build the handler via
         # ``object.__new__`` and skip ``__init__`` (no tail-grace state).
         if getattr(self, "_tail_grace_active", False):
@@ -3632,26 +4675,25 @@ class PipelineStreamHandler(StreamHandler):
             # before the VAD speech_start rescue fires.
             await self._end_tail_grace_for_new_turn()
             return
-        # Echo guard: when audio is forwarded to STT during TTS (no effective
-        # AEC), the agent's own voice can be transcribed and would otherwise
-        # barge in on itself. Drop any transcript that looks like a fragment of
-        # what the agent is currently saying. Only active under
-        # ``_forward_stt_while_speaking`` (the only path that feeds TTS audio to
-        # STT), so the default VAD path is unaffected. Mirrors TS ``handleBargeIn``.
-        if getattr(self, "_forward_stt_while_speaking", False) and _looks_like_echo(
-            transcript.text, getattr(self, "_current_agent_spoken_text", "")
-        ):
-            logger.info(
-                "Barge-in suppressed: transcript matches agent's own speech "
-                "(echo) — %r",
-                sanitize_log_value(transcript.text[:40]),
-            )
-            return
         if not self._can_barge_in():
             aec_state = "on" if getattr(self, "_aec", None) is not None else "off"
             logger.info(
                 "Barge-in transcript suppressed (agent speaking < gate, aec=%s)",
                 aec_state,
+            )
+            return
+        # Pause-and-resume: while output is paused, only a committed FINAL
+        # transcript (non-hallucination, non-duplicate) may confirm the kill
+        # — interims and noise wait for the resume timer instead. The
+        # confirming transcript then continues through the strategy/legacy
+        # decision below exactly as today.
+        if getattr(self, "_output_paused", False) and not self._passes_paused_kill_filters(
+            transcript
+        ):
+            logger.debug(
+                "Paused turn: transcript %r cannot confirm the kill "
+                "(interim/hallucination/duplicate) — awaiting resume timer",
+                sanitize_log_value(transcript.text[:40]),
             )
             return
         strategies = getattr(self, "_barge_in_strategies", ()) or ()
@@ -3715,8 +4757,13 @@ class PipelineStreamHandler(StreamHandler):
             # A barge-in landing AFTER the turn completed (carrier still
             # draining the buffered tail) — rewrite the history to the heard
             # prefix FIRST, while the playback cursor still measures what
-            # was left unheard.
+            # was left unheard (or, for a paused turn, while the frozen
+            # pause cursor still does).
             self._maybe_truncate_completed_turn_history()
+            # Pause-and-resume: a kill while paused discards the held
+            # buffers (queued sentences + retained audio) and wakes any
+            # pause-decision waiter, which then observes the interrupt.
+            self._discard_pause_state()
             # The ``send_clear`` below drops whatever the carrier had
             # buffered ahead — snap the playback cursor back and kill any
             # pending grace task so its phase-1 wait (carrier backlog) /
@@ -3756,6 +4803,15 @@ class PipelineStreamHandler(StreamHandler):
                 await self.audio_sender.send_clear()
             except Exception as exc:
                 logger.debug("send_clear during barge-in failed: %s", exc)
+            # Speech-event: agent stop edge — interrupted by the caller.
+            await self._emit_agent_speech_ended(interrupted=True)
+            # Replay the self-hearing ring so the words the user spoke
+            # BEFORE the confirming transcript reach STT (the models.py
+            # contract for confirmed barge-ins promised this flush).
+            try:
+                await self._flush_inbound_audio_ring()
+            except Exception as exc:  # noqa: BLE001 - best-effort replay
+                logger.debug("barge-in ring flush failed: %s", exc)
             if self.metrics is not None:
                 self.metrics.record_tts_stopped()
                 self.metrics.record_turn_interrupted()
@@ -3780,6 +4836,13 @@ class PipelineStreamHandler(StreamHandler):
         logger.info(
             "Barge-in PENDING (VAD speech_start during TTS); awaiting strategy confirmation"
         )
+        # Replay the ring NOW: the strategies confirm on transcripts, so STT
+        # must see the user's leading words while the pending window runs
+        # (on_audio_received also forwards live frames while pending).
+        try:
+            await self._flush_inbound_audio_ring()
+        except Exception as exc:  # noqa: BLE001 - best-effort replay
+            logger.debug("pending barge-in ring flush failed: %s", exc)
         try:
             self._barge_in_pending_task = asyncio.create_task(
                 self._pending_barge_in_timeout()
@@ -3817,6 +4880,398 @@ class PipelineStreamHandler(StreamHandler):
         self._barge_in_pending_task = None
         self._barge_in_pending_since = None
 
+    # ---------------------------------------------------------------
+    # Pause-and-resume false-interruption handling (barge_in_mode =
+    # "pause_resume"). LiveKit-style: PAUSE output on VAD speech_start,
+    # KILL on a committed final transcript within the confirm window,
+    # RESUME from the first not-fully-heard sentence otherwise.
+    # ---------------------------------------------------------------
+
+    # Cap on sentences buffered as text while output is paused. A pause
+    # lasts at most ``_barge_in_confirm_s`` (1.5 s default) so this is
+    # generous; an agent-runtime LLM that delivers its whole reply at once
+    # can exceed it — overflow degrades to a full cancel so memory stays
+    # bounded. Mirrors TS ``PAUSE_MAX_BUFFERED_SENTENCES``.
+    _PAUSE_MAX_BUFFERED_SENTENCES: int = 32
+    # Cap (seconds of playout) on retained per-sentence TTS audio — both
+    # the already-sent tail kept for re-send and chunks queued while
+    # paused. 15 s ≈ 480 KB of PCM16 @ 16 kHz per concurrent call.
+    # Overflow while paused → degrade to full cancel; overflow while
+    # speaking (very long carrier backlog) → release the retention and
+    # fall back to legacy cancel behaviour for the rest of the turn.
+    # Mirrors TS ``PAUSE_RESUME_MAX_RETAINED_S``.
+    _PAUSE_RESUME_MAX_RETAINED_S: float = 15.0
+
+    def _pause_retained_cap_bytes(self) -> int:
+        """Retained-audio cap in bytes for the active TTS chunk format
+        (mirrors the bytes-per-second logic of ``_track_outbound_playback``)."""
+        bytes_per_s = (
+            8_000.0
+            if getattr(self.audio_sender, "_input_is_mulaw_8k", False)
+            else 32_000.0
+        )
+        return int(self._PAUSE_RESUME_MAX_RETAINED_S * bytes_per_s)
+
+    def _should_pause_for_barge_in(self) -> bool:
+        """Whether a VAD ``speech_start`` during the agent's turn should take
+        the pause-and-resume path instead of cancel/pending.
+
+        Requires ``barge_in_mode="pause_resume"`` AND resumable state: a
+        dispatch in flight (the sentence/TTS loops honour the pause gate) or
+        retained sentence audio from a just-completed turn still playing out
+        of the carrier buffer. The firstMessage paced sender keeps today's
+        immediate-cancel behaviour (its prewarm-bytes path has no retained
+        sentences to resume from — known limitation, see ``_start_pause_resume``).
+        """
+        if getattr(self, "_barge_in_mode", "cancel") != "pause_resume":
+            return False
+        if getattr(self, "_pause_resume_overflowed", False):
+            return False
+        if getattr(self, "_output_paused", False):
+            return True  # already paused — stay on the pause path (idempotent)
+        dispatch = getattr(self, "_dispatch_task", None)
+        if dispatch is not None and not dispatch.done():
+            return True
+        return bool(getattr(self, "_turn_sentence_audio", None))
+
+    def _compute_pause_resume_point(self) -> tuple[int, float]:
+        """Resume offset at SENTENCE granularity.
+
+        Returns ``(index, heard_s)`` where ``index`` is the first sentence
+        (into ``_turn_spoken_segments`` / ``_turn_sentence_audio``) whose
+        playback had NOT completed when the pause landed — computed from the
+        #164 playback-cursor bookkeeping: ``heard = total_pushed -
+        carrier_backlog``. Granularity choice: the partially-played sentence
+        is replayed from its start (mark/clear bookkeeping is per-sentence
+        and a clipped sentence restarted at its boundary sounds like a
+        natural repair), rather than resumed mid-word at byte offset.
+        """
+        segments = getattr(self, "_turn_spoken_segments", None) or []
+        total_s = getattr(self, "_turn_playback_total_s", 0.0)
+        remaining_s = max(
+            0.0, getattr(self, "_playback_buffered_until", 0.0) - time.time()
+        )
+        heard_s = max(0.0, total_s - remaining_s)
+        idx = len(segments)
+        for i in range(len(segments) - 1, -1, -1):
+            end_s = segments[i + 1][1] if i + 1 < len(segments) else total_s
+            if end_s > heard_s + 1e-6:
+                idx = i
+            else:
+                break
+        return idx, heard_s
+
+    async def _start_pause_resume(self) -> None:
+        """PAUSE the agent's output on a VAD ``speech_start`` (pause_resume
+        mode): gate further sends on ``_output_paused``, ``send_clear`` the
+        carrier so queued audio stops quickly, and schedule the
+        false-interruption resume timer. The LLM stream and the TTS
+        provider stream are deliberately NOT cancelled — tokens keep
+        buffering as sentences and synthesized audio queues in memory (both
+        bounded) so a resume can pick up seamlessly.
+        """
+        if getattr(self, "_output_paused", False):
+            return
+        # Anchor the overlap window exactly like ``_start_pending_barge_in``
+        # so a kill records detection_delay from VAD-T1 (never restarted).
+        if getattr(self, "_barge_in_pending_since", None) is None:
+            self._barge_in_pending_since = time.time()
+            if self.metrics is not None:
+                self.metrics.record_overlap_start()
+        # A stale strategy-pending timer is superseded by the pause timer.
+        task = getattr(self, "_barge_in_pending_task", None)
+        if task is not None and not task.done():
+            task.cancel()
+        self._barge_in_pending_task = None
+        self._output_paused = True
+        self._pause_decision_event = asyncio.Event()
+        # Freeze the playback bookkeeping at the heard offset: the clear
+        # below drops the carrier backlog, so anything pushed beyond the
+        # heard cursor is void. A kill that follows then computes the
+        # heard prefix from this frozen state; a resume re-advances it as
+        # the tail is re-sent.
+        idx, heard_s = self._compute_pause_resume_point()
+        self._pause_resume_index = idx
+        self._turn_playback_total_s = heard_s
+        self._playback_buffered_until = 0.0
+        # The phase-1 grace wait (carrier backlog) is void after the clear;
+        # resume re-arms it for the re-sent tail.
+        self._clear_grace_task()
+        if getattr(self, "_pending_marks", None):
+            self._drain_pending_marks()
+        logger.info(
+            "Barge-in PAUSE (VAD speech_start during TTS); resuming from "
+            "sentence %d unless a transcript confirms within %.2fs",
+            idx,
+            getattr(self, "_barge_in_confirm_s", 1.5),
+        )
+        try:
+            await self.audio_sender.send_clear()
+        except Exception as exc:
+            logger.debug("send_clear during pause failed: %s", exc)
+        # Output is silent from here — flush the self-hearing ring so STT
+        # receives the user's leading words and can produce the confirming
+        # transcript (or nothing, for a cough). ``on_audio_received``
+        # forwards subsequent frames to STT while paused for the same reason.
+        await self._flush_inbound_audio_ring()
+        try:
+            self._barge_in_pending_task = asyncio.create_task(
+                self._pause_resume_timeout()
+            )
+        except RuntimeError as exc:  # pragma: no cover - no running loop
+            logger.debug("could not schedule pause-resume timeout: %s", exc)
+            self._barge_in_pending_task = None
+
+    async def _pause_resume_timeout(self) -> None:
+        """Fire the false-interruption resume when no transcript confirmed
+        the pause within ``_barge_in_confirm_s``."""
+        try:
+            await asyncio.sleep(self._barge_in_confirm_s)
+        except asyncio.CancelledError:
+            return
+        if not getattr(self, "_output_paused", False):
+            return
+        await self._resume_after_false_interruption()
+
+    async def _resume_after_false_interruption(self) -> None:
+        """RESUME output after a pause that no transcript confirmed.
+
+        Re-sends the cleared-but-unheard tail from the retained sentence
+        audio (sentence granularity, no TTS re-billing), unpauses the live
+        send path, and records the event as a FALSE interruption: the
+        overlap closes via ``record_overlap_end(was_interruption=False)``
+        (the backchannel counter — the interruption count is NOT
+        incremented) and the turn is never marked interrupted.
+        """
+        if not getattr(self, "_output_paused", False):
+            return
+        entries = getattr(self, "_turn_sentence_audio", None) or []
+        idx = max(0, min(getattr(self, "_pause_resume_index", 0), len(entries)))
+        tail = entries[idx:]
+        # Drop the stale segment stamps of the sentences about to be
+        # replayed — the replay re-stamps them at their new positions on
+        # the (frozen-then-resumed) playback timeline, so a later barge-in
+        # still maps to an accurate heard prefix without duplicates.
+        segments = getattr(self, "_turn_spoken_segments", None)
+        if segments is not None:
+            del segments[idx:]
+        for entry in tail:
+            entry["sent"] = 0
+        if self.metrics is not None:
+            # False interruption — the backchannel path. Mirrors
+            # ``_pending_barge_in_timeout``.
+            self.metrics.record_overlap_end(was_interruption=False)
+            self.metrics.anchor_user_speech_start()
+        self._barge_in_pending_since = None
+        self._barge_in_pending_task = None
+        logger.info(
+            "False interruption: no confirming transcript within %.2fs — "
+            "resuming %d retained sentence(s)",
+            getattr(self, "_barge_in_confirm_s", 1.5),
+            len(tail),
+        )
+        if self._event_bus is not None:
+            self._event_bus.emit(
+                "false_interruption", {"resumed_sentences": len(tail)}
+            )
+        # Re-send the unheard tail BEFORE unpausing so the in-flight
+        # synthesis (which queues while paused) cannot interleave a newer
+        # chunk ahead of the replayed audio.
+        for entry in tail:
+            if not self._is_speaking:
+                break
+            # Sentence boundary — drop any stale PCM16 alignment carry, the
+            # same contract ``_synthesize_sentence`` keeps per sentence.
+            self.audio_sender.reset_pcm_carry()
+            await self._drain_sentence_entry(entry, force=True)
+        self._output_paused = False
+        # Close the unpause race: a chunk queued between the last drain and
+        # the flag flip would otherwise wait for the next live chunk.
+        if tail and self._is_speaking:
+            await self._drain_sentence_entry(tail[-1], force=True)
+        evt = getattr(self, "_pause_decision_event", None)
+        if evt is not None and not evt.is_set():
+            evt.set()
+        # Post-complete turn (carrier was draining the buffered tail when
+        # the pause landed): the turn body already finished pushing — its
+        # grace task was cancelled at pause time — so re-arm the grace
+        # machinery for the re-sent backlog: phase-1 hold keeps barge-in
+        # armed for the whole audible window, exactly as #164. A turn
+        # still in flight arms it itself in its ``finally``.
+        if getattr(self, "_turn_output_done", True) and self._is_speaking:
+            await self._end_speaking_with_grace()
+
+    def _discard_pause_state(self) -> None:
+        """Drop all pause-and-resume state (flags + buffers) and wake any
+        pause-decision waiter. Used by the kill path, fresh turns, and
+        teardown. Idempotent; safe on ``object.__new__`` test fixtures."""
+        self._output_paused = False
+        self._pause_resume_index = 0
+        paused = getattr(self, "_paused_sentences", None)
+        if paused:
+            paused.clear()
+        entries = getattr(self, "_turn_sentence_audio", None)
+        if entries:
+            entries.clear()
+        self._pause_retained_bytes = 0
+        evt = getattr(self, "_pause_decision_event", None)
+        if evt is not None and not evt.is_set():
+            evt.set()
+
+    async def _await_pause_decision(self) -> bool:
+        """Block until the in-flight pause resolves. ``True`` → resumed
+        (keep speaking); ``False`` → killed (turn interrupted). Bounded:
+        fails open past the confirm window plus margin (the resume timer
+        guarantees a decision; the margin covers teardown races)."""
+        while getattr(self, "_output_paused", False) and self._is_speaking:
+            evt = getattr(self, "_pause_decision_event", None)
+            if evt is None:
+                break
+            try:
+                await asyncio.wait_for(
+                    evt.wait(),
+                    timeout=getattr(self, "_barge_in_confirm_s", 1.5) + 5.0,
+                )
+            except asyncio.TimeoutError:  # pragma: no cover - defensive
+                logger.debug("pause decision wait timed out — failing open")
+                break
+        return self._is_speaking
+
+    async def _buffer_sentence_if_paused(self, sentence: str) -> bool:
+        """While paused, buffer ``sentence`` (pre-guardrail text) for the
+        resume drain and return ``True``; return ``False`` when not paused
+        (caller synthesizes normally). Overflow degrades to a full cancel —
+        the bounded buffer is a memory-safety valve, not a speech queue."""
+        if not getattr(self, "_output_paused", False):
+            return False
+        buf = getattr(self, "_paused_sentences", None)
+        if buf is None:
+            buf = self._paused_sentences = []
+        if len(buf) >= self._PAUSE_MAX_BUFFERED_SENTENCES:
+            logger.warning(
+                "pause_resume sentence buffer overflow (%d) — degrading to full cancel",
+                len(buf),
+            )
+            await self._do_cancel_for_barge_in("<pause_resume sentence-buffer overflow>")
+            return True  # handled; the loop observes _is_speaking=False next
+        buf.append(sentence)
+        return True
+
+    def _release_paused_sentences(self) -> list[str]:
+        """Pop-and-return every sentence buffered during the pause."""
+        buf = getattr(self, "_paused_sentences", None)
+        if not buf:
+            return []
+        out = list(buf)
+        buf.clear()
+        return out
+
+    def _begin_retained_sentence(self, text: str) -> dict | None:
+        """Open a retention entry for a response sentence (pause_resume mode
+        only — returns ``None`` otherwise, keeping the legacy send path
+        byte-identical). Filler / error-fallback audio is never retained
+        (``record_segment=False`` callers skip this)."""
+        if getattr(self, "_barge_in_mode", "cancel") != "pause_resume":
+            return None
+        if getattr(self, "_pause_resume_overflowed", False):
+            return None
+        entries = getattr(self, "_turn_sentence_audio", None)
+        if entries is None:
+            entries = self._turn_sentence_audio = []
+        entry = {"text": text, "chunks": [], "sent": 0}
+        entries.append(entry)
+        return entry
+
+    async def _retain_pause_chunk(self, entry: dict, chunk: bytes) -> bool:
+        """Append ``chunk`` to the sentence's retention entry, enforcing the
+        retained-audio cap. Returns ``True`` when retained; ``False`` on
+        overflow (paused → the turn was just killed; speaking → retention
+        was released and the caller falls back to direct sends)."""
+        entry["chunks"].append(chunk)
+        self._pause_retained_bytes = (
+            getattr(self, "_pause_retained_bytes", 0) + len(chunk)
+        )
+        if self._pause_retained_bytes <= self._pause_retained_cap_bytes():
+            return True
+        if getattr(self, "_output_paused", False):
+            logger.warning(
+                "pause_resume retained-audio cap (%.0fs) exceeded while paused — "
+                "degrading to full cancel",
+                self._PAUSE_RESUME_MAX_RETAINED_S,
+            )
+            await self._do_cancel_for_barge_in("<pause_resume audio-buffer overflow>")
+        else:
+            logger.info(
+                "pause_resume retained-audio cap (%.0fs) exceeded — disabling "
+                "pause-resume for this turn (legacy cancel applies)",
+                self._PAUSE_RESUME_MAX_RETAINED_S,
+            )
+            self._pause_resume_overflowed = True
+            self._pause_retained_bytes = 0
+            entries = getattr(self, "_turn_sentence_audio", None) or []
+            for e in entries:
+                e["chunks"] = []
+                e["sent"] = 0
+        return False
+
+    async def _drain_sentence_entry(self, entry: dict, force: bool = False) -> None:
+        """Send every not-yet-sent chunk of a retention entry to the carrier
+        (claim-then-send so concurrent drains can never double-send).
+        Stamps the sentence's heard-prefix segment at its first sent chunk —
+        a replay (``sent`` reset to 0) re-stamps at the new timeline
+        position. ``force=True`` bypasses the pause gate (resume path only).
+        """
+        while entry["sent"] < len(entry["chunks"]):
+            if not self._is_speaking:
+                return
+            if getattr(self, "_output_paused", False) and not force:
+                return
+            idx = entry["sent"]
+            entry["sent"] = idx + 1
+            chunk = entry["chunks"][idx]
+            if idx == 0:
+                segments = getattr(self, "_turn_spoken_segments", None)
+                if segments is not None:
+                    segments.append(
+                        (entry["text"], getattr(self, "_turn_playback_total_s", 0.0))
+                    )
+            # Far-end tap mirrors the direct send path: SKIPPED on the
+            # carrier-native fast path where these are mulaw 8 kHz wire
+            # bytes that would corrupt the int16-PCM-16k AEC reference.
+            if getattr(self, "_aec", None) is not None and not getattr(
+                self, "_tts_output_format_native_for_carrier", False
+            ):
+                self._aec.push_far_end(chunk)
+            # Local-recording tap (agent side) — decodes on the
+            # carrier-native μ-law fast path instead of skipping.
+            self._tap_pipeline_agent_audio(chunk)
+            await self.audio_sender.send_audio(chunk)
+            self._track_outbound_playback(len(chunk))
+            self._mark_first_audio_sent()
+
+    def _passes_paused_kill_filters(self, transcript) -> bool:
+        """Whether a transcript may KILL a paused turn: it must be a
+        committed FINAL (interims cannot confirm), not a known STT
+        hallucination, and not a duplicate of the last committed utterance —
+        the same filter family ``_commit_transcript`` applies, evaluated
+        without consuming its dedup state (the transcript still flows on to
+        ``_commit_transcript`` to become the user's next turn)."""
+        if not (
+            getattr(transcript, "is_final", False)
+            or getattr(transcript, "speech_final", False)
+        ):
+            return False
+        normalised = transcript.text.strip().lower()
+        stripped = normalised.rstrip(".,!?;: ").strip()
+        if stripped in _STT_HALLUCINATIONS or stripped == "":
+            return False
+        if (
+            normalised == getattr(self, "_last_commit_text", "")
+            and time.time() - getattr(self, "_last_commit_at", 0.0) < 2.0
+        ):
+            return False
+        return True
+
     def _commit_transcript(self, text: str) -> bool:
         """Dedup + throttle + hallucination filter for final STT transcripts.
 
@@ -3836,13 +5291,17 @@ class PipelineStreamHandler(StreamHandler):
             logger.debug("Dropped likely STT hallucination: %r", normalised[:40])
             return False
         # Echo guard: while the agent is still speaking (the forward-STT echo
-        # window), a transcript that matches the agent's own speech is its TTS
-        # bleeding back into STT, not a user turn. Gated on
-        # ``_forward_stt_while_speaking`` + ``_is_speaking`` so a real post-turn
+        # window — or a pause_resume confirm window, which forwards mic audio
+        # to STT while the agent formally holds the floor), a transcript that
+        # matches the agent's own speech is its TTS bleeding back into STT,
+        # not a user turn. Gated on ``_is_speaking`` so a real post-turn
         # reply (committed when the agent is idle) is never dropped, and the
         # default VAD path — which withholds audio during TTS — is unaffected.
         if (
-            getattr(self, "_forward_stt_while_speaking", False)
+            (
+                getattr(self, "_forward_stt_while_speaking", False)
+                or getattr(self, "_output_paused", False)
+            )
             and getattr(self, "_is_speaking", False)
             and _looks_like_echo(text, getattr(self, "_current_agent_spoken_text", ""))
         ):
@@ -3904,6 +5363,11 @@ class PipelineStreamHandler(StreamHandler):
                 if not (
                     (transcript.is_final or transcript.speech_final) and transcript.text
                 ):
+                    # PREEMPTIVE GENERATION: a confident interim may start a
+                    # speculative LLM+TTS dispatch (audio held until the final
+                    # commits). No-op unless ``agent.preemptive_generation``.
+                    if transcript.text:
+                        await self._note_interim_transcript(transcript.text)
                     continue
                 if not self._commit_transcript(transcript.text):
                     # Final transcript dropped (dedup / hallucination /
@@ -3917,6 +5381,11 @@ class PipelineStreamHandler(StreamHandler):
                         self.metrics.anchor_user_speech_start()
                     continue
 
+                # A final transcript committed — interim-stability tracking
+                # for this utterance is over (prevents a stale stability
+                # watcher from speculating on the just-answered utterance).
+                self._reset_interim_tracking()
+
                 # Decouple dispatch from the receive loop: run the turn as a
                 # SINGLE tracked task so the ``async for`` keeps draining
                 # transcripts during a long (30-90 s) agent-runtime turn and
@@ -3925,6 +5394,13 @@ class PipelineStreamHandler(StreamHandler):
                 # first so exactly one dispatch is in flight and the per-turn
                 # conversation_history / metrics ordering is preserved.
                 await self._await_dispatch_settle()
+                # PREEMPTIVE GENERATION: when a speculative turn matching this
+                # final is in flight, RELEASE it (its task becomes the live
+                # dispatch) instead of starting a fresh one; a mismatch
+                # discards the speculation and falls through to the normal
+                # dispatch below.
+                if await self._try_release_speculation(transcript.text):
+                    continue
                 self._dispatch_task = asyncio.create_task(
                     self._dispatch_turn(transcript.text)
                 )
@@ -3932,6 +5408,11 @@ class PipelineStreamHandler(StreamHandler):
         except Exception as exc:
             logger.exception("Pipeline STT loop error: %s", exc)
         finally:
+            # No more transcripts can arrive — a still-pending speculation
+            # will never see its final, so tear it down (teardown, not a
+            # miss) before settling the last dispatch.
+            self._reset_interim_tracking()
+            await self._abort_speculation(reason="stt_loop_end", count_miss=False)
             # Return only once the last dispatch fully settles, so callers and
             # tests that inspect state right after ``await _stt_loop()`` still
             # observe completed turn effects (the loop no longer blocks DURING
@@ -3955,15 +5436,772 @@ class PipelineStreamHandler(StreamHandler):
         try:
             await task
         except asyncio.CancelledError:  # pragma: no cover - teardown path
-            pass
-        except Exception as exc:  # pragma: no cover - already handled in dispatch
-            logger.debug("backgrounded dispatch raised: %s", exc)
+            # Re-raise when WE are the one being cancelled (STT-loop
+            # teardown): swallowing it here defeated the cancelling task's
+            # own cleanup and let a racing transcript respawn a dispatch
+            # that survived teardown.
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise
+        except Exception as exc:
+            # NOT debug: _dispatch_turn's on_message path has no internal
+            # handler — webhook raise_for_status / 30 s read timeouts / user
+            # exceptions all surface here, and at DEBUG the caller heard
+            # silence while operators saw nothing.
+            logger.exception("LLM dispatch turn failed: %s", exc)
         finally:
             # Only clear if it is still the task we awaited — a re-entrant
             # launch could have replaced it (it cannot today: the loop is the
             # sole launcher and awaits here first, but be defensive).
             if self._dispatch_task is task:
                 self._dispatch_task = None
+
+    # ------------------------------------------------------------------
+    # PREEMPTIVE GENERATION (opt-in) — speculative dispatch on a confident
+    # interim transcript; commit-or-discard at end of utterance. Mirrors TS
+    # ``noteInterimTranscript`` / ``tryReleaseSpeculation`` and LiveKit's
+    # ``preemptive_generation``.
+    # ------------------------------------------------------------------
+
+    def _can_speculate(self) -> bool:
+        """Whether a speculative dispatch may start right now.
+
+        Built-in LLM loop only (an ``on_message`` handler may have external
+        side effects per invocation, so it is never run speculatively), and
+        only while the agent is idle: not speaking (an interim during agent
+        speech is barge-in material, not a next turn) and no turn dispatch
+        in flight (single-in-flight contract).
+        """
+        if not getattr(self, "_preemptive_enabled", False):
+            return False
+        if self.on_message is not None or self._llm_loop is None:
+            return False
+        if self._is_speaking:
+            return False
+        dispatch = self._dispatch_task
+        return dispatch is None or dispatch.done()
+
+    def _speculation_input_ok(self, text: str) -> bool:
+        """Read-only mirror of the :meth:`_commit_transcript` filters.
+
+        A candidate interim must pass the same hallucination / echo /
+        duplicate checks a final would face at commit time — otherwise we
+        would speculate on text whose final is guaranteed to be dropped.
+        Unlike ``_commit_transcript`` this NEVER mutates the dedup state.
+        """
+        normalised = text.strip().lower()
+        stripped = normalised.rstrip(".,!?;: ").strip()
+        if stripped in _STT_HALLUCINATIONS or stripped == "":
+            return False
+        if (
+            getattr(self, "_forward_stt_while_speaking", False)
+            and getattr(self, "_is_speaking", False)
+            and _looks_like_echo(text, getattr(self, "_current_agent_spoken_text", ""))
+        ):
+            return False
+        # The matching final would be dropped as a duplicate at commit time.
+        since_last = time.time() - self._last_commit_at
+        if since_last < 2.0 and normalised == self._last_commit_text:
+            return False
+        return True
+
+    async def _note_interim_transcript(self, text: str) -> None:
+        """Track an interim transcript and start a speculation when it
+        qualifies: (a) it ends with sentence-final punctuation (immediate),
+        or (b) it has been unchanged for ``preemptive_min_stable_ms``
+        (one-shot stability watcher). No-op when preemptive generation is
+        disabled or the handler cannot speculate right now."""
+        if not getattr(self, "_preemptive_enabled", False):
+            return
+        norm = _normalize_for_echo(text)
+        if not norm:
+            return
+        spec = self._speculation
+        if spec is not None and spec.norm_text == norm and not spec.failed:
+            return  # already speculating on this exact utterance
+        if not self._can_speculate():
+            self._cancel_interim_stability_task()
+            self._interim_norm = ""
+            return
+        if not self._speculation_input_ok(text):
+            return
+        if _ends_with_sentence_final_punct(text):
+            # High-confidence interim — speculate immediately (replacing any
+            # stale speculation on older text).
+            self._cancel_interim_stability_task()
+            self._interim_norm = norm
+            self._interim_text = text
+            await self._start_speculation(text)
+            return
+        if norm != self._interim_norm:
+            # Text changed — restart the stability window.
+            self._interim_norm = norm
+            self._interim_text = text
+            self._cancel_interim_stability_task()
+            if self._preemptive_min_stable_s <= 0:
+                await self._start_speculation(text)
+                return
+            self._interim_stable_task = asyncio.create_task(
+                self._interim_stability_watch(norm)
+            )
+
+    async def _interim_stability_watch(self, norm: str) -> None:
+        """One-shot watcher: after ``preemptive_min_stable_ms`` of the interim
+        text being unchanged, start the speculation (re-validating every gate
+        — the world may have moved on while we slept)."""
+        try:
+            await asyncio.sleep(self._preemptive_min_stable_s)
+        except asyncio.CancelledError:
+            return
+        if self._interim_norm != norm:
+            return  # a newer interim superseded this one
+        spec = self._speculation
+        if spec is not None and spec.norm_text == norm and not spec.failed:
+            return
+        if not self._can_speculate() or not self._speculation_input_ok(
+            self._interim_text
+        ):
+            return
+        try:
+            await self._start_speculation(self._interim_text)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("Preemptive: stability-triggered speculation failed")
+
+    def _cancel_interim_stability_task(self) -> None:
+        """Cancel the pending interim-stability watcher, if any. Idempotent;
+        safe from fixtures built via ``object.__new__`` (no ``__init__``)."""
+        task = getattr(self, "_interim_stable_task", None)
+        if task is not None and not task.done():
+            task.cancel()
+        self._interim_stable_task = None
+
+    def _reset_interim_tracking(self) -> None:
+        """Drop interim-stability state — called once a final commits (the
+        utterance is decided) and on teardown."""
+        self._cancel_interim_stability_task()
+        self._interim_norm = ""
+        self._interim_text = ""
+
+    async def _start_speculation(self, interim_text: str) -> None:
+        """Launch a speculative dispatch for ``interim_text``, replacing (and
+        counting as a miss) any previous speculation on different text."""
+        await self._abort_speculation(reason="replaced_by_newer_interim")
+        if self._speculation is not None:
+            # A concurrent path (the stability watcher vs. the STT loop)
+            # registered a NEWER speculation while we awaited the old one's
+            # unwind — keep it. Overwriting here would orphan its task parked
+            # on the commit decision forever (held audio + an open LLM
+            # stream, never aborted, never counted as a miss).
+            return
+        spec = _SpeculativeTurn(interim_text)
+        self._speculation = spec
+        spec.task = asyncio.create_task(self._run_speculative_dispatch(spec))
+        logger.debug(
+            "Preemptive: speculation started on interim %r",
+            sanitize_log_value(interim_text[:60]),
+        )
+
+    async def _abort_speculation(
+        self, *, reason: str, count_miss: bool = True
+    ) -> None:
+        """Discard the current speculation (if any): signal cancel, await the
+        task's unwind (bounded), and count a miss unless this is teardown.
+        The speculative task never touched history / carrier / per-turn
+        metrics, so there is nothing to roll back. Idempotent."""
+        spec = getattr(self, "_speculation", None)
+        if spec is None:
+            return
+        # Deregister synchronously so a concurrent commit cannot release a
+        # speculation that is already being torn down.
+        self._speculation = None
+        spec.failed = True
+        spec.cancel_event.set()
+        # Wake a task parked on the commit decision; ``released`` stays False
+        # so it unwinds as a discard.
+        spec.release_event.set()
+        task = spec.task
+        if task is not None and not task.done():
+            try:
+                await asyncio.wait_for(task, timeout=5.0)
+            except asyncio.TimeoutError:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            except (asyncio.CancelledError, Exception):  # pragma: no cover
+                pass
+        if (
+            count_miss
+            and self.metrics is not None
+            and hasattr(self.metrics, "record_preemptive_miss")
+        ):
+            self.metrics.record_preemptive_miss()
+        logger.debug("Preemptive: speculation discarded (%s)", reason)
+
+    def _fail_speculation_inline(self, spec: _SpeculativeTurn, reason: str) -> None:
+        """Self-abort from WITHIN the speculative task (LLM error, buffer
+        overflow, afterTranscribe veto). Marks the speculation unreleasable
+        and deregisters it so the commit path dispatches normally. Never
+        awaits (the caller IS the task)."""
+        spec.failed = True
+        spec.cancel_event.set()
+        spec.release_event.set()
+        if self._speculation is spec:
+            self._speculation = None
+        if self.metrics is not None and hasattr(
+            self.metrics, "record_preemptive_miss"
+        ):
+            self.metrics.record_preemptive_miss()
+        logger.debug("Preemptive: speculation failed (%s)", reason)
+
+    async def _try_release_speculation(self, final_text: str) -> bool:
+        """Commit-time decision for the in-flight speculation.
+
+        Returns ``True`` when the speculation was RELEASED — the caller must
+        NOT dispatch a normal turn (the speculative task is now the live
+        turn, tracked via ``_dispatch_task``). Returns ``False`` when there
+        was no usable speculation (none in flight, failed, or mismatched —
+        the mismatch is discarded here) and the normal dispatch must run.
+
+        On release, all commit-point bookkeeping the normal path performs in
+        ``_dispatch_turn`` happens HERE — metrics anchors (so TTFT/latency
+        reflect user-perceived timing from the REAL final-transcript commit),
+        the conversation-history user push (final transcript text), and the
+        ``on_transcript`` callback — exactly once per turn.
+        """
+        spec = getattr(self, "_speculation", None)
+        if spec is None:
+            return False
+        if (
+            spec.failed
+            or spec.cancel_event.is_set()
+            or not _speculation_matches(spec.interim_text, final_text)
+        ):
+            await self._abort_speculation(reason="final_mismatch")
+            return False
+
+        # ---- RELEASE ----
+        self._speculation = None
+        spec.final_text = final_text
+        # Point the live cancel machinery at the speculative stream so the
+        # existing barge-in paths (``_do_cancel_for_barge_in`` and the VAD
+        # legacy cancel, which set ``self._llm_cancel_event``) tear it down
+        # exactly like a normal turn's stream.
+        self._llm_cancel_event = spec.cancel_event
+
+        if self.metrics is not None:
+            if hasattr(self.metrics, "record_preemptive_hit"):
+                self.metrics.record_preemptive_hit()
+            self.metrics.start_turn_if_idle()
+            self.metrics.record_vad_stop()
+            self.metrics.record_stt_complete(final_text)
+            self.metrics.record_stt_final_timestamp()
+        with start_span(
+            SPAN_STT,
+            {
+                "getpatter.stt.text_len": len(final_text),
+                "patter.call.id": self.call_id,
+            },
+        ):
+            pass
+        logger.debug("User: %s", sanitize_log_value(final_text))
+
+        # History/transcript record the FINAL transcript text as the user
+        # message (the LLM consumed the matching interim — normalized-equal
+        # by definition of the release gate).
+        self.transcript_entries.append({"role": "user", "text": final_text})
+        self.conversation_history.append(
+            {"role": "user", "text": final_text, "timestamp": self._last_commit_at}
+        )
+        if self.on_transcript:
+            await self.on_transcript(
+                {
+                    "role": "user",
+                    "text": final_text,
+                    "call_id": self.call_id,
+                    "history": list(self.conversation_history),
+                }
+            )
+        if self.metrics is not None:
+            self.metrics.record_on_user_turn_completed_delay(0.0)
+            self.metrics.record_turn_committed()
+        # Released turns bypass ``_dispatch_turn``: perform its semantic
+        # turn-detection commit bookkeeping here too, EOS event included, so
+        # combining ``preemptive_generation`` with ``turn_detector`` neither
+        # leaks a stale stamped trigger into the next turn nor skips the
+        # committed-EOS speech event.
+        if getattr(self, "_turn_detector", None) is not None:
+            self._cancel_semantic_hold()
+            self._reset_semantic_window()
+            _eou_trigger = self._last_eou_trigger
+            self._last_eou_trigger = EouTrigger.VAD_SILENCE
+        else:
+            _eou_trigger = (
+                "vad_silence"
+                if (getattr(self.agent, "vad", None) or self._auto_vad) is not None
+                else "manual_commit"
+            )
+        await self._emit_user_speech_eos(
+            trigger=_eou_trigger, transcript_so_far=final_text
+        )
+
+        spec.released = True
+        spec.release_event.set()
+        # The speculative task is now the live turn — single-in-flight
+        # semantics keep holding through ``_await_dispatch_settle``.
+        self._dispatch_task = spec.task
+        logger.info(
+            "Preemptive: speculation RELEASED on matching final %r",
+            sanitize_log_value(final_text[:60]),
+        )
+        return True
+
+    def _spec_buffer_seconds(self, spec: _SpeculativeTurn) -> float:
+        """Playout duration of the audio a speculation has buffered so far.
+        Same bytes-per-second model as ``_track_outbound_playback``."""
+        bytes_per_s = (
+            8_000.0
+            if getattr(self.audio_sender, "_input_is_mulaw_8k", False)
+            else 32_000.0
+        )
+        return spec.buffered_bytes / bytes_per_s
+
+    async def _spec_send_chunk(
+        self, spec: _SpeculativeTurn, processed_audio: bytes
+    ) -> None:
+        """Push one (already hook-processed) audio chunk of a RELEASED
+        speculation to the carrier — the same per-chunk bookkeeping
+        ``_synthesize_sentence`` performs on the live path."""
+        if spec.first_tts_chunk[0]:
+            spec.first_tts_chunk[0] = False
+            if self.metrics is not None:
+                self.metrics.record_tts_first_byte()
+            await self._emit_audio_out()
+        if self._event_bus is not None:
+            self._event_bus.emit("tts_chunk", {"bytes": len(processed_audio)})
+        # Far-end tap mirrors the direct send path: SKIPPED on the
+        # carrier-native fast path where these are mulaw 8 kHz wire bytes
+        # that would corrupt the int16-PCM-16k AEC reference.
+        if self._aec is not None and not getattr(
+            self, "_tts_output_format_native_for_carrier", False
+        ):
+            self._aec.push_far_end(processed_audio)
+        # Local-recording tap (agent side) — decodes on the carrier-native
+        # μ-law fast path instead of skipping.
+        self._tap_pipeline_agent_audio(processed_audio)
+        await self.audio_sender.send_audio(processed_audio)
+        self._track_outbound_playback(len(processed_audio))
+        self._mark_first_audio_sent()
+
+    async def _spec_ensure_flushed(self, spec: _SpeculativeTurn) -> None:
+        """Idempotent release flush: take the floor (``_begin_speaking``),
+        stamp the post-commit LLM markers, and stream every buffered sentence
+        to the carrier in order. After this the speculative task continues as
+        a plain live turn. No-op until the speculation is released."""
+        if spec.flushed or not spec.released:
+            return
+        spec.flushed = True
+        await self._begin_speaking()
+        # Post-commit metric markers: the user-perceived TTFT for a released
+        # speculation is "final commit → audio", so the first-token /
+        # first-sentence stamps are recorded NOW (post ``record_turn_
+        # committed``) rather than back when the speculative stream actually
+        # produced them.
+        if spec.response_parts:
+            if self.metrics is not None and not spec.llm_first_token_recorded:
+                self.metrics.record_llm_first_token()
+            if not spec.llm_first_token_recorded:
+                spec.llm_first_token_recorded = True
+                await self._emit_llm_first_token(
+                    llm_provider=self._infer_llm_provider(),
+                    model=self.agent.model,
+                )
+            # Echo-guard reference for barge-in comparisons during the live
+            # continuation (``_begin_speaking`` reset it).
+            self._current_agent_spoken_text = "".join(spec.response_parts)
+        if spec.buffered and self.metrics is not None:
+            self.metrics.record_llm_first_sentence()
+        for sentence_text, chunks in spec.buffered:
+            if not chunks:
+                continue
+            # Per-sentence carry reset, mirroring ``_synthesize_sentence``.
+            self.audio_sender.reset_pcm_carry()
+            record_segment = True
+            for audio in chunks:
+                if not self._is_speaking:
+                    # Barge-in landed mid-flush — stop exactly like the live
+                    # sentence loop would.
+                    spec.interrupted = True
+                    spec.buffered = []
+                    return
+                if record_segment:
+                    self._turn_spoken_segments.append(
+                        (sentence_text, self._turn_playback_total_s)
+                    )
+                    record_segment = False
+                await self._spec_send_chunk(spec, audio)
+            self.audio_sender.reset_pcm_carry()
+        spec.buffered = []  # release the held memory
+
+    async def _spec_synthesize_buffered(
+        self,
+        spec: _SpeculativeTurn,
+        sentence: str,
+        hook_executor: PipelineHookExecutor,
+        hook_ctx: HookContext,
+    ) -> bool:
+        """Synthesize one sentence of an UNRELEASED speculation, holding the
+        audio in ``spec.buffered``. Transitions to live sending mid-sentence
+        the moment the release lands. Returns ``False`` when the speculation
+        must stop (cancelled, overflow, or barge-in after a mid-sentence
+        release)."""
+        if self._tts is None:
+            # No TTS configured — nothing audible to hold; still track the
+            # sentence so the released turn records it (parity with the live
+            # path, which is also silent without TTS).
+            spec.buffered.append((sentence, []))
+            return True
+
+        transformed = sentence
+        text_transforms = getattr(self.agent, "text_transforms", None)
+        if text_transforms:
+            for fn in text_transforms:
+                transformed = fn(transformed)
+        processed = await hook_executor.run_before_synthesize(transformed, hook_ctx)
+        if processed is None:
+            return True  # hook skipped this sentence
+
+        chunks: list[bytes] = []
+        # Register BEFORE synthesis so a mid-sentence release flushes the
+        # partial chunks collected so far in order.
+        spec.buffered.append((processed, chunks))
+        _tts_span = start_span(
+            SPAN_TTS,
+            {
+                "getpatter.tts.text_len": len(processed),
+                "patter.call.id": self.call_id,
+            },
+        )
+        _tts_span.__enter__()
+        gen = self._tts.synthesize(processed)
+        try:
+            async for audio_chunk in gen:
+                if spec.cancel_event.is_set() and not spec.released:
+                    return False
+                processed_audio = await hook_executor.run_after_synthesize(
+                    audio_chunk, processed, hook_ctx
+                )
+                if processed_audio is None:
+                    continue
+                if spec.released and not spec.flushed:
+                    # The final committed while this sentence was mid-synth —
+                    # flush everything buffered (including this sentence's
+                    # earlier chunks) and continue live below.
+                    await self._spec_ensure_flushed(spec)
+                if spec.flushed:
+                    if not self._is_speaking:
+                        spec.interrupted = True
+                        return False
+                    await self._spec_send_chunk(spec, processed_audio)
+                else:
+                    chunks.append(processed_audio)
+                    spec.buffered_bytes += len(processed_audio)
+                    if self._spec_buffer_seconds(spec) > _PREEMPTIVE_MAX_BUFFER_S:
+                        self._fail_speculation_inline(spec, "buffer_overflow")
+                        return False
+        finally:
+            await gen.aclose()
+            _tts_span.__exit__(None, None, None)
+        return True
+
+    async def _spec_speak_sentence(
+        self,
+        spec: _SpeculativeTurn,
+        sentence: str,
+        hook_executor: PipelineHookExecutor,
+        hook_ctx: HookContext,
+    ) -> bool:
+        """Guardrails + tier-2 hook + synthesis for one speculative sentence
+        — buffered pre-release, live post-release (same transforms either
+        way). Returns ``False`` when the turn must stop."""
+        blocked, guard_name = evaluate_guardrails(self.agent, sentence)
+        if blocked:
+            sentence = get_guardrail_replacement(self.agent, guard_name)
+        if hook_executor.has_after_llm_sentence():
+            transformed = await hook_executor.run_after_llm_sentence(
+                sentence, hook_ctx
+            )
+            if transformed is None:
+                return True  # hook dropped this sentence
+            sentence = transformed
+        if spec.released:
+            await self._spec_ensure_flushed(spec)
+            if not self._is_speaking:
+                spec.interrupted = True
+                return False
+            if (
+                self.metrics is not None
+                and spec.first_tts_chunk[0]
+                and not spec.buffered
+            ):
+                # First sentence of the turn is being synthesized live
+                # (nothing was buffered pre-release) — stamp the boundary the
+                # streaming path stamps via ``record_llm_first_sentence``.
+                self.metrics.record_llm_first_sentence()
+            ok = await self._synthesize_sentence(
+                sentence, hook_executor, hook_ctx, spec.first_tts_chunk
+            )
+            if not ok:
+                spec.interrupted = True
+            return ok
+        return await self._spec_synthesize_buffered(
+            spec, sentence, hook_executor, hook_ctx
+        )
+
+    async def _finish_released_speculation(
+        self, spec: _SpeculativeTurn, *, llm_error: bool
+    ) -> None:
+        """Turn-complete bookkeeping for a RELEASED speculation — mirrors the
+        tail of ``_process_streaming_response`` + ``_dispatch_turn`` (metrics
+        turn record, interrupted heard-prefix marker, assistant history
+        entry). Runs exactly once, after all audio was sent/cancelled."""
+        response_text = "".join(spec.response_parts)
+        interrupted = spec.interrupted
+        if not interrupted and not llm_error and response_text:
+            if self.metrics is not None:
+                self.metrics.record_tts_complete(response_text)
+                turn = self.metrics.record_turn_complete(response_text)
+                await self._emit_turn_metrics(turn, call_id=self.call_id)
+        self._last_response_interrupted = interrupted
+        if interrupted and response_text:
+            heard = self._heard_response_prefix()
+            if heard is not None:
+                heard_text, _heard_everything = heard
+                response_text = (
+                    f"{heard_text} [interrupted by caller]"
+                    if heard_text
+                    else "[interrupted by caller]"
+                )
+            else:
+                response_text = f"{response_text} [interrupted by caller]"
+        if response_text:
+            await self._emit_assistant_transcript(response_text)
+
+    async def _run_speculative_dispatch(self, spec: _SpeculativeTurn) -> None:
+        """Body of one speculative turn: LLM stream → sentence chunking →
+        buffered TTS, then commit-or-discard.
+
+        Until release this task is side-effect free outside ``spec`` itself
+        — no conversation-history writes, no carrier audio, no per-turn
+        metrics (LLM token usage/cost IS recorded by ``LLMLoop``: the tokens
+        were genuinely consumed either way). After release it behaves
+        exactly like a live ``_dispatch_turn`` body.
+        """
+        result = None
+        llm_error = False
+        stopped = False
+        try:
+            hooks = getattr(self.agent, "hooks", None)
+            hook_executor = PipelineHookExecutor(hooks)
+            hook_ctx = self._build_hook_context()
+
+            # afterTranscribe gates/edits the text the LLM sees — same as a
+            # normal dispatch. A veto means the matching final would be
+            # vetoed too; fail the speculation and let the commit path run
+            # the hook again on the real final.
+            filtered_text = await hook_executor.run_after_transcribe(
+                spec.interim_text, hook_ctx
+            )
+            if filtered_text is None:
+                self._fail_speculation_inline(spec, "after_transcribe_veto")
+                return
+
+            # Prompt parity with ``_dispatch_turn``: snapshot history and
+            # append the (filtered) user entry to the SNAPSHOT only — the
+            # shared conversation_history is committed at release time.
+            snapshot = list(self.conversation_history)
+            snapshot.append(
+                {"role": "user", "text": filtered_text, "timestamp": time.time()}
+            )
+            call_ctx = {
+                "call_id": self.call_id,
+                "caller": self.caller,
+                "callee": self.callee,
+            }
+            chunker = SentenceChunker(
+                aggressive_first_flush=getattr(
+                    self.agent, "aggressive_first_flush", False
+                ),
+                language=getattr(self.agent, "language", "en"),
+            )
+            result = self._llm_loop.run(
+                filtered_text,
+                snapshot,
+                call_ctx,
+                hook_executor=hook_executor,
+                hook_ctx=hook_ctx,
+                cancel_event=spec.cancel_event,
+            )
+            try:
+                token_iter = result.__aiter__()
+                while True:
+                    next_token = asyncio.ensure_future(token_iter.__anext__())
+                    # Pre-release: race the next token against the commit
+                    # decision so buffered audio flushes the MOMENT the final
+                    # commits — even while the LLM is silent between tokens
+                    # (agent-runtime LLMs can pause for seconds mid-stream).
+                    while not next_token.done() and not spec.released:
+                        if spec.cancel_event.is_set():
+                            break
+                        release_wait = asyncio.ensure_future(
+                            spec.release_event.wait()
+                        )
+                        try:
+                            await asyncio.wait(
+                                {next_token, release_wait},
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                        finally:
+                            release_wait.cancel()
+                            try:
+                                await release_wait
+                            except (asyncio.CancelledError, Exception):
+                                pass
+                        if (
+                            spec.released
+                            and not spec.flushed
+                            and not spec.cancel_event.is_set()
+                        ):
+                            await self._spec_ensure_flushed(spec)
+                    if spec.cancel_event.is_set():
+                        # Aborted (pre-release discard) or barge-in cancelled
+                        # (post-release) — abandon the pending token fetch.
+                        if not next_token.done():
+                            next_token.cancel()
+                        try:
+                            await next_token
+                        except (
+                            StopAsyncIteration,
+                            asyncio.CancelledError,
+                            Exception,
+                        ):
+                            pass
+                        if spec.released:
+                            spec.interrupted = True
+                        stopped = True
+                        break
+                    try:
+                        token = await next_token
+                    except StopAsyncIteration:
+                        break
+                    spec.response_parts.append(token)
+                    if spec.released:
+                        # Flush as soon as the release is observed — never
+                        # hold already-synthesized audio while waiting for
+                        # the next sentence boundary.
+                        if not spec.flushed:
+                            await self._spec_ensure_flushed(spec)
+                        # Live continuation — keep the echo-guard reference
+                        # and user-perceived TTFT current.
+                        self._current_agent_spoken_text = "".join(
+                            spec.response_parts
+                        )
+                        if not spec.llm_first_token_recorded:
+                            spec.llm_first_token_recorded = True
+                            if self.metrics is not None:
+                                self.metrics.record_llm_first_token()
+                            await self._emit_llm_first_token(
+                                llm_provider=self._infer_llm_provider(),
+                                model=self.agent.model,
+                            )
+                    for sentence in chunker.push(token):
+                        if not await self._spec_speak_sentence(
+                            spec, sentence, hook_executor, hook_ctx
+                        ):
+                            stopped = True
+                            break
+                    if stopped:
+                        break
+            except Exception as exc:
+                if spec.cancel_event.is_set() and not spec.released:
+                    return  # torn down mid-stream by an abort — silent
+                llm_error = True
+                chunker.reset()
+                logger.exception(
+                    "Preemptive: LLM streaming error during speculation: %s", exc
+                )
+                if not spec.released:
+                    # Unreleased — fail silently; the final dispatches
+                    # normally (and gets its own, live, error handling).
+                    self._fail_speculation_inline(spec, "llm_error")
+                    return
+                # Released — the turn is live: mirror the live error path.
+                if self.metrics is not None and self.metrics.turn_active:
+                    self.metrics.record_turn_interrupted()
+                fallback = getattr(self.agent, "llm_error_message", None)
+                if fallback and spec.first_tts_chunk[0] and self._is_speaking:
+                    try:
+                        await self._synthesize_sentence(
+                            fallback,
+                            hook_executor,
+                            hook_ctx,
+                            spec.first_tts_chunk,
+                            record_segment=False,
+                        )
+                    except Exception:  # pragma: no cover - defensive
+                        logger.exception(
+                            "llm_error_message fallback synthesis failed"
+                        )
+
+            if not llm_error and not stopped:
+                for sentence in chunker.flush():
+                    if not await self._spec_speak_sentence(
+                        spec, sentence, hook_executor, hook_ctx
+                    ):
+                        stopped = True
+                        break
+
+            if not spec.released:
+                if spec.cancel_event.is_set() or spec.failed:
+                    return  # aborted pre-release — unwind silently
+                # Generation finished before the final committed — park and
+                # hold the audio until the commit decision lands.
+                await spec.release_event.wait()
+                if not spec.released:
+                    return  # discarded
+
+            # Released: flush anything still held (covers "LLM finished
+            # before the final committed" — the common case), then run the
+            # turn-complete bookkeeping. ``_end_speaking_with_grace`` pairs
+            # with the ``_begin_speaking`` inside the flush.
+            try:
+                if not spec.interrupted and not llm_error:
+                    await self._spec_ensure_flushed(spec)
+            finally:
+                if spec.flushed:
+                    await self._end_speaking_with_grace()
+            if self.metrics is not None:
+                self.metrics.record_llm_complete()
+            await self._finish_released_speculation(spec, llm_error=llm_error)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Preemptive: speculative dispatch failed")
+            if not spec.released:
+                self._fail_speculation_inline(spec, "exception")
+            elif spec.flushed and self._is_speaking:
+                # Never leave the floor held on an unexpected released-path
+                # failure.
+                await self._end_speaking_with_grace()
+        finally:
+            if result is not None and hasattr(result, "aclose"):
+                try:
+                    await result.aclose()
+                except Exception:  # pragma: no cover - defensive
+                    pass
+            if self._speculation is spec:
+                self._speculation = None
 
     async def _dispatch_turn(self, transcript_text: str) -> None:
         """Run the post-commit pipeline (record STT → afterTranscribe →
@@ -4001,9 +6239,45 @@ class PipelineStreamHandler(StreamHandler):
             # Known limitation: per-turn audio_seconds is not tracked
             # here; metrics rely on total _stt_byte_count plus the
             # end_call() estimation pass.
-            self.metrics.record_vad_stop()
+            # first_wins: only a FALLBACK when no VAD speech_end stamped
+            # this turn (no local VAD configured). Unconditional stamping
+            # made EOU delay ≈0 on every emission (TS gates the stamp on the
+            # provider's speechFinal for the same reason).
+            self.metrics.record_vad_stop(first_wins=True)
             self.metrics.record_stt_complete(transcript_text)
             self.metrics.record_stt_final_timestamp()
+
+        # Semantic turn detection (opt-in): a committed transcript
+        # supersedes any in-flight hold (the STT endpointed on its own), and
+        # the per-turn rolling window restarts so the next turn is scored on
+        # its own audio.
+        if self._turn_detector is not None:
+            self._cancel_semantic_hold()
+            self._reset_semantic_window()
+        # Speech-event: end-of-utterance committed (pipeline analogue of
+        # Realtime's input_audio_buffer.committed, which fires at the server
+        # commit signal regardless of what the app does with the text).
+        # Fires HERE — at transcript commit, before the hook veto and the
+        # handler-availability checks — so both the on_message and built-in
+        # LLM paths (and discarded orphan turns) advance the dispatcher's
+        # turn index. With a semantic detector configured, consume the
+        # trigger its finalize path stamped (``semantic_turn_detector`` when
+        # the model approved the commit) — single consumption point so the
+        # event fires exactly once per committed turn. Otherwise the trigger
+        # reflects how this commit was driven: local VAD silence when a VAD
+        # is active, else the STT provider's own endpointing.
+        if self._turn_detector is not None:
+            _eou_trigger = self._last_eou_trigger
+            self._last_eou_trigger = EouTrigger.VAD_SILENCE
+        else:
+            _eou_trigger = (
+                "vad_silence"
+                if (getattr(self.agent, "vad", None) or self._auto_vad) is not None
+                else "manual_commit"
+            )
+        await self._emit_user_speech_eos(
+            trigger=_eou_trigger, transcript_so_far=transcript_text
+        )
 
         # Endpoint span — silence-detected → LLM-dispatch window. Open
         # here (right after VAD stop / final transcript is recorded)
@@ -4044,7 +6318,7 @@ class PipelineStreamHandler(StreamHandler):
         )
 
         if self.on_transcript:
-            await self.on_transcript(
+            await self._safe_on_transcript(
                 {
                     "role": "user",
                     "text": transcript_text,
@@ -4098,6 +6372,11 @@ class PipelineStreamHandler(StreamHandler):
             and self.conversation_history[-1].get("text") == transcript_text
         ):
             self.conversation_history.pop()
+        # Snapshot history BEFORE appending the current turn:
+        # ``LLMLoop._build_messages`` replays the given history and then
+        # appends ``user_text`` itself, so including the current turn here
+        # sent the user's utterance to the model twice on every turn.
+        history_snapshot = list(self.conversation_history)
         self.conversation_history.append(
             {"role": "user", "text": filtered_text, "timestamp": _turn_ts}
         )
@@ -4114,7 +6393,7 @@ class PipelineStreamHandler(StreamHandler):
             _close_endpoint_span()
             result = self._llm_loop.run(
                 filtered_text,
-                list(self.conversation_history),
+                history_snapshot,
                 call_ctx,
                 hook_executor=hook_executor,
                 hook_ctx=hook_ctx,
@@ -4192,6 +6471,18 @@ class PipelineStreamHandler(StreamHandler):
 
     async def on_audio_received(self, audio_bytes: bytes) -> None:
         """Forward caller audio to STT (transcoding to PCM16 16 kHz, running VAD/hooks)."""
+        # Local-recording tap — ABOVE the STT/barge-in early-returns so the
+        # caller channel has no gaps when STT is unset or inbound frames are
+        # dropped during TTS (``barge_in_threshold_ms == 0``). The recorder
+        # performs the same mulaw→PCM16 decode + 8→16 kHz resample as the
+        # STT path below (own stateful resampler), so it always receives
+        # PCM16 16 kHz regardless of the carrier wire codec. Tapped PRE-AEC:
+        # the recording captures what the caller actually sent.
+        if getattr(self, "local_recorder", None) is not None:
+            self._tap_caller_audio(
+                audio_bytes,
+                "mulaw_8k" if self._input_is_mulaw_8k else "pcm16_16k",
+            )
         if self._stt is None:
             return
         # Always forward caller audio to STT — even while the agent is
@@ -4203,41 +6494,54 @@ class PipelineStreamHandler(StreamHandler):
         # Inbound PCMU 8 kHz (Twilio always, Telnyx when streaming_start
         # negotiated PCMU bidirectional) must be decoded to PCM16 and
         # up-sampled to 16 kHz before hitting STT adapters configured for
-        # linear16 @ 16 kHz.
-        if self._input_is_mulaw_8k:
-            from getpatter.audio.transcoding import mulaw_to_pcm16
+        # linear16 @ 16 kHz. Decode -> stateful resample -> AEC near-end ->
+        # ``agent.audio_filter`` -> VAD all live in the
+        # ``InputProcessingChain`` (slice 1 of the pipeline-stages
+        # decomposition — docs/architecture/pipeline-stages.md). Lazily
+        # constructed (mirrors the old lazy resampler) with late-bound
+        # getters so ``start()`` — and test fixtures — can install
+        # ``_aec`` / ``_auto_vad`` after the chain already exists.
+        chain = getattr(self, "_input_chain", None)
+        if chain is None:
+            chain = InputProcessingChain(
+                input_is_mulaw_8k=self._input_is_mulaw_8k,
+                get_aec=lambda: getattr(self, "_aec", None),
+                get_audio_filter=lambda: getattr(self.agent, "audio_filter", None),
+                get_vad=lambda: getattr(self.agent, "vad", None)
+                or getattr(self, "_auto_vad", None),
+            )
+            self._input_chain = chain
+        frame = await chain.process(audio_bytes)
+        pcm = frame.pcm
 
-            # Use per-handler StatefulResampler to preserve ratecv filter state
-            # across audio chunks (prevents boundary artefacts at STT input).
-            if self._resampler_8k_to_16k is None:
-                from getpatter.audio.transcoding import create_resampler_8k_to_16k
+        # ---- Semantic turn detection: rolling audio window ----
+        # Keep the last ~8 s of post-chain (decoded, AEC'd, filtered) PCM16
+        # 16 kHz so the detector can score the caller's current turn on the
+        # VAD speech_end edge. Zero cost when no ``agent.turn_detector`` is
+        # configured (or after the detector failed and semantic endpointing
+        # was disabled).
+        if self._turn_detector is not None and not self._semantic_detector_failed:
+            self._semantic_buffer_append(pcm)
 
-                self._resampler_8k_to_16k = create_resampler_8k_to_16k()
-            pcm = self._resampler_8k_to_16k.process(mulaw_to_pcm16(audio_bytes))
-        else:
-            pcm = audio_bytes
-
-        # ---- AEC ---- subtract estimated TTS bleed before VAD/STT see it.
-        # Pass-through until the canceller has enough far-end history to
-        # fill its filter window (~128 ms), then converges over the next
-        # 0.5–2 s of TTS-only frames.
-        if self._aec is not None:
-            pcm = self._aec.process_near_end(pcm)
-
-        # ---- VAD wiring (Fix 8) ----
-        # Optional ``agent.vad`` (or auto-loaded SileroVAD when the user
-        # didn't pass one) runs *before* STT so we can react to speech_start
+        # ---- VAD event handling (Fix 8) ----
+        # The chain fed the (AEC'd, filtered) frame to ``agent.vad`` (or the
+        # auto-loaded SileroVAD) *before* STT so we can react to speech_start
         # with immediate barge-in (clearing the carrier audio buffer) rather
         # than waiting for the STT engine's slower endpoint.
-        vad = getattr(self.agent, "vad", None) or self._auto_vad
-        if vad is not None:
-            try:
-                vad_event = await vad.process_frame(pcm, 16000)
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.debug("VAD process_frame failed: %s", exc)
-                vad_event = None
+        if frame.vad_configured:
+            vad_event = frame.vad_event
             if vad_event is not None:
                 if vad_event.type == "speech_start":
+                    # Speech-event: the seven-event public API never fired in
+                    # pipeline mode (only realtime emitted) — wire the user
+                    # start edge here. No-op without a dispatcher.
+                    await self._emit_user_speech_started()
+                    # The user resumed speaking — an active semantic hold
+                    # (detector judged the previous pause mid-turn) is proven
+                    # right; drop it so the utterance keeps accumulating and
+                    # the next speech_end re-evaluates from scratch.
+                    if self._turn_detector is not None:
+                        self._cancel_semantic_hold()
                     # Tail-grace new-turn rescue: the agent already finished
                     # its turn and we are only in the post-TTS echo-guard
                     # window. A VAD speech_start here is the user's next turn,
@@ -4279,6 +6583,23 @@ class PipelineStreamHandler(StreamHandler):
                         # grace-timer flip will drain the ring buffer to
                         # STT so the user's words are not silently lost.
                         self._suppressed_speech_pending = True
+                    elif self._is_speaking and self._should_pause_for_barge_in():
+                        # PAUSE-AND-RESUME (opt-in ``barge_in_mode=
+                        # "pause_resume"``): output pauses immediately —
+                        # the carrier buffer is cleared so the agent goes
+                        # silent within one frame — but nothing is
+                        # cancelled. A committed final transcript within
+                        # ``_barge_in_confirm_s`` kills the turn via
+                        # ``_handle_barge_in`` → ``_do_cancel_for_barge_in``;
+                        # otherwise ``_pause_resume_timeout`` resumes from
+                        # the first not-fully-heard sentence. Takes
+                        # precedence over the defer_cancel paths below —
+                        # it is strictly safer (output stops immediately
+                        # AND a false positive is recoverable). The frame
+                        # falls through to STT below (paused output makes
+                        # the line echo-quiet) so the confirm window can
+                        # actually hear the user.
+                        await self._start_pause_resume()
                     elif self._is_speaking:
                         # Caller spoke over in-flight TTS. The cancel is
                         # DEFERRED to transcript confirmation — instead of
@@ -4358,26 +6679,59 @@ class PipelineStreamHandler(StreamHandler):
                         # plus the original "phantom during warmup gate"
                         # vulnerability. No-op once the turn is committed.
                         self.metrics.anchor_user_speech_start()
+                    # PREEMPTIVE GENERATION: the user resumed speaking while a
+                    # speculative turn was buffering — the interim it was
+                    # generated from is stale, so abort silently (nothing was
+                    # audible; the next confident interim re-speculates). A
+                    # RELEASED speculation is no longer registered here — it
+                    # is the live turn and the barge-in paths above own it.
+                    if (
+                        not self._is_speaking
+                        and getattr(self, "_speculation", None) is not None
+                    ):
+                        await self._abort_speculation(reason="user_speech_resumed")
                 elif vad_event.type == "speech_end":
+                    # Speech-event: user stop edge (pipeline-mode parity with
+                    # realtime). No-op without a dispatcher.
+                    await self._emit_user_speech_ended()
                     if self.metrics is not None:
                         self.metrics.record_vad_stop()
-                    # The SDK's VAD has detected end-of-speech earlier
-                    # and more reliably than the provider's own
-                    # endpointing on PSTN (Deepgram natural-pause
-                    # endpointing can run 1-6 s before it emits a
-                    # final). Ask the provider to finalise the
-                    # in-flight utterance NOW so the next turn can
-                    # dispatch immediately. ``getattr`` so STT
-                    # adapters that don't implement it (Whisper-class
-                    # one-shot transcribers) simply skip.
-                    finalize = getattr(self._stt, "finalize", None)
-                    if callable(finalize):
-                        try:
-                            ret = finalize()
-                            if asyncio.iscoroutine(ret):
-                                await ret
-                        except Exception as exc:  # pragma: no cover - defensive
-                            logger.debug("STT finalize threw: %s", exc)
+                    if (
+                        self._turn_detector is not None
+                        and not self._semantic_detector_failed
+                    ):
+                        # Semantic turn detection (opt-in): defer the STT
+                        # finalize until the end-of-utterance model agrees
+                        # the caller is done — or hold for at most
+                        # ``max_semantic_hold_ms`` while it predicts
+                        # "incomplete" (mid-sentence pause). The default
+                        # ``turn_detector=None`` path below is unchanged,
+                        # and a failed detector permanently rejoins it.
+                        await self._semantic_eou_check()
+                    else:
+                        # The SDK's VAD has detected end-of-speech earlier
+                        # and more reliably than the provider's own
+                        # endpointing on PSTN (Deepgram natural-pause
+                        # endpointing can run 1-6 s before it emits a
+                        # final). Ask the provider to finalise the
+                        # in-flight utterance NOW so the next turn can
+                        # dispatch immediately.
+                        await self._finalize_stt_for_eou()
+
+            # Semantic hold poll: while the detector is holding the turn
+            # open, every additional silent frame advances the audio clock —
+            # re-score after each ``_SEMANTIC_POLL_MS`` window of silence and
+            # force the finalize once the hard cap is reached. Frames that
+            # carried a VAD transition are skipped: a ``speech_start`` just
+            # cancelled the hold, and on the ``speech_end`` frame itself the
+            # detector already scored this audio (the silence window starts
+            # AFTER the decision point).
+            if (
+                self._turn_detector is not None
+                and self._semantic_hold_active
+                and vad_event is None
+            ):
+                await self._poll_semantic_hold(len(pcm))
 
             # Self-hearing guard: while the agent is speaking, don't pass
             # caller audio to STT — VAD already gave us authoritative
@@ -4393,7 +6747,12 @@ class PipelineStreamHandler(StreamHandler):
             # interruptions ("stop") never produced a transcript and the
             # agent kept talking; long ones produced truncated
             # transcripts and the agent answered to fragments.
-            if self._is_speaking:
+            # Pause-and-resume: while output is PAUSED the line is
+            # echo-quiet (no TTS is playing), so frames flow straight to
+            # STT — the confirm window depends on STT hearing the user.
+            # ``_start_pause_resume`` already flushed the ring's leading
+            # edge when the pause began.
+            if self._is_speaking and not getattr(self, "_output_paused", False):
                 # The deque's ``maxlen=13`` (~260 ms at 20 ms/frame, matching
                 # SileroVAD ``min_speech_duration``) evicts the oldest frame
                 # on append, so the post-barge-in replay only recovers the
@@ -4412,7 +6771,16 @@ class PipelineStreamHandler(StreamHandler):
                 # agent's own voice may be transcribed as a phantom
                 # interruption; pair with agent.barge_in_strategies. Default
                 # OFF → byte-identical push-and-return.
-                if not self._forward_stt_while_speaking:
+                #
+                # ALSO forward while a strategy barge-in is PENDING: the
+                # strategies are consulted on transcripts, but with audio
+                # withheld from STT no transcript could ever arrive — the
+                # pending state always timed out and barge-in was
+                # structurally impossible with strategies configured.
+                _pending = (
+                    getattr(self, "_barge_in_pending_since", None) is not None
+                )
+                if not self._forward_stt_while_speaking and not _pending:
                     return
 
         # before_send_to_stt hook — gate/transform the audio chunk before it
@@ -4427,7 +6795,19 @@ class PipelineStreamHandler(StreamHandler):
                 return
             pcm = processed
 
-        await self._stt.send_audio(pcm)
+        try:
+            await self._stt.send_audio(pcm)
+        except Exception as _exc:  # noqa: BLE001 - degrade, don't kill the call
+            # A dropped STT WebSocket used to propagate out of the carrier
+            # read loop and tear the whole call down as "Stream error".
+            # Degrade to dropped frames (rate-limited log) like TS; the STT
+            # loop's own error path handles recovery/escalation.
+            now = time.time()
+            last = getattr(self, "_stt_send_error_logged_at", 0.0)
+            if now - last > 5.0:
+                self._stt_send_error_logged_at = now
+                logger.warning("STT send_audio failed (dropping frames): %s", _exc)
+            return
         if self.metrics is not None:
             # Count bytes that actually reach the STT adapter. When the
             # input is mulaw 8 kHz (Twilio / Telnyx PCMU), ``audio_bytes``
@@ -4437,6 +6817,202 @@ class PipelineStreamHandler(StreamHandler):
             # post-resample) so the byte count matches the configured
             # STT format.
             self.metrics.add_stt_audio_bytes(len(pcm))
+
+    # ---------------------------------------------------------------
+    # Semantic turn detection (opt-in via ``agent.turn_detector``)
+    # ---------------------------------------------------------------
+
+    # Rolling-window byte budget: the last 8 s of PCM16 @ 16 kHz — exactly
+    # the maximum context smart-turn v3 consumes per prediction (256 000 B
+    # per concurrent call, only when a detector is configured).
+    _SEMANTIC_WINDOW_MAX_BYTES: int = 16000 * 2 * 8
+    # While a hold is active, re-score after each additional silence window
+    # of this many milliseconds of inbound audio (~10 frames at 20 ms/frame).
+    _SEMANTIC_POLL_MS: int = 200
+
+    def _semantic_buffer_append(self, pcm: bytes) -> None:
+        """Append a post-decode PCM16-16k frame to the rolling 8 s window."""
+        if not pcm:
+            return
+        self._semantic_audio_ring.append(pcm)
+        self._semantic_audio_ring_bytes += len(pcm)
+        while (
+            self._semantic_audio_ring_bytes > self._SEMANTIC_WINDOW_MAX_BYTES
+            and self._semantic_audio_ring
+        ):
+            dropped = self._semantic_audio_ring.popleft()
+            self._semantic_audio_ring_bytes -= len(dropped)
+
+    def _semantic_window_bytes(self) -> bytes:
+        """Concatenate the rolling window for one detector prediction."""
+        return b"".join(self._semantic_audio_ring)
+
+    def _reset_semantic_window(self) -> None:
+        """Drop the rolling window — called when a turn commits so the next
+        turn's window contains only its own audio (mirrors the reference
+        smart-turn integrations, which score per-turn audio)."""
+        self._semantic_audio_ring.clear()
+        self._semantic_audio_ring_bytes = 0
+
+    async def _semantic_eou_check(self) -> None:
+        """Score the rolling window; finalize, or hold for more silence.
+
+        Fail-open AND fail-once: the first detector error falls back to the
+        legacy immediate finalize (``vad_silence`` trigger) and disables
+        semantic endpointing for the remainder of the call — a broken model
+        must never stall a live phone call, and a permanently broken one
+        (onnxruntime missing/incompatible, model file gone) must produce a
+        single clear warning, not one per turn.
+        """
+        detector = self._turn_detector
+        if detector is None:
+            return
+        try:
+            probability = float(
+                await detector.predict(self._semantic_window_bytes())
+            )
+        except Exception as exc:
+            self._semantic_detector_failed = True
+            logger.warning(
+                "Semantic turn detector failed — disabling it for this call "
+                "and falling back to plain VAD-silence endpointing: %s",
+                exc,
+            )
+            self._cancel_semantic_hold()
+            # The rolling window is dead weight now that the detector is
+            # disabled — release the up-to-8 s of buffered PCM immediately.
+            self._reset_semantic_window()
+            self._last_eou_trigger = EouTrigger.VAD_SILENCE
+            await self._finalize_stt_for_eou()
+            return
+
+        threshold = float(getattr(detector, "threshold", 0.5))
+        if probability >= threshold:
+            logger.debug(
+                "Semantic turn detector: end of turn (p=%.3f >= %.2f)",
+                probability,
+                threshold,
+            )
+            self._cancel_semantic_hold()
+            self._last_eou_trigger = EouTrigger.SEMANTIC_TURN_DETECTOR
+            await self._finalize_stt_for_eou()
+        elif not self._semantic_hold_active:
+            logger.debug(
+                "Semantic turn detector: holding turn open (p=%.3f < %.2f)",
+                probability,
+                threshold,
+            )
+            self._begin_semantic_hold()
+        # else: already holding — stay held; the frame-driven poll (or the
+        # wall-clock backstop) schedules the next decision.
+
+    def _begin_semantic_hold(self) -> None:
+        """Arm the hold state + the wall-clock backstop for the hard cap."""
+        self._semantic_hold_active = True
+        self._semantic_hold_deadline = (
+            time.monotonic() + self._max_semantic_hold_ms / 1000.0
+        )
+        self._semantic_poll_pending_bytes = 0
+        self._semantic_hold_generation += 1
+        generation = self._semantic_hold_generation
+        delay_s = self._max_semantic_hold_ms / 1000.0
+        try:
+            self._semantic_hold_task = asyncio.create_task(
+                self._semantic_hold_backstop(generation, delay_s)
+            )
+        except RuntimeError:  # pragma: no cover — no running loop
+            self._semantic_hold_task = None
+
+    def _cancel_semantic_hold(self) -> None:
+        """Drop the hold (and its backstop task) without finalizing.
+
+        Idempotent, and safe on partially-constructed handlers (teardown
+        paths run against ``object.__new__`` instances in unit tests) where
+        the semantic state attributes were never initialized.
+        """
+        if not getattr(self, "_semantic_hold_active", False):
+            return
+        self._semantic_hold_active = False
+        self._semantic_hold_deadline = None
+        self._semantic_poll_pending_bytes = 0
+        self._semantic_hold_generation += 1
+        task = self._semantic_hold_task
+        self._semantic_hold_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _poll_semantic_hold(self, frame_bytes: int) -> None:
+        """Advance the audio clock of an active hold by one inbound frame.
+
+        Finalizes (``vad_silence``) once the hard cap is reached; otherwise
+        re-runs the detector after each additional ``_SEMANTIC_POLL_MS`` of
+        silence so a model that flips to "complete" with more trailing
+        silence commits the turn as ``semantic_turn_detector``.
+        """
+        deadline = self._semantic_hold_deadline
+        if deadline is not None and time.monotonic() >= deadline:
+            await self._resolve_semantic_hold_cap()
+            return
+        self._semantic_poll_pending_bytes += frame_bytes
+        poll_bytes = int(16000 * 2 * (self._SEMANTIC_POLL_MS / 1000.0))
+        if self._semantic_poll_pending_bytes < poll_bytes:
+            return
+        self._semantic_poll_pending_bytes = 0
+        await self._semantic_eou_check()
+
+    async def _semantic_hold_backstop(self, generation: int, delay_s: float) -> None:
+        """Wall-clock cap enforcement — runs even if inbound audio stalls.
+
+        Generation-guarded (mirrors the grace-flip pattern): a hold resolved
+        before the timer fires invalidates this task, so it can never
+        finalize a later turn's utterance.
+        """
+        try:
+            await asyncio.sleep(delay_s)
+        except asyncio.CancelledError:  # pragma: no cover — cancelled hold
+            return
+        if (
+            generation != self._semantic_hold_generation
+            or not self._semantic_hold_active
+        ):
+            return
+        # Detach the handle BEFORE resolving so _cancel_semantic_hold (called
+        # inside the resolve) does not cancel the currently-running task.
+        self._semantic_hold_task = None
+        await self._resolve_semantic_hold_cap()
+
+    async def _resolve_semantic_hold_cap(self) -> None:
+        """Hard cap reached: finalize anyway so the turn can never hang.
+
+        The semantic model never agreed, so the commit reason is the
+        accumulated silence — the EOU trigger stays ``vad_silence``.
+        """
+        if not self._semantic_hold_active:
+            return
+        logger.debug(
+            "Semantic hold cap reached (%d ms) — finalizing on VAD silence",
+            self._max_semantic_hold_ms,
+        )
+        self._cancel_semantic_hold()
+        self._last_eou_trigger = EouTrigger.VAD_SILENCE
+        await self._finalize_stt_for_eou()
+
+    async def _finalize_stt_for_eou(self) -> None:
+        """Ask the STT provider to finalize the in-flight utterance NOW.
+
+        ``getattr`` so STT adapters that don't implement it (Whisper-class
+        one-shot transcribers) simply skip. Extracted verbatim from the VAD
+        ``speech_end`` branch so the default path stays byte-identical and
+        the semantic turn-detector paths reuse it.
+        """
+        finalize = getattr(self._stt, "finalize", None)
+        if callable(finalize):
+            try:
+                ret = finalize()
+                if asyncio.iscoroutine(ret):
+                    await ret
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug("STT finalize threw: %s", exc)
 
     # ---------------------------------------------------------------
     # TTS speaking state helpers (Fix 9)
@@ -4451,6 +7027,8 @@ class PipelineStreamHandler(StreamHandler):
     _POST_CANCEL_DRAIN_S: float = 0.15
 
     async def _begin_speaking(self, is_first_message: bool = False) -> None:
+        # Speech-event: agent start edge (pipeline parity with realtime).
+        await self._emit_agent_speech_started(engine="pipeline")
         """Mark TTS playback as in-progress and bump the generation counter.
 
         Awaits the post-cancel drain window before flipping state so the
@@ -4504,6 +7082,21 @@ class PipelineStreamHandler(StreamHandler):
         # Fresh turn — reset the heard-prefix playback timeline.
         self._turn_playback_total_s = 0.0
         self._turn_spoken_segments = []
+        # Fresh turn — drop any pause-and-resume state and retained audio
+        # from the previous turn (a paused turn can never reach here — the
+        # pause-decision wait resolves before the turn ends — but be
+        # defensive) and re-enable retention after an overflow.
+        self._discard_pause_state()
+        self._turn_sentence_audio = []
+        self._pause_retained_bytes = 0
+        self._pause_resume_overflowed = False
+        self._pause_decision_event = None
+        # False until the turn body finishes pushing audio (the
+        # ``_end_speaking_with_grace`` call in its finally). The resume
+        # path uses it to decide whether the #164 grace machinery must be
+        # re-armed for the re-sent tail (post-complete pause) or whether
+        # the still-running turn body will arm it itself.
+        self._turn_output_done = False
         # Reset the VAD detector so the next user utterance triggers a clean
         # SILENCE→SPEECH transition. Without this, PSTN echo from the
         # previous turn can keep the smoothed probability above the
@@ -4617,7 +7210,11 @@ class PipelineStreamHandler(StreamHandler):
         if dispatch is not None and not dispatch.done():
             return
         remaining_s = getattr(self, "_playback_buffered_until", 0.0) - time.time()
-        if remaining_s <= 0:
+        # Pause-and-resume froze the playback bookkeeping at pause time
+        # (cursor snapped to 0, total rewound to the heard offset), so a
+        # kill while paused has no live backlog — the frozen heard prefix
+        # below is still the right input for the rewrite.
+        if remaining_s <= 0 and not getattr(self, "_output_paused", False):
             return
         heard = self._heard_response_prefix()
         if heard is None:
@@ -4666,6 +7263,8 @@ class PipelineStreamHandler(StreamHandler):
         return elapsed >= gate
 
     async def _end_speaking_with_grace(self) -> None:
+        # Speech-event: agent stop edge (clean turn end).
+        await self._emit_agent_speech_ended(interrupted=False)
         """Flip ``_is_speaking`` to False after a configurable grace period.
 
         TTS adapters typically signal "stream complete" while the carrier is
@@ -4682,6 +7281,10 @@ class PipelineStreamHandler(StreamHandler):
         — with barge-in armed — for the whole audible window. See the inline
         comments below.
         """
+        # The turn body has finished pushing audio — from here on, a
+        # pause-resume cycle owns re-arming the grace machinery (see
+        # ``_resume_after_false_interruption``).
+        self._turn_output_done = True
         try:
             grace_ms = int(os.environ.get("PATTER_TTS_TAIL_GRACE_MS", "1500"))
         except ValueError:
@@ -4703,6 +7306,10 @@ class PipelineStreamHandler(StreamHandler):
             self._speaking_started_at = None
             self._first_audio_sent_at = None
             self._clear_pending_barge_in()
+            # Hygiene: a turn that ended while paused (only reachable via
+            # the LLM-error path — normal turns wait out the pause
+            # decision) must not leak its pause buffers into idle time.
+            self._discard_pause_state()
             await self._reset_barge_in_strategies()
             if self._suppressed_speech_pending:
                 self._suppressed_speech_pending = False
@@ -4761,6 +7368,9 @@ class PipelineStreamHandler(StreamHandler):
                     self._speaking_started_at = None
                     self._first_audio_sent_at = None
                     self._clear_pending_barge_in()
+                    # See the zero-grace branch — drop any pause state a
+                    # turn that errored mid-pause left behind.
+                    self._discard_pause_state()
                     await self._reset_barge_in_strategies()
                     if self._suppressed_speech_pending:
                         self._suppressed_speech_pending = False
@@ -4817,6 +7427,8 @@ class PipelineStreamHandler(StreamHandler):
         self._speaking_generation += 1
         self._clear_grace_task()
         self._clear_pending_barge_in()
+        # The next turn owns the floor — any stale pause state is void.
+        self._discard_pause_state()
         await self._reset_barge_in_strategies()
         # Recover the user's leading words. Same rationale as the barge-in
         # flush — but here it is the only audio recovery, since the agent
@@ -4885,8 +7497,9 @@ class PipelineStreamHandler(StreamHandler):
         carrier's wire codec — meaning no client-side resample/transcode is
         needed in ``TwilioAudioSender.send_audio``.
 
-        Twilio expects ``ulaw_8000``; Telnyx expects ``pcm_16000``. Anything
-        else goes through the normal resample-and-encode path.
+        Every carrier wire here is μ-law 8 kHz — the SDK's own
+        ``streaming_start`` pins Telnyx to PCMU (the old ``pcm_16000``
+        expectation shipped raw PCM16 onto the μ-law wire: static).
 
         Parity with TS ``StreamHandler.isTtsOutputFormatNativeForCarrier``.
         """
@@ -4895,12 +7508,34 @@ class PipelineStreamHandler(StreamHandler):
         fmt = getattr(self._tts, "output_format", None)
         if not isinstance(fmt, str):
             return False
-        carrier = "twilio" if self._for_twilio else "telnyx"
-        if carrier == "twilio":
-            return fmt == "ulaw_8000"
-        if carrier == "telnyx":
-            return fmt == "pcm_16000"
-        return False
+        return fmt == "ulaw_8000"
+
+    def _tap_pipeline_agent_audio(self, chunk: bytes) -> None:
+        """Local-recording tap for outbound pipeline TTS chunks.
+
+        Sits next to the AEC far-end taps. Unlike AEC (which must skip
+        non-PCM bytes), the recording tap DECODES on the carrier-native fast
+        path: when the TTS adapter emits the wire codec directly
+        (``_tts_output_format_native_for_carrier``) the chunk is μ-law 8 kHz
+        on mulaw carriers (Twilio / Plivo) — decode + resample in the
+        recorder so it always receives PCM16 16 kHz. Telnyx-native
+        (``pcm_16000``) and the default transcode path are already
+        PCM16 16 kHz.
+        """
+        # ``getattr`` is defensive against test fixtures built via
+        # ``object.__new__`` (no ``__init__``) — same pattern as the
+        # ``_turn_spoken_segments`` access in ``_synthesize_sentence``.
+        if getattr(self, "local_recorder", None) is None:
+            return
+        encoding = (
+            "mulaw_8k"
+            if (
+                getattr(self, "_tts_output_format_native_for_carrier", False)
+                and getattr(self, "_for_twilio", False)
+            )
+            else "pcm16_16k"
+        )
+        self._tap_agent_audio(chunk, encoding)
 
     # 40 ms @ 16 kHz mono PCM16 = 1280 bytes. Sized to mirror the smallest
     # live-TTS chunk boundary so cancel granularity (mark/clear bookkeeping)
@@ -5020,6 +7655,130 @@ class PipelineStreamHandler(StreamHandler):
         """Stream a cached firstMessage buffer in pacing-friendly chunks."""
         return await self._send_paced_first_message_bytes(prewarm_bytes)
 
+    async def _play_first_message(self) -> None:
+        """Stream the configured greeting — runs as a BACKGROUND task.
+
+        ``start()`` used to execute this inline, which blocked the carrier
+        bridge's single read loop for the whole greeting: no media frames
+        were processed (VAD/barge-in structurally impossible on the first
+        message), ``stop`` frames went unnoticed, and prewarmed mark-gated
+        pacing starved because mark acks could never be read (0.5 s timeout
+        per chunk → ~13x slower than realtime, guaranteed jitter underrun).
+        ``start()`` awaits ``_begin_speaking(is_first_message=True)`` BEFORE
+        spawning this task so the self-hearing guard engages from the very
+        first inbound frame.
+        """
+        if self.metrics is not None:
+            self.metrics.start_turn()
+        # Mark the agent as speaking for the duration of the first
+        # message — without this, the self-hearing guard never
+        # engages, the user's audio (mixed with TTS bleed) is
+        # forwarded to STT and produces garbage transcripts, and
+        # the ring buffer for pre-barge-in audio is never
+        # populated. Mirrors the per-turn behaviour in
+        # `_process_streaming_response` / `_process_regular_response`.
+        #
+        # ``is_first_message=True`` pre-stamps ``_first_audio_sent_at``
+        # synchronously so the barge-in gate runs in parallel with TTS
+        # TTFB instead of only after audio arrives — without this, the
+        # firstMessage is effectively un-interruptible for 300-800 ms.
+        first_chunk_sent = False
+        # Drop any stale PCM16 carry byte from a prior synth (none at call
+        # start, but defensive for parity with TS ``ttsByteCarry = null``).
+        self.audio_sender.reset_pcm_carry()
+        # Check the prewarm cache first. When ``Patter.call`` was made
+        # with ``agent.prewarm_first_message=True`` the firstMessage
+        # has already been synthesised during the ringing window — we
+        # stream the bytes directly through the carrier-side
+        # AudioSender (which handles native-rate → carrier-rate
+        # resampling) and skip the TTS round-trip entirely.
+        prewarm_bytes: bytes | None = None
+        if self._pop_prewarm_audio is not None:
+            try:
+                prewarm_bytes = self._pop_prewarm_audio(self.call_id)
+            except Exception as exc:  # noqa: BLE001 - best-effort
+                logger.debug("pop_prewarm_audio raised: %s", exc)
+                prewarm_bytes = None
+        try:
+            if prewarm_bytes:
+                if self.metrics is not None:
+                    self.metrics.record_tts_first_byte()
+                first_chunk_sent = await self._stream_prewarm_bytes(prewarm_bytes)
+            else:
+                # Streaming TTS path (no prewarm cache). Uses the same
+                # simple per-chunk send as _synthesize_sentence —
+                # ElevenLabs HTTP streams at near-real-time speed so the
+                # carrier-side buffer stays bounded without mark-gated
+                # pacing.  Routing streaming chunks through
+                # _send_paced_first_message_bytes caused crackling: its
+                # drain+reset on every HTTP chunk destroyed mark
+                # back-pressure continuity and the per-sub-chunk sleep
+                # slowed delivery below Twilio's playout rate, producing
+                # periodic buffer underruns.  The prewarm path (a single
+                # pre-synthesised buffer) still uses
+                # _send_paced_first_message_bytes because that buffer can
+                # be several seconds long and needs pacing.
+                async for audio_chunk in self._tts.synthesize(
+                    self.agent.first_message
+                ):
+                    if not self._is_speaking:
+                        break
+                    if not first_chunk_sent:
+                        first_chunk_sent = True
+                        if self.metrics is not None:
+                            self.metrics.record_tts_first_byte()
+                    # AEC far-end tap gated on the
+                    # carrier-native fast path: when the TTS adapter was
+                    # auto-flipped to ulaw_8000, these bytes are mulaw
+                    # wire bytes — pushing them into an AEC built for
+                    # int16 PCM 16 kHz corrupted the reference (and an
+                    # odd-length mulaw chunk crashed np.frombuffer).
+                    if self._aec is not None and not getattr(
+                        self, "_tts_output_format_native_for_carrier", False
+                    ):
+                        self._aec.push_far_end(audio_chunk)
+                    # Local-recording tap (agent side) — decodes on the
+                    # carrier-native μ-law fast path instead of skipping.
+                    self._tap_pipeline_agent_audio(audio_chunk)
+                    await self.audio_sender.send_audio(audio_chunk)
+                    self._mark_first_audio_sent()
+        finally:
+            # Drop any partial int16 byte to prevent cross-turn corruption
+            # if the stream threw before a complete sample was delivered.
+            self.audio_sender.reset_pcm_carry()
+            # Flip back to not-speaking with grace so the ring
+            # buffer accumulated during the intro is flushed and
+            # the next user utterance is recognised cleanly.
+            await self._end_speaking_with_grace()
+        if first_chunk_sent:
+            # History append must NOT depend on metrics being enabled:
+            # with ``metrics=None`` the greeting was absent from LLM
+            # context (the model could re-greet) and from transcripts.
+            self.conversation_history.append(
+                {
+                    "role": "assistant",
+                    "text": self.agent.first_message,
+                    "timestamp": time.time(),
+                }
+            )
+            # Echo-guard reference: under forward-STT-while-speaking the
+            # guard compared echoes against an EMPTY reference during the
+            # greeting (the highest-echo window of the call) and treated
+            # the agent's own first words as a user barge-in.
+            self._current_agent_spoken_text = self.agent.first_message
+        if first_chunk_sent and self.metrics is not None:
+            # Bill the firstMessage TTS characters — they were synthesised
+            # at ElevenLabs (or the configured TTS provider) and the
+            # customer pays for them. The previous flow only called
+            # ``record_turn_complete`` here, which finalises the turn
+            # but does NOT increment ``_total_tts_characters`` — so a
+            # 5-turn call with an 82-char greeting was under-billed
+            # by ~22% on TTS cost. ``record_tts_complete`` is the
+            # canonical accumulator entry point for TTS char billing.
+            self.metrics.record_tts_complete(self.agent.first_message)
+            turn = self.metrics.record_turn_complete(self.agent.first_message)
+            await self._emit_turn_metrics(turn)
+
     async def _send_paced_first_message_bytes(self, bytes_: bytes) -> bool:
         """Iterate ``bytes_`` as ``_PREWARM_CHUNK_BYTES``-sized PCM16 slices
         and forward each via ``audio_sender.send_audio`` with mark-gated
@@ -5075,8 +7834,15 @@ class PipelineStreamHandler(StreamHandler):
             chunk = bytes_[i : i + self._PREWARM_CHUNK_BYTES]
             if not first_chunk_sent:
                 first_chunk_sent = True
-            if self._aec is not None:
+            # Same carrier-native gate as the live-TTS far-end taps: prewarm
+            # bytes are mulaw 8 kHz on Twilio/Plivo.
+            if self._aec is not None and not getattr(
+                self, "_tts_output_format_native_for_carrier", False
+            ):
                 self._aec.push_far_end(chunk)
+            # Local-recording tap (agent side) — decodes on the
+            # carrier-native μ-law fast path instead of skipping.
+            self._tap_pipeline_agent_audio(chunk)
             await self.audio_sender.send_audio(chunk)
             self._mark_first_audio_sent()
             mark_awaitable = await self._send_mark_awaitable()
@@ -5092,15 +7858,24 @@ class PipelineStreamHandler(StreamHandler):
             # ``initial_fill_complete`` flag) to prevent batch-ACK bursts
             # from draining the buffer → crackling.
             if mark_awaitable is None or initial_fill_complete:
-                playout_ms = max(
-                    1,
-                    len(chunk) // self._PCM16_16K_BYTES_PER_MS,
+                # Derive the byte rate from the active output format: on the
+                # carrier-native path the prewarm cache holds mulaw 8 kHz
+                # (8 B/ms, not 32) — pacing those bytes at the PCM16-16k rate
+                # delivered 4x faster than playout, re-opening the barge-in
+                # flush window the pacing exists to bound. Mirrors the TS
+                # ``bytesPerMs`` selection.
+                bytes_per_ms = (
+                    8
+                    if getattr(self, "_tts_output_format_native_for_carrier", False)
+                    else self._PCM16_16K_BYTES_PER_MS
                 )
+                playout_ms = max(1, len(chunk) // bytes_per_ms)
                 await asyncio.sleep(playout_ms / 1000.0)
         return first_chunk_sent
 
     async def cleanup(self) -> None:
         """Cancel the STT loop and close STT/TTS/remote-message adapters."""
+        self._cancel_max_call_watchdog()
         # Abort any in-flight LLM stream and close any in-flight TTS WS so
         # the run_pipeline_llm / synthesize awaits unblock immediately
         # instead of waiting up to 30 s for their own watchdog timers.
@@ -5117,6 +7892,37 @@ class PipelineStreamHandler(StreamHandler):
                 _tts_cancel()
             except Exception:
                 pass
+        # Stop a still-running greeting task before tearing anything down.
+        _fm_task = getattr(self, "_first_message_task", None)
+        if _fm_task is not None and not _fm_task.done():
+            _fm_task.cancel()
+            try:
+                await _fm_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._first_message_task = None
+        # Cancel the STT consumer FIRST: while cleanup awaited the cancelled
+        # dispatch task, the still-alive STT loop (blocked in
+        # ``_await_dispatch_settle`` on that same task) could wake first and
+        # respawn a fresh dispatch with a fresh cancel_event — an orphan turn
+        # running LLM + TTS against closed adapters after teardown.
+        if self._stt_task:
+            self._stt_task.cancel()
+            try:
+                await self._stt_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._stt_task = None
+        # PREEMPTIVE GENERATION: stop the interim-stability watcher and tear
+        # down any in-flight speculation (teardown — not a miss) before
+        # adapters close underneath it. Runs AFTER the STT loop cancel so no
+        # spawn source (STT interim / stability watcher) can re-register a
+        # speculation while the abort is awaited.
+        self._cancel_interim_stability_task()
+        try:
+            await self._abort_speculation(reason="cleanup", count_miss=False)
+        except Exception:  # pragma: no cover - teardown must never raise
+            logger.debug("speculation cleanup failed", exc_info=True)
         # Hard-cancel the backgrounded turn dispatch (teardown backstop) so no
         # orphan task touches a finalized handler. The cancel_event.set() above
         # lets a post-first-token turn break gracefully; the cancel covers a
@@ -5138,6 +7944,14 @@ class PipelineStreamHandler(StreamHandler):
         # spurious overlap_end events. Idempotent: safe to call when no
         # pending state exists.
         self._clear_pending_barge_in()
+        # Drop pause-and-resume buffers and wake any pause-decision waiter
+        # so a call ending mid-pause cannot strand a loop awaiting the
+        # (now cancelled) resume timer.
+        self._discard_pause_state()
+        # Drop any active semantic-turn hold so its wall-clock backstop task
+        # cannot fire after teardown and call ``stt.finalize`` on a closed
+        # adapter. Idempotent; no-op when no ``turn_detector`` is configured.
+        self._cancel_semantic_hold()
         # Cancel any pending tail-grace flip task so it does not sleep past
         # teardown and touch a finalised handler.
         self._clear_grace_task()
@@ -5153,22 +7967,40 @@ class PipelineStreamHandler(StreamHandler):
         # See ``_send_paced_first_message_bytes`` for the per-send reset
         # that protects the within-call path.
         self._first_message_mark_counter = 0
-        if self._stt_task:
-            self._stt_task.cancel()
-            try:
-                await self._stt_task
-            except (asyncio.CancelledError, Exception):
-                pass
+        # Per-resource guards: one raising close used to skip every later
+        # close (leaked TTS/remote sockets on an STT close failure).
         if self._stt is not None:
-            await self._stt.close()
+            try:
+                await self._stt.close()
+            except Exception as _exc:  # noqa: BLE001 - teardown must continue
+                logger.warning("STT close failed: %s", _exc)
         if self._tts is not None:
-            await self._tts.close()
+            try:
+                await self._tts.close()
+            except Exception as _exc:  # noqa: BLE001 - teardown must continue
+                logger.warning("TTS close failed: %s", _exc)
         if self._remote_handler is not None:
-            await self._remote_handler.close()
-        # Flush and discard the inbound resampler tail on cleanup.
-        if self._resampler_8k_to_16k is not None:
-            self._resampler_8k_to_16k.flush()
-            self._resampler_8k_to_16k = None
+            try:
+                await self._remote_handler.close()
+            except Exception as _exc:  # noqa: BLE001 - teardown must continue
+                logger.warning("Remote-message close failed: %s", _exc)
+        # Close MCP sessions opened by _init_mcp_tools (pipeline mode).
+        try:
+            await self._close_mcp()
+        except Exception as _exc:  # noqa: BLE001 - teardown must continue
+            logger.debug("MCP close failed: %s", _exc)
+        # Finalize the local recording WAV (guarded + idempotent) — covers
+        # abnormal teardown too: the bridge ``finally`` block always runs
+        # ``cleanup()``, so a truncated call still gets its header patched.
+        self._close_local_recorder()
+        # Flush and discard the inbound resampler tail on cleanup (owned by
+        # the input processing chain since slice 1 of the pipeline-stages
+        # decomposition). ``getattr`` so test fixtures built via
+        # ``object.__new__`` (no ``__init__``) stay safe.
+        chain = getattr(self, "_input_chain", None)
+        if chain is not None:
+            chain.flush()
+            self._input_chain = None
 
     @property
     def stt(self):
