@@ -107,6 +107,7 @@ async def serve(
     agent: Agent,
     port: int = 8000,
     recording: bool = False,
+    local_recording: bool | str = False,
     on_call_start: Callable[[dict], Awaitable[None]] | None = None,
     on_call_end: Callable[[dict], Awaitable[None]] | None = None,
     on_transcript: Callable[[dict], Awaitable[None]] | None = None,
@@ -120,6 +121,8 @@ async def serve(
 ```
 
 Start the embedded server. Blocks until stopped.
+
+`local_recording` enables carrier-neutral SDK-side recording: an interleaved stereo WAV (left = caller, right = agent, PCM16 16 kHz) written incrementally per call. Pass a directory string to choose the output directory. The final path is surfaced as `recording_path` in the `on_call_end` payload. Independent of the carrier-side `recording` flag. See [Local Recording](/python-sdk/features#local-recording-carrier-neutral).
 
 ---
 

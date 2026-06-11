@@ -134,8 +134,11 @@ def test_agent_pipeline_requires_stt_instance():
         phone.agent(system_prompt="test", tts=ElevenLabsTTS(api_key="el"))
 
 
-def test_agent_openai_realtime_requires_openai_key():
+def test_agent_openai_realtime_requires_openai_key(monkeypatch):
     """openai_realtime provider without openai_key raises ValueError."""
+    # "Without any openai_key" includes the environment — the provider path
+    # honours OPENAI_API_KEY since the env-backfill fix.
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     # Build a Patter without any openai_key, and call agent() without an engine
     # so the default provider picks up openai_realtime without a key.
     phone = Patter(

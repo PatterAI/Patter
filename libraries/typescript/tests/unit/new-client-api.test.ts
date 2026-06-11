@@ -238,6 +238,37 @@ describe('phone.agent({ tools / guardrails })', () => {
 });
 
 // ---------------------------------------------------------------------------
+// provider: 'openai_realtime' — OPENAI_API_KEY env handling
+// ---------------------------------------------------------------------------
+
+describe("phone.agent({ provider: 'openai_realtime' }) — env key", () => {
+  function makeKeylessPhone(): Patter {
+    return new Patter({
+      carrier: new Twilio({ accountSid: 'AC_test', authToken: 'tok' }),
+      phoneNumber: '+15550001234',
+    });
+  }
+
+  it('accepts OPENAI_API_KEY from the env AND backfills the local config', () => {
+    // Accepting at validation but dialing with an empty key later would be a
+    // dead call — the env key must reach the call path (parity with Python).
+    process.env.OPENAI_API_KEY = 'sk-env';
+    const phone = makeKeylessPhone();
+    const agent = phone.agent({ provider: 'openai_realtime', systemPrompt: 'hi' });
+    expect(agent.provider).toBe('openai_realtime');
+    const cfg = (phone as unknown as { localConfig: { openaiKey?: string } }).localConfig;
+    expect(cfg.openaiKey).toBe('sk-env');
+  });
+
+  it('rejects when no key is configured anywhere', () => {
+    const phone = makeKeylessPhone();
+    expect(() => phone.agent({ provider: 'openai_realtime', systemPrompt: 'hi' })).toThrow(
+      /OpenAI API key/,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Tunnel
 // ---------------------------------------------------------------------------
 

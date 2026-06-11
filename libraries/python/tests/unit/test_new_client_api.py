@@ -356,3 +356,165 @@ class TestQuickstartSmoke:
         assert agent.provider == "openai_realtime"
         assert phone._local_config.twilio_sid == "AC_env"
         assert phone._local_config.openai_key == "sk-env"
+
+
+# ---------------------------------------------------------------------------
+# Engine voice/model merge precedence
+# ---------------------------------------------------------------------------
+
+
+class TestEngineModelVoiceMerge:
+    """Explicit kwargs > engine marker > defaults.
+
+    Mirrors the TypeScript resolution ``opts.model ?? engineModel ??
+    "gpt-realtime-mini"`` (and the same for voice): an explicit ``model=`` /
+    ``voice=`` kwarg always wins, even when its value equals the documented
+    default — the engine fills the slot only when the kwarg is omitted.
+    """
+
+    def _phone(self) -> Patter:
+        return Patter(
+            carrier=Twilio(account_sid="AC", auth_token="tok"),
+            phone_number="+15550001234",
+            webhook_url="abc.ngrok.io",
+        )
+
+    def test_explicit_model_wins_over_engine_model(self) -> None:
+        phone = self._phone()
+        agent = phone.agent(
+            engine=OpenAIRealtime(api_key="sk-engine", model="gpt-realtime-2"),
+            system_prompt="hi",
+            model="gpt-realtime-mini",
+        )
+        assert agent.model == "gpt-realtime-mini"
+
+    def test_engine_model_fills_unset_kwarg(self) -> None:
+        phone = self._phone()
+        agent = phone.agent(
+            engine=OpenAIRealtime(api_key="sk-engine", model="gpt-realtime-2"),
+            system_prompt="hi",
+        )
+        assert agent.model == "gpt-realtime-2"
+
+    def test_explicit_voice_wins_over_engine_voice(self) -> None:
+        phone = self._phone()
+        agent = phone.agent(
+            engine=OpenAIRealtime(api_key="sk-engine", voice="nova"),
+            system_prompt="hi",
+            voice="alloy",
+        )
+        assert agent.voice == "alloy"
+
+    def test_engine_voice_fills_unset_kwarg(self) -> None:
+        phone = self._phone()
+        agent = phone.agent(
+            engine=OpenAIRealtime(api_key="sk-engine", voice="nova"),
+            system_prompt="hi",
+        )
+        assert agent.voice == "nova"
+
+    def test_defaults_without_engine_or_kwargs(self) -> None:
+        """Old-shape call (no voice=/model=) keeps today's documented defaults.
+
+        Pipeline mode: no engine marker touches the slots, so the sentinel
+        fallback must land on ``"alloy"`` / ``"gpt-realtime-mini"`` unchanged.
+        """
+        phone = self._phone()
+        agent = phone.agent(
+            system_prompt="hi",
+            stt=deepgram_stt.STT(api_key="dg_test"),
+            tts=elevenlabs_tts.TTS(api_key="el_test"),
+        )
+        assert agent.voice == "alloy"
+        assert agent.model == "gpt-realtime-mini"
+
+    def test_defaults_with_bare_engine(self) -> None:
+        """Engine constructed with its own defaults yields the same defaults."""
+        phone = self._phone()
+        agent = phone.agent(
+            engine=OpenAIRealtime(api_key="sk-engine"),
+            system_prompt="hi",
+        )
+        assert agent.voice == "alloy"
+        assert agent.model == "gpt-realtime-mini"
+
+
+class TestAgentFactoryBargeInKwargs:
+    """``barge_in_mode`` / ``barge_in_confirm_ms`` are factory kwargs (TS parity).
+
+    TypeScript ``AgentOptions`` exposes ``bargeInMode`` / ``bargeInConfirmMs``;
+    the Python factory must accept the same knobs instead of forcing callers
+    through ``dataclasses.replace`` on the returned Agent.
+    """
+
+    def _phone(self) -> Patter:
+        return Patter(
+            carrier=Twilio(account_sid="AC", auth_token="tok"),
+            phone_number="+15550001234",
+            webhook_url="abc.ngrok.io",
+        )
+
+    def test_factory_passes_barge_in_mode_and_confirm_ms(self) -> None:
+        phone = self._phone()
+        agent = phone.agent(
+            system_prompt="hi",
+            stt=deepgram_stt.STT(api_key="dg_test"),
+            tts=elevenlabs_tts.TTS(api_key="el_test"),
+            barge_in_mode="pause_resume",
+            barge_in_confirm_ms=900,
+        )
+        assert agent.barge_in_mode == "pause_resume"
+        assert agent.barge_in_confirm_ms == 900
+
+    def test_factory_defaults_match_dataclass(self) -> None:
+        phone = self._phone()
+        agent = phone.agent(
+            system_prompt="hi",
+            stt=deepgram_stt.STT(api_key="dg_test"),
+            tts=elevenlabs_tts.TTS(api_key="el_test"),
+        )
+        assert agent.barge_in_mode == "cancel"
+        assert agent.barge_in_confirm_ms == 1500
+
+    def test_invalid_barge_in_mode_rejected(self) -> None:
+        phone = self._phone()
+        with pytest.raises(ValueError, match="barge_in_mode"):
+            phone.agent(
+                system_prompt="hi",
+                stt=deepgram_stt.STT(api_key="dg_test"),
+                tts=elevenlabs_tts.TTS(api_key="el_test"),
+                barge_in_mode="silence",
+            )
+
+
+class TestProviderRealtimeEnvKey:
+    """``provider="openai_realtime"`` honours ``OPENAI_API_KEY`` from the env.
+
+    The error message has always promised "or set OPENAI_API_KEY in the
+    environment" and TypeScript accepts the env var — Python must too, AND the
+    key must be backfilled into the local config so the call path actually
+    uses it (accepting at validation but dialing with an empty key would be a
+    dead call).
+    """
+
+    def _phone(self) -> Patter:
+        return Patter(
+            carrier=Twilio(account_sid="AC", auth_token="tok"),
+            phone_number="+15550001234",
+            webhook_url="abc.ngrok.io",
+        )
+
+    def test_env_key_accepted_and_backfilled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+        phone = self._phone()
+        agent = phone.agent(system_prompt="hi", provider="openai_realtime")
+        assert agent.provider == "openai_realtime"
+        assert phone._local_config.openai_key == "sk-env"
+
+    def test_no_key_anywhere_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        phone = self._phone()
+        with pytest.raises(ValueError, match="OpenAI API key"):
+            phone.agent(system_prompt="hi", provider="openai_realtime")

@@ -228,6 +228,87 @@ async def test_aclose_awaits_in_flight_flush_started_by_record(enabled, collecto
     assert [e["event"] for e in collector.events] == ["cli_command"]
 
 
+class _GatedCollector(_Collector):
+    """A real collector that holds its FIRST response until released.
+
+    Lets a test pin the "event recorded while a flush POST is in flight"
+    window deterministically: the first POST blocks server-side, the test
+    records a second event, then releases the gate.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.first_request_started = threading.Event()
+        self._gate = threading.Event()
+        self._held_one = False
+
+    def release(self) -> None:
+        self._gate.set()
+
+    def start(self) -> None:
+        collector = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802 (stdlib name)
+                length = int(self.headers.get("Content-Length", "0") or 0)
+                body = self.rfile.read(length)
+                hold = not collector._held_one
+                collector._held_one = True
+                collector.first_request_started.set()
+                if hold:
+                    collector._gate.wait(timeout=5.0)
+                try:
+                    collector.requests.append(json.loads(body))
+                except Exception:
+                    collector.requests.append(body)
+                self.send_response(204)
+                self.end_headers()
+
+            def log_message(self, *args: object) -> None:  # silence
+                pass
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+
+@pytest.fixture
+def gated_collector():
+    c = _GatedCollector()
+    c.start()
+    yield c
+    c.release()  # never leave the handler thread blocked
+    c.stop()
+
+
+async def test_event_recorded_during_in_flight_flush_is_chained(
+    enabled, gated_collector
+):
+    """An event recorded *while* a flush POST is in flight must not strand in
+    the buffer: the completing flush chains another one (regression: ``record``
+    saw the live flush task and skipped scheduling, so constructor-time events
+    shadowed agent-time events until ``aclose``/process exit).
+
+    Pinned WITHOUT calling ``aclose`` — delivery must happen on its own.
+    """
+    client = TelemetryClient(sdk_version="0.6.7", endpoint=gated_collector.url)
+    client.record("cli_command", cli_command="dashboard")
+
+    # Wait until the first POST is genuinely in flight (held by the server).
+    await asyncio.to_thread(gated_collector.first_request_started.wait, 5.0)
+    client.record("first_run")  # lands in the buffer; no flush is scheduled
+    gated_collector.release()
+
+    await _wait_for(gated_collector, 2)
+    assert sorted(e["event"] for e in gated_collector.events) == [
+        "cli_command",
+        "first_run",
+    ]
+    # Two separate POSTs: the second was chained by the completing first flush.
+    assert len(gated_collector.requests) == 2
+    await client.aclose()
+
+
 # --- disabled paths: zero egress -------------------------------------------
 
 

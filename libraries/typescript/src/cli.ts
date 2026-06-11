@@ -5,7 +5,7 @@
  *
  * Usage:
  *   npx getpatter dashboard [--port 8000]
- *   npx getpatter eval                        (stub — evals are Python-only today)
+ *   npx getpatter eval run <suite> [--agent module:export] [--output report.json]
  *   npx getpatter telemetry [status|disable|enable]
  */
 
@@ -102,14 +102,101 @@ function parseArgs(argv: string[]): { port: number } {
   return { port };
 }
 
-function printEvalStub(): void {
-  console.log(
-    'Evaluations are not yet available in the TypeScript SDK.\n' +
-      'Use the Python SDK instead:\n\n' +
-      '  pip install getpatter\n' +
-      '  patter eval --help\n\n' +
-      'See https://github.com/PatterAI/Patter for docs.',
-  );
+/**
+ * `getpatter eval run <suite>` — run an evaluation suite. Mirrors the
+ * Python `patter eval run` CLI (same flags, same report shape, same exit
+ * codes: 0 all passed, 1 failures, 2 usage).
+ */
+async function runEvalCommand(args: string[]): Promise<number> {
+  if (args[0] !== 'run' || !args[1]) {
+    console.log('Usage: getpatter eval run <suite> [--agent module:export]');
+    console.log('       [--judge-model gpt-4o-mini] [--pass-threshold 0.7] [--output report.json]');
+    return 2;
+  }
+  const suitePath = args[1];
+  let agentSpec = '';
+  let judgeModel = 'gpt-4o-mini';
+  let passThreshold = 0.7;
+  let output = '';
+  for (let i = 2; i < args.length; i++) {
+    const flag = args[i];
+    const value = args[i + 1];
+    if (flag === '--agent' && value !== undefined) {
+      agentSpec = value;
+      i++;
+    } else if (flag === '--judge-model' && value !== undefined) {
+      judgeModel = value;
+      i++;
+    } else if (flag === '--pass-threshold' && value !== undefined) {
+      passThreshold = Number.parseFloat(value);
+      i++;
+    } else if (flag === '--output' && value !== undefined) {
+      output = value;
+      i++;
+    } else {
+      console.log(`Unknown eval option: ${flag}`);
+      return 2;
+    }
+  }
+
+  const { EvalRunner, LLMJudge, loadSuite } = await import('./evals');
+  const suite = await loadSuite(suitePath);
+  const judge = new LLMJudge({ model: judgeModel, passThreshold });
+  const runner = new EvalRunner({ judge });
+
+  const factory = await loadAgentFactory(agentSpec);
+  const results = await runner.run(suite, factory);
+  const report = runner.report(suite, results);
+
+  if (output) {
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(output, report, 'utf-8');
+    console.log(`Wrote report to ${output}`);
+  } else {
+    console.log(report);
+  }
+
+  const total = results.length;
+  const passed = results.filter((r) => r.judge.passed).length;
+  console.error(`\n${passed}/${total} cases passed`);
+  return passed === total ? 0 : 1;
+}
+
+/**
+ * Resolve a ``module:export`` string to an agent factory.
+ *
+ * Falls back to an echo-style mock agent when no factory is provided — lets
+ * developers sanity-check their suite shape before wiring the real agent.
+ */
+async function loadAgentFactory(
+  spec: string,
+): Promise<() => (text: string) => Promise<string>> {
+  if (!spec) {
+    const echo = async (text: string): Promise<string> => `echo: ${text}`;
+    return () => echo;
+  }
+  const sep = spec.lastIndexOf(':');
+  if (sep <= 0) {
+    throw new Error("--agent must be of the form 'module-or-path:exportName'");
+  }
+  const modulePath = spec.slice(0, sep);
+  const exportName = spec.slice(sep + 1);
+  const { pathToFileURL } = await import('node:url');
+  const { resolve } = await import('node:path');
+  const { existsSync } = await import('node:fs');
+  // File paths (./agent.mjs, ../x.js, absolute) are resolved against cwd;
+  // anything else is treated as a bare module specifier.
+  const looksLikePath =
+    modulePath.startsWith('.') || modulePath.startsWith('/') || existsSync(modulePath);
+  const specifier = looksLikePath
+    ? pathToFileURL(resolve(modulePath)).href
+    : modulePath;
+  const mod = (await import(specifier)) as Record<string, unknown>;
+  const target = mod[exportName] ?? (mod.default as Record<string, unknown> | undefined)?.[exportName];
+  if (typeof target !== 'function') {
+    throw new Error(`--agent target ${JSON.stringify(spec)} is not callable`);
+  }
+  return target as () => (text: string) => Promise<string>;
 }
 
 function printHermesStub(): void {
@@ -151,8 +238,12 @@ async function main(): Promise<void> {
 
   if (command === 'eval') {
     await emitCliCommand('eval');
-    printEvalStub();
-    process.exit(0);
+    try {
+      process.exit(await runEvalCommand(process.argv.slice(3)));
+    } catch (err) {
+      console.error(`eval failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
   }
   if (command === 'hermes') {
     printHermesStub();
@@ -165,7 +256,7 @@ async function main(): Promise<void> {
   if (command !== 'dashboard') {
     await emitCliCommand(command ? 'other' : 'none');
     console.log('Usage: getpatter dashboard [--port 8000]');
-    console.log('       getpatter eval          (stub — use Python SDK for evals)');
+    console.log('       getpatter eval run <suite> [--agent module:export] [--output report.json]');
     console.log('       getpatter hermes        (stub — use Python SDK for the wizard)');
     console.log('       getpatter openclaw      (stub — use Python SDK for the wizard)');
     console.log('       getpatter telemetry [status|disable|enable]');

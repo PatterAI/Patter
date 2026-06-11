@@ -1,6 +1,6 @@
 """Fluent assertions for :class:`~getpatter.evals.session.TurnResult`.
 
-LiveKit-style chainable expectations against the outcome of one real
+Chainable expectations against the outcome of one real
 pipeline turn driven by :class:`~getpatter.evals.session.EvalSession`::
 
     from getpatter.evals.assertions import expect

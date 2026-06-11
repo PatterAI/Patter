@@ -28,6 +28,45 @@ await phone.serve({
 
 The SDK sets up a `/webhooks/twilio/recording` endpoint to receive recording status callbacks. Recording URLs are logged to the console when they become available.
 
+### Local Recording (Carrier-Neutral)
+
+`localRecording` records each call **on your own machine**, with no carrier API involved. The SDK taps the audio already flowing through the per-call stream handler and writes an interleaved stereo WAV — **left channel = caller, right channel = agent** — as PCM16 at 16 kHz. μ-law 8 kHz carrier audio is upsampled and 24 kHz Realtime audio is downsampled, so the output format is the same on every carrier and engine mode.
+
+```typescript
+await phone.serve({ agent, localRecording: true });
+
+// Or pass a directory string to choose where the WAVs go:
+await phone.serve({ agent, localRecording: "/var/recordings" });
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `localRecording` | `boolean \| string` | `false` | SDK-side stereo WAV recording (left = caller, right = agent, PCM16 16 kHz). Pass a directory string to set the output directory. Works on every carrier (Twilio, Telnyx, Plivo) and engine mode. |
+
+Where the file lands:
+
+1. Directory string → `<dir>/<call_id>.wav`.
+2. [Call logging](/typescript-sdk/call-logging) enabled → `<call_log_dir>/recording.wav`, next to `metadata.json` and `transcript.jsonl` (so it is covered by the same `PATTER_LOG_RETENTION_DAYS` cleanup).
+3. Otherwise → `./recordings/<call_id>.wav` under the current working directory.
+
+The final path is surfaced as `recording_path` in the [`onCallEnd`](/typescript-sdk/events#oncallend) payload and persisted in the call-log `metadata.json`:
+
+```typescript
+await phone.serve({
+  agent,
+  localRecording: true,
+  onCallEnd: async (data) => {
+    if (data.recording_path) {
+      console.log(`Recording saved: ${data.recording_path}`);
+    }
+  },
+});
+```
+
+<Note>
+  The WAV header is finalized on **every** teardown path — including abnormal carrier WebSocket drops — so a truncated call still yields a playable file. `localRecording` is independent of the carrier-side `recording` flag: both can be enabled on the same call.
+</Note>
+
 ## Answering Machine Detection (AMD)
 
 Detect voicemail systems on outbound calls and optionally leave a message. AMD is available with Twilio only.

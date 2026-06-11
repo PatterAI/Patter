@@ -1,8 +1,8 @@
 /**
  * Custom LLM — point Patter's pipeline at ANY OpenAI-compatible endpoint.
  *
- * The industry-standard "Custom LLM" pattern (the same concept ElevenLabs
- * Agents, Retell, and Vapi expose under that name): Patter owns the phone leg
+ * The industry-standard "Custom LLM" pattern (the name the voice-AI
+ * ecosystem uses for this concept): Patter owns the phone leg
  * — carrier, STT, turn-taking, barge-in, TTS — and POSTs each conversation
  * turn to YOUR ``/chat/completions`` endpoint. That endpoint can be:
  *

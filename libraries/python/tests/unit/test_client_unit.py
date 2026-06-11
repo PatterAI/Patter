@@ -212,7 +212,12 @@ class TestAgentFactory:
         assert agent.disable_phone_preamble is True
         assert agent.echo_cancellation is True
 
-    def test_agent_openai_realtime_requires_key(self) -> None:
+    def test_agent_openai_realtime_requires_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # "No openai key anywhere" includes the environment — the provider
+        # path honours OPENAI_API_KEY since the env-backfill fix.
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         client = _local_phone()
         # No engine and no openai key anywhere → should raise.
         with pytest.raises(ValueError, match="OpenAI"):
