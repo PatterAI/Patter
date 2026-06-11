@@ -356,3 +356,84 @@ class TestQuickstartSmoke:
         assert agent.provider == "openai_realtime"
         assert phone._local_config.twilio_sid == "AC_env"
         assert phone._local_config.openai_key == "sk-env"
+
+
+# ---------------------------------------------------------------------------
+# Engine voice/model merge precedence
+# ---------------------------------------------------------------------------
+
+
+class TestEngineModelVoiceMerge:
+    """Explicit kwargs > engine marker > defaults.
+
+    Mirrors the TypeScript resolution ``opts.model ?? engineModel ??
+    "gpt-realtime-mini"`` (and the same for voice): an explicit ``model=`` /
+    ``voice=`` kwarg always wins, even when its value equals the documented
+    default — the engine fills the slot only when the kwarg is omitted.
+    """
+
+    def _phone(self) -> Patter:
+        return Patter(
+            carrier=Twilio(account_sid="AC", auth_token="tok"),
+            phone_number="+15550001234",
+            webhook_url="abc.ngrok.io",
+        )
+
+    def test_explicit_model_wins_over_engine_model(self) -> None:
+        phone = self._phone()
+        agent = phone.agent(
+            engine=OpenAIRealtime(api_key="sk-engine", model="gpt-realtime-2"),
+            system_prompt="hi",
+            model="gpt-realtime-mini",
+        )
+        assert agent.model == "gpt-realtime-mini"
+
+    def test_engine_model_fills_unset_kwarg(self) -> None:
+        phone = self._phone()
+        agent = phone.agent(
+            engine=OpenAIRealtime(api_key="sk-engine", model="gpt-realtime-2"),
+            system_prompt="hi",
+        )
+        assert agent.model == "gpt-realtime-2"
+
+    def test_explicit_voice_wins_over_engine_voice(self) -> None:
+        phone = self._phone()
+        agent = phone.agent(
+            engine=OpenAIRealtime(api_key="sk-engine", voice="nova"),
+            system_prompt="hi",
+            voice="alloy",
+        )
+        assert agent.voice == "alloy"
+
+    def test_engine_voice_fills_unset_kwarg(self) -> None:
+        phone = self._phone()
+        agent = phone.agent(
+            engine=OpenAIRealtime(api_key="sk-engine", voice="nova"),
+            system_prompt="hi",
+        )
+        assert agent.voice == "nova"
+
+    def test_defaults_without_engine_or_kwargs(self) -> None:
+        """Old-shape call (no voice=/model=) keeps today's documented defaults.
+
+        Pipeline mode: no engine marker touches the slots, so the sentinel
+        fallback must land on ``"alloy"`` / ``"gpt-realtime-mini"`` unchanged.
+        """
+        phone = self._phone()
+        agent = phone.agent(
+            system_prompt="hi",
+            stt=deepgram_stt.STT(api_key="dg_test"),
+            tts=elevenlabs_tts.TTS(api_key="el_test"),
+        )
+        assert agent.voice == "alloy"
+        assert agent.model == "gpt-realtime-mini"
+
+    def test_defaults_with_bare_engine(self) -> None:
+        """Engine constructed with its own defaults yields the same defaults."""
+        phone = self._phone()
+        agent = phone.agent(
+            engine=OpenAIRealtime(api_key="sk-engine"),
+            system_prompt="hi",
+        )
+        assert agent.voice == "alloy"
+        assert agent.model == "gpt-realtime-mini"

@@ -1670,8 +1670,8 @@ class Patter:
     def agent(
         self,
         system_prompt: str,
-        voice: str = "alloy",
-        model: str = "gpt-realtime-mini",
+        voice: str | None = None,
+        model: str | None = None,
         language: str = "en",
         first_message: str = "",
         llm_error_message: str | None = None,
@@ -1720,8 +1720,12 @@ class Patter:
 
         Args:
             system_prompt: Instructions for the AI agent.
-            voice: TTS voice name (e.g. ``"alloy"``, ``"echo"``).
-            model: OpenAI Realtime model ID.
+            voice: TTS voice name (e.g. ``"alloy"``, ``"echo"``). When omitted,
+                the ``engine=`` marker's voice applies (default ``"alloy"``);
+                an explicit value always wins over the engine.
+            model: OpenAI Realtime model ID. When omitted, the ``engine=``
+                marker's model applies (default ``"gpt-realtime-mini"``); an
+                explicit value always wins over the engine.
             language: BCP-47 language code, e.g. ``"en"``.
             first_message: If set, the agent speaks this immediately on connect.
             long_turn_message: Pipeline mode only. Opt-in short filler spoken
@@ -1785,9 +1789,11 @@ class Patter:
             # Realtime has no composed stack, so the model variant is the whole
             # story — resolve it the same way the engine unpacking below does
             # (an explicit model= kwarg wins; otherwise the engine's model).
-            _rt_model = model
-            if _rt_model == "gpt-realtime-mini" and getattr(engine, "model", None):
-                _rt_model = engine.model
+            _rt_model = (
+                model
+                if model is not None
+                else (getattr(engine, "model", None) or "gpt-realtime-mini")
+            )
             _stack = {**_stack, "llm_model": model_token("openai", _rt_model)}
         _feature_key = (
             _family + "|" + ",".join(f"{k}={v}" for k, v in sorted(_stack.items()))
@@ -1890,12 +1896,13 @@ class Patter:
                 )
             engine_kind, engine_fields = self._unpack_engine(engine)
             provider = engine_kind
-            # Engine-supplied voice/model win over the method defaults, but we
-            # let any *explicit* voice=/model= kwarg pass through unchanged —
-            # users sometimes pass the engine AND a specific voice.
-            if voice == "alloy" and engine_fields.get("voice"):
+            # Engine-supplied voice/model fill the slots the caller left unset
+            # (sentinel ``None``); an *explicit* voice=/model= kwarg always
+            # wins — even when its value equals the documented default.
+            # Mirrors TS ``opts.model ?? engineModel ?? default``.
+            if voice is None and engine_fields.get("voice"):
                 voice = engine_fields["voice"]
-            if model == "gpt-realtime-mini" and engine_fields.get("model"):
+            if model is None and engine_fields.get("model"):
                 model = engine_fields["model"]
             if engine_kind in ("openai_realtime", "openai_realtime_2"):
                 openai_engine_key = engine_fields.get("api_key", "")
@@ -2044,6 +2051,14 @@ class Patter:
                     "handoff_to tool is only injected in Realtime and Pipeline "
                     "modes and will be ignored for this agent."
                 )
+
+        # Apply the documented defaults to slots neither the caller nor an
+        # engine marker filled (sentinel ``None`` distinguishes "unset" from an
+        # explicit value equal to the default).
+        if voice is None:
+            voice = "alloy"
+        if model is None:
+            model = "gpt-realtime-mini"
 
         return Agent(
             system_prompt=system_prompt,

@@ -2,6 +2,17 @@
 
 ### Fixed
 
+- **Python: an explicit `voice=` / `model=` on `agent()` now always wins over
+  the `engine=` marker — even when the value equals the documented default.**
+  The kwargs moved to sentinel defaults (`voice: str | None = None`,
+  `model: str | None = None`) so "explicit `gpt-realtime-mini`" is
+  distinguishable from "unset": previously
+  `agent(model="gpt-realtime-mini", engine=OpenAIRealtime(model="gpt-realtime-2"))`
+  silently ran (and reported in telemetry) the engine's model, while the same
+  call in TypeScript ran the explicit one. Resolution is now
+  explicit → engine → default in both SDKs (TS was already correct). Calls
+  that omit `voice=`/`model=` see zero change.
+  `libraries/python/getpatter/client.py`.
 - **Telemetry (TypeScript): a flush completing after `close()` began no longer
   chains a detached delivery.** The post-flush chain in
   `libraries/typescript/src/telemetry/client.ts` now stops once `close()` has
