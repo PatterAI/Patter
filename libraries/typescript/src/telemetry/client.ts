@@ -34,6 +34,15 @@ let noticeShown = false;
 const liveClients = new Set<WeakRef<TelemetryClient>>();
 let exitHookRegistered = false;
 
+// Strong references to clients that still hold undelivered events (mirrors the
+// Python `_PENDING_FLUSH` set). The registry above is deliberately weak so a
+// discarded `Patter`'s client can be collected — but a client constructed
+// fire-and-forget (`new TelemetryClient(...).record(...)` with no reference
+// held) must not take its buffered events to the grave before a flush delivers
+// them. A client is held strongly from its first buffered event until the
+// buffer drains, so the lifetime is bounded by the next flush.
+const pendingFlush = new Set<TelemetryClient>();
+
 function showNoticeOnce(): void {
   if (noticeShown) return;
   noticeShown = true;
@@ -73,7 +82,7 @@ export class TelemetryClient {
   private readonly endpoint: string;
   private readonly debug: boolean;
   private readonly buffer: TelemetryEvent[] = [];
-  private flushing = false;
+  private inflight: Promise<void> | null = null;
   private closed = false;
   private readonly selfRef: WeakRef<TelemetryClient> = new WeakRef(this);
 
@@ -120,6 +129,7 @@ export class TelemetryClient {
     try {
       if (this.buffer.length >= BUFFER_MAX) this.buffer.shift(); // drop oldest
       this.buffer.push(event);
+      pendingFlush.add(this); // survive GC until the buffer drains
       this.scheduleFlush();
     } catch (err) {
       getLogger().debug('telemetry enqueue failed', err);
@@ -145,25 +155,38 @@ export class TelemetryClient {
     if (this.closed) return;
     this.closed = true;
     liveClients.delete(this.selfRef);
-    if (!this.enabledFlag || this.debug) return;
+    if (!this.enabledFlag || this.debug) {
+      pendingFlush.delete(this);
+      return;
+    }
     try {
+      // A flush scheduled by `record()` drains the buffer immediately, so
+      // flushing again below would see nothing — await the in-flight delivery
+      // first or a CLI that exits right after close() kills the POST mid-air.
+      if (this.inflight) await this.inflight;
       await this.flush();
     } catch (err) {
       getLogger().debug('telemetry close flush failed', err);
     }
+    pendingFlush.delete(this);
   }
 
   private scheduleFlush(): void {
-    if (this.flushing) return;
-    this.flushing = true;
-    void this.flush().finally(() => {
-      this.flushing = false;
+    if (this.inflight) return;
+    this.inflight = this.flush().finally(() => {
+      this.inflight = null;
+      // Events recorded while the POST was in flight are sitting in the buffer
+      // with no flush scheduled (record() saw `inflight` and skipped) — chain
+      // another flush or they strand until close()/process exit.
+      if (this.buffer.length > 0) this.scheduleFlush();
     });
+    void this.inflight;
   }
 
   private async flush(): Promise<void> {
     if (this.buffer.length === 0) return;
     const events = this.buffer.splice(0, this.buffer.length);
+    pendingFlush.delete(this); // nothing buffered — GC may reclaim us again
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);

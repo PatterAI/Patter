@@ -52,6 +52,15 @@ _BUFFER_MAX = 256
 _LIVE_CLIENTS: "weakref.WeakSet[TelemetryClient]" = weakref.WeakSet()
 _ATEXIT_REGISTERED = False
 
+# Strong references to clients that still hold undelivered events. The registry
+# above is deliberately weak so a discarded ``Patter``'s client can be collected —
+# but a client constructed fire-and-forget (the CLI pattern:
+# ``TelemetryClient(...).record(...)`` with no reference held) must not take its
+# buffered events to the grave before a flush delivers them. A client is held
+# strongly from its first buffered event until the buffer drains, so the lifetime
+# is bounded by the next flush (async task, ``aclose``, or the atexit hook).
+_PENDING_FLUSH: "set[TelemetryClient]" = set()
+
 # One-time "telemetry is on" notice, shown once per process.
 _NOTICE_SHOWN = False
 
@@ -143,6 +152,7 @@ class TelemetryClient:
 
         try:
             self._buffer.append(event)  # maxlen deque drops oldest when full
+            _PENDING_FLUSH.add(self)  # survive GC until the buffer drains
             self._schedule_flush()
         except Exception:
             logger.debug("telemetry enqueue failed", exc_info=True)
@@ -169,11 +179,21 @@ class TelemetryClient:
         self._closed = True
         _LIVE_CLIENTS.discard(self)
         if not self._enabled or self._debug:
+            _PENDING_FLUSH.discard(self)
             return
+        try:
+            # A flush task scheduled by ``record`` drains the buffer immediately,
+            # so flushing again below would see nothing — await the in-flight
+            # delivery first or shutdown kills its POST mid-air.
+            if self._flush_task is not None and not self._flush_task.done():
+                await asyncio.wait_for(self._flush_task, timeout=_FLUSH_TIMEOUT_S)
+        except Exception:
+            logger.debug("telemetry aclose in-flight flush failed", exc_info=True)
         try:
             await asyncio.wait_for(self._flush(), timeout=_FLUSH_TIMEOUT_S)
         except Exception:
             logger.debug("telemetry aclose flush failed", exc_info=True)
+        _PENDING_FLUSH.discard(self)
         if self._http is not None:
             try:
                 await self._http.aclose()
@@ -193,17 +213,22 @@ class TelemetryClient:
         self._flush_task = loop.create_task(self._flush())
         self._flush_task.add_done_callback(self._on_flush_done)
 
-    @staticmethod
-    def _on_flush_done(task: "asyncio.Task[None]") -> None:
+    def _on_flush_done(self, task: "asyncio.Task[None]") -> None:
         if task.cancelled():
             return
         exc = task.exception()
         if exc is not None:
             logger.debug("telemetry flush task raised", exc_info=exc)
+        # Events recorded while the POST was in flight are sitting in the buffer
+        # with no flush scheduled (``record`` saw the live task and skipped) —
+        # chain another flush or they strand until aclose()/process exit.
+        if self._buffer and not self._closed:
+            self._schedule_flush()
 
     def _drain(self) -> list[dict[str, Any]]:
         events = list(self._buffer)
         self._buffer.clear()
+        _PENDING_FLUSH.discard(self)  # nothing buffered — GC may reclaim us again
         return events
 
     async def _flush(self) -> None:

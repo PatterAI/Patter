@@ -1679,10 +1679,18 @@ class Patter:
         # --- Anonymous telemetry: engine family + the composed stack, deduped ---
         # Deduped by the *whole* stack signature (not just the engine family) so a
         # second agent with a different STT/TTS/LLM still records its composition.
-        from getpatter.telemetry.stack import stack_dimensions
+        from getpatter.telemetry.stack import model_token, stack_dimensions
 
         _family = _telemetry_engine_family(engine, provider, stt, tts)
         _stack = stack_dimensions(stt, tts, llm)
+        if _family == "realtime":
+            # Realtime has no composed stack, so the model variant is the whole
+            # story — resolve it the same way the engine unpacking below does
+            # (an explicit model= kwarg wins; otherwise the engine's model).
+            _rt_model = model
+            if _rt_model == "gpt-realtime-mini" and getattr(engine, "model", None):
+                _rt_model = engine.model
+            _stack = {**_stack, "llm_model": model_token("openai", _rt_model)}
         _feature_key = (
             _family + "|" + ",".join(f"{k}={v}" for k, v in sorted(_stack.items()))
         )

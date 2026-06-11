@@ -10,6 +10,7 @@ network egress are all real.
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -149,6 +150,82 @@ async def test_denylisted_dimensions_are_dropped(enabled, collector):
     blob = json.dumps(event)
     assert "+1555" not in blob
     assert "sk-secret" not in blob
+
+
+# --- realtime model capture --------------------------------------------------
+
+
+async def test_agent_records_realtime_model_in_feature_used(
+    enabled, collector, monkeypatch
+):
+    """The Realtime engine's model variant ships in ``feature_used`` (pipeline
+    already carries per-layer models; realtime previously sent only the engine
+    family). The dedupe key includes the model, so a second agent on a different
+    Realtime model records again.
+    """
+    monkeypatch.setenv("PATTER_TELEMETRY_ENDPOINT", collector.url)
+    from getpatter import OpenAIRealtime, Patter
+
+    phone = Patter()
+    phone.agent(
+        system_prompt="hi",
+        engine=OpenAIRealtime(api_key="sk-test", model="gpt-realtime-2"),
+    )
+    phone.agent(
+        system_prompt="hi",
+        engine=OpenAIRealtime(api_key="sk-test", model="gpt-realtime-mini"),
+    )
+
+    deadline = asyncio.get_event_loop().time() + 2.0
+    while (
+        sum(1 for e in collector.events if e["event"] == "feature_used") < 2
+        and asyncio.get_event_loop().time() < deadline
+    ):
+        await asyncio.sleep(0.01)
+
+    feature_events = [e for e in collector.events if e["event"] == "feature_used"]
+    assert sorted(e.get("llm_model") for e in feature_events) == [
+        "openai-gpt-realtime-2",
+        "openai-gpt-realtime-mini",
+    ]
+    assert all(e["engine"] == "realtime" for e in feature_events)
+
+
+# --- pending-buffer survival (fire-and-forget clients) ----------------------
+
+
+def test_unreferenced_client_buffered_event_survives_gc_until_atexit(
+    enabled, collector
+):
+    """The CLI records via ``TelemetryClient(...).record(...)`` without keeping a
+    reference. The buffered event must survive garbage collection and ship via
+    the atexit flush — a client holding undelivered events may not die with its
+    last reference (regression: the WeakSet registry let CPython collect it,
+    silently losing every ``cli_command`` event).
+    """
+    from getpatter.telemetry import client as client_mod
+
+    TelemetryClient(sdk_version="0.6.6", endpoint=collector.url).record(
+        "cli_command", cli_command="dashboard"
+    )
+    gc.collect()
+
+    client_mod._atexit_flush_all()
+
+    assert [e["event"] for e in collector.events] == ["cli_command"]
+
+
+async def test_aclose_awaits_in_flight_flush_started_by_record(enabled, collector):
+    """``record`` schedules a flush task that drains the buffer immediately;
+    ``aclose`` must await that in-flight delivery — not just its own (now-empty)
+    flush — or a graceful shutdown right after recording kills the POST mid-air.
+    """
+    client = TelemetryClient(sdk_version="0.6.6", endpoint=collector.url)
+    client.record("cli_command", cli_command="dashboard")
+    await asyncio.sleep(0)  # let the scheduled flush task start and drain
+    await client.aclose()
+
+    assert [e["event"] for e in collector.events] == ["cli_command"]
 
 
 # --- disabled paths: zero egress -------------------------------------------
