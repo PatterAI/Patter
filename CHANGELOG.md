@@ -1,5 +1,15 @@
 ## Unreleased
 
+### Added
+
+- **Python: `barge_in_mode` / `barge_in_confirm_ms` are now `Patter.agent()`
+  keywords** (TypeScript parity — `AgentOptions` already exposed `bargeInMode` /
+  `bargeInConfirmMs`). Previously they existed only as `Agent` dataclass fields,
+  forcing callers through `dataclasses.replace(...)` on the returned agent.
+  Same defaults (`"cancel"` / `1500`); invalid modes are rejected with a
+  `ValueError`. Opt-in — existing calls are unaffected.
+  `libraries/python/getpatter/client.py`.
+
 ### Fixed
 
 - **Python: an explicit `voice=` / `model=` on `agent()` now always wins over

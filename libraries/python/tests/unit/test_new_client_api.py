@@ -437,3 +437,51 @@ class TestEngineModelVoiceMerge:
         )
         assert agent.voice == "alloy"
         assert agent.model == "gpt-realtime-mini"
+
+
+class TestAgentFactoryBargeInKwargs:
+    """``barge_in_mode`` / ``barge_in_confirm_ms`` are factory kwargs (TS parity).
+
+    TypeScript ``AgentOptions`` exposes ``bargeInMode`` / ``bargeInConfirmMs``;
+    the Python factory must accept the same knobs instead of forcing callers
+    through ``dataclasses.replace`` on the returned Agent.
+    """
+
+    def _phone(self) -> Patter:
+        return Patter(
+            carrier=Twilio(account_sid="AC", auth_token="tok"),
+            phone_number="+15550001234",
+            webhook_url="abc.ngrok.io",
+        )
+
+    def test_factory_passes_barge_in_mode_and_confirm_ms(self) -> None:
+        phone = self._phone()
+        agent = phone.agent(
+            system_prompt="hi",
+            stt=deepgram_stt.STT(api_key="dg_test"),
+            tts=elevenlabs_tts.TTS(api_key="el_test"),
+            barge_in_mode="pause_resume",
+            barge_in_confirm_ms=900,
+        )
+        assert agent.barge_in_mode == "pause_resume"
+        assert agent.barge_in_confirm_ms == 900
+
+    def test_factory_defaults_match_dataclass(self) -> None:
+        phone = self._phone()
+        agent = phone.agent(
+            system_prompt="hi",
+            stt=deepgram_stt.STT(api_key="dg_test"),
+            tts=elevenlabs_tts.TTS(api_key="el_test"),
+        )
+        assert agent.barge_in_mode == "cancel"
+        assert agent.barge_in_confirm_ms == 1500
+
+    def test_invalid_barge_in_mode_rejected(self) -> None:
+        phone = self._phone()
+        with pytest.raises(ValueError, match="barge_in_mode"):
+            phone.agent(
+                system_prompt="hi",
+                stt=deepgram_stt.STT(api_key="dg_test"),
+                tts=elevenlabs_tts.TTS(api_key="el_test"),
+                barge_in_mode="silence",
+            )

@@ -1690,6 +1690,8 @@ class Patter:
         audio_filter: AudioFilter | None = None,
         background_audio: BackgroundAudioPlayer | None = None,
         barge_in_threshold_ms: int = 300,
+        barge_in_mode: str = "cancel",
+        barge_in_confirm_ms: int = 1500,
         aggressive_first_flush: bool = False,
         disable_phone_preamble: bool = False,
         echo_cancellation: bool = False,
@@ -1879,6 +1881,15 @@ class Patter:
                     + ", ".join(_valid_providers)
                     + f". Got: {provider!r}"
                 )
+
+        # --- Validate barge_in_mode (parity with TS ``bargeInMode`` union) ---
+        _valid_barge_in_modes = ("cancel", "pause_resume")
+        if barge_in_mode not in _valid_barge_in_modes:
+            raise ValueError(
+                "barge_in_mode must be one of: "
+                + ", ".join(_valid_barge_in_modes)
+                + f". Got: {barge_in_mode!r}"
+            )
 
         # --- Engine dispatch ---
         openai_engine_key: str = ""
@@ -2085,6 +2096,8 @@ class Patter:
             audio_filter=audio_filter,
             background_audio=background_audio,
             barge_in_threshold_ms=barge_in_threshold_ms,
+            barge_in_mode=barge_in_mode,
+            barge_in_confirm_ms=barge_in_confirm_ms,
             aggressive_first_flush=aggressive_first_flush,
             disable_phone_preamble=disable_phone_preamble,
             echo_cancellation=echo_cancellation,
