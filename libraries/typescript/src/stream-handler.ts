@@ -1509,10 +1509,8 @@ export class StreamHandler {
       }
     }
     this.inboundAudioRing = [];
-    // [DIAG-2026-05-05] INFO so we can see in stdout whether the ring flush
-    // is feeding STT bleed-only audio that produces phantom transcripts.
-    getLogger().info(
-      `[DIAG] Flushed ${replayed} pre-barge-in frame(s) (~${replayed * 20} ms) to STT`,
+    getLogger().debug(
+      `Flushed ${replayed} pre-barge-in frame(s) (~${replayed * 20} ms) to STT`,
     );
   }
   /**
@@ -3579,11 +3577,6 @@ export class StreamHandler {
   }
 
   private async processTranscript(transcript: STTTranscript): Promise<void> {
-    // [DIAG-2026-05-05] Temporary INFO logging to diagnose post-barge-in
-    // empty/phantom transcripts. Remove once root cause is understood.
-    getLogger().info(
-      `[DIAG] processTranscript text=${JSON.stringify((transcript.text ?? '').slice(0, 60))} isFinal=${transcript.isFinal} speechFinal=${transcript.speechFinal} isSpeaking=${this.isSpeaking}`,
-    );
     // Function-scope barge-in flag — set either by the upfront barge-in
     // check, or by the TTS loops downstream when ``isSpeaking`` flips mid-
     // synthesis. Prevents recordTurnComplete double-counting a half-spoken
@@ -3626,10 +3619,6 @@ export class StreamHandler {
     }
 
     const label = this.deps.bridge.label;
-    // [DIAG-2026-05-05] Temporary INFO. Remove once root cause known.
-    getLogger().info(
-      `[DIAG] processTranscript COMMITTED → LLM (${label} pipeline): ${sanitizeLogValue(transcript.text.slice(0, 80))}`,
-    );
     getLogger().debug(`User (${label} pipeline): ${sanitizeLogValue(transcript.text)}`);
 
     // A final transcript committed — interim-stability tracking for this
